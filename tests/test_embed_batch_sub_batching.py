@@ -36,7 +36,7 @@ def _content_keyed_provider(api_calls: list, cache_size: int = 4096) -> Embeddin
     """
     provider = EmbeddingProvider(api_key="test", cache_size=cache_size)
 
-    async def fake_post(payload):
+    async def fake_post(payload, **_kw):
         api_calls.append(payload)
         inp = payload["input"]
         texts = [inp] if isinstance(inp, str) else inp
@@ -150,7 +150,7 @@ class TestCrossBatchSemantics:
         p = _content_keyed_provider(calls)
         real_post = p._post_with_retry
 
-        async def failing_second(payload):
+        async def failing_second(payload, **_kw):
             if calls:  # first request succeeds, second fails
                 raise RuntimeError("api down")
             return await real_post(payload)
@@ -171,7 +171,7 @@ class TestCrossBatchSemantics:
         real_post = p._post_with_retry
         request_n = 0
 
-        async def short_second(payload):
+        async def short_second(payload, **_kw):
             nonlocal request_n
             request_n += 1
             if request_n < 2:

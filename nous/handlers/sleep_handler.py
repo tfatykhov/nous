@@ -2267,17 +2267,23 @@ class SleepHandler:
         Recovered episodes stay `active=true` (matching F057). Marked-
         abandoned episodes go `active=false` so search excludes them.
 
-        H-5: first, closed episodes whose embed failed (NULL embedding) are
-        re-embedded, a bounded batch per cycle. That step needs neither the
-        summarizer nor the recovery flag, and it runs before
-        graph_densification, which skips rows without a vector.
+        H-5: first, closed episodes, active facts and decisions whose write
+        embed failed (NULL embedding) are re-embedded, a bounded batch per type
+        per cycle. That step needs neither the summarizer nor the recovery
+        flag, and it runs before graph_densification, which skips rows without
+        a vector.
         """
-        try:
-            reembedded = await self._heart.episodes.reembed_missing()
-            if reembedded:
-                sleep_stats["episodes_reembedded"] = reembedded
-        except Exception:
-            logger.warning("Episode re-embed backfill failed", exc_info=True)
+        for stat_key, reembed in (
+            ("episodes_reembedded", self._heart.episodes.reembed_missing),
+            ("facts_reembedded", self._heart.facts.reembed_missing),
+            ("decisions_reembedded", self._brain.reembed_missing),
+        ):
+            try:
+                reembedded = await reembed()
+                if reembedded:
+                    sleep_stats[stat_key] = reembedded
+            except Exception:
+                logger.warning("Re-embed backfill failed (%s)", stat_key, exc_info=True)
 
         if not getattr(self._settings, "abandoned_recovery_enabled", True):
             return True

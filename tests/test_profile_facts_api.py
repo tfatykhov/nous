@@ -252,7 +252,7 @@ class TestMergedIntoExisting:
             async def embed(self, text: str, fail_fast: bool = False):
                 return [1.0] + [0.0] * 1535
 
-            async def embed_batch(self, texts):
+            async def embed_batch(self, texts, fail_fast: bool = False):
                 return [[1.0] + [0.0] * 1535 for _ in texts]
 
             async def close(self):

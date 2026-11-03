@@ -86,7 +86,7 @@ class MockEmbeddingProvider:
         norm = sum(x * x for x in noisy) ** 0.5
         return [x / norm for x in noisy]
 
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+    async def embed_batch(self, texts: list[str], fail_fast: bool = False) -> list[list[float]]:
         return [await self.embed(t) for t in texts]
 
     async def close(self) -> None:

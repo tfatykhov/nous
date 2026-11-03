@@ -24,7 +24,7 @@ from sqlalchemy.orm import selectinload
 from nous.brain.bridge import BridgeExtractor
 from nous.brain.calibration import CalibrationEngine
 from nous.brain.graph_constants import RETRIEVAL_EXCLUDED_RELATIONS
-from nous.brain.embeddings import EmbeddingProvider
+from nous.brain.embeddings import _REEMBED_MAX_PER_CYCLE, EmbeddingProvider, reembed_rows
 from nous.brain.guardrails import GuardrailEngine
 from nous.brain.quality import QualityScorer
 from nous.brain.schemas import (
@@ -149,6 +149,11 @@ def apply_outcome_demotion(
         demoted,
         key=lambda pair: (pair[1] is None, -pair[1] if pair[1] is not None else 0.0),
     )
+
+
+def _decision_embed_text(description: str, context: str | None, pattern: str | None) -> str:
+    """The text a decision is embedded from: by record(), update() and the backfill."""
+    return f"{description} {context or ''} {pattern or ''}".strip()
 
 
 class Brain:
@@ -507,7 +512,7 @@ class Brain:
         # 2. Generate embedding (P1-6: graceful degradation)
         embedding = None
         if self.embeddings:
-            embed_text = f"{input.description} {input.context or ''} {input.pattern or ''}".strip()
+            embed_text = _decision_embed_text(input.description, input.context, input.pattern)
             try:
                 embedding = await self.embeddings.embed(embed_text)
             except Exception:
@@ -669,7 +674,7 @@ class Brain:
 
         # Re-generate embedding if text changed (P1-6: graceful degradation)
         if self.embeddings:
-            embed_text = f"{decision.description} {decision.context or ''} {decision.pattern or ''}".strip()
+            embed_text = _decision_embed_text(decision.description, decision.context, decision.pattern)
             try:
                 decision.embedding = await self.embeddings.embed(embed_text)
             except Exception:
@@ -696,6 +701,48 @@ class Brain:
         )
 
         return self._decision_to_detail(decision)
+
+    # ------------------------------------------------------------------
+    # reembed_missing() — H-5 backfill, run by the sleep cycle
+    # ------------------------------------------------------------------
+
+    async def reembed_missing(self, limit: int = _REEMBED_MAX_PER_CYCLE) -> int:
+        """Embed up to ``limit`` decisions whose embedding is NULL.
+
+        record() stores the decision with a NULL vector when its embed fails,
+        which hides it from the decision query's vector leg. The text is the
+        one record() embeds. Decisions have no active flag (a delete removes
+        the row), so every row of this agent counts. Newest first; failures are
+        classified by reembed_rows. No transaction is held while embedding.
+        Returns the number re-embedded.
+        """
+        if not self.embeddings or limit <= 0:
+            return 0
+        async with self.db.session() as session:
+            rows = (
+                await session.execute(
+                    select(Decision.id, Decision.description, Decision.context, Decision.pattern)
+                    .where(Decision.agent_id == self.agent_id, Decision.embedding.is_(None))
+                    .order_by(Decision.created_at.desc())
+                    .limit(limit)
+                )
+            ).all()
+        vectors = await reembed_rows(
+            self.embeddings,
+            [(row.id, _decision_embed_text(row.description, row.context, row.pattern)) for row in rows],
+            "Decision",
+        )
+        if vectors:
+            async with self.db.session() as session:
+                for decision_id, vector in vectors.items():
+                    # Only fill a NULL: a vector written meanwhile is newer than ours.
+                    await session.execute(
+                        update(Decision)
+                        .where(Decision.id == decision_id, Decision.embedding.is_(None))
+                        .values(embedding=vector)
+                    )
+                await session.commit()
+        return len(vectors)
 
     # ------------------------------------------------------------------
     # delete()

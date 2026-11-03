@@ -311,6 +311,92 @@ async def test_an_oversized_fact_gets_a_vector_through_learn(db):
         await _drop_agent(db, agent_id)
 
 
+async def test_start_skips_the_embed_while_the_provider_is_failing(db):
+    """start() is on a session's first turn: during an outage it must not wait out the budget."""
+    import httpx
+
+    from nous.brain.embeddings import EmbeddingProvider
+    from nous.heart.episodes import EpisodeManager
+    from nous.heart.schemas import EpisodeInput
+
+    calls = 0
+
+    def unavailable(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503)
+
+    provider = EmbeddingProvider(api_key="test", cache_size=0)
+    await provider._client.aclose()
+    provider._client = httpx.AsyncClient(
+        base_url="https://api.openai.com/v1", transport=httpx.MockTransport(unavailable)
+    )
+    provider._unavailable_until = float("inf")  # a recent embed failed
+    agent_id = f"start-ff-{uuid4().hex[:8]}"
+    await _add_agent(db, agent_id)
+    try:
+        ep = await EpisodeManager(db, provider, agent_id).start(EpisodeInput(title="t", summary="first turn"))
+        assert calls == 0, "start() called the API inside the fail-fast window"
+        assert not await _has_vector(db, ep.id)  # _end() or the backfill re-embeds it
+    finally:
+        await provider.close()
+        await _drop_agent(db, agent_id)
+
+
+async def test_sleep_reembeds_a_fact_and_a_decision_with_a_null_embedding(db, mock_embeddings):
+    from nous.brain.brain import Brain
+    from nous.brain.schemas import RecordInput
+    from nous.heart import FactInput, Heart
+
+    agent_id = f"reembed-fd-{uuid4().hex[:8]}"
+    await _add_agent(db, agent_id)
+    try:
+        settings = Settings(_env_file=None)
+        object.__setattr__(settings, "agent_id", agent_id)
+        heart = Heart(db, settings, embedding_provider=mock_embeddings)
+        brain = Brain(db, settings, embedding_provider=mock_embeddings)
+        fact = await heart.learn(FactInput(subject="cache", content="The cache warms in 40 seconds after a deploy"))
+        decision = await brain.record(
+            RecordInput(
+                description="Warm the cache before switching traffic",
+                context="Cold starts doubled p99 latency",
+                pattern="Prime caches before cutover",
+                confidence=0.8,
+                category="process",
+                stakes="medium",
+            )
+        )
+        fact_sql = "SELECT embedding::text AS vec FROM heart.facts WHERE id = :id"
+        decision_sql = "SELECT embedding::text AS vec FROM brain.decisions WHERE id = :id"
+        async with db.session() as s:
+            fact_vec = (await s.execute(sql_text(fact_sql), {"id": fact.id})).one().vec
+            decision_vec = (await s.execute(sql_text(decision_sql), {"id": decision.id})).one().vec
+            await s.execute(sql_text("UPDATE heart.facts SET embedding = NULL WHERE id = :id"), {"id": fact.id})
+            await s.execute(sql_text("UPDATE brain.decisions SET embedding = NULL WHERE id = :id"), {"id": decision.id})
+            await s.commit()
+
+        bus = MagicMock(spec=EventBus)
+        bus.on = MagicMock()
+        bus.emit = AsyncMock()
+        from nous.handlers.sleep_handler import SleepHandler
+
+        handler = SleepHandler(brain, heart, settings, bus, AsyncMock())
+        sleep_stats: dict = {}
+        assert await handler._phase_recover_abandoned_episodes(sleep_stats) is True
+
+        async with db.session() as s:
+            assert (await s.execute(sql_text(fact_sql), {"id": fact.id})).one().vec == fact_vec
+            assert (await s.execute(sql_text(decision_sql), {"id": decision.id})).one().vec == decision_vec
+        assert sleep_stats.get("facts_reembedded") == 1
+        assert sleep_stats.get("decisions_reembedded") == 1
+        await heart.close()
+    finally:
+        async with db.session() as s:
+            await s.execute(sql_text("DELETE FROM brain.decisions WHERE agent_id = :aid"), {"aid": agent_id})
+            await s.commit()
+        await _drop_agent(db, agent_id)
+
+
 # ---------------------------------------------------------------------------
 # I-5: a SQL error in the censor's semantic match leaves the keyword match working
 # ---------------------------------------------------------------------------

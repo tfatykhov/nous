@@ -83,7 +83,7 @@ class _FailingEmbeddings:
     async def embed(self, text: str, fail_fast: bool = False):
         raise RuntimeError("embedding backend down")
 
-    async def embed_batch(self, texts):
+    async def embed_batch(self, texts, fail_fast: bool = False):
         raise RuntimeError("embedding backend down")
 
     async def close(self):
@@ -100,7 +100,7 @@ class _GoodEmbeddings:
     async def embed(self, text: str, fail_fast: bool = False):
         return [0.1] * 1536
 
-    async def embed_batch(self, texts):
+    async def embed_batch(self, texts, fail_fast: bool = False):
         return [[0.1] * 1536 for _ in texts]
 
     async def close(self):

@@ -10,13 +10,12 @@ import logging
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-import httpx
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.utils import text_overlap
 
-from nous.brain.embeddings import EmbeddingProvider
+from nous.brain.embeddings import _REEMBED_MAX_PER_CYCLE, EmbeddingProvider, reembed_rows
 from nous.heart.schemas import EpisodeDetail, EpisodeInput, EpisodeSummary
 from nous.heart.search import hybrid_search, hybrid_search_multi
 from nous.storage.database import Database
@@ -24,11 +23,6 @@ from nous.storage.models import Episode, Event
 
 logger = logging.getLogger(__name__)
 
-# Closed episodes with a NULL embedding re-embedded per sleep cycle (H-5).
-_REEMBED_MAX_PER_CYCLE = 20
-# A 4xx that rejects this request's input. Any other failure (401/403, 429,
-# 5xx, transport) would fail every row alike, so it stops the backfill.
-_REJECTED_INPUT_STATUSES = frozenset({400, 413, 422})
 
 
 class EpisodeManager:
@@ -102,7 +96,11 @@ class EpisodeManager:
         if self.embeddings:
             embed_text = f"{input.title or ''} {input.summary}".strip()
             try:
-                embedding = await self.embeddings.embed(embed_text)
+                # fail_fast, unlike the other write paths: start() runs on a
+                # session's first turn, which must not wait out the budget in
+                # an outage. A NULL here is not lost: _end() re-embeds the
+                # episode, and reembed_missing() catches it after close.
+                embedding = await self.embeddings.embed(embed_text, fail_fast=True)
             except Exception:
                 logger.warning("Embedding generation failed for episode start")
 
@@ -293,11 +291,10 @@ class EpisodeManager:
         hides the episode from vector search and the densifier until something
         re-embeds it. The text is the one _end() embeds (with a missing summary
         as empty, where _end() would embed the word "None"); the provider cuts
-        it to its char cap. Newest first. A row whose input the API rejects (400,
-        413, 422) is skipped, so it cannot block older rows. Any other failure
-        (401/403, 429, 5xx, transport error, timeout, fail-fast skip) would
-        fail every row, so it stops the batch and the next cycle retries. No
-        transaction is held while embedding. Returns the number re-embedded.
+        it to its char cap. Newest first; failures are classified by
+        reembed_rows (a rejected row is skipped, anything else stops the
+        batch). No transaction is held while embedding. Returns the number
+        re-embedded.
         """
         if not self.embeddings or limit <= 0:
             return 0
@@ -318,34 +315,18 @@ class EpisodeManager:
                 )
             ).all()
 
-        vectors: dict[UUID, list[float]] = {}
-        for row in rows:
-            embed_text = (
-                f"{row.title or ''} {row.summary or ''} {row.outcome or ''} {' '.join(row.lessons_learned or [])}"
-            ).strip()
-            if not embed_text:
-                continue
-            try:
-                vectors[row.id] = await self.embeddings.embed(embed_text)
-            except httpx.HTTPStatusError as e:
-                status = e.response.status_code
-                if status in _REJECTED_INPUT_STATUSES:
-                    logger.warning("Episode re-embed rejected for %s (HTTP %d); skipped", row.id, status)
-                    continue
-                logger.warning(
-                    "Episode re-embed failed for %s (HTTP %d); the rest wait for the next sleep cycle",
+        vectors = await reembed_rows(
+            self.embeddings,
+            [
+                (
                     row.id,
-                    status,
+                    f"{row.title or ''} {row.summary or ''} {row.outcome or ''} "
+                    f"{' '.join(row.lessons_learned or [])}".strip(),
                 )
-                break
-            except Exception:
-                logger.warning(
-                    "Episode re-embed failed for %s; the rest wait for the next sleep cycle",
-                    row.id,
-                    exc_info=True,
-                )
-                break
-
+                for row in rows
+            ],
+            "Episode",
+        )
         if vectors:
             async with self.db.session() as session:
                 for episode_id, vector in vectors.items():

@@ -568,7 +568,7 @@ class _StubEmbeddings:
     tests — the modal-routing assertions are about WHICH inputs get stored, so a
     constant non-None vector is enough."""
 
-    async def embed_batch(self, texts):
+    async def embed_batch(self, texts, fail_fast: bool = False):
         return [[0.1, 0.2, 0.3, 0.4] for _ in texts]
 
     async def embed(self, text, fail_fast: bool = False):

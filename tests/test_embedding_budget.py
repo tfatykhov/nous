@@ -289,3 +289,41 @@ async def test_oversized_input_is_cut_before_it_is_sent_and_cache_keyed():
     await _guarded(provider.embed_batch(["b" * (cap + 1), "short"]))
     assert sent[1] == ["b" * cap, "short"]
     await provider.close()
+
+
+async def test_fail_fast_batch_raises_inside_the_window(fast_limits):
+    calls = 0
+
+    def unavailable(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(503)
+
+    provider = await _provider(unavailable)
+    with pytest.raises(httpx.HTTPStatusError):
+        await _guarded(provider.embed("open the window"))
+    before = calls
+    with pytest.raises(embeddings_mod.EmbeddingUnavailableError):
+        await _guarded(provider.embed_batch(["variant one", "variant two"], fail_fast=True))
+    assert calls == before, "a fail_fast batch inside the window reached the transport"
+    await provider.close()
+
+
+async def test_fail_fast_batch_uses_the_single_text_budget_and_opens_the_window(fast_limits):
+    calls = 0
+
+    async def slow_but_healthy(request):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.4)  # over the 0.3 s single-text budget, under the 0.6 s batch one
+        return _ok(request)
+
+    provider = await _provider(slow_but_healthy)
+    with pytest.raises(TimeoutError):
+        await _guarded(provider.embed_batch(["variant one", "variant two"], fail_fast=True))
+    # A read-path batch failing says the same as a failed query embed: skip the next read.
+    before = calls
+    with pytest.raises(embeddings_mod.EmbeddingUnavailableError):
+        await _guarded(provider.embed("query", fail_fast=True))
+    assert calls == before
+    await provider.close()

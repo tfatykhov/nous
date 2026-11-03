@@ -533,7 +533,7 @@ def _provider(cache_size: int, api_calls: list) -> "object":
 
     provider = EmbeddingProvider(api_key="test", cache_size=cache_size)
 
-    async def fake_post(payload):
+    async def fake_post(payload, **_kw):
         api_calls.append(payload)
         inp = payload["input"]
         texts = [inp] if isinstance(inp, str) else inp
@@ -642,7 +642,7 @@ class TestEmbeddingCache:
         p = _provider(16, calls)
         await p.embed("warm entry")
 
-        async def failing_post(payload):
+        async def failing_post(payload, **_kw):
             raise RuntimeError("api down")
 
         p._post_with_retry = failing_post
@@ -659,7 +659,7 @@ class TestEmbeddingCache:
 
         p = EmbeddingProvider(api_key="t", cache_size=16)
 
-        async def shuffled_post(payload):
+        async def shuffled_post(payload, **_kw):
             texts = payload["input"]
             data = [
                 {"index": i, "embedding": [float(len(t)), float(i)]}
@@ -683,7 +683,7 @@ class TestEmbeddingCache:
 
         p = EmbeddingProvider(api_key="t", cache_size=16)
 
-        async def short_post(payload):
+        async def short_post(payload, **_kw):
             response = MagicMock()
             response.json = MagicMock(return_value={"data": [
                 {"index": 0, "embedding": [1.0, 0.0]},

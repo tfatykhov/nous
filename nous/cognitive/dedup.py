@@ -88,7 +88,9 @@ class ConversationDeduplicator:
 
         # F2: Batch all texts into single embed_batch() call
         all_texts = list(conversation_messages) + [content for _, content in memories]
-        all_embeddings = await self._embeddings.embed_batch(all_texts)
+        # A read path (context build): during an outage, check() falls back to
+        # keyword overlap at once instead of waiting out the budget.
+        all_embeddings = await self._embeddings.embed_batch(all_texts, fail_fast=True)
 
         # Split results
         n_conv = len(conversation_messages)
