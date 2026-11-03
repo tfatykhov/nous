@@ -1816,6 +1816,18 @@ class TestSleepStartsOnce:
         assert handler.is_sleeping is False
         assert handler._sleep_task is None
 
+    async def test_a_wake_before_the_runs_first_step_is_kept(self):
+        handler, brain, heart, bus, _ = _make_sleep_handler()
+        for name in _ALL_OTHER_PHASES:
+            setattr(handler, f"_phase_{name}", AsyncMock(return_value=True))
+        await handler.handle(_make_event("sleep_started"))
+        await handler._on_wake(_make_event("message_received"))
+
+        await handler._sleep_task
+
+        assert bus.emit.call_args[0][0].data["interrupted"] is True
+        handler._phase_review_decisions.assert_not_awaited()
+
     async def test_a_finished_runs_late_callback_leaves_a_newer_run_alone(self):
         handler, *_ = _make_sleep_handler()
         release = asyncio.Event()

@@ -536,8 +536,9 @@ class SleepHandler:
 
     async def _run_sleep(self, event: Event) -> None:
         """Actual sleep work — runs as independent task, NOT blocking bus."""
+        # handle() already set both flags and cleared _interrupted; clearing it
+        # again here would drop a wake that arrived before this first step.
         self._sleeping = True
-        self._interrupted = False
         self._currently_sleeping = True
         phases_completed: list[str] = []
         sleep_stats = {"facts_created": 0, "procedures_created": 0, "censors_retired": 0}
@@ -1814,23 +1815,29 @@ class SleepHandler:
                 # hold the five slots. A window of 0 days turns its arm off.
                 now = datetime.now(UTC)
                 windows = [
-                    (_MERGE_ABORT_OUTCOMES, int(getattr(settings, "contradiction_recheck_cooldown_days", 30))),
-                    ((_LLM_REFUSED,), int(getattr(settings, "cluster_refusal_ttl_days", 7))),
-                ]
-                arms = [
-                    and_(
-                        EventRow.data["outcome"].astext.in_(outcomes),
-                        EventRow.created_at > now - timedelta(days=days),
+                    (outcomes, days)
+                    for outcomes, days in (
+                        (_MERGE_ABORT_OUTCOMES, int(getattr(settings, "contradiction_recheck_cooldown_days", 30))),
+                        ((_LLM_REFUSED,), int(getattr(settings, "cluster_refusal_ttl_days", 7))),
                     )
-                    for outcomes, days in windows
                     if days > 0
                 ]
-                if arms:
+                if windows:
+                    arms = [
+                        and_(
+                            EventRow.data["outcome"].astext.in_(outcomes),
+                            EventRow.created_at > now - timedelta(days=days),
+                        )
+                        for outcomes, days in windows
+                    ]
                     stmt = stmt.where(
                         ~select(EventRow.id)
                         .where(
                             EventRow.agent_id == self._heart.agent_id,
                             EventRow.event_type == "f027_cluster_merge",
+                            # The widest window, outside the OR, keeps a range
+                            # scan on idx_events_created available.
+                            EventRow.created_at > now - timedelta(days=max(days for _, days in windows)),
                             or_(*arms),
                             EventRow.data["subject"].astext == func.left(grouped.c.subject, 200),
                             EventRow.data["source_count"].as_integer() == grouped.c.cnt,
