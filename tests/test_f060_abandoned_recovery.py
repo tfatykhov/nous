@@ -28,6 +28,8 @@ from uuid import uuid4
 import pytest
 
 from nous.config import Settings
+from nous.events import EventBus
+from nous.handlers.fact_extractor import FactExtractor
 from nous.handlers.sleep_handler import SleepHandler
 
 
@@ -54,6 +56,7 @@ def _make_handler(settings: Settings, summarizer=None) -> SleepHandler:
     heart.db = MagicMock()
     bus = MagicMock()
     bus.on = MagicMock()
+    bus.emit = AsyncMock()
     handler = SleepHandler(brain, heart, settings, bus, llm_client=None)
     handler._episode_summarizer = summarizer
     return handler
@@ -417,3 +420,79 @@ async def test_recovery_and_mark_abandoned_both_fire_in_one_cycle():
     assert sleep_stats["episodes_recovered"] == 1
     assert sleep_stats["episodes_recovered_full_transcript"] == 1
     assert sleep_stats["episodes_marked_abandoned"] == 3
+
+
+# ---------------------------------------------------------------------
+# Fact extraction for transcript recoveries
+# ---------------------------------------------------------------------
+# summarize_episode does not emit episode_summarized, the only event
+# FactExtractor listens to, so Loop A emits it itself -- but only for a
+# recovery from the full transcript. A plain-summary recovery read just the
+# user's first message, and its facts would rest on that alone.
+
+
+def _bus_with_fact_extractor(settings: Settings) -> tuple[EventBus, FactExtractor]:
+    """A real bus, never started: the phase's events stay queued for the test."""
+    bus = EventBus()
+    extractor = FactExtractor(MagicMock(), settings, bus)
+    extractor.extract_and_store = AsyncMock()
+    return bus, extractor
+
+
+@pytest.mark.asyncio
+async def test_transcript_recovery_hands_the_episode_to_fact_extraction():
+    settings = _make_settings()
+    summary = {"title": "ok", "candidate_facts": ["The deploy host is vm-a"]}
+    summarizer = SimpleNamespace(summarize_episode=AsyncMock(return_value=summary))
+    handler = _make_handler(settings, summarizer=summarizer)
+    bus, extractor = _bus_with_fact_extractor(settings)
+    handler._bus = bus
+
+    ep1 = uuid4()
+    long_transcript = "user: hello" + ("x" * 100)
+    factory = _make_session_cm([(ep1, long_transcript, "short summary")])
+    handler._heart.db.session = MagicMock(side_effect=factory)
+
+    sleep_stats: dict = {}
+    assert await handler._phase_recover_abandoned_episodes(sleep_stats) is True
+
+    assert sleep_stats["episodes_recovery_extracted"] == 1
+    event = bus._queue.get_nowait()
+    assert bus._queue.empty()
+    assert event.type == "episode_summarized"
+    assert event.agent_id == "test-agent"
+    assert event.data == {
+        "episode_id": str(ep1),
+        "summary": summary,
+        "candidate_facts": ["The deploy host is vm-a"],
+        "transcript": long_transcript,
+    }
+    await bus._dispatch(event)
+    extractor.extract_and_store.assert_awaited_once_with(
+        summary=summary,
+        episode_id=str(ep1),
+        transcript=long_transcript,
+        candidate_facts=["The deploy host is vm-a"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_summary_only_recovery_is_not_handed_to_fact_extraction():
+    settings = _make_settings()
+    summarizer = SimpleNamespace(
+        summarize_episode=AsyncMock(return_value={"title": "ok", "candidate_facts": ["x"]}),
+    )
+    handler = _make_handler(settings, summarizer=summarizer)
+    bus, extractor = _bus_with_fact_extractor(settings)
+    handler._bus = bus
+
+    factory = _make_session_cm([(uuid4(), None, "User asked about NOUS_MAX_TOKENS configuration")])
+    handler._heart.db.session = MagicMock(side_effect=factory)
+
+    sleep_stats: dict = {}
+    assert await handler._phase_recover_abandoned_episodes(sleep_stats) is True
+
+    assert sleep_stats["episodes_recovered_summary_only"] == 1
+    assert "episodes_recovery_extracted" not in sleep_stats
+    assert bus._queue.empty()
+    extractor.extract_and_store.assert_not_awaited()

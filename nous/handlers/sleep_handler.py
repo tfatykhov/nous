@@ -2347,6 +2347,7 @@ class SleepHandler:
             recovered_full = 0
             recovered_summary_only = 0
             skipped_no_data = 0
+            extracted = 0
             closed = 0
             marked_abandoned = 0
             errors = 0
@@ -2400,6 +2401,27 @@ class SleepHandler:
                     if summary is not None:
                         if source_kind == "transcript":
                             recovered_full += 1
+                            # summarize_episode does not emit episode_summarized,
+                            # the only event FactExtractor listens to, so without
+                            # this a recovered episode never becomes facts. Fires
+                            # once per episode: summarize_episode returns a summary
+                            # only for a row it has not summarized before. Not for
+                            # a plain-summary recovery: that read only the user's
+                            # first message, and admission would be the only guard
+                            # against the facts extraction mints from it.
+                            await self._bus.emit(
+                                Event(
+                                    type="episode_summarized",
+                                    agent_id=agent_id,
+                                    data={
+                                        "episode_id": str(ep_id),
+                                        "summary": summary,
+                                        "candidate_facts": summary.get("candidate_facts", []),
+                                        "transcript": source,
+                                    },
+                                )
+                            )
+                            extracted += 1
                         else:
                             recovered_summary_only += 1
                 except Exception:
@@ -2505,6 +2527,8 @@ class SleepHandler:
                 sleep_stats["episodes_recovered_full_transcript"] = recovered_full
             if recovered_summary_only:
                 sleep_stats["episodes_recovered_summary_only"] = recovered_summary_only
+            if extracted:
+                sleep_stats["episodes_recovery_extracted"] = extracted
             if closed:
                 sleep_stats["episodes_recovery_closed"] = closed
             if marked_abandoned:
@@ -2514,10 +2538,11 @@ class SleepHandler:
             if errors:
                 sleep_stats["abandoned_recovery_errors"] = errors
             logger.info(
-                "F060 recovery: %d full + %d summary-only recovered, %d closed, %d marked abandoned, "
-                "%d skipped (%d errors)",
+                "F060 recovery: %d full + %d summary-only recovered, %d sent to fact extraction, %d closed, "
+                "%d marked abandoned, %d skipped (%d errors)",
                 recovered_full,
                 recovered_summary_only,
+                extracted,
                 closed,
                 marked_abandoned,
                 skipped_no_data,
