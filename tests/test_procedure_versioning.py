@@ -541,7 +541,11 @@ async def test_restore_of_an_unknown_procedure_raises(heart, session):
 
 
 async def test_two_concurrent_stores_of_one_lesson_leave_one_row(db):
-    """Committed (no SAVEPOINT): the advisory lock orders the two creates, so the second merges."""
+    """Committed (no SAVEPOINT): the advisory lock orders the two creates, so the second merges.
+
+    Either store can win the lock. A merge appends only evidence the row does not cite yet,
+    so each input carries evidence the other lacks: whichever comes second adds a version.
+    """
     import asyncio
 
     from sqlalchemy import delete
@@ -550,7 +554,7 @@ async def test_two_concurrent_stores_of_one_lesson_leave_one_row(db):
     manager = ProcedureManager(db, _AxisEmbeddings({}), agent)
     try:
         await asyncio.gather(
-            manager.store(_input()),
+            manager.store(_input(implementation_notes=["lesson: report acceptance only", "evidence: e1"])),
             manager.store(_input(name="report send results honestly", implementation_notes=["evidence: e2"])),
         )
         async with db.session() as check:
