@@ -25,15 +25,32 @@ Two measured write-path failures from the MAB evaluation:
 ## Design — R1: Enumerative Extraction
 
 R1 is **modal (density-adaptive, per R1.1)**. A cheap heuristic (`density_score`) counts the
-fraction of transcript lines that look like standalone declarative statements or list items. If
+fraction of transcript lines that are list items, `key: value` lines or short (10–80 char)
+statements; a line starting with a speaker label (`User:`, `Assistant:`, `System:`, `Human:`)
+never counts, and fewer than five such lines scores 0. Lines inside Assistant turns are left out
+of both counts, since facts come from what the user supplied. A turn starts with a speaker label
+at the top of the transcript or after a blank line, as layer.py joins turns; a labelled line right
+after another non-empty line stays in the current turn, but after a blank line it starts a new
+turn even inside a user's message. If
 the score meets `NOUS_ENUMERATIVE_DENSITY_THRESHOLD` (default 0.6), the episode is **enumerable**
 and routes fact storage through the enumerative leg INSTEAD of the candidate-facts leg (the legacy
-summarize-then-extract path). Narrative episodes are byte-identical to today.
+summarize-then-extract path). Narrative episodes are byte-identical to today. Episodes of
+background sessions (`is_background_session`: DAG summary, subtask, scheduled continuation,
+heartbeat, dynamic check and callback, continuation, approved action and claude-job sessions) never
+take the enumerative leg:
+their transcripts are generated prompts full of `Key: value` lines and lists, not knowledge a user
+supplied.
 
 **Modal, not additive (deviation #4):** storing both paths would mint un-mergeable paraphrase
 variants (the enumerative leg produces keyed facts; the legacy leg produces keyless summary facts;
 R2's exact-key lookup can never merge them, so paraphrases in the 0.92–0.95 cosine band evade
 both dedup legs permanently — round-2 devil finding #3).
+
+**Profile carve-out:** when the enumerative leg stores facts, summarizer candidates in the profile
+categories (person, preference, rule) are still stored; every other candidate is dropped. They are
+the only automatic source of profile facts, and no enumerative fact carries those categories (the
+extraction schema offers technical/concept/tool and a drifted profile label is stored as technical),
+so no profile-category variant pair can form.
 
 ### Extraction
 
@@ -175,6 +192,9 @@ Partial index `idx_facts_conflict_slot` on `(agent_id, subject_key, attribute_ke
 
 4. **Modal, not additive:** Enumerable episodes route fact storage INSTEAD of the candidate-facts
    leg. The episode summary is still generated and stored; only fact extraction switches source.
+   Exception: candidates in the profile categories (person, preference, rule) are still stored
+   when the enumerative leg stores facts (see the profile carve-out above), and their dedup only
+   matches profile-category facts, so an identical technical atom cannot absorb them.
 
 5. **R2 transition-period gap:** With R2 enabled (`supersession_key_resolution_enabled=true`),
    keyed facts do not subject-supersede legacy UNKEYED rows — exact-key matching only. Stale

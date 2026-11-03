@@ -2215,6 +2215,8 @@ class TestExemplarCompatibleCandidateDedup:
                     subject="dark mode pref",
                     content="The user likes using dark mode in the application.",
                     source="fact_extractor",
+                    # A preference input dedups only into a profile-category fact.
+                    category="preference",
                     active=True,
                     embedding=_vec_at_cosine(base, 0.96, "ds-norm"),
                 )

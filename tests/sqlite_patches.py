@@ -164,8 +164,12 @@ async def sqlite_find_duplicate(
     candidate_event_date=None,
     prefer_slot: tuple[str, str] | None = None,
     probed_ids: list[UUID] | None = None,
+    tier1_only: bool = False,
 ):
     """Pure-Python duplicate finding using cosine similarity.
+
+    Mirrors production's ``tier1_only``: a person/preference/rule input only
+    matches person/preference/rule facts.
 
     F075: mirrors the production ORDER BY in facts.py::_find_duplicate —
     among above-threshold matches, prefer the one whose event_date equals
@@ -202,6 +206,8 @@ async def sqlite_find_duplicate(
     )
     if exclude_ids:
         query = query.where(Fact.id.notin_(exclude_ids))
+    if tier1_only:
+        query = query.where(Fact.category.in_(("preference", "person", "rule")))
 
     result = await session.execute(query)
     facts = result.scalars().all()
@@ -296,8 +302,9 @@ async def sqlite_find_max_similarity(
     embedding: list[float],
     exclude_ids: list[UUID],
     session: AsyncSession,
+    tier1_only: bool = False,
 ) -> float | None:
-    """Pure-Python max similarity search."""
+    """Pure-Python max similarity search (mirrors production's ``tier1_only``)."""
     from nous.storage.models import Fact
 
     if not embedding:
@@ -309,6 +316,8 @@ async def sqlite_find_max_similarity(
     )
     if exclude_ids:
         query = query.where(Fact.id.notin_(exclude_ids))
+    if tier1_only:
+        query = query.where(Fact.category.in_(("preference", "person", "rule")))
 
     result = await session.execute(query)
     facts = result.scalars().all()

@@ -54,6 +54,11 @@ _EXEMPLAR_EXISTS_TTL_SECONDS = 300.0
 # only weak ones, so an unreferenced task can be garbage-collected mid-flight.
 _TRACK_ACCESS_TASKS: set[asyncio.Task] = set()
 
+# The profile (tier-1) categories. The source of truth is
+# nous.cognitive.context.TIER1_FACT_CATEGORIES, which heart cannot import
+# (cognitive imports heart).
+_TIER1_CATEGORIES = ("preference", "person", "rule")
+
 # F027: classifier prompt. Exported so the F027 eval script
 # (scripts/eval/eval_f027_supersession.py) tests the same prompt prod uses.
 # Apply this decision tree IN ORDER, returning the first match. UPDATE is
@@ -867,6 +872,7 @@ class FactManager:
                 candidate_event_date=input.event_date,
                 prefer_slot=prefer_slot,
                 probed_ids=probed_ids,
+                tier1_only=input.category in _TIER1_CATEGORIES,
             )
             if found is not None:
                 dupe, dupe_similarity = found
@@ -987,7 +993,13 @@ class FactManager:
                 admission_excludes = list({*exclude_ids, routed_dupe_id, *same_slot_ids, *probed_ids})
             else:
                 admission_excludes = exclude_ids
-            max_sim = await self._find_max_similarity(embedding, admission_excludes, session) if embedding else None
+            max_sim = (
+                await self._find_max_similarity(
+                    embedding, admission_excludes, session, tier1_only=input.category in _TIER1_CATEGORIES
+                )
+                if embedding
+                else None
+            )
             source_text = await self._get_source_text(input, session)
 
             admission_result = await self._admission_controller.score(
@@ -1192,6 +1204,7 @@ class FactManager:
                 new_event_date=input.event_date,
                 exclude_ids=exclude_ids,
                 keep_both_ids=keep_both_ids,
+                new_category=input.category,
             )
 
         if (
@@ -1483,12 +1496,21 @@ class FactManager:
         new_event_date: date | None = None,
         exclude_ids: list[UUID] | None = None,
         keep_both_ids: list[UUID] | None = None,
+        new_category: str | None = None,
     ) -> bool:
         """Supersede older facts with same subject AND similar content (006.2).
 
         Only supersedes when both conditions are met:
         1. Same subject (case-insensitive exact match)
         2. Cosine similarity > ``fact_supersession_threshold`` setting (default 0.80)
+
+        Profile (tier-1) and non-profile facts never supersede each other:
+        ``new_category`` keeps the candidates to the new fact's class (a fact
+        with no category is non-profile). Otherwise a profile candidate would
+        deactivate the identical technical fact the enumerative extractor
+        stored, and that row's conflict-slot and entity keys would leave keyed
+        retrieval with it; the other way round, a technical fact would
+        deactivate a profile fact.
 
         F027: For ambiguous range (``fact_supersession_threshold``–``fact_native_cosine_threshold``,
         default 0.80–0.95) with LLM available, use classifier to disambiguate
@@ -1537,6 +1559,11 @@ class FactManager:
             # INPUTS out). is_distinct_from keeps NULL-source normals in.
             Fact.source.is_distinct_from("exemplar_extractor"),
             distance < 1 - _supersession_threshold,
+            (
+                Fact.category.in_(_TIER1_CATEGORIES)
+                if new_category in _TIER1_CATEGORIES
+                else or_(Fact.category.is_(None), Fact.category.notin_(_TIER1_CATEGORIES))
+            ),
         ]
         if excluded:
             conditions.append(Fact.id.notin_(excluded))
@@ -1966,8 +1993,15 @@ class FactManager:
         candidate_event_date: date | None = None,
         prefer_slot: tuple[str, str] | None = None,
         probed_ids: list[UUID] | None = None,
+        tier1_only: bool = False,
     ) -> tuple[Fact, float] | None:
         """Find a near-duplicate fact by cosine similarity > threshold.
+
+        ``tier1_only`` (set by ``_learn`` for a person/preference/rule input)
+        limits the candidates to tier-1 facts, in the WHERE for the same reason
+        as the exemplar exclusion below: a profile fact folded into an
+        identical technical fact (the enumerative extractor stores the same
+        statement as technical) is lost from the profile.
 
         Returns ``(fact, similarity)`` so the caller can band-route the hit
         (audit S3), or None when nothing clears the threshold.
@@ -2043,6 +2077,10 @@ class FactManager:
             exclude_clause = f"AND id NOT IN ({placeholders})"
             for i, eid in enumerate(exclude_ids):
                 params[f"excl_{i}"] = eid
+        category_clause = ""
+        if tier1_only:
+            category_clause = "AND category = ANY(CAST(:tier1 AS text[]))"
+            params["tier1"] = list(_TIER1_CATEGORIES)
 
         # codex P2 (2026-06-09) + Codex r19 (F086): pgvector applies the
         # agent_id/active/source filters AFTER the approximate candidate walk,
@@ -2072,6 +2110,7 @@ class FactManager:
               AND embedding IS NOT NULL
               AND source IS DISTINCT FROM 'exemplar_extractor'
               {exclude_clause}
+              {category_clause}
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT 20
         """)
@@ -2144,6 +2183,7 @@ class FactManager:
         embedding: list[float],
         exclude_ids: list[UUID],
         session: AsyncSession,
+        tier1_only: bool = False,
     ) -> float | None:
         """Find highest cosine similarity to any existing active fact.
 
@@ -2155,6 +2195,11 @@ class FactManager:
         isolation touchpoint; exemplar inputs themselves bypass admission
         scoring, so the exclusion only ever changes a NON-exemplar input's
         novelty. Returns None if no facts exist or no embedding available.
+
+        ``tier1_only`` (a person/preference/rule input) scans tier-1 facts
+        only, matching ``_find_duplicate``: a profile fact that dedup kept
+        apart from an identical technical fact must not then be rejected
+        because that technical fact zeroes its novelty.
         """
         if not embedding:
             return None
@@ -2168,6 +2213,10 @@ class FactManager:
             exclude_clause = f"AND id NOT IN ({placeholders})"
             for i, eid in enumerate(exclude_ids):
                 params[f"excl_{i}"] = eid
+        category_clause = ""
+        if tier1_only:
+            category_clause = "AND category = ANY(CAST(:tier1 AS text[]))"
+            params["tier1"] = list(_TIER1_CATEGORIES)
 
         # Codex r19 (F086): self-issue the HNSW widening + iterative scan so this
         # novelty probe does not depend on _find_duplicate having run earlier in
@@ -2187,6 +2236,7 @@ class FactManager:
               AND embedding IS NOT NULL
               AND source IS DISTINCT FROM 'exemplar_extractor'
               {exclude_clause}
+              {category_clause}
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT 1
         """)

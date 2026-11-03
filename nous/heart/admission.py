@@ -87,6 +87,10 @@ SOURCE_PENALTIES: dict[str, float] = {
     # mild-penalty pattern instead so the composite score doesn't tank.
     "correction_extraction": 0.10,
     "inline_correction": 0.10,
+    # learn_fact facts (source user_direct) carry no transcript source_text
+    # to ground them on, so the 0.3 ungrounded floor applied and could reject
+    # a plain fact the user stated. Their declared confidence stands.
+    "user_direct": 0.0,
 }
 
 

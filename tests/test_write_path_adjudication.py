@@ -137,6 +137,179 @@ def test_density_score_detects_unnumbered_short_fact_sheet():
     assert density_score(doc) > 0.8
 
 
+# A chat transcript as layer.py stores it ("User: ..." / "Assistant: ...",
+# turns joined by blank lines), written in full prose sentences. Every line
+# is 81-180 chars and ends in a period, so the old statement-line rule
+# (10-180 chars) counted each one as an enumerable statement.
+_CHAT_PROSE_TRANSCRIPT = "\n\n".join(
+    [
+        "User: I spent the weekend reading about how consensus protocols cope with partial failure.",
+        "Assistant: That is a deep topic, and the classic papers are still the clearest way into it.\n"
+        "Raft was designed to be understandable, which is why so many production systems choose it.\n"
+        "Paxos is older and more general, but its first presentation made it hard to implement well.",
+        "User: For a small internal service that only needs a replicated config store, I'd buy, not build.",
+        "Assistant: I would start from an existing Raft library rather than writing the protocol yourself.\n"
+        "The hard parts are membership changes and snapshots, and mature libraries handle both of them.",
+    ]
+)
+
+
+def test_density_gate_skips_conversational_prose():
+    """A User/Assistant transcript in long prose sentences is not enumerable."""
+    lines = [ln for ln in _CHAT_PROSE_TRANSCRIPT.splitlines() if ln.strip()]
+    assert all(81 <= len(ln) <= 180 and ln.endswith(".") for ln in lines)  # fixture shape
+    assert density_score(_CHAT_PROSE_TRANSCRIPT) < 0.6
+    assert is_enumerable(_CHAT_PROSE_TRANSCRIPT, threshold=0.6) is False
+
+
+def test_density_gate_speaker_label_lines_never_count():
+    """Short labelled turns look like "key: value" and like short statements,
+    but a speaker label marks a chat turn, whatever its case."""
+    doc = "\n".join(
+        [
+            "User: Thanks, that works.",
+            "Assistant: Glad it helped.",
+            "user: One more thing.",
+            "ASSISTANT: Go ahead.",
+            "System: Session resumed.",
+            "Human: Please continue.",
+        ]
+    )
+    assert density_score(doc) == 0.0
+    assert is_enumerable(doc, threshold=0.6) is False
+
+
+def test_density_gate_needs_five_hits():
+    """A high ratio over a handful of lines is not a list: fewer than five
+    hits never fires."""
+    doc = "\n".join(
+        [
+            "Alice is 30.",
+            "Bob is CEO.",
+            "Tim likes dogs.",
+            "Sky is blue.",
+            "and that is about everything I wanted to tell you about the people on the team for now",
+        ]
+    )
+    assert density_score(doc) == 0.0
+    assert is_enumerable(doc, threshold=0.6) is False
+
+
+def test_density_gate_still_fires_on_list_shaped_text():
+    """A numbered list (the MemoryAgentBench CR shape), the short fact sheet and
+    a key: value sheet without trailing periods are all enumerable."""
+    numbered = "Here is a list of facts:\n" + "\n".join(
+        f"{i}. The director of Organisation {i} is Person {i}, who was born in City {i}." for i in range(30)
+    )
+    fact_sheet = "\n".join(
+        ["Alice is 30.", "City: Paris.", "Bob is CEO.", "Tim likes dogs.", "Bob owns the car.", "Sky is blue."]
+    )
+    key_values = "\n".join(["Name: Alice Smith", "Age: 30", "City: Paris", "Role: CEO", "Team: Platform"])
+    for doc in (numbered, fact_sheet, key_values):
+        assert is_enumerable(doc, threshold=0.6) is True
+
+
+def _chat_with_list_answers(user: str, assistant: str) -> str:
+    """A chat in which the user asks in prose and the assistant answers in
+    markdown lists, turns joined by a blank line as layer.py joins them."""
+    packing = [
+        "Ski jacket",
+        "Thermal base layers",
+        "Gloves and liners",
+        "Goggles",
+        "Helmet",
+        "Neck gaiter",
+        "Wool socks",
+        "Sunscreen",
+        "Lip balm",
+        "Hand warmers",
+    ]
+    food = [
+        "Trail mix",
+        "Energy bars",
+        "Dried fruit",
+        "Cheese and crackers",
+        "A thermos of soup",
+        "Dark chocolate",
+        "Bananas",
+        "Plenty of water",
+    ]
+    return "\n\n".join(
+        [
+            f"{user}: What should I pack for a week of skiing in the Alps?",
+            f"{assistant}: Here is a packing list for the week:\n" + "\n".join(f"- {p}." for p in packing),
+            f"{user}: Thanks, and what should I eat on the mountain?",
+            f"{assistant}: A few options that travel well:\n"
+            + "\n".join(f"{i}. {f}." for i, f in enumerate(food, start=1)),
+        ]
+    )
+
+
+@pytest.mark.parametrize(("user", "assistant"), [("User", "Assistant"), ("user", "assistant")])
+def test_density_gate_skips_assistant_list_answers(user, assistant):
+    """Facts come from what the user supplied: list lines inside Assistant
+    turns are not counted, so a chat whose assistant answers in markdown lists
+    is not enumerable (layer.py writes User/Assistant, nous_eval ingest the
+    lower-case roles)."""
+    doc = _chat_with_list_answers(user, assistant)
+    assert density_score(doc) == 0.0
+    assert is_enumerable(doc, threshold=0.6) is False
+    # Nothing outside Assistant turns: the gate does not fire.
+    only_answer = f"{assistant}: Packing list:\n" + "\n".join(f"- Item number {i}." for i in range(12))
+    assert is_enumerable(only_answer, threshold=0.6) is False
+
+
+def test_density_gate_counts_user_pasted_list_in_chat():
+    """A list the user pastes into a chat still fires, and a long assistant
+    answer does not dilute it: its lines are left out of the line count too."""
+    notes = [
+        "- Alice is the team lead.",
+        "- Bob owns the billing service.",
+        "- Carol joined in March.",
+        "- Dan is on call this week.",
+        "- Erin runs the Friday demo.",
+        "- Frank prefers async reviews.",
+        "- Grace maintains the CI runners.",
+        "- Heidi is based in Berlin.",
+    ]
+    answer = "\n".join(
+        f"Noted, and I will bring point {i} about the team back up whenever it becomes relevant to your work."
+        for i in range(20)
+    )
+    doc = "\n\n".join(
+        [
+            "User: Please keep these notes about the team:\n" + "\n".join(notes),
+            "Assistant: " + answer,
+            "User: Thanks, that is everything for now.",
+        ]
+    )
+    assert is_enumerable(doc, threshold=0.6) is True
+    # A CR document as the MemoryAgentBench adapter sends it, in a User turn.
+    cr_turn = "User: [Source document for later questions — part 1/3]\n\n" + "\n".join(
+        f"{i}. The director of Organisation {i} is Person {i}." for i in range(30)
+    )
+    assert is_enumerable(cr_turn, threshold=0.6) is True
+
+
+def test_density_gate_label_inside_a_turn_does_not_switch_turns():
+    """A turn starts only at the top of the text or after a blank line, as
+    layer.py joins turns. "Assistant: Bob Jones" right after another roster
+    line is a roster line, so the rest of the roster still counts. (After a
+    blank line it would start an Assistant turn.)"""
+    roster = "\n".join(
+        [
+            "User: Here is who does what on the project:",
+            "Lead: Alice Smith",
+            "Assistant: Bob Jones",
+            "Reviewer: Carol White",
+            "Tester: Dan Brown",
+            "Writer: Erin Black",
+            "Designer: Frank Green",
+        ]
+    )
+    assert is_enumerable(roster, threshold=0.6) is True
+
+
 # ---------------------------------------------------------------------------
 # R1.2/R1.3: EnumerativeExtractor — chunked LLM extraction + batched store
 # ---------------------------------------------------------------------------
@@ -298,7 +471,10 @@ def _make_settings(*, flag_on: bool = False, **kw):
 _DENSE_TRANSCRIPT = "\n".join(
     f"{i}. Fact number {i}: item {i} belongs to person {i}." for i in range(40)
 )
-_VALID_SUMMARY = {"candidate_facts": [{"content": "Tim likes coffee " + "x" * 20, "subject": "Tim", "category": "preference", "confidence": 0.9}]}
+# A non-profile candidate: when the enumerative leg stores facts, candidates of
+# this kind are dropped (modal), so the routing tests below can assert that the
+# candidate path stored nothing. Profile candidates are covered separately.
+_VALID_SUMMARY = {"candidate_facts": [{"content": "Tim likes coffee " + "x" * 20, "subject": "Tim", "category": "technical", "confidence": 0.9}]}
 
 
 @pytest.mark.asyncio
@@ -364,6 +540,510 @@ async def test_flag_on_enumerable_routes_modally(monkeypatch):
     assert heart._captured == []
     # Returns the enumerative UUIDs.
     assert result == fake_ids
+
+
+def _mixed_candidates(profile_category: str) -> list[dict]:
+    """One profile candidate and one technical candidate, as the summarizer
+    emits them in event.data["candidate_facts"]."""
+    return [
+        {
+            "content": "Tim prefers answers in metric units, always",
+            "subject": "Tim",
+            "category": profile_category,
+            "confidence": 0.9,
+        },
+        {
+            "content": "The staging cluster runs Postgres seventeen with pgvector",
+            "subject": "staging",
+            "category": "technical",
+            "confidence": 0.9,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile_category", ["person", "preference", "rule"])
+async def test_enumerative_fired_still_stores_profile_candidates(monkeypatch, profile_category):
+    """When the enumerative leg stores facts, a summarizer candidate whose
+    category is person/preference/rule is still stored, and a technical
+    candidate is still dropped. The returned ids are the enumerative ids
+    followed by the profile ids."""
+    fake_ids = [uuid4(), uuid4()]
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.EnumerativeExtractor.process_transcript",
+        AsyncMock(return_value=fake_ids),
+    )
+
+    from nous.handlers import fact_extractor as fe_mod
+
+    heart = _stub_heart_for_extractor()
+    ext = fe_mod.FactExtractor.__new__(fe_mod.FactExtractor)
+    ext._heart = heart
+    ext._settings = _make_settings(flag_on=True, enumerative_density_threshold=0.0)
+    ext._dedup_via_search = False
+    ext._llm = object()
+
+    # handle() passes the candidates at the event-data level, not in summary.
+    result = await ext.extract_and_store(
+        summary={"summary": "Tim talked about units and the staging cluster."},
+        episode_id=str(uuid4()),
+        transcript=_DENSE_TRANSCRIPT,
+        candidate_facts=_mixed_candidates(profile_category),
+    )
+
+    assert [fi.category for fi in heart._captured] == [profile_category]
+    assert heart._captured[0].content == "Tim prefers answers in metric units, always"
+    assert heart._captured[0].source == "episode_summarizer"
+    assert len(result) == 3
+    assert result[:2] == fake_ids
+
+
+@pytest.mark.asyncio
+async def test_enumerative_fired_profile_candidates_read_from_summary(monkeypatch):
+    """Direct callers (ingest) leave candidate_facts=None and carry the
+    candidates in summary; the profile carve-out reads them from there too."""
+    fake_ids = [uuid4()]
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.EnumerativeExtractor.process_transcript",
+        AsyncMock(return_value=fake_ids),
+    )
+
+    from nous.handlers import fact_extractor as fe_mod
+
+    heart = _stub_heart_for_extractor()
+    ext = fe_mod.FactExtractor.__new__(fe_mod.FactExtractor)
+    ext._heart = heart
+    ext._settings = _make_settings(flag_on=True, enumerative_density_threshold=0.0)
+    ext._dedup_via_search = False
+    ext._llm = object()
+
+    result = await ext.extract_and_store(
+        summary={"candidate_facts": _mixed_candidates("preference")},
+        episode_id=str(uuid4()),
+        transcript=_DENSE_TRANSCRIPT,
+    )
+
+    assert [fi.category for fi in heart._captured] == ["preference"]
+    assert len(result) == 2
+
+
+@pytest.mark.asyncio
+async def test_enumerative_not_fired_stores_every_candidate(monkeypatch):
+    """When the enumerative leg does not fire, the candidate path is unchanged:
+    profile and non-profile candidates are all stored."""
+    sentinel = AsyncMock(side_effect=AssertionError("enumerative ran on narrative"))
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.EnumerativeExtractor.process_transcript",
+        sentinel,
+    )
+
+    from nous.handlers import fact_extractor as fe_mod
+
+    heart = _stub_heart_for_extractor()
+    ext = fe_mod.FactExtractor.__new__(fe_mod.FactExtractor)
+    ext._heart = heart
+    ext._settings = _make_settings(flag_on=True, enumerative_density_threshold=0.99)
+    ext._dedup_via_search = False
+    ext._llm = object()
+
+    narrative = (
+        "User: hey, how was your weekend?\n"
+        "Assistant: It went well! I spent time reading about distributed systems.\n"
+    ) * 20
+
+    result = await ext.extract_and_store(
+        summary={"summary": "Small talk."},
+        episode_id=str(uuid4()),
+        transcript=narrative,
+        candidate_facts=_mixed_candidates("preference"),
+    )
+
+    sentinel.assert_not_called()
+    assert [fi.category for fi in heart._captured] == ["preference", "technical"]
+    assert len(result) == 2
+
+
+# ---------------------------------------------------------------------------
+# Tier-1 dedup isolation: a profile fact (person/preference/rule) is never
+# deduplicated into a non-profile fact, or the profile fact is lost — the
+# enumerative extractor stores the same statement as technical. Identical
+# content gives cosine 1.0 under the mock embeddings; a per-test suffix keeps
+# leftover rows in a shared database from matching.
+# ---------------------------------------------------------------------------
+
+
+def _same_statement() -> str:
+    return f"Tim prefers answers in metric units, always (ref {uuid4().hex[:12]})"
+
+
+async def _learn_twice(heart, session, first: FactInput, second: FactInput):
+    a = await heart.learn(first, session=session)
+    b = await heart.learn(second, session=session)
+    return a, b
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_profile_fact_not_deduped_into_technical_fact(heart, session):
+    """Leg 2 (_find_duplicate): a preference fact identical to an enumerated
+    technical fact is stored as its own tier-1 row."""
+    content = _same_statement()
+    technical, preference = await _learn_twice(
+        heart,
+        session,
+        FactInput(
+            content=content,
+            subject="units",
+            subject_key="tim",
+            attribute_key="unit preference",
+            category="technical",
+            source="enumerative_extractor",
+        ),
+        FactInput(content=content, subject="Tim", category="preference", source="episode_summarizer"),
+    )
+    assert preference.id != technical.id
+    pref_row = await _get_fact(heart, preference.id, session)
+    tech_row = await _get_fact(heart, technical.id, session)
+    assert pref_row.category == "preference" and pref_row.active
+    assert tech_row.category == "technical" and tech_row.active
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_profile_fact_still_dedups_into_profile_fact(heart, session):
+    """The isolation narrows the pool to tier-1 facts; it does not switch dedup
+    off: a repeated preference confirms the stored one."""
+    content = _same_statement()
+    first, second = await _learn_twice(
+        heart,
+        session,
+        FactInput(content=content, subject="Tim", category="preference", source="episode_summarizer"),
+        FactInput(content=content, subject="Tim", category="person", source="episode_summarizer"),
+    )
+    assert second.id == first.id
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_technical_fact_dedup_unchanged(heart, session):
+    content = _same_statement()
+    first, second = await _learn_twice(
+        heart,
+        session,
+        FactInput(content=content, subject="units", category="technical", source="episode_summarizer"),
+        FactInput(content=content, subject="units", category="technical", source="episode_summarizer"),
+    )
+    assert second.id == first.id
+
+
+async def _entity_keys(session, fact_id) -> set[str]:
+    from nous.storage.models import FactEntityKey
+
+    rows = await session.execute(select(FactEntityKey.entity_key).where(FactEntityKey.fact_id == fact_id))
+    return set(rows.scalars().all())
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_profile_fact_does_not_supersede_same_subject_technical_fact(heart, session):
+    """Subject supersession keeps the classes apart too: a preference candidate
+    with the same subject and identical content as an enumerated technical
+    fact is stored beside it, and the technical row stays active with its
+    conflict-slot keys and entity-key rows (keyed retrieval and same-slot
+    resolution still find it)."""
+    content = _same_statement()
+    subject = f"Alex {uuid4().hex[:8]}"
+    technical = await heart.learn(
+        FactInput(
+            content=content,
+            subject=subject,
+            subject_key="alex rivera",
+            attribute_key="unit preference",
+            entity_keys=["metric system"],
+            category="technical",
+            source="enumerative_extractor",
+        ),
+        session=session,
+    )
+    keys_before = await _entity_keys(session, technical.id)
+    assert keys_before, "the enumerated fact must have entity-key rows to protect"
+
+    preference = await heart.learn(
+        FactInput(content=content, subject=subject, category="preference", source="episode_summarizer"),
+        session=session,
+    )
+
+    assert preference.id != technical.id
+    tech_row = await _get_fact(heart, technical.id, session)
+    pref_row = await _get_fact(heart, preference.id, session)
+    assert tech_row.active and tech_row.superseded_by is None
+    assert (tech_row.subject_key, tech_row.attribute_key) == ("alex rivera", "unit preference")
+    assert await _entity_keys(session, technical.id) == keys_before
+    assert pref_row.active and pref_row.category == "preference"
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_non_profile_fact_does_not_supersede_same_subject_profile_fact(heart, session, monkeypatch):
+    """The other direction: a technical fact with the same subject, judged an
+    UPDATE of a profile fact by the classifier, does not supersede it. The
+    similarity (0.83) is above the supersession gate (0.80) and below both the
+    dedup threshold and the contradiction band, so only subject supersession
+    could act on the pair."""
+    import math
+
+    def vec(sim_to_base: float) -> list[float]:
+        v = [0.0] * 1536
+        v[1500] = sim_to_base
+        v[1501] = math.sqrt(max(0.0, 1.0 - sim_to_base**2))
+        return v
+
+    verdict = {"relation": "UPDATE", "current_fact": "new", "confidence": 0.9}
+    monkeypatch.setattr(heart.facts, "_llm", object())
+    monkeypatch.setattr(heart.facts, "_classify_fact_pair", AsyncMock(return_value=verdict))
+    monkeypatch.setattr(heart.facts, "_key_budget_ok", lambda: True)
+    subject = f"Alex {uuid4().hex[:8]}"
+    profile = await heart.learn(
+        FactInput(
+            content=f"Alex prefers answers in metric units ({subject})",
+            subject=subject,
+            category="preference",
+            source="episode_summarizer",
+        ),
+        session=session,
+        precomputed_embedding=vec(1.0),
+    )
+    technical = await heart.learn(
+        FactInput(
+            content=f"Alex's reports are generated with imperial units ({subject})",
+            subject=subject,
+            category="technical",
+            source="episode_summarizer",
+        ),
+        session=session,
+        precomputed_embedding=vec(0.83),
+    )
+
+    assert technical.id != profile.id
+    profile_row = await _get_fact(heart, profile.id, session)
+    assert profile_row.active and profile_row.superseded_by is None
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_profile_fact_novelty_ignores_technical_twin(heart, session, monkeypatch):
+    """Admission's novelty term for a profile fact is measured against profile
+    facts only. An identical technical twin would put novelty at 0, and a
+    summarizer candidate (confidence = ROUGE-L against the whole transcript,
+    small on a real episode) then scores under the 0.60 threshold, so the
+    profile fact that survived dedup is lost at admission."""
+    from nous.heart.admission import AdmissionConfig, AdmissionController
+    from nous.heart.schemas import FactRejected
+
+    monkeypatch.setattr(
+        heart.facts,
+        "_admission_controller",
+        AdmissionController(config=AdmissionConfig(shadow_mode=False, utility_llm_enabled=False, threshold=0.60)),
+    )
+    content = _same_statement()
+    transcript = "\n\n".join(
+        [f"User: {content}"]
+        + [
+            f"Assistant: Noted. Item {i} of the plan covers the staging cluster, the release train and the "
+            f"on-call rota, and I will keep it in mind for the rest of this conversation."
+            for i in range(12)
+        ]
+    )
+    technical, preference = await _learn_twice(
+        heart,
+        session,
+        FactInput(
+            content=content,
+            subject="units",
+            subject_key="tim",
+            attribute_key="unit preference",
+            category="technical",
+            source="enumerative_extractor",
+        ),
+        FactInput(
+            content=content,
+            subject="Tim",
+            category="preference",
+            source="episode_summarizer",
+            confidence=0.8,
+            source_text=transcript,
+        ),
+    )
+    assert not isinstance(preference, FactRejected), preference.explanation
+    assert preference.id != technical.id
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_profile_candidate_survives_both_dedup_legs(heart):
+    """End to end through the summarizer-candidate path: Leg 1
+    (_resolve_dedup's raw-cosine probe) and Leg 2 both skip the enumerated
+    technical twin, so the preference candidate gets its own row. The rows
+    are committed (the extractor opens its own sessions) and removed after."""
+    from sqlalchemy import delete
+
+    from nous.handlers.fact_extractor import FactExtractor
+
+    content = _same_statement()
+    try:
+        technical = await heart.learn(
+            FactInput(
+                content=content,
+                subject="units",
+                subject_key="tim",
+                attribute_key="unit preference",
+                category="technical",
+                source="enumerative_extractor",
+            )
+        )
+        extractor = FactExtractor(heart=heart, settings=heart.facts._settings, bus=None, dedup_via_search=True)
+        ids = await extractor._store_candidate_facts(
+            [{"content": content, "subject": "Tim", "category": "preference"}],
+            episode_id="?",
+            transcript=content,
+        )
+        assert len(ids) == 1 and ids[0] != technical.id
+        pref_row = await _get_fact(heart, ids[0])
+        tech_row = await _get_fact(heart, technical.id)
+        assert pref_row.category == "preference" and pref_row.active
+        assert tech_row.category == "technical" and tech_row.active
+    finally:
+        async with heart.db.session() as s:
+            await s.execute(delete(Fact).where(Fact.content == content))
+            await s.commit()
+
+
+# ---------------------------------------------------------------------------
+# Background sessions: the enumerative leg runs only for conversations. A DAG
+# summary prompt, a subtask or a job report is a generated template full of
+# "Key: value" lines and lists, not knowledge a user supplied.
+# ---------------------------------------------------------------------------
+
+# A DAG summary turn as layer.py stores it: the prompt is key: value lines.
+_DAG_PROMPT_TRANSCRIPT = (
+    "User: "
+    + "\n".join(
+        [
+            "DAG: nightly-report",
+            "Status: completed",
+            "Node: fetch_metrics",
+            "Result: ok",
+            "Node: build_report",
+            "Result: ok",
+            "Node: publish",
+            "Result: skipped",
+            "Duration: 412 seconds",
+        ]
+    )
+    + "\n\nAssistant: The nightly report DAG finished; publish was skipped because nothing changed."
+)
+
+_PASTED_LIST_CHAT = "\n\n".join(
+    [
+        "User: Please keep these notes about the team:\n"
+        + "\n".join(f"- Person {i} owns service number {i}." for i in range(8)),
+        "Assistant: Noted, I will keep them in mind.",
+    ]
+)
+
+
+def _session_routing_extractor(fe_mod):
+    heart = _stub_heart_for_extractor()
+    ext = fe_mod.FactExtractor.__new__(fe_mod.FactExtractor)
+    ext._heart = heart
+    ext._settings = _make_settings(flag_on=True)  # the real 0.6 threshold
+    ext._dedup_via_search = False
+    ext._llm = object()
+    ext._enumerative_extractor = None
+    return ext, heart
+
+
+def _summarized(session_id, transcript):
+    from nous.events import Event
+
+    return Event(
+        type="episode_summarized",
+        agent_id="nous-default",
+        session_id=session_id,
+        data={
+            "episode_id": str(uuid4()),
+            "summary": {"summary": "s"},
+            "candidate_facts": _mixed_candidates("preference"),
+            "transcript": transcript,
+        },
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "session_id",
+    [
+        "dag-summary-0123456789abcdef-g1",
+        "subtask-1a2b3c4d",
+        "schedule-1a2b3c4d-3",
+        "heartbeat-1a2b3c4d",
+        "dynamic-check-disk-1a2b3c4d",
+        "dynamic-callback-disk-1a2b3c4d",
+        "intent-6f1c2d3e-5a4b-4c3d-8e2f-1a2b3c4d5e6f",
+        "proposal-0b1c2d3e-5a4b-4c3d-8e2f-1a2b3c4d5e6f",
+        "claude-job-20261103-1",
+    ],
+)
+async def test_background_session_never_reaches_enumerative_leg(monkeypatch, session_id):
+    """A key: value DAG prompt passes the density gate, but a background
+    session never reaches the enumerative leg; its summarizer candidates
+    take the normal path, all of them."""
+    from nous.handlers import fact_extractor as fe_mod
+    from nous.handlers.enumerative_extractor import is_enumerable
+
+    assert is_enumerable(_DAG_PROMPT_TRANSCRIPT, 0.6)  # the gate alone would fire
+    process = AsyncMock(return_value=[uuid4()])
+    monkeypatch.setattr("nous.handlers.enumerative_extractor.EnumerativeExtractor.process_transcript", process)
+    ext, heart = _session_routing_extractor(fe_mod)
+
+    await ext.handle(_summarized(session_id, _DAG_PROMPT_TRANSCRIPT))
+
+    process.assert_not_called()
+    assert [fi.category for fi in heart._captured] == ["preference", "technical"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "session_id", ["3f2b8c1e-9d4a-4b7e-a1c2-5d6e7f8a9b0c", "ingest-factconsolidation_sh_6k-1a2b3c4d", None]
+)
+async def test_conversation_with_pasted_list_reaches_enumerative_leg(monkeypatch, session_id):
+    """A chat (uuid session), a MemoryAgentBench ingest session and a caller
+    with no session (nous_eval) still reach the enumerative leg."""
+    from nous.handlers import fact_extractor as fe_mod
+
+    process = AsyncMock(return_value=[uuid4()])
+    monkeypatch.setattr("nous.handlers.enumerative_extractor.EnumerativeExtractor.process_transcript", process)
+    ext, _heart = _session_routing_extractor(fe_mod)
+
+    await ext.handle(_summarized(session_id, _PASTED_LIST_CHAT))
+
+    process.assert_called_once()
+
+
+def test_is_background_session_covers_the_minted_prefixes():
+    from nous.api.execution_context import is_background_session
+    from nous.api.idempotency import SUMMARY_SESSION_PREFIX
+    from nous.brain.continuation import INTENT_SESSION_PREFIX
+
+    for sid in (
+        f"{SUMMARY_SESSION_PREFIX}abc-g1",
+        f"{INTENT_SESSION_PREFIX}{uuid4()}",
+        "subtask-1a2b3c4d",
+        "schedule-1a2b3c4d-3",  # task_scheduler's continuation session
+    ):
+        assert is_background_session(sid) is True
+    for sid in (str(uuid4()), "ingest-x-1a2b3c4d", "", None):
+        assert is_background_session(sid) is False
 
 
 @pytest.mark.asyncio
@@ -2296,9 +2976,9 @@ class TestGate1SameSlotDedupRouting:
         captured_excludes: list[list] = []
         original_find_max = heart.facts._find_max_similarity
 
-        async def _capturing_find_max_similarity(embedding, exclude_ids, session):
+        async def _capturing_find_max_similarity(embedding, exclude_ids, session, **kwargs):
             captured_excludes.append(list(exclude_ids))
-            return await original_find_max(embedding, exclude_ids, session)
+            return await original_find_max(embedding, exclude_ids, session, **kwargs)
 
         monkeypatch.setattr(heart.facts, "_find_max_similarity", _capturing_find_max_similarity)
 
@@ -2364,9 +3044,9 @@ class TestGate1SameSlotDedupRouting:
         captured_excludes: list[list] = []
         original_find_max = heart.facts._find_max_similarity
 
-        async def _capturing_find_max_similarity(embedding, exclude_ids, session):
+        async def _capturing_find_max_similarity(embedding, exclude_ids, session, **kwargs):
             captured_excludes.append(list(exclude_ids))
-            return await original_find_max(embedding, exclude_ids, session)
+            return await original_find_max(embedding, exclude_ids, session, **kwargs)
 
         monkeypatch.setattr(heart.facts, "_find_max_similarity", _capturing_find_max_similarity)
 
@@ -2458,9 +3138,9 @@ class TestGate1SameSlotDedupRouting:
         captured_excludes: list[list] = []
         original_find_max = heart.facts._find_max_similarity
 
-        async def _capturing_find_max_similarity(embedding, exclude_ids, session):
+        async def _capturing_find_max_similarity(embedding, exclude_ids, session, **kwargs):
             captured_excludes.append(list(exclude_ids))
-            return await original_find_max(embedding, exclude_ids, session)
+            return await original_find_max(embedding, exclude_ids, session, **kwargs)
 
         monkeypatch.setattr(heart.facts, "_find_max_similarity", _capturing_find_max_similarity)
 
@@ -3699,6 +4379,49 @@ async def test_select_backfill_episodes_includes_closed_episodes(session):
     assert ep_open.id in ids, "open episode must still be included"
     assert ep_orphan.id not in ids, "never-ended deactivated orphan must stay excluded"
     assert ep_abandoned.id not in ids, "abandoned episode must stay excluded (F060.2)"
+
+
+@pytest.mark.postgres_only
+async def test_select_backfill_episodes_skips_background_sessions(session):
+    """The backfill skips background sessions as the live enumerative leg does
+    (is_background_session): a DAG summary, subtask or job transcript is a
+    generated prompt, not knowledge a user supplied. Chats, the MAB ingest
+    sessions and episodes with no session id are still selected."""
+    from datetime import UTC
+
+    from nous.storage.models import Episode
+    from scripts.backfill_enumerative_facts import select_backfill_episodes
+
+    agent_id = f"test-enum-bg-{uuid4().hex[:8]}"
+    now = datetime.now(UTC)
+    sessions = {
+        "chat": "3f2b8c1e-9d4a-4b7e-a1c2-5d6e7f8a9b0c",
+        "no session": None,
+        "ingest": "ingest-factconsolidation_sh_6k-1a2b3c4d",
+        "dag": "dag-summary-0123456789abcdef-g1",
+        "subtask": "subtask-1a2b3c4d",
+        "claude": "claude-job-20261103-1",
+        "heartbeat": "heartbeat-1a2b3c4d",
+    }
+    episodes = {
+        name: Episode(
+            agent_id=agent_id,
+            summary=f"{name} episode",
+            session_id=sid,
+            transcript="Fact one.\nFact two.\nFact three.",
+            started_at=now,
+            ended_at=now,
+            active=False,
+        )
+        for name, sid in sessions.items()
+    }
+    session.add_all(episodes.values())
+    await session.flush()
+
+    rows = await select_backfill_episodes(session, agent_id, None, 0)
+    selected = {name for name, ep in episodes.items() if ep.id in {r.id for r in rows}}
+
+    assert selected == {"chat", "no session", "ingest"}
 
 
 @pytest.mark.postgres_only
@@ -5409,3 +6132,29 @@ def test_enumerative_non_tier1_category_passes_through(settings_fixture):
     inputs = ex._to_fact_inputs(raw, chunk_index=0, episode_id=uuid4())
     assert len(inputs) == 1
     assert inputs[0].category == "concept"
+
+
+@pytest.mark.parametrize("missing", [None, "", "omitted"])
+def test_enumerative_missing_category_stored_as_technical(settings_fixture, missing):
+    """An enumerated fact whose category the LLM left out (or sent empty) is
+    stored as technical, never with a NULL category."""
+    ex = EnumerativeExtractor.__new__(EnumerativeExtractor)
+    ex._settings = settings_fixture()
+
+    fact = {
+        "content": "The subject has some documented attribute value here.",
+        "subject_key": "subject",
+        "attribute_key": "attribute",
+    }
+    if missing != "omitted":
+        fact["category"] = missing
+    inputs = ex._to_fact_inputs([fact], chunk_index=0, episode_id=uuid4())
+    assert len(inputs) == 1
+    assert inputs[0].category == "technical"
+
+
+def test_enumerative_schema_requires_category():
+    """The schema asks the LLM for a category on every fact."""
+    from nous.handlers.enumerative_extractor import _EXTRACTION_SCHEMA
+
+    assert "category" in _EXTRACTION_SCHEMA["properties"]["facts"]["items"]["required"]

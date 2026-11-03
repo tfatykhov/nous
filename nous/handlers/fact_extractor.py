@@ -30,6 +30,8 @@ def _parse_episode_uuid(episode_id: str | None) -> UUID | None:
     except (ValueError, TypeError):
         return None
 
+from nous.api.execution_context import is_background_session
+from nous.cognitive.context import TIER1_FACT_CATEGORIES
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.handlers import LLMClient, call_background_llm, cap_candidate_facts, parse_llm_json
@@ -143,7 +145,7 @@ class FactExtractor:
         return True
 
     async def _resolve_dedup(
-        self, content: str, candidate_event_date: "date | None"
+        self, content: str, candidate_event_date: "date | None", category: str | None = None
     ) -> "tuple[UUID | None, list[UUID]]":
         """Resolve the Leg-1 dedup decision for a candidate.
 
@@ -172,8 +174,13 @@ class FactExtractor:
         (superseded facts are inactive and never returned).
 
         Hits whose ``event_date`` differs from the candidate are skipped
-        (F075: distinct dates = distinct events). Shared by both producer
-        paths (cf. #354)."""
+        (F075: distinct dates = distinct events). For a person/preference/rule
+        candidate, hits in other categories are skipped too: folding a profile
+        fact into an identical technical one (the enumerative extractor stores
+        the same statement as technical) loses it from the profile. Only the
+        top 5 are probed; Leg 2 (``_find_duplicate``) applies the same filter
+        in SQL, so a tier-1 duplicate below five technical hits is still found
+        there. Shared by both producer paths (cf. #354)."""
         distinct_ids: list[UUID] = []
         if not self._dedup_via_search:
             return None, distinct_ids
@@ -190,11 +197,14 @@ class FactExtractor:
         # bypassing _learn's label-aware two-sided guard.
         hits = await self._heart.find_similar_facts(content, limit=5, exclude_sources=("exemplar_extractor",))
 
+        profile_only = category in TIER1_FACT_CATEGORIES
         for cand in hits:
             if cand.score is None or cand.score <= threshold:
                 break  # similarity-descending: nothing further can clear it
             if self._event_date_differs(cand, candidate_event_date):
                 continue  # F075: distinct dates = distinct events
+            if profile_only and cand.category not in TIER1_FACT_CATEGORIES:
+                continue  # a profile fact is never folded into a non-profile one
             if await self._confirm_dedup(cand.content, content):
                 return cand.id, distinct_ids
             distinct_ids.append(cand.id)  # tiebreaker judged DISTINCT
@@ -221,6 +231,7 @@ class FactExtractor:
         episode_id: str,
         transcript: str | None = None,
         candidate_facts: list | None = None,
+        session_id: str | None = None,
     ) -> list[UUID]:
         """F051.5: Public direct-invocation entry point.
 
@@ -238,6 +249,10 @@ class FactExtractor:
         extract_and_store falls back to ``summary.get("candidate_facts")``.
 
         ``handle()`` discards the return value; ingest paths consume it.
+
+        ``session_id`` is the episode's session: the enumerative leg does not
+        run for a background session (``is_background_session``). None, as
+        direct callers pass it, counts as a conversation.
         """
         if not summary:
             return []
@@ -272,14 +287,25 @@ class FactExtractor:
         # no conflict-slot keys, so R2 could never merge them with their
         # enumerative paraphrases; storing both would mint permanent variant
         # pairs, devil-2 #3). Narrative transcripts keep today's path exactly.
+        # One carve-out: summarizer candidates in the profile categories
+        # (person/preference/rule) are still stored. They are the only automatic
+        # source of profile facts, and they have no enumerative twin in their
+        # category: the enumerative schema offers only technical/concept/tool
+        # and remaps a drifted profile label to technical.
+        # Background sessions (DAG summaries, subtasks, heartbeat, continuation,
+        # job reports) never take this leg: their transcripts are generated
+        # prompts full of "Key: value" lines and lists, not knowledge a user
+        # supplied. Their candidates take the normal path below.
         if (
             getattr(self._settings, "extraction_enumerative_enabled", False) is True
             and getattr(self._settings, "enumerative_classifier", "heuristic") != "off"
             and transcript
             and self._llm is not None
+            and not is_background_session(session_id)
         ):
             from nous.handlers.enumerative_extractor import EnumerativeExtractor, is_enumerable
             if is_enumerable(transcript, self._settings.enumerative_density_threshold):
+                stored_ids: list[UUID] = []
                 try:
                     if getattr(self, "_enumerative_extractor", None) is None:
                         self._enumerative_extractor = EnumerativeExtractor(
@@ -289,12 +315,11 @@ class FactExtractor:
                     ex = self._enumerative_extractor
                     stored_ids = await ex.process_transcript(transcript, _parse_episode_uuid(episode_id))
                     logger.info("R1: stored %d enumerative facts for episode %s", len(stored_ids), episode_id)
-                    if stored_ids:
-                        return stored_ids
-                    logger.warning(
-                        "R1: enumerative leg stored 0 facts for episode %s — falling back to legacy path",
-                        episode_id,
-                    )
+                    if not stored_ids:
+                        logger.warning(
+                            "R1: enumerative leg stored 0 facts for episode %s — falling back to legacy path",
+                            episode_id,
+                        )
                     # fall through: zero enumerative facts stored (e.g. API failure
                     # swallowed by call_background_llm_structured) — legacy path
                     # ensures the episode's facts are never silently dropped.
@@ -308,6 +333,17 @@ class FactExtractor:
                     # process_transcript catches per-chunk failures internally and returns
                     # partial results; reaching this except means nothing was stored, so
                     # the legacy fallback cannot create variant pairs.
+                if stored_ids:
+                    # Outside the try: a failure while storing the profile
+                    # candidates must not reach the legacy fallback, which would
+                    # store every candidate beside the enumerative facts.
+                    cands = candidate_facts if candidate_facts is not None else summary.get("candidate_facts", [])
+                    profile = [c for c in cands if isinstance(c, dict) and c.get("category") in TIER1_FACT_CATEGORIES]
+                    if profile:
+                        stored_ids = stored_ids + await self._store_candidate_facts(
+                            profile, episode_id, transcript=transcript
+                        )
+                    return stored_ids
 
         # Legacy path — byte-identical to today.
         cands = candidate_facts if candidate_facts is not None else summary.get("candidate_facts", [])
@@ -377,7 +413,7 @@ class FactExtractor:
             # _resolve_dedup examines all above-threshold RRF hits (F377) and
             # applies the F075 distinct-event_date bypass; None = store as new.
             content = fact.get("content", "")
-            canonical, exclude_ids = await self._resolve_dedup(content, candidate_event_date)
+            canonical, exclude_ids = await self._resolve_dedup(content, candidate_event_date, fact.get("category"))
             if canonical is not None:
                 stored_ids.append(canonical)
                 logger.debug(
@@ -452,6 +488,7 @@ class FactExtractor:
                 episode_id=event.data.get("episode_id", "?"),
                 transcript=transcript,
                 candidate_facts=event.data.get("candidate_facts", []),
+                session_id=event.session_id,
             )
         except Exception:
             logger.exception("Fact extraction failed for episode %s", event.data.get("episode_id"))
@@ -499,7 +536,7 @@ class FactExtractor:
             # Dedup: check if similar fact exists. _resolve_dedup examines all
             # above-threshold RRF hits (F377) + the F075 distinct-date bypass;
             # None = store as new.
-            canonical, exclude_ids = await self._resolve_dedup(content, candidate_event_date)
+            canonical, exclude_ids = await self._resolve_dedup(content, candidate_event_date, category)
             if canonical is not None:
                 stored_ids.append(canonical)
                 logger.debug("Dedup skip (candidate) — adding canonical UUID %s for: %s", canonical, content[:50])
