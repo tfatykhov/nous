@@ -3425,6 +3425,7 @@ class FactManager:
         track_access: bool = True,
         stage_errors: dict[str, int] | None = None,
         stage_error_msgs: dict[str, str] | None = None,
+        keyword_text: str | None = None,
     ) -> list[FactSummary]:
         """Hybrid search over facts.
 
@@ -3446,6 +3447,11 @@ class FactManager:
             stage_errors / stage_error_msgs: optional caller maps. A failed
                 query embedding (the search then runs keyword-only, on another
                 score scale) is counted under ``fact_embed_fallback``.
+            keyword_text: what the keyword leg matches instead of ``query``,
+                which is still what is embedded. The Session Profile leg passes
+                its lexical anchor here so a natural-language query does not
+                add mandatory words under ``require_keyword_hit``. Single-query
+                path only. Default None: the keyword leg matches ``query``.
         """
         if session is None:
             async with self.db.session() as session:
@@ -3464,6 +3470,7 @@ class FactManager:
                     track_access=track_access,
                     stage_errors=stage_errors,
                     stage_error_msgs=stage_error_msgs,
+                    keyword_text=keyword_text,
                 )
         return await self._search(
             query,
@@ -3480,6 +3487,7 @@ class FactManager:
             track_access=track_access,
             stage_errors=stage_errors,
             stage_error_msgs=stage_error_msgs,
+            keyword_text=keyword_text,
         )
 
     async def _search(
@@ -3498,6 +3506,7 @@ class FactManager:
         track_access: bool = True,
         stage_errors: dict[str, int] | None = None,
         stage_error_msgs: dict[str, str] | None = None,
+        keyword_text: str | None = None,
     ) -> list[FactSummary]:
         # Generate query embedding
         embedding = None
@@ -3574,7 +3583,7 @@ class FactManager:
                 session=session,
                 table="heart.facts",
                 embedding=embedding,
-                query_text=query,
+                query_text=query if keyword_text is None else keyword_text,
                 agent_id=self.agent_id,
                 extra_where=extra_where,
                 extra_params=extra_params,

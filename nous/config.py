@@ -719,6 +719,22 @@ class Settings(BaseSettings):
                 raise ValueError(f"context_budget_overrides[{key!r}]={val} must be >= 0")
         return v
 
+    # What the pre-turn decision, fact, episode and Session Profile legs search
+    # with. "bag" is the keyword bag of IntentClassifier.classify. "conditional"
+    # is the input itself when it is at most context_query_short_chars long,
+    # and otherwise the task part of the prompt (intent.extract_query). The
+    # procedure ladder searches the raw input in both modes. Conditional mode
+    # also skips retrieval only for an empty or acknowledgement input, not for
+    # any input without a keyword.
+    context_query_mode: Literal["bag", "conditional"] = "bag"
+    context_query_short_chars: int = Field(default=300, ge=1)
+    # Conditional mode only: skip the memory legs of a build whose query equals
+    # the query the same session last searched with, less than
+    # context_skip_unchanged_ttl_seconds ago, as a short input skips them.
+    # Memories learned in between are not retrieved until the TTL passes.
+    context_skip_unchanged_query: bool = False
+    context_skip_unchanged_ttl_seconds: int = Field(default=600, ge=0)
+
     @field_validator("effort", mode="before")
     @classmethod
     def _normalize_effort_alias(cls, v: object) -> object:
@@ -3787,6 +3803,18 @@ class Settings(BaseSettings):
                 "NOUS_INTENTION_CALIBRATION_ENABLED=true needs NOUS_CONTINUATION_ENABLED=true; calibration stays OFF."
             )
             object.__setattr__(self, "intention_calibration_enabled", False)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_skip_unchanged_query_mode(self) -> "Settings":
+        """A keyword bag is shared by distinct questions ("what did we decide
+        about X?" and "... about Y?" both bag to ``decide``), so skipping on an
+        unchanged bag would drop the memory of a new question."""
+        if self.context_skip_unchanged_query and self.context_query_mode != "conditional":
+            logging.getLogger(__name__).warning(
+                "NOUS_CONTEXT_SKIP_UNCHANGED_QUERY=true needs NOUS_CONTEXT_QUERY_MODE=conditional; the skip stays OFF."
+            )
+            object.__setattr__(self, "context_skip_unchanged_query", False)
         return self
 
     @model_validator(mode="after")
