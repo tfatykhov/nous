@@ -10,6 +10,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+import httpx
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 # Closed episodes with a NULL embedding re-embedded per sleep cycle (H-5).
 _REEMBED_MAX_PER_CYCLE = 20
+# The char bound procedures._build_embed_text puts on embed input (8191-token
+# model limit, no tokenizer dependency). The backfill applies it so an
+# oversized episode is embedded truncated instead of rejected every cycle.
+_REEMBED_CHAR_CAP = 16000
 
 
 class EpisodeManager:
@@ -288,10 +293,12 @@ class EpisodeManager:
         is NULL only when start()'s embed and every later one failed. A NULL
         hides the episode from vector search and the densifier until something
         re-embeds it. The text is the one _end() embeds (with a missing summary
-        as empty, where _end() would embed the word "None"). Newest first;
-        stops at the first failure (the provider is likely down, the next cycle
-        retries). No transaction is held while embedding. Returns the number
-        re-embedded.
+        as empty, where _end() would embed the word "None"), cut to
+        _REEMBED_CHAR_CAP. Newest first. A provider failure (transport error,
+        timeout, 429, 5xx, or a fail-fast skip) stops the batch: the next cycle
+        retries. A row the API rejects (any other 4xx) is skipped, so it cannot
+        block older rows. No transaction is held while embedding. Returns the
+        number re-embedded.
         """
         if not self.embeddings or limit <= 0:
             return 0
@@ -316,11 +323,22 @@ class EpisodeManager:
         for row in rows:
             embed_text = (
                 f"{row.title or ''} {row.summary or ''} {row.outcome or ''} {' '.join(row.lessons_learned or [])}"
-            ).strip()
+            ).strip()[:_REEMBED_CHAR_CAP]
             if not embed_text:
                 continue
             try:
                 vectors[row.id] = await self.embeddings.embed(embed_text)
+            except httpx.HTTPStatusError as e:
+                status = e.response.status_code
+                if status != 429 and 400 <= status < 500:
+                    logger.warning("Episode re-embed rejected for %s (HTTP %d); skipped", row.id, status)
+                    continue
+                logger.warning(
+                    "Episode re-embed failed for %s (HTTP %d); the rest wait for the next sleep cycle",
+                    row.id,
+                    status,
+                )
+                break
             except Exception:
                 logger.warning(
                     "Episode re-embed failed for %s; the rest wait for the next sleep cycle",

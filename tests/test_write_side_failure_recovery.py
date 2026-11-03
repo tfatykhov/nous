@@ -104,6 +104,112 @@ async def test_sleep_reembeds_a_closed_episode_with_a_null_embedding(db, mock_em
         await _drop_agent(db, agent_id)
 
 
+class _ScriptedEmbedder:
+    """Raises ``error`` for texts containing ``marker``; records every text it is given."""
+
+    def __init__(self, marker: str, error: Exception) -> None:
+        self.marker = marker
+        self.error = error
+        self.texts: list[str] = []
+
+    async def embed(self, text: str, fail_fast: bool = False) -> list[float]:
+        self.texts.append(text)
+        if self.marker in text:
+            raise self.error
+        return [1.0] + [0.0] * 1535
+
+
+def _http_error(status: int):
+    import httpx
+
+    request = httpx.Request("POST", "https://api.openai.com/v1/embeddings")
+    return httpx.HTTPStatusError(f"{status}", request=request, response=httpx.Response(status, request=request))
+
+
+async def _closed_episodes_without_vectors(db, agent_id: str, summaries: list[str]) -> list:
+    """Insert closed, vector-less episodes; the first summary is the newest."""
+    now = datetime.now(UTC)
+    ids = []
+    async with db.session() as s:
+        for age, summary in enumerate(summaries):
+            ep_id = uuid4()
+            ids.append(ep_id)
+            await s.execute(
+                sql_text(
+                    "INSERT INTO heart.episodes "
+                    "(id, agent_id, title, summary, outcome, started_at, ended_at, active, tags) "
+                    "VALUES (:id, :aid, 'Episode', :s, 'success', :t, :t, false, '{}')"
+                ),
+                {"id": ep_id, "aid": agent_id, "s": summary, "t": now - timedelta(hours=age + 1)},
+            )
+        await s.commit()
+    return ids
+
+
+async def _has_vector(db, ep_id) -> bool:
+    async with db.session() as s:
+        row = await s.execute(
+            sql_text("SELECT embedding IS NOT NULL AS has_vec FROM heart.episodes WHERE id = :id"), {"id": ep_id}
+        )
+        return row.one().has_vec
+
+
+async def test_a_rejected_newest_episode_does_not_block_older_ones(db):
+    """A 400 is about that row's text, not the provider: skip it, keep going.
+
+    Before, the backfill stopped at any failure, and newest-first ordering
+    made the same rejected row stop every later cycle too.
+    """
+    from nous.heart.episodes import EpisodeManager
+
+    agent_id = f"reembed-400-{uuid4().hex[:8]}"
+    await _add_agent(db, agent_id)
+    try:
+        rejected, older = await _closed_episodes_without_vectors(db, agent_id, ["REJECT me", "a normal summary"])
+        manager = EpisodeManager(db, _ScriptedEmbedder("REJECT", _http_error(400)), agent_id)
+
+        assert await manager.reembed_missing() == 1
+        assert not await _has_vector(db, rejected)
+        assert await _has_vector(db, older), "a rejected row stopped the older backlog"
+    finally:
+        await _drop_agent(db, agent_id)
+
+
+@pytest.mark.parametrize("status", [429, 503])
+async def test_a_provider_failure_still_stops_the_backfill(db, status):
+    from nous.heart.episodes import EpisodeManager
+
+    agent_id = f"reembed-{status}-{uuid4().hex[:8]}"
+    await _add_agent(db, agent_id)
+    try:
+        _failing, older = await _closed_episodes_without_vectors(db, agent_id, ["FAIL here", "a normal summary"])
+        embedder = _ScriptedEmbedder("FAIL", _http_error(status))
+        manager = EpisodeManager(db, embedder, agent_id)
+
+        assert await manager.reembed_missing() == 0
+        assert len(embedder.texts) == 1, "kept calling a provider that is down"
+        assert not await _has_vector(db, older)
+    finally:
+        await _drop_agent(db, agent_id)
+
+
+async def test_backfill_text_is_capped_like_procedure_embeds(db):
+    from nous.heart.episodes import EpisodeManager
+
+    agent_id = f"reembed-cap-{uuid4().hex[:8]}"
+    await _add_agent(db, agent_id)
+    try:
+        (huge,) = await _closed_episodes_without_vectors(db, agent_id, ["x" * 40_000])
+        embedder = _ScriptedEmbedder("never", RuntimeError("unused"))
+        manager = EpisodeManager(db, embedder, agent_id)
+
+        assert await manager.reembed_missing() == 1
+        assert len(embedder.texts[0]) == 16_000
+        assert await _has_vector(db, huge)
+    finally:
+        await _drop_agent(db, agent_id)
+
+
 # ---------------------------------------------------------------------------
 # I-5: a SQL error in the censor's semantic match leaves the keyword match working
 # ---------------------------------------------------------------------------
