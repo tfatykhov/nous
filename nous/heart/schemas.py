@@ -485,6 +485,9 @@ class CensorMatch(BaseModel):
     reason: str
     domain: str | None
     score: float | None = None  # Search relevance score
+    # search() only: which leg found it. "semantic" scores a cosine; "regex"
+    # (pattern hit, embedding not close) scores the semantic floor.
+    matched_by: Literal["semantic", "regex"] | None = None
     trigger_action: dict | None = None  # F031
     action_instruction: str | None = None  # F031
     unblock_pattern: str | None = None  # F031

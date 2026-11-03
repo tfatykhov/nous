@@ -1,4 +1,4 @@
-"""Recall selection fixes (PR-G2).
+"""Recall selection fixes.
 
 Each test pins one defect: rows served twice or dropped by the graph legs'
 dedup pools, contradiction edges never fetched for facts, the recency
@@ -66,7 +66,7 @@ class _FakeSession:
 
 def _brain(*, neighbors_by_node, decisions=(), edges=()):
     brain = MagicMock()
-    brain.agent_id = "g2-mock"
+    brain.agent_id = "recall-selection-mock"
     brain.query = AsyncMock(return_value=list(decisions))
 
     async def _neighbors(node_id, node_type="decision", limit=10, *, neighbor_type=None):
@@ -102,7 +102,7 @@ def _keyed_heart():
     keyed_r2.
     """
     heart = MagicMock()
-    heart.agent_id = "g2-mock"
+    heart.agent_id = "recall-selection-mock"
     heart.recall = AsyncMock(return_value=[RecallResult(type="fact", id=FACT_ID, summary="stage one fact", score=0.9)])
     heart.facts.entity_key_vocabulary = AsyncMock(return_value=frozenset({"alpha station", "bravo hub"}))
     heart.facts.fetch_by_entity_keys = AsyncMock(
@@ -159,7 +159,7 @@ def _rows(results, rid):
 
 
 # ---------------------------------------------------------------------------
-# A-2: keyed ids join the graph legs' dedup pool
+# Keyed ids join the graph legs' dedup pool
 # ---------------------------------------------------------------------------
 
 
@@ -199,7 +199,7 @@ class TestKeyedIdsInGraphDedupPool:
 
 
 # ---------------------------------------------------------------------------
-# A-3: the 1-hop fallback does not re-serve earlier legs' rows
+# The 1-hop fallback does not re-serve earlier legs' rows
 # ---------------------------------------------------------------------------
 
 
@@ -228,7 +228,7 @@ class TestOneHopFallbackSeenIds:
 
 
 # ---------------------------------------------------------------------------
-# B-1: the recency resolver orders by statement time
+# The recency resolver orders by statement time
 # ---------------------------------------------------------------------------
 
 
@@ -360,7 +360,7 @@ class TestPreTurnRecencyByStatementTime:
 
 
 # ---------------------------------------------------------------------------
-# F-2: F055 records only the rows the formatter rendered
+# F055 records only the rows the formatter rendered
 # ---------------------------------------------------------------------------
 
 
@@ -401,7 +401,7 @@ class TestRecordSurfacedRenderedOnly:
 
 
 # ---------------------------------------------------------------------------
-# F-7: every model-facing score names its space
+# Every model-facing score names its space
 # ---------------------------------------------------------------------------
 
 
@@ -410,6 +410,14 @@ class TestScoreSpaceLabels:
         rows = [
             PipelineResult(id=uuid.uuid4(), type="fact", description="hybrid fact", score=0.9, source="heart"),
             PipelineResult(id=uuid.uuid4(), type="censor", description="a censor", score=0.8, source="heart"),
+            PipelineResult(
+                id=uuid.uuid4(),
+                type="censor",
+                description="a pattern censor",
+                score=0.7,
+                source="heart",
+                metadata={"matched_by": "regex"},
+            ),
             PipelineResult(id=uuid.uuid4(), type="chunk", description="a chunk", score=0.7, source="heart"),
             PipelineResult(
                 id=uuid.uuid4(),
@@ -471,6 +479,7 @@ class TestScoreSpaceLabels:
 
         assert "score: 0.900 [rrf])" in line_for("hybrid fact")
         assert "score: 0.800 [cosine])" in line_for("a censor")
+        assert "score: 0.700 [regex])" in line_for("a pattern censor")
         assert "score: 0.700 [chunk])" in line_for("a chunk")
         assert "score: 0.550 [keyed band])" in line_for("keyed fact")
         assert "score: 0.400 [graph])" in line_for("path a fact")
@@ -480,13 +489,44 @@ class TestScoreSpaceLabels:
         assert "score: 0.200 [activation])" in line_for("spread decision")
 
 
+class TestContradictionWarnings:
+    def test_only_edges_between_two_shown_rows_are_printed(self):
+        shown_a, shown_b, unseen = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+        rows = [
+            PipelineResult(id=shown_a, type="fact", description="fact a", score=0.9, source="heart"),
+            PipelineResult(id=shown_b, type="fact", description="fact b", score=0.8, source="heart"),
+            # Not rendered: decisions are out of scope for a fact-only recall.
+            PipelineResult(
+                id=unseen,
+                type="decision",
+                description="a decision",
+                score=0.7,
+                source="brain",
+                metadata={"raw_score": 0.7, "category": "tooling", "stakes": "low", "confidence": 0.5},
+            ),
+        ]
+        stats = PipelineStats(
+            contradiction_edges=[
+                (shown_a, "fact", shown_b, "fact"),
+                (shown_a, "fact", unseen, "decision"),
+            ]
+        )
+
+        text_out = _format_pipeline_text(rows, stats, ["fact"])
+
+        warnings = [line for line in text_out.splitlines() if line.startswith("Warning: Contradiction")]
+        assert warnings == [
+            f"Warning: Contradiction detected between fact({str(shown_a)[:8]}) and fact({str(shown_b)[:8]})"
+        ]
+
+
 # ---------------------------------------------------------------------------
 # DB-backed tests
 # ---------------------------------------------------------------------------
 
 
 def _agent(tag: str) -> str:
-    return f"g2-{tag}-{uuid.uuid4().hex[:8]}"
+    return f"recall-sel-{tag}-{uuid.uuid4().hex[:8]}"
 
 
 async def _purge(db, agent: str) -> None:
@@ -557,14 +597,14 @@ async def _two_dated_facts(db, agent, vec, *, old, new, edge_agent=None):
 
 @pytest.mark.postgres_only
 class TestFactContradictionEdgesReachTheResolver:
-    """A-4: Stage 5 fetches fact-to-fact ``contradicts`` edges on every scope."""
+    """Stage 5 fetches fact-to-fact ``contradicts`` edges on every scope."""
 
     @pytest.mark.parametrize("memory_types", [["fact"], None])
     async def test_edge_pairs_two_dissimilar_facts(self, db, mock_embeddings, memory_types):
         from nous.brain.brain import Brain
         from nous.heart import Heart
 
-        agent = _agent("a4")
+        agent = _agent("edge-pairs")
         settings = _db_settings(agent)
         heart = Heart(db, settings, embedding_provider=mock_embeddings)
         brain = Brain(database=db, settings=settings)
@@ -605,7 +645,7 @@ class TestFactContradictionEdgesReachTheResolver:
         from nous.brain.brain import Brain
         from nous.heart import Heart
 
-        agent, other = _agent("a4-own"), _agent("a4-other")
+        agent, other = _agent("edge-own"), _agent("edge-other")
         settings = _db_settings(agent)
         heart = Heart(db, settings, embedding_provider=mock_embeddings)
         brain = Brain(database=db, settings=settings)
@@ -640,12 +680,77 @@ class TestFactContradictionEdgesReachTheResolver:
             await heart.close()
             await brain.close()
 
-    async def test_correction_stated_later_wins_over_a_later_event_date(self, db, mock_embeddings):
-        """B-1 end to end: learned_at travels from the row to the resolver."""
+    async def test_graph_served_rows_pair_with_a_stage_one_fact(self, db, mock_embeddings):
+        """A Path A neighbour and a Stage 2 decision are served rows too, so their edges are read."""
         from nous.brain.brain import Brain
         from nous.heart import Heart
 
-        agent = _agent("b1")
+        agent = _agent("stage5-graph")
+        settings = _db_settings(
+            agent,
+            heart_graph_all_types_enabled=True,
+            cross_type_linking_enabled=True,
+            graph_associative_query_gate_enabled=False,
+        )
+        heart = Heart(db, settings, embedding_provider=mock_embeddings)
+        brain = Brain(database=db, settings=settings)
+        query = "zanzibar ferry schedule"
+        seed_id, neighbour_id = uuid.uuid4(), uuid.uuid4()
+        try:
+            async with db.session() as s:
+                s.add(
+                    Fact(
+                        id=seed_id,
+                        agent_id=agent,
+                        content="Zanzibar ferry schedule for the spring holiday",
+                        active=True,
+                        embedding=await mock_embeddings.embed(query),
+                    )
+                )
+                # Reachable only through the graph: distant vector, no shared words.
+                s.add(
+                    Fact(
+                        id=neighbour_id,
+                        agent_id=agent,
+                        content="Unrelated archival footnote filed under miscellany",
+                        active=True,
+                        embedding=await mock_embeddings.embed("gardening tips for tomatoes"),
+                    )
+                )
+                decision_id = await _decision(s, agent, description="Book the earlier crossing")
+                for target_id, target_type in ((neighbour_id, "fact"), (decision_id, "decision")):
+                    for relation in ("related_to", "contradicts"):
+                        s.add(
+                            GraphEdge(
+                                source_id=seed_id,
+                                source_type="fact",
+                                target_id=target_id,
+                                target_type=target_type,
+                                agent_id=agent,
+                                relation=relation,
+                                weight=0.9,
+                            )
+                        )
+                await s.commit()
+
+            # limit=1: Stage 1 returns the seed only, so the neighbour can come only from Path A.
+            results, _ = await run_recall_pipeline(query, heart, brain, settings, limit=1, memory_types=["fact"])
+
+            by_id = {r.id: r for r in results}
+            assert by_id[neighbour_id].metadata.get("stage_origin") == "heart_graph_memory"
+            assert by_id[decision_id].metadata.get("stage_origin") == "heart_graph"
+            assert set(by_id[seed_id].contradicts) == {neighbour_id, decision_id}
+        finally:
+            await _purge(db, agent)
+            await heart.close()
+            await brain.close()
+
+    async def test_correction_stated_later_wins_over_a_later_event_date(self, db, mock_embeddings):
+        """End to end: learned_at travels from the row to the resolver."""
+        from nous.brain.brain import Brain
+        from nous.heart import Heart
+
+        agent = _agent("stated-later")
         settings = _db_settings(agent)
         heart = Heart(db, settings, embedding_provider=mock_embeddings)
         brain = Brain(database=db, settings=settings)
@@ -680,10 +785,10 @@ class TestFactContradictionEdgesReachTheResolver:
 
 @pytest.mark.postgres_only
 async def test_recall_tracks_access_only_for_the_rows_it_returns(db, mock_embeddings):
-    """D-8: the fact leg fetches limit*2; only the merge's survivors are tracked."""
+    """The fact leg fetches limit*2; only the merge's survivors are tracked."""
     from nous.heart import Heart
 
-    agent = _agent("d8")
+    agent = _agent("track-access")
     heart = Heart(db, _db_settings(agent), embedding_provider=mock_embeddings)
     query = "quarterly zebra inventory"
     vec = await mock_embeddings.embed(query)
@@ -706,11 +811,11 @@ async def test_recall_tracks_access_only_for_the_rows_it_returns(db, mock_embedd
 
 @pytest.mark.postgres_only
 async def test_source_text_ignores_another_agents_episode(db, mock_embeddings):
-    """D-9: grounding text comes only from this agent's episodes."""
+    """Grounding text comes only from this agent's episodes."""
     from nous.heart import Heart
     from nous.heart.schemas import FactInput
 
-    owner, other = _agent("d9-own"), _agent("d9-other")
+    owner, other = _agent("source-own"), _agent("source-other")
     heart = Heart(db, _db_settings(owner), embedding_provider=mock_embeddings)
     episode_id = uuid.uuid4()
     try:
@@ -745,10 +850,10 @@ async def _decision(s, agent, *, description, confidence=0.8, outcome="pending",
 
 @pytest.mark.postgres_only
 async def test_pending_zero_confidence_decision_is_searchable(db):
-    """F-6: outcome NULL with confidence 0.0 is not an abandoned decision."""
+    """Outcome NULL with confidence 0.0 is not an abandoned decision."""
     from nous.brain.brain import Brain
 
-    agent = _agent("f6")
+    agent = _agent("pending-zero")
     brain = Brain(database=db, settings=_db_settings(agent))
     try:
         async with db.session() as s:
@@ -773,7 +878,7 @@ async def test_graph_resolver_keeps_a_pending_zero_confidence_decision(db):
     """The graph-node resolver mirrors brain.query's abandoned-decision predicate, NULL-safe too."""
     from nous.brain.brain import Brain
 
-    agent = _agent("f6-graph")
+    agent = _agent("pending-zero-graph")
     brain = Brain(database=db, settings=_db_settings(agent))
     try:
         async with db.session() as s:
@@ -794,12 +899,12 @@ async def test_graph_resolver_keeps_a_pending_zero_confidence_decision(db):
 
 @pytest.mark.postgres_only
 class TestDecisionDelete:
-    """I-7: delete acts only on this agent's decision and clears superseded_by referrers."""
+    """Delete acts only on this agent's decision and clears superseded_by referrers."""
 
     async def test_another_agent_cannot_delete_or_detach(self, db):
         from nous.brain.brain import Brain
 
-        owner, other = _agent("i7-own"), _agent("i7-other")
+        owner, other = _agent("delete-own"), _agent("delete-other")
         brain = Brain(database=db, settings=_db_settings(other))
         fact_id = uuid.uuid4()
         try:
@@ -820,7 +925,7 @@ class TestDecisionDelete:
     async def test_delete_clears_superseded_by_referrers(self, db):
         from nous.brain.brain import Brain
 
-        agent = _agent("i7-sup")
+        agent = _agent("delete-superseded")
         brain = Brain(database=db, settings=_db_settings(agent))
         try:
             async with db.session() as s:
@@ -841,10 +946,14 @@ class TestDecisionDelete:
 @pytest.mark.postgres_only
 class TestCensorSearchAndUpdate:
     async def test_regex_match_is_returned_when_the_embedding_is_distant(self, db, mock_embeddings):
-        """I-2: the regex leg runs next to the semantic leg, not only when embedding fails."""
+        """The regex leg runs next to the semantic leg, not only when embedding fails.
+
+        A regex-only hit scores the semantic floor (0.7); a censor both legs
+        find keeps its cosine.
+        """
         from nous.heart import Heart
 
-        agent = _agent("i2")
+        agent = _agent("censor-legs")
         heart = Heart(db, _db_settings(agent), embedding_provider=mock_embeddings)
         query = "please run rm -rf /tmp/build now"
         try:
@@ -865,22 +974,56 @@ class TestCensorSearchAndUpdate:
                 await s.commit()
                 distant_id, both_id = distant.id, both.id
 
-            matches = await heart.censors.search(query)
+            matches = {m.id: m for m in await heart.censors.search(query)}
 
-            ids = [m.id for m in matches]
-            assert sorted(ids) == sorted([distant_id, both_id])
-            assert len(ids) == len(set(ids))
-            assert all(m.score == 1.0 for m in matches)
+            assert set(matches) == {distant_id, both_id}
+            assert (matches[distant_id].matched_by, matches[distant_id].score) == ("regex", 0.7)
+            assert matches[both_id].matched_by == "semantic"
+            assert matches[both_id].score == pytest.approx(1.0, abs=1e-4)
+        finally:
+            await _purge(db, agent)
+            await heart.close()
+
+    async def test_a_regex_hit_does_not_outrank_a_relevant_fact(self, db, mock_embeddings):
+        """In a cross-type recall a pattern hit sits at the semantic floor, below a close fact."""
+        from nous.heart import Heart
+
+        agent = _agent("censor-rank")
+        heart = Heart(db, _db_settings(agent), embedding_provider=mock_embeddings)
+        query = "please run rm -rf on the build directory"
+        try:
+            async with db.session() as s:
+                fact = Fact(
+                    agent_id=agent,
+                    content="The build directory is cleaned by the nightly job",
+                    active=True,
+                    embedding=await mock_embeddings.embed(query),
+                )
+                censor = Censor(
+                    agent_id=agent,
+                    trigger_pattern=r"rm\s+-rf",
+                    reason="never wipe directories",
+                    embedding=await mock_embeddings.embed("gardening tips for tomatoes"),
+                )
+                s.add_all([fact, censor])
+                await s.commit()
+                fact_id, censor_id = fact.id, censor.id
+
+            out = await heart.recall(query, limit=5, types=["fact", "censor"])
+
+            assert [r.id for r in out] == [fact_id, censor_id]
+            assert out[1].score == 0.7
+            assert out[1].metadata["matched_by"] == "regex"
         finally:
             await _purge(db, agent)
             await heart.close()
 
     async def test_reason_update_refreshes_the_embedding(self, db, mock_embeddings):
-        """I-13: the embedded text is trigger_pattern + reason; a new reason re-embeds."""
+        """The embedded text is trigger_pattern + reason; a new reason re-embeds."""
         from nous.heart import Heart
         from nous.heart.schemas import CensorInput
 
-        agent = _agent("i13")
+        agent = _agent("censor-reembed")
         heart = Heart(db, _db_settings(agent), embedding_provider=mock_embeddings)
         try:
             detail = await heart.censors.add(CensorInput(trigger_pattern="drop table", reason="old reason"))

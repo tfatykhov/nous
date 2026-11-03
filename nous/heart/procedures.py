@@ -10,7 +10,7 @@ import hashlib
 import json
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 from sqlalchemy import func, select, text
@@ -485,6 +485,7 @@ class ProcedureManager:
         stale_before: datetime,
         revise_reason_prefix: str,
         limit: int = 50,
+        day: date | None = None,
     ) -> list[UUID]:
         """Active auto-learned procedures (LEARNED_WHERE) that are weak and not freshly revised.
 
@@ -493,6 +494,11 @@ class ProcedureManager:
         ``stale_before``. A procedure whose body a weak review revised
         (``update_body`` version whose reason starts with ``revise_reason_prefix``)
         at or after ``stale_before`` is skipped: its score is the old body's.
+
+        The ``limit`` window is ordered by a hash of the id and ``day`` (default:
+        today, UTC). A review that keeps a procedure writes nothing, so a fixed
+        order would hand the same rows the window every run; the daily order lets
+        every weak procedure reach it.
         """
         params = {
             **LEARNED_PARAMS,
@@ -501,6 +507,7 @@ class ProcedureManager:
             "stale_before": stale_before,
             "revise_reason": revise_reason_prefix,
             "limit": limit,
+            "day": (day or datetime.now(UTC).date()).isoformat(),
         }
         sql = text(
             "SELECT id FROM heart.procedures p"
@@ -515,7 +522,7 @@ class ProcedureManager:
             "   WHERE v.procedure_id = p.id AND v.agent_id = p.agent_id"
             "     AND v.change_source = 'update_body' AND starts_with(v.reason, :revise_reason)"
             "     AND v.created_at >= :stale_before)"
-            " ORDER BY created_at, id"
+            " ORDER BY md5(id::text || :day), id"
             " LIMIT :limit"
         )
         async with self.db.session() as session:

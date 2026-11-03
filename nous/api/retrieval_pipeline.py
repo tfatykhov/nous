@@ -1369,7 +1369,7 @@ async def _run_stages(
             logger.warning("exemplar leg failed", exc_info=True)
             acc.stage_errors["exemplar"] = acc.stage_errors.get("exemplar", 0) + 1
 
-    # A-2: the fact rows the keyed legs will serve, so the graph legs below do
+    # The fact rows the keyed legs will serve, so the graph legs below do
     # not serve them again (at a weaker score, with graph provenance) and the
     # keyed hit is not lost as a duplicate at assembly. Round 1 renders whole.
     # Round 2 renders only its top K2: its ranked list is already disjoint from
@@ -1655,7 +1655,7 @@ async def _run_stages(
     if settings.graph_recall_enabled and (decision_results or heart_fact_seeds):
         seen_ids: set[UUID] = {d.id for d in decision_results}
         # Rows earlier legs already serve. Spreading excludes (or rescores)
-        # them; the 1-hop fallback skips them (A-3).
+        # them; the 1-hop fallback skips them.
         candidate_ids: set[UUID] = (
             {hr.id for hr in acc.heart_results}
             | {item[0] for item in acc.chunk_results}
@@ -1932,7 +1932,7 @@ async def _run_stages(
             ):
                 acc.attempted_legs.add("brain_graph")
                 acc.attempted_legs.add("heart_graph_memory")
-            # A-3: a neighbour an earlier leg already serves is skipped, not
+            # A neighbour an earlier leg already serves is skipped, not
             # appended again. Seeded here only: the spreading branch passes
             # seen_ids to the CTE as exclude_ids, where candidate_ids would
             # override the rescore that branch gives them.
@@ -2005,14 +2005,17 @@ async def _run_stages(
     # ------------------------------------------------------------------
     if settings.graph_recall_enabled and settings.contradiction_detection:
         try:
-            # A-4: Stage-1 and keyed facts too, on every scope, so fact-to-fact
-            # `contradicts` edges reach the recency resolver's strong branch.
-            # Keyed round 2 contributes only the slice that renders (keyed_ids).
+            # Every served fact and decision, on every scope, so any two that
+            # contradict pair up (fact-to-fact edges reach the recency
+            # resolver's strong branch). Keyed round 2 contributes only the
+            # slice that renders (keyed_ids).
             all_ids: set[UUID] = (
                 {d.id for d in decision_results}
                 | {n.id for n in graph_expanded}
                 | {hr.id for hr in acc.heart_results if hr.type == "fact"}
                 | keyed_ids
+                | {n.id for n in acc.heart_graph_decisions}
+                | {n.id for n in acc.heart_graph_memory_neighbors}
             )
 
             if len(all_ids) >= 2:
@@ -2587,7 +2590,7 @@ def _keyed_to_pipeline(
         }
         if row.event_date is not None:
             metadata["event_date"] = row.event_date.isoformat()
-        # B-1: when the fact was stated; the recency resolver orders by it.
+        # When the fact was stated; the recency resolver orders by it.
         if row.learned_at is not None:
             metadata["learned_at"] = row.learned_at.isoformat()
         if row.source_episode_id:
@@ -2698,7 +2701,7 @@ def _keyed_r2_to_pipeline(
         }
         if row.event_date is not None:
             metadata["event_date"] = row.event_date.isoformat()
-        # B-1: when the fact was stated; the recency resolver orders by it.
+        # When the fact was stated; the recency resolver orders by it.
         if row.learned_at is not None:
             metadata["learned_at"] = row.learned_at.isoformat()
         if row.source_episode_id:
@@ -3201,7 +3204,7 @@ def _resolve_recency_conflicts(
                 kb, _ = _recency_key(b.metadata)
                 if ka is None or kb is None or ka == kb:
                     continue
-                # Resolve (B-1): the fact stated later is current, since a
+                # Resolve: the fact stated later is current, since a
                 # correction can move an event EARLIER. event_date decides
                 # only a pair without two distinct statement times (facts
                 # stored in one transaction share learned_at).

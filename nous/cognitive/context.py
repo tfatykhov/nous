@@ -2267,7 +2267,7 @@ class ContextEngine:
                         None, a.content or "", b.content or ""
                     ).ratio() < floor:
                         continue
-                    # B-1: the fact stated later is current, since a correction
+                    # The fact stated later is current, since a correction
                     # can move an event EARLIER. event_date decides only a pair
                     # without two distinct statement times (one transaction
                     # gives its facts one learned_at).

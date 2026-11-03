@@ -734,8 +734,8 @@ async def test_a_weak_review_revise_keeps_the_rows_kind(db):
 
 
 async def test_the_weak_review_selects_by_the_auto_tag_not_by_the_text_auto(db):
-    """I-1: a hand-written procedure whose text says "auto:" is not an auto-learned one."""
-    agent = "g2-weak-review-by-tag"
+    """A hand-written procedure whose text says "auto:" is not an auto-learned one."""
+    agent = "weak-review-by-tag"
     heart, a, _b = await _weak_review_setup(db, agent)
     try:
         setup = ProcedureManager(db, _AxisEmbeddings({}), agent, dedupe_enabled=False)
@@ -764,8 +764,8 @@ async def test_the_weak_review_selects_by_the_auto_tag_not_by_the_text_auto(db):
 
 
 async def test_the_weak_review_skips_a_procedure_that_is_not_weak(db):
-    """I-14: weakness is decided in SQL; a healthy, recently used procedure is not reviewed."""
-    agent = "g2-weak-review-healthy"
+    """Weakness is decided in SQL; a healthy, recently used procedure is not reviewed."""
+    agent = "weak-review-healthy"
     heart, a, _b = await _weak_review_setup(db, agent)
     try:
         async with db.session() as s:
@@ -779,6 +779,56 @@ async def test_the_weak_review_skips_a_procedure_that_is_not_weak(db):
     finally:
         await _cleanup(db, agent)
         await heart.close()
+
+
+async def test_the_weak_review_window_rotates_by_day(db):
+    """More weak procedures than the window: each day orders them by md5(id || day),
+    so a review that keeps every row it reads still reaches the others on later days."""
+    import hashlib
+    from datetime import UTC, date, datetime, timedelta
+
+    from nous.handlers.procedure_learner import _REVISE_REASON
+
+    agent = "weak-review-rotation"
+    manager = ProcedureManager(db, _AxisEmbeddings({}), agent, dedupe_enabled=False)
+    try:
+        ids = []
+        for i in range(6):
+            stored = await manager.store(_input(name=f"Weak rotation {i}", description=f"rotation body {i}"))
+            ids.append(stored.id)
+        async with db.session() as s:
+            for pid in ids:
+                row = await s.get(Procedure, pid)
+                row.success_count, row.failure_count, row.activation_count = 0, 5, 5
+            await s.commit()
+
+        def window(day: date) -> list:
+            def rank(pid) -> tuple[str, str]:
+                return hashlib.md5(f"{pid}{day.isoformat()}".encode()).hexdigest(), str(pid)
+
+            return sorted(ids, key=rank)[:3]
+
+        async def selected(day: date) -> list:
+            return await manager.weak_learned_ids(
+                weakness_threshold=0.3,
+                stale_before=datetime.now(UTC) - timedelta(days=30),
+                revise_reason_prefix=_REVISE_REASON,
+                limit=3,
+                day=day,
+            )
+
+        days = [date(2026, 11, 1) + timedelta(days=n) for n in range(30)]
+        first, other = days[0], next(d for d in days[1:] if set(window(d)) != set(window(days[0])))
+
+        assert await selected(first) == window(first)
+        assert await selected(other) == window(other)
+        assert set(await selected(first)) != set(await selected(other))
+        reached = set()
+        for day in days:
+            reached |= set(await selected(day))
+        assert reached == set(ids)
+    finally:
+        await _cleanup(db, agent)
 
 
 # ---------------------------------------------------------------------------

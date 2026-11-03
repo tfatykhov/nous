@@ -2212,7 +2212,7 @@ class FactManager:
         if not fact_input.source_episode_id:
             return None
 
-        # D-9: scoped by agent_id, like _get_fact_orm — another agent's
+        # Scoped by agent_id, like _get_fact_orm — another agent's
         # transcript is never grounding text here.
         result = await session.execute(
             select(Episode).where(Episode.id == fact_input.source_episode_id).where(Episode.agent_id == self.agent_id)

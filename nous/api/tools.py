@@ -869,11 +869,14 @@ def _format_pipeline_text(
     """
     search_all = "all" in search_types
     results_text: list[str] = []
+    # Ids written into the text so far; the contradiction warnings name only these.
+    shown_ids: set[Any] = set()
 
     def _emit(r: Any) -> None:
         """Record that ``r`` was written into the text. Call at the emission
         site, immediately alongside the ``results_text.append`` that renders it,
         so the two cannot drift."""
+        shown_ids.add(r.id)
         if emitted_out is not None:
             emitted_out.append((r.id, r.type))
 
@@ -910,7 +913,7 @@ def _format_pipeline_text(
         return ""
 
     def _score_tag(r) -> str:
-        # F-7: the printed scores come from different scales; name the one each
+        # The printed scores come from different scales; name the one each
         # row's score is on so the model does not compare across them. (Heart
         # rows read "rrf"; with the cross-encoder on, their score is its
         # sigmoid, which nothing on the row records.)
@@ -921,7 +924,8 @@ def _format_pipeline_text(
         if r.metadata.get("retrieval_leg") in ("keyed", "keyed_r2"):
             return "[keyed band]"
         if r.type == "censor":
-            return "[cosine]"
+            # A pattern hit scores the semantic floor, not a cosine.
+            return "[regex]" if r.metadata.get("matched_by") == "regex" else "[cosine]"
         if r.type == "chunk":
             return "[chunk]"
         return "[rrf]"
@@ -1098,7 +1102,13 @@ def _format_pipeline_text(
     # ------------------------------------------------------------------
     # Contradiction warnings (F022 Phase 3)
     # ------------------------------------------------------------------
+    # Only edges whose two ends this output shows: a warning naming a row the
+    # reader cannot see tells it nothing. The examples block renders below, but
+    # every exemplar row in it is shown.
+    shown_or_example = shown_ids | {r.id for r in exemplar_rows}
     for src_id, src_type, tgt_id, tgt_type in stats.contradiction_edges:
+        if src_id not in shown_or_example or tgt_id not in shown_or_example:
+            continue
         results_text.append(
             f"\nWarning: Contradiction detected between {src_type}({str(src_id)[:8]}) and {tgt_type}({str(tgt_id)[:8]})"
         )
@@ -1781,9 +1791,11 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # Two failures in opposite directions from one predicate is the
             # signature of predicting a rule instead of asking its owner.
             #
-            # Set semantics, not a count: the same decision legitimately renders
-            # in BOTH the Graph-Connected and Brain sections (Stage 2 and Stage 3
-            # do not cross-dedup), so `_emitted` may hold a duplicate pair.
+            # Set semantics, not a count: the same decision can render in BOTH
+            # the Graph-Connected and Brain sections, because Stage 2's
+            # heart-graph decisions and Stage 3's search hits are not deduped
+            # against each other (Stage 4's graph rows now skip both), so
+            # `_emitted` may hold a duplicate pair.
             _emitted_keys = set(_emitted)
             # The parent-episode section (:1540-1550) renders UNCONDITIONALLY
             # and is marked rendered above, but its ids are not collected —
@@ -1834,7 +1846,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                             float(r.score) if r.score is not None else 0.0,
                             (r.description or "")[:160],  # audit E2: real summary
                         )
-                        # F-2: only what reached the model; the formatter's
+                        # Only what reached the model; the formatter's
                         # scope filter drops the rest.
                         for r in results
                         if _was_rendered(r)

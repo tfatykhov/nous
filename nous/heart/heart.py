@@ -1235,8 +1235,9 @@ class Heart:
                         penalty_limit=heart_penalty_limit,
                     )
                 elif memory_type == "fact":
-                    # D-8: fetch_limit is twice what survives the cut below, so
-                    # access is tracked for the survivors there, not here.
+                    # This fetches twice what survives the cut below
+                    # (fetch_limit), so access is tracked for the survivors
+                    # there, not here.
                     result = await self.facts.search(
                         query,
                         fetch_limit,
@@ -1436,7 +1437,7 @@ class Heart:
             _kept = {(r.id, r.type) for r in merged}
             dropped_out.extend(r for r in _pre_cut if (r.id, r.type) not in _kept)
 
-        # D-8: F027 access tracking for the facts this recall returns.
+        # F027 access tracking for the facts this recall returns.
         returned_fact_ids = [r.id for r in merged if r.type == "fact"]
         if returned_fact_ids:
             self.facts._fire_track_access(returned_fact_ids)
@@ -1474,7 +1475,7 @@ class Heart:
                     # _heart_results_to_pipeline) + downstream consumers
                     # see the iso string. None for stable facts.
                     "event_date": item.event_date.isoformat() if item.event_date else None,
-                    # B-1: when the fact was stated; the recall_deep recency
+                    # When the fact was stated; the recall_deep recency
                     # resolver orders conflicting facts by it.
                     "learned_at": item.learned_at.isoformat() if item.learned_at else None,
                     # The remaining persisted FactSummary fields. Carried so a
@@ -1520,6 +1521,8 @@ class Heart:
                 metadata={
                     "action": item.action,
                     "domain": item.domain,
+                    # Which leg found it, so a printed score names its scale.
+                    "matched_by": item.matched_by,
                 },
             )
         return None
