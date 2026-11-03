@@ -645,7 +645,8 @@ async def test_weak_review_retires():
     heart.list_episodes.return_value = []
 
     weak_proc = _make_procedure_summary(name="Weak proc", score=0.5)
-    heart.search_procedures.return_value = [weak_proc]
+    # Weakness is selected in SQL (heart.weak_learned_procedure_ids).
+    heart.weak_learned_procedure_ids.return_value = [weak_proc.id]
     heart.get_procedure.return_value = _make_procedure_detail(
         name="Weak proc",
         effectiveness=0.20,  # below 0.30 threshold
@@ -866,8 +867,9 @@ async def test_weak_review_confounded_leaves_the_procedure_unchanged():
     learner, brain, heart, embeddings, llm_client = _build_learner()
     brain.list_decisions.side_effect = [([], 0), ([], 0)]
     heart.list_episodes.return_value = []
-    heart.search_procedures.return_value = [_make_procedure_summary(name="Weak proc")]
-    heart.get_procedure.return_value = _make_procedure_detail(name="Weak proc", effectiveness=0.20)
+    weak = _make_procedure_detail(name="Weak proc", effectiveness=0.20)
+    heart.weak_learned_procedure_ids.return_value = [weak.id]
+    heart.get_procedure.return_value = weak
     llm_client.call.return_value = _mock_llm_response(
         {"action": "confounded", "reason": "two activations on unrelated tasks"}
     )
@@ -1138,10 +1140,7 @@ async def test_weak_review_revise_with_a_malformed_answer_keeps_the_procedure():
     heart.list_episodes.return_value = []
     first = _make_procedure_detail(name="Weak one", effectiveness=0.20)
     second = _make_procedure_detail(name="Weak two", effectiveness=0.20)
-    heart.search_procedures.return_value = [
-        _make_procedure_summary(name="Weak one"),
-        _make_procedure_summary(name="Weak two"),
-    ]
+    heart.weak_learned_procedure_ids.return_value = [first.id, second.id]
     heart.get_procedure.side_effect = [first, second]
     llm_client.call.side_effect = [
         _mock_llm_response({"action": "revise", "reason": "vague", "revised_description": ["not", "a", "string"]}),
@@ -1163,7 +1162,7 @@ async def test_weak_review_revise_keeps_a_lone_string_pattern_whole():
     brain.list_decisions.side_effect = [([], 0), ([], 0)]
     heart.list_episodes.return_value = []
     weak = _make_procedure_detail(name="Weak proc", effectiveness=0.20)
-    heart.search_procedures.return_value = [_make_procedure_summary(name="Weak proc")]
+    heart.weak_learned_procedure_ids.return_value = [weak.id]
     heart.get_procedure.return_value = weak
     llm_client.call.return_value = _mock_llm_response(
         {
@@ -1197,10 +1196,7 @@ async def test_weak_review_revise_of_a_body_changed_meanwhile_is_skipped():
     heart.list_episodes.return_value = []
     first = _make_procedure_detail(name="Weak one", effectiveness=0.20)
     second = _make_procedure_detail(name="Weak two", effectiveness=0.20)
-    heart.search_procedures.return_value = [
-        _make_procedure_summary(name="Weak one"),
-        _make_procedure_summary(name="Weak two"),
-    ]
+    heart.weak_learned_procedure_ids.return_value = [first.id, second.id]
     heart.get_procedure.side_effect = [first, second]
     heart.update_procedure_body.side_effect = ProcedureConflictError("moved on")
     llm_client.call.side_effect = [

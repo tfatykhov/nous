@@ -373,16 +373,23 @@ class CensorManager:
         domain: str | None,
         session: AsyncSession,
     ) -> list[CensorMatch]:
-        if self.embeddings:
-            try:
-                embedding = await self.embeddings.embed(query, fail_fast=True)
-            except Exception:
-                logger.warning("Embedding failed for censor search, falling back to ILIKE")
-                return await self._keyword_search(query, limit, domain, session)
-
-            return await self._semantic_search(embedding, limit, domain, session)
-
-        return await self._keyword_search(query, limit, domain, session)
+        keyword = await self._keyword_search(query, limit, domain, session)
+        if not self.embeddings:
+            return keyword
+        try:
+            embedding = await self.embeddings.embed(query, fail_fast=True)
+        except Exception:
+            logger.warning("Embedding failed for censor search, using the regex match only")
+            return keyword
+        # I-2: both legs, not regex only when embedding fails. A censor whose
+        # pattern matches but whose embedding is distant is still a match. One
+        # row per censor, at its higher score (a regex match is 1.0).
+        best: dict[UUID, CensorMatch] = {}
+        for match in [*keyword, *await self._semantic_search(embedding, limit, domain, session)]:
+            prev = best.get(match.id)
+            if prev is None or (match.score or 0.0) > (prev.score or 0.0):
+                best[match.id] = match
+        return sorted(best.values(), key=lambda m: m.score or 0.0, reverse=True)[:limit]
 
     async def _semantic_search(
         self,
@@ -733,8 +740,16 @@ class CensorManager:
             censor.action_instruction = action_instruction
         if unblock_pattern is not SENTINEL:
             censor.unblock_pattern = unblock_pattern
-        if reason is not SENTINEL and reason is not None:
+        if reason is not SENTINEL and reason is not None and reason != censor.reason:
             censor.reason = reason
+            # I-13: _add embeds "<trigger_pattern> <reason>"; a new reason
+            # re-embeds it. On failure the old vector stays (its pattern half
+            # is still right) rather than none.
+            if self.embeddings:
+                try:
+                    censor.embedding = await self.embeddings.embed(f"{censor.trigger_pattern} {reason}")
+                except Exception:
+                    logger.warning("Embedding refresh failed for censor %s update", censor_id)
         if domain is not SENTINEL:
             censor.domain = domain
 

@@ -2212,7 +2212,12 @@ class FactManager:
         if not fact_input.source_episode_id:
             return None
 
-        episode = await session.get(Episode, fact_input.source_episode_id)
+        # D-9: scoped by agent_id, like _get_fact_orm — another agent's
+        # transcript is never grounding text here.
+        result = await session.execute(
+            select(Episode).where(Episode.id == fact_input.source_episode_id).where(Episode.agent_id == self.agent_id)
+        )
+        episode = result.scalars().first()
         if not episode:
             return None
 
@@ -3201,6 +3206,7 @@ class FactManager:
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
                 event_date=f.event_date,  # F075
+                learned_at=f.learned_at,
                 overrides_prior=bool(f.overrides_prior or False),  # R2.4
             )
             for f in facts
@@ -3340,6 +3346,7 @@ class FactManager:
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
                 event_date=f.event_date,
+                learned_at=f.learned_at,
                 overrides_prior=bool(f.overrides_prior or False),  # R2.4
             )
             for fid in ids
@@ -3554,6 +3561,7 @@ class FactManager:
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
                 event_date=f.event_date,  # F075
+                learned_at=f.learned_at,
                 overrides_prior=bool(f.overrides_prior or False),  # R2.4
             )
             for fid in ids
@@ -3654,6 +3662,7 @@ class FactManager:
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
                 event_date=f.event_date,  # F075
+                learned_at=f.learned_at,
                 overrides_prior=bool(f.overrides_prior or False),  # R2.4
             )
             for fid in ids
@@ -3810,6 +3819,7 @@ class FactManager:
                 actionable_confidence=f.actionable_confidence,
                 tags=list(f.tags or []),
                 event_date=f.event_date,  # F075
+                learned_at=f.learned_at,
                 overrides_prior=bool(f.overrides_prior or False),  # R2.4
             )
             for f in facts

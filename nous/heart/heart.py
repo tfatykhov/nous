@@ -18,6 +18,8 @@ from uuid import UUID
 from sqlalchemy import select
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from nous.heart.date_window import DateWindow
     from nous.heart.query_expansion import QueryExpander
     from nous.heart.residual_activation import ResidualActivator
@@ -600,6 +602,22 @@ class Heart:
     ) -> list[ProcedureVersionDetail]:
         """Every recorded version of a procedure's body, oldest first (F102)."""
         return await self.procedures.list_versions(procedure_id, session)
+
+    async def weak_learned_procedure_ids(
+        self,
+        *,
+        weakness_threshold: float,
+        stale_before: datetime,
+        revise_reason_prefix: str,
+        limit: int = 50,
+    ) -> list[UUID]:
+        """Auto-learned procedures due a weak review (see ProcedureManager.weak_learned_ids)."""
+        return await self.procedures.weak_learned_ids(
+            weakness_threshold=weakness_threshold,
+            stale_before=stale_before,
+            revise_reason_prefix=revise_reason_prefix,
+            limit=limit,
+        )
 
     async def _emit_procedure_relink(self, result: ProcedureDetail) -> None:
         """Emit procedure_stored for a stored or rewritten body, for graph linking (a job lesson gets no edges)."""
@@ -1217,6 +1235,8 @@ class Heart:
                         penalty_limit=heart_penalty_limit,
                     )
                 elif memory_type == "fact":
+                    # D-8: fetch_limit is twice what survives the cut below, so
+                    # access is tracked for the survivors there, not here.
                     result = await self.facts.search(
                         query,
                         fetch_limit,
@@ -1224,6 +1244,7 @@ class Heart:
                         variant_pairs=variant_pairs,
                         date_window=date_window,
                         penalty_limit=heart_penalty_limit,
+                        track_access=False,
                     )
                 elif memory_type == "procedure":
                     result = await self.procedures.search(
@@ -1415,6 +1436,11 @@ class Heart:
             _kept = {(r.id, r.type) for r in merged}
             dropped_out.extend(r for r in _pre_cut if (r.id, r.type) not in _kept)
 
+        # D-8: F027 access tracking for the facts this recall returns.
+        returned_fact_ids = [r.id for r in merged if r.type == "fact"]
+        if returned_fact_ids:
+            self.facts._fire_track_access(returned_fact_ids)
+
         # F079 catalog-first: recall_deep returns procedures as name+desc summaries (like
         # facts/episodes). Procedure BREADTH is the static `## Procedure Catalog` and DEPTH
         # is get_procedure(<name>) on selection — recall_deep no longer inlines bodies.
@@ -1448,6 +1474,9 @@ class Heart:
                     # _heart_results_to_pipeline) + downstream consumers
                     # see the iso string. None for stable facts.
                     "event_date": item.event_date.isoformat() if item.event_date else None,
+                    # B-1: when the fact was stated; the recall_deep recency
+                    # resolver orders conflicting facts by it.
+                    "learned_at": item.learned_at.isoformat() if item.learned_at else None,
                     # The remaining persisted FactSummary fields. Carried so a
                     # consumer holding a fact-derived result can read the fact's
                     # REAL values instead of a default standing in for them —

@@ -271,6 +271,9 @@ class FactSummary(BaseModel):
     # F075: Propagated from ORM for the dedup-bypass rule + Layer 3 boost.
     # Distinct event_dates between candidate and existing => distinct events.
     event_date: date | None = None
+    # When the fact was stated (never updated after insert). The recall_deep
+    # recency resolver treats the later-stated of two conflicting facts as current.
+    learned_at: datetime | None = None
     # R2.4: True when the extractor classified this fact as contradicting common
     # world knowledge (parametric override). Propagated from ORM for context rendering.
     overrides_prior: bool = False

@@ -475,6 +475,53 @@ class ProcedureManager:
         return notes
 
     # ------------------------------------------------------------------
+    # weak_learned_ids() — the learner's weak review targets
+    # ------------------------------------------------------------------
+
+    async def weak_learned_ids(
+        self,
+        *,
+        weakness_threshold: float,
+        stale_before: datetime,
+        revise_reason_prefix: str,
+        limit: int = 50,
+    ) -> list[UUID]:
+        """Active auto-learned procedures (LEARNED_WHERE) that are weak and not freshly revised.
+
+        Weak: effectiveness ((success+1)/(success+failure+2), only with outcomes)
+        below ``weakness_threshold``, or last activated (else created) before
+        ``stale_before``. A procedure whose body a weak review revised
+        (``update_body`` version whose reason starts with ``revise_reason_prefix``)
+        at or after ``stale_before`` is skipped: its score is the old body's.
+        """
+        params = {
+            **LEARNED_PARAMS,
+            "agent_id": self.agent_id,
+            "threshold": weakness_threshold,
+            "stale_before": stale_before,
+            "revise_reason": revise_reason_prefix,
+            "limit": limit,
+        }
+        sql = text(
+            "SELECT id FROM heart.procedures p"
+            f" WHERE agent_id = :agent_id AND active = true AND {LEARNED_WHERE} AND ("
+            "   (coalesce(success_count, 0) + coalesce(failure_count, 0) > 0"
+            "    AND (coalesce(success_count, 0) + 1.0)"
+            "        / (coalesce(success_count, 0) + coalesce(failure_count, 0) + 2) < :threshold)"
+            "   OR last_activated < :stale_before"
+            "   OR (last_activated IS NULL AND created_at < :stale_before)"
+            " )"
+            " AND NOT EXISTS (SELECT 1 FROM heart.procedure_versions v"
+            "   WHERE v.procedure_id = p.id AND v.agent_id = p.agent_id"
+            "     AND v.change_source = 'update_body' AND starts_with(v.reason, :revise_reason)"
+            "     AND v.created_at >= :stale_before)"
+            " ORDER BY created_at, id"
+            " LIMIT :limit"
+        )
+        async with self.db.session() as session:
+            return list((await session.execute(sql, params)).scalars().all())
+
+    # ------------------------------------------------------------------
     # list_versions() / restore() — F102 version history
     # ------------------------------------------------------------------
 
