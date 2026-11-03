@@ -813,10 +813,15 @@ def create_app(
 
     async def rebuild_profile_card(request: Request) -> JSONResponse:
         """POST /profile-card/rebuild — rewrite the card once now; 409 when the writer is off, asleep or running."""
-        writer = getattr(sleep_handler, "_profile_card_writer", None) if sleep_handler else None
+        try:
+            # sleep_handler is a lazy proxy in prod: reading it raises RuntimeError while the component is unset.
+            writer = getattr(sleep_handler, "_profile_card_writer", None) if sleep_handler else None
+            running = writer is not None and (sleep_handler.is_sleeping or writer.busy)
+        except (RuntimeError, AttributeError):
+            writer, running = None, False
         if writer is None:
             return JSONResponse({"error": "the profile card writer is off"}, status_code=409)
-        if sleep_handler.is_sleeping or writer.busy:
+        if running:
             return JSONResponse({"error": "a sleep cycle or another rebuild is running"}, status_code=409)
         try:
             result = await writer.rebuild()

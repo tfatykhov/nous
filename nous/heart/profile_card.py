@@ -34,6 +34,7 @@ LINE_CHARS = 160
 MAX_CITES = 5
 REJECTED_CAP = 20
 FACT_CHARS = 200
+TAG_CHARS = 120
 EPISODE_CHARS = 300
 # 25 lines of 160 characters with 5 citations each come to about 2,000 output tokens; a reply cut off at max_tokens
 # is discarded, so the cap leaves room above that.
@@ -55,6 +56,7 @@ _CARD_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "text": {
                         "type": "string",
+                        "maxLength": LINE_CHARS,
                         "description": f"One durable profile fact, third person, at most {LINE_CHARS} characters.",
                     },
                     "fact_ids": {
@@ -210,28 +212,33 @@ def settle_entries(
 ) -> tuple[list[dict] | None, dict[str, int]]:
     """Check the model's entries against the source set; None means keep the old card (fail closed).
 
-    In order: drop an entry with no text or with a citation outside the source set (``dropped``); drop a rejected
-    line (``rejected_dropped``); fail closed when no entry is left or more than half were ``dropped``; add a verbatim
-    line for each pinned fact no entry cites (``pinned_added``); drop whole lines from the end, unpinned first, until
-    the card fits (``trimmed``).
+    In order: drop an entry with no text, a line over ``LINE_CHARS`` or a citation outside the source set
+    (``dropped``); drop a rejected line (``rejected_dropped``) and a repeat of a kept line; fail closed when no entry
+    is left or more than half were ``dropped``; add a line (the fact's text cut to ``LINE_CHARS``) for each pinned
+    fact no entry cites (``pinned_added``); drop whole lines from the end, unpinned first, until the card fits
+    (``trimmed``).
     """
     counts = {"dropped": 0, "rejected_dropped": 0, "pinned_added": 0, "trimmed": 0}
     if not isinstance(raw, list) or not raw:
         return None, counts
     ids = [str(f.id) for f in facts]
     banned = {_norm(t) for t in rejected}
+    seen: set[str] = set()
     kept: list[dict] = []
     for item in raw:
         item = item if isinstance(item, dict) else {}
         text = _one_line(item["text"]) if isinstance(item.get("text"), str) else ""
         cited = item.get("fact_ids")
         resolved = [_resolve(c, ids) for c in cited] if isinstance(cited, list) and 1 <= len(cited) <= MAX_CITES else []
-        if not text or not resolved or None in resolved:
+        if not text or len(text) > LINE_CHARS or not resolved or None in resolved:
             counts["dropped"] += 1
             continue
         if _norm(text) in banned:
             counts["rejected_dropped"] += 1
             continue
+        if _norm(text) in seen:
+            continue
+        seen.add(_norm(text))
         kept.append({"id": uuid.uuid4().hex[:12], "text": text, "fact_ids": list(dict.fromkeys(resolved))})
     if not kept or counts["dropped"] * 2 > len(raw):
         return None, counts
@@ -239,8 +246,9 @@ def settle_entries(
     cited_ids = {i for e in kept for i in e["fact_ids"]}
     for fact in facts:
         fid = str(fact.id)
-        if fid in pinned and fid not in cited_ids and _norm(fact.content) not in banned:
-            kept.append({"id": uuid.uuid4().hex[:12], "text": _one_line(fact.content), "fact_ids": [fid]})
+        text = _one_line(fact.content)[:LINE_CHARS]
+        if fid in pinned and fid not in cited_ids and _norm(text) not in banned:
+            kept.append({"id": uuid.uuid4().hex[:12], "text": text, "fact_ids": [fid]})
             counts["pinned_added"] += 1
 
     while kept and (len(kept) > max_entries or card_tokens(kept) > max_tokens):
@@ -251,12 +259,14 @@ def settle_entries(
 
 
 def _render_fact(fact: Fact) -> str:
+    """One source row. Every agent-writable field is put on one line, so none can start a forged row."""
+    tags = ", ".join(_one_line(t) for t in fact.tags or [])[:TAG_CHARS]
     parts = [
         f"[{str(fact.id)[:8]}] {fact.category}",
         _one_line(fact.subject or "-"),
         _one_line(fact.content)[:FACT_CHARS],
-        "tags: " + (", ".join(fact.tags) if fact.tags else "-"),
-        f"source: {fact.source or 'unknown'}",
+        "tags: " + (tags or "-"),
+        f"source: {_one_line(fact.source or 'unknown')}",
         f"learned {fact.learned_at:%Y-%m-%d}",
     ]
     if fact.overrides_prior:

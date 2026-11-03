@@ -19,7 +19,7 @@ Documented routes served by `nous/api/rest.py`, which is the full list. Part of 
 | GET | `/profile/facts` | Tier-1 user-profile facts (preference/person/rule), prompt-order; `?core=true` filters to the curated core set |
 | POST | `/facts/{fact_id}/core` | Toggle the `profile_core` curation tag on a Tier-1 fact (`{"core": true|false}`) |
 | GET | `/profile-card` | The bounded profile card: `entries` (`{id, text, fact_ids}`), `tokens`, `rejected` (the deleted lines) and `updated_at`. 200 with empty `entries` when no card was written |
-| DELETE | `/profile-card/entries/{entry_id}` | Remove one card line now and add its text to `rejected` (newest 20), so no later rewrite brings it back. 404 for an unknown line or no card |
+| DELETE | `/profile-card/entries/{entry_id}` | Remove one card line now and add its text to `rejected` (newest 20), so no later rewrite brings it back. A reworded line of a `profile_core` fact comes back as the fact's own text at the next rewrite: unpin the fact to keep it off. 404 for an unknown line or no card |
 | POST | `/profile-card/rebuild` | Rewrite the card once now, even when its source facts are unchanged; answers with the writer's `outcome`, counts and the `added` and `removed` lines. 409 when `NOUS_PROFILE_CARD_WRITER_ENABLED` is off, a sleep cycle is running or another rebuild is |
 | GET | `/censors` | Active censors |
 | PUT | `/censors/{id}` | Update censor fields (trigger_action, action_instruction, unblock_pattern) |
