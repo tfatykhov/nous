@@ -500,13 +500,121 @@ async def test_bag_mode_never_skips_distinct_questions_that_share_a_bag():
     assert _memory_calls(engine) == (2, 2, 2)
 
 
+@pytest.mark.parametrize("failing", ["brain.query", "search_facts", "search_episodes"])
+async def test_a_failed_search_is_retried_on_the_next_identical_turn(failing):
+    engine = _skip_engine()
+    mock = engine._brain.query if failing == "brain.query" else getattr(engine._heart, failing)
+    mock.side_effect = [RuntimeError("backend down"), []]
+    await _cbuild(engine, SHORT_QUESTION)  # the leg raised: nothing remembered
+    assert "s" not in engine._last_query_by_session
+    await _cbuild(engine, SHORT_QUESTION)  # searched again, cleanly this time
+    assert _memory_calls(engine) == (2, 2, 2)
+    await _cbuild(engine, SHORT_QUESTION)  # now the clean search is remembered
+    assert _memory_calls(engine) == (2, 2, 2)
+
+
+async def test_a_failed_profile_leg_is_retried_on_the_next_identical_turn():
+    engine = _skip_engine(profile_intent_leg_enabled=True)
+
+    async def search_facts(*a, **kw):
+        if "include_categories" in kw and engine._heart.search_facts.call_count == 2:
+            raise RuntimeError("backend down")
+        return []
+
+    engine._heart.search_facts.side_effect = search_facts
+    await _cbuild(engine, SHORT_QUESTION)
+    assert "s" not in engine._last_query_by_session
+    await _cbuild(engine, SHORT_QUESTION)
+    assert "s" in engine._last_query_by_session
+
+
 def test_skip_unchanged_remembers_a_bounded_number_of_sessions():
     engine = _skip_engine()
     for i in range(1001):
-        assert engine._query_unchanged(f"s{i}", ("q",), 600) is False
+        engine._record_searched_query(f"s{i}", ("q",))
     assert len(engine._last_query_by_session) == 1000
     assert engine._query_unchanged("s0", ("q",), 600) is False  # the oldest was evicted
     assert engine._query_unchanged("s1000", ("q",), 600) is True
+
+
+# ---------------------------------------------------------------------------
+# The Session Profile leg keeps the keyword bag as its lexical anchor
+# ---------------------------------------------------------------------------
+
+SAILING = "what do we know about sailing?"
+
+
+def _profile_call(engine: ContextEngine):
+    return next(c for c in engine._heart.search_facts.call_args_list if "include_categories" in c.kwargs)
+
+
+async def test_conditional_profile_leg_embeds_the_sentence_and_anchors_on_the_bag():
+    engine = _engine(context_query_mode="conditional", profile_intent_leg_enabled=True)
+    await _cbuild(engine, SAILING)
+    call = _profile_call(engine)
+    assert call.args[0] == SAILING
+    assert call.kwargs["keyword_text"] == "sailing"
+    assert call.kwargs["require_keyword_hit"] is True
+
+
+async def test_bag_mode_profile_leg_call_is_unchanged():
+    engine = _engine(profile_intent_leg_enabled=True)
+    await _build(engine, SAILING)
+    call = _profile_call(engine)
+    assert call.args[0] == "sailing"
+    assert "keyword_text" not in call.kwargs
+
+
+@pytest.mark.postgres_only
+async def test_conditional_profile_leg_finds_a_fact_without_the_question_words(db, mock_embeddings, settings):
+    import uuid
+
+    from sqlalchemy import text as sqltext
+
+    from nous.brain.brain import Brain
+    from nous.heart import FactInput, Heart
+
+    agent_id = f"test-q-anchor-{uuid.uuid4().hex[:8]}"
+    async with db.session() as session:
+        await session.execute(
+            sqltext("INSERT INTO nous_system.agents (id, name, config) VALUES (:id, :name, '{}'::jsonb)"),
+            {"id": agent_id, "name": "Query anchor test"},
+        )
+        await session.commit()
+    s = settings.model_copy(
+        update={
+            "agent_id": agent_id,
+            "context_query_mode": "conditional",
+            "profile_intent_leg_enabled": True,
+            # No User Profile section, which would render the fact first and
+            # so keep it out of the Session Profile leg.
+            "context_budget_overrides": {"user_profile": 0},
+            "proc_selection_graph_primary": False,
+            "temporal_context_enabled": False,
+        }
+    )
+    heart = Heart(db, s, embedding_provider=mock_embeddings)
+    brain = Brain(database=db, settings=s)
+    try:
+        async with db.session() as session:
+            await heart.learn(
+                FactInput(content="Tim keeps his sailing dinghy at the marina slip", category="rule", subject="boat"),
+                session=session,
+            )
+            await session.commit()
+        engine = ContextEngine(brain, heart, s, identity_prompt="")
+        clf = IntentClassifier(s)
+        plan = clf.plan_retrieval(clf.classify(SAILING, _frame()), input_text=SAILING)
+        result = await engine.build(
+            agent_id=agent_id, session_id="s", input_text=SAILING, frame=_frame(), retrieval_plan=plan
+        )
+        # The natural-language query alone would need "know" too and find nothing.
+        assert await heart.search_facts(SAILING, include_categories=["rule"], require_keyword_hit=True) == []
+    finally:
+        await heart.close()
+        await brain.close()
+    profile = next((sec for sec in result.sections if sec.label == "Session Profile"), None)
+    assert profile is not None and "sailing dinghy" in profile.content
 
 
 # ---------------------------------------------------------------------------

@@ -44,6 +44,10 @@ class RetrievalQuery:
     memory_type: str  # "decision", "fact", "procedure", "episode"
     query_text: str
     limit: int = 5
+    # Conditional mode: the keyword bag, for a keyword gate that needs every
+    # word to match (the Session Profile leg), so the natural-language
+    # ``query_text`` adds no mandatory words to it. None: gate on query_text.
+    keyword_text: str | None = None
 
 
 @dataclass
@@ -332,11 +336,15 @@ class IntentClassifier:
         plan = RetrievalPlan()
         # F27: Fall back to original input_text, not empty string -- or to the part
         # of it the signals describe, when that is not all of it
+        bag_text = " ".join(signals.topic_keywords) if signals.topic_keywords else signals.text or input_text
+        keyword_text = None
         if self._conditional:
-            # The user's words, or the task part of a long prompt.
+            # The user's words, or the task part of a long prompt; the bag stays
+            # the lexical anchor of an all-words keyword gate.
             query_text = extract_query(signals.text or input_text, self._settings.context_query_short_chars)
+            keyword_text = bag_text
         else:
-            query_text = " ".join(signals.topic_keywords) if signals.topic_keywords else signals.text or input_text
+            query_text = bag_text
 
         # If strong memory type hints, bias toward those types
         if signals.memory_type_hints:
@@ -348,6 +356,7 @@ class IntentClassifier:
                         memory_type=mem_type,
                         query_text=query_text,
                         limit=limit,
+                        keyword_text=keyword_text,
                     )
                 )
         else:
@@ -358,6 +367,7 @@ class IntentClassifier:
                         memory_type=mem_type,
                         query_text=query_text,
                         limit=5,
+                        keyword_text=keyword_text,
                     )
                 )
 

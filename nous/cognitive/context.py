@@ -275,27 +275,26 @@ class ContextEngine:
         self._settings = settings
         self._identity_prompt = identity_prompt
         self._deduplicator = deduplicator
-        # context_skip_unchanged_query: each session's last searched plan query
-        # and when it was searched (time.monotonic), in-process.
+        # context_skip_unchanged_query: each session's last cleanly searched
+        # plan query and when (time.monotonic), in-process.
         self._last_query_by_session: OrderedDict[str, tuple[tuple[str, ...], float]] = OrderedDict()
 
     def _query_unchanged(self, session_id: str, query: tuple[str, ...], ttl_seconds: float) -> bool:
-        """Whether this session searched with ``query`` less than ``ttl_seconds`` ago.
+        """Whether this session's last clean search used ``query`` less than ``ttl_seconds`` ago.
 
-        Only a search (a False answer) records the query and its time; a skip
-        does not, so a repeated query is searched again once ``ttl_seconds``
-        have passed since its last search. At most ``_LAST_QUERY_SESSIONS``
-        sessions are remembered (LRU).
+        A skip records nothing, so a repeated query is searched again once
+        ``ttl_seconds`` have passed since its last clean search.
         """
-        now = time.monotonic()
         last = self._last_query_by_session.get(session_id)
-        unchanged = last is not None and last[0] == query and now - last[1] < ttl_seconds
-        if not unchanged:
-            self._last_query_by_session[session_id] = (query, now)
+        return last is not None and last[0] == query and time.monotonic() - last[1] < ttl_seconds
+
+    def _record_searched_query(self, session_id: str, query: tuple[str, ...]) -> None:
+        """Remember ``query`` as this session's last clean search, for at most
+        ``_LAST_QUERY_SESSIONS`` sessions (LRU)."""
+        self._last_query_by_session[session_id] = (query, time.monotonic())
         self._last_query_by_session.move_to_end(session_id)
         if len(self._last_query_by_session) > _LAST_QUERY_SESSIONS:
             self._last_query_by_session.popitem(last=False)
-        return unchanged
 
     async def build(
         self,
@@ -510,31 +509,37 @@ class ContextEngine:
         # than the TTL ago skips the four memory types, as a short input's plan
         # does. Every reader of those budgets is gated on skip_types too, so no
         # memory leg runs and no memory section renders. A plan that already
-        # skips has no query and leaves the remembered one alone.
+        # skips has no query and leaves the remembered one alone. A searched
+        # query is remembered only at the end, if no memory leg raised, so a
+        # transient failure is searched again on the next turn.
         _unchanged_types: set[str] = set()
+        _searched_query: tuple[str, ...] | None = None
+        _memory_leg_failed = False
         if (
             retrieval_plan
             and retrieval_plan.queries
             and getattr(self._settings, "context_skip_unchanged_query", False) is True
             and getattr(self._settings, "context_query_mode", "bag") == "conditional"
-            and self._query_unchanged(
-                session_id,
-                tuple(q.query_text for q in retrieval_plan.queries),
-                self._settings.context_skip_unchanged_ttl_seconds,
-            )
         ):
-            _unchanged_types = {"decision", "fact", "procedure", "episode"} - skip_types
-            skip_types = skip_types | _unchanged_types
-            logger.info("Context build skips memory legs: query unchanged for session %s", session_id)
+            _plan_query = tuple(q.query_text for q in retrieval_plan.queries)
+            if self._query_unchanged(session_id, _plan_query, self._settings.context_skip_unchanged_ttl_seconds):
+                _unchanged_types = {"decision", "fact", "procedure", "episode"} - skip_types
+                skip_types = skip_types | _unchanged_types
+                logger.info("Context build skips memory legs: query unchanged for session %s", session_id)
+            else:
+                _searched_query = _plan_query
 
         # Determine per-type query text and limits from plan
         _query_texts: dict[str, str] = {}
+        _keyword_texts: dict[str, str] = {}
         _limits: dict[str, int] = {}
         if retrieval_plan and retrieval_plan.queries:
             for q in retrieval_plan.queries:
                 _limits[q.memory_type] = q.limit
                 if q.query_text:
                     _query_texts[q.memory_type] = q.query_text
+                if q.keyword_text:
+                    _keyword_texts[q.memory_type] = q.keyword_text
 
         # Trim conversation_messages to budget.conversation_window (F13)
         _conv_msgs = conversation_messages
@@ -1103,6 +1108,7 @@ class ContextEngine:
                     )
             except Exception as e:
                 logger.warning("Brain.query failed during context build: %s", e)
+                _memory_leg_failed = True
                 # F091: a leg that CRASHED must not read as one that never
                 # ran. Registration lives after the await, so the exception
                 # path skips it entirely.
@@ -1255,6 +1261,7 @@ class ContextEngine:
                 logger.warning("Heart.search_facts failed during context build: %s", e)
                 tr.leg("context_facts", attempted=True, error=short_error(e))
                 _failed_legs.append(("fact recall", e))
+                _memory_leg_failed = True
 
         # 6a. Session Profile intent leg (Task 2, land dark): intent-selected
         # tier-1 domain facts (trading stances, sailing contacts, project
@@ -1277,6 +1284,10 @@ class ContextEngine:
                 # Mirror the Tier-3 fact leg EXACTLY: same query text (topic-
                 # prefixed _default_query unless a per-type query was supplied).
                 q_text = _query_texts.get("fact", _default_query)
+                # Conditional mode embeds the user's words but keeps the keyword
+                # bag as the lexical anchor: the keyword leg needs EVERY word,
+                # so "what do we know about sailing?" must not also need "know".
+                _anchor = {"keyword_text": _keyword_texts["fact"]} if "fact" in _keyword_texts else {}
                 leg_facts = await self._heart.search_facts(
                     q_text,
                     limit=self._settings.profile_intent_leg_limit,
@@ -1287,6 +1298,7 @@ class ContextEngine:
                     # (vector-only rank-0 normalizes to ~0.97), so the score
                     # floor alone cannot exclude nearest-neighbor noise.
                     require_keyword_hit=True,
+                    **_anchor,
                 )
                 # Outside the `if` — see the decisions leg above.
                 _tr_enter(leg_facts or [], "fact", "context_profile_intent")
@@ -1346,6 +1358,7 @@ class ContextEngine:
                 logger.warning("Session Profile intent leg failed during context build: %s", e)
                 tr.leg("context_profile_intent", attempted=True, error=short_error(e))
                 _failed_legs.append(("session profile recall", e))
+                _memory_leg_failed = True
 
         # 6b. Recall backstop (2026-07-13 plan): empty final fact list => tell the
         # agent to recall before answering. Fires on search failure too (the
@@ -1495,6 +1508,7 @@ class ContextEngine:
                 logger.warning("F080 §14.7 procedure selection failed: %s", e)
                 tr.leg("context_procedures_ladder", attempted=True, error=short_error(e))
                 _failed_legs.append(("procedure selection", e))
+                _memory_leg_failed = True
 
         # 7. Procedures (dual-track: Critic reserved slots + embedding slots, issue #229)
         # F079 unified pull: `proc_passive_injection_enabled=False` removes only the
@@ -1721,6 +1735,7 @@ class ContextEngine:
                         )
             except Exception as e:
                 logger.warning("Procedure context build failed: %s", e)
+                _memory_leg_failed = True
 
         # 7.5 Temporal awareness — always include recent episode titles (008.6)
         # Not gated by budget.episodes — this is a lightweight tier that shows
@@ -1874,6 +1889,7 @@ class ContextEngine:
                 logger.warning("Heart.search_episodes failed during context build: %s", e)
                 tr.leg("context_episodes", attempted=True, error=short_error(e))
                 _failed_legs.append(("episode recall", e))
+                _memory_leg_failed = True
 
         # After every budget cut, so the line is never cut itself.
         self._note_changed_tools(sections)
@@ -1961,6 +1977,11 @@ class ContextEngine:
                 tr.finalize(_rendered, duration_ms=(time.monotonic() - _tr_t0) * 1000.0)
             except Exception:
                 logger.debug("F091: context retrieval trace failed", exc_info=True)
+
+        # context_skip_unchanged_query: remember the query only after a clean
+        # retrieval, so a failed leg is searched again on the next turn.
+        if _searched_query is not None and not _memory_leg_failed:
+            self._record_searched_query(session_id, _searched_query)
 
         return BuildResult(
             # Finalized but NOT committed — pre_turn commits once it knows the

@@ -398,8 +398,10 @@ class Heart:
         include_categories: list[str] | None = None,
         require_keyword_hit: bool = False,
         track_access: bool = True,
+        keyword_text: str | None = None,
     ) -> list[FactSummary]:
-        """Hybrid search over facts."""
+        """Hybrid search over facts. ``keyword_text``, when set, is what the
+        keyword leg matches instead of ``query`` (which is still embedded)."""
         return await self.facts.search(
             query,
             limit,
@@ -410,6 +412,7 @@ class Heart:
             include_categories=include_categories,
             require_keyword_hit=require_keyword_hit,
             track_access=track_access,
+            keyword_text=keyword_text,
         )
 
     async def find_similar_facts(
