@@ -866,7 +866,9 @@ def _format_pipeline_text(
     entries tagged ``metadata["retrieval_leg"] == "exemplar"`` are excluded
     from the Heart Memory section and rendered instead in a trailing
     `=== Nearest stored examples ===` section; absent when no exemplar rows
-    are present (default, flag off).
+    are present (default, flag off). When a retrieval leg failed, the text
+    ends with one ``Note: ...; results may be incomplete.`` line
+    (``retrieval_pipeline.failure_note``); absent when none failed.
     """
     search_all = "all" in search_types
     results_text: list[str] = []
@@ -1160,6 +1162,15 @@ def _format_pipeline_text(
             # served-ness by regexing rendered ids is silently blind here.
             # Collection works because the id comes from the row, not the text.
             _emit(r)
+
+    # The model never sees the retrieval trace, so a leg that failed would read
+    # as a complete result with fewer hits. One closing line names it. Absent
+    # when nothing failed, so the text is byte-identical then.
+    from nous.api.retrieval_pipeline import failure_note
+
+    note = failure_note(stats)
+    if note:
+        results_text.append(f"\n{note}")
 
     return "\n".join(results_text)
 

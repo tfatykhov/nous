@@ -369,3 +369,102 @@ class TestSessionProfileLegTraced:
         traced = next(c for c in trace["candidates"] if c["id"] == str(fact.id))
         assert traced["disposition"] == "rendered"
         assert str(fact.id) not in result.recalled_ids["fact"]
+
+
+# ---------------------------------------------------------------------------
+# #827: the model sees a one-line note when a leg failed
+# ---------------------------------------------------------------------------
+
+
+class TestRecallDeepFailureNote:
+    @pytest.mark.asyncio
+    async def test_brain_query_failure_ends_the_tool_text_with_a_note(self):
+        """The trace goes to retrieval_log, which the agent never reads, so a
+        partly failed recall read as a complete one with fewer hits."""
+        from nous.api.tools import create_nous_tools
+
+        heart = _make_heart(recall_results=_make_recall_results())
+        brain = _make_brain(neighbors_by_node={}, contradictions=[], decision_results=[])
+        brain.query = AsyncMock(side_effect=RuntimeError("connection reset"))
+        tools = create_nous_tools(brain=brain, heart=heart, settings=_make_settings(graph_recall_enabled=False))
+
+        result = await tools["recall_deep"](query="anything", limit=5)
+
+        text = result["content"][0]["text"]
+        assert "fact summary one" in text, "the heart results are still served"
+        assert text.endswith("\n\nNote: decision search failed (RuntimeError); results may be incomplete.")
+        assert text.count("Note:") == 1
+
+    @pytest.mark.asyncio
+    async def test_no_errors_no_note(self):
+        from nous.api.tools import create_nous_tools
+
+        heart = _make_heart(recall_results=_make_recall_results())
+        brain = _make_brain(neighbors_by_node={}, contradictions=[], decision_results=[])
+        tools = create_nous_tools(brain=brain, heart=heart, settings=_make_settings(graph_recall_enabled=False))
+
+        result = await tools["recall_deep"](query="anything", limit=5)
+
+        assert "Note:" not in result["content"][0]["text"]
+
+    def test_wording_for_failures_and_keyword_only_fallbacks(self):
+        from nous.api.retrieval_pipeline import PipelineStats, failure_note
+
+        stats = PipelineStats(
+            n_stage_errors={"fact_embed_fallback": 1, "heart_recall_episode": 2, "decision_neighbors": 1},
+            stage_error_msgs={"heart_recall_episode": "ProgrammingError: column x does not exist"},
+        )
+        assert failure_note(stats) == (
+            "Note: episode search failed (ProgrammingError); graph expansion failed; "
+            "fact search used keyword-only (embedding unavailable); results may be incomplete."
+        )
+
+    def test_a_failed_search_is_not_also_reported_as_keyword_only(self):
+        from nous.api.retrieval_pipeline import PipelineStats, failure_note
+
+        stats = PipelineStats(
+            n_stage_errors={"fact_embed_fallback": 1, "heart_recall_fact": 1},
+            stage_error_msgs={"heart_recall_fact": "OperationalError: server closed the connection"},
+        )
+        assert failure_note(stats) == "Note: fact search failed (OperationalError); results may be incomplete."
+
+    def test_dedup_counts_and_harmless_steps_give_no_note(self):
+        from nous.api.retrieval_pipeline import _NOTE_EXEMPT_STAGE_ERRORS, PipelineStats, failure_note
+
+        assert failure_note(PipelineStats()) is None
+        harmless = dict.fromkeys(_NOTE_EXEMPT_STAGE_ERRORS, 1)
+        harmless["heart_graph_memory_duplicates"] = 9
+        assert failure_note(PipelineStats(n_stage_errors=harmless)) is None
+
+
+class TestPreTurnFailureNote:
+    @pytest.mark.asyncio
+    async def test_a_failed_context_leg_adds_one_dynamic_note(self):
+        from test_preturn_fact_injection import _frame as _pt_frame
+        from test_preturn_fact_injection import _make_engine, _stub_heart_for_build
+
+        engine = _make_engine()
+        _stub_heart_for_build(engine, [])
+        engine._brain.query.side_effect = RuntimeError("connection reset")
+
+        result = await engine.build(agent_id="a", session_id="s", input_text="what did we decide?", frame=_pt_frame())
+
+        note = next(s for s in result.sections if s.label == "Retrieval Failures")
+        assert note.content == "Note: decision recall failed (RuntimeError); results may be incomplete."
+        assert note.tier == "dynamic"
+        assert result.system_prompt.endswith("## Retrieval Failures\n\n" + note.content)
+        assert "Retrieval Failures" not in result.sections_by_tier.get("static", "")
+        assert "Retrieval Failures" not in result.sections_by_tier.get("semi_stable", "")
+
+    @pytest.mark.asyncio
+    async def test_no_failed_leg_no_note(self):
+        from test_preturn_fact_injection import _frame as _pt_frame
+        from test_preturn_fact_injection import _make_engine, _stub_heart_for_build
+
+        engine = _make_engine()
+        _stub_heart_for_build(engine, [])
+
+        result = await engine.build(agent_id="a", session_id="s", input_text="what did we decide?", frame=_pt_frame())
+
+        assert all(s.label != "Retrieval Failures" for s in result.sections)
+        assert "Note:" not in result.system_prompt

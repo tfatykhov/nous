@@ -57,7 +57,7 @@ from nous.observability.retrieval_trace import (
     TYPE_EXCLUDED,
     UNACCOUNTED,
 )
-from nous.utils import note_stage_error, short_error
+from nous.utils import note_stage_error
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -199,6 +199,9 @@ class PipelineStats:
     # logged at WARN inside Heart with nothing reaching the caller, so a
     # crashed fact leg was indistinguishable from an empty one.
     n_stage_errors: dict[str, int] = field(default_factory=dict)
+    # The first error text per ``n_stage_errors`` key ("Class: first line").
+    # ``failure_note`` turns the two into the line recall_deep shows the model.
+    stage_error_msgs: dict[str, str] = field(default_factory=dict)
     # Raw contradiction edges (source_id, source_type, target_id, target_type).
     # Preserves byte-identical warning emission for the legacy formatter
     # because PipelineResult.contradicts deduplicates and loses source-type
@@ -401,6 +404,73 @@ class _PipelineAccumulator:
 
 
 # ---------------------------------------------------------------------------
+# Failure note: the model-visible side of ``stage_errors``
+# ---------------------------------------------------------------------------
+
+# Stage-error keys left out of the note: the returned results are as complete
+# as without the failure, because the step only chooses a mechanism, refines
+# ranking or does bookkeeping, or the search falls back to the original query.
+_NOTE_EXEMPT_STAGE_ERRORS = frozenset(
+    {
+        "spreading_density_check",  # chooses spreading vs 1-hop; 1-hop runs instead
+        "spreading_query_gate",  # rows stay ungated, none lost
+        "path_a_associative_gate",  # batch stays ungated, none lost
+        "adjacency_boost",  # ranking refinement only
+        "recall_reactivation",  # write-side bookkeeping, after results are final
+        "fact_source_episodes",  # formatter session grouping only
+        "exemplar_strip",  # stray exemplar rows stay in the results
+        "query_expansion",  # the original query is still searched
+        "query_expansion_embed_fallback",  # same: the single-query path runs
+    }
+)
+
+_NOTE_LABELS = {
+    "brain": "decision search",
+    "chunk_recall": "episode chunk search",
+    "keyed": "keyed fact lookup",
+    "keyed_r2": "keyed fact lookup",
+    "exemplar": "example search",
+    "heart_graph_neighbors": "graph expansion",
+    "heart_graph_memory_neighbors": "graph expansion",
+    "decision_neighbors": "graph expansion",
+    "spreading_activation": "graph expansion",
+    "contradiction_query": "contradiction check",
+    "date_window": "date-window search",
+}
+
+
+def failure_note(stats: PipelineStats) -> str | None:
+    """One line telling the model which legs failed, or None when none did.
+
+    The trace goes to ``retrieval_log``, which the agent never reads, so without
+    this a partly failed recall reads as a complete one with fewer hits. Skips
+    ``*_duplicates`` (dedup counts, not errors) and ``_NOTE_EXEMPT_STAGE_ERRORS``.
+    A key with no label (a future stage) is named as it is, not dropped.
+    """
+    errors = getattr(stats, "n_stage_errors", None) or {}
+    msgs = getattr(stats, "stage_error_msgs", None) or {}
+    failed: dict[str, str] = {}  # label -> part; one part per label, first wins
+    keyword_only: dict[str, str] = {}
+    for key in errors:
+        if key.endswith("_duplicates") or key in _NOTE_EXEMPT_STAGE_ERRORS:
+            continue
+        if key.endswith("_embed_fallback"):
+            label = f"{key.removesuffix('_embed_fallback')} search"
+            keyword_only.setdefault(label, f"{label} used keyword-only (embedding unavailable)")
+            continue
+        label = _NOTE_LABELS.get(key) or (
+            f"{key.removeprefix('heart_recall_')} search" if key.startswith("heart_recall_") else key
+        )
+        cls = msgs.get(key, "").split(":", 1)[0]
+        failed.setdefault(label, f"{label} failed ({cls})" if cls else f"{label} failed")
+    # A search that failed outright says so; its keyword-only fallback is moot.
+    parts = list(failed.values()) + [p for label, p in keyword_only.items() if label not in failed]
+    if not parts:
+        return None
+    return f"Note: {'; '.join(parts)}; results may be incomplete."
+
+
+# ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
@@ -455,6 +525,7 @@ async def run_recall_pipeline(
     tr = trace if trace is not None else NULL_TRACE
     _t0 = time.monotonic()
     date_window = None
+    date_exc: Exception | None = None
     parser = getattr(heart, "date_window_parser", None)
     # Only the fact leg consumes the window, so skip the Haiku parse (latency +
     # budget) when facts aren't in scope, e.g. memory_types=["decision"] (codex P2).
@@ -467,16 +538,18 @@ async def run_recall_pipeline(
         try:
             date_window = await parser.parse(query, _dt.date.today())
         except Exception as exc:
-            # Runs before the stages, so there is no accumulator yet: the trace
-            # leg is the record. Without the guard this aborted the retrieval.
+            # Without the guard this aborted the retrieval. Counted once the
+            # accumulator exists, just below.
             logger.warning("date-window parse raised; searching without a date window", exc_info=True)
-            tr.leg("date_window", attempted=True, error=short_error(exc))
+            date_exc = exc
 
     acc = await _run_stages(
         query, heart, brain, settings, limit, memory_types,
         residual_activations, apply_mmr=apply_mmr, date_window=date_window,
         exclude_ids=exclude_ids, trace=tr,
     )
+    if date_exc is not None:
+        note_stage_error(acc.stage_errors, acc.stage_error_msgs, "date_window", date_exc)
 
     # Build flat PipelineResult list in stage order
     results: list[PipelineResult] = []
@@ -917,6 +990,7 @@ async def run_recall_pipeline(
         n_brain_results=len(acc.decision_results),
         n_graph_expanded=len(acc.graph_expanded),
         n_stage_errors=dict(acc.stage_errors),
+        stage_error_msgs=dict(acc.stage_error_msgs),
         contradiction_edges=list(acc.contradictions),
         excluded_in_context=excluded_in_context,  # F071
         attempted_legs=frozenset(acc.attempted_legs),

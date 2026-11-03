@@ -326,6 +326,8 @@ class ContextEngine:
             "episode": [],
         }
         recalled_content_map: dict[str, str] = {}
+        # Memory legs that raised this turn, for the closing failure note.
+        _failed_legs: list[tuple[str, Exception]] = []
 
         # F091: this path runs on EVERY turn and fills the system prompt, but
         # until now its only telemetry was counting bullets in the rendered
@@ -1056,6 +1058,7 @@ class ContextEngine:
                 # ran. Registration lives after the await, so the exception
                 # path skips it entirely.
                 tr.leg("context_decisions", attempted=True, error=short_error(e))
+                _failed_legs.append(("decision recall", e))
 
         facts_injected = False
         # 6. Facts (F10: retrieve -> apply_frame_boost -> dedup -> usage_boost -> truncate)
@@ -1202,6 +1205,7 @@ class ContextEngine:
             except Exception as e:
                 logger.warning("Heart.search_facts failed during context build: %s", e)
                 tr.leg("context_facts", attempted=True, error=short_error(e))
+                _failed_legs.append(("fact recall", e))
 
         # 6a. Session Profile intent leg (Task 2, land dark): intent-selected
         # tier-1 domain facts (trading stances, sailing contacts, project
@@ -1292,6 +1296,7 @@ class ContextEngine:
             except Exception as e:
                 logger.warning("Session Profile intent leg failed during context build: %s", e)
                 tr.leg("context_profile_intent", attempted=True, error=short_error(e))
+                _failed_legs.append(("session profile recall", e))
 
         # 6b. Recall backstop (2026-07-13 plan): empty final fact list => tell the
         # agent to recall before answering. Fires on search failure too (the
@@ -1440,6 +1445,7 @@ class ContextEngine:
             except Exception as e:
                 logger.warning("F080 §14.7 procedure selection failed: %s", e)
                 tr.leg("context_procedures_ladder", attempted=True, error=short_error(e))
+                _failed_legs.append(("procedure selection", e))
 
         # 7. Procedures (dual-track: Critic reserved slots + embedding slots, issue #229)
         # F079 unified pull: `proc_passive_injection_enabled=False` removes only the
@@ -1731,6 +1737,7 @@ class ContextEngine:
             except Exception as e:
                 logger.warning("Temporal tier failed: %s", e)
                 tr.leg("context_episodes_temporal", attempted=True, error=short_error(e))
+                _failed_legs.append(("recent conversations", e))
 
         # 8. Episodes
         if not (budget.episodes > 0 and "episode" not in skip_types):
@@ -1817,9 +1824,26 @@ class ContextEngine:
             except Exception as e:
                 logger.warning("Heart.search_episodes failed during context build: %s", e)
                 tr.leg("context_episodes", attempted=True, error=short_error(e))
+                _failed_legs.append(("episode recall", e))
 
         # After every budget cut, so the line is never cut itself.
         self._note_changed_tools(sections)
+
+        # A memory leg that raised would otherwise read to the model as "nothing
+        # relevant is stored". One dynamic line after every memory section says
+        # so; absent when nothing failed, so the prompt is byte-identical then.
+        if _failed_legs:
+            parts = dict.fromkeys(f"{label} failed ({type(e).__name__})" for label, e in _failed_legs)
+            note = f"Note: {'; '.join(parts)}; results may be incomplete."
+            sections.append(
+                ContextSection(
+                    priority=9,
+                    label="Retrieval Failures",
+                    content=note,
+                    token_estimate=self._estimate_tokens(note),
+                    tier="dynamic",
+                )
+            )
 
         # Assemble system prompt with markdown headers
         parts: list[str] = []
