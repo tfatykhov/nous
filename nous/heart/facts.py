@@ -54,6 +54,11 @@ _EXEMPLAR_EXISTS_TTL_SECONDS = 300.0
 # only weak ones, so an unreferenced task can be garbage-collected mid-flight.
 _TRACK_ACCESS_TASKS: set[asyncio.Task] = set()
 
+# The profile (tier-1) categories. The source of truth is
+# nous.cognitive.context.TIER1_FACT_CATEGORIES, which heart cannot import
+# (cognitive imports heart).
+_TIER1_CATEGORIES = ("preference", "person", "rule")
+
 # F027: classifier prompt. Exported so the F027 eval script
 # (scripts/eval/eval_f027_supersession.py) tests the same prompt prod uses.
 # Apply this decision tree IN ORDER, returning the first match. UPDATE is
@@ -867,6 +872,7 @@ class FactManager:
                 candidate_event_date=input.event_date,
                 prefer_slot=prefer_slot,
                 probed_ids=probed_ids,
+                tier1_only=input.category in _TIER1_CATEGORIES,
             )
             if found is not None:
                 dupe, dupe_similarity = found
@@ -1966,8 +1972,15 @@ class FactManager:
         candidate_event_date: date | None = None,
         prefer_slot: tuple[str, str] | None = None,
         probed_ids: list[UUID] | None = None,
+        tier1_only: bool = False,
     ) -> tuple[Fact, float] | None:
         """Find a near-duplicate fact by cosine similarity > threshold.
+
+        ``tier1_only`` (set by ``_learn`` for a person/preference/rule input)
+        limits the candidates to tier-1 facts, in the WHERE for the same reason
+        as the exemplar exclusion below: a profile fact folded into an
+        identical technical fact (the enumerative extractor stores the same
+        statement as technical) is lost from the profile.
 
         Returns ``(fact, similarity)`` so the caller can band-route the hit
         (audit S3), or None when nothing clears the threshold.
@@ -2043,6 +2056,10 @@ class FactManager:
             exclude_clause = f"AND id NOT IN ({placeholders})"
             for i, eid in enumerate(exclude_ids):
                 params[f"excl_{i}"] = eid
+        category_clause = ""
+        if tier1_only:
+            category_clause = "AND category = ANY(CAST(:tier1 AS text[]))"
+            params["tier1"] = list(_TIER1_CATEGORIES)
 
         # codex P2 (2026-06-09) + Codex r19 (F086): pgvector applies the
         # agent_id/active/source filters AFTER the approximate candidate walk,
@@ -2072,6 +2089,7 @@ class FactManager:
               AND embedding IS NOT NULL
               AND source IS DISTINCT FROM 'exemplar_extractor'
               {exclude_clause}
+              {category_clause}
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT 20
         """)

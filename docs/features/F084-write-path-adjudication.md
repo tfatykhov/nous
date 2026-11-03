@@ -185,6 +185,9 @@ Partial index `idx_facts_conflict_slot` on `(agent_id, subject_key, attribute_ke
 
 4. **Modal, not additive:** Enumerable episodes route fact storage INSTEAD of the candidate-facts
    leg. The episode summary is still generated and stored; only fact extraction switches source.
+   Exception: candidates in the profile categories (person, preference, rule) are still stored
+   when the enumerative leg stores facts (see the profile carve-out above), and their dedup only
+   matches profile-category facts, so an identical technical atom cannot absorb them.
 
 5. **R2 transition-period gap:** With R2 enabled (`supersession_key_resolution_enabled=true`),
    keyed facts do not subject-supersede legacy UNKEYED rows — exact-key matching only. Stale

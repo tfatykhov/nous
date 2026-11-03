@@ -662,6 +662,120 @@ async def test_enumerative_not_fired_stores_every_candidate(monkeypatch):
     assert len(result) == 2
 
 
+# ---------------------------------------------------------------------------
+# Tier-1 dedup isolation: a profile fact (person/preference/rule) is never
+# deduplicated into a non-profile fact, or the profile fact is lost — the
+# enumerative extractor stores the same statement as technical. Identical
+# content gives cosine 1.0 under the mock embeddings; a per-test suffix keeps
+# leftover rows in a shared database from matching.
+# ---------------------------------------------------------------------------
+
+
+def _same_statement() -> str:
+    return f"Tim prefers answers in metric units, always (ref {uuid4().hex[:12]})"
+
+
+async def _learn_twice(heart, session, first: FactInput, second: FactInput):
+    a = await heart.learn(first, session=session)
+    b = await heart.learn(second, session=session)
+    return a, b
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_profile_fact_not_deduped_into_technical_fact(heart, session):
+    """Leg 2 (_find_duplicate): a preference fact identical to an enumerated
+    technical fact is stored as its own tier-1 row."""
+    content = _same_statement()
+    technical, preference = await _learn_twice(
+        heart,
+        session,
+        FactInput(
+            content=content,
+            subject="units",
+            subject_key="tim",
+            attribute_key="unit preference",
+            category="technical",
+            source="enumerative_extractor",
+        ),
+        FactInput(content=content, subject="Tim", category="preference", source="episode_summarizer"),
+    )
+    assert preference.id != technical.id
+    pref_row = await _get_fact(heart, preference.id, session)
+    tech_row = await _get_fact(heart, technical.id, session)
+    assert pref_row.category == "preference" and pref_row.active
+    assert tech_row.category == "technical" and tech_row.active
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_profile_fact_still_dedups_into_profile_fact(heart, session):
+    """The isolation narrows the pool to tier-1 facts; it does not switch dedup
+    off: a repeated preference confirms the stored one."""
+    content = _same_statement()
+    first, second = await _learn_twice(
+        heart,
+        session,
+        FactInput(content=content, subject="Tim", category="preference", source="episode_summarizer"),
+        FactInput(content=content, subject="Tim", category="person", source="episode_summarizer"),
+    )
+    assert second.id == first.id
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_technical_fact_dedup_unchanged(heart, session):
+    content = _same_statement()
+    first, second = await _learn_twice(
+        heart,
+        session,
+        FactInput(content=content, subject="units", category="technical", source="episode_summarizer"),
+        FactInput(content=content, subject="units", category="technical", source="episode_summarizer"),
+    )
+    assert second.id == first.id
+
+
+@pytest.mark.postgres_only
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_profile_candidate_survives_both_dedup_legs(heart):
+    """End to end through the summarizer-candidate path: Leg 1
+    (_resolve_dedup's raw-cosine probe) and Leg 2 both skip the enumerated
+    technical twin, so the preference candidate gets its own row. The rows
+    are committed (the extractor opens its own sessions) and removed after."""
+    from sqlalchemy import delete
+
+    from nous.handlers.fact_extractor import FactExtractor
+
+    content = _same_statement()
+    try:
+        technical = await heart.learn(
+            FactInput(
+                content=content,
+                subject="units",
+                subject_key="tim",
+                attribute_key="unit preference",
+                category="technical",
+                source="enumerative_extractor",
+            )
+        )
+        extractor = FactExtractor(heart=heart, settings=heart.facts._settings, bus=None, dedup_via_search=True)
+        ids = await extractor._store_candidate_facts(
+            [{"content": content, "subject": "Tim", "category": "preference"}],
+            episode_id="?",
+            transcript=content,
+        )
+        assert len(ids) == 1 and ids[0] != technical.id
+        pref_row = await _get_fact(heart, ids[0])
+        tech_row = await _get_fact(heart, technical.id)
+        assert pref_row.category == "preference" and pref_row.active
+        assert tech_row.category == "technical" and tech_row.active
+    finally:
+        async with heart.db.session() as s:
+            await s.execute(delete(Fact).where(Fact.content == content))
+            await s.commit()
+
+
 @pytest.mark.asyncio
 async def test_flag_on_narrative_keeps_legacy_path(monkeypatch):
     """Flag on + NARRATIVE transcript (density below threshold): candidate path

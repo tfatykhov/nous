@@ -144,7 +144,7 @@ class FactExtractor:
         return True
 
     async def _resolve_dedup(
-        self, content: str, candidate_event_date: "date | None"
+        self, content: str, candidate_event_date: "date | None", category: str | None = None
     ) -> "tuple[UUID | None, list[UUID]]":
         """Resolve the Leg-1 dedup decision for a candidate.
 
@@ -173,8 +173,13 @@ class FactExtractor:
         (superseded facts are inactive and never returned).
 
         Hits whose ``event_date`` differs from the candidate are skipped
-        (F075: distinct dates = distinct events). Shared by both producer
-        paths (cf. #354)."""
+        (F075: distinct dates = distinct events). For a person/preference/rule
+        candidate, hits in other categories are skipped too: folding a profile
+        fact into an identical technical one (the enumerative extractor stores
+        the same statement as technical) loses it from the profile. Only the
+        top 5 are probed; Leg 2 (``_find_duplicate``) applies the same filter
+        in SQL, so a tier-1 duplicate below five technical hits is still found
+        there. Shared by both producer paths (cf. #354)."""
         distinct_ids: list[UUID] = []
         if not self._dedup_via_search:
             return None, distinct_ids
@@ -191,11 +196,14 @@ class FactExtractor:
         # bypassing _learn's label-aware two-sided guard.
         hits = await self._heart.find_similar_facts(content, limit=5, exclude_sources=("exemplar_extractor",))
 
+        profile_only = category in TIER1_FACT_CATEGORIES
         for cand in hits:
             if cand.score is None or cand.score <= threshold:
                 break  # similarity-descending: nothing further can clear it
             if self._event_date_differs(cand, candidate_event_date):
                 continue  # F075: distinct dates = distinct events
+            if profile_only and cand.category not in TIER1_FACT_CATEGORIES:
+                continue  # a profile fact is never folded into a non-profile one
             if await self._confirm_dedup(cand.content, content):
                 return cand.id, distinct_ids
             distinct_ids.append(cand.id)  # tiebreaker judged DISTINCT
@@ -394,7 +402,7 @@ class FactExtractor:
             # _resolve_dedup examines all above-threshold RRF hits (F377) and
             # applies the F075 distinct-event_date bypass; None = store as new.
             content = fact.get("content", "")
-            canonical, exclude_ids = await self._resolve_dedup(content, candidate_event_date)
+            canonical, exclude_ids = await self._resolve_dedup(content, candidate_event_date, fact.get("category"))
             if canonical is not None:
                 stored_ids.append(canonical)
                 logger.debug(
@@ -516,7 +524,7 @@ class FactExtractor:
             # Dedup: check if similar fact exists. _resolve_dedup examines all
             # above-threshold RRF hits (F377) + the F075 distinct-date bypass;
             # None = store as new.
-            canonical, exclude_ids = await self._resolve_dedup(content, candidate_event_date)
+            canonical, exclude_ids = await self._resolve_dedup(content, candidate_event_date, category)
             if canonical is not None:
                 stored_ids.append(canonical)
                 logger.debug("Dedup skip (candidate) — adding canonical UUID %s for: %s", canonical, content[:50])
