@@ -37,10 +37,10 @@ def _legs(tr: RetrievalTrace) -> dict[str, dict]:
 class _FailingEmbeddings:
     """An embedding provider whose every call fails, as during an API outage."""
 
-    async def embed(self, _text: str) -> list[float]:
+    async def embed(self, _text: str, *, fail_fast: bool = False) -> list[float]:
         raise RuntimeError("embedding API unavailable")
 
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+    async def embed_batch(self, texts: list[str], *, fail_fast: bool = False) -> list[list[float]]:
         raise RuntimeError("embedding API unavailable")
 
     async def close(self) -> None:
@@ -468,3 +468,57 @@ class TestPreTurnFailureNote:
 
         assert all(s.label != "Retrieval Failures" for s in result.sections)
         assert "Note:" not in result.system_prompt
+
+
+# ---------------------------------------------------------------------------
+# #826: a fail_fast skip (EmbeddingUnavailableError) is an embed fallback too
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+class TestEmbeddingUnavailableIsAFallback:
+    @pytest.mark.asyncio
+    async def test_fact_leg_counts_it_and_the_note_says_keyword_only(self, heart, session, monkeypatch):
+        from nous.api.retrieval_pipeline import PipelineStats, failure_note
+        from nous.brain.embeddings import EmbeddingUnavailableError
+
+        monkeypatch.setattr(
+            heart.facts.embeddings,
+            "embed",
+            AsyncMock(side_effect=EmbeddingUnavailableError("embeddings API failed recently; skipped on a read path")),
+        )
+        stage_errors: dict[str, int] = {}
+        msgs: dict[str, str] = {}
+
+        await heart.recall(
+            "anything at all", types=["fact"], session=session, stage_errors=stage_errors, stage_error_msgs=msgs
+        )
+
+        assert stage_errors == {"fact_embed_fallback": 1}
+        assert msgs["fact_embed_fallback"].startswith("EmbeddingUnavailableError: ")
+        note = failure_note(PipelineStats(n_stage_errors=stage_errors, stage_error_msgs=msgs))
+        assert note == "Note: fact search used keyword-only (embedding unavailable); results may be incomplete."
+
+    @pytest.mark.asyncio
+    async def test_chunk_hybrid_leg_counts_it(self, heart, monkeypatch):
+        """#826's keyword-only fallback on the chunk leg records the same key shape."""
+        from nous.api.retrieval_pipeline import _search_episode_chunks
+        from nous.brain.embeddings import EmbeddingUnavailableError
+
+        failing = SimpleNamespace(embed=AsyncMock(side_effect=EmbeddingUnavailableError("skipped on a read path")))
+        monkeypatch.setattr(heart, "_embeddings", failing)
+        stage_errors: dict[str, int] = {}
+        msgs: dict[str, str] = {}
+
+        await _search_episode_chunks(
+            heart=heart,
+            query="anything at all",
+            agent_id=heart.agent_id,
+            limit=5,
+            settings=SimpleNamespace(chunk_hybrid_search_enabled=True, chunk_rrf_penalty_limit=None),
+            stage_errors=stage_errors,
+            stage_error_msgs=msgs,
+        )
+
+        assert stage_errors == {"chunk_embed_fallback": 1}
+        assert msgs["chunk_embed_fallback"].startswith("EmbeddingUnavailableError")

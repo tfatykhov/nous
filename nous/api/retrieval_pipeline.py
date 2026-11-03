@@ -455,7 +455,9 @@ def failure_note(stats: PipelineStats) -> str | None:
         if key.endswith("_duplicates") or key in _NOTE_EXEMPT_STAGE_ERRORS:
             continue
         if key.endswith("_embed_fallback"):
-            label = f"{key.removesuffix('_embed_fallback')} search"
+            # Same label as the leg's own failure key, so the two can be matched.
+            base = key.removesuffix("_embed_fallback")
+            label = "episode chunk search" if base == "chunk" else f"{base} search"
             keyword_only.setdefault(label, f"{label} used keyword-only (embedding unavailable)")
             continue
         label = _NOTE_LABELS.get(key) or (
@@ -1181,6 +1183,10 @@ async def _run_stages(
                 # round-trips. `tr.add` still no-ops on unsampled rows, so only
                 # the tuples are wasted, and only briefly.
                 dropped_out=acc.chunk_dropped if tr.enabled else None,
+                # A failed query embed on the hybrid path is counted as
+                # chunk_embed_fallback (keyword-only), like the heart legs.
+                stage_errors=acc.stage_errors,
+                stage_error_msgs=acc.stage_error_msgs,
                 ),
             )
             if not getattr(settings, "chunk_hybrid_search_enabled", False):
@@ -2840,6 +2846,8 @@ async def _search_episode_chunks(
     settings: "Settings | None" = None,
     attempted: "set[str] | None" = None,
     dropped_out: list | None = None,
+    stage_errors: dict[str, int] | None = None,
+    stage_error_msgs: dict[str, str] | None = None,
 ) -> list[tuple[UUID, str, float]]:
     """F067: search over heart.episode_chunks.
 
@@ -2892,9 +2900,10 @@ async def _search_episode_chunks(
         if embedder is not None:
             try:
                 query_vec = await embedder.embed(query, fail_fast=True)
-            except Exception:
+            except Exception as exc:
                 # A failed embed takes the keyword-only path below, as an empty one does.
                 logger.warning("Embedding generation failed for chunk search, searching keywords only")
+                note_stage_error(stage_errors, stage_error_msgs, "chunk_embed_fallback", exc)
         query_vec = query_vec or None  # empty or failed embed → keyword-only fallback
         # Hybrid always queries (keyword-only when the vector is absent).
         if attempted is not None:
