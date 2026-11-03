@@ -2258,13 +2258,16 @@ class GraphDensifier:
                     continue
                 table, _, content_col, _ = config
                 try:
-                    res = await session.execute(text(
-                        f"SELECT {content_col} AS content FROM {table} t WHERE t.id = :hub_id"
-                    ), {"hub_id": hub_id})
-                    row = res.first()
+                    # A savepoint: a failed read must not abort the shared session.
+                    async with session.begin_nested():
+                        res = await session.execute(text(
+                            f"SELECT {content_col} AS content FROM {table} t WHERE t.id = :hub_id"
+                        ), {"hub_id": hub_id})
+                        row = res.first()
                     if row and row.content:
                         hub_contents[hub_id] = row.content
                 except Exception:
+                    logger.warning("Hub content read failed for %s %s", hub_type, hub_id, exc_info=True)
                     continue
 
             # 7. Bridge similar hubs from different components

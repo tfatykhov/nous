@@ -1313,9 +1313,12 @@ async def _run_stages(
                 acc.exemplar_leg_used = True
                 # arch-review M2: exact chunk-leg idiom (retrieval_pipeline.py
                 # Stage 1.5's _search_episode_chunks); the process LRU
-                # (NOUS_EMBEDDING_CACHE_SIZE) makes the repeat embed free.
+                # (NOUS_EMBEDDING_CACHE_SIZE) makes the repeat embed free once
+                # an earlier leg's embed succeeded. A failed embed is not
+                # cached, so fail_fast is what keeps an outage from costing
+                # this leg the full budget again.
                 embedder = getattr(heart, "_embeddings", None)
-                q_vec = (await embedder.embed(query)) if embedder is not None else None
+                q_vec = (await embedder.embed(query, fail_fast=True)) if embedder is not None else None
                 if q_vec:
                     # Marked only once BOTH gates pass (a non-empty exemplar
                     # store and a usable query vector); either failing means
@@ -2127,8 +2130,10 @@ async def _query_gate(
     try:
         from nous.brain.spreading_activation import gate_factor, query_cosines
 
-        # The chunk and exemplar legs embed the same query: an LRU hit in practice.
-        query_vec = await embedder.embed(query)
+        # The chunk and exemplar legs embed the same query: an LRU hit when
+        # their embed succeeded. A failure is not cached, so fail_fast keeps an
+        # outage from costing this gate the full budget again.
+        query_vec = await embedder.embed(query, fail_fast=True)
         if not query_vec:
             return activated
         nodes: dict[UUID, str] = {nid: ntype for nid, ntype, _a, _d in activated}
@@ -2231,7 +2236,7 @@ class _PathAAssociativeGate:
                 raise ValueError(f"unknown associative query gate mode {self.mode!r}")
             if not self._embedded:
                 self._embedded = True
-                self._query_vec = await embedder.embed(self.query)
+                self._query_vec = await embedder.embed(self.query, fail_fast=True)
             if not self._query_vec:
                 return {}, set()
             nodes = [(n.id, n.node_type) for n in assoc]
@@ -2733,8 +2738,14 @@ async def _search_episode_chunks(
     if getattr(settings, "chunk_hybrid_search_enabled", False):
         from nous.heart import search as heart_search
 
-        query_vec = (await embedder.embed(query)) if embedder is not None else None
-        query_vec = query_vec or None  # empty embed → keyword-only fallback
+        query_vec = None
+        if embedder is not None:
+            try:
+                query_vec = await embedder.embed(query, fail_fast=True)
+            except Exception:
+                # A failed embed takes the keyword-only path below, as an empty one does.
+                logger.warning("Embedding generation failed for chunk search, searching keywords only")
+        query_vec = query_vec or None  # empty or failed embed → keyword-only fallback
         # Hybrid always queries (keyword-only when the vector is absent).
         if attempted is not None:
             attempted.add("chunk")
@@ -2773,7 +2784,7 @@ async def _search_episode_chunks(
 
     if embedder is None:
         return []
-    query_vec = await embedder.embed(query)
+    query_vec = await embedder.embed(query, fail_fast=True)
     if not query_vec:
         return []
     # Vector path: both early returns above skip the query entirely, so

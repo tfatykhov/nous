@@ -525,6 +525,7 @@ class ProcedureLearner:
                     else:
                         skipped_no_lessons += 1
                 except (ValueError, Exception):
+                    logger.warning("Episode pathway: could not read episode %s", ep_summary.id, exc_info=True)
                     continue
 
             logger.info(

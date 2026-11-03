@@ -86,3 +86,22 @@ async def test_fallback_keyword_overlap():
     assert len(results) == 1
     assert results[0].is_redundant is True
     assert results[0].max_similarity > 0.5
+
+
+@pytest.mark.asyncio
+async def test_embedding_outage_falls_back_to_keyword_overlap_at_once():
+    """Context build is a read path: it asks for fail_fast and degrades to keywords."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nous.brain.embeddings import EmbeddingUnavailableError
+
+    embedder = MagicMock()
+    embedder.embed_batch = AsyncMock(side_effect=EmbeddingUnavailableError("down"))
+    dedup = ConversationDeduplicator(embedding_provider=embedder)
+    results = await dedup.check(
+        memories=[("mem-1", "the quick brown fox jumps over the lazy dog")],
+        conversation_messages=["the quick brown fox jumps over the lazy dog"],
+    )
+
+    assert embedder.embed_batch.await_args.kwargs == {"fail_fast": True}
+    assert results[0].is_redundant is True

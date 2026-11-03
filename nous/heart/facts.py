@@ -18,7 +18,7 @@ from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nous.brain.embeddings import EmbeddingProvider
+from nous.brain.embeddings import _REEMBED_MAX_PER_CYCLE, EmbeddingProvider, reembed_rows
 from nous.heart.admission import AdmissionController, AdmissionResult
 from nous.heart.keys import is_keyable_entity, normalize_key
 from nous.heart.schemas import ContradictionWarning, FactDetail, FactInput, FactRejected, FactSummary
@@ -49,6 +49,10 @@ _ENTITY_VOCAB_TTL_SECONDS = 300.0
 # F086: has_exemplars() exists-probe cache TTL, in seconds. Same rationale
 # and shape as _ENTITY_VOCAB_TTL_SECONDS above.
 _EXEMPLAR_EXISTS_TTL_SECONDS = 300.0
+
+# Strong references to fire-and-forget track_access tasks: the event loop keeps
+# only weak ones, so an unreferenced task can be garbage-collected mid-flight.
+_TRACK_ACCESS_TASKS: set[asyncio.Task] = set()
 
 # F027: classifier prompt. Exported so the F027 eval script
 # (scripts/eval/eval_f027_supersession.py) tests the same prompt prod uses.
@@ -382,14 +386,51 @@ class FactManager:
                 await session.execute(stmt)
                 await session.commit()
         except Exception:
-            logger.debug("F027: access tracking failed for %d facts", len(fact_ids))
+            logger.warning("F027: access tracking failed for %d facts", len(fact_ids), exc_info=True)
+
+    async def reembed_missing(self, limit: int = _REEMBED_MAX_PER_CYCLE) -> int:
+        """Embed up to ``limit`` active facts whose embedding is NULL (H-5 backfill).
+
+        _learn() stores the fact with a NULL vector when its embed fails, which
+        hides it from vector search and dedup. The text is the one _learn()
+        embeds: ``content``. Newest first; failures are classified by
+        reembed_rows. No transaction is held while embedding. Returns the
+        number re-embedded.
+        """
+        if not self.embeddings or limit <= 0:
+            return 0
+        async with self.db.session() as session:
+            rows = (
+                await session.execute(
+                    select(Fact.id, Fact.content)
+                    .where(
+                        Fact.agent_id == self.agent_id,
+                        Fact.active == True,  # noqa: E712
+                        Fact.embedding.is_(None),
+                    )
+                    .order_by(Fact.learned_at.desc())
+                    .limit(limit)
+                )
+            ).all()
+        vectors = await reembed_rows(self.embeddings, [(row.id, row.content) for row in rows], "Fact")
+        if vectors:
+            async with self.db.session() as session:
+                for fact_id, vector in vectors.items():
+                    # Only fill a NULL: a vector written meanwhile is newer than ours.
+                    await session.execute(
+                        update(Fact).where(Fact.id == fact_id, Fact.embedding.is_(None)).values(embedding=vector)
+                    )
+                await session.commit()
+        return len(vectors)
 
     def _fire_track_access(self, fact_ids: list[UUID]) -> None:
         """Fire-and-forget access tracking."""
         if fact_ids:
             try:
                 loop = asyncio.get_running_loop()
-                loop.create_task(self.track_access(fact_ids))
+                task = loop.create_task(self.track_access(fact_ids))
+                _TRACK_ACCESS_TASKS.add(task)
+                task.add_done_callback(_TRACK_ACCESS_TASKS.discard)
             except RuntimeError:
                 pass  # No running event loop
 
@@ -454,7 +495,7 @@ class FactManager:
                 max_tokens=100,
             )
         except Exception:
-            logger.debug("F377 dedup tiebreaker call failed; failing open", exc_info=True)
+            logger.warning("F377 dedup tiebreaker call failed; failing open", exc_info=True)
             return None
 
         if not result or "verdict" not in result:
@@ -3295,7 +3336,7 @@ class FactManager:
         embedding = None
         if self.embeddings:
             try:
-                embedding = await self.embeddings.embed(query)
+                embedding = await self.embeddings.embed(query, fail_fast=True)
             except Exception:
                 logger.warning("Embedding generation failed for fact search")
 
@@ -4207,9 +4248,10 @@ class FactManager:
                     )
                     await session.commit()
                 except Exception:
-                    logger.debug(
+                    logger.warning(
                         "R3.3: keyed-leg access tracking failed for %d facts",
                         len(result_rows),
+                        exc_info=True,
                     )
             return result_rows
 

@@ -207,7 +207,7 @@ async def test_gate_is_agent_scoped(session):
 class _ShortEmbedder:
     """A 3-dim query vector against 1536-dim rows: pgvector refuses the ``<=>``."""
 
-    async def embed(self, _text: str) -> list[float]:
+    async def embed(self, _text: str, fail_fast: bool = False) -> list[float]:
         return [1.0, 0.0, 0.0]
 
 
@@ -324,7 +324,7 @@ async def test_gate_records_raw_and_gated():
     seeds_out = {NA: DECISION_ONE_ID, NB: DECISION_TWO_ID}
     cosines = {NA: 0.35, NB: 0.6, DECISION_ONE_ID: 0.5, DECISION_TWO_ID: 0.8}
     tr, stats, qc, embedder = await _run(gate=GATE_ON, activated=activated, seeds_out=seeds_out, cosines=cosines)
-    embedder.embed.assert_awaited_once_with("q")
+    embedder.embed.assert_awaited_once_with("q", fail_fast=True)
     qc.assert_awaited_once()
     _session, agent, nodes, vec = qc.await_args.args
     assert agent == "nous-test-agent"

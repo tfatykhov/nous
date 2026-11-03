@@ -101,7 +101,7 @@ async def test_the_closeness_read_opens_its_own_session_when_given_none(vector_h
 
 
 class _EmbedderThatFails:
-    async def embed(self, text: str) -> list[float]:
+    async def embed(self, text: str, fail_fast: bool = False) -> list[float]:
         raise RuntimeError("the embedding service is down")
 
     async def close(self) -> None:
@@ -140,7 +140,7 @@ async def test_a_closeness_read_with_no_embedder_or_no_rows_does_no_work(card_he
 
 
 class _ZeroEmbedder:
-    async def embed(self, text: str) -> list[float]:
+    async def embed(self, text: str, fail_fast: bool = False) -> list[float]:
         return [0.0] * 1536
 
     async def close(self) -> None:

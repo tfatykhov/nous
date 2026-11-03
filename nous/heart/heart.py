@@ -1195,7 +1195,8 @@ class Heart:
 
             if len(variants) > 1:
                 try:
-                    embeddings = await self._embeddings.embed_batch(variants)
+                    # A read path: during an outage, fall back at once (below).
+                    embeddings = await self._embeddings.embed_batch(variants, fail_fast=True)
                     variant_pairs = list(zip(variants, embeddings))
                 except Exception as exc:
                     logger.warning(
@@ -1384,7 +1385,7 @@ class Heart:
                 )
 
                 # Generate query embedding for MMR relevance term
-                query_embedding = await self._embeddings.embed(query)
+                query_embedding = await self._embeddings.embed(query, fail_fast=True)
 
                 pre_mmr_order = [r.id for r in merged[:limit]]
                 merged = mmr_rerank(

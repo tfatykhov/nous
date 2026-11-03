@@ -82,7 +82,7 @@ class _Embedder:
         self.calls = 0
         self.error = error
 
-    async def embed(self, _text: str) -> list[float]:
+    async def embed(self, _text: str, fail_fast: bool = False) -> list[float]:
         self.calls += 1
         if self.error is not None:
             raise self.error

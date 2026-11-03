@@ -44,7 +44,7 @@ class _AxisEmbeddings:
     def __init__(self, angles: dict[str, float]) -> None:
         self.angles = angles
 
-    async def embed(self, text: str) -> list[float]:
+    async def embed(self, text: str, fail_fast: bool = False) -> list[float]:
         vec = [0.0] * 1536
         for marker, angle in self.angles.items():
             if marker in text:
@@ -880,7 +880,7 @@ async def test_the_merge_embeds_before_the_create_lock(db):
     held: list[bool] = []
 
     class _Watching(_AxisEmbeddings):
-        async def embed(self, text_: str) -> list[float]:
+        async def embed(self, text_: str, fail_fast: bool = False) -> list[float]:
             async with db.engine.connect() as other:
                 row = (await other.execute(text(
                     "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted"

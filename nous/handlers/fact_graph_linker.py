@@ -78,4 +78,4 @@ class FactGraphLinker:
         except asyncio.CancelledError:
             raise  # Let the EventBus handle cancellation for clean shutdown
         except Exception:
-            logger.debug("F022 fact graph linking failed for fact %s", fact_id_str)
+            logger.warning("F022 fact graph linking failed for fact %s", fact_id_str, exc_info=True)

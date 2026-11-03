@@ -196,6 +196,19 @@ class TestSelfInitiatedEmbedding:
         assert embeddings.embed_batch.call_count == 1  # still 1
 
     @pytest.mark.asyncio
+    async def test_failed_prototype_embedding_is_retried_on_the_next_call(self):
+        """A failed embed is not cached: caching [] switched the check off until restart."""
+        embeddings = MagicMock()
+        vectors = [[0.1] * 10] * 5
+        embeddings.embed_batch = AsyncMock(side_effect=[RuntimeError("embeddings API down"), vectors])
+        check = SelfInitiatedCheck(MagicMock(), MagicMock(), _mock_settings(), embeddings=embeddings)
+
+        assert await check._ensure_prototypes() == []
+        assert await check._ensure_prototypes() == vectors
+        assert await check._ensure_prototypes() == vectors  # cached once it succeeded
+        assert embeddings.embed_batch.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_max_pending_items_limit(self):
         """Findings are capped at max_pending_items."""
         heart = MagicMock()

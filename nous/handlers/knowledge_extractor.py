@@ -156,8 +156,12 @@ class KnowledgeExtractor:
                 ):
                     if cand.score is None or cand.score <= 0.85:
                         break  # similarity-descending: nothing further clears it
-                    if not (tiebreaker_on and
-                            await self._heart.facts.is_distinct_fact(cand.content, content) is True):
+                    verdict = None
+                    if tiebreaker_on:
+                        verdict = await self._heart.facts.is_distinct_fact(cand.content, content)
+                        if verdict is None:
+                            logger.warning("F377 tiebreaker gave no verdict; failing open, the candidate is deduped")
+                    if verdict is not True:
                         is_duplicate = True  # a genuine paraphrase duplicate
                         break
                     exclude_ids.append(cand.id)  # tiebreaker judged DISTINCT
@@ -250,6 +254,7 @@ class KnowledgeExtractor:
         try:
             parsed = parse_llm_json(text)
         except json.JSONDecodeError:
+            logger.warning("Knowledge extraction response was not valid JSON (%d chars); no facts extracted", len(text))
             return []
         # S2: verbatim prompt-echo backstop (guard only what we can evaluate —
         # a non-list parse is handled by the caller as before). Screens the

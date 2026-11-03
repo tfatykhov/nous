@@ -10,18 +10,19 @@ import logging
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.utils import text_overlap
 
-from nous.brain.embeddings import EmbeddingProvider
+from nous.brain.embeddings import _REEMBED_MAX_PER_CYCLE, EmbeddingProvider, reembed_rows
 from nous.heart.schemas import EpisodeDetail, EpisodeInput, EpisodeSummary
 from nous.heart.search import hybrid_search, hybrid_search_multi
 from nous.storage.database import Database
 from nous.storage.models import Episode, Event
 
 logger = logging.getLogger(__name__)
+
 
 
 class EpisodeManager:
@@ -95,7 +96,11 @@ class EpisodeManager:
         if self.embeddings:
             embed_text = f"{input.title or ''} {input.summary}".strip()
             try:
-                embedding = await self.embeddings.embed(embed_text)
+                # fail_fast, unlike the other write paths: start() runs on a
+                # session's first turn, which must not wait out the budget in
+                # an outage. A NULL here is not lost: _end() re-embeds the
+                # episode, and reembed_missing() catches it after close.
+                embedding = await self.embeddings.embed(embed_text, fail_fast=True)
             except Exception:
                 logger.warning("Embedding generation failed for episode start")
 
@@ -162,7 +167,10 @@ class EpisodeManager:
                     try:
                         episode.embedding = await self.embeddings.embed(embed_text)
                     except Exception:
-                        logger.debug("Failed to refresh episode embedding after summary")
+                        logger.warning(
+                            "Failed to refresh episode embedding after summary; keeping the old vector",
+                            exc_info=True,
+                        )
 
             await session.flush()
 
@@ -269,6 +277,67 @@ class EpisodeManager:
         # Re-fetch with eager loading to avoid lazy-load MissingGreenlet
         episode = await self._get_episode_orm(episode_id, session)
         return self._to_detail(episode)
+
+    # ------------------------------------------------------------------
+    # reembed_missing() — H-5 backfill, run by the sleep cycle
+    # ------------------------------------------------------------------
+
+    async def reembed_missing(self, limit: int = _REEMBED_MAX_PER_CYCLE) -> int:
+        """Embed up to ``limit`` closed episodes whose embedding is NULL.
+
+        start() stores NULL when its embed fails. _end() and the summary
+        update keep the vector they had when theirs fails, so a closed episode
+        is NULL only when start()'s embed and every later one failed. A NULL
+        hides the episode from vector search and the densifier until something
+        re-embeds it. The text is the one _end() embeds (with a missing summary
+        as empty, where _end() would embed the word "None"); the provider cuts
+        it to its char cap. Newest first; failures are classified by
+        reembed_rows (a rejected row is skipped, anything else stops the
+        batch). No transaction is held while embedding. Returns the number
+        re-embedded.
+        """
+        if not self.embeddings or limit <= 0:
+            return 0
+        async with self.db.session() as session:
+            rows = (
+                await session.execute(
+                    select(Episode.id, Episode.title, Episode.summary, Episode.outcome, Episode.lessons_learned)
+                    .where(
+                        Episode.agent_id == self.agent_id,
+                        Episode.ended_at.is_not(None),
+                        Episode.embedding.is_(None),
+                        # F060.2 closes content-less rows as 'abandoned'; search
+                        # excludes them, so a vector would serve nothing.
+                        Episode.outcome.is_distinct_from("abandoned"),
+                    )
+                    .order_by(Episode.ended_at.desc())
+                    .limit(limit)
+                )
+            ).all()
+
+        vectors = await reembed_rows(
+            self.embeddings,
+            [
+                (
+                    row.id,
+                    f"{row.title or ''} {row.summary or ''} {row.outcome or ''} "
+                    f"{' '.join(row.lessons_learned or [])}".strip(),
+                )
+                for row in rows
+            ],
+            "Episode",
+        )
+        if vectors:
+            async with self.db.session() as session:
+                for episode_id, vector in vectors.items():
+                    # Only fill a NULL: a vector written meanwhile is newer than ours.
+                    await session.execute(
+                        update(Episode)
+                        .where(Episode.id == episode_id, Episode.embedding.is_(None))
+                        .values(embedding=vector)
+                    )
+                await session.commit()
+        return len(vectors)
 
     # ------------------------------------------------------------------
     # get()
@@ -461,7 +530,7 @@ class EpisodeManager:
         embedding = None
         if self.embeddings:
             try:
-                embedding = await self.embeddings.embed(query)
+                embedding = await self.embeddings.embed(query, fail_fast=True)
             except Exception:
                 logger.warning("Embedding generation failed for episode search")
 

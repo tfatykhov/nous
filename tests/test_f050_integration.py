@@ -174,8 +174,9 @@ class TestHeartRecallWithExpander:
 
         # Expander was called once with the original query.
         expander.expand.assert_awaited_once()
-        # embed_batch was called for the variant list.
+        # embed_batch was called for the variant list, as a read path.
         embeddings.embed_batch.assert_awaited_once()
+        assert embeddings.embed_batch.await_args.kwargs == {"fail_fast": True}
 
         # Sub-managers received variant_pairs (a non-None list of (text, emb) pairs).
         for mock in (heart.facts.search, heart.episodes.search, heart.procedures.search):

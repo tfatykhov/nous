@@ -198,10 +198,15 @@ class CensorManager:
         if self.embeddings:
             # Semantic matching: cosine similarity > 0.7
             try:
-                embedding = await self.embeddings.embed(text_input)
-                matches = await self._semantic_match(embedding, domain, session)
+                # fail_fast: this runs every turn; during an outage the keyword
+                # match below still enforces, without waiting out the budget.
+                embedding = await self.embeddings.embed(text_input, fail_fast=True)
+                # A savepoint (I-5): a SQL error here rolls back only this read,
+                # so the keyword match below still runs on a usable session.
+                async with session.begin_nested():
+                    matches = await self._semantic_match(embedding, domain, session)
             except Exception:
-                logger.warning("Embedding failed for censor check, skipping semantic")
+                logger.warning("Semantic censor check failed, skipping semantic", exc_info=True)
 
         # Always run keyword matching to catch censors without embeddings
         # or those below the semantic similarity threshold.
@@ -370,7 +375,7 @@ class CensorManager:
     ) -> list[CensorMatch]:
         if self.embeddings:
             try:
-                embedding = await self.embeddings.embed(query)
+                embedding = await self.embeddings.embed(query, fail_fast=True)
             except Exception:
                 logger.warning("Embedding failed for censor search, falling back to ILIKE")
                 return await self._keyword_search(query, limit, domain, session)

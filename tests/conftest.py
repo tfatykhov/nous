@@ -67,7 +67,7 @@ class MockEmbeddingProvider:
     texts is near zero while identical texts produce identical vectors.
     """
 
-    async def embed(self, text: str) -> list[float]:
+    async def embed(self, text: str, fail_fast: bool = False) -> list[float]:
         h = hashlib.sha256(text.encode()).hexdigest()
         rng = random.Random(h)
         vec = [rng.gauss(0, 1) for _ in range(1536)]
@@ -86,7 +86,7 @@ class MockEmbeddingProvider:
         norm = sum(x * x for x in noisy) ** 0.5
         return [x / norm for x in noisy]
 
-    async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+    async def embed_batch(self, texts: list[str], fail_fast: bool = False) -> list[list[float]]:
         return [await self.embed(t) for t in texts]
 
     async def close(self) -> None:
