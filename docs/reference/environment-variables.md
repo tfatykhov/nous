@@ -228,7 +228,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_RELEVANCE_FLOOR_ENABLED` | `true` | Enable per-type minimum score filtering on memory retrieval |
 | `NOUS_RELEVANCE_DROP_RATIO` | `0.6` | Diminishing returns cutoff — stop at >40% score drops |
 | `NOUS_BUDGET_SCALE_ENABLED` | `true` | Scale context budgets based on model context window |
-| `NOUS_CONTEXT_BUDGET_OVERRIDES` | `{}` | JSON dict overriding per-frame budget defaults (e.g. `{"total": 12000, "decisions": 3000}`) |
+| `NOUS_CONTEXT_BUDGET_OVERRIDES` | `{}` | JSON dict overriding per-frame budget defaults (e.g. `{"total": 12000, "decisions": 3000}`). An env override wins over the plan's frame budget overrides. |
 | `NOUS_STALENESS_PENALTY_ENABLED` | `true` | Apply time-decay penalty to memory scores |
 | `NOUS_STALENESS_HALF_LIFE_DAYS` | `30` | Half-life in days for staleness decay |
 | `NOUS_TRANSCRIPT_MAX_CHARS` | `16000` | Max chars for episode transcript truncation before summarization |

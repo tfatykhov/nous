@@ -1,9 +1,11 @@
 """F091: retrieval telemetry — what recall retrieved, and what it dropped.
 
 The collector is **write-only**: the retrieval pipeline reports into it and
-nothing reads back out. That is the load-bearing property — with the feature
-off (``NullTrace``) there is no branch anywhere that consumes trace state, so
-result shape, ordering and rendered text are byte-identical by construction.
+nothing reads back out (``last_mutation_stage`` is read only to word a drop's
+stage label, never to decide what is kept). That is the load-bearing
+property — with the feature off (``NullTrace``) there is no branch anywhere
+that consumes trace state, so result shape, ordering and rendered text are
+byte-identical by construction.
 The ``recall_deep`` snapshot test and the ``nous_eval`` contract are therefore
 unaffected without needing to be reasoned about at each call site.
 
@@ -192,6 +194,11 @@ class Leg:
     # of the 0 it showed as "ran, found nothing". ``None`` (every other leg, and
     # every row written before this field) is omitted from ``to_dict``.
     counted_in: str | None = None
+    # The query text this leg actually searched with. On the context path it
+    # differs from the trace's ``query`` (the user's sentence): the legs search
+    # with the retrieval plan's query text. Truncated like ``query``; ``None``
+    # is omitted from ``to_dict``.
+    query: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -211,6 +218,8 @@ class Leg:
                 d[key] = value
         if self.counted_in is not None:
             d["counted_in"] = self.counted_in
+        if self.query is not None:
+            d["query"] = self.query
         return d
 
 
@@ -340,6 +349,7 @@ class RetrievalTrace:
         # persisted for the whole retention window instead. Negative is clamped
         # to 0 rather than wrapping the slice.
         self.query = (query or "")[: max(0, query_chars)]
+        self._query_chars = max(0, query_chars)
         self.path = path
         self.agent_id = agent_id
         self.session_id = session_id
@@ -373,12 +383,14 @@ class RetrievalTrace:
         n_keyword_zero: int | None = None,
         n_keyword_fallback: int | None = None,
         counted_in: str | None = None,
+        query: str | None = None,
     ) -> None:
         """Record (or update) one leg's summary. Idempotent per name.
 
         The A4 keyword counts follow the ``n_dropped`` rule: ``None`` leaves
         whatever is already recorded alone, so a later rollup pass that does not
-        know them cannot erase them."""
+        know them cannot erase them. ``query`` is cut to the trace's
+        ``query_chars``, like the trace's own query."""
         entry = self._legs.get(name)
         if entry is None:
             entry = Leg(name=name, attempted=attempted)
@@ -399,6 +411,8 @@ class RetrievalTrace:
                 setattr(entry, key, value)
         if counted_in is not None:
             entry.counted_in = counted_in
+        if query is not None:
+            entry.query = str(query)[: self._query_chars]
         if error is not None:
             entry.error = error
         if skip_reason is not None:
@@ -488,6 +502,17 @@ class RetrievalTrace:
         cand = self._candidates.get(_key(item_id, item_type))
         if cand is not None:
             cand.mutations.append(Mutation(stage, before, after, reason))
+
+    def last_mutation_stage(self, item_id: Any, item_type: str) -> str | None:
+        """The stage that last changed this candidate's score, if any.
+
+        The one read the pipeline makes, and only to word a drop's stage
+        label: what is retrieved and rendered never depends on it.
+        """
+        cand = self._candidates.get(_key(item_id, item_type))
+        if cand is None or not cand.mutations:
+            return None
+        return cand.mutations[-1].stage
 
     def drop(self, item_id: Any, item_type: str, disposition: str, stage: str) -> None:
         """Assign a terminal disposition. First drop wins — a candidate removed
@@ -594,6 +619,10 @@ class RetrievalTrace:
 
         Anything registered but neither dropped nor present here keeps
         ``UNACCOUNTED`` on purpose — see the module docstring.
+
+        A result may carry a string ``render_stage`` naming why it reached the
+        model (the context path's pinned facts use ``"pinned"``); it replaces
+        the default stage ``"final"``.
         """
         self.duration_ms = duration_ms
         self._resolve_best_paths()
@@ -623,7 +652,8 @@ class RetrievalTrace:
             if cand.disposition not in (UNACCOUNTED, RENDERED):
                 cand.restored_from = f"{cand.disposition}@{cand.disposition_stage}"
             cand.disposition = RENDERED
-            cand.disposition_stage = "final"
+            stage = getattr(r, "render_stage", None)
+            cand.disposition_stage = stage if isinstance(stage, str) else "final"
 
     # -- output -------------------------------------------------------------
 
@@ -710,6 +740,7 @@ class NullTrace:
     def add(self, *a: Any, **k: Any) -> None: ...
     def add_many(self, *a: Any, **k: Any) -> None: ...
     def mutate(self, *a: Any, **k: Any) -> None: ...
+    def last_mutation_stage(self, *a: Any, **k: Any) -> None: return None
     def drop(self, *a: Any, **k: Any) -> None: ...
     def drop_all(self, *a: Any, **k: Any) -> None: ...
     def mark_rendered(self, *a: Any, **k: Any) -> None: ...
