@@ -64,6 +64,8 @@ class EpisodeManager:
     ) -> EpisodeDetail:
         """Start a new episode.
 
+        With ``dedup`` on, a similar ongoing episode of the same ``session_id``
+        is returned instead; an input without a session_id is never deduped.
         ``dedup=False`` always creates one, never reusing a similar ongoing
         episode: for a writer that must own the episode it closes.
         """
@@ -75,12 +77,16 @@ class EpisodeManager:
         return await self._start(input, session, dedup=dedup)
 
     async def _start(self, input: EpisodeInput, session: AsyncSession, *, dedup: bool = True) -> EpisodeDetail:
-        # 006.2: Dedup — check for similar ongoing episodes in recent window
-        if dedup:
+        # 006.2: Dedup — check for similar ongoing episodes in recent window,
+        # within the SAME session only. The caller maps the returned episode to
+        # its session, so another session's episode would be closed by this
+        # session's end_session. No session_id, no dedup.
+        if dedup and input.session_id is not None:
             cutoff = datetime.now(UTC) - timedelta(minutes=self._DEDUP_WINDOW_MINUTES)
             recent_result = await session.execute(
                 select(Episode).where(
                     Episode.agent_id == self.agent_id,
+                    Episode.session_id == input.session_id,
                     Episode.ended_at.is_(None),  # ongoing = not ended
                     Episode.started_at >= cutoff,
                 )
@@ -620,59 +626,6 @@ class EpisodeManager:
         if episode:
             episode.active = False
             await session.flush()
-
-    # ------------------------------------------------------------------
-    # search_recent_by_embedding()
-    # ------------------------------------------------------------------
-
-    async def search_recent_by_embedding(
-        self,
-        query_embedding: list[float],
-        hours: int = 48,
-        limit: int = 1,
-        session: AsyncSession | None = None,
-    ) -> list[tuple[UUID, float]]:
-        """Find recent episodes by direct cosine similarity.
-
-        Returns list of (episode_id, cosine_similarity) tuples.
-        Only searches episodes within the given time window.
-        """
-        if session is None:
-            async with self.db.session() as session:
-                return await self._search_recent_by_embedding(
-                    query_embedding, hours, limit, session
-                )
-        return await self._search_recent_by_embedding(
-            query_embedding, hours, limit, session
-        )
-
-    async def _search_recent_by_embedding(
-        self,
-        query_embedding: list[float],
-        hours: int,
-        limit: int,
-        session: AsyncSession,
-    ) -> list[tuple[UUID, float]]:
-        from sqlalchemy import text
-
-        sql = text("""
-            SELECT id, 1 - (embedding <=> CAST(:embedding AS vector)) AS cosine_sim
-            FROM heart.episodes
-            WHERE agent_id = :agent_id
-              AND active = true
-              AND outcome != 'abandoned'
-              AND embedding IS NOT NULL
-              AND started_at > NOW() - make_interval(hours => :hours)
-            ORDER BY embedding <=> CAST(:embedding AS vector)
-            LIMIT :limit
-        """)
-        result = await session.execute(sql, {
-            "embedding": str(query_embedding),
-            "agent_id": self.agent_id,
-            "hours": hours,
-            "limit": limit,
-        })
-        return [(row[0], float(row[1])) for row in result.fetchall()]
 
     # ------------------------------------------------------------------
     # Private helpers

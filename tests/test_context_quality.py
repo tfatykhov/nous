@@ -354,7 +354,7 @@ class TestEpisodeDedup:
 
     @pytest.mark.asyncio
     async def test_episode_start_dedup_reuses_existing(self):
-        """_start() returns existing episode when summary overlaps > 0.80."""
+        """_start() returns the session's existing episode when summary overlaps > 0.80."""
         from nous.heart.episodes import EpisodeManager
         from nous.heart.schemas import EpisodeInput
         from nous.storage.models import Episode
@@ -383,7 +383,7 @@ class TestEpisodeDedup:
         detail = MagicMock()
         manager._to_detail = MagicMock(return_value=detail)
 
-        inp = EpisodeInput(summary="Show me your current status and tools")
+        inp = EpisodeInput(summary="Show me your current status and tools", session_id="s-ctx")
         result = await manager._start(inp, mock_session)
 
         assert result is detail

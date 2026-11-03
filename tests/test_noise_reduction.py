@@ -1,8 +1,7 @@
-"""Tests for 005.5 Noise Reduction — Episode Significance, Dedup, Decision Noise.
+"""Tests for 005.5 Noise Reduction — Episode Significance, Decision Noise.
 
-26 tests across 4 classes:
+Tests across 3 classes:
 - TestEpisodeSignificance (8): _should_create_episode() in CognitiveLayer
-- TestEpisodeDedup (7): _is_duplicate_episode() in CognitiveLayer
 - TestDecisionNoise (7): _is_noise_decision() in Brain
 - TestFrameInstructions (4): Updated frame instructions in AgentRunner
 
@@ -58,7 +57,6 @@ def _make_cognitive_layer():
     mock_heart.start_episode = AsyncMock()
     mock_heart.end_episode = AsyncMock()
     mock_heart.deactivate_episode = AsyncMock()
-    mock_heart.search_recent_episodes_by_embedding = AsyncMock(return_value=[])
     mock_heart.list_censors = AsyncMock(return_value=[])
     mock_heart.get_or_create_working_memory = AsyncMock()
     mock_heart.focus = AsyncMock()
@@ -71,8 +69,6 @@ def _make_cognitive_layer():
     mock_settings.episode_lessons_max_chars = 500
     mock_settings.transcript_message_max_chars = 500
     mock_settings.episode_seed_summary_chars = 200
-    mock_settings.episode_dedup_threshold = 0.85
-    mock_settings.episode_dedup_window_hours = 48
 
     with (
         patch("nous.cognitive.layer.FrameEngine"),
@@ -339,200 +335,6 @@ class TestEpisodeSignificance:
         layer._heart.deactivate_episode.assert_not_called()
         # Session tracking should be cleaned up
         assert sid not in layer._active_episodes
-
-
-# ===========================================================================
-# TestEpisodeDedup — 7 tests for _is_duplicate_episode()
-# ===========================================================================
-
-
-class TestEpisodeDedup:
-    """Tests for _is_duplicate_episode() in CognitiveLayer.
-
-    _is_duplicate_episode is an async method that checks if a similar
-    recent episode already exists (>0.85 cosine similarity within 48h).
-
-    R-P0-2: Returns bool only, never stores reused IDs in _active_episodes.
-    R-P1-2: Uses direct cosine similarity, not hybrid_search.
-    R-P1-3: Filters to episodes within last 48 hours.
-    """
-
-    # 9. No similar episode -> returns False
-    @pytest.mark.asyncio
-    async def test_no_similar_episode_returns_false(self):
-        """No similar recent episode found -> returns False, create the episode."""
-        layer = _make_cognitive_layer()
-
-        # Enable embeddings so dedup check runs
-        mock_embeddings = MagicMock()
-        mock_embeddings.embed = AsyncMock(return_value=[0.1] * 1536)
-        layer._heart.episodes.embeddings = mock_embeddings
-
-        # No similar episodes found
-        layer._heart.search_recent_episodes_by_embedding = AsyncMock(return_value=[])
-
-        result = await layer._is_duplicate_episode("Build a REST API")
-        assert result is False
-
-    # 10. Similar episode (>0.85 cosine) -> returns True
-    @pytest.mark.asyncio
-    async def test_similar_episode_above_threshold_returns_true(self):
-        """Episode with >0.85 cosine similarity -> True, skip creation."""
-        layer = _make_cognitive_layer()
-
-        mock_embeddings = MagicMock()
-        mock_embeddings.embed = AsyncMock(return_value=[0.1] * 1536)
-        layer._heart.episodes.embeddings = mock_embeddings
-
-        # Return a match above the 0.85 threshold
-        matching_episode_id = uuid.uuid4()
-        layer._heart.search_recent_episodes_by_embedding = AsyncMock(
-            return_value=[(matching_episode_id, 0.92)]
-        )
-
-        result = await layer._is_duplicate_episode("Hello, what can you do?")
-        assert result is True
-
-    # 11. Similar but below threshold (0.80) -> returns False
-    @pytest.mark.asyncio
-    async def test_similar_episode_below_threshold_returns_false(self):
-        """Episode at 0.80 cosine similarity (below 0.85 threshold) -> False."""
-        layer = _make_cognitive_layer()
-
-        mock_embeddings = MagicMock()
-        mock_embeddings.embed = AsyncMock(return_value=[0.1] * 1536)
-        layer._heart.episodes.embeddings = mock_embeddings
-
-        # Return a match below the 0.85 threshold
-        matching_episode_id = uuid.uuid4()
-        layer._heart.search_recent_episodes_by_embedding = AsyncMock(
-            return_value=[(matching_episode_id, 0.80)]
-        )
-
-        result = await layer._is_duplicate_episode("Build a REST API")
-        assert result is False
-
-    # 12. Embedding failure -> returns False (graceful degradation)
-    @pytest.mark.asyncio
-    async def test_embedding_failure_returns_false(self):
-        """If embedding generation fails, return False and proceed with creation.
-
-        Graceful degradation: never block episode creation due to infra failures.
-        """
-        layer = _make_cognitive_layer()
-
-        mock_embeddings = MagicMock()
-        mock_embeddings.embed = AsyncMock(side_effect=RuntimeError("API down"))
-        layer._heart.episodes.embeddings = mock_embeddings
-
-        result = await layer._is_duplicate_episode("Build something")
-        assert result is False
-
-    # 13. Empty search results -> returns False
-    @pytest.mark.asyncio
-    async def test_empty_search_results_returns_false(self):
-        """Search returns empty list -> returns False."""
-        layer = _make_cognitive_layer()
-
-        mock_embeddings = MagicMock()
-        mock_embeddings.embed = AsyncMock(return_value=[0.1] * 1536)
-        layer._heart.episodes.embeddings = mock_embeddings
-
-        layer._heart.search_recent_episodes_by_embedding = AsyncMock(
-            return_value=[]
-        )
-
-        result = await layer._is_duplicate_episode("Totally new topic")
-        assert result is False
-
-    # 14. Duplicate skips episode creation (no episode in _active_episodes)
-    @pytest.mark.asyncio
-    async def test_duplicate_skips_episode_creation(self):
-        """When duplicate detected in pre_turn, no new episode is created.
-
-        R-P0-2: We never store reused episode IDs in _active_episodes because
-        end_session would corrupt/delete the original episode. Instead, we
-        simply skip creation entirely.
-        """
-        layer = _make_cognitive_layer()
-        sid = f"test-{uuid.uuid4().hex[:8]}"
-
-        # Precondition: no active episode for this session
-        assert sid not in layer._active_episodes
-
-        # Mock _should_create_episode to return True (significance passes)
-        layer._should_create_episode = MagicMock(return_value=True)
-
-        # Mock _is_duplicate_episode to return True (duplicate found)
-        layer._is_duplicate_episode = AsyncMock(return_value=True)
-
-        # Mock the rest of pre_turn dependencies
-        mock_frame = FrameSelection(
-            frame_id="conversation",
-            frame_name="Conversation",
-            confidence=0.9,
-            match_method="default",
-        )
-        layer._frames = MagicMock()
-        layer._frames.select = AsyncMock(return_value=mock_frame)
-        layer._intent_classifier = MagicMock()
-        mock_signals = MagicMock()
-        mock_signals.temporal_recency = 0.0
-        layer._intent_classifier.classify = MagicMock(return_value=mock_signals)
-        layer._intent_classifier.plan_retrieval = MagicMock(return_value=MagicMock())
-        layer._context = MagicMock()
-        layer._context.build = AsyncMock(
-            return_value=MagicMock(
-                system_prompt="Test",
-                sections=[],
-                recalled_ids={},
-                recalled_content_map={},
-                recalled_score_map={},
-                sections_by_tier={},
-            )
-        )
-        layer._deliberation = MagicMock()
-        layer._deliberation.should_deliberate = AsyncMock(return_value=False)
-
-        # Call pre_turn
-        await layer.pre_turn("test-agent", sid, "Hello!", session=None)
-
-        # Episode should NOT be in _active_episodes (duplicate was skipped)
-        assert sid not in layer._active_episodes
-
-    # 15. Old duplicate (>48h) not matched
-    @pytest.mark.asyncio
-    async def test_old_duplicate_not_matched(self):
-        """Episodes older than 48h are filtered by the time window.
-
-        The 48h filter is in the SQL query (search_recent_episodes_by_embedding).
-        When similar episodes are older than 48h, the search returns nothing
-        and _is_duplicate_episode returns False.
-        """
-        layer = _make_cognitive_layer()
-
-        mock_embeddings = MagicMock()
-        mock_embeddings.embed = AsyncMock(return_value=[0.1] * 1536)
-        layer._heart.episodes.embeddings = mock_embeddings
-
-        # The search method filters by 48h window and finds nothing
-        # (the similar episode exists but is older than 48h)
-        layer._heart.search_recent_episodes_by_embedding = AsyncMock(
-            return_value=[]
-        )
-
-        result = await layer._is_duplicate_episode("Hello, what can you do?")
-        assert result is False
-
-        # Verify the search was called with hours=48
-        layer._heart.search_recent_episodes_by_embedding.assert_called_once()
-        call_kwargs = layer._heart.search_recent_episodes_by_embedding.call_args
-        # Check hours parameter — could be positional or keyword
-        if call_kwargs.kwargs:
-            assert call_kwargs.kwargs.get("hours", 48) == 48
-        args = call_kwargs.args
-        if len(args) > 1:
-            assert args[1] == 48
 
 
 # ===========================================================================

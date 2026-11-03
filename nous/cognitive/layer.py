@@ -703,9 +703,8 @@ class CognitiveLayer:
         # only restores ongoing (ended_at IS NULL, active=True) episodes — a just-ENDED
         # session correctly stays first-turn. R15: exclude subtask/background turns.
         await self.warm_active_episode(session_id)
-        # First turn iff: (a) no prior in-process turn for this session (turn_count==0 —
-        # robust to the dedup branch below that skips episode creation, which would
-        # otherwise leave _active_episodes empty on turn 2), AND (b) no ongoing episode
+        # First turn iff: (a) no prior in-process turn for this session
+        # (turn_count==0), AND (b) no ongoing episode
         # in the map after warm (survives LRU eviction / process restart via DB warm),
         # AND (c) not a subtask/background turn. meta is created by setdefault above.
         _meta_ft = self._session_metadata.get(session_id)
@@ -913,23 +912,17 @@ class CognitiveLayer:
         if not skip_episode and session_id not in self._active_episodes:
             if self._should_create_episode(session_id, user_input):
                 try:
-                    # B1: Check for duplicate — skip creation if found
-                    # R-P0-2: Do NOT store existing episode IDs in _active_episodes
-                    # because end_session would corrupt the original episode.
                     seed = user_input[:self._settings.episode_seed_summary_chars]
-                    if await self._is_duplicate_episode(seed, session=session):
-                        logger.debug("Skipping episode creation — duplicate found")
-                    else:
-                        episode_input = EpisodeInput(
-                            summary=seed,
-                            frame_used=frame.frame_id,
-                            trigger="user_message",
-                            user_id=user_id,
-                            user_display_name=user_display_name,
-                            session_id=session_id,  # F022 follow-up
-                        )
-                        episode = await self._heart.start_episode(episode_input, session=session)
-                        self._active_episodes[session_id] = str(episode.id)
+                    episode_input = EpisodeInput(
+                        summary=seed,
+                        frame_used=frame.frame_id,
+                        trigger="user_message",
+                        user_id=user_id,
+                        user_display_name=user_display_name,
+                        session_id=session_id,  # F022 follow-up
+                    )
+                    episode = await self._heart.start_episode(episode_input, session=session)
+                    self._active_episodes[session_id] = str(episode.id)
                 except Exception:
                     logger.warning("Failed to start episode for session %s", session_id)
 
@@ -1856,53 +1849,6 @@ class CognitiveLayer:
         if total_chars >= self._settings.episode_min_content_length and meta.turn_count >= 1:
             return True
 
-        return False
-
-    async def _is_duplicate_episode(
-        self,
-        summary: str,
-        session: AsyncSession | None = None,
-    ) -> bool:
-        """Check if a similar recent episode already exists.
-
-        Returns True if a recent episode (within 48h) with >0.85 cosine
-        similarity exists, meaning we should skip creating a new episode.
-
-        R-P0-2: Returns bool, NOT episode_id. We never store reused IDs in
-        _active_episodes because end_session would corrupt/delete the
-        original episode.
-
-        R-P1-2: Uses direct cosine similarity via EmbeddingProvider, NOT
-        hybrid_search (which returns vector*w + keyword*(1-w) combined scores
-        that max at ~0.79 at default weight — making 0.85 unreachable).
-
-        R-P1-3: Filters to episodes started within last 48 hours to avoid
-        matching ancient episodes about similar topics.
-        """
-        if not self._heart.episodes.embeddings:
-            return False  # No embeddings available — skip dedup
-
-        dedup_window_hours = self._settings.episode_dedup_window_hours
-        dedup_threshold = self._settings.episode_dedup_threshold
-        try:
-            # Generate embedding for current input
-            query_embedding = await self._heart.episodes.embeddings.embed(summary)
-
-            # Search recent episodes with direct cosine similarity
-            results = await self._heart.search_recent_episodes_by_embedding(
-                query_embedding,
-                hours=dedup_window_hours,
-                limit=1,
-                session=session,
-            )
-            if results and results[0][1] > dedup_threshold:
-                logger.debug(
-                    "Found duplicate episode (%.2f cosine similarity), skipping creation",
-                    results[0][1],
-                )
-                return True
-        except Exception:
-            logger.warning("Episode dedup check failed, proceeding with creation")
         return False
 
     # ------------------------------------------------------------------

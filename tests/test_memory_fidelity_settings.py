@@ -17,8 +17,6 @@ def test_fidelity_defaults_match_reviewed_values():
     assert s.episode_summary_max_chunks == 4        # NEW downstream bound (0=unlimited)
     assert s.episode_chunk_max_per_episode == 100   # NEW downstream bound (0=unlimited)
     assert s.episode_seed_summary_chars == 500      # was 200
-    assert s.episode_dedup_threshold == 0.85        # gate — keep
-    assert s.episode_dedup_window_hours == 48       # gate — keep
     assert s.episode_min_content_length == 200      # gate — keep
     assert s.correction_input_max_chars == 2000     # was 1000
     assert s.correction_max_tokens == 1024          # was 512 (F031 precedent)

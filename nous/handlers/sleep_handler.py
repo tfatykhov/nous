@@ -614,7 +614,7 @@ class SleepHandler:
                         "recover",
                         lambda: self._phase_recover_abandoned_episodes(sleep_stats),
                         sleep_stats,
-                        ("episodes_recovered", "episodes_marked_abandoned"),
+                        ("episodes_recovered", "episodes_recovery_closed", "episodes_marked_abandoned"),
                     ),
                 )
                 if success:
@@ -637,11 +637,11 @@ class SleepHandler:
                 if success:
                     phases_completed.append("graph_densification")
 
-            # F057: re-link active episodes that the live F022 linker
+            # F057: re-link live episodes that the live F022 linker
             # missed (sessions that never received episode_ended → no
-            # summarizer trigger → no link). Runs BEFORE prune_dead_edges
-            # so the new edges (active→active endpoints) won't be touched
-            # by F053 on this cycle.
+            # summarizer trigger → no link), including the ones F060 just
+            # closed. Runs BEFORE prune_dead_edges so the new edges (live
+            # endpoints) won't be touched by F053 on this cycle.
             if not self._interrupted:
                 success = await self._run_phase(
                     "relink_open_episodes",
@@ -2268,8 +2268,10 @@ class SleepHandler:
         forever, and downstream consumers (F040 graph_densifier, fact
         extraction, search relevance) lose signal.
 
-        Recovered episodes stay `active=true` (matching F057). Marked-
-        abandoned episodes go `active=false` so search excludes them.
+        Recovered episodes are then closed (`ended_at` set, `active=false`,
+        `outcome='partial'`) once their session shows no working-memory
+        activity inside the min-age window; closed rows stay searchable.
+        Marked-abandoned episodes go `active=false` so search excludes them.
 
         H-5: first, closed episodes, active facts and decisions whose write
         embed failed (NULL embedding) are re-embedded, a bounded batch per type
@@ -2343,6 +2345,7 @@ class SleepHandler:
             recovered_full = 0
             recovered_summary_only = 0
             skipped_no_data = 0
+            closed = 0
             marked_abandoned = 0
             errors = 0
 
@@ -2405,6 +2408,53 @@ class SleepHandler:
                         exc_info=True,
                     )
 
+            # Close — a recovered episode is still open (active=true, ended_at
+            # NULL) and would rank as a live one forever. Close every open row
+            # that already has a structured_summary (only Loop A writes one on
+            # an open row: the summarizer's own path runs after _end), unless
+            # its session wrote working memory inside the min-age window:
+            # pre_turn writes heart.working_memory on nearly every turn, and
+            # end_session or the F049 TTL sweep deletes the row. A row left
+            # open here is closed by a later cycle, which is why this is a
+            # sweep and not a per-row close inside Loop A. Bounded by Loop B's
+            # cheap-UPDATE cap. No episode_ended event: a bulk close must not
+            # fan out to handlers.
+            if not self._interrupted:
+                async with self._heart.db.session() as session:
+                    result = await session.execute(
+                        sql_text("""
+                        UPDATE heart.episodes
+                        SET ended_at = COALESCE(ended_at, now()),
+                            duration_seconds = COALESCE(
+                                duration_seconds,
+                                EXTRACT(EPOCH FROM now() - started_at)::int
+                            ),
+                            active = false,
+                            outcome = COALESCE(outcome, 'partial')
+                        WHERE agent_id = :agent_id
+                          AND ended_at IS NULL
+                          AND id IN (
+                            SELECT e.id FROM heart.episodes e
+                            WHERE e.agent_id = :agent_id
+                              AND e.active = true
+                              AND e.ended_at IS NULL
+                              AND e.structured_summary IS NOT NULL
+                              AND e.started_at < now() - make_interval(hours => :hours)
+                              AND NOT EXISTS (
+                                SELECT 1 FROM heart.working_memory wm
+                                WHERE wm.agent_id = e.agent_id
+                                  AND wm.session_id = e.session_id
+                                  AND wm.updated_at >= now() - make_interval(hours => :hours)
+                              )
+                            ORDER BY e.started_at ASC
+                            LIMIT :lim
+                          )
+                    """),
+                        {"agent_id": agent_id, "hours": min_age, "lim": mark_max},
+                    )
+                    closed = result.rowcount or 0
+                    await session.commit()
+
             # Loop B — F060.2 mark abandoned. Targets rows with no usable
             # content AND age >= mark_age_days. Cheap SQL UPDATE; can clear
             # a large legacy backlog quickly.
@@ -2444,6 +2494,8 @@ class SleepHandler:
                 sleep_stats["episodes_recovered_full_transcript"] = recovered_full
             if recovered_summary_only:
                 sleep_stats["episodes_recovered_summary_only"] = recovered_summary_only
+            if closed:
+                sleep_stats["episodes_recovery_closed"] = closed
             if marked_abandoned:
                 sleep_stats["episodes_marked_abandoned"] = marked_abandoned
             if skipped_no_data:
@@ -2451,9 +2503,11 @@ class SleepHandler:
             if errors:
                 sleep_stats["abandoned_recovery_errors"] = errors
             logger.info(
-                "F060 recovery: %d full + %d summary-only recovered, %d marked abandoned, %d skipped (%d errors)",
+                "F060 recovery: %d full + %d summary-only recovered, %d closed, %d marked abandoned, "
+                "%d skipped (%d errors)",
                 recovered_full,
                 recovered_summary_only,
+                closed,
                 marked_abandoned,
                 skipped_no_data,
                 errors,
@@ -2477,18 +2531,17 @@ class SleepHandler:
         ``source_episode_id`` — those should have been linked by the live
         path; this phase backfills them.
 
-        Approach: find active episodes with no incident graph edges,
-        started >= ``episode_relink_min_age_hours`` ago (skip recent —
-        the live linker handles those). For each, look up linkable
+        Approach: find live episodes (``episode_live_sql``: open, or closed
+        but not deleted) with no incident graph edges, started >=
+        ``episode_relink_min_age_hours`` ago (skip recent — the live linker
+        handles those). For each, look up linkable
         anchors (facts via source_episode_id, decisions via the shared
         session_id window). If anchors exist, call
         ``graph_linker.link_episode_deterministic``. Bounded by
         ``episode_relink_max_per_cycle`` to keep the cycle short.
 
-        Episodes stay ``active=true`` so they remain searchable
-        (heart.episodes.search filters on active=true). Only the
-        linker's outputs change. F053 does NOT prune the new edges
-        because both endpoints are active=true.
+        Only the linker's outputs change. F053 does NOT prune the new
+        edges because it treats only deleted episodes as dead nodes.
         """
         if not getattr(self._settings, "episode_relink_enabled", True):
             return True
@@ -2519,13 +2572,17 @@ class SleepHandler:
                 episode_decision_bounds_sql,
                 episode_decision_join_sql,
                 episode_decisions_query,
+                episode_live_sql,
             )
 
             relinked = 0
             edges_created = 0
             errors = 0
             async with self._heart.db.session() as session:
-                # Find active orphan episodes older than min_age_hours.
+                # Find live orphan episodes older than min_age_hours: open, or
+                # closed but not deleted (episode_live_sql, as F040 uses). F060
+                # closes a recovered episode without an episode_ended event, so
+                # this phase is its only deterministic relink path.
                 # An "orphan" here = no incident graph_edges row at all.
                 # Only surface episodes that have at least one linkable
                 # anchor (active fact via source_episode_id, or a decision
@@ -2553,7 +2610,7 @@ class SleepHandler:
                     SELECT e.id
                     FROM heart.episodes e
                     WHERE e.agent_id = :agent_id
-                      AND e.active = true
+                      AND {episode_live_sql("e.")}
                       AND e.started_at < now() - make_interval(hours => :hours)
                       AND NOT EXISTS (
                         SELECT 1 FROM brain.graph_edges ge
