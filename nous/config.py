@@ -508,7 +508,10 @@ class Settings(BaseSettings):
         default=0.6,
         ge=0.0,
         le=1.0,
-        description="Statement-per-line density above which a transcript is enumerable (conservative default).",
+        description=(
+            "Share of lines that are list items, key: value lines or short statements above which a "
+            "transcript is enumerable (conservative default)."
+        ),
     )
     enumerative_max_facts_per_episode: int = Field(
         default=1000,

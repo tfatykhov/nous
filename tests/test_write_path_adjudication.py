@@ -137,6 +137,78 @@ def test_density_score_detects_unnumbered_short_fact_sheet():
     assert density_score(doc) > 0.8
 
 
+# A chat transcript as layer.py stores it ("User: ..." / "Assistant: ...",
+# turns joined by blank lines), written in full prose sentences. Every line
+# is 81-180 chars and ends in a period, so the old statement-line rule
+# (10-180 chars) counted each one as an enumerable statement.
+_CHAT_PROSE_TRANSCRIPT = "\n\n".join(
+    [
+        "User: I spent the weekend reading about how consensus protocols cope with partial failure.",
+        "Assistant: That is a deep topic, and the classic papers are still the clearest way into it.\n"
+        "Raft was designed to be understandable, which is why so many production systems choose it.\n"
+        "Paxos is older and more general, but its first presentation made it hard to implement well.",
+        "User: For a small internal service that only needs a replicated config store, I'd buy, not build.",
+        "Assistant: I would start from an existing Raft library rather than writing the protocol yourself.\n"
+        "The hard parts are membership changes and snapshots, and mature libraries handle both of them.",
+    ]
+)
+
+
+def test_density_gate_skips_conversational_prose():
+    """H-4: a User/Assistant transcript in long prose sentences is not enumerable."""
+    lines = [ln for ln in _CHAT_PROSE_TRANSCRIPT.splitlines() if ln.strip()]
+    assert all(81 <= len(ln) <= 180 and ln.endswith(".") for ln in lines)  # fixture shape
+    assert density_score(_CHAT_PROSE_TRANSCRIPT) < 0.6
+    assert is_enumerable(_CHAT_PROSE_TRANSCRIPT, threshold=0.6) is False
+
+
+def test_density_gate_speaker_label_lines_never_count():
+    """Short labelled turns look like "key: value" and like short statements,
+    but a speaker label marks a chat turn, whatever its case."""
+    doc = "\n".join(
+        [
+            "User: Thanks, that works.",
+            "Assistant: Glad it helped.",
+            "user: One more thing.",
+            "ASSISTANT: Go ahead.",
+            "System: Session resumed.",
+            "Human: Please continue.",
+        ]
+    )
+    assert density_score(doc) == 0.0
+    assert is_enumerable(doc, threshold=0.6) is False
+
+
+def test_density_gate_needs_five_hits():
+    """A high ratio over a handful of lines is not a list: fewer than five
+    hits never fires."""
+    doc = "\n".join(
+        [
+            "Alice is 30.",
+            "Bob is CEO.",
+            "Tim likes dogs.",
+            "Sky is blue.",
+            "and that is about everything I wanted to tell you about the people on the team for now",
+        ]
+    )
+    assert density_score(doc) == 0.0
+    assert is_enumerable(doc, threshold=0.6) is False
+
+
+def test_density_gate_still_fires_on_list_shaped_text():
+    """A numbered list (the MemoryAgentBench CR shape), the short fact sheet and
+    a key: value sheet without trailing periods are all enumerable."""
+    numbered = "Here is a list of facts:\n" + "\n".join(
+        f"{i}. The director of Organisation {i} is Person {i}, who was born in City {i}." for i in range(30)
+    )
+    fact_sheet = "\n".join(
+        ["Alice is 30.", "City: Paris.", "Bob is CEO.", "Tim likes dogs.", "Bob owns the car.", "Sky is blue."]
+    )
+    key_values = "\n".join(["Name: Alice Smith", "Age: 30", "City: Paris", "Role: CEO", "Team: Platform"])
+    for doc in (numbered, fact_sheet, key_values):
+        assert is_enumerable(doc, threshold=0.6) is True
+
+
 # ---------------------------------------------------------------------------
 # R1.2/R1.3: EnumerativeExtractor — chunked LLM extraction + batched store
 # ---------------------------------------------------------------------------

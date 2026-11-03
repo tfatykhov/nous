@@ -22,21 +22,35 @@ from nous.heart.schemas import FactInput, FactRejected
 logger = logging.getLogger(__name__)
 
 _LIST_MARKER = re.compile(r"^\s*(?:[-*•]|\d{1,5}[.):])\s+")
-# A short, self-contained declarative line: 10-180 chars ending in period/semicolon (not question/exclamation).
-_STATEMENT_LINE = re.compile(r"^.{10,180}[.;]\s*$")
+# A "key: value" line, as in a fact sheet or a record (City: Paris).
+_KEY_VALUE = re.compile(r"^[^:]{1,40}:\s+\S")
+# A short, self-contained declarative line: 10-80 chars ending in period/semicolon
+# (not question/exclamation). Prose sentences in chat run longer.
+_SHORT_STATEMENT = re.compile(r"^.{10,80}[.;]\s*$")
+# A transcript turn ("User: ..." / "Assistant: ...", layer.py). It looks like
+# "key: value" but is a chat turn, so it never counts.
+_SPEAKER_LABEL = re.compile(r"^(?:user|assistant|system|human):", re.IGNORECASE)
+_MIN_HITS = 5
 
 from nous.heart.keys import is_keyable_entity, normalize_key  # noqa: F401 — re-exported; R3.2 single canonicalizer
 
 
+def _is_list_line(line: str) -> bool:
+    """A list item, a "key: value" line or a short statement, and not a
+    speaker-labelled transcript turn."""
+    if _SPEAKER_LABEL.match(line):
+        return False
+    return bool(_LIST_MARKER.match(line) or _KEY_VALUE.match(line) or _SHORT_STATEMENT.match(line))
+
+
 def density_score(text: str) -> float:
-    """Fraction of non-empty lines that look like standalone declarative
-    statements or list items. Pure heuristic — no LLM (R1.1)."""
+    """Fraction of non-empty lines that look like list items, "key: value"
+    lines or short standalone statements; 0.0 below five such lines. Pure
+    heuristic — no LLM (R1.1)."""
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    if len(lines) < 5:
+    hits = sum(1 for ln in lines if _is_list_line(ln))
+    if hits < _MIN_HITS:
         return 0.0
-    hits = sum(
-        1 for ln in lines if _LIST_MARKER.match(ln) or _STATEMENT_LINE.match(ln)
-    )
     return hits / len(lines)
 
 
