@@ -121,12 +121,11 @@ def apply_outcome_demotion(
     is correct in both. None scores pass through untouched and sort last.
 
     THE RE-SORT IS THE FEATURE: ``_query`` builds its summaries preserving
-    search order and nothing downstream re-sorts (``_apply_staleness_penalty``
-    returns input order; ``_enforce_diversity`` / ``_apply_relevance_filter`` /
-    ``_format_decisions`` all iterate in order). A multiplier without the
-    re-sort would be a no-op on the pre-turn path — and worse than nothing,
-    because a low score injected mid-list desynchronizes
-    ``_apply_relevance_filter``'s monotonic ``prev_score`` walk.
+    search order, and on the pre-turn path ``_enforce_diversity`` and
+    ``_format_decisions`` iterate in that order (``_apply_staleness_penalty``
+    re-sorts only when staleness is enabled; ``_apply_relevance_filter``
+    sorts before its cuts). Without the re-sort a demoted decision could
+    still take a diversity slot and render ahead of better ones.
 
     Module level (not a method) so it is unit-testable without a database:
     ``Brain._query`` needs Postgres FTS and cannot run on the sqlite backend
