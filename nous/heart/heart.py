@@ -271,18 +271,6 @@ class Heart:
         """Search episodes."""
         return await self.episodes.search(query, limit, session)
 
-    async def search_recent_episodes_by_embedding(
-        self,
-        query_embedding: list[float],
-        hours: int = 48,
-        limit: int = 1,
-        session: AsyncSession | None = None,
-    ) -> list[tuple[UUID, float]]:
-        """Search recent episodes by direct cosine similarity for dedup."""
-        return await self.episodes.search_recent_by_embedding(
-            query_embedding, hours=hours, limit=limit, session=session
-        )
-
     # ==================================================================
     # Facts
     # ==================================================================

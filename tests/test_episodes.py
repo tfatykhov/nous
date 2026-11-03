@@ -299,3 +299,47 @@ async def test_end_with_lessons_and_active_flag(heart, session):
     )
     assert ended.active is False
     assert ended.lessons_learned == ["Always check DB state first"]
+
+
+# ---------------------------------------------------------------------------
+# 12. Start-time dedup stays inside one session (H-1)
+# ---------------------------------------------------------------------------
+# A greeting scores text_overlap 1.0 against another session's identical
+# greeting. The caller maps the returned episode into
+# _active_episodes[session_id], so a cross-session match made session Y's
+# end_session close session X's episode and Y's summary, chunks and facts
+# were never produced.
+
+
+async def test_start_dedup_never_reuses_another_sessions_episode(heart, session):
+    x = await heart.start_episode(
+        _episode_input(summary="hello there", session_id="h1-session-x"),
+        session=session,
+    )
+    y = await heart.start_episode(
+        _episode_input(summary="hello there", session_id="h1-session-y"),
+        session=session,
+    )
+
+    assert y.id != x.id
+    assert y.session_id == "h1-session-y"
+
+
+async def test_start_dedup_still_reuses_same_session_episode(heart, session):
+    first = await heart.start_episode(
+        _episode_input(summary="hello there", session_id="h1-session-same"),
+        session=session,
+    )
+    again = await heart.start_episode(
+        _episode_input(summary="hello there", session_id="h1-session-same"),
+        session=session,
+    )
+
+    assert again.id == first.id
+
+
+async def test_start_without_session_id_does_not_dedup(heart, session):
+    first = await heart.start_episode(_episode_input(summary="hello there"), session=session)
+    second = await heart.start_episode(_episode_input(summary="hello there"), session=session)
+
+    assert second.id != first.id

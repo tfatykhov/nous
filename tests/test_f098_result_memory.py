@@ -372,10 +372,10 @@ async def test_episode_dedup_still_applies_to_every_other_caller(mem_env):
 
     env = mem_env
     first = await env.heart.start_episode(EpisodeInput(summary="Plan the ski trip to Innsbruck", session_id="S2"))
-    again = await env.heart.start_episode(EpisodeInput(summary="Plan the ski trip to Innsbruck", session_id="S3"))
+    again = await env.heart.start_episode(EpisodeInput(summary="Plan the ski trip to Innsbruck", session_id="S2"))
     assert again.id == first.id
     fresh = await env.heart.start_episode(
-        EpisodeInput(summary="Plan the ski trip to Innsbruck", session_id="S4"), dedup=False
+        EpisodeInput(summary="Plan the ski trip to Innsbruck", session_id="S2"), dedup=False
     )
     assert fresh.id != first.id
 

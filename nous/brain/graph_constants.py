@@ -249,7 +249,12 @@ def episode_decision_bounds_sql(*, agent_param: str = "agent_id") -> str:
                            ) - interval '1 microsecond'
                        END
                    )
-               ) AS decision_window_end
+               ) AS decision_window_end,
+               -- The next live episode of the session, which bounds an open
+               -- one above (NULL: nothing does, and its window runs to now()).
+               LEAD(started_at) OVER (
+                   PARTITION BY agent_id, session_id ORDER BY started_at
+               ) AS successor_started_at
         FROM heart.episodes
         WHERE session_id IS NOT NULL AND agent_id = :{agent_param}
           -- Codex r4: the open/closed split above keys on ended_at, but
@@ -263,6 +268,67 @@ def episode_decision_bounds_sql(*, agent_param: str = "agent_id") -> str:
           -- against the previous LIVE episode. Reuses the canonical liveness
           -- predicate rather than restating the rule.
           AND {episode_live_sql()}
+    """
+
+
+# Facts a live turn wrote for its episode: the learn_fact tool, stored
+# attachments, and post_turn's inline correction (F039). Every other writer
+# that sets source_episode_id runs once the session is over or its summary is
+# written (fact_extractor, episode_summarizer, enumerative_extractor,
+# exemplar_extractor, end_session's reflection), so its created_at says
+# nothing about when the episode was last active. An allowlist: a new writer
+# is ignored until it is known to be live.
+_LIVE_TURN_FACT_SQL = "(f.source IN ('user_direct', 'inline_correction') OR f.source LIKE '%-attachment')"
+
+
+def episode_close_at_sql(target_ids_sql: str, *, agent_param: str = "agent_id") -> str:
+    """Derived table ``(id, close_at, end_known)`` for the open episodes that
+    ``target_ids_sql`` (a SELECT of episode ids) picks: the ``ended_at`` that
+    closes each one in bulk, and whether that is a known end.
+
+    An episode with a successor in its session closes at its current
+    ``decision_window_end``. The bounds above treat a closed episode's
+    ``ended_at`` as authoritative, and an open one's window ends where the
+    successor begins (less the grace band). So closing it at now() would
+    claim the successor's decisions and push the successor's window start
+    past them (codex P2 on #825). Closing at the window end leaves both
+    windows where they were.
+
+    Anything else, including every episode without a session_id, has no such
+    bound, and now() would stamp a months-old episode as ending today. It
+    closes at its last real activity: the latest live-turn fact linked to it,
+    decision in its window, or document chunk filed under it. Nothing the
+    recovery itself writes counts (extracted facts, dialogue chunks, the
+    summary). With no evidence it closes at ``started_at`` and ``end_known``
+    is false, so the caller leaves ``duration_seconds`` NULL.
+
+    Every bulk close of an open row uses this. A live session ending now
+    (``EpisodeManager._end``) does not need it."""
+    return f"""
+        SELECT t.id,
+               CASE WHEN b.successor_started_at IS NOT NULL
+                    THEN b.decision_window_end
+                    ELSE GREATEST(t.started_at, ev.last_activity)
+               END AS close_at,
+               (b.successor_started_at IS NOT NULL OR ev.last_activity IS NOT NULL) AS end_known
+        FROM heart.episodes t
+        LEFT JOIN ({episode_decision_bounds_sql(agent_param=agent_param)}) b
+          ON b.id = t.id
+        LEFT JOIN LATERAL (
+            SELECT GREATEST(
+                (SELECT max(f.created_at) FROM heart.facts f
+                 WHERE f.agent_id = t.agent_id
+                   AND f.source_episode_id = t.id
+                   AND {_LIVE_TURN_FACT_SQL}),
+                (SELECT max(d.created_at) FROM brain.decisions d
+                 WHERE {episode_decision_join_sql("b.")}),
+                (SELECT max(ch.created_at) FROM heart.episode_chunks ch
+                 WHERE ch.episode_id = t.id
+                   AND ch.source_kind <> 'dialogue')
+            ) AS last_activity
+        ) ev ON true
+        WHERE t.agent_id = :{agent_param}
+          AND t.id IN ({target_ids_sql})
     """
 
 

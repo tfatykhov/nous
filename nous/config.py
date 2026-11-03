@@ -763,10 +763,10 @@ class Settings(BaseSettings):
     # never fired). Of the 99 orphans, 27 have facts referencing them via
     # source_episode_id — those should have linked; the rest need semantic
     # episode↔episode (handled separately by F040).
-    # The re-linker queries active orphan episodes older than min_age_hours,
-    # fetches their fact/decision anchors, and calls
-    # graph_linker.link_episode_deterministic. Episodes stay active=true
-    # so they remain searchable; only the linker's outputs change.
+    # The re-linker queries live (open, or closed but not deleted) orphan
+    # episodes older than min_age_hours, fetches their fact/decision anchors,
+    # and calls graph_linker.link_episode_deterministic; only the linker's
+    # outputs change.
     episode_relink_enabled: bool = True
     episode_relink_min_age_hours: int = 24  # skip recent — live linker handles
     episode_relink_max_per_cycle: int = 30
@@ -777,7 +777,10 @@ class Settings(BaseSettings):
     # populate the missing summary. Closes the gap that F058 was patching at
     # the densifier layer. Requires the F025 P3-C transcript column (rows
     # without a persisted transcript can't be summarized retroactively).
-    # Episodes stay active=true (matching F057 — search filters on active=true).
+    # A recovered episode is then closed with outcome='partial' once its
+    # session has no working-memory activity inside min_age_hours. Keep
+    # working_memory_ttl_hours >= abandoned_recovery_min_age_hours: a
+    # working-memory row removed by the TTL sweep reads as an idle session.
     abandoned_recovery_enabled: bool = True
     abandoned_recovery_min_age_hours: int = 24
     abandoned_recovery_max_per_cycle: int = 50
@@ -838,18 +841,7 @@ class Settings(BaseSettings):
     episode_seed_summary_chars: int = Field(
         default=500,
         ge=50,
-        description="Chars of the first user message used as the episode's seed summary AND its dedup embedding probe. Was hardcoded 200.",
-    )
-    episode_dedup_threshold: float = Field(
-        default=0.85,
-        ge=0.0,
-        le=1.0,
-        description="Cosine threshold above which a new episode is treated as a duplicate and not created.",
-    )
-    episode_dedup_window_hours: int = Field(
-        default=48,
-        ge=1,
-        description="Lookback window for episode-duplicate detection.",
+        description="Chars of the first user message used as the episode's seed summary. Was hardcoded 200.",
     )
     episode_min_content_length: int = Field(
         default=200,

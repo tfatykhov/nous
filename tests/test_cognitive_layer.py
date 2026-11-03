@@ -966,7 +966,6 @@ def _make_layer_with_settings(**setting_overrides):
     mock_heart.start_episode = AsyncMock()
     mock_heart.end_episode = AsyncMock()
     mock_heart.deactivate_episode = AsyncMock()
-    mock_heart.search_recent_episodes_by_embedding = AsyncMock(return_value=[])
     mock_heart.list_censors = AsyncMock(return_value=[])
     mock_heart.get_or_create_working_memory = AsyncMock()
     mock_heart.focus = AsyncMock()
@@ -1151,9 +1150,8 @@ class TestMemoryFidelityCaps:
 
         We set the cap to 300 and pass a 500-char user_input.  The episode
         creation branch runs when no active episode exists AND the session
-        passes _should_create_episode.  We mock _is_duplicate_episode to
-        return False so the creation branch always fires, then inspect the
-        EpisodeInput.summary captured by heart.start_episode.
+        passes _should_create_episode.  We inspect the EpisodeInput.summary
+        captured by heart.start_episode.
 
         pre_turn runs through MagicMock-backed intent/context/deliberation
         engines that may raise; those are all wrapped in except blocks in
@@ -1196,8 +1194,6 @@ class TestMemoryFidelityCaps:
         # No pre-existing active episode → creation branch fires
         assert sid not in layer._active_episodes
 
-        # Patch _is_duplicate_episode to return False (no duplicate)
-        layer._is_duplicate_episode = AsyncMock(return_value=False)
         try:
             await layer.pre_turn("test-agent", sid, long_input)
         except Exception:
