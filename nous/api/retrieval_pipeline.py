@@ -39,6 +39,7 @@ from nous.heart.exemplars import parse_label
 from nous.heart.keys import extract_entity_candidates, normalize_key
 from nous.heart.search import (
     VECTOR_LEG_EF_SEARCH,
+    VECTOR_LEG_MAX_SCAN_TUPLES,
     set_local_ef_search,
     summarize_keyword_stats,
     with_keyword_stats,
@@ -2781,7 +2782,7 @@ async def _search_episode_chunks(
         attempted.add("chunk")
     vec_lit = "[" + ",".join(f"{v:.6f}" for v in query_vec) + "]"
     async with heart.db.session() as s:
-        await set_local_ef_search(s, VECTOR_LEG_EF_SEARCH)
+        await set_local_ef_search(s, VECTOR_LEG_EF_SEARCH, max_scan_tuples=VECTOR_LEG_MAX_SCAN_TUPLES)
         # P1.1: include episode_id so the formatter can session-group chunks.
         rows = (await s.execute(sa_text(
             "SELECT id, content, 1 - (embedding <=> CAST(:v AS vector)) AS sim, episode_id "

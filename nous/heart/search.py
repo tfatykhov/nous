@@ -43,9 +43,15 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
 # set_local_ef_search also turns on iterative scan. The value is fixed, not
 # derived from the LIMIT: a small ef_search with iterative scan measured slower.
 VECTOR_LEG_EF_SEARCH = 200
+# hnsw.max_scan_tuples for the same retrieval legs. With strict_order the scan
+# keeps going until the LIMIT is met after filtering, up to pgvector's default
+# of 20000 tuples; this bounds the slow tail of a retrieval leg. Only the
+# retrieval legs pass it: fact dedup and the contradiction probes rely on the
+# scan running to completion.
+VECTOR_LEG_MAX_SCAN_TUPLES = 5000
 
 
-async def set_local_ef_search(session: AsyncSession, value: int) -> None:
+async def set_local_ef_search(session: AsyncSession, value: int, max_scan_tuples: int | None = None) -> None:
     """Prepare a filtered HNSW query — Postgres only, no-op elsewhere.
 
     Two transaction-scoped GUCs:
@@ -65,6 +71,15 @@ async def set_local_ef_search(session: AsyncSession, value: int) -> None:
       or errors on pgvector < 0.8 (reserved ``hnsw.`` prefix, unknown
       parameter) — the savepoint absorbs that error so the surrounding
       transaction degrades cleanly to the ef_search margin.
+    - ``hnsw.max_scan_tuples`` (pgvector >= 0.8, same savepoint): caps how
+      many tuples the iterative scan visits. ``None`` sets it back to the
+      default, so a caller that passes no cap gets the default even when an
+      earlier query in the same transaction set one.
+
+    These are ``SET LOCAL``: they last for the rest of the transaction, not
+    just the next query. The pre-turn path shares one session across its
+    legs, so every later vector query in the transaction inherits these
+    values unless it sets its own or calls ``reset_local_ef_search``.
 
     Guarded by dialect so SQLite test harnesses don't choke.
     """
@@ -72,11 +87,13 @@ async def set_local_ef_search(session: AsyncSession, value: int) -> None:
     if bind is None or getattr(getattr(bind, "dialect", None), "name", "") != "postgresql":
         return
     await session.execute(text(f"SET LOCAL hnsw.ef_search = {int(value)}"))
+    max_scan = "DEFAULT" if max_scan_tuples is None else str(int(max_scan_tuples))
     try:
         async with session.begin_nested():
             await session.execute(
                 text("SET LOCAL hnsw.iterative_scan = strict_order")
             )
+            await session.execute(text(f"SET LOCAL hnsw.max_scan_tuples = {max_scan}"))
     except Exception:
         pass  # pgvector < 0.8 — GUC absent; ef_search margin still applies
 
@@ -86,9 +103,9 @@ async def reset_local_ef_search(session: AsyncSession) -> None:
 
     ``SET LOCAL`` lasts until the transaction ends, so a query that must run
     at pgvector's defaults after a ``hybrid_search`` in the same transaction
-    calls this first. ``iterative_scan`` is reset under a savepoint for the
-    same reason the helper sets it under one: pgvector < 0.8 has no such
-    parameter. Postgres only, no-op elsewhere.
+    calls this first. ``iterative_scan`` and ``max_scan_tuples`` are reset
+    under a savepoint for the same reason the helper sets them under one:
+    pgvector < 0.8 has no such parameters. Postgres only, no-op elsewhere.
     """
     bind = getattr(session, "bind", None)
     if bind is None or getattr(getattr(bind, "dialect", None), "name", "") != "postgresql":
@@ -97,6 +114,7 @@ async def reset_local_ef_search(session: AsyncSession) -> None:
     try:
         async with session.begin_nested():
             await session.execute(text("SET LOCAL hnsw.iterative_scan TO DEFAULT"))
+            await session.execute(text("SET LOCAL hnsw.max_scan_tuples TO DEFAULT"))
     except Exception:
         pass  # pgvector < 0.8 — GUC absent
 
@@ -701,7 +719,7 @@ async def hybrid_search(
     if embedding is not None:
         # Vector search
         params["query_embedding"] = "[" + ",".join(str(float(v)) for v in embedding) + "]"
-        await set_local_ef_search(session, VECTOR_LEG_EF_SEARCH)
+        await set_local_ef_search(session, VECTOR_LEG_EF_SEARCH, max_scan_tuples=VECTOR_LEG_MAX_SCAN_TUPLES)
         vector_sql = text(f"""
             SELECT t.id, 1 - (t.embedding <=> CAST(:query_embedding AS vector)) AS score
             FROM {table} t

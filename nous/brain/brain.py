@@ -898,6 +898,7 @@ class Brain:
             # Full hybrid search using RRF (F025)
             from nous.heart.search import (
                 VECTOR_LEG_EF_SEARCH,
+                VECTOR_LEG_MAX_SCAN_TUPLES,
                 _resolve_rrf_k,
                 _resolve_vector_weight,
                 _rrf_merge,
@@ -910,7 +911,7 @@ class Brain:
             params["query_embedding"] = "[" + ",".join(str(float(v)) for v in query_embedding) + "]"
 
             # Vector search
-            await set_local_ef_search(session, VECTOR_LEG_EF_SEARCH)
+            await set_local_ef_search(session, VECTOR_LEG_EF_SEARCH, max_scan_tuples=VECTOR_LEG_MAX_SCAN_TUPLES)
             vector_sql = text(f"""
                 SELECT d.id, 1 - (d.embedding <=> CAST(:query_embedding AS vector)) AS score
                 FROM brain.decisions d

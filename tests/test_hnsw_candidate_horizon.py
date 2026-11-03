@@ -14,9 +14,10 @@ lies at angle ``theta`` from the query ``e1``, with its azimuth in the
 cap and the HNSW graph stays navigable (a degenerate layout with every row on
 its own orthogonal axis leaves rows unreachable, which tests something else).
 
-The last test covers the other side of ``SET LOCAL``: the graph densifier runs
-a hybrid search and then, in the same transaction, a threshold-gated linking
-query that must keep pgvector's default horizon.
+The last two tests cover the other side of ``SET LOCAL``: the settings last for
+the rest of the transaction. A retrieval leg also caps ``hnsw.max_scan_tuples``,
+and the graph densifier runs a hybrid search and then, in the same transaction,
+a threshold-gated linking query that must keep pgvector's default horizon.
 """
 
 from __future__ import annotations
@@ -30,7 +31,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.graph_densifier import GraphDensifier
 from nous.brain.graph_linker import GraphLinker
-from nous.heart.search import hybrid_search
+from nous.heart.search import (
+    VECTOR_LEG_EF_SEARCH,
+    VECTOR_LEG_MAX_SCAN_TUPLES,
+    hybrid_search,
+    reset_local_ef_search,
+    set_local_ef_search,
+)
 from nous.storage.models import Fact, GraphEdge
 
 DIM = 1536
@@ -121,6 +128,38 @@ async def test_hybrid_vector_leg_returns_full_active_set_behind_closer_filtered_
     assert vector_leg == expected
 
 
+async def _hnsw_settings(session) -> tuple[str, str, str]:
+    """(ef_search, iterative_scan, max_scan_tuples) as SHOW reports them."""
+    names = ("hnsw.ef_search", "hnsw.iterative_scan", "hnsw.max_scan_tuples")
+    return tuple([(await session.execute(text(f"SHOW {n}"))).scalar() for n in names])
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_retrieval_leg_caps_max_scan_tuples_for_the_rest_of_the_transaction(session):
+    """A retrieval leg leaves its settings, including the max_scan_tuples cap,
+    in place for the rest of the transaction. A reset, or a helper call that
+    passes no cap, puts the default back (pgvector: 40, off, 20000)."""
+    agent = f"hnsw-cap-{uuid4().hex[:8]}"
+    query = [1.0] + [0.0] * (DIM - 1)
+
+    await hybrid_search(session, "heart.facts", query, "zzqxv", agent, limit=5)
+    assert await _hnsw_settings(session) == (
+        str(VECTOR_LEG_EF_SEARCH),
+        "strict_order",
+        str(VECTOR_LEG_MAX_SCAN_TUPLES),
+    )
+
+    await reset_local_ef_search(session)
+    assert await _hnsw_settings(session) == ("40", "off", "20000")
+
+    # An uncapped caller (fact dedup, contradiction probes) after a capped
+    # retrieval leg in the same transaction scans to the default again.
+    await hybrid_search(session, "heart.facts", query, "zzqxv", agent, limit=5)
+    await set_local_ef_search(session, 100)
+    assert await _hnsw_settings(session) == ("100", "strict_order", "20000")
+
+
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
 async def test_densifier_cross_type_query_runs_at_default_horizon_after_hybrid_search(
@@ -129,8 +168,8 @@ async def test_densifier_cross_type_query_runs_at_default_horizon_after_hybrid_s
     """``backfill_orphan_facts`` runs ``_backfill_same_type`` (a hybrid search,
     which widens the horizon) and then ``_backfill_cross_type`` in one
     transaction. The cross-type threshold query must see pgvector's defaults
-    (ef_search 40, iterative scan off), or this change would alter which graph
-    edges get created."""
+    (ef_search 40, iterative scan off, max_scan_tuples 20000), or this change
+    would alter which graph edges get created."""
     agent = f"hnsw-dens-{uuid4().hex[:8]}"
     linker = GraphLinker(db, mock_embeddings, settings, agent)
     densifier = GraphDensifier(db, linker, mock_embeddings, settings, agent)
@@ -141,14 +180,15 @@ async def test_densifier_cross_type_query_runs_at_default_horizon_after_hybrid_s
         await _insert(s, agent, True, 0.3, 1)
         await s.commit()
 
-    seen: list[tuple[str, str]] = []
+    seen: list[tuple[str, str, str]] = []
     original_execute = AsyncSession.execute
 
     async def _spy_execute(self, statement, *args, **kwargs):
         if ":pre_threshold" in str(statement):
             ef = (await original_execute(self, text("SHOW hnsw.ef_search"))).scalar()
             it = (await original_execute(self, text("SHOW hnsw.iterative_scan"))).scalar()
-            seen.append((ef, it))
+            mst = (await original_execute(self, text("SHOW hnsw.max_scan_tuples"))).scalar()
+            seen.append((ef, it, mst))
         return await original_execute(self, statement, *args, **kwargs)
 
     monkeypatch.setattr(AsyncSession, "execute", _spy_execute)
@@ -161,4 +201,4 @@ async def test_densifier_cross_type_query_runs_at_default_horizon_after_hybrid_s
                 await s.execute(delete(model).where(model.agent_id == agent))
             await s.commit()
 
-    assert seen == [("40", "off")]
+    assert seen == [("40", "off", "20000")]
