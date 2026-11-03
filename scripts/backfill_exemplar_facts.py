@@ -36,9 +36,10 @@ ROLLBACK: all facts written by this script (and by the live write path,
 NOUS_EXEMPLAR_EXTRACTION_ENABLED) carry source='exemplar_extractor'.
     --phase rollback --watermark <iso-ts>  (the "ROLLBACK KEY" printed at
     the start of the run you want to undo) soft-deactivates:
-        UPDATE heart.facts SET active = false
+        UPDATE heart.facts SET active = false,
+            deactivated_at = now(), deactivation_reason = 'rollback'
         WHERE agent_id = :a AND source = 'exemplar_extractor'
-          AND created_at >= :watermark;
+          AND created_at >= :watermark AND active;
     (never hard-delete; reactivation is the inverse.) Aborts (no writes)
     if any of those facts derive from episode_chunks THEMSELVES newer than
     the watermark (i.e. content that did not exist yet when this run

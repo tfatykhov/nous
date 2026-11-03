@@ -266,7 +266,9 @@ class ProcessFaultCheck(BaseCheck):
         count and the scan agree on which facts are eligible.
         """
         # Same normalisation as the phase: an explicit [] excludes nothing.
-        excluded: list[str] = list(getattr(self._settings, "stale_scan_excluded_categories", ["rule"]) or [])
+        excluded: list[str] = list(
+            getattr(self._settings, "stale_scan_excluded_categories", ["rule", "person", "preference"]) or []
+        )
         try:
             from sqlalchemy import text
 

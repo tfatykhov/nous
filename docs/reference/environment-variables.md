@@ -49,6 +49,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_SESSION_TIMEOUT` | `1800` | Session idle timeout in seconds |
 | `NOUS_SLEEP_TIMEOUT` | `7200` | Sleep mode timeout in seconds |
 | `NOUS_SLEEP_CHECK_INTERVAL` | `60` | Sleep check interval in seconds |
+| `NOUS_STALE_SCAN_EXCLUDED_CATEGORIES` | `["rule", "person", "preference"]` | Fact categories the sleep `stale_scan` never deactivates. The tier-1 profile channel renders these every turn without stamping `last_recalled_at`, so the scan would otherwise remove still-true user facts (previous default `["rule"]`). An explicit `[]` excludes nothing |
 | `NOUS_SUBTASK_ENABLED` | `true` | Enable subtask worker pool |
 | `NOUS_SUBTASK_WORKERS` | `2` | Number of async worker tasks |
 | `NOUS_SUBTASK_POLL_INTERVAL` | `2.0` | Seconds between queue polls |
