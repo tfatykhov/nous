@@ -760,6 +760,19 @@ class Settings(BaseSettings):
     # mergeable clusters get a chance.
     cluster_consolidation_min_facts: int = 3
     cluster_consolidation_max_facts: int = 10
+    cluster_refusal_ttl_days: int = Field(
+        default=7,
+        ge=0,
+        description=(
+            "F027 refusal memory. A cluster the merge LLM refused (should_merge=false) is "
+            "skipped by cluster selection for this many days unless its member count "
+            "changed, so refused clusters stop holding the five selection slots every "
+            "cycle. Read from the f027_cluster_merge llm_refused events. Shorter than "
+            "contradiction_recheck_cooldown_days, which covers aborted merges: a refusal "
+            "is an LLM judgment that may differ on a later run, an abort follows from the "
+            "stored facts. 0 disables it."
+        ),
+    )
 
     # F057 (2026-05-04): episode re-linker — periodic backfill of F022
     # episode-graph edges for episodes the live linker missed. Investigation
@@ -883,6 +896,15 @@ class Settings(BaseSettings):
         default=500,
         ge=50,
         description="Per-episode summary chars fed to the sleep reflection LLM. Was hardcoded 200 (~28% of a typical summary).",
+    )
+    sleep_reflection_hours: int = Field(
+        default=24,
+        ge=1,
+        description=(
+            "Sleep reflection reads only episodes that started within this many hours, and its "
+            "prompt names the window. Fewer than 2 such episodes skips the LLM call. Before this, "
+            "it read the last 10 episodes of any age while the prompt said 'past 24 hours'."
+        ),
     )
     sleep_contradiction_fact_chars: int = Field(
         default=1000,

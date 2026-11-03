@@ -50,6 +50,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_SLEEP_TIMEOUT` | `7200` | Sleep mode timeout in seconds |
 | `NOUS_SLEEP_CHECK_INTERVAL` | `60` | Sleep check interval in seconds |
 | `NOUS_STALE_SCAN_EXCLUDED_CATEGORIES` | `["rule", "person", "preference"]` | Fact categories the sleep `stale_scan` never deactivates. The tier-1 profile channel renders these every turn without stamping `last_recalled_at`, so the scan would otherwise remove still-true user facts (previous default `["rule"]`). An explicit `[]` excludes nothing |
+| `NOUS_CLUSTER_REFUSAL_TTL_DAYS` | `7` | F027 refusal memory. A cluster the merge LLM refused (`should_merge=false`) is skipped by cluster selection for this many days unless its member count changed, so refused clusters stop holding the five selection slots every cycle. Read from the `f027_cluster_merge` `llm_refused` events in `nous_system.events`, in the same query that skips aborted merges for `NOUS_CONTRADICTION_RECHECK_COOLDOWN_DAYS` (30). Its own, shorter window because a refusal is an LLM judgment that may differ on a later run, while an abort follows from the stored facts. A swap (one fact in, one out) keeps the count, so this window bounds that case. 0 disables it. |
 | `NOUS_SUBTASK_ENABLED` | `true` | Enable subtask worker pool |
 | `NOUS_SUBTASK_WORKERS` | `2` | Number of async worker tasks |
 | `NOUS_SUBTASK_POLL_INTERVAL` | `2.0` | Seconds between queue polls |
@@ -245,6 +246,7 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_EPISODE_SUMMARY_MAX_TOKENS` | `0` (auto) | Override for the episode-summarization LLM max_tokens. 0 = auto (3000 when coverage/open-threads prompts are on, else 1500). |
 | `NOUS_KNOWLEDGE_EXTRACTOR_MAX_CHARS` | `24000` | Pre-compaction fact extraction: total chars of the doomed-message snapshot shown to the LLM (head-truncated). Was hardcoded 12000; fires once per compaction, under-capture is permanent loss. |
 | `NOUS_SLEEP_REFLECTION_SUMMARY_CHARS` | `500` | Per-episode summary chars fed to the sleep reflection LLM. Was hardcoded 200 (~28% of a typical summary). |
+| `NOUS_SLEEP_REFLECTION_HOURS` | `24` | Sleep reflection reads only episodes that started within this many hours (`ended_at` set, not abandoned), and its prompt names the window. Fewer than 2 such episodes skips the LLM call. Before this, it read the last 10 episodes of any age while the prompt said "past 24 hours". |
 | `NOUS_SLEEP_CONTRADICTION_FACT_CHARS` | `1000` | Per-fact chars shown to the contradiction-resolution LLM (verdicts are destructive: SUPERSEDE/REMOVE/MERGE). Was hardcoded 500; 1000 matches the call's max_tokens. |
 | `NOUS_FACT_MIN_CONTENT_CHARS` | `30` | F038-1.2 hard floor: facts shorter than this are rejected before dedup/admission on every write path. |
 | `NOUS_FACT_SUPERSESSION_THRESHOLD` | `0.80` | Same-subject supersession cosine gate in _supersede_same_subject (deactivates the old fact). Sibling of `NOUS_FACT_NATIVE_COSINE_THRESHOLD`. |
