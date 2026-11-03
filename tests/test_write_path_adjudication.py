@@ -4294,6 +4294,9 @@ class TestOverridePriorMarking:
             actionable_confidence=None,
             event_date=None,
             overrides_prior=True,
+            valid_from=None,  # 097
+            valid_to=None,
+            mentioned_at=None,
         )
 
         mgr = FactManager.__new__(FactManager)

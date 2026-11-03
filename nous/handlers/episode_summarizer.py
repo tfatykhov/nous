@@ -156,6 +156,36 @@ becomes a stable fact."""
 _F075_EPISODE_TS_BLOCK = "EPISODE_START_TIMESTAMP: {iso}\n\n"
 
 
+# Bi-temporal facts, flag W (temporal_intervals_enabled, which needs
+# temporal_extraction_enabled): sent INSTEAD of _F075_TEMPORAL_INSTRUCTION. Built
+# from it so the shared rules stay one copy: the month/year omit rule becomes a
+# span rule, and a section on spans and states is added. CONCATENATED like the
+# F075 block, single braces only.
+_F075_MONTH_OMIT_RULE = """  - Any date you cannot pin to a specific DAY. If only a month or year is known
+    ("Feb 2026", "last spring"), OMIT event_date — never default to the 1st."""
+
+_INTERVALS_VAGUE_RULE = """  - A season or a vague phrase ("last spring", "a while ago"). A month or a
+    year alone is not vague: it is a span, see DATE SPANS AND STATES below."""
+
+_TEMPORAL_INTERVALS_INSTRUCTION = _F075_TEMPORAL_INSTRUCTION.replace(
+    _F075_MONTH_OMIT_RULE, _INTERVALS_VAGUE_RULE
+) + """
+
+DATE SPANS AND STATES:
+A candidate_fact may instead carry optional "valid_from" and "valid_to"
+fields (both "YYYY-MM-DD"), the first and last day the fact was true. Use them
+when the date is not a single day:
+  - A month or a year alone is the whole span. "in Feb 2026" →
+    "valid_from": "2026-02-01", "valid_to": "2026-02-28".
+  - "since X" is a state that is still true: "valid_from" = X, no "valid_to".
+  - "from X until Y" is a closed span: "valid_from" = X, "valid_to" = Y.
+Example: User says "I've lived in Berlin since January" (EPISODE_START_TIMESTAMP = 2024-04-11) →
+    {"subject": "Berlin residence", "content": "The user has lived in Berlin since January 2024.",
+     "category": "person", "valid_from": "2024-01-01"}
+Never emit event_date together with valid_from or valid_to: a single day is
+event_date alone. Resolve and anchor these dates exactly like event_date."""
+
+
 # Coverage fix (2026-06-14 audit): appended to _SUMMARY_PROMPT when
 # settings.extraction_coverage_broadened is True. The base candidate_facts
 # framing ("concrete, reusable knowledge: tool configs, preferences,
@@ -238,6 +268,7 @@ enough that the JSON object always completes."""
 _ECHO_GUARD_TEMPLATES = (
     _SUMMARY_PROMPT,
     _F075_TEMPORAL_INSTRUCTION,
+    _TEMPORAL_INTERVALS_INSTRUCTION,
     _COVERAGE_EXPANSION_INSTRUCTION,
     _OPEN_THREADS_INSTRUCTION,
     _INPUT_HARDENING_GUARD,
@@ -651,7 +682,10 @@ class EpisodeSummarizer:
         if getattr(self._settings, "temporal_extraction_enabled", False):
             if started_at is not None:
                 prompt = _F075_EPISODE_TS_BLOCK.format(iso=started_at.isoformat()) + prompt
-            prompt = prompt + _F075_TEMPORAL_INSTRUCTION
+            # 097 flag W: the same block with spans and states (`is True`, so a
+            # duck-typed settings object never turns it on by accident).
+            intervals = getattr(self._settings, "temporal_intervals_enabled", False) is True
+            prompt = prompt + (_TEMPORAL_INTERVALS_INSTRUCTION if intervals else _F075_TEMPORAL_INSTRUCTION)
         if getattr(self._settings, "extraction_coverage_broadened", False):
             prompt = prompt + _COVERAGE_EXPANSION_INSTRUCTION
         if getattr(self._settings, "episode_open_threads", False):

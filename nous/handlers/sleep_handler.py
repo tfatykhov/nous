@@ -21,6 +21,7 @@ blocking the event bus dispatch loop.
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -284,6 +285,34 @@ _CLUSTER_MERGE_SCHEMA: dict[str, Any] = {
     },
     "required": ["should_merge", "confidence"],
 }
+
+
+# 097 bi-temporal facts, flag W (temporal_intervals_enabled): a merge keeps every
+# dated event verbatim, so the dates survive into the merged fact that inherits
+# its sources' interval. Added to the F031 and F027 prompts and to the F027
+# should_merge description only under W, so with W off all three are unchanged.
+_KEEP_DATED_EVENTS_RULE = (
+    "Keep every dated event verbatim: copy each date in the source facts into the "
+    "merged text exactly as written, and never drop, round or summarize a date. "
+    "This overrides any instruction that accepts losing dates."
+)
+_KEEP_DATED_EVENTS_ADDENDUM = "\n\nDATED EVENTS: " + _KEEP_DATED_EVENTS_RULE
+_CLUSTER_MERGE_SCHEMA_KEEP_DATES: dict[str, Any] = copy.deepcopy(_CLUSTER_MERGE_SCHEMA)
+_CLUSTER_MERGE_SCHEMA_KEEP_DATES["properties"]["should_merge"]["description"] += " " + _KEEP_DATED_EVENTS_RULE
+
+
+def _keep_dated_events(settings: object) -> bool:
+    return getattr(settings, "temporal_intervals_enabled", False) is True
+
+
+def _merge_prompt_tail(settings: object) -> str:
+    """097: the F031/F027 merge prompt addendum; empty with W off."""
+    return _KEEP_DATED_EVENTS_ADDENDUM if _keep_dated_events(settings) else ""
+
+
+def _cluster_merge_schema(settings: object) -> dict[str, Any]:
+    """097: the F027 output schema; the unchanged one with W off."""
+    return _CLUSTER_MERGE_SCHEMA_KEEP_DATES if _keep_dated_events(settings) else _CLUSTER_MERGE_SCHEMA
 
 
 _CLUSTER_MERGE_PROMPT = """You are consolidating a cluster of facts about the same subject in a long-running agent's memory.
@@ -1288,7 +1317,7 @@ class SleepHandler:
                     date_b=_fmt_ts(pair["date2"]),
                     content_a=pair["content1"][:sleep_contradiction_fact_chars],
                     content_b=pair["content2"][:sleep_contradiction_fact_chars],
-                )
+                ) + _merge_prompt_tail(self._settings)
 
                 resolution = await call_background_llm_structured(
                     client=self._llm,
@@ -1490,6 +1519,7 @@ class SleepHandler:
                                             merged_detail.id,
                                             [fact1_id, fact2_id],
                                             session,
+                                            inherit_temporal=True,  # 097
                                         )
                                         for orig_id in (fact1_id, fact2_id):
                                             # Defensive: never set
@@ -1907,7 +1937,8 @@ class SleepHandler:
                         subject=subject,
                         n_facts=len(facts),
                         facts=facts_text,
-                    ),
+                    )
+                    + _merge_prompt_tail(self._settings),
                     tool_name="merge_facts",
                     tool_description=(
                         "Return verdict on whether the cluster merges. "
@@ -1916,7 +1947,7 @@ class SleepHandler:
                         "refuse_reason for entity collisions or "
                         "irreconcilable contradictions."
                     ),
-                    output_schema=_CLUSTER_MERGE_SCHEMA,
+                    output_schema=_cluster_merge_schema(self._settings),
                     # Align with the pairwise resolver (600 -> 1000): same
                     # truncation class, and a multi-fact cluster merge can need a
                     # longer merged_content than the pairwise case. Precautionary
@@ -2026,6 +2057,7 @@ class SleepHandler:
                         merged_detail.id,
                         [f.id for f in facts],
                         session,
+                        inherit_temporal=True,  # 097
                     )
                     for fact in facts:
                         # Defensive (mirrors F031 fix on PR #412): never

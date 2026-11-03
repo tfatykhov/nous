@@ -2952,6 +2952,17 @@ class Settings(BaseSettings):
             "confirms no regression on existing test suite or LME baseline."
         ),
     )
+    temporal_intervals_enabled: bool = Field(
+        default=False,
+        description=(
+            "Bi-temporal facts (W): the extraction prompts also ask for valid_from/"
+            "valid_to, so a month or year becomes a span and 'since X' an open "
+            "state, the enumerative extractor gets the observation date, and sleep "
+            "merges keep dated events verbatim and inherit their sources' interval. "
+            "Needs temporal_extraction_enabled. Off: facts still store mentioned_at "
+            "and a dated fact still gets its one-day interval."
+        ),
+    )
     candidate_facts_event_limit: int = Field(
         default=30,
         ge=0,
@@ -3801,6 +3812,18 @@ class Settings(BaseSettings):
                 "NOUS_INTENTIONS_ENABLED=true needs NOUS_RESULT_INBOX_ENABLED=true; intentions stay OFF."
             )
             object.__setattr__(self, "intentions_enabled", False)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_temporal_intervals_dependency(self) -> "Settings":
+        """Bi-temporal facts: W extends the F075 prompts, which are only sent with
+        temporal_extraction_enabled, so W alone would do nothing. Forced off, loudly."""
+        if self.temporal_intervals_enabled and not self.temporal_extraction_enabled:
+            logging.getLogger(__name__).warning(
+                "NOUS_TEMPORAL_INTERVALS_ENABLED=true needs NOUS_TEMPORAL_EXTRACTION_ENABLED=true; "
+                "temporal intervals stay OFF."
+            )
+            object.__setattr__(self, "temporal_intervals_enabled", False)
         return self
 
     @model_validator(mode="after")

@@ -273,11 +273,21 @@ async def _process_batch(
 
         # Stamp classified_at (even when event_date is NULL = "no date") so a
         # cleanly-answered row is never re-processed.
+        # 097 row invariant: an event_date is its one-day interval. A new date
+        # sets both. Clearing a date clears the interval it implied. A row
+        # with no date before or after keeps any span it already carries.
+        # (Right-hand sides read the row's values from before this UPDATE.)
         await session.execute(
             text(
                 """
                 UPDATE heart.facts
                 SET event_date = :event_date,
+                    valid_from = CASE WHEN CAST(:event_date AS date) IS NOT NULL THEN CAST(:event_date AS date)
+                                      WHEN event_date IS NOT NULL THEN NULL
+                                      ELSE valid_from END,
+                    valid_to = CASE WHEN CAST(:event_date AS date) IS NOT NULL THEN CAST(:event_date AS date)
+                                    WHEN event_date IS NOT NULL THEN NULL
+                                    ELSE valid_to END,
                     event_date_classified_at = NOW(),
                     updated_at = NOW()
                 WHERE id = :id

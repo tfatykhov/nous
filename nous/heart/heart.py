@@ -1525,6 +1525,11 @@ class Heart:
                     "actionable": item.actionable,
                     "actionable_confidence": item.actionable_confidence,
                     "overrides_prior": item.overrides_prior,
+                    # 097: event time and statement time, as iso strings like
+                    # event_date. Carried for scripts; nothing renders them yet.
+                    "valid_from": item.valid_from.isoformat() if item.valid_from else None,
+                    "valid_to": item.valid_to.isoformat() if item.valid_to else None,
+                    "mentioned_at": item.mentioned_at.isoformat() if item.mentioned_at else None,
                 },
             )
         elif isinstance(item, ProcedureSummary):

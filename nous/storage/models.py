@@ -768,6 +768,13 @@ class Fact(Base):
     deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
     deactivation_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
+    # 097: event time (valid_from/valid_to, the days the fact was true; an
+    # event_date row is the one-day interval) and statement time (mentioned_at,
+    # the source episode's start; NULL = unknown, readers use learned_at).
+    valid_from: Mapped[date | None] = mapped_column(Date, nullable=True, default=None)
+    valid_to: Mapped[date | None] = mapped_column(Date, nullable=True, default=None)
+    mentioned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, default=None)
+
     # Relationships
     source_episode: Mapped["Episode | None"] = relationship(foreign_keys=[source_episode_id])
     source_decision: Mapped["Decision | None"] = relationship(foreign_keys=[source_decision_id])
