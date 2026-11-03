@@ -372,6 +372,7 @@ class SleepHandler:
         self._procedure_learner = None  # F012: Set externally if enabled
         self._job_lessons = None  # Job lessons: set externally if enabled
         self._job_fixer = None  # Job fixes: set externally if enabled
+        self._profile_card_writer = None  # Profile card: set externally if enabled
         self._rubric_evolver = None  # F024-3b: Set externally if enabled
         self._graph_densifier = None  # F040: Set externally if enabled
         self._episode_summarizer = None  # F060: Set externally if enabled
@@ -629,6 +630,22 @@ class SleepHandler:
                     success = await self._phase_stale_scan(sleep_stats)
                 if success:
                     phases_completed.append("stale_scan")
+
+            # Optional: registered only when the profile card writer is wired. After the stale scan, so a fact it
+            # deactivates leaves the card in this sleep.
+            if not self._interrupted and self._profile_card_writer is not None:
+                success = await self._run_phase(
+                    "profile_card",
+                    lambda: self._run_audited_phase(
+                        "profile_card",
+                        "rewrite",
+                        lambda: self._phase_profile_card(sleep_stats),
+                        sleep_stats,
+                        ("profile_card_rewritten",),
+                    ),
+                )
+                if success:
+                    phases_completed.append("profile_card")
 
             if not self._interrupted:
                 success = await self._run_phase(
@@ -2957,6 +2974,29 @@ class SleepHandler:
             return True
         except Exception:
             logger.warning("Job lessons phase failed", exc_info=True)
+            return False
+
+    async def _phase_profile_card(self, sleep_stats: dict) -> bool:
+        """Rewrite the bounded profile card when its source facts changed (one model call at most)."""
+        if self._profile_card_writer is None:
+            logger.debug("Sleep phase: profile_card (no writer configured)")
+            return True
+        try:
+            stats = await self._profile_card_writer.run_sleep(interrupted=lambda: self._interrupted)
+            # The rewrite is the one memory change, so it is the one top-level int the audit sums.
+            sleep_stats["profile_card_rewritten"] = stats.get("rewritten", 0)
+            keys = ("sources", "dropped", "rejected_dropped", "pinned_added", "trimmed", "entries", "tokens")
+            counts = {key: stats.get(key, 0) for key in keys}
+            sleep_stats["profile_card"] = {"outcome": stats.get("outcome", ""), **counts}
+            logger.info(
+                "Sleep profile card: %s, %d sources, %d dropped, %d rejected_dropped, %d pinned_added, %d trimmed, "
+                "%d entries, %d tokens",
+                stats.get("outcome", ""),
+                *counts.values(),
+            )
+            return True
+        except Exception:
+            logger.warning("Profile card phase failed", exc_info=True)
             return False
 
     async def _phase_job_fixes(self, sleep_stats: dict) -> bool:
