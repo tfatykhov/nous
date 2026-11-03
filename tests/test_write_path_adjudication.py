@@ -824,6 +824,128 @@ async def test_profile_candidate_survives_both_dedup_legs(heart):
             await s.commit()
 
 
+# ---------------------------------------------------------------------------
+# Background sessions: the enumerative leg runs only for conversations. A DAG
+# summary prompt, a subtask or a job report is a generated template full of
+# "Key: value" lines and lists, not knowledge a user supplied.
+# ---------------------------------------------------------------------------
+
+# A DAG summary turn as layer.py stores it: the prompt is key: value lines.
+_DAG_PROMPT_TRANSCRIPT = (
+    "User: "
+    + "\n".join(
+        [
+            "DAG: nightly-report",
+            "Status: completed",
+            "Node: fetch_metrics",
+            "Result: ok",
+            "Node: build_report",
+            "Result: ok",
+            "Node: publish",
+            "Result: skipped",
+            "Duration: 412 seconds",
+        ]
+    )
+    + "\n\nAssistant: The nightly report DAG finished; publish was skipped because nothing changed."
+)
+
+_PASTED_LIST_CHAT = "\n\n".join(
+    [
+        "User: Please keep these notes about the team:\n"
+        + "\n".join(f"- Person {i} owns service number {i}." for i in range(8)),
+        "Assistant: Noted, I will keep them in mind.",
+    ]
+)
+
+
+def _session_routing_extractor(fe_mod):
+    heart = _stub_heart_for_extractor()
+    ext = fe_mod.FactExtractor.__new__(fe_mod.FactExtractor)
+    ext._heart = heart
+    ext._settings = _make_settings(flag_on=True)  # the real 0.6 threshold
+    ext._dedup_via_search = False
+    ext._llm = object()
+    ext._enumerative_extractor = None
+    return ext, heart
+
+
+def _summarized(session_id, transcript):
+    from nous.events import Event
+
+    return Event(
+        type="episode_summarized",
+        agent_id="nous-default",
+        session_id=session_id,
+        data={
+            "episode_id": str(uuid4()),
+            "summary": {"summary": "s"},
+            "candidate_facts": _mixed_candidates("preference"),
+            "transcript": transcript,
+        },
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "session_id",
+    [
+        "dag-summary-0123456789abcdef-g1",
+        "subtask-1a2b3c4d",
+        "heartbeat-1a2b3c4d",
+        "dynamic-check-disk-1a2b3c4d",
+        "dynamic-callback-disk-1a2b3c4d",
+        "intent-6f1c2d3e-5a4b-4c3d-8e2f-1a2b3c4d5e6f",
+        "proposal-0b1c2d3e-5a4b-4c3d-8e2f-1a2b3c4d5e6f",
+        "claude-job-20261103-1",
+    ],
+)
+async def test_background_session_never_reaches_enumerative_leg(monkeypatch, session_id):
+    """A key: value DAG prompt passes the density gate, but a background
+    session never reaches the enumerative leg; its summarizer candidates
+    take the normal path, all of them."""
+    from nous.handlers import fact_extractor as fe_mod
+    from nous.handlers.enumerative_extractor import is_enumerable
+
+    assert is_enumerable(_DAG_PROMPT_TRANSCRIPT, 0.6)  # the gate alone would fire
+    process = AsyncMock(return_value=[uuid4()])
+    monkeypatch.setattr("nous.handlers.enumerative_extractor.EnumerativeExtractor.process_transcript", process)
+    ext, heart = _session_routing_extractor(fe_mod)
+
+    await ext.handle(_summarized(session_id, _DAG_PROMPT_TRANSCRIPT))
+
+    process.assert_not_called()
+    assert [fi.category for fi in heart._captured] == ["preference", "technical"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "session_id", ["3f2b8c1e-9d4a-4b7e-a1c2-5d6e7f8a9b0c", "ingest-factconsolidation_sh_6k-1a2b3c4d", None]
+)
+async def test_conversation_with_pasted_list_reaches_enumerative_leg(monkeypatch, session_id):
+    """A chat (uuid session), a MemoryAgentBench ingest session and a caller
+    with no session (nous_eval) still reach the enumerative leg."""
+    from nous.handlers import fact_extractor as fe_mod
+
+    process = AsyncMock(return_value=[uuid4()])
+    monkeypatch.setattr("nous.handlers.enumerative_extractor.EnumerativeExtractor.process_transcript", process)
+    ext, _heart = _session_routing_extractor(fe_mod)
+
+    await ext.handle(_summarized(session_id, _PASTED_LIST_CHAT))
+
+    process.assert_called_once()
+
+
+def test_is_background_session_covers_the_minted_prefixes():
+    from nous.api.execution_context import is_background_session
+    from nous.api.idempotency import SUMMARY_SESSION_PREFIX
+    from nous.brain.continuation import INTENT_SESSION_PREFIX
+
+    for sid in (f"{SUMMARY_SESSION_PREFIX}abc-g1", f"{INTENT_SESSION_PREFIX}{uuid4()}", "subtask-1a2b3c4d"):
+        assert is_background_session(sid) is True
+    for sid in (str(uuid4()), "ingest-x-1a2b3c4d", "", None):
+        assert is_background_session(sid) is False
+
+
 @pytest.mark.asyncio
 async def test_flag_on_narrative_keeps_legacy_path(monkeypatch):
     """Flag on + NARRATIVE transcript (density below threshold): candidate path

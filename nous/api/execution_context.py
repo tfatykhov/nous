@@ -44,6 +44,35 @@ BACKGROUND_BASH_TIMEOUT = 120  # seconds
 # (NOUS_DAG_DELIVERY_AGENT_SUMMARY_TIMEOUT_SECONDS, 120 s) are bounded as a whole.
 SHORT_BACKGROUND_KINDS: frozenset[str] = frozenset({"agent_action", "heartbeat_check", "dag_summary"})
 
+# Session ids of the sessions nobody converses in. ExecutionContext.is_background is
+# per turn and is gone by the time a session ends; code that has only the session id
+# (an episode's facts, at summary time) uses is_background_session. Literals, because
+# the modules that mint them import this one:
+#   subtask-          handlers/subtask_worker.py, subtask_executor.py, api/tools.py
+#   heartbeat-        heartbeat/runner.py (triage)
+#   dynamic-check-    heartbeat/dynamic.py
+#   dynamic-callback- heartbeat/runner.py
+#   intent-           brain/continuation.py INTENT_SESSION_PREFIX
+#   proposal-         handlers/continuation_runner.py (an approved action)
+#   dag-              api/idempotency.py SUMMARY_SESSION_PREFIX ("dag-summary-")
+#   claude-           the claude-jobs runner reporting a job over /chat
+BACKGROUND_SESSION_PREFIXES: tuple[str, ...] = (
+    "subtask-",
+    "heartbeat-",
+    "dynamic-check-",
+    "dynamic-callback-",
+    "intent-",
+    "proposal-",
+    "dag-",
+    "claude-",
+)
+
+
+def is_background_session(session_id: str | None) -> bool:
+    """True for a session id minted by a background path. Anything else,
+    including no session id, counts as a conversation."""
+    return bool(session_id) and session_id.startswith(BACKGROUND_SESSION_PREFIXES)
+
 
 def _as_uuid(value: Any) -> UUID | None:
     if value is None or isinstance(value, UUID):

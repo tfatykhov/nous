@@ -30,6 +30,7 @@ def _parse_episode_uuid(episode_id: str | None) -> UUID | None:
     except (ValueError, TypeError):
         return None
 
+from nous.api.execution_context import is_background_session
 from nous.cognitive.context import TIER1_FACT_CATEGORIES
 from nous.config import Settings
 from nous.events import Event, EventBus
@@ -230,6 +231,7 @@ class FactExtractor:
         episode_id: str,
         transcript: str | None = None,
         candidate_facts: list | None = None,
+        session_id: str | None = None,
     ) -> list[UUID]:
         """F051.5: Public direct-invocation entry point.
 
@@ -247,6 +249,10 @@ class FactExtractor:
         extract_and_store falls back to ``summary.get("candidate_facts")``.
 
         ``handle()`` discards the return value; ingest paths consume it.
+
+        ``session_id`` is the episode's session: the enumerative leg does not
+        run for a background session (``is_background_session``). None, as
+        direct callers pass it, counts as a conversation.
         """
         if not summary:
             return []
@@ -286,11 +292,16 @@ class FactExtractor:
         # source of profile facts, and they have no enumerative twin in their
         # category: the enumerative schema offers only technical/concept/tool
         # and remaps a drifted profile label to technical.
+        # Background sessions (DAG summaries, subtasks, heartbeat, continuation,
+        # job reports) never take this leg: their transcripts are generated
+        # prompts full of "Key: value" lines and lists, not knowledge a user
+        # supplied. Their candidates take the normal path below.
         if (
             getattr(self._settings, "extraction_enumerative_enabled", False) is True
             and getattr(self._settings, "enumerative_classifier", "heuristic") != "off"
             and transcript
             and self._llm is not None
+            and not is_background_session(session_id)
         ):
             from nous.handlers.enumerative_extractor import EnumerativeExtractor, is_enumerable
             if is_enumerable(transcript, self._settings.enumerative_density_threshold):
@@ -477,6 +488,7 @@ class FactExtractor:
                 episode_id=event.data.get("episode_id", "?"),
                 transcript=transcript,
                 candidate_facts=event.data.get("candidate_facts", []),
+                session_id=event.session_id,
             )
         except Exception:
             logger.exception("Fact extraction failed for episode %s", event.data.get("episode_id"))

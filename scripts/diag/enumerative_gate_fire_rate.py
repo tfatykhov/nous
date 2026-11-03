@@ -3,9 +3,11 @@
 The old gate (b43c46a8) counted a line as a hit when it was a list item or any
 10-180 char line ending in "." or ";", so ordinary chat prose fired it. The new
 gate counts list items, "key: value" lines and 10-80 char statements outside
-Assistant turns, never a speaker-labelled line, and needs five hits. This
-script runs both over a set of texts and prints counts and rates only, never
-any text.
+Assistant turns, never a speaker-labelled line, and needs five hits; and the
+enumerative leg does not run at all for a background session (DAG summary,
+subtask, heartbeat, continuation, job report). This script runs both over a
+set of texts and prints counts and rates only, never any text: overall, per
+session kind, and the kinds of line behind the new decision's fires.
 
 It is self-contained so it can run inside an image that still has the old
 gate: from nous it imports only Settings, for the database connection.
@@ -16,7 +18,7 @@ gate: from nous it imports only Settings, for the database connection.
     python scripts/diag/enumerative_gate_fire_rate.py --limit 500
     docker exec -i nous-agent python - --limit 500 < scripts/diag/enumerative_gate_fire_rate.py
 
-    # local corpora, one text per file
+    # local corpora, one text per file (session kind "file", never background)
     python scripts/diag/enumerative_gate_fire_rate.py --files "corpus/**/*.txt"
 
 The threshold defaults to Settings().enumerative_density_threshold.
@@ -29,6 +31,7 @@ import asyncio
 import glob
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 # Run from a checkout, put its root on the path. Piped to `python -`, __file__
@@ -40,10 +43,11 @@ if _HERE.is_file():
 from nous.config import Settings  # noqa: E402
 
 # ---------------------------------------------------------------------------
-# Measurement copies of the two gate decisions. They are kept in sync with
-# nous/handlers/enumerative_extractor.py by hand, so this script measures the
-# same rules in an image that does not have the new gate yet. Delete this
-# script once the new gate is rolled out.
+# Measurement copies of the gate decisions. They are kept in sync with
+# nous/handlers/enumerative_extractor.py and is_background_session in
+# nous/api/execution_context.py by hand, so this script measures the same rules
+# in an image that does not have them yet. Delete this script once the new
+# gate is rolled out.
 # ---------------------------------------------------------------------------
 
 # Old gate: density_score / is_enumerable as of b43c46a8.
@@ -108,17 +112,67 @@ def _new_gate(text: str, threshold: float) -> bool:
     return _new_density_score(text) >= threshold
 
 
+# New: is_background_session / BACKGROUND_SESSION_PREFIXES on fix/profile-learning.
+_BACKGROUND_SESSION_PREFIXES = (
+    "subtask-",
+    "heartbeat-",
+    "dynamic-check-",
+    "dynamic-callback-",
+    "intent-",
+    "proposal-",
+    "dag-",
+    "claude-",
+)
+
+
+def _is_background_session(session_id: str | None) -> bool:
+    return bool(session_id) and session_id.startswith(_BACKGROUND_SESSION_PREFIXES)
+
+
+def _new_decision(session_id: str | None, text: str, threshold: float) -> bool:
+    """Whether the enumerative leg now runs for this episode."""
+    return not _is_background_session(session_id) and _new_gate(text, threshold)
+
+
 # ---------------------------------------------------------------------------
 
+_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
+_LEADING_LETTERS = re.compile(r"[A-Za-z]+")
 
-def file_texts(pattern: str) -> list[str]:
+
+def _kind(session_id: str | None) -> str:
+    """A uuid-shaped session id is a chat; otherwise the leading letters."""
+    if not session_id:
+        return "none"
+    if _UUID.match(session_id):
+        return "chat"
+    m = _LEADING_LETTERS.match(session_id)
+    return m.group(0).lower() if m else "other"
+
+
+def _hit_kinds(text: str) -> Counter:
+    """Hit lines of the new gate by kind (a line counts once, in this order)."""
+    kinds: Counter = Counter()
+    for line in _lines_outside_assistant_turns(text):
+        if _SPEAKER_LABEL.match(line):
+            continue
+        if _LIST_MARKER.match(line):
+            kinds["list"] += 1
+        elif _KEY_VALUE.match(line):
+            kinds["key_value"] += 1
+        elif _SHORT_STATEMENT.match(line):
+            kinds["short"] += 1
+    return kinds
+
+
+def file_items(pattern: str) -> list[tuple[str | None, str]]:
     paths = sorted(p for p in glob.glob(pattern, recursive=True) if Path(p).is_file())
-    return [Path(p).read_text(encoding="utf-8", errors="replace") for p in paths]
+    return [(None, Path(p).read_text(encoding="utf-8", errors="replace")) for p in paths]
 
 
-async def db_texts(settings: Settings, limit: int) -> list[str]:
-    """Transcripts of the agent's last ``limit`` closed episodes, read in a
-    read-only session, so nothing this script runs can write."""
+async def db_items(settings: Settings, limit: int) -> list[tuple[str | None, str]]:
+    """(session id, transcript) of the agent's last ``limit`` closed episodes,
+    read in a read-only session, so nothing this script runs can write."""
     import asyncpg
 
     conn = await asyncpg.connect(
@@ -134,7 +188,7 @@ async def db_texts(settings: Settings, limit: int) -> list[str]:
             raise SystemExit("could not make the session read-only; nothing was read")
         rows = await conn.fetch(
             """
-            SELECT transcript FROM heart.episodes
+            SELECT session_id, transcript FROM heart.episodes
             WHERE agent_id = $1 AND ended_at IS NOT NULL
               AND transcript IS NOT NULL AND transcript <> ''
             ORDER BY ended_at DESC
@@ -145,18 +199,21 @@ async def db_texts(settings: Settings, limit: int) -> list[str]:
         )
     finally:
         await conn.close()
-    return [r["transcript"] for r in rows]
+    return [(r["session_id"], r["transcript"]) for r in rows]
 
 
 def _rate(n: int, total: int) -> str:
     return f"{n} / {total} ({100.0 * n / total:.1f}%)" if total else f"{n} / 0"
 
 
-def report(texts: list[str], threshold: float, source: str) -> None:
+def report(items: list[tuple[str | None, str]], threshold: float, source: str, from_files: bool = False) -> None:
     both = old_only = new_only = neither = 0
-    for text in texts:
+    per_kind: dict[str, Counter] = {}
+    hit_kinds: Counter = Counter()
+    for session_id, text in items:
         old = _old_gate(text, threshold)
-        new = _new_gate(text, threshold)
+        new_text = _new_gate(text, threshold)
+        new = _new_decision(session_id, text, threshold)
         if old and new:
             both += 1
         elif old:
@@ -165,11 +222,30 @@ def report(texts: list[str], threshold: float, source: str) -> None:
             new_only += 1
         else:
             neither += 1
-    total = len(texts)
+        row = per_kind.setdefault("file" if from_files else _kind(session_id), Counter())
+        row["episodes"] += 1
+        row["old"] += old
+        row["new_text"] += new_text
+        row["new"] += new
+        row["new_only"] += new and not old
+        if new:
+            hit_kinds.update(_hit_kinds(text))
+    total = len(items)
     print(f"source: {source}  texts: {total}  threshold: {threshold}")
     print(f"old gate fires: {_rate(both + old_only, total)}")
-    print(f"new gate fires: {_rate(both + new_only, total)}")
+    print(f"new gate fires: {_rate(both + new_only, total)}  (text gate, background sessions skipped)")
     print(f"both: {both}  old only: {old_only}  new only: {new_only}  neither: {neither}")
+    print()
+    print(f"{'kind':<12}{'episodes':>9}{'old':>7}{'new text':>10}{'new':>7}{'new only':>10}")
+    for kind, row in sorted(per_kind.items(), key=lambda kv: (-kv[1]["episodes"], kv[0])):
+        eps, old_n, text_n, new_n, only_n = (row[k] for k in ("episodes", "old", "new_text", "new", "new_only"))
+        print(f"{kind:<12}{eps:>9}{old_n:>7}{text_n:>10}{new_n:>7}{only_n:>10}")
+    print("('new text' is the text gate alone; 'new' also skips background sessions)")
+    print()
+    print(
+        f"hit lines across new fires: list {hit_kinds['list']}  key_value {hit_kinds['key_value']}"
+        f"  short {hit_kinds['short']}"
+    )
 
 
 def main() -> None:
@@ -187,10 +263,10 @@ def main() -> None:
     settings = Settings()
     threshold = args.threshold if args.threshold is not None else settings.enumerative_density_threshold
     if args.files:
-        report(file_texts(args.files), threshold, "files")
+        report(file_items(args.files), threshold, "files", from_files=True)
     else:
-        texts = asyncio.run(db_texts(settings, args.limit))
-        report(texts, threshold, f"db agent={settings.agent_id} last {args.limit} closed episodes")
+        items = asyncio.run(db_items(settings, args.limit))
+        report(items, threshold, f"db agent={settings.agent_id} last {args.limit} closed episodes")
 
 
 if __name__ == "__main__":

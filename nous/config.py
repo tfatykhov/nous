@@ -500,7 +500,8 @@ class Settings(BaseSettings):
             "enumerable episodes route fact storage through the enumerative leg "
             "INSTEAD of the candidate/summary leg (summary candidates in the "
             "profile categories person/preference/rule are still stored); "
-            "narrative episodes keep the current path unchanged. Requires "
+            "narrative episodes and background sessions (DAG, subtask, heartbeat, "
+            "continuation, job reports) keep the current path unchanged. Requires "
             "background LLM."
         ),
     )

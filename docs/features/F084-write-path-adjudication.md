@@ -32,7 +32,11 @@ of both counts, since facts come from what the user supplied (a turn starts with
 at the top of the transcript or after a blank line, as layer.py joins turns). If
 the score meets `NOUS_ENUMERATIVE_DENSITY_THRESHOLD` (default 0.6), the episode is **enumerable**
 and routes fact storage through the enumerative leg INSTEAD of the candidate-facts leg (the legacy
-summarize-then-extract path). Narrative episodes are byte-identical to today.
+summarize-then-extract path). Narrative episodes are byte-identical to today. Episodes of
+background sessions (`is_background_session`: DAG summary, subtask, heartbeat, dynamic check and
+callback, continuation, approved action and claude-job sessions) never take the enumerative leg:
+their transcripts are generated prompts full of `Key: value` lines and lists, not knowledge a user
+supplied.
 
 **Modal, not additive (deviation #4):** storing both paths would mint un-mergeable paraphrase
 variants (the enumerative leg produces keyed facts; the legacy leg produces keyless summary facts;
