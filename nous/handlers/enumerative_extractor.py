@@ -48,8 +48,10 @@ def _lines_outside_assistant_turns(text: str) -> list[str]:
 
     layer.py joins turns ("User: ..." / "Assistant: ...") with a blank line,
     so a turn starts with a speaker label at the top of the text or after a
-    blank line; a labelled line anywhere else (a roster's "Assistant: Bob")
-    stays in the current turn. Text before any label counts as supplied text.
+    blank line. A labelled line that directly follows another non-empty line
+    (a roster's "Assistant: Bob") stays in the current turn; after a blank
+    line, even inside a user's message, it starts a new turn. Text before any
+    label counts as supplied text.
     """
     kept: list[str] = []
     in_assistant = False

@@ -28,13 +28,16 @@ R1 is **modal (density-adaptive, per R1.1)**. A cheap heuristic (`density_score`
 fraction of transcript lines that are list items, `key: value` lines or short (10–80 char)
 statements; a line starting with a speaker label (`User:`, `Assistant:`, `System:`, `Human:`)
 never counts, and fewer than five such lines scores 0. Lines inside Assistant turns are left out
-of both counts, since facts come from what the user supplied (a turn starts with a speaker label
-at the top of the transcript or after a blank line, as layer.py joins turns). If
+of both counts, since facts come from what the user supplied. A turn starts with a speaker label
+at the top of the transcript or after a blank line, as layer.py joins turns; a labelled line right
+after another non-empty line stays in the current turn, but after a blank line it starts a new
+turn even inside a user's message. If
 the score meets `NOUS_ENUMERATIVE_DENSITY_THRESHOLD` (default 0.6), the episode is **enumerable**
 and routes fact storage through the enumerative leg INSTEAD of the candidate-facts leg (the legacy
 summarize-then-extract path). Narrative episodes are byte-identical to today. Episodes of
-background sessions (`is_background_session`: DAG summary, subtask, heartbeat, dynamic check and
-callback, continuation, approved action and claude-job sessions) never take the enumerative leg:
+background sessions (`is_background_session`: DAG summary, subtask, scheduled continuation,
+heartbeat, dynamic check and callback, continuation, approved action and claude-job sessions) never
+take the enumerative leg:
 their transcripts are generated prompts full of `Key: value` lines and lists, not knowledge a user
 supplied.
 

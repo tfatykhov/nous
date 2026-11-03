@@ -255,7 +255,7 @@ class TestConfidence:
         assert score == pytest.approx(0.70, abs=0.01)
 
     def test_user_direct_without_source_text_keeps_declared_confidence(self):
-        """G-7: a fact the agent stores with learn_fact has no transcript
+        """A fact the agent stores with learn_fact has no transcript
         source_text. It is the user's own statement, so its declared
         confidence stands instead of the 0.3 ungrounded floor."""
         ctrl = _controller()
@@ -745,7 +745,7 @@ class TestUserDirectBonus:
 
     @pytest.mark.asyncio
     async def test_plain_user_fact_admitted_at_prod_threshold(self):
-        """G-7: learn_fact with no category and no source text, scored with a
+        """learn_fact with no category and no source text, scored with a
         weak utility and some similar facts already stored, passes the 0.60
         threshold. Before user_direct kept its declared confidence it was
         capped at 0.3 and this scored 0.58, so the fact was rejected."""

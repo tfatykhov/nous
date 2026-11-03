@@ -49,6 +49,8 @@ SHORT_BACKGROUND_KINDS: frozenset[str] = frozenset({"agent_action", "heartbeat_c
 # (an episode's facts, at summary time) uses is_background_session. Literals, because
 # the modules that mint them import this one:
 #   subtask-          handlers/subtask_worker.py, subtask_executor.py, api/tools.py
+#   schedule-         handlers/task_scheduler.py (a scheduled continuation's session,
+#                     which subtask_worker.py runs instead of subtask-)
 #   heartbeat-        heartbeat/runner.py (triage)
 #   dynamic-check-    heartbeat/dynamic.py
 #   dynamic-callback- heartbeat/runner.py
@@ -58,6 +60,7 @@ SHORT_BACKGROUND_KINDS: frozenset[str] = frozenset({"agent_action", "heartbeat_c
 #   claude-           the claude-jobs runner reporting a job over /chat
 BACKGROUND_SESSION_PREFIXES: tuple[str, ...] = (
     "subtask-",
+    "schedule-",
     "heartbeat-",
     "dynamic-check-",
     "dynamic-callback-",

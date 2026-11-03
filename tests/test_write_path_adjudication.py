@@ -155,7 +155,7 @@ _CHAT_PROSE_TRANSCRIPT = "\n\n".join(
 
 
 def test_density_gate_skips_conversational_prose():
-    """H-4: a User/Assistant transcript in long prose sentences is not enumerable."""
+    """A User/Assistant transcript in long prose sentences is not enumerable."""
     lines = [ln for ln in _CHAT_PROSE_TRANSCRIPT.splitlines() if ln.strip()]
     assert all(81 <= len(ln) <= 180 and ln.endswith(".") for ln in lines)  # fixture shape
     assert density_score(_CHAT_PROSE_TRANSCRIPT) < 0.6
@@ -293,8 +293,9 @@ def test_density_gate_counts_user_pasted_list_in_chat():
 
 def test_density_gate_label_inside_a_turn_does_not_switch_turns():
     """A turn starts only at the top of the text or after a blank line, as
-    layer.py joins turns. "Assistant: Bob Jones" inside a user's pasted roster
-    is a roster line, so the rest of the roster still counts."""
+    layer.py joins turns. "Assistant: Bob Jones" right after another roster
+    line is a roster line, so the rest of the roster still counts. (After a
+    blank line it would start an Assistant turn.)"""
     roster = "\n".join(
         [
             "User: Here is who does what on the project:",
@@ -891,6 +892,7 @@ def _summarized(session_id, transcript):
     [
         "dag-summary-0123456789abcdef-g1",
         "subtask-1a2b3c4d",
+        "schedule-1a2b3c4d-3",
         "heartbeat-1a2b3c4d",
         "dynamic-check-disk-1a2b3c4d",
         "dynamic-callback-disk-1a2b3c4d",
@@ -940,7 +942,12 @@ def test_is_background_session_covers_the_minted_prefixes():
     from nous.api.idempotency import SUMMARY_SESSION_PREFIX
     from nous.brain.continuation import INTENT_SESSION_PREFIX
 
-    for sid in (f"{SUMMARY_SESSION_PREFIX}abc-g1", f"{INTENT_SESSION_PREFIX}{uuid4()}", "subtask-1a2b3c4d"):
+    for sid in (
+        f"{SUMMARY_SESSION_PREFIX}abc-g1",
+        f"{INTENT_SESSION_PREFIX}{uuid4()}",
+        "subtask-1a2b3c4d",
+        "schedule-1a2b3c4d-3",  # task_scheduler's continuation session
+    ):
         assert is_background_session(sid) is True
     for sid in (str(uuid4()), "ingest-x-1a2b3c4d", "", None):
         assert is_background_session(sid) is False

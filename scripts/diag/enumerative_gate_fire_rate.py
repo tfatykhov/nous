@@ -1,5 +1,7 @@
 """How often the enumerative extractor's density gate fires, old rule vs new.
 
+Delete after the new gate has run in prod for two weeks (added 2026-11-03).
+
 The old gate (b43c46a8) counted a line as a hit when it was a list item or any
 10-180 char line ending in "." or ";", so ordinary chat prose fired it. The new
 gate counts list items, "key: value" lines and 10-80 char statements outside
@@ -115,6 +117,7 @@ def _new_gate(text: str, threshold: float) -> bool:
 # New: is_background_session / BACKGROUND_SESSION_PREFIXES on fix/profile-learning.
 _BACKGROUND_SESSION_PREFIXES = (
     "subtask-",
+    "schedule-",
     "heartbeat-",
     "dynamic-check-",
     "dynamic-callback-",
