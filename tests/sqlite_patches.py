@@ -329,7 +329,8 @@ async def sqlite_find_max_similarity(
             sim = cosine_similarity(embedding, fact_emb)
             if max_sim is None or sim > max_sim:
                 max_sim = sim
-    return max_sim
+    # Production returns 0.0 when no comparable fact exists (novelty 1.0).
+    return max_sim if max_sim is not None else 0.0
 
 
 async def sqlite_search_all(
