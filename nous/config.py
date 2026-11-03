@@ -719,6 +719,19 @@ class Settings(BaseSettings):
                 raise ValueError(f"context_budget_overrides[{key!r}]={val} must be >= 0")
         return v
 
+    # E-2/E-3: what the pre-turn decision, fact, episode and Session Profile
+    # legs search with. "bag" is the keyword bag of IntentClassifier.classify.
+    # "conditional" is the input itself when it is at most
+    # context_query_short_chars long, and otherwise the task part of the prompt
+    # (intent.extract_query). The procedure ladder searches the raw input in
+    # both modes. Conditional mode also skips retrieval only for an empty or
+    # acknowledgement input (E-4), not for any input without a keyword.
+    context_query_mode: Literal["bag", "conditional"] = "bag"
+    context_query_short_chars: int = Field(default=300, ge=1)
+    # Skip the memory legs of a build whose query equals the previous build's
+    # query for the same session, as a short input skips them.
+    context_skip_unchanged_query: bool = False
+
     @field_validator("effort", mode="before")
     @classmethod
     def _normalize_effort_alias(cls, v: object) -> object:

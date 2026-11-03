@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import OrderedDict
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -207,6 +208,9 @@ DEFAULT_FETCH_LIMITS: dict[str, int] = {
     "fact": 15, "decision": 8, "procedure": 5, "episode": 8,
 }
 
+# context_skip_unchanged_query: sessions whose last query is remembered.
+_LAST_QUERY_SESSIONS = 1000
+
 # Markers that identify internal/system episodes (handler tasks, summarizers)
 _SYSTEM_EPISODE_MARKERS = ("SYSTEM TASK", "SYSTEM:", "DO NOT USE TOOLS")
 
@@ -271,6 +275,18 @@ class ContextEngine:
         self._settings = settings
         self._identity_prompt = identity_prompt
         self._deduplicator = deduplicator
+        # context_skip_unchanged_query: each session's last plan query, in-process.
+        self._last_query_by_session: OrderedDict[str, tuple[str, ...]] = OrderedDict()
+
+    def _query_unchanged(self, session_id: str, query: tuple[str, ...]) -> bool:
+        """Whether ``query`` equals this session's previous one. Records it
+        either way, for at most ``_LAST_QUERY_SESSIONS`` sessions (LRU)."""
+        unchanged = self._last_query_by_session.get(session_id) == query
+        self._last_query_by_session[session_id] = query
+        self._last_query_by_session.move_to_end(session_id)
+        if len(self._last_query_by_session) > _LAST_QUERY_SESSIONS:
+            self._last_query_by_session.popitem(last=False)
+        return unchanged
 
     async def build(
         self,
@@ -370,6 +386,8 @@ class ContextEngine:
                 "section budget is 0" if budget_value <= 0
                 else f"retrieval plan skipped '{mem_type}'"
             )
+            if _unchanged_skip:
+                reason = "query unchanged since this session's previous build"
             tr.leg(leg, attempted=False, n_returned=0, skip_reason=reason)
 
         @_tr_guard
@@ -460,6 +478,25 @@ class ContextEngine:
 
         recalled_score_map: dict[str, float] = {}
         _pinned_fact_ids: set[str] = set()
+
+        # context_skip_unchanged_query: a plan whose query equals this session's
+        # previous one is replaced by the plan a short input gets (intent.py),
+        # so no memory leg runs and no memory section renders. A plan that
+        # already skips has no query and leaves the remembered one alone.
+        _unchanged_skip = False
+        if (
+            retrieval_plan
+            and retrieval_plan.queries
+            and getattr(self._settings, "context_skip_unchanged_query", False) is True
+        ):
+            _plan_query = tuple(q.query_text for q in retrieval_plan.queries)
+            if self._query_unchanged(session_id, _plan_query):
+                _unchanged_skip = True
+                logger.info("Context build skips memory legs: query unchanged for session %s", session_id)
+                retrieval_plan = RetrievalPlan(
+                    skip_types={"decision", "fact", "procedure", "episode"},
+                    budget_overrides={"decisions": 0, "facts": 0, "procedures": 0, "episodes": 0},
+                )
 
         # Apply budget overrides from retrieval plan (F6: REPLACE semantics)
         skip_types: set[str] = set()
