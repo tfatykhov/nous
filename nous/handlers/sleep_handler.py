@@ -1175,6 +1175,23 @@ class SleepHandler:
             await session.commit()
             return ok
 
+    @staticmethod
+    async def _merge_abort_outcome(session, merged_detail) -> str | None:
+        """Why a merge must not deactivate its sources, or None to go ahead.
+
+        ``merged_detail`` is what ``heart.learn`` returned inside the merge's
+        own session. A confirmed dupe (``confirmation_count >= 1``, a fresh
+        insert has 0) is a THIRD fact that does not contain the sources. A
+        merged fact that lost its own write-time scan is already inactive, so
+        the sources would point at a fact nobody reads.
+        """
+        if merged_detail.confirmation_count >= 1:
+            return "merge_confirmed_third_fact"
+        merged_row = await session.get(Fact, merged_detail.id)
+        if merged_row is None or merged_row.active is False:
+            return "merge_target_inactive"
+        return None
+
     async def _phase_resolve_contradictions(self, sleep_stats: dict) -> bool:
         """Phase 4.5: Find and resolve contradictory facts (F031)."""
         if not self._llm:
@@ -1384,24 +1401,22 @@ class SleepHandler:
                                             "F031 MERGE: heart.learn rejected the merged fact unexpectedly: %s",
                                             merged_detail.explanation,
                                         )
-                                    elif merged_detail.confirmation_count >= 1:
-                                        # K-2: dedup confirmed a THIRD fact (a
-                                        # fresh insert has 0). Superseding the
-                                        # sources by it would drop what they
-                                        # say: abort, keep both sources.
+                                    elif (abort := await self._merge_abort_outcome(session, merged_detail)) is not None:
+                                        # Abort, keep both sources, write nothing.
                                         await session.rollback()
                                         self._emit_action_event(
                                             "f031_merge",
                                             {
                                                 "fact1_id": str(fact1_id),
                                                 "fact2_id": str(fact2_id),
-                                                "confirmed_fact_id": str(merged_detail.id),
+                                                "learned_fact_id": str(merged_detail.id),
                                                 "merged_content": merged_content[:500],
-                                                "outcome": "merge_confirmed_third_fact",
+                                                "outcome": abort,
                                             },
                                         )
                                         logger.info(
-                                            "F031 MERGE: merged content confirmed %s — keeping %s and %s",
+                                            "F031 MERGE aborted (%s, learned %s) — keeping %s and %s",
+                                            abort,
                                             merged_detail.id,
                                             fact1_id,
                                             fact2_id,
@@ -1830,6 +1845,8 @@ class SleepHandler:
                 #   rejected_by_admission: heart.learn returned FactRejected
                 #   merge_confirmed_third_fact: the merged content confirmed an
                 #     existing non-member fact; nothing written
+                #   merge_target_inactive: the merged fact lost its own
+                #     write-time scan; nothing written
                 #   merged: full success (originals deactivated, new fact stored)
                 merged_fact_id: str | None = None
 
@@ -1883,14 +1900,14 @@ class SleepHandler:
                         exclude_ids=[f.id for f in facts],
                     )
 
-                    # K-2: a confirmed dupe (confirmation_count >= 1, a fresh
-                    # insert has 0) is a THIRD fact; superseding the members
-                    # by it would drop what they say. Abort, keep them.
+                    # A third fact confirmed, or a merged fact that is already
+                    # inactive: abort, keep the members, write nothing.
                     rejected = isinstance(merged_detail, FactRejected)
-                    if rejected or merged_detail.confirmation_count >= 1:
+                    abort = None if rejected else await self._merge_abort_outcome(session, merged_detail)
+                    if rejected or abort is not None:
                         if not rejected:
                             await session.rollback()
-                        merge_outcome = "rejected_by_admission" if rejected else "merge_confirmed_third_fact"
+                        merge_outcome = "rejected_by_admission" if rejected else abort
                         self._emit_action_event(
                             "f027_cluster_merge",
                             {
@@ -1899,7 +1916,7 @@ class SleepHandler:
                                 "source_count": len(facts),
                                 "merged_content": str(merge_result.get("merged_content", ""))[:500],
                                 "merged_fact_id": None,
-                                "confirmed_fact_id": None if rejected else str(merged_detail.id),
+                                "learned_fact_id": None if rejected else str(merged_detail.id),
                                 "confidence": float(merge_result.get("confidence", 0.8)),
                                 "refuse_reason": None,
                                 "outcome": merge_outcome,

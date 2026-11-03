@@ -185,8 +185,8 @@ def test_2d_added_no_migration_and_no_setting():  # PIN: changes when a later PR
     migrations = Path(__file__).resolve().parents[1] / "sql" / "migrations"
     # 2e 085, ledger 086, task scores 087, scorer heartbeat 088, node attempt history 089, check audits 090,
     # schedule policies 091, procedure versions 092 (F102), dag wait nodes 093, fact deactivation
-    # reason 094; 2d none
-    assert sorted(migrations.glob("*.sql"))[-1].name.startswith("094_")
+    # reason 094, refines edge relation 095; 2d none
+    assert sorted(migrations.glob("*.sql"))[-1].name.startswith("095_")
     named = {name for name in Settings.model_fields if "proposal" in name or "owner_action" in name}
     assert named == {"intention_proposal_ttl_hours"}
 

@@ -524,8 +524,10 @@ class TestContradictionResolution:
         orm2 = MagicMock()
         orm2.superseded_by = None
         orm_facts = {fact1_id: orm1, fact2_id: orm2}
+        # PR-D: the merge re-reads the merged fact before touching the sources.
+        merged_row = MagicMock(active=True, superseded_by=None)
         mock_session = MagicMock()
-        mock_session.get = AsyncMock(side_effect=lambda _model, fid: orm_facts.get(fid))
+        mock_session.get = AsyncMock(side_effect=lambda _model, fid: {**orm_facts, merged_id: merged_row}.get(fid))
         mock_session.commit = AsyncMock()
         cm = MagicMock()
         cm.__aenter__ = AsyncMock(return_value=mock_session)
@@ -552,7 +554,7 @@ class TestContradictionResolution:
         heart.db.session.assert_called_once()
         mock_session.commit.assert_awaited_once()
         # Both originals fetched and linked to merged fact.
-        assert mock_session.get.await_count == 2
+        assert mock_session.get.await_count == 3  # the merged fact + both originals
         for orig_id, orm in orm_facts.items():
             assert orm.superseded_by == merged_id, (
                 f"orig {orig_id} should be linked to merged_id"
@@ -600,8 +602,10 @@ class TestContradictionResolution:
         orm2.superseded_by = None
         orm2.active = True
         orm_facts = {fact1_id: orm1, fact2_id: orm2}
+        # PR-D: the merge re-reads the merged fact before touching the sources.
+        merged_row = MagicMock(active=True, superseded_by=None)
         mock_session = MagicMock()
-        mock_session.get = AsyncMock(side_effect=lambda _model, fid: orm_facts.get(fid))
+        mock_session.get = AsyncMock(side_effect=lambda _model, fid: {**orm_facts, merged_id: merged_row}.get(fid))
         mock_session.commit = AsyncMock()
         cm = MagicMock()
         cm.__aenter__ = AsyncMock(return_value=mock_session)

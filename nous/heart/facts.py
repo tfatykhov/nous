@@ -1557,6 +1557,9 @@ class FactManager:
                     # F027: LLM disambiguation for ambiguous range. Fail
                     # closed: without a confident verdict both facts stay.
                     if similarity <= 0.95:
+                        # Each judged candidate spends a slot from the same
+                        # hourly pool the keyed resolver (R2) uses: up to
+                        # _SUBJECT_SUPERSESSION_CANDIDATES per learn.
                         if self._llm is None or not new_content or not self._key_budget_ok():
                             continue
                         classification = await self._classify_fact_pair(old.content, new_content)
@@ -4123,8 +4126,11 @@ class FactManager:
                     -- Only cool down GENUINE keep-both verdicts. Truncation-
                     -- downgraded merges (raw_action='MERGE') must still retry —
                     -- they are mergeable and now succeed under the 1000-token cap,
-                    -- so they should NOT be suppressed by the cooldown.
-                    AND e.data->>'raw_action' = 'KEEP_BOTH'
+                    -- so they should NOT be suppressed by the cooldown. A MERGE
+                    -- downgraded because a source is a tier-1 fact is a genuine
+                    -- keep-both too, it would be downgraded again next cycle.
+                    AND (e.data->>'raw_action' = 'KEEP_BOTH'
+                         OR e.data->>'downgraded_tier1' = 'true')
                     AND (
                         (e.data->>'fact1_id' = f1.id::text AND e.data->>'fact2_id' = f2.id::text)
                         OR (e.data->>'fact1_id' = f2.id::text AND e.data->>'fact2_id' = f1.id::text)

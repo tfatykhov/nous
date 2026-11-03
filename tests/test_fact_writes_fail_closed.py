@@ -21,18 +21,22 @@ One test (or a small group) per item of the PR-D brief:
 
 from __future__ import annotations
 
+import asyncio
 import math
+import re
 from datetime import date
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 
 from nous.heart.facts import FactManager
 from nous.heart.schemas import FactInput
-from nous.storage.models import Fact, FactEntityKey, GraphEdge
+from nous.storage.migrator import _split_sql_statements
+from nous.storage.models import Event, Fact, FactEntityKey, GraphEdge
 
 DIM = 1536
 
@@ -311,6 +315,7 @@ async def test_g5_a_distinct_refinement_below_the_band_inserts(heart, session):
     assert detail.id != old.id
     fm.is_distinct_fact.assert_awaited_once()
     assert (old.confirmation_count or 0) == 0
+    assert await _edge(session, detail.id, old.id, "refines")  # migration 095
 
 
 @pytest.mark.postgres_only
@@ -377,12 +382,19 @@ class _Agent:
     async def __aexit__(self, *exc):
         self.heart.agent_id, self.heart.facts.agent_id = self._orig
         async with self.heart.db.session() as s:
-            for model in (FactEntityKey, GraphEdge, Fact):
+            for model in (FactEntityKey, GraphEdge, Event, Fact):
                 await s.execute(delete(model).where(model.agent_id == self.agent_id))
             await s.commit()
         return False
 
-    async def fact(self, content: str, *, subject: str = "pr-d subject", category: str | None = "technical") -> Fact:
+    async def fact(
+        self,
+        content: str,
+        *,
+        subject: str = "pr-d subject",
+        category: str | None = "technical",
+        embedding: list[float] | None = None,
+    ) -> Fact:
         """A committed active row, embedded like heart.learn would embed it."""
         row = Fact(
             id=uuid4(),
@@ -390,7 +402,7 @@ class _Agent:
             content=content,
             subject=subject,
             category=category,
-            embedding=await self.heart.facts.embeddings.embed(content),
+            embedding=embedding if embedding is not None else await self.heart.facts.embeddings.embed(content),
             active=True,
         )
         async with self.heart.db.session() as s:
@@ -601,6 +613,203 @@ async def test_k7_a_failed_f027_merge_leaves_no_merged_fact(heart, monkeypatch):
         assert await agent.count(merged) == 0
         for member in members:
             assert (await agent.row(member.id)).active is True
+
+
+# ---------------------------------------------------------------------------
+# A merge never points its sources at a merged fact that is already inactive
+# ---------------------------------------------------------------------------
+
+
+def _merged_fact_loses_to(heart, winner_id):
+    """Stand-in contradiction scan that makes the new (merged) fact lose."""
+
+    async def lose(embedding, new_content, exclude_ids, session, new_fact_id=None, new_event_date=None):
+        assert await heart.facts.apply_supersession(winner_id, new_fact_id, session)
+        return None
+
+    return lose
+
+
+@pytest.mark.postgres_only
+async def test_f031_merge_whose_merged_fact_lost_is_aborted(heart, monkeypatch):
+    async with _Agent(heart) as agent:
+        a = await agent.fact("The alert router pages the primary on-call first.")
+        b = await agent.fact("The alert router escalates after fifteen minutes.")
+        winner = await agent.fact("The alert router config lives in the ops repository.", subject="router config")
+        merged = "The alert router pages the primary on-call and escalates after fifteen minutes."
+        heart.find_contradiction_candidates = AsyncMock(return_value=[_pair(a, b)])
+        monkeypatch.setattr(
+            "nous.handlers.sleep_handler.call_background_llm_structured", AsyncMock(return_value=_merge(merged))
+        )
+        monkeypatch.setattr(heart.facts, "_find_contradiction", _merged_fact_loses_to(heart, winner.id))
+        handler = _handler(heart)
+        stats: dict = {"facts_created": 0}
+        try:
+            await handler._phase_resolve_contradictions(stats)
+        finally:
+            del heart.find_contradiction_candidates
+
+        for source in (a, b):
+            row = await agent.row(source.id)
+            assert row.active is True and row.superseded_by is None
+        assert await agent.count(merged) == 0
+        assert stats["contradictions_resolved"] == 0
+        assert _outcomes(handler, "f031_merge") == ["merge_target_inactive"]
+
+
+@pytest.mark.postgres_only
+async def test_f027_merge_whose_merged_fact_lost_is_aborted(heart, monkeypatch):
+    async with _Agent(heart) as agent:
+        members = [
+            await agent.fact(f"Cluster member {i}: the backup job keeps {i + 7} daily copies.", subject="backup job")
+            for i in range(3)
+        ]
+        winner = await agent.fact("The backup job config lives in the ops repository.", subject="backup config")
+        merged = "The backup job keeps between seven and nine daily copies."
+        monkeypatch.setattr(
+            "nous.handlers.sleep_handler.call_background_llm_structured",
+            AsyncMock(return_value={"should_merge": True, "merged_content": merged, "confidence": 0.9}),
+        )
+        monkeypatch.setattr(heart.facts, "_find_contradiction", _merged_fact_loses_to(heart, winner.id))
+        handler = _handler(heart)
+        stats: dict = {}
+        assert await handler._phase_cluster_consolidation(stats) is True
+
+        for member in members:
+            row = await agent.row(member.id)
+            assert row.active is True and row.superseded_by is None
+        assert await agent.count(merged) == 0
+        assert stats["clusters_merged"] == 0
+        assert _outcomes(handler, "f027_cluster_merge") == ["merge_target_inactive"]
+
+
+# ---------------------------------------------------------------------------
+# A tier-1 MERGE downgraded to KEEP_BOTH cools the pair down like a KEEP_BOTH
+# ---------------------------------------------------------------------------
+
+
+async def _wait_for_event(heart, agent_id: str, event_type: str) -> None:
+    """The F031 resolution event is written fire-and-forget."""
+    for _ in range(200):
+        async with heart.db.session() as s:
+            found = await s.execute(
+                select(func.count())
+                .select_from(Event)
+                .where(Event.agent_id == agent_id, Event.event_type == event_type)
+            )
+            if found.scalar_one():
+                return
+        await asyncio.sleep(0.02)
+    raise AssertionError(f"no {event_type} event was written")
+
+
+@pytest.mark.postgres_only
+async def test_k9_a_tier1_merge_downgrade_is_not_rejudged_next_cycle(heart, monkeypatch):
+    monkeypatch.setattr(heart.facts._settings, "contradiction_recheck_cooldown_days", 30)
+    async with _Agent(heart) as agent:
+        await agent.fact("Tim prefers short written updates over calls.", category="person", embedding=ANCHOR)
+        await agent.fact("Tim's team sends its written updates every Friday.", embedding=_vec(0.85))
+
+        async def emit_event(event_type, data):  # what Brain.emit_event writes
+            async with heart.db.session() as s:
+                s.add(Event(agent_id=agent.agent_id, event_type=event_type, data=data))
+                await s.commit()
+
+        llm = AsyncMock(return_value=_merge("Tim prefers short written updates, which his team sends on Fridays."))
+        monkeypatch.setattr("nous.handlers.sleep_handler.call_background_llm_structured", llm)
+        handler = _handler(heart)
+        handler._brain = SimpleNamespace(emit_event=emit_event)
+
+        assert len(await heart.find_contradiction_candidates(limit=10)) == 1
+        await handler._phase_resolve_contradictions({"facts_created": 0})
+        assert llm.await_count == 1
+        await _wait_for_event(heart, agent.agent_id, "f031_contradiction_resolution")
+
+        assert await heart.find_contradiction_candidates(limit=10) == []
+        await handler._phase_resolve_contradictions({"facts_created": 0})
+        assert llm.await_count == 1  # skipped on the next cycle
+
+
+# ---------------------------------------------------------------------------
+# fact_learned on a caller's session is published only after that commit
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_fact_learned_on_an_injected_session_is_published_after_commit(heart, monkeypatch):
+    monkeypatch.setattr(heart.facts, "_admission_controller", None)
+    seen: list[tuple[str, bool]] = []
+
+    class _Bus:
+        async def emit(self, event):
+            async with heart.db.session() as other:  # another connection
+                visible = await other.get(Fact, UUID(event.data["fact_id"])) is not None
+            seen.append((event.type, visible))
+
+    monkeypatch.setattr(heart, "_bus", _Bus())
+    async with _Agent(heart):
+        async with heart.db.session() as s:
+            await heart.learn(FactInput(content="The release checklist now lives in the ops wiki."), session=s)
+            await asyncio.sleep(0)
+            assert seen == []
+            await s.commit()
+        await asyncio.gather(*list(heart._pending_emits))
+        assert seen == [("fact_learned", True)]
+
+        async with heart.db.session() as s:
+            await heart.learn(FactInput(content="The rollback drill runs on the first Monday."), session=s)
+            await s.rollback()
+        await asyncio.sleep(0)
+        assert not heart._pending_emits
+        assert seen == [("fact_learned", True)]
+
+
+# ---------------------------------------------------------------------------
+# Migration 095: the refines edge relation
+# ---------------------------------------------------------------------------
+
+_MIGRATIONS = Path(__file__).resolve().parents[1] / "sql" / "migrations"
+_REFINES_SQL = (_MIGRATIONS / "095_edges_refines_relation.sql").read_text(encoding="utf-8")
+
+
+def _relations(sql_text: str) -> set[str]:
+    inside = re.search(r"relation IN \(([^)]*)\)", sql_text)
+    assert inside is not None, sql_text
+    return set(re.findall(r"'([a-z_]+)'", inside.group(1)))
+
+
+def test_095_adds_refines_to_the_full_relation_list_and_the_orm_matches():
+    statements = _split_sql_statements(_REFINES_SQL)
+    assert len(statements) == 2
+    assert statements[0].startswith("ALTER TABLE brain.graph_edges")
+    assert "DROP CONSTRAINT IF EXISTS ck_edges_relation" in statements[0]
+    assert statements[1].startswith("ALTER TABLE brain.graph_edges")
+    assert "ADD CONSTRAINT ck_edges_relation" in statements[1]
+    assert all(";" not in ln for ln in _REFINES_SQL.splitlines() if ln.lstrip().startswith("--"))
+
+    previous = _relations((_MIGRATIONS / "055_cooccurrence_edges.sql").read_text(encoding="utf-8"))
+    (constraint,) = [c for c in GraphEdge.__table__.constraints if c.name == "ck_edges_relation"]
+    assert _relations(statements[1]) == _relations(str(constraint.sqltext)) == previous | {"refines"}
+
+
+@pytest.mark.postgres_only
+async def test_095_applies_twice_and_a_refines_edge_lands(session):
+    # DDL is transactional in Postgres: the session fixture rolls all of it back.
+    for _ in range(2):
+        for statement in _split_sql_statements(_REFINES_SQL):
+            await session.execute(text(statement))
+    async with session.begin_nested():
+        session.add(
+            GraphEdge(
+                source_id=uuid4(),
+                target_id=uuid4(),
+                source_type="fact",
+                target_type="fact",
+                agent_id=f"test-pr-d-{uuid4()}",
+                relation="refines",
+                weight=0.8,
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
