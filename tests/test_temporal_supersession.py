@@ -279,6 +279,37 @@ async def test_keyed_a_trip_inside_a_residence_is_protected_only_by_the_classifi
     assert (await _row(session, trip)).active
 
 
+MUNICH = "Tim moved to Munich, to an apartment in Schwabing, on 1 June 2024."
+BERLIN_MOVE = "Tim moved to Berlin, to an apartment in Mitte, on 1 June 2024."
+
+
+@pytest.mark.postgres_only
+async def test_keyed_tie_on_update_keeps_todays_direction_and_never_closes(heart, session, monkeypatch):
+    """Same start: the intervals decide nothing. The classifier's direction stands,
+    and a start that is not strictly later never closes the loser."""
+    _flags(heart, s=True)
+    _classifier(monkeypatch, heart, UPDATE_NEW)
+    old = await _keyed(heart, session, BERLIN_MOVE, valid_from=JUN)
+    new = await _keyed(heart, session, MUNICH, valid_from=JUN)
+    o = await _row(session, old)
+    assert o.active is False and o.superseded_by == new
+    assert o.valid_to is None
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("new_said_later", [True, False])
+async def test_keyed_tie_on_contradiction_resolves_by_statement_time(heart, session, monkeypatch, new_said_later):
+    _flags(heart, s=True)
+    _classifier(monkeypatch, heart, CONTRADICTION)
+    early, late = datetime(2024, 6, 2, tzinfo=UTC), datetime(2024, 6, 9, tzinfo=UTC)
+    old = await _keyed(heart, session, BERLIN_MOVE, valid_from=JUN, mentioned_at=early if new_said_later else late)
+    new = await _keyed(heart, session, MUNICH, valid_from=JUN, mentioned_at=late if new_said_later else early)
+    o, n = await _row(session, old), await _row(session, new)
+    loser, winner = (o, n) if new_said_later else (n, o)
+    assert loser.active is False and loser.superseded_by == winner.id
+    assert winner.active and loser.valid_to is None
+
+
 # ---------------------------------------------------------------------------
 # Legacy same-subject write path (R2 off)
 # ---------------------------------------------------------------------------
@@ -462,3 +493,53 @@ async def test_the_sweep_never_judges_a_pair_that_became_disjoint(heart, own_age
     assert cls.await_count == 0
     async with heart.db.session() as s:
         assert (await s.execute(select(Fact.active).where(Fact.id == lyon.id))).scalar_one() is True
+
+
+# ---------------------------------------------------------------------------
+# F031 sleep contradiction finder
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("s", [True, False])
+async def test_f031_leaves_a_closed_late_arrival_alone_across_sleep_cycles(heart, own_agent, monkeypatch, s):
+    """A late arrival S closed stays active beside the stored fact, same subject
+    and similar text. F031 must not judge the pair every cycle: each call spends
+    budget, and a SUPERSEDE or MERGE verdict would undo the coexistence."""
+    from nous.handlers.sleep_handler import SleepHandler
+
+    _flags(heart, s=s)
+    saved_heart_agent = heart.agent_id
+    heart.agent_id = own_agent
+    subject = "Tim residence"
+    berlin = await _stored(heart, own_agent, BERLIN, T, valid_from=JUN, subject=subject, embedding=_vec(1.0))
+    paris = await _stored(
+        heart,
+        own_agent,
+        PARIS,
+        datetime(2026, 11, 2, tzinfo=UTC),
+        valid_from=JAN,
+        valid_to=MAY_31,
+        subject=subject,
+        embedding=_vec(0.85),
+    )
+    llm = AsyncMock(return_value={"action": "SUPERSEDE_A", "confidence": 0.95, "reason": "B is later"})
+    monkeypatch.setattr("nous.handlers.sleep_handler.call_background_llm_structured", llm)
+    handler = SleepHandler(AsyncMock(), heart, heart.facts._settings, AsyncMock(), llm_client=object())
+    try:
+        for _ in range(2):
+            assert await handler._phase_resolve_contradictions({}) is True
+            if not s:
+                break  # with S off the pair is judged, as before
+        async with heart.db.session() as session:
+            rows = {r.id: r for r in (await session.execute(select(Fact).where(Fact.agent_id == own_agent))).scalars()}
+        if s:
+            assert llm.await_count == 0
+            assert rows[berlin.id].active and rows[paris.id].active
+        else:
+            assert llm.await_count == 1
+    finally:
+        heart.agent_id = saved_heart_agent
+        async with heart.db.session() as session:
+            await session.execute(text("DELETE FROM nous_system.events WHERE agent_id = :a"), {"a": own_agent})
+            await session.commit()

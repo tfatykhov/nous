@@ -1652,12 +1652,10 @@ class FactManager:
             if old.id in excluded:
                 continue
             time_relation = self._time_relation(old, new_interval)
-            if time_relation is not None:
-                # S: intervals that share no day coexist.
-                if time_relation == "coexist":
-                    continue
+            if time_relation == "coexist":
+                continue  # S: intervals that share no day coexist
             # F075: skip supersession on date-disagreement.
-            elif new_event_date is not None and old.event_date is not None and new_event_date != old.event_date:
+            if new_event_date is not None and old.event_date is not None and new_event_date != old.event_date:
                 continue
             if old.embedding is not None:
                 similarity = self._cosine_similarity(embedding, old.embedding)
@@ -3120,10 +3118,9 @@ class FactManager:
                 continue
             # S: ``fact`` carries its interval, closed below if it arrives late.
             time_relation = self._time_relation(old, fact)
-            if time_relation is not None:
-                if time_relation == "coexist":
-                    continue  # S: intervals that share no day, never supersede
-            elif input.event_date is not None and old.event_date is not None and input.event_date != old.event_date:
+            if time_relation == "coexist":
+                continue  # S: intervals that share no day, never supersede
+            if input.event_date is not None and old.event_date is not None and input.event_date != old.event_date:
                 continue  # F075 precedence: distinct events, never supersede
             if not self._key_budget_ok():
                 logger.warning("R2: key-conflict classifier hourly budget spent — deferring to sleep sweep")
@@ -4507,7 +4504,7 @@ class FactManager:
         limit: int,
         session: AsyncSession,
     ) -> list[dict]:
-        params: dict = {"agent_id": self.agent_id, "limit": limit}
+        params: dict = {"agent_id": self.agent_id, "limit": limit, "temporal": self._temporal_supersession_on()}
         # F031 re-check cooldown: skip pairs resolved within the cooldown window
         # so genuine-KEEP_BOTH pairs aren't re-resolved every sleep cycle (wasted
         # LLM calls + LIMIT-slot starvation). Reuses the persisted resolution
@@ -4582,6 +4579,16 @@ class FactManager:
               -- NULL-source normal facts in scope.
               AND f2.source IS DISTINCT FROM 'exemplar_extractor'
               AND LOWER(f1.subject) = LOWER(f2.subject)
+              -- Flag S (bound as temporal, false when off) leaves out pairs
+              -- whose intervals share no day, such as a late arrival S closed
+              -- beside the stored fact, and two one-day events on different
+              -- days (the F075 rule, kept even where valid_from is missing).
+              AND NOT (CAST(:temporal AS boolean) AND (
+                  (f1.valid_from IS NOT NULL AND f2.valid_from IS NOT NULL
+                   AND (COALESCE(f1.valid_to, DATE 'infinity') < f2.valid_from
+                        OR COALESCE(f2.valid_to, DATE 'infinity') < f1.valid_from))
+                  OR (f1.event_date IS NOT NULL AND f2.event_date IS NOT NULL
+                      AND f1.event_date <> f2.event_date)))
               AND 1 - (f1.embedding <=> f2.embedding) > 0.75
               AND 1 - (f1.embedding <=> f2.embedding) < 0.95
             WHERE f1.agent_id = :agent_id
