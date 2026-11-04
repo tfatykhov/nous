@@ -16,6 +16,7 @@ its own ingest under its own ``--agent-tag``.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
@@ -25,13 +26,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+logger = logging.getLogger(__name__)
+
 # The settings an arm may change: memory, retrieval, context, sleep, extraction,
 # graph, spreading, temporal, profile-card and model choices. Written out by hand
 # from nous/config.py; no prefix matching. Credentials, URLs, logins, delivery,
 # the handler on/off switches and anything the harness sets itself are absent.
 ARM_SETTINGS = frozenset(
     {
-        # models
+        # models. embedding_model/embedding_dimensions must match between an ingest and the
+        # answers on it (they come in with a prod flags file); never vary them on an answer arm.
         "model", "background_model", "contradiction_model", "rubric_outcome_model", "query_expansion_model",
         "epistemic_gate_model", "date_leg_model", "cross_encoder_model", "embedding_model", "embedding_dimensions",
         # retrieval and ranking
@@ -257,6 +261,9 @@ def build_settings(db_url: str, agent_id: str, overrides: dict[str, str]) -> Any
         raise SystemExit("--db-url must look like postgresql+asyncpg://user:password@host:port/dbname")
     with _environ(overrides):
         base = Settings()
+    for name, value in EVAL_OVERRIDES.items():
+        if getattr(base, name) != value:
+            logger.info("eval override: %s=%r replaces the configured %r", name, value, getattr(base, name))
     return base.model_copy(
         update={
             "db_host": p.hostname,

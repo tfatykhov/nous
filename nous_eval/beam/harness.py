@@ -396,7 +396,9 @@ async def ingest_conversation(stack: Stack, conv: Conversation, *, limit_session
             hours,
         )
     await ensure_agent(stack)
-    since = await db_now(stack)  # every row written from here on is this ingest's
+    # Every fact written from here on is this ingest's. Facts' created_at is their
+    # transaction's start, so ``since`` must be read before the first session opens one.
+    since = await db_now(stack)
     sleeps = 0
     t0 = time.monotonic()
     for i, session in enumerate(sessions):

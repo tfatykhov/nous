@@ -502,8 +502,9 @@ class FakeLLM:
         raise RuntimeError("fake llm: no route for this call")
 
 
-async def purge_agent(db, agent_id: str) -> None:
-    """Delete every row the test agent wrote (several passes, for foreign keys), then the agent."""
+async def purge_agent(db, agent_id: str) -> list[str]:
+    """Delete every row the test agent wrote (several passes, for foreign keys), then the
+    agent; returns the tables whose delete still failed."""
     from sqlalchemy import text
 
     async with db.engine.connect() as conn:
@@ -535,6 +536,7 @@ async def purge_agent(db, agent_id: str) -> None:
             break
     async with db.engine.begin() as conn:
         await conn.execute(text("DELETE FROM nous_system.agents WHERE id = :a"), {"a": agent_id})
+    return pending
 
 
 @pytest.mark.postgres_only
@@ -609,6 +611,17 @@ async def test_offline_smoke_ingest_answer_score(tmp_path: Path, db) -> None:
         async with harness.open_stack(
             arms.build_settings(db_url, agent, {}), llm=llm, embeddings=MockEmbeddingProvider()
         ) as stack:
+            # The facts' date columns: mentioned_at joins once its migration (#839) lands.
+            async with db.session() as s:
+                has_mentioned = (
+                    await s.execute(
+                        text(
+                            "SELECT count(*) FROM information_schema.columns WHERE table_schema = 'heart'"
+                            " AND table_name = 'facts' AND column_name = 'mentioned_at'"
+                        )
+                    )
+                ).scalar_one()
+            assert stack.fact_time_columns == ("created_at", "learned_at", "mentioned_at")[: 3 if has_mentioned else 2]
             with pytest.raises(SystemExit, match="already has"):  # a second ingest into the agent
                 await harness.ingest_conversation(stack, corpus.load_conversation(chats, "100K", "1"))
 
@@ -649,13 +662,16 @@ async def test_offline_smoke_ingest_answer_score(tmp_path: Path, db) -> None:
             assert set(result) == {"information_extraction", "event_ordering"}
             assert result["event_ordering"][0]["llm_response"] == ANSWER
     finally:
-        await purge_agent(db, agent)
+        leftover_tables = await purge_agent(db, agent)
+    assert leftover_tables == []
     async with db.session() as s:
         left = (
             await s.execute(
                 text(
                     "SELECT (SELECT count(*) FROM heart.episodes WHERE agent_id = :a)"
                     " + (SELECT count(*) FROM heart.facts WHERE agent_id = :a)"
+                    " + (SELECT count(*) FROM heart.outcome_signals WHERE agent_id = :a)"
+                    " + (SELECT count(*) FROM brain.graph_edges WHERE agent_id = :a)"
                     " + (SELECT count(*) FROM nous_system.agents WHERE id = :a)"
                 ),
                 {"a": agent},
