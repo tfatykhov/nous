@@ -31,7 +31,9 @@ logger = logging.getLogger(__name__)
 # The settings an arm may change: memory, retrieval, context, sleep, extraction,
 # graph, spreading, temporal, profile-card and model choices. Written out by hand
 # from nous/config.py; no prefix matching. Credentials, URLs, logins, delivery,
-# the handler on/off switches and anything the harness sets itself are absent.
+# the summarizer and fact-extractor switches (episode_summary_enabled,
+# fact_extraction_enabled) and anything the harness sets itself are absent. The
+# outcome-detection and correction-extraction switches are arm settings.
 ARM_SETTINGS = frozenset(
     {
         # models. embedding_model/embedding_dimensions must match between an ingest and the

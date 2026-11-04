@@ -23,7 +23,9 @@ still reads the wall clock is listed in arms.CLOCK_NOTES and recorded with the r
 With ``sleep=True`` a full sleep cycle runs after each batch (BEAM batches are days
 apart). Sleep reflection reads only episodes started within
 ``sleep_reflection_hours`` of wall-clock now, so on dated episodes it finds none
-unless the arm widens that window.
+unless the arm widens that window. With every memory BEAM-dated, the staleness
+penalty and episode recency decay sit at their floors for all of them alike, so
+absolute scores compare arm to arm only, not with a run on a prod timeline.
 
 Answer modes, both through BEAM's own answer prompt (scoring.ANSWER_PROMPT):
   preturn      the context is the system prompt ``ContextEngine.build`` returns,
