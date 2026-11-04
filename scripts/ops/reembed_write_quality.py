@@ -57,15 +57,32 @@ async def reembed(
     return counts
 
 
+def embedding_provider(settings: Settings) -> EmbeddingProvider | None:
+    """The provider nous/main.py builds, so rows are embedded in the same space: the same key, model,
+    dimensions and cache size. None without an API key, as there."""
+    if not settings.openai_api_key:
+        return None
+    return EmbeddingProvider(
+        api_key=settings.openai_api_key,
+        model=settings.embedding_model,
+        dimensions=settings.embedding_dimensions,
+        cache_size=settings.embedding_cache_size,
+    )
+
+
 async def main_async(agent_id: str, *, censors: bool, procedures: bool, apply: bool) -> None:
     settings = Settings().model_copy(update={"agent_id": agent_id})
     print(
         f"agent {agent_id}: censor_embed_text_mode={settings.censor_embed_text_mode}, "
-        f"procedure_embed_evidence={settings.procedure_embed_evidence}"
+        f"procedure_embed_evidence={settings.procedure_embed_evidence}, "
+        f"embedding_model={settings.embedding_model} ({settings.embedding_dimensions} dims)"
     )
+    provider = embedding_provider(settings)
+    if apply and provider is None:
+        raise SystemExit("--apply needs OPENAI_API_KEY: without it nothing can be embedded")
     db = Database(settings)
     await db.connect()
-    heart = Heart(db, settings, embedding_provider=EmbeddingProvider(settings))
+    heart = Heart(db, settings, embedding_provider=provider)
     try:
         async with db.session() as session:
             planned = await reembed(heart, session, censors=censors, procedures=procedures, apply=False)

@@ -205,3 +205,18 @@ async def test_reembed_script_dry_run_counts_what_apply_rewrites(db, settings, s
     assert all(after["censors"][cid] != vec for cid, vec in before["censors"].items())
     changed = [pid for pid, vec in before["procedures"].items() if after["procedures"][pid] != vec]
     assert len(changed) == 1  # the active one; the retired one keeps its vector
+
+
+async def test_reembed_script_builds_the_provider_the_app_builds(settings):
+    """The same key, model, dimensions and cache size as nous/main.py, so the vectors share its space."""
+    configured = settings.model_copy(update={
+        "openai_api_key": "sk-test-w2", "embedding_model": "text-embedding-3-large",
+        "embedding_dimensions": 1024, "embedding_cache_size": 7,
+    })
+    provider = reembed_write_quality.embedding_provider(configured)
+    try:
+        assert (provider.model, provider.dimensions, provider._cache_size) == ("text-embedding-3-large", 1024, 7)
+        assert provider._client.headers["Authorization"] == "Bearer sk-test-w2"
+    finally:
+        await provider.close()
+    assert reembed_write_quality.embedding_provider(configured.model_copy(update={"openai_api_key": ""})) is None
