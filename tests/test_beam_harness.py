@@ -27,6 +27,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # Fixture conversation (BEAM layout, synthetic text)
 # ---------------------------------------------------------------------------
 
+# Pads each real session past episode_min_content_length (200 chars), so end_session keeps it.
+PLAN_DETAIL = "loosen the soil, add compost, water the beds the evening before and label each row by variety."
 BATCH_1 = {
     "batch_number": 1,
     "time_anchor": None,
@@ -41,7 +43,7 @@ BATCH_1 = {
             {
                 "role": "assistant",
                 "id": 1,
-                "content": "Good plan. We will prepare the Larkspur beds for the March 29 planting.",
+                "content": "Good plan. We will prepare the Larkspur beds for the March 29 planting: " + PLAN_DETAIL,
             },
         ],
         [
@@ -50,7 +52,7 @@ BATCH_1 = {
                 "id": 2,
                 "content": "Next I set up the irrigation timer for the Larkspur beds, watering at 6am.",
             },
-            {"role": "assistant", "id": 3, "content": "Here is how to configure the irrigation timer to run at 6am."},
+            {"role": "assistant", "id": 3, "content": "Set the irrigation timer to run at 6am: " + PLAN_DETAIL},
         ],
     ],
 }
@@ -65,8 +67,10 @@ BATCH_2 = {
                 "time_anchor": "April-05-2024",
                 "content": "Update for Larkspur: the first planting moved to April 12 because of frost.",
             },
-            {"role": "assistant", "id": 5, "content": "Noted: the Larkspur first planting is now April 12."},
-        ]
+            {"role": "assistant", "id": 5, "content": "Noted, the first planting is now April 12: " + PLAN_DETAIL},
+        ],
+        # Trivial: one turn, under episode_min_content_length -> soft-deleted, as end_session does.
+        [{"role": "user", "id": 6, "content": "ok"}, {"role": "assistant", "id": 7, "content": "Sure."}],
     ],
 }
 QUESTIONS = {
@@ -106,8 +110,8 @@ def test_load_conversation_both_shapes(tmp_path: Path, ten_m: bool) -> None:
     conv = corpus.load_conversation(tmp_path, "100K", "1")
 
     assert conv.key == "100K/1"
-    assert [(s.batch, s.index) for s in conv.sessions] == [(1, 0), (1, 1), (2, 0)]
-    assert conv.batch_ends == (1, 2)
+    assert [(s.batch, s.index) for s in conv.sessions] == [(1, 0), (1, 1), (2, 0), (2, 1)]
+    assert conv.batch_ends == (1, 3)
     assert conv.sessions[0].started_at == datetime(2024, 3, 15, tzinfo=UTC)
     assert conv.sessions[1].started_at == datetime(2024, 3, 15, tzinfo=UTC) + corpus.SESSION_SPACING
     assert conv.sessions[2].started_at == datetime(2024, 4, 5, tzinfo=UTC)
@@ -281,14 +285,17 @@ def test_aggregate_averages_per_conversation_first() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Arms: overrides, flags file, settings, snapshot, out-dir guard
+# Arms: overrides, flags file, settings, snapshot, scratch-DB and out-dir guards
 # ---------------------------------------------------------------------------
 
-DB_URL = "postgresql+asyncpg://u:pw@dbhost:5999/scratchdb"
+DB_URL = "postgresql+asyncpg://u:pw@dbhost:5999/nous_eval_scratch"
 
 
-def test_parse_overrides_accepts_known_flags_case_insensitively() -> None:
-    assert arms.parse_overrides(["nous_sleep_reflection_hours=48"]) == {"NOUS_SLEEP_REFLECTION_HOURS": "48"}
+def test_parse_overrides_accepts_arm_settings_case_insensitively() -> None:
+    assert arms.parse_overrides(["nous_sleep_reflection_hours=48", "NOUS_CONTEXT_QUERY_MODE=conditional"]) == {
+        "NOUS_SLEEP_REFLECTION_HOURS": "48",
+        "NOUS_CONTEXT_QUERY_MODE": "conditional",
+    }
 
 
 @pytest.mark.parametrize(
@@ -299,41 +306,68 @@ def test_parse_overrides_accepts_known_flags_case_insensitively() -> None:
         "ANTHROPIC_AUTH_TOKEN=x",
         "DB_NAME=prod",
         "NOUS_AGENT_ID=x",
+        "NOUS_EMERSON_HOOK_URL=https://example.invalid/hook",
+        "NOUS_EMAIL_USER=someone",
+        'GOOGLE_SERVICE_ACCOUNT_JSON={"private_key": "x"}',
+        "NOUS_STALE_SCAN_AGE_DAYS=1",  # set by the harness for every arm
+        "NOUS_FACT_EXTRACTION_ENABLED=false",  # a handler switch, not an arm
         "NOUS_SLEEP_REFLECTION_HOURS",
     ],
 )
-def test_parse_overrides_rejects_unknown_credential_and_harness_names(pair: str) -> None:
+def test_parse_overrides_refuses_everything_outside_the_allowlist(pair: str) -> None:
     with pytest.raises(SystemExit):
         arms.parse_overrides([pair])
 
 
-def test_flags_file_keeps_only_known_nous_flags(tmp_path: Path) -> None:
+def test_arm_settings_are_real_settings_and_never_credentials_or_endpoints() -> None:
+    from nous.config import Settings
+
+    assert arms.ARM_SETTINGS <= set(Settings.model_fields)
+    words = {"token", "password", "secret", "url", "user", "json", "email", "login", "hook", "credential", "chat"}
+    flagged = [n for n in arms.ARM_SETTINGS if n.endswith("_key") or "api_key" in n or words & set(n.split("_"))]
+    assert not flagged
+    assert not arms.ARM_SETTINGS & {"episode_summary_enabled", "fact_extraction_enabled", *arms.EVAL_OVERRIDES}
+
+
+def test_flags_file_reads_multiline_values_and_keeps_only_arm_settings(tmp_path: Path) -> None:
     f = tmp_path / "flags.env"
     f.write_text(
         "# comment\n"
+        'NOUS_IDENTITY_PROMPT="You are Nous.\n'
+        "NOUS_SLEEP_REFLECTION_HOURS=1\n"
+        'Second line of the prompt."\n'
         "NOUS_SLEEP_REFLECTION_HOURS=48\n"
         'export NOUS_EPISODE_CHUNKS_ENABLED="true"\n'
+        "NOUS_EMERSON_HOOK_URL=https://example.invalid/hook\n"
+        "NOUS_EMAIL_USER=someone\n"
+        'GOOGLE_SERVICE_ACCOUNT_JSON=\'{"type": "service_account",\n "private_key": "do-not-read"}\'\n'
+        "NOUS_CONTEXT_QUERY_MODE=conditional\n"
         "NOUS_NOT_A_REAL_FLAG=1\n"
         "ANTHROPIC_AUTH_TOKEN=do-not-read\n"
-        "NOUS_SOME_TOKEN=do-not-read\n"
         "NOUS_AGENT_ID=nous-default\n"
         "DB_PASSWORD=do-not-read\n",
         encoding="utf-8",
     )
-    flags, skipped = arms.load_flags_file(f)
-    assert flags == {"NOUS_SLEEP_REFLECTION_HOURS": "48", "NOUS_EPISODE_CHUNKS_ENABLED": "true"}
-    assert skipped == ["NOUS_NOT_A_REAL_FLAG"]
+    flags, ignored = arms.load_flags_file(f)
+    assert flags == {
+        "NOUS_SLEEP_REFLECTION_HOURS": "48",
+        "NOUS_EPISODE_CHUNKS_ENABLED": "true",
+        "NOUS_CONTEXT_QUERY_MODE": "conditional",
+    }
+    assert ignored == 8
 
 
-def test_build_settings_applies_override_and_restores_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_settings_applies_override_and_eval_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NOUS_SLEEP_REFLECTION_HOURS", raising=False)
+    monkeypatch.setenv("NOUS_STALE_SCAN_AGE_DAYS", "1")  # an environment value never beats the harness
     s = arms.build_settings(DB_URL, "beam-100k-1-t", {"NOUS_SLEEP_REFLECTION_HOURS": "48"})
     assert s.sleep_reflection_hours == 48  # parsed to int, as the deployed env is
+    assert s.stale_scan_age_days == arms.EVAL_OVERRIDES["stale_scan_age_days"]
     assert (s.db_host, s.db_port, s.db_user, s.db_name, s.agent_id) == (
         "dbhost",
         5999,
         "u",
-        "scratchdb",
+        "nous_eval_scratch",
         "beam-100k-1-t",
     )
     assert "NOUS_SLEEP_REFLECTION_HOURS" not in os.environ
@@ -344,27 +378,48 @@ def test_build_settings_rejects_malformed_db_url() -> None:
         arms.build_settings("not-a-url", "a", {})
 
 
-def test_settings_snapshot_is_allowlisted() -> None:
-    s = arms.build_settings(DB_URL, "a", {"NOUS_SLEEP_REFLECTION_HOURS": "48"})
-    snap = arms.settings_snapshot(s, {"NOUS_SLEEP_REFLECTION_HOURS": "48"})
-    assert snap["sleep_reflection_hours"] == 48
-    assert set(snap) == set(arms.SNAPSHOT_FIELDS)
+@pytest.mark.parametrize("name", ["nous", "nous_prod", "nous_prod_clone", "postgres", "eval_nous_test"])
+def test_scratch_db_guard_refuses_other_databases(name: str) -> None:
+    url = f"postgresql+asyncpg://u:pw@h:5432/{name}"
+    with pytest.raises(SystemExit, match="i-know-this-is-scratch"):
+        arms.check_scratch_db(url)
+    arms.check_scratch_db(url, allow_any=True)
+
+
+@pytest.mark.parametrize("name", ["nous_eval", "nous_eval_scratch", "nous_test_mem_m", "beam_scratch"])
+def test_scratch_db_guard_accepts_eval_and_test_databases(name: str) -> None:
+    arms.check_scratch_db(f"postgresql+asyncpg://u:pw@h:5432/{name}")
+
+
+def test_run_record_keeps_names_and_snapshot_values_only() -> None:
+    overrides = {"NOUS_SLEEP_REFLECTION_HOURS": "48", "NOUS_EPISODE_SEED_SUMMARY_CHARS": "123"}
+    s = arms.build_settings(DB_URL, "a", overrides)
+    record = beam_run.run_settings_record(s, overrides, ignored=2)
+    assert record["override_names"] == sorted(overrides)
+    snap = record["settings"]
+    assert set(snap) == {*arms.SNAPSHOT_FIELDS, *arms.EVAL_OVERRIDES, "episode_seed_summary_chars"}
+    assert snap["sleep_reflection_hours"] == 48 and snap["episode_seed_summary_chars"] == 123
+    assert snap["stale_scan_age_days"] == arms.EVAL_OVERRIDES["stale_scan_age_days"]
     for name, value in snap.items():
-        assert not re.search("key|token|password|secret", name, re.IGNORECASE)
         assert value == "absent" or value == getattr(s, name)
-    assert "pw" not in json.dumps(snap, default=str)
-
-
-def test_snapshot_records_an_override_outside_the_allowlist() -> None:
-    s = arms.build_settings(DB_URL, "a", {"NOUS_EPISODE_SEED_SUMMARY_CHARS": "123"})
-    snap = arms.settings_snapshot(s, {"NOUS_EPISODE_SEED_SUMMARY_CHARS": "123"})
-    assert snap["episode_seed_summary_chars"] == 123
+    assert record["clock_notes"] == list(arms.CLOCK_NOTES)
+    assert "pw" not in json.dumps(record, default=str)
 
 
 def test_out_dir_must_not_be_tracked(tmp_path: Path) -> None:
     arms.check_out_dir(tmp_path / "beam-run")  # outside any repo: fine
     with pytest.raises(SystemExit):
         arms.check_out_dir(REPO_ROOT / "nous_eval" / "beam" / "out-test")
+
+
+def test_trivial_session_matches_end_session_rule() -> None:
+    now = datetime.now(UTC)
+    short = corpus.Session(1, 0, (corpus.Message("user", "ok"), corpus.Message("assistant", "Sure.")), now)
+    two_turns = corpus.Session(1, 0, (corpus.Message("user", "ok"), corpus.Message("user", "and?")), now)
+    long = corpus.Session(1, 0, (corpus.Message("user", "x" * 150), corpus.Message("assistant", "y" * 60)), now)
+    assert harness.is_trivial(short, 200)
+    assert not harness.is_trivial(two_turns, 200)
+    assert not harness.is_trivial(long, 200)
 
 
 # ---------------------------------------------------------------------------
@@ -397,14 +452,22 @@ async def test_drained_bus_dispatches_caused_events_in_order() -> None:
 # Offline smoke: ingest (with sleep) -> both answer modes -> score
 # ---------------------------------------------------------------------------
 
+ANSWER = "Planting date\nIrrigation timer\n"  # trailing newline: event ordering splits the raw answer
+
 
 class FakeLLM:
     """Routes Anthropic-shaped payloads by prompt: summaries carry one candidate
-    fact per session; the answer prompt gets an ordered list; anything else
-    raises, which each caller handles as it handles an API failure."""
+    fact per session; the outcome classifier reports a correction for the frost
+    session and the correction extractor turns it into a rule; the answer prompt
+    gets an ordered list; anything else raises, which each caller handles as it
+    handles an API failure."""
 
     def __init__(self) -> None:
         self.routes: list[str] = []
+
+    @staticmethod
+    def _reply(text: str) -> SimpleNamespace:
+        return SimpleNamespace(content=[{"type": "text", "text": text}], stop_reason="end_turn")
 
     async def call(self, payload: dict) -> SimpleNamespace:
         system = payload.get("system")
@@ -423,111 +486,179 @@ class FakeLLM:
                 "candidate_facts": [{"subject": "Larkspur garden", "content": first, "category": "technical"}],
             }
             self.routes.append("summary")
-            return SimpleNamespace(content=[{"type": "text", "text": json.dumps(body)}], stop_reason="end_turn")
+            return self._reply(json.dumps(body))
+        if "outcome signal classifier" in system_text:
+            self.routes.append("outcome")
+            signals = [{"type": "corrected", "confidence": 0.9, "evidence": "frost"}] if "frost" in user else []
+            return self._reply(json.dumps({"signals": signals}))
+        if "correction analysis system" in system_text:
+            self.routes.append("correction")
+            principle = "Always re-check the Larkspur planting date after a frost warning before scheduling work."
+            return self._reply(json.dumps({"principle": principle, "subject": "Larkspur planting", "confidence": 0.8}))
         if "STRICT INSTRUCTIONS" in user:
             self.routes.append("answer")
-            return SimpleNamespace(
-                content=[{"type": "text", "text": "Planting date\nIrrigation timer"}], stop_reason="end_turn"
-            )
+            return self._reply(ANSWER)
         self.routes.append("unrouted")
         raise RuntimeError("fake llm: no route for this call")
 
 
+async def purge_agent(db, agent_id: str) -> None:
+    """Delete every row the test agent wrote (several passes, for foreign keys), then the agent."""
+    from sqlalchemy import text
+
+    async with db.engine.connect() as conn:
+        tables = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT c.table_schema || '.' || c.table_name FROM information_schema.columns c"
+                        " JOIN information_schema.tables t USING (table_schema, table_name)"
+                        " WHERE c.column_name = 'agent_id' AND t.table_type = 'BASE TABLE'"
+                        " AND c.table_schema IN ('brain', 'heart', 'nous_system', 'scoring')"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    pending = list(tables)
+    for _ in range(6):
+        failed = []
+        for table in pending:
+            try:
+                async with db.engine.begin() as conn:
+                    await conn.execute(text(f"DELETE FROM {table} WHERE agent_id = :a"), {"a": agent_id})
+            except Exception:
+                failed.append(table)
+        pending = failed
+        if not pending:
+            break
+    async with db.engine.begin() as conn:
+        await conn.execute(text("DELETE FROM nous_system.agents WHERE id = :a"), {"a": agent_id})
+
+
 @pytest.mark.postgres_only
-async def test_offline_smoke_ingest_answer_score(tmp_path: Path) -> None:
+async def test_offline_smoke_ingest_answer_score(tmp_path: Path, db) -> None:
     from conftest import MockEmbeddingProvider
     from sqlalchemy import text
 
-    from nous.config import Settings
-
+    db_url = db.engine.url.render_as_string(hide_password=False)
     chats = write_conversation(tmp_path / "chats")
     out = tmp_path / "out"
     out.mkdir()
     tag = uuid.uuid4().hex[:8]
-    common = [
-        "--chats-dir",
-        str(chats),
-        "--bucket",
-        "100K",
-        "--conv",
-        "1",
-        "--db-url",
-        Settings().db_url,
-        "--agent-tag",
-        tag,
-        "--out-dir",
-        str(out),
-    ]
+    agent = f"beam-100k-1-{tag}"
+    common = ["--chats-dir", str(chats), "--bucket", "100K", "--conv", "1", "--db-url", db_url]
+    common += ["--agent-tag", tag, "--i-know-this-is-scratch"]  # the CI test database is named "nous"
     llm = FakeLLM()
+    try:
+        ingest_args = beam_run.parse_args(
+            ["ingest", *common, "--out-dir", str(out), "--sleep", "--set", "NOUS_SLEEP_REFLECTION_HOURS=200000"]
+        )
+        [record] = await beam_run.cmd_ingest(ingest_args, llm=llm, embeddings=MockEmbeddingProvider(), prepare=False)
+        assert record["agent_id"] == agent
+        assert record["sessions"] == 4 and record["sleep_cycles"] == 2
+        assert record["rows"]["episodes"] == 4
+        assert record["rows"]["facts"] >= 3, record
+        assert record["settings"]["sleep_reflection_hours"] == 200000
+        assert record["override_names"] == ["NOUS_SLEEP_REFLECTION_HOURS"] and "overrides" not in record
+        assert record["eval_overrides"] == arms.EVAL_OVERRIDES and record["clock_notes"]
+        assert llm.routes.count("summary") == 3  # the trivial session's transcript is too short to summarize
+        assert {"outcome", "correction"} <= set(llm.routes)
+        saved = json.loads((out / f"ingest-100K-1-{tag}.json").read_text(encoding="utf-8"))
+        assert saved["agent_id"] == agent
 
-    ingest_args = beam_run.parse_args(["ingest", *common, "--sleep", "--set", "NOUS_SLEEP_REFLECTION_HOURS=200000"])
-    [record] = await beam_run.cmd_ingest(ingest_args, llm=llm, embeddings=MockEmbeddingProvider(), prepare=False)
-    assert record["agent_id"] == f"beam-100k-1-{tag}"
-    assert record["sessions"] == 3 and record["sleep_cycles"] == 2
-    assert record["rows"]["episodes"] == 3
-    assert record["rows"]["facts"] >= 1, record
-    assert record["settings"]["sleep_reflection_hours"] == 200000
-    assert llm.routes.count("summary") == 3
-    assert json.loads((out / f"ingest-100K-1-{tag}.json").read_text(encoding="utf-8"))["agent_id"] == record["agent_id"]
-
-    async with harness.open_stack(
-        arms.build_settings(Settings().db_url, record["agent_id"], {}), llm=llm, embeddings=MockEmbeddingProvider()
-    ) as stack:
-        async with stack.db.session() as s:
-            rows = (
+        async with db.session() as s:
+            episodes = (
                 await s.execute(
                     text(
                         "SELECT started_at, ended_at, transcript FROM heart.episodes"
                         " WHERE agent_id = :a ORDER BY started_at"
                     ),
-                    {"a": record["agent_id"]},
+                    {"a": agent},
                 )
             ).all()
-        assert [r.started_at.date().isoformat() for r in rows] == ["2024-03-15", "2024-03-15", "2024-04-05"]
-        assert all(r.ended_at > r.started_at for r in rows)
-        assert rows[0].transcript.startswith("User: I am planning the Larkspur garden project")
-        # A second ingest into the same agent is refused.
-        conv = corpus.load_conversation(chats, "100K", "1")
-        with pytest.raises(SystemExit, match="already has"):
-            await harness.ingest_conversation(stack, conv)
-
-    for mode in ("preturn", "recall_deep"):
-        mode_out = out / mode
-        mode_out.mkdir()
-        args = beam_run.parse_args(
-            [
-                "answer",
-                *[a if a != str(out) else str(mode_out) for a in common],
-                "--mode",
-                mode,
-                "--answer-model",
-                "fake-model",
-                "--arm",
-                "smoke",
-            ]
-        )
-        assert await beam_run.cmd_answer(args, llm=llm, embeddings=MockEmbeddingProvider()) == 2
-        assert await beam_run.cmd_answer(args, llm=llm, embeddings=MockEmbeddingProvider()) == 0  # resumes
-        answers = [json.loads(line) for line in (mode_out / "answers.jsonl").read_text(encoding="utf-8").splitlines()]
-        assert [(a["ability"], a["error"]) for a in answers] == [
-            ("information_extraction", None),
-            ("event_ordering", None),
+            facts = (
+                await s.execute(
+                    text("SELECT created_at, learned_at, source, category FROM heart.facts WHERE agent_id = :a"),
+                    {"a": agent},
+                )
+            ).all()
+            signals = (
+                (
+                    await s.execute(
+                        text("SELECT signal_type FROM heart.outcome_signals WHERE agent_id = :a"), {"a": agent}
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        dates = [e.started_at.date().isoformat() for e in episodes]
+        assert dates == ["2024-03-15", "2024-03-15", "2024-04-05", "2024-04-05"]
+        # The trivial session is soft-deleted, never ended (end_episode would set ended_at and the transcript).
+        assert episodes[3].ended_at is None and episodes[3].transcript is None
+        assert all(e.ended_at and e.ended_at > e.started_at and e.transcript for e in episodes[:3]), [
+            (e.started_at, e.ended_at, bool(e.transcript)) for e in episodes
         ]
-        assert all(a["answer"] == "Planting date\nIrrigation timer" and a["stop_reason"] == "end_turn" for a in answers)
-        assert all("Larkspur" in a["context"] for a in answers), [a["context"][:300] for a in answers]
-        if mode == "preturn":
-            assert answers[0]["retrieval"]["plan_queries"].get("fact")
-            assert answers[0]["retrieval"]["recalled_ids"].get("fact")
-        run_info = json.loads((mode_out / "run.json").read_text(encoding="utf-8"))
-        assert run_info["mode"] == mode and run_info["answer_model"] == "fake-model" and run_info["git"]["sha"]
+        assert episodes[0].transcript.startswith("User: I am planning the Larkspur garden project")
+        # Every fact carries its session's (or the following sleep's) BEAM date, never the wall clock.
+        assert facts and all(f.created_at.year == 2024 and f.learned_at.year == 2024 for f in facts)
+        assert "corrected" in signals
+        assert any(f.source == "correction_extraction" and f.category == "rule" for f in facts)
 
-        summary = await beam_run.cmd_score(
-            beam_run.parse_args(["score", "--out-dir", str(mode_out)]), judge=exact_match_judge()
-        )
-        assert summary["n_errors"] == 0
-        assert summary["abilities"]["information_extraction"]["score"] == pytest.approx(1.0)
-        assert summary["abilities"]["event_ordering"]["score"] == pytest.approx(1.0)  # tau_norm
-        assert summary["event_ordering"]["aligned_events_per_question"] == [2]
-        result = json.loads((mode_out / "results" / "100K" / "1" / "result.json").read_text(encoding="utf-8"))
-        assert set(result) == {"information_extraction", "event_ordering"}
-        assert result["event_ordering"][0]["llm_response"] == "Planting date\nIrrigation timer"
+        async with harness.open_stack(
+            arms.build_settings(db_url, agent, {}), llm=llm, embeddings=MockEmbeddingProvider()
+        ) as stack:
+            with pytest.raises(SystemExit, match="already has"):  # a second ingest into the agent
+                await harness.ingest_conversation(stack, corpus.load_conversation(chats, "100K", "1"))
+
+        for mode in ("preturn", "recall_deep"):
+            mode_out = out / mode
+            args = beam_run.parse_args(
+                ["answer", *common, "--out-dir", str(mode_out), "--mode", mode, "--answer-model", "fake-model"]
+            )
+            mode_out.mkdir()
+            assert await beam_run.cmd_answer(args, llm=llm, embeddings=MockEmbeddingProvider()) == 2
+            assert await beam_run.cmd_answer(args, llm=llm, embeddings=MockEmbeddingProvider()) == 0  # resumes
+            answers = [json.loads(x) for x in (mode_out / "answers.jsonl").read_text(encoding="utf-8").splitlines()]
+            assert [(a["ability"], a["error"]) for a in answers] == [
+                ("information_extraction", None),
+                ("event_ordering", None),
+            ]
+            assert all(a["answer"] == ANSWER and a["stop_reason"] == "end_turn" for a in answers)
+            assert all("Larkspur" in a["context"] for a in answers), [a["context"][:300] for a in answers]
+            if mode == "preturn":
+                assert answers[0]["retrieval"]["plan_queries"].get("fact")
+                assert answers[0]["retrieval"]["recalled_ids"].get("fact")
+            run_info = json.loads((mode_out / "run.json").read_text(encoding="utf-8"))
+            assert run_info["mode"] == mode and run_info["answer_model"] == "fake-model" and run_info["git"]["sha"]
+            assert run_info["recall_deep_limit"] == harness.RECALL_DEEP_LIMIT and run_info["clock_notes"]
+            assert run_info["override_names"] == [] and "overrides" not in run_info
+
+            summary = await beam_run.cmd_score(
+                beam_run.parse_args(["score", "--out-dir", str(mode_out)]), judge=exact_match_judge()
+            )
+            assert summary["n_errors"] == 0
+            assert summary["abilities"]["information_extraction"]["score"] == pytest.approx(1.0)
+            assert summary["abilities"]["event_ordering"]["score"] == pytest.approx(1.0)  # tau_norm
+            assert summary["event_ordering"]["aligned_events_per_question"] == [2]
+            scored = [json.loads(x) for x in (mode_out / "scores.jsonl").read_text(encoding="utf-8").splitlines()]
+            eo = next(r["score"] for r in scored if r["ability"] == "event_ordering")
+            assert eo["n_system"] == 3 and eo["f1"] == pytest.approx(0.8)  # the trailing blank line counts
+            result = json.loads((mode_out / "results" / "100K" / "1" / "result.json").read_text(encoding="utf-8"))
+            assert set(result) == {"information_extraction", "event_ordering"}
+            assert result["event_ordering"][0]["llm_response"] == ANSWER
+    finally:
+        await purge_agent(db, agent)
+    async with db.session() as s:
+        left = (
+            await s.execute(
+                text(
+                    "SELECT (SELECT count(*) FROM heart.episodes WHERE agent_id = :a)"
+                    " + (SELECT count(*) FROM heart.facts WHERE agent_id = :a)"
+                    " + (SELECT count(*) FROM nous_system.agents WHERE id = :a)"
+                ),
+                {"a": agent},
+            )
+        ).scalar_one()
+    assert left == 0

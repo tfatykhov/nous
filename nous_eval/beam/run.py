@@ -9,7 +9,9 @@
             and BEAM-shaped ``results/<bucket>/<id>/result.json``.
 
 One out-dir per (arm, mode). ``answer`` and ``score`` resume: rows already
-written are skipped. The out-dir must be outside version control.
+written are skipped (a row that recorded an error too: delete it to retry). The
+out-dir must be outside version control, and the database's name must start with
+nous_eval, nous_test or beam unless ``--i-know-this-is-scratch`` is given.
 """
 
 from __future__ import annotations
@@ -39,9 +41,16 @@ def _common(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument("--agent-tag", required=True, help="names the ingest: agent id is beam-<bucket>-<id>-<tag>")
     p.add_argument("--arm", default="base", help="label recorded with the run")
-    p.add_argument("--flags-file", type=Path, help="dotenv file whose NOUS_* flags form the base config")
-    p.add_argument("--set", action="append", default=[], metavar="NOUS_NAME=VALUE", help="arm override (repeatable)")
+    p.add_argument("--flags-file", type=Path, help="dotenv file; its arm settings (arms.ARM_SETTINGS) form the base")
+    p.add_argument(
+        "--set", action="append", default=[], metavar="NOUS_NAME=VALUE", help="arm setting override (repeatable)"
+    )
     p.add_argument("--out-dir", type=Path, required=True)
+    p.add_argument(
+        "--i-know-this-is-scratch",
+        action="store_true",
+        help="write to a database whose name does not start with nous_eval, nous_test or beam",
+    )
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -62,10 +71,22 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def resolve_overrides(args: argparse.Namespace) -> tuple[dict[str, str], list[str]]:
-    """Flags file first, ``--set`` on top. Returns (overrides, flags-file names unknown to this code)."""
-    base, skipped = arms.load_flags_file(args.flags_file) if args.flags_file else ({}, [])
-    return {**base, **arms.parse_overrides(args.set)}, skipped
+def resolve_overrides(args: argparse.Namespace) -> tuple[dict[str, str], int]:
+    """Flags file first, ``--set`` on top. Returns (overrides, number of flags-file names ignored)."""
+    base, ignored = arms.load_flags_file(args.flags_file) if args.flags_file else ({}, 0)
+    return {**base, **arms.parse_overrides(args.set)}, ignored
+
+
+def run_settings_record(settings: Any, overrides: dict[str, str], ignored: int) -> dict[str, Any]:
+    """What a run record says about settings: override names, values only from the allowlisted snapshot."""
+    return {
+        "override_names": sorted(overrides),
+        "flags_file_names_ignored": ignored,
+        "settings": arms.settings_snapshot(settings, sorted(overrides)),
+        "eval_overrides": arms.EVAL_OVERRIDES,
+        "clock_notes": list(arms.CLOCK_NOTES),
+        "git": arms.code_revision(),
+    }
 
 
 def agent_id(bucket: str, conv_id: str, tag: str) -> str:
@@ -101,13 +122,18 @@ def _write_json(path: Path, data: Any) -> None:
 def _require_db(args: argparse.Namespace) -> str:
     if not args.db_url:
         raise SystemExit("--db-url (or NOUS_EVAL_SCRATCH_DB_URL) is required")
+    arms.check_scratch_db(args.db_url, allow_any=args.i_know_this_is_scratch)
     return args.db_url
+
+
+def _json(value: Any) -> Any:
+    return json.loads(json.dumps(value, default=str))
 
 
 async def cmd_ingest(
     args: argparse.Namespace, *, llm: Any = None, embeddings: Any = None, prepare: bool = True
 ) -> list[dict[str, Any]]:
-    overrides, skipped = resolve_overrides(args)
+    overrides, ignored = resolve_overrides(args)
     db_url = _require_db(args)
     out: list[dict[str, Any]] = []
     for i, cid in enumerate(_conv_ids(args)):
@@ -122,10 +148,7 @@ async def cmd_ingest(
             "agent_id": settings.agent_id,
             "sleep": args.sleep,
             "arm": args.arm,
-            "overrides": overrides,
-            "flags_file_unknown_names": skipped,
-            "settings": arms.settings_snapshot(settings, overrides),
-            "git": arms.code_revision(),
+            **run_settings_record(settings, overrides, ignored),
             **stats,
         }
         _write_json(args.out_dir / f"ingest-{args.bucket}-{cid}-{args.agent_tag}.json", record)
@@ -135,42 +158,42 @@ async def cmd_ingest(
 
 
 async def cmd_answer(args: argparse.Namespace, *, llm: Any = None, embeddings: Any = None) -> int:
-    overrides, skipped = resolve_overrides(args)
+    overrides, ignored = resolve_overrides(args)
     db_url = _require_db(args)
     answers_path = args.out_dir / "answers.jsonl"
     run_path = args.out_dir / "run.json"
-    run_id = {
-        "mode": args.mode,
-        "arm": args.arm,
-        "overrides": overrides,
-        "agent_tag": args.agent_tag,
-        "bucket": args.bucket,
-    }
+    conv_ids = _conv_ids(args)
+    first = arms.build_settings(db_url, agent_id(args.bucket, conv_ids[0], args.agent_tag), overrides)
+    model = args.answer_model or first.model
+    record = run_settings_record(first, overrides, ignored)
+    by_env = arms.env_name_to_field()
+    run_id = _json(
+        {
+            "mode": args.mode,
+            "arm": args.arm,
+            "override_names": record["override_names"],
+            "arm_values": {by_env[n]: record["settings"][by_env[n]] for n in record["override_names"]},
+            "agent_tag": args.agent_tag,
+            "bucket": args.bucket,
+            "answer_model": model,
+        }
+    )
     if run_path.exists():
         prior = json.loads(run_path.read_text(encoding="utf-8"))
         if {k: prior.get(k) for k in run_id} != run_id:
             raise SystemExit(
-                f"{args.out_dir} holds a different run (mode/arm/overrides/tag/bucket); use a new --out-dir"
+                f"{args.out_dir} holds a different run (mode/arm/settings/tag/bucket/model); use a new one"
             )
+    else:
+        _write_json(
+            run_path,
+            {**run_id, **record, "recall_deep_limit": harness.RECALL_DEEP_LIMIT, "chats_dir": str(args.chats_dir)},
+        )
     done = {_row_key(r) for r in _read_jsonl(answers_path)}
     written = 0
-    for cid in _conv_ids(args):
+    for cid in conv_ids:
         conv = corpus.load_conversation(args.chats_dir, args.bucket, cid)
         settings = arms.build_settings(db_url, agent_id(args.bucket, cid, args.agent_tag), overrides)
-        model = args.answer_model or settings.model
-        if not run_path.exists():
-            snapshot = arms.settings_snapshot(settings, overrides)
-            _write_json(
-                run_path,
-                {
-                    **run_id,
-                    "answer_model": model,
-                    "chats_dir": str(args.chats_dir),
-                    "flags_file_unknown_names": skipped,
-                    "settings": snapshot,
-                    "git": arms.code_revision(),
-                },
-            )
         questions = conv.questions[: args.limit_questions] if args.limit_questions else conv.questions
         async with harness.open_stack(settings, llm=llm, embeddings=embeddings) as stack:
             if not (await harness.count_rows(stack))["episodes"]:

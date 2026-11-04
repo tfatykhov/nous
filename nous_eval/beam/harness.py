@@ -9,14 +9,21 @@ FactExtractor.handle (candidate facts, admission, F027 supersession), whose
 ``fact_learned`` events reach FactGraphLinker. The bus is not started; it is
 drained after each session, in the order the production loop would dispatch.
 
-Episodes are backdated to the BEAM batch date before summarizing (the summarizer
-resolves relative dates against ``started_at``). Facts keep their ingest-time
-timestamps, in conversation order: sleep's stale scan deactivates facts whose
-``created_at`` is past ``stale_scan_age_days``, so 2024 dates would wipe the corpus.
+OutcomeDetector and CorrectionExtractor (rule facts, censors) run on
+``session_ended`` as in prod, each when its flag is on; so do the summarizer and
+the extractor. A single-turn session shorter than ``episode_min_content_length``
+is soft-deleted as trivial instead of ended, as end_session does.
+
+Clock: each session runs at its BEAM date. Its episode is dated before summarizing
+(the summarizer resolves relative dates against ``started_at``), and every fact
+written while the session (or the sleep cycle after its batch) is processed gets
+that date as ``created_at``/``learned_at`` (and ``mentioned_at`` where the column
+exists). arms.EVAL_OVERRIDES turns the sleep stale scan off for every arm; what
+still reads the wall clock is listed in arms.CLOCK_NOTES and recorded with the run.
 With ``sleep=True`` a full sleep cycle runs after each batch (BEAM batches are days
 apart). Sleep reflection reads only episodes started within
-``sleep_reflection_hours`` of wall-clock now, so on backdated episodes it finds
-none unless the arm widens that window.
+``sleep_reflection_hours`` of wall-clock now, so on dated episodes it finds none
+unless the arm widens that window.
 
 Answer modes, both through BEAM's own answer prompt (scoring.ANSWER_PROMPT):
   preturn      the context is the system prompt ``ContextEngine.build`` returns,
@@ -50,6 +57,8 @@ logger = logging.getLogger(__name__)
 # seeded agent's frame set, as prod does from its own.
 FRAME_AGENT = "nous-default"
 SESSION_LENGTH = timedelta(minutes=5)
+SLEEP_GAP = timedelta(minutes=1)  # a batch's sleep cycle runs this long after its last session ends
+RECALL_DEEP_LIMIT = 10  # the recall_deep tool's default limit
 
 
 class DrainedBus(EventBus):
@@ -82,6 +91,7 @@ class Stack:
     recall_deep: Any
     epistemic: Any
     sleep_handler: Any
+    fact_time_columns: tuple[str, ...] = ("created_at", "learned_at")
 
 
 async def prepare_db(settings: Any) -> None:
@@ -112,9 +122,11 @@ async def open_stack(
     from nous.cognitive.context import ContextEngine
     from nous.cognitive.frames import FrameEngine
     from nous.cognitive.intent import IntentClassifier
+    from nous.handlers.correction_extractor import CorrectionExtractor
     from nous.handlers.episode_summarizer import EpisodeSummarizer
     from nous.handlers.fact_extractor import FactExtractor
     from nous.handlers.fact_graph_linker import FactGraphLinker
+    from nous.handlers.outcome_detector import OutcomeDetector
     from nous.heart.date_window import DateWindowParser
     from nous.heart.heart import Heart
     from nous.storage.database import Database
@@ -153,11 +165,20 @@ async def open_stack(
         heart.facts.set_llm_client(llm, model=settings.contradiction_model)
         heart.date_window_parser = DateWindowParser(llm, settings)
 
-        # main.py handler block: the memory-forming handlers only.
+        # main.py handler block: the handlers that write memory, each behind its flag as there.
         graph_linker = GraphLinker(db=db, embedder=embeddings, settings=settings, agent_id=settings.agent_id)
-        summarizer = EpisodeSummarizer(heart, brain, settings, bus, llm, graph_linker=graph_linker)
-        summarizer._embedder = embeddings
-        FactExtractor(heart, settings, bus, llm)
+        summarizer = None
+        if settings.episode_summary_enabled:
+            summarizer = EpisodeSummarizer(heart, brain, settings, bus, llm, graph_linker=graph_linker)
+            summarizer._embedder = embeddings
+        if settings.fact_extraction_enabled:
+            FactExtractor(heart, settings, bus, llm)
+        if settings.rubric_outcome_detection_enabled:
+            OutcomeDetector(db=db, settings=settings, bus=bus, llm_client=llm, agent_id=settings.agent_id)
+        if settings.correction_extraction_enabled:
+            CorrectionExtractor(
+                db=db, settings=settings, bus=bus, llm_client=llm, heart=heart, agent_id=settings.agent_id
+            )
         brain._bus = bus
         if settings.cross_type_linking_enabled:
             heart._bus = bus
@@ -173,7 +194,21 @@ async def open_stack(
                 sleep_handler._graph_densifier = GraphDensifier(
                     db=db, graph_linker=graph_linker, embedder=embeddings, settings=settings, agent_id=settings.agent_id
                 )
-            sleep_handler._episode_summarizer = summarizer
+            if summarizer is not None:
+                sleep_handler._episode_summarizer = summarizer
+
+        async with db.session() as s:
+            columns = set(
+                (
+                    await s.execute(
+                        sa_text(
+                            "SELECT column_name FROM information_schema.columns"
+                            " WHERE table_schema = 'heart' AND table_name = 'facts'"
+                        )
+                    )
+                ).scalars()
+            )
+        fact_time_columns = tuple(c for c in ("created_at", "learned_at", "mentioned_at") if c in columns)
 
         epistemic = None
         if settings.epistemic_gate_enabled:
@@ -193,6 +228,7 @@ async def open_stack(
             recall_deep=create_nous_tools(brain, heart, settings)["recall_deep"],
             epistemic=epistemic,
             sleep_handler=sleep_handler,
+            fact_time_columns=fact_time_columns,
         )
     finally:
         if owns_llm:
@@ -241,7 +277,45 @@ async def _set_episode_times(stack: Stack, episode_id: Any, started: Any, ended:
         await s.commit()
 
 
-async def ingest_session(stack: Stack, conv: Conversation, session: Session) -> None:
+async def ensure_agent(stack: Stack) -> None:
+    """The agent row (outcome signals reference it), configured like the seeded agent."""
+    async with stack.db.session() as s:
+        await s.execute(
+            sa_text(
+                "INSERT INTO nous_system.agents (id, name, description, config)"
+                " SELECT :a, :a, 'BEAM eval agent',"
+                " COALESCE((SELECT config FROM nous_system.agents WHERE id = :seed), '{}'::jsonb)"
+                " ON CONFLICT (id) DO NOTHING"
+            ),
+            {"a": stack.settings.agent_id, "seed": FRAME_AGENT},
+        )
+        await s.commit()
+
+
+async def db_now(stack: Stack) -> datetime:
+    async with stack.db.session() as s:
+        return (await s.execute(sa_text("SELECT clock_timestamp()"))).scalar_one()
+
+
+async def date_new_facts(stack: Stack, since: datetime, when: datetime) -> int:
+    """Give every fact this agent wrote since ``since`` (wall clock) the simulated time ``when``."""
+    sets = ", ".join(f"{c} = :t" for c in stack.fact_time_columns)
+    async with stack.db.session() as s:
+        result = await s.execute(
+            sa_text(f"UPDATE heart.facts SET {sets} WHERE agent_id = :a AND created_at >= :since"),
+            {"t": when, "a": stack.settings.agent_id, "since": since},
+        )
+        await s.commit()
+    return result.rowcount or 0
+
+
+def is_trivial(session: Session, min_chars: int) -> bool:
+    """end_session's test: one turn, no tools, combined user+assistant text under the minimum."""
+    turns = sum(1 for m in session.messages if m.role == "user")
+    return turns <= 1 and sum(len(m.content) for m in session.messages) < min_chars
+
+
+async def ingest_session(stack: Stack, conv: Conversation, session: Session, since: datetime) -> None:
     from nous.heart.schemas import EpisodeInput
 
     settings, heart = stack.settings, stack.heart
@@ -258,8 +332,12 @@ async def ingest_session(stack: Stack, conv: Conversation, session: Session) -> 
     )
     await _set_episode_times(stack, episode.id, session.started_at)
     transcript = render_transcript(session, settings.transcript_message_max_chars)
-    await heart.end_episode(episode.id, outcome="success", transcript=transcript)
-    await _set_episode_times(stack, episode.id, session.started_at, session.started_at + SESSION_LENGTH)
+    ended = session.started_at + SESSION_LENGTH
+    if is_trivial(session, settings.episode_min_content_length):
+        await heart.deactivate_episode(episode.id)
+    else:
+        await heart.end_episode(episode.id, outcome="success", transcript=transcript)
+        await _set_episode_times(stack, episode.id, session.started_at, ended)
     event = Event(
         type="session_ended",
         agent_id=settings.agent_id,
@@ -282,10 +360,11 @@ async def ingest_session(stack: Stack, conv: Conversation, session: Session) -> 
     event.trace_id = event.event_id
     await stack.bus.emit(event)
     await stack.bus.drain(heart._pending_emits, stack.brain._pending_emits)
+    await date_new_facts(stack, since, ended)
 
 
-async def run_sleep(stack: Stack) -> None:
-    """One full sleep cycle, then whatever it emitted."""
+async def run_sleep(stack: Stack, since: datetime, when: datetime) -> None:
+    """One full sleep cycle, then whatever it emitted; facts it wrote get the time ``when``."""
     handler = stack.sleep_handler
     event = Event(type="sleep_started", agent_id=stack.settings.agent_id, data={"source": "beam_harness"})
     event.trace_id = event.event_id
@@ -293,6 +372,7 @@ async def run_sleep(stack: Stack) -> None:
     handler._interrupted = False
     await handler._run_sleep(event)
     await stack.bus.drain(stack.heart._pending_emits, stack.brain._pending_emits, handler._pending_emits)
+    await date_new_facts(stack, since, when)
 
 
 async def ingest_conversation(stack: Stack, conv: Conversation, *, limit_sessions: int | None = None) -> dict[str, Any]:
@@ -315,12 +395,14 @@ async def ingest_conversation(stack: Stack, conv: Conversation, *, limit_session
             "BEAM episodes are older, so reflection finds none unless the arm widens NOUS_SLEEP_REFLECTION_HOURS",
             hours,
         )
+    await ensure_agent(stack)
+    since = await db_now(stack)  # every row written from here on is this ingest's
     sleeps = 0
     t0 = time.monotonic()
     for i, session in enumerate(sessions):
-        await ingest_session(stack, conv, session)
+        await ingest_session(stack, conv, session, since)
         if stack.sleep_handler is not None and (i in batch_ends or i == len(sessions) - 1):
-            await run_sleep(stack)
+            await run_sleep(stack, since, session.started_at + SESSION_LENGTH + SLEEP_GAP)
             sleeps += 1
         if (i + 1) % 10 == 0:
             logger.info("%s: %d/%d sessions ingested", conv.key, i + 1, len(sessions))
@@ -401,7 +483,7 @@ async def context_preturn(stack: Stack, question: str) -> tuple[str, dict[str, A
 
 async def context_recall_deep(stack: Stack, question: str) -> tuple[str, dict[str, Any]]:
     session_id = f"beam-ask-{uuid.uuid4().hex[:12]}"
-    out = await stack.recall_deep(query=question, limit=10, _session_id=session_id, _turn_number=1)
+    out = await stack.recall_deep(query=question, limit=RECALL_DEEP_LIMIT, _session_id=session_id, _turn_number=1)
     return out["content"][0]["text"], {"session_id": session_id, "tool_is_error": bool(out.get("is_error"))}
 
 
@@ -415,6 +497,7 @@ async def generate_answer(
 
     No sampling parameters (current models reject them); thinking runs at the model's default.
     A refused or cut-off answer is kept as given and scored as such, with its stop_reason recorded.
+    The text is not stripped: event ordering splits the raw answer on newlines, as upstream does.
     """
     from nous_eval._oat_preamble import call_with_retries, with_oat_preamble
 
@@ -431,4 +514,4 @@ async def generate_answer(
     }
     response = await call_with_retries(llm, payload)
     text = "".join(b.get("text", "") for b in response.content if isinstance(b, dict) and b.get("type") == "text")
-    return text.strip(), getattr(response, "stop_reason", None)
+    return text, getattr(response, "stop_reason", None)
