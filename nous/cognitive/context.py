@@ -1858,9 +1858,13 @@ class ContextEngine:
                     episodes = apply_frame_boost(episodes, frame.frame_id, _active_censor_names)
                     _tr_rescored(_before, episodes, "episode", "frame_boost")
 
-                    # 007.2: Diversity filter — use first tag as topic key
+                    # 007.2: Diversity filter — use first tag as topic key. Chat
+                    # episodes have no tags; E-17 caps their shared bucket apart.
                     _before = episodes
-                    episodes = self._enforce_diversity(episodes, "tags", max_per_subject=2)
+                    episodes = self._enforce_diversity(
+                        episodes, "tags", max_per_subject=2,
+                        unknown_cap=self._settings.context_episode_untagged_diversity_cap,
+                    )
                     _tr_filtered(_before, episodes, "episode", FILTER_DROPPED, "diversity")
 
                     # Dedup + usage boost
@@ -2207,13 +2211,18 @@ class ContextEngine:
             adjusted.append(_wrap_with_score(ep, score * decay))
         return adjusted
 
-    def _enforce_diversity(self, items: list, topic_attr: str, max_per_subject: int = 2) -> list:
+    def _enforce_diversity(
+        self, items: list, topic_attr: str, max_per_subject: int = 2, unknown_cap: int | None = None,
+    ) -> list:
         """Prevent one topic from dominating recall results (007.2).
 
         Extracts a topic key from each item using topic_attr:
         - String attrs (e.g. 'subject', 'category'): full string, stripped and lowercased
         - List attrs (e.g. 'tags'): first element, lowercased
         Items without the attr default to 'unknown'.
+
+        ``unknown_cap`` caps the 'unknown' bucket instead of ``max_per_subject``
+        (0 = no cap); ``None`` treats it like any other key (E-17).
         """
         if not items:
             return items
@@ -2229,8 +2238,11 @@ class ContextEngine:
             else:
                 topic_key = "unknown"
 
+            cap = max_per_subject
+            if topic_key == "unknown" and unknown_cap is not None:
+                cap = unknown_cap or None
             count = seen.get(topic_key, 0)
-            if count < max_per_subject:
+            if cap is None or count < cap:
                 result.append(item)
                 seen[topic_key] = count + 1
         return result

@@ -768,6 +768,11 @@ class Settings(BaseSettings):
     # Memories learned in between are not retrieved until the TTL passes.
     context_skip_unchanged_query: bool = False
     context_skip_unchanged_ttl_seconds: int = Field(default=600, ge=0)
+    # E-17: the episode leg's diversity stage keys on an episode's first tag and keeps
+    # 2 per key. Chat episodes carry no tags, so all of them share the "unknown" key and
+    # at most 2 reach the relevance filter. This caps that untagged bucket alone (0 = no
+    # cap); tagged buckets keep 2, and decisions and facts are unchanged. 2 = as before.
+    context_episode_untagged_diversity_cap: int = Field(default=2, ge=0)
 
     @field_validator("effort", mode="before")
     @classmethod
@@ -2778,11 +2783,26 @@ class Settings(BaseSettings):
     )
     episode_chunk_size: int = Field(
         default=600,
-        description="F067 chunk size in chars (sliding window).",
+        # nous.heart.chunking.MIN_TURN_AWARE_CHUNK_SIZE: the turn-aware chunker
+        # (episode_chunk_turn_aware) rejects smaller sizes.
+        ge=44,
+        description="F067 chunk size in chars (sliding window). At least 44.",
     )
     episode_chunk_overlap: int = Field(
         default=80,
         description="F067 chunk overlap in chars to avoid splitting key tokens.",
+    )
+    episode_chunk_turn_aware: bool = Field(
+        default=False,
+        description=(
+            "H-7: chunk NEW episodes' transcripts with chunk_transcript (whole turns "
+            "packed up to episode_chunk_size, a question never split from the start "
+            "of its answer, role label on every fragment of a long turn; overlap "
+            "only at hard cuts) instead of the raw chunk_text window. Changes chunk "
+            "text, count and embeddings, so what the chunk leg retrieves. Existing "
+            "chunks are not rewritten. Default OFF until the LongMemEval and "
+            "shared-corpus evals."
+        ),
     )
     episode_chunk_recall_limit: int = Field(
         default=10,

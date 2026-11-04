@@ -10,10 +10,20 @@ It uses the same chunking + embedding path as the live hook
 (``_chunk_and_store_transcript``):
 
 - ``chunk_text()`` with ``settings.episode_chunk_size`` / ``overlap`` /
-  ``min_transcript_chars``
+  ``min_transcript_chars``, or ``chunk_transcript()`` when
+  ``NOUS_EPISODE_CHUNK_TURN_AWARE`` is on (H-7). The flag applies to normal
+  runs only: ``--repair-dialogue`` always rebuilds with ``chunk_text()``.
 - ``EmbeddingProvider.embed_batch`` for batched embedding
-- ``INSERT ... ON CONFLICT (episode_id, chunk_index) DO NOTHING`` for
-  idempotency (matches the unique index on heart.episode_chunks)
+- idempotency from the ``source_kind='dialogue'`` existence check under the
+  episode's advisory lock (indexes are MAX+1-allocated)
+
+``--repair-dialogue`` must NOT be used until PR-J (graph hygiene) lands. It
+hard-deletes an episode's dialogue chunks and rebuilds them under new ids. It
+deletes the graph edges of the old chunks in the same transaction, so the
+F070 chunk edges are lost and the rebuilt chunks have none until the
+densifier relinks them. So a re-chunk of already-chunked episodes (H-7's
+back catalogue) waits for PR-J too; a normal run touches only episodes with
+no dialogue chunks.
 
 Failure semantics match the live path: when ``embed_batch`` fails for an
 episode, the script ABORTS that episode's chunk insert (no NULL-embedding
@@ -120,9 +130,12 @@ async def _process_episode(
     repair deletes the existing dialogue chunks under the advisory lock
     and rebuilds the full set."""
     from sqlalchemy import text as sa_text
-    from nous.heart.chunking import chunk_text
+    from nous.heart.chunking import chunk_text, chunk_transcript
 
-    chunks = chunk_text(
+    # H-7: a normal run chunks like the live hook; a repair rebuilds what the
+    # window chunker produced.
+    turn_aware = getattr(settings, "episode_chunk_turn_aware", False) and not repair
+    chunks = (chunk_transcript if turn_aware else chunk_text)(
         transcript,
         chunk_size=settings.episode_chunk_size,
         overlap=settings.episode_chunk_overlap,
@@ -242,7 +255,11 @@ async def main() -> int:
             "lock). Use to repair episodes whose dialogue set is incomplete — "
             "e.g. damaged by the pre-fix F069/F067 chunk-index collision, "
             "which destroyed every transcript chunk overlapping a document "
-            "index range while leaving the suffix (codex P1, PR #495)."
+            "index range while leaving the suffix (codex P1, PR #495). "
+            "DO NOT USE until PR-J (graph hygiene) lands: the rebuilt chunks "
+            "get new ids and the old chunks' graph edges are deleted with "
+            "them. Always rebuilds with the window chunker "
+            "(ignores NOUS_EPISODE_CHUNK_TURN_AWARE)."
         ),
     )
     args = parser.parse_args()
@@ -283,6 +300,8 @@ async def main() -> int:
     print(f"  Eligible episodes:   {eligible}")
     print(f"  Agent filter:        {args.agent_id or '(all agents)'}")
     print(f"  Chunk size / overlap: {settings.episode_chunk_size} / {settings.episode_chunk_overlap}")
+    turn_aware = getattr(settings, "episode_chunk_turn_aware", False) and not args.repair_dialogue
+    print(f"  Chunker:             {'turn-aware (H-7)' if turn_aware else 'window'}")
     print(f"  Min transcript chars: {settings.episode_chunk_min_transcript_chars}")
     print(f"  Embedder:            {settings.embedding_model} @ {settings.embedding_dimensions}d")
     print(f"  Dry run:             {args.dry_run}")
