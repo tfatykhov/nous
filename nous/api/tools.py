@@ -51,6 +51,7 @@ from nous.heart.schemas import (
     FactInput,
     FactRejected,
     FactSummary,
+    fact_source_marker,
     is_job_lesson,
 )
 from nous.heart.subtasks import INLINE_WORKER_ID
@@ -830,6 +831,7 @@ def _format_pipeline_text(
     session_group_heart: bool = False,
     emitted_out: list[tuple[Any, str]] | None = None,
     temporal_render: bool = False,
+    source_marker: bool = False,
 ) -> str:
     """Format ``run_recall_pipeline`` output into legacy ``recall_deep`` text.
 
@@ -876,7 +878,10 @@ def _format_pipeline_text(
     `=== Nearest stored examples ===` section; absent when no exemplar rows
     are present (default, flag off). When a retrieval leg failed, the text
     ends with one ``Note: ...; results may be incomplete.`` line
-    (``retrieval_pipeline.failure_note``); absent when none failed.
+    (``retrieval_pipeline.failure_note``); absent when none failed. K-13: with
+    ``source_marker`` a fact the agent inferred or merged ends with
+    ``[inferred]`` or ``[merged]`` (``fact_source_marker_enabled``); off by
+    default, so the text is unchanged.
     """
     search_all = "all" in search_types
     results_text: list[str] = []
@@ -912,6 +917,7 @@ def _format_pipeline_text(
         results_text.extend(f"   - [learned {s['learned_at']}] {s['content']}" for s in sources)
         if dropped:
             results_text.append(f"   - +{dropped} older")
+
     def _fact_start(r: Any) -> Any:
         if not temporal_render or r.type != "fact":
             return None
@@ -929,6 +935,13 @@ def _format_pipeline_text(
 
     def _by_date(rows: list) -> list:
         return sort_dated(rows, _fact_start) if temporal_render else rows
+
+    def _source_tag(r: Any) -> str:
+        # K-13: " [inferred]" / " [merged]" from the fact's source, after the
+        # recency tag. Empty with the marker off => byte-identical.
+        if not source_marker or r.type != "fact":
+            return ""
+        return fact_source_marker(r.metadata.get("source"))
 
     # ------------------------------------------------------------------
     # Heart Memory section
@@ -1019,7 +1032,7 @@ def _format_pipeline_text(
                     for result in _by_date(items):
                         results_text.append(
                             f"{i}. [{result.type}] {_via_tag(result)}{result.description}"
-                            f"{_date_tag(result)}{_recency_tag(result)} "
+                            f"{_date_tag(result)}{_recency_tag(result)}{_source_tag(result)} "
                             f"(id: {result.id}, score: {result.score:.3f} {_score_tag(result)})"
                         )
                         _emit(result)
@@ -1031,7 +1044,7 @@ def _format_pipeline_text(
                     for result in _by_date(no_session):
                         results_text.append(
                             f"{i}. [{result.type}] {_via_tag(result)}{result.description}"
-                            f"{_date_tag(result)}{_recency_tag(result)} "
+                            f"{_date_tag(result)}{_recency_tag(result)}{_source_tag(result)} "
                             f"(id: {result.id}, score: {result.score:.3f} {_score_tag(result)})"
                         )
                         _emit(result)
@@ -1043,7 +1056,7 @@ def _format_pipeline_text(
                 for i, result in enumerate(_by_date(heart_results), 1):
                     results_text.append(
                         f"{i}. [{result.type}] {_via_tag(result)}{result.description}"
-                        f"{_date_tag(result)}{_recency_tag(result)} "
+                        f"{_date_tag(result)}{_recency_tag(result)}{_source_tag(result)} "
                         f"(id: {result.id}, score: {result.score:.3f} {_score_tag(result)})"
                     )
                     _emit(result)
@@ -1838,6 +1851,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 search_types,
                 parent_episodes=parent_episodes,
                 session_group_heart=getattr(settings, "session_group_heart_section", False),
+                source_marker=getattr(settings, "fact_source_marker_enabled", False) is True,
                 emitted_out=_emitted,
                 temporal_render=getattr(settings, "temporal_render_enabled", False) is True,
             )

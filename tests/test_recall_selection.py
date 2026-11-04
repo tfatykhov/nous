@@ -91,6 +91,7 @@ def _keyed_row(fid: UUID, content: str, *, attribute_key: str | None = None, lea
         matched=1,
         learned_at=learned_at or datetime(2026, 1, 1, tzinfo=UTC),
         attribute_key=attribute_key,
+        source=None,  # fetch_by_entity_keys returns it since K-13
     )
 
 

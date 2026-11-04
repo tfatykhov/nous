@@ -414,6 +414,7 @@ def test_keyed_rows_carry_their_interval_and_statement_time():
         valid_from=D(2024, 6, 1),
         valid_to=None,
         mentioned_at=datetime(2024, 6, 2, tzinfo=UTC),
+        source=None,  # fetch_by_entity_keys returns it since K-13
     )
     for convert in (_keyed_to_pipeline, _keyed_r2_to_pipeline):
         (result,), _ = convert([row], SimpleNamespace(), set())
@@ -436,6 +437,7 @@ def test_keyed_rows_without_dates_keep_today_s_metadata_exactly():
         valid_from=None,
         valid_to=None,
         mentioned_at=None,
+        source=None,  # fetch_by_entity_keys returns it since K-13
     )
     for convert, leg in ((_keyed_to_pipeline, "keyed"), (_keyed_r2_to_pipeline, "keyed_r2")):
         (result,), _ = convert([row], SimpleNamespace(), set())
@@ -443,10 +445,18 @@ def test_keyed_rows_without_dates_keep_today_s_metadata_exactly():
             "retrieval_leg": leg,
             "matched_keys": 1,
             "subject": "alice",
+            "source": None,
             "learned_at": "2024-06-03T00:00:00+00:00",
             "source_episode_id": "ep-1",
         }
-        assert list(result.metadata) == ["retrieval_leg", "matched_keys", "subject", "learned_at", "source_episode_id"]
+        assert list(result.metadata) == [
+            "retrieval_leg",
+            "matched_keys",
+            "subject",
+            "source",
+            "learned_at",
+            "source_episode_id",
+        ]
 
 
 _FLAGS = ("temporal_read_intervals_enabled", "temporal_resolver_intervals_enabled", "temporal_render_enabled")

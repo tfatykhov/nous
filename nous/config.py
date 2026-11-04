@@ -524,6 +524,15 @@ class Settings(BaseSettings):
             "fallbacks; the inoculation must sit AT the fact, not in a generic instruction."
         ),
     )
+    fact_source_marker_enabled: bool = Field(
+        default=False,
+        description=(
+            "K-13: end the line of a fact the agent wrote itself with [inferred] (sleep_reflection, "
+            "reflection) or [merged] (cluster_consolidation, contradiction_resolution), in recall_deep "
+            "and the pre-turn context (User Profile and the intent leg included). Model-facing, so it "
+            "is A/B-gated. Off: the text is byte-identical."
+        ),
+    )
 
     # 064 R1: enumerative extraction (land-dark)
     extraction_enumerative_enabled: bool = Field(

@@ -24,7 +24,7 @@ from nous.cognitive.usage_tracker import UsageTracker
 from nous.config import Settings
 from nous.heart.heart import Heart
 from nous.heart.profile_card import ProfileCardStore
-from nous.heart.schemas import is_job_lesson, is_strategy_card
+from nous.heart.schemas import fact_source_marker, is_job_lesson, is_strategy_card
 from nous.heart.search import (
     _wrap_with_score,
     apply_frame_boost,
@@ -2585,10 +2585,15 @@ class ContextEngine:
                 dtag = f" {span}" if span else ""
                 dates.append(start or event)
 
+            # K-13: [inferred] / [merged] for a fact the agent wrote itself.
+            stag = ""
+            if getattr(self._settings, "fact_source_marker_enabled", False) is True:
+                stag = fact_source_marker(getattr(f, "source", None))
+
             if subject:
-                line = f"- [{subject}] {content}{dtag}{rtag}{ltag} [confidence: {conf:.2f}]"
+                line = f"- [{subject}] {content}{dtag}{rtag}{ltag}{stag} [confidence: {conf:.2f}]"
             else:
-                line = f"- {content}{dtag}{rtag}{ltag} [confidence: {conf:.2f}]"
+                line = f"- {content}{dtag}{rtag}{ltag}{stag} [confidence: {conf:.2f}]"
             if (
                 getattr(self._settings, "override_prior_marking_enabled", False) is True
                 and getattr(f, "overrides_prior", False)
