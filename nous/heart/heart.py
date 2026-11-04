@@ -136,8 +136,11 @@ class Heart:
             min_activations_for_boost=settings.procedure_min_activations_for_boost,
             dedupe_enabled=settings.procedure_dedupe_enabled,
             dedupe_threshold=settings.procedure_dedupe_threshold,
+            embed_evidence=settings.procedure_embed_evidence,
         )
-        self.censors = CensorManager(database, embedding_provider, settings.agent_id)
+        self.censors = CensorManager(
+            database, embedding_provider, settings.agent_id, embed_text_mode=settings.censor_embed_text_mode,
+        )
         self.working_memory = WorkingMemoryManager(database, settings.agent_id)
         self.subtasks = SubtaskManager(database, settings.agent_id)
         self.result_inbox = ResultInboxStore(database, settings.agent_id)  # F098

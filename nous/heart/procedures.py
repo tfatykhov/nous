@@ -86,6 +86,9 @@ def _in_dedupe_population(procedure: object) -> bool:
 
 # Evidence lines one procedure collects (the K-line learner's covered path and a dedupe merge).
 MAX_EVIDENCE_NOTES = 10
+# A learned procedure's evidence note: "evidence: <id> (<recorded>) — <observed>".
+_EVIDENCE_PREFIX = "evidence: "
+_EVIDENCE_OBSERVED_SEP = " — "
 
 
 def new_evidence_notes(notes: list[str], incoming: list[str]) -> list[str]:
@@ -93,11 +96,11 @@ def new_evidence_notes(notes: list[str], incoming: list[str]) -> list[str]:
 
     The line's second word is the ID of the input item it cites.
     """
-    evidence = [note for note in notes if note.startswith("evidence: ")]
+    evidence = [note for note in notes if note.startswith(_EVIDENCE_PREFIX)]
     cited = {note.split(" ")[1] for note in evidence}
     return [
         note for note in incoming
-        if note.startswith("evidence: ") and note.split(" ")[1] not in cited
+        if note.startswith(_EVIDENCE_PREFIX) and note.split(" ")[1] not in cited
     ][: max(0, MAX_EVIDENCE_NOTES - len(evidence))]
 
 
@@ -159,6 +162,15 @@ def _fingerprint(input: ProcedureInput) -> str:
     return hashlib.sha256(request.encode()).hexdigest()
 
 
+def _embedded_note(note: str, evidence: str) -> str | None:
+    """``note`` as the embedding takes it under ``evidence`` mode; None leaves it out."""
+    if evidence == "keep" or not note.startswith(_EVIDENCE_PREFIX):
+        return note
+    if evidence == "observed" and _EVIDENCE_OBSERVED_SEP in note:
+        return note.split(_EVIDENCE_OBSERVED_SEP, 1)[1]
+    return None
+
+
 def _build_embed_text(
     name: str,
     description: str | None,
@@ -167,11 +179,20 @@ def _build_embed_text(
     core_tools: list[str] | None,
     core_concepts: list[str] | None,
     implementation_notes: list[str] | None,
+    evidence: str = "keep",
 ) -> str:
     """Build the text used for procedure embedding (issue #197).
 
     Includes all body fields, not just metadata, for full-body search accuracy.
+    ``evidence`` (Settings.procedure_embed_evidence) says how the ``evidence: `` notes enter it:
+    "keep" whole, "drop" none, "observed" only the text after " — " (none without it).
     """
+    if evidence not in ("keep", "drop", "observed"):
+        raise ValueError(f"Unknown procedure evidence mode: {evidence!r}")
+    if evidence != "keep":
+        implementation_notes = [
+            kept for note in implementation_notes or [] if (kept := _embedded_note(note, evidence)) is not None
+        ]
     text = (
         f"{name} {description or ''} "
         f"{' '.join(core_patterns or [])} "
@@ -209,6 +230,7 @@ class ProcedureManager:
         min_activations_for_boost: int = 5,
         dedupe_enabled: bool = True,
         dedupe_threshold: float = 0.85,
+        embed_evidence: str = "keep",
     ) -> None:
         self.db = db
         self.embeddings = embeddings
@@ -219,6 +241,7 @@ class ProcedureManager:
         self._min_activations_for_boost = min_activations_for_boost
         self._dedupe_enabled = dedupe_enabled
         self._dedupe_threshold = dedupe_threshold
+        self._embed_evidence = embed_evidence
 
     # ------------------------------------------------------------------
     # Event helper
@@ -288,7 +311,7 @@ class ProcedureManager:
             embed_text = _build_embed_text(
                 input.name, input.description, input.core_patterns,
                 input.goals, input.core_tools, input.core_concepts,
-                input.implementation_notes,
+                input.implementation_notes, self._embed_evidence,
             )
             embedding = await self._embed_with_retry(embed_text)
 
@@ -410,7 +433,7 @@ class ProcedureManager:
             embed_text = _build_embed_text(
                 input.name, input.description, input.core_patterns,
                 input.goals, input.core_tools, input.core_concepts,
-                input.implementation_notes,
+                input.implementation_notes, self._embed_evidence,
             )
             # Re-embed from the new body. On failure _embed_with_retry returns None and
             # logs ERROR; store NULL (consistent with _store) rather than keep the now-stale
@@ -1578,7 +1601,7 @@ class ProcedureManager:
             embed_text = _build_embed_text(
                 proc.name, proc.description, proc.core_patterns,
                 proc.goals, proc.core_tools, proc.core_concepts,
-                proc.implementation_notes,
+                proc.implementation_notes, self._embed_evidence,
             )
             try:
                 proc.embedding = await self.embeddings.embed(embed_text)
@@ -1749,7 +1772,7 @@ class ProcedureManager:
             procedure.embedding = await self._embed_with_retry(_build_embed_text(
                 procedure.name, procedure.description, procedure.core_patterns,
                 procedure.goals, procedure.core_tools, procedure.core_concepts,
-                procedure.implementation_notes,
+                procedure.implementation_notes, self._embed_evidence,
             ))
 
     async def _lock_creates(self, session: AsyncSession) -> None:
@@ -1892,7 +1915,7 @@ class ProcedureManager:
         merged_embedding = await self._embed_with_retry(
             _build_embed_text(
                 procedure.name, body["description"], body["core_patterns"], body["goals"],
-                body["core_tools"], body["core_concepts"], body["implementation_notes"],
+                body["core_tools"], body["core_concepts"], body["implementation_notes"], self._embed_evidence,
             ),
             on_failure="the merge keeps the procedure's previous embedding",
         )
