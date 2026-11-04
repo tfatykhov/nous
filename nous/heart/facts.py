@@ -4151,13 +4151,19 @@ class FactManager:
         # iterative scan may run to pgvector's default tuple budget to fill
         # :limit. Every later retrieval leg sets its own cap.
         await set_local_ef_search(session, VECTOR_LEG_EF_SEARCH)
-        sql = text("""
+        # temporal_read_intervals_enabled: a fact whose interval overlaps the window (an open state has no end).
+        if getattr(self._settings, "temporal_read_intervals_enabled", False) is True:
+            in_window = (
+                "t.valid_from IS NOT NULL AND t.valid_from <= :hi AND COALESCE(t.valid_to, DATE 'infinity') >= :lo"
+            )
+        else:
+            in_window = "t.event_date IS NOT NULL AND t.event_date BETWEEN :lo AND :hi"
+        sql = text(f"""
             SELECT t.id, 1 - (t.embedding <=> CAST(:qvec AS vector)) AS score
             FROM heart.facts t
             WHERE t.agent_id = :agent_id
               AND t.active = true
-              AND t.event_date IS NOT NULL
-              AND t.event_date BETWEEN :lo AND :hi
+              AND {in_window}
               AND t.embedding IS NOT NULL
             ORDER BY t.embedding <=> CAST(:qvec AS vector)
             LIMIT :limit
@@ -4818,7 +4824,7 @@ class FactManager:
             rows = await session.execute(
                 text(
                     "SELECT f.id, f.content, f.learned_at, f.source_ordinal, "
-                    "       f.subject, f.event_date, "
+                    "       f.subject, f.event_date, f.valid_from, f.valid_to, f.mentioned_at, "
                     "       f.source_episode_id::text AS source_episode_id, "
                     "       f.attribute_key, f.subject_key, "
                     "       COUNT(DISTINCT ek.entity_key) AS matched "
@@ -4828,7 +4834,7 @@ class FactManager:
                     "  AND f.active = true AND f.agent_id = :a "
                     + exclude_clause
                     + "GROUP BY f.id, f.content, f.learned_at, f.source_ordinal, "
-                    "         f.subject, f.event_date, f.source_episode_id, "
+                    "         f.subject, f.event_date, f.valid_from, f.valid_to, f.mentioned_at, f.source_episode_id, "
                     "         f.attribute_key, f.subject_key "
                     "ORDER BY matched DESC, f.learned_at DESC, "
                     "         f.source_ordinal DESC NULLS LAST, f.id "

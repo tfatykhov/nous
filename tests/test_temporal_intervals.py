@@ -1,4 +1,5 @@
-"""Bi-temporal facts, PR2: ``interval_relation``, the pure rule supersession uses.
+"""Bi-temporal facts: ``interval_relation``, the pure rule supersession (PR2) and the readers (PR3) use, plus
+PR3's ``format_span``, ``sort_dated`` and ``as_date``.
 
 Graphiti's rules: non-overlapping intervals coexist, a late-arriving earlier
 fact is closed by the newer one, and a NULL date is never compared.
@@ -6,11 +7,11 @@ fact is closed by the newer one, and a NULL date is never compared.
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
-from nous.heart.temporal import Interval, close_before, interval_relation
+from nous.heart.temporal import Interval, as_date, close_before, format_span, interval_relation, sort_dated
 
 D = date
 
@@ -64,3 +65,72 @@ def test_any_object_with_the_two_attributes_works():
 def test_close_before_is_the_day_before():
     assert close_before(D(2024, 6, 1)) == D(2024, 5, 31)
     assert close_before(D(2024, 3, 1)) == D(2024, 2, 29)
+
+
+# ---- PR3 (read and render): the same table as interval pairs, the date label, the date sort ----------------------
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "relation"),
+    [
+        (Interval(D(2024, 3, 10), D(2024, 3, 10)), Interval(D(2024, 3, 10), D(2024, 3, 10)), "tie"),
+        (Interval(D(2024, 3, 10), D(2024, 3, 10)), Interval(D(2024, 3, 12), D(2024, 3, 12)), "coexist"),
+        (Interval(D(2024, 1, 1), None), Interval(D(2024, 6, 1), None), "new_later"),
+        (Interval(D(2024, 6, 1), None), Interval(D(2024, 1, 1), None), "old_later"),
+        (Interval(D(2024, 1, 1), D(2024, 2, 1)), Interval(D(2024, 5, 1), D(2024, 6, 1)), "coexist"),
+        (Interval(D(2024, 3, 10), D(2024, 3, 10)), Interval(D(2024, 3, 11), D(2024, 3, 11)), "coexist"),
+        (Interval(D(2024, 1, 1), D(2024, 1, 31)), Interval(D(2024, 2, 1), D(2024, 2, 29)), "coexist"),
+        (Interval(D(2024, 1, 1), None), Interval(D(2024, 3, 1), D(2024, 3, 14)), "new_later"),
+        (Interval(D(2024, 1, 1), None), Interval(D(2024, 1, 1), D(2024, 2, 1)), "tie"),
+        (Interval(None, None), Interval(D(2024, 1, 1), None), "unknown"),
+        (Interval(D(2024, 1, 1), None), Interval(None, None), "unknown"),
+    ],
+)
+def test_interval_relation_truth_table_for_the_readers(a, b, relation):
+    assert interval_relation(a, b) == relation
+
+
+@pytest.mark.parametrize(
+    ("valid_from", "valid_to", "event_date", "label"),
+    [
+        (D(2024, 3, 10), D(2024, 3, 10), D(2024, 3, 10), "[2024-03-10]"),  # point
+        (D(2026, 2, 1), D(2026, 2, 28), None, "[2026-02]"),  # full month
+        (D(2024, 2, 1), D(2024, 2, 29), None, "[2024-02]"),  # full leap month
+        (D(2024, 1, 5), D(2024, 6, 1), None, "[2024-01-05 to 2024-06-01]"),  # closed span
+        (D(2024, 2, 1), D(2024, 2, 20), None, "[2024-02-01 to 2024-02-20]"),  # part of a month
+        (D(2024, 1, 5), None, None, "[since 2024-01-05]"),  # open
+        (None, None, None, ""),  # no date
+        (None, None, D(2024, 3, 10), "[2024-03-10]"),  # not backfilled: event_date
+    ],
+)
+def test_format_span(valid_from, valid_to, event_date, label):
+    assert format_span(valid_from, valid_to, event_date) == label
+
+
+def test_sort_dated_orders_only_the_dated_items_and_keeps_the_rest_in_place():
+    items = ["c", "x", "a", "y", "b"]  # rank order; x and y are undated
+    dates = {"a": D(2024, 1, 1), "b": D(2024, 2, 1), "c": D(2024, 3, 1)}
+    assert sort_dated(items, dates.get) == ["a", "x", "b", "y", "c"]
+
+
+def test_sort_dated_is_stable_for_equal_dates_and_a_no_op_without_dates():
+    items = ["b1", "a1", "b2"]
+    same = {"b1": D(2024, 1, 1), "a1": D(2024, 1, 1), "b2": D(2024, 1, 1)}
+    assert sort_dated(items, same.get) == ["b1", "a1", "b2"]
+    assert sort_dated(items, lambda _: None) == items
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (D(2024, 3, 10), D(2024, 3, 10)),
+        (datetime(2024, 3, 10, 15, 0), D(2024, 3, 10)),
+        ("2024-03-10", D(2024, 3, 10)),
+        ("2024-03-10T00:00:00+00:00", D(2024, 3, 10)),
+        ("not a date", None),
+        (None, None),
+        (20240310, None),
+    ],
+)
+def test_as_date(value, expected):
+    assert as_date(value) == expected

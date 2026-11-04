@@ -44,6 +44,7 @@ from nous.heart.search import (
     summarize_keyword_stats,
     with_keyword_stats,
 )
+from nous.heart.temporal import Interval, as_date, interval_relation
 from nous.observability.retrieval_trace import (
     BELOW_FLOOR,
     BUDGET_TRUNCATED,
@@ -2748,6 +2749,15 @@ def _chunks_to_pipeline(
     return out
 
 
+def _add_temporal_metadata(metadata: dict, row: Any) -> None:
+    """The 097 event-time interval and statement time of a keyed row, as ISO strings, each key omitted when NULL
+    (the convention ``_heart_results_to_pipeline`` keeps)."""
+    for key in ("valid_from", "valid_to", "mentioned_at"):
+        value = getattr(row, key, None)
+        if value is not None:
+            metadata[key] = value.isoformat()
+
+
 def _keyed_to_pipeline(
     rows, settings: "Settings", existing_ids: set,
 ) -> tuple[list[PipelineResult], int]:
@@ -2791,6 +2801,7 @@ def _keyed_to_pipeline(
         # When the fact was stated; the recency resolver orders by it.
         if row.learned_at is not None:
             metadata["learned_at"] = row.learned_at.isoformat()
+        _add_temporal_metadata(metadata, row)
         if row.source_episode_id:
             metadata["source_episode_id"] = row.source_episode_id
         out.append(PipelineResult(
@@ -2902,6 +2913,7 @@ def _keyed_r2_to_pipeline(
         # When the fact was stated; the recency resolver orders by it.
         if row.learned_at is not None:
             metadata["learned_at"] = row.learned_at.isoformat()
+        _add_temporal_metadata(metadata, row)
         if row.source_episode_id:
             metadata["source_episode_id"] = row.source_episode_id
         out.append(PipelineResult(
@@ -3324,17 +3336,31 @@ def _recency_key(meta: dict) -> tuple[date | None, str]:
     return (parsed, parsed.strftime("%Y-%m"))
 
 
-def _stated_at(meta: dict) -> datetime | None:
+def _stated_at(meta: dict, mentioned_first: bool = False) -> datetime | None:
     """When the fact was stated (``metadata["learned_at"]``, an ISO string), or None.
 
+    ``mentioned_first`` (temporal_resolver_intervals_enabled) reads ``COALESCE(mentioned_at, learned_at)``.
     Fails open like ``_recency_key``: absent/None/unparseable is None. A naive
     value is read as UTC so two values always compare.
     """
+    raw = (meta.get("mentioned_at") if mentioned_first else None) or meta.get("learned_at")
     try:
-        parsed = datetime.fromisoformat(meta.get("learned_at"))  # type: ignore[arg-type]
+        parsed = datetime.fromisoformat(raw)  # type: ignore[arg-type]
     except (ValueError, TypeError):
         return None
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
+def _interval(meta: dict) -> Interval:
+    """A fact's ``(valid_from, valid_to)`` from its metadata; an absent or unparseable value is None."""
+    return Interval(as_date(meta.get("valid_from")), as_date(meta.get("valid_to")))
+
+
+def _month_label(meta: dict, intervals: bool) -> str:
+    """The ``YYYY-MM`` of a recency tag: from ``valid_from`` under temporal_resolver_intervals_enabled, else
+    from ``event_date``."""
+    start = _interval(meta)[0] if intervals else None
+    return start.strftime("%Y-%m") if start is not None else _recency_key(meta)[1]
 
 
 def _resolve_recency_conflicts(
@@ -3360,6 +3386,7 @@ def _resolve_recency_conflicts(
     (cosmetic; nothing downstream re-reads it).
     """
     floor = float(getattr(settings, "recency_resolver_similarity_floor", 0.55))
+    intervals = getattr(settings, "temporal_resolver_intervals_enabled", False) is True
 
     # Group facts by normalized non-empty subject. subject is a real
     # ``str | None`` (heart.py forwards None verbatim), so ``(x or "")`` is
@@ -3400,16 +3427,31 @@ def _resolve_recency_conflicts(
                     ).ratio()
                     if ratio < floor:
                         continue
+                # Intervals: when a span or state is involved, the one that
+                # starts later while overlapping is current; facts that do not
+                # overlap coexist (no tag). Two points keep the rule below.
+                if intervals:
+                    ia, ib = _interval(a.metadata), _interval(b.metadata)
+                    if ia[0] is not None and ib[0] is not None and not (ia[0] == ia[1] and ib[0] == ib[1]):
+                        relation = interval_relation(ia, ib)
+                        if relation not in ("new_later", "old_later"):
+                            continue
+                        newer, older = (b, a) if relation == "new_later" else (a, b)
+                        _mark(newer.id, "current", "")
+                        _mark(older.id, "superseded", "")
+                        continue
                 # Gate 4: both event_dates present AND differing.
                 ka, _ = _recency_key(a.metadata)
                 kb, _ = _recency_key(b.metadata)
+                if intervals:  # a one-day interval is a point even without an event_date
+                    ka, kb = _interval(a.metadata)[0] or ka, _interval(b.metadata)[0] or kb
                 if ka is None or kb is None or ka == kb:
                     continue
                 # Resolve: the fact stated later is current, since a
                 # correction can move an event EARLIER. event_date decides
                 # only a pair without two distinct statement times (facts
                 # stored in one transaction share learned_at).
-                sa, sb = _stated_at(a.metadata), _stated_at(b.metadata)
+                sa, sb = _stated_at(a.metadata, intervals), _stated_at(b.metadata, intervals)
                 a_newer = sa > sb if sa is not None and sb is not None and sa != sb else ka > kb
                 newer, older = (a, b) if a_newer else (b, a)
                 _mark(newer.id, "current", newer.metadata.get("recency_date", ""))
@@ -3428,7 +3470,7 @@ def _resolve_recency_conflicts(
             rebuilt.append(r)
             continue
         status, _ = entry
-        _, month = _recency_key(r.metadata)
+        month = _month_label(r.metadata, intervals)
         new_meta = {**r.metadata, "recency_status": status, "recency_date": month}
         if status == "superseded":
             rebuilt.append(

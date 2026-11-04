@@ -55,6 +55,7 @@ nous/
 │   │   ├── result_reconciler.py  # F098: repairs lost inbox writes (the inbox passes: subtask and DAG); Phase C adds the memory pass; F099 adds the intentions pass (closes finished work and stopped schedules); F099 Phase 2c adds `repair_missing_results` and ContinuationWakePass
 │   │   ├── result_memory.py    # F098 Phase C: a finished subtask result becomes an episode + marked chunks (log, writer, reconciler pass)
 │   │   ├── schedules.py        # Schedule CRUD operations
+│   │   ├── temporal.py         # Bi-temporal helpers (pure): interval_relation and close_before (supersession), format_span and sort_dated (reading)
 │   │   └── schemas.py          # Pydantic models
 │   ├── cognitive/              # Cognitive layer (Nous Loop)
 │   │   ├── layer.py            # pre_turn / post_turn / end_session

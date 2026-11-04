@@ -3074,6 +3074,31 @@ class Settings(BaseSettings):
             "(mentioned_at, else learned_at). Off: every supersession path is unchanged."
         ),
     )
+    # Bi-temporal read and render (PR3). Three flags so each eval arm changes one variable.
+    temporal_read_intervals_enabled: bool = Field(
+        default=False,
+        description=(
+            "Bi-temporal date leg (R): a dated query matches every fact whose valid_from..valid_to interval "
+            "overlaps the window (an open state matches every later window), not only facts whose event_date "
+            "falls inside it."
+        ),
+    )
+    temporal_resolver_intervals_enabled: bool = Field(
+        default=False,
+        description=(
+            "Bi-temporal recency resolver (both copies): when a span or state is involved the interval relation "
+            "decides (non-overlapping facts coexist with no tag, an overlapping later start is current), two point "
+            "facts keep the statement-time rule, and statement time is COALESCE(mentioned_at, learned_at)."
+        ),
+    )
+    temporal_render_enabled: bool = Field(
+        default=False,
+        description=(
+            "Bi-temporal rendering (D): recall_deep and the pre-turn Relevant Facts section show each fact's date "
+            "span ([2024-03-10], [2026-02], [since 2024-01-05]) and list dated facts in date order; undated rows "
+            "keep their rank order."
+        ),
+    )
     candidate_facts_event_limit: int = Field(
         default=30,
         ge=0,
@@ -3961,6 +3986,19 @@ class Settings(BaseSettings):
                 "temporal intervals stay OFF."
             )
             object.__setattr__(self, "temporal_intervals_enabled", False)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_temporal_supersession_dependency(self) -> "Settings":
+        """Bi-temporal facts: under S a late-arriving fact is closed and both facts
+        stay, so the reader sees two values for one slot; only D's date labels tell
+        them apart. Forced off, loudly, without D."""
+        if self.temporal_supersession_enabled and not self.temporal_render_enabled:
+            logging.getLogger(__name__).warning(
+                "NOUS_TEMPORAL_SUPERSESSION_ENABLED=true needs NOUS_TEMPORAL_RENDER_ENABLED=true; "
+                "temporal supersession stays OFF."
+            )
+            object.__setattr__(self, "temporal_supersession_enabled", False)
         return self
 
     @model_validator(mode="after")
