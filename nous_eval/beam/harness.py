@@ -12,7 +12,10 @@ drained after each session, in the order the production loop would dispatch.
 OutcomeDetector and CorrectionExtractor (rule facts, censors) run on
 ``session_ended`` as in prod, each when its flag is on; so do the summarizer and
 the extractor. A single-turn session shorter than ``episode_min_content_length``
-is soft-deleted as trivial instead of ended, as end_session does.
+is soft-deleted as trivial instead of ended, as end_session does. Like main.py,
+each stack loads the runtime overrides stored in nous_system.config (an explicit
+arm setting beats them) and, for as long as it lives, publishes the fusion
+settings hybrid search re-reads from the environment on every query.
 
 Clock: each session runs at its BEAM date. Its episode is dated before summarizing
 (the summarizer resolves relative dates against ``started_at``), and every fact
@@ -39,10 +42,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -94,6 +98,7 @@ class Stack:
     epistemic: Any
     sleep_handler: Any
     fact_time_columns: tuple[str, ...] = ("created_at", "learned_at")
+    runtime_config: dict[str, Any] | None = None
 
 
 async def prepare_db(settings: Any) -> None:
@@ -112,11 +117,62 @@ async def prepare_db(settings: Any) -> None:
         await db.disconnect()
 
 
+async def load_runtime_config(db: Any, settings: Any, pinned: Iterable[str]) -> dict[str, Any]:
+    """main.py's startup load of the runtime overrides in nous_system.config (prod: vector_weight 0.5,
+    rrf_k 30). A setting the arm set explicitly (``pinned``) beats its stored override."""
+    from nous.runtime_config import RuntimeConfig
+
+    RuntimeConfig.reset()
+    rc = RuntimeConfig.get()
+    async with db.session() as s:
+        await rc.load_from_db(s)
+    knobs = {
+        "vector_weight": (rc.get_vector_weight, rc.get_vector_weight_source, rc.clear_vector_weight),
+        "rrf_k": (rc.get_rrf_k, rc.get_rrf_k_source, rc.clear_rrf_k),
+        "cross_encoder_enabled": (
+            rc.get_cross_encoder_enabled,
+            rc.get_cross_encoder_enabled_source,
+            rc.clear_cross_encoder_enabled,
+        ),
+    }
+    db_overrides = {k: get(settings) for k, (get, source, _) in knobs.items() if source(settings) == "runtime_override"}
+    arm_wins = sorted(set(pinned) & set(db_overrides))
+    for k in arm_wins:
+        knobs[k][2]()
+    return {
+        "db_overrides": db_overrides,
+        "arm_wins": arm_wins,
+        "effective": {k: get(settings) for k, (get, _, _) in knobs.items()},
+    }
+
+
+@contextmanager
+def published_resolver_env(settings: Any) -> Iterator[None]:
+    """Hybrid search re-reads its fusion settings (NOUS_RRF_K and friends) from the environment per
+    query; publish this run's values for as long as the stack lives, then restore the shell's."""
+    from nous_eval.env_pin import _RESOLVER_VARS, publish_resolver_env
+
+    saved = {var: os.environ.get(var) for var in _RESOLVER_VARS}
+    publish_resolver_env(settings)
+    try:
+        yield
+    finally:
+        for var, value in saved.items():
+            if value is None:
+                os.environ.pop(var, None)
+            else:
+                os.environ[var] = value
+
+
 @asynccontextmanager
 async def open_stack(
-    settings: Any, *, llm: Any = None, embeddings: Any = None, sleep: bool = False
+    settings: Any, *, llm: Any = None, embeddings: Any = None, sleep: bool = False, pinned: Iterable[str] = ()
 ) -> AsyncIterator[Stack]:
-    """Components wired as nous/main.py wires them; ``llm``/``embeddings`` injectable for tests."""
+    """Components wired as nous/main.py wires them; ``llm``/``embeddings`` injectable for tests.
+
+    ``pinned`` names the settings the arm set explicitly (flags file or --set): they win over the
+    runtime overrides stored in nous_system.config.
+    """
     from nous.api.anthropic_client import create_client
     from nous.api.tools import create_nous_tools
     from nous.brain.brain import Brain
@@ -131,6 +187,7 @@ async def open_stack(
     from nous.handlers.outcome_detector import OutcomeDetector
     from nous.heart.date_window import DateWindowParser
     from nous.heart.heart import Heart
+    from nous.runtime_config import RuntimeConfig
     from nous.storage.database import Database
     from nous_eval.retrieval_runner import make_eval_embedding_provider
 
@@ -144,7 +201,10 @@ async def open_stack(
     if owns_llm:
         llm = create_client(settings)
         await llm.start()
+    env = published_resolver_env(settings)
+    env.__enter__()
     try:
+        runtime_config = await load_runtime_config(db, settings, pinned)
         brain = Brain(db, settings, embeddings)
         heart = Heart(db, settings, embeddings, owns_embeddings=False)
         bus = DrainedBus()
@@ -235,8 +295,11 @@ async def open_stack(
             epistemic=epistemic,
             sleep_handler=sleep_handler,
             fact_time_columns=fact_time_columns,
+            runtime_config=runtime_config,
         )
     finally:
+        RuntimeConfig.reset()
+        env.__exit__(None, None, None)
         if owns_llm:
             await llm.close()
         await embeddings.close()

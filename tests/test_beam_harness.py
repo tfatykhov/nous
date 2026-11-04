@@ -561,6 +561,31 @@ async def test_score_refuses_scores_from_another_judge(tmp_path: Path) -> None:
         )
 
 
+async def test_score_rescores_a_question_whose_answer_changed(tmp_path: Path) -> None:
+    """An errored answer that is retried and now succeeds is scored again, not left at its old error."""
+    (tmp_path / "run.json").write_text(json.dumps({"mode": "preturn"}), encoding="utf-8")
+    base = {
+        "conversation": "100K/1",
+        "ability": "information_extraction",
+        "index": 0,
+        "question": "When is the first Larkspur planting?",
+        "rubric": ["LLM response should state: April 12"],
+    }
+    answers = tmp_path / "answers.jsonl"
+    answers.write_text(json.dumps({**base, "answer": None, "error": "RuntimeError: boom"}) + "\n", encoding="utf-8")
+    args = beam_run.parse_args(["score", "--out-dir", str(tmp_path), "--judge-model", "j"])
+    first = await beam_run.cmd_score(args, judge=NamedJudge("j"))
+    assert first["n_errors"] == 1
+
+    # The operator deleted the error row and re-ran answer: the question now has an answer.
+    answers.write_text(json.dumps({**base, "answer": "April 12", "error": None}) + "\n", encoding="utf-8")
+    second = await beam_run.cmd_score(args, judge=NamedJudge("j"))
+    assert second["n_errors"] == 0
+    assert second["abilities"]["information_extraction"]["score"] == pytest.approx(1.0)
+    scored = [json.loads(x) for x in (tmp_path / "scores.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(scored) == 1 and scored[0]["answer"] == "April 12" and scored[0]["error"] is None
+
+
 # ---------------------------------------------------------------------------
 # Event bus drain
 # ---------------------------------------------------------------------------
@@ -695,6 +720,68 @@ async def test_sleep_stack_wires_the_profile_card_writer_behind_its_flag(db, fla
 
 
 @pytest.mark.postgres_only
+async def test_stack_publishes_the_arms_fusion_settings_for_its_lifetime(db, monkeypatch: pytest.MonkeyPatch) -> None:
+    """hybrid search re-reads NOUS_RRF_K and friends from the environment per query."""
+    from conftest import MockEmbeddingProvider
+
+    from nous.heart.search import _resolve_rrf_k
+
+    monkeypatch.setenv("NOUS_RRF_K", "99")  # the ambient shell
+    db_url = db.engine.url.render_as_string(hide_password=False)
+    settings = arms.build_settings(db_url, "beam-resolver-check", {"NOUS_RRF_K": "17"})
+    async with harness.open_stack(
+        settings, llm=FakeLLM(), embeddings=MockEmbeddingProvider(), pinned=("rrf_k",)
+    ) as stack:
+        assert _resolve_rrf_k() == 17
+        assert stack.runtime_config["effective"]["rrf_k"] == 17
+    assert os.environ["NOUS_RRF_K"] == "99"
+
+
+@pytest.mark.postgres_only
+async def test_stack_loads_runtime_overrides_and_an_arm_override_wins(db) -> None:
+    """main.py loads nous_system.config at startup (prod: vector_weight 0.5); an explicit arm value beats it."""
+    from conftest import MockEmbeddingProvider
+    from sqlalchemy import text
+
+    from nous.heart.search import _resolve_vector_weight
+    from nous.runtime_config import RuntimeConfig
+
+    db_url = db.engine.url.render_as_string(hide_password=False)
+    async with db.engine.begin() as conn:
+        prior = (
+            await conn.execute(text("SELECT value FROM nous_system.config WHERE key = 'vector_weight'"))
+        ).scalar_one_or_none()
+        await conn.execute(
+            text(
+                "INSERT INTO nous_system.config (key, value) VALUES ('vector_weight', '0.5'::jsonb)"
+                " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
+            )
+        )
+    try:
+        plain = arms.build_settings(db_url, "beam-rc-check", {})
+        async with harness.open_stack(plain, llm=FakeLLM(), embeddings=MockEmbeddingProvider()) as stack:
+            assert _resolve_vector_weight() == 0.5
+            assert stack.runtime_config["db_overrides"]["vector_weight"] == 0.5
+            assert stack.runtime_config["effective"]["vector_weight"] == 0.5
+        arm = arms.build_settings(db_url, "beam-rc-check", {"NOUS_VECTOR_WEIGHT": "0.6"})
+        async with harness.open_stack(
+            arm, llm=FakeLLM(), embeddings=MockEmbeddingProvider(), pinned=("vector_weight",)
+        ) as stack:
+            assert _resolve_vector_weight() == 0.6
+            assert stack.runtime_config["effective"]["vector_weight"] == 0.6
+        assert RuntimeConfig.get().get_vector_weight_source(plain) != "runtime_override"  # reset on exit
+    finally:
+        async with db.engine.begin() as conn:
+            if prior is None:
+                await conn.execute(text("DELETE FROM nous_system.config WHERE key = 'vector_weight'"))
+            else:
+                await conn.execute(
+                    text("UPDATE nous_system.config SET value = CAST(:v AS jsonb) WHERE key = 'vector_weight'"),
+                    {"v": json.dumps(prior)},
+                )
+
+
+@pytest.mark.postgres_only
 async def test_offline_smoke_ingest_answer_score(tmp_path: Path, db) -> None:
     from conftest import MockEmbeddingProvider
     from sqlalchemy import text
@@ -720,6 +807,7 @@ async def test_offline_smoke_ingest_answer_score(tmp_path: Path, db) -> None:
         assert record["settings"]["sleep_reflection_hours"] == 200000
         assert record["override_names"] == ["NOUS_SLEEP_REFLECTION_HOURS"] and "overrides" not in record
         assert record["eval_overrides"] == arms.EVAL_OVERRIDES and record["clock_notes"]
+        assert set(record["runtime_config"]["effective"]) == {"vector_weight", "rrf_k", "cross_encoder_enabled"}
         assert llm.routes.count("summary") == 3  # the trivial session's transcript is too short to summarize
         assert {"outcome", "correction"} <= set(llm.routes)
         saved = json.loads((out / f"ingest-100K-1-{tag}.json").read_text(encoding="utf-8"))
@@ -802,6 +890,7 @@ async def test_offline_smoke_ingest_answer_score(tmp_path: Path, db) -> None:
             assert run_info["mode"] == mode and run_info["answer_model"] == "fake-model" and run_info["git"]["sha"]
             assert run_info["recall_deep_limit"] == harness.RECALL_DEEP_LIMIT and run_info["clock_notes"]
             assert run_info["override_names"] == [] and "overrides" not in run_info
+            assert run_info["runtime_config"] == record["runtime_config"]
 
             summary = await beam_run.cmd_score(
                 beam_run.parse_args(["score", "--out-dir", str(mode_out)]), judge=exact_match_judge()

@@ -144,6 +144,27 @@ RESUME_KEYS = (
 )
 
 
+def pinned_fields(overrides: dict[str, str]) -> list[str]:
+    """The settings an arm set explicitly; they win over nous_system.config runtime overrides."""
+    by_env = arms.env_name_to_field()
+    return sorted(by_env[n] for n in overrides)
+
+
+def record_runtime_config(run_path: Path, runtime_config: dict[str, Any] | None) -> None:
+    """Add the stack's runtime-config resolution to run.json, or refuse if it changed since."""
+    if runtime_config is None:
+        return
+    info = json.loads(run_path.read_text(encoding="utf-8"))
+    current = _json(runtime_config)
+    if "runtime_config" not in info:
+        _write_json(run_path, {**info, "runtime_config": current})
+    elif info["runtime_config"] != current:
+        raise SystemExit(
+            f"{run_path.parent} was answered under runtime config {info['runtime_config']}, now {current}; "
+            "use a new --out-dir"
+        )
+
+
 def _run_differences(prior: dict[str, Any], current: dict[str, Any]) -> list[str]:
     """The RESUME_KEYS (and, inside ``settings``, the setting names) where two run records differ."""
     out: list[str] = []
@@ -167,14 +188,18 @@ async def cmd_ingest(
         settings = arms.build_settings(db_url, agent_id(args.bucket, cid, args.agent_tag), overrides)
         if prepare and i == 0:
             await harness.prepare_db(settings)
-        async with harness.open_stack(settings, llm=llm, embeddings=embeddings, sleep=args.sleep) as stack:
+        async with harness.open_stack(
+            settings, llm=llm, embeddings=embeddings, sleep=args.sleep, pinned=pinned_fields(overrides)
+        ) as stack:
             stats = await harness.ingest_conversation(stack, conv, limit_sessions=args.limit_sessions)
+            runtime_config = stack.runtime_config
         record = {
             "conversation": conv.key,
             "agent_id": settings.agent_id,
             "sleep": args.sleep,
             "arm": args.arm,
             **run_settings_record(settings, overrides, ignored),
+            "runtime_config": runtime_config,
             **stats,
         }
         _write_json(args.out_dir / f"ingest-{args.bucket}-{cid}-{args.agent_tag}.json", record)
@@ -227,7 +252,10 @@ async def cmd_answer(args: argparse.Namespace, *, llm: Any = None, embeddings: A
         conv = corpus.load_conversation(args.chats_dir, args.bucket, cid)
         settings = arms.build_settings(db_url, agent_id(args.bucket, cid, args.agent_tag), overrides)
         questions = conv.questions[: args.limit_questions] if args.limit_questions else conv.questions
-        async with harness.open_stack(settings, llm=llm, embeddings=embeddings) as stack:
+        async with harness.open_stack(
+            settings, llm=llm, embeddings=embeddings, pinned=pinned_fields(overrides)
+        ) as stack:
+            record_runtime_config(run_path, getattr(stack, "runtime_config", None))
             if not (await harness.count_rows(stack))["episodes"]:
                 raise SystemExit(f"agent {settings.agent_id} has no episodes; run ingest first")
             for q in questions:
@@ -264,7 +292,8 @@ async def cmd_answer(args: argparse.Namespace, *, llm: Any = None, embeddings: A
 async def cmd_score(args: argparse.Namespace, *, judge: scoring.Judge | None = None) -> dict[str, Any]:
     from nous.config import Settings
 
-    answers = _read_jsonl(args.out_dir / "answers.jsonl")
+    latest = {_row_key(r): r for r in _read_jsonl(args.out_dir / "answers.jsonl")}  # a retry's row wins
+    answers = list(latest.values())
     if not answers:
         raise SystemExit(f"no answers.jsonl in {args.out_dir}")
     scores_path = args.out_dir / "scores.jsonl"
@@ -276,7 +305,18 @@ async def cmd_score(args: argparse.Namespace, *, judge: scoring.Judge | None = N
             f"{scores_path} was judged by {', '.join(prior_judges)}, not {judge_model}; score with another judge "
             "in a new --out-dir (copy answers.jsonl and run.json into it)"
         )
-    done = {_row_key(r) for r in prior_rows}
+    # A score is reused only for the answer it scored: a question answered again since is scored again.
+    kept = {
+        _row_key(r): r
+        for r in prior_rows
+        if _row_key(r) in latest
+        and r.get("answer") == latest[_row_key(r)].get("answer")
+        and r.get("answer_error", r.get("error")) == latest[_row_key(r)].get("error")
+    }
+    if len(kept) != len(prior_rows):
+        logger.info("re-scoring %d questions whose answers changed", len(prior_rows) - len(kept))
+        scores_path.write_text("".join(json.dumps(r, default=str) + "\n" for r in kept.values()), encoding="utf-8")
+    done = set(kept)
     owned = judge is None
     if owned:
         judge = scoring.OpenAIJudge(Settings().openai_api_key, model=args.judge_model)
@@ -286,6 +326,7 @@ async def cmd_score(args: argparse.Namespace, *, judge: scoring.Judge | None = N
                 continue
             scored = {k: row[k] for k in ("conversation", "ability", "index", "question", "answer", "error")}
             scored["judge_model"] = judge_model
+            scored["answer_error"] = row["error"]
             if row.get("error") is None:
                 try:
                     scored["score"] = await scoring.score_answer(judge, row["ability"], row["rubric"], row["answer"])
