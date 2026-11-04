@@ -406,6 +406,19 @@ async def test_migration_098_stamps_exactly_the_merge_sources(heart, session):
     loser = await fact("SUPERSEDE_A loser", m31)
     plain_winner = await fact("plain winner")
     await fact("plain SUPERSEDE loser, no event", plain_winner)
+    now = datetime.now(UTC)
+    # A MERGE whose content duplicated an older fact pointed both sources at it.
+    dup_target = await fact("older fact the merged content duplicated", created_at=now - timedelta(days=30))
+    d1 = await fact("Larch caterer is Bo's Kitchen", dup_target)
+    d2 = await fact("Larch caterer serves 40 guests", dup_target)
+    # A MERGE that aborted, then both facts lost F031 SUPERSEDEs to one older winner.
+    older_winner = await fact("older winner of two SUPERSEDEs", created_at=now - timedelta(days=30))
+    x1 = await fact("aborted MERGE, lost SUPERSEDE_A", older_winner)
+    x2 = await fact("aborted MERGE, lost SUPERSEDE_B", older_winner)
+    # A MERGE that aborted, then a write-time supersede by a newer fact took both.
+    newer_winner = await fact("newer write-time winner", created_at=now + timedelta(hours=6))
+    y1 = await fact("aborted MERGE, lost to a newer fact (1)", newer_winner)
+    y2 = await fact("aborted MERGE, lost to a newer fact (2)", newer_winner)
     session.add_all(
         [
             Event(agent_id=agent, event_type="f027_cluster_merge", data=_f027(m27, [member])),
@@ -419,6 +432,20 @@ async def test_migration_098_stamps_exactly_the_merge_sources(heart, session):
             Event(agent_id=agent, event_type="f031_contradiction_resolution", data=_f031("MERGE", b1, b2)),
             Event(agent_id=agent, event_type="f031_contradiction_resolution", data=_f031("MERGE", lone, other)),
             Event(agent_id=agent, event_type="f031_contradiction_resolution", data=_f031("SUPERSEDE_A", loser, m31)),
+            Event(agent_id=agent, event_type="f031_contradiction_resolution", data=_f031("MERGE", d1, d2)),
+            # SUPERSEDE_A: fact1 loses to fact2. SUPERSEDE_B: fact2 loses to fact1.
+            Event(agent_id=agent, event_type="f031_contradiction_resolution", data=_f031("MERGE", x1, x2)),
+            Event(
+                agent_id=agent,
+                event_type="f031_contradiction_resolution",
+                data=_f031("SUPERSEDE_A", x1, older_winner),
+            ),
+            Event(
+                agent_id=agent,
+                event_type="f031_contradiction_resolution",
+                data=_f031("SUPERSEDE_B", older_winner, x2),
+            ),
+            Event(agent_id=agent, event_type="f031_contradiction_resolution", data=_f031("MERGE", y1, y2)),
         ]
     )
     await session.flush()
@@ -438,11 +465,13 @@ async def test_migration_098_stamps_exactly_the_merge_sources(heart, session):
         await session.execute(text(statement))
     after = await state()
 
-    # Exactly the three merge sources are stamped, every other row stays NULL.
+    # Exactly the merge sources are stamped, every other row stays NULL.
     assert {c: reason for c, (reason, _) in after.items() if reason is not None} == {
         "Larch kickoff on 2 Feb in Lyon": "merged",
         "Larch venue is hall B": "merged",
         "Larch venue is hall C": "merged",
+        "Larch caterer is Bo's Kitchen": "merged",
+        "Larch caterer serves 40 guests": "merged",
     }
     # The stamp is not an edit.
     assert {ua for _, ua in after.values()} == {edited}

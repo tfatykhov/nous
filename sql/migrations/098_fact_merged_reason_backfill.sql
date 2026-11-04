@@ -10,7 +10,13 @@
 -- aborted cluster has no merged_fact_id, so its members stay NULL.
 -- F031: the event carries no merged id. A source counts when a MERGE event
 -- names it and the other fact of that pair is superseded by the same fact.
--- That rules out a fact in an aborted MERGE that later lost a SUPERSEDE.
+-- A pair whose MERGE aborted and whose two facts later lost to one winner
+-- also looks like that, so two more conditions rule it out. No F031
+-- SUPERSEDE_A or SUPERSEDE_B event may name the row and its superseder
+-- (an older winner). The superseder must exist no later than ten minutes
+-- after the MERGE event (a write-time supersede creates a newer winner). A
+-- MERGE writes its product within a second of the event, or points the
+-- sources at an older fact its content duplicated.
 -- A loser of a plain SUPERSEDE matches neither rule and stays NULL.
 -- Every UPDATE touches only rows still NULL, so a second run changes nothing.
 -- The stamp is not an edit, so it must not move updated_at (the
@@ -34,12 +40,12 @@ UPDATE heart.facts AS s
 UPDATE heart.facts AS s
     SET deactivation_reason = 'merged'
     FROM (
-        SELECT agent_id, data->>'fact1_id' AS self_id, data->>'fact2_id' AS partner_id
+        SELECT agent_id, created_at, data->>'fact1_id' AS self_id, data->>'fact2_id' AS partner_id
         FROM nous_system.events
         WHERE event_type = 'f031_contradiction_resolution'
           AND data->>'applied_action' = 'MERGE'
         UNION ALL
-        SELECT agent_id, data->>'fact2_id', data->>'fact1_id'
+        SELECT agent_id, created_at, data->>'fact2_id', data->>'fact1_id'
         FROM nous_system.events
         WHERE event_type = 'f031_contradiction_resolution'
           AND data->>'applied_action' = 'MERGE'
@@ -47,13 +53,26 @@ UPDATE heart.facts AS s
     JOIN heart.facts AS p
         ON p.agent_id = pair.agent_id
         AND p.id::text = pair.partner_id
+    JOIN heart.facts AS m
+        ON m.id = p.superseded_by
     WHERE s.active = false
       AND s.deactivation_reason IS NULL
       AND s.superseded_by IS NOT NULL
       AND s.agent_id = pair.agent_id
       AND s.id::text = pair.self_id
       AND p.id <> s.id
-      AND p.superseded_by = s.superseded_by;
+      AND p.superseded_by = s.superseded_by
+      AND m.created_at <= pair.created_at + interval '10 minutes'
+      AND NOT EXISTS (
+          SELECT 1 FROM nous_system.events AS x
+          WHERE x.agent_id = s.agent_id
+            AND x.event_type = 'f031_contradiction_resolution'
+            AND x.data->>'applied_action' IN ('SUPERSEDE_A', 'SUPERSEDE_B')
+            AND (
+                (x.data->>'fact1_id' = s.id::text AND x.data->>'fact2_id' = s.superseded_by::text)
+                OR (x.data->>'fact2_id' = s.id::text AND x.data->>'fact1_id' = s.superseded_by::text)
+            )
+      );
 
 ALTER TABLE heart.facts ENABLE TRIGGER set_updated_at;
 
