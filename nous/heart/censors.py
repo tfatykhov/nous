@@ -43,6 +43,19 @@ _MAX_REGEX_INPUT_LEN = 10_000
 _SEARCH_SIMILARITY_FLOOR = 0.7
 
 
+def _censor_embed_text(trigger_pattern: str, reason: str, action_instruction: str | None, mode: str) -> str:
+    """The text a censor is embedded from (Settings.censor_embed_text_mode).
+
+    "legacy": the pattern and the reason. "reason": the reason and the action instruction, without
+    the pattern, which is a regex and matched as one by the keyword leg.
+    """
+    if mode == "reason":
+        return f"{reason} {action_instruction or ''}".strip()
+    if mode == "legacy":
+        return f"{trigger_pattern} {reason}"
+    raise ValueError(f"Unknown censor embed text mode: {mode!r}")
+
+
 def _safe_regex_match(pattern: str, text_input: str) -> bool:
     """Match pattern against text with ReDoS protection.
 
@@ -64,10 +77,13 @@ class CensorManager:
         db: Database,
         embeddings: EmbeddingProvider | None,
         agent_id: str,
+        *,
+        embed_text_mode: str = "legacy",
     ) -> None:
         self.db = db
         self.embeddings = embeddings
         self.agent_id = agent_id
+        self._embed_text_mode = embed_text_mode
 
     # ------------------------------------------------------------------
     # Event helper
@@ -128,10 +144,11 @@ class CensorManager:
             )
             action = cap
 
-        # Generate embedding from trigger_pattern + reason
         embedding = None
         if self.embeddings:
-            embed_text = f"{input.trigger_pattern} {input.reason}"
+            embed_text = _censor_embed_text(
+                input.trigger_pattern, input.reason, input.action_instruction, self._embed_text_mode,
+            )
             try:
                 embedding = await self.embeddings.embed(embed_text)
             except Exception:
@@ -535,6 +552,40 @@ class CensorManager:
         return matches
 
     # ------------------------------------------------------------------
+    # reembed_all()
+    # ------------------------------------------------------------------
+
+    async def reembed_all(self, session: AsyncSession | None = None) -> int:
+        """Re-embed every censor of this agent, active or not, from the current embed-text mode.
+
+        Run after changing the mode (scripts/ops/reembed_write_quality.py). A failed embed keeps
+        the row's vector and is not counted. Returns the number re-embedded.
+        """
+        if session is None:
+            async with self.db.session() as session:
+                count = await self._reembed_all(session)
+                await session.commit()
+                return count
+        return await self._reembed_all(session)
+
+    async def _reembed_all(self, session: AsyncSession) -> int:
+        if not self.embeddings:
+            return 0
+        result = await session.execute(select(Censor).where(Censor.agent_id == self.agent_id))
+        count = 0
+        for censor in result.scalars().all():
+            embed_text = _censor_embed_text(
+                censor.trigger_pattern, censor.reason, censor.action_instruction, self._embed_text_mode,
+            )
+            try:
+                censor.embedding = await self.embeddings.embed(embed_text)
+                count += 1
+            except Exception:
+                logger.warning("Re-embed failed for censor %s", censor.id)
+        await session.flush()
+        return count
+
+    # ------------------------------------------------------------------
     # record_false_positive()
     # ------------------------------------------------------------------
 
@@ -757,6 +808,9 @@ class CensorManager:
             raise ValueError(f"Censor {censor_id} not found")
 
         SENTINEL = self._SENTINEL
+        old_text = _censor_embed_text(
+            censor.trigger_pattern, censor.reason, censor.action_instruction, self._embed_text_mode,
+        )
         if trigger_action is not SENTINEL:
             censor.trigger_action = trigger_action
         if action_instruction is not SENTINEL:
@@ -765,14 +819,16 @@ class CensorManager:
             censor.unblock_pattern = unblock_pattern
         if reason is not SENTINEL and reason is not None and reason != censor.reason:
             censor.reason = reason
-            # _add embeds "<trigger_pattern> <reason>"; a new reason
-            # re-embeds it. On failure the old vector stays (its pattern half
-            # is still right) rather than none.
-            if self.embeddings:
-                try:
-                    censor.embedding = await self.embeddings.embed(f"{censor.trigger_pattern} {reason}")
-                except Exception:
-                    logger.warning("Embedding refresh failed for censor %s update", censor_id)
+        # A change to the embedded text (the reason, and in "reason" mode the action
+        # instruction) re-embeds it. On failure the old vector stays rather than none.
+        new_text = _censor_embed_text(
+            censor.trigger_pattern, censor.reason, censor.action_instruction, self._embed_text_mode,
+        )
+        if self.embeddings and new_text != old_text:
+            try:
+                censor.embedding = await self.embeddings.embed(new_text)
+            except Exception:
+                logger.warning("Embedding refresh failed for censor %s update", censor_id)
         if domain is not SENTINEL:
             censor.domain = domain
 

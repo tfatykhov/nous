@@ -115,6 +115,10 @@ services:
       # error outside the procedure's core tools. Both land dark.
       - NOUS_DECISION_RELINK_ON_UPDATE_ENABLED=${NOUS_DECISION_RELINK_ON_UPDATE_ENABLED:-false}
       - NOUS_PROCEDURE_OUTCOME_ATTRIBUTION_ENABLED=${NOUS_PROCEDURE_OUTCOME_ATTRIBUTION_ENABLED:-false}
+      # Embed text of learned procedures (keep|drop|observed evidence notes) and censors (legacy|reason). Both land as
+      # today's text; after a change run scripts/ops/reembed_write_quality.py --apply.
+      - NOUS_PROCEDURE_EMBED_EVIDENCE=${NOUS_PROCEDURE_EMBED_EVIDENCE:-keep}
+      - NOUS_CENSOR_EMBED_TEXT_MODE=${NOUS_CENSOR_EMBED_TEXT_MODE:-legacy}
       # A4 Step 2: any-word keyword fallback. Experiment, lands dark.
       - NOUS_HYBRID_KEYWORD_OR_FALLBACK_ENABLED=${NOUS_HYBRID_KEYWORD_OR_FALLBACK_ENABLED:-false}
       # Execution ledger: also keep the redacted call input and tool output (migration 086).

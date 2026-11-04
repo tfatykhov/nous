@@ -792,6 +792,7 @@ class ProcedureLearner:
         query_text = _build_embed_text(
             proc_input.name, proc_input.description, proc_input.core_patterns, proc_input.goals,
             proc_input.core_tools, proc_input.core_concepts, proc_input.implementation_notes,
+            self._settings.procedure_embed_evidence,
         )
         neighbours = [
             n for n in await find_neighbours(query_text)

@@ -2028,6 +2028,15 @@ class Settings(BaseSettings):
     # auto-learned one whose stored embedding is this close (raw cosine), instead of inserting.
     procedure_dedupe_enabled: bool = True
     procedure_dedupe_threshold: float = Field(default=0.85, ge=0.0, le=1.0)
+    # How a learned procedure's "evidence: <id> (<recorded>) — <observed>" notes enter its embedding:
+    # "keep" all of each note, "drop" them, or keep only the "observed" text. Every procedure embed
+    # and the learner's covered probe use it. Changing it leaves stored rows on the old text until
+    # scripts/ops/reembed_write_quality.py --procedures --apply runs.
+    procedure_embed_evidence: Literal["keep", "drop", "observed"] = "keep"
+    # What a censor's embedding is built from: "legacy" is "<trigger_pattern> <reason>" (a regex
+    # and its reason); "reason" is "<reason> <action_instruction>", without the regex. Changing it
+    # leaves stored rows on the old text until scripts/ops/reembed_write_quality.py --censors --apply.
+    censor_embed_text_mode: Literal["legacy", "reason"] = "legacy"
 
     # F023: Memory Admission Control (A-MAC)
     admission_control_enabled: bool = True

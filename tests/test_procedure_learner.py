@@ -59,6 +59,7 @@ def _make_settings(**overrides) -> MagicMock:
         api_base_url="https://api.anthropic.com",
         anthropic_api_key="sk-ant-test-key",
         anthropic_auth_token="",
+        procedure_embed_evidence="keep",
     )
     defaults.update(overrides)
     mock = MagicMock()
