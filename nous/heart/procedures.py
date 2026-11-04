@@ -762,6 +762,7 @@ class ProcedureManager:
         penalty_limit: int | None = None,
         stage_errors: dict[str, int] | None = None,
         stage_error_msgs: dict[str, str] | None = None,
+        original_weighted: bool = False,
     ) -> list[ProcedureSummary]:
         """Hybrid search over procedures. Optional domain filter.
 
@@ -776,6 +777,9 @@ class ProcedureManager:
             stage_errors / stage_error_msgs: optional caller maps. A failed
                 query embedding (the search then runs keyword-only, on another
                 score scale) is counted under ``procedure_embed_fallback``.
+            original_weighted: C-4, forwarded to ``hybrid_search_multi``: the
+                original query (``variant_pairs[0]``) gets half the
+                cross-variant weight. Variant path only; default False.
         """
         if session is None:
             async with self.db.session() as session:
@@ -789,6 +793,7 @@ class ProcedureManager:
                     penalty_limit,
                     stage_errors=stage_errors,
                     stage_error_msgs=stage_error_msgs,
+                    original_weighted=original_weighted,
                 )
         return await self._search(
             query,
@@ -800,6 +805,7 @@ class ProcedureManager:
             penalty_limit,
             stage_errors=stage_errors,
             stage_error_msgs=stage_error_msgs,
+            original_weighted=original_weighted,
         )
 
     async def _search(
@@ -813,10 +819,14 @@ class ProcedureManager:
         penalty_limit: int | None = None,
         stage_errors: dict[str, int] | None = None,
         stage_error_msgs: dict[str, str] | None = None,
+        original_weighted: bool = False,
     ) -> list[ProcedureSummary]:
+        # The variant fusion embeds each variant itself (the original is the
+        # first), so the base query's vector is used only on the single path.
+        use_variants = bool(variant_pairs) and len(variant_pairs) > 1
         embedding = None
         embed_exc: Exception | None = None
-        if self.embeddings:
+        if self.embeddings and not use_variants:
             try:
                 embedding = await self.embeddings.embed(query, fail_fast=True)
             except Exception as exc:
@@ -838,7 +848,6 @@ class ProcedureManager:
 
         # A failed base embed is a keyword-only fallback only when the search
         # that runs has no vector: the variant fusion carries its own.
-        use_variants = bool(variant_pairs) and len(variant_pairs) > 1
         if embed_exc is not None and not has_vector_input(use_variants, embedding, variant_pairs):
             note_stage_error(stage_errors, stage_error_msgs, "procedure_embed_fallback", embed_exc)
         if use_variants:
@@ -852,6 +861,7 @@ class ProcedureManager:
                 limit=limit,
                 penalty_limit=penalty_limit,
                 any_word_fallback=True,
+                original_weighted=original_weighted,
             )
         else:
             results = await hybrid_search(

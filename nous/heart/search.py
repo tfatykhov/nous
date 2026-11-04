@@ -464,6 +464,8 @@ def _rrf_merge(
     limit: int,
     return_limit: int | None = None,
     cap_ranks_at_penalty: bool = False,
+    date_ranked: list[tuple[UUID, float]] | None = None,
+    date_weight: float = 0.0,
 ) -> list[tuple[UUID, float]]:
     """Merge two ranked lists using Reciprocal Rank Fusion.
 
@@ -471,6 +473,14 @@ def _rrf_merge(
                    + keyword_weight / (k + keyword_rank)
 
     Docs appearing in only one list get a penalty rank of limit + 1.
+
+    ``date_ranked`` (C-1, used only when ``date_leg_inline_rrf`` is on) is the
+    F075 date leg fused here as a third list with ``date_weight``, instead of
+    as a second RRF layer over the merged result. A doc missing from it gets
+    the same penalty rank, the cap applies to it as to the other two, and the
+    normaliser becomes ``(vector_weight + keyword_weight + date_weight) / k``,
+    so rank 0 in all three lists is still 1.0. None or empty adds no list and
+    leaves every score unchanged.
 
     ``return_limit`` (default = ``limit``) decouples HOW MANY rows come back
     from the ``limit`` that defines ``penalty_rank``. A caller that needs a
@@ -497,8 +507,11 @@ def _rrf_merge(
     # Build rank maps (0-indexed)
     vector_ranks: dict[UUID, int] = {doc_id: i for i, (doc_id, _) in enumerate(vector_ranked)}
     keyword_ranks: dict[UUID, int] = {doc_id: i for i, (doc_id, _) in enumerate(keyword_ranked)}
+    date_ranks: dict[UUID, int] = {doc_id: i for i, (doc_id, _) in enumerate(date_ranked or ())}
 
     all_ids = set(vector_ranks) | set(keyword_ranks)
+    if date_ranks:
+        all_ids |= set(date_ranks)
     if not all_ids:
         return []
 
@@ -510,6 +523,11 @@ def _rrf_merge(
             v_rank = min(v_rank, penalty_rank)
             k_rank = min(k_rank, penalty_rank)
         score = vector_weight / (k + v_rank) + keyword_weight / (k + k_rank)
+        if date_ranks:
+            d_rank = date_ranks.get(doc_id, penalty_rank)
+            if cap_ranks_at_penalty:
+                d_rank = min(d_rank, penalty_rank)
+            score += date_weight / (k + d_rank)
         scored.append((doc_id, score))
 
     scored.sort(key=lambda x: x[1], reverse=True)
@@ -518,6 +536,8 @@ def _rrf_merge(
     # Max RRF = vector_weight/(k+0) + keyword_weight/(k+0) = 1/k
     # (since vector_weight + keyword_weight = 1.0 by construction)
     max_score = 1.0 / k
+    if date_ranks:
+        max_score = (vector_weight + keyword_weight + date_weight) / k
     if max_score > 0 and scored:
         scored = [(doc_id, score / max_score) for doc_id, score in scored]
 
@@ -539,6 +559,8 @@ async def hybrid_search(
     require_keyword_hit: bool = False,
     dropped_out: list | None = None,
     any_word_fallback: bool = False,
+    date_ranked: list[tuple[UUID, float]] | None = None,
+    date_weight: float = 0.0,
 ) -> list[tuple[UUID, float]]:
     """Hybrid vector + keyword search over a Heart table using RRF.
 
@@ -644,6 +666,12 @@ async def hybrid_search(
             any-word gate would pass on any shared word. The keyword-only exit
             (``embedding is None``) has no merge, so the penalty analysis does
             not apply and it is excluded.
+        date_ranked / date_weight: C-1. A ranked list fused into the
+            vector/keyword merge as a third list (see ``_rrf_merge``); the
+            fact search passes the F075 date leg here when
+            ``date_leg_inline_rrf`` is on. Not used by the keyword-only exit
+            (``embedding is None``), which has no merge, and its date-only ids
+            are not reported to ``dropped_out``. None (default) changes nothing.
 
     Returns:
         List of (id, rrf_score) ordered by score DESC.
@@ -820,7 +848,7 @@ async def hybrid_search(
     # merged list and a 3x window still starved it). Candidate count is
     # bounded by the SQL legs' limit_expanded, so this is cheap.
     merge_limit = (
-        max(limit, len(vector_results) + len(keyword_results))
+        max(limit, len(vector_results) + len(keyword_results) + len(date_ranked or ()))
         if require_keyword_hit
         else limit
     )
@@ -831,12 +859,26 @@ async def hybrid_search(
     # keeps its inflated value, only the penalty base is pinned.
     if penalty_limit is not None:
         merged = _rrf_merge(
-            vector_results, keyword_results, rrf_k, vector_weight,
-            penalty_limit, return_limit=merge_limit,
+            vector_results,
+            keyword_results,
+            rrf_k,
+            vector_weight,
+            penalty_limit,
+            return_limit=merge_limit,
             cap_ranks_at_penalty=True,
+            date_ranked=date_ranked,
+            date_weight=date_weight,
         )
     else:
-        merged = _rrf_merge(vector_results, keyword_results, rrf_k, vector_weight, merge_limit)
+        merged = _rrf_merge(
+            vector_results,
+            keyword_results,
+            rrf_k,
+            vector_weight,
+            merge_limit,
+            date_ranked=date_ranked,
+            date_weight=date_weight,
+        )
     if require_keyword_hit:
         # Codex #574 r3: _rrf_merge's missing-leg penalty rank (limit+1) is
         # nearly free at typical k (a vector-only rank-0 hit normalizes to
@@ -872,6 +914,7 @@ def _rrf_merge_n(
     limit: int,
     return_limit: int | None = None,
     cap_ranks_at_penalty: bool = False,
+    weights: list[float] | None = None,
 ) -> list[tuple[UUID, float]]:
     """Equal-weight Reciprocal Rank Fusion across N ranked lists.
 
@@ -893,12 +936,19 @@ def _rrf_merge_n(
     any list. Needed here too because ``Heart.recall`` derives its limit as
     ``limit * 2`` from an LLM-controlled parameter.
 
+    ``weights`` (C-4) replaces the equal ``1/N`` with one weight per list, in
+    list order; the normaliser becomes ``sum(weights) / k`` so rank 0 in every
+    list is still 1.0. None (default) keeps the equal weights and today's
+    arithmetic exactly.
+
     Note: the single-query fast-path in ``hybrid_search_multi`` short-circuits
     before reaching this function; it is only invoked when ``len(ranked_lists) >= 2``.
     """
     n = len(ranked_lists)
     if n == 0:
         return []
+    if weights is not None and len(weights) != n:
+        raise ValueError(f"_rrf_merge_n got {len(weights)} weights for {n} lists")
 
     penalty_rank = limit + 1
     per_list_weight = 1.0 / n
@@ -917,14 +967,14 @@ def _rrf_merge_n(
     scored: list[tuple[UUID, float]] = []
     for doc_id in all_ids:
         score = 0.0
-        for rm in rank_maps:
+        for i, rm in enumerate(rank_maps):
             r = rm.get(doc_id, penalty_rank)
             # See _rrf_merge: past penalty_rank an observed rank contributes
             # LESS than being absent, so a doc surfacing deep in a variant as
             # the row count grows would still be rescored despite the pin.
             if cap_ranks_at_penalty:
                 r = min(r, penalty_rank)
-            score += per_list_weight / (k + r)
+            score += (per_list_weight if weights is None else weights[i]) / (k + r)
         scored.append((doc_id, score))
 
     scored.sort(key=lambda x: x[1], reverse=True)
@@ -932,7 +982,7 @@ def _rrf_merge_n(
     # Same normalization as _rrf_merge: divide by theoretical max = 1/k.
     # Independent of N because per-list weights sum to 1.0 and best per-list
     # contribution is (1/N) / k, summing to 1/k across N lists.
-    max_score = 1.0 / k
+    max_score = 1.0 / k if weights is None else sum(weights) / k
     if max_score > 0 and scored:
         scored = [(doc_id, score / max_score) for doc_id, score in scored]
 
@@ -967,6 +1017,9 @@ async def hybrid_search_multi(
     active_filter: bool = True,
     penalty_limit: int | None = None,
     any_word_fallback: bool = False,
+    date_ranked: list[tuple[UUID, float]] | None = None,
+    date_weight: float = 0.0,
+    original_weighted: bool = False,
 ) -> list[tuple[UUID, float]]:
     """Multi-query hybrid search over a Heart table (F050).
 
@@ -1003,6 +1056,16 @@ async def hybrid_search_multi(
             ``hybrid_search`` call. The cross-variant fusion is unchanged. The
             keyword-stats sink (``with_keyword_stats``) is a ContextVar, so each
             variant's call appends its own record with no forwarding.
+        date_ranked / date_weight: C-1, forwarded to every per-variant
+            ``hybrid_search`` call, so the same date list joins each
+            variant's vector/keyword merge. The cross-variant fusion is
+            unchanged.
+        original_weighted: C-4. ``queries[0]`` is the original query
+            (``QueryExpander.expand`` returns ``[query, *variants]`` and
+            ``Heart`` keeps that order). When True the cross-variant fusion
+            gives it weight 0.5 and splits 0.5 evenly across the variants, so
+            the variants together never outvote it. False (default) keeps
+            equal weights.
 
     Returns:
         List of ``(id, rrf_score)`` ordered by score DESC, length ``<= limit``.
@@ -1033,6 +1096,8 @@ async def hybrid_search_multi(
             active_filter=active_filter,
             penalty_limit=penalty_limit,
             any_word_fallback=any_word_fallback,
+            date_ranked=date_ranked,
+            date_weight=date_weight,
         )
 
     rrf_k = _resolve_rrf_k()
@@ -1066,18 +1131,27 @@ async def hybrid_search_multi(
             active_filter=active_filter,
             penalty_limit=penalty_limit,
             any_word_fallback=any_word_fallback,
+            date_ranked=date_ranked,
+            date_weight=date_weight,
         )
         ranked_lists.append(per_variant)
+
+    n_variants = len(ranked_lists) - 1
+    weights = [0.5] + [0.5 / n_variants] * n_variants if original_weighted else None
 
     # Second penalty layer: pin the cross-variant fusion's base too, keeping
     # the row count on return_limit. Pinning only the per-variant merges above
     # would leave this one still tracking `limit`.
     if penalty_limit is not None:
         return _rrf_merge_n(
-            ranked_lists, rrf_k, penalty_limit, return_limit=limit,
+            ranked_lists,
+            rrf_k,
+            penalty_limit,
+            return_limit=limit,
             cap_ranks_at_penalty=True,
+            weights=weights,
         )
-    return _rrf_merge_n(ranked_lists, rrf_k, limit)
+    return _rrf_merge_n(ranked_lists, rrf_k, limit, weights=weights)
 
 
 class _ScoredWrapper:

@@ -3529,6 +3529,7 @@ class FactManager:
         stage_errors: dict[str, int] | None = None,
         stage_error_msgs: dict[str, str] | None = None,
         keyword_text: str | None = None,
+        original_weighted: bool = False,
     ) -> list[FactSummary]:
         """Hybrid search over facts.
 
@@ -3537,7 +3538,9 @@ class FactManager:
                 hybrid_search_multi for RRF fusion across query variants.
                 Defaults to None (single-query path; backwards compatible).
             date_window: F075 L3 — when set, fuses the date-window retrieval
-                leg into the results via _rrf_merge_n.
+                leg into the results: via _rrf_merge_n over the merged facts,
+                or, with ``date_leg_inline_rrf``, as a third list inside the
+                vector/keyword merge (C-1).
             include_categories: restrict to these categories (plain IN). Symmetric
                 to ``exclude_categories``; used by the Session Profile intent leg
                 to search only tier-1 categories. Default None → no restriction.
@@ -3555,6 +3558,9 @@ class FactManager:
                 its lexical anchor here so a natural-language query does not
                 add mandatory words under ``require_keyword_hit``. Single-query
                 path only. Default None: the keyword leg matches ``query``.
+            original_weighted: C-4, forwarded to ``hybrid_search_multi``: the
+                original query (``variant_pairs[0]``) gets half the
+                cross-variant weight. Variant path only; default False.
         """
         if session is None:
             async with self.db.session() as session:
@@ -3574,6 +3580,7 @@ class FactManager:
                     stage_errors=stage_errors,
                     stage_error_msgs=stage_error_msgs,
                     keyword_text=keyword_text,
+                    original_weighted=original_weighted,
                 )
         return await self._search(
             query,
@@ -3591,6 +3598,7 @@ class FactManager:
             stage_errors=stage_errors,
             stage_error_msgs=stage_error_msgs,
             keyword_text=keyword_text,
+            original_weighted=original_weighted,
         )
 
     async def _search(
@@ -3610,22 +3618,24 @@ class FactManager:
         stage_errors: dict[str, int] | None = None,
         stage_error_msgs: dict[str, str] | None = None,
         keyword_text: str | None = None,
+        original_weighted: bool = False,
     ) -> list[FactSummary]:
-        # Generate query embedding
+        # Which primary search runs (below): the inactive-facts scan, the
+        # variant fusion, or the single-query hybrid. Only the variant fusion
+        # carries its own vectors, so a failed base embed is a keyword-only
+        # fallback on the other two, and on it only when no variant has one.
+        use_variants = active_only and bool(variant_pairs) and len(variant_pairs) > 1 and not require_keyword_hit
+        # Under the variant fusion the base query's vector feeds only the
+        # date leg, so it is not computed when there is no window.
         embedding = None
         embed_exc: Exception | None = None
-        if self.embeddings:
+        if self.embeddings and (not use_variants or date_window is not None):
             try:
                 embedding = await self.embeddings.embed(query, fail_fast=True)
             except Exception as exc:
                 logger.warning("Embedding generation failed for fact search")
                 embed_exc = exc
 
-        # Which primary search runs (below): the inactive-facts scan, the
-        # variant fusion, or the single-query hybrid. Only the variant fusion
-        # carries its own vectors, so a failed base embed is a keyword-only
-        # fallback on the other two, and on it only when no variant has one.
-        use_variants = active_only and bool(variant_pairs) and len(variant_pairs) > 1 and not require_keyword_hit
         if embed_exc is not None and not has_vector_input(use_variants, embedding, variant_pairs):
             note_stage_error(stage_errors, stage_error_msgs, "fact_embed_fallback", embed_exc)
 
@@ -3669,6 +3679,18 @@ class FactManager:
         # penalty_limit + 1, not penalty_limit: the boundary rank drifts at
         # exactly penalty_limit.
         primary_limit = max(penalty_limit + 1, limit) if penalty_limit is not None else limit
+
+        # C-1: with date_leg_inline_rrf the date leg is fetched first and fused
+        # inside the per-type merge below (inside each variant's merge under
+        # expansion) as one more weighted list, instead of as the second RRF
+        # layer after it. An empty leg adds no list.
+        inline_date = date_window is not None and bool(getattr(self._settings, "date_leg_inline_rrf", False))
+        date_kwargs: dict = {}
+        if inline_date and embedding is not None:
+            date_leg = await self._date_window_leg(session, embedding, date_window, self._settings.date_leg_k)
+            if date_leg:
+                date_kwargs = {"date_ranked": date_leg, "date_weight": self._settings.date_leg_rrf_weight}
+
         if use_variants:
             results = await hybrid_search_multi(
                 session=session,
@@ -3680,6 +3702,8 @@ class FactManager:
                 limit=primary_limit,
                 penalty_limit=penalty_limit,
                 any_word_fallback=True,
+                original_weighted=original_weighted,
+                **date_kwargs,
             )
         else:
             results = await hybrid_search(
@@ -3694,6 +3718,7 @@ class FactManager:
                 require_keyword_hit=require_keyword_hit,
                 penalty_limit=penalty_limit,
                 any_word_fallback=True,
+                **date_kwargs,
             )
 
         # F075 L3: fuse the date-window leg (position-based RRF). Present only when
@@ -3704,7 +3729,7 @@ class FactManager:
         # above ran with vectors.
         if date_window is not None and embedding is None and embed_exc is not None:
             note_stage_error(stage_errors, stage_error_msgs, "date_window", embed_exc, cause="embedding unavailable")
-        if date_window is not None and embedding is not None:
+        if date_window is not None and embedding is not None and not inline_date:
             from nous.heart.search import _resolve_rrf_k, _rrf_merge_n
 
             k_leg = self._settings.date_leg_k if self._settings else 15
@@ -3882,8 +3907,11 @@ class FactManager:
         # Raise HNSW ef_search well above :limit: the agent/date/active predicates
         # are post-applied to the approximate walk, so a selective date window can
         # otherwise evict the in-window rows from the candidate set (codex P2).
-        # Mirrors _find_duplicate (facts.py:1200) and censor probe (censors.py:409).
-        await set_local_ef_search(session, 200)
+        # No max_scan_tuples cap, unlike the hybrid legs: this leg exists to
+        # rescue in-window facts that sit far from the query vector, so the
+        # iterative scan may run to pgvector's default tuple budget to fill
+        # :limit. Every later retrieval leg sets its own cap.
+        await set_local_ef_search(session, VECTOR_LEG_EF_SEARCH)
         sql = text("""
             SELECT t.id, 1 - (t.embedding <=> CAST(:qvec AS vector)) AS score
             FROM heart.facts t

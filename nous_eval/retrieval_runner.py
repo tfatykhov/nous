@@ -488,6 +488,28 @@ async def _build_heart_for_eval(db: Database, settings: Settings) -> AsyncIterat
                 exc_info=True,
             )
 
+    # F075 L3: wire the date-window parser when date_leg_enabled=True. Mirrors
+    # nous/main.py. run_recall_pipeline reads heart.date_window_parser, so
+    # without this the date leg never fires in the harness and a date-leg arm
+    # (date_leg_enabled, date_leg_inline_rrf) measures the baseline. Reuses
+    # the api_client if one was already created.
+    if getattr(settings, "date_leg_enabled", False):
+        try:
+            if api_client is None:
+                from nous.api.anthropic_client import create_client
+
+                api_client = create_client(settings)
+                await api_client.start()
+            from nous.heart.date_window import DateWindowParser
+
+            heart.date_window_parser = DateWindowParser(api_client, settings)
+            logger.info("F075: harness date-window parser wired for eval")
+        except Exception:
+            logger.warning(
+                "F075: harness date-window parser wiring failed; the date leg collapses to off",
+                exc_info=True,
+            )
+
     try:
         async with heart:
             yield heart

@@ -2700,6 +2700,16 @@ class Settings(BaseSettings):
         default=30,
         description="F050 — cache row retention; sweep handler ships in F050.2.",
     )
+    query_expansion_original_weighted: bool = Field(
+        default=False,
+        description=(
+            "C-4. When true, the cross-variant fusion gives the original query "
+            "weight 0.5 and splits 0.5 evenly across its variants, so the "
+            "variants together cannot outvote it (with 3 variants and equal "
+            "weights, a doc at rank 0 in the original only scores below one "
+            "at rank 10 in all three). False = equal weights, as before."
+        ),
+    )
 
     # §2: Haiku-layered three-way epistemic gate (grounded / world_knowledge /
     # abstain). All default OFF (dark-launch); fail-open to softened prose.
@@ -3131,6 +3141,32 @@ class Settings(BaseSettings):
     date_leg_cache_ttl_days: int = Field(
         default=30,
         description="F075 L3: parsed-window in-process cache retention.",
+    )
+    date_leg_inline_rrf: bool = Field(
+        default=False,
+        description=(
+            "C-1. When true, the date leg is fused inside the fact search's "
+            "vector/keyword RRF as a third list weighted date_leg_rrf_weight "
+            "(on the expansion path, inside each variant's merge), instead of "
+            "as a second RRF layer over the merged facts. The second layer "
+            "caps every fact outside the window at 0.5 + 0.5*k/(k+P) while "
+            "other memory types reach 1.0. False = the second layer, as before."
+        ),
+    )
+    date_leg_rrf_weight: float = Field(
+        default=0.3,
+        gt=0.0,
+        description=(
+            "C-1. Weight of the date list when date_leg_inline_rrf is on; the "
+            "vector and keyword lists keep their split and scores are "
+            "renormalised so rank 0 in all three lists is 1.0. 0.3 is the "
+            "keyword list's default share. Up to 2*vector_weight - 1 (0.4 at "
+            "the default 0.7), a fact outside the window that is first in "
+            "the vector leg scores at least the second layer's cap. Must be "
+            "> 0: at 0, in-window facts that neither leg returned would still "
+            "enter the merge at the all-absent score, so 0 is not off; turn "
+            "the list off with date_leg_inline_rrf=false."
+        ),
     )
     heart_graph_all_types_enabled: bool = Field(
         default=False,
