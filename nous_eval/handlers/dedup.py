@@ -255,13 +255,27 @@ async def _delete_facts_by_ids(heart: "Heart", fact_ids: list[UUID]) -> None:
     production at `nous/api/dashboard_queries.py:206-209`). The
     `text(...).bindparams(ids=[...])` form does NOT work for `ANY(:ids)`
     array bindings — it only handles scalar parameters.
+
+    Hard deletes leave edges: `brain.graph_edges` has no foreign key to its
+    endpoints, and the anchor and stored paraphrases were edged by event-time
+    linking. Their edges go in the same transaction. (F053 now also collects
+    edges whose endpoint row is missing, as a backstop.)
     """
     if not fact_ids:
         return
+    ids = [str(fid) for fid in fact_ids]
     async with heart.db.session() as session:
         await session.execute(
+            text(
+                "DELETE FROM brain.graph_edges "
+                "WHERE (source_type = 'fact' AND source_id = ANY(:ids)) "
+                "OR (target_type = 'fact' AND target_id = ANY(:ids))"
+            ),
+            {"ids": ids},
+        )
+        await session.execute(
             text("DELETE FROM heart.facts WHERE id = ANY(:ids)"),
-            {"ids": [str(fid) for fid in fact_ids]},
+            {"ids": ids},
         )
         await session.commit()
 

@@ -29,6 +29,9 @@ Usage:
 
     # All agents
     uv run python scripts/backfill_episode_chunks.py
+
+Hard deletes leave edges: brain.graph_edges has no foreign key to its endpoints,
+so delete a row's edges with the row (F053 now collects any left behind).
 """
 from __future__ import annotations
 

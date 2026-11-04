@@ -1593,12 +1593,20 @@ async def test_structural_chunk_edges_tagged_deterministic(
             "FROM brain.graph_edges "
             "WHERE agent_id = :a AND source_id = :c0 AND source_type = 'chunk'"
         ), {"a": agent_id, "c0": c0})).all()
+        # PR-J1: a chunk↔chunk pair is stored once, in id order, so the
+        # adjacency edge may have c1 as its source.
+        sibling_rows = (await s.execute(text(
+            "SELECT extraction_method FROM brain.graph_edges "
+            "WHERE agent_id = :a AND relation = 'related_to' "
+            "  AND ((source_id = :c0 AND target_id = :c1) "
+            "    OR (source_id = :c1 AND target_id = :c0))"
+        ), {"a": agent_id, "c0": c0, "c1": c1})).all()
     by_target = {(r.target_id, r.relation): r.extraction_method for r in rows}
     assert by_target.get((str(ep), "part_of")) == "deterministic", (
         f"chunk→episode part_of must be deterministic, got {by_target}"
     )
-    assert by_target.get((str(c1), "related_to")) == "deterministic", (
-        f"adjacent chunk→chunk must be deterministic, got {by_target}"
+    assert [r.extraction_method for r in sibling_rows] == ["deterministic"], (
+        f"adjacent chunk↔chunk must be one deterministic edge, got {sibling_rows}"
     )
     assert by_target.get((str(fact), "summarized_by")) == "inferred", (
         f"cosine-derived chunk→fact summarized_by must remain inferred, "
@@ -2283,3 +2291,368 @@ async def test_discussed_in_leg_is_gated_by_the_rollout_flag(
                 "DELETE FROM nous_system.agents WHERE id = :a"
             ), {"a": agent})
             await cs.commit()
+
+
+# ---------------------------------------------------------------------------
+# PR-J1 graph hygiene: edge orientation (J-4), one row per same-type pair
+# (C3), and the orphan window that moves past unlinkable orphans (J-7).
+# ---------------------------------------------------------------------------
+
+
+class TestOrient:
+    """``_orient`` returns ``(src_type, src_id, dst_type, dst_id, relation)``
+    oriented the way ``_RELATION_MAP`` defines the relation."""
+
+    def test_orient_fact_chunk_is_chunk_to_fact(self):
+        from nous.brain.graph_densifier import _orient
+
+        f, c = uuid4(), uuid4()
+        assert _orient("fact", f, "chunk", c) == ("chunk", c, "fact", f, "summarized_by")
+
+    def test_orient_decision_fact_is_fact_to_decision(self):
+        from nous.brain.graph_densifier import _orient
+
+        d, f = uuid4(), uuid4()
+        assert _orient("decision", d, "fact", f) == ("fact", f, "decision", d, "evidence_for")
+
+    def test_orient_keeps_an_order_already_in_the_map(self):
+        from nous.brain.graph_densifier import _orient
+
+        f, e = uuid4(), uuid4()
+        assert _orient("fact", f, "episode", e) == ("fact", f, "episode", e, "extracted_from")
+
+    def test_orient_unmapped_pair_keeps_input_order(self):
+        from nous.brain.graph_densifier import _orient
+
+        c, d = uuid4(), uuid4()
+        assert _orient("chunk", c, "decision", d) == ("chunk", c, "decision", d, "related_to")
+
+    def test_orient_same_type_is_canonical_by_id(self):
+        from nous.brain.graph_densifier import _orient
+
+        a, b = sorted([uuid4(), uuid4()], key=str)
+        expected = ("fact", a, "fact", b, "related_to")
+        assert _orient("fact", a, "fact", b) == expected
+        assert _orient("fact", b, "fact", a) == expected
+
+
+class _ConstEmbedder:
+    """Embeds every text to one fixed unit vector, so every cosine is 1.0."""
+
+    def __init__(self, vec: list[float]) -> None:
+        self._vec = vec
+
+    async def embed(self, text: str, fail_fast: bool = False) -> list[float]:
+        return list(self._vec)
+
+    async def embed_batch(self, texts: list[str], fail_fast: bool = False) -> list[list[float]]:
+        return [list(self._vec) for _ in texts]
+
+    async def close(self) -> None:
+        pass
+
+
+async def _pair_edges(db, agent_id: str, a, b) -> list:
+    """Every edge between ``a`` and ``b``, in either direction."""
+    async with db.session() as s:
+        return (await s.execute(text(
+            "SELECT source_id, source_type, target_id, target_type, relation, "
+            "       weight, extraction_method, ltp_count "
+            "FROM brain.graph_edges WHERE agent_id = :a "
+            "  AND ((source_id = :x AND target_id = :y) "
+            "    OR (source_id = :y AND target_id = :x))"
+        ), {"a": agent_id, "x": a, "y": b})).all()
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cross_type_backfill_writes_fact_to_decision_for_decision_orphan(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """J-4: a decision orphan linked to a fact is stored fact -> decision
+    ``evidence_for`` (the map's direction, and the event-time linker's), with
+    each id written under its own type."""
+    agent_id = f"test-j1-xtype-{uuid4().hex[:8]}"
+    vec = await mock_embeddings.embed(agent_id)
+    emb = _ConstEmbedder(vec)
+    s_local = settings.model_copy(update={"ce_backfill_enabled": False})
+    linker = GraphLinker(db, emb, s_local, agent_id)
+    d = GraphDensifier(db, linker, emb, s_local, agent_id)
+
+    async with db.session() as s:
+        dec = await _insert_decision(s, agent_id, "choose postgres for the store", vec)
+        fact = await _insert_fact(s, agent_id, "postgres is the chosen store", vec)
+        # The fact is linked already, so only the decision is an orphan.
+        await _insert_edge(s, agent_id, fact, uuid4(), "fact", "fact")
+        await s.commit()
+
+    await d.backfill_orphan_decisions(max_count=5)
+
+    rows = await _pair_edges(db, agent_id, dec, fact)
+    assert [(r.source_type, r.source_id, r.target_type, r.target_id, r.relation)
+            for r in rows] == [("fact", fact, "decision", dec, "evidence_for")]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cluster_bridge_chunk_hub_uses_related_to(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """J-4: a bridge between a chunk hub and a fact hub is ``related_to``
+    (a cosine bridge is not the structural ``summarized_by``), chunk -> fact."""
+    agent_id = f"test-j1-bridge-{uuid4().hex[:8]}"
+    vec = await mock_embeddings.embed(agent_id)
+    emb = _ConstEmbedder(vec)
+    linker = GraphLinker(db, emb, settings, agent_id)
+    d = GraphDensifier(db, linker, emb, settings, agent_id)
+
+    async with db.session() as s:
+        ep = await _insert_episode(s, agent_id, "bridge episode")
+        chunk = await _insert_chunk(s, agent_id, ep, 0, "the deploy runbook chunk", vec)
+        fact = await _insert_fact(s, agent_id, "the deploy runbook lives in ops", vec)
+        # Two 3-node components; the chunk and the fact are their hubs.
+        await _insert_edge(s, agent_id, chunk, uuid4(), "chunk", "chunk")
+        await _insert_edge(s, agent_id, chunk, uuid4(), "chunk", "chunk")
+        await _insert_edge(s, agent_id, fact, uuid4(), "fact", "fact")
+        await _insert_edge(s, agent_id, fact, uuid4(), "fact", "fact")
+        await s.commit()
+
+    assert await d.discover_clusters() == 1
+
+    rows = await _pair_edges(db, agent_id, chunk, fact)
+    assert [(r.source_type, r.source_id, r.target_type, r.target_id, r.relation)
+            for r in rows] == [("chunk", chunk, "fact", fact, "related_to")]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_same_type_backfill_writes_one_edge_per_pair(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """C3: two orphan facts that find each other in one cycle store ONE
+    ``related_to`` row, source < target by id, not one row per direction."""
+    agent_id = f"test-j1-pair-{uuid4().hex[:8]}"
+    vec = await mock_embeddings.embed(agent_id)
+    emb = _ConstEmbedder(vec)
+    linker = GraphLinker(db, emb, settings, agent_id)
+    d = GraphDensifier(db, linker, emb, settings, agent_id)
+
+    async with db.session() as s:
+        a = await _insert_fact(s, agent_id, "the build cache lives on the nvme disk", vec)
+        b = await _insert_fact(s, agent_id, "the nvme disk holds the build cache", vec)
+        await s.commit()
+
+    await d.backfill_orphan_facts(max_count=10)
+
+    lo, hi = sorted([a, b], key=str)
+    rows = await _pair_edges(db, agent_id, a, b)
+    assert [(r.source_id, r.target_id, r.relation) for r in rows] == [
+        (lo, hi, "related_to"),
+    ]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_intra_episode_siblings_write_one_edge_per_pair(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """C3: processing every sibling of an episode stores each chunk pair once,
+    in id order. Side effect, with tinyHippo-Lite on (prod): the second
+    sibling's write of a COSINE pair hits ON CONFLICT and bumps that edge's
+    ltp_count once (c0-c2 here); adjacency pairs are ``structural`` and exempt."""
+    agent_id = f"test-j1-sib-{uuid4().hex[:8]}"
+    s_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+        "graph_threshold_chunk_chunk_intra": 0.5,
+        "tinyhippo_lite_enabled": True,
+    })
+    linker = GraphLinker(db, mock_embeddings, s_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, s_local, agent_id)
+
+    async with db.session() as s:
+        ep = await _insert_episode(s, agent_id, "sibling episode")
+        same = await mock_embeddings.embed(f"{agent_id}-same")
+        other = await mock_embeddings.embed(f"{agent_id}-other")
+        c0 = await _insert_chunk(s, agent_id, ep, 0, "chunk zero", same)
+        c1 = await _insert_chunk(s, agent_id, ep, 1, "chunk one", other)
+        c2 = await _insert_chunk(s, agent_id, ep, 2, "chunk two", same)
+        await s.commit()
+
+    await d.backfill_orphan_chunks()
+
+    async with db.session() as s:
+        rows = (await s.execute(text(
+            "SELECT source_id, target_id, extraction_method, ltp_count "
+            "FROM brain.graph_edges WHERE agent_id = :a "
+            "  AND source_type = 'chunk' AND target_type = 'chunk'"
+        ), {"a": agent_id})).all()
+    got = {frozenset((r.source_id, r.target_id)): r for r in rows}
+    assert len(rows) == 3, f"one row per chunk pair, got {len(rows)}"
+    assert all(str(r.source_id) < str(r.target_id) for r in rows)
+    assert got[frozenset((c0, c1))].extraction_method == "deterministic"
+    assert got[frozenset((c1, c2))].extraction_method == "deterministic"
+    assert got[frozenset((c0, c1))].ltp_count == 0
+    assert got[frozenset((c1, c2))].ltp_count == 0
+    cosine = got[frozenset((c0, c2))]
+    assert cosine.extraction_method == "inferred"
+    assert cosine.ltp_count == 1
+
+
+# J-7: the orphan window. The spies record which orphans each cycle visits;
+# linking itself is stubbed out, so every orphan stays unlinkable.
+
+
+def _spy_on_linking(d: GraphDensifier, *, interrupt_after: int | None = None) -> list:
+    """Replace the per-orphan linkers with spies and return the visit log of
+    ``(entity_type, orphan_id)``. ``interrupt_after`` raises the interrupt flag
+    once that many orphans were visited."""
+    visits: list = []
+
+    async def _same(entity_type, orphan_id, content, session, ce_stats=None):
+        visits.append((entity_type, orphan_id))
+        if interrupt_after is not None and len(visits) >= interrupt_after:
+            d._interrupted = True
+        return 0
+
+    async def _cross(*args, **kwargs):
+        return 0
+
+    d._backfill_same_type = _same
+    d._backfill_cross_type = _cross
+    return visits
+
+
+async def _insert_aged_facts(db, embedder, agent_id: str, n: int) -> list:
+    """``n`` embedded orphan facts, newest first (fact i is i minutes old)."""
+    now = datetime.now(UTC)
+    ids = []
+    async with db.session() as s:
+        for i in range(n):
+            fid = uuid4()
+            vec = await embedder.embed(f"{agent_id}-{i}")
+            await s.execute(text("""
+                INSERT INTO heart.facts (id, agent_id, content, active, embedding, created_at)
+                VALUES (:id, :a, :c, true, CAST(:e AS vector), :t)
+            """), {
+                "id": fid, "a": agent_id, "c": f"orphan fact number {i}",
+                "e": "[" + ",".join(str(v) for v in vec) + "]",
+                "t": now - timedelta(minutes=i),
+            })
+            ids.append(fid)
+        await s.commit()
+    return ids
+
+
+def _plain_densifier(db, settings, embedder, agent_id: str, **overrides) -> GraphDensifier:
+    s_local = settings.model_copy(update=overrides) if overrides else settings
+    linker = GraphLinker(db, embedder, s_local, agent_id)
+    return GraphDensifier(db, linker, embedder, s_local, agent_id)
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_find_orphans_exclude_ids_skips_attempted(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    agent_id = f"test-j1-excl-{uuid4().hex[:8]}"
+    f = await _insert_aged_facts(db, mock_embeddings, agent_id, 4)
+    d = _plain_densifier(db, settings, mock_embeddings, agent_id)
+
+    async with db.session() as s:
+        orphans = await d.find_orphans("fact", 10, s, exclude_ids={f[0], f[1]})
+
+    assert [oid for oid, _ in orphans] == [f[2], f[3]]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_backfill_visits_older_orphans_when_newest_unlinkable(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """J-7: when the newest orphans never link, the next cycle visits the
+    older ones instead of the same newest window again."""
+    agent_id = f"test-j1-starve-{uuid4().hex[:8]}"
+    f = await _insert_aged_facts(db, mock_embeddings, agent_id, 5)
+    d = _plain_densifier(db, settings, mock_embeddings, agent_id)
+    visits = _spy_on_linking(d)
+
+    await d.backfill_orphan_facts(max_count=3)
+    assert [oid for _, oid in visits] == f[:3]
+    visits.clear()
+
+    await d.backfill_orphan_facts(max_count=3)
+    assert [oid for _, oid in visits] == f[3:]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_orphan_window_wraps_and_restarts_newest_first(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """J-7: once the window is exhausted (fewer orphans left than the cap),
+    the next cycle starts newest-first again. The cycle reports the orphans
+    it visited and the wraps under underscore keys (not edge counts)."""
+    agent_id = f"test-j1-wrap-{uuid4().hex[:8]}"
+    f = await _insert_aged_facts(db, mock_embeddings, agent_id, 5)
+    d = _plain_densifier(
+        db, settings, mock_embeddings, agent_id, graph_backfill_max_facts=3,
+    )
+    visits = _spy_on_linking(d)
+
+    seen_per_cycle, reported = [], []
+    for _ in range(3):
+        visits.clear()
+        result = await d.run_backfill_cycle()
+        seen_per_cycle.append([oid for etype, oid in visits if etype == "fact"])
+        reported.append((result.get("_orphans_visited"), result.get("_orphan_window_wraps")))
+
+    assert seen_per_cycle == [f[:3], f[3:], f[:3]]
+    assert reported == [(3, 0), (2, 1), (3, 0)]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_orphan_seen_set_not_shared_across_entity_types(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """J-7: each entity type keeps its own window, so exhausting the decision
+    window does not restart the fact window."""
+    agent_id = f"test-j1-types-{uuid4().hex[:8]}"
+    f = await _insert_aged_facts(db, mock_embeddings, agent_id, 3)
+    async with db.session() as s:
+        await _insert_decision(
+            s, agent_id, "a lone decision", await mock_embeddings.embed(agent_id),
+        )
+        await s.commit()
+    d = _plain_densifier(db, settings, mock_embeddings, agent_id)
+    visits = _spy_on_linking(d)
+
+    await d.backfill_orphan_facts(max_count=2)
+    await d.backfill_orphan_decisions(max_count=2)  # exhausts its own window
+    visits.clear()
+    await d.backfill_orphan_facts(max_count=2)
+
+    assert [oid for _, oid in visits] == [f[2]]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_interrupted_cycle_marks_only_processed_and_keeps_window(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """J-7 / C4: an interrupted cycle marks only the orphans it processed and
+    does not clear the window, so the next cycle resumes at the first orphan
+    it did not reach."""
+    agent_id = f"test-j1-intr-{uuid4().hex[:8]}"
+    f = await _insert_aged_facts(db, mock_embeddings, agent_id, 2)
+    d = _plain_densifier(db, settings, mock_embeddings, agent_id)
+    visits = _spy_on_linking(d, interrupt_after=1)
+
+    await d.backfill_orphan_facts(max_count=3)
+    assert [oid for _, oid in visits] == [f[0]]
+
+    d._interrupted = False
+    visits.clear()
+    await d.backfill_orphan_facts(max_count=3)
+    assert [oid for _, oid in visits] == [f[1]]

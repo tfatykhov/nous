@@ -127,3 +127,26 @@ async def test_graph_densification_partial_failure(handler):
     assert result is False
     # But orphan_edges_created was set before the error
     assert sleep_stats.get("orphan_edges_created") == 7
+
+
+@pytest.mark.asyncio
+async def test_graph_densification_reports_orphan_window_counters(handler):
+    """J-7: the orphan-window counters land in sleep_stats as flat ints and
+    stay out of the orphan_edges_created sum (3 + 2 = 5, not 5 + 200 + 1)."""
+    densifier = MagicMock()
+    densifier.run_backfill_cycle = AsyncMock(return_value={
+        "facts": 3,
+        "decisions": 2,
+        "_ce_stats": {"survived": 0, "pruned": 0},
+        "_orphans_visited": 200,
+        "_orphan_window_wraps": 1,
+    })
+    densifier.discover_clusters = AsyncMock(return_value=0)
+    handler._graph_densifier = densifier
+
+    sleep_stats = {}
+    assert await handler._phase_graph_densification(sleep_stats) is True
+
+    assert sleep_stats["orphan_edges_created"] == 5
+    assert sleep_stats["orphans_visited"] == 200
+    assert sleep_stats["orphan_window_wraps"] == 1

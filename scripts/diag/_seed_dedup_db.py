@@ -4,6 +4,9 @@ Inserts the 20 cluster procedures + their affinity rows + incident graph edges s
 consolidation tool can be validated end-to-end against prod-shaped data on a throwaway DB.
 Array columns are passed as their PostgreSQL array-literal strings (the canonical output
 format is also valid input) and cast in SQL. Connects via DB_* env vars.
+
+Hard deletes leave edges: brain.graph_edges has no foreign key to its endpoints,
+so delete a row's edges with the row (F053 now collects any left behind).
 """
 from __future__ import annotations
 

@@ -14,6 +14,9 @@ Then run baseline_agentic.py against the instance for the agentic table.
   uv run python scripts/diag/faculty/baseline_live.py setup
   # launch run_baseline_instance.py with recency+temporal on, then:
   uv run python scripts/diag/faculty/baseline_agentic.py
+
+Hard deletes leave edges: brain.graph_edges has no foreign key to its endpoints,
+so delete a row's edges with the row (F053 now collects any left behind).
 """
 from __future__ import annotations
 

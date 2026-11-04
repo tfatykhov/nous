@@ -10,6 +10,9 @@ path? If yes, path-unification's value is real; if no, the plan is wrong (build 
   uv run python scripts/diag/faculty/baseline_confirm.py setup
   # launch run_baseline_instance.py with NOUS_RECENCY_RESOLVER_ENABLED=true NOUS_TEMPORAL_EXTRACTION_ENABLED=true
   uv run python scripts/diag/faculty/baseline_confirm.py ask
+
+Hard deletes leave edges: brain.graph_edges has no foreign key to its endpoints,
+so delete a row's edges with the row (F053 now collects any left behind).
 """
 from __future__ import annotations
 
