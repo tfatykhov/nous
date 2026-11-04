@@ -457,6 +457,67 @@ async def test_answer_resume_refuses_a_changed_resolved_setting(
         await beam_run.cmd_answer(args)
 
 
+async def test_answer_resume_warns_when_the_code_changed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    def stop_before_db(*args, **kwargs):
+        raise _StopBeforeDB
+
+    monkeypatch.setattr(harness, "open_stack", stop_before_db)
+    chats = write_conversation(tmp_path / "chats")
+    out = tmp_path / "out"
+    out.mkdir()
+    argv = ["answer", "--chats-dir", str(chats), "--bucket", "100K", "--conv", "1", "--db-url", DB_URL]
+    args = beam_run.parse_args([*argv, "--agent-tag", "t", "--out-dir", str(out), "--mode", "preturn"])
+    with pytest.raises(_StopBeforeDB):
+        await beam_run.cmd_answer(args)
+    run_json = out / "run.json"
+    recorded = json.loads(run_json.read_text(encoding="utf-8"))
+    recorded["git"]["sha"] = "0123456789abcdef"
+    run_json.write_text(json.dumps(recorded), encoding="utf-8")
+    with caplog.at_level("WARNING", logger="nous_eval.beam"), pytest.raises(_StopBeforeDB):
+        await beam_run.cmd_answer(args)
+    assert any("0123456789abcdef" in r.getMessage() for r in caplog.records)
+
+
+async def test_recall_deep_tool_error_is_a_row_error_not_an_answer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tool error never reaches the answer model: the row records it and scoring leaves it out."""
+    from contextlib import asynccontextmanager
+
+    async def failing_recall_deep(**kwargs):
+        return {"content": [{"type": "text", "text": "Error searching memory: connection reset"}], "is_error": True}
+
+    @asynccontextmanager
+    async def fake_stack(*args, **kwargs):
+        yield SimpleNamespace(recall_deep=failing_recall_deep, llm=None)
+
+    async def some_episodes(stack):
+        return {"episodes": 1}
+
+    answered: list[str] = []
+
+    async def generate_answer(llm, model, context, question, **kwargs):
+        answered.append(context)
+        return "an answer", "end_turn"
+
+    monkeypatch.setattr(harness, "open_stack", fake_stack)
+    monkeypatch.setattr(harness, "count_rows", some_episodes)
+    monkeypatch.setattr(harness, "generate_answer", generate_answer)
+    chats = write_conversation(tmp_path / "chats")
+    out = tmp_path / "out"
+    out.mkdir()
+    argv = ["answer", "--chats-dir", str(chats), "--bucket", "100K", "--conv", "1", "--db-url", DB_URL]
+    args = beam_run.parse_args([*argv, "--agent-tag", "t", "--out-dir", str(out), "--mode", "recall_deep"])
+    assert await beam_run.cmd_answer(args) == 2
+    rows = [json.loads(x) for x in (out / "answers.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert answered == []
+    assert all(r["answer"] is None and "Error searching memory: connection reset" in r["error"] for r in rows)
+    summary = await beam_run.cmd_score(beam_run.parse_args(["score", "--out-dir", str(out)]), judge=NamedJudge("j"))
+    assert summary["n_errors"] == 2 and summary["abilities"] == {}
+
+
 class NamedJudge:
     """A fake judge with a model name, as OpenAIJudge has."""
 

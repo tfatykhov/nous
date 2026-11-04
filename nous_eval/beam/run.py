@@ -204,11 +204,20 @@ async def cmd_answer(args: argparse.Namespace, *, llm: Any = None, embeddings: A
         }
     )
     if run_path.exists():  # resume only under the same resolved configuration
-        differences = _run_differences(json.loads(run_path.read_text(encoding="utf-8")), run_info)
+        prior = json.loads(run_path.read_text(encoding="utf-8"))
+        differences = _run_differences(prior, run_info)
         if differences:
             raise SystemExit(
                 f"{args.out_dir} holds answers made under a different configuration ({', '.join(differences)}); "
                 "use a new --out-dir"
+            )
+        prior_sha, sha = (prior.get("git") or {}).get("sha"), run_info["git"]["sha"]
+        if prior_sha != sha:
+            logger.warning(
+                "resuming %s with code at %s; its run.json records %s, so its answers will mix two revisions",
+                args.out_dir,
+                sha,
+                prior_sha,
             )
     else:
         _write_json(run_path, run_info)

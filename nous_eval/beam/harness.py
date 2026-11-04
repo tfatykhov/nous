@@ -489,10 +489,17 @@ async def context_preturn(stack: Stack, question: str) -> tuple[str, dict[str, A
     }
 
 
+class ToolError(RuntimeError):
+    """A memory tool answered with an error: the question gets no answer, and the row records the error."""
+
+
 async def context_recall_deep(stack: Stack, question: str) -> tuple[str, dict[str, Any]]:
     session_id = f"beam-ask-{uuid.uuid4().hex[:12]}"
     out = await stack.recall_deep(query=question, limit=RECALL_DEEP_LIMIT, _session_id=session_id, _turn_number=1)
-    return out["content"][0]["text"], {"session_id": session_id, "tool_is_error": bool(out.get("is_error"))}
+    text = out["content"][0]["text"]
+    if out.get("is_error"):
+        raise ToolError(text)
+    return text, {"session_id": session_id}
 
 
 MODES = {"preturn": context_preturn, "recall_deep": context_recall_deep}
