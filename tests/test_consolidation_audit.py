@@ -354,6 +354,33 @@ async def test_stc_phase_records_only_f044_mutations_not_telemetry():
 
 
 @pytest.mark.asyncio
+async def test_graph_phases_audit_mutations_not_orphan_window_counters():
+    """PR-J1 wiring: the F053 phase's audit row carries the new
+    missing-endpoint deletes, and the densify phase's audit row ignores the
+    orphan-window counters (visits and wraps are not mutations, K-16 class)."""
+    import json
+
+    db = _FakeDB()
+    handler = _make_handler(db, audit_enabled=True)
+
+    async def _densify(stats):
+        stats.update({"orphan_edges_created": 0, "orphans_visited": 200, "orphan_window_wraps": 1})
+        return True
+
+    async def _prune(stats):
+        stats.update({"dead_edges_pruned": 0, "dead_edges_missing_endpoint": 4})
+        return True
+
+    handler._phase_graph_densification = _densify
+    handler._phase_prune_dead_edges = _prune
+    await handler._run_sleep(_sleep_event())
+
+    by_phase = {a["phase"]: json.loads(a["after"]) for a in db.actions}
+    assert "graph_densify" not in by_phase
+    assert by_phase["prune_dead_edges"] == {"counts": {"dead_edges_missing_endpoint": 4}}
+
+
+@pytest.mark.asyncio
 async def test_audited_phase_records_bool_flip():
     db = _FakeDB()
     handler = _make_handler(db, audit_enabled=True)

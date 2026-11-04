@@ -19,6 +19,9 @@ Probes (each prints PASS/FAIL; exit code 1 if any fail):
 Run: uv run python scripts/diag/validate_memory_integrity.py
 Override DB with DB_* env vars (defaults to 127.0.0.1:5433 nous_eval_prod).
 All writes are scoped to a throwaway agent_id and cleaned up at the end.
+
+Hard deletes leave edges: brain.graph_edges has no foreign key to its endpoints,
+so delete a row's edges with the row (F053 now collects any left behind).
 """
 from __future__ import annotations
 

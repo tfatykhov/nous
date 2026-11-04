@@ -11,6 +11,7 @@ import asyncio
 import logging
 import math
 from collections import defaultdict
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from uuid import UUID
@@ -110,6 +111,27 @@ def _get_relation(source_type: str, target_type: str) -> str:
     """Get the relation type for a given type pair."""
     return _RELATION_MAP.get((source_type, target_type),
                              _RELATION_MAP.get((target_type, source_type), "related_to"))
+
+
+def _orient(
+    type_a: str, id_a: UUID, type_b: str, id_b: UUID,
+) -> tuple[str, UUID, str, UUID, str]:
+    """Orient an edge between two nodes: ``(src_type, src_id, dst_type, dst_id, relation)``.
+
+    A ``(type, id)`` pair always moves as a unit. A cross-type pair takes the
+    direction its ``_RELATION_MAP`` key defines (``fact → decision``
+    ``evidence_for``, ``chunk → fact`` ``summarized_by``), whichever node the
+    caller started from. A same-type pair is stored once, smaller id first
+    (string order, as the F106 planners do), so both sides finding each other
+    hit ON CONFLICT instead of writing a second, reversed row. A pair absent
+    from the map in both orders keeps the input order.
+    """
+    if type_a == type_b:
+        if str(id_b) < str(id_a):
+            id_a, id_b = id_b, id_a
+    elif (type_a, type_b) not in _RELATION_MAP and (type_b, type_a) in _RELATION_MAP:
+        type_a, id_a, type_b, id_b = type_b, id_b, type_a, id_a
+    return type_a, id_a, type_b, id_b, _get_relation(type_a, type_b)
 
 
 # F106: the co-mention and co-occurrence v2 scans yield to the event loop (and
@@ -213,10 +235,37 @@ class GraphDensifier:
         self._agent_id = agent_id
         self._interrupted = False
         self._last_cluster_discovery: datetime | None = None
+        # J-7: per entity type, the orphans already visited in the current
+        # newest-first sweep. Excluding them lets the next cycle reach older
+        # orphans instead of re-fetching the same unlinkable newest window.
+        # In memory only: a restart starts a new sweep.
+        self._orphan_seen: dict[str, set[UUID]] = {}
+        self._orphans_visited = 0
+        self._orphan_window_wraps = 0
 
     def interrupt(self) -> None:
         """Signal the densifier to stop at the next safe point."""
         self._interrupted = True
+
+    def _advance_orphan_window(
+        self, entity_type: str, visited: list[UUID], fetched: int, limit: int,
+    ) -> None:
+        """J-7: record the orphans one backfill call processed.
+
+        ``visited`` holds only the orphans actually processed, so a call cut
+        short by an interrupt marks what ran and keeps its window. A full
+        call that fetched fewer than ``limit`` orphans has exhausted the
+        window: the set is cleared and the next call starts newest-first
+        again (one wrap, counted when an earlier call had advanced it).
+        """
+        seen = self._orphan_seen.setdefault(entity_type, set())
+        self._orphans_visited += len(visited)
+        if len(visited) == fetched and fetched < limit:
+            if seen:
+                self._orphan_window_wraps += 1
+            seen.clear()
+        else:
+            seen.update(visited)
 
     async def find_orphans(
         self,
@@ -225,6 +274,7 @@ class GraphDensifier:
         session: AsyncSession,
         *,
         require_embedding: bool = True,
+        exclude_ids: Collection[UUID] | None = None,
     ) -> list[tuple[UUID, str]]:
         """Find nodes with no graph edges (orphans).
 
@@ -234,6 +284,8 @@ class GraphDensifier:
         failed to still receive structural edges (e.g. ``part_of``) that
         don't depend on embeddings. Default keeps existing semantics for
         all other entity types (cosine-driven backfill requires embeddings).
+
+        ``exclude_ids`` (J-7) skips orphans already visited in this sweep.
         """
         config = _ENTITY_CONFIG.get(entity_type)
         if not config:
@@ -242,6 +294,16 @@ class GraphDensifier:
         table, type_name, content_col, extra_where = config
         embedding_clause = "AND t.embedding IS NOT NULL" if require_embedding else ""
         orphan_excl = autobehavior_exclusion_sql("e.")  # 2b
+        params: dict[str, object] = {
+            "agent_id": self._agent_id,
+            "type_name": type_name,
+            "lim": limit,
+        }
+        exclude_clause = ""
+        if exclude_ids:
+            # One text[] parameter, as find_chunks_lacking_cross_episode_edges.
+            params["excl"] = [str(uid) for uid in exclude_ids]
+            exclude_clause = "AND t.id::text != ALL(CAST(:excl AS text[]))"
 
         sql = text(f"""
             SELECT t.id, {content_col} AS content
@@ -249,6 +311,7 @@ class GraphDensifier:
             WHERE t.agent_id = :agent_id
               AND {extra_where}
               {embedding_clause}
+              {exclude_clause}
               AND NOT EXISTS (
                   SELECT 1 FROM brain.graph_edges e
                   WHERE e.agent_id = :agent_id
@@ -266,11 +329,7 @@ class GraphDensifier:
             ORDER BY t.created_at DESC NULLS LAST
             LIMIT :lim
         """)
-        result = await session.execute(sql, {
-            "agent_id": self._agent_id,
-            "type_name": type_name,
-            "lim": limit,
-        })
+        result = await session.execute(sql, params)
         return [(row.id, row.content or "") for row in result.all()]
 
     async def _backfill_same_type(
@@ -280,12 +339,20 @@ class GraphDensifier:
         orphan_content: str,
         session: AsyncSession,
         ce_stats: dict[str, int] | None = None,
+        *,
+        pass_pairs: set[tuple[UUID, UUID]] | None = None,
     ) -> int:
         """Link an orphan to similar nodes of the same type using hybrid search.
 
         Uses RRF-fused vector + keyword search to find candidates, catching
         relationships that pure vector search misses (shared terms in
         different embedding neighborhoods).
+
+        ``pass_pairs`` holds the canonical pairs already written in the
+        caller's pass. Two orphans of one pass that find each other write
+        their pair once: the second side would hit ON CONFLICT, which with
+        tinyHippo-Lite on counts a re-derivation. A pair found again in a
+        later pass still counts.
         """
         config = _ENTITY_CONFIG[entity_type]
         table, type_name, content_col, extra_where = config
@@ -355,10 +422,14 @@ class GraphDensifier:
         # For each candidate, verify actual cosine similarity meets threshold
         # (RRF scores are rank-based, not directly comparable to similarity thresholds)
         edges_created = 0
-        relation = _get_relation(entity_type, entity_type)
 
         for cand_id, rrf_score in candidates:
             if cand_id == orphan_id:
+                continue
+            src_type, src_id, dst_type, dst_id, relation = _orient(
+                type_name, orphan_id, type_name, cand_id,
+            )
+            if pass_pairs is not None and (src_id, dst_id) in pass_pairs:
                 continue
 
             # Check actual embedding similarity if we have the orphan embedding
@@ -380,11 +451,13 @@ class GraphDensifier:
                 # Keyword-only match — use RRF score as proxy weight
                 weight = min(rrf_score, 1.0)
 
+            if pass_pairs is not None:
+                pass_pairs.add((src_id, dst_id))
             edge = await self._linker.create_edge(
-                source_id=orphan_id,
-                target_id=cand_id,
-                source_type=type_name,
-                target_type=type_name,
+                source_id=src_id,
+                target_id=dst_id,
+                source_type=src_type,
+                target_type=dst_type,
                 relation=relation,
                 weight=weight,
                 session=session,
@@ -512,7 +585,6 @@ class GraphDensifier:
                 ce_stats["pruned"] += max(before - after, 0)
 
         edges_created = 0
-        relation = _get_relation(source_type, target_type)
 
         for cand_id, content in candidate_content.items():
             # Re-embed target with common template for fair similarity
@@ -538,11 +610,16 @@ class GraphDensifier:
                     temporal_proximity_days=0.0,
                 )
 
+                # J-4: the orphan is not always the map's source (a decision
+                # orphan links fact → decision), so orient by type.
+                src_type, src_id, dst_type, dst_id, relation = _orient(
+                    source_type, orphan_id, target_type_name, cand_id,
+                )
                 edge = await self._linker.create_edge(
-                    source_id=orphan_id,
-                    target_id=cand_id,
-                    source_type=source_type,
-                    target_type=target_type_name,
+                    source_id=src_id,
+                    target_id=dst_id,
+                    source_type=src_type,
+                    target_type=dst_type,
                     relation=relation,
                     weight=confidence,
                     session=session,
@@ -564,17 +641,25 @@ class GraphDensifier:
         total = 0
 
         async with self.db.session() as session:
-            orphans = await self.find_orphans("fact", limit, session)
+            orphans = await self.find_orphans(
+                "fact", limit, session,
+                exclude_ids=self._orphan_seen.get("fact"),
+            )
+            visited: list[UUID] = []
+            pass_pairs: set[tuple[UUID, UUID]] = set()
             for orphan_id, content in orphans:
                 if self._interrupted:
                     break
+                visited.append(orphan_id)
                 total += await self._backfill_same_type(
-                    "fact", orphan_id, content, session, ce_stats=ce_stats
+                    "fact", orphan_id, content, session, ce_stats=ce_stats,
+                    pass_pairs=pass_pairs,
                 )
                 total += await self._backfill_cross_type(
                     "fact", orphan_id, content, "decision", session, ce_stats=ce_stats
                 )
             await session.commit()
+        self._advance_orphan_window("fact", visited, len(orphans), limit)
 
         logger.info("F040: backfill_orphan_facts created %d edges from %d orphans", total, len(orphans))
         return total
@@ -591,17 +676,25 @@ class GraphDensifier:
         total = 0
 
         async with self.db.session() as session:
-            orphans = await self.find_orphans("decision", limit, session)
+            orphans = await self.find_orphans(
+                "decision", limit, session,
+                exclude_ids=self._orphan_seen.get("decision"),
+            )
+            visited: list[UUID] = []
+            pass_pairs: set[tuple[UUID, UUID]] = set()
             for orphan_id, content in orphans:
                 if self._interrupted:
                     break
+                visited.append(orphan_id)
                 total += await self._backfill_same_type(
-                    "decision", orphan_id, content, session, ce_stats=ce_stats
+                    "decision", orphan_id, content, session, ce_stats=ce_stats,
+                    pass_pairs=pass_pairs,
                 )
                 total += await self._backfill_cross_type(
                     "decision", orphan_id, content, "fact", session, ce_stats=ce_stats
                 )
             await session.commit()
+        self._advance_orphan_window("decision", visited, len(orphans), limit)
 
         logger.info("F040: backfill_orphan_decisions created %d edges from %d orphans", total, len(orphans))
         return total
@@ -618,17 +711,25 @@ class GraphDensifier:
         total = 0
 
         async with self.db.session() as session:
-            orphans = await self.find_orphans("episode", limit, session)
+            orphans = await self.find_orphans(
+                "episode", limit, session,
+                exclude_ids=self._orphan_seen.get("episode"),
+            )
+            visited: list[UUID] = []
+            pass_pairs: set[tuple[UUID, UUID]] = set()
             for orphan_id, content in orphans:
                 if self._interrupted:
                     break
+                visited.append(orphan_id)
                 total += await self._backfill_same_type(
-                    "episode", orphan_id, content, session, ce_stats=ce_stats
+                    "episode", orphan_id, content, session, ce_stats=ce_stats,
+                    pass_pairs=pass_pairs,
                 )
                 total += await self._backfill_cross_type(
                     "episode", orphan_id, content, "fact", session, ce_stats=ce_stats
                 )
             await session.commit()
+        self._advance_orphan_window("episode", visited, len(orphans), limit)
 
         logger.info("F040: backfill_orphan_episodes created %d edges from %d orphans", total, len(orphans))
         return total
@@ -671,10 +772,17 @@ class GraphDensifier:
             # when the source embedding is NULL.
             orphans = await self.find_orphans(
                 "chunk", limit, session, require_embedding=False,
+                exclude_ids=self._orphan_seen.get("chunk"),
             )
+            visited: list[UUID] = []
+            # Chunks of this pass not processed yet. A pair between two of them
+            # is written by whichever is processed second.
+            pending = {orphan_id for orphan_id, _content in orphans}
             for orphan_id, _content in orphans:
                 if self._interrupted:
                     break
+                visited.append(orphan_id)
+                pending.discard(orphan_id)
 
                 # 1. chunk → episode (always; FK guarantees the episode exists)
                 ep_row = (await session.execute(
@@ -710,10 +818,12 @@ class GraphDensifier:
                 # 3. chunk ↔ chunk intra-episode (sequential + non-adjacent)
                 chunk_edges = await self._link_chunk_to_intra_episode_chunks(
                     orphan_id, episode_id, thresh_chunk_chunk_intra, session,
+                    defer_to=pending,
                 )
                 total += chunk_edges
 
             await session.commit()
+        self._advance_orphan_window("chunk", visited, len(orphans), limit)
 
         logger.info(
             "F070: backfill_orphan_chunks created %d edges from %d orphans",
@@ -901,6 +1011,8 @@ class GraphDensifier:
         episode_id: UUID,
         cosine_threshold: float,
         session: AsyncSession,
+        *,
+        defer_to: Collection[UUID] = frozenset(),
     ) -> int:
         """Link a chunk to other chunks in the same episode.
 
@@ -912,6 +1024,16 @@ class GraphDensifier:
           chunk — index adjacency across source kinds is an allocation
           artifact, not a structural relationship.
         - Non-adjacent (or cross-kind): cosine ≥ ``cosine_threshold``
+
+        Each pair is written once, smaller id as source. ``defer_to`` holds
+        the chunks of the caller's pass that are not processed yet: a pair
+        with one of them is left to it, so the pass writes each pair once
+        (a second write would hit ON CONFLICT, which with tinyHippo-Lite on
+        counts a re-derivation). If an interrupt stops the pass first, that
+        chunk got no edge from its siblings, stays an orphan and writes the
+        pair in a later pass. A sibling outside the pass (already linked,
+        e.g. when chunks are appended to an episode) never processes the
+        pair, so this chunk writes it.
 
         Returns count of edges created.
         """
@@ -981,9 +1103,13 @@ class GraphDensifier:
                 provenance = "auto_linker"
             else:
                 continue
+            if row.id in defer_to:
+                continue  # that chunk writes the pair when the pass reaches it
+            # C3: one row per sibling pair, smaller id first.
+            _, src_id, _, dst_id, _ = _orient("chunk", chunk_id, "chunk", row.id)
             edge = await self._linker.create_edge(
-                source_id=chunk_id,
-                target_id=row.id,
+                source_id=src_id,
+                target_id=dst_id,
                 source_type="chunk",
                 target_type="chunk",
                 relation="related_to",
@@ -1162,12 +1288,16 @@ class GraphDensifier:
         threshold: float,
         top_k: int,
         session: AsyncSession,
+        *,
+        pass_pairs: set[tuple[UUID, UUID]] | None = None,
     ) -> int:
         """F070.1: chunk ↔ chunk related_to ACROSS episodes (dedup).
 
         Same HNSW pattern. Excludes the source chunk's own id (so a chunk
         doesn't link to itself) and same-episode siblings (handled by v1
         intra-episode method). Cosine-derived → inferred provenance.
+        ``pass_pairs``: as in ``_backfill_same_type``, a pair two chunks of
+        one pass find from both sides is written once.
         """
         rows = (await session.execute(
             text(
@@ -1194,9 +1324,15 @@ class GraphDensifier:
             sim = float(row.sim or 0.0)
             if sim < threshold:
                 continue
+            # C3: one row per pair (the finder checks both directions).
+            _, src_id, _, dst_id, _ = _orient("chunk", chunk_id, "chunk", row.id)
+            if pass_pairs is not None:
+                if (src_id, dst_id) in pass_pairs:
+                    continue
+                pass_pairs.add((src_id, dst_id))
             edge = await self._linker.create_edge(
-                source_id=chunk_id,
-                target_id=row.id,
+                source_id=src_id,
+                target_id=dst_id,
                 source_type="chunk",
                 target_type="chunk",
                 relation="related_to",
@@ -1247,6 +1383,7 @@ class GraphDensifier:
             candidates = await self.find_chunks_lacking_cross_episode_edges(
                 limit, session, exclude_ids=exclude_ids,
             )
+            pass_pairs: set[tuple[UUID, UUID]] = set()
             for chunk_id, _content, episode_id in candidates:
                 if self._interrupted:
                     break
@@ -1264,6 +1401,7 @@ class GraphDensifier:
 
                 chunk_edges = await self._link_chunk_to_cross_episode_chunks(
                     chunk_id, episode_id, thresh_chunk, top_k, session,
+                    pass_pairs=pass_pairs,
                 )
                 total += chunk_edges
 
@@ -1288,12 +1426,19 @@ class GraphDensifier:
         total = 0
 
         async with self.db.session() as session:
-            orphans = await self.find_orphans("procedure", limit, session)
+            orphans = await self.find_orphans(
+                "procedure", limit, session,
+                exclude_ids=self._orphan_seen.get("procedure"),
+            )
+            visited: list[UUID] = []
+            pass_pairs: set[tuple[UUID, UUID]] = set()
             for orphan_id, content in orphans:
                 if self._interrupted:
                     break
+                visited.append(orphan_id)
                 total += await self._backfill_same_type(
-                    "procedure", orphan_id, content, session, ce_stats=ce_stats
+                    "procedure", orphan_id, content, session, ce_stats=ce_stats,
+                    pass_pairs=pass_pairs,
                 )
                 total += await self._backfill_cross_type(
                     "procedure", orphan_id, content, "fact", session, ce_stats=ce_stats
@@ -1302,6 +1447,7 @@ class GraphDensifier:
                     "procedure", orphan_id, content, "decision", session, ce_stats=ce_stats
                 )
             await session.commit()
+        self._advance_orphan_window("procedure", visited, len(orphans), limit)
 
         logger.info("F040: backfill_orphan_procedures created %d edges from %d orphans", total, len(orphans))
         return total
@@ -1316,6 +1462,8 @@ class GraphDensifier:
         ``result.values()``.
         """
         self._interrupted = False
+        self._orphans_visited = 0
+        self._orphan_window_wraps = 0
         ce_stats: dict[str, int] = {"survived": 0, "pruned": 0}
         results: dict = {}
 
@@ -1324,6 +1472,9 @@ class GraphDensifier:
             # never inflate the per-type totals (F043 P1 regression guard).
             edge_total = sum(v for k, v in results.items() if not k.startswith("_"))
             results["_ce_stats"] = ce_stats
+            # J-7: orphan-window telemetry, not edge counts (underscore keys).
+            results["_orphans_visited"] = self._orphans_visited
+            results["_orphan_window_wraps"] = self._orphan_window_wraps
             per_type = {k: v for k, v in results.items() if not k.startswith("_")}
             if aborted:
                 logger.info(
@@ -2306,12 +2457,19 @@ class GraphDensifier:
                     )
                     threshold = _get_threshold(self._settings, type_a, type_b)
                     if sim >= threshold:
-                        relation = _get_relation(type_a, type_b)
+                        src_type, src_id, dst_type, dst_id, relation = _orient(
+                            type_a, hub_a, type_b, hub_b,
+                        )
+                        if "chunk" in (type_a, type_b):
+                            # J-4: part_of / summarized_by state a chunk's
+                            # structure (its episode, its own facts); a cosine
+                            # bridge between two hubs is neither.
+                            relation = "related_to"
                         edge = await self._linker.create_edge(
-                            source_id=hub_a,
-                            target_id=hub_b,
-                            source_type=type_a,
-                            target_type=type_b,
+                            source_id=src_id,
+                            target_id=dst_id,
+                            source_type=src_type,
+                            target_type=dst_type,
                             relation=relation,
                             weight=sim,
                             session=session,

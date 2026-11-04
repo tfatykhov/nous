@@ -213,3 +213,49 @@ class TestSettingsOverrides:
         base = Settings()
         overridden = _settings_with_dedup_overrides(base)
         assert overridden.agent_id == _AGENT_ID
+
+
+# ---------------------------------------------------------------------------
+# Per-pair cleanup leaves no edges behind (G-13)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_delete_facts_by_ids_removes_their_graph_edges(db):
+    """G-13: the per-pair cleanup hard-deletes facts. Their graph edges must
+    go in the same transaction, or they dangle; edges of other facts stay."""
+    from types import SimpleNamespace
+
+    from sqlalchemy import text
+
+    from nous_eval.handlers.dedup import _delete_facts_by_ids
+
+    agent = f"test-dedup-edges-{uuid4().hex[:8]}"
+    gone_a, gone_b, kept_a, kept_b = uuid4(), uuid4(), uuid4(), uuid4()
+    async with db.session() as s:
+        for fid in (gone_a, gone_b, kept_a, kept_b):
+            await s.execute(text(
+                "INSERT INTO heart.facts (id, agent_id, content, active) "
+                "VALUES (:id, :a, 'dedup cleanup fixture', true)"
+            ), {"id": fid, "a": agent})
+        for src, tgt in ((gone_a, kept_a), (kept_b, gone_b), (kept_a, kept_b)):
+            await s.execute(text(
+                "INSERT INTO brain.graph_edges "
+                "(source_id, source_type, target_id, target_type, agent_id, relation, weight) "
+                "VALUES (:s, 'fact', :t, 'fact', :a, 'related_to', 1.0)"
+            ), {"s": src, "t": tgt, "a": agent})
+        await s.commit()
+
+    try:
+        await _delete_facts_by_ids(SimpleNamespace(db=db), [gone_a, gone_b])
+
+        async with db.session() as s:
+            rows = (await s.execute(text(
+                "SELECT source_id, target_id FROM brain.graph_edges WHERE agent_id = :a"
+            ), {"a": agent})).all()
+        assert [(r.source_id, r.target_id) for r in rows] == [(kept_a, kept_b)]
+    finally:
+        async with db.session() as s:
+            await s.execute(text("DELETE FROM brain.graph_edges WHERE agent_id = :a"), {"a": agent})
+            await s.execute(text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": agent})
+            await s.commit()

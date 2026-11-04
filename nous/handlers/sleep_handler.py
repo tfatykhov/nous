@@ -768,7 +768,7 @@ class SleepHandler:
                         "edge_prune",
                         lambda: self._phase_prune_dead_edges(sleep_stats),
                         sleep_stats,
-                        ("dead_edges_pruned",),
+                        ("dead_edges_pruned", "dead_edges_missing_endpoint"),
                     ),
                 )
                 if success:
@@ -2166,8 +2166,13 @@ class SleepHandler:
             cooccurrence = result.pop("_co_occurrence", 0)
             cooccurrence_deleted = result.pop("_co_occurrence_deleted", None)
             cooccurrence_reweighted = result.pop("_co_occurrence_reweighted", None)
+            # J-7: orphan-window telemetry (visits, sweep wraps), not edges.
+            orphans_visited = result.pop("_orphans_visited", 0)
+            orphan_window_wraps = result.pop("_orphan_window_wraps", 0)
             total_edges = sum(result.values())
             sleep_stats["orphan_edges_created"] = total_edges
+            sleep_stats["orphans_visited"] = orphans_visited
+            sleep_stats["orphan_window_wraps"] = orphan_window_wraps
             sleep_stats["temporal_chain_edges"] = happened_before
             sleep_stats["comention_edges"] = comention
             if comention_deleted is not None:
@@ -2297,6 +2302,15 @@ class SleepHandler:
         Agent-scoped both on the edges side and the inactive-id side
         defense-in-depth — no chance of cross-agent edge deletion even
         if a row was misclassified at write time.
+
+        K-14: a second statement in the same transaction deletes edges
+        whose endpoint ROW is missing altogether (a hard delete outside the
+        app, e.g. an eval or diag script), which the inactive pool can never
+        match. It covers every node type in ``_ENTITY_CONFIG``, includes
+        ``supersedes`` (lineage to a row that no longer exists is garbage),
+        and takes what is left of the same per-cycle cap. Edges are
+        agent-scoped; the node lookup is by primary key only, so an endpoint
+        that exists under another agent is not "missing".
         """
         try:
             if not self._settings.dead_edge_pruning_enabled:
@@ -2309,6 +2323,7 @@ class SleepHandler:
                 return True
             from sqlalchemy import text
 
+            from nous.brain._entity_config import _ENTITY_CONFIG
             from nous.brain.graph_constants import episode_dead_sql
 
             async with self._heart.db.session() as session:
@@ -2370,11 +2385,42 @@ class SleepHandler:
                     {"agent_id": agent_id, "max_per_cycle": max_per_cycle},
                 )
                 deleted = len(result.all())
+
+                missing = 0
+                remaining = max_per_cycle - deleted
+                if remaining > 0:
+                    missing_endpoint = " OR ".join(
+                        f"(e.{side}_type = '{type_name}' AND NOT EXISTS ("
+                        f"SELECT 1 FROM {table} n WHERE n.id = e.{side}_id))"
+                        for table, type_name, _content, _where in _ENTITY_CONFIG.values()
+                        for side in ("source", "target")
+                    )
+                    missing_sql = text(f"""
+                        WITH victim_edges AS (
+                            SELECT e.id
+                            FROM brain.graph_edges e
+                            WHERE e.agent_id = :agent_id
+                              AND ({missing_endpoint})
+                            LIMIT :lim
+                        )
+                        DELETE FROM brain.graph_edges
+                        WHERE id IN (SELECT id FROM victim_edges)
+                        RETURNING id
+                    """)
+                    result = await session.execute(
+                        missing_sql,
+                        # What is left of the cap after the first statement.
+                        {"agent_id": agent_id, "lim": remaining},
+                    )
+                    missing = len(result.all())
                 await session.commit()
             sleep_stats["dead_edges_pruned"] = deleted
+            sleep_stats["dead_edges_missing_endpoint"] = missing
             logger.info(
-                "F053 dead-edge prune: deleted %d edges (cap=%d)",
+                "F053 dead-edge prune: deleted %d edges to inactive nodes and "
+                "%d to missing rows (cap=%d)",
                 deleted,
+                missing,
                 max_per_cycle,
             )
             return True

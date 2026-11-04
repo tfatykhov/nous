@@ -24,6 +24,7 @@ This module verifies the phase logic without a real Postgres:
 
 from __future__ import annotations
 
+import re
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -120,9 +121,11 @@ class TestF053DeadEdgePrune:
         sleep_stats = {}
         result = await handler._phase_prune_dead_edges(sleep_stats)
         assert result is True
-        mock_session.execute.assert_awaited_once()
+        # Two statements (inactive endpoint, then missing endpoint row), one commit.
+        assert mock_session.execute.await_count == 2
         mock_session.commit.assert_awaited_once()
         assert sleep_stats["dead_edges_pruned"] == 3
+        assert sleep_stats["dead_edges_missing_endpoint"] == 3
 
     @pytest.mark.asyncio
     async def test_prune_zero_records_zero(self):
@@ -150,10 +153,11 @@ class TestF053DeadEdgePrune:
             dead_edge_pruning_max_per_cycle=42
         )
         await handler._phase_prune_dead_edges({})
-        call = mock_session.execute.await_args
-        params = call.args[1]
-        assert params["agent_id"] == handler._settings.agent_id
-        assert params["max_per_cycle"] == 42
+        # Nothing deleted by the first statement, so the second gets the whole cap.
+        first, second = (c.args[1] for c in mock_session.execute.await_args_list)
+        assert first["agent_id"] == second["agent_id"] == handler._settings.agent_id
+        assert first["max_per_cycle"] == 42
+        assert second["lim"] == 42
 
     @pytest.mark.asyncio
     async def test_sql_does_not_reference_decisions_active(self):
@@ -161,20 +165,18 @@ class TestF053DeadEdgePrune:
         must NOT reference it. Caught by code review on first pass."""
         handler, mock_session = _make_handler()
         await handler._phase_prune_dead_edges({})
-        call = mock_session.execute.await_args
-        sql_str = str(call.args[0])
-        # Either the SQL doesn't mention decisions at all, or if it does
-        # (in a comment), it must not pair them with `active`.
-        decisions_block = "FROM brain.decisions" in sql_str
-        active_on_decisions = "decisions" in sql_str.lower() and (
-            "decisions" in sql_str.split("active = false")[0].split("FROM ")[-1]
-            if "active = false" in sql_str
-            else False
-        )
-        assert not decisions_block, (
-            "F053 SQL references brain.decisions in a FROM/WHERE clause; "
+        calls = mock_session.execute.await_args_list
+        # The inactive-endpoint pool has no decisions branch.
+        assert "FROM brain.decisions" not in str(calls[0].args[0]), (
+            "F053 inactive-node pool references brain.decisions; "
             "decisions has no active column today. Remove the branch."
         )
+        # The missing-endpoint statement reads brain.decisions by id only.
+        decisions_active = re.compile(r"FROM brain\.decisions\b[^)]*\bactive\b")
+        for call in calls:
+            assert not decisions_active.search(str(call.args[0])), (
+                "brain.decisions has no active column"
+            )
 
     @pytest.mark.asyncio
     async def test_sql_preserves_supersedes_lineage(self):
@@ -184,7 +186,7 @@ class TestF053DeadEdgePrune:
         deactivated in the same sleep cycle)."""
         handler, mock_session = _make_handler()
         await handler._phase_prune_dead_edges({})
-        sql_str = str(mock_session.execute.await_args.args[0])
+        sql_str = str(mock_session.execute.await_args_list[0].args[0])
         assert "supersedes" in sql_str, (
             "F053 prune SQL must exclude relation = 'supersedes' so it does not "
             "delete supersession lineage edges incident to the inactive fact"
@@ -209,7 +211,7 @@ class TestF053DeadEdgePrune:
         (active=false AND ended_at IS NULL) and abandoned marks."""
         handler, mock_session = _make_handler()
         await handler._phase_prune_dead_edges({})
-        sql_str = str(mock_session.execute.await_args.args[0])
+        sql_str = str(mock_session.execute.await_args_list[0].args[0])
         assert "ended_at IS NULL" in sql_str, (
             "episode dead-node branch must require ended_at IS NULL "
             "alongside active=false (trivial-discard shape)"
@@ -217,6 +219,29 @@ class TestF053DeadEdgePrune:
         assert "outcome = 'abandoned'" in sql_str, (
             "episode dead-node branch must include F060.2 abandoned marks"
         )
+
+    @pytest.mark.asyncio
+    async def test_missing_endpoint_statement_gets_the_rest_of_the_cap(self):
+        """K-14: the missing-endpoint statement shares the per-cycle cap with
+        the inactive-endpoint one: 3 deleted of 5 leaves it a limit of 2."""
+        handler, mock_session = _make_handler(
+            dead_edge_pruning_max_per_cycle=5, deleted_ids=[uuid4() for _ in range(3)],
+        )
+        await handler._phase_prune_dead_edges({})
+        calls = mock_session.execute.await_args_list
+        assert calls[0].args[1]["max_per_cycle"] == 5
+        assert calls[1].args[1]["lim"] == 2
+
+    @pytest.mark.asyncio
+    async def test_missing_endpoint_statement_skipped_when_cap_spent(self):
+        handler, mock_session = _make_handler(
+            dead_edge_pruning_max_per_cycle=3, deleted_ids=[uuid4() for _ in range(3)],
+        )
+        sleep_stats: dict = {}
+        assert await handler._phase_prune_dead_edges(sleep_stats) is True
+        assert mock_session.execute.await_count == 1
+        assert sleep_stats["dead_edges_pruned"] == 3
+        assert sleep_stats["dead_edges_missing_endpoint"] == 0
 
 
 # ===========================================================================
@@ -498,3 +523,225 @@ class TestF053Integration:
                     "DELETE FROM nous_system.agents WHERE id = :aid"
                 ), {"aid": agent_id})
                 await cs.commit()
+
+
+# ===========================================================================
+# K-14 / L-4: edges whose endpoint ROW is missing (hard-deleted out of band)
+# ===========================================================================
+
+
+async def _insert_live_node(fs, node_type: str, agent_id: str):
+    """Insert one live node of ``node_type`` for ``agent_id``; return its id."""
+    from datetime import UTC, datetime
+
+    from sqlalchemy import text as sql_text
+
+    nid = uuid4()
+    if node_type == "fact":
+        await fs.execute(sql_text(
+            "INSERT INTO heart.facts (id, agent_id, content, active) "
+            "VALUES (:id, :a, 'k14 live fact', true)"
+        ), {"id": nid, "a": agent_id})
+    elif node_type == "episode":
+        await fs.execute(sql_text(
+            "INSERT INTO heart.episodes (id, agent_id, summary, active, started_at) "
+            "VALUES (:id, :a, 'k14 live episode', true, :t)"
+        ), {"id": nid, "a": agent_id, "t": datetime.now(UTC)})
+    elif node_type == "procedure":
+        await fs.execute(sql_text(
+            "INSERT INTO heart.procedures (id, agent_id, name, active) "
+            "VALUES (:id, :a, 'k14 live procedure', true)"
+        ), {"id": nid, "a": agent_id})
+    elif node_type == "decision":
+        await fs.execute(sql_text(
+            "INSERT INTO brain.decisions "
+            "(id, agent_id, description, confidence, category, stakes) "
+            "VALUES (:id, :a, 'k14 live decision', 0.8, 'architecture', 'low')"
+        ), {"id": nid, "a": agent_id})
+    elif node_type == "chunk":
+        ep = await _insert_live_node(fs, "episode", agent_id)
+        await fs.execute(sql_text(
+            "INSERT INTO heart.episode_chunks (id, agent_id, episode_id, chunk_index, content) "
+            "VALUES (:id, :a, :ep, 0, 'k14 live chunk')"
+        ), {"id": nid, "a": agent_id, "ep": ep})
+    else:  # pragma: no cover - test helper misuse
+        raise ValueError(node_type)
+    return nid
+
+
+async def _insert_edge_row(fs, agent_id, src, src_t, tgt, tgt_t, relation="related_to"):
+    from sqlalchemy import text as sql_text
+
+    eid = uuid4()
+    await fs.execute(sql_text(
+        "INSERT INTO brain.graph_edges "
+        "(id, source_id, source_type, target_id, target_type, agent_id, relation, weight) "
+        "VALUES (:id, :s, :st, :t, :tt, :a, :rel, 1.0)"
+    ), {"id": eid, "s": src, "st": src_t, "t": tgt, "tt": tgt_t, "a": agent_id, "rel": relation})
+    return eid
+
+
+async def _run_prune(db, mock_embeddings, agent_id: str, cap: int = 1000) -> dict:
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nous.heart import Heart
+
+    settings = Settings()
+    object.__setattr__(settings, "agent_id", agent_id)
+    object.__setattr__(settings, "dead_edge_pruning_enabled", True)
+    object.__setattr__(settings, "dead_edge_pruning_max_per_cycle", cap)
+    heart = Heart(db, settings, embedding_provider=mock_embeddings)
+    bus = MagicMock(spec=EventBus)
+    bus.on = MagicMock()
+    bus.emit = AsyncMock()
+    handler = SleepHandler(AsyncMock(), heart, settings, bus, AsyncMock())
+    sleep_stats: dict = {}
+    try:
+        assert await handler._phase_prune_dead_edges(sleep_stats) is True
+    finally:
+        await heart.close()
+    return sleep_stats
+
+
+async def _edge_ids(db, agent_id: str) -> set:
+    from sqlalchemy import text as sql_text
+
+    async with db.session() as vs:
+        rows = await vs.execute(sql_text(
+            "SELECT id FROM brain.graph_edges WHERE agent_id = :a"
+        ), {"a": agent_id})
+        return {r.id for r in rows}
+
+
+async def _cleanup(db, *agent_ids: str) -> None:
+    from sqlalchemy import text as sql_text
+
+    async with db.session() as cs:
+        for aid in agent_ids:
+            await cs.execute(sql_text("DELETE FROM brain.graph_edges WHERE agent_id = :a"), {"a": aid})
+            await cs.execute(sql_text("DELETE FROM heart.episode_chunks WHERE agent_id = :a"), {"a": aid})
+            await cs.execute(sql_text("DELETE FROM heart.facts WHERE agent_id = :a"), {"a": aid})
+            await cs.execute(sql_text("DELETE FROM heart.episodes WHERE agent_id = :a"), {"a": aid})
+            await cs.execute(sql_text("DELETE FROM heart.procedures WHERE agent_id = :a"), {"a": aid})
+            await cs.execute(sql_text("DELETE FROM brain.decisions WHERE agent_id = :a"), {"a": aid})
+        await cs.commit()
+
+
+@pytest.mark.postgres_only
+class TestF053MissingEndpointIntegration:
+    """K-14: F053 also deletes edges whose endpoint row does not exist at all.
+    The inactive-node pool can never match those (there is no row to be
+    inactive), so before this branch they survived every cycle.
+
+    Marked ``postgres_only`` but not ``integration``: CI runs on Postgres
+    without ``--integration``, and these tests clean up their own agents."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("node_type", ["fact", "episode", "procedure", "decision", "chunk"])
+    async def test_prunes_edge_with_missing_endpoint_of_each_type(
+        self, db, mock_embeddings, node_type,
+    ):
+        agent_id = f"k14-{node_type}-{uuid4().hex[:8]}"
+        try:
+            async with db.session() as fs:
+                a = await _insert_live_node(fs, "fact", agent_id)
+                b = await _insert_live_node(fs, "fact", agent_id)
+                live = await _insert_live_node(fs, node_type, agent_id)
+                keep_ff = await _insert_edge_row(fs, agent_id, a, "fact", b, "fact")
+                keep_live = await _insert_edge_row(fs, agent_id, a, "fact", live, node_type)
+                # Endpoint ids with no row in the type's table.
+                await _insert_edge_row(fs, agent_id, uuid4(), node_type, a, "fact")
+                await _insert_edge_row(fs, agent_id, b, "fact", uuid4(), node_type)
+                await fs.commit()
+
+            stats = await _run_prune(db, mock_embeddings, agent_id)
+
+            assert await _edge_ids(db, agent_id) == {keep_ff, keep_live}
+            assert stats["dead_edges_pruned"] == 0
+            assert stats["dead_edges_missing_endpoint"] == 2
+        finally:
+            await _cleanup(db, agent_id)
+
+    @pytest.mark.asyncio
+    async def test_supersedes_edge_kept_when_rows_exist_pruned_when_row_missing(
+        self, db, mock_embeddings,
+    ):
+        """Lineage to an INACTIVE fact is kept (the row exists); lineage to a
+        fact row that no longer exists is garbage and goes."""
+        from sqlalchemy import text as sql_text
+
+        agent_id = f"k14-sup-{uuid4().hex[:8]}"
+        try:
+            async with db.session() as fs:
+                winner = await _insert_live_node(fs, "fact", agent_id)
+                loser = await _insert_live_node(fs, "fact", agent_id)
+                await fs.execute(sql_text(
+                    "UPDATE heart.facts SET active = false WHERE id = :id"
+                ), {"id": loser})
+                kept = await _insert_edge_row(
+                    fs, agent_id, winner, "fact", loser, "fact", "supersedes",
+                )
+                await _insert_edge_row(
+                    fs, agent_id, winner, "fact", uuid4(), "fact", "supersedes",
+                )
+                await fs.commit()
+
+            stats = await _run_prune(db, mock_embeddings, agent_id)
+
+            assert await _edge_ids(db, agent_id) == {kept}
+            assert stats["dead_edges_pruned"] == 0
+            assert stats["dead_edges_missing_endpoint"] == 1
+        finally:
+            await _cleanup(db, agent_id)
+
+    @pytest.mark.asyncio
+    async def test_missing_endpoint_prune_respects_shared_cap(self, db, mock_embeddings):
+        """Both statements share dead_edge_pruning_max_per_cycle: with a cap of
+        3 and 2 inactive-endpoint edges, only 1 missing-endpoint edge goes."""
+        from sqlalchemy import text as sql_text
+
+        agent_id = f"k14-cap-{uuid4().hex[:8]}"
+        try:
+            async with db.session() as fs:
+                a = await _insert_live_node(fs, "fact", agent_id)
+                dead = await _insert_live_node(fs, "fact", agent_id)
+                await fs.execute(sql_text(
+                    "UPDATE heart.facts SET active = false WHERE id = :id"
+                ), {"id": dead})
+                await _insert_edge_row(fs, agent_id, a, "fact", dead, "fact", "related_to")
+                await _insert_edge_row(fs, agent_id, a, "fact", dead, "fact", "evidence_for")
+                for _ in range(3):
+                    await _insert_edge_row(fs, agent_id, a, "fact", uuid4(), "fact")
+                await fs.commit()
+
+            stats = await _run_prune(db, mock_embeddings, agent_id, cap=3)
+
+            assert len(await _edge_ids(db, agent_id)) == 2
+            assert stats["dead_edges_pruned"] == 2
+            assert stats["dead_edges_missing_endpoint"] == 1
+        finally:
+            await _cleanup(db, agent_id)
+
+    @pytest.mark.asyncio
+    async def test_other_agent_edges_untouched(self, db, mock_embeddings):
+        """The edge side is agent-scoped; the node side is a primary-key
+        lookup only, so an endpoint that exists under ANOTHER agent is not
+        "missing" and its edge is kept (C7)."""
+        agent_id = f"k14-me-{uuid4().hex[:8]}"
+        other_id = f"k14-other-{uuid4().hex[:8]}"
+        try:
+            async with db.session() as fs:
+                mine = await _insert_live_node(fs, "fact", agent_id)
+                theirs = await _insert_live_node(fs, "fact", other_id)
+                to_foreign = await _insert_edge_row(fs, agent_id, mine, "fact", theirs, "fact")
+                await _insert_edge_row(fs, agent_id, mine, "fact", uuid4(), "fact")
+                other_ghost = await _insert_edge_row(fs, other_id, theirs, "fact", uuid4(), "fact")
+                await fs.commit()
+
+            stats = await _run_prune(db, mock_embeddings, agent_id)
+
+            assert await _edge_ids(db, agent_id) == {to_foreign}
+            assert await _edge_ids(db, other_id) == {other_ghost}
+            assert stats["dead_edges_missing_endpoint"] == 1
+        finally:
+            await _cleanup(db, agent_id, other_id)
