@@ -768,6 +768,11 @@ class Settings(BaseSettings):
     # Memories learned in between are not retrieved until the TTL passes.
     context_skip_unchanged_query: bool = False
     context_skip_unchanged_ttl_seconds: int = Field(default=600, ge=0)
+    # E-17: the episode leg's diversity stage keys on an episode's first tag and keeps
+    # 2 per key. Chat episodes carry no tags, so all of them share the "unknown" key and
+    # at most 2 reach the relevance filter. This caps that untagged bucket alone (0 = no
+    # cap); tagged buckets keep 2, and decisions and facts are unchanged. 2 = as before.
+    context_episode_untagged_diversity_cap: int = Field(default=2, ge=0)
 
     @field_validator("effort", mode="before")
     @classmethod

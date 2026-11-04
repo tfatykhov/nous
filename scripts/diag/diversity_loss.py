@@ -30,7 +30,9 @@ score (an ``EpisodeSummary`` has no ``encoded_frame``); it only sorts by score.
 
 Check: each build's legacy diversity rule is re-run on the reconstructed list, and the
 report says how many builds it reproduces exactly. A low share means the reconstruction is
-wrong and the inversion counts should not be trusted.
+wrong and the inversion counts should not be trusted. The re-run assumes the default caps;
+builds made with ``NOUS_CONTEXT_EPISODE_UNTAGGED_DIVERSITY_CAP`` set to anything but 2 will
+not reproduce.
 
 Read-only (``SET TRANSACTION READ ONLY``). Prints counts and category names only, never
 memory text. Connection from the standard DB_* env vars via ``nous.config.Settings``. The
