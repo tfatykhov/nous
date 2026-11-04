@@ -3907,8 +3907,10 @@ class FactManager:
         # Raise HNSW ef_search well above :limit: the agent/date/active predicates
         # are post-applied to the approximate walk, so a selective date window can
         # otherwise evict the in-window rows from the candidate set (codex P2).
-        # Mirrors _find_duplicate (facts.py:1200) and censor probe (censors.py:409).
-        await set_local_ef_search(session, 200)
+        # This is a retrieval leg, so it also sets the retrieval scan cap: a call
+        # with no cap resets hnsw.max_scan_tuples to the default for every later
+        # leg in the transaction (SET LOCAL lasts the transaction).
+        await set_local_ef_search(session, VECTOR_LEG_EF_SEARCH, max_scan_tuples=VECTOR_LEG_MAX_SCAN_TUPLES)
         sql = text("""
             SELECT t.id, 1 - (t.embedding <=> CAST(:qvec AS vector)) AS score
             FROM heart.facts t

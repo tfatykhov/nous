@@ -3155,14 +3155,17 @@ class Settings(BaseSettings):
     )
     date_leg_rrf_weight: float = Field(
         default=0.3,
-        ge=0.0,
+        gt=0.0,
         description=(
             "C-1. Weight of the date list when date_leg_inline_rrf is on; the "
             "vector and keyword lists keep their split and scores are "
             "renormalised so rank 0 in all three lists is 1.0. 0.3 is the "
             "keyword list's default share. Up to 2*vector_weight - 1 (0.4 at "
             "the default 0.7), a fact outside the window that is first in "
-            "the vector leg scores at least the second layer's cap."
+            "the vector leg scores at least the second layer's cap. Must be "
+            "> 0: at 0, in-window facts that neither leg returned would still "
+            "enter the merge at the all-absent score, so 0 is not off; turn "
+            "the list off with date_leg_inline_rrf=false."
         ),
     )
     heart_graph_all_types_enabled: bool = Field(

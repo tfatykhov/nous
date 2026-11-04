@@ -317,3 +317,22 @@ async def test_inline_flag_with_an_empty_window_is_unchanged(fact_store, seed_ou
     a = await fact_store.search(seed["query"], limit=10, session=session)
     b = await fact_store.search(seed["query"], limit=10, date_window=empty, session=session)
     assert [(f.id, f.score) for f in a] == [(f.id, f.score) for f in b]
+
+
+async def test_date_window_leg_keeps_the_retrieval_scan_cap(fact_store, session):
+    """The date leg is a retrieval leg: it must set the same HNSW scan cap as
+    the others. SET LOCAL lasts the transaction, so a helper call with no cap
+    puts max_scan_tuples back to pgvector's default for every later leg."""
+    from sqlalchemy import text
+
+    from nous.heart.search import VECTOR_LEG_EF_SEARCH, VECTOR_LEG_MAX_SCAN_TUPLES
+
+    window = DateWindow(start=datetime.date(2026, 4, 20), end=datetime.date(2026, 4, 30))
+    emb = await fact_store.embeddings.embed("calibration work in late April")
+    await fact_store._date_window_leg(session, emb, window, limit=15)
+
+    shown = [
+        (await session.execute(text(f"SHOW {name}"))).scalar()
+        for name in ("hnsw.ef_search", "hnsw.iterative_scan", "hnsw.max_scan_tuples")
+    ]
+    assert shown == [str(VECTOR_LEG_EF_SEARCH), "strict_order", str(VECTOR_LEG_MAX_SCAN_TUPLES)]

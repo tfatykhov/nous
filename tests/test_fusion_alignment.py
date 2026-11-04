@@ -477,3 +477,71 @@ def test_new_settings_default_off() -> None:
     assert s.date_leg_inline_rrf is False
     assert s.date_leg_rrf_weight == 0.3
     assert s.query_expansion_original_weighted is False
+
+
+def test_date_leg_rrf_weight_rejects_zero() -> None:
+    """Zero is not "off": in-window facts that neither leg returned would still
+    enter the merge at the all-absent score. Off is date_leg_inline_rrf=false."""
+    from pydantic import ValidationError
+
+    from nous.config import Settings
+
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, date_leg_rrf_weight=0.0)
+    assert Settings(_env_file=None, date_leg_rrf_weight=0.1).date_leg_rrf_weight == 0.1
+
+
+# ---------------------------------------------------------------------------
+# The eval runner wires the date-window parser, so a date-leg arm can fire
+# ---------------------------------------------------------------------------
+
+
+class _FakeEvalHeart:
+    """Stands in for Heart in the eval runner's builder: no DB, no embeddings."""
+
+    def __init__(self, **kwargs) -> None:
+        self.facts = SimpleNamespace(set_llm_client=lambda *a, **k: None)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+    def set_query_expander(self, expander) -> None:
+        self._query_expander = expander
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_eval_runner_wires_the_date_window_parser(enabled: bool) -> None:
+    """run_recall_pipeline reads heart.date_window_parser; without the wiring the
+    date leg never fires in the harness and a date-leg arm measures baseline."""
+    from unittest.mock import MagicMock
+
+    from nous_eval.env_pin import pinned_settings
+    from nous_eval.retrieval_runner import _build_heart_for_eval
+
+    settings = pinned_settings(date_leg_enabled=enabled)
+    client = SimpleNamespace(start=AsyncMock(), close=AsyncMock())
+    db = MagicMock()
+    with (
+        patch("nous_eval.schema_preflight.seed_baked_migration_history", new=AsyncMock(return_value=[])),
+        patch("nous.storage.migrator.run_migrations", new=AsyncMock(return_value=[])),
+        patch("nous_eval.schema_preflight.assert_eval_db_schema_matches_orm", new=AsyncMock()),
+        patch("nous_eval.retrieval_runner.Heart", new=_FakeEvalHeart),
+        patch("nous.api.anthropic_client.create_client", return_value=client) as make_client,
+    ):
+        async with _build_heart_for_eval(db, settings) as heart:
+            parser = getattr(heart, "date_window_parser", None)
+            if enabled:
+                assert isinstance(parser, DateWindowParser)
+                assert parser._client is client
+                assert parser._settings is settings
+            else:
+                assert parser is None
+                assert make_client.call_count == 0
+
+    if enabled:
+        assert client.start.await_count == 1
+        assert client.close.await_count == 1  # the harness-owned client is closed on exit
