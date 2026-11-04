@@ -1898,8 +1898,11 @@ class FactManager:
             return await self._confirm(dupe.id, session)
         # 097: the date and its interval move together, and only onto a dupe
         # with neither: a dupe that carries a span keeps it, never gaining a
-        # one-day event_date that contradicts it.
-        if input.event_date is not None and dupe.event_date is None and dupe.valid_from is None:
+        # one-day event_date that contradicts it. An interval-only input (a
+        # span or a state, flag W) fills the same way, with no event_date.
+        # FactInput's validator gives every event_date its interval, so
+        # valid_from is set whenever either is.
+        if input.valid_from is not None and dupe.event_date is None and dupe.valid_from is None:
             dupe.event_date = input.event_date
             dupe.event_date_classified_at = input.event_date_classified_at or datetime.now(UTC)
             dupe.valid_from = input.valid_from

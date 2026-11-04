@@ -374,7 +374,7 @@ class FactExtractor:
                     profile = [c for c in cands if isinstance(c, dict) and c.get("category") in TIER1_FACT_CATEGORIES]
                     if profile:
                         stored_ids = stored_ids + await self._store_candidate_facts(
-                            profile, episode_id, transcript=transcript
+                            profile, episode_id, transcript=transcript, ref_time=ref_time
                         )
                     return stored_ids
 

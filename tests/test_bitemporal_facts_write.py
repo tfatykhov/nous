@@ -631,6 +631,35 @@ async def test_confirm_duplicate_never_dates_a_row_that_carries_a_span(heart, se
     assert (row.event_date, row.valid_from, row.valid_to) == (None, date(2026, 2, 1), date(2026, 2, 28))
 
 
+@pytest.mark.postgres_only
+@pytest.mark.parametrize(
+    ("valid_from", "valid_to"), [("2026-02-01", "2026-02-28"), ("2026-01-01", None)], ids=["span", "open_state"]
+)
+async def test_confirm_duplicate_fills_an_interval_onto_an_undated_row(heart, session, valid_from, valid_to):
+    undated = await heart.learn(FactInput(content=LISBON), session=session)
+    dupe = await _row(session, undated.id)
+    stamp = datetime(2026, 3, 1, tzinfo=UTC)
+    await heart.facts._confirm_duplicate(
+        dupe,
+        FactInput(content=LISBON, valid_from=valid_from, valid_to=valid_to, event_date_classified_at=stamp),
+        session,
+    )
+    row = await _row(session, undated.id)
+    expected_to = date.fromisoformat(valid_to) if valid_to else None
+    assert (row.event_date, row.valid_from, row.valid_to) == (None, date.fromisoformat(valid_from), expected_to)
+    assert row.event_date_classified_at == stamp
+
+
+@pytest.mark.postgres_only
+async def test_confirm_duplicate_never_overwrites_an_interval(heart, session):
+    span = await heart.learn(FactInput(content=LISBON, valid_from="2026-02-01", valid_to="2026-02-28"), session=session)
+    dupe = await _row(session, span.id)
+    await heart.facts._confirm_duplicate(dupe, FactInput(content=LISBON, valid_from="2025-06-01"), session)
+    row = await _row(session, span.id)
+    assert (row.event_date, row.valid_from, row.valid_to) == (None, date(2026, 2, 1), date(2026, 2, 28))
+    assert row.event_date_classified_at is None
+
+
 # ---------------------------------------------------------------------------
 # Merge inheritance
 # ---------------------------------------------------------------------------
@@ -885,6 +914,70 @@ async def test_the_fallback_extractor_sets_only_the_statement_time():
     (fi,) = captured
     assert fi.mentioned_at == EPISODE_START
     assert fi.valid_from is None  # the fallback prompt asks for no interval
+
+
+async def test_profile_candidates_stored_beside_enumerative_facts_get_the_statement_time(monkeypatch):
+    """When the enumerative leg stores facts, the profile candidates stored after
+    it come from the same episode and carry its start as mentioned_at too."""
+    from nous.handlers.fact_extractor import FactExtractor
+
+    monkeypatch.setattr(
+        "nous.handlers.enumerative_extractor.EnumerativeExtractor.process_transcript",
+        AsyncMock(return_value=[uuid4()]),
+    )
+    captured = []
+    fx = FactExtractor.__new__(FactExtractor)
+    fx._heart = AsyncMock()
+    fx._heart.get_episode = AsyncMock(return_value=SimpleNamespace(started_at=EPISODE_START))
+    fx._heart.learn = AsyncMock(side_effect=lambda fi, **_kw: captured.append(fi) or SimpleNamespace(id=uuid4()))
+    fx._settings = SimpleNamespace(
+        extraction_enumerative_enabled=True,
+        enumerative_classifier="heuristic",
+        enumerative_density_threshold=0.0,
+        temporal_extraction_enabled=False,
+    )
+    fx._dedup_via_search = False
+    fx._llm = object()
+    fx._enumerative_extractor = None
+    ids = await fx.extract_and_store(
+        summary={"summary": "Tim talked about units."},
+        episode_id=str(uuid4()),
+        transcript=_TRANSCRIPT,
+        candidate_facts=[{"content": "Tim prefers answers in metric units, always", "category": "preference"}],
+    )
+    assert len(ids) == 2
+    (fi,) = captured
+    assert fi.category == "preference"
+    assert fi.mentioned_at == EPISODE_START
+
+
+def _spans(n: int) -> list[dict]:
+    return [{"content": f"span {i}", "valid_from": "2026-02-01", "valid_to": "2026-02-28"} for i in range(n)]
+
+
+def test_under_w_interval_candidates_share_the_dated_cap():
+    """A span or state has no event_date. Under W it is dated all the same, so it
+    is capped at candidate_facts_event_limit, not crowded into the stable five."""
+    from nous.handlers import cap_candidate_facts
+
+    stable = [{"content": f"stable {i}"} for i in range(6)]
+    state = {"content": "since january", "valid_from": "2026-01-01"}
+    candidates = stable + _spans(8) + [state]
+    on = SimpleNamespace(temporal_intervals_enabled=True, candidate_facts_event_limit=30)
+    kept = cap_candidate_facts(candidates, on)
+    assert kept == _spans(8) + [state] + stable[:5]
+    # The dated cap applies to them too.
+    assert cap_candidate_facts(
+        _spans(8), SimpleNamespace(temporal_intervals_enabled=True, candidate_facts_event_limit=3)
+    ) == _spans(3)
+
+
+@pytest.mark.parametrize("settings", [SimpleNamespace(temporal_intervals_enabled=False), SimpleNamespace(), None])
+def test_with_w_off_interval_candidates_are_capped_as_before(settings):
+    from nous.handlers import cap_candidate_facts
+
+    point = {"content": "point", "event_date": "2024-04-10"}
+    assert cap_candidate_facts(_spans(8) + [point], settings) == [point] + _spans(5)
 
 
 # ---------------------------------------------------------------------------
