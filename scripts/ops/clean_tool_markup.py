@@ -22,6 +22,8 @@ learn_fact inside a fact) is listed apart, with the call names, and --apply leav
 it was read, and re-embeds it from the text its write path embeds (the provider nous/main.py
 builds) when that text changed. A row whose embed fails is left as it was. The tables' updated_at
 triggers move updated_at, as for any edit. Agent-scoped and idempotent: a second run finds nothing.
+A cleaned fact can equal a clean copy stored later (write-time dedup compared the dirty text); the
+script does not look for such pairs or merge them.
 
 Usage::
 
@@ -243,6 +245,8 @@ async def run(
     include_calls: bool = False,
 ) -> Report:
     """Scan (read only) and, with ``apply``, rewrite and re-embed each row in its own transaction."""
+    if apply and provider is None:
+        raise ValueError("apply needs an embedding provider: a cleaned row would keep its old vector")
     report = Report()
     async with db.session() as session:
         await session.execute(text("SET TRANSACTION READ ONLY"))
@@ -257,7 +261,7 @@ async def run(
                 report.skipped_calls[key] += 1
                 continue
             vector = None
-            if change.new_embed_text != change.old_embed_text and provider is not None:
+            if change.new_embed_text != change.old_embed_text:
                 try:
                     vector = await provider.embed(change.new_embed_text)
                 except Exception:

@@ -133,3 +133,11 @@ async def test_apply_cleans_reembeds_and_is_idempotent(env):
 
     again = await clean_tool_markup.run(db, settings, embedder, tables=tables, apply=False)
     assert all(not v for v in again.planned.values())
+
+
+@pytest.mark.asyncio
+async def test_apply_without_a_provider_refuses(env):
+    db, settings, _, ids = env
+    with pytest.raises(ValueError):
+        await clean_tool_markup.run(db, settings, None, tables=["facts"], apply=True)
+    assert await _content(db, ids["dirty"]) == DIRTY
