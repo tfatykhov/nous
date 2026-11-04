@@ -456,14 +456,17 @@ class Settings(BaseSettings):
     )
     # Bounded profile card (2026-11-03 spec). A sleep phase rewrites a short card of durable profile lines from the
     # tier-1 facts, each line citing its source facts. The writer and the reader land dark and separately: the
-    # owner inspects GET /profile-card before the reader (a later PR) renders it.
+    # owner inspects GET /profile-card before the reader renders it.
     profile_card_writer_enabled: bool = Field(
         default=False,
         description="Run the profile card sleep phase and allow POST /profile-card/rebuild. Land dark.",
     )
     profile_card_enabled: bool = Field(
         default=False,
-        description="Render the profile card as the User Profile section. Read by nothing yet. Land dark.",
+        description=(
+            "Render the profile card's live lines as the User Profile section, in place of the profile facts "
+            "(falls back to them when no line cites an active fact). Land dark."
+        ),
     )
     profile_card_max_tokens: int = Field(
         default=400,

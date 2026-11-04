@@ -10,6 +10,7 @@ import logging
 import time
 from collections import OrderedDict
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy.exc import DBAPIError
@@ -22,6 +23,7 @@ from nous.cognitive.schemas import BuildResult, ContextBudget, ContextSection, F
 from nous.cognitive.usage_tracker import UsageTracker
 from nous.config import Settings
 from nous.heart.heart import Heart
+from nous.heart.profile_card import ProfileCardStore
 from nous.heart.schemas import is_job_lesson, is_strategy_card
 from nous.heart.search import (
     _wrap_with_score,
@@ -836,7 +838,15 @@ class ContextEngine:
         # recalled_ids["fact"] holds only non-tier-1 facts, so this set is the
         # only real guard against re-injecting a tier-1 fact via the leg).
         profile_fact_ids: set[str] = set()
-        if budget.user_profile > 0:
+        # Profile card (profile_card_enabled): its live lines replace the profile facts below; with no live line the
+        # facts render as before.
+        card_section: ContextSection | None = None
+        if budget.user_profile > 0 and getattr(self._settings, "profile_card_enabled", False):
+            card_section, card_ids = await self._profile_card_section(budget.user_profile, session, tr)
+            if card_section is not None:
+                sections.append(card_section)
+                profile_fact_ids = card_ids
+        if budget.user_profile > 0 and card_section is None:
             try:
                 _exclude_sources = self._settings.profile_exclude_sources or None
                 core_mode = getattr(self._settings, "profile_core_enabled", False)
@@ -2277,6 +2287,57 @@ class ContextEngine:
             "refuse a general question merely because it is not in the retrieved "
             "memory."
         )
+
+    async def _profile_card_section(
+        self, user_profile_budget: int, session: AsyncSession | None, tr: Any
+    ) -> tuple[ContextSection | None, set[str]]:
+        """The User Profile section built from the profile card, with every fact id the card cites.
+
+        Renders the card's live lines (each cites an active, unsuperseded fact and is not rejected) as ``- text``,
+        without their citations, and skips identity dedup and the recency pass. Returns ``(None, set())`` when there
+        is no card, no live line, or the card cannot be read, so the profile facts render instead. The trace leg
+        ``context_profile_card`` says which source was used.
+        """
+        card: dict | None = None
+        error: str | None = None
+        try:
+            card = await ProfileCardStore(self._heart.db, self._heart.agent_id).live_entries(session=session)
+        except Exception as exc:
+            error = type(exc).__name__
+            logger.warning("Profile card read failed; the profile facts render instead", exc_info=True)
+        entries = card["entries"] if card else []
+        dropped = (card["dropped_inactive"] + card["dropped_rejected"]) if card else 0
+        try:
+            tr.leg(
+                "context_profile_card",
+                attempted=True,
+                n_returned=len(entries),
+                n_dropped=dropped,
+                error=error,
+                skip_reason=None if entries or error else ("no card" if card is None else "no live line"),
+            )
+        except Exception:
+            logger.debug("F091: trace helper failed (non-fatal)", exc_info=True)
+        if not entries:
+            return None, set()
+
+        text = "\n".join(f"- {e['text']}" for e in entries)
+        # The writer bounds the card at profile_card_max_tokens (characters // 4); the larger cap keeps a full card
+        # whole, and the line truncation stays as a safety net. +1 because that count rounds down.
+        cap = max(self._scaled_budget(user_profile_budget), self._settings.profile_card_max_tokens + 1)
+        rendered = self._truncate_to_budget_lines(text, cap)
+        logger.info(
+            "User Profile: card entries=%d dropped_inactive=%d dropped_rejected=%d truncated=%s",
+            len(entries), card["dropped_inactive"], card["dropped_rejected"], len(rendered) < len(text),
+        )
+        section = ContextSection(
+            priority=1,
+            label="User Profile",
+            content=rendered,
+            token_estimate=self._estimate_tokens(rendered),
+            tier=SECTION_TIERS.get("User Profile", "dynamic"),
+        )
+        return section, set(card["cited"])
 
     def _estimate_tokens(self, text: str) -> int:
         """Rough token count: len(text) / CHARS_PER_TOKEN."""
