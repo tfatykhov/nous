@@ -215,8 +215,35 @@ def test_a_hard_cut_overlaps_and_keeps_the_prefix():
 def test_turn_aware_rejects_bad_sizes():
     with pytest.raises(ValueError, match="overlap"):
         chunk_transcript("User: " + "x" * 100, chunk_size=100, overlap=100, min_chars=10)
-    with pytest.raises(ValueError, match="chunk_size"):
-        chunk_transcript("User: " + "x" * 100, chunk_size=11, overlap=0, min_chars=10)
+    with pytest.raises(ValueError, match="chunk_size must be at least 44"):
+        chunk_transcript("User: " + "x" * 100, chunk_size=43, overlap=0, min_chars=10)
+
+
+def test_the_size_floor_matches_the_settings_bound():
+    from pydantic import ValidationError
+
+    from nous.config import Settings
+    from nous.heart.chunking import MIN_TURN_AWARE_CHUNK_SIZE
+
+    assert MIN_TURN_AWARE_CHUNK_SIZE == 44
+    assert Settings(_env_file=None, episode_chunk_size=44).episode_chunk_size == 44
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, episode_chunk_size=MIN_TURN_AWARE_CHUNK_SIZE - 1)
+
+
+@pytest.mark.parametrize("overlap", [0, 10, 30, 43])
+def test_invariants_hold_at_the_size_floor(overlap):
+    import re
+
+    text = "\n\n".join([
+        "User: " + "q" * 70, "Assistant: " + _sentences(200, "ab"), "user: " + "z" * 50,
+        "assistant: " + "x" * 90 + " " + _sentences(60, "c"),
+    ])
+    spans = _transcript_spans(text, 44, overlap)
+    labels = list(re.finditer(r"(?:^|(?<=\n\n))(user|assistant): ", text, re.I))
+    assert _covered(text, spans)
+    assert all(len(label) + b - a <= 44 and text[a:b].strip() for a, b, label in spans)
+    assert not any(m.start() < a < m.end() for m in labels for a, _b, _label in spans)
 
 
 def test_no_chunk_ends_on_a_bare_role_label():

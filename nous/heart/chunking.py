@@ -89,6 +89,10 @@ _CUT_LEVELS = (
     re.compile(r"\s"),
 )
 _LONGEST_LABEL = len("assistant: ")
+# Below this a window holds too little besides a label for the cut rules to hold
+# (the hard-cut fallback can run out of allowed cut points). Settings bounds
+# episode_chunk_size at the same value.
+MIN_TURN_AWARE_CHUNK_SIZE = 4 * _LONGEST_LABEL
 
 
 def chunk_transcript(
@@ -122,12 +126,14 @@ def chunk_transcript(
     Text with no role labels falls back to the same paragraph / sentence /
     whitespace / hard cuts, with no labels added. Short texts follow
     ``chunk_text``'s contract: below ``min_chars`` → ``[]``, within
-    ``chunk_size`` → ``[text]``. Deterministic.
+    ``chunk_size`` → ``[text]``. Deterministic. ``chunk_size`` must be at
+    least ``MIN_TURN_AWARE_CHUNK_SIZE`` (4 role labels, 44 chars): below it
+    the cut rules cannot all hold, so a smaller size raises ``ValueError``.
     """
     if not text or len(text) < min_chars:
         return []
-    if chunk_size <= _LONGEST_LABEL:
-        raise ValueError(f"chunk_size must exceed {_LONGEST_LABEL} (a role label), got {chunk_size}")
+    if chunk_size < MIN_TURN_AWARE_CHUNK_SIZE:
+        raise ValueError(f"chunk_size must be at least {MIN_TURN_AWARE_CHUNK_SIZE}, got {chunk_size}")
     if overlap < 0:
         raise ValueError(f"overlap must be non-negative, got {overlap}")
     if overlap >= chunk_size:

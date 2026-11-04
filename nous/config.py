@@ -2773,7 +2773,10 @@ class Settings(BaseSettings):
     )
     episode_chunk_size: int = Field(
         default=600,
-        description="F067 chunk size in chars (sliding window).",
+        # nous.heart.chunking.MIN_TURN_AWARE_CHUNK_SIZE: the turn-aware chunker
+        # (episode_chunk_turn_aware) rejects smaller sizes.
+        ge=44,
+        description="F067 chunk size in chars (sliding window). At least 44.",
     )
     episode_chunk_overlap: int = Field(
         default=80,
