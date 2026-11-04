@@ -94,10 +94,16 @@ def _get_threshold(settings: Settings, source_type: str, target_type: str) -> fl
 
     Routes to CE-mode (relaxed) thresholds when ``ce_backfill_enabled`` is set,
     otherwise returns the strict defaults. F045.
+
+    Review J-6: either is raised to ``graph_backfill_min_cosine`` when below it,
+    so an arm can stop admitting edges at cosine 0.45-0.55. The default 0.0
+    leaves every threshold as is.
     """
     if getattr(settings, "ce_backfill_enabled", False):
-        return _get_ce_mode_threshold(settings, source_type, target_type)
-    return _get_strict_threshold(settings, source_type, target_type)
+        threshold = _get_ce_mode_threshold(settings, source_type, target_type)
+    else:
+        threshold = _get_strict_threshold(settings, source_type, target_type)
+    return max(threshold, float(getattr(settings, "graph_backfill_min_cosine", 0.0)))
 
 
 def _get_relation(source_type: str, target_type: str) -> str:

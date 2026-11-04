@@ -1906,13 +1906,22 @@ async def _run_stages(
                     _floor = float(
                         getattr(settings, "spreading_activation_floor", 0.1)
                     )
+                    # Review B-7: with the gate as ordering only, the floor
+                    # reads the RAW activation; the gated value still orders
+                    # the rows for the cap and stays their score. Off, the map
+                    # is empty and the floor sees the gated value as before.
+                    floor_on: dict[tuple[UUID, str], float] = (
+                        raw_activation
+                        if getattr(settings, "spreading_query_gate_order_only", False)
+                        else {}
+                    )
                     hits = [
                         (nid, ntype, activation, depth)
                         for nid, ntype, activation, depth in activated
                         if nid not in seed_ids
                         and nid not in seen_ids
                         and nid not in candidate_ids
-                        and activation > _floor
+                        and floor_on.get((nid, ntype), activation) > _floor
                     ]
                     # F105: the gate left no hit where the raw rows had some.
                     # That is a relevance verdict, not a resolution failure, so
@@ -1947,6 +1956,7 @@ async def _run_stages(
                     # attribute all three, or a spreading run reports only what
                     # survived and looks like it activated nothing else.
                     for _nid, _ntype, _act, _d in activated:
+                        _act = floor_on.get((_nid, _ntype), _act)
                         if _act <= _floor and _nid not in seed_ids and _nid not in seen_ids:
                             tr.add(_nid, _ntype, "spreading_activation", score=_act)
                             tr.drop(_nid, _ntype, BELOW_FLOOR, "spreading_activation_floor")
@@ -2261,7 +2271,8 @@ async def _query_gate(
     Each row's activation is multiplied by ``gate_factor(cos(node, q),
     cos(winning seed, q))``, which is in [0, 1], and the rows are re-sorted by
     the gated value (stably, so ties keep the CTE's order) for the result cap.
-    A node or seed without an embedding is neutral (factor 1.0). With no
+    A node without an embedding gets ``spreading_query_gate_unembedded_factor``
+    (1.0, neutral, by default); a seed without one is neutral. With no
     embedder, or an empty query vector, the rows come back unchanged, and so
     they do on any failure, counted in ``acc.stage_errors["spreading_query_gate"]``:
     the gate fails open, and a failure never turns spreading into the 1-hop
@@ -2298,18 +2309,19 @@ async def _query_gate(
         q_lo = float(getattr(settings, "spreading_query_gate_q_lo", 0.0))
         q_hi = float(getattr(settings, "spreading_query_gate_q_hi", 1.0))
         s_min = float(getattr(settings, "spreading_query_gate_seed_min", 0.19))
+        unembedded = float(getattr(settings, "spreading_query_gate_unembedded_factor", 1.0))
         gated: list[tuple[UUID, str, float, int]] = []
         for nid, ntype, activation, depth in activated:
             seed_id = winning_seed.get(nid)
             factor = gate_factor(
                 cos.get(nid), cos.get(seed_id) if seed_id is not None else None,
-                mode, q_lo, q_hi, s_min,
+                mode, q_lo, q_hi, s_min, unembedded,
             )
             gated.append((nid, ntype, activation * factor, depth))
         gated.sort(key=lambda r: r[2], reverse=True)
         logger.debug(
-            "Spreading query gate (%s): %d rows, %d without a node embedding (neutral)",
-            mode, len(gated), sum(1 for nid, *_ in activated if cos.get(nid) is None),
+            "Spreading query gate (%s): %d rows, %d without a node embedding (factor %s)",
+            mode, len(gated), sum(1 for nid, *_ in activated if cos.get(nid) is None), unembedded,
         )
         return gated
     except Exception as exc:

@@ -1085,6 +1085,45 @@ def test_get_threshold_default_flag_off(settings):
     assert _get_threshold(settings, "fact", "fact") == settings.graph_threshold_fact_fact
 
 
+_THRESHOLD_PAIRS = [
+    ("fact", "fact"), ("fact", "decision"), ("fact", "episode"), ("decision", "decision"),
+    ("episode", "episode"), ("fact", "procedure"), ("procedure", "procedure"), ("chunk", "chunk"),
+]
+
+
+def test_get_threshold_min_cosine_raises_low_thresholds(settings):
+    """Review J-6: graph_backfill_min_cosine is a floor under the resolved
+    threshold. At 0.55 it stops CE mode admitting at 0.45 (procedure) and 0.50
+    (decision and episode pairs), and leaves thresholds at or above it alone."""
+    from nous.brain.graph_densifier import _get_threshold
+
+    ce = settings.model_copy(update={"ce_backfill_enabled": True})
+    floored = ce.model_copy(update={"graph_backfill_min_cosine": 0.55})
+    assert _get_threshold(ce, "procedure", "fact") == 0.45, "non-vacuous: CE mode admits at 0.45"
+    for a, b in _THRESHOLD_PAIRS:
+        assert _get_threshold(floored, a, b) == max(_get_threshold(ce, a, b), 0.55), (a, b)
+    assert _get_threshold(floored, "procedure", "fact") == 0.55
+    assert _get_threshold(floored, "decision", "decision") == 0.55
+    strict = settings.model_copy(update={"graph_backfill_min_cosine": 0.55})
+    for a, b in _THRESHOLD_PAIRS:
+        assert _get_threshold(strict, a, b) == _get_threshold(settings, a, b), "strict thresholds are all >= 0.70"
+
+
+def test_get_threshold_min_cosine_default_changes_nothing(settings):
+    """The default 0.0 returns what settings without the field return, in both modes."""
+    from types import SimpleNamespace
+
+    from nous.brain.graph_densifier import _get_threshold
+
+    assert settings.graph_backfill_min_cosine == 0.0
+    for ce_on in (False, True):
+        s = settings.model_copy(update={"ce_backfill_enabled": ce_on})
+        lacking = SimpleNamespace(
+            **{k: getattr(s, k) for k in type(s).model_fields if k != "graph_backfill_min_cosine"})
+        for a, b in _THRESHOLD_PAIRS:
+            assert _get_threshold(s, a, b) == _get_threshold(lacking, a, b), (ce_on, a, b)
+
+
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
 async def test_backfill_uses_ce_mode_threshold_end_to_end(
@@ -1146,6 +1185,46 @@ async def test_backfill_uses_ce_mode_threshold_end_to_end(
         f"CE-mode fact_fact=0.01 should always pass. Got {edges} edges, "
         f"ce_stats={ce_stats}."
     )
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_backfill_min_cosine_blocks_end_to_end(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint, monkeypatch
+):
+    """Review J-6: the F045 dispatch test's setup (CE-mode fact_fact 0.01, every
+    candidate passing the CE) with graph_backfill_min_cosine at 1.0: the near
+    duplicates (cosine just below 1) are no longer linked."""
+    agent_id = f"test-j6-floor-{uuid4().hex[:8]}"
+    s = settings.model_copy(update={
+        "graph_threshold_fact_fact": 0.99,
+        "graph_threshold_fact_decision": 0.99,
+        "ce_backfill_threshold_fact_fact": 0.01,
+        "ce_backfill_threshold_fact_decision": 0.01,
+        "ce_backfill_enabled": True,
+        "ce_backfill_top_k": 10,
+        "ce_backfill_min_score": 0.1,
+        "ce_backfill_min_content_chars": 0,
+        "graph_backfill_min_cosine": 1.0,
+    })
+    _install_fake_ce(monkeypatch, _FakeCE(scores=[5.0, 5.0, 5.0, 5.0]))
+
+    linker = GraphLinker(db, mock_embeddings, s, agent_id)
+    densifier = GraphDensifier(db, linker, mock_embeddings, s, agent_id)
+
+    async with db.session() as session:
+        base_emb = await mock_embeddings.embed("J6 floor seed")
+        await _insert_fact(session, agent_id, "J6 floor seed fact text", base_emb)
+        for i in range(2):
+            near = await mock_embeddings.embed_near("J6 floor seed", noise=0.005)
+            await _insert_fact(session, agent_id, f"J6 floor candidate {i}", near)
+        await session.commit()
+
+    ce_stats = {"survived": 0, "pruned": 0}
+    edges = await densifier.backfill_orphan_facts(max_count=1, ce_stats=ce_stats)
+
+    assert ce_stats["survived"] >= 1, f"non-vacuous: the CE kept candidates, ce_stats={ce_stats}"
+    assert edges == 0, f"the 1.0 floor admits no near duplicate; got {edges} edges"
 
 
 # ============================================================================
