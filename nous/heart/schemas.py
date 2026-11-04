@@ -7,11 +7,11 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from nous.heart.keys import normalize_key
 
@@ -21,6 +21,43 @@ logger = logging.getLogger(__name__)
 # accepts alternate ISO forms ('20240310', '2024-W10-7') — the regex
 # enforces the prompt/schema contract before the calendar-validity check.
 _DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _parse_date(v: object, field: str) -> date | None:
+    """The one parser for a fact's dates (event_date, valid_from, valid_to).
+
+    A datetime becomes its date (the columns are DATE). A string must be a
+    real YYYY-MM-DD day: anything else is dropped with a warning, so LLM format
+    drift shows in the logs instead of vanishing, and the fact is kept.
+    """
+    if v is None:
+        return None
+    # Order matters: datetime IS-A date in Python's stdlib, so test datetime FIRST.
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    if isinstance(v, str):
+        if not _DATE_PATTERN.fullmatch(v):
+            logger.warning("F075: dropped non-YYYY-MM-DD %s %r", field, v[:32])
+            return None
+        try:
+            return date.fromisoformat(v)
+        except ValueError:
+            logger.warning("F075: dropped invalid-calendar %s %r", field, v[:32])
+            return None
+    return None
+
+
+def date_was_dropped(raw: dict[str, object], parsed: FactInput) -> bool:
+    """True when a producer got a date from the LLM that ``parsed`` could not keep.
+
+    ``raw`` maps date field names to what the LLM emitted. The producers then
+    leave ``event_date_classified_at`` NULL, so the F075.1 backfill retries the
+    row instead of treating it as classified.
+    """
+    return any(value is not None and getattr(parsed, name) is None for name, value in raw.items())
+
 
 # Type aliases using Literal for compile-time validation (P3-2)
 MemoryType = Literal["fact", "procedure", "decision", "censor", "episode", "chunk"]
@@ -150,32 +187,52 @@ class FactInput(BaseModel):
     # 064 R2.4: statement contradicts widely-known world knowledge; rendered
     # with an override marker when NOUS_OVERRIDE_PRIOR_MARKING_ENABLED.
     overrides_prior: bool = False
+    # 097 bi-temporal facts. Event time: the days the fact was true. A one-day
+    # event has valid_from = valid_to = event_date, a span or a coarse date
+    # ("Feb 2026") has both and no event_date, an open state ("since Jan") has
+    # no valid_to. The validator below keeps these consistent for every producer.
+    valid_from: date | None = None
+    valid_to: date | None = None
+    # Statement time: when the fact was said, the source episode's start. Set by
+    # the producers; None means unknown, and readers fall back to learned_at.
+    mentioned_at: datetime | None = None
 
-    @field_validator("event_date", mode="before")
+    @field_validator("event_date", "valid_from", "valid_to", mode="before")
     @classmethod
-    def _parse_event_date(cls, v):
-        if v is None:
-            return v
-        # Order matters: datetime IS-A date in Python's stdlib, so test
-        # datetime FIRST. A datetime input gets explicitly coerced to date
-        # (DB column is DATE, not DATETIME).
-        if isinstance(v, datetime):
-            return v.date()
-        if isinstance(v, date):
-            return v
-        if isinstance(v, str):
-            # Regex enforces surface shape (strictly YYYY-MM-DD).
-            if not _DATE_PATTERN.fullmatch(v):
-                # F075: log dropped dates so LLM format drift is observable
-                # rather than vanishing silently (SFH final-review Medium).
-                logger.warning("F075: dropped non-YYYY-MM-DD event_date %r", v[:32])
-                return None
-            try:
-                return date.fromisoformat(v)
-            except ValueError:
-                logger.warning("F075: dropped invalid-calendar event_date %r", v[:32])
-                return None  # fail-soft: drop bad date, keep fact
-        return None
+    def _parse_dates(cls, v, info: ValidationInfo):
+        return _parse_date(v, info.field_name)
+
+    @field_validator("mentioned_at", mode="after")
+    @classmethod
+    def _mentioned_at_is_utc_when_naive(cls, v: datetime | None) -> datetime | None:
+        """A naive timestamp is taken as UTC, as every producer writes UTC. Left
+        naive, asyncpg would read it in the host's local zone and shift it."""
+        if v is not None and v.tzinfo is None:
+            return v.replace(tzinfo=UTC)
+        return v
+
+    @model_validator(mode="after")
+    def _derive_interval(self) -> FactInput:
+        """Keep the row invariant: an event_date is a one-day interval.
+
+        event_date set: valid_from = valid_to = event_date, overriding a
+        different interval (logged). event_date is never derived from the
+        interval. valid_to before valid_from, or without it, is dropped (logged).
+        """
+        if self.event_date is not None:
+            point = (self.event_date, self.event_date)
+            if self.valid_from is not None and (self.valid_from, self.valid_to) != point:
+                logger.warning(
+                    "bi-temporal: event_date %s overrides valid_from %s / valid_to %s",
+                    self.event_date,
+                    self.valid_from,
+                    self.valid_to,
+                )
+            self.valid_from, self.valid_to = point
+        elif self.valid_to is not None and (self.valid_from is None or self.valid_to < self.valid_from):
+            logger.warning("bi-temporal: dropped valid_to %s (valid_from %s)", self.valid_to, self.valid_from)
+            self.valid_to = None
+        return self
 
     # codex P2 round 7: canonicalize conflict-slot keys at the SINGLE write
     # boundary (R3.2: one canonicalizer). Direct Heart.learn callers were
@@ -239,6 +296,10 @@ class FactDetail(BaseModel):
     # R2.4: True when the extractor classified this fact as contradicting common
     # world knowledge (parametric override). Propagated to FactSummary for context rendering.
     overrides_prior: bool = False
+    # 097: event time (the days the fact was true) and statement time (when it was said).
+    valid_from: date | None = None
+    valid_to: date | None = None
+    mentioned_at: datetime | None = None
 
 
 class FactRejected(BaseModel):
@@ -277,6 +338,11 @@ class FactSummary(BaseModel):
     # R2.4: True when the extractor classified this fact as contradicting common
     # world knowledge (parametric override). Propagated from ORM for context rendering.
     overrides_prior: bool = False
+    # 097: event time (the days the fact was true) and statement time (when it was
+    # said; None = unknown, fall back to learned_at). Carried, not yet read.
+    valid_from: date | None = None
+    valid_to: date | None = None
+    mentioned_at: datetime | None = None
     # Gap-2: transient pre-turn recency-resolution tags set by
     # ContextEngine._resolve_recency (current/superseded + YYYY-MM). NOT persisted;
     # default None keeps every other consumer byte-identical.

@@ -2234,15 +2234,18 @@ def _heart_results_to_pipeline(
     Forwards the full ``RecallResult.metadata`` dict so future consumers
     don't have to amend this conversion when they add new keys. Strips
     only the ``event_date`` value when it's None (F075: avoid a False-y
-    placeholder that breaks ``"event_date" in metadata`` consumer checks).
+    placeholder that breaks ``"event_date" in metadata`` consumer checks),
+    and the 097 ``valid_from``/``valid_to``/``mentioned_at`` the same way.
     """
     out: list[PipelineResult] = []
     for r in heart_results:
         meta = dict(r.metadata) if r.metadata else {}
         # F075: omit the key entirely when None so ``in metadata``
         # presence checks correctly distinguish "no date" from "present".
-        if meta.get("event_date") is None:
-            meta.pop("event_date", None)
+        # 097: the same for event time and statement time.
+        for key in ("event_date", "valid_from", "valid_to", "mentioned_at"):
+            if meta.get(key) is None:
+                meta.pop(key, None)
         out.append(
             PipelineResult(
                 id=r.id,

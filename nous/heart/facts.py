@@ -180,6 +180,12 @@ class ExemplarHit(NamedTuple):
 _NOT_PERSISTED_FACT_FIELDS = frozenset({"id", "content", "score", "recency_status", "recency_date"})
 
 
+def _temporal_kwargs(f: Fact) -> dict[str, Any]:
+    """097: the event time and statement time every FactSummary / FactDetail builder
+    copies off the row. One helper so a builder cannot carry two of the three."""
+    return {"valid_from": f.valid_from, "valid_to": f.valid_to, "mentioned_at": f.mentioned_at}
+
+
 # Subjects that name a bucket, not an entity: many unrelated facts share them,
 # so the legacy same-subject supersession path never runs for them.
 _SENTINEL_SUBJECTS = frozenset({"lesson_learned", "daily_reflection", "reflection", "unknown"})
@@ -1086,6 +1092,12 @@ class FactManager:
             # knowledge_extractor) leave both at None → backfill-eligible.
             event_date=input.event_date,
             event_date_classified_at=input.event_date_classified_at,
+            # 097: pure sinks too. FactInput's validator already made a dated
+            # input a one-day interval; mentioned_at is what the producer set
+            # (None from learn_fact and the REST/MCP paths).
+            valid_from=input.valid_from,
+            valid_to=input.valid_to,
+            mentioned_at=input.mentioned_at,
             subject_key=input.subject_key,
             attribute_key=input.attribute_key,
             source_ordinal=input.source_ordinal,
@@ -1884,9 +1896,17 @@ class FactManager:
         """
         if not copy_metadata:
             return await self._confirm(dupe.id, session)
-        if input.event_date is not None and dupe.event_date is None:
+        # 097: the date and its interval move together, and only onto a dupe
+        # with neither: a dupe that carries a span keeps it, never gaining a
+        # one-day event_date that contradicts it. An interval-only input (a
+        # span or a state, flag W) fills the same way, with no event_date.
+        # FactInput's validator gives every event_date its interval, so
+        # valid_from is set whenever either is.
+        if input.valid_from is not None and dupe.event_date is None and dupe.valid_from is None:
             dupe.event_date = input.event_date
             dupe.event_date_classified_at = input.event_date_classified_at or datetime.now(UTC)
+            dupe.valid_from = input.valid_from
+            dupe.valid_to = input.valid_to
         # Fill subject_key + attribute_key as a PAIR — only when both input
         # keys are present and both row keys are NULL (avoids half-keyed rows).
         if (
@@ -2472,6 +2492,8 @@ class FactManager:
         replacement_id: UUID,
         source_ids: list[UUID],
         session: AsyncSession,
+        *,
+        inherit_temporal: bool = False,
     ) -> None:
         """codex P2 round 9: merged/replacement facts (F031 contradiction-
         resolution MERGE, F027 cluster-consolidation MERGE in sleep_handler.py)
@@ -2578,11 +2600,18 @@ class FactManager:
         an already-present candidate costs nothing, so the remaining slots
         go only to insertions that actually happen.
 
+        097: ``inherit_temporal=True`` (the two sleep merge sites only) also
+        gives the merged fact its sources' time; see _inherit_temporal_fields.
+        The supersede path leaves it False: a superseding fact is a new state,
+        and the loser's dates would be wrong on it.
+
         No commit here — caller-owned session/transaction, same contract as
         apply_supersession above.
         """
         if not source_ids:
             return
+        if inherit_temporal:
+            await self._inherit_temporal_fields(replacement_id, source_ids, session)
 
         replacement_row = (
             await session.execute(select(Fact.subject_key, Fact.attribute_key).where(Fact.id == replacement_id))
@@ -2680,6 +2709,71 @@ class FactManager:
 
             if inserted_any:
                 self.invalidate_entity_vocab()
+
+    async def _inherit_temporal_fields(
+        self,
+        replacement_id: UUID,
+        source_ids: list[UUID],
+        session: AsyncSession,
+    ) -> None:
+        """097: give a merged fact the time of the facts it replaces.
+
+        Fill-if-empty: a replacement that already has a time keeps it. Statement
+        time is the latest of the sources' ``COALESCE(mentioned_at, learned_at)``.
+        Event time only under W (``temporal_intervals_enabled``), because with W
+        off merged facts stay undated as before:
+
+        - ``valid_from`` is the earliest, and only when every source has one;
+          ``valid_to`` is NULL if any source is open, else the latest.
+        - An inherited interval also stamps ``event_date_classified_at``, so the
+          F075.1 backfill never re-classifies the merged text over it.
+        - ``event_date`` is the one date every dated source shares. With no
+          interval it becomes a one-day interval. When the interval is wider
+          than that day, event_date is dropped: a row's event_date is always
+          its whole interval.
+        """
+        row = (
+            await session.execute(
+                select(Fact.event_date, Fact.valid_from, Fact.mentioned_at).where(Fact.id == replacement_id)
+            )
+        ).first()
+        sources = (
+            await session.execute(
+                select(Fact.event_date, Fact.valid_from, Fact.valid_to, Fact.mentioned_at, Fact.learned_at).where(
+                    Fact.id.in_(source_ids)
+                )
+            )
+        ).all()
+        if row is None or not sources:
+            return
+        values: dict[str, Any] = {}
+        if row.mentioned_at is None:
+            values["mentioned_at"] = max(s.mentioned_at or s.learned_at for s in sources)
+        w_on = getattr(self._settings, "temporal_intervals_enabled", False) is True
+        if w_on and row.event_date is None and row.valid_from is None:
+            valid_from = valid_to = None
+            if all(s.valid_from is not None for s in sources):
+                valid_from = min(s.valid_from for s in sources)
+                if all(s.valid_to is not None for s in sources):
+                    valid_to = max(s.valid_to for s in sources)
+            dates = {s.event_date for s in sources if s.event_date is not None}
+            event_date = dates.pop() if len(dates) == 1 else None
+            if event_date is not None:
+                if valid_from is None:
+                    valid_from = valid_to = event_date
+                elif (valid_from, valid_to) != (event_date, event_date):
+                    event_date = None
+            if valid_from is not None:
+                # Stamped as classified, or the F075.1 backfill would re-ask the
+                # LLM about the merged text and overwrite the inherited span.
+                values.update(
+                    valid_from=valid_from,
+                    valid_to=valid_to,
+                    event_date=event_date,
+                    event_date_classified_at=datetime.now(UTC),
+                )
+        if values:
+            await session.execute(update(Fact).where(Fact.id == replacement_id).values(**values))
 
     # ------------------------------------------------------------------
     # 064 R2: key-conflict resolution
@@ -3267,6 +3361,7 @@ class FactManager:
                 event_date=f.event_date,  # F075
                 learned_at=f.learned_at,
                 overrides_prior=bool(f.overrides_prior or False),  # R2.4
+                **_temporal_kwargs(f),
             )
             for f in facts
         ]
@@ -3407,6 +3502,7 @@ class FactManager:
                 event_date=f.event_date,
                 learned_at=f.learned_at,
                 overrides_prior=bool(f.overrides_prior or False),  # R2.4
+                **_temporal_kwargs(f),
             )
             for fid in ids
             if (f := facts.get(fid)) is not None
@@ -3657,6 +3753,7 @@ class FactManager:
                 event_date=f.event_date,  # F075
                 learned_at=f.learned_at,
                 overrides_prior=bool(f.overrides_prior or False),  # R2.4
+                **_temporal_kwargs(f),
             )
             for fid in ids
             if (f := facts.get(fid)) is not None
@@ -3758,6 +3855,7 @@ class FactManager:
                 event_date=f.event_date,  # F075
                 learned_at=f.learned_at,
                 overrides_prior=bool(f.overrides_prior or False),  # R2.4
+                **_temporal_kwargs(f),
             )
             for fid in ids
             if (f := facts.get(fid)) is not None
@@ -3915,6 +4013,7 @@ class FactManager:
                 event_date=f.event_date,  # F075
                 learned_at=f.learned_at,
                 overrides_prior=bool(f.overrides_prior or False),  # R2.4
+                **_temporal_kwargs(f),
             )
             for f in facts
         ]
@@ -4173,6 +4272,7 @@ class FactManager:
             actionable_confidence=fact.actionable_confidence,
             event_date=fact.event_date,  # F075
             overrides_prior=bool(fact.overrides_prior or False),  # R2.4
+            **_temporal_kwargs(fact),
         )
 
     # ------------------------------------------------------------------
@@ -4685,7 +4785,8 @@ class FactManager:
             # string, so returning a `date` here would make the same field a
             # different type depending on which leg found the fact — a subtler
             # version of the bug this backfill exists to fix.
-            if vals.get("event_date") is not None:
-                vals["event_date"] = vals["event_date"].isoformat()
+            for key in ("event_date", "valid_from", "valid_to", "mentioned_at"):
+                if vals.get(key) is not None:
+                    vals[key] = vals[key].isoformat()
             out[row[0]] = vals
         return out

@@ -48,6 +48,8 @@ def _dupe(content: str = "old fact content here", **kw) -> SimpleNamespace:
         # truthy) -- a real Fact ORM row always has this attribute (default
         # None), so the test double needs it too.
         entity_keys_extracted_at=kw.get("entity_keys_extracted_at"),
+        # 097: real rows carry these too; the date fill copies the interval.
+        valid_from=kw.get("valid_from"), valid_to=kw.get("valid_to"),
     )
 
 

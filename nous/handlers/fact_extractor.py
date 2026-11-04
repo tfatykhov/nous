@@ -39,7 +39,7 @@ from nous.handlers.exemplar_ingest import ingest_exemplars
 from nous.heart.category_prompts import TIER1_CATEGORY_GUIDANCE
 from nous.heart.exemplars import is_exemplar_stream
 from nous.heart.heart import Heart
-from nous.heart.schemas import FactDetail, FactInput, FactRejected
+from nous.heart.schemas import FactDetail, FactInput, FactRejected, date_was_dropped
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +215,35 @@ class FactExtractor:
                 break
         return None, distinct_ids
 
+    async def _episode_ref_time(self, episode_id: str | None) -> datetime | None:
+        """097: the reference time of an episode's facts, its ``started_at``.
+
+        Every fact the episode yields is stored with it as ``mentioned_at``, and
+        the enumerative extractor resolves relative dates against it. None when
+        there is no episode or it cannot be read: the facts are still stored,
+        and readers fall back to ``learned_at``.
+        """
+        uid = _parse_episode_uuid(episode_id)
+        if uid is None:
+            return None
+        try:
+            started_at = (await self._heart.get_episode(uid)).started_at
+        except ValueError:  # Heart.get_episode: the episode does not exist
+            logger.debug("No reference time: episode %s not found", episode_id)
+            return None
+        except Exception:
+            logger.warning(
+                "No reference time for episode %s: reading it failed; its facts get no mentioned_at",
+                episode_id,
+                exc_info=True,
+            )
+            return None
+        return started_at if isinstance(started_at, datetime) else None
+
+    def _intervals_on(self) -> bool:
+        """097 flag W. `is True`, so a duck-typed settings object never enables it."""
+        return getattr(self._settings, "temporal_intervals_enabled", False) is True
+
     @staticmethod
     def _event_date_differs(hit: "FactSummary", candidate_event_date: "date | None") -> bool:
         """F075: True when both sides carry a distinct event_date (= distinct
@@ -281,6 +310,8 @@ class FactExtractor:
             except Exception:
                 logger.warning("F086 exemplar leg failed; falling through to legacy", exc_info=True)
 
+        ref_time = await self._episode_ref_time(episode_id)
+
         # 064 R1.1 modal routing: with the flag on, an ENUMERABLE transcript
         # routes fact storage through the enumerative leg INSTEAD of the
         # candidate/summary leg (modal, not additive — summary-path facts have
@@ -313,7 +344,9 @@ class FactExtractor:
                             llm_client=self._llm, embedder=getattr(self._heart, "_embeddings", None),
                         )
                     ex = self._enumerative_extractor
-                    stored_ids = await ex.process_transcript(transcript, _parse_episode_uuid(episode_id))
+                    stored_ids = await ex.process_transcript(
+                        transcript, _parse_episode_uuid(episode_id), ref_time=ref_time
+                    )
                     logger.info("R1: stored %d enumerative facts for episode %s", len(stored_ids), episode_id)
                     if not stored_ids:
                         logger.warning(
@@ -341,7 +374,7 @@ class FactExtractor:
                     profile = [c for c in cands if isinstance(c, dict) and c.get("category") in TIER1_FACT_CATEGORIES]
                     if profile:
                         stored_ids = stored_ids + await self._store_candidate_facts(
-                            profile, episode_id, transcript=transcript
+                            profile, episode_id, transcript=transcript, ref_time=ref_time
                         )
                     return stored_ids
 
@@ -349,13 +382,13 @@ class FactExtractor:
         cands = candidate_facts if candidate_facts is not None else summary.get("candidate_facts", [])
         if cands:
             return await self._store_candidate_facts(
-                cands, episode_id, transcript=transcript
+                cands, episode_id, transcript=transcript, ref_time=ref_time
             )
         # Fallback: LLM extraction
         candidates = await self._extract_facts(summary)
         if not candidates:
             return []
-        return await self._store_extracted_facts(candidates, episode_id, transcript)
+        return await self._store_extracted_facts(candidates, episode_id, transcript, ref_time=ref_time)
 
     async def _learn_one(
         self, fact_input: FactInput, exclude_ids: list[UUID], episode_id: str
@@ -376,12 +409,17 @@ class FactExtractor:
         candidates: list[dict],
         episode_id: str,
         transcript: str | None,
+        *,
+        ref_time: datetime | None = None,
     ) -> list[UUID]:
         """F051.5: LLM-fallback storage path, refactored to track UUIDs.
 
         Mirrors the loop body of pre-F051.5 handle() lines 108-139 verbatim,
         with the addition of ``stored_ids`` accumulation across both
         dedup-skip and successful-store branches (P2-fix per spec §7).
+
+        097: ``ref_time`` becomes every fact's ``mentioned_at``. The fallback
+        prompt asks for no interval, so ``valid_*`` are never read here.
         """
         stored_ids: list[UUID] = []
         stored = 0
@@ -449,6 +487,7 @@ class FactExtractor:
                 source_episode_id=_parse_episode_uuid(episode_id),
                 event_date=candidate_event_date,
                 event_date_classified_at=classified_at,
+                mentioned_at=ref_time,
             )
             # F377: exclude tiebreaker-DISTINCT hits from native (Leg-2) dedup so
             # learn can't re-merge what the tiebreaker already cleared.
@@ -493,7 +532,14 @@ class FactExtractor:
         except Exception:
             logger.exception("Fact extraction failed for episode %s", event.data.get("episode_id"))
 
-    async def _store_candidate_facts(self, candidates: list[str | dict], episode_id: str, transcript: str | None = None) -> list[UUID]:
+    async def _store_candidate_facts(
+        self,
+        candidates: list[str | dict],
+        episode_id: str,
+        transcript: str | None = None,
+        *,
+        ref_time: datetime | None = None,
+    ) -> list[UUID]:
         """008.4: Store pre-extracted candidate facts directly, with dedup.
 
         Accepts both structured dicts (with subject/category/content) and
@@ -502,33 +548,37 @@ class FactExtractor:
         F051.5: returns list of fact UUIDs that materially exist after this
         call — newly-stored UUIDs PLUS canonical UUIDs of dedup-skipped
         facts. handle() callers ignore the return; ingest paths consume it.
+
+        097: ``ref_time`` (the episode start) becomes every fact's
+        ``mentioned_at``. Under flag W a candidate's ``valid_from``/``valid_to``
+        are read too; with W off they are ignored, as the prompt never asks.
         """
         stored_ids: list[UUID] = []
         stored = 0
+        intervals = self._intervals_on()
         # F075 + coverage fix: shared partition/cap helper (single source of
         # truth so the stable cap matches the summarizer + the LLM-fallback path,
         # rather than re-truncating a broadened merge back to 5).
         capped = cap_candidate_facts(candidates, self._settings)
         for item in capped:
             # Handle both structured dicts and plain strings
+            raw_dates: dict[str, Any] = {}
             if isinstance(item, dict):
                 content = item.get("content", "")
                 subject = item.get("subject")
                 category = item.get("category")
                 # F075: normalize candidate event_date through the validator so
                 # the dedup compare is type-safe (date == date, not str == str).
-                raw_event_date = item.get("event_date")
-                candidate_event_date = (
-                    FactInput(content="_", event_date=raw_event_date).event_date
-                    if raw_event_date is not None
-                    else None
-                )
+                raw_dates["event_date"] = item.get("event_date")
+                if intervals:
+                    raw_dates["valid_from"] = item.get("valid_from")
+                    raw_dates["valid_to"] = item.get("valid_to")
             else:
                 content = item
                 subject = None
                 category = None
-                raw_event_date = None
-                candidate_event_date = None
+            dates = FactInput(content="_", **raw_dates)
+            candidate_event_date = dates.event_date
 
             if not content or not str(content).strip():
                 continue
@@ -554,7 +604,7 @@ class FactExtractor:
             # on exactly the rows F075 exists to capture (SFH final-review
             # Medium). Leave classified_at NULL so backfill can retry it.
             flag_on = getattr(self._settings, "temporal_extraction_enabled", False)
-            date_dropped = raw_event_date is not None and candidate_event_date is None
+            date_dropped = date_was_dropped(raw_dates, dates)
             classified_at = datetime.now(UTC) if (flag_on and not date_dropped) else None
             # F022 orphan-rate audit fix: tag candidate facts with their
             # source episode (same change as the LLM-fallback path above).
@@ -568,6 +618,9 @@ class FactExtractor:
                 source_episode_id=_parse_episode_uuid(episode_id),
                 event_date=candidate_event_date,
                 event_date_classified_at=classified_at,
+                valid_from=dates.valid_from,
+                valid_to=dates.valid_to,
+                mentioned_at=ref_time,
             )
             # F377: exclude tiebreaker-DISTINCT hits from native (Leg-2) dedup.
             result = await self._learn_one(fact_input, exclude_ids, episode_id)

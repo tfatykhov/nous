@@ -379,9 +379,17 @@ def cap_candidate_facts(candidates: list, settings: Any) -> list:
     ``candidate_facts_stable_limit`` (default 15) when
     ``extraction_coverage_broadened`` is on, else the legacy 5. ``settings`` may
     be None (test ``__new__`` paths) — getattr defaults apply.
+
+    097 flag W (``temporal_intervals_enabled``): a span or a state carries
+    ``valid_from`` and no ``event_date``, and counts as dated too.
     """
-    dated = [c for c in candidates if isinstance(c, dict) and c.get("event_date")]
-    stable = [c for c in candidates if not (isinstance(c, dict) and c.get("event_date"))]
+    intervals = getattr(settings, "temporal_intervals_enabled", False) is True
+
+    def _dated(c: object) -> bool:
+        return isinstance(c, dict) and bool(c.get("event_date") or (intervals and c.get("valid_from")))
+
+    dated = [c for c in candidates if _dated(c)]
+    stable = [c for c in candidates if not _dated(c)]
     event_limit = getattr(settings, "candidate_facts_event_limit", 30)
     broadened = getattr(settings, "extraction_coverage_broadened", False)
     stable_limit = getattr(settings, "candidate_facts_stable_limit", 15) if broadened else 5
