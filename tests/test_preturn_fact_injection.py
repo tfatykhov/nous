@@ -67,14 +67,24 @@ GOLDEN_FACTS = [
              score=0.5, id="f2"),
     FakeFact(content="short fact three", subject=None, confidence=0.7,
              score=0.4, id="f3"),
+    # K-13: two rows past the relevance filter's gap (0.1 < 0.4 * 0.6). The
+    # plain one is cut; the pre_prune_extraction one is exempt and kept. Real
+    # facts carry `source` since K-13, so this holds for them too. Each has a
+    # subject of its own, so the two-per-subject diversity cap leaves them be.
+    FakeFact(content="short fact four", subject="four", confidence=0.6,
+             score=0.1, id="f4"),
+    FakeFact(content="Larch kickoff notes kept before pruning", subject="larch",
+             confidence=0.6, score=0.1, id="f5", source="pre_prune_extraction"),
 ]
 
 # Captured on unmodified HEAD (see Step 2). Reconstructed via formula to avoid
 # manual A-count errors; equivalent to the repr() output from the capture run.
+# K-13 added the last line (the exempt pre_prune_extraction row).
 GOLDEN_RELEVANT_FACTS = (
     "- [long-one] " + "A" * 150 + " midpoint marker... [confidence: 1.00]\n"
     "- [short-two] short fact two [confidence: 0.80]\n"
-    "- short fact three [confidence: 0.70]"
+    "- short fact three [confidence: 0.70]\n"
+    "- [larch] Larch kickoff notes kept before pruning [confidence: 0.60]"
 )
 
 

@@ -423,6 +423,7 @@ _NOTE_EXEMPT_STAGE_ERRORS = frozenset(
         "query_expansion",  # the original query is still searched
         "query_expansion_embed_fallback",  # same: the single-query path runs
         "merge_history",  # merged facts render without their sources, as with the flag off
+        "fact_sources",  # graph-reached facts render without a marker, as with the flag off
     }
 )
 
@@ -869,6 +870,17 @@ async def run_recall_pipeline(
             heart,
             results,
             int(getattr(settings, "recall_merge_history_max", 6)),
+            stage_errors=acc.stage_errors,
+            stage_error_msgs=acc.stage_error_msgs,
+        )
+
+    # K-13: graph-reached facts arrive without their source; look it up so the
+    # marker covers every fact line. After every filter, so only served rows cost
+    # a lookup, and only when the marker is on.
+    if getattr(settings, "fact_source_marker_enabled", False) is True:
+        results = await _attach_fact_sources(
+            heart,
+            results,
             stage_errors=acc.stage_errors,
             stage_error_msgs=acc.stage_error_msgs,
         )
@@ -2721,6 +2733,42 @@ async def _attach_merge_history(
     return out
 
 
+async def _attach_fact_sources(
+    heart: Heart,
+    results: list[PipelineResult],
+    *,
+    stage_errors: dict[str, int] | None = None,
+    stage_error_msgs: dict[str, str] | None = None,
+) -> list[PipelineResult]:
+    """K-13: set ``metadata["source"]`` on fact rows that arrived without it.
+
+    The heart and keyed legs carry the source. Graph-reached facts (Path A
+    neighbours, graph expansion, spreading) do not, so they are looked up in
+    one query. No such row means no query. Exemplar rows render in their own
+    section and are skipped. A failed lookup leaves the rows unmarked, which is
+    the flag-off output.
+    """
+    missing = [
+        r.id
+        for r in results
+        if r.type == "fact" and "source" not in r.metadata and r.metadata.get("retrieval_leg") != "exemplar"
+    ]
+    if not missing:
+        return results
+    try:
+        sources = await heart.facts.get_sources(missing)
+    except Exception as exc:
+        logger.warning("Fact source lookup failed; graph-reached facts render unmarked", exc_info=True)
+        note_stage_error(stage_errors, stage_error_msgs, "fact_sources", exc)
+        return results
+    return [
+        replace(r, metadata={**r.metadata, "source": sources[r.id]})
+        if r.type == "fact" and r.id in sources and "source" not in r.metadata
+        else r
+        for r in results
+    ]
+
+
 def _chunks_to_pipeline(
     chunk_results: list,
 ) -> list[PipelineResult]:
@@ -2795,6 +2843,7 @@ def _keyed_to_pipeline(
             "retrieval_leg": "keyed",
             "matched_keys": int(row.matched),
             "subject": row.subject,
+            "source": row.source,  # K-13
         }
         if row.event_date is not None:
             metadata["event_date"] = row.event_date.isoformat()
@@ -2907,6 +2956,7 @@ def _keyed_r2_to_pipeline(
             "retrieval_leg": "keyed_r2",
             "matched_keys": int(row.matched),
             "subject": row.subject,
+            "source": row.source,  # K-13
         }
         if row.event_date is not None:
             metadata["event_date"] = row.event_date.isoformat()

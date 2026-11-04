@@ -345,11 +345,33 @@ class FactSummary(BaseModel):
     valid_from: date | None = None
     valid_to: date | None = None
     mentioned_at: datetime | None = None
+    # K-13: who wrote the fact (heart.facts.source). The renderers mark an inferred
+    # or merged fact through FACT_SOURCE_MARKERS.
+    source: str | None = None
     # Gap-2: transient pre-turn recency-resolution tags set by
     # ContextEngine._resolve_recency (current/superseded + YYYY-MM). NOT persisted;
     # default None keeps every other consumer byte-identical.
     recency_status: str | None = None
     recency_date: str | None = None
+
+
+# K-13: fact sources whose line ends with a provenance marker when
+# fact_source_marker_enabled is on. The agent inferred these (a sleep reflection,
+# a session lesson) or rewrote several facts into one (a merge), so they must not
+# read like something the user said. ONE map shared by recall_deep and the
+# pre-turn context. Every other source renders nothing.
+FACT_SOURCE_MARKERS: dict[str, str] = {
+    "sleep_reflection": "inferred",
+    "reflection": "inferred",
+    "cluster_consolidation": "merged",
+    "contradiction_resolution": "merged",
+}
+
+
+def fact_source_marker(source: object) -> str:
+    """`` [inferred]`` or `` [merged]`` for a source in FACT_SOURCE_MARKERS, else ``""``."""
+    label = FACT_SOURCE_MARKERS.get(source) if isinstance(source, str) else None
+    return f" [{label}]" if label else ""
 
 
 # --- Procedures ---

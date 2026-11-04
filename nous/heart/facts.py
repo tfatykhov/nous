@@ -3542,6 +3542,7 @@ class FactManager:
                 event_date=f.event_date,  # F075
                 learned_at=f.learned_at,
                 overrides_prior=bool(f.overrides_prior or False),  # R2.4
+                source=f.source,  # K-13
                 **_temporal_kwargs(f),
             )
             for f in facts
@@ -3682,6 +3683,25 @@ class FactManager:
             hist["sources"].append({"content": body, "learned_at": learned_at.astimezone(UTC).date().isoformat()})
         return out
 
+    async def get_sources(
+        self, fact_ids: Sequence[UUID], session: AsyncSession | None = None
+    ) -> dict[UUID, str | None]:
+        """K-13: ``heart.facts.source`` for each of ``fact_ids`` (agent-scoped).
+
+        For fact results that arrived without it (graph-reached facts), so the
+        renderers can mark them like any other fact. Ids that are not this
+        agent's facts are absent.
+        """
+        if not fact_ids:
+            return {}
+        stmt = select(Fact.id, Fact.source).where(Fact.agent_id == self.agent_id, Fact.id.in_(list(fact_ids)))
+        if session is None:
+            async with self.db.session() as session:
+                rows = (await session.execute(stmt)).all()
+        else:
+            rows = (await session.execute(stmt)).all()
+        return {fid: source for fid, source in rows}
+
     async def _find_similar_for_dedup(
         self,
         content: str,
@@ -3741,6 +3761,7 @@ class FactManager:
                 event_date=f.event_date,
                 learned_at=f.learned_at,
                 overrides_prior=bool(f.overrides_prior or False),  # R2.4
+                source=f.source,  # K-13
                 **_temporal_kwargs(f),
             )
             for fid in ids
@@ -4017,6 +4038,7 @@ class FactManager:
                 event_date=f.event_date,  # F075
                 learned_at=f.learned_at,
                 overrides_prior=bool(f.overrides_prior or False),  # R2.4
+                source=f.source,  # K-13
                 **_temporal_kwargs(f),
             )
             for fid in ids
@@ -4119,6 +4141,7 @@ class FactManager:
                 event_date=f.event_date,  # F075
                 learned_at=f.learned_at,
                 overrides_prior=bool(f.overrides_prior or False),  # R2.4
+                source=f.source,  # K-13
                 **_temporal_kwargs(f),
             )
             for fid in ids
@@ -4286,6 +4309,7 @@ class FactManager:
                 event_date=f.event_date,  # F075
                 learned_at=f.learned_at,
                 overrides_prior=bool(f.overrides_prior or False),  # R2.4
+                source=f.source,  # K-13
                 **_temporal_kwargs(f),
             )
             for f in facts
@@ -4800,6 +4824,9 @@ class FactManager:
         rows can reorder, so it is not a byte-identity violation (pinned by
         the existing ``recall_deep`` snapshot test).
 
+        K-13: also returns ``source`` so the keyed builders can mark a fact
+        the agent inferred or merged.
+
         codex r5: ``exclude_fact_ids`` pushes round-2's r1-exclusion into
         the SQL fetch itself, rather than relying solely on the Python-side
         filter downstream. Derived R2 keys often match the r1 facts' own
@@ -4826,7 +4853,7 @@ class FactManager:
                     "SELECT f.id, f.content, f.learned_at, f.source_ordinal, "
                     "       f.subject, f.event_date, f.valid_from, f.valid_to, f.mentioned_at, "
                     "       f.source_episode_id::text AS source_episode_id, "
-                    "       f.attribute_key, f.subject_key, "
+                    "       f.attribute_key, f.subject_key, f.source, "
                     "       COUNT(DISTINCT ek.entity_key) AS matched "
                     "FROM heart.fact_entity_keys ek "
                     "JOIN heart.facts f ON f.id = ek.fact_id "
@@ -4835,7 +4862,7 @@ class FactManager:
                     + exclude_clause
                     + "GROUP BY f.id, f.content, f.learned_at, f.source_ordinal, "
                     "         f.subject, f.event_date, f.valid_from, f.valid_to, f.mentioned_at, f.source_episode_id, "
-                    "         f.attribute_key, f.subject_key "
+                    "         f.attribute_key, f.subject_key, f.source "
                     "ORDER BY matched DESC, f.learned_at DESC, "
                     "         f.source_ordinal DESC NULLS LAST, f.id "
                     "LIMIT :lim"
