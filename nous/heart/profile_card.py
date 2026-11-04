@@ -191,6 +191,57 @@ class ProfileCardStore:
             await s.flush()
             return _as_dict(row)
 
+    async def live_entries(self, session: AsyncSession | None = None) -> dict | None:
+        """The lines the pre-turn User Profile section may render, or None when there is no card.
+
+        A line is shown when it cites at least one active, unsuperseded fact and is not in ``rejected``. Returns
+        ``entries`` (the shown lines, in card order), ``cited`` (every fact id any line cites), ``dropped_inactive``
+        and ``dropped_rejected``. An entry without a text is skipped, and only string fact ids count.
+        """
+        async with _session_scope(self._db, session) as s:
+            row = await self._row(s, lock=False)
+            if row is None:
+                return None
+            lines: list[tuple[dict, list[str]]] = []
+            for entry in row.entries if isinstance(row.entries, list) else []:
+                text = entry.get("text") if isinstance(entry, dict) else None
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                fact_ids = entry.get("fact_ids")
+                lines.append((entry, [i for i in fact_ids if isinstance(i, str)] if isinstance(fact_ids, list) else []))
+            cited = {i for _, fact_ids in lines for i in fact_ids}
+            ids = []
+            for i in cited:
+                try:
+                    ids.append(uuid.UUID(i))
+                except (TypeError, ValueError):
+                    continue
+            live: set[str] = set()
+            if ids:
+                stmt = select(Fact.id).where(
+                    Fact.agent_id == self.agent_id,
+                    Fact.id.in_(ids),
+                    Fact.active.is_(True),
+                    Fact.superseded_by.is_(None),
+                )
+                live = {str(i) for i in (await s.execute(stmt)).scalars()}
+            banned = {_norm(t) for t in (row.rejected if isinstance(row.rejected, list) else []) if isinstance(t, str)}
+            shown: list[dict] = []
+            dropped_inactive = dropped_rejected = 0
+            for entry, fact_ids in lines:
+                if _norm(entry["text"]) in banned:
+                    dropped_rejected += 1
+                elif not live.intersection(fact_ids):
+                    dropped_inactive += 1
+                else:
+                    shown.append(entry)
+            return {
+                "entries": shown,
+                "cited": cited,
+                "dropped_inactive": dropped_inactive,
+                "dropped_rejected": dropped_rejected,
+            }
+
     async def delete_entry(self, entry_id: str, session: AsyncSession | None = None) -> bool:
         """Remove one line now and remember its text in ``rejected`` (newest 20). False when there is no such line."""
         async with _session_scope(self._db, session) as s:
