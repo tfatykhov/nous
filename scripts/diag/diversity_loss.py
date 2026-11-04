@@ -32,7 +32,8 @@ Check: each build's legacy diversity rule is re-run on the reconstructed list, a
 report says how many builds it reproduces exactly. A low share means the reconstruction is
 wrong and the inversion counts should not be trusted. The re-run assumes the default caps;
 builds made with ``NOUS_CONTEXT_EPISODE_UNTAGGED_DIVERSITY_CAP`` set to anything but 2 will
-not reproduce.
+not reproduce. A trace whose capture hit ``retrieval_telemetry_max_candidates`` (``truncated``)
+lists only some of its candidates; such rows are left out and their count is printed.
 
 Read-only (``SET TRANSACTION READ ONLY``). Prints counts and category names only, never
 memory text. Connection from the standard DB_* env vars via ``nous.config.Settings``. The
@@ -368,7 +369,14 @@ def render(tallies: dict[tuple[str, str], Tally]) -> str:
     return "\n".join(lines)
 
 
-_ROWS_SQL = """
+# A context row in the window. A row whose capture hit retrieval_telemetry_max_candidates
+# (truncated) lists only some of its candidates, so it is left out and counted instead.
+_CONTEXT_ROWS = (
+    "r.agent_id = :agent_id AND r.path = 'context' AND r.candidates IS NOT NULL "
+    "AND (:days = 0 OR r.timestamp > now() - make_interval(days => :days))"
+)
+
+_ROWS_SQL = f"""
 SELECT r.id, r.timestamp,
        EXISTS (SELECT 1 FROM jsonb_array_elements(r.legs) l
                WHERE l->>'name' IN ('context_decisions', 'context_episodes') AND l ? 'query') AS traced,
@@ -377,11 +385,18 @@ SELECT r.id, r.timestamp,
        c->'mutations' AS mutations, c->>'disposition' AS disposition,
        c->>'disposition_stage' AS stage
 FROM nous_system.retrieval_log r, jsonb_array_elements(r.candidates) c
-WHERE r.agent_id = :agent_id AND r.path = 'context' AND r.candidates IS NOT NULL
-  AND (:days = 0 OR r.timestamp > now() - make_interval(days => :days))
+WHERE {_CONTEXT_ROWS} AND NOT r.truncated
   AND c->>'entry_leg' IN ('context_decisions', 'context_episodes')
 ORDER BY r.timestamp
 """
+
+
+async def count_truncated(session: AsyncSession, agent_id: str, days: int) -> int:
+    """Context rows in the window left out because their capture was truncated."""
+    return (await session.execute(
+        text(f"SELECT count(*) FROM nous_system.retrieval_log r WHERE {_CONTEXT_ROWS} AND r.truncated"),
+        {"agent_id": agent_id, "days": days},
+    )).scalar_one()
 
 
 async def load_builds(session: AsyncSession, agent_id: str, days: int) -> list[Build]:
@@ -435,6 +450,7 @@ async def main() -> int:
         async with db.session() as session:
             await session.execute(text("SET TRANSACTION READ ONLY"))
             builds = await load_builds(session, args.agent_id, args.days)
+            truncated = await count_truncated(session, args.agent_id, args.days)
             meta = await load_meta(session, builds)
             await session.rollback()
     finally:
@@ -446,7 +462,8 @@ async def main() -> int:
     traced = sum(1 for b in builds if b.traced)
     print(
         f"diversity_loss agent={args.agent_id} days={args.days or 'all'} "
-        f"context builds={len(builds)} (traced {traced}, replayed {len(builds) - traced}); "
+        f"context builds={len(builds)} (traced {traced}, replayed {len(builds) - traced}; "
+        f"{truncated} truncated captures left out); "
         f"staleness replay: {'half-life ' + str(half_life) + 'd' if half_life else 'off'}; "
         f"relevance drop ratio {s.relevance_drop_ratio}"
     )

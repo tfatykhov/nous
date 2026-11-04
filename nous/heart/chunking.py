@@ -122,7 +122,8 @@ def chunk_transcript(
     takes a hard cut at the window's end instead. ``overlap`` applies only to
     a hard cut: the next chunk starts ``overlap`` chars back, as
     ``chunk_text`` does. Cuts at whitespace split no token, so they need none.
-    No cut falls inside a role label.
+    No cut falls inside a role label or right after one, so no chunk ends on a
+    bare label.
     Text with no role labels falls back to the same paragraph / sentence /
     whitespace / hard cuts, with no labels added. Short texts follow
     ``chunk_text``'s contract: below ``min_chars`` → ``[]``, within
@@ -163,9 +164,11 @@ def _transcript_spans(text: str, chunk_size: int, overlap: int) -> list[tuple[in
         return i
 
     def allowed(cut: int, pos: int) -> bool:
+        # A cut inside a label, or after a label with nothing but whitespace since,
+        # would end the chunk on a bare label.
         k = bisect_right(starts, cut) - 1
-        inside_label = k >= 0 and starts[k] < cut < starts[k] + len(turns[k][2])
-        return cut > pos and not inside_label and next_start(cut) not in answer_starts
+        bare_label = k >= 0 and starts[k] < cut and next_start(starts[k] + len(turns[k][2])) >= cut
+        return cut > pos and not bare_label and next_start(cut) not in answer_starts
 
     spans: list[tuple[int, int, str]] = []
     pos = 0

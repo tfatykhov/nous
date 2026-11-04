@@ -195,3 +195,33 @@ async def test_loader_reads_context_traces_and_metadata(session):
 
     meta = await dl.load_meta(session, builds)
     assert meta[str(ep)].bucket == "unknown" and meta[str(ep)].session_id == "s1"
+
+
+@pytest.mark.postgres_only
+async def test_truncated_traces_are_excluded_and_counted(session):
+    """Codex P2 on #845: a trace that hit max_candidates lists only some of its
+    candidates, so reading it as complete misreports drops and survivors."""
+    from nous.observability.retrieval_trace import RetrievalTrace
+
+    agent = f"div-loss-{uuid.uuid4().hex[:8]}"
+    rows = []
+    for name, cap in (("complete", 300), ("capped", 1)):
+        tr = RetrievalTrace(query="q", path="context", agent_id=agent, max_candidates=cap)
+        tr.leg("context_episodes", attempted=True, n_returned=2, query="q")
+        tr.add("e1", "episode", "context_episodes", score=0.9, rank=1)
+        tr.add("e2", "episode", "context_episodes", score=0.8, rank=2)
+        tr.drop("e2", "episode", "filter_dropped", "diversity")
+        tr.finalize([SimpleNamespace(id="e1", type="episode")])
+        rows.append((name, tr.to_dict()))
+    assert [d["truncated"] for _n, d in rows] == [False, True]
+    for name, d in rows:
+        await session.execute(text(
+            "INSERT INTO nous_system.retrieval_log (id, agent_id, path, legs, candidates, truncated) "
+            "VALUES (:id, :a, 'context', CAST(:legs AS jsonb), CAST(:c AS jsonb), :t)"
+        ), {"id": f"{name}-{agent}", "a": agent, "legs": json.dumps(d["legs"]),
+            "c": json.dumps(d["candidates"]), "t": d["truncated"]})
+
+    builds = await dl.load_builds(session, agent, 0)
+    assert [b.id for b in builds] == [f"complete-{agent}"]
+    assert len(builds[0].by_type["episode"]) == 2
+    assert await dl.count_truncated(session, agent, 0) == 1

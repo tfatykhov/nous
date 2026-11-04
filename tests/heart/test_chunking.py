@@ -6,6 +6,8 @@ arithmetic, invalid arg rejection, determinism.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from nous.heart.chunking import _transcript_spans, chunk_text, chunk_transcript
@@ -104,6 +106,9 @@ def _sentences(n_chars: int, word: str) -> str:
     while len(out) < n_chars:
         out += " ".join([word] * 9) + ". "
     return out[:n_chars].rstrip()
+
+
+_BARE_LABEL_END = re.compile(r"(?:^|\n\n)(?:user|assistant):\s*$", re.IGNORECASE)
 
 
 def _covered(text: str, spans: list[tuple[int, int, str]]) -> bool:
@@ -233,8 +238,6 @@ def test_the_size_floor_matches_the_settings_bound():
 
 @pytest.mark.parametrize("overlap", [0, 10, 30, 43])
 def test_invariants_hold_at_the_size_floor(overlap):
-    import re
-
     text = "\n\n".join([
         "User: " + "q" * 70, "Assistant: " + _sentences(200, "ab"), "user: " + "z" * 50,
         "assistant: " + "x" * 90 + " " + _sentences(60, "c"),
@@ -244,6 +247,7 @@ def test_invariants_hold_at_the_size_floor(overlap):
     assert _covered(text, spans)
     assert all(len(label) + b - a <= 44 and text[a:b].strip() for a, b, label in spans)
     assert not any(m.start() < a < m.end() for m in labels for a, _b, _label in spans)
+    assert not any(_BARE_LABEL_END.search(label + text[a:b]) for a, b, label in spans)
 
 
 def test_no_chunk_ends_on_a_bare_role_label():
@@ -255,7 +259,6 @@ def test_no_chunk_ends_on_a_bare_role_label():
 
 def test_invariants_hold_on_generated_transcripts():
     import random
-    import re
 
     rng = random.Random(7)
     for _ in range(300):
@@ -280,6 +283,8 @@ def test_invariants_hold_on_generated_transcripts():
         # No chunk starts inside a role label, and none is a bare label.
         assert not any(m.start() < a < m.end() for m in labels for a, _b, _label in spans)
         assert all(text[a:b].strip() for a, b, _label in spans)
+        # No chunk ends on a bare role label (a label with no text after it).
+        assert not any(_BARE_LABEL_END.search(label + text[a:b]) for a, b, label in spans)
 
 
 @pytest.mark.parametrize("q_len", [507, 510, 514])
@@ -288,3 +293,13 @@ def test_a_hard_cut_rewind_never_starts_inside_a_label(q_len):
     reading "Assistant: tant: ...") or on the blank line before it (an empty "User: " stub)."""
     text = "User: " + "q" * q_len + "\n\nAssistant: " + "x" * 300
     assert chunk_transcript(text, chunk_size=600, overlap=80) == [text[:600], "Assistant: " + "x" * 300]
+
+
+@pytest.mark.parametrize("overlap", [0, 80])
+def test_a_hard_cut_never_ends_on_the_answer_label(overlap):
+    """Codex P2 on #845: a window ending right after "Assistant: " was a valid hard cut,
+    so the question's chunk ended on a bare label and no chunk held question and answer."""
+    text = "User: " + "q" * 581 + "\n\nAssistant: " + "x" * 700
+    chunks = chunk_transcript(text, chunk_size=600, overlap=overlap)
+    assert not any(_BARE_LABEL_END.search(c) for c in chunks)
+    assert any("q\n\nAssistant: x" in c for c in chunks)
