@@ -215,6 +215,9 @@ class PipelineStats:
     # exclusion set was passed. Surfaced in recall_deep INFO log so the
     # duplication-tax measurement is grep-able from prod.
     excluded_in_context: int = 0
+    # Results dropped because they are the calling conversation itself (its
+    # ongoing episode or a dialogue chunk of it, see own_session_exclusions).
+    excluded_own_session: int = 0
     # N7 follow-up: legs this call ATTEMPTED, marked at each stage's entry
     # before its work ran — so a leg that executed and produced nothing is
     # still named. Lets a consumer distinguish "this leg was never run" from
@@ -487,6 +490,44 @@ def failure_note(stats: PipelineStats) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+async def own_session_exclusions(heart: "Heart", session_id: str | None) -> dict[str, set[str]] | None:
+    """The calling conversation's own rows, for ``run_recall_pipeline(own_session=...)``.
+
+    Its ongoing episodes (``active``: ``_end`` clears it, so an ended episode of a
+    reused session id is a past conversation, out of the model's context, and stays
+    recallable) and their dialogue chunks. Not their document chunks: an attachment
+    or ``ingest_document`` is stored on the episode so the model can search the
+    document, and after compaction recall is the only way back to its text. Not the
+    session's facts either: they are what the conversation taught, and F071 already
+    drops the ones in this turn's prompt. Agent-scoped. None when there is nothing.
+    """
+    if not session_id:
+        return None
+    from sqlalchemy import text as sa_text
+
+    async with heart.db.session() as s:
+        rows = (
+            await s.execute(
+                sa_text(
+                    "SELECT 'episode', e.id::text FROM heart.episodes e "
+                    "WHERE e.agent_id = :a AND e.session_id = :s AND e.active = true "
+                    "UNION ALL "
+                    "SELECT 'chunk', c.id::text FROM heart.episode_chunks c "
+                    "JOIN heart.episodes e ON e.id = c.episode_id "
+                    "WHERE e.agent_id = :a AND e.session_id = :s AND e.active = true "
+                    "AND c.agent_id = :a AND c.source_kind = 'dialogue'"
+                ),
+                {"a": heart.agent_id, "s": session_id},
+            )
+        ).all()
+    if not rows:
+        return None
+    out: dict[str, set[str]] = {"episode": set(), "chunk": set()}
+    for kind, row_id in rows:
+        out[kind].add(row_id)
+    return out
+
+
 async def run_recall_pipeline(
     query: str,
     heart: "Heart",
@@ -499,6 +540,7 @@ async def run_recall_pipeline(
     rerank_by_score: bool = False,
     exclude_ids: dict[str, set[str]] | None = None,
     trace: object | None = None,
+    own_session: dict[str, set[str]] | None = None,
 ) -> tuple[list[PipelineResult], PipelineStats]:
     """Run the full retrieval pipeline.
 
@@ -523,6 +565,9 @@ async def run_recall_pipeline(
             no-op, so behavior is byte-identical when telemetry is off — the
             pipeline only ever writes INTO it, never reads back out, so no
             branch can depend on trace state.
+        own_session: the calling conversation's rows, ``{"episode": ids,
+            "chunk": ids}`` from ``own_session_exclusions``; they are left out
+            of the results. None excludes nothing.
 
     Returns:
         ``(results, stats)`` where ``results`` is a flat list of
@@ -853,6 +898,19 @@ async def run_recall_pipeline(
         ]
         excluded_in_context = before - len(results)
 
+    # The calling conversation's own episode and dialogue chunks: the model
+    # already has that conversation, so a search from it must not return it.
+    # Here, after every leg has merged, because the graph and spreading legs
+    # reach episodes and chunks by edges, not only the search legs.
+    excluded_own_session = 0
+    if own_session:
+        before = len(results)
+        for r in results:
+            if str(r.id) in own_session.get(r.type, ()):
+                tr.drop(r.id, r.type, FILTER_DROPPED, "own_session")
+        results = [r for r in results if str(r.id) not in own_session.get(r.type, ())]
+        excluded_own_session = before - len(results)
+
     # F105 Task 6: bound the spreading rows. After F071, so a row F071 removed
     # does not take a slot; before the reactivation read, so a cut row is not
     # treated as co-retrieved. It selects by score, so the sort above does not
@@ -1027,6 +1085,7 @@ async def run_recall_pipeline(
         stage_error_msgs=dict(acc.stage_error_msgs),
         contradiction_edges=list(acc.contradictions),
         excluded_in_context=excluded_in_context,  # F071
+        excluded_own_session=excluded_own_session,
         attempted_legs=frozenset(acc.attempted_legs),
         coherent_ranking_applied=acc.coherent_ranking_applied,  # F080: reflects the filter actually running (search_all only)
         keyed_leg_used=acc.keyed_leg_used,  # R3.3 (F085)

@@ -840,8 +840,25 @@ class TestRunPythonMemoryWrappers:
         assert patched_pipeline.call_args.kwargs["exclude_ids"] == ids
 
     @pytest.mark.asyncio
-    async def test_recall_deep_carries_residual_activation(
+    async def test_recall_deep_leaves_out_the_calling_conversation(
         self, mock_brain, mock_heart, patched_pipeline
+    ):
+        """The scripted recall excludes the calling session's own rows, as the tool does."""
+        from nous.api.tools import create_programmatic_tools
+
+        own = {"episode": {str(uuid4())}, "chunk": set()}
+        lookup = AsyncMock(return_value=own)
+        s = Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=5)
+        tool = create_programmatic_tools(mock_brain, mock_heart, s)["run_python"]
+        with patch("nous.api.retrieval_pipeline.own_session_exclusions", lookup):
+            await tool(code='recall_deep("caching")\nrecall_deep("other")', _session_id="sess-1")
+
+        assert patched_pipeline.call_args.kwargs["own_session"] == own
+        lookup.assert_awaited_once_with(mock_heart, "sess-1")  # once per run, not per recall
+
+    @pytest.mark.asyncio
+    async def test_recall_deep_carries_residual_activation(
+        self, mock_brain, mock_heart, patched_pipeline, monkeypatch
     ):
         """F055 state must flow BOTH ways on the scripted path.
 
@@ -851,6 +868,9 @@ class TestRunPythonMemoryWrappers:
         used, which is the divergence this whole PR exists to remove.
         """
         from nous.api.tools import create_programmatic_tools
+
+        # The mocked heart has no async DB session; the own-session lookup is not under test here.
+        monkeypatch.setattr("nous.api.retrieval_pipeline.own_session_exclusions", AsyncMock(return_value=None))
 
         fid = uuid4()
         activator = MagicMock()
@@ -1251,7 +1271,7 @@ class TestRunPythonMemoryWrappers:
 
     @pytest.mark.asyncio
     async def test_limit_does_not_surface_excess_to_residual_activation(
-        self, mock_brain, mock_heart
+        self, mock_brain, mock_heart, monkeypatch
     ):
         """F055 must record only what the script actually received.
 
@@ -1261,6 +1281,9 @@ class TestRunPythonMemoryWrappers:
         """
         from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
         from nous.api.tools import create_programmatic_tools
+
+        # The mocked heart has no async DB session; the own-session lookup is not under test here.
+        monkeypatch.setattr("nous.api.retrieval_pipeline.own_session_exclusions", AsyncMock(return_value=None))
 
         activator = MagicMock()
         activator.current_turn = AsyncMock(return_value=1)
