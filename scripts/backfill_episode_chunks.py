@@ -297,7 +297,7 @@ async def main() -> int:
     print(f"  Eligible episodes:   {eligible}")
     print(f"  Agent filter:        {args.agent_id or '(all agents)'}")
     print(f"  Chunk size / overlap: {settings.episode_chunk_size} / {settings.episode_chunk_overlap}")
-    turn_aware = settings.episode_chunk_turn_aware and not args.repair_dialogue
+    turn_aware = getattr(settings, "episode_chunk_turn_aware", False) and not args.repair_dialogue
     print(f"  Chunker:             {'turn-aware (H-7)' if turn_aware else 'window'}")
     print(f"  Min transcript chars: {settings.episode_chunk_min_transcript_chars}")
     print(f"  Embedder:            {settings.embedding_model} @ {settings.embedding_dimensions}d")

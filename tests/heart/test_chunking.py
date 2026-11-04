@@ -231,7 +231,7 @@ def test_invariants_hold_on_generated_transcripts():
     import re
 
     rng = random.Random(7)
-    for _ in range(60):
+    for _ in range(300):
         turns = []
         for i in range(rng.randint(1, 8)):
             role = rng.choice(["User", "Assistant", "user", "assistant"]) if i else "User"
@@ -246,7 +246,18 @@ def test_invariants_hold_on_generated_transcripts():
         spans = _transcript_spans(text, 600, 80)
         assert _covered(text, spans)
         assert all(len(label) + b - a <= 600 and b > a for a, b, label in spans)
-        labels = re.finditer(r"(?:^|(?<=\n\n))(user|assistant): ", text, re.I)
+        labels = list(re.finditer(r"(?:^|(?<=\n\n))(user|assistant): ", text, re.I))
         starts = [(m.start(), m.group(1).lower()) for m in labels]
         answers = {s for (s, r), (_, pr) in zip(starts[1:], starts) if r == "assistant" and pr == "user"}
         assert not any(a in answers for a, _b, _label in spans[1:])
+        # No chunk starts inside a role label, and none is a bare label.
+        assert not any(m.start() < a < m.end() for m in labels for a, _b, _label in spans)
+        assert all(text[a:b].strip() for a, b, _label in spans)
+
+
+@pytest.mark.parametrize("q_len", [507, 510, 514])
+def test_a_hard_cut_rewind_never_starts_inside_a_label(q_len):
+    """The overlap rewind after a hard cut used to land inside "Assistant: " (a chunk
+    reading "Assistant: tant: ...") or on the blank line before it (an empty "User: " stub)."""
+    text = "User: " + "q" * q_len + "\n\nAssistant: " + "x" * 300
+    assert chunk_transcript(text, chunk_size=600, overlap=80) == [text[:600], "Assistant: " + "x" * 300]

@@ -109,6 +109,10 @@ def chunk_transcript(
     label (``Assistant: …``) as written in the transcript, so a fragment of a
     long answer still says whose words it holds.
 
+    A role label is recognised only at the start of the text or after a blank
+    line (``\\n\\n``), case-insensitively. So a ``User:`` or ``Assistant:``
+    pasted after a blank line inside a message is taken as a turn start.
+
     A sentence or whitespace cut must leave the chunk at least half full;
     when the rest of the window is one unbroken run (a pasted blob), the chunk
     takes a hard cut at the window's end instead. ``overlap`` applies only to
@@ -185,5 +189,11 @@ def _transcript_spans(text: str, chunk_size: int, overlap: int) -> list[tuple[in
         while cut > pos + 1 and not allowed(cut, pos):
             cut -= 1
         spans.append((pos, cut, label))
-        pos = max(cut - overlap, pos + 1)
+        # The rewind can land on the blank line before a turn or inside its label.
+        # Start after the label instead: the loop adds it back as the prefix, so the
+        # chunk text equals a start at the label, and the position still advances.
+        pos = next_start(max(cut - overlap, pos + 1))
+        k = bisect_right(starts, pos) - 1
+        if k >= 0 and starts[k] <= pos < starts[k] + len(turns[k][2]):
+            pos = starts[k] + len(turns[k][2])
     return spans
