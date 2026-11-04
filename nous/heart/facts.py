@@ -3458,15 +3458,10 @@ class FactManager:
         trimmed to ``max_chars`` and ``learned_at`` as a ``YYYY-MM-DD`` string.
         Facts without merge sources are absent.
 
-        Only MERGE sources count. A loser of a non-merge supersession is a
-        stale belief, so it is never returned. Rows deactivated since migration
-        094 say so in ``deactivation_reason``. Older rows have NULL there and
-        count only when the event that recorded their merge names them: the
-        ``f027_cluster_merge`` event that wrote this merged fact, or an
-        ``f031_contradiction_resolution`` MERGE of a ``contradiction_resolution``
-        fact. (That F031 event carries no merged id, so a fact in a MERGE that
-        aborted and that later lost a SUPERSEDE to a ``contradiction_resolution``
-        fact would still match.)
+        Only MERGE sources count, read from ``deactivation_reason = 'merged'``
+        (stamped by the merge since 094, and on older merges by migration 098).
+        A loser of a non-merge supersession is a stale belief, so it is never
+        returned.
         """
         if not fact_ids:
             return {}
@@ -3483,35 +3478,11 @@ class FactManager:
                 """
                 SELECT s.superseded_by AS merged_id, s.content, s.learned_at
                 FROM heart.facts s
-                JOIN heart.facts m ON m.id = s.superseded_by
+                JOIN heart.facts m ON m.id = s.superseded_by AND m.agent_id = :agent_id
                 WHERE s.agent_id = :agent_id
-                  AND s.superseded_by = ANY(CAST(:ids AS uuid[]))
                   AND s.active = false
-                  AND (
-                    s.deactivation_reason = 'merged'
-                    OR (
-                      s.deactivation_reason IS NULL
-                      AND (
-                        EXISTS (
-                          SELECT 1 FROM nous_system.events e
-                          WHERE e.agent_id = s.agent_id
-                            AND e.event_type = 'f027_cluster_merge'
-                            AND e.data->>'merged_fact_id' = s.superseded_by::text
-                            AND e.data->'source_fact_ids' @> jsonb_build_array(s.id::text)
-                        )
-                        OR (
-                          m.source = 'contradiction_resolution'
-                          AND EXISTS (
-                            SELECT 1 FROM nous_system.events e
-                            WHERE e.agent_id = s.agent_id
-                              AND e.event_type = 'f031_contradiction_resolution'
-                              AND e.data->>'applied_action' = 'MERGE'
-                              AND s.id::text IN (e.data->>'fact1_id', e.data->>'fact2_id')
-                          )
-                        )
-                      )
-                    )
-                  )
+                  AND s.deactivation_reason = 'merged'
+                  AND s.superseded_by = ANY(CAST(:ids AS uuid[]))
                 ORDER BY s.superseded_by, s.learned_at DESC, s.id DESC
                 """
             ),

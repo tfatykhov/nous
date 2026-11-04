@@ -11,17 +11,24 @@ its loser is a stale belief, not a detail of the current one.
 from __future__ import annotations
 
 import functools
+import re
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import text
 from test_retrieval_pipeline import _make_brain, _make_heart, _make_settings  # noqa: E402
 
 from nous.api.retrieval_pipeline import PipelineResult, PipelineStats, failure_note, run_recall_pipeline
 from nous.api.tools import _format_pipeline_text, create_nous_tools
-from nous.heart.schemas import RecallResult
+from nous.heart.facts import FactManager
+from nous.heart.schemas import FactInput, RecallResult
+from nous.storage.migrator import _split_sql_statements
 from nous.storage.models import Event, Fact
+
+MIGRATION = Path(__file__).resolve().parents[1] / "sql" / "migrations" / "098_fact_merged_reason_backfill.sql"
 
 # ---------------------------------------------------------------------------
 # FactManager.get_merge_history (real Postgres)
@@ -39,6 +46,22 @@ async def _fact(session, agent_id: str, content: str, **cols) -> Fact:
 
 async def _merged(session, agent_id: str, source: str = "cluster_consolidation") -> Fact:
     return await _fact(session, agent_id, "Project Larch: launch and budget details", source=source)
+
+
+def _f027(merged: Fact | None, members: list[Fact], outcome: str = "merged", learned: Fact | None = None) -> dict:
+    """An f027_cluster_merge event body as sleep_handler writes it."""
+    return {
+        "source_fact_ids": [str(f.id) for f in members],
+        "source_count": len(members),
+        "merged_fact_id": str(merged.id) if merged else None,
+        "learned_fact_id": str(learned.id) if learned else None,
+        "outcome": outcome,
+    }
+
+
+def _f031(action: str, fact1: Fact, fact2: Fact) -> dict:
+    """An f031_contradiction_resolution event body (no merged-fact id)."""
+    return {"raw_action": action, "applied_action": action, "fact1_id": str(fact1.id), "fact2_id": str(fact2.id)}
 
 
 async def _source(session, agent_id: str, merged: Fact, content: str, days: int, reason: str | None = "merged") -> Fact:
@@ -87,68 +110,39 @@ class TestGetMergeHistory:
         assert set(out) == {m.id}
         assert [s["content"] for s in out[m.id]["sources"]] == ["Larch budget is 41,500 EUR"]
 
-    async def test_pre_reason_f027_merge_is_backfilled_from_its_event(self, heart, session):
-        """Rows merged before the deactivation_reason stamp carry NULL; the
-        f027_cluster_merge event that wrote the merged fact names them."""
+    async def test_only_the_stamp_counts_at_read_time(self, heart, session):
+        """An unstamped row is not history even when an event names it: the
+        read path never consults events (migration 098 stamps old merges)."""
         a = heart.agent_id
         m = await _merged(session, a)
         member = await _source(session, a, m, "Larch kickoff on 2 Feb in Lyon", days=0, reason=None)
-        # Superseded by the same fact but not a member of its merge: it was in
-        # a REFUSED cluster, then lost a plain SUPERSEDE to the merged fact
-        # before the stamp existed. A stale belief, so it stays hidden.
-        stale = await _source(session, a, m, "Larch kickoff in Paris", days=5, reason=None)
-        session.add_all(
-            [
-                Event(
-                    agent_id=a,
-                    event_type="f027_cluster_merge",
-                    data={
-                        "source_fact_ids": [str(member.id)],
-                        "merged_fact_id": str(m.id),
-                        "outcome": "merged",
-                    },
-                ),
-                Event(
-                    agent_id=a,
-                    event_type="f027_cluster_merge",
-                    data={"source_fact_ids": [str(stale.id)], "merged_fact_id": None, "outcome": "llm_refused"},
-                ),
-            ]
-        )
+        session.add(Event(agent_id=a, event_type="f027_cluster_merge", data=_f027(m, [member])))
         await session.flush()
 
-        out = await heart.facts.get_merge_history([m.id], session=session)
+        assert await heart.facts.get_merge_history([m.id], session=session) == {}
 
-        assert [s["content"] for s in out[m.id]["sources"]] == ["Larch kickoff on 2 Feb in Lyon"]
-
-    async def test_pre_reason_f031_merge_is_backfilled_from_its_event(self, heart, session):
+    async def test_a_real_supersede_never_counts_as_a_merge(self, heart, session):
+        """Through the real supersede paths: if one ever stamped 'merged', its
+        loser (a stale belief) would show up as history."""
         a = heart.agent_id
-        m = await _merged(session, a, source="contradiction_resolution")
-        f1 = await _source(session, a, m, "Larch venue is hall B", days=0, reason=None)
-        f2 = await _source(session, a, m, "Larch venue is hall C (east wing)", days=1, reason=None)
-        loser = await _source(session, a, m, "Larch venue is hall A", days=2, reason=None)
-        session.add_all(
-            [
-                Event(
-                    agent_id=a,
-                    event_type="f031_contradiction_resolution",
-                    data={"applied_action": "MERGE", "fact1_id": str(f1.id), "fact2_id": str(f2.id)},
-                ),
-                Event(
-                    agent_id=a,
-                    event_type="f031_contradiction_resolution",
-                    data={"applied_action": "SUPERSEDE_A", "fact1_id": str(loser.id), "fact2_id": str(m.id)},
-                ),
-            ]
+        m = await _merged(session, a)
+        await _source(session, a, m, "Larch budget is 41,500 EUR", days=1)
+        # The merged fact later wins a SUPERSEDE (the sleep F031 path).
+        loser = await _fact(session, a, "Larch budget is 30,000 EUR", source="conversation")
+        assert await heart.facts.apply_supersession(m.id, loser.id, session)
+        # A plain replacement (FactManager.supersede).
+        old = await heart.learn(FactInput(content="The Larch project is owned by Sam Okafor."), session=session)
+        new = await heart.supersede_fact(
+            old.id, FactInput(content="The Larch project is owned by Dana Whitfield."), session=session
         )
-        await session.flush()
 
-        out = await heart.facts.get_merge_history([m.id], session=session)
+        out = await heart.facts.get_merge_history([m.id, new.id], session=session)
 
-        assert [s["content"] for s in out[m.id]["sources"]] == [
-            "Larch venue is hall C (east wing)",
-            "Larch venue is hall B",
-        ]
+        assert set(out) == {m.id}
+        assert [s["content"] for s in out[m.id]["sources"]] == ["Larch budget is 41,500 EUR"]
+        assert {
+            r.deactivation_reason for r in (await session.get(Fact, loser.id), await session.get(Fact, old.id))
+        } == {"superseded"}
 
     async def test_caps_per_fact_counts_the_dropped_and_trims_content(self, heart, session):
         a = heart.agent_id
@@ -345,3 +339,134 @@ class TestFormatterSites:
         _format_pipeline_text(rows, PipelineStats(), ["all"], emitted_out=emitted)
 
         assert emitted == [(r.id, r.type) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Migration 098: stamp 'merged' on the sources merged before 094
+# ---------------------------------------------------------------------------
+
+
+def _sql() -> str:
+    return MIGRATION.read_text(encoding="utf-8")
+
+
+def _code() -> str:
+    return "\n".join(ln for ln in _sql().splitlines() if not ln.lstrip().startswith("--"))
+
+
+class TestMigration098File:
+    def test_two_stamps_without_the_updated_at_trigger_then_the_index(self):
+        statements = _split_sql_statements(_sql())
+        assert len(statements) == 5
+        assert statements[0] == "ALTER TABLE heart.facts DISABLE TRIGGER set_updated_at"
+        for stamp in statements[1:3]:
+            assert stamp.startswith("UPDATE heart.facts AS s")
+            assert "SET deactivation_reason = 'merged'" in stamp
+            assert "s.deactivation_reason IS NULL" in stamp and "s.active = false" in stamp
+        assert statements[3] == "ALTER TABLE heart.facts ENABLE TRIGGER set_updated_at"
+        assert statements[4].startswith("CREATE INDEX IF NOT EXISTS idx_facts_merged_sources")
+        assert statements[4].endswith("WHERE deactivation_reason = 'merged'")
+
+    def test_nothing_the_splitter_would_mangle_and_no_grants(self):
+        sql = _sql()
+        assert "/*" not in sql and "$$" not in sql
+        assert not re.search(r"(?<!:):[A-Za-z_]", _code())  # text() reads :name as a bind parameter
+        assert all(";" not in ln for ln in sql.splitlines() if ln.lstrip().startswith("--"))
+        code = _code().upper()
+        for word in ("GRANT", "REVOKE", "OWNER", "ROLE", "AUTHORIZATION"):
+            assert not re.search(rf"\b{word}\b", code), word
+
+    def test_the_eval_preflight_probes_the_index(self):
+        from nous_eval.schema_preflight import migration_artifacts
+
+        assert migration_artifacts(_sql()) == [("index", "idx_facts_merged_sources")]
+
+
+@pytest.mark.postgres_only
+async def test_migration_098_stamps_exactly_the_merge_sources(heart, session):
+    agent = f"test-098-{uuid4()}"
+    edited = datetime(2026, 6, 1, 8, 0, tzinfo=UTC)  # the rows' last real edit
+
+    async def fact(content: str, gone_to: Fact | None = None, **cols) -> Fact:
+        # gone_to: an inactive pre-094 row superseded by that fact, reason NULL.
+        if gone_to is not None:
+            cols.update(active=False, superseded_by=gone_to.id)
+        return await _fact(session, agent, content, updated_at=edited, **cols)
+
+    m27 = await fact("cluster merge product", source="cluster_consolidation")
+    member = await fact("Larch kickoff on 2 Feb in Lyon", m27)
+    refused = await fact("refused cluster, then a plain SUPERSEDE", m27)
+    aborted = await fact("aborted cluster, then a plain SUPERSEDE", m27)
+    foreign = await fact("named only by another agent's event", m27)
+    m31 = await fact("contradiction merge product", source="contradiction_resolution")
+    b1 = await fact("Larch venue is hall B", m31)
+    b2 = await fact("Larch venue is hall C", m31)
+    lone = await fact("MERGE aborted, then lost a SUPERSEDE", m31)
+    other = await fact("lone's MERGE partner, still active")
+    loser = await fact("SUPERSEDE_A loser", m31)
+    plain_winner = await fact("plain winner")
+    await fact("plain SUPERSEDE loser, no event", plain_winner)
+    session.add_all(
+        [
+            Event(agent_id=agent, event_type="f027_cluster_merge", data=_f027(m27, [member])),
+            Event(agent_id=agent, event_type="f027_cluster_merge", data=_f027(None, [refused], "llm_refused")),
+            Event(
+                agent_id=agent,
+                event_type="f027_cluster_merge",
+                data=_f027(None, [aborted], "merge_target_inactive", learned=m27),
+            ),
+            Event(agent_id=f"{agent}-other", event_type="f027_cluster_merge", data=_f027(m27, [foreign])),
+            Event(agent_id=agent, event_type="f031_contradiction_resolution", data=_f031("MERGE", b1, b2)),
+            Event(agent_id=agent, event_type="f031_contradiction_resolution", data=_f031("MERGE", lone, other)),
+            Event(agent_id=agent, event_type="f031_contradiction_resolution", data=_f031("SUPERSEDE_A", loser, m31)),
+        ]
+    )
+    await session.flush()
+
+    async def state() -> dict[str, tuple]:
+        res = await session.execute(
+            text("SELECT content, deactivation_reason, updated_at FROM heart.facts WHERE agent_id = :a"),
+            {"a": agent},
+        )
+        return {r.content: (r.deactivation_reason, r.updated_at) for r in res}
+
+    async def scalar(sql: str):
+        return (await session.execute(text(sql))).scalar_one()
+
+    statements = _split_sql_statements(_sql())
+    for statement in statements:
+        await session.execute(text(statement))
+    after = await state()
+
+    # Exactly the three merge sources are stamped, every other row stays NULL.
+    assert {c: reason for c, (reason, _) in after.items() if reason is not None} == {
+        "Larch kickoff on 2 Feb in Lyon": "merged",
+        "Larch venue is hall B": "merged",
+        "Larch venue is hall C": "merged",
+    }
+    # The stamp is not an edit.
+    assert {ua for _, ua in after.values()} == {edited}
+
+    # A second run stamps nothing, anywhere.
+    rowcounts = [(await session.execute(text(s))).rowcount for s in statements]
+    assert rowcounts[1:3] == [0, 0]
+    assert await state() == after
+
+    # The trigger is back on, and the index exists.
+    assert (
+        await scalar(
+            "SELECT tgenabled::text FROM pg_trigger "
+            "WHERE tgrelid = 'heart.facts'::regclass AND tgname = 'set_updated_at'"
+        )
+        == "O"
+    )
+    assert (
+        await scalar("SELECT to_regclass('heart.idx_facts_merged_sources')::text") == "heart.idx_facts_merged_sources"
+    )
+
+    # The read path now sees the backfilled merges.
+    out = await FactManager(heart.db, None, agent).get_merge_history([m27.id, m31.id], session=session)
+    assert {k: {s["content"] for s in v["sources"]} for k, v in out.items()} == {
+        m27.id: {"Larch kickoff on 2 Feb in Lyon"},
+        m31.id: {"Larch venue is hall B", "Larch venue is hall C"},
+    }
