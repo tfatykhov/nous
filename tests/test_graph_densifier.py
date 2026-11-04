@@ -2883,7 +2883,7 @@ def _spy_on_cross_linking(d: GraphDensifier) -> list:
     """Record which chunks the cross-episode pass visits; link nothing."""
     visits: list = []
 
-    async def _chunks(chunk_id, source_episode_id, threshold, top_k, session):
+    async def _chunks(chunk_id, source_episode_id, threshold, top_k, session, **kwargs):
         visits.append(chunk_id)
         return 0
 
