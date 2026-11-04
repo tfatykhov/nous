@@ -840,6 +840,23 @@ class TestRunPythonMemoryWrappers:
         assert patched_pipeline.call_args.kwargs["exclude_ids"] == ids
 
     @pytest.mark.asyncio
+    async def test_recall_deep_leaves_out_the_calling_conversation(
+        self, mock_brain, mock_heart, patched_pipeline
+    ):
+        """The scripted recall excludes the calling session's own rows, as the tool does."""
+        from nous.api.tools import create_programmatic_tools
+
+        own = {"episode": {str(uuid4())}, "chunk": set()}
+        lookup = AsyncMock(return_value=own)
+        s = Settings(programmatic_tools_enabled=True, programmatic_tools_timeout=5)
+        tool = create_programmatic_tools(mock_brain, mock_heart, s)["run_python"]
+        with patch("nous.api.retrieval_pipeline.own_session_exclusions", lookup):
+            await tool(code='recall_deep("caching")\nrecall_deep("other")', _session_id="sess-1")
+
+        assert patched_pipeline.call_args.kwargs["own_session"] == own
+        lookup.assert_awaited_once_with(mock_heart, "sess-1")  # once per run, not per recall
+
+    @pytest.mark.asyncio
     async def test_recall_deep_carries_residual_activation(
         self, mock_brain, mock_heart, patched_pipeline
     ):

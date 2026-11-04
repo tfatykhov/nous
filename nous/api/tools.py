@@ -754,12 +754,15 @@ async def _fetch_parent_episodes_for_facts(
     results: list[Any],  # list[PipelineResult]
     max_parents: int,
     truncate: int,
+    exclude_episode_ids: set[str] | None = None,
 ) -> list[tuple[str, str]]:
     """F067 Phase 2: fetch parent episode summaries for fact-typed results.
 
     Walks ``results`` in rank order, collects each fact's ``source_episode_id``
     (deduped, preserving rank order), caps at ``max_parents``, fetches the
     episode summary for each, and returns ``[(episode_id, summary)]``.
+    Episodes in ``exclude_episode_ids`` (the calling conversation's own) are
+    skipped before the cap, so they take no slot.
 
     Returns an empty list when no facts have parent episodes or all lookups
     fail. The caller is responsible for the feature-flag gate.
@@ -794,7 +797,7 @@ async def _fetch_parent_episodes_for_facts(
             if len(ordered_eps) >= max_parents:
                 break
             ep = fact_to_ep.get(fid)
-            if ep and ep not in seen:
+            if ep and ep not in seen and ep not in (exclude_episode_ids or ()):
                 seen.add(ep)
                 ordered_eps.append(ep)
         if not ordered_eps:
@@ -1672,7 +1675,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         Returns:
             MCP-compliant response with ranked results or error message
         """
-        from nous.api.retrieval_pipeline import run_recall_pipeline
+        from nous.api.retrieval_pipeline import own_session_exclusions, run_recall_pipeline
 
         # F071: lazy import to avoid runner.py <-> tools.py circular dependency.
         # Mirrors the existing `from nous.api.runner import FRAME_TOOLS`
@@ -1687,6 +1690,18 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
         try:
             search_types = memory_types or ["all"]
+
+            # The conversation this call comes from is left out of the results.
+            # Fails open: without the lookup the search runs as it did before.
+            own_session: dict[str, set[str]] | None = None
+            try:
+                own_session = await own_session_exclusions(heart, _session_id)
+            except Exception:
+                logger.warning(
+                    "recall_deep: own-session lookup failed for %s; its conversation is not excluded",
+                    _session_id,
+                    exc_info=True,
+                )
 
             # F055: compute residual activations BEFORE recall (consumed
             # inside Heart._recall via the threaded `residual_activations`
@@ -1761,6 +1776,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 rerank_by_score=chunks_rerank,
                 exclude_ids=_f071_exclude_ids,  # F071
                 trace=_tr,  # F091
+                own_session=own_session,
             )
             # NOTE: the trace is committed further down, AFTER the
             # parent-episode fetch — those summaries reach the model, so
@@ -1782,6 +1798,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 "chunks_enabled=%s chunks_searched=%s "
                 "n_chunks_total=%d n_chunks_top10=%d first_chunk_rank=%s "
                 "excluded_in_context=%d "  # F071
+                "excluded_own_session=%d "
                 "n_total=%d "
                 "n_keyed_r2=%d keyed_r2_truncated=%s "  # R3v2
                 "exemplar_leg_used=%s n_exemplar=%d",  # F086
@@ -1794,6 +1811,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 n_chunks_top10,
                 first_chunk_rank if first_chunk_rank is not None else "n/a",
                 stats.excluded_in_context,  # F071
+                stats.excluded_own_session,
                 len(results),
                 stats.n_keyed_r2,  # R3v2
                 stats.keyed_r2_truncated,  # R3v2
@@ -1811,6 +1829,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                         results=results,
                         max_parents=settings.recall_max_parent_episodes,
                         truncate=settings.recall_parent_episode_truncate,
+                        exclude_episode_ids=(own_session or {}).get("episode"),
                     )
                 except Exception as exc:
                     n_facts = sum(1 for r in results if getattr(r, "type", None) == "fact")
@@ -4895,6 +4914,27 @@ def create_programmatic_tools(
                 )
                 _residual_state["acts"] = {}
 
+        _own_session_state: dict[str, Any] = {"loaded": False, "ids": None}
+
+        def _load_own_session() -> dict[str, set[str]] | None:
+            """The calling conversation's rows, resolved on first use like F055 state.
+
+            Fails open, as the tool does: without them the conversation is not excluded.
+            """
+            if not _own_session_state["loaded"] and _session_id:
+                _own_session_state["loaded"] = True
+                from nous.api.retrieval_pipeline import own_session_exclusions
+
+                try:
+                    _own_session_state["ids"] = _schedule(own_session_exclusions(heart, _session_id))
+                except Exception:
+                    logger.warning(
+                        "run_python recall_deep: own-session lookup failed for %s; its conversation is not excluded",
+                        _session_id,
+                        exc_info=True,
+                    )
+            return _own_session_state["ids"]
+
         def _recall_deep(query: str, limit: int = 5) -> list[dict]:
             """The same retrieval the `recall_deep` TOOL runs — not a fact search.
 
@@ -4915,6 +4955,7 @@ def create_programmatic_tools(
             from nous.api.retrieval_pipeline import run_recall_pipeline
 
             _load_residual()
+            _own_session = _load_own_session()
 
             # Mirrors the tool's `chunks_rerank`. A script passes no
             # memory_types, so the tool's `search_all` branch is always taken and
@@ -5025,6 +5066,7 @@ def create_programmatic_tools(
                         trace=_tr,
                         residual_activations=_residual_state["acts"] or None,  # F055
                         exclude_ids=_script_exclude_ids,  # F071
+                        own_session=_own_session,
                     )
                 )
                 out = _apply_script_limit(
