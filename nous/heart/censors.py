@@ -199,6 +199,9 @@ class CensorManager:
         session: AsyncSession,
     ) -> list[CensorMatch]:
         matches: list[tuple[Censor, float]] = []
+        # False when the semantic leg did not run (no provider, embed or SQL failure): then a
+        # "regex" match only says the regex matched, not that the cosine missed.
+        semantic_checked = False
 
         if self.embeddings:
             # Semantic matching: cosine similarity > 0.7
@@ -210,14 +213,17 @@ class CensorManager:
                 # so the keyword match below still runs on a usable session.
                 async with session.begin_nested():
                     matches = await self._semantic_match(embedding, domain, session)
+                semantic_checked = True
             except Exception:
                 logger.warning("Semantic censor check failed, skipping semantic", exc_info=True)
 
         # Always run keyword matching to catch censors without embeddings
         # or those below the semantic similarity threshold.
         keyword_matches = await self._keyword_match(text_input, domain, session)
+        semantic_ids = {c.id for c, _ in matches}
+        keyword_ids = {c.id for c, _ in keyword_matches}
         if keyword_matches:
-            seen_ids = {c.id for c, _ in matches}
+            seen_ids = set(semantic_ids)
             for censor, sim in keyword_matches:
                 if censor.id not in seen_ids:
                     matches.append((censor, sim))
@@ -227,7 +233,14 @@ class CensorManager:
         results: list[CensorMatch] = []
         now = datetime.now(UTC)
 
-        for censor, _similarity in matches:
+        for censor, similarity in matches:
+            # Which leg found it: a semantic hit keeps its cosine, a regex-only hit scores 1.0.
+            if censor.id not in semantic_ids:
+                matched_by = "regex"
+            elif censor.id in keyword_ids:
+                matched_by = "both"
+            else:
+                matched_by = "semantic"
             # Increment activation_count (P2-9: NULL-safe)
             # F078: auto-escalation removed — a loose auto-created rule can no
             # longer promote itself into a turn-killer. Promotion is human-only.
@@ -240,6 +253,9 @@ class CensorManager:
                 {
                     "censor_id": str(censor.id),
                     "matched_text": text_input[:200],
+                    "matched_by": matched_by,
+                    "score": similarity,
+                    "semantic_checked": semantic_checked,
                 },
             )
 
@@ -250,6 +266,8 @@ class CensorManager:
                     action=censor.action,
                     reason=censor.reason,
                     domain=censor.domain,
+                    score=similarity,
+                    matched_by=matched_by,
                     trigger_action=censor.trigger_action,
                     action_instruction=censor.action_instruction,
                     unblock_pattern=censor.unblock_pattern,

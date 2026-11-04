@@ -89,10 +89,9 @@ class TestDecisionGraphLinker:
         return handler, brain, graph_linker, embedder, bus
 
     def test_registers_on_decision_recorded(self):
-        """Handler should register on the decision_recorded event."""
+        """Handler should register on decision_recorded, and on decision_updated for the re-link."""
         _, _, _, _, bus = self._make_handler()
-        bus.on.assert_called_once()
-        assert bus.on.call_args[0][0] == "decision_recorded"
+        assert {c.args[0] for c in bus.on.call_args_list} == {"decision_recorded", "decision_updated"}
 
     @pytest.mark.asyncio
     async def test_skips_when_linking_disabled(self):

@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 from datetime import UTC, date, datetime
 from uuid import UUID
 
@@ -23,6 +23,7 @@ from nous.heart.schemas import (
     STRATEGY_CARD_KIND,
     EvolutionCandidate,
     JobLesson,
+    ProcedureAttribution,
     ProcedureChangeSource,
     ProcedureDetail,
     ProcedureInput,
@@ -35,6 +36,7 @@ from nous.heart.schemas import (
 from nous.heart.search import cosine_similarity, has_vector_input, hybrid_search, hybrid_search_multi
 from nous.storage.database import Database
 from nous.storage.models import Event, Procedure, ProcedureTaskAffinity, ProcedureVersion
+from nous.tool_names import canonical_tool_names
 from nous.utils import note_stage_error
 
 logger = logging.getLogger(__name__)
@@ -97,6 +99,26 @@ def new_evidence_notes(notes: list[str], incoming: list[str]) -> list[str]:
         note for note in incoming
         if note.startswith("evidence: ") and note.split(" ")[1] not in cited
     ][: max(0, MAX_EVIDENCE_NOTES - len(evidence))]
+
+
+def outcome_attribution(
+    core_tools: Iterable[str], *, turn_error: bool, failed_tools: Sequence[str]
+) -> ProcedureAttribution:
+    """What a rendered procedure's turn outcome rests on.
+
+    "turn_error": the turn itself failed. "core_tool_error": a failed tool is one of the procedure's
+    ``core_tools``. "unrelated_error": only other tools failed (always the case for empty
+    ``core_tools``). "none": nothing failed. ``failed_tools`` names the turn's failed tool calls. Both
+    sides are compared by canonical name (a stored list may hold an old name), so a retired name
+    matches nothing. Quietly: this runs on every turn that renders a procedure.
+    """
+    if turn_error:
+        return "turn_error"
+    if not failed_tools:
+        return "none"
+    if set(canonical_tool_names(failed_tools, log=False)) & set(canonical_tool_names(core_tools, log=False)):
+        return "core_tool_error"
+    return "unrelated_error"
 
 
 def _union(existing: list[str] | None, incoming: list[str]) -> list[str]:
@@ -677,6 +699,7 @@ class ProcedureManager:
         outcome: ProcedureOutcome,
         frame_type: str | None = None,
         session: AsyncSession | None = None,
+        attribution: ProcedureAttribution | None = None,
     ) -> ProcedureDetail:
         """Record procedure activation outcome.
 
@@ -686,13 +709,15 @@ class ProcedureManager:
             frame_type: Optional cognitive frame type (e.g. 'task', 'conversation').
                         When provided, also upserts the procedure_task_affinity row (F037).
             session: Optional existing session.
+            attribution: Optional label of what the outcome rests on (see
+                        ``outcome_attribution``); recorded on the procedure_outcome event only.
         """
         if session is None:
             async with self.db.session() as session:
-                result = await self._record_outcome(procedure_id, outcome, frame_type, session)
+                result = await self._record_outcome(procedure_id, outcome, frame_type, session, attribution)
                 await session.commit()
                 return result
-        return await self._record_outcome(procedure_id, outcome, frame_type, session)
+        return await self._record_outcome(procedure_id, outcome, frame_type, session, attribution)
 
     async def _record_outcome(
         self,
@@ -700,6 +725,7 @@ class ProcedureManager:
         outcome: ProcedureOutcome,
         frame_type: str | None,
         session: AsyncSession,
+        attribution: ProcedureAttribution | None = None,
     ) -> ProcedureDetail:
         if outcome not in self._VALID_OUTCOMES:
             raise ValueError(f"Invalid outcome {outcome!r}; must be one of {sorted(self._VALID_OUTCOMES)}")
@@ -722,11 +748,10 @@ class ProcedureManager:
         if frame_type:
             await self._upsert_task_affinity(procedure_id, frame_type, outcome, session)
 
-        await self._emit_event(
-            session,
-            "procedure_outcome",
-            {"procedure_id": str(procedure_id), "outcome": outcome},
-        )
+        data = {"procedure_id": str(procedure_id), "outcome": outcome}
+        if attribution is not None:
+            data["attribution"] = attribution
+        await self._emit_event(session, "procedure_outcome", data)
 
         return self._to_detail(procedure)
 

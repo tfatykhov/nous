@@ -95,6 +95,7 @@ class GraphLinker:
         *,
         weight_multiplier_override: float | None = None,
         provenance_source: str = "auto_linker",
+        reinforce: bool = True,
     ) -> GraphEdgeInfo | None:
         """Create a graph edge with relation-aware weight multiplier.
 
@@ -114,6 +115,10 @@ class GraphLinker:
         ``"structural"`` for FK-derived / index-derived anchors (F070
         chunk→episode part_of and chunk→chunk sequential adjacency) so
         ``graph_inferred_edge_penalty`` does not down-weight them.
+
+        ``reinforce=False`` leaves a re-derived edge's LTP counter alone: the
+        re-link after a decision's description update derives edges from the
+        same turn's text again, which is not independent evidence.
         """
         multiplier = (
             weight_multiplier_override
@@ -146,7 +151,8 @@ class GraphLinker:
             # every cycle and would inflate the counter uniformly, so they are
             # excluded by provenance.
             if (
-                getattr(self.settings, "tinyhippo_lite_enabled", False)
+                reinforce
+                and getattr(self.settings, "tinyhippo_lite_enabled", False)
                 and provenance_source != "structural"
             ):
                 from nous.brain.tinyhippo_lite import increment_ltp_on_rederivation

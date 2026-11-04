@@ -130,6 +130,12 @@ class Settings(BaseSettings):
     openai_api_key: str = Field("", validation_alias="OPENAI_API_KEY")
     auto_link_threshold: float = 0.85
     auto_link_max: int = 3
+    # A deliberated decision is recorded under a "Plan: <user message>" placeholder and linked on that
+    # text; finalize writes the real description later. With this on, an update that changes the
+    # description (and re-embeds it) links the decision again on the new text: related_to edges here
+    # and the evidence_for / discussed_in edges of DecisionGraphLinker. Add-only: the placeholder's
+    # edges stay, and a re-derived edge does not count as LTP reinforcement.
+    decision_relink_on_update_enabled: bool = False
     # BR-1: removed `quality_block_threshold` — it had zero readers (decision
     # quality_score is advisory for human review; nothing gates on it). A stale
     # NOUS_QUALITY_BLOCK_THRESHOLD in an operator .env is harmless (extra=ignore).
@@ -2011,6 +2017,11 @@ class Settings(BaseSettings):
     procedure_utility_alpha: float = 0.15
     procedure_affinity_beta: float = 0.10
     procedure_min_activations_for_boost: int = 5
+    # A procedure rendered in a turn is recorded a failure when any tool of the turn errored. With
+    # this on, an error in none of the procedure's core_tools records "neutral" (counted in no
+    # effectiveness), while a turn error or a core-tool error is still a failure. The attribution
+    # label rides on every procedure_outcome event either way.
+    procedure_outcome_attribution_enabled: bool = False
 
     # F102: create-time procedure dedupe (versioning itself is always on). With it, store()
     # merges a learned procedure into an active one of the same normalized name, or into an
