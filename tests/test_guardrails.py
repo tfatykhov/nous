@@ -24,6 +24,14 @@ from nous.brain.schemas import GuardrailResult
 from nous.storage.models import Guardrail
 
 
+@pytest.fixture(autouse=True)
+def _generous_cel_timeout(monkeypatch):
+    """These tests check CEL results, not the 100 ms evaluation budget (the
+    timeout tests simulate it by patching Future.result). A GC pause or a busy
+    CI runner past 100 ms would otherwise turn a False into a fail-closed True."""
+    monkeypatch.setattr("nous.brain.guardrails._EVAL_TIMEOUT_SECONDS", 10.0)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
