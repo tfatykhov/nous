@@ -339,12 +339,20 @@ class GraphDensifier:
         orphan_content: str,
         session: AsyncSession,
         ce_stats: dict[str, int] | None = None,
+        *,
+        pass_pairs: set[tuple[UUID, UUID]] | None = None,
     ) -> int:
         """Link an orphan to similar nodes of the same type using hybrid search.
 
         Uses RRF-fused vector + keyword search to find candidates, catching
         relationships that pure vector search misses (shared terms in
         different embedding neighborhoods).
+
+        ``pass_pairs`` holds the canonical pairs already written in the
+        caller's pass. Two orphans of one pass that find each other write
+        their pair once: the second side would hit ON CONFLICT, which with
+        tinyHippo-Lite on counts a re-derivation. A pair found again in a
+        later pass still counts.
         """
         config = _ENTITY_CONFIG[entity_type]
         table, type_name, content_col, extra_where = config
@@ -418,6 +426,11 @@ class GraphDensifier:
         for cand_id, rrf_score in candidates:
             if cand_id == orphan_id:
                 continue
+            src_type, src_id, dst_type, dst_id, relation = _orient(
+                type_name, orphan_id, type_name, cand_id,
+            )
+            if pass_pairs is not None and (src_id, dst_id) in pass_pairs:
+                continue
 
             # Check actual embedding similarity if we have the orphan embedding
             if orphan_embedding:
@@ -438,9 +451,8 @@ class GraphDensifier:
                 # Keyword-only match — use RRF score as proxy weight
                 weight = min(rrf_score, 1.0)
 
-            src_type, src_id, dst_type, dst_id, relation = _orient(
-                type_name, orphan_id, type_name, cand_id,
-            )
+            if pass_pairs is not None:
+                pass_pairs.add((src_id, dst_id))
             edge = await self._linker.create_edge(
                 source_id=src_id,
                 target_id=dst_id,
@@ -634,12 +646,14 @@ class GraphDensifier:
                 exclude_ids=self._orphan_seen.get("fact"),
             )
             visited: list[UUID] = []
+            pass_pairs: set[tuple[UUID, UUID]] = set()
             for orphan_id, content in orphans:
                 if self._interrupted:
                     break
                 visited.append(orphan_id)
                 total += await self._backfill_same_type(
-                    "fact", orphan_id, content, session, ce_stats=ce_stats
+                    "fact", orphan_id, content, session, ce_stats=ce_stats,
+                    pass_pairs=pass_pairs,
                 )
                 total += await self._backfill_cross_type(
                     "fact", orphan_id, content, "decision", session, ce_stats=ce_stats
@@ -667,12 +681,14 @@ class GraphDensifier:
                 exclude_ids=self._orphan_seen.get("decision"),
             )
             visited: list[UUID] = []
+            pass_pairs: set[tuple[UUID, UUID]] = set()
             for orphan_id, content in orphans:
                 if self._interrupted:
                     break
                 visited.append(orphan_id)
                 total += await self._backfill_same_type(
-                    "decision", orphan_id, content, session, ce_stats=ce_stats
+                    "decision", orphan_id, content, session, ce_stats=ce_stats,
+                    pass_pairs=pass_pairs,
                 )
                 total += await self._backfill_cross_type(
                     "decision", orphan_id, content, "fact", session, ce_stats=ce_stats
@@ -700,12 +716,14 @@ class GraphDensifier:
                 exclude_ids=self._orphan_seen.get("episode"),
             )
             visited: list[UUID] = []
+            pass_pairs: set[tuple[UUID, UUID]] = set()
             for orphan_id, content in orphans:
                 if self._interrupted:
                     break
                 visited.append(orphan_id)
                 total += await self._backfill_same_type(
-                    "episode", orphan_id, content, session, ce_stats=ce_stats
+                    "episode", orphan_id, content, session, ce_stats=ce_stats,
+                    pass_pairs=pass_pairs,
                 )
                 total += await self._backfill_cross_type(
                     "episode", orphan_id, content, "fact", session, ce_stats=ce_stats
@@ -757,11 +775,14 @@ class GraphDensifier:
                 exclude_ids=self._orphan_seen.get("chunk"),
             )
             visited: list[UUID] = []
-            batch = {orphan_id for orphan_id, _content in orphans}
+            # Chunks of this pass not processed yet. A pair between two of them
+            # is written by whichever is processed second.
+            pending = {orphan_id for orphan_id, _content in orphans}
             for orphan_id, _content in orphans:
                 if self._interrupted:
                     break
                 visited.append(orphan_id)
+                pending.discard(orphan_id)
 
                 # 1. chunk → episode (always; FK guarantees the episode exists)
                 ep_row = (await session.execute(
@@ -797,7 +818,7 @@ class GraphDensifier:
                 # 3. chunk ↔ chunk intra-episode (sequential + non-adjacent)
                 chunk_edges = await self._link_chunk_to_intra_episode_chunks(
                     orphan_id, episode_id, thresh_chunk_chunk_intra, session,
-                    batch_peers=batch,
+                    defer_to=pending,
                 )
                 total += chunk_edges
 
@@ -991,7 +1012,7 @@ class GraphDensifier:
         cosine_threshold: float,
         session: AsyncSession,
         *,
-        batch_peers: Collection[UUID] = frozenset(),
+        defer_to: Collection[UUID] = frozenset(),
     ) -> int:
         """Link a chunk to other chunks in the same episode.
 
@@ -1004,13 +1025,15 @@ class GraphDensifier:
           artifact, not a structural relationship.
         - Non-adjacent (or cross-kind): cosine ≥ ``cosine_threshold``
 
-        Each pair is written once, smaller id as source. ``batch_peers`` are
-        the chunks the caller processes in the same pass: a pair with a
-        lower-id peer is left to that peer, so the second side does not hit
-        ON CONFLICT (which, with tinyHippo-Lite on, would count a
-        re-derivation on every new cosine pair). A lower-id sibling outside
-        the pass (already linked, e.g. when chunks are appended to an
-        episode) does not process this pair, so this chunk writes it.
+        Each pair is written once, smaller id as source. ``defer_to`` holds
+        the chunks of the caller's pass that are not processed yet: a pair
+        with one of them is left to it, so the pass writes each pair once
+        (a second write would hit ON CONFLICT, which with tinyHippo-Lite on
+        counts a re-derivation). If an interrupt stops the pass first, that
+        chunk got no edge from its siblings, stays an orphan and writes the
+        pair in a later pass. A sibling outside the pass (already linked,
+        e.g. when chunks are appended to an episode) never processes the
+        pair, so this chunk writes it.
 
         Returns count of edges created.
         """
@@ -1080,8 +1103,8 @@ class GraphDensifier:
                 provenance = "auto_linker"
             else:
                 continue
-            if row.id in batch_peers and str(row.id) < str(chunk_id):
-                continue  # the lower-id peer writes this pair in its own pass
+            if row.id in defer_to:
+                continue  # that chunk writes the pair when the pass reaches it
             # C3: one row per sibling pair, smaller id first.
             _, src_id, _, dst_id, _ = _orient("chunk", chunk_id, "chunk", row.id)
             edge = await self._linker.create_edge(
@@ -1265,12 +1288,16 @@ class GraphDensifier:
         threshold: float,
         top_k: int,
         session: AsyncSession,
+        *,
+        pass_pairs: set[tuple[UUID, UUID]] | None = None,
     ) -> int:
         """F070.1: chunk ↔ chunk related_to ACROSS episodes (dedup).
 
         Same HNSW pattern. Excludes the source chunk's own id (so a chunk
         doesn't link to itself) and same-episode siblings (handled by v1
         intra-episode method). Cosine-derived → inferred provenance.
+        ``pass_pairs``: as in ``_backfill_same_type``, a pair two chunks of
+        one pass find from both sides is written once.
         """
         rows = (await session.execute(
             text(
@@ -1299,6 +1326,10 @@ class GraphDensifier:
                 continue
             # C3: one row per pair (the finder checks both directions).
             _, src_id, _, dst_id, _ = _orient("chunk", chunk_id, "chunk", row.id)
+            if pass_pairs is not None:
+                if (src_id, dst_id) in pass_pairs:
+                    continue
+                pass_pairs.add((src_id, dst_id))
             edge = await self._linker.create_edge(
                 source_id=src_id,
                 target_id=dst_id,
@@ -1352,6 +1383,7 @@ class GraphDensifier:
             candidates = await self.find_chunks_lacking_cross_episode_edges(
                 limit, session, exclude_ids=exclude_ids,
             )
+            pass_pairs: set[tuple[UUID, UUID]] = set()
             for chunk_id, _content, episode_id in candidates:
                 if self._interrupted:
                     break
@@ -1369,6 +1401,7 @@ class GraphDensifier:
 
                 chunk_edges = await self._link_chunk_to_cross_episode_chunks(
                     chunk_id, episode_id, thresh_chunk, top_k, session,
+                    pass_pairs=pass_pairs,
                 )
                 total += chunk_edges
 
@@ -1398,12 +1431,14 @@ class GraphDensifier:
                 exclude_ids=self._orphan_seen.get("procedure"),
             )
             visited: list[UUID] = []
+            pass_pairs: set[tuple[UUID, UUID]] = set()
             for orphan_id, content in orphans:
                 if self._interrupted:
                     break
                 visited.append(orphan_id)
                 total += await self._backfill_same_type(
-                    "procedure", orphan_id, content, session, ce_stats=ce_stats
+                    "procedure", orphan_id, content, session, ce_stats=ce_stats,
+                    pass_pairs=pass_pairs,
                 )
                 total += await self._backfill_cross_type(
                     "procedure", orphan_id, content, "fact", session, ce_stats=ce_stats

@@ -2536,6 +2536,146 @@ async def test_appended_chunk_links_to_an_already_linked_lower_id_sibling(
     ]
 
 
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_intra_episode_pair_survives_an_interrupted_pass(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """Codex P2 on #846: siblings A < B < C (by id) are fetched C, A, B
+    (newest first) and an interrupt stops the pass after C and A. B must
+    not lose B-C: a pair is left only to a chunk the pass has not reached,
+    which then stays an orphan and writes its pairs in the next pass."""
+    agent_id = f"test-j1-intr-sib-{uuid4().hex[:8]}"
+    s_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+        "graph_threshold_chunk_chunk_intra": 0.5,
+        "tinyhippo_lite_enabled": True,
+    })
+    linker = GraphLinker(db, mock_embeddings, s_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, s_local, agent_id)
+
+    a, b, c = sorted([uuid4(), uuid4(), uuid4()], key=str)
+    vec = await mock_embeddings.embed(agent_id)
+    now = datetime.now(UTC)
+    async with db.session() as s:
+        ep = await _insert_episode(s, agent_id, "interrupted episode")
+        # Indexes make A-B and B-C adjacent, A-C a cosine pair; created_at
+        # makes the fetch order C, A, B.
+        for cid, idx, age in ((a, 0, 1), (b, 1, 2), (c, 2, 0)):
+            await s.execute(text("""
+                INSERT INTO heart.episode_chunks
+                    (id, agent_id, episode_id, chunk_index, content, embedding, created_at)
+                VALUES (:id, :a, :ep, :idx, :c, CAST(:e AS vector), :t)
+            """), {
+                "id": cid, "a": agent_id, "ep": ep, "idx": idx, "c": f"chunk {idx}",
+                "e": "[" + ",".join(str(v) for v in vec) + "]",
+                "t": now - timedelta(minutes=age),
+            })
+        await s.commit()
+
+    real_link = d._link_chunk_to_intra_episode_chunks
+    calls: list = []
+
+    async def _link_then_interrupt(chunk_id, *args, **kwargs):
+        calls.append(chunk_id)
+        created = await real_link(chunk_id, *args, **kwargs)
+        if len(calls) == 2:
+            d._interrupted = True
+        return created
+
+    d._link_chunk_to_intra_episode_chunks = _link_then_interrupt
+    await d.backfill_orphan_chunks()
+    assert calls == [c, a]
+
+    d._interrupted = False
+    await d.backfill_orphan_chunks()
+
+    async with db.session() as s:
+        rows = (await s.execute(text(
+            "SELECT source_id, target_id, ltp_count FROM brain.graph_edges "
+            "WHERE agent_id = :a AND source_type = 'chunk' AND target_type = 'chunk'"
+        ), {"a": agent_id})).all()
+        b_part_of = (await s.execute(text(
+            "SELECT count(*) FROM brain.graph_edges "
+            "WHERE agent_id = :a AND source_id = :b AND relation = 'part_of'"
+        ), {"a": agent_id, "b": b})).scalar_one()
+    assert sorted((r.source_id, r.target_id) for r in rows) == sorted(
+        [(a, b), (a, c), (b, c)], key=str,
+    )
+    assert [r.ltp_count for r in rows] == [0, 0, 0]
+    assert b_part_of == 1
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_same_type_pass_writes_each_pair_once_and_later_rederivation_counts(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """Codex P2 on #846: two orphan facts of one pass that find each other
+    write their pair once, so with tinyHippo-Lite on the edge starts at
+    ltp_count 0. Finding the pair again in a later pass still counts."""
+    agent_id = f"test-j1-pass-{uuid4().hex[:8]}"
+    vec = await mock_embeddings.embed(agent_id)
+    emb = _ConstEmbedder(vec)
+    s_local = settings.model_copy(update={"tinyhippo_lite_enabled": True})
+    linker = GraphLinker(db, emb, s_local, agent_id)
+    d = GraphDensifier(db, linker, emb, s_local, agent_id)
+
+    content_b = "the nvme disk holds the build cache"
+    async with db.session() as s:
+        a = await _insert_fact(s, agent_id, "the build cache lives on the nvme disk", vec)
+        b = await _insert_fact(s, agent_id, content_b, vec)
+        await s.commit()
+
+    await d.backfill_orphan_facts(max_count=10)
+
+    rows = await _pair_edges(db, agent_id, a, b)
+    assert [(r.relation, r.ltp_count) for r in rows] == [("related_to", 0)]
+
+    async with db.session() as s:
+        await d._backfill_same_type("fact", b, content_b, s)
+        await s.commit()
+
+    rows = await _pair_edges(db, agent_id, a, b)
+    assert [(r.relation, r.ltp_count) for r in rows] == [("related_to", 1)]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cross_episode_pass_writes_each_pair_once(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """Same class in the F070.1 cross-episode pass: two chunks of one pass
+    that find each other write the pair once (ltp_count 0 with
+    tinyHippo-Lite on)."""
+    agent_id = f"test-j1-xpass-{uuid4().hex[:8]}"
+    s_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+        "graph_threshold_chunk_chunk_cross": 0.4,
+        "chunk_cross_episode_top_k": 10,
+        "tinyhippo_lite_enabled": True,
+    })
+    linker = GraphLinker(db, mock_embeddings, s_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, s_local, agent_id)
+
+    async with db.session() as s:
+        ep_a = await _insert_episode(s, agent_id, "episode A")
+        ep_b = await _insert_episode(s, agent_id, "episode B")
+        emb = await mock_embeddings.embed(agent_id)
+        c_a = await _insert_chunk(s, agent_id, ep_a, 0, "topic content A", emb)
+        c_b = await _insert_chunk(s, agent_id, ep_b, 0, "topic content B", emb)
+        await _insert_edge(s, agent_id, c_a, ep_a, "chunk", "episode")
+        await _insert_edge(s, agent_id, c_b, ep_b, "chunk", "episode")
+        await s.commit()
+
+    await d.backfill_orphan_chunks_cross_episode()
+
+    rows = await _pair_edges(db, agent_id, c_a, c_b)
+    assert [(r.relation, r.ltp_count) for r in rows] == [("related_to", 0)]
+
+
 # J-7: the orphan window. The spies record which orphans each cycle visits;
 # linking itself is stubbed out, so every orphan stays unlinkable.
 
@@ -2546,7 +2686,7 @@ def _spy_on_linking(d: GraphDensifier, *, interrupt_after: int | None = None) ->
     once that many orphans were visited."""
     visits: list = []
 
-    async def _same(entity_type, orphan_id, content, session, ce_stats=None):
+    async def _same(entity_type, orphan_id, content, session, ce_stats=None, **kwargs):
         visits.append((entity_type, orphan_id))
         if interrupt_after is not None and len(visits) >= interrupt_after:
             d._interrupted = True
