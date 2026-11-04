@@ -625,7 +625,9 @@ async def test_a_failed_f027_merge_leaves_no_merged_fact(heart, monkeypatch):
 def _merged_fact_loses_to(heart, winner_id):
     """Stand-in contradiction scan that makes the new (merged) fact lose."""
 
-    async def lose(embedding, new_content, exclude_ids, session, new_fact_id=None, new_event_date=None):
+    async def lose(
+        embedding, new_content, exclude_ids, session, new_fact_id=None, new_event_date=None, new_interval=None
+    ):
         assert await heart.facts.apply_supersession(winner_id, new_fact_id, session)
         return None
 

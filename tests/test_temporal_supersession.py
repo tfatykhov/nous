@@ -496,6 +496,44 @@ async def test_the_sweep_never_judges_a_pair_that_became_disjoint(heart, own_age
 
 
 # ---------------------------------------------------------------------------
+# The post-insert contradiction scan in _learn
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("path", ["legacy", "keyed"])
+@pytest.mark.parametrize("verdict", [UPDATE_NEW, CONTRADICTION], ids=["update", "contradiction"])
+async def test_the_contradiction_scan_leaves_a_coexisting_pair_alone(heart, session, monkeypatch, path, verdict):
+    """Both resolvers skip a pair whose intervals share no day. The scan that runs
+    after them (cosine 0.85-0.95) must skip it too: an UPDATE verdict there would
+    deactivate the older fact, and a CONTRADICTION verdict would flag the pair."""
+    _flags(heart, s=True, r2=(path == "keyed"))
+    monkeypatch.setattr(heart.facts, "_llm", object())
+    cls = _classifier(monkeypatch, heart, verdict)
+    keys = {"subject_key": "tim", "attribute_key": "residence"} if path == "keyed" else {}
+    subject = f"Tim residence {uuid4().hex[:8]}"
+
+    async def learn(content: str, sim: float, **kw):
+        detail = await heart.learn(
+            FactInput(content=content, subject=subject, source="user_stated", **keys, **kw),
+            session=session,
+            precomputed_embedding=_vec(sim),
+        )
+        return detail
+
+    lyon = await learn(
+        "Tim lived in Lyon from January to March 2023.", 1.0, valid_from="2023-01-01", valid_to="2023-03-31"
+    )
+    berlin = await learn(BERLIN, 0.9, valid_from=JUN)
+    assert berlin.contradiction_warning is None
+    assert cls.await_count == 0
+    lo, b = await _row(session, lyon.id), await _row(session, berlin.id)
+    assert lo.active and lo.superseded_by is None and lo.contradiction_of is None
+    assert b.active and b.contradiction_of is None
+    assert lo.confidence == 1.0
+
+
+# ---------------------------------------------------------------------------
 # F031 sleep contradiction finder
 # ---------------------------------------------------------------------------
 

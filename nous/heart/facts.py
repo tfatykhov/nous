@@ -1312,6 +1312,8 @@ class FactManager:
                     session,
                     new_fact_id=fact.id,
                     new_event_date=input.event_date,
+                    # The row, not the input: a late arrival was closed above.
+                    new_interval=Interval(fact.valid_from, fact.valid_to),
                 )
                 if contradiction is not None:
                     contradiction_warning = contradiction
@@ -1340,6 +1342,7 @@ class FactManager:
         session: AsyncSession,
         new_fact_id: UUID | None = None,
         new_event_date: date | None = None,
+        new_interval: Interval | None = None,
     ) -> ContradictionWarning | None:
         """Detect potential contradictions: similar embedding (0.85-0.95) but different content.
 
@@ -1352,18 +1355,27 @@ class FactManager:
 
         F075: a fact dated differently from ``new_event_date`` is a separate
         event, never a candidate (the same guard _supersede_by_subject has).
+
+        Flag S, with ``new_interval`` the new fact's interval after both
+        resolvers ran: a fact whose interval shares no day with it coexists
+        and is never a candidate, the rule both resolvers already apply.
+        Filtered in the SQL, so a coexisting fact cannot take the single slot.
         """
         if not embedding:
             return None
 
         embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
 
+        new_interval = new_interval or Interval(None, None)
         params: dict = {
             "embedding": embedding_str,
             "agent_id": self.agent_id,
             "sim_min": self.CONTRADICTION_SIMILARITY_MIN,
             "sim_max": self.CONTRADICTION_SIMILARITY_MAX,
             "new_event_date": new_event_date,
+            "temporal": self._temporal_supersession_on(),
+            "new_valid_from": new_interval.valid_from,
+            "new_valid_to": new_interval.valid_to,
         }
 
         exclude_clause = ""
@@ -1396,6 +1408,11 @@ class FactManager:
               AND 1 - (embedding <=> CAST(:embedding AS vector)) <= :sim_max
               AND (CAST(:new_event_date AS date) IS NULL OR event_date IS NULL
                    OR event_date = CAST(:new_event_date AS date))
+              AND NOT (CAST(:temporal AS boolean)
+                       AND valid_from IS NOT NULL
+                       AND CAST(:new_valid_from AS date) IS NOT NULL
+                       AND (COALESCE(valid_to, DATE 'infinity') < CAST(:new_valid_from AS date)
+                            OR COALESCE(CAST(:new_valid_to AS date), DATE 'infinity') < valid_from))
               {exclude_clause}
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT 1
