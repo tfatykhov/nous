@@ -1352,6 +1352,7 @@ class SleepHandler:
                     str(resolution.get("merged_content", "") or "").strip(),
                     tool="sleep.contradiction_resolution",
                     field="merged_content",
+                    params=_CONTRADICTION_RESOLUTION_SCHEMA["properties"],
                 )
                 fact1_id = pair["fact1_id"]
                 fact2_id = pair["fact2_id"]
@@ -1983,6 +1984,7 @@ class SleepHandler:
                         str(merge_result["merged_content"]),
                         tool="sleep.cluster_consolidation",
                         field="merged_content",
+                        params=_CLUSTER_MERGE_SCHEMA["properties"],
                     )
 
                 # Classify the LLM's response into the right refusal

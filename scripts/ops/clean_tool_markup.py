@@ -14,14 +14,17 @@ function:
 A dry run reads in a READ ONLY transaction and prints, per table, how many rows --apply would
 rewrite: their ids, the columns, and the parameter names the markup gave values to (category,
 pattern: values meant as the call's other arguments, which the cleaning drops), never their text.
-A row whose markup holds a tool call that never ran (a
-learn_fact inside a fact) is listed apart, with the call names, and --apply leaves it alone unless
---include-calls: the stored text is the only copy of that call.
+It also counts the rows the SQL prefilter matched that hold no markup the function removes. A row
+whose markup holds a tool call that never ran (a learn_fact inside a fact) is listed apart, with
+the call names, and --apply leaves it alone unless --include-calls: the stored text is the only
+copy of that call.
 
---apply rewrites each row to the cleaned text in its own transaction, only if the row is still as
-it was read, and re-embeds it from the text its write path embeds (the provider nous/main.py
-builds) when that text changed. A row whose embed fails is left as it was. The tables' updated_at
-triggers move updated_at, as for any edit. Agent-scoped and idempotent: a second run finds nothing.
+--apply rewrites each row to the cleaned text in its own transaction, only if every column its new
+text and embedding are built from is still as it was read, and re-embeds it from the text its
+write path embeds (the provider nous/main.py builds) when that text changed. A row whose embed
+fails is left as it was. The updated_at triggers on facts, decisions, procedures and censors move
+updated_at, as for any edit; episodes have no updated_at. Agent-scoped and idempotent: a second
+run finds nothing.
 A cleaned fact can equal a clean copy stored later (write-time dedup compared the dirty text); the
 script does not look for such pairs or merge them.
 
@@ -43,6 +46,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nous.api.tools import _CREATE_CENSOR_SCHEMA, _LEARN_FACT_SCHEMA, _RECORD_DECISION_SCHEMA
 from nous.brain.brain import _decision_embed_text
 from nous.config import Settings
 from nous.heart.censors import _censor_embed_text
@@ -71,6 +75,21 @@ class _Table:
     # A JSONB column whose string keys are cleaned too.
     json_column: str | None = None
     json_keys: tuple[str, ...] = ()
+    # The parameters of the tool that wrote the text: <category> is markup only for one that has it.
+    params: frozenset[str] = frozenset()
+
+    def read_columns(self) -> list[str]:
+        """Every column the new text and embedding are built from: the guard of an --apply."""
+        return [*self.columns, *self.extra, *([self.json_column] if self.json_column else [])]
+
+
+def _episode_embed_text(r: dict[str, Any], s: Settings) -> str:
+    """The text heart/episodes.py embeds: an ended episode's title, summary, outcome and lessons
+    (_end and reembed_missing), an ongoing one's title and summary (_start)."""
+    if r["ended_at"] is not None:
+        lessons = " ".join(r["lessons_learned"] or [])
+        return f"{r['title'] or ''} {r['summary'] or ''} {r['outcome'] or ''} {lessons}".strip()
+    return f"{r['title'] or ''} {r['summary'] or ''}".strip()
 
 
 TABLES: dict[str, _Table] = {
@@ -80,12 +99,14 @@ TABLES: dict[str, _Table] = {
         (),
         lambda r, s: r["content"],
         has_active=True,
+        params=frozenset(_LEARN_FACT_SCHEMA["properties"]),
     ),
     "decisions": _Table(
         "brain.decisions",
         {"description": "description", "context": "context", "pattern": "pattern"},
         (),
         lambda r, s: _decision_embed_text(r["description"], r["context"], r["pattern"]),
+        params=frozenset(_RECORD_DECISION_SCHEMA["properties"]),
     ),
     "procedures": _Table(
         "heart.procedures",
@@ -102,6 +123,7 @@ TABLES: dict[str, _Table] = {
             s.procedure_embed_evidence,
         ),
         has_active=True,
+        params=frozenset({"type", "content", "domain", "source"}),  # MCP nous_teach (nous/api/mcp.py)
     ),
     "censors": _Table(
         "heart.censors",
@@ -111,12 +133,13 @@ TABLES: dict[str, _Table] = {
             r["trigger_pattern"], r["reason"], r["action_instruction"], s.censor_embed_text_mode
         ),
         has_active=True,
+        params=frozenset(_CREATE_CENSOR_SCHEMA["properties"]),
     ),
     "episodes": _Table(
         "heart.episodes",
         {"title": None, "summary": None},
-        (),
-        lambda r, s: f"{r['title'] or ''} {r['summary'] or ''}".strip(),
+        ("outcome", "lessons_learned", "ended_at"),
+        _episode_embed_text,
         has_active=True,
         json_column="structured_summary",
         json_keys=("title", "summary"),
@@ -131,6 +154,8 @@ class Change:
     table: str
     id: Any
     active: bool | None
+    # md5 of every column the new text and embedding are built from, as read.
+    fingerprint: str
     old: dict[str, Any]
     new: dict[str, Any]
     calls: list[str]
@@ -142,24 +167,37 @@ class Change:
 @dataclass
 class Report:
     planned: dict[str, list[Change]] = field(default_factory=dict)
+    # Rows the SQL prefilter matched that hold no markup the function removes.
+    unchanged: dict[str, int] = field(default_factory=dict)
     cleaned: dict[str, int] = field(default_factory=dict)
     failed: dict[str, int] = field(default_factory=dict)
     skipped_calls: dict[str, int] = field(default_factory=dict)
 
 
-def _clean(value: Any, param: str | None) -> tuple[Any, str]:
+def _clean(value: Any, param: str | None, params: frozenset[str]) -> tuple[Any, str]:
     if not isinstance(value, str):
         return value, ""
-    return strip_tool_markup(value, param)
+    return strip_tool_markup(value, param, params)
 
 
-async def scan(session: AsyncSession, settings: Settings, tables: list[str]) -> dict[str, list[Change]]:
-    """Every row of the agent whose text the sanitiser changes, per table. Reads only."""
+def _fingerprint(t: _Table) -> str:
+    return f"md5(ROW({', '.join(t.read_columns())})::text)"
+
+
+async def scan(
+    session: AsyncSession, settings: Settings, tables: list[str], unchanged: dict[str, int] | None = None
+) -> dict[str, list[Change]]:
+    """Every row of the agent whose text the sanitiser changes, per table. Reads only.
+
+    ``unchanged`` gets, per table, how many rows the prefilter matched and the function left.
+    """
     out: dict[str, list[Change]] = {}
     for key in tables:
         t = TABLES[key]
         cols = list(t.columns) + list(t.extra)
-        select_cols = ", ".join(["id", "active" if t.has_active else "NULL AS active", *cols])
+        select_cols = ", ".join(
+            ["id", "active" if t.has_active else "NULL AS active", *cols, f"{_fingerprint(t)} AS fp"]
+        )
         where = " OR ".join(f"{c} ~ :pat" for c in t.columns)
         if t.json_column:
             select_cols += f", {t.json_column}::text AS {t.json_column}"
@@ -171,13 +209,15 @@ async def scan(session: AsyncSession, settings: Settings, tables: list[str]) -> 
             )
         ).mappings()
         changes: list[Change] = []
+        matched = 0
         for row in rows:
+            matched += 1
             row = dict(row)
             old: dict[str, Any] = {}
             new: dict[str, Any] = {}
             removed: list[str] = []
             for col, param in t.columns.items():
-                clean, cut = _clean(row[col], param)
+                clean, cut = _clean(row[col], param, t.params)
                 if cut:
                     old[col], new[col] = row[col], clean
                     removed.append(cut)
@@ -186,7 +226,7 @@ async def scan(session: AsyncSession, settings: Settings, tables: list[str]) -> 
                 if isinstance(doc, dict):
                     cleaned_doc = dict(doc)
                     for k in t.json_keys:
-                        clean, cut = _clean(doc.get(k), None)
+                        clean, cut = _clean(doc.get(k), None, t.params)
                         if cut:
                             cleaned_doc[k] = clean
                             removed.append(cut)
@@ -200,6 +240,7 @@ async def scan(session: AsyncSession, settings: Settings, tables: list[str]) -> 
                     table=key,
                     id=row["id"],
                     active=row["active"],
+                    fingerprint=row["fp"],
                     old=old,
                     new=new,
                     calls=calls_in("".join(removed)),
@@ -209,27 +250,24 @@ async def scan(session: AsyncSession, settings: Settings, tables: list[str]) -> 
                 )
             )
         out[key] = changes
+        if unchanged is not None:
+            unchanged[key] = matched - len(changes)
     return out
 
 
 async def _write(session: AsyncSession, change: Change, agent_id: str, vector: list[float] | None) -> bool:
-    """Rewrite one row if it still holds what was read. True when it did."""
+    """Rewrite one row if every column it is built from still holds what was read. True when it did."""
     t = TABLES[change.table]
-    params: dict[str, Any] = {"id": change.id, "a": agent_id}
-    sets, guards = [], []
+    params: dict[str, Any] = {"id": change.id, "a": agent_id, "fp": change.fingerprint}
+    sets = []
     for i, col in enumerate(change.new):
-        params[f"new{i}"], params[f"old{i}"] = change.new[col], change.old[col]
-        if col == t.json_column:
-            sets.append(f"{col} = CAST(:new{i} AS jsonb)")
-            guards.append(f"{col}::text = :old{i}")
-        else:
-            sets.append(f"{col} = :new{i}")
-            guards.append(f"{col} = :old{i}")
+        params[f"new{i}"] = change.new[col]
+        sets.append(f"{col} = CAST(:new{i} AS jsonb)" if col == t.json_column else f"{col} = :new{i}")
     if vector is not None:
         params["vec"] = "[" + ",".join(f"{v:.6f}" for v in vector) + "]"
         sets.append("embedding = CAST(:vec AS vector)")
     result = await session.execute(
-        text(f"UPDATE {t.name} SET {', '.join(sets)} WHERE id = :id AND agent_id = :a AND {' AND '.join(guards)}"),
+        text(f"UPDATE {t.name} SET {', '.join(sets)} WHERE id = :id AND agent_id = :a AND {_fingerprint(t)} = :fp"),
         params,
     )
     return result.rowcount == 1
@@ -250,7 +288,7 @@ async def run(
     report = Report()
     async with db.session() as session:
         await session.execute(text("SET TRANSACTION READ ONLY"))
-        report.planned = await scan(session, settings, tables)
+        report.planned = await scan(session, settings, tables, report.unchanged)
         await session.rollback()
     if not apply:
         return report
@@ -284,6 +322,7 @@ def _print_report(report: Report, apply: bool, include_calls: bool) -> None:
         if TABLES[key].has_active:
             line += f" ({sum(1 for c in changes if c.active)} active)"
         line += f"; {len(calls)} of them hold tool calls that never ran"
+        line += f"; {report.unchanged.get(key, 0)} more matched the prefilter and hold none the function removes"
         print(line)
         for c in sorted(changes, key=lambda c: bool(c.calls)):
             line = f"  {c.id}  {','.join(c.new)}  params: {','.join(c.params) or '-'}"

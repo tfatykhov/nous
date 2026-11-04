@@ -315,7 +315,9 @@ def create_mcp_server(
 
     async def _handle_teach(args: dict) -> list[TextContent]:
         teach_type = args["type"]
-        content, _ = clean_model_text(args["content"], tool="nous_teach", field="content")
+        content, _ = clean_model_text(
+            args["content"], tool="nous_teach", field="content", params=("type", "content", "domain", "source")
+        )
         domain = args.get("domain")
         source = args.get("source", "mcp")
 

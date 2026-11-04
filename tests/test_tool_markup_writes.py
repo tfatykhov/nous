@@ -93,8 +93,99 @@ async def test_record_decision_stores_clean_text(env):
             text("SELECT text FROM brain.decision_reasons WHERE decision_id = :i"), {"i": _id(result)}
         )
     assert row.description == "Use the coastal feed."
-    assert row.context == "Two feeds exist."
+    assert row.context == "Two feeds exist."  # set by the call: the leaked "ctx" does not override it
     assert reason == "It is primary."
+
+
+async def _fact(db, fid):
+    async with db.session() as s:
+        return (
+            await s.execute(text("SELECT content, category, subject FROM heart.facts WHERE id = :i"), {"i": fid})
+        ).one()
+
+
+@pytest.mark.asyncio
+async def test_atom_closing_tags_are_stored_whole(env):
+    """B1: the field's own close followed by another closing tag is prose, not markup."""
+    tools, db, _ = env
+    content = "Atom closing tags: </content> </entry>"
+    result = await tools["learn_fact"](content=content, category="technical", subject="atom feeds")
+    assert "markup" not in result["content"][0]["text"]
+    assert (await _fact(db, _id(result))).content == content
+
+
+@pytest.mark.asyncio
+async def test_a_leaked_category_fills_the_unset_argument(env):
+    tools, db, _ = env
+    result = await tools["learn_fact"](content=LEAKED_FACT, subject="coastal zone")
+    row = await _fact(db, _id(result))
+    assert row.content == "The coastal zone forecast is issued twice a day."
+    assert row.category == "technical"
+
+
+@pytest.mark.asyncio
+async def test_a_leaked_category_does_not_override_the_call(env):
+    tools, db, _ = env
+    result = await tools["learn_fact"](content=LEAKED_FACT, category="concept", subject="coastal zone")
+    assert (await _fact(db, _id(result))).category == "concept"
+
+
+@pytest.mark.asyncio
+async def test_an_argument_of_the_next_call_is_not_used(env):
+    tools, db, _ = env
+    content = (
+        "The coastal zone forecast is issued twice a day.</content>\n</invoke>\n"
+        '<invoke name="learn_fact">\n<parameter name="category">technical'
+    )
+    result = await tools["learn_fact"](content=content, subject="coastal zone")
+    row = await _fact(db, _id(result))
+    assert row.content == "The coastal zone forecast is issued twice a day."
+    assert row.category is None
+
+
+@pytest.mark.asyncio
+async def test_record_decision_fills_unset_context_and_pattern(env):
+    tools, db, _ = env
+    result = await tools["record_decision"](
+        description=(
+            'Use the coastal feed.</description>\n<parameter name="context">Two feeds exist.</parameter>\n'
+            "<pattern>prefer the primary feed</pattern>"
+        ),
+        confidence=0.8,
+        category="tooling",
+        stakes="low",
+    )
+    async with db.session() as s:
+        row = (
+            await s.execute(
+                text("SELECT description, context, pattern FROM brain.decisions WHERE id = :i"), {"i": _id(result)}
+            )
+        ).one()
+    assert (row.description, row.context, row.pattern) == (
+        "Use the coastal feed.",
+        "Two feeds exist.",
+        "prefer the primary feed",
+    )
+
+
+@pytest.mark.asyncio
+async def test_resolve_decisions_stores_a_clean_note(env):
+    tools, db, _ = env
+    decision = await tools["record_decision"](
+        description="Use the coastal feed for the forecast", confidence=0.8, category="tooling", stakes="low"
+    )
+    await tools["resolve_decisions"](
+        resolutions=[
+            {
+                "decision_id": str(_id(decision)),
+                "outcome": "success",
+                "resolution_note": 'The feed held up.</resolution_note>\n<parameter name="superseded_by">x',
+            }
+        ]
+    )
+    async with db.session() as s:
+        note = await s.scalar(text("SELECT outcome_result FROM brain.decisions WHERE id = :i"), {"i": _id(decision)})
+    assert note == "The feed held up."
 
 
 @pytest.mark.asyncio

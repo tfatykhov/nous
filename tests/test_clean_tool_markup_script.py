@@ -25,6 +25,9 @@ WITH_CALL = (
     '<invoke name="learn_fact">\n<parameter name="content">Another fact.</content>\n</invoke>'
 )
 LEGIT = "Atom entries wrap their text in <content>...</content>"
+# A parameter left open to the end, with no closing tag before it.
+OPEN_PARAM_CLEAN = "The marine forecast covers the outer waters."
+OPEN_PARAM = OPEN_PARAM_CLEAN + '\n<parameter name="category">technical'
 
 
 def _vec(v: list[float]) -> str:
@@ -58,6 +61,7 @@ async def env(db):
         "dirty": await _fact(db, embedder, agent_x, DIRTY),
         "call": await _fact(db, embedder, agent_x, WITH_CALL),
         "legit": await _fact(db, embedder, agent_x, LEGIT),
+        "open_param": await _fact(db, embedder, agent_x, OPEN_PARAM),
         "other_agent": await _fact(db, embedder, agent_y, DIRTY),
     }
     brain = Brain(database=db, settings=settings, embedding_provider=embedder)
@@ -96,9 +100,10 @@ async def test_dry_run_counts_this_agent_and_writes_nothing(env):
     db, settings, embedder, ids = env
     report = await clean_tool_markup.run(db, settings, embedder, tables=list(clean_tool_markup.TABLES), apply=False)
     planned = {k: {c.id for c in v} for k, v in report.planned.items()}
-    assert planned["facts"] == {ids["dirty"], ids["call"]}  # not the legit XML, not agent Y's
+    assert planned["facts"] == {ids["dirty"], ids["call"], ids["open_param"]}  # not the legit XML, not agent Y's
     assert planned["decisions"] == {ids["decision"]}
     assert planned["episodes"] == {ids["episode"]}
+    assert report.unchanged["facts"] == 1  # the legit XML matched the prefilter and was left
     assert [c.calls for c in report.planned["facts"] if c.id == ids["call"]] == [["learn_fact"]]
     assert [c.params for c in report.planned["facts"] if c.id == ids["dirty"]] == [["category"]]
     assert report.cleaned == {}
@@ -110,9 +115,10 @@ async def test_apply_cleans_reembeds_and_is_idempotent(env):
     db, settings, embedder, ids = env
     tables = list(clean_tool_markup.TABLES)
     report = await clean_tool_markup.run(db, settings, embedder, tables=tables, apply=True)
-    assert report.cleaned == {"facts": 1, "decisions": 1, "procedures": 0, "censors": 0, "episodes": 1}
+    assert report.cleaned == {"facts": 2, "decisions": 1, "procedures": 0, "censors": 0, "episodes": 1}
     assert report.skipped_calls["facts"] == 1
     assert await _content(db, ids["dirty"]) == CLEAN
+    assert await _content(db, ids["open_param"]) == OPEN_PARAM_CLEAN
     assert await _content(db, ids["call"]) == WITH_CALL  # left alone without --include-calls
     assert await _content(db, ids["legit"]) == LEGIT
     assert await _content(db, ids["other_agent"]) == DIRTY
@@ -133,6 +139,61 @@ async def test_apply_cleans_reembeds_and_is_idempotent(env):
 
     again = await clean_tool_markup.run(db, settings, embedder, tables=tables, apply=False)
     assert all(not v for v in again.planned.values())
+
+
+def _floats(vec: str) -> list[float]:
+    return [float(x) for x in vec.strip("[]").split(",")]
+
+
+@pytest.mark.asyncio
+async def test_episode_embed_text_is_the_write_paths(env):
+    """An ended episode is embedded from title, summary, outcome and lessons, an ongoing one from title and
+    summary: the script re-embeds from the same text, compared here with the vector the write path stored."""
+    db, settings, embedder, ids = env
+    heart = Heart(db, settings, embedding_provider=embedder)
+    try:
+        ended = await heart.start_episode(EpisodeInput(title="Harbour check", summary="Checked the harbour gauge"))
+        await heart.end_episode(ended.id, outcome="success", lessons_learned=["gauge reads high", "recalibrate"])
+    finally:
+        await heart.close()
+    async with db.session() as s:
+        rows = (
+            await s.execute(
+                text(
+                    "SELECT id, title, summary, outcome, lessons_learned, ended_at, embedding::text AS embedding "
+                    "FROM heart.episodes WHERE id = ANY(:ids)"
+                ),
+                {"ids": [ended.id, ids["episode"]]},
+            )
+        ).mappings()
+        rows = [dict(r) for r in rows]
+    assert {r["ended_at"] is None for r in rows} == {True, False}  # one ongoing, one ended
+    for row in rows:
+        built = clean_tool_markup.TABLES["episodes"].embed_text(row, settings)
+        expected = await embedder.embed(built)
+        assert max(abs(a - b) for a, b in zip(_floats(row["embedding"]), expected, strict=True)) < 1e-5
+
+
+@pytest.mark.asyncio
+async def test_apply_skips_a_row_whose_embed_inputs_changed_since_read(env):
+    """The guard covers every column the new embedding is built from, not only the cleaned ones."""
+    db, settings, embedder, ids = env
+    async with db.session() as s:
+        planned = await clean_tool_markup.scan(s, settings, ["decisions"])
+        await s.rollback()
+    (change,) = planned["decisions"]
+    async with db.session() as s:  # the app edits the clean context meanwhile
+        await s.execute(
+            text("UPDATE brain.decisions SET context = 'Newer context.' WHERE id = :i"), {"i": ids["decision"]}
+        )
+        await s.commit()
+    async with db.session() as s:
+        assert not await clean_tool_markup._write(
+            s, change, settings.agent_id, await embedder.embed(change.new_embed_text)
+        )
+        await s.rollback()
+        desc = await s.scalar(text("SELECT description FROM brain.decisions WHERE id = :i"), {"i": ids["decision"]})
+    assert desc.startswith("Use the coastal feed.</description>")
 
 
 @pytest.mark.asyncio
