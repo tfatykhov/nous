@@ -194,6 +194,7 @@ nous/
 │   ├── probe_gen.py            # Auto-generate probes from INDEX.md + git log
 │   ├── hand_labels_draft.py    # AI-drafted hand-label qrels
 │   ├── multi_turn_eval.py      # F051.4: walks LongMemEval haystacks via dispatcher; per-config metrics
+│   ├── beam/                   # PR-M: `python -m nous_eval.beam {ingest,answer,score}` — BEAM via the prod write path, pre-turn or recall_deep answers, BEAM's judge
 │   ├── run_history.py          # F051 Phase 1 finish (#365/#366/#367): persists eval_runs to EVAL DB
 │   └── regression.py           # `python -m nous_eval.regression` — compares latest run vs N-day-old baseline, exits non-zero on regression
 ├── tests/                      # 1750+ tests across 91 files
