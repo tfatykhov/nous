@@ -892,6 +892,19 @@ def _format_pipeline_text(
         month = r.metadata.get("recency_date", "")
         return f"[{status} {month}]".rstrip()  # no leading space
 
+    def _add_merge_history(r: Any) -> None:
+        # K-6: the dated sources a merged fact was built from, under its line.
+        # Only rows the pipeline gave a history (flag on), so the text is
+        # byte-identical with it off. Not _emit-ted: the sources are not results.
+        hist = r.metadata.get("merge_history")
+        if not hist:
+            return
+        sources, dropped = hist["sources"], hist["dropped"]
+        results_text.append(f"   history (merged from {len(sources) + dropped} facts, newest first):")
+        results_text.extend(f"   - [learned {s['learned_at']}] {s['content']}" for s in sources)
+        if dropped:
+            results_text.append(f"   - +{dropped} older")
+
     # ------------------------------------------------------------------
     # Heart Memory section
     # ------------------------------------------------------------------
@@ -984,6 +997,7 @@ def _format_pipeline_text(
                             f"(id: {result.id}, score: {result.score:.3f} {_score_tag(result)})"
                         )
                         _emit(result)
+                        _add_merge_history(result)
                         i += 1
                 if no_session:
                     if session_buckets:
@@ -994,6 +1008,7 @@ def _format_pipeline_text(
                             f"(id: {result.id}, score: {result.score:.3f} {_score_tag(result)})"
                         )
                         _emit(result)
+                        _add_merge_history(result)
                         i += 1
             else:
                 # Flat output (byte-identical to pre-P1.1 when no graph-memory neighbours
@@ -1004,6 +1019,7 @@ def _format_pipeline_text(
                         f"(id: {result.id}, score: {result.score:.3f} {_score_tag(result)})"
                     )
                     _emit(result)
+                    _add_merge_history(result)
         elif not exemplar_rows:
             # Codex r14: suppress the empty-section placeholder when the examples
             # block will render below — "No results found." would contradict it.
