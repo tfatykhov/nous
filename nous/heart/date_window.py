@@ -16,7 +16,9 @@ logger = logging.getLogger(__name__)
 # parser timeout, so words that are only vague on their own ("when", "after",
 # "since", "this", "last", "may") do not trigger it unless they sit next to a
 # date or a period. Every pattern below contains a word the earlier, wider
-# trigger matched, so this one only drops queries, never adds an LLM call.
+# trigger matched, except the past/previous/coming and season branches: those
+# are explicit periods it missed ("past few weeks", "in the spring"). So a
+# query with no date in it never gains an LLM call.
 _MONTHS_NOT_MAY = (
     r"jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|jun(e)?|jul(y)?|"
     r"aug(ust)?|sep(tember)?|oct(ober)?|nov(ember)?|dec(ember)?"
@@ -38,7 +40,8 @@ _TEMPORAL_RE = re.compile(
     r"|\b(yesterday|today|tomorrow)\b"
     # "this week", "last 3 months", "next tuesday", "recent weeks" (codex P2)
     r"|\b(last|this|next|recent)\s+((" + _COUNT + r")\s+)?(" + _PERIODS + r")s?\b"
-    r"|\b(past|previous|coming)\s+(week|month|quarter)\b"
+    r"|\b(past|previous|coming)\s+((" + _COUNT + r")\s+)?(" + _PERIODS + r")s?\b"
+    r"|\b(in|during)\s+(the\s+)?(spring|summer|autumn|fall|winter)\b"
     r"|\b(" + _COUNT + r")\s+(day|week|month|quarter|year)s?\s+ago\b"
     r"|\b(since|before|after|during|around)\s+(" + _WEEKDAYS + r")\b",
     re.IGNORECASE,

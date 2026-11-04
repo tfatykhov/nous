@@ -3907,10 +3907,11 @@ class FactManager:
         # Raise HNSW ef_search well above :limit: the agent/date/active predicates
         # are post-applied to the approximate walk, so a selective date window can
         # otherwise evict the in-window rows from the candidate set (codex P2).
-        # This is a retrieval leg, so it also sets the retrieval scan cap: a call
-        # with no cap resets hnsw.max_scan_tuples to the default for every later
-        # leg in the transaction (SET LOCAL lasts the transaction).
-        await set_local_ef_search(session, VECTOR_LEG_EF_SEARCH, max_scan_tuples=VECTOR_LEG_MAX_SCAN_TUPLES)
+        # No max_scan_tuples cap, unlike the hybrid legs: this leg exists to
+        # rescue in-window facts that sit far from the query vector, so the
+        # iterative scan may run to pgvector's default tuple budget to fill
+        # :limit. Every later retrieval leg sets its own cap.
+        await set_local_ef_search(session, VECTOR_LEG_EF_SEARCH)
         sql = text("""
             SELECT t.id, 1 - (t.embedding <=> CAST(:qvec AS vector)) AS score
             FROM heart.facts t

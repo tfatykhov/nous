@@ -333,8 +333,8 @@ async def test_single_query_search_still_embeds() -> None:
 # C-5: only an explicit date pattern reaches the date-window LLM parse
 # ---------------------------------------------------------------------------
 
-# The trigger as it stood before C-5, kept verbatim so the subset property
-# below is checked against the real old behaviour.
+# The trigger as it stood before C-5, kept verbatim so the property below is
+# checked against the real old behaviour.
 _OLD_MONTHS = (
     r"jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|jun(e)?|jul(y)?|"
     r"aug(ust)?|sep(tember)?|oct(ober)?|nov(ember)?|dec(ember)?"
@@ -346,6 +346,18 @@ _OLD_TEMPORAL_RE = re.compile(
     r"|\b(yesterday|today|tomorrow|last|this|next|recent(ly)?|ago|"
     r"early|mid|late|around|when|during|after|before|since|"
     r"week|month|quarter)\b",
+    re.IGNORECASE,
+)
+
+# The only queries C-5 may newly send to the parser: explicit periods the old
+# trigger missed, since it matched only singular week/month/quarter and had no
+# "past" and no seasons ("past few weeks", "in the past 3 months", "in the spring").
+_ADDED_PERIOD_RE = re.compile(
+    r"\b(past|previous|coming)\s+"
+    r"((\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|few|several|couple(\s+of)?)\s+)?"
+    r"(day|week|weekend|month|quarter|year|night|morning|afternoon|evening|spring|summer|autumn|fall|winter|"
+    r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)s?\b"
+    r"|\b(in|during)\s+(the\s+)?(spring|summer|autumn|fall|winter)\b",
     re.IGNORECASE,
 )
 
@@ -364,6 +376,9 @@ _NO_DATE = [
     "how early can the sleep cycle start?",
     "around how many facts are active?",
     "it worked a while ago",
+    "what did we decide in the past?",
+    "the previous error in the job runner",
+    "the coming refactor of the scorer",
 ]
 
 _EXPLICIT = [
@@ -388,6 +403,11 @@ _EXPLICIT = [
     "recent weeks of deploys",
     "budget for 2025",
     "this morning's run",
+    "past few weeks",
+    "in the past 3 months",
+    "during the summer",
+    "in the spring",
+    "the previous two quarters",
 ]
 
 
@@ -402,10 +422,19 @@ def test_explicit_dates_still_trigger(query: str) -> None:
 
 
 @pytest.mark.parametrize("query", _NO_DATE + _EXPLICIT)
-def test_trigger_only_narrows(query: str) -> None:
-    """Every query the trigger passes also passed the old one: no new LLM calls."""
+def test_trigger_adds_only_explicit_periods(query: str) -> None:
+    """Every query the trigger passes either passed the old one or is an
+    explicit period the old one missed, so a query with no date in it never
+    gains an LLM call."""
     if has_temporal_signal(query):
-        assert _OLD_TEMPORAL_RE.search(query)
+        assert _OLD_TEMPORAL_RE.search(query) or _ADDED_PERIOD_RE.search(query)
+
+
+@pytest.mark.parametrize("query", ["past few weeks", "in the past 3 months", "in the spring"])
+def test_the_added_periods_are_ones_the_old_trigger_missed(query: str) -> None:
+    """Pins why the property above has a second clause."""
+    assert not _OLD_TEMPORAL_RE.search(query)
+    assert has_temporal_signal(query) is True
 
 
 class _FakeClient:

@@ -319,20 +319,25 @@ async def test_inline_flag_with_an_empty_window_is_unchanged(fact_store, seed_ou
     assert [(f.id, f.score) for f in a] == [(f.id, f.score) for f in b]
 
 
-async def test_date_window_leg_keeps_the_retrieval_scan_cap(fact_store, session):
-    """The date leg is a retrieval leg: it must set the same HNSW scan cap as
-    the others. SET LOCAL lasts the transaction, so a helper call with no cap
-    puts max_scan_tuples back to pgvector's default for every later leg."""
+async def test_date_window_leg_runs_uncapped(fact_store, session):
+    """The date leg rescues in-window facts far from the query vector, so it
+    scans to pgvector's default tuple budget (20000) rather than the hybrid
+    legs' cap, even after a capped leg earlier in the same transaction."""
     from sqlalchemy import text
 
-    from nous.heart.search import VECTOR_LEG_EF_SEARCH, VECTOR_LEG_MAX_SCAN_TUPLES
+    from nous.heart.search import VECTOR_LEG_EF_SEARCH, VECTOR_LEG_MAX_SCAN_TUPLES, hybrid_search
 
     window = DateWindow(start=datetime.date(2026, 4, 20), end=datetime.date(2026, 4, 30))
     emb = await fact_store.embeddings.embed("calibration work in late April")
-    await fact_store._date_window_leg(session, emb, window, limit=15)
 
-    shown = [
-        (await session.execute(text(f"SHOW {name}"))).scalar()
-        for name in ("hnsw.ef_search", "hnsw.iterative_scan", "hnsw.max_scan_tuples")
-    ]
-    assert shown == [str(VECTOR_LEG_EF_SEARCH), "strict_order", str(VECTOR_LEG_MAX_SCAN_TUPLES)]
+    async def shown() -> list[str]:
+        return [
+            (await session.execute(text(f"SHOW {name}"))).scalar()
+            for name in ("hnsw.ef_search", "hnsw.iterative_scan", "hnsw.max_scan_tuples")
+        ]
+
+    await hybrid_search(session, "heart.facts", emb, "calibration", fact_store.agent_id, limit=5)
+    assert await shown() == [str(VECTOR_LEG_EF_SEARCH), "strict_order", str(VECTOR_LEG_MAX_SCAN_TUPLES)]
+
+    await fact_store._date_window_leg(session, emb, window, limit=15)
+    assert await shown() == [str(VECTOR_LEG_EF_SEARCH), "strict_order", "20000"]
