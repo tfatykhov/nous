@@ -10,7 +10,7 @@ import uuid
 from unittest.mock import MagicMock
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import text, update
 
 from nous.heart.profile_card import ProfileCardStore
 from nous.heart.schemas import FactSummary
@@ -238,5 +238,70 @@ async def test_the_trace_records_which_source_the_profile_used(db, mock_embeddin
         fallback, card = (t.legs["context_profile_card"] for t in traces)
         assert fallback["n_returned"] == 0 and fallback["skip_reason"] == "no card"
         assert card["n_returned"] == 1 and card.get("skip_reason") is None
+    finally:
+        await heart.close()
+
+
+def _record_traces(monkeypatch) -> list[_Trace]:
+    traces: list[_Trace] = []
+    logger = MagicMock()
+    logger.start = lambda **_: traces.append(_Trace()) or traces[-1]
+    monkeypatch.setattr("nous.cognitive.context.get_active_retrieval_logger", lambda: logger)
+    return traces
+
+
+@pytest.mark.parametrize("shared_session", [False, True])
+async def test_a_card_read_error_renders_the_facts_and_is_traced(
+    db, mock_embeddings, settings, monkeypatch, shared_session
+):
+    engine, heart, s = await _engine(db, mock_embeddings, settings, profile_card_enabled=True)
+    try:
+        f1, _f2 = await _facts(db, s.agent_id, "prefers Celsius", "lives in Lisbon")
+        await _card(db, s.agent_id, _entry("The user prefers Celsius.", f1))
+
+        async def _fail(self, session=None):
+            if session is None:
+                raise RuntimeError("card store down")
+            # A database error on the shared session: without a savepoint it aborts the pre-turn transaction.
+            await session.execute(text("SELECT 1/0"))
+
+        monkeypatch.setattr(ProfileCardStore, "live_entries", _fail)
+        traces = _record_traces(monkeypatch)
+        if shared_session:
+            async with db.session() as session:
+                result = await engine.build(
+                    agent_id=s.agent_id, session_id="s-card", input_text="hello", frame=_frame(), session=session
+                )
+        else:
+            result = await _build(engine, s)
+
+        profile = _profile_section(result)
+        assert profile is not None and "lives in Lisbon" in profile.content
+        leg = traces[-1].legs["context_profile_card"]
+        assert leg["error"] == ("DBAPIError" if shared_session else "RuntimeError") and leg["n_returned"] == 0
+    finally:
+        await heart.close()
+
+
+async def test_malformed_card_entries_are_skipped(db, mock_embeddings, settings):
+    engine, heart, s = await _engine(db, mock_embeddings, settings, profile_card_enabled=True)
+    try:
+        (f1,) = await _facts(db, s.agent_id, "prefers Celsius")
+        fid = str(f1.id)
+        entries = [
+            {"id": "a"},
+            "junk",
+            {"id": "b", "text": 5, "fact_ids": [fid]},
+            {"id": "c", "text": "No ids.", "fact_ids": "nope"},
+            {"id": "d", "text": "The user prefers Celsius.", "fact_ids": [fid, 7, ["x"]]},
+        ]
+        await _card(db, s.agent_id)
+        async with db.session() as session:
+            await session.execute(
+                update(ProfileCard).where(ProfileCard.agent_id == s.agent_id).values(entries=entries, rejected=[3])
+            )
+            await session.commit()
+        profile = _profile_section(await _build(engine, s))
+        assert profile.content == "- The user prefers Celsius."
     finally:
         await heart.close()

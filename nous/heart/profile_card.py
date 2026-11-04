@@ -196,13 +196,20 @@ class ProfileCardStore:
 
         A line is shown when it cites at least one active, unsuperseded fact and is not in ``rejected``. Returns
         ``entries`` (the shown lines, in card order), ``cited`` (every fact id any line cites), ``dropped_inactive``
-        and ``dropped_rejected``.
+        and ``dropped_rejected``. An entry without a text is skipped, and only string fact ids count.
         """
         async with _session_scope(self._db, session) as s:
             row = await self._row(s, lock=False)
             if row is None:
                 return None
-            cited = {i for e in row.entries for i in e.get("fact_ids", [])}
+            lines: list[tuple[dict, list[str]]] = []
+            for entry in row.entries if isinstance(row.entries, list) else []:
+                text = entry.get("text") if isinstance(entry, dict) else None
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                fact_ids = entry.get("fact_ids")
+                lines.append((entry, [i for i in fact_ids if isinstance(i, str)] if isinstance(fact_ids, list) else []))
+            cited = {i for _, fact_ids in lines for i in fact_ids}
             ids = []
             for i in cited:
                 try:
@@ -218,13 +225,13 @@ class ProfileCardStore:
                     Fact.superseded_by.is_(None),
                 )
                 live = {str(i) for i in (await s.execute(stmt)).scalars()}
-            banned = {_norm(t) for t in row.rejected}
+            banned = {_norm(t) for t in (row.rejected if isinstance(row.rejected, list) else []) if isinstance(t, str)}
             shown: list[dict] = []
             dropped_inactive = dropped_rejected = 0
-            for entry in row.entries:
+            for entry, fact_ids in lines:
                 if _norm(entry["text"]) in banned:
                     dropped_rejected += 1
-                elif not live.intersection(entry.get("fact_ids", [])):
+                elif not live.intersection(fact_ids):
                     dropped_inactive += 1
                 else:
                     shown.append(entry)

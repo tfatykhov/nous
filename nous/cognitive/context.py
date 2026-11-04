@@ -2300,8 +2300,14 @@ class ContextEngine:
         """
         card: dict | None = None
         error: str | None = None
+        store = ProfileCardStore(self._heart.db, self._heart.agent_id)
         try:
-            card = await ProfileCardStore(self._heart.db, self._heart.agent_id).live_entries(session=session)
+            if session is None:
+                card = await store.live_entries()
+            else:
+                # A savepoint: a database error here must not abort the shared pre-turn transaction.
+                async with session.begin_nested():
+                    card = await store.live_entries(session=session)
         except Exception as exc:
             error = type(exc).__name__
             logger.warning("Profile card read failed; the profile facts render instead", exc_info=True)
