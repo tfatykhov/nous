@@ -59,6 +59,7 @@ from nous.heart.temporal import as_date, format_span, sort_dated
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
 from nous.observability.retrieval_trace import RETURNED_TO_SCRIPT, SLICED_OFF
 from nous.skills.parser import SkillParser
+from nous.tool_markup import clean_model_text, markup_note
 from nous.tool_names import CHANGED_TOOLS, ToolAlias, canonical_tool_names, changed_tools_note
 from nous.utils import leaked_markup_start as _leak_tail_start
 from nous.utils import short_error
@@ -1496,6 +1497,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             MCP-compliant response with decision ID or error message
         """
         try:
+            removed: list[str] = []
             # Validate and construct input
             reason_inputs = []
             if reasons:
@@ -1504,7 +1506,16 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                         return _tool_error(
                             f"Error: Invalid reason format. Expected dict with 'type' and 'text', got: {r}"
                         )
-                    reason_inputs.append(ReasonInput(type=r["type"], text=r["text"]))
+                    reason_text, cut = clean_model_text(r["text"], tool="record_decision", field="text")
+                    removed.append(cut)
+                    reason_inputs.append(ReasonInput(type=r["type"], text=reason_text))
+
+            description, cut = clean_model_text(description, tool="record_decision", field="description")
+            removed.append(cut)
+            context, cut = clean_model_text(context, tool="record_decision", field="context")
+            removed.append(cut)
+            pattern, cut = clean_model_text(pattern, tool="record_decision", field="pattern")
+            removed.append(cut)
 
             input_data = RecordInput(
                 description=description,
@@ -1533,6 +1544,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                             f"Quality score: {result.quality_score:.2f}\n"
                             f"Category: {result.category}\n"
                             f"Stakes: {result.stakes}"
+                            f"{markup_note(*removed)}"
                         ),
                     }
                 ]
@@ -1576,6 +1588,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             episode_uuid = UUID(source_episode_id) if source_episode_id else None
             decision_uuid = UUID(source_decision_id) if source_decision_id else None
 
+            content, removed_content = clean_model_text(content, tool="learn_fact", field="content")
+            subject, removed_subject = clean_model_text(subject, tool="learn_fact", field="subject")
             input_data = FactInput(
                 content=content,
                 category=category,
@@ -1622,6 +1636,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                             f"Category: {result.category or 'none'}\n"
                             f"Subject: {result.subject or 'none'}"
                             f"{warning_msg}"
+                            f"{markup_note(removed_content, removed_subject)}"
                         ),
                     }
                 ]
@@ -2017,6 +2032,8 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             decision_uuid = UUID(learned_from_decision) if learned_from_decision else None
             episode_uuid = UUID(learned_from_episode) if learned_from_episode else None
 
+            # Not trigger_pattern: it is a regex or substring, matched as written.
+            reason, removed_reason = clean_model_text(reason, tool="create_censor", field="reason")
             input_data = CensorInput(
                 trigger_pattern=trigger_pattern,
                 reason=reason,
@@ -2041,6 +2058,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                             f"Action: {result.action}\n"
                             f"Domain: {result.domain or 'all'}\n"
                             f"Pattern: {result.trigger_pattern}"
+                            f"{markup_note(removed_reason)}"
                         ),
                     }
                 ]
@@ -5307,6 +5325,8 @@ def create_programmatic_tools(
             from uuid import UUID as _UUID
 
             ep_uuid = _UUID(_active_episode_id) if _active_episode_id else None
+            content, _ = clean_model_text(content, tool="run_python.learn_fact", field="content")
+            subject, _ = clean_model_text(subject, tool="run_python.learn_fact", field="subject")
             result = _schedule(
                 heart.learn(
                     FactInput(

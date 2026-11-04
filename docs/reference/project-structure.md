@@ -18,6 +18,7 @@ nous/
 │   ├── owner_actions.py        # F099 Phase 2d: callback-data codec and refusal vocabulary shared by the publisher, the REST routes and the Telegram bot (stdlib only)
 │   ├── events.py               # Event bus (async pub/sub)
 │   ├── utils.py                # Shared utilities
+│   ├── tool_markup.py          # Strips tool-call markup a model leaked into a stored value (</content><parameter ...>), used by the memory write paths and scripts/ops/clean_tool_markup.py
 │   ├── loop_watchdog.py        # Event-loop stall watchdog (stack dump + exit)
 │   ├── log_redaction.py        # Logging setup for both entry points: keeps the bot token and the API key out of the logs
 │   ├── cancellation.py         # cancel_requested(): a task's own cancellation, as opposed to one that came out of something it awaited
