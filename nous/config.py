@@ -1711,6 +1711,20 @@ class Settings(BaseSettings):
             "MAX bound activation <= seed_score."
         ),
     )
+    # 2026-11-03 memory review, PR-S: an eval arm that spreads over the edges
+    # that carry information only. Off reproduces today's SQL byte for byte.
+    spreading_associative_edges_only: bool = Field(
+        default=False,
+        description=(
+            "When true, spreading activation traverses ONLY associative edges "
+            "(relation co_occurred, or extraction_method co_mention), whatever "
+            "spreading_associative_edges_enabled says; supersedes, contradicts and "
+            "happened_before stay excluded even when such an edge carries method "
+            "co_mention. spreading_associative_weight_mult is not applied: it ranks "
+            "an associative hop below a regular one, and no regular hop is taken, so "
+            "it would only rescale every row against the absolute activation floor."
+        ),
+    )
     # F105 Task 5: query-conditioned gate, applied to the CTE's rows in Stage 4
     # (retrieval_pipeline) before the floor and the cap. The SQL is unchanged.
     spreading_query_gate_enabled: bool = Field(
@@ -1751,6 +1765,32 @@ class Settings(BaseSettings):
             "or negative query cosine still gates its rows. 0.19 is the median "
             "cos(seed, query) of the Task 5 replay (831 seeds, text-embedding-3-large "
             "at 1536 dimensions); another embedding model needs its own value."
+        ),
+    )
+    # 2026-11-03 memory review B-7: the gate ran before the absolute floor, so
+    # a typical depth-1 row with any factor below about 0.56 fell under 0.1.
+    spreading_query_gate_order_only: bool = Field(
+        default=False,
+        description=(
+            "When true (and the query gate is on), the activation floor compares each "
+            "row's RAW activation, so the gate no longer removes rows there. The gated "
+            "value still orders the rows for the result cap and is still the row's "
+            "score (edge_weight), so a row the gate scores 0 survives at score 0. Off: "
+            "the floor sees the gated value, as before."
+        ),
+    )
+    # 2026-11-03 memory review B-5: a node without an embedding was neutral
+    # (1.0) while an embedded one is scaled down, so unembedded nodes were
+    # favoured into the result cap.
+    spreading_query_gate_unembedded_factor: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "The query gate's factor for a spreading row whose node has no embedding, "
+            "in every gate mode. 1.0 (default) is today's neutral factor; a value "
+            "below 1 stops such a row from outranking embedded rows the gate scales "
+            "down. A seed without an embedding stays neutral in seed_relative mode."
         ),
     )
     # F105 Task 6: a budget on spreading rows in the merged recall list
@@ -1907,6 +1947,19 @@ class Settings(BaseSettings):
     ce_backfill_threshold_decision_decision: float = 0.50  # F054: 0.60 -> 0.50
     ce_backfill_threshold_episode_episode: float = 0.50  # F054: 0.58 -> 0.50
     ce_backfill_threshold_procedure_any: float = 0.45  # F054: 0.55 -> 0.45
+    # 2026-11-03 memory review J-6: a floor under every orphan-backfill and
+    # cluster-bridge threshold above, so an arm can stop the densifier admitting
+    # edges at cosine 0.45-0.55. 0.0 (default) leaves every threshold as is.
+    graph_backfill_min_cosine: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Lowest cosine the densifier's orphan backfill (same-type and cross-type) "
+            "and cluster discovery may admit an edge at: each per-relation threshold "
+            "(strict or CE mode) is raised to this when below it. 0.0 changes nothing."
+        ),
+    )
 
     # F045: content-length guard for CE backfill. Candidates whose content is
     # shorter than this (after strip) are dropped before CE inference — filters

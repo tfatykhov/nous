@@ -300,16 +300,22 @@ async def spreading_activation_search(
     # its own predicate. (The SQL comment at the traversal's WHERE describes the
     # default and stays as is: the flags-off text must not change.)
     allow_associative = bool(getattr(settings, "spreading_associative_edges_enabled", False))
+    # PR-S: associative edges alone. The weight multiplier ranks an associative
+    # hop below a regular one; with no regular hop it would only rescale every
+    # row against the absolute floor, so it is not applied in this mode.
+    associative_only = bool(getattr(settings, "spreading_associative_edges_only", False))
 
     def edge_filter(col_prefix: str) -> str:
-        return spreading_exclusion_sql(col_prefix, allow_associative=allow_associative)
+        return spreading_exclusion_sql(
+            col_prefix, allow_associative=allow_associative, associative_only=associative_only,
+        )
 
     excl_e = edge_filter("e.")
 
     # F105 fragments: each is "" while its option is off, so the SQL is then
     # byte-identical to before (tests/test_spreading_sql_identity.py).
     fan_join = fan_mult = assoc_mult = ""
-    if allow_associative:
+    if allow_associative and not associative_only:
         params["assoc_mult"] = float(getattr(settings, "spreading_associative_weight_mult", 0.5))
         assoc_mult = (
             f"\n                    * CASE WHEN {associative_edge_sql('e.')}"
@@ -504,35 +510,40 @@ def gate_factor(
     q_lo: float,
     q_hi: float,
     s_min: float,
+    unembedded: float = 1.0,
 ) -> float:
     """F105: the query gate's multiplier for one spreading row, always in [0, 1].
 
     - ``seed_relative``: ``min(1, max(cos_node, 0) / max(cos_seed, s_min))``. A
       node as relevant to the query as the seed that activated it keeps full
       activation; a seed with a cosine below ``s_min`` (zero or negative too)
-      is divided by ``s_min``, so it still gates. Neutral (1.0) when either
-      cosine is None.
+      is divided by ``s_min``, so it still gates. Neutral (1.0) when
+      ``cos_seed`` is None.
     - ``quantile``: ``clamp((cos_node - q_lo) / (q_hi - q_lo), 0, 1)``.
     - ``raw``: ``max(cos_node, 0)``.
 
-    ``quantile`` and ``raw`` are neutral when ``cos_node`` is None. The result is
-    clamped, so a cosine a hair above 1 cannot amplify. ``s_min`` must be
-    positive (the setting is ``gt=0``): at 0 a non-positive seed cosine would
-    divide by zero, so a direct caller gets a ``ValueError`` instead.
+    In every mode a node whose ``cos_node`` is None gets ``unembedded`` (1.0,
+    neutral, by default; review B-5: neutral favours such a node over embedded
+    ones the gate scales down). The result is clamped, so a cosine a hair above
+    1 cannot amplify. ``s_min`` must be positive (the setting is ``gt=0``): at 0
+    a non-positive seed cosine would divide by zero, so a direct caller gets a
+    ``ValueError`` instead.
     """
     if s_min <= 0:
         raise ValueError(f"s_min must be positive, got {s_min!r}")
     if mode == "seed_relative":
-        if cos_node is None or cos_seed is None:
+        if cos_node is None:
+            return min(1.0, max(0.0, unembedded))
+        if cos_seed is None:
             return 1.0
         factor = max(cos_node, 0.0) / max(cos_seed, s_min)
     elif mode == "quantile":
         if cos_node is None:
-            return 1.0
+            return min(1.0, max(0.0, unembedded))
         factor = (cos_node - q_lo) / (q_hi - q_lo)
     elif mode == "raw":
         if cos_node is None:
-            return 1.0
+            return min(1.0, max(0.0, unembedded))
         factor = cos_node
     else:
         raise ValueError(f"unknown spreading query gate mode {mode!r}")

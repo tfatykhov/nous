@@ -30,8 +30,10 @@ Two sets, because the correct exclusion depends on consumer PURPOSE:
 F105 Task 4 gives the spreading TRAVERSAL its own predicate,
 ``spreading_exclusion_sql``. By default it is the auto-behavior one; behind
 ``spreading_associative_edges_enabled`` it admits the associative edges and keeps
-refusing lineage, negative and temporal ones. The density gate, orphan detection
-and cluster discovery keep ``autobehavior_exclusion_sql`` whatever that flag says.
+refusing lineage, negative and temporal ones. Behind
+``spreading_associative_edges_only`` it admits the associative edges alone. The
+density gate, orphan detection and cluster discovery keep
+``autobehavior_exclusion_sql`` whatever those flags say.
 """
 
 from __future__ import annotations
@@ -77,15 +79,24 @@ SPREADING_ALWAYS_EXCLUDED_RELATIONS: frozenset[str] = frozenset(
 )
 
 
-def spreading_exclusion_sql(col_prefix: str = "", *, allow_associative: bool = False) -> str:
+def spreading_exclusion_sql(
+    col_prefix: str = "", *, allow_associative: bool = False, associative_only: bool = False,
+) -> str:
     """SQL boolean fragment for the edges spreading activation may traverse.
 
     ``allow_associative=False`` returns exactly :func:`autobehavior_exclusion_sql`.
     ``True`` excludes only :data:`SPREADING_ALWAYS_EXCLUDED_RELATIONS`, so
-    ``co_occurred`` and ``co_mention`` edges become traversable."""
+    ``co_occurred`` and ``co_mention`` edges become traversable.
+    ``associative_only=True`` (whatever ``allow_associative`` says) admits only
+    the associative edges (:func:`associative_edge_sql`), and still none of
+    :data:`SPREADING_ALWAYS_EXCLUDED_RELATIONS`: a ``supersedes`` edge carrying
+    method ``co_mention`` stays refused."""
+    always = f"{col_prefix}relation NOT IN ({_sql_list(SPREADING_ALWAYS_EXCLUDED_RELATIONS)})"
+    if associative_only:
+        return f"{always} AND {associative_edge_sql(col_prefix)}"
     if not allow_associative:
         return autobehavior_exclusion_sql(col_prefix)
-    return f"{col_prefix}relation NOT IN ({_sql_list(SPREADING_ALWAYS_EXCLUDED_RELATIONS)})"
+    return always
 
 
 def associative_edge_sql(col_prefix: str = "") -> str:
