@@ -3580,10 +3580,29 @@ class Settings(BaseSettings):
     )
     chunk_cross_episode_top_k: int = Field(
         default=20,
+        ge=1,
         description=(
             "F070.1: HNSW-bounded LIMIT for the cross-episode cosine scan "
             "per chunk. Higher = more candidates to threshold-gate; lower = "
             "tighter. 20 lands ~5 surviving neighbors per chunk in eval."
+        ),
+    )
+    chunk_cross_episode_live_enabled: bool = Field(
+        default=False,
+        description=(
+            "J-3: run the F070.1 cross-episode chunk pass in every sleep "
+            "cycle's graph backfill (GraphDensifier.run_backfill_cycle), not "
+            "only from scripts/backfill_f070_chunks.py. Also needs "
+            "chunk_consolidation_enabled and graph_backfill_enabled. Lands "
+            "dark: the new edges enter Path A at full weight."
+        ),
+    )
+    chunk_cross_episode_live_max: int = Field(
+        default=200,
+        ge=1,
+        description=(
+            "J-3: chunks the live cross-episode pass visits per sleep cycle "
+            "(the script keeps graph_backfill_max_chunks_cross_episode)."
         ),
     )
 

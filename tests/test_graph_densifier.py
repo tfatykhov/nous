@@ -2833,3 +2833,358 @@ async def test_interrupted_cycle_marks_only_processed_and_keeps_window(
     visits.clear()
     await d.backfill_orphan_facts(max_count=3)
     assert [oid for _, oid in visits] == [f[1]]
+
+
+# ---------------------------------------------------------------------------
+# PR-J3: the F070.1 cross-episode chunk pass on the live sleep cycle, behind
+# chunk_cross_episode_live_enabled (default off).
+# ---------------------------------------------------------------------------
+
+
+def _live_densifier(db, settings, embedder, agent_id: str, **overrides) -> GraphDensifier:
+    """Densifier with chunk consolidation on and the live cross pass as asked."""
+    update = {
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+        "chunk_cross_episode_top_k": 10,
+    }
+    update.update(overrides)
+    s_local = settings.model_copy(update=update)
+    linker = GraphLinker(db, embedder, s_local, agent_id)
+    return GraphDensifier(db, linker, embedder, s_local, agent_id)
+
+
+async def _insert_cross_candidates(db, embedder, agent_id: str, vecs: list) -> list:
+    """One episode per vector, each with one chunk that already has a
+    non-cross edge (so it is a cross-episode candidate, not a v1 orphan).
+    Chunk i is i minutes old, newest first."""
+    now = datetime.now(UTC)
+    chunks = []
+    async with db.session() as s:
+        for i, vec in enumerate(vecs):
+            ep = await _insert_episode(s, agent_id, f"cross candidate episode {i}")
+            cid = uuid4()
+            await s.execute(text("""
+                INSERT INTO heart.episode_chunks
+                    (id, agent_id, episode_id, chunk_index, content, embedding, created_at)
+                VALUES (:id, :a, :ep, 0, :c, CAST(:e AS vector), :t)
+            """), {
+                "id": cid, "a": agent_id, "ep": ep, "c": f"cross candidate chunk {i}",
+                "e": "[" + ",".join(str(float(v)) for v in vec) + "]",
+                "t": now - timedelta(minutes=i),
+            })
+            await _insert_edge(s, agent_id, cid, ep, "chunk", "episode")
+            chunks.append(cid)
+        await s.commit()
+    return chunks
+
+
+def _spy_on_cross_linking(d: GraphDensifier) -> list:
+    """Record which chunks the cross-episode pass visits; link nothing."""
+    visits: list = []
+
+    async def _chunks(chunk_id, source_episode_id, threshold, top_k, session, **kwargs):
+        visits.append(chunk_id)
+        return 0
+
+    async def _facts(chunk_id, source_episode_id, threshold, top_k, session):
+        return 0
+
+    d._link_chunk_to_cross_episode_chunks = _chunks
+    d._link_chunk_to_cross_episode_facts = _facts
+    return visits
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_run_backfill_cycle_runs_cross_episode_pass_when_live_flag_on(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    agent_id = f"test-j3-on-{uuid4().hex[:8]}"
+    vec = await mock_embeddings.embed(agent_id)
+    c_a, c_b = await _insert_cross_candidates(db, mock_embeddings, agent_id, [vec, vec])
+    d = _live_densifier(
+        db, settings, mock_embeddings, agent_id,
+        chunk_cross_episode_live_enabled=True,
+        graph_threshold_chunk_chunk_cross=0.4,
+    )
+
+    result = await d.run_backfill_cycle()
+
+    assert result.get("chunks_cross_episode", 0) >= 1
+    rows = await _pair_edges(db, agent_id, c_a, c_b)
+    assert [r.relation for r in rows] == ["related_to"]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_run_backfill_cycle_skips_cross_episode_pass_when_live_flag_off(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    agent_id = f"test-j3-off-{uuid4().hex[:8]}"
+    vec = await mock_embeddings.embed(agent_id)
+    c_a, c_b = await _insert_cross_candidates(db, mock_embeddings, agent_id, [vec, vec])
+    d = _live_densifier(
+        db, settings, mock_embeddings, agent_id, graph_threshold_chunk_chunk_cross=0.4,
+    )
+
+    result = await d.run_backfill_cycle()
+
+    assert result.get("chunks_cross_episode") == 0
+    assert await _pair_edges(db, agent_id, c_a, c_b) == []
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cross_episode_live_pass_respects_its_cap(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """The live pass visits at most chunk_cross_episode_live_max chunks per
+    cycle (not the script's graph_backfill_max_chunks_cross_episode)."""
+    agent_id = f"test-j3-cap-{uuid4().hex[:8]}"
+    vecs = [await mock_embeddings.embed(f"{agent_id}-{i}") for i in range(3)]
+    chunks = await _insert_cross_candidates(db, mock_embeddings, agent_id, vecs)
+    d = _live_densifier(
+        db, settings, mock_embeddings, agent_id,
+        chunk_cross_episode_live_enabled=True, chunk_cross_episode_live_max=2,
+    )
+    visits = _spy_on_cross_linking(d)
+
+    await d.run_backfill_cycle()
+
+    assert visits == chunks[:2]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cross_episode_live_pass_skips_attempted_and_wraps(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """Same window as J-7: chunks visited without a cross edge are skipped
+    until the window is exhausted, then the next cycle starts newest-first."""
+    agent_id = f"test-j3-wrap-{uuid4().hex[:8]}"
+    vecs = [await mock_embeddings.embed(f"{agent_id}-{i}") for i in range(3)]
+    chunks = await _insert_cross_candidates(db, mock_embeddings, agent_id, vecs)
+    d = _live_densifier(
+        db, settings, mock_embeddings, agent_id,
+        chunk_cross_episode_live_enabled=True, chunk_cross_episode_live_max=2,
+    )
+    visits = _spy_on_cross_linking(d)
+
+    per_cycle = []
+    for _ in range(3):
+        visits.clear()
+        await d.run_backfill_cycle()
+        per_cycle.append(list(visits))
+
+    assert per_cycle == [chunks[:2], chunks[2:], chunks[:2]]
+
+
+class _SpySession:
+    """Wraps an AsyncSession and records every statement it executes."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._s = session
+        self.statements: list = []
+
+    async def execute(self, stmt, params=None, *args, **kwargs):
+        self.statements.append((str(stmt), params))
+        return await self._s.execute(stmt, params, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._s, name)
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cross_episode_chunk_query_can_use_the_hnsw_index(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """C9: the chunk -> chunk neighbour query orders by distance to a bound
+    vector, so the HNSW index can serve its ORDER BY. (An ORDER BY on two
+    columns of a join cannot use it.) Which plan wins depends on table size,
+    so the plan is read with seq scans and sorts disabled: the HNSW scan is
+    then the only cheap way to deliver the order."""
+    agent_id = f"test-j3-plan-{uuid4().hex[:8]}"
+    vec = await mock_embeddings.embed(agent_id)
+    c_a, _ = await _insert_cross_candidates(db, mock_embeddings, agent_id, [vec, vec])
+    d = _live_densifier(db, settings, mock_embeddings, agent_id)
+
+    async with db.session() as s:
+        ep = (await s.execute(text(
+            "SELECT episode_id FROM heart.episode_chunks WHERE id = :i"
+        ), {"i": c_a})).scalar_one()
+        spy = _SpySession(s)
+        await d._link_chunk_to_cross_episode_chunks(c_a, ep, 0.99, 10, spy)
+        query, params = next(
+            (q, p) for q, p in spy.statements
+            if "heart.episode_chunks" in q and "ORDER BY" in q
+        )
+        await s.execute(text("SET LOCAL enable_seqscan = off"))
+        await s.execute(text("SET LOCAL enable_sort = off"))
+        plan = "\n".join(
+            r[0] for r in (await s.execute(text("EXPLAIN " + query), params)).all()
+        )
+        await s.rollback()
+
+    assert "idx_episode_chunks_embedding" in plan, plan
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cross_episode_queries_keep_default_ef_search_and_reset(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """C8: the neighbour queries run at pgvector's default ef_search (a wider
+    horizon sends the planner back to a seq scan on this table) with the
+    strict_order iterative scan, and leave the transaction at the defaults
+    even when an earlier query had widened it."""
+    agent_id = f"test-j3-ef-{uuid4().hex[:8]}"
+    vec = await mock_embeddings.embed(agent_id)
+    c_a, _ = await _insert_cross_candidates(db, mock_embeddings, agent_id, [vec, vec])
+    d = _live_densifier(db, settings, mock_embeddings, agent_id)
+
+    async with db.session() as s:
+        ep = (await s.execute(text(
+            "SELECT episode_id FROM heart.episode_chunks WHERE id = :i"
+        ), {"i": c_a})).scalar_one()
+        await s.execute(text("SET LOCAL hnsw.ef_search = 100"))
+        spy = _SpySession(s)
+        await d._link_chunk_to_cross_episode_chunks(c_a, ep, 0.99, 10, spy)
+        await d._link_chunk_to_cross_episode_facts(c_a, ep, 0.99, 10, spy)
+        ef = (await s.execute(text("SELECT current_setting('hnsw.ef_search')"))).scalar_one()
+        it = (await s.execute(text("SELECT current_setting('hnsw.iterative_scan')"))).scalar_one()
+        await s.rollback()
+
+    sets = [q for q, _ in spy.statements if q.startswith("SET LOCAL hnsw.")]
+    assert "SET LOCAL hnsw.ef_search = 40" in sets
+    assert "SET LOCAL hnsw.iterative_scan = strict_order" in sets
+    assert not any("ef_search = " in q and not q.endswith("= 40") for q in sets)
+    assert (ef, it) == ("40", "off")
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cross_episode_chunk_found_past_same_episode_horizon(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """Guard for the HNSW rewrite: 120 same-episode siblings sit nearer to
+    the chunk than its cross-episode matches, filling a 40-candidate horizon
+    that the episode filter then empties. The iterative scan must keep going
+    and still find a match. Seq scans and sorts are off so the HNSW path
+    runs (on a small table an exact scan would win and hide the horizon).
+    HNSW search is approximate in both directions, so the siblings are three
+    times the horizon (a few unreachable ones cannot leave it room for a
+    match) and the three matches go in first (a crowded cluster can leave a
+    late match without incoming links)."""
+    agent_id = f"test-j3-horizon-{uuid4().hex[:8]}"
+    base = await mock_embeddings.embed(f"{agent_id}-base")
+    async with db.session() as s:
+        ep_a = await _insert_episode(s, agent_id, "episode with many siblings")
+        ep_b = await _insert_episode(s, agent_id, "episode with the matches")
+        matches = set()
+        for j in range(3):
+            match_vec = await mock_embeddings.embed_near(
+                f"{agent_id}-base", noise=0.01 + j * 0.001,
+            )
+            matches.add(await _insert_chunk(s, agent_id, ep_b, j, f"match {j}", match_vec))
+        probe = await _insert_chunk(s, agent_id, ep_a, 0, "probe chunk", base)
+        for i in range(120):
+            # Distinct vectors: pgvector's HNSW stores identical vectors as one
+            # element, which would widen the horizon in tuples.
+            sibling = await mock_embeddings.embed_near(
+                f"{agent_id}-base", noise=0.001 + i * 0.00001,
+            )
+            await _insert_chunk(s, agent_id, ep_a, i + 1, f"sibling {i}", sibling)
+        await s.commit()
+    d = _live_densifier(db, settings, mock_embeddings, agent_id)
+
+    async with db.session() as s:
+        await s.execute(text("SET LOCAL enable_seqscan = off"))
+        await s.execute(text("SET LOCAL enable_sort = off"))
+        created = await d._link_chunk_to_cross_episode_chunks(probe, ep_a, 0.5, 5, s)
+        await s.commit()
+
+    assert created >= 1
+    async with db.session() as s:
+        linked = {
+            r.other for r in (await s.execute(text(
+                "SELECT CASE WHEN source_id = :p THEN target_id ELSE source_id END AS other "
+                "FROM brain.graph_edges WHERE agent_id = :a AND relation = 'related_to' "
+                "  AND (source_id = :p OR target_id = :p)"
+            ), {"a": agent_id, "p": probe})).all()
+        }
+    assert linked and linked <= matches
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cross_episode_fact_found_past_same_episode_horizon(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """The chunk -> fact twin of the guard above: 120 facts from the chunk's
+    own episode sit nearer than a fact from another episode. The fact query
+    can use the facts HNSW index too, so the iterative scan must get past
+    them and still find a match (three, inserted first, as above)."""
+    agent_id = f"test-j3-fhorizon-{uuid4().hex[:8]}"
+    base = await mock_embeddings.embed(f"{agent_id}-base")
+    async with db.session() as s:
+        ep_a = await _insert_episode(s, agent_id, "episode with many facts")
+        ep_b = await _insert_episode(s, agent_id, "episode with the matching facts")
+        matches = set()
+        for j in range(3):
+            match_vec = await mock_embeddings.embed_near(
+                f"{agent_id}-base", noise=0.01 + j * 0.001,
+            )
+            matches.add(await _insert_fact_with_episode(
+                s, agent_id, f"matching fact {j}", match_vec, ep_b,
+            ))
+        probe = await _insert_chunk(s, agent_id, ep_a, 0, "probe chunk", base)
+        for i in range(120):
+            near = await mock_embeddings.embed_near(
+                f"{agent_id}-base", noise=0.001 + i * 0.00001,
+            )
+            await _insert_fact_with_episode(s, agent_id, f"same-episode fact {i}", near, ep_a)
+        await s.commit()
+    d = _live_densifier(db, settings, mock_embeddings, agent_id)
+
+    async with db.session() as s:
+        await s.execute(text("SET LOCAL enable_seqscan = off"))
+        await s.execute(text("SET LOCAL enable_sort = off"))
+        created = await d._link_chunk_to_cross_episode_facts(probe, ep_a, 0.5, 5, s)
+        await s.commit()
+
+    assert created >= 1
+    async with db.session() as s:
+        linked = {
+            r.target_id for r in (await s.execute(text(
+                "SELECT target_id FROM brain.graph_edges WHERE agent_id = :a "
+                "  AND source_id = :p AND relation = 'summarized_by'"
+            ), {"a": agent_id, "p": probe})).all()
+        }
+    assert linked and linked <= matches
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_run_backfill_cycle_survives_a_failing_cross_episode_pass(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """Review P2 on #850: an error in the live cross-episode pass is logged
+    and counted as 0 edges; the cycle still runs its later passes, so the
+    sleep phase still records what the earlier passes committed."""
+    agent_id = f"test-j3-fail-{uuid4().hex[:8]}"
+    d = _live_densifier(
+        db, settings, mock_embeddings, agent_id, chunk_cross_episode_live_enabled=True,
+    )
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("neighbour query failed")
+
+    d._cross_episode_pass = _boom
+
+    result = await d.run_backfill_cycle()
+
+    assert result["chunks_cross_episode"] == 0
+    assert "_happened_before" in result
+    assert "_co_mention" in result

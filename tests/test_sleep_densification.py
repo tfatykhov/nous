@@ -150,3 +150,24 @@ async def test_graph_densification_reports_orphan_window_counters(handler):
     assert sleep_stats["orphan_edges_created"] == 5
     assert sleep_stats["orphans_visited"] == 200
     assert sleep_stats["orphan_window_wraps"] == 1
+
+
+@pytest.mark.asyncio
+async def test_graph_densification_reports_cross_episode_chunk_edges(handler):
+    """J-3: the live cross-episode chunk edges count toward
+    orphan_edges_created and are also reported on their own."""
+    densifier = MagicMock()
+    densifier.run_backfill_cycle = AsyncMock(return_value={
+        "facts": 1,
+        "chunks": 0,
+        "chunks_cross_episode": 4,
+        "_ce_stats": {"survived": 0, "pruned": 0},
+    })
+    densifier.discover_clusters = AsyncMock(return_value=0)
+    handler._graph_densifier = densifier
+
+    sleep_stats = {}
+    assert await handler._phase_graph_densification(sleep_stats) is True
+
+    assert sleep_stats["orphan_edges_created"] == 5
+    assert sleep_stats["chunk_cross_episode_edges"] == 4
