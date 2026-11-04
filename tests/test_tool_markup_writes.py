@@ -168,6 +168,47 @@ async def test_record_decision_fills_unset_context_and_pattern(env):
     )
 
 
+async def _decision(db, did):
+    async with db.session() as s:
+        return (
+            await s.execute(text("SELECT description, context, pattern FROM brain.decisions WHERE id = :i"), {"i": did})
+        ).one()
+
+
+@pytest.mark.asyncio
+async def test_a_recovered_value_keeps_a_literal_less_than(env):
+    """The value runs to its matching closer, not to the first '<'."""
+    tools, db, _ = env
+    result = await tools["record_decision"](
+        description=(
+            "Gate the coastal feed on load.</description>"
+            '<parameter name="context">Only enable when load < 5; otherwise reject.</parameter></invoke>'
+        ),
+        confidence=0.8,
+        category="tooling",
+        stakes="low",
+    )
+    row = await _decision(db, _id(result))
+    assert row.description == "Gate the coastal feed on load."
+    assert row.context == "Only enable when load < 5; otherwise reject."
+
+
+@pytest.mark.asyncio
+async def test_a_value_whose_end_cannot_be_told_is_not_recovered(env, caplog):
+    tools, db, _ = env
+    with caplog.at_level("WARNING", logger="nous.api.tools"):
+        result = await tools["record_decision"](
+            description='Gate the coastal feed on load.</description>\n<parameter name="context">load <b>high',
+            confidence=0.8,
+            category="tooling",
+            stakes="low",
+        )
+    row = await _decision(db, _id(result))
+    assert row.description == "Gate the coastal feed on load."
+    assert row.context is None
+    assert "not recovered" in caplog.text and "context" in caplog.text
+
+
 @pytest.mark.asyncio
 async def test_resolve_decisions_stores_a_clean_note(env):
     tools, db, _ = env

@@ -243,8 +243,8 @@ async def scan(
                     fingerprint=row["fp"],
                     old=old,
                     new=new,
-                    calls=calls_in("".join(removed)),
-                    params=params_in("".join(removed)),
+                    calls=[call for cut in removed for call in calls_in(cut)],
+                    params=list(dict.fromkeys(name for cut in removed for name in params_in(cut))),
                     old_embed_text=t.embed_text(row, settings),
                     new_embed_text=t.embed_text(after, settings),
                 )

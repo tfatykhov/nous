@@ -7,7 +7,14 @@ import time
 
 import pytest
 
-from nous.tool_markup import calls_in, clean_model_text, markup_note, params_in, strip_tool_markup
+from nous.tool_markup import (
+    calls_in,
+    clean_model_text,
+    leaked_values,
+    markup_note,
+    params_in,
+    strip_tool_markup,
+)
 
 # The namespaced form of the tags, built so this file holds no literal namespaced tag.
 NS = "antml" + ":"
@@ -95,6 +102,34 @@ KEEP = [
     ("See <https://example.com/x> or mail <tim@example.com>", "content", LEARN),
     ("", "content", LEARN),
     ("no markup at all", "content", LEARN),
+    # Fenced code blocks (CommonMark), separate from inline spans: tilde fences, a closing run
+    # longer than the opener, an indented opener, and an unclosed fence protecting to the end.
+    (
+        'Example:\n~~~xml\n<invoke name="learn_fact">\n<parameter name="content">example</parameter>\n'
+        "</invoke>\n~~~\nDo not execute this.",
+        "content",
+        LEARN,
+    ),
+    (
+        'Example:\n```\n<invoke name="learn_fact">\n<parameter name="content">x</parameter>\n</invoke>\n````\nDone.',
+        "content",
+        LEARN,
+    ),
+    ('Example:\n   ~~~~\nf.</content>\n<parameter name="category">technical\n~~~~~\nDone.', "content", LEARN),
+    ('Example:\n```\n<invoke name="learn_fact">\n<parameter name="content">x', "content", LEARN),
+    ('Example:\n~~~\nf.</content>\n<parameter name="category">technical', "content", LEARN),
+    # An open <parameter name=...> mid-sentence is prose about the format (a leak starts its line).
+    ('Each value opens with <parameter name="content"> and the text follows on the same line.', "content", LEARN),
+    ('The opening tag is <parameter name="content">. Nothing else is needed.', "content", LEARN),
+    ('After </parameter> comes <parameter name="category"> and its value, technical for instance.', "content", LEARN),
+    ('Tags used: <function_calls>, <invoke name="x">, <parameter name="y">.', "content", LEARN),
+    (
+        'Facts open with <parameter name="content">; decisions open with <parameter name="description">.',
+        "content",
+        LEARN,
+    ),
+    # An open plain <x> of a tool parameter at the end, with no tool tag: kept (see the module docstring).
+    ("f.\n<category>technical</category>\n<subject>s", "content", LEARN),
 ]
 
 
@@ -130,6 +165,62 @@ def test_linear_on_adversarial_input(text):
     t0 = time.perf_counter()
     strip_tool_markup(text, "content", LEARN)
     assert time.perf_counter() - t0 < 1.0
+
+
+def _best_time(text: str, n: int = 3) -> float:
+    best = float("inf")
+    for _ in range(n):
+        t0 = time.perf_counter()
+        strip_tool_markup(text, "content", LEARN)
+        best = min(best, time.perf_counter() - t0)
+    return best
+
+
+def test_many_openers_sharing_one_closer_are_linear():
+    """Each opener's run reaches the same closer; the gap after it must be read once, not per opener."""
+
+    def shape(n: int) -> str:
+        return "<x>" * n + "v</x>" + " " * n + "prose"
+
+    t40, t80 = _best_time(shape(40000)), _best_time(shape(80000))
+    assert t80 < 0.5
+    assert t80 < 2.5 * t40 + 0.005
+
+
+def test_a_leading_call_is_not_reported_as_one_that_never_ran():
+    """The <invoke> before the value is the call that ran; only the tail's calls did not."""
+    text = '<invoke name="learn_fact">\n<parameter name="content">Fact.</content>\n<parameter name="category">technical'
+    clean, removed = strip_tool_markup(text, "content", LEARN)
+    assert clean == "Fact."
+    assert calls_in(removed) == []
+    assert params_in(removed) == ["category"]
+    assert dict(leaked_values(removed)) == {"category": "technical"}
+
+
+@pytest.mark.parametrize(
+    ("removed", "expected"),
+    [
+        # The value runs to its matching closer; a literal '<' inside is kept.
+        (
+            '</description><parameter name="context">Only enable when load < 5; otherwise reject.</parameter></invoke>',
+            {"context": "Only enable when load < 5; otherwise reject."},
+        ),
+        ("</content>\n<category>a < b</category>\n<subject>s</subject>", {"category": "a < b", "subject": "s"}),
+        # A tag inside a value does not start a pair of its own.
+        (
+            '</content>\n<parameter name="subject">see <category>x</category> here</parameter>',
+            {"subject": "see <category>x</category> here"},
+        ),
+        # No closer, nothing tag-shaped after it: the rest is the value.
+        ('</content>\n<parameter name="category">technical', {"category": "technical"}),
+        # No closer, and a tag after it: the value cannot be told, so it is declined (None).
+        ('</content>\n<parameter name="subject">zone <b>x', {"subject": None}),
+        # Only the closed call's part: a later call's arguments are not this call's.
+        ('</content>\n</invoke>\n<invoke name="learn_fact">\n<parameter name="category">technical', {}),
+    ],
+)
+def test_leaked_values_run_to_the_matching_closer(removed, expected):
+    assert dict(leaked_values(removed)) == expected
 
 
 def _best_of(text: str, n: int = 5) -> float:

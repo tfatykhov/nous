@@ -59,7 +59,7 @@ from nous.heart.temporal import as_date, format_span, sort_dated
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
 from nous.observability.retrieval_trace import RETURNED_TO_SCRIPT, SLICED_OFF
 from nous.skills.parser import SkillParser
-from nous.tool_markup import clean_model_text, markup_note, own_call_part
+from nous.tool_markup import clean_model_text, leaked_values, markup_note
 from nous.tool_names import CHANGED_TOOLS, ToolAlias, canonical_tool_names, changed_tools_note
 from nous.utils import leaked_markup_start as _leak_tail_start
 from nous.utils import short_error
@@ -95,8 +95,6 @@ def _tool_error(text: str) -> dict[str, Any]:
 # The trailing run of leaked XML tool syntax, and how it is located, are shared
 # with the strategy-card distiller: see nous.utils.leaked_markup_start.
 _XML_PARAM_LEAK_PAIR = re.compile(r'<parameter\s+name="([^"]+)">\s*([^<]*)')
-# The same pair written as a tag named after the parameter: <category>technical.
-_XML_TAG_LEAK_PAIR = re.compile(r"<([A-Za-z_]\w*)>\s*([^<]*)")
 
 
 def _schema_params(schema: dict[str, Any]) -> frozenset[str]:
@@ -109,26 +107,33 @@ def _fill_from_leaked_markup(
 ) -> dict[str, Any]:
     """Values the markup stripped from a value gave to arguments the call left unset.
 
-    Only the part of each removed text before a new call (a later call's arguments are
-    not this call's), only names in ``unset``, coerced like the dispatcher's salvage;
+    ``leaked_values`` reads the pairs (``<parameter name="x">v`` and ``<x>v</x>``) of the
+    call the markup closed, each value up to its matching closer; a value whose end cannot
+    be told is declined. Only names in ``unset``, coerced like the dispatcher's salvage;
     the input model (FactInput, RecordInput, CensorInput) validates the result.
     """
     props = schema.get("properties", {})
     filled: dict[str, Any] = {}
+    declined: list[str] = []
     for cut in removed:
-        head = own_call_part(cut)
-        pairs = sorted(
-            (m.start(), m.group(1), m.group(2))
-            for pattern in (_XML_PARAM_LEAK_PAIR, _XML_TAG_LEAK_PAIR)
-            for m in pattern.finditer(head)
-        )
-        for _, key, raw in pairs:
-            if key in unset and key in props and key not in filled and raw.strip():
-                value = _coerce_to_schema_type(raw, props[key])
-                if value is not None:
-                    filled[key] = value
+        for key, raw in leaked_values(cut):
+            if key not in unset or key not in props or key in filled:
+                continue
+            if raw is None:
+                declined.append(key)
+                continue
+            value = _coerce_to_schema_type(raw, props[key]) if raw.strip() else None
+            if value is not None:
+                filled[key] = value
     if filled:
         logger.warning("%s: filled %s from leaked tool-call markup", tool_name, ", ".join(sorted(filled)))
+    not_recovered = sorted(set(declined) - set(filled))
+    if not_recovered:
+        logger.warning(
+            "%s: not recovered from leaked tool-call markup (value end unclear): %s",
+            tool_name,
+            ", ".join(not_recovered),
+        )
     return filled
 
 
@@ -1547,7 +1552,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     removed.append(cut)
                     reason_inputs.append(ReasonInput(type=r["type"], text=reason_text))
 
-            params = _schema_params(_RECORD_DECISION_SCHEMA)
+            params = _RECORD_DECISION_PARAMS
             top: list[str] = []
             description, cut = clean_model_text(description, tool="record_decision", field="description", params=params)
             top.append(cut)
@@ -1631,7 +1636,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             episode_uuid = UUID(source_episode_id) if source_episode_id else None
             decision_uuid = UUID(source_decision_id) if source_decision_id else None
 
-            params = _schema_params(_LEARN_FACT_SCHEMA)
+            params = _LEARN_FACT_PARAMS
             content, removed_content = clean_model_text(content, tool="learn_fact", field="content", params=params)
             subject, removed_subject = clean_model_text(subject, tool="learn_fact", field="subject", params=params)
             unset = [k for k, v in (("category", category), ("subject", subject)) if v is None]
@@ -2083,7 +2088,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
 
             # Not trigger_pattern: it is a regex or substring, matched as written.
             reason, removed_reason = clean_model_text(
-                reason, tool="create_censor", field="reason", params=_schema_params(_CREATE_CENSOR_SCHEMA)
+                reason, tool="create_censor", field="reason", params=_CREATE_CENSOR_PARAMS
             )
             if domain is None:
                 domain = _fill_from_leaked_markup(
@@ -2736,7 +2741,9 @@ _RESOLVE_DECISIONS_SCHEMA: dict[str, Any] = {
     "required": ["resolutions"],
 }
 
-# The names a reason's or a resolution's leaked markup can carry (see clean_model_text).
+# The parameter names of the write tools, for clean_model_text: <category> is markup only for a
+# tool that has it. A reason's markup can also carry the reason item's names.
+_RECORD_DECISION_PARAMS = _schema_params(_RECORD_DECISION_SCHEMA)
 _RESOLUTION_PARAMS = _schema_params(_RESOLVE_DECISIONS_SCHEMA["properties"]["resolutions"]["items"])
 _REASON_PARAMS = _schema_params(_RECORD_DECISION_SCHEMA) | _schema_params(
     _RECORD_DECISION_SCHEMA["properties"]["reasons"]["items"]
@@ -2799,6 +2806,7 @@ _LEARN_FACT_SCHEMA: dict[str, Any] = {
     },
     "required": ["content"],
 }
+_LEARN_FACT_PARAMS = _schema_params(_LEARN_FACT_SCHEMA)
 
 _RECALL_DEEP_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -2866,6 +2874,7 @@ _CREATE_CENSOR_SCHEMA: dict[str, Any] = {
     },
     "required": ["trigger_pattern", "reason"],
 }
+_CREATE_CENSOR_PARAMS = _schema_params(_CREATE_CENSOR_SCHEMA)
 
 _LEARN_SKILL_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -5391,7 +5400,7 @@ def create_programmatic_tools(
             from uuid import UUID as _UUID
 
             ep_uuid = _UUID(_active_episode_id) if _active_episode_id else None
-            params = _schema_params(_LEARN_FACT_SCHEMA)
+            params = _LEARN_FACT_PARAMS
             content, _ = clean_model_text(content, tool="run_python.learn_fact", field="content", params=params)
             subject, _ = clean_model_text(subject, tool="run_python.learn_fact", field="subject", params=params)
             result = _schedule(

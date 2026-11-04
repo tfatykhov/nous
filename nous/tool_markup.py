@@ -7,7 +7,7 @@ the value, for instance ``</content>``, and go on with the next parameters as ma
 string, and a write tool stores it as part of a fact or a decision.
 
 ``strip_tool_markup`` removes that spill-over and nothing else. It cuts at the first tag,
-outside a code span, that starts it:
+outside code, that starts it:
 
 * a closing tag that closes nothing the text opened, followed (after whitespace) by:
   the end of the text, when the tag is ``</parameter>``, ``</invoke>`` or
@@ -19,14 +19,21 @@ outside a code span, that starts it:
 * ``<invoke name=…>`` or ``<function_calls>`` followed by markup: a new call.
 * ``<parameter name=…>``, ``<x>`` (a parameter of the tool) or a plain ``<x>`` that starts
   a run of elements ending in a tool closing tag or a new call, or a
-  ``<parameter name=…>`` left open to the end of the text (the shape
-  ``nous.utils.leaked_markup_start`` finds for the dispatcher).
+  ``<parameter name=…>`` that starts its line and is left open to the end of the text
+  (the shape ``nous.utils.leaked_markup_start`` finds for the dispatcher).
 
-A run of complete elements with nothing after it (``<parameter name="x">v</parameter>``)
-is kept: it is as likely a quoted example. Code spans follow CommonMark: a run of N
-backticks opens one that only a run of exactly N backticks closes, and markup inside
-one is kept. It also removes a ``<parameter name="...">`` that opens the text. Markup in
-the middle of prose is left alone.
+Kept, as likely quoted: a run of complete elements with nothing after it
+(``<parameter name="x">v</parameter>``); an open ``<parameter name=…>`` after other words
+on its line (prose about the format); an open plain ``<x>`` of a tool parameter at the
+end with no tool tag after it (``f.\\n<category>t</category>\\n<subject>s``). Residual: an
+example of the format on a line of its own (``Like this:\\n<parameter name="content">``)
+is the leak shape itself and is cut.
+
+Code is kept: fenced blocks (a line of up to 3 spaces, then 3 or more backticks or
+tildes, closed by a line of the same character at least as long, or by the end of the
+text) and, outside them, inline code spans (a run of N backticks to the next run of
+exactly N), both as CommonMark has them. It also removes a ``<parameter name="...">``
+that opens the text.
 
 The dispatcher's ``_salvage_leaked_args`` (with ``leaked_markup_start``) fires only for a
 missing REQUIRED argument, so the write paths call this for every value they store.
@@ -52,7 +59,13 @@ _LEADING = re.compile(
     rf"\A\s*(?:<{_NS}function_calls>\s*)?(?:<{_NS}invoke\s+name=\"[^\"<>]*\">\s*)?"
     rf"<{_NS}parameter\s+name=\"[^\"<>]*\">"
 )
+# An opening that carries a value: <parameter name="x"> or <x>.
+_VALUE_OPEN = re.compile(rf"<{_NS}(?:parameter\s+name=\"([^\"<>]*)\"|([A-Za-z_][\w-]*+))\s*>")
 _BACKTICKS = re.compile(r"`+")
+_FENCE_OPEN = re.compile(r" {0,3}(`{3,}|~{3,})([^\n]*)")
+_FENCE_CLOSE = re.compile(r" {0,3}(`{3,}|~{3,})[ \t\r]*")
+_SPACE = re.compile(r"\s*")
+_INDENT = re.compile(r"[^\S\n]*")
 _TOOL_TAGS = frozenset({"parameter", "invoke", "function_calls"})
 _NAME_CHARS = re.compile(r"[^\w.-]")
 
@@ -61,9 +74,52 @@ _CLOSE_TOOL, _CLOSE, _CALL_OPEN, _PARAM, _PARAM_TAG, _TAG, _OTHER = range(7)
 _END, _PROSE = -1, -2
 
 
-def _code_spans(text: str) -> list[tuple[int, int]]:
-    """CommonMark code spans: a run of N backticks to the next run of exactly N. Linear."""
-    runs = [(m.start(), m.end()) for m in _BACKTICKS.finditer(text)]
+class Cut(str):
+    """The markup ``strip_tool_markup`` removed, as one string: a leading
+    ``<invoke …><parameter …>`` (``lead``, the call that ran) and the spill-over after the
+    value (``tail``). ``calls_in``, ``params_in`` and ``leaked_values`` read the tail only."""
+
+    lead: str
+    tail: str
+
+    def __new__(cls, lead: str, tail: str) -> Cut:
+        cut = super().__new__(cls, lead + tail)
+        cut.lead, cut.tail = lead, tail
+        return cut
+
+
+def _tail(removed: str) -> str:
+    return removed.tail if isinstance(removed, Cut) else removed
+
+
+def _fences(text: str) -> list[tuple[int, int]]:
+    """CommonMark fenced code blocks, line by line in one pass; an unclosed one runs to the end."""
+    spans: list[tuple[int, int]] = []
+    opened_at, char, length = -1, "", 0
+    pos = 0
+    while pos <= len(text):
+        eol = text.find("\n", pos)
+        line_end = len(text) if eol == -1 else eol
+        if opened_at < 0:
+            m = _FENCE_OPEN.match(text, pos, line_end)
+            if m and not (m.group(1)[0] == "`" and "`" in m.group(2)):  # a backtick info string has none
+                opened_at, char, length = pos, m.group(1)[0], len(m.group(1))
+        else:
+            m = _FENCE_CLOSE.match(text, pos, line_end)
+            if m and m.end() == line_end and m.group(1)[0] == char and len(m.group(1)) >= length:
+                spans.append((opened_at, line_end))
+                opened_at = -1
+        if eol == -1:
+            break
+        pos = eol + 1
+    if opened_at >= 0:
+        spans.append((opened_at, len(text)))
+    return spans
+
+
+def _inline_spans(text: str, start: int, end: int) -> list[tuple[int, int]]:
+    """CommonMark code spans in ``text[start:end]``: a run of N backticks to the next run of exactly N."""
+    runs = [(m.start(), m.end()) for m in _BACKTICKS.finditer(text, start, end)]
     by_len: dict[int, deque[int]] = {}
     for i, (s, e) in enumerate(runs):
         by_len.setdefault(e - s, deque()).append(i)
@@ -82,6 +138,17 @@ def _code_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
+def _code_spans(text: str) -> list[tuple[int, int]]:
+    """Fenced blocks, and the inline code spans between them, in text order. Linear."""
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for fence_start, fence_end in _fences(text):
+        spans += _inline_spans(text, start, fence_start)
+        spans.append((fence_start, fence_end))
+        start = fence_end
+    return spans + _inline_spans(text, start, len(text))
+
+
 def _kind(m: re.Match[str], params: Collection[str]) -> int:
     closing, name, attrs = m.group(1) == "/", m.group(2), m.group(3)
     if closing:
@@ -98,7 +165,12 @@ def _kind(m: re.Match[str], params: Collection[str]) -> int:
 
 
 class _Scan:
-    """The tags of one text, with what follows each, for one forward pass."""
+    """The tags of one text, with what follows each, for one forward pass.
+
+    Everything a candidate asks is precomputed or memoised, so no question rescans the
+    text: the token after each token (each gap read once), the closing tags per name (for a
+    binary search), the line starts and the run results.
+    """
 
     def __init__(self, text: str, params: Collection[str]) -> None:
         self.text = text
@@ -106,12 +178,20 @@ class _Scan:
         self.kinds = [_kind(m, params) for m in self.tokens]
         self.names = [m.group(2) for m in self.tokens]
         self._runs: dict[int, bool] = {}
-        # Closing-tag indices per name, for a binary search instead of a scan per element.
         self._closers: dict[str, list[int]] = {}
         for i, kind in enumerate(self.kinds):
             if kind in (_CLOSE, _CLOSE_TOOL):
                 self._closers.setdefault(self.names[i], []).append(i)
+        # The token after each one when only whitespace is between, else _END or _PROSE.
+        self._next: list[int] = []
+        for i, m in enumerate(self.tokens):
+            space_end = _SPACE.match(text, m.end()).end()  # a run of whitespace stops at the next '<'
+            if i + 1 < len(self.tokens):
+                self._next.append(i + 1 if space_end >= self.tokens[i + 1].start() else _PROSE)
+            else:
+                self._next.append(_END if space_end == len(text) else _PROSE)
         self._last_lt = text.rfind("<")
+        self._newlines: list[int] | None = None
 
     def _closer_after(self, j: int, name: str) -> int | None:
         indices = self._closers.get(name, [])
@@ -120,16 +200,21 @@ class _Scan:
 
     def next_of(self, i: int) -> int:
         """The token after token ``i`` when only whitespace is between, else _END or _PROSE."""
-        end = self.tokens[i].end()
-        if i + 1 < len(self.tokens):
-            gap = self.text[end : self.tokens[i + 1].start()]
-            return i + 1 if not gap.strip() else _PROSE
-        return _END if not self.text[end:].strip() else _PROSE
+        return self._next[i]
+
+    def starts_line(self, i: int) -> bool:
+        """Whether only spaces or tabs are between the line's start and token ``i``."""
+        if self._newlines is None:
+            self._newlines = [m.start() for m in re.finditer("\n", self.text)]
+        start = self.tokens[i].start()
+        k = bisect.bisect_left(self._newlines, start)
+        line_start = self._newlines[k - 1] + 1 if k else 0
+        return _INDENT.match(self.text, line_start).end() == start
 
     def run_ends_in_markup(self, j: int) -> bool:
         """Whether the run of elements from token ``j`` ends in a tool closing tag, a new call,
-        or a ``<parameter name=…>`` left open to the end. Memoised per element, so every token
-        is read once across all the runs a text holds."""
+        or a ``<parameter name=…>`` that starts its line and is left open to the end.
+        Memoised per element, so every token is read once across all the runs a text holds."""
         visited: list[int] = []
         result = False
         while True:
@@ -139,8 +224,9 @@ class _Scan:
             visited.append(j)
             c = self._closer_after(j, "parameter" if self.kinds[j] == _PARAM else self.names[j])
             if c is None:
-                # Left open to the end with no '<' in its value, as leaked_markup_start requires.
-                result = self.kinds[j] == _PARAM and self._last_lt < self.tokens[j].end()
+                # Left open to the end with no '<' in its value, as leaked_markup_start requires,
+                # and on a line of its own: after other words it is prose about the format.
+                result = self.kinds[j] == _PARAM and self._last_lt < self.tokens[j].end() and self.starts_line(j)
                 break
             nxt = self.next_of(c)
             if nxt < 0:
@@ -206,37 +292,38 @@ def strip_tool_markup(text: str, field: str | None = None, params: Collection[st
 
     ``field`` is the tool parameter the text came from (``content`` for ``learn_fact``)
     and ``params`` the tool's parameter names: ``<category>`` counts as markup only when
-    ``category`` is one of them. Returns ``(text, "")`` when nothing leaked.
+    ``category`` is one of them. The markup removed is a ``Cut``, which keeps a leading
+    ``<invoke …><parameter …>`` (the call that ran) apart from the spill-over. Returns
+    ``(text, "")`` when nothing leaked.
     """
     if not isinstance(text, str) or "<" not in text:
         return text, ""
-    removed: list[str] = []
     lead = _LEADING.match(text)
-    if lead:
-        removed.append(lead.group(0))
-        text = text[lead.end() :]
+    lead_text = lead.group(0) if lead else ""
+    text = text[len(lead_text) :]
     start = _tail_start(text, field, params)
+    tail_text = text[start:] if start is not None else ""
     if start is not None:
-        removed.append(text[start:])
         text = text[:start]
-    if not removed:
+    if not (lead_text or tail_text):
         return text, ""
-    return text.strip(), "".join(removed)
+    return text.strip(), Cut(lead_text, tail_text)
 
 
 def calls_in(removed: str) -> list[str]:
-    """Names of the tool calls the removed markup held: calls that never ran."""
-    return _CALL.findall(removed)
+    """Names of the tool calls the removed spill-over held: calls that never ran."""
+    return _CALL.findall(_tail(removed))
 
 
 def own_call_part(removed: str) -> str:
-    """The removed markup up to the first new call: the part that belongs to the call it closed."""
-    first_call = _CALL.search(removed)
-    return removed[: first_call.start()] if first_call else removed
+    """The spill-over up to the first new call: the part that belongs to the call it closed."""
+    tail = _tail(removed)
+    first_call = _CALL.search(tail)
+    return tail[: first_call.start()] if first_call else tail
 
 
 def params_in(removed: str) -> list[str]:
-    """Names the removed markup gave values to in the call it closed (not in calls after it).
+    """Names the removed spill-over gave values to in the call it closed (not in calls after it).
 
     Those values were meant as the call's other arguments. Each name is cut to 64
     characters of ``[\\w.-]``, since it is printed.
@@ -255,6 +342,34 @@ def params_in(removed: str) -> list[str]:
         if name and name not in names:
             names.append(name)
     return names
+
+
+def leaked_values(removed: str) -> list[tuple[str, str | None]]:
+    """The ``(name, value)`` pairs the spill-over gave the call it closed, in order.
+
+    A value runs to its matching closer (``</parameter>``, or ``</x>`` for ``<x>``), so a
+    literal '<' inside it is kept and a tag inside it starts no pair of its own. A value
+    with no closer is the rest of the cut when nothing tag-shaped follows it, else ``None``:
+    where it ends cannot be told, so it is not recovered.
+    """
+    head = own_call_part(removed)
+    pairs: list[tuple[str, str | None]] = []
+    pos = 0
+    while (m := _VALUE_OPEN.search(head, pos)) is not None:
+        name = m.group(1) if m.group(1) is not None else m.group(2)
+        if m.group(1) is None and name in _TOOL_TAGS:
+            pos = m.end()
+            continue
+        closer_name = "parameter" if m.group(1) is not None else re.escape(name)
+        closer = re.compile(rf"</{_NS}{closer_name}\s*>").search(head, m.end())
+        if closer is not None:
+            pairs.append((name, head[m.end() : closer.start()]))
+            pos = closer.end()
+            continue
+        rest = head[m.end() :]
+        pairs.append((name, None if _TOKEN.search(rest) else rest))
+        break
+    return pairs
 
 
 def clean_model_text(
@@ -280,11 +395,10 @@ def clean_model_text(
 
 def markup_note(*removed: str) -> str:
     """One line for a tool result when markup was removed, else ``""``."""
-    removed_text = "".join(removed)
-    if not removed_text:
+    if not any(removed):
         return ""
     note = "\nNote: tool-call markup at the end of the text was removed before storing it."
-    calls = calls_in(removed_text)
+    calls = [call for cut in removed for call in calls_in(cut)]
     if calls:
         note += (
             f" It held tool calls that did not run ({', '.join(calls)}); "
