@@ -3042,6 +3042,18 @@ class Settings(BaseSettings):
             "and a dated fact still gets its one-day interval."
         ),
     )
+    temporal_supersession_enabled: bool = Field(
+        default=False,
+        description=(
+            "Bi-temporal facts (S): supersession reads event time. A judged conflict "
+            "(classifier UPDATE/CONTRADICTION >= 0.8) is still required. Facts whose "
+            "intervals share no day coexist and are never judged; when they overlap the "
+            "later start wins and the loser's open interval is closed the day before; "
+            "a late-arriving fact that started earlier is closed instead and both stay. "
+            "Undated pairs keep today's logic, ordered by statement time "
+            "(mentioned_at, else learned_at). Off: every supersession path is unchanged."
+        ),
+    )
     candidate_facts_event_limit: int = Field(
         default=30,
         ge=0,

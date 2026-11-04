@@ -30,6 +30,7 @@ from nous.heart.search import (
     hybrid_search_multi,
     set_local_ef_search,
 )
+from nous.heart.temporal import HasInterval, Interval, IntervalRelation, close_before, interval_relation
 from nous.storage.database import Database
 from nous.storage.models import Episode, Event, Fact, FactEntityKey, GraphEdge
 from nous.utils import note_stage_error
@@ -310,6 +311,48 @@ class FactManager:
             return False
         self._key_calls += 1
         return True
+
+    def _temporal_supersession_on(self) -> bool:
+        """Flag S. `is True`, so a duck-typed settings object never enables it."""
+        return getattr(getattr(self, "_settings", None), "temporal_supersession_enabled", False) is True
+
+    def _time_relation(self, old: HasInterval, new: HasInterval) -> IntervalRelation | None:
+        """The pair's event-time relation under flag S, None with S off.
+
+        A judged conflict is still required before a relation decides anything,
+        except ``coexist``: intervals that share no day are skipped before the
+        classifier, as F075 skips one-day events on different days.
+        """
+        return interval_relation(old, new) if self._temporal_supersession_on() else None
+
+    @staticmethod
+    def _close_late_arrival(late: Fact, stored: HasInterval) -> None:
+        """S: a fact that arrives after ``stored`` but started before it is closed the
+        day before ``stored`` starts. Both stay active, and the pair now coexists."""
+        late.valid_to = close_before(stored.valid_from)
+        logger.info(
+            "Temporal supersession: late arrival %s closed at %s (stored fact starts %s)",
+            late.id,
+            late.valid_to,
+            stored.valid_from,
+        )
+
+    async def _late_arrival_by_id(
+        self,
+        new_fact_id: UUID,
+        stored: Fact,
+        session: AsyncSession,
+        keep_both_ids: list[UUID] | None,
+    ) -> Interval:
+        """The legacy path's late arrival: close the new fact, keep the pair out of
+        this learn's contradiction scan, and return the new fact's interval now."""
+        if keep_both_ids is not None:
+            keep_both_ids.append(stored.id)
+        new_fact = await self._get_fact_orm(new_fact_id, session)
+        if new_fact is None:
+            return Interval(None, None)
+        self._close_late_arrival(new_fact, stored)
+        return Interval(new_fact.valid_from, new_fact.valid_to)
 
     def key_budget_exhausted(self) -> bool:
         """Non-consuming peek at the hourly key-classifier budget. Rolls the
@@ -1219,6 +1262,7 @@ class FactManager:
                 exclude_ids=exclude_ids,
                 keep_both_ids=keep_both_ids,
                 new_category=input.category,
+                new_interval=Interval(input.valid_from, input.valid_to),
             )
 
         if (
@@ -1268,6 +1312,8 @@ class FactManager:
                     session,
                     new_fact_id=fact.id,
                     new_event_date=input.event_date,
+                    # The row, not the input: a late arrival was closed above.
+                    new_interval=Interval(fact.valid_from, fact.valid_to),
                 )
                 if contradiction is not None:
                     contradiction_warning = contradiction
@@ -1296,6 +1342,7 @@ class FactManager:
         session: AsyncSession,
         new_fact_id: UUID | None = None,
         new_event_date: date | None = None,
+        new_interval: Interval | None = None,
     ) -> ContradictionWarning | None:
         """Detect potential contradictions: similar embedding (0.85-0.95) but different content.
 
@@ -1308,18 +1355,27 @@ class FactManager:
 
         F075: a fact dated differently from ``new_event_date`` is a separate
         event, never a candidate (the same guard _supersede_by_subject has).
+
+        Flag S, with ``new_interval`` the new fact's interval after both
+        resolvers ran: a fact whose interval shares no day with it coexists
+        and is never a candidate, the rule both resolvers already apply.
+        Filtered in the SQL, so a coexisting fact cannot take the single slot.
         """
         if not embedding:
             return None
 
         embedding_str = "[" + ",".join(str(float(v)) for v in embedding) + "]"
 
+        new_interval = new_interval or Interval(None, None)
         params: dict = {
             "embedding": embedding_str,
             "agent_id": self.agent_id,
             "sim_min": self.CONTRADICTION_SIMILARITY_MIN,
             "sim_max": self.CONTRADICTION_SIMILARITY_MAX,
             "new_event_date": new_event_date,
+            "temporal": self._temporal_supersession_on(),
+            "new_valid_from": new_interval.valid_from,
+            "new_valid_to": new_interval.valid_to,
         }
 
         exclude_clause = ""
@@ -1352,6 +1408,11 @@ class FactManager:
               AND 1 - (embedding <=> CAST(:embedding AS vector)) <= :sim_max
               AND (CAST(:new_event_date AS date) IS NULL OR event_date IS NULL
                    OR event_date = CAST(:new_event_date AS date))
+              AND NOT (CAST(:temporal AS boolean)
+                       AND valid_from IS NOT NULL
+                       AND CAST(:new_valid_from AS date) IS NOT NULL
+                       AND (COALESCE(valid_to, DATE 'infinity') < CAST(:new_valid_from AS date)
+                            OR COALESCE(CAST(:new_valid_to AS date), DATE 'infinity') < valid_from))
               {exclude_clause}
             ORDER BY embedding <=> CAST(:embedding AS vector)
             LIMIT 1
@@ -1511,6 +1572,7 @@ class FactManager:
         exclude_ids: list[UUID] | None = None,
         keep_both_ids: list[UUID] | None = None,
         new_category: str | None = None,
+        new_interval: Interval | None = None,
     ) -> bool:
         """Supersede older facts with same subject AND similar content (006.2).
 
@@ -1556,9 +1618,20 @@ class FactManager:
         fact flagged KEEP-BOTH via ``_flag_contradiction_pair`` during this
         call is appended to it, so the caller can exclude it from a
         subsequent contradiction scan in the same learn.
+
+        Flag S (``temporal_supersession_enabled``), with ``new_interval`` the
+        new fact's ``valid_from``/``valid_to``: a candidate whose interval
+        shares no day with it is skipped (the F075 skip, generalised). Once the
+        classifier band has judged an UPDATE or CONTRADICTION, a later-starting
+        new fact wins, and a new fact that started earlier is closed the day
+        before the candidate starts, keeping both (the candidate goes to
+        ``keep_both_ids``). Above the band nothing is judged, so the direction
+        stays new-over-old, and the deactivation goes through
+        ``apply_supersession``, which closes the old fact's open interval.
         """
         if subject.strip().lower() in _SENTINEL_SUBJECTS:
             return False
+        new_interval = new_interval or Interval(None, None)
         excluded = set(exclude_ids or [])
         _supersession_threshold = self._settings.fact_supersession_threshold if self._settings else 0.80
         distance = Fact.embedding.cosine_distance(embedding)
@@ -1595,6 +1668,9 @@ class FactManager:
             # entirely, silently undoing the store-both verdict.
             if old.id in excluded:
                 continue
+            time_relation = self._time_relation(old, new_interval)
+            if time_relation == "coexist":
+                continue  # S: intervals that share no day coexist
             # F075: skip supersession on date-disagreement.
             if new_event_date is not None and old.event_date is not None and new_event_date != old.event_date:
                 continue
@@ -1636,7 +1712,12 @@ class FactManager:
                         if relation == "UPDATE":
                             if conf < 0.8 or current not in ("new", "old"):
                                 continue
-                            if current == "old":
+                            if time_relation == "old_later":
+                                new_interval = await self._late_arrival_by_id(new_fact_id, old, session, keep_both_ids)
+                                continue
+                            # S: a later-starting new fact is current, whatever
+                            # the classifier's direction.
+                            if current == "old" and time_relation != "new_later":
                                 # Old is current: the new fact loses, with lineage.
                                 if await self.apply_supersession(old.id, new_fact_id, session):
                                     # Codex r11 FIX 2: new fact is now inactive —
@@ -1663,9 +1744,15 @@ class FactManager:
                             # superseded with a wrong-type 'supersedes'
                             # edge; this uses the same uniform primitive
                             # (apply_supersession) the keyed paths use.
+                            if time_relation == "old_later":
+                                new_interval = await self._late_arrival_by_id(new_fact_id, old, session, keep_both_ids)
+                                continue
                             new_fact = await self._get_fact_orm(new_fact_id, session)
                             if new_fact is not None:
-                                winner = self._pick_contradiction_winner(old, new_fact)
+                                if time_relation == "new_later":
+                                    winner = new_fact  # S: the later start is current
+                                else:
+                                    winner = self._pick_contradiction_winner(old, new_fact)
                                 if winner is None:
                                     await self._flag_contradiction_pair(old, new_fact, session)
                                     if keep_both_ids is not None:
@@ -1681,6 +1768,19 @@ class FactManager:
                         else:
                             continue  # unknown relation: keep both
 
+                    if self._temporal_supersession_on():
+                        # S: through the shared primitive, which also closes
+                        # the old fact's open interval when the new one
+                        # starts later.
+                        if await self.apply_supersession(new_fact_id, old.id, session):
+                            logger.info(
+                                "Superseded fact %s (subject=%s, sim=%.2f) by %s",
+                                old.id,
+                                subject,
+                                similarity,
+                                new_fact_id,
+                            )
+                        continue
                     mark_fact_inactive(old, "superseded")
                     old.superseded_by = new_fact_id
                     # Mirror the column write with the graph edge so the
@@ -2461,6 +2561,17 @@ class FactManager:
         if winner is None or winner.active is False or winner.superseded_by is not None:
             logger.debug("apply_supersession: skip %s — winner %s is not current", loser_id, winner_id)
             return False
+        # S (forward update): the winner started later, so the loser's open
+        # interval ends the day before. Only a strictly later known start
+        # stamps: a tie or an unknown start never does.
+        if (
+            self._temporal_supersession_on()
+            and loser.valid_to is None
+            and loser.valid_from is not None
+            and winner.valid_from is not None
+            and winner.valid_from > loser.valid_from
+        ):
+            loser.valid_to = close_before(winner.valid_from)
         loser.superseded_by = winner_id
         mark_fact_inactive(loser, reason)
         await self._create_graph_edge(winner_id, loser_id, "fact", "fact", "supersedes", 1.0, session)
@@ -2796,6 +2907,11 @@ class FactManager:
         in the same transaction) are still included, with ``id`` as the
         deterministic tiebreak.
 
+        Flag S (bound as ``:temporal``, so the SQL text never changes) also
+        leaves out pairs whose intervals share no day: they coexist, and a late
+        arrival closed by ``resolve_key_conflict_pair`` becomes such a pair, so
+        the sweep converges instead of re-judging it every cycle.
+
         Args:
             after: Optional paging cursor ``(ts1, id1, ts2, id2)`` — the
                    full 4-tuple of the last pair processed.  The 4-tuple
@@ -2825,6 +2941,10 @@ class FactManager:
                   AND f1.subject_key IS NOT NULL AND f1.attribute_key IS NOT NULL
                   AND (f1.event_date IS NULL OR f2.event_date IS NULL
                        OR f1.event_date = f2.event_date)
+                  AND NOT (CAST(:temporal AS boolean)
+                           AND f1.valid_from IS NOT NULL AND f2.valid_from IS NOT NULL
+                           AND (COALESCE(f1.valid_to, DATE 'infinity') < f2.valid_from
+                                OR COALESCE(f2.valid_to, DATE 'infinity') < f1.valid_from))
                   AND (f1.learned_at, f1.id, f2.learned_at, f2.id)
                       > (:after_ts1, :after_id1, :after_ts2, :after_id2)
                 ORDER BY f1.learned_at ASC, f1.id ASC,
@@ -2838,6 +2958,7 @@ class FactManager:
                 "after_id1": after[1],
                 "after_ts2": after[2],
                 "after_id2": after[3],
+                "temporal": self._temporal_supersession_on(),
             }
         else:
             sql = text("""
@@ -2855,11 +2976,15 @@ class FactManager:
                   AND f1.subject_key IS NOT NULL AND f1.attribute_key IS NOT NULL
                   AND (f1.event_date IS NULL OR f2.event_date IS NULL
                        OR f1.event_date = f2.event_date)
+                  AND NOT (CAST(:temporal AS boolean)
+                           AND f1.valid_from IS NOT NULL AND f2.valid_from IS NOT NULL
+                           AND (COALESCE(f1.valid_to, DATE 'infinity') < f2.valid_from
+                                OR COALESCE(f2.valid_to, DATE 'infinity') < f1.valid_from))
                 ORDER BY f1.learned_at ASC, f1.id ASC,
                          f2.learned_at ASC, f2.id ASC
                 LIMIT :limit
             """)
-            params = {"agent_id": self.agent_id, "limit": limit}
+            params = {"agent_id": self.agent_id, "limit": limit, "temporal": self._temporal_supersession_on()}
         if session is None:
             async with self.db.session() as session:
                 rows = await session.execute(sql, params)
@@ -2905,6 +3030,12 @@ class FactManager:
                     id2,
                 )
                 return False
+            # S: a pair that shares no day coexists. The sweep's SQL already
+            # leaves such pairs out, but a page goes stale when an earlier pair
+            # on it closed one side, so check again before spending a slot.
+            time_relation = self._time_relation(f_old, f_new)
+            if time_relation == "coexist":
+                return False
             # Budget check after staleness guard (codex r8): stale pairs must
             # not consume a classifier slot — dense clusters of already-resolved
             # pairs would otherwise exhaust the hourly cap on no-ops.
@@ -2921,7 +3052,16 @@ class FactManager:
                 conf = 0.0
             if relation not in ("UPDATE", "CONTRADICTION") or conf < 0.8:
                 return False
-            if relation == "CONTRADICTION":
+            if time_relation == "old_later":
+                # S: f_new arrived later but started first. It is closed the day
+                # before f_old starts, both stay, and the pair now coexists, so
+                # later sweeps leave it alone.
+                self._close_late_arrival(f_new, f_old)
+                await session.commit()
+                return False
+            if time_relation == "new_later":
+                winner, loser = f_new, f_old  # S: the later start is current
+            elif relation == "CONTRADICTION":
                 # Gate-1 D1: statement order resolves CONTRADICTION, never the
                 # classifier's current_fact verdict — see _pick_contradiction_winner.
                 winner = self._pick_contradiction_winner(f_old, f_new)
@@ -2964,6 +3104,11 @@ class FactManager:
              present) else recency (learned_at).
         Never deletes; loser keeps full lineage via apply_supersession.
 
+        Flag S replaces 1 with "intervals that share no day coexist" and, after
+        2, lets the intervals decide direction: the later start wins, and a new
+        fact that started earlier is closed the day before ``old`` starts, with
+        both kept. Undated pairs keep 3, with statement time before learned_at.
+
         Returns True when the newly-inserted fact (``fact``) lost and is now
         inactive; False otherwise (codex r11).
 
@@ -2988,6 +3133,10 @@ class FactManager:
         for old in rows.scalars().all():
             if old.id in exclude_ids:
                 continue
+            # S: ``fact`` carries its interval, closed below if it arrives late.
+            time_relation = self._time_relation(old, fact)
+            if time_relation == "coexist":
+                continue  # S: intervals that share no day, never supersede
             if input.event_date is not None and old.event_date is not None and input.event_date != old.event_date:
                 continue  # F075 precedence: distinct events, never supersede
             if not self._key_budget_ok():
@@ -3004,7 +3153,16 @@ class FactManager:
                 conf = 0.0
             if relation not in ("UPDATE", "CONTRADICTION") or conf < 0.8:
                 continue  # not a confirmed same-slot conflict
-            if relation == "CONTRADICTION":
+            if time_relation == "old_later":
+                # S: the new fact arrived late and started first. It is closed
+                # the day before ``old`` starts, and both stay current.
+                self._close_late_arrival(fact, old)
+                if keep_both_ids is not None:
+                    keep_both_ids.append(old.id)
+                continue
+            if time_relation == "new_later":
+                winner, loser = fact, old  # S: the later start is current
+            elif relation == "CONTRADICTION":
                 # Gate-1 D1: statement order resolves CONTRADICTION, never the
                 # classifier's current_fact verdict (a memory store records
                 # what was said; a user's correction must beat the model's
@@ -3047,11 +3205,27 @@ class FactManager:
         # recency fallback (also the 'recency' policy): later learned_at wins;
         # the just-inserted fact's learned_at is now(), so new wins unless the
         # DB clock says otherwise (backfill can set learned_at explicitly).
+        if self._temporal_supersession_on():
+            # S: statement time first, learned_at on a tie; still a tie: new wins.
+            if self._later_statement(old_fact, new_fact) is old_fact:
+                return (old_fact, new_fact)
+            return (new_fact, old_fact)
         new_ts = new_fact.learned_at
         old_ts = old_fact.learned_at
         if new_ts is not None and old_ts is not None and old_ts > new_ts:
             return (old_fact, new_fact)
         return (new_fact, old_fact)
+
+    @staticmethod
+    def _later_statement(a: Fact, b: Fact) -> Fact | None:
+        """S: which fact was said later. Statement time is ``mentioned_at``, else
+        ``learned_at``. Facts from one episode share its start, so a tie there
+        falls to ``learned_at``. None when both tie or a time is missing."""
+        for key in (lambda f: f.mentioned_at or f.learned_at, lambda f: f.learned_at):
+            ta, tb = key(a), key(b)
+            if ta is not None and tb is not None and ta != tb:
+                return a if ta > tb else b
+        return None
 
     def _pick_contradiction_winner(self, old_fact: Fact, new_fact: Fact) -> Fact | None:
         """Gate-1 D1: CONTRADICTION resolves by TESTIMONY ORDER, never by which
@@ -3065,7 +3239,11 @@ class FactManager:
         resolution a coin-flip on call/UUID order rather than genuine
         testimony order, exactly the corruption class this fix removes.
         Equality now falls through to the learned_at tiebreak instead of
-        being treated as new_fact reading later."""
+        being treated as new_fact reading later.
+
+        Flag S puts statement time (``mentioned_at``, else ``learned_at``)
+        before ``learned_at``: a backfill or a backdated ingest learns facts in
+        another order than they were said."""
         if (
             old_fact.source_ordinal is not None
             and new_fact.source_ordinal is not None
@@ -3077,6 +3255,9 @@ class FactManager:
             if old_fact.source_ordinal > new_fact.source_ordinal:
                 return old_fact
             # Equal ordinals: no order signal from position — fall through.
+        if self._temporal_supersession_on():
+            # S: statement time (mentioned_at, else learned_at), then learned_at.
+            return self._later_statement(old_fact, new_fact)
         if old_fact.learned_at != new_fact.learned_at:
             return new_fact if new_fact.learned_at > old_fact.learned_at else old_fact
         return None
@@ -4398,7 +4579,7 @@ class FactManager:
         limit: int,
         session: AsyncSession,
     ) -> list[dict]:
-        params: dict = {"agent_id": self.agent_id, "limit": limit}
+        params: dict = {"agent_id": self.agent_id, "limit": limit, "temporal": self._temporal_supersession_on()}
         # F031 re-check cooldown: skip pairs resolved within the cooldown window
         # so genuine-KEEP_BOTH pairs aren't re-resolved every sleep cycle (wasted
         # LLM calls + LIMIT-slot starvation). Reuses the persisted resolution
@@ -4473,6 +4654,16 @@ class FactManager:
               -- NULL-source normal facts in scope.
               AND f2.source IS DISTINCT FROM 'exemplar_extractor'
               AND LOWER(f1.subject) = LOWER(f2.subject)
+              -- Flag S (bound as temporal, false when off) leaves out pairs
+              -- whose intervals share no day, such as a late arrival S closed
+              -- beside the stored fact, and two one-day events on different
+              -- days (the F075 rule, kept even where valid_from is missing).
+              AND NOT (CAST(:temporal AS boolean) AND (
+                  (f1.valid_from IS NOT NULL AND f2.valid_from IS NOT NULL
+                   AND (COALESCE(f1.valid_to, DATE 'infinity') < f2.valid_from
+                        OR COALESCE(f2.valid_to, DATE 'infinity') < f1.valid_from))
+                  OR (f1.event_date IS NOT NULL AND f2.event_date IS NOT NULL
+                      AND f1.event_date <> f2.event_date)))
               AND 1 - (f1.embedding <=> f2.embedding) > 0.75
               AND 1 - (f1.embedding <=> f2.embedding) < 0.95
             WHERE f1.agent_id = :agent_id
