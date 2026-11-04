@@ -626,12 +626,14 @@ async def _cleanup(db, *agent_ids: str) -> None:
         await cs.commit()
 
 
-@pytest.mark.integration
 @pytest.mark.postgres_only
 class TestF053MissingEndpointIntegration:
     """K-14: F053 also deletes edges whose endpoint row does not exist at all.
     The inactive-node pool can never match those (there is no row to be
-    inactive), so before this branch they survived every cycle."""
+    inactive), so before this branch they survived every cycle.
+
+    Marked ``postgres_only`` but not ``integration``: CI runs on Postgres
+    without ``--integration``, and these tests clean up their own agents."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("node_type", ["fact", "episode", "procedure", "decision", "chunk"])
