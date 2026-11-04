@@ -757,6 +757,7 @@ class GraphDensifier:
                 exclude_ids=self._orphan_seen.get("chunk"),
             )
             visited: list[UUID] = []
+            batch = {orphan_id for orphan_id, _content in orphans}
             for orphan_id, _content in orphans:
                 if self._interrupted:
                     break
@@ -796,6 +797,7 @@ class GraphDensifier:
                 # 3. chunk ↔ chunk intra-episode (sequential + non-adjacent)
                 chunk_edges = await self._link_chunk_to_intra_episode_chunks(
                     orphan_id, episode_id, thresh_chunk_chunk_intra, session,
+                    batch_peers=batch,
                 )
                 total += chunk_edges
 
@@ -988,6 +990,8 @@ class GraphDensifier:
         episode_id: UUID,
         cosine_threshold: float,
         session: AsyncSession,
+        *,
+        batch_peers: Collection[UUID] = frozenset(),
     ) -> int:
         """Link a chunk to other chunks in the same episode.
 
@@ -999,6 +1003,14 @@ class GraphDensifier:
           chunk — index adjacency across source kinds is an allocation
           artifact, not a structural relationship.
         - Non-adjacent (or cross-kind): cosine ≥ ``cosine_threshold``
+
+        Each pair is written once, smaller id as source. ``batch_peers`` are
+        the chunks the caller processes in the same pass: a pair with a
+        lower-id peer is left to that peer, so the second side does not hit
+        ON CONFLICT (which, with tinyHippo-Lite on, would count a
+        re-derivation on every new cosine pair). A lower-id sibling outside
+        the pass (already linked, e.g. when chunks are appended to an
+        episode) does not process this pair, so this chunk writes it.
 
         Returns count of edges created.
         """
@@ -1068,8 +1080,9 @@ class GraphDensifier:
                 provenance = "auto_linker"
             else:
                 continue
-            # C3: one row per sibling pair. The other sibling's own pass now
-            # hits ON CONFLICT instead of writing the reversed duplicate.
+            if row.id in batch_peers and str(row.id) < str(chunk_id):
+                continue  # the lower-id peer writes this pair in its own pass
+            # C3: one row per sibling pair, smaller id first.
             _, src_id, _, dst_id, _ = _orient("chunk", chunk_id, "chunk", row.id)
             edge = await self._linker.create_edge(
                 source_id=src_id,

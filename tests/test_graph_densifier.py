@@ -2457,9 +2457,10 @@ async def test_intra_episode_siblings_write_one_edge_per_pair(
     db, settings, mock_embeddings, _fix_stale_relation_constraint,
 ):
     """C3: processing every sibling of an episode stores each chunk pair once,
-    in id order. Side effect, with tinyHippo-Lite on (prod): the second
-    sibling's write of a COSINE pair hits ON CONFLICT and bumps that edge's
-    ltp_count once (c0-c2 here); adjacency pairs are ``structural`` and exempt."""
+    in id order, written by ONE side: the lower-id sibling of the pass. With
+    tinyHippo-Lite on (prod), a second write would hit ON CONFLICT and count
+    a re-derivation, so no pair, cosine (c0-c2) or adjacent, starts with an
+    ltp_count."""
     agent_id = f"test-j1-sib-{uuid4().hex[:8]}"
     s_local = settings.model_copy(update={
         "chunk_consolidation_enabled": True,
@@ -2492,11 +2493,47 @@ async def test_intra_episode_siblings_write_one_edge_per_pair(
     assert all(str(r.source_id) < str(r.target_id) for r in rows)
     assert got[frozenset((c0, c1))].extraction_method == "deterministic"
     assert got[frozenset((c1, c2))].extraction_method == "deterministic"
-    assert got[frozenset((c0, c1))].ltp_count == 0
-    assert got[frozenset((c1, c2))].ltp_count == 0
     cosine = got[frozenset((c0, c2))]
     assert cosine.extraction_method == "inferred"
-    assert cosine.ltp_count == 1
+    assert [r.ltp_count for r in rows] == [0, 0, 0]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_appended_chunk_links_to_an_already_linked_lower_id_sibling(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """N2 guard: a chunk appended to an episode whose older chunk is already
+    linked (so not an orphan, never processed again) still gets its pair,
+    even when the older chunk has the lower id. Only a lower-id sibling in
+    the same pass is left to write the pair."""
+    agent_id = f"test-j1-append-{uuid4().hex[:8]}"
+    s_local = settings.model_copy(update={
+        "chunk_consolidation_enabled": True,
+        "graph_backfill_enabled": True,
+    })
+    linker = GraphLinker(db, mock_embeddings, s_local, agent_id)
+    d = GraphDensifier(db, linker, mock_embeddings, s_local, agent_id)
+
+    old_id, new_id = sorted([uuid4(), uuid4()], key=str)
+    async with db.session() as s:
+        ep = await _insert_episode(s, agent_id, "episode that grows")
+        for cid, idx in ((old_id, 0), (new_id, 1)):
+            await s.execute(text("""
+                INSERT INTO heart.episode_chunks
+                    (id, agent_id, episode_id, chunk_index, content, embedding)
+                VALUES (:id, :a, :ep, :idx, :c, NULL)
+            """), {"id": cid, "a": agent_id, "ep": ep, "idx": idx, "c": f"chunk {idx}"})
+        # The older chunk was linked in an earlier cycle.
+        await _insert_edge(s, agent_id, old_id, ep, "chunk", "episode")
+        await s.commit()
+
+    await d.backfill_orphan_chunks()
+
+    rows = await _pair_edges(db, agent_id, old_id, new_id)
+    assert [(r.source_id, r.target_id, r.extraction_method) for r in rows] == [
+        (old_id, new_id, "deterministic"),
+    ]
 
 
 # J-7: the orphan window. The spies record which orphans each cycle visits;

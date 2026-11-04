@@ -2401,7 +2401,7 @@ class SleepHandler:
                             FROM brain.graph_edges e
                             WHERE e.agent_id = :agent_id
                               AND ({missing_endpoint})
-                            LIMIT :max_per_cycle
+                            LIMIT :lim
                         )
                         DELETE FROM brain.graph_edges
                         WHERE id IN (SELECT id FROM victim_edges)
@@ -2409,7 +2409,8 @@ class SleepHandler:
                     """)
                     result = await session.execute(
                         missing_sql,
-                        {"agent_id": agent_id, "max_per_cycle": remaining},
+                        # What is left of the cap after the first statement.
+                        {"agent_id": agent_id, "lim": remaining},
                     )
                     missing = len(result.all())
                 await session.commit()

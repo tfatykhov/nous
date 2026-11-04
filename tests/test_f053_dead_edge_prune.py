@@ -154,10 +154,10 @@ class TestF053DeadEdgePrune:
         )
         await handler._phase_prune_dead_edges({})
         # Nothing deleted by the first statement, so the second gets the whole cap.
-        for call in mock_session.execute.await_args_list:
-            params = call.args[1]
-            assert params["agent_id"] == handler._settings.agent_id
-            assert params["max_per_cycle"] == 42
+        first, second = (c.args[1] for c in mock_session.execute.await_args_list)
+        assert first["agent_id"] == second["agent_id"] == handler._settings.agent_id
+        assert first["max_per_cycle"] == 42
+        assert second["lim"] == 42
 
     @pytest.mark.asyncio
     async def test_sql_does_not_reference_decisions_active(self):
@@ -229,7 +229,8 @@ class TestF053DeadEdgePrune:
         )
         await handler._phase_prune_dead_edges({})
         calls = mock_session.execute.await_args_list
-        assert [c.args[1]["max_per_cycle"] for c in calls] == [5, 2]
+        assert calls[0].args[1]["max_per_cycle"] == 5
+        assert calls[1].args[1]["lim"] == 2
 
     @pytest.mark.asyncio
     async def test_missing_endpoint_statement_skipped_when_cap_spent(self):
