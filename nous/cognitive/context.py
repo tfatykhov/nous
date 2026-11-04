@@ -2436,7 +2436,8 @@ class ContextEngine:
         only when BOTH facts carry a non-None, DIFFERING event_date AND either share a
         superseded_by link or are content-similar (difflib >= floor). The one stated earlier
         (``learned_at``; event_date when the two share one) is down-ranked (*0.3) and tagged
-        'superseded'; the other tagged 'current'. Transient tags only.
+        'superseded'; the other tagged 'current'. On a chain of three or more, a fact that loses
+        any pair is superseded and down-ranked once, whatever the input order. Transient tags only.
         """
         import difflib
 
@@ -2456,6 +2457,15 @@ class ContextEngine:
         def _month(f) -> str:
             start = _interval(f)[0] or f.event_date
             return start.strftime("%Y-%m")
+
+        # Like the recall_deep copy: a pass collects each fact's status, "superseded" is sticky (a fact newer than one
+        # fact but older than another is superseded), then each tagged fact is labelled once and each superseded fact
+        # penalised once, so the result does not depend on input order. Keyed by object identity.
+        status: dict[int, str] = {}
+
+        def _mark(f, value: str) -> None:
+            if status.get(id(f)) != "superseded":
+                status[id(f)] = value
 
         groups: dict[str, list] = {}
         for f in facts:
@@ -2497,12 +2507,16 @@ class ContextEngine:
                         sa, sb = _stated_at(a, intervals), _stated_at(b, intervals)
                         a_newer = sa > sb if sa is not None and sb is not None and sa != sb else da > db
                         newer, older = (a, b) if a_newer else (b, a)
-                    newer.recency_status = "current"
-                    newer.recency_date = _month(newer)
-                    if older.recency_status != "current":
-                        older.recency_status = "superseded"
-                        older.recency_date = _month(older)
-                        older.score = (getattr(older, "score", None) or 0.0) * 0.3
+                    _mark(newer, "current")
+                    _mark(older, "superseded")
+        for f in facts:
+            value = status.get(id(f))
+            if value is None:
+                continue
+            f.recency_status = value
+            f.recency_date = _month(f)
+            if value == "superseded":
+                f.score = (getattr(f, "score", None) or 0.0) * 0.3
         return facts
 
     def _recall_backstop_text(self) -> str:
