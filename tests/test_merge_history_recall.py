@@ -386,12 +386,16 @@ class TestMigration098File:
 async def test_migration_098_stamps_exactly_the_merge_sources(heart, session):
     agent = f"test-098-{uuid4()}"
     edited = datetime(2026, 6, 1, 8, 0, tzinfo=UTC)  # the rows' last real edit
+    # The events below are written now, so a source the MERGE deactivated was
+    # last updated now as well. updated_at records when a row went inactive.
+    now = datetime.now(UTC)
 
     async def fact(content: str, gone_to: Fact | None = None, **cols) -> Fact:
         # gone_to: an inactive pre-094 row superseded by that fact, reason NULL.
         if gone_to is not None:
             cols.update(active=False, superseded_by=gone_to.id)
-        return await _fact(session, agent, content, updated_at=edited, **cols)
+        cols.setdefault("updated_at", edited)
+        return await _fact(session, agent, content, **cols)
 
     m27 = await fact("cluster merge product", source="cluster_consolidation")
     member = await fact("Larch kickoff on 2 Feb in Lyon", m27)
@@ -399,26 +403,34 @@ async def test_migration_098_stamps_exactly_the_merge_sources(heart, session):
     aborted = await fact("aborted cluster, then a plain SUPERSEDE", m27)
     foreign = await fact("named only by another agent's event", m27)
     m31 = await fact("contradiction merge product", source="contradiction_resolution")
-    b1 = await fact("Larch venue is hall B", m31)
-    b2 = await fact("Larch venue is hall C", m31)
-    lone = await fact("MERGE aborted, then lost a SUPERSEDE", m31)
+    b1 = await fact("Larch venue is hall B", m31, updated_at=now)
+    b2 = await fact("Larch venue is hall C", m31, updated_at=now)
+    lone = await fact("MERGE aborted, then lost a SUPERSEDE", m31, updated_at=now)
     other = await fact("lone's MERGE partner, still active")
     loser = await fact("SUPERSEDE_A loser", m31)
     plain_winner = await fact("plain winner")
     await fact("plain SUPERSEDE loser, no event", plain_winner)
-    now = datetime.now(UTC)
-    # A MERGE whose content duplicated an older fact pointed both sources at it.
+    # A MERGE whose content duplicated an older fact pointed both sources at it
+    # when it ran.
     dup_target = await fact("older fact the merged content duplicated", created_at=now - timedelta(days=30))
-    d1 = await fact("Larch caterer is Bo's Kitchen", dup_target)
-    d2 = await fact("Larch caterer serves 40 guests", dup_target)
-    # A MERGE that aborted, then both facts lost F031 SUPERSEDEs to one older winner.
+    d1 = await fact("Larch caterer is Bo's Kitchen", dup_target, updated_at=now)
+    d2 = await fact("Larch caterer serves 40 guests", dup_target, updated_at=now)
+    # A MERGE that aborted, then both facts lost key conflicts (which write no
+    # event) to one older winner two hours later.
+    key_winner = await fact("older key-conflict winner", created_at=now - timedelta(days=30))
+    k1 = await fact("aborted MERGE, later lost a key conflict (1)", key_winner, updated_at=now + timedelta(hours=2))
+    k2 = await fact("aborted MERGE, later lost a key conflict (2)", key_winner, updated_at=now + timedelta(hours=2))
+    # A MERGE that aborted, then both facts lost F031 SUPERSEDEs to one older
+    # winner within the same minute.
     older_winner = await fact("older winner of two SUPERSEDEs", created_at=now - timedelta(days=30))
-    x1 = await fact("aborted MERGE, lost SUPERSEDE_A", older_winner)
-    x2 = await fact("aborted MERGE, lost SUPERSEDE_B", older_winner)
-    # A MERGE that aborted, then a write-time supersede by a newer fact took both.
+    x1 = await fact("aborted MERGE, lost SUPERSEDE_A", older_winner, updated_at=now)
+    x2 = await fact("aborted MERGE, lost SUPERSEDE_B", older_winner, updated_at=now)
+    # A MERGE that aborted, then a write-time supersede by a newer fact took
+    # both. updated_at is left inside the window so the winner's age alone
+    # rules them out.
     newer_winner = await fact("newer write-time winner", created_at=now + timedelta(hours=6))
-    y1 = await fact("aborted MERGE, lost to a newer fact (1)", newer_winner)
-    y2 = await fact("aborted MERGE, lost to a newer fact (2)", newer_winner)
+    y1 = await fact("aborted MERGE, lost to a newer fact (1)", newer_winner, updated_at=now)
+    y2 = await fact("aborted MERGE, lost to a newer fact (2)", newer_winner, updated_at=now)
     session.add_all(
         [
             Event(agent_id=agent, event_type="f027_cluster_merge", data=_f027(m27, [member])),
@@ -433,6 +445,7 @@ async def test_migration_098_stamps_exactly_the_merge_sources(heart, session):
             Event(agent_id=agent, event_type="f031_contradiction_resolution", data=_f031("MERGE", lone, other)),
             Event(agent_id=agent, event_type="f031_contradiction_resolution", data=_f031("SUPERSEDE_A", loser, m31)),
             Event(agent_id=agent, event_type="f031_contradiction_resolution", data=_f031("MERGE", d1, d2)),
+            Event(agent_id=agent, event_type="f031_contradiction_resolution", data=_f031("MERGE", k1, k2)),
             # SUPERSEDE_A: fact1 loses to fact2. SUPERSEDE_B: fact2 loses to fact1.
             Event(agent_id=agent, event_type="f031_contradiction_resolution", data=_f031("MERGE", x1, x2)),
             Event(
@@ -460,6 +473,7 @@ async def test_migration_098_stamps_exactly_the_merge_sources(heart, session):
     async def scalar(sql: str):
         return (await session.execute(text(sql))).scalar_one()
 
+    before = await state()
     statements = _split_sql_statements(_sql())
     for statement in statements:
         await session.execute(text(statement))
@@ -474,7 +488,7 @@ async def test_migration_098_stamps_exactly_the_merge_sources(heart, session):
         "Larch caterer serves 40 guests": "merged",
     }
     # The stamp is not an edit.
-    assert {ua for _, ua in after.values()} == {edited}
+    assert {c: ua for c, (_, ua) in after.items()} == {c: ua for c, (_, ua) in before.items()}
 
     # A second run stamps nothing, anywhere.
     rowcounts = [(await session.execute(text(s))).rowcount for s in statements]

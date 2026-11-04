@@ -11,11 +11,16 @@
 -- F031: the event carries no merged id. A source counts when a MERGE event
 -- names it and the other fact of that pair is superseded by the same fact.
 -- A pair whose MERGE aborted and whose two facts later lost to one winner
--- also looks like that, so two more conditions rule it out. No F031
--- SUPERSEDE_A or SUPERSEDE_B event may name the row and its superseder
--- (an older winner). The superseder must exist no later than ten minutes
--- after the MERGE event (a write-time supersede creates a newer winner). A
--- MERGE writes its product within a second of the event, or points the
+-- also looks like that, so three more conditions rule it out.
+-- The row went inactive with the MERGE: its updated_at, which records the
+-- deactivation, lies between a minute before and ten minutes after the
+-- event. A later supersede of any kind, a key conflict included, writes no
+-- F031 event but moves updated_at past that window. Anything that touched
+-- the row after it went inactive also moves it, which leaves it unstamped.
+-- No F031 SUPERSEDE_A or SUPERSEDE_B event names the row and its superseder
+-- (a supersede within the window). The superseder exists no later than ten
+-- minutes after the event (a write-time supersede creates a newer winner).
+-- A MERGE writes its product within a second of the event, or points the
 -- sources at an older fact its content duplicated.
 -- A loser of a plain SUPERSEDE matches neither rule and stays NULL.
 -- Every UPDATE touches only rows still NULL, so a second run changes nothing.
@@ -40,28 +45,36 @@ UPDATE heart.facts AS s
 UPDATE heart.facts AS s
     SET deactivation_reason = 'merged'
     FROM (
-        SELECT agent_id, created_at, data->>'fact1_id' AS self_id, data->>'fact2_id' AS partner_id
-        FROM nous_system.events
-        WHERE event_type = 'f031_contradiction_resolution'
-          AND data->>'applied_action' = 'MERGE'
-        UNION ALL
-        SELECT agent_id, created_at, data->>'fact2_id', data->>'fact1_id'
-        FROM nous_system.events
-        WHERE event_type = 'f031_contradiction_resolution'
-          AND data->>'applied_action' = 'MERGE'
+        SELECT agent_id, created_at,
+            CASE WHEN self_text ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                THEN CAST(self_text AS uuid) END AS self_id,
+            CASE WHEN partner_text ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                THEN CAST(partner_text AS uuid) END AS partner_id
+        FROM (
+            SELECT agent_id, created_at, data->>'fact1_id' AS self_text, data->>'fact2_id' AS partner_text
+            FROM nous_system.events
+            WHERE event_type = 'f031_contradiction_resolution'
+              AND data->>'applied_action' = 'MERGE'
+            UNION ALL
+            SELECT agent_id, created_at, data->>'fact2_id', data->>'fact1_id'
+            FROM nous_system.events
+            WHERE event_type = 'f031_contradiction_resolution'
+              AND data->>'applied_action' = 'MERGE'
+        ) AS named
     ) AS pair
     JOIN heart.facts AS p
-        ON p.agent_id = pair.agent_id
-        AND p.id::text = pair.partner_id
+        ON p.id = pair.partner_id
+        AND p.agent_id = pair.agent_id
     JOIN heart.facts AS m
         ON m.id = p.superseded_by
-    WHERE s.active = false
+    WHERE s.id = pair.self_id
+      AND s.agent_id = pair.agent_id
+      AND s.active = false
       AND s.deactivation_reason IS NULL
       AND s.superseded_by IS NOT NULL
-      AND s.agent_id = pair.agent_id
-      AND s.id::text = pair.self_id
       AND p.id <> s.id
       AND p.superseded_by = s.superseded_by
+      AND s.updated_at BETWEEN pair.created_at - interval '1 minute' AND pair.created_at + interval '10 minutes'
       AND m.created_at <= pair.created_at + interval '10 minutes'
       AND NOT EXISTS (
           SELECT 1 FROM nous_system.events AS x
