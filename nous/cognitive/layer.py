@@ -1329,20 +1329,32 @@ class CognitiveLayer:
 
         # F012: Procedure reinforcement — record outcomes for procedures in context
         if turn_context.recalled_procedure_ids:
-            has_any_error = turn_result.error is not None or any(
-                tr.error for tr in turn_result.tool_results
-            )
-            proc_outcome = "failure" if has_any_error else "success"
+            from nous.heart.procedures import outcome_attribution
+
+            failed_tools = [tr.tool_name for tr in turn_result.tool_results if tr.error]
+            attribute = getattr(self._settings, "procedure_outcome_attribution_enabled", False)
             for proc_id_str in turn_context.recalled_procedure_ids:
                 try:
                     from uuid import UUID as _UUID
                     pid = _UUID(proc_id_str)
-                    await self._heart.activate_procedure(pid, session=session)
+                    detail = await self._heart.activate_procedure(pid, session=session)
+                    attribution = outcome_attribution(
+                        detail.core_tools, turn_error=turn_result.error is not None, failed_tools=failed_tools,
+                    )
+                    # Any error is a failure for every rendered procedure, unless attribution is on:
+                    # then an error in none of the procedure's core tools is neutral.
+                    if attribution == "none":
+                        proc_outcome = "success"
+                    elif attribute and attribution == "unrelated_error":
+                        proc_outcome = "neutral"
+                    else:
+                        proc_outcome = "failure"
                     await self._heart.record_procedure_outcome(
                         pid,
                         proc_outcome,
                         frame_type=turn_context.frame.frame_id if turn_context.frame else None,
                         session=session,
+                        attribution=attribution,
                     )
                 except Exception:
                     logger.debug("Failed to reinforce procedure %s", proc_id_str)

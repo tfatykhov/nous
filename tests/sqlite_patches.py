@@ -795,7 +795,7 @@ def patch_brain():
     if hasattr(brain_mod.Brain, '_auto_link'):
         original_auto_link = brain_mod.Brain._auto_link
 
-        async def _sqlite_auto_link(self, decision_id, session, threshold=0.7, max_links=5):
+        async def _sqlite_auto_link(self, decision_id, session, threshold=0.7, max_links=5, reinforce=True):
             """Pure-Python auto-linking without PG vector operators."""
             # Get the decision
             result = await session.execute(

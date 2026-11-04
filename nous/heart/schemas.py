@@ -65,6 +65,8 @@ CensorAction = Literal["steer", "refuse", "abort"]  # F078 (was warn|block|absol
 CensorProvenance = Literal["auto", "agent", "human"]  # F078: caps max tier at create
 EpisodeOutcome = Literal["success", "partial", "failure", "ongoing", "abandoned"]
 ProcedureOutcome = Literal["success", "failure", "neutral"]
+# What a rendered procedure's turn outcome rests on (procedures.outcome_attribution).
+ProcedureAttribution = Literal["turn_error", "core_tool_error", "unrelated_error", "none"]
 # F102: how a procedure version came to be ("backfill" is migration 092's version 1).
 ProcedureChangeSource = Literal["create", "update_body", "append_notes", "dedupe_merge", "restore", "backfill"]
 
@@ -551,9 +553,10 @@ class CensorMatch(BaseModel):
     reason: str
     domain: str | None
     score: float | None = None  # Search relevance score
-    # search() only: which leg found it. "semantic" scores a cosine; "regex"
-    # (pattern hit, embedding not close) scores the semantic floor.
-    matched_by: Literal["semantic", "regex"] | None = None
+    # Which leg found it. "semantic" scores a cosine. search(): "regex" (pattern
+    # hit, embedding not close) scores the semantic floor. check(): "regex"
+    # scores 1.0, and "both" (pattern hit and cosine over the gate) the cosine.
+    matched_by: Literal["semantic", "regex", "both"] | None = None
     trigger_action: dict | None = None  # F031
     action_instruction: str | None = None  # F031
     unblock_pattern: str | None = None  # F031
