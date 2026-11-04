@@ -111,6 +111,9 @@ services:
       - NOUS_TEMPORAL_READ_INTERVALS_ENABLED=${NOUS_TEMPORAL_READ_INTERVALS_ENABLED:-false}
       - NOUS_TEMPORAL_RESOLVER_INTERVALS_ENABLED=${NOUS_TEMPORAL_RESOLVER_INTERVALS_ENABLED:-false}
       - NOUS_TEMPORAL_RENDER_ENABLED=${NOUS_TEMPORAL_RENDER_ENABLED:-false}
+      # J-3: the F070.1 cross-episode chunk pass in each sleep's graph backfill (needs chunk consolidation). Lands dark.
+      - NOUS_CHUNK_CROSS_EPISODE_LIVE_ENABLED=${NOUS_CHUNK_CROSS_EPISODE_LIVE_ENABLED:-false}
+      - NOUS_CHUNK_CROSS_EPISODE_LIVE_MAX=${NOUS_CHUNK_CROSS_EPISODE_LIVE_MAX:-200}
       # A4 Step 2: any-word keyword fallback. Experiment, lands dark.
       - NOUS_HYBRID_KEYWORD_OR_FALLBACK_ENABLED=${NOUS_HYBRID_KEYWORD_OR_FALLBACK_ENABLED:-false}
       # Execution ledger: also keep the redacted call input and tool output (migration 086).

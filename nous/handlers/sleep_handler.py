@@ -2171,6 +2171,8 @@ class SleepHandler:
             orphan_window_wraps = result.pop("_orphan_window_wraps", 0)
             total_edges = sum(result.values())
             sleep_stats["orphan_edges_created"] = total_edges
+            # J-3: the live cross-episode chunk edges, also in the total above.
+            sleep_stats["chunk_cross_episode_edges"] = result.get("chunks_cross_episode", 0)
             sleep_stats["orphans_visited"] = orphans_visited
             sleep_stats["orphan_window_wraps"] = orphan_window_wraps
             sleep_stats["temporal_chain_edges"] = happened_before

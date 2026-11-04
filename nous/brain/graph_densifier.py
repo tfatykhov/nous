@@ -33,7 +33,7 @@ from nous.brain.backfill_rerank import (
 from nous.brain.embeddings import EmbeddingProvider
 from nous.brain.graph_linker import GraphLinker, common_template_text, edge_confidence
 from nous.config import Settings
-from nous.heart.search import hybrid_search, reset_local_ef_search
+from nous.heart.search import hybrid_search, reset_local_ef_search, set_local_ef_search
 from nous.storage.database import Database
 
 logger = logging.getLogger(__name__)
@@ -133,6 +133,36 @@ def _orient(
         type_a, id_a, type_b, id_b = type_b, id_b, type_a, id_a
     return type_a, id_a, type_b, id_b, _get_relation(type_a, type_b)
 
+
+# J-3: the F070.1 cross-episode neighbour queries. Ordering by the distance to a
+# bound vector lets the HNSW index serve them. They run at pgvector's default
+# horizon: the strict_order iterative scan gets past same-episode siblings, and
+# a wider ef_search raises the HNSW startup cost until the planner prefers a
+# seq scan on the chunk table. The LIMIT is a literal: with a bound LIMIT, a
+# cached generic plan assumes a large share of the table and picks a seq scan.
+_CROSS_EPISODE_EF_SEARCH = 40
+_CROSS_EPISODE_CHUNKS_SQL = (
+    "SELECT other.id, other.episode_id, "
+    "  1 - (other.embedding <=> CAST(:emb AS vector)) AS sim "
+    "FROM heart.episode_chunks other "
+    "WHERE other.agent_id = :a "
+    "  AND other.id != :chunk_id "
+    "  AND other.episode_id != :ep_id "
+    "  AND other.embedding IS NOT NULL "
+    "ORDER BY other.embedding <=> CAST(:emb AS vector) "
+    "LIMIT {top_k}"
+)
+_CROSS_EPISODE_FACTS_SQL = (
+    "SELECT f.id, 1 - (f.embedding <=> CAST(:emb AS vector)) AS sim "
+    "FROM heart.facts f "
+    "WHERE f.agent_id = :a "
+    "  AND f.active = true "
+    "  AND f.source_episode_id IS NOT NULL "
+    "  AND f.source_episode_id != :ep_id "
+    "  AND f.embedding IS NOT NULL "
+    "ORDER BY f.embedding <=> CAST(:emb AS vector) "
+    "LIMIT {top_k}"
+)
 
 # F106: the co-mention and co-occurrence v2 scans yield to the event loop (and
 # honour an interrupt) once per this many rows.
@@ -247,25 +277,33 @@ class GraphDensifier:
         """Signal the densifier to stop at the next safe point."""
         self._interrupted = True
 
+    def _advance_window(
+        self, key: str, visited: list[UUID], fetched: int, limit: int,
+    ) -> bool:
+        """J-7: record the nodes one newest-first pass processed under ``key``.
+
+        ``visited`` holds only the nodes actually processed, so a pass cut
+        short by an interrupt marks what ran and keeps its window. A full
+        pass that fetched fewer than ``limit`` nodes has exhausted the
+        window: the set is cleared and the next pass starts newest-first
+        again. Returns True for such a wrap after an earlier pass had
+        advanced the window.
+        """
+        seen = self._orphan_seen.setdefault(key, set())
+        if len(visited) == fetched and fetched < limit:
+            wrapped = bool(seen)
+            seen.clear()
+            return wrapped
+        seen.update(visited)
+        return False
+
     def _advance_orphan_window(
         self, entity_type: str, visited: list[UUID], fetched: int, limit: int,
     ) -> None:
-        """J-7: record the orphans one backfill call processed.
-
-        ``visited`` holds only the orphans actually processed, so a call cut
-        short by an interrupt marks what ran and keeps its window. A full
-        call that fetched fewer than ``limit`` orphans has exhausted the
-        window: the set is cleared and the next call starts newest-first
-        again (one wrap, counted when an earlier call had advanced it).
-        """
-        seen = self._orphan_seen.setdefault(entity_type, set())
+        """J-7: ``_advance_window`` for an orphan backfill, with its counters."""
         self._orphans_visited += len(visited)
-        if len(visited) == fetched and fetched < limit:
-            if seen:
-                self._orphan_window_wraps += 1
-            seen.clear()
-        else:
-            seen.update(visited)
+        if self._advance_window(entity_type, visited, fetched, limit):
+            self._orphan_window_wraps += 1
 
     async def find_orphans(
         self,
@@ -1226,6 +1264,41 @@ class GraphDensifier:
         result = await session.execute(sql, params)
         return [(row.id, row.content or "", row.episode_id) for row in result.all()]
 
+    async def _cross_episode_neighbours(
+        self,
+        sql: str,
+        chunk_id: UUID,
+        top_k: int,
+        params: dict[str, object],
+        session: AsyncSession,
+    ) -> list:
+        """J-3: run one cross-episode neighbour query for ``chunk_id``.
+
+        The chunk's embedding is read once and bound as a constant, so the
+        ``ORDER BY`` can use the HNSW index (an ordering on two columns of a
+        join cannot). The query runs at pgvector's default ef_search with the
+        strict_order iterative scan, which keeps scanning past the
+        same-episode siblings the episode filter drops, and both are reset
+        afterwards for the rest of the transaction. A chunk without an
+        embedding has no neighbours.
+        """
+        emb = (await session.execute(
+            text(
+                "SELECT embedding::text FROM heart.episode_chunks "
+                "WHERE id = :i AND agent_id = :a AND embedding IS NOT NULL"
+            ),
+            {"i": chunk_id, "a": self._agent_id},
+        )).scalar()
+        if emb is None:
+            return []
+        await set_local_ef_search(session, _CROSS_EPISODE_EF_SEARCH)
+        rows = (await session.execute(
+            text(sql.format(top_k=int(top_k))),
+            {**params, "emb": emb, "a": self._agent_id},
+        )).all()
+        await reset_local_ef_search(session)
+        return rows
+
     async def _link_chunk_to_cross_episode_facts(
         self,
         chunk_id: UUID,
@@ -1236,31 +1309,14 @@ class GraphDensifier:
     ) -> int:
         """F070.1: chunk → fact summarized_by ACROSS episodes.
 
-        HNSW-bounded scan: take the top_k facts (excluding the source's own
-        episode) by cosine, then threshold-gate. Returns count of edges created.
+        Takes the top_k facts by cosine (excluding the source's own episode),
+        then threshold-gates them. Returns count of edges created.
         Inferred provenance — cosine-derived, not structural.
         """
-        rows = (await session.execute(
-            text(
-                "SELECT f.id, "
-                "  1 - (c.embedding <=> f.embedding) AS sim "
-                "FROM heart.episode_chunks c, heart.facts f "
-                "WHERE c.id = :chunk_id "
-                "  AND c.agent_id = :a "
-                "  AND f.agent_id = :a "
-                "  AND f.active = true "
-                "  AND f.source_episode_id IS NOT NULL "
-                "  AND f.source_episode_id != :ep_id "
-                "  AND f.embedding IS NOT NULL "
-                "  AND c.embedding IS NOT NULL "
-                "ORDER BY c.embedding <=> f.embedding "
-                "LIMIT :top_k"
-            ),
-            {
-                "chunk_id": chunk_id, "ep_id": source_episode_id,
-                "a": self._agent_id, "top_k": top_k,
-            },
-        )).all()
+        rows = await self._cross_episode_neighbours(
+            _CROSS_EPISODE_FACTS_SQL, chunk_id, top_k,
+            {"ep_id": source_episode_id}, session,
+        )
         created = 0
         for row in rows:
             sim = float(row.sim or 0.0)
@@ -1293,32 +1349,16 @@ class GraphDensifier:
     ) -> int:
         """F070.1: chunk ↔ chunk related_to ACROSS episodes (dedup).
 
-        Same HNSW pattern. Excludes the source chunk's own id (so a chunk
+        Same pattern. Excludes the source chunk's own id (so a chunk
         doesn't link to itself) and same-episode siblings (handled by v1
         intra-episode method). Cosine-derived → inferred provenance.
         ``pass_pairs``: as in ``_backfill_same_type``, a pair two chunks of
         one pass find from both sides is written once.
         """
-        rows = (await session.execute(
-            text(
-                "SELECT other.id, other.episode_id, "
-                "  1 - (c.embedding <=> other.embedding) AS sim "
-                "FROM heart.episode_chunks c, heart.episode_chunks other "
-                "WHERE c.id = :chunk_id "
-                "  AND c.agent_id = :a "
-                "  AND other.agent_id = :a "
-                "  AND other.id != :chunk_id "
-                "  AND other.episode_id != :ep_id "
-                "  AND other.embedding IS NOT NULL "
-                "  AND c.embedding IS NOT NULL "
-                "ORDER BY c.embedding <=> other.embedding "
-                "LIMIT :top_k"
-            ),
-            {
-                "chunk_id": chunk_id, "ep_id": source_episode_id,
-                "a": self._agent_id, "top_k": top_k,
-            },
-        )).all()
+        rows = await self._cross_episode_neighbours(
+            _CROSS_EPISODE_CHUNKS_SQL, chunk_id, top_k,
+            {"chunk_id": chunk_id, "ep_id": source_episode_id}, session,
+        )
         created = 0
         for row in rows:
             sim = float(row.sim or 0.0)
@@ -1345,34 +1385,16 @@ class GraphDensifier:
                 created += 1
         return created
 
-    async def backfill_orphan_chunks_cross_episode(
+    async def _cross_episode_pass(
         self,
-        max_count: int | None = None,
-        exclude_ids: set[UUID] | frozenset[UUID] | None = None,
-    ) -> tuple[int, list[UUID]]:
-        """F070.1: add cross-episode summarized_by + related_to edges.
+        limit: int,
+        exclude_ids: set[UUID] | frozenset[UUID] | None,
+    ) -> tuple[int, list[UUID], int]:
+        """F070.1: one cross-episode pass over at most ``limit`` chunks.
 
-        Returns ``(edges_created, attempted_chunk_ids)``. The caller is
-        expected to extend its ``attempted`` set with the returned IDs
-        and pass that set back as ``exclude_ids`` on the next call —
-        ensures every chunk is visited at most once per run regardless
-        of per-batch link success/failure (codex round-3 P1; the prior
-        offset-based pagination skipped chunks when batches succeeded).
-
-        Idempotent across runs: ``find_chunks_lacking_cross_episode_edges``
-        skips any chunk that already has cross-episode edges; ``create_edge``
-        uses ON CONFLICT DO NOTHING under the hood. Re-running after a
-        partial run picks up where the last run left off.
-
-        Returns ``(0, [])`` when ``chunk_consolidation_enabled`` or
-        ``graph_backfill_enabled`` is False.
+        Returns ``(edges_created, attempted_chunk_ids, fetched)``. Every
+        fetched chunk is attempted unless an interrupt cuts the pass short.
         """
-        if not self._settings.chunk_consolidation_enabled:
-            return 0, []
-        if not self._settings.graph_backfill_enabled:
-            return 0, []
-
-        limit = max_count or self._settings.graph_backfill_max_chunks_cross_episode
         thresh_fact = self._settings.graph_threshold_chunk_fact_cross
         thresh_chunk = self._settings.graph_threshold_chunk_chunk_cross
         top_k = self._settings.chunk_cross_episode_top_k
@@ -1408,11 +1430,66 @@ class GraphDensifier:
             await session.commit()
 
         logger.info(
-            "F070.1: backfill_orphan_chunks_cross_episode created %d edges "
-            "from %d candidates",
+            "F070.1: cross-episode pass created %d edges from %d candidates",
             total, len(candidates),
         )
+        return total, attempted, len(candidates)
+
+    async def backfill_orphan_chunks_cross_episode(
+        self,
+        max_count: int | None = None,
+        exclude_ids: set[UUID] | frozenset[UUID] | None = None,
+    ) -> tuple[int, list[UUID]]:
+        """F070.1: add cross-episode summarized_by + related_to edges.
+
+        Returns ``(edges_created, attempted_chunk_ids)``. The caller is
+        expected to extend its ``attempted`` set with the returned IDs
+        and pass that set back as ``exclude_ids`` on the next call —
+        ensures every chunk is visited at most once per run regardless
+        of per-batch link success/failure (codex round-3 P1; the prior
+        offset-based pagination skipped chunks when batches succeeded).
+
+        Idempotent across runs: ``find_chunks_lacking_cross_episode_edges``
+        skips any chunk that already has cross-episode edges; ``create_edge``
+        uses ON CONFLICT DO NOTHING under the hood. Re-running after a
+        partial run picks up where the last run left off.
+
+        Returns ``(0, [])`` when ``chunk_consolidation_enabled`` or
+        ``graph_backfill_enabled`` is False.
+        """
+        if not self._settings.chunk_consolidation_enabled:
+            return 0, []
+        if not self._settings.graph_backfill_enabled:
+            return 0, []
+
+        limit = max_count or self._settings.graph_backfill_max_chunks_cross_episode
+        total, attempted, _fetched = await self._cross_episode_pass(limit, exclude_ids)
         return total, attempted
+
+    async def backfill_chunks_cross_episode_live(self) -> int:
+        """J-3: the F070.1 pass inside the sleep cycle's backfill.
+
+        Off unless ``chunk_cross_episode_live_enabled`` (with
+        ``chunk_consolidation_enabled`` and ``graph_backfill_enabled``).
+        Visits at most ``chunk_cross_episode_live_max`` chunks per cycle and
+        keeps a J-7 window under the key ``chunk_cross``: a chunk visited
+        without getting a cross-episode edge is skipped until the window is
+        exhausted, so chunks with no neighbour above threshold do not hold
+        the newest-first window every cycle.
+        """
+        s = self._settings
+        if not (
+            s.chunk_cross_episode_live_enabled
+            and s.chunk_consolidation_enabled
+            and s.graph_backfill_enabled
+        ):
+            return 0
+        limit = s.chunk_cross_episode_live_max
+        total, attempted, fetched = await self._cross_episode_pass(
+            limit, self._orphan_seen.get("chunk_cross"),
+        )
+        self._advance_window("chunk_cross", attempted, fetched, limit)
+        return total
 
     async def backfill_orphan_procedures(
         self,
@@ -1510,6 +1587,13 @@ class GraphDensifier:
         # (chunk_consolidation_enabled) so it can ship independently of the
         # main F040 backfill master switch.
         results["chunks"] = await self.backfill_orphan_chunks()
+        if self._interrupted:
+            return _log_and_return(aborted=True)
+
+        # J-3: the F070.1 cross-episode chunk pass, bounded and off unless
+        # chunk_cross_episode_live_enabled. A plain key, so its edges count
+        # toward orphan_edges_created.
+        results["chunks_cross_episode"] = await self.backfill_chunks_cross_episode_live()
         if self._interrupted:
             return _log_and_return(aborted=True)
 
