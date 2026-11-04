@@ -530,7 +530,9 @@ class Settings(BaseSettings):
             "K-13: end the line of a fact the agent wrote itself with [inferred] (sleep_reflection, "
             "reflection) or [merged] (cluster_consolidation, contradiction_resolution), in recall_deep "
             "and the pre-turn context (User Profile and the intent leg included). Model-facing, so it "
-            "is A/B-gated. Off: the text is byte-identical."
+            "is A/B-gated. Off: the rendered text is byte-identical. Independent of the flag, facts "
+            "now carry their source, so the pre-turn relevance filter's pre_prune_extraction "
+            "exemption (FILTER_EXEMPT_SOURCES), dead until K-13, keeps such a fact past the gap cut."
         ),
     )
 

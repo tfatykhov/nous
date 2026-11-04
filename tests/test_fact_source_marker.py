@@ -11,6 +11,7 @@ context end such a fact's line with ``[inferred]`` or ``[merged]``.
 from __future__ import annotations
 
 import ast
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -299,6 +300,35 @@ class TestRecallDeepRender:
         assert "dated[current 2026-03] [inferred] (id: " in on
         assert "[inferred]" not in off and "[merged]" not in off
 
+    @pytest.mark.parametrize(
+        ("grouped", "meta"),
+        [
+            (False, {}),
+            (True, {"source_episode_id": "ep-1"}),  # a session bucket
+            (True, {}),  # the no-session tail
+        ],
+    )
+    def test_the_marker_follows_the_date_and_recency_tags(self, grouped, meta):
+        row = PipelineResult(
+            id=uuid4(),
+            type="fact",
+            description="Larch office is in Lyon",
+            score=0.9,
+            metadata={
+                **meta,
+                "source": "cluster_consolidation",
+                "valid_from": "2024-01-05",
+                "recency_status": "current",
+                "recency_date": "2026-03",
+            },
+        )
+
+        text = _format_pipeline_text(
+            [row], PipelineStats(), ["all"], session_group_heart=grouped, temporal_render=True, source_marker=True
+        )
+
+        assert "Larch office is in Lyon [since 2024-01-05][current 2026-03] [merged] (id: " in text
+
 
 # ---------------------------------------------------------------------------
 # Pre-turn context
@@ -350,4 +380,27 @@ class TestPreTurnRender:
 
         assert out == (
             "- lesson [current 2026-03] [current — supersedes an earlier belief] [inferred] [confidence: 0.70]"
+        )
+
+    @pytest.mark.parametrize(("subject", "prefix"), [("larch", "- [larch] "), (None, "- ")])
+    def test_the_marker_follows_the_date_recency_and_lineage_tags(self, subject, prefix):
+        fact = SimpleNamespace(
+            id=uuid4(),
+            content="Larch office is in Lyon",
+            confidence=0.8,
+            subject=subject,
+            source="cluster_consolidation",
+            valid_from=date(2024, 1, 5),
+            valid_to=None,
+            event_date=None,
+            recency_status="current",
+            recency_date="2026-03",
+        )
+        engine = _engine(fact_source_marker_enabled=True, supersession_lineage_mode="named")
+
+        out = engine._format_facts([fact], lineage={str(fact.id): ["Larch office is in Paris"]}, dated=True)
+
+        assert out == (
+            f"{prefix}Larch office is in Lyon [since 2024-01-05] [current 2026-03]"
+            ' (supersedes earlier belief: "Larch office is in Paris") [merged] [confidence: 0.80]'
         )

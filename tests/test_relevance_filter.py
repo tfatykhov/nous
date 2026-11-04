@@ -1,9 +1,14 @@
 """Tests for adaptive relevance filtering (replaces F017 floor + diminishing returns)."""
 
 from unittest.mock import AsyncMock
+from uuid import uuid4
+
+import pytest
 
 from nous.cognitive.context import ContextEngine, RELEVANCE_MIN_RESULTS, RELEVANCE_MAX_RESULTS
 from nous.config import Settings
+from nous.heart.schemas import FactSummary
+from nous.heart.search import _wrap_with_score
 
 
 class FakeItem:
@@ -136,3 +141,47 @@ class TestRelevanceFilter:
         result = engine._apply_relevance_filter(items, "decision")
         # 0.80 vs prev 0.85: 0.80 >= 0.85*0.6=0.51 → kept
         assert len(result) == 4
+
+
+class TestExemptSourceOnRealFacts:
+    """The exemption on the type the pre-turn path really filters.
+
+    Until K-13 ``FactSummary`` had no ``source``, so ``FILTER_EXEMPT_SOURCES``
+    matched only the ``FakeItem`` rows above and never a real fact. From K-13
+    on a ``pre_prune_extraction`` fact past the gap cut is kept, whatever
+    ``fact_source_marker_enabled`` says.
+    """
+
+    def _fact(self, score: float, source: str | None = None) -> FactSummary:
+        return FactSummary(
+            id=uuid4(),
+            content=f"fact at {score}",
+            category=None,
+            subject=None,
+            confidence=1.0,
+            active=True,
+            score=score,
+            source=source,
+        )
+
+    @pytest.mark.parametrize("wrapped", [False, True])
+    def test_a_pre_prune_fact_past_the_gap_is_kept_and_another_is_cut(self, wrapped):
+        engine = TestRelevanceFilter()._make_engine()
+        facts = [
+            self._fact(0.9),
+            self._fact(0.85),
+            self._fact(0.8, "user_direct"),
+            self._fact(0.1, "enumerative_extractor"),  # past the gap: 0.1 < 0.8 * 0.6
+            self._fact(0.1, "pre_prune_extraction"),  # past the gap, exempt
+        ]
+        if wrapped:  # the pre-turn pipeline hands the filter score-wrapped facts
+            facts = [_wrap_with_score(f, f.score) for f in facts]
+
+        result = engine._apply_relevance_filter(facts, "fact")
+
+        assert [(r.score, r.source) for r in result] == [
+            (0.9, None),
+            (0.85, None),
+            (0.8, "user_direct"),
+            (0.1, "pre_prune_extraction"),
+        ]
