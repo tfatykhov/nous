@@ -3569,6 +3569,7 @@ class Settings(BaseSettings):
     )
     chunk_cross_episode_top_k: int = Field(
         default=20,
+        ge=1,
         description=(
             "F070.1: HNSW-bounded LIMIT for the cross-episode cosine scan "
             "per chunk. Higher = more candidates to threshold-gate; lower = "

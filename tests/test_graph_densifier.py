@@ -3068,26 +3068,34 @@ async def test_cross_episode_queries_keep_default_ef_search_and_reset(
 async def test_cross_episode_chunk_found_past_same_episode_horizon(
     db, settings, mock_embeddings, _fix_stale_relation_constraint,
 ):
-    """Guard for the HNSW rewrite: 50 same-episode siblings sit nearer to
-    the chunk than its cross-episode match, filling a 40-candidate horizon
+    """Guard for the HNSW rewrite: 120 same-episode siblings sit nearer to
+    the chunk than its cross-episode matches, filling a 40-candidate horizon
     that the episode filter then empties. The iterative scan must keep going
-    and still find the match. Seq scans and sorts are off so the HNSW path
-    runs (on a small table an exact scan would win and hide the horizon)."""
+    and still find a match. Seq scans and sorts are off so the HNSW path
+    runs (on a small table an exact scan would win and hide the horizon).
+    HNSW search is approximate in both directions, so the siblings are three
+    times the horizon (a few unreachable ones cannot leave it room for a
+    match) and the three matches go in first (a crowded cluster can leave a
+    late match without incoming links)."""
     agent_id = f"test-j3-horizon-{uuid4().hex[:8]}"
     base = await mock_embeddings.embed(f"{agent_id}-base")
-    match_vec = await mock_embeddings.embed_near(f"{agent_id}-base", noise=0.01)
     async with db.session() as s:
         ep_a = await _insert_episode(s, agent_id, "episode with many siblings")
-        ep_b = await _insert_episode(s, agent_id, "episode with the match")
+        ep_b = await _insert_episode(s, agent_id, "episode with the matches")
+        matches = set()
+        for j in range(3):
+            match_vec = await mock_embeddings.embed_near(
+                f"{agent_id}-base", noise=0.01 + j * 0.001,
+            )
+            matches.add(await _insert_chunk(s, agent_id, ep_b, j, f"match {j}", match_vec))
         probe = await _insert_chunk(s, agent_id, ep_a, 0, "probe chunk", base)
-        for i in range(50):
+        for i in range(120):
             # Distinct vectors: pgvector's HNSW stores identical vectors as one
             # element, which would widen the horizon in tuples.
             sibling = await mock_embeddings.embed_near(
                 f"{agent_id}-base", noise=0.001 + i * 0.00001,
             )
             await _insert_chunk(s, agent_id, ep_a, i + 1, f"sibling {i}", sibling)
-        match = await _insert_chunk(s, agent_id, ep_b, 0, "match chunk", match_vec)
         await s.commit()
     d = _live_densifier(db, settings, mock_embeddings, agent_id)
 
@@ -3097,6 +3105,86 @@ async def test_cross_episode_chunk_found_past_same_episode_horizon(
         created = await d._link_chunk_to_cross_episode_chunks(probe, ep_a, 0.5, 5, s)
         await s.commit()
 
-    assert created == 1
-    rows = await _pair_edges(db, agent_id, probe, match)
-    assert [r.relation for r in rows] == ["related_to"]
+    assert created >= 1
+    async with db.session() as s:
+        linked = {
+            r.other for r in (await s.execute(text(
+                "SELECT CASE WHEN source_id = :p THEN target_id ELSE source_id END AS other "
+                "FROM brain.graph_edges WHERE agent_id = :a AND relation = 'related_to' "
+                "  AND (source_id = :p OR target_id = :p)"
+            ), {"a": agent_id, "p": probe})).all()
+        }
+    assert linked and linked <= matches
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_cross_episode_fact_found_past_same_episode_horizon(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """The chunk -> fact twin of the guard above: 120 facts from the chunk's
+    own episode sit nearer than a fact from another episode. The fact query
+    can use the facts HNSW index too, so the iterative scan must get past
+    them and still find a match (three, inserted first, as above)."""
+    agent_id = f"test-j3-fhorizon-{uuid4().hex[:8]}"
+    base = await mock_embeddings.embed(f"{agent_id}-base")
+    async with db.session() as s:
+        ep_a = await _insert_episode(s, agent_id, "episode with many facts")
+        ep_b = await _insert_episode(s, agent_id, "episode with the matching facts")
+        matches = set()
+        for j in range(3):
+            match_vec = await mock_embeddings.embed_near(
+                f"{agent_id}-base", noise=0.01 + j * 0.001,
+            )
+            matches.add(await _insert_fact_with_episode(
+                s, agent_id, f"matching fact {j}", match_vec, ep_b,
+            ))
+        probe = await _insert_chunk(s, agent_id, ep_a, 0, "probe chunk", base)
+        for i in range(120):
+            near = await mock_embeddings.embed_near(
+                f"{agent_id}-base", noise=0.001 + i * 0.00001,
+            )
+            await _insert_fact_with_episode(s, agent_id, f"same-episode fact {i}", near, ep_a)
+        await s.commit()
+    d = _live_densifier(db, settings, mock_embeddings, agent_id)
+
+    async with db.session() as s:
+        await s.execute(text("SET LOCAL enable_seqscan = off"))
+        await s.execute(text("SET LOCAL enable_sort = off"))
+        created = await d._link_chunk_to_cross_episode_facts(probe, ep_a, 0.5, 5, s)
+        await s.commit()
+
+    assert created >= 1
+    async with db.session() as s:
+        linked = {
+            r.target_id for r in (await s.execute(text(
+                "SELECT target_id FROM brain.graph_edges WHERE agent_id = :a "
+                "  AND source_id = :p AND relation = 'summarized_by'"
+            ), {"a": agent_id, "p": probe})).all()
+        }
+    assert linked and linked <= matches
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_run_backfill_cycle_survives_a_failing_cross_episode_pass(
+    db, settings, mock_embeddings, _fix_stale_relation_constraint,
+):
+    """Review P2 on #850: an error in the live cross-episode pass is logged
+    and counted as 0 edges; the cycle still runs its later passes, so the
+    sleep phase still records what the earlier passes committed."""
+    agent_id = f"test-j3-fail-{uuid4().hex[:8]}"
+    d = _live_densifier(
+        db, settings, mock_embeddings, agent_id, chunk_cross_episode_live_enabled=True,
+    )
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("neighbour query failed")
+
+    d._cross_episode_pass = _boom
+
+    result = await d.run_backfill_cycle()
+
+    assert result["chunks_cross_episode"] == 0
+    assert "_happened_before" in result
+    assert "_co_mention" in result

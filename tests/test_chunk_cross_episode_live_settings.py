@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 from nous.config import Settings
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,3 +40,11 @@ def test_the_docs_have_both_rows():
     rows = doc.splitlines()
     assert any(r.startswith("| `NOUS_CHUNK_CROSS_EPISODE_LIVE_ENABLED` | `false` |") for r in rows)
     assert any(r.startswith("| `NOUS_CHUNK_CROSS_EPISODE_LIVE_MAX` | `200` |") for r in rows)
+
+
+def test_top_k_must_be_positive(monkeypatch):
+    """The neighbour queries render top_k as a literal LIMIT, so a value
+    below 1 must fail at startup, not on every chunk."""
+    monkeypatch.setenv("NOUS_CHUNK_CROSS_EPISODE_TOP_K", "0")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)

@@ -1592,8 +1592,18 @@ class GraphDensifier:
 
         # J-3: the F070.1 cross-episode chunk pass, bounded and off unless
         # chunk_cross_episode_live_enabled. A plain key, so its edges count
-        # toward orphan_edges_created.
-        results["chunks_cross_episode"] = await self.backfill_chunks_cross_episode_live()
+        # toward orphan_edges_created. Wrapped like the co-mention pass: a
+        # failure rolls back only this pass's own session, so it must not
+        # cost the cycle its later passes or the phase its audit row.
+        try:
+            results["chunks_cross_episode"] = await self.backfill_chunks_cross_episode_live()
+        except Exception:
+            logger.warning(
+                "J-3: live cross-episode chunk pass failed for agent_id=%s "
+                "(non-fatal; earlier backfill edges already committed)",
+                self._agent_id, exc_info=True,
+            )
+            results["chunks_cross_episode"] = 0
         if self._interrupted:
             return _log_and_return(aborted=True)
 
