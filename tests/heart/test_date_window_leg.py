@@ -191,3 +191,129 @@ async def test_no_window_is_unchanged(fact_store, seed_rescue_case, session):
     a = await fact_store.search(q, limit=5, session=session)
     b = await fact_store.search(q, limit=5, date_window=None, session=session)
     assert [f.id for f in a] == [f.id for f in b]
+
+
+# ---------------------------------------------------------------------------
+# C-1: the date leg fused inside the per-type merge (date_leg_inline_rrf)
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def seed_out_of_window_match(session, heart):
+    """One fact matching the query on BOTH legs but undated, one in-window fact.
+
+    ``top``: content == query and embedding == the query's, so it is rank 0 in
+    the vector leg and the only keyword hit; it has no event_date, so the date
+    leg never returns it. ``dated``: unrelated text, event_date in the window.
+    """
+    agent_id = heart.facts.agent_id
+    embeddings = heart.facts.embeddings
+    query = "quarterly ledger reconciliation cadence"
+    q_emb = await embeddings.embed(query)
+    top = Fact(
+        id=uuid4(),
+        agent_id=agent_id,
+        content=query,
+        event_date=None,
+        embedding=q_emb,
+        active=True,
+        category="technical",
+    )
+    dated = Fact(
+        id=uuid4(),
+        agent_id=agent_id,
+        content="database initialization sequence",
+        event_date=datetime.date(2026, 4, 25),
+        embedding=await embeddings.embed("database initialization sequence"),
+        active=True,
+        category="technical",
+    )
+    session.add(top)
+    session.add(dated)
+    await session.flush()
+    window = DateWindow(start=datetime.date(2026, 4, 20), end=datetime.date(2026, 4, 30))
+    return {"query": query, "q_emb": q_emb, "window": window, "top": top.id, "dated": dated.id}
+
+
+def _set_inline(fact_store, on: bool) -> None:
+    fact_store._settings = fact_store._settings.model_copy(update={"date_leg_inline_rrf": on})
+
+
+async def _scores(fact_store, session, **kwargs) -> dict:
+    return {f.id: f.score for f in await fact_store.search(session=session, **kwargs)}
+
+
+async def test_inline_date_fusion_lifts_the_out_of_window_cap(fact_store, seed_out_of_window_match, session):
+    """Stacked, an undated perfect match caps at 0.5 + 0.5 * k / (k + P); inline
+    it is one weighted list short of 1.0. The in-window fact still comes back."""
+    from nous.heart.search import _resolve_rrf_k
+
+    seed = seed_out_of_window_match
+    limit = 10
+    c = _resolve_rrf_k() / (_resolve_rrf_k() + limit + 1)
+    args = dict(query=seed["query"], limit=limit, date_window=seed["window"])
+
+    _set_inline(fact_store, False)
+    stacked = await _scores(fact_store, session, **args)
+    _set_inline(fact_store, True)
+    inline = await _scores(fact_store, session, **args)
+
+    assert stacked[seed["top"]] == pytest.approx(0.5 + 0.5 * c)
+    assert inline[seed["top"]] == pytest.approx((1.0 + 0.3 * c) / 1.3)
+    assert inline[seed["top"]] > stacked[seed["top"]]
+    assert seed["dated"] in inline
+
+
+async def test_inline_date_fusion_under_variants_reranks_per_variant(fact_store, seed_out_of_window_match, session):
+    """With expansion the date list joins each per-variant merge; the
+    cross-variant fusion is rank-based, so a doc still first in every variant
+    scores 1.0 instead of the stacked cap."""
+    from nous.heart.search import _resolve_rrf_k
+
+    seed = seed_out_of_window_match
+    limit = 10
+    c = _resolve_rrf_k() / (_resolve_rrf_k() + limit + 1)
+    variants = [(seed["query"], seed["q_emb"]), ("ledger reconciliation quarterly cadence", seed["q_emb"])]
+    args = dict(query=seed["query"], limit=limit, date_window=seed["window"], variant_pairs=variants)
+
+    _set_inline(fact_store, False)
+    stacked = await _scores(fact_store, session, **args)
+    _set_inline(fact_store, True)
+    inline = await _scores(fact_store, session, **args)
+
+    assert stacked[seed["top"]] == pytest.approx(0.5 + 0.5 * c)
+    assert inline[seed["top"]] == pytest.approx(1.0)
+    assert seed["dated"] in inline
+
+
+async def test_inline_date_fusion_honours_the_pinned_penalty_base(fact_store, seed_out_of_window_match, session):
+    from nous.heart.search import _resolve_rrf_k
+
+    seed = seed_out_of_window_match
+    k = _resolve_rrf_k()
+    _set_inline(fact_store, True)
+    scores = {}
+    for limit in (5, 10, 30):
+        scores[limit] = (
+            await _scores(
+                fact_store,
+                session,
+                query=seed["query"],
+                limit=limit,
+                date_window=seed["window"],
+                penalty_limit=20,
+            )
+        )[seed["top"]]
+    assert scores[5] == pytest.approx((1.0 + 0.3 * k / (k + 21)) / 1.3)
+    assert scores[10] == pytest.approx(scores[5])
+    assert scores[30] == pytest.approx(scores[5])
+
+
+async def test_inline_flag_with_an_empty_window_is_unchanged(fact_store, seed_out_of_window_match, session):
+    """A window holding no facts adds no list, so ids and scores match no window."""
+    seed = seed_out_of_window_match
+    empty = DateWindow(start=datetime.date(2020, 1, 1), end=datetime.date(2020, 1, 31))
+    _set_inline(fact_store, True)
+    a = await fact_store.search(seed["query"], limit=10, session=session)
+    b = await fact_store.search(seed["query"], limit=10, date_window=empty, session=session)
+    assert [(f.id, f.score) for f in a] == [(f.id, f.score) for f in b]

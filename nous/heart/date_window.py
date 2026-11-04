@@ -11,19 +11,36 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-# Month names, 4-digit years, ISO dates, and vague-period words. A hit means the
-# query is worth a Haiku parse; a miss skips the LLM entirely (hot-path guard).
-_MONTHS = (r"jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|jun(e)?|jul(y)?|"
-           r"aug(ust)?|sep(tember)?|oct(ober)?|nov(ember)?|dec(ember)?")
-# Deliberately generous (recall-over-precision): false-positives here are cheap since
-# the LLM parse is fail-open, budget-capped, and cached.
+# Only an explicit date pattern is worth a Haiku parse; a miss skips the LLM
+# entirely (hot-path guard). The parse runs before retrieval and adds up to the
+# parser timeout, so words that are only vague on their own ("when", "after",
+# "since", "this", "last", "may") do not trigger it unless they sit next to a
+# date or a period. Every pattern below contains a word the earlier, wider
+# trigger matched, so this one only drops queries, never adds an LLM call.
+_MONTHS_NOT_MAY = (
+    r"jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|jun(e)?|jul(y)?|"
+    r"aug(ust)?|sep(tember)?|oct(ober)?|nov(ember)?|dec(ember)?"
+)
+_WEEKDAYS = r"monday|tuesday|wednesday|thursday|friday|saturday|sunday"
+_PERIODS = (
+    r"day|week|weekend|month|quarter|year|night|morning|afternoon|evening|"
+    r"spring|summer|autumn|fall|winter|" + _WEEKDAYS
+)
+_COUNT = r"\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|few|several|couple(\s+of)?"
 _TEMPORAL_RE = re.compile(
-    r"\b(" + _MONTHS + r")\b"
-    r"|\b(19|20)\d{2}\b"                 # 4-digit year
-    r"|\d{4}-\d{2}-\d{2}"                # ISO date
-    r"|\b(yesterday|today|tomorrow|last|this|next|recent(ly)?|ago|"
-    r"early|mid|late|around|when|during|after|before|since|"
-    r"week|month|quarter)\b",  # this/next + period nouns: "this week", "next month" (codex P2)
+    r"\b(" + _MONTHS_NOT_MAY + r")\b"
+    # "May" is a month only beside a day, a year or a date preposition.
+    r"|\bmay\s+\d"
+    r"|\b(in|early|mid|late|since|before|after|during|until|of|by|from|last|this|next|around)[\s-]+may\b"
+    r"|\d(st|nd|rd|th)?\s+(of\s+)?may\b"
+    r"|\b(19|20)\d{2}\b"  # 4-digit year
+    r"|\d{4}-\d{2}-\d{2}"  # ISO date
+    r"|\b(yesterday|today|tomorrow)\b"
+    # "this week", "last 3 months", "next tuesday", "recent weeks" (codex P2)
+    r"|\b(last|this|next|recent)\s+((" + _COUNT + r")\s+)?(" + _PERIODS + r")s?\b"
+    r"|\b(past|previous|coming)\s+(week|month|quarter)\b"
+    r"|\b(" + _COUNT + r")\s+(day|week|month|quarter|year)s?\s+ago\b"
+    r"|\b(since|before|after|during|around)\s+(" + _WEEKDAYS + r")\b",
     re.IGNORECASE,
 )
 
@@ -67,8 +84,11 @@ def _prompt(query: str, today: datetime.date) -> str:
 
 
 def _parse_iso(x: object) -> datetime.date | None:
+    # datetime.fromisoformat also takes a plain date, and it takes the
+    # "2026-04-20T00:00:00Z" shape the model sometimes emits, which
+    # date.fromisoformat rejects (the window was then cached as no-date).
     try:
-        return datetime.date.fromisoformat(str(x).strip())
+        return datetime.datetime.fromisoformat(str(x).strip()).date()
     except (ValueError, TypeError):
         return None
 

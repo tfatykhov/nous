@@ -1067,11 +1067,16 @@ class Heart:
         it a caller sees only survivors and cannot tell a thin corpus from a
         crowded one (F091).
 
-        Results carry their original hybrid search scores (configurable
-        vector/keyword weighting via hybrid_search(); default 0.7/0.3,
-        overridable at runtime). Censors use cosine similarity. Since
-        most sub-searches use the same scoring formula, scores are
-        directly comparable.
+        Each type's score comes from that type's own fusion, and the
+        cross-type ranking sorts those scores as they are. Episodes, facts
+        and procedures carry RRF scores normalised to [0, 1]: rank-derived
+        within the type (vector/keyword merge, plus the cross-variant merge
+        under query expansion), so 1.0 means "first in every list of this
+        type", not an absolute relevance. Facts can carry one more list when
+        a date window is given (the F075 date leg, stacked as a second merge
+        or, with ``date_leg_inline_rrf``, inside the per-type merge), and no
+        other type has that list. Censors carry raw cosine similarity, on a
+        different scale. The scores share a range, not a meaning.
 
         F055: ``residual_activations`` is an optional ``{node_id: activation}``
         dict computed by ``ResidualActivator.compute_activations`` in the
@@ -1194,6 +1199,9 @@ class Heart:
             "heart_rrf_penalty_limit",
             None,
         )
+        # C-4: the original query's share of the cross-variant fusion. Read
+        # here, from this Heart's Settings, so an eval's model_copy reaches it.
+        original_weighted = bool(getattr(self.settings, "query_expansion_original_weighted", False))
 
         # Execute searches sequentially — AsyncSession is not safe for
         # concurrent use, so asyncio.gather would risk InvalidRequestError.
@@ -1258,6 +1266,7 @@ class Heart:
                             session,
                             variant_pairs=variant_pairs,
                             penalty_limit=heart_penalty_limit,
+                            original_weighted=original_weighted,
                             stage_errors=stage_errors,
                             stage_error_msgs=stage_error_msgs,
                         )
@@ -1272,6 +1281,7 @@ class Heart:
                             variant_pairs=variant_pairs,
                             date_window=date_window,
                             penalty_limit=heart_penalty_limit,
+                            original_weighted=original_weighted,
                             track_access=False,
                             stage_errors=stage_errors,
                             stage_error_msgs=stage_error_msgs,
@@ -1283,6 +1293,7 @@ class Heart:
                             session=session,
                             variant_pairs=variant_pairs,
                             penalty_limit=heart_penalty_limit,
+                            original_weighted=original_weighted,
                             stage_errors=stage_errors,
                             stage_error_msgs=stage_error_msgs,
                         )
@@ -1315,10 +1326,9 @@ class Heart:
                             exc_info=True,
                         )
 
-        # Use original search scores instead of RRF positional scores.
-        # Episodes, facts, and procedures use hybrid_search() (configurable
-        # vector/keyword weight; default 0.7/0.3). Censors use cosine
-        # similarity. Scores are comparable enough for cross-type ranking.
+        # Each type keeps the score its own search produced: per-type RRF
+        # scores in [0, 1] for episodes, facts and procedures, raw cosine for
+        # censors. The sort below compares them as they are (see recall()).
         merged: list[RecallResult] = []
 
         for memory_type, raw_results in zip(keys, results_list):
