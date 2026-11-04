@@ -582,7 +582,8 @@ class FakeLLM:
 
 async def purge_agent(db, agent_id: str) -> list[str]:
     """Delete every row the test agent wrote (several passes, for foreign keys), then the
-    agent; returns the tables whose delete still failed."""
+    agent; returns the tables whose delete still failed. Not the scoring schema: the
+    harness never writes it, and the application role (the DB roles CI job) cannot."""
     from sqlalchemy import text
 
     async with db.engine.connect() as conn:
@@ -593,7 +594,7 @@ async def purge_agent(db, agent_id: str) -> list[str]:
                         "SELECT c.table_schema || '.' || c.table_name FROM information_schema.columns c"
                         " JOIN information_schema.tables t USING (table_schema, table_name)"
                         " WHERE c.column_name = 'agent_id' AND t.table_type = 'BASE TABLE'"
-                        " AND c.table_schema IN ('brain', 'heart', 'nous_system', 'scoring')"
+                        " AND c.table_schema IN ('brain', 'heart', 'nous_system')"
                     )
                 )
             )
