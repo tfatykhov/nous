@@ -2196,7 +2196,14 @@ class FactManager:
         just nudge the weighted term). This is the 7th and final exemplar
         isolation touchpoint; exemplar inputs themselves bypass admission
         scoring, so the exclusion only ever changes a NON-exemplar input's
-        novelty. Returns None if no facts exist or no embedding available.
+        novelty.
+
+        Returns None when there is no embedding: the novelty is unknown and
+        admission scores it 0.5. Returns 0.0 when the scan finds no comparable
+        active fact (an empty agent, every fact excluded, or an empty tier-1
+        pool): nothing similar exists, so admission scores novelty 1.0. Scoring
+        that case 0.5 rejected a new agent's low-confidence first fact, which
+        left the agent empty for the next one too.
 
         ``tier1_only`` (a person/preference/rule input) scans tier-1 facts
         only, matching ``_find_duplicate``: a profile fact that dedup kept
@@ -2245,7 +2252,7 @@ class FactManager:
 
         result = await session.execute(sql, params)
         row = result.first()
-        return float(row.similarity) if row else None
+        return float(row.similarity) if row else 0.0
 
     async def _get_source_text(
         self,

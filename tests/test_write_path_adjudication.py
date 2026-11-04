@@ -2849,13 +2849,12 @@ async def isolated_heart(db, session, mock_embeddings):
     """A Heart on an agent of its own, seeded with one unrelated active fact.
 
     Admission scores a new fact's novelty against the agent's other active
-    facts. With none to compare against, _find_max_similarity returns None
-    and novelty falls back to 0.5, which puts the first learn of the tests
-    below the admission threshold. On the shared default agent the result
-    therefore depended on whether an earlier test had committed facts. The
-    seed's embedding is orthogonal to every _unit_vec these tests use, so
-    novelty is 1.0 whatever else the database holds. The seed lives in the
-    test's rolled-back session, like everything the tests write.
+    facts. On the shared default agent the result depended on what earlier
+    tests had committed. An empty agent now scores novelty 1.0 (see
+    tests/test_admission_novelty.py); the seed stays so these tests do not
+    depend on that path. Its embedding is orthogonal to every _unit_vec these
+    tests use, so novelty is 1.0 either way. The seed lives in the test's
+    rolled-back session, like everything the tests write.
     """
     from nous.config import Settings
     from nous.heart import Heart
