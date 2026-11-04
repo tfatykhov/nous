@@ -370,14 +370,21 @@ class EpisodeSummarizer:
     ) -> int:
         """F067: chunk transcript, embed each chunk, insert into heart.episode_chunks.
 
-        Returns count of chunks written. Idempotent via the
-        (episode_id, chunk_index) unique constraint — re-running on the same
-        episode is a no-op (ON CONFLICT DO NOTHING).
+        Returns count of chunks written. Idempotent via the per-kind check
+        under the episode's advisory lock: an episode that already has
+        ``source_kind='dialogue'`` chunks is skipped (indexes are MAX+1, so
+        the (episode_id, chunk_index) conflict would not stop a second copy).
         """
         from sqlalchemy import text as sa_text
-        from nous.heart.chunking import chunk_text
+        from nous.heart.chunking import chunk_text, chunk_transcript
 
-        chunks = chunk_text(
+        # H-7: the turn-aware chunker is opt-in and applies to the episodes
+        # chunked from here on; stored chunks are never rewritten.
+        chunker = (
+            chunk_transcript if getattr(self._settings, "episode_chunk_turn_aware", False)
+            else chunk_text
+        )
+        chunks = chunker(
             transcript,
             chunk_size=self._settings.episode_chunk_size,
             overlap=self._settings.episode_chunk_overlap,
