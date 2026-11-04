@@ -858,7 +858,7 @@ class TestRunPythonMemoryWrappers:
 
     @pytest.mark.asyncio
     async def test_recall_deep_carries_residual_activation(
-        self, mock_brain, mock_heart, patched_pipeline
+        self, mock_brain, mock_heart, patched_pipeline, monkeypatch
     ):
         """F055 state must flow BOTH ways on the scripted path.
 
@@ -868,6 +868,9 @@ class TestRunPythonMemoryWrappers:
         used, which is the divergence this whole PR exists to remove.
         """
         from nous.api.tools import create_programmatic_tools
+
+        # The mocked heart has no async DB session; the own-session lookup is not under test here.
+        monkeypatch.setattr("nous.api.retrieval_pipeline.own_session_exclusions", AsyncMock(return_value=None))
 
         fid = uuid4()
         activator = MagicMock()
@@ -1268,7 +1271,7 @@ class TestRunPythonMemoryWrappers:
 
     @pytest.mark.asyncio
     async def test_limit_does_not_surface_excess_to_residual_activation(
-        self, mock_brain, mock_heart
+        self, mock_brain, mock_heart, monkeypatch
     ):
         """F055 must record only what the script actually received.
 
@@ -1278,6 +1281,9 @@ class TestRunPythonMemoryWrappers:
         """
         from nous.api.retrieval_pipeline import PipelineResult, PipelineStats
         from nous.api.tools import create_programmatic_tools
+
+        # The mocked heart has no async DB session; the own-session lookup is not under test here.
+        monkeypatch.setattr("nous.api.retrieval_pipeline.own_session_exclusions", AsyncMock(return_value=None))
 
         activator = MagicMock()
         activator.current_turn = AsyncMock(return_value=1)
