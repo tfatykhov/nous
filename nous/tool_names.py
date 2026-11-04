@@ -78,22 +78,22 @@ CHANGED_TOOLS: Mapping[str, ToolAlias] = MappingProxyType(
 _CHANGED_NAME = re.compile(r"\b(" + "|".join(map(re.escape, CHANGED_TOOLS)) + r")\b")
 
 
-def canonical_tool_name(name: str) -> str | None:
-    """The name a tool has now: an alias becomes its target, a retired name None (logged). Anything that is not
-    a string is returned as it is, for the caller's own validation."""
+def canonical_tool_name(name: str, *, log: bool = True) -> str | None:
+    """The name a tool has now: an alias becomes its target, a retired name None (logged unless ``log`` is
+    False). Anything that is not a string is returned as it is, for the caller's own validation."""
     change = CHANGED_TOOLS.get(name) if isinstance(name, str) else None
     if change is None:
         return name
-    if change.target is None:
+    if change.target is None and log:
         logger.warning("Dropped the retired tool name %r from a stored tool list", name)
     return change.target
 
 
-def canonical_tool_names(names: Iterable[str]) -> list[str]:
+def canonical_tool_names(names: Iterable[str], *, log: bool = True) -> list[str]:
     """``names`` with each one canonical, retired names dropped and repeats removed, in order."""
     out: list[str] = []
     for name in names:
-        canonical = canonical_tool_name(name)
+        canonical = canonical_tool_name(name, log=log)
         if canonical is not None and canonical not in out:
             out.append(canonical)
     return out

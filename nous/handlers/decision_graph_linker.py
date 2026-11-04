@@ -1,6 +1,6 @@
 """Decision Graph Linker — reverse cross-type linking on decision creation.
 
-Listens to: decision_recorded (in-process EventBus)
+Listens to: decision_recorded and decision_updated (in-process EventBus)
 Creates: fact→decision (evidence_for) and episode→decision (discussed_in) edges.
 
 F040 Phase 5: When a decision is recorded, searches for existing facts and
@@ -49,11 +49,15 @@ class DecisionGraphLinker:
         self._embedder = embedder
         self._settings = settings
         bus.on("decision_recorded", self.handle)
+        # Brain.update emits it (decision_relink_on_update_enabled) after a new description.
+        bus.on("decision_updated", self.handle)
 
     async def handle(self, event: Event) -> None:
-        """Handle decision_recorded — link decision to related facts and episodes."""
+        """Handle decision_recorded / decision_updated — link decision to related facts and episodes."""
         if not self._settings.cross_type_linking_enabled:
             return
+        # A re-link derives edges from the same turn's text again: not new evidence for LTP.
+        reinforce = event.type != "decision_updated"
 
         decision_id_str = event.data.get("decision_id")
         if not decision_id_str:
@@ -127,6 +131,7 @@ class DecisionGraphLinker:
                             relation="evidence_for",
                             weight=float(similarity),
                             session=session,
+                            reinforce=reinforce,
                         )
                         if edge:
                             edges_created += 1
@@ -170,6 +175,7 @@ class DecisionGraphLinker:
                             relation="discussed_in",
                             weight=float(similarity),
                             session=session,
+                            reinforce=reinforce,
                         )
                         if edge:
                             edges_created += 1

@@ -54,6 +54,7 @@ from nous.heart.schemas import (
     FactSummary,
     JobLesson,
     OpenThread,
+    ProcedureAttribution,
     ProcedureDetail,
     ProcedureInput,
     ProcedureOutcome,
@@ -666,9 +667,10 @@ class Heart:
         outcome: ProcedureOutcome,
         frame_type: str | None = None,
         session: AsyncSession | None = None,
+        attribution: ProcedureAttribution | None = None,
     ) -> ProcedureDetail:
         """Record procedure activation outcome."""
-        return await self.procedures.record_outcome(procedure_id, outcome, frame_type, session)
+        return await self.procedures.record_outcome(procedure_id, outcome, frame_type, session, attribution)
 
     async def get_procedure(self, procedure_id: UUID, session: AsyncSession | None = None) -> ProcedureDetail:
         """Fetch a single procedure. Raises ValueError if not found (P2-7)."""

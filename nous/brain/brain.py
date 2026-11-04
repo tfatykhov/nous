@@ -601,6 +601,7 @@ class Brain:
             raise ValueError(f"Decision {decision_id} not found")
 
         changed = False
+        description_changed = description is not None and description != decision.description
         if description is not None:
             decision.description = description
             changed = True
@@ -644,10 +645,12 @@ class Brain:
         )
 
         # Re-generate embedding if text changed (P1-6: graceful degradation)
+        embedded = False
         if self.embeddings:
             embed_text = _decision_embed_text(decision.description, decision.context, decision.pattern)
             try:
                 decision.embedding = await self.embeddings.embed(embed_text)
+                embedded = True
             except Exception:
                 logger.warning("Embedding re-generation failed during update; keeping the old vector", exc_info=True)
 
@@ -670,6 +673,30 @@ class Brain:
             "decision_updated",
             {"decision_id": str(decision_id)},
         )
+
+        # A new description is linked again (a deliberated decision was first linked on its
+        # "Plan: <user message>" placeholder). Add-only, and only on the new vector: when the
+        # embed failed the old vector is still stored, so linking again would repeat the old links.
+        if getattr(self.settings, "decision_relink_on_update_enabled", False) and description_changed and embedded:
+            try:
+                async with session.begin_nested():
+                    await self._auto_link(decision_id, session, reinforce=False)
+            except Exception:
+                logger.warning("auto_link after update failed for decision %s, continuing", decision_id, exc_info=True)
+            # DecisionGraphLinker links facts and episodes to the committed description. The
+            # audit row above is the record of this event, so the bus does not write another.
+            if self._bus is not None:
+                from nous.events import Event as BusEvent
+
+                self._emit_after_commit(
+                    session,
+                    BusEvent(
+                        type="decision_updated",
+                        agent_id=self.agent_id,
+                        data={"decision_id": str(decision_id)},
+                        persist=False,
+                    ),
+                )
 
         return self._decision_to_detail(decision)
 
@@ -2298,11 +2325,14 @@ class Brain:
         session: AsyncSession,
         threshold: float | None = None,
         max_links: int | None = None,
+        reinforce: bool = True,
     ) -> list[GraphEdgeInfo]:
         """Internal auto_link — finds similar decisions by cosine similarity.
 
         P2-19: Normalizes edge direction (lower UUID as source_id).
         P2-20: Uses ON CONFLICT DO NOTHING for concurrent inserts.
+        ``reinforce=False``: a re-derived edge keeps its LTP counter (the
+        re-link after an update is the same turn's text, not new evidence).
         """
         if threshold is None:
             threshold = self.settings.auto_link_threshold
@@ -2381,7 +2411,8 @@ class Brain:
             # F044-STC-HOOK: a conflict (rowcount 0) means this decision↔decision
             # edge already existed and was re-derived → reinforce its LTP counter.
             if (
-                getattr(self.settings, "tinyhippo_lite_enabled", False)
+                reinforce
+                and getattr(self.settings, "tinyhippo_lite_enabled", False)
                 and result.rowcount == 0
             ):
                 from nous.brain.tinyhippo_lite import increment_ltp_on_rederivation
