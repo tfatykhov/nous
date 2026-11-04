@@ -198,6 +198,10 @@ async def open_stack(
                 )
             if summarizer is not None:
                 sleep_handler._episode_summarizer = summarizer
+            if settings.profile_card_writer_enabled:  # main.py: the card is rewritten in a sleep phase
+                from nous.heart.profile_card import ProfileCardWriter
+
+                sleep_handler._profile_card_writer = ProfileCardWriter(db, settings, llm)
 
         async with db.session() as s:
             columns = set(

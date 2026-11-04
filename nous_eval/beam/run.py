@@ -130,6 +130,32 @@ def _json(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
 
 
+# What an answers.jsonl was produced under; a resume must match all of it.
+RESUME_KEYS = (
+    "mode",
+    "arm",
+    "override_names",
+    "agent_tag",
+    "bucket",
+    "answer_model",
+    "settings",
+    "eval_overrides",
+    "recall_deep_limit",
+)
+
+
+def _run_differences(prior: dict[str, Any], current: dict[str, Any]) -> list[str]:
+    """The RESUME_KEYS (and, inside ``settings``, the setting names) where two run records differ."""
+    out: list[str] = []
+    for key in RESUME_KEYS:
+        if key == "settings" and isinstance(prior.get(key), dict):
+            names = sorted(set(prior[key]) | set(current[key]))
+            out += [f"settings.{n}" for n in names if prior[key].get(n) != current[key].get(n)]
+        elif prior.get(key) != current.get(key):
+            out.append(key)
+    return out
+
+
 async def cmd_ingest(
     args: argparse.Namespace, *, llm: Any = None, embeddings: Any = None, prepare: bool = True
 ) -> list[dict[str, Any]]:
@@ -165,30 +191,27 @@ async def cmd_answer(args: argparse.Namespace, *, llm: Any = None, embeddings: A
     conv_ids = _conv_ids(args)
     first = arms.build_settings(db_url, agent_id(args.bucket, conv_ids[0], args.agent_tag), overrides)
     model = args.answer_model or first.model
-    record = run_settings_record(first, overrides, ignored)
-    by_env = arms.env_name_to_field()
-    run_id = _json(
+    run_info = _json(
         {
             "mode": args.mode,
             "arm": args.arm,
-            "override_names": record["override_names"],
-            "arm_values": {by_env[n]: record["settings"][by_env[n]] for n in record["override_names"]},
             "agent_tag": args.agent_tag,
             "bucket": args.bucket,
             "answer_model": model,
+            **run_settings_record(first, overrides, ignored),
+            "recall_deep_limit": harness.RECALL_DEEP_LIMIT,
+            "chats_dir": str(args.chats_dir),
         }
     )
-    if run_path.exists():
-        prior = json.loads(run_path.read_text(encoding="utf-8"))
-        if {k: prior.get(k) for k in run_id} != run_id:
+    if run_path.exists():  # resume only under the same resolved configuration
+        differences = _run_differences(json.loads(run_path.read_text(encoding="utf-8")), run_info)
+        if differences:
             raise SystemExit(
-                f"{args.out_dir} holds a different run (mode/arm/settings/tag/bucket/model); use a new one"
+                f"{args.out_dir} holds answers made under a different configuration ({', '.join(differences)}); "
+                "use a new --out-dir"
             )
     else:
-        _write_json(
-            run_path,
-            {**run_id, **record, "recall_deep_limit": harness.RECALL_DEEP_LIMIT, "chats_dir": str(args.chats_dir)},
-        )
+        _write_json(run_path, run_info)
     done = {_row_key(r) for r in _read_jsonl(answers_path)}
     written = 0
     for cid in conv_ids:
@@ -236,7 +259,15 @@ async def cmd_score(args: argparse.Namespace, *, judge: scoring.Judge | None = N
     if not answers:
         raise SystemExit(f"no answers.jsonl in {args.out_dir}")
     scores_path = args.out_dir / "scores.jsonl"
-    done = {_row_key(r) for r in _read_jsonl(scores_path)}
+    prior_rows = _read_jsonl(scores_path)
+    judge_model = args.judge_model if judge is None else getattr(judge, "model", args.judge_model)
+    prior_judges = sorted({str(r.get("judge_model")) for r in prior_rows})
+    if prior_judges and prior_judges != [judge_model]:
+        raise SystemExit(
+            f"{scores_path} was judged by {', '.join(prior_judges)}, not {judge_model}; score with another judge "
+            "in a new --out-dir (copy answers.jsonl and run.json into it)"
+        )
+    done = {_row_key(r) for r in prior_rows}
     owned = judge is None
     if owned:
         judge = scoring.OpenAIJudge(Settings().openai_api_key, model=args.judge_model)
@@ -245,6 +276,7 @@ async def cmd_score(args: argparse.Namespace, *, judge: scoring.Judge | None = N
             if _row_key(row) in done:
                 continue
             scored = {k: row[k] for k in ("conversation", "ability", "index", "question", "answer", "error")}
+            scored["judge_model"] = judge_model
             if row.get("error") is None:
                 try:
                     scored["score"] = await scoring.score_answer(judge, row["ability"], row["rubric"], row["answer"])
@@ -260,7 +292,7 @@ async def cmd_score(args: argparse.Namespace, *, judge: scoring.Judge | None = N
     run = json.loads((args.out_dir / "run.json").read_text(encoding="utf-8"))
     summary = {
         "run": run,
-        "judge_model": getattr(judge, "model", args.judge_model),
+        "judge_model": judge_model,
         "n_answers": len(answers),
         "n_errors": sum(1 for r in rows if r.get("error")),
         **scoring.aggregate(rows),

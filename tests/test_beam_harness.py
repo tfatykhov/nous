@@ -423,6 +423,84 @@ def test_trivial_session_matches_end_session_rule() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Resume guards: an out-dir holds one configuration and one judge
+# ---------------------------------------------------------------------------
+
+
+class _StopBeforeDB(Exception):
+    pass
+
+
+async def test_answer_resume_refuses_a_changed_resolved_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A setting changed through the environment (no override) still changes the run."""
+
+    def stop_before_db(*args, **kwargs):
+        raise _StopBeforeDB
+
+    monkeypatch.setattr(harness, "open_stack", stop_before_db)
+    monkeypatch.setenv("NOUS_CONTEXT_QUERY_MODE", "bag")
+    chats = write_conversation(tmp_path / "chats")
+    out = tmp_path / "out"
+    out.mkdir()
+    argv = ["answer", "--chats-dir", str(chats), "--bucket", "100K", "--conv", "1", "--db-url", DB_URL]
+    args = beam_run.parse_args([*argv, "--agent-tag", "t", "--out-dir", str(out), "--mode", "preturn"])
+    with pytest.raises(_StopBeforeDB):  # first run: run.json written, then the stack would open
+        await beam_run.cmd_answer(args)
+    assert json.loads((out / "run.json").read_text(encoding="utf-8"))["settings"]["context_query_mode"] == "bag"
+
+    with pytest.raises(_StopBeforeDB):  # same configuration: resumes
+        await beam_run.cmd_answer(args)
+    monkeypatch.setenv("NOUS_CONTEXT_QUERY_MODE", "conditional")
+    with pytest.raises(SystemExit, match="context_query_mode"):
+        await beam_run.cmd_answer(args)
+
+
+class NamedJudge:
+    """A fake judge with a model name, as OpenAIJudge has."""
+
+    def __init__(self, model: str) -> None:
+        self.model = model
+        self._judge = exact_match_judge()
+
+    async def __call__(self, messages: list[dict[str, str]]) -> str:
+        return await self._judge(messages)
+
+
+async def test_score_refuses_scores_from_another_judge(tmp_path: Path) -> None:
+    (tmp_path / "run.json").write_text(json.dumps({"mode": "preturn"}), encoding="utf-8")
+    row = {
+        "conversation": "100K/1",
+        "ability": "information_extraction",
+        "index": 0,
+        "question": "When is the first Larkspur planting?",
+        "rubric": ["LLM response should state: April 12"],
+        "answer": "April 12",
+        "error": None,
+    }
+    (tmp_path / "answers.jsonl").write_text(json.dumps(row) + "\n", encoding="utf-8")
+    first = await beam_run.cmd_score(
+        beam_run.parse_args(["score", "--out-dir", str(tmp_path), "--judge-model", "judge-a"]),
+        judge=NamedJudge("judge-a"),
+    )
+    assert first["judge_model"] == "judge-a"
+    scored = [json.loads(x) for x in (tmp_path / "scores.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [r["judge_model"] for r in scored] == ["judge-a"]
+
+    again = await beam_run.cmd_score(  # the same judge resumes
+        beam_run.parse_args(["score", "--out-dir", str(tmp_path), "--judge-model", "judge-a"]),
+        judge=NamedJudge("judge-a"),
+    )
+    assert again["n_answers"] == 1
+    with pytest.raises(SystemExit, match="judge-a"):
+        await beam_run.cmd_score(
+            beam_run.parse_args(["score", "--out-dir", str(tmp_path), "--judge-model", "judge-b"]),
+            judge=NamedJudge("judge-b"),
+        )
+
+
+# ---------------------------------------------------------------------------
 # Event bus drain
 # ---------------------------------------------------------------------------
 
@@ -537,6 +615,21 @@ async def purge_agent(db, agent_id: str) -> list[str]:
     async with db.engine.begin() as conn:
         await conn.execute(text("DELETE FROM nous_system.agents WHERE id = :a"), {"a": agent_id})
     return pending
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize(("flag", "wired"), [("true", True), ("false", False)])
+async def test_sleep_stack_wires_the_profile_card_writer_behind_its_flag(db, flag: str, wired: bool) -> None:
+    """As main.py does: with sleep on, the writer is injected exactly when its flag is on."""
+    from conftest import MockEmbeddingProvider
+
+    from nous.heart.profile_card import ProfileCardWriter
+
+    db_url = db.engine.url.render_as_string(hide_password=False)
+    settings = arms.build_settings(db_url, "beam-profile-card-check", {"NOUS_PROFILE_CARD_WRITER_ENABLED": flag})
+    async with harness.open_stack(settings, llm=FakeLLM(), embeddings=MockEmbeddingProvider(), sleep=True) as stack:
+        writer = stack.sleep_handler._profile_card_writer
+    assert isinstance(writer, ProfileCardWriter) is wired
 
 
 @pytest.mark.postgres_only
