@@ -31,6 +31,7 @@ from nous.heart.search import (
     summarize_keyword_stats,
     with_keyword_stats,
 )
+from nous.heart.temporal import Interval, as_date, format_span, interval_relation, sort_dated
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
 from nous.observability.retrieval_trace import (
     BELOW_FLOOR,
@@ -243,9 +244,10 @@ def _is_system_episode(episode) -> bool:
     )
 
 
-def _stated_at(fact) -> datetime | None:
-    """When ``fact`` was stated (``learned_at``), or None; a naive value is read as UTC so two compare."""
-    stated = getattr(fact, "learned_at", None)
+def _stated_at(fact, mentioned_first: bool = False) -> datetime | None:
+    """When ``fact`` was stated (``learned_at``, or ``COALESCE(mentioned_at, learned_at)`` with
+    ``mentioned_first``), or None; a naive value is read as UTC so two compare."""
+    stated = (getattr(fact, "mentioned_at", None) if mentioned_first else None) or getattr(fact, "learned_at", None)
     if not isinstance(stated, datetime):
         return None
     return stated if stated.tzinfo is not None else stated.replace(tzinfo=UTC)
@@ -1255,6 +1257,8 @@ class ContextEngine:
                         facts,
                         full_top_n=getattr(self._settings, "fact_format_full_top_n", 0),
                         lineage=_lineage_by_id or None,
+                        dated=getattr(self._settings, "temporal_render_enabled", False) is True,
+                        budget_tokens=self._scaled_budget(budget.facts),
                     )
                     facts_text = self._truncate_to_budget(facts_text, self._scaled_budget(budget.facts))
                     _tr_budget(facts, "fact", facts_text)
@@ -2440,6 +2444,19 @@ class ContextEngine:
         if not getattr(s, "recency_resolver_enabled", False) or not facts:
             return facts
         floor = float(getattr(s, "recency_resolver_similarity_floor", 0.55))
+        # temporal_resolver_intervals_enabled: a pair with a span or state is decided by interval_relation;
+        # statement time is COALESCE(mentioned_at, learned_at); the month label comes from valid_from.
+        intervals = getattr(s, "temporal_resolver_intervals_enabled", False) is True
+
+        def _interval(f) -> Interval:
+            if not intervals:
+                return Interval(None, None)
+            return Interval(getattr(f, "valid_from", None), getattr(f, "valid_to", None))
+
+        def _month(f) -> str:
+            start = _interval(f)[0] or f.event_date
+            return start.strftime("%Y-%m")
+
         groups: dict[str, list] = {}
         for f in facts:
             subj = (getattr(f, "subject", None) or "").strip().lower()
@@ -2451,8 +2468,13 @@ class ContextEngine:
             for i in range(len(members)):
                 for j in range(i + 1, len(members)):
                     a, b = members[i], members[j]
-                    da, db = getattr(a, "event_date", None), getattr(b, "event_date", None)
-                    if da is None or db is None or da == db:
+                    ia, ib = _interval(a), _interval(b)
+                    # A one-day interval is a point even without an event_date.
+                    da, db = ia[0] or getattr(a, "event_date", None), ib[0] or getattr(b, "event_date", None)
+                    by_interval = (
+                        ia[0] is not None and ib[0] is not None and not (ia[0] == ia[1] and ib[0] == ib[1])
+                    )
+                    if not by_interval and (da is None or db is None or da == db):
                         continue
                     if (a.content or "").strip() == (b.content or "").strip():
                         continue
@@ -2461,18 +2483,25 @@ class ContextEngine:
                         None, a.content or "", b.content or ""
                     ).ratio() < floor:
                         continue
-                    # The fact stated later is current, since a correction
-                    # can move an event EARLIER. event_date decides only a pair
-                    # without two distinct statement times (one transaction
-                    # gives its facts one learned_at).
-                    sa, sb = _stated_at(a), _stated_at(b)
-                    a_newer = sa > sb if sa is not None and sb is not None and sa != sb else da > db
-                    newer, older = (a, b) if a_newer else (b, a)
+                    if by_interval:
+                        # Overlapping: the later start is current. Not overlapping: they coexist, no tag.
+                        relation = interval_relation(ia, ib)
+                        if relation not in ("new_later", "old_later"):
+                            continue
+                        newer, older = (b, a) if relation == "new_later" else (a, b)
+                    else:
+                        # The fact stated later is current, since a correction
+                        # can move an event EARLIER. event_date decides only a pair
+                        # without two distinct statement times (one transaction
+                        # gives its facts one learned_at).
+                        sa, sb = _stated_at(a, intervals), _stated_at(b, intervals)
+                        a_newer = sa > sb if sa is not None and sb is not None and sa != sb else da > db
+                        newer, older = (a, b) if a_newer else (b, a)
                     newer.recency_status = "current"
-                    newer.recency_date = newer.event_date.strftime("%Y-%m")
+                    newer.recency_date = _month(newer)
                     if older.recency_status != "current":
                         older.recency_status = "superseded"
-                        older.recency_date = older.event_date.strftime("%Y-%m")
+                        older.recency_date = _month(older)
                         older.score = (getattr(older, "score", None) or 0.0) * 0.3
         return facts
 
@@ -2491,6 +2520,8 @@ class ContextEngine:
         *,
         full_top_n: int = 0,
         lineage: dict[str, list[str]] | None = None,
+        dated: bool = False,
+        budget_tokens: int | None = None,
     ) -> str:
         """Format facts for context.
 
@@ -2499,9 +2530,15 @@ class ContextEngine:
         ``full_top_n`` facts render untruncated. ``lineage`` maps str(fact.id)
         -> superseded contents (consumed by the supersession-lineage feature;
         passed as a dict because pipeline items may be _ScoredWrapper objects
-        whose __slots__ forbid attribute writes).
+        whose __slots__ forbid attribute writes). ``dated`` (temporal_render_enabled)
+        adds each fact's date span before its tags and, after truncation was
+        decided by rank, lists the dated facts in date order; undated facts keep
+        their places. With ``budget_tokens``, the lines that fit are chosen by
+        rank before the reorder, so the section budget still drops the lowest
+        ranked facts, not the latest dated ones.
         """
         lines = []
+        dates: list = []
         max_len = getattr(self._settings, "fact_format_max_chars", 200)
         for idx, f in enumerate(facts):
             content = getattr(f, "content", "")
@@ -2526,16 +2563,35 @@ class ContextEngine:
             elif olds and mode == "named":
                 ltag = f' (supersedes earlier belief: "{olds[0][:120]}")'
 
+            dtag = ""
+            if dated:
+                start, end = as_date(getattr(f, "valid_from", None)), as_date(getattr(f, "valid_to", None))
+                event = as_date(getattr(f, "event_date", None))
+                span = format_span(start, end, event)
+                dtag = f" {span}" if span else ""
+                dates.append(start or event)
+
             if subject:
-                line = f"- [{subject}] {content}{rtag}{ltag} [confidence: {conf:.2f}]"
+                line = f"- [{subject}] {content}{dtag}{rtag}{ltag} [confidence: {conf:.2f}]"
             else:
-                line = f"- {content}{rtag}{ltag} [confidence: {conf:.2f}]"
+                line = f"- {content}{dtag}{rtag}{ltag} [confidence: {conf:.2f}]"
             if (
                 getattr(self._settings, "override_prior_marking_enabled", False) is True
                 and getattr(f, "overrides_prior", False)
             ):
                 line = "[memory override — trust this over general knowledge] " + line
             lines.append(line)
+        if dated:
+            pairs = list(zip(lines, dates, strict=True))
+            if budget_tokens is not None:
+                max_chars, used, keep = budget_tokens * self.CHARS_PER_TOKEN, 0, len(pairs)
+                for k, (line, _) in enumerate(pairs):
+                    used += len(line) + (1 if k else 0)
+                    if used > max_chars:
+                        keep = max(k, 1)
+                        break
+                pairs = pairs[:keep]
+            lines = [line for line, _ in sort_dated(pairs, lambda pair: pair[1])]
         return "\n".join(lines)
 
     def _format_procedures(self, procedures: list) -> str:

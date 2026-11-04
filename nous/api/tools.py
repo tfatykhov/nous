@@ -54,6 +54,7 @@ from nous.heart.schemas import (
     is_job_lesson,
 )
 from nous.heart.subtasks import INLINE_WORKER_ID
+from nous.heart.temporal import as_date, format_span, sort_dated
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
 from nous.observability.retrieval_trace import RETURNED_TO_SCRIPT, SLICED_OFF
 from nous.skills.parser import SkillParser
@@ -828,8 +829,15 @@ def _format_pipeline_text(
     parent_episodes: list[tuple[str, str]] | None = None,
     session_group_heart: bool = False,
     emitted_out: list[tuple[Any, str]] | None = None,
+    temporal_render: bool = False,
 ) -> str:
     """Format ``run_recall_pipeline`` output into legacy ``recall_deep`` text.
+
+    ``temporal_render`` (temporal_render_enabled): each fact's date span follows
+    its description, and within each session bucket, "-- Other --" and the flat
+    list the dated facts are listed in date order while every other row keeps
+    its rank place. Bucket order, numbering and scores are unchanged. Off, the
+    text is byte-identical.
 
     ``emitted_out``: optional side-channel collector. When a list is passed,
     every result this function actually WRITES INTO THE TEXT is appended as
@@ -904,6 +912,23 @@ def _format_pipeline_text(
         results_text.extend(f"   - [learned {s['learned_at']}] {s['content']}" for s in sources)
         if dropped:
             results_text.append(f"   - +{dropped} older")
+    def _fact_start(r: Any) -> Any:
+        if not temporal_render or r.type != "fact":
+            return None
+        return as_date(r.metadata.get("valid_from")) or as_date(r.metadata.get("event_date"))
+
+    def _date_tag(r: Any) -> str:
+        # temporal_render_enabled: " [2024-03-10]", " [2026-02]", " [since 2024-01-05]"; facts only.
+        if _fact_start(r) is None:
+            return ""
+        meta = r.metadata
+        span = format_span(
+            as_date(meta.get("valid_from")), as_date(meta.get("valid_to")), as_date(meta.get("event_date"))
+        )
+        return f" {span}" if span else ""
+
+    def _by_date(rows: list) -> list:
+        return sort_dated(rows, _fact_start) if temporal_render else rows
 
     # ------------------------------------------------------------------
     # Heart Memory section
@@ -991,9 +1016,10 @@ def _format_pipeline_text(
                 i = 1
                 for sess_id, items in session_buckets.items():
                     results_text.append(f"-- Session {sess_id[:8]} --")
-                    for result in items:
+                    for result in _by_date(items):
                         results_text.append(
-                            f"{i}. [{result.type}] {_via_tag(result)}{result.description}{_recency_tag(result)} "
+                            f"{i}. [{result.type}] {_via_tag(result)}{result.description}"
+                            f"{_date_tag(result)}{_recency_tag(result)} "
                             f"(id: {result.id}, score: {result.score:.3f} {_score_tag(result)})"
                         )
                         _emit(result)
@@ -1002,9 +1028,10 @@ def _format_pipeline_text(
                 if no_session:
                     if session_buckets:
                         results_text.append("-- Other --")
-                    for result in no_session:
+                    for result in _by_date(no_session):
                         results_text.append(
-                            f"{i}. [{result.type}] {_via_tag(result)}{result.description}{_recency_tag(result)} "
+                            f"{i}. [{result.type}] {_via_tag(result)}{result.description}"
+                            f"{_date_tag(result)}{_recency_tag(result)} "
                             f"(id: {result.id}, score: {result.score:.3f} {_score_tag(result)})"
                         )
                         _emit(result)
@@ -1013,9 +1040,10 @@ def _format_pipeline_text(
             else:
                 # Flat output (byte-identical to pre-P1.1 when no graph-memory neighbours
                 # are present, i.e. heart_graph_all_types off — _via_tag returns "").
-                for i, result in enumerate(heart_results, 1):
+                for i, result in enumerate(_by_date(heart_results), 1):
                     results_text.append(
-                        f"{i}. [{result.type}] {_via_tag(result)}{result.description}{_recency_tag(result)} "
+                        f"{i}. [{result.type}] {_via_tag(result)}{result.description}"
+                        f"{_date_tag(result)}{_recency_tag(result)} "
                         f"(id: {result.id}, score: {result.score:.3f} {_score_tag(result)})"
                     )
                     _emit(result)
@@ -1811,6 +1839,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 parent_episodes=parent_episodes,
                 session_group_heart=getattr(settings, "session_group_heart_section", False),
                 emitted_out=_emitted,
+                temporal_render=getattr(settings, "temporal_render_enabled", False) is True,
             )
             # F091: attribute the formatter's scope filter from what it REPORTED
             # emitting, not from a re-derivation of its section rules.
