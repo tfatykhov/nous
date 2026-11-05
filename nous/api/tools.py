@@ -59,6 +59,7 @@ from nous.heart.temporal import as_date, format_span, sort_dated
 from nous.observability.retrieval_logger import get_active as get_active_retrieval_logger
 from nous.observability.retrieval_trace import RETURNED_TO_SCRIPT, SLICED_OFF
 from nous.skills.parser import SkillParser
+from nous.tool_markup import clean_model_text, leaked_values, markup_note
 from nous.tool_names import CHANGED_TOOLS, ToolAlias, canonical_tool_names, changed_tools_note
 from nous.utils import leaked_markup_start as _leak_tail_start
 from nous.utils import short_error
@@ -94,6 +95,46 @@ def _tool_error(text: str) -> dict[str, Any]:
 # The trailing run of leaked XML tool syntax, and how it is located, are shared
 # with the strategy-card distiller: see nous.utils.leaked_markup_start.
 _XML_PARAM_LEAK_PAIR = re.compile(r'<parameter\s+name="([^"]+)">\s*([^<]*)')
+
+
+def _schema_params(schema: dict[str, Any]) -> frozenset[str]:
+    """A tool's parameter names, for ``clean_model_text``: ``<category>`` is markup only for a tool that has it."""
+    return frozenset(schema.get("properties", {}))
+
+
+def _fill_from_leaked_markup(
+    tool_name: str, removed: list[str], unset: list[str], schema: dict[str, Any]
+) -> dict[str, Any]:
+    """Values the markup stripped from a value gave to arguments the call left unset.
+
+    ``leaked_values`` reads the pairs (``<parameter name="x">v`` and ``<x>v</x>``) of the
+    call the markup closed, each value up to its matching closer; a value whose end cannot
+    be told is declined. Only names in ``unset``, coerced like the dispatcher's salvage;
+    the input model (FactInput, RecordInput, CensorInput) validates the result.
+    """
+    props = schema.get("properties", {})
+    filled: dict[str, Any] = {}
+    declined: list[str] = []
+    for cut in removed:
+        for key, raw in leaked_values(cut):
+            if key not in unset or key not in props or key in filled:
+                continue
+            if raw is None:
+                declined.append(key)
+                continue
+            value = _coerce_to_schema_type(raw, props[key]) if raw.strip() else None
+            if value is not None:
+                filled[key] = value
+    if filled:
+        logger.warning("%s: filled %s from leaked tool-call markup", tool_name, ", ".join(sorted(filled)))
+    not_recovered = sorted(set(declined) - set(filled))
+    if not_recovered:
+        logger.warning(
+            "%s: not recovered from leaked tool-call markup (value end unclear): %s",
+            tool_name,
+            ", ".join(not_recovered),
+        )
+    return filled
 
 
 def _satisfies_schema_constraints(value: Any, prop_schema: dict[str, Any]) -> bool:
@@ -1496,6 +1537,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             MCP-compliant response with decision ID or error message
         """
         try:
+            removed: list[str] = []
             # Validate and construct input
             reason_inputs = []
             if reasons:
@@ -1504,7 +1546,24 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                         return _tool_error(
                             f"Error: Invalid reason format. Expected dict with 'type' and 'text', got: {r}"
                         )
-                    reason_inputs.append(ReasonInput(type=r["type"], text=r["text"]))
+                    reason_text, cut = clean_model_text(
+                        r["text"], tool="record_decision", field="text", params=_REASON_PARAMS
+                    )
+                    removed.append(cut)
+                    reason_inputs.append(ReasonInput(type=r["type"], text=reason_text))
+
+            params = _RECORD_DECISION_PARAMS
+            top: list[str] = []
+            description, cut = clean_model_text(description, tool="record_decision", field="description", params=params)
+            top.append(cut)
+            context, cut = clean_model_text(context, tool="record_decision", field="context", params=params)
+            top.append(cut)
+            pattern, cut = clean_model_text(pattern, tool="record_decision", field="pattern", params=params)
+            top.append(cut)
+            removed += top
+            unset = [k for k, v in (("context", context), ("pattern", pattern)) if v is None]
+            filled = _fill_from_leaked_markup("record_decision", top, unset, _RECORD_DECISION_SCHEMA)
+            context, pattern = filled.get("context", context), filled.get("pattern", pattern)
 
             input_data = RecordInput(
                 description=description,
@@ -1533,6 +1592,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                             f"Quality score: {result.quality_score:.2f}\n"
                             f"Category: {result.category}\n"
                             f"Stakes: {result.stakes}"
+                            f"{markup_note(*removed)}"
                         ),
                     }
                 ]
@@ -1576,6 +1636,14 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             episode_uuid = UUID(source_episode_id) if source_episode_id else None
             decision_uuid = UUID(source_decision_id) if source_decision_id else None
 
+            params = _LEARN_FACT_PARAMS
+            content, removed_content = clean_model_text(content, tool="learn_fact", field="content", params=params)
+            subject, removed_subject = clean_model_text(subject, tool="learn_fact", field="subject", params=params)
+            unset = [k for k, v in (("category", category), ("subject", subject)) if v is None]
+            filled = _fill_from_leaked_markup(
+                "learn_fact", [removed_content, removed_subject], unset, _LEARN_FACT_SCHEMA
+            )
+            category, subject = filled.get("category", category), filled.get("subject", subject)
             input_data = FactInput(
                 content=content,
                 category=category,
@@ -1622,6 +1690,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                             f"Category: {result.category or 'none'}\n"
                             f"Subject: {result.subject or 'none'}"
                             f"{warning_msg}"
+                            f"{markup_note(removed_content, removed_subject)}"
                         ),
                     }
                 ]
@@ -2017,6 +2086,14 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             decision_uuid = UUID(learned_from_decision) if learned_from_decision else None
             episode_uuid = UUID(learned_from_episode) if learned_from_episode else None
 
+            # Not trigger_pattern: it is a regex or substring, matched as written.
+            reason, removed_reason = clean_model_text(
+                reason, tool="create_censor", field="reason", params=_CREATE_CENSOR_PARAMS
+            )
+            if domain is None:
+                domain = _fill_from_leaked_markup(
+                    "create_censor", [removed_reason], ["domain"], _CREATE_CENSOR_SCHEMA
+                ).get("domain")
             input_data = CensorInput(
                 trigger_pattern=trigger_pattern,
                 reason=reason,
@@ -2041,6 +2118,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                             f"Action: {result.action}\n"
                             f"Domain: {result.domain or 'all'}\n"
                             f"Pattern: {result.trigger_pattern}"
+                            f"{markup_note(removed_reason)}"
                         ),
                     }
                 ]
@@ -2442,7 +2520,12 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 {
                     "decision_id": r.get("decision_id"),
                     "outcome": r.get("outcome"),
-                    "result": r.get("resolution_note"),
+                    "result": clean_model_text(
+                        r.get("resolution_note"),
+                        tool="resolve_decisions",
+                        field="resolution_note",
+                        params=_RESOLUTION_PARAMS,
+                    )[0],
                     "superseded_by": r.get("superseded_by"),
                 }
                 for r in resolutions
@@ -2658,6 +2741,14 @@ _RESOLVE_DECISIONS_SCHEMA: dict[str, Any] = {
     "required": ["resolutions"],
 }
 
+# The parameter names of the write tools, for clean_model_text: <category> is markup only for a
+# tool that has it. A reason's markup can also carry the reason item's names.
+_RECORD_DECISION_PARAMS = _schema_params(_RECORD_DECISION_SCHEMA)
+_RESOLUTION_PARAMS = _schema_params(_RESOLVE_DECISIONS_SCHEMA["properties"]["resolutions"]["items"])
+_REASON_PARAMS = _schema_params(_RECORD_DECISION_SCHEMA) | _schema_params(
+    _RECORD_DECISION_SCHEMA["properties"]["reasons"]["items"]
+)
+
 _LIST_DECISIONS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
@@ -2715,6 +2806,7 @@ _LEARN_FACT_SCHEMA: dict[str, Any] = {
     },
     "required": ["content"],
 }
+_LEARN_FACT_PARAMS = _schema_params(_LEARN_FACT_SCHEMA)
 
 _RECALL_DEEP_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -2782,6 +2874,7 @@ _CREATE_CENSOR_SCHEMA: dict[str, Any] = {
     },
     "required": ["trigger_pattern", "reason"],
 }
+_CREATE_CENSOR_PARAMS = _schema_params(_CREATE_CENSOR_SCHEMA)
 
 _LEARN_SKILL_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -5307,6 +5400,9 @@ def create_programmatic_tools(
             from uuid import UUID as _UUID
 
             ep_uuid = _UUID(_active_episode_id) if _active_episode_id else None
+            params = _LEARN_FACT_PARAMS
+            content, _ = clean_model_text(content, tool="run_python.learn_fact", field="content", params=params)
+            subject, _ = clean_model_text(subject, tool="run_python.learn_fact", field="subject", params=params)
             result = _schedule(
                 heart.learn(
                     FactInput(

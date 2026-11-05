@@ -41,6 +41,7 @@ from nous.heart.heart import Heart
 from nous.heart.schemas import FactDetail, FactInput, FactRejected
 from nous.storage.models import Event as EventRow
 from nous.storage.models import Fact
+from nous.tool_markup import clean_model_text
 
 logger = logging.getLogger(__name__)
 
@@ -1347,7 +1348,12 @@ class SleepHandler:
                 raw_action = str(resolution.get("action", "")).upper().strip()
                 action = raw_action
                 confidence = float(resolution.get("confidence", 0.0))
-                merged_content = str(resolution.get("merged_content", "") or "").strip()
+                merged_content, _ = clean_model_text(
+                    str(resolution.get("merged_content", "") or "").strip(),
+                    tool="sleep.contradiction_resolution",
+                    field="merged_content",
+                    params=_CONTRADICTION_RESOLUTION_SCHEMA["properties"],
+                )
                 fact1_id = pair["fact1_id"]
                 fact2_id = pair["fact2_id"]
 
@@ -1973,6 +1979,13 @@ class SleepHandler:
                 #     write-time scan; nothing written
                 #   merged: full success (originals deactivated, new fact stored)
                 merged_fact_id: str | None = None
+                if merge_result and merge_result.get("merged_content"):
+                    merge_result["merged_content"], _ = clean_model_text(
+                        str(merge_result["merged_content"]),
+                        tool="sleep.cluster_consolidation",
+                        field="merged_content",
+                        params=_CLUSTER_MERGE_SCHEMA["properties"],
+                    )
 
                 # Classify the LLM's response into the right refusal
                 # bucket. Order matters: explicit should_merge=false is
