@@ -82,6 +82,9 @@ async def cross_encoder_rerank(
         `.score = float("-inf")` so they sink to the end of the head.
       - On ANY exception (missing dep, load failure, predict failure) the
         original `candidates` list is returned unchanged — never raises.
+        Whenever nothing is scored, the same list object comes back, so a
+        caller can tell a scored result (a new list) by identity.
+      - A lone candidate is scored too (its sigmoid), not passed through.
 
     Args:
         query: The retrieval query string.
@@ -94,7 +97,7 @@ async def cross_encoder_rerank(
     Returns:
         The reranked list (same list objects, possibly reordered).
     """
-    if not CROSS_ENCODER_AVAILABLE or not query or len(candidates) <= 1:
+    if not CROSS_ENCODER_AVAILABLE or not query or not candidates:
         return candidates
 
     # P3: cap query length too (defensive against pathologically long queries).

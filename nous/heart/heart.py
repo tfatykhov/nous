@@ -1490,10 +1490,11 @@ class Heart:
         # same per-(query, text) score the pre-cut rerank gives it, and the
         # list is sorted by score as the CE path's sort above does, so every
         # consumer of Heart's scores and order sees the CE's, within this set.
-        if ce_order_only and len(merged) > 1 and CROSS_ENCODER_AVAILABLE:
+        # A lone selected row is scored too, as the pre-cut rerank scores it.
+        if ce_order_only and merged and CROSS_ENCODER_AVAILABLE:
             try:
                 pre_ce_order = [r.id for r in merged]
-                merged = await cross_encoder_rerank(
+                reranked = await cross_encoder_rerank(
                     query=query,
                     candidates=merged,
                     text_fn=lambda r: r.summary or "",
@@ -1501,7 +1502,12 @@ class Heart:
                     max_candidates=self.settings.cross_encoder_max_candidates,
                     text_limit=self.settings.cross_encoder_text_limit,
                 )
-                merged.sort(key=lambda r: r.score, reverse=True)
+                # The reranker hands back the same list when it scored nothing
+                # (load or predict failure): keep the selection order, MMR's
+                # included, rather than re-sort it by the selection scores.
+                if reranked is not merged:
+                    merged = reranked
+                    merged.sort(key=lambda r: r.score, reverse=True)
                 logger.info(
                     "Cross-encoder (order only): reordered the %d selected, reordered=%s",
                     len(merged),

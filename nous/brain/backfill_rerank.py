@@ -142,8 +142,8 @@ async def ce_rerank_backfill_candidates(
     ``score < ce_backfill_min_score`` — the stable sort inside F042
     guarantees that break is correct.
 
-    NOTE: The F042 reranker short-circuits on ``len(candidates) <= 1``,
-    so a lone survivor bypasses ``min_score``. The downstream cosine
+    NOTE: A lone survivor is returned before the F042 reranker runs,
+    so it bypasses ``min_score``. The downstream cosine
     gate in ``graph_densifier._backfill_same_type`` /
     ``_backfill_cross_type`` is the correctness floor for that case.
     """
@@ -181,9 +181,9 @@ async def ce_rerank_backfill_candidates(
     if not wrapped:
         return []
     if len(wrapped) == 1:
-        # The F042 reranker returns a lone candidate unscored, still carrying
-        # its RRF score (~0.016); the CE floor below is a sigmoid threshold and
-        # would drop it. Returned here, as the docstring NOTE says.
+        # A lone candidate is returned unscored, still carrying its RRF score
+        # (~0.016), so the CE floor below (a sigmoid threshold) cannot drop
+        # it. Returned here, as the docstring NOTE says.
         return [(wrapped[0].id, wrapped[0].score)]
 
     top_k = max(int(getattr(settings, "ce_backfill_top_k", 10)), 1)

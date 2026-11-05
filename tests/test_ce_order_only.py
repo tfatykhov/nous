@@ -48,14 +48,14 @@ def stand_in_ce(monkeypatch):
     monkeypatch.delitem(RuntimeConfig.get()._overrides, "cross_encoder_enabled", raising=False)
 
 
-async def _heart_recall(db, agent: str, **overrides) -> list:
-    """heart.recall(QUERY, limit=10) on the seeded corpus under ``overrides``."""
+async def _heart_recall(db, agent: str, limit: int = 10, **overrides) -> list:
+    """heart.recall(QUERY, limit=limit) on the seeded corpus under ``overrides``."""
     from nous.heart import Heart
 
     settings = corpus_settings(agent, **overrides)
     heart = Heart(db, settings, embedding_provider=MockEmbeddingProvider())
     try:
-        return await heart.recall(QUERY, limit=10)
+        return await heart.recall(QUERY, limit=limit)
     finally:
         await heart.close()
 
@@ -99,7 +99,10 @@ async def test_order_only_orders_by_the_ce(db, stand_in_ce):
 @pytest.mark.asyncio
 async def test_downstream_sees_the_ce_scores_and_order_within_the_set(db, stand_in_ce):
     """recall_deep merges the legs by score (rerank_by_score) and 'ranked' prints that order: a Heart row both modes
-    serve prints the same CE score in both, and those rows keep the same relative order."""
+    serve prints the same CE score in both, and those rows keep the same relative order.
+
+    A consistency guard only: it would also pass if order_only did nothing (both renders would be today's text).
+    ``test_order_only_serves_the_ce_off_set`` is the test that proves the two modes differ."""
     on_txt, on_em = await render_corpus(db, corpus_settings(_agent(), **CE, recall_deep_section_order="ranked"))
     oo_txt, oo_em = await render_corpus(
         db, corpus_settings(_agent(), **CE, cross_encoder_order_only=True, recall_deep_section_order="ranked")
@@ -111,6 +114,47 @@ async def test_downstream_sees_the_ce_scores_and_order_within_the_set(db, stand_
     assert {i: on_scores[i] for i in common} == {i: oo_scores[i] for i in common}
     order = lambda em: [str(i) for i, _ in em if str(i) in common]  # noqa: E731
     assert order(on_em) == order(oo_em)
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_order_only_scores_a_lone_selected_row(db, stand_in_ce):
+    """limit=1: the one served row is CE-off's, and it carries its CE sigmoid, as the pre-cut rerank would give it."""
+    agent = _agent()
+    await _seed(db, agent, MockEmbeddingProvider())
+    try:
+        off = await _heart_recall(db, agent, limit=1, cross_encoder_enabled=False)
+        only = await _heart_recall(db, agent, limit=1, **CE, cross_encoder_order_only=True)
+    finally:
+        await _clear(db, agent)
+    assert [(r.type, r.id) for r in only] == [(r.type, r.id) for r in off]
+    assert only[0].score == pytest.approx(1 / (1 + math.exp(-logit(only[0].summary or ""))))
+    assert only[0].score != pytest.approx(off[0].score)
+
+
+class _FailingModel:
+    def predict(self, pairs):
+        raise RuntimeError("stand-in predict failure")
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_order_only_keeps_the_mmr_order_when_the_ce_fails(db, stand_in_ce, monkeypatch):
+    """A failed rerank leaves the selection as it was: MMR's order and scores, not a re-sort by score."""
+    import nous.heart.reranker as reranker
+
+    monkeypatch.setattr(reranker, "_load_cross_encoder", lambda _name: _FailingModel())
+    agent = _agent()
+    await _seed(db, agent, MockEmbeddingProvider())
+    try:
+        off = await _heart_recall(db, agent, cross_encoder_enabled=False, mmr_enabled=True)
+        only = await _heart_recall(db, agent, **CE, cross_encoder_order_only=True, mmr_enabled=True)
+    finally:
+        await _clear(db, agent)
+    rows = lambda rs: [(r.type, r.id, r.score) for r in rs]  # noqa: E731
+    by_score = sorted(off, key=lambda r: r.score, reverse=True)
+    assert rows(off) != rows(by_score), "MMR must reorder something, or this test proves nothing"
+    assert rows(only) == rows(off)
 
 
 @pytest.mark.postgres_only
