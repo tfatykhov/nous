@@ -23,6 +23,7 @@
   import Harness from './views/Harness.svelte';
   import Intentions from './views/Intentions.svelte';
   import Autonomy from './views/Autonomy.svelte';
+  import MemoryWriteHealth from './views/MemoryWriteHealth.svelte';
   import { usePoll } from '$lib/poll';
   import { attentionPoll, attentionCounts } from '$lib/stores/attention';
 
@@ -216,6 +217,8 @@
     <Intentions />
   {:else if $currentRoute === 'autonomy'}
     <Autonomy />
+  {:else if $currentRoute === 'memory-write-health'}
+    <MemoryWriteHealth />
   {/if}
 </main>
 

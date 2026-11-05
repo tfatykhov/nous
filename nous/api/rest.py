@@ -2217,6 +2217,67 @@ def create_app(
             logger.error("Dashboard autonomy error: %s", e)
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    async def dashboard_memory_write_health(request: Request) -> JSONResponse:
+        """GET /dashboard/memory-write-health — P4: the daily write-health rollup, every rule evaluated now and the
+        latest acknowledgements. Read-only; ``days`` 1 to 90, default 30. With the check off: 200 {"enabled": false}
+        and no session."""
+        from nous.api import memory_write_health_dashboard as mwh_dash
+
+        try:
+            days = mwh_dash.parse_window(request.query_params.get("days"))
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        if not settings.memory_write_health_enabled:
+            return JSONResponse(mwh_dash.disabled_payload(days))
+        try:
+            async with database.session() as session:
+                data = await mwh_dash.get_memory_write_health_data(session, settings.agent_id, days)
+            return JSONResponse(data)
+        except Exception as e:
+            logger.error("Dashboard memory write health error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    async def dashboard_memory_write_health_acknowledge(request: Request) -> JSONResponse:
+        """POST /dashboard/memory-write-health/acknowledge {rule, day?, note?} — P4: the owner accepts a rule's
+        evidence (a deliberate restore or delete) and resets its baseline. Records who acknowledged what as an events
+        row. 415 unless the body is sent as application/json; 400 for a bad rule, day or note; 409 with the check
+        off."""
+        from datetime import UTC, datetime
+
+        from nous.api import memory_write_health_dashboard as mwh_dash
+        from nous.observability import memory_write_health as mwh
+
+        if not settings.memory_write_health_enabled:
+            return JSONResponse({"error": "memory write health is off"}, status_code=409)
+        # Content-Type is the CSRF control, as for /a2ui/action and /a2ui/push/register: Request.json() never checks
+        # it, but a cross-origin simple request (text/plain, a form) cannot carry application/json without a
+        # preflight, so another site cannot reset a rule's baseline from the owner's browser.
+        if "application/json" not in (request.headers.get("content-type", "") or ""):
+            return JSONResponse({"error": "Content-Type must be application/json"}, status_code=415)
+        try:
+            body = await request.json()
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        now = datetime.now(UTC)
+        try:
+            rule, day, note = mwh_dash.parse_acknowledgement(body, today=mwh.utc_day(now))
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        # Forwarded identity only when trusted, as for /a2ui/action: on a reachable port anyone can set the header.
+        who = "unattributed"
+        if settings.a2ui_trust_forwarded_identity:
+            who = request.headers.get("x-forwarded-user") or request.headers.get("x-forwarded-email") or who
+        try:
+            async with database.session() as session:
+                ack = await mwh.acknowledge(session, settings.agent_id, rule, day, note, f"dashboard:{who}", now=now)
+                await session.commit()
+            return JSONResponse({"acknowledged": ack})
+        except mwh.AcknowledgeError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        except Exception as e:
+            logger.error("Dashboard memory write health acknowledge error: %s", e)
+            return JSONResponse({"error": str(e)}, status_code=500)
+
     async def dashboard_intentions(request: Request) -> JSONResponse:
         """GET /dashboard/intentions — F099 Phase 3c: every intention root as a tree, and the metrics beside it
         (``window`` 24h|7d|30d, ``state`` open|all, ``limit`` 1 to 200). With NOUS_CONTINUATION_ENABLED off it
@@ -3707,6 +3768,12 @@ def create_app(
         Route("/dashboard/intentions", dashboard_intentions),
         Route("/dashboard/attention", dashboard_attention),
         Route("/dashboard/autonomy", dashboard_autonomy),
+        Route(
+            "/dashboard/memory-write-health/acknowledge",
+            dashboard_memory_write_health_acknowledge,
+            methods=["POST"],
+        ),
+        Route("/dashboard/memory-write-health", dashboard_memory_write_health),
         # F040: Graph density dashboard
         Route("/dashboard/density", dashboard_density),
         # F035.6: Consolidation audit diff dashboard — detail (path param) MUST

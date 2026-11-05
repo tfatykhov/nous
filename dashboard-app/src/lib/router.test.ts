@@ -7,7 +7,8 @@ describe('router', () => {
   it('defaults to overview when hash empty', () => { initRouter(); expect(get(currentRoute)).toBe('overview'); });
   it('reads the hash route', () => { location.hash = '#/cache'; initRouter(); expect(get(currentRoute)).toBe('cache'); });
   it('falls back to overview on unknown route', () => { location.hash = '#/nope'; initRouter(); expect(get(currentRoute)).toBe('overview'); });
-  it('lists all 21 routes', () => { expect(ROUTES.length).toBe(21); });
+  it('lists all 22 routes', () => { expect(ROUTES.length).toBe(22); });
+  it('includes the memory write health route', () => { expect(ROUTES).toContain('memory-write-health'); });
   it('includes the autonomy route', () => { expect(ROUTES).toContain('autonomy'); });
   it('includes the intentions route', () => { expect(ROUTES).toContain('intentions'); });
   it('includes the harness route', () => { expect(ROUTES).toContain('harness'); });
