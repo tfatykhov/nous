@@ -13,8 +13,8 @@ Design notes:
   ``cross_encoder_text_limit`` are intentionally shared with F042; the
   MVP runs one reranker model across both recall and sleep backfill.
   Only the enable flag, top-K, and min-score floor are F043-specific.
-* **``len(candidates) <= 1`` short-circuit in F042.** The F042 reranker
-  returns the candidate list unchanged when there is 0 or 1 element.
+* **A lone survivor skips the reranker.** ``ce_rerank_backfill_candidates``
+  returns a single candidate before calling F042, with its RRF score.
   That path bypasses the ``ce_backfill_min_score`` floor for a lone
   survivor — the downstream cosine gate in
   ``graph_densifier._backfill_same_type`` / ``_backfill_cross_type``
