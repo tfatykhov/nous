@@ -2991,8 +2991,10 @@ class Settings(BaseSettings):
             "Legs nothing else reads are not run: keyed (both keyed rounds, since round 2 hops from round-1 "
             "hits), keyed_r2, exemplar, graph_expanded (Stage 4: spreading or the 1-hop fallback) and "
             "parent_episode. heart_primary, chunk, heart_graph, heart_graph_memory and brain still run, since "
-            "they seed the graph legs, but their rows are dropped before the merge and take no slot. The trace "
-            "marks each one skip_reason='disabled'. Empty: every leg as before."
+            "they seed the graph legs, but their rows are dropped before the merge and take no slot (a hidden "
+            "heart_primary or chunk row still counts as served for graph_expanded; the keyed leg can still "
+            "serve a hidden heart fact). The trace marks each one skip_reason='disabled' and records the hidden "
+            "rows as dropped. Empty: every leg as before."
         ),
     )
     recall_deep_max_items: int = Field(
@@ -3003,21 +3005,23 @@ class Settings(BaseSettings):
             "edge weight times decay or activation, keyed rows a fixed band under keyed_fact_leg_score, heart "
             "rows RRF, chunk rows their own search score, decisions normalised within the brain leg), so the "
             "cut does not re-sort by score: it keeps the first k rows of the pipeline's own final order, which "
-            "is the merged score sort "
-            "when rerank_by_score is on (recall_deep with chunks enabled) and stage order otherwise. Applied "
+            "is the merged score sort when rerank_by_score is on (recall_deep with chunks enabled) and stage "
+            "order otherwise. Only rows the text shows for the call's scope count; a row it hides takes no "
+            "slot. Applied "
             "after the F071, own-session and spreading-budget filters and before the merge-history, "
             "fact-source and reactivation steps. recall_deep's limit caps only the heart and brain legs; this "
-            "caps the served list. Parent episodes are not counted (recall_max_parent_episodes caps them)."
+            "caps the served list. Parent episodes are not counted (recall_max_parent_episodes caps them). "
+            "An empty env value is 0."
         ),
     )
     recall_deep_type_min: Annotated[dict[str, int], NoDecode] = Field(
         default_factory=dict,
         description=(
             "Per-type floors for recall_deep_max_items, as 'decision:2,episode:2,chunk:2' (types: "
-            "config.RECALL_DEEP_ITEM_TYPES). The first n rows of each listed type, in pipeline order, are kept "
+            "config.RECALL_DEEP_ITEM_TYPES). The first n shown rows of each listed type, in pipeline order, are kept "
             "whenever the cut runs and that many exist (fewer if fewer exist); the remaining slots go to the "
             "other rows in order. When the floors add up to more than max_items, the floors win. No effect "
-            "with recall_deep_max_items 0."
+            "with recall_deep_max_items 0. A type listed twice is an error."
         ),
     )
     recall_deep_section_order: Annotated[list[str], NoDecode] = Field(
@@ -3026,8 +3030,8 @@ class Settings(BaseSettings):
             "Order of recall_deep's ranked sections: a comma permutation of heart, graph_decisions, "
             "brain_decisions (default, today's order), or 'ranked': one numbered list in the pipeline's own "
             "order with each row in its usual line form (decision rows tagged [decision]), without session "
-            "grouping or date reordering. Contradiction warnings, Parent Episode Context and stored examples "
-            "stay after the sections."
+            "grouping or date reordering. A reordered text does not open with a blank line. Contradiction "
+            "warnings, Parent Episode Context and stored examples stay after the sections."
         ),
     )
 
@@ -3060,8 +3064,16 @@ class Settings(BaseSettings):
             name, sep, count = part.partition(":")
             if not sep:
                 raise ValueError(f"recall_deep_type_min: {part!r} is not type:count")
+            if name.strip() in out:
+                raise ValueError(f"recall_deep_type_min: {name.strip()!r} is listed twice")
             out[name.strip()] = count.strip()
         return out
+
+    @field_validator("recall_deep_max_items", mode="before")
+    @classmethod
+    def _empty_recall_deep_max_items(cls, v: object) -> object:
+        """An empty env value is 0 (off), as an empty value is the default for the three sibling settings."""
+        return 0 if isinstance(v, str) and not v.strip() else v
 
     @field_validator("recall_deep_type_min", mode="after")
     @classmethod

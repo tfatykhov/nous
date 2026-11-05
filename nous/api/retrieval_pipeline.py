@@ -491,6 +491,39 @@ def disabled_legs(settings: "Settings") -> frozenset[str]:
     return frozenset(v) if isinstance(v, (list, tuple, set, frozenset)) else frozenset()
 
 
+# The recall_deep text's sections and the scope that shows each. One rule for
+# the formatter (``tools._format_pipeline_text``) and for recall_deep_max_items,
+# so a row the text will not show never takes one of its slots.
+def text_section(r: PipelineResult) -> str | None:
+    """The section of the recall_deep text ``r`` renders in, before scope:
+    ``examples`` (an exemplar-leg row), ``heart`` (Heart Memory),
+    ``graph_decisions`` (Graph-Connected Decisions), ``brain`` and
+    ``brain_graph`` (Brain Decisions' search hits and graph rows), or None for
+    a row no section shows."""
+    meta = r.metadata
+    if meta.get("retrieval_leg") == "exemplar":
+        return "examples"
+    if r.source == "heart" or meta.get("stage_origin") == "heart_graph_memory":
+        return "heart"
+    if r.source == "graph_expanded" and r.type == "decision" and meta.get("stage_origin") == "heart_graph":
+        return "graph_decisions"
+    if r.source == "brain":
+        return "brain"
+    if r.source in ("graph_expanded", "spreading_activation") and meta.get("stage_origin") == "brain_graph":
+        return "brain_graph"
+    return None
+
+
+def section_shown(section: str | None, search_types: list[str]) -> bool:
+    """Whether the recall_deep text shows ``section`` on a call scoped to ``search_types``."""
+    search_all = "all" in search_types
+    if section == "heart":
+        return search_all or any(t in search_types for t in ("episode", "fact", "procedure", "censor"))
+    if section in ("brain", "brain_graph"):
+        return search_all or "decision" in search_types
+    return section in ("graph_decisions", "examples")
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -624,13 +657,19 @@ async def run_recall_pipeline(
             tr.add(r.id, r.type, leg, score=r.score, rank=offset + 1,
                    content=r.description)
 
+    # recall_deep_disabled_legs: the rows of a disabled leg that still ran,
+    # recorded dropped at the end (see the drain before finalize).
+    disabled_rows: dict[str, list[PipelineResult]] = {}
+
     def _merge_leg(leg: str, rows: list[PipelineResult]) -> None:
         """Append one leg's rows, registered under ``leg``. A leg in
         recall_deep_disabled_legs still ran if its stage did (it seeds the
         graph legs), but its rows are left out here, so they take no slot.
-        ``attempted`` stays the stage's own answer (set by the loop below)."""
+        ``attempted`` and ``n_returned`` stay the stage's own answer (set by
+        the loop below)."""
         if leg in disabled:
             tr.leg(leg, attempted=False, skip_reason="disabled")
+            disabled_rows[leg] = rows
             return
         start = len(results)
         results.extend(rows)
@@ -934,7 +973,7 @@ async def run_recall_pipeline(
     # filtered row takes no slot; before the lookups below, so only served rows
     # cost one, and before the reactivation read, so a cut row is not treated
     # as co-retrieved. Off (0) returns ``results`` itself.
-    results = _apply_max_items(results, settings, tr)
+    results = _apply_max_items(results, settings, tr, memory_types or ["all"])
 
     # K-6: the dated sources of the top merged facts. After every sort and
     # filter, so the slots go to facts that are served; scores are untouched.
@@ -1088,6 +1127,22 @@ async def run_recall_pipeline(
                rank=_vrank if _vrank is not None else _krank)
         tr.drop(_cid, "chunk", _CHUNK_DROP_DISPOSITIONS.get(_stage, UNACCOUNTED),
                 f"chunk_{_stage}")
+
+    # recall_deep_disabled_legs: a disabled leg that ran had its rows left out
+    # at the merge. Registered last, like the chunk discards, so a row another
+    # leg served keeps that leg's name (first-wins) and is skipped here; every
+    # other row is recorded dropped, and n_dropped counts all of the leg's rows
+    # (the chunk leg's on top of its merge discards).
+    if disabled_rows:
+        _served_keys = {(r.id, r.type) for r in results}
+        for _leg_name, _rows in disabled_rows.items():
+            for offset, r in enumerate(_rows):
+                if (r.id, r.type) in _served_keys:
+                    continue
+                tr.add(r.id, r.type, _leg_name, score=r.score, rank=offset + 1, content=r.description)
+                tr.drop(r.id, r.type, FILTER_DROPPED, "recall_deep_disabled_legs")
+            _prior = len(acc.chunk_dropped) if _leg_name == "chunk" else 0
+            tr.leg(_leg_name, attempted=False, n_dropped=_prior + len(_rows))
 
     tr.finalize(results, duration_ms=(time.monotonic() - _t0) * 1000.0)
 
@@ -2342,38 +2397,45 @@ def _apply_spreading_budget(
 
 
 def _apply_max_items(
-    results: list[PipelineResult], settings: "Settings", tr: Any
+    results: list[PipelineResult], settings: "Settings", tr: Any, search_types: list[str]
 ) -> list[PipelineResult]:
     """recall_deep_max_items with recall_deep_type_min floors.
 
-    The legs score on different scales, so this does not re-sort: it keeps
-    rows by their place in ``results``, the pipeline's final order. Each
-    floored type first keeps its first n rows (all of them when fewer exist);
-    the slots left of k go to the remaining rows in order. When the floors add
-    up to more than k, the floors win. Survivors keep their relative order;
-    every cut row is recorded ``SLICED_OFF``. Off (k <= 0), or nothing to cut,
-    returns ``results`` itself.
+    Only rows the text shows on a call scoped to ``search_types`` count
+    (``text_section`` / ``section_shown``, the formatter's own rule); the rest
+    are left in place and take no slot. The legs score on different scales,
+    so this does not re-sort: it keeps shown rows by their place in
+    ``results``, the pipeline's final order. Each floored type first keeps its
+    first n shown rows (all of them when fewer exist); the slots left of k go
+    to the remaining shown rows in order. When the floors add up to more than
+    k, the floors win. Survivors keep their relative order; every cut row is
+    recorded ``SLICED_OFF``. Off (k <= 0), or nothing to cut, returns
+    ``results`` itself.
     """
     k = getattr(settings, "recall_deep_max_items", 0)
-    if not isinstance(k, int) or isinstance(k, bool) or k <= 0 or len(results) <= k:
+    if not isinstance(k, int) or isinstance(k, bool) or k <= 0:
+        return results
+    shown = [i for i, r in enumerate(results) if section_shown(text_section(r), search_types)]
+    if len(shown) <= k:
         return results
     floors = getattr(settings, "recall_deep_type_min", None)
     keep: set[int] = set()
     for rtype, n in (floors.items() if isinstance(floors, dict) else ()):
-        keep.update([i for i, r in enumerate(results) if r.type == rtype][:n])
+        keep.update([i for i in shown if results[i].type == rtype][:n])
     room = k - len(keep)
-    for i in range(len(results)):
+    for i in shown:
         if room <= 0:
             break
         if i not in keep:
             keep.add(i)
             room -= 1
+    cut = set(shown) - keep
     out: list[PipelineResult] = []
     for i, r in enumerate(results):
-        if i in keep:
-            out.append(r)
-        else:
+        if i in cut:
             tr.drop(r.id, r.type, SLICED_OFF, "recall_deep_max_items")
+        else:
+            out.append(r)
     return out
 
 

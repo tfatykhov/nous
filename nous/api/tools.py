@@ -934,7 +934,6 @@ def _format_pipeline_text(
     ``[inferred]`` or ``[merged]`` (``fact_source_marker_enabled``); off by
     default, so the text is unchanged.
     """
-    search_all = "all" in search_types
     results_text: list[str] = []
     # Ids written into the text so far; the contradiction warnings name only these.
     shown_ids: set[Any] = set()
@@ -1041,16 +1040,22 @@ def _format_pipeline_text(
     # so an associatively-linked memory (e.g. a co-occurrence neighbour) sits at its true
     # rank where the agent actually reads. Empty when heart_graph_all_types is off
     # (default) => the default recall_deep output stays byte-identical.
-    heart_results = [
-        r
-        for r in results
-        if (r.source == "heart" or r.metadata.get("stage_origin") == "heart_graph_memory")
-        and r.metadata.get("retrieval_leg") != "exemplar"
-    ]
+    #
+    # Which section a row renders in, and which scope shows it, is one rule
+    # (``text_section`` / ``section_shown``) shared with recall_deep_max_items,
+    # so the cap never spends a slot on a row this text will not show.
+    from nous.api.retrieval_pipeline import section_shown, text_section
+
+    sections_of = [text_section(r) for r in results]
+
+    def _rows_in(section: str) -> list:
+        return [r for r, s in zip(results, sections_of) if s == section]
+
+    heart_results = _rows_in("heart")
     # F086: ICL exemplar-leg hits get their own dedicated section (rendered
     # near the end of the function) instead of the Heart Memory list.
-    exemplar_rows = [r for r in results if r.metadata.get("retrieval_leg") == "exemplar"]
-    heart_section_eligible = search_all or any(t in search_types for t in ["episode", "fact", "procedure", "censor"])
+    exemplar_rows = _rows_in("examples")
+    heart_section_eligible = section_shown("heart", search_types)
     # The original closure ALSO requires that heart_types resolves to a non-empty
     # list — which is always true once heart_section_eligible is True (because the
     # filter expression yields the same membership). So the gate matches.
@@ -1127,11 +1132,7 @@ def _format_pipeline_text(
     # them correctly regardless of result-list order — important because
     # ``rerank_by_score`` (set when F067 chunks are enabled) globally
     # re-sorts the list and would otherwise break a position-based gate.
-    heart_graph: list = [
-        r
-        for r in results
-        if r.source == "graph_expanded" and r.type == "decision" and r.metadata.get("stage_origin") == "heart_graph"
-    ]
+    heart_graph: list = _rows_in("graph_decisions")
 
     def _graph_line(i: int, n: Any, tag: str = "") -> str:
         return f"{i}. {tag}[via {n.edge_relation}] {n.description} (id: {n.id}, score: {n.score:.3f} {_score_tag(n)})"
@@ -1151,20 +1152,16 @@ def _format_pipeline_text(
     # ------------------------------------------------------------------
     # Brain Decisions section
     # ------------------------------------------------------------------
-    brain_section_eligible = search_all or "decision" in search_types
-    decision_results = [r for r in results if r.source == "brain"]
+    brain_section_eligible = section_shown("brain", search_types)
+    decision_results = _rows_in("brain")
     # Brain-side graph-expanded entries (stage 4): tagged
     # ``metadata["stage_origin"] == "brain_graph"`` by
     # ``_graph_expanded_to_pipeline``. Spreading-activation results
-    # share the brain-graph bucket — see the OR below. Companion to
+    # share the brain-graph bucket (``text_section``). Companion to
     # the heart-side filter above; the metadata tag replaces the
     # previous position-based gate so the formatter is stable under
     # ``rerank_by_score``.
-    brain_graph: list = [
-        r
-        for r in results
-        if r.source in ("graph_expanded", "spreading_activation") and r.metadata.get("stage_origin") == "brain_graph"
-    ]
+    brain_graph: list = _rows_in("brain_graph")
 
     def _brain_line(i: int, dec: Any, tag: str = "") -> str:
         # Preserve original truthy-elision behavior: ``raw_score``
@@ -1262,8 +1259,14 @@ def _format_pipeline_text(
     if order == ["ranked"]:
         _ranked_section()
     else:
-        for name in order if sorted(order) == sorted(sections) else sections:
+        custom = sorted(order) == sorted(sections) and order != list(sections)
+        for name in order if custom else sections:
             sections[name]()
+        if custom and results_text:
+            # A reordered text does not open with a blank line, whichever
+            # section leads (today's order keeps its bytes, decision-only
+            # scope included).
+            results_text[0] = results_text[0].lstrip("\n")
 
     # ------------------------------------------------------------------
     # Contradiction warnings (F022 Phase 3)

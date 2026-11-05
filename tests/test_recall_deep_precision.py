@@ -399,34 +399,51 @@ async def test_legs_nothing_reads_are_not_run(db):
         await _clear(db, agent)
 
 
-def test_disabled_leg_trace_says_disabled():
-    """Each disabled leg is named in the trace with skip_reason='disabled', run or not."""
+def test_disabled_leg_trace_is_truthful():
+    """Each disabled leg reads skip_reason='disabled'. One that ran keeps attempted and n_returned as its stage
+    reported them, counts its hidden rows in n_dropped and records each one dropped; one that never ran reads
+    attempted=False. So no dashboard row reads as a leg that ran and served its rows."""
     import asyncio
 
     from nous.api.retrieval_pipeline import run_recall_pipeline
+    from nous.heart.schemas import RecallResult
     from nous.observability.retrieval_trace import RetrievalTrace
 
+    facts = [
+        RecallResult(type="fact", id=_uid(710 + i), summary=f"hidden fact {i}", score=0.9 - i / 10) for i in range(2)
+    ]
     tr = RetrievalTrace(query="q", path="pipeline")
-    heart, brain = _empty_heart_brain()
+    heart, brain = _heart_brain(facts)
     settings = SimpleNamespace(
         graph_recall_enabled=False,
         cross_type_linking_enabled=False,
         contradiction_detection=False,
         recall_deep_disabled_legs=["heart_primary", "graph_expanded", "keyed"],
     )
-    asyncio.run(run_recall_pipeline("q", heart, brain, settings, limit=10, trace=tr))
-    legs = {lg["name"]: lg for lg in tr.to_dict()["legs"]}
+    results, _ = asyncio.run(run_recall_pipeline("q", heart, brain, settings, limit=10, trace=tr))
+    assert results == []
+    trace = tr.to_dict()
+    legs = {lg["name"]: lg for lg in trace["legs"]}
     for name in ("heart_primary", "graph_expanded", "keyed"):
         assert legs[name]["skip_reason"] == "disabled", name
-    assert legs["heart_primary"]["attempted"] is True  # it ran; its rows were left out
+    hp = legs["heart_primary"]
+    assert (hp["attempted"], hp["n_returned"], hp["n_dropped"]) == (True, 2, 2)  # it ran; both rows hidden
     assert legs["graph_expanded"]["attempted"] is False
+    cands = {c["id"]: c for c in trace["candidates"]}
+    for f in facts:
+        c = cands[str(f.id)]
+        assert (c["entry_leg"], c["disposition"], c["disposition_stage"]) == (
+            "heart_primary",
+            "filter_dropped",
+            "recall_deep_disabled_legs",
+        )
 
 
-def _empty_heart_brain():
+def _heart_brain(heart_rows: list):
     from unittest.mock import AsyncMock, MagicMock
 
     heart = MagicMock()
-    heart.recall = AsyncMock(return_value=[])
+    heart.recall = AsyncMock(return_value=heart_rows)
     heart.date_window_parser = None
     brain = MagicMock()
     brain.query = AsyncMock(return_value=[])
@@ -487,12 +504,59 @@ def _rows(types: str) -> list:
     ]
 
 
-def _cut(rows, k, floors=None):
+def _cut(rows, k, floors=None, search_types=("all",)):
     from nous.api.retrieval_pipeline import _apply_max_items
 
     tr = _Trace()
     s = SimpleNamespace(recall_deep_max_items=k, recall_deep_type_min=floors or {})
-    return _apply_max_items(rows, s, tr), tr
+    return _apply_max_items(rows, s, tr, list(search_types)), tr
+
+
+def test_cap_counts_only_rows_the_text_shows():
+    """Codex P2 on #861: a memory_types=["fact"] call's text hides decisions, so a spreading decision ranked
+    above the matching fact must not take the only slot. It took it, and the tool said "No results found."."""
+    import asyncio
+    from datetime import UTC, datetime
+    from unittest.mock import AsyncMock, patch
+
+    from test_retrieval_pipeline import _make_brain, _make_heart, _make_settings
+
+    from nous.api.retrieval_pipeline import run_recall_pipeline
+    from nous.api.tools import _format_pipeline_text
+    from nous.heart.schemas import RecallResult
+
+    dec = _uid(702)
+    heart = _make_heart(
+        recall_results=[RecallResult(type="fact", id=_uid(701), summary="the matching fact", score=0.2)]
+    )
+    brain = _make_brain(neighbors_by_node={}, contradictions=[], decision_results=[])
+    brain._resolve_node_descriptions = AsyncMock(
+        return_value={dec: ("a spread-reached decision", datetime(2026, 1, 5, tzinfo=UTC))}
+    )
+    settings = _make_settings(spreading_activation_enabled="true")
+    settings.recall_deep_max_items = 1
+    spread = AsyncMock(return_value=[(dec, "decision", 1.0, 1)])
+    with patch("nous.brain.spreading_activation.spreading_activation_search", spread):
+        results, stats = asyncio.run(
+            run_recall_pipeline("q", heart, brain, settings, limit=10, memory_types=["fact"], rerank_by_score=True)
+        )
+    assert results[0].id == dec  # the hidden decision ranks above the fact
+    text = _format_pipeline_text(results, stats, ["fact"])
+    assert "the matching fact" in text
+    assert "No results found." not in text
+
+
+def test_rows_the_scope_hides_pass_the_cap_untouched():
+    from dataclasses import replace
+
+    rows = _rows("ddff")
+    rows[0] = replace(rows[0], source="brain")
+    rows[1] = replace(rows[1], source="spreading_activation", metadata={"stage_origin": "brain_graph"})
+    out, tr = _cut(rows, 1, search_types=("fact",))
+    assert out == rows[:3]  # both hidden decisions stay where they are; one fact fills the slot
+    assert [i for i, _, _ in tr.dropped] == [rows[3].id]
+    out_all, _ = _cut(rows, 1)
+    assert out_all == rows[:1]  # with every type in scope the first decision takes it
 
 
 def test_max_items_off_or_short_list_is_the_same_list():
@@ -552,6 +616,7 @@ async def test_brain_decisions_first(db):
         < txt.index("=== Graph-Connected Decisions ===")
     )
     assert "\n\n=== Heart Memory ===" in txt  # a blank line before a section that is not first
+    assert txt.startswith("=== Brain Decisions ===")  # but none before the first
     assert sorted(map(str, emitted)) == sorted(map(str, base))  # the same rows, reordered
     assert emitted[0][1] == "decision"
     assert [i for i, _ in emitted] == [UUID(i) for i in _row_ids(txt)]  # emission order is text order
@@ -596,6 +661,7 @@ async def test_ranked_is_one_list_in_pipeline_order(db):
         ({"recall_deep_type_min": "decisions:2"}, "unknown type"),
         ({"recall_deep_type_min": "decision"}, "type:count"),
         ({"recall_deep_type_min": "decision:-1"}, ">= 0"),
+        ({"recall_deep_type_min": "decision:2,decision:3"}, "listed twice"),
         ({"recall_deep_section_order": "heart,brain_decisions"}, "permutation"),
         ({"recall_deep_section_order": "ranked,heart"}, "permutation"),
         ({"recall_deep_max_items": -1}, "greater than or equal"),
@@ -631,5 +697,11 @@ def test_env_values_parse(monkeypatch):
     )
     assert again.recall_deep_type_min == s.recall_deep_type_min
     assert again.recall_deep_section_order == ["ranked"]
-    monkeypatch.setenv("NOUS_RECALL_DEEP_SECTION_ORDER", "")
-    assert Settings(_env_file=None).recall_deep_section_order == ["heart", "graph_decisions", "brain_decisions"]
+    # An empty value is each setting's default.
+    for name in ("DISABLED_LEGS", "MAX_ITEMS", "TYPE_MIN", "SECTION_ORDER"):
+        monkeypatch.setenv(f"NOUS_RECALL_DEEP_{name}", "")
+    empty = Settings(_env_file=None)
+    assert empty.recall_deep_disabled_legs == []
+    assert empty.recall_deep_max_items == 0
+    assert empty.recall_deep_type_min == {}
+    assert empty.recall_deep_section_order == ["heart", "graph_decisions", "brain_decisions"]
