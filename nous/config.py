@@ -2999,9 +2999,11 @@ class Settings(BaseSettings):
         default=0,
         ge=0,
         description=(
-            "Keep at most this many recall_deep rows (0 = off). The legs score on different scales (graph "
-            "~0.07-0.3, keyed bands ~0.47-0.55, heart and chunk rows up to 1), so the cut does not re-sort by "
-            "score: it keeps the first k rows of the pipeline's own final order, which is the merged score sort "
+            "Keep at most this many recall_deep rows (0 = off). The legs score on different scales (graph rows "
+            "edge weight times decay or activation, keyed rows a fixed band under keyed_fact_leg_score, heart "
+            "rows RRF, chunk rows their own search score, decisions normalised within the brain leg), so the "
+            "cut does not re-sort by score: it keeps the first k rows of the pipeline's own final order, which "
+            "is the merged score sort "
             "when rerank_by_score is on (recall_deep with chunks enabled) and stage order otherwise. Applied "
             "after the F071, own-session and spreading-budget filters and before the merge-history, "
             "fact-source and reactivation steps. recall_deep's limit caps only the heart and brain legs; this "

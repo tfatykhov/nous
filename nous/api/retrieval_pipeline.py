@@ -626,10 +626,11 @@ async def run_recall_pipeline(
 
     def _merge_leg(leg: str, rows: list[PipelineResult]) -> None:
         """Append one leg's rows, registered under ``leg``. A leg in
-        recall_deep_disabled_legs ran (it seeds the graph legs) but its rows
-        are left out here, so they take no slot."""
+        recall_deep_disabled_legs still ran if its stage did (it seeds the
+        graph legs), but its rows are left out here, so they take no slot.
+        ``attempted`` stays the stage's own answer (set by the loop below)."""
         if leg in disabled:
-            tr.leg(leg, attempted=True, skip_reason="disabled")
+            tr.leg(leg, attempted=False, skip_reason="disabled")
             return
         start = len(results)
         results.extend(rows)

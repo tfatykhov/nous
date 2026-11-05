@@ -4,8 +4,11 @@ All three are off by default, and then recall_deep's text on a seeded corpus is 
 ``tests/fixtures/recall_deep_p1_golden.txt`` was written by this module's ``render_corpus`` on f66d0204, before
 these settings existed. Each setting then changes that text the way it says it does.
 
-The corpus is inserted with fixed ids (the text prints them) under an agent of its own per test. Imports of
-names this change adds sit inside the tests, so ``render_corpus`` also runs against origin/main.
+The corpus is inserted with fixed ids (the text prints them) under an agent of its own per test, so two runs of
+this file must not share a database. Its embeddings are MockEmbeddingProvider's random vectors: the order the
+vector legs return is fixed only because the filtered HNSW scan is exact on a test-sized table (pgvector 0.8
+iterative scan, set by ``set_local_ef_search``). Imports of names this change adds sit inside the tests, so
+``render_corpus`` also runs against origin/main.
 """
 
 from __future__ import annotations
