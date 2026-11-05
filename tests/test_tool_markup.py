@@ -128,6 +128,17 @@ KEEP = [
         "content",
         LEARN,
     ),
+    # Tags inside code take no part in any scan: not as candidates, closers or what follows a run.
+    (
+        "Use <context> to wrap values; close them with `</context></invoke>`; do not execute this example.",
+        "context",
+        DECIDE,
+    ),
+    (
+        "Use <context> to wrap values, closed like this:\n```\n</context>\n</invoke>\n```\nDo not run it.",
+        "context",
+        DECIDE,
+    ),
     # An open plain <x> of a tool parameter at the end, with no tool tag: kept (see the module docstring).
     ("f.\n<category>technical</category>\n<subject>s", "content", LEARN),
 ]

@@ -32,8 +32,11 @@ is the leak shape itself and is cut.
 Code is kept: fenced blocks (a line of up to 3 spaces, then 3 or more backticks or
 tildes, closed by a line of the same character at least as long, or by the end of the
 text) and, outside them, inline code spans (a run of N backticks to the next run of
-exactly N), both as CommonMark has them. It also removes a ``<parameter name="...">``
-that opens the text.
+exactly N), both as CommonMark has them. A tag inside code takes no part in any scan.
+An unclosed fence opener protects everything after it, as CommonMark reads it, so a
+stray ``` line before a leak keeps the leak: a deliberate trade, since cutting inside
+what may be a code example loses text that cannot be recovered. It also removes a
+``<parameter name="...">`` that opens the text.
 
 The dispatcher's ``_salvage_leaked_args`` (with ``leaked_markup_start``) fires only for a
 missing REQUIRED argument, so the write paths call this for every value they store.
@@ -164,17 +167,31 @@ def _kind(m: re.Match[str], params: Collection[str]) -> int:
     return _PARAM_TAG if name in params else _TAG
 
 
-class _Scan:
-    """The tags of one text, with what follows each, for one forward pass.
+def _outside_code(tokens: list[re.Match[str]], spans: list[tuple[int, int]]) -> list[re.Match[str]]:
+    """The tokens outside every code span and fence; both lists are in text order. Linear."""
+    kept: list[re.Match[str]] = []
+    span_i = 0
+    for m in tokens:
+        while span_i < len(spans) and spans[span_i][1] <= m.start():
+            span_i += 1
+        if not (span_i < len(spans) and spans[span_i][0] <= m.start()):
+            kept.append(m)
+    return kept
 
-    Everything a candidate asks is precomputed or memoised, so no question rescans the
-    text: the token after each token (each gap read once), the closing tags per name (for a
-    binary search), the line starts and the run results.
+
+class _Scan:
+    """The tags of one text outside code, with what follows each, for one forward pass.
+
+    A tag inside a code span or fence is dropped here, before any question is asked, so it
+    is never a candidate, a closer, the token after another or the end of a run: code holds
+    content, and the gap across it is prose. Everything a candidate asks is precomputed or
+    memoised, so no question rescans the text: the token after each token (each gap read
+    once), the closing tags per name (for a binary search), the line starts and the run results.
     """
 
     def __init__(self, text: str, params: Collection[str]) -> None:
         self.text = text
-        self.tokens = list(_TOKEN.finditer(text))
+        self.tokens = _outside_code(list(_TOKEN.finditer(text)), _code_spans(text))
         self.kinds = [_kind(m, params) for m in self.tokens]
         self.names = [m.group(2) for m in self.tokens]
         self._runs: dict[int, bool] = {}
@@ -245,16 +262,11 @@ class _Scan:
 def _tail_start(text: str, field: str | None, params: Collection[str]) -> int | None:
     """Where the spill-over starts, or None. One forward pass; see the module docstring."""
     scan = _Scan(text, params)
-    spans = _code_spans(text)
-    span_i = 0
     opened: dict[str, int] = {}
     closed: dict[str, int] = {}
     for i, m in enumerate(scan.tokens):
         start, kind, name = m.start(), scan.kinds[i], scan.names[i]
-        while span_i < len(spans) and spans[span_i][1] <= start:
-            span_i += 1
-        quoted = span_i < len(spans) and spans[span_i][0] <= start
-        if not quoted and _starts_spill(scan, i, kind, name, field, opened, closed):
+        if _starts_spill(scan, i, kind, name, field, opened, closed):
             return start
         if kind in (_CLOSE, _CLOSE_TOOL):
             closed[name] = closed.get(name, 0) + 1
