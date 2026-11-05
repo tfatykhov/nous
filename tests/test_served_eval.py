@@ -1005,28 +1005,6 @@ def test_capture_render_order_wraps_the_formatter_and_restores_nothing_else(monk
     assert out == "text" and sink == [[("chunk", "b"), ("fact", "a"), ("episode", "e1")]]
 
 
-def test_procedure_text_is_the_rendered_block() -> None:
-    from nous_eval.served.stack import _capture_procedure_text
-
-    class Ctx:
-        def _format_procedure_bodies(self, details, per_item_cap):
-            return [f"### {p.name}\n\n{p.body}" for p in details]
-
-        def _format_procedures(self, procedures):
-            return "\n".join(f"- **{p.name}**: {p.body}" for p in procedures)
-
-    stack = SimpleNamespace(ctx=Ctx(), procedure_text={})
-    _capture_procedure_text(stack)
-    procs = [
-        SimpleNamespace(id="p1", name="deploy", body="run the steps"),
-        SimpleNamespace(id="p2", name="b", body="x"),
-    ]
-    assert stack.ctx._format_procedure_bodies(procs, 100)[0] == "### deploy\n\nrun the steps"
-    assert stack.procedure_text["p1"] == "### deploy\n\nrun the steps"
-    stack.ctx._format_procedures(procs)
-    assert stack.procedure_text["p2"] == "- **b**: x"
-
-
 async def test_date_store_holds_the_unpadded_window_and_each_arm_pads_its_own(tmp_path: Path) -> None:
     import datetime
 
@@ -1136,54 +1114,6 @@ def test_win_is_false_when_gold_or_judged_rows_are_missing(tmp_path: Path) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_preturn_items_are_ordered_by_section_with_recent_before_past() -> None:
-    from nous_eval.served import preturn
-
-    labels = [
-        "User Profile",
-        "Related Decisions",
-        "Relevant Facts",
-        "Session Profile",
-        "Recommended Procedures",
-        "Recent Conversations",
-        "Past Episodes",
-    ]
-    recalled = {"decision": ["d1"], "fact": ["f1", "f2"], "procedure": ["p1"], "episode": ["e9", "e2"]}
-    # final ranks that put Past Episodes first, as the old trace-rank order did
-    rendered = [
-        ("episode", "e9", 1),
-        ("episode", "e2", 2),
-        ("episode", "e5", 3),
-        ("fact", "f2", 4),
-        ("fact", "f1", 5),
-        ("decision", "d1", 6),
-        ("procedure", "p1", 7),
-        ("fact", "s1", 8),
-        ("fact", "zz", 9),
-    ]
-    order, unplaced = preturn.section_order(labels, recalled, ["e5", "e2"], ["s1"], rendered)
-    assert order == [
-        ("decision", "d1"),
-        ("fact", "f1"),
-        ("fact", "f2"),
-        ("fact", "s1"),
-        ("procedure", "p1"),
-        ("episode", "e5"),
-        ("episode", "e2"),
-        ("episode", "e9"),
-        ("fact", "zz"),
-    ]
-    assert unplaced == 1  # zz: no section claimed it
-    # a gold episode shown first in Recent Conversations reads at rank 1 among episodes
-    row = {
-        "rendered": [f"{t}:{i}" for t, i in order],
-        "gold": {"type": "episode", "ids": ["e5"]},
-        "tokens_total": 1,
-        "gold_text_in_prompt": False,
-    }
-    assert score.preturn_gold_row(row)["rr"] == 1.0
-
-
 def _episode(eid: str, title: str, *, summary: str = "s", outcome: str = "success") -> SimpleNamespace:
     return SimpleNamespace(id=eid, title=title, summary=summary, outcome=outcome)
 
@@ -1199,26 +1129,6 @@ def test_recent_conversations_blocks_pair_with_the_episodes_the_build_kept() -> 
     ids, blocks, ok = preturn.recent_episodes(listed, "- [Nov 04 10:00] garden plan")  # one block, two episodes
     assert not ok and blocks == {} and ids == ["e1", "e3"]
     assert preturn.recent_episodes([], "") == ([], {}, True)
-
-
-def test_items_are_judged_on_the_text_they_were_rendered_as() -> None:
-    from nous_eval.served import preturn
-
-    order = [("procedure", "p1"), ("episode", "e1"), ("episode", "e2"), ("fact", "f1")]
-    texts = preturn.item_texts(
-        order,
-        {"p1": "### deploy\n\nrun the steps"},
-        {"e1": "- [Nov 04 10:00] garden plan", "e2": "- [Nov 04 09:00] invoices"},
-        ["e2"],  # e2 is also in Past Episodes: judged on that rendering
-        {"p1": "deploy", "e1": "full summary e1", "e2": "full summary e2", "f1": "fact text"},
-        {("fact", "f1"): "snippet"},
-    )
-    assert texts == {
-        "procedure:p1": "### deploy\n\nrun the steps",
-        "episode:e1": "- [Nov 04 10:00] garden plan",
-        "episode:e2": "full summary e2",
-        "fact:f1": "fact text",
-    }
 
 
 def test_fingerprint_covers_as_of_first_turn_and_turn_number(tmp_path: Path) -> None:
@@ -1314,3 +1224,196 @@ async def test_judge_refuses_a_run_whose_read_order_checks_failed(tmp_path: Path
         )
         == 0
     )
+
+
+# ---------------------------------------------------------------------------
+# round 4: pre-turn items, text and positions come from what each section rendered
+# ---------------------------------------------------------------------------
+
+
+def _engine(**overrides):
+    """The real ContextEngine section formatters on a minimal object (they read only settings)."""
+    from nous.cognitive.context import ContextEngine
+    from nous.config import Settings
+
+    class Ctx:
+        CHARS_PER_TOKEN = ContextEngine.CHARS_PER_TOKEN
+        _format_facts = ContextEngine._format_facts
+        _format_decisions = ContextEngine._format_decisions
+        _format_episodes = ContextEngine._format_episodes
+        _format_procedures = ContextEngine._format_procedures
+        _truncate_to_budget = ContextEngine._truncate_to_budget
+
+        def _format_procedure_bodies(self, details, per_item_cap):
+            return [f"### {p.name}\n\n{p.body}" for p in details]
+
+    ctx = Ctx()
+    ctx._settings = Settings(_env_file=None).model_copy(update=overrides)
+    return ctx
+
+
+def _fact(fid: str, content: str, day: int | None) -> SimpleNamespace:
+    import datetime
+
+    d = datetime.date(2026, 10, day) if day else None
+    return SimpleNamespace(
+        id=fid,
+        content=content,
+        confidence=0.9,
+        subject=None,
+        valid_from=d,
+        valid_to=None,
+        event_date=None,
+        source="test",
+    )
+
+
+def _read(stack, sections, traced, *, recent=([], {}, True)):
+    from nous_eval.served import preturn
+
+    prompt = "\n\n".join(f"## {label}\n\n{content}" for label, content in sections)
+    return preturn.read_items(sections, preturn.formatter_lines(stack.formatter_calls), *recent, traced, prompt)
+
+
+CHECKS_ZERO = {"unplaced": 0, "untraced": 0, "unmatched_segments": 0, "sections_not_in_prompt": 0}
+
+
+def test_facts_are_read_in_date_order_with_the_text_the_formatter_kept() -> None:
+    """temporal render re-sorts dated facts by date after the full-text exemption was decided by
+    rank; fact_format_max_chars cuts the others at a word boundary."""
+    from nous_eval.served.stack import _capture_formatters
+
+    stack = SimpleNamespace(ctx=_engine(fact_format_max_chars=40), formatter_calls=[])
+    _capture_formatters(stack)
+    long = "the garden beds are watered at six in the morning before the heat"
+    facts = [_fact("f1", long + " one", 20), _fact("f2", long + " two", 5), _fact("f3", "short fact three", 12)]
+    text = stack.ctx._format_facts(facts, full_top_n=1, dated=True)
+    read = _read(stack, [("Relevant Facts", text)], {("fact", "f1"), ("fact", "f2"), ("fact", "f3")})
+    # the ranked input was f1, f2, f3; the model reads them by date: f2 (Oct 5), f3 (Oct 12), f1 (Oct 20)
+    assert read["order"] == [("fact", "f2"), ("fact", "f3"), ("fact", "f1")]
+    assert [read["texts"][k] for k in read["order"]] == text.split("\n")
+    assert long + " one" in read["texts"][("fact", "f1")]  # rank 1: exempt, full text
+    assert "watered at six" in read["texts"][("fact", "f2")] and "two" not in read["texts"][("fact", "f2")]
+    assert "..." in read["texts"][("fact", "f2")]  # cut to 40 chars at a word boundary
+    assert {k: read[k] for k in CHECKS_ZERO} == CHECKS_ZERO
+
+
+def test_a_budget_cut_item_is_judged_on_what_survived_and_a_dropped_one_is_unplaced() -> None:
+    from nous_eval.served.stack import _capture_formatters
+
+    stack = SimpleNamespace(ctx=_engine(), formatter_calls=[])
+    _capture_formatters(stack)
+    decs = [
+        SimpleNamespace(id=f"d{i}", description=f"decision number {i} " + "x" * 40, outcome="success", confidence=0.8)
+        for i in range(3)
+    ]
+    full = stack.ctx._format_decisions(decs)
+    cut = stack.ctx._truncate_to_budget(full, (len(full) - 50) // 4)  # mid-way through the last line
+    traced = {("decision", f"d{i}") for i in range(3)}
+    read = _read(stack, [("Related Decisions", cut)], traced)
+    assert read["order"] == [("decision", "d0"), ("decision", "d1"), ("decision", "d2")]
+    tail = read["texts"][("decision", "d2")]
+    assert tail.endswith("...") and full.split("\n")[2].startswith(tail[:-3]) and len(tail) < len(full.split("\n")[2])
+    shorter = stack.ctx._truncate_to_budget(full, (len(full.split("\n")[0]) + 3) // 4 + 2)  # d2 never shown
+    read = _read(stack, [("Related Decisions", shorter)], traced)
+    # the trace still says rendered (its budget probe is approximate); the text says no
+    assert ("decision", "d2") not in read["texts"] and read["unplaced"] == 0 and read["budget_cut_but_traced"] == 1
+
+
+def test_sections_are_read_in_prompt_order_and_checked_against_the_prompt_and_the_trace() -> None:
+    from nous_eval.served import preturn
+    from nous_eval.served.stack import _capture_formatters
+
+    stack = SimpleNamespace(ctx=_engine(), formatter_calls=[])
+    _capture_formatters(stack)
+    past = stack.ctx._format_episodes(
+        [SimpleNamespace(id="e9", summary="past session", outcome="success", started_at=None)]
+    )
+    blocks = stack.ctx._format_procedure_bodies([SimpleNamespace(id="p1", name="deploy", body="run the steps")], 1000)
+    recent = "- [Nov 04 10:00] garden plan"
+    # br.sections order: Past Episodes first; the prompt holds Recent Conversations first
+    sections = [
+        ("Past Episodes", past),
+        ("Recommended Procedures", "\n\n".join(blocks)),
+        ("Recent Conversations", recent),
+    ]
+    prompt = "\n\n".join(f"## {label}\n\n{c}" for label, c in (sections[2], sections[1], sections[0]))
+    pools = preturn.formatter_lines(stack.formatter_calls)
+    traced = {("episode", "e9"), ("procedure", "p1"), ("episode", "e1"), ("fact", "gone")}
+    read = preturn.read_items(sections, pools, ["e1"], {"e1": recent}, True, traced, prompt)
+    assert read["order"] == [("episode", "e1"), ("procedure", "p1"), ("episode", "e9")]
+    assert read["texts"][("procedure", "p1")] == "### deploy\n\nrun the steps"
+    assert read["texts"][("episode", "e1")] == recent and read["texts"][("episode", "e9")] == past
+    assert read["unplaced"] == 1 and read["untraced"] == 0  # the traced fact "gone" is in no section
+    read = preturn.read_items(
+        sections,
+        pools,
+        ["e1"],
+        {"e1": recent},
+        True,
+        {("episode", "e9")},
+        prompt.replace("## Past Episodes", "## Past"),
+    )
+    assert read["sections_not_in_prompt"] == 1 and read["untraced"] == 2
+
+
+def test_section_text_no_formatter_produced_is_counted() -> None:
+    from nous_eval.served import preturn
+
+    known = "- [success] known (confidence: 0.80)"
+    items, unmatched = preturn.parse_section("- a line nobody rendered\n" + known, [(("decision", "d1"), known)])
+    assert items == [(("decision", "d1"), known)] and unmatched == ["- a line nobody rendered"]
+
+
+async def test_query_expansions_are_shared_across_runs(tmp_path: Path) -> None:
+    from nous_eval.served.stack import ExpansionStore, share_expansions
+
+    class Expander:
+        def __init__(self, answer: list[str]) -> None:
+            self.answer, self.db = answer, {}
+
+        async def _cache_get(self, h):
+            return self.db.get(h)
+
+        async def _cache_put(self, h, query, variants):
+            self.db[h] = variants
+
+        async def expand(self, query):  # QueryExpander.expand's shape: the cache, else the LLM, then store
+            h = query.encode()
+            hit = await self._cache_get(h)
+            if hit is not None:
+                return hit
+            await self._cache_put(h, query, [query, *self.answer])
+            return [query, *self.answer]
+
+    cfg = SimpleNamespace(query_expansion_model="haiku", query_expansion_max_variants=3)
+    first, second = Expander(["garden schedule"]), Expander(["a different variant"])  # two arms, fresh clones
+    for e in (first, second):
+        share_expansions(e, ExpansionStore(tmp_path / "qe.jsonl", cfg))
+    assert await first.expand("when do we water") == ["when do we water", "garden schedule"]
+    assert await second.expand("when do we water") == ["when do we water", "garden schedule"]
+    other = Expander(["x"])  # another expansion config does not share
+    share_expansions(
+        other,
+        ExpansionStore(
+            tmp_path / "qe.jsonl", SimpleNamespace(query_expansion_model="haiku", query_expansion_max_variants=5)
+        ),
+    )
+    assert await other.expand("when do we water") == ["when do we water", "x"]
+
+
+def test_the_changed_tools_note_is_section_furniture_not_an_item() -> None:
+    from nous.tool_names import changed_tools_note
+    from nous_eval.served import preturn
+    from nous_eval.served.stack import _capture_formatters
+
+    stack = SimpleNamespace(ctx=_engine(), formatter_calls=[])
+    _capture_formatters(stack)
+    text = stack.ctx._format_decisions(
+        [SimpleNamespace(id="d1", description="we stopped using recall_hubs", outcome="success", confidence=0.8)]
+    )
+    note = changed_tools_note(text)
+    assert note  # the fixture names a changed tool
+    read = _read(stack, [("Related Decisions", f"{text}\n{note}")], {("decision", "d1")})
+    assert read["order"] == [("decision", "d1")] and read["unmatched_segments"] == 0
+    assert preturn.strip_tools_note("- a line\nNote: not the tools note.") == "- a line\nNote: not the tools note."

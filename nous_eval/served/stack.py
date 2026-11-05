@@ -11,8 +11,9 @@ every arm: fact access tracking (recall_count UPDATEs, which also add HNSW tuple
 approximate searches) and the keyed leg's own tracking. The date-window parser is wrapped by a
 store shared across runs, keyed (as-of date, query, model) and holding the unpadded window: the
 parse a query gets is fixed once and every later run reuses it, so latency excludes the parse
-and arms see the same windows. Two formatters are observed, not changed: recall_deep's (the
-order the model reads its items) and the pre-turn procedure renderers (the text a procedure got).
+and arms see the same windows. Query-expansion variants are shared the same way when expansion
+is on. Formatters are observed, not changed: recall_deep's (the order the model reads its items)
+and the pre-turn section formatters (the text each item got, and its place).
 """
 
 from __future__ import annotations
@@ -163,6 +164,54 @@ class CachedDateParser:
         return rec
 
 
+class ExpansionStore:
+    """Query-expansion variants shared by every run of a data dir, keyed (query hash, model,
+    max variants): the clone's ``heart.query_expansions`` table is thrown away with the clone, so
+    without this each arm would ask the LLM again for a query the template lacked and retrieve
+    with different variants."""
+
+    def __init__(self, path: Path, settings: Any) -> None:
+        self.path = path
+        self.config = f"{settings.query_expansion_model}\x00{settings.query_expansion_max_variants}"
+        self.rows = {d["k"]: d["variants"] for d in read_jsonl(path)}
+
+    def _k(self, h: bytes) -> str:
+        return hashlib.sha1(h.hex().encode() + b"\x00" + self.config.encode()).hexdigest()
+
+    def get(self, h: bytes) -> list[str] | None:
+        k = self._k(h)
+        if k not in self.rows:  # another run may have stored it since this one loaded the file
+            self.rows.update({d["k"]: d["variants"] for d in read_jsonl(self.path)})
+        return self.rows.get(k)
+
+    def put(self, h: bytes, variants: list[str]) -> None:
+        k = self._k(h)
+        if k not in self.rows and variants:
+            self.rows[k] = list(variants)
+            append_lines(self.path, [json.dumps({"k": k, "variants": list(variants)}) + "\n"])
+
+
+def share_expansions(expander: Any, store: ExpansionStore) -> None:
+    """Route the expander's cache through the shared store: a stored entry wins (the DB lookup
+    still runs first, as prod's does), a DB hit or a fresh expansion is stored for later runs."""
+    orig_get, orig_put = expander._cache_get, expander._cache_put
+
+    async def cache_get(h: bytes) -> list[str] | None:
+        from_db = await orig_get(h)
+        shared = store.get(h)
+        if shared is not None:
+            return shared
+        if from_db is not None:
+            store.put(h, from_db)
+        return from_db
+
+    async def cache_put(h: bytes, query: str, variants: list[str]) -> None:
+        store.put(h, variants)
+        await orig_put(h, query, variants)
+
+    expander._cache_get, expander._cache_put = cache_get, cache_put
+
+
 @dataclass
 class Stack:
     settings: Any
@@ -180,9 +229,8 @@ class Stack:
     date_parser: CachedDateParser | None
     embeddings: Any = None
     ce_calls: list = field(default_factory=list)
-    intent_leg_hits: list = field(default_factory=list)
     render_orders: list = field(default_factory=list)  # one per recall_deep call: [(type, id), ...] as read
-    procedure_text: dict = field(default_factory=dict)  # procedure id -> the text the pre-turn build rendered
+    formatter_calls: list = field(default_factory=list)  # the pre-turn build's section formatter calls
     listed_episodes: list = field(default_factory=list)  # the build's last heart.list_episodes result
 
 
@@ -228,25 +276,33 @@ def _capture_render_order(sink: list) -> Any:
     return orig
 
 
-def _capture_procedure_text(stack: Stack) -> None:
-    """Record the text each rendered procedure got: its body block (Recommended Procedures) or its
-    catalog line (Known Procedures). ``recalled_content_map`` holds only the name."""
+def _capture_formatters(stack: Stack) -> None:
+    """Record every call the pre-turn build makes to a section formatter (facts, decisions, Past
+    Episodes, procedure lines) with its arguments, and the blocks ``_format_procedure_bodies``
+    returns. preturn.formatter_lines re-renders each item from these after the timed build, so
+    the wrappers only append to a list inside it."""
     ctx = stack.ctx
-    orig_bodies, orig_lines = ctx._format_procedure_bodies, ctx._format_procedures
+    for name, kind in (
+        ("_format_facts", "fact"),
+        ("_format_decisions", "decision"),
+        ("_format_episodes", "episode"),
+        ("_format_procedures", "procedure"),
+    ):
+        orig = getattr(ctx, name)
+
+        def wrapped(items: list, _orig: Any = orig, _kind: str = kind, **kw: Any) -> str:
+            stack.formatter_calls.append((_kind, _orig, list(items), dict(kw)))
+            return _orig(items, **kw)
+
+        setattr(ctx, name, wrapped)
+    orig_bodies = ctx._format_procedure_bodies
 
     def bodies(details: list, per_item_cap: int) -> list[str]:
         blocks = orig_bodies(details, per_item_cap)
-        for p, block in zip(details, blocks, strict=False):
-            stack.procedure_text[str(getattr(p, "id", ""))] = block
+        stack.formatter_calls.append(("procedure_blocks", list(zip(details, blocks, strict=False))))
         return blocks
 
-    def lines(procedures: list) -> str:
-        for p in procedures:
-            stack.procedure_text[str(getattr(p, "id", ""))] = orig_lines([p])
-        return orig_lines(procedures)
-
     ctx._format_procedure_bodies = bodies
-    ctx._format_procedures = lines
 
 
 def make_embeddings(settings: Any) -> Any:
@@ -373,9 +429,9 @@ async def open_stack(
         if settings.query_expansion_enabled:
             from nous.heart.query_expansion import QueryExpander
 
-            heart.set_query_expander(
-                QueryExpander(llm=llm, settings=settings, db=db, model=settings.query_expansion_model)
-            )
+            expander = QueryExpander(llm=llm, settings=settings, db=db, model=settings.query_expansion_model)
+            share_expansions(expander, ExpansionStore(data_dir / "query_expansions.jsonl", settings))
+            heart.set_query_expander(expander)
         if settings.residual_activation_enabled:
             from nous.heart.residual_activation import ResidualActivator
 
@@ -414,9 +470,8 @@ async def open_stack(
                 ce_calls=ce_calls,
                 render_orders=render_orders,
             )
-            _hook_intent_leg(stack)
             _hook_list_episodes(stack)
-            _capture_procedure_text(stack)
+            _capture_formatters(stack)
             yield stack
     finally:
         set_active(None)
@@ -442,20 +497,6 @@ def _hook_list_episodes(stack: Stack) -> None:
         return res
 
     stack.heart.list_episodes = list_episodes
-
-
-def _hook_intent_leg(stack: Stack) -> None:
-    """The Session Profile (intent) leg is not in the retrieval trace; record its hits so the
-    ones that reach that section count as rendered items (query-mode A/B)."""
-    orig = stack.heart.search_facts
-
-    async def search_facts(*a: Any, **kw: Any) -> Any:
-        res = await orig(*a, **kw)
-        if kw.get("include_categories"):
-            stack.intent_leg_hits.extend(res or [])
-        return res
-
-    stack.heart.search_facts = search_facts
 
 
 def ce_environment(settings: Any) -> dict[str, Any]:

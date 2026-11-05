@@ -1,12 +1,14 @@
 """Pre-turn entry point: each input replays pre_turn's retrieval steps (layer.py: FrameEngine.select
 -> IntentClassifier.classify -> plan_retrieval -> deictic/recap adjustments -> ContextEngine.build).
-What reached the model is read from the F091 retrieval trace (candidates with disposition
-``rendered``, in each section's render order), plus the Session Profile intent-leg facts whose text
-reached that section. Items are ordered as the model reads them: section by section in the order
-the build emitted its sections, each section in its own order (``section_order``). An item's text
-is what it was rendered as: a procedure's body block or catalog line, not its name; an episode
-shown only in Recent Conversations, its block there. Ported from the query-mode A/B harness
-(eval/query-mode-ab, 082135ea).
+Ported from the query-mode A/B harness (eval/query-mode-ab, 082135ea).
+
+What a row holds is read from the final text, not from the engine's id lists: every section
+formatter's calls are recorded (``stack.formatter_calls``), each item's own line or block is
+re-rendered from them, and each judged section's final content (after date sorting and budget
+cuts) is split into those items, sections in the order the final prompt holds them
+(``read_items``). That split is the only source of a
+row's items, their positions and the text the judge sees, and it is checked per build against
+the retrieval trace and the final system prompt (``READ_CHECKS``).
 
 First turn: pre_turn computes ``is_first_turn`` as no earlier turn in the session, no active
 episode, and not a subtask turn. Each replay is a fresh session, so an input is a first turn when
@@ -73,8 +75,7 @@ async def build_one(
     agent = stack.settings.agent_id
     frame = await stack.frames.select(agent, text)
     plan, temporal_boost = plan_like_pre_turn(stack, text, frame, first_turn)
-    stack.intent_leg_hits.clear()
-    stack.procedure_text.clear()
+    stack.formatter_calls.clear()
     stack.listed_episodes = []
     t0 = time.monotonic()
     br = await stack.ctx.build(
@@ -91,22 +92,17 @@ async def build_one(
     ms = (time.monotonic() - t0) * 1000
     trace = br.retrieval_trace.to_dict() if br.retrieval_trace is not None else {}
     cands = trace.get("candidates") or []
-    rendered_cands = [c for c in cands if c.get("disposition") == "rendered"]
-    snippets = {(c["type"], str(c["id"])): c.get("snippet") or "" for c in rendered_cands}
-    rendered = [(c["type"], str(c["id"]), c.get("final_rank")) for c in rendered_cands]
-    profile_ids = _profile_fact_ids(stack.intent_leg_hits, br, snippets, rendered)
+    traced = {(c["type"], str(c["id"])) for c in cands if c.get("disposition") == "rendered"}
     recent_text = "\n".join(sec.content for sec in br.sections if sec.label == "Recent Conversations")
-    temporal_ids, temporal_blocks, temporal_ok = recent_episodes(stack.listed_episodes, recent_text)
-    order, unplaced = section_order(
-        [sec.label for sec in br.sections], br.recalled_ids, temporal_ids, profile_ids, rendered
-    )
-    contents = item_texts(
-        order,
-        stack.procedure_text,
-        temporal_blocks,
-        br.recalled_ids.get("episode", []),
-        br.recalled_content_map,
-        snippets,
+    recent_ids, recent_blocks, recent_ok = recent_episodes(stack.listed_episodes, recent_text)
+    read = read_items(
+        [(sec.label, sec.content) for sec in br.sections],
+        formatter_lines(stack.formatter_calls),
+        recent_ids,
+        recent_blocks,
+        recent_ok,
+        traced,
+        br.system_prompt,
     )
     by_label: dict[str, int] = defaultdict(int)
     for sec in br.sections:
@@ -124,77 +120,172 @@ async def build_one(
         "plan_queries": {q.memory_type: q.query_text for q in plan.queries},
         "plan_skip_types": sorted(plan.skip_types),
         "legs": legs,
-        "rendered": [f"{t}:{i}" for t, i in order],
+        "rendered": [f"{t}:{i}" for t, i in read["order"]],
         "dropped": dict(dropped),
-        "contents": contents,
+        "contents": {f"{t}:{i}": read["texts"][(t, i)][:1200] for t, i in read["order"]},
         "tokens_total": sum(by_label.values()),
         "tokens_memory": sum(v for k, v in by_label.items() if k in MEMORY_LABELS),
         "tokens_by_label": dict(by_label),
         "system_prompt": br.system_prompt,
         "build_ms": round(ms, 1),
         "first_turn": first_turn,
-        "unplaced": unplaced,
-        "recent_parsed": temporal_ok,
+        "recent_parsed": recent_ok,
+        **{k: read[k] for k in (*READ_CHECKS, *READ_NOTES)},
+        **({"read_problems": read["problems"]} if read["problems"] else {}),
     }
 
 
-def item_texts(
-    order: list[tuple[str, str]],
-    procedure_text: dict[str, str],
-    recent_blocks: dict[str, str],
-    past_episode_ids: list,
-    recalled_content_map: dict[str, str],
-    snippets: dict[tuple[str, str], str],
-) -> dict[str, str]:
-    """What each item was rendered as (to 1200 chars), the text the judge sees: a procedure's body
-    block or catalog line, not its name; an episode shown only in Recent Conversations, its block
-    there (title, plus a summary only on a first turn or under temporal boost), not its full
-    summary; otherwise the section's content map, then the trace snippet."""
-    past = {str(i) for i in past_episode_ids}
-    shown = {("procedure", k): v for k, v in procedure_text.items()}
-    shown.update({("episode", i): v for i, v in recent_blocks.items() if i not in past})
-    return {
-        f"{t}:{i}": (shown.get((t, i)) or recalled_content_map.get(i) or snippets.get((t, i)) or "")[:1200]
-        for t, i in order
-    }
-
-
-# Section label -> what renders in it, in the order the build appended the sections.
-_SECTION_ITEMS = {
+# Section label -> the formatter pool its items come from. Recent Conversations is built inline
+# (not by a formatter) and is read by ``recent_episodes``.
+_SECTION_POOLS = {
     "Related Decisions": "decision",
     "Relevant Facts": "fact",
-    "Session Profile": "profile",
+    "Session Profile": "fact",
     "Recommended Procedures": "procedure",
     "Known Procedures": "procedure",
-    "Recent Conversations": "recent",
     "Past Episodes": "episode",
+    "Recent Conversations": "recent",
 }
+# What each build checks; a run sums them and ``judge`` refuses a run where any is non-zero.
+READ_CHECKS = ("unplaced", "untraced", "unmatched_segments", "sections_not_in_prompt")
+# Recorded per build and summed per run, not a refusal: see read_items.
+READ_NOTES = ("budget_cut_but_traced",)
 
 
-def section_order(
-    labels: list[str],
-    recalled_ids: dict[str, list],
+def formatter_lines(calls: list) -> dict[str, list[tuple[tuple[str, str], str]]]:
+    """Each item's text as its section formatter renders it, per pool, from the calls the build
+    made (``stack.formatter_calls``). A fact's line is re-rendered alone with its own exemption
+    (inside ``full_top_n`` or not), lineage and date flag, which is how the formatter renders
+    it inside the list; the date sort and the budget only reorder and cut whole lines."""
+    pools: dict[str, list[tuple[tuple[str, str], str]]] = defaultdict(list)
+    for call in calls:
+        kind = call[0]
+        if kind == "procedure_blocks":
+            for p, block in call[1]:
+                pools["procedure"].append((("procedure", str(getattr(p, "id", ""))), block))
+            continue
+        _, orig, items, kwargs = call
+        for idx, it in enumerate(items):
+            if kind == "fact":
+                full = 1 if idx < int(kwargs.get("full_top_n") or 0) else 0
+                line = orig([it], full_top_n=full, lineage=kwargs.get("lineage"), dated=kwargs.get("dated", False))
+            else:
+                line = orig([it])
+            if line:
+                pools[kind].append(((kind, str(getattr(it, "id", ""))), line))
+    return pools
+
+
+def parse_section(text: str, candidates: list[tuple[tuple[str, str], str]]) -> tuple[list, list[str]]:
+    """Split a section's final text into the items it rendered, in order. At each position the
+    longest unused candidate line that matches and ends at a line break (or the end) is taken;
+    the separating newlines are skipped. A tail that only begins a candidate's line (the section
+    budget cut it, ``...`` appended by a character cut) is that item, as cut. Returns
+    [(key, text as rendered)] and the text segments (lines) no candidate matched."""
+    cands = sorted((c for c in candidates if c[1]), key=lambda c: -len(c[1]))
+    used: set = set()
+    out: list = []
+    unmatched: list[str] = []
+    pos, n = 0, len(text)
+    while pos < n:
+        if text[pos] == "\n":
+            pos += 1
+            continue
+        hit = None
+        for key, line in cands:
+            end = pos + len(line)
+            if key not in used and text.startswith(line, pos) and (end == n or text[end] == "\n"):
+                hit = (key, line)
+                break
+        if hit is not None:
+            out.append(hit)
+            used.add(hit[0])
+            pos += len(hit[1])
+            continue
+        tail = text[pos:]
+        stem = tail[:-3] if tail.endswith("...") else tail
+        part = next((k for k, line in cands if stem and k not in used and line.startswith(stem)), None)
+        if part is not None:
+            out.append((part, tail))
+            break
+        nl = text.find("\n", pos)
+        if stem:
+            unmatched.append(text[pos : n if nl < 0 else nl])
+        pos = n if nl < 0 else nl + 1
+    return out, unmatched
+
+
+def read_items(
+    sections: list[tuple[str, str]],
+    pools: dict[str, list],
     recent_ids: list[str],
-    profile_ids: list[str],
-    rendered: list[tuple[str, str, int | None]],
-) -> tuple[list[tuple[str, str]], int]:
-    """Rendered items in the order the model reads them: section by section as the build emitted
-    its sections (Recent Conversations before Past Episodes), each section in its own order. A
-    rendered item no section claims (none expected) goes last by final rank, and is counted."""
-    keyed = {(t, i) for t, i, _ in rendered}
-    lists = {
-        "recent": [("episode", i) for i in recent_ids],
-        "profile": [("fact", i) for i in profile_ids],
-        **{t: [(t, str(i)) for i in recalled_ids.get(t, [])] for t in ("decision", "fact", "procedure", "episode")},
-    }
+    recent_blocks: dict[str, str],
+    recent_ok: bool,
+    traced: set[tuple[str, str]],
+    prompt: str,
+) -> dict[str, Any]:
+    """The items the model read, in the order it read them, each with the text it read: judged
+    sections in the order they appear in the final system prompt, each split into the items its
+    formatter rendered. This is the only source of a row's items, their text and their positions.
+
+    Checks, each expected 0: ``unplaced`` (the trace says rendered, no section text holds it),
+    ``untraced`` (in the text, not rendered per the trace), ``unmatched_segments`` (text no
+    candidate matched), ``sections_not_in_prompt`` (a judged section missing from the prompt)."""
+    placed = []
+    missing = 0
+    for label, content in sections:
+        if label not in _SECTION_POOLS or not content:
+            continue
+        at = prompt.find(f"## {label}\n\n{content}")
+        if at < 0:
+            missing += 1
+            continue
+        placed.append((at, label, content))
     order: list[tuple[str, str]] = []
-    for label in labels:
-        for k in lists.get(_SECTION_ITEMS.get(label, ""), []):
-            if k in keyed and k not in order:
-                order.append(k)
-    placed = set(order)
-    rest = sorted(((r, t, i) for t, i, r in rendered if (t, i) not in placed), key=lambda x: (x[0] is None, x[0] or 0))
-    return order + [(t, i) for _, t, i in rest], len(rest)
+    texts: dict[tuple[str, str], str] = {}
+    problems: list[dict[str, str]] = []  # what a non-zero check is about, for the row
+    for _, label, content in sorted(placed):
+        if _SECTION_POOLS[label] == "recent":
+            items = [(("episode", i), recent_blocks[i]) for i in recent_ids if i in recent_blocks] if recent_ok else []
+        else:
+            items, bad = parse_section(strip_tools_note(content), pools.get(_SECTION_POOLS[label], []))
+            problems += [{"check": "unmatched_segments", "section": label, "text": t[:300]} for t in bad]
+        for key, txt in items:
+            if key not in texts:
+                order.append(key)
+                texts[key] = txt
+    # A traced item that no section text holds although its formatter rendered a line for it: the
+    # section budget cut that line, and the trace's own budget check (a 40-char content probe that
+    # only ever downgrades on a clear absence) found its content elsewhere in the prompt. The text
+    # is the authority; these are recorded, not counted as unplaced.
+    formatted = {k for pool in pools.values() for k, _ in pool}
+    missing_items = [(t, i) for t, i in traced if (t, i) not in texts]
+    unplaced = sorted(f"{t}:{i}" for t, i in missing_items if (t, i) not in formatted)
+    cut = sorted(f"{t}:{i}" for t, i in missing_items if (t, i) in formatted)
+    untraced = sorted(f"{t}:{i}" for t, i in texts if (t, i) not in traced)
+    problems += [{"check": "unplaced", "item": k} for k in unplaced]
+    problems += [{"check": "untraced", "item": k} for k in untraced]
+    return {
+        "order": order,
+        "texts": texts,
+        "unplaced": len(unplaced),
+        "untraced": len(untraced),
+        "unmatched_segments": sum(1 for x in problems if x["check"] == "unmatched_segments"),
+        "sections_not_in_prompt": missing,
+        "budget_cut_but_traced": len(cut),
+        "problems": problems + [{"check": "budget_cut_but_traced", "item": k} for k in cut],
+    }
+
+
+def strip_tools_note(content: str) -> str:
+    """A recalled-memory section that names a changed tool ends with one note line about it
+    (ContextEngine._note_changed_tools): section furniture, not an item. Removed before splitting."""
+    try:
+        from nous.tool_names import changed_tools_note
+    except ImportError:  # code that predates the note
+        return content
+    head, sep, last = content.rpartition("\n")
+    return head if sep and last and changed_tools_note(head) == last else content
 
 
 def recent_episodes(listed: list, section_text: str) -> tuple[list[str], dict[str, str], bool]:
@@ -215,23 +306,6 @@ def recent_episodes(listed: list, section_text: str) -> tuple[list[str], dict[st
             blocks[-1] += "\n" + line
     ok = len(blocks) == len(ids)
     return ids, (dict(zip(ids, blocks, strict=True)) if ok else {}), ok
-
-
-def _profile_fact_ids(hits: list, br: Any, snippets: dict, rendered: list) -> list[str]:
-    """Session Profile facts in the order their text appears in that section. The intent leg is
-    not in recalled_ids; a hit counts when its text is in the section (query-mode A/B)."""
-    text = "\n".join(sec.content for sec in br.sections if sec.label == "Session Profile")
-    facts = {str(i) for i in br.recalled_ids.get("fact", [])}
-    found: dict[str, int] = {}
-    for f in hits:
-        fid, body = str(f.id), (getattr(f, "content", "") or "")
-        pos = text.find(body.strip()[:40]) if text and body.strip() else -1
-        if pos >= 0 and fid not in facts and fid not in found:
-            found[fid] = pos
-            snippets.setdefault(("fact", fid), body)
-            if ("fact", fid) not in {(t, i) for t, i, _ in rendered}:
-                rendered.append(("fact", fid, None))
-    return sorted(found, key=lambda fid: found[fid])
 
 
 class DegradedBuild(Exception):
@@ -280,13 +354,15 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
         except Exception:  # noqa: BLE001 - a warm-up failure shows up again in the measured build
             pass
     profile_seen: list[bool] = []
-    n_err = n_unplaced = n_recent_unparsed = 0
+    n_err = n_recent_unparsed = 0
+    checks = dict.fromkeys((*READ_CHECKS, *READ_NOTES), 0)
     before = embedding_cache_size(stack.embeddings)
     with rows_path.open("w", encoding="utf-8") as f:
         for i, it in enumerate(items):
             r = await build_item(stack, it, profile_seen)
             n_err += 1 if r.get("error") else 0
-            n_unplaced += r.get("unplaced") or 0
+            for k in checks:
+                checks[k] += r.get(k) or 0
             n_recent_unparsed += r.get("recent_parsed") is False
             row = {
                 "key": it["key"],
@@ -307,6 +383,6 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
         "n": len(items),
         "errors": n_err,
         "embeddings_added_while_measuring": None if before is None else after - before,
-        "unplaced": n_unplaced,
+        **checks,
         "recent_unparsed": n_recent_unparsed,
     }

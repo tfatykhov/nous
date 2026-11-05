@@ -29,6 +29,7 @@ synthetic fixtures only.
   cost_ledger.jsonl            one row per LLM call: purpose, run, model, usage
   embedding_cache.jsonl        query embeddings (float32), shared by every run
   date_windows_unpadded.jsonl  date-window parses (unpadded), keyed (as-of date, query, model)
+  query_expansions.jsonl       query-expansion variants, keyed (query hash, model, max variants)
   runs/<entry>/<tag>/          meta.json, rows.jsonl, scores.json
 ```
 
@@ -150,12 +151,23 @@ reciprocal rank, per gold type; an episode is served when its summary or any chu
 rendered, and the summary-only rates are reported beside (`served_summary`, `top10_summary`).
 
 Pre-turn, set `prod`: micro precision overall and per item type (the sections), items and relevant
-items per build, total and memory tokens, build latency. Items are ordered as the model reads
-them: section by section in the order the build emitted its sections (Recent Conversations
-before Past Episodes), each section in its own order. Each item is judged on the text it was
-rendered as: a procedure's body block or catalog line, not its name; an episode shown only in
-Recent Conversations, its block there (a title line, plus a summary only on a first turn or under
-temporal boost), not its full summary. Set `gold`: gold-in-context (the
+items per build, total and memory tokens, build latency. A row's items, their order and the text
+the judge sees all come from one place, the final text of each judged section. Every call the
+build makes to a section formatter (facts, decisions, Past Episodes, procedure lines and blocks)
+is recorded; each item's own line is re-rendered from it, with its own full-text exemption,
+lineage and date flag. Each section's final content is then split into those lines, after the
+temporal date sort, the `fact_format_max_chars` cut and the section budget cut, and the
+changed-tools note line is set aside. Recent Conversations (built inline) is split into one
+block per episode the build kept. Sections are taken in the order the final system prompt holds
+them, so Recent Conversations comes before Past Episodes. An item the budget cut part-way is
+judged on what survived.
+
+Per build checks, summed per run, each expected 0; `judge` refuses a run where one is not:
+`unplaced` (the trace says rendered, no formatter produced it and no text holds it), `untraced`
+(in the text, not rendered per the trace), `unmatched_segments` (section text no item produced)
+and `sections_not_in_prompt`. `budget_cut_but_traced` is recorded, not refused: the item's line
+was cut by the section budget, but the trace's approximate budget check (a 40-character content
+probe) found its content elsewhere and kept it rendered. The text decides. Set `gold`: gold-in-context (the
 gold item rendered, or its text in the system prompt) and reciprocal rank among rendered items of
 its type.
 
@@ -196,6 +208,9 @@ a runtime-backed setting (`vector_weight`, `rrf_k`, `cross_encoder_enabled`) cou
   so each measured call finds its query embedded, the cross-encoder loaded and the buffers warm,
   whichever arm ran first; `meta.json` records `embeddings_added_while_measuring` (0 expected).
   A run takes about twice as long as its measured pass.
+- Query-expansion variants (when an arm turns expansion on) are shared by every run of a data dir
+  in `query_expansions.jsonl`, keyed (query hash, model, max variants), so arms on fresh clones
+  retrieve with the same variants; the clone's own table is still read first, as prod does.
 - Date-window parses are fixed per (as-of date, query, model) in `date_windows_unpadded.jsonl`,
   stored unpadded and padded per run with its own `date_leg_pad_days`, and filled before any call is
   measured, so latency excludes the parse and arms see the same windows. A query's as-of date is its

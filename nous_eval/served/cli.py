@@ -380,7 +380,18 @@ async def cmd_judge(args: argparse.Namespace, *, client: Any = None) -> int:
 
     meta, rows = load_run(args.run_dir)
     run = meta.get("run") or {}
-    failed = {k: run.get(k) for k in ("read_order_mismatches", "unplaced", "recent_unparsed") if run.get(k)}
+    failed = {
+        k: run.get(k)
+        for k in (
+            "read_order_mismatches",
+            "unplaced",
+            "untraced",
+            "unmatched_segments",
+            "sections_not_in_prompt",
+            "recent_unparsed",
+        )
+        if run.get(k)
+    }
     if failed and not args.allow_unchecked:
         raise SystemExit(
             f"run checks failed {failed}: ranks or item text may not be what the model read; "
