@@ -157,27 +157,6 @@ def test_keeps_text_that_is_not_leaked_markup(text, field, params):
     assert strip_tool_markup(text, field, params) == (text, "")
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "</b>" * 20000,
-        "x</b>" * 20000,
-        "<content>" * 10000 + "</content>" * 10000,
-        "</content>" * 20000 + '<parameter name="x">',
-        '<parameter name="x">' * 20000 + " prose",
-        "<category>a</category>" * 10000 + " prose",
-        "`" * 20000 + "</content>" + "``" * 5000,
-        " " * 50000 + "</content>" + " " * 50000,
-    ],
-    ids=["closes", "closes-in-prose", "paired", "closes-then-param", "open-params", "runs", "backticks", "whitespace"],
-)
-def test_linear_on_adversarial_input(text):
-    """Model text reaches this on the event loop: a rescan per tag would stall it."""
-    t0 = time.perf_counter()
-    strip_tool_markup(text, "content", LEARN)
-    assert time.perf_counter() - t0 < 1.0
-
-
 def _best_time(text: str, n: int = 3) -> float:
     best = float("inf")
     for _ in range(n):
@@ -187,15 +166,38 @@ def _best_time(text: str, n: int = 3) -> float:
     return best
 
 
+def _assert_linear(shape) -> None:
+    """Doubling the input at most about doubles the time; a rescan per tag would quadruple it.
+
+    A ratio, not a wall-clock limit: a shared CI runner can be several times slower than a
+    dev box, and an absolute bound failed there on linear code.
+    """
+    t1, t2 = _best_time(shape(10000)), _best_time(shape(20000))
+    assert t2 < 2.5 * t1 + 0.01, (t1, t2)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        lambda n: "</b>" * n,
+        lambda n: "x</b>" * n,
+        lambda n: "<content>" * (n // 2) + "</content>" * (n // 2),
+        lambda n: "</content>" * n + '<parameter name="x">',
+        lambda n: '<parameter name="x">' * n + " prose",
+        lambda n: "<category>a</category>" * (n // 2) + " prose",
+        lambda n: "`" * n + "</content>" + "``" * (n // 4),
+        lambda n: " " * (n * 5 // 2) + "</content>" + " " * (n * 5 // 2),
+    ],
+    ids=["closes", "closes-in-prose", "paired", "closes-then-param", "open-params", "runs", "backticks", "whitespace"],
+)
+def test_linear_on_adversarial_input(shape):
+    """Model text reaches this on the event loop: a rescan per tag would stall it."""
+    _assert_linear(shape)
+
+
 def test_many_openers_sharing_one_closer_are_linear():
     """Each opener's run reaches the same closer; the gap after it must be read once, not per opener."""
-
-    def shape(n: int) -> str:
-        return "<x>" * n + "v</x>" + " " * n + "prose"
-
-    t40, t80 = _best_time(shape(40000)), _best_time(shape(80000))
-    assert t80 < 0.5
-    assert t80 < 2.5 * t40 + 0.005
+    _assert_linear(lambda n: "<x>" * n + "v</x>" + " " * n + "prose")
 
 
 def test_a_leading_call_is_not_reported_as_one_that_never_ran():
