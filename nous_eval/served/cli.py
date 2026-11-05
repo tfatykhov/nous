@@ -304,6 +304,7 @@ async def cmd_run(args: argparse.Namespace, *, embeddings: Any = None, llm: Any 
         "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "code": prep.code,
         "python": sys.version.split()[0],
+        "python_hash_seed": os.environ.get("PYTHONHASHSEED", "random"),
         "settings": prep.resolved.record(),
         "arm_overrides": {k: str(v) for k, v in prep.resolved.arm_overrides.items()},
         "base_files": prep.resolved.base_files,

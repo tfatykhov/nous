@@ -46,7 +46,15 @@ def differences(ma: dict, mb: dict) -> dict[str, Any]:
     for k in ("head", "dirty_files", "served_sha256"):
         if ca.get(k) != cb.get(k):
             out[f"code.{k}"] = {"a": ca.get(k), "b": cb.get(k)}
-    for k in ("inputs_sha256", "db_template", "judge_model", "agent", "runtime_config", "base_files"):
+    for k in (
+        "inputs_sha256",
+        "db_template",
+        "judge_model",
+        "agent",
+        "runtime_config",
+        "base_files",
+        "python_hash_seed",
+    ):
         if ma.get(k) != mb.get(k):
             out[k] = {"a": ma.get(k), "b": mb.get(k)}
     out["n_variables"] = len(settings) + sum(1 for k in out if k not in ("settings", "n_variables"))

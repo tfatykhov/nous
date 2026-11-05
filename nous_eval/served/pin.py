@@ -95,9 +95,12 @@ def resolve_code_root(spec: str, *, repo: Path, worktree_base: Path) -> Path:
 
 
 def child_env(code_root: Path) -> dict[str, str]:
-    """The parent's environment minus NOUS_*/DB_*, with PYTHONPATH = the pinned root only."""
+    """The parent's environment minus NOUS_*/DB_*, with PYTHONPATH = the pinned root only and a
+    fixed hash seed: the pre-turn build orders some items by set iteration, which varies with the
+    per-process string hash seed (an A/A pair rendered the same sets in a different tail order)."""
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith(_HIDDEN_PREFIXES)}
     env["PYTHONPATH"] = str(code_root)
+    env["PYTHONHASHSEED"] = "0"
     return env
 
 

@@ -291,6 +291,7 @@ def test_reexec_strips_code_and_child_env_hides_nous_vars(monkeypatch: pytest.Mo
     monkeypatch.setenv("DB_NAME", "nous")
     env = pin.child_env(tmp_path)
     assert "NOUS_RRF_K" not in env and "DB_NAME" not in env and env["PYTHONPATH"] == str(tmp_path)
+    assert env["PYTHONHASHSEED"] == "0"
 
 
 def test_database_guards() -> None:
