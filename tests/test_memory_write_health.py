@@ -711,9 +711,10 @@ def test_no_finding_asks_the_agent_to_act_and_only_h1_f1_s1_are_high():
 
 def test_the_check_runs_hourly_in_quiet_hours_and_off_chat():
     check = MemoryWriteHealthCheck(database=object(), agent_id="test-mwh-attrs")
-    assert (check.name, check.interval, check.urgent_override, check.chat_delivery) == (
+    assert (check.name, check.interval, check.timeout, check.urgent_override, check.chat_delivery) == (
         "memory_write_health",
         3600,
+        120,
         True,
         False,
     )

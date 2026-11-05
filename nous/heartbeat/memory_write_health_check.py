@@ -44,7 +44,7 @@ class MemoryWriteHealthCheck(BaseCheck):
 
     name = "memory_write_health"
     interval = 3600
-    timeout = 30
+    timeout = 120  # the first run after a restart reads cold pages (the id ledger, the edges), many times a warm run
     urgent_override = True
     chat_delivery = False
 
