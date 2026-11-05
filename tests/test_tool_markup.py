@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 import time
 
@@ -158,46 +159,64 @@ def test_keeps_text_that_is_not_leaked_markup(text, field, params):
 
 
 def _best_time(text: str, n: int = 3) -> float:
+    """Best of n runs with the garbage collector off: a collection inside one timed run was
+    the main source of noise on a loaded machine."""
     best = float("inf")
-    for _ in range(n):
-        t0 = time.perf_counter()
-        strip_tool_markup(text, "content", LEARN)
-        best = min(best, time.perf_counter() - t0)
+    gc.disable()
+    try:
+        for _ in range(n):
+            t0 = time.perf_counter()
+            strip_tool_markup(text, "content", LEARN)
+            best = min(best, time.perf_counter() - t0)
+    finally:
+        gc.enable()
     return best
 
 
-def _assert_linear(shape) -> None:
-    """Doubling the input at most about doubles the time; a rescan per tag would quadruple it.
+def _assert_linear(shape, n: int = 5000) -> None:
+    """Eight times the input takes about eight times as long; a rescan per tag takes about 64.
 
     A ratio, not a wall-clock limit: a shared CI runner can be several times slower than a
-    dev box, and an absolute bound failed there on linear code.
+    dev box, and an absolute bound failed there on linear code. n against 8n, not 2n: at 2n
+    the linear code's noise on a loaded machine (up to 3.4x) overlapped the quadratic's 3.1x.
+    Measured: linear 7.9-8.5x; the quadratic next_of this was written against, 32x at n=5000.
+    Each shape's n puts its smaller run at a few milliseconds, so the 2 ms margin is not most
+    of the bound.
     """
-    t1, t2 = _best_time(shape(10000)), _best_time(shape(20000))
-    assert t2 < 2.5 * t1 + 0.01, (t1, t2)
+    t1, t8 = _best_time(shape(n), 5), _best_time(shape(8 * n))
+    assert t8 < 16 * t1 + 0.002, (n, t1, t8)
 
 
 @pytest.mark.parametrize(
-    "shape",
+    ("shape", "n"),
     [
-        lambda n: "</b>" * n,
-        lambda n: "x</b>" * n,
-        lambda n: "<content>" * (n // 2) + "</content>" * (n // 2),
-        lambda n: "</content>" * n + '<parameter name="x">',
-        lambda n: '<parameter name="x">' * n + " prose",
-        lambda n: "<category>a</category>" * (n // 2) + " prose",
-        lambda n: "`" * n + "</content>" + "``" * (n // 4),
-        lambda n: " " * (n * 5 // 2) + "</content>" + " " * (n * 5 // 2),
+        (lambda n: "</b>" * n, 5000),
+        (lambda n: "x</b>" * n, 5000),
+        (lambda n: "<content>" * (n // 2) + "</content>" * (n // 2), 5000),
+        (lambda n: "</content>" * n + '<parameter name="x">', 5000),
+        (lambda n: '<parameter name="x">' * n + " prose", 5000),
+        (lambda n: "<category>a</category>" * (n // 2) + " prose", 5000),
+        (lambda n: "`" * n + "</content>" + "``" * (n // 4), 400000),
+        (lambda n: " " * (n * 5 // 2) + "</content>" + " " * (n * 5 // 2), 50000),
+        (lambda n: "<x>" * n + "v</x>" + " " * n + "prose", 5000),
     ],
-    ids=["closes", "closes-in-prose", "paired", "closes-then-param", "open-params", "runs", "backticks", "whitespace"],
+    ids=[
+        "closes",
+        "closes-in-prose",
+        "paired",
+        "closes-then-param",
+        "open-params",
+        "runs",
+        "backticks",
+        "whitespace",
+        "many-openers-one-closer",
+    ],
 )
-def test_linear_on_adversarial_input(shape):
-    """Model text reaches this on the event loop: a rescan per tag would stall it."""
-    _assert_linear(shape)
-
-
-def test_many_openers_sharing_one_closer_are_linear():
-    """Each opener's run reaches the same closer; the gap after it must be read once, not per opener."""
-    _assert_linear(lambda n: "<x>" * n + "v</x>" + " " * n + "prose")
+def test_linear_on_adversarial_input(shape, n):
+    """Model text reaches this on the event loop: a rescan per tag would stall it. The
+    many-openers shape: each opener's run reaches the same closer, and the gap after it must
+    be read once, not once per opener."""
+    _assert_linear(shape, n)
 
 
 def test_a_leading_call_is_not_reported_as_one_that_never_ran():
@@ -236,19 +255,14 @@ def test_leaked_values_run_to_the_matching_closer(removed, expected):
     assert dict(leaked_values(removed)) == expected
 
 
-def _best_of(text: str, n: int = 5) -> float:
-    best = float("inf")
-    for _ in range(n):
-        t0 = time.perf_counter()
-        strip_tool_markup(text, "content", LEARN)
-        best = min(best, time.perf_counter() - t0)
-    return best
-
-
 def test_an_unterminated_tag_is_linear():
-    """A '<' with no '>' after it: the tokenizer must not retry every name/attribute split."""
-    t20 = _best_of("<" + "a" * 20000)
-    t40 = _best_of("<" + "a" * 40000)
+    """A '<' with no '>' after it: the tokenizer must not retry every name/attribute split.
+
+    This one keeps a wall-clock bound on purpose: the work is inside the regex engine, where
+    nothing can be counted, and the backtracking it guards against took about half a second
+    at 10k letters against well under a millisecond for the linear tokenizer."""
+    t20 = _best_time("<" + "a" * 20000, 5)
+    t40 = _best_time("<" + "a" * 40000, 5)
     assert t20 < 0.2
     # Linear doubles; quadratic quadruples. 3x leaves room for timer noise on small numbers.
     assert t40 < 3 * t20 + 0.005
