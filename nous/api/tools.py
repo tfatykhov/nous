@@ -876,8 +876,15 @@ def _format_pipeline_text(
     emitted_out: list[tuple[Any, str]] | None = None,
     temporal_render: bool = False,
     source_marker: bool = False,
+    section_order: list[str] | None = None,
 ) -> str:
     """Format ``run_recall_pipeline`` output into legacy ``recall_deep`` text.
+
+    ``section_order`` (recall_deep_section_order): the order of the Heart
+    Memory, Graph-Connected Decisions and Brain Decisions sections, as a
+    permutation of ``heart``, ``graph_decisions``, ``brain_decisions``, or
+    ``["ranked"]`` for one numbered list of the same rows in ``results`` order.
+    None (default) is today's order, byte-identical.
 
     ``temporal_render`` (temporal_render_enabled): each fact's date span follows
     its description, and within each session bucket, "-- Other --" and the flat
@@ -1047,9 +1054,27 @@ def _format_pipeline_text(
     # The original closure ALSO requires that heart_types resolves to a non-empty
     # list — which is always true once heart_section_eligible is True (because the
     # filter expression yields the same membership). So the gate matches.
-    if heart_section_eligible:
+
+    def _heart_line(i: int, result: Any) -> str:
+        return (
+            f"{i}. [{result.type}] {_via_tag(result)}{result.description}"
+            f"{_date_tag(result)}{_recency_tag(result)}{_source_tag(result)} "
+            f"(id: {result.id}, score: {result.score:.3f} {_score_tag(result)})"
+        )
+
+    def _heart_row(i: int, result: Any) -> None:
+        results_text.append(_heart_line(i, result))
+        _emit(result)
+        _add_merge_history(result)
+
+    def _heart_section() -> None:
+        if not heart_section_eligible:
+            return
+        # In today's order this section comes first, so the header has no
+        # leading blank line; placed after another section it gets one.
+        header = ("\n" if results_text else "") + "=== Heart Memory ==="
         if heart_results:
-            results_text.append("=== Heart Memory ===")
+            results_text.append(header)
             if session_group_heart:
                 # P1.1: group facts/chunks/episodes by source session_id so
                 # the LLM sees session boundaries — helps multi-session
@@ -1074,42 +1099,24 @@ def _format_pipeline_text(
                 for sess_id, items in session_buckets.items():
                     results_text.append(f"-- Session {sess_id[:8]} --")
                     for result in _by_date(items):
-                        results_text.append(
-                            f"{i}. [{result.type}] {_via_tag(result)}{result.description}"
-                            f"{_date_tag(result)}{_recency_tag(result)}{_source_tag(result)} "
-                            f"(id: {result.id}, score: {result.score:.3f} {_score_tag(result)})"
-                        )
-                        _emit(result)
-                        _add_merge_history(result)
+                        _heart_row(i, result)
                         i += 1
                 if no_session:
                     if session_buckets:
                         results_text.append("-- Other --")
                     for result in _by_date(no_session):
-                        results_text.append(
-                            f"{i}. [{result.type}] {_via_tag(result)}{result.description}"
-                            f"{_date_tag(result)}{_recency_tag(result)}{_source_tag(result)} "
-                            f"(id: {result.id}, score: {result.score:.3f} {_score_tag(result)})"
-                        )
-                        _emit(result)
-                        _add_merge_history(result)
+                        _heart_row(i, result)
                         i += 1
             else:
                 # Flat output (byte-identical to pre-P1.1 when no graph-memory neighbours
                 # are present, i.e. heart_graph_all_types off — _via_tag returns "").
                 for i, result in enumerate(_by_date(heart_results), 1):
-                    results_text.append(
-                        f"{i}. [{result.type}] {_via_tag(result)}{result.description}"
-                        f"{_date_tag(result)}{_recency_tag(result)}{_source_tag(result)} "
-                        f"(id: {result.id}, score: {result.score:.3f} {_score_tag(result)})"
-                    )
-                    _emit(result)
-                    _add_merge_history(result)
+                    _heart_row(i, result)
         elif not exemplar_rows:
             # Codex r14: suppress the empty-section placeholder when the examples
             # block will render below — "No results found." would contradict it.
             # Byte-identical (placeholder retained) when there are no exemplars.
-            results_text.append("=== Heart Memory ===\nNo results found.")
+            results_text.append(header + "\nNo results found.")
 
     # ------------------------------------------------------------------
     # Graph-Connected Decisions section (F022 Phase 2 cross-type)
@@ -1126,13 +1133,15 @@ def _format_pipeline_text(
         if r.source == "graph_expanded" and r.type == "decision" and r.metadata.get("stage_origin") == "heart_graph"
     ]
 
-    if heart_graph:
-        results_text.append("\n=== Graph-Connected Decisions ===")
-        for i, n in enumerate(heart_graph, 1):
-            results_text.append(
-                f"{i}. [via {n.edge_relation}] {n.description} (id: {n.id}, score: {n.score:.3f} {_score_tag(n)})"
-            )
-            _emit(n)
+    def _graph_line(i: int, n: Any, tag: str = "") -> str:
+        return f"{i}. {tag}[via {n.edge_relation}] {n.description} (id: {n.id}, score: {n.score:.3f} {_score_tag(n)})"
+
+    def _graph_decisions_section() -> None:
+        if heart_graph:
+            results_text.append("\n=== Graph-Connected Decisions ===")
+            for i, n in enumerate(heart_graph, 1):
+                results_text.append(_graph_line(i, n))
+                _emit(n)
 
     # NOTE: Path-A graph-memory neighbours (stage_origin == "heart_graph_memory") are no
     # longer a trailing section — they are interleaved into the ranked Heart Memory list
@@ -1142,66 +1151,119 @@ def _format_pipeline_text(
     # ------------------------------------------------------------------
     # Brain Decisions section
     # ------------------------------------------------------------------
-    if search_all or "decision" in search_types:
-        decision_results = [r for r in results if r.source == "brain"]
-        # Brain-side graph-expanded entries (stage 4): tagged
-        # ``metadata["stage_origin"] == "brain_graph"`` by
-        # ``_graph_expanded_to_pipeline``. Spreading-activation results
-        # share the brain-graph bucket — see the OR below. Companion to
-        # the heart-side filter above; the metadata tag replaces the
-        # previous position-based gate so the formatter is stable under
-        # ``rerank_by_score``.
-        brain_graph: list = [
-            r
-            for r in results
-            if r.source in ("graph_expanded", "spreading_activation")
-            and r.metadata.get("stage_origin") == "brain_graph"
-        ]
+    brain_section_eligible = search_all or "decision" in search_types
+    decision_results = [r for r in results if r.source == "brain"]
+    # Brain-side graph-expanded entries (stage 4): tagged
+    # ``metadata["stage_origin"] == "brain_graph"`` by
+    # ``_graph_expanded_to_pipeline``. Spreading-activation results
+    # share the brain-graph bucket — see the OR below. Companion to
+    # the heart-side filter above; the metadata tag replaces the
+    # previous position-based gate so the formatter is stable under
+    # ``rerank_by_score``.
+    brain_graph: list = [
+        r
+        for r in results
+        if r.source in ("graph_expanded", "spreading_activation") and r.metadata.get("stage_origin") == "brain_graph"
+    ]
 
+    def _brain_line(i: int, dec: Any, tag: str = "") -> str:
+        # Preserve original truthy-elision behavior: ``raw_score``
+        # is None or 0.0 -> empty string. Don't use ``dec.score``
+        # because it's normalized to 0.0 for None (see _decisions_to_pipeline).
+        raw = dec.metadata.get("raw_score")
+        score_str = f", score: {raw:.3f} {_score_tag(dec)}" if raw else ""
+        category = dec.metadata.get("category", "")
+        stakes = dec.metadata.get("stakes", "")
+        confidence = dec.metadata.get("confidence", 0.0)
+        # F079 P1: include the abstract pattern when present (B-pull-thin).
+        pattern = dec.metadata.get("pattern")
+        pattern_str = f" | pattern: {pattern}" if pattern else ""
+        # 2026-07-27: render the outcome so recall_deep matches the
+        # pre-turn section (context.py _format_decisions already emits
+        # "[outcome] desc"). Without this a superseded/failed decision
+        # reached the LLM through this tool with NO status at all —
+        # the metadata key alone had no consumer (branch-review P1-1).
+        outcome = dec.metadata.get("outcome")
+        # "pending" is the default (not-yet-reviewed) state and carries
+        # no information, so it is suppressed here — every outcome the
+        # reader acts on (superseded / noise / failure / success /
+        # partial) still renders. This deliberately differs from the
+        # pre-turn `_format_decisions`, which prefixes unconditionally;
+        # suppressing the no-op label also keeps the F051 byte-identity
+        # snapshot (whose fixtures are all pending) intact.
+        outcome_str = f"[{outcome}] " if outcome and outcome != "pending" else ""
+        return (
+            f"{i}. {tag}{outcome_str}{dec.description} | {category} | {stakes} | "
+            f"confidence: {confidence:.2f}{pattern_str} "
+            f"(id: {dec.id}{score_str})"
+        )
+
+    def _brain_graph_line(j: int, n: Any, tag: str = "") -> str:
+        return (
+            f"{j}. {tag}[via graph: {n.edge_relation}] {n.description} "
+            f"(id: {n.id}, score: {n.score:.3f} {_score_tag(n)})"
+        )
+
+    def _brain_decisions_section() -> None:
+        if not brain_section_eligible:
+            return
         if decision_results or brain_graph:
             results_text.append("\n=== Brain Decisions ===")
             for i, dec in enumerate(decision_results, 1):
-                # Preserve original truthy-elision behavior: ``raw_score``
-                # is None or 0.0 -> empty string. Don't use ``dec.score``
-                # because it's normalized to 0.0 for None (see _decisions_to_pipeline).
-                raw = dec.metadata.get("raw_score")
-                score_str = f", score: {raw:.3f} {_score_tag(dec)}" if raw else ""
-                category = dec.metadata.get("category", "")
-                stakes = dec.metadata.get("stakes", "")
-                confidence = dec.metadata.get("confidence", 0.0)
-                # F079 P1: include the abstract pattern when present (B-pull-thin).
-                pattern = dec.metadata.get("pattern")
-                pattern_str = f" | pattern: {pattern}" if pattern else ""
-                # 2026-07-27: render the outcome so recall_deep matches the
-                # pre-turn section (context.py _format_decisions already emits
-                # "[outcome] desc"). Without this a superseded/failed decision
-                # reached the LLM through this tool with NO status at all —
-                # the metadata key alone had no consumer (branch-review P1-1).
-                outcome = dec.metadata.get("outcome")
-                # "pending" is the default (not-yet-reviewed) state and carries
-                # no information, so it is suppressed here — every outcome the
-                # reader acts on (superseded / noise / failure / success /
-                # partial) still renders. This deliberately differs from the
-                # pre-turn `_format_decisions`, which prefixes unconditionally;
-                # suppressing the no-op label also keeps the F051 byte-identity
-                # snapshot (whose fixtures are all pending) intact.
-                outcome_str = f"[{outcome}] " if outcome and outcome != "pending" else ""
-                results_text.append(
-                    f"{i}. {outcome_str}{dec.description} | {category} | {stakes} | "
-                    f"confidence: {confidence:.2f}{pattern_str} "
-                    f"(id: {dec.id}{score_str})"
-                )
+                results_text.append(_brain_line(i, dec))
                 _emit(dec)
             for j, n in enumerate(brain_graph, len(decision_results) + 1):
-                results_text.append(
-                    f"{j}. [via graph: {n.edge_relation}] {n.description} "
-                    f"(id: {n.id}, score: {n.score:.3f} {_score_tag(n)})"
-                )
+                results_text.append(_brain_graph_line(j, n))
                 _emit(n)
         elif not exemplar_rows:
             # Codex r14: same as Heart Memory above — no empty placeholder when
             # the examples block will render. Byte-identical without exemplars.
             results_text.append("\n=== Brain Decisions ===\nNo results found.")
+
+    def _ranked_section() -> None:
+        # recall_deep_section_order "ranked": the rows the three sections would
+        # show, as one numbered list in the pipeline's own order (``results``).
+        # Each row keeps its section's line form; decision rows say [decision],
+        # since no section heading names them. No session grouping or date
+        # reordering: both would undo the order. Keyed by object identity, so
+        # the set is exactly what the section lists above hold.
+        kinds: dict[int, str] = {}
+        if heart_section_eligible:
+            kinds.update(dict.fromkeys(map(id, heart_results), "heart"))
+        kinds.update(dict.fromkeys(map(id, heart_graph), "graph"))
+        if brain_section_eligible:
+            kinds.update(dict.fromkeys(map(id, decision_results), "brain"))
+            kinds.update(dict.fromkeys(map(id, brain_graph), "brain_graph"))
+        ranked = [r for r in results if id(r) in kinds]
+        if not ranked:
+            return
+        results_text.append("=== Memory (ranked) ===")
+        for i, r in enumerate(ranked, 1):
+            kind = kinds[id(r)]
+            if kind == "heart":
+                _heart_row(i, r)
+                continue
+            if kind == "graph":
+                results_text.append(_graph_line(i, r, "[decision] "))
+            elif kind == "brain":
+                results_text.append(_brain_line(i, r, "[decision] "))
+            else:
+                results_text.append(_brain_graph_line(i, r, "[decision] "))
+            _emit(r)
+
+    # recall_deep_section_order: the sections in the configured order, or the
+    # one ranked list. Anything else (a settings stand-in) is today's order.
+    sections = {
+        "heart": _heart_section,
+        "graph_decisions": _graph_decisions_section,
+        "brain_decisions": _brain_decisions_section,
+    }
+    order = list(section_order) if isinstance(section_order, (list, tuple)) else []
+    if order == ["ranked"]:
+        _ranked_section()
+    else:
+        for name in order if sorted(order) == sorted(sections) else sections:
+            sections[name]()
 
     # ------------------------------------------------------------------
     # Contradiction warnings (F022 Phase 3)
@@ -1744,7 +1806,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
         Returns:
             MCP-compliant response with ranked results or error message
         """
-        from nous.api.retrieval_pipeline import own_session_exclusions, run_recall_pipeline
+        from nous.api.retrieval_pipeline import disabled_legs, own_session_exclusions, run_recall_pipeline
 
         # F071: lazy import to avoid runner.py <-> tools.py circular dependency.
         # Mirrors the existing `from nous.api.runner import FRAME_TOOLS`
@@ -1891,7 +1953,13 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             # facts in the result set. Failures are non-fatal — the formatter
             # falls back to legacy output when parent_episodes is empty.
             parent_episodes: list[tuple[str, str]] = []
-            if getattr(settings, "recall_include_parent_episodes", False):
+            _parents_on = getattr(settings, "recall_include_parent_episodes", False)
+            if _parents_on and "parent_episode" in disabled_legs(settings):
+                # recall_deep_disabled_legs: the fetch is skipped, as with the flag off.
+                _parents_on = False
+                if _tr is not None:
+                    _tr.leg("parent_episode", attempted=False, skip_reason="disabled")
+            if _parents_on:
                 try:
                     parent_episodes = await _fetch_parent_episodes_for_facts(
                         heart=heart,
@@ -1942,6 +2010,7 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                 source_marker=getattr(settings, "fact_source_marker_enabled", False) is True,
                 emitted_out=_emitted,
                 temporal_render=getattr(settings, "temporal_render_enabled", False) is True,
+                section_order=getattr(settings, "recall_deep_section_order", None),
             )
             # F091: attribute the formatter's scope filter from what it REPORTED
             # emitting, not from a re-derivation of its section rules.

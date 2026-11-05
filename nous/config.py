@@ -24,6 +24,16 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 # `test_timeout_grace_is_shared` asserts the two never drift apart.
 PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS = 2.0
 
+# recall_deep precision controls (NOUS_RECALL_DEEP_*). The legs are the entry-leg names the F091 trace gives
+# recall_deep's rows (graph_expanded covers both spreading activation and the 1-hop fallback); parent_episode is
+# the Parent Episode Context fetch in the tool itself. The sections are the formatter's three ranked sections.
+RECALL_DEEP_LEGS = (
+    "heart_primary", "chunk", "heart_graph", "heart_graph_memory", "brain",
+    "graph_expanded", "keyed", "keyed_r2", "exemplar", "parent_episode",
+)
+RECALL_DEEP_ITEM_TYPES = ("episode", "fact", "procedure", "censor", "decision", "chunk")
+RECALL_DEEP_SECTIONS = ("heart", "graph_decisions", "brain_decisions")
+
 # NOUS_GITHUB_DEFAULT_REPO: an owner/repo pair, the same charset typed_checks.py accepts for a PR check's repo.
 DEFAULT_GITHUB_REPO = "tfatykhov/nous"
 _GITHUB_REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
@@ -2969,6 +2979,110 @@ class Settings(BaseSettings):
         ge=1,
         description="K-6 cap on the sources listed per merged fact (newest first; the rest are counted).",
     )
+
+    # recall_deep precision controls (precision plan P1). All off by default: the text is then byte-identical.
+    # They act in run_recall_pipeline, so the in-script recall_deep (run_python) and the eval harnesses that
+    # call the pipeline get them too; the pre-turn context does not use the pipeline. Unknown names raise, so a
+    # typo cannot silently leave a leg or a section as it was.
+    recall_deep_disabled_legs: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        description=(
+            "Comma list of recall_deep legs to leave out, by trace entry-leg name (config.RECALL_DEEP_LEGS). "
+            "Legs nothing else reads are not run: keyed (both keyed rounds, since round 2 hops from round-1 "
+            "hits), keyed_r2, exemplar, graph_expanded (Stage 4: spreading or the 1-hop fallback) and "
+            "parent_episode. heart_primary, chunk, heart_graph, heart_graph_memory and brain still run, since "
+            "they seed the graph legs, but their rows are dropped before the merge and take no slot. The trace "
+            "marks each one skip_reason='disabled'. Empty: every leg as before."
+        ),
+    )
+    recall_deep_max_items: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Keep at most this many recall_deep rows (0 = off). The legs score on different scales (graph "
+            "~0.07-0.3, keyed bands ~0.47-0.55, heart and chunk rows up to 1), so the cut does not re-sort by "
+            "score: it keeps the first k rows of the pipeline's own final order, which is the merged score sort "
+            "when rerank_by_score is on (recall_deep with chunks enabled) and stage order otherwise. Applied "
+            "after the F071, own-session and spreading-budget filters and before the merge-history, "
+            "fact-source and reactivation steps. recall_deep's limit caps only the heart and brain legs; this "
+            "caps the served list. Parent episodes are not counted (recall_max_parent_episodes caps them)."
+        ),
+    )
+    recall_deep_type_min: Annotated[dict[str, int], NoDecode] = Field(
+        default_factory=dict,
+        description=(
+            "Per-type floors for recall_deep_max_items, as 'decision:2,episode:2,chunk:2' (types: "
+            "config.RECALL_DEEP_ITEM_TYPES). The first n rows of each listed type, in pipeline order, are kept "
+            "whenever the cut runs and that many exist (fewer if fewer exist); the remaining slots go to the "
+            "other rows in order. When the floors add up to more than max_items, the floors win. No effect "
+            "with recall_deep_max_items 0."
+        ),
+    )
+    recall_deep_section_order: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: list(RECALL_DEEP_SECTIONS),
+        description=(
+            "Order of recall_deep's ranked sections: a comma permutation of heart, graph_decisions, "
+            "brain_decisions (default, today's order), or 'ranked': one numbered list in the pipeline's own "
+            "order with each row in its usual line form (decision rows tagged [decision]), without session "
+            "grouping or date reordering. Contradiction warnings, Parent Episode Context and stored examples "
+            "stay after the sections."
+        ),
+    )
+
+    @field_validator("recall_deep_disabled_legs", "recall_deep_section_order", mode="before")
+    @classmethod
+    def _split_recall_deep_list(cls, v: object) -> object:
+        """Split the env string ourselves (NoDecode) into its stripped, non-empty names."""
+        if isinstance(v, str):
+            return [p.strip() for p in v.split(",") if p.strip()]
+        return v
+
+    @field_validator("recall_deep_disabled_legs", mode="after")
+    @classmethod
+    def _validate_recall_deep_disabled_legs(cls, v: list[str]) -> list[str]:
+        unknown = [n for n in v if n not in RECALL_DEEP_LEGS]
+        if unknown:
+            raise ValueError(f"recall_deep_disabled_legs: unknown legs {unknown}; known: {', '.join(RECALL_DEEP_LEGS)}")
+        return list(dict.fromkeys(v))
+
+    @field_validator("recall_deep_type_min", mode="before")
+    @classmethod
+    def _parse_recall_deep_type_min(cls, v: object) -> object:
+        """'decision:2,episode:2' -> {"decision": 2, "episode": 2}; a dict passes through to validation."""
+        if not isinstance(v, str):
+            return v
+        out: dict[str, str] = {}
+        for part in (p.strip() for p in v.split(",")):
+            if not part:
+                continue
+            name, sep, count = part.partition(":")
+            if not sep:
+                raise ValueError(f"recall_deep_type_min: {part!r} is not type:count")
+            out[name.strip()] = count.strip()
+        return out
+
+    @field_validator("recall_deep_type_min", mode="after")
+    @classmethod
+    def _validate_recall_deep_type_min(cls, v: dict[str, int]) -> dict[str, int]:
+        for name, count in v.items():
+            if name not in RECALL_DEEP_ITEM_TYPES:
+                raise ValueError(
+                    f"recall_deep_type_min: unknown type {name!r}; known: {', '.join(RECALL_DEEP_ITEM_TYPES)}"
+                )
+            if count < 0:
+                raise ValueError(f"recall_deep_type_min[{name!r}]={count} must be >= 0")
+        return v
+
+    @field_validator("recall_deep_section_order", mode="after")
+    @classmethod
+    def _validate_recall_deep_section_order(cls, v: list[str]) -> list[str]:
+        if not v:  # an empty env value: today's order
+            return list(RECALL_DEEP_SECTIONS)
+        if v == ["ranked"] or sorted(v) == sorted(RECALL_DEEP_SECTIONS):
+            return v
+        raise ValueError(
+            f"recall_deep_section_order: {v} is neither 'ranked' nor a permutation of {', '.join(RECALL_DEEP_SECTIONS)}"
+        )
 
     # --- F083 Follow-up Association ---
     followup_episode_budget_enabled: bool = Field(
