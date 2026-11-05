@@ -131,11 +131,25 @@ class LabelCache:
     def get(self, k: str) -> bool | None:
         return self.labels.get(k)
 
-    def put(self, f, k: str, value: bool, model: str, run: str) -> None:
-        if k in self.labels:
-            return
-        self.labels[k] = value
-        f.write(json.dumps({"k": k, "relevant": value, "model": model, "run": run}) + "\n")
+    def put_many(self, labels: list[tuple[str, bool]], model: str, run: str) -> None:
+        """Store new labels (a key already held keeps its first label) in one append."""
+        lines = []
+        for k, value in labels:
+            if k not in self.labels:
+                self.labels[k] = value
+                lines.append(json.dumps({"k": k, "relevant": value, "model": model, "run": run}) + "\n")
+        append_lines(self.path, lines)
+
+
+def append_lines(path: Path, lines: list[str]) -> None:
+    """Append whole lines with one unbuffered write. Several processes append to the same cache
+    and ledger files at once; a buffered writer flushes at arbitrary byte offsets, and two of them
+    interleaved mid-line (measured: corrupted ledger rows)."""
+    if not lines:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("ab", buffering=0) as f:
+        f.write("".join(lines).encode("utf-8"))
 
 
 def cache_path(data_dir: Path, model: str) -> Path:
@@ -163,20 +177,14 @@ class CostLedger:
         self.path = path
 
     def add(self, purpose: str, run: str, model: str, usage: dict | None) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as f:
-            f.write(
-                json.dumps(
-                    {
-                        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                        "purpose": purpose,
-                        "run": run,
-                        "model": model,
-                        "usage": usage or {},
-                    }
-                )
-                + "\n"
-            )
+        row = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "purpose": purpose,
+            "run": run,
+            "model": model,
+            "usage": usage or {},
+        }
+        append_lines(self.path, [json.dumps(row) + "\n"])
 
     def summary(self, run: str | None = None, purpose: str | None = None) -> dict[str, Any]:
         """Calls, tokens and list-price dollars per model, for one run tag and/or one purpose
@@ -303,9 +311,8 @@ async def judge_units(
     counts["jobs"] = len(jobs)
     limiter = RateLimiter(min_interval_s=min_interval_s)
     sem = asyncio.Semaphore(concurrency)
-    cache.path.parent.mkdir(parents=True, exist_ok=True)
 
-    async def run_one(u: dict, items: list[dict], f) -> None:
+    async def run_one(u: dict, items: list[dict]) -> None:
         listing = "\n".join(f"i{j + 1} [{it['type']}]: {it['shown']}" for j, it in enumerate(items))
         user = template.format(**{field_name: u["prompt"], "items": listing})
         data = None
@@ -331,17 +338,17 @@ async def judge_units(
             return
         counts["calls"] += 1
         labels = data.get("labels", {}) if isinstance(data, dict) else {}
+        got = []
         for j, it in enumerate(items):
             v = labels.get(f"i{j + 1}")
             if isinstance(v, bool):
-                cache.put(f, it["key"], v, model, run)
-                counts["new_labels"] += 1
+                got.append((it["key"], v))
             else:
                 counts["missing_labels"] += 1
-        f.flush()
+        cache.put_many(got, model, run)
+        counts["new_labels"] += len(got)
         if counts["calls"] % 50 == 0:
             logger.info("judge %s: %d/%d calls", model, counts["calls"], len(jobs))
 
-    with cache.path.open("a", encoding="utf-8") as f:
-        await asyncio.gather(*(run_one(u, items, f) for u, items in jobs))
+    await asyncio.gather(*(run_one(u, items) for u, items in jobs))
     return dict(counts)

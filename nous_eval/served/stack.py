@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from nous_eval.served.judge import read_jsonl
+from nous_eval.served.judge import append_lines, read_jsonl
 
 IDENTITY = "You are Nous, a cognitive agent."
 _LEAF_RESOLVERS = (
@@ -74,10 +74,8 @@ class EmbedDiskCache:
             for k, a in provider._cache.items()
             if k not in self.entries
         ]
-        with self.path.open("a", encoding="utf-8") as f:
-            for k, v in new:
-                f.write(json.dumps({"k": k, "v": v}) + "\n")
-                self.entries[k] = v
+        append_lines(self.path, [json.dumps({"k": k, "v": v}) + "\n" for k, v in new])
+        self.entries.update(new)
         return len(new)
 
 
@@ -149,8 +147,7 @@ class CachedDateParser:
         }
         if ok:  # a transient failure is not stored: the next run parses again
             self.store[sk] = rec
-            with self.path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps(rec) + "\n")
+            append_lines(self.path, [json.dumps(rec) + "\n"])
         return rec
 
 

@@ -510,11 +510,12 @@ def _write_run(
 
 def _label_all(root: Path, entry: str, rows: list[dict], rel_words: set[str]) -> None:
     cache = judge.LabelCache(judge.cache_path(root, "m"))
-    cache.path.parent.mkdir(parents=True, exist_ok=True)
-    with cache.path.open("a", encoding="utf-8") as f:
-        for u in judge.units_for_rows(entry, rows):
-            for it in u["items"]:
-                cache.put(f, it["key"], any(w in it["shown"] for w in rel_words), "m", "t")
+    labels = [
+        (it["key"], any(w in it["shown"] for w in rel_words))
+        for u in judge.units_for_rows(entry, rows)
+        for it in u["items"]
+    ]
+    cache.put_many(labels, "m", "t")
 
 
 def _arm_rows(cut: int) -> list[dict]:
@@ -582,9 +583,7 @@ def test_summarize_recall_per_leg_band_gold_and_agreement(tmp_path: Path) -> Non
     _label_all(tmp_path, "recall", rows, {"good", "gold"})
     run = _write_run(tmp_path, "s", rows)
     alt = judge.LabelCache(judge.cache_path(tmp_path, "alt"))
-    with alt.path.open("a", encoding="utf-8") as f:
-        for k, v in judge.LabelCache(judge.cache_path(tmp_path, "m")).labels.items():
-            alt.put(f, k, v, "alt", "t")
+    alt.put_many(list(judge.LabelCache(judge.cache_path(tmp_path, "m")).labels.items()), "alt", "t")
     out = score.summarize(run, alt_model="alt")
     p = out["prod"]
     assert out["errors"] == 1 and p["n_rows"] == 20 and p["n_judged"] == 20
@@ -830,3 +829,12 @@ async def test_offline_smoke_both_entry_points(tmp_path: Path, db, monkeypatch: 
     finally:
         leftover = await _purge_agent(db, agent)
     assert leftover == []
+
+
+def test_label_cache_appends_whole_lines_and_keeps_the_first_label(tmp_path: Path) -> None:
+    cache = judge.LabelCache(tmp_path / "judge" / "m.jsonl")
+    cache.put_many([("k1", True), ("k2", False)], "m", "r1")
+    cache.put_many([("k2", True), ("k3", True)], "m", "r2")  # k2 is held: its first label stays
+    lines = (tmp_path / "judge" / "m.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(x)["k"] for x in lines] == ["k1", "k2", "k3"]
+    assert judge.LabelCache(cache.path).labels == {"k1": True, "k2": False, "k3": True}
