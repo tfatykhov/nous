@@ -133,6 +133,10 @@ class EpisodeSummary(BaseModel):
     tags: list[str]
     structured_summary: dict | None = None
     score: float | None = None  # Relevance from search
+    # Set by search only: the pre-turn context leaves out the calling session's
+    # ongoing episode with them. Kept out of model_dump, so payloads are unchanged.
+    session_id: str | None = Field(default=None, exclude=True)
+    active: bool | None = Field(default=None, exclude=True)
 
 
 # --- Facts ---
