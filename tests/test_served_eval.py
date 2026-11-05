@@ -158,6 +158,31 @@ def test_set_parses_like_the_environment() -> None:
     assert settings.parse_overrides(["nous_mmr_enabled=TRUE", "NOUS_RRF_K=12"]) == {"mmr_enabled": True, "rrf_k": 12}
 
 
+def test_cross_field_validation_sees_base_and_arm_together(tmp_path: Path) -> None:
+    flags = tmp_path / "flags.env"
+    flags.write_text("NOUS_CONTEXT_QUERY_MODE=conditional\n", encoding="utf-8")
+    r = settings.resolve([flags], ["NOUS_CONTEXT_SKIP_UNCHANGED_QUERY=true"], db=DB, agent_id="a1")
+    assert r.settings.context_query_mode == "conditional"
+    assert r.settings.context_skip_unchanged_query is True  # the arm is on, not reset by a lone-layer check
+    assert r.arm_overrides == {"context_skip_unchanged_query": True}
+
+
+def test_a_validator_that_changes_a_requested_value_stops_the_run(tmp_path: Path) -> None:
+    flags = tmp_path / "flags.env"
+    flags.write_text("NOUS_CONTEXT_QUERY_MODE=bag\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="context_skip_unchanged_query.*a validator changed it"):
+        settings.resolve([flags], ["NOUS_CONTEXT_SKIP_UNCHANGED_QUERY=true"], db=DB, agent_id="a1")
+
+
+def test_a_json_snapshot_value_is_parsed_like_the_field(tmp_path: Path) -> None:
+    snap = tmp_path / "snap.json"
+    snap.write_text(json.dumps({"settings": {"context_budget_overrides": {"facts": 900}}}), encoding="utf-8")
+    flags = tmp_path / "flags.env"
+    flags.write_text("NOUS_RRF_K=30\n", encoding="utf-8")
+    s = settings.resolve([snap, flags], ['NOUS_CONTEXT_BUDGET_OVERRIDES={"facts": 700}'], db=DB, agent_id="a1").settings
+    assert s.context_budget_overrides == {"facts": 700} and s.rrf_k == 30
+
+
 def test_never_apply_keeps_retrieval_knobs_whose_names_look_like_secrets() -> None:
     for name in (
         "keyed_fact_leg_enabled",
@@ -982,6 +1007,104 @@ def test_read_order_follows_the_formatters_sections_not_final_rank() -> None:
     assert not recall.text_order_agrees(text, [("fact", uid[0]), ("fact", uid[1]), ("decision", uid[2])])
 
 
+def _pr(rid: str, rtype: str, desc: str, source: str = "heart", score: float = 0.5, rel: str | None = None, **meta):
+    """A PipelineResult-shaped row for the real formatter."""
+    return SimpleNamespace(
+        id=rid, type=rtype, description=desc, source=source, score=score, edge_relation=rel, metadata=meta
+    )
+
+
+def test_recall_judges_each_items_emitted_text_not_the_trace_snippet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The judged text of a recall item is what the formatter wrote for it: the decision's
+    category, stakes, confidence and pattern, a fact's date tag and merge-history lines, the
+    exemplar utterance cut to 500 characters with its label, a parent episode's summary. Rank,
+    score and provenance furniture (list number, similarity, type tag, [via ...], the id/score
+    trailer) is not part of it, so the same item shown at another rank keeps its label."""
+    import nous.api.tools as tools_mod
+    from nous_eval.served import recall
+    from nous_eval.served.stack import _capture_render_order
+
+    ids = {k: str(uuid.uuid5(uuid.NAMESPACE_URL, k)) for k in ("f1", "c1", "d1", "d2", "g1", "x1", "e1")}
+    history = {
+        "sources": [{"learned_at": "2026-01-02", "content": "new"}, {"learned_at": "2025-12-01", "content": "old"}],
+        "dropped": 1,
+    }
+    results = [
+        _pr(ids["f1"], "fact", "the fact", retrieval_leg="keyed", event_date="2026-03-10", merge_history=history),
+        _pr(ids["c1"], "chunk", "chunk line one\nchunk line two"),
+        _pr(ids["d1"], "decision", "the decision", source="brain", raw_score=0.7, category="arch", stakes="low",
+            confidence=0.8, pattern="the pattern", outcome="success"),
+        _pr(ids["g1"], "decision", "graph decision", source="graph_expanded", rel="supports",
+            stage_origin="brain_graph"),
+        _pr(ids["x1"], "fact", "u" * 600 + "\nlabel: yes", retrieval_leg="exemplar", similarity=0.83),
+    ]  # fmt: skip
+    stats = SimpleNamespace(contradiction_edges=[], n_stage_errors={}, stage_error_msgs={})
+    monkeypatch.setattr(tools_mod, "_format_pipeline_text", tools_mod._format_pipeline_text)  # restored after
+    orders: list = []
+    captures: list = []
+    _capture_render_order(orders, captures)
+    caller: list = []  # recall_deep's own emitted_out: it reads it after the call
+    text = tools_mod._format_pipeline_text(
+        results, stats, ["all"], parent_episodes=[(ids["e1"], "the parent summary")], emitted_out=caller,
+        temporal_render=True,
+    )  # fmt: skip
+    assert caller == [(r.id, r.type) for r in results]
+    texts, checks = recall.item_texts(captures[-1], text)
+    assert checks == {"text_unmatched": 0, "output_matches_capture": True}
+    assert texts[f"fact:{ids['f1']}"] == (
+        "the fact [2026-03-10]\n   history (merged from 3 facts, newest first):\n"
+        "   - [learned 2026-01-02] new\n   - [learned 2025-12-01] old\n   - +1 older"
+    )
+    assert texts[f"chunk:{ids['c1']}"] == "chunk line one\nchunk line two"
+    assert (
+        texts[f"decision:{ids['d1']}"]
+        == "[success] the decision | arch | low | confidence: 0.80 | pattern: the pattern"
+    )
+    assert texts[f"decision:{ids['g1']}"] == "graph decision"
+    assert texts[f"fact:{ids['x1']}"] == "u" * 500 + "\nlabel: yes"
+    assert texts[f"episode:{ids['e1']}"] == "the parent summary"
+    assert not [t for t in texts.values() if "(id: " in t or "score" in t]
+
+
+def test_item_texts_count_what_they_cannot_place() -> None:
+    from nous_eval.served import recall
+
+    cap = {
+        "lines": ["=== Heart Memory ===", "1. [fact] a (id: f1, score: 0.500 [rrf])", "2. [fact] b without trailer"],
+        "at": [1, 2],
+        "emissions": [("f1", "fact"), ("f2", "fact")],
+        "exemplar": set(),
+        "parents": [("e1", "summary not shown")],
+    }
+    texts, checks = recall.item_texts(cap, "\n".join(cap["lines"]))
+    assert texts == {"fact:f1": "a"} and checks == {"text_unmatched": 2, "output_matches_capture": True}
+    _, checks = recall.item_texts(cap, "something else")
+    assert checks["output_matches_capture"] is False
+    _, checks = recall.item_texts(dict(cap, lines=None), "x")  # a formatter frame we could not read
+    assert checks == {"text_unmatched": 3, "output_matches_capture": None}
+
+
+def test_recall_output_check_allows_the_tools_own_changed_tools_note() -> None:
+    """recall_deep appends a changed-tools note to the formatter's text when it names a changed
+    tool; the capture still matches that output, and only that note is allowed."""
+    from nous.tool_names import CHANGED_TOOLS, changed_tools_note
+    from nous_eval.served import recall
+
+    name = next(iter(CHANGED_TOOLS))
+    cap = {
+        "lines": ["=== Heart Memory ===", f"1. [fact] used {name} (id: f1, score: 0.500 [rrf])"],
+        "at": [1],
+        "emissions": [("f1", "fact")],
+        "exemplar": set(),
+        "parents": [],
+    }
+    formatted = "\n".join(cap["lines"])
+    _, checks = recall.item_texts(cap, f"{formatted}\n\n{changed_tools_note(formatted)}")
+    assert checks["output_matches_capture"] is True
+    _, checks = recall.item_texts(cap, f"{formatted}\n\nNote: something else.")
+    assert checks["output_matches_capture"] is False
+
+
 def test_capture_render_order_wraps_the_formatter_and_restores_nothing_else(monkeypatch: pytest.MonkeyPatch) -> None:
     import nous.api.tools as tools_mod
     from nous_eval.served.stack import _capture_render_order
@@ -1019,15 +1142,60 @@ async def test_date_store_holds_the_unpadded_window_and_each_arm_pads_its_own(tm
             return True, DateWindow(start=datetime.date(2026, 10, 5), end=datetime.date(2026, 10, 11))
 
     q = "what did we change last week"
-    as_of = {q: datetime.date(2026, 10, 14)}
     path = tmp_path / "w.jsonl"
-    two = CachedDateParser(Inner(), path, as_of, "m", pad_days=2)
+    two = CachedDateParser(Inner(), path, "m", pad_days=2)
+    two.day = datetime.date(2026, 10, 14)
     w2 = await two.parse(q, datetime.date(2030, 1, 1))
     assert (w2.start, w2.end) == (datetime.date(2026, 10, 3), datetime.date(2026, 10, 13))
-    zero = CachedDateParser(Inner(), path, as_of, "m", pad_days=0)  # a later arm, same store file
+    zero = CachedDateParser(Inner(), path, "m", pad_days=0)  # a later arm, same store file
+    zero.day = datetime.date(2026, 10, 14)
     w0 = await zero.parse(q, datetime.date(2030, 1, 1))
     assert (w0.start, w0.end) == (datetime.date(2026, 10, 5), datetime.date(2026, 10, 11)) and Inner.calls == 1
     assert json.loads(path.read_text(encoding="utf-8"))["window"] == ["2026-10-05", "2026-10-11"]
+
+
+async def test_one_query_text_on_two_dates_runs_each_on_its_own_date(tmp_path: Path) -> None:
+    """Two inputs with the same text and different as-of dates: each is prefilled, warmed and
+    measured against its own date, never against one date picked by the text."""
+    import datetime
+
+    from nous.heart.date_window import DateWindow
+    from nous_eval.served import recall
+    from nous_eval.served.stack import CachedDateParser
+
+    parsed: list[datetime.date] = []
+
+    class Inner:
+        async def _parse_llm(self, query, day):
+            parsed.append(day)
+            return True, DateWindow(start=day - datetime.timedelta(days=7), end=day)
+
+    parser = CachedDateParser(Inner(), tmp_path / "w.jsonl", "m", pad_days=0)
+    ends: list[datetime.date] = []
+
+    async def recall_deep(query, limit, memory_types):
+        ends.append((await parser.parse(query, datetime.date(2030, 1, 1))).end)
+        return {"content": []}
+
+    stack = SimpleNamespace(
+        recorder=SimpleNamespace(_entries=[]),
+        ce_calls=[],
+        render_orders=[],
+        render_captures=[],
+        date_parser=parser,
+        tools={"recall_deep": recall_deep},
+        embeddings=None,
+    )
+    q = "what did we change last week"
+    d1, d2 = datetime.date(2026, 10, 1), datetime.date(2026, 10, 20)
+    items = [
+        {"key": "Q1", "set": "prod", "text": q, "as_of": d1.isoformat()},
+        {"key": "Q2", "set": "prod", "text": q, "as_of": d2.isoformat()},
+    ]
+    stats = await recall.run(stack, items, tmp_path / "rows.jsonl", warm=-1)
+    assert stats["date_prefill"] == {"gated": 2, "parsed_now": 2, "transient": 0}
+    assert sorted(parsed) == [d1, d2]  # both parsed by the prefill, nothing parsed while measuring
+    assert ends == [d1, d2, d1, d2]  # the warm pass, then the measured pass, each on its own date
 
 
 class _CachingEmbedder:
@@ -1053,7 +1221,7 @@ async def test_measured_calls_hit_a_warm_cache_whichever_run_came_first(
     emb = _CachingEmbedder({it["text"]: [1.0] for it in items} if prefilled else None)
     stack = SimpleNamespace(embeddings=emb, date_parser=None)
 
-    async def fake_call(stack, query):
+    async def fake_call(stack, query, day=None):
         await stack.embeddings.embed(query)
         return {"wall_ms": 1.0, "chars": 4, "rendered": [], "contents": {}}
 
@@ -1210,11 +1378,12 @@ def test_read_order_check_is_none_when_nothing_printed_an_id() -> None:
     assert recall.text_order_agrees("recall_deep failed: timeout", [("fact", "x")]) is None
 
 
-async def test_judge_refuses_a_run_whose_read_order_checks_failed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("check", ["read_order_mismatches", "text_unmatched", "output_mismatches"])
+async def test_judge_refuses_a_run_whose_read_order_checks_failed(tmp_path: Path, check: str) -> None:
     rows = _arm_rows(12)
     run = _write_run(tmp_path, "r", rows)
     meta = json.loads((run / "meta.json").read_text(encoding="utf-8"))
-    meta["run"] = {"read_order_mismatches": 2, "unplaced": 0}
+    meta["run"] = {check: 2, "unplaced": 0}
     (run / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
     with pytest.raises(SystemExit, match="run checks failed"):
         await cli.cmd_judge(cli.parse_args(["recall", "judge", str(run), "--model", "m"]), client=FakeJudgeClient())

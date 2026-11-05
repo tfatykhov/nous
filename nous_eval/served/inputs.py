@@ -14,7 +14,6 @@ Files (all under the untracked data directory):
 
 from __future__ import annotations
 
-import datetime
 import hashlib
 import json
 import random
@@ -128,10 +127,6 @@ def inputs_sha256(items: list[dict]) -> str:
         ]
         h.update(json.dumps(fields, sort_keys=True).encode() + b"\n")
     return h.hexdigest()
-
-
-def as_of_map(items: list[dict]) -> dict[str, datetime.date]:
-    return {it["text"]: datetime.date.fromisoformat(it["as_of"]) for it in items if it.get("as_of")}
 
 
 async def mark_gold_validity(db: Any, agent: str, items: list[dict]) -> dict[str, int]:

@@ -22,6 +22,7 @@ import base64
 import datetime
 import hashlib
 import json
+import sys
 import time
 from array import array
 from collections import defaultdict
@@ -85,15 +86,18 @@ class EmbedDiskCache:
 class CachedDateParser:
     """Stands in for ``heart.date_window_parser``: the code's own gate, then a persistent window
     store keyed (as-of date, query, model). A miss parses once (the pinned code's LLM parse, up to
-    three tries on a transient failure) against the query's as-of date, not today.
+    three tries on a transient failure) against the as-of date of the input being run, not today:
+    the runner sets ``day`` before each call, so two inputs with the same text and different dates
+    each resolve against their own.
 
     The store holds the UNPADDED window: ``inner`` must parse with ``date_leg_pad_days`` 0, and
     each run applies its own ``pad_days`` on the way out, so an arm that changes the padding is
     not served another arm's padded window."""
 
-    def __init__(self, inner: Any, path: Path, as_of: dict[str, datetime.date], model: str, pad_days: int) -> None:
-        self.inner, self.path, self.as_of, self.model, self.pad_days = inner, path, as_of, model, pad_days
+    def __init__(self, inner: Any, path: Path, model: str, pad_days: int) -> None:
+        self.inner, self.path, self.model, self.pad_days = inner, path, model, pad_days
         self.store = {d["sk"]: d for d in read_jsonl(path)}
+        self.day: datetime.date | None = None  # the as-of date of the input being run
         self.last: dict[str, Any] | None = None
 
     def _sk(self, day: datetime.date, query: str) -> str:
@@ -102,10 +106,15 @@ class CachedDateParser:
     async def parse(self, query: str, today: datetime.date) -> Any:
         from nous.heart.date_window import DateWindow, has_temporal_signal
 
-        self.last = {"gate": bool(query and has_temporal_signal(query)), "window": None, "cached": None}
+        day = self.day or today
+        self.last = {
+            "gate": bool(query and has_temporal_signal(query)),
+            "day": day.isoformat(),
+            "window": None,
+            "cached": None,
+        }
         if not self.last["gate"]:
             return None
-        day = self.as_of.get(query, today)
         sk = self._sk(day, query)
         rec = self.store.get(sk)
         self.last["cached"] = rec is not None
@@ -124,17 +133,17 @@ class CachedDateParser:
             return w
         return None
 
-    async def prefill(self, queries: list[str]) -> dict[str, int]:
-        """Parse every gated query the store lacks before anything is measured, so no measured
-        call pays for a parse and the first run's latency matches later runs'."""
+    async def prefill(self, inputs: list[tuple[str, datetime.date | None]]) -> dict[str, int]:
+        """Parse every gated (query, as-of date) the store lacks before anything is measured, so no
+        measured call pays for a parse and the first run's latency matches later runs'."""
         from nous.heart.date_window import has_temporal_signal
 
         stats = {"gated": 0, "parsed_now": 0, "transient": 0}
-        for q in dict.fromkeys(queries):
+        for q, d in dict.fromkeys(inputs):
             if not (q and has_temporal_signal(q)):
                 continue
             stats["gated"] += 1
-            day = self.as_of.get(q, datetime.date.today())
+            day = d or datetime.date.today()
             sk = self._sk(day, q)
             if sk not in self.store:
                 rec = await self._fetch(q, day, sk)
@@ -230,6 +239,7 @@ class Stack:
     embeddings: Any = None
     ce_calls: list = field(default_factory=list)
     render_orders: list = field(default_factory=list)  # one per recall_deep call: [(type, id), ...] as read
+    render_captures: list = field(default_factory=list)  # one per recall_deep call: the formatter's elements
     formatter_calls: list = field(default_factory=list)  # the pre-turn build's section formatter calls
     listed_episodes: list = field(default_factory=list)  # the build's last heart.list_episodes result
 
@@ -256,20 +266,62 @@ def render_order(results: list, emitted: list, parent_episodes: list | None) -> 
     return [(t, i) for i, t in dict.fromkeys(order)]
 
 
-def _capture_render_order(sink: list) -> Any:
+class _Emissions(list):
+    """Stands in for the ``emitted_out`` list ``_format_pipeline_text`` fills. Its ``_emit(r)`` runs
+    right after the item's element is appended to the formatter's local ``results_text``, so each
+    append notes that element's index; the list itself is read once from the formatter's frame
+    (the nearest frame up the stack running its code). ``lines`` stays None when no such frame is
+    found (a stand-in formatter), and every item then counts as unmatched."""
+
+    def __init__(self, code: Any) -> None:
+        super().__init__()
+        self.code = code
+        self.lines: list[str] | None = None
+        self.at: list[int] = []
+
+    def append(self, pair: Any) -> None:
+        super().append(pair)
+        if self.lines is None:
+            f = sys._getframe(1)
+            while f is not None and f.f_code is not self.code:
+                f = f.f_back
+            self.lines = f.f_locals.get("results_text") if f is not None else None
+        self.at.append(len(self.lines) - 1 if self.lines is not None else -1)
+
+
+def _capture_render_order(sink: list, captures: list | None = None) -> Any:
     """Wrap ``nous.api.tools._format_pipeline_text`` (the recall_deep closure looks it up by name
-    at call time) so every call records its read order in ``sink``."""
+    at call time) so every call records its read order in ``sink`` and, in ``captures``, the
+    formatter's own output elements with the index each emitted item was written at
+    (recall.item_texts turns them into each item's text after the timed call). The caller's
+    ``emitted_out`` gets the same (id, type) pairs it would have got."""
     import nous.api.tools as tools_mod
 
     orig = tools_mod._format_pipeline_text
 
     def wrapped(*a: Any, **kw: Any) -> str:
-        emitted = kw.get("emitted_out")
-        if emitted is None:
-            emitted = kw["emitted_out"] = []
+        caller = kw.get("emitted_out")
+        emitted = kw["emitted_out"] = _Emissions(orig.__code__)
         text = orig(*a, **kw)
+        if caller is not None:
+            caller.extend(emitted)
+        results = a[0] if a else kw["results"]
         parents = kw.get("parent_episodes", a[3] if len(a) > 3 else None)
-        sink.append(render_order(a[0] if a else kw["results"], emitted, parents))
+        sink.append(render_order(results, emitted, parents))
+        if captures is not None:
+            captures.append(
+                {
+                    "lines": emitted.lines,
+                    "at": list(emitted.at),
+                    "emissions": [(str(i), t) for i, t in emitted],
+                    "exemplar": {
+                        (str(r.id), r.type)
+                        for r in results
+                        if (getattr(r, "metadata", None) or {}).get("retrieval_leg") == "exemplar"
+                    },
+                    "parents": [(str(e), s) for e, s in (parents or ())],
+                }
+            )
         return text
 
     tools_mod._format_pipeline_text = wrapped
@@ -373,7 +425,6 @@ async def open_stack(
     *,
     pinned: list[str],
     data_dir: Path,
-    as_of: dict[str, datetime.date],
     snippet_chars: int,
     embeddings: Any = None,
     llm: Any = None,
@@ -409,6 +460,7 @@ async def open_stack(
     await db.connect()
     ce_calls: list = []
     render_orders: list = []
+    render_captures: list = []
     orig_ce = hh.cross_encoder_rerank
     orig_format = tools_mod._format_pipeline_text
     leaf_seen: dict = {n[len("_resolve_") :]: defaultdict(int) for n in _LEAF_RESOLVERS}
@@ -418,7 +470,7 @@ async def open_stack(
     env.__enter__()
     try:
         _install_ce_timer(ce_calls)
-        _capture_render_order(render_orders)
+        _capture_render_order(render_orders, render_captures)
         runtime = await load_runtime_config(db, settings, pinned)
         leaf_start = {n[len("_resolve_") :]: getattr(search_mod, n)() for n in _LEAF_RESOLVERS}
         eff = runtime["effective"]
@@ -443,7 +495,6 @@ async def open_stack(
             date_parser = CachedDateParser(
                 DateWindowParser(llm, settings.model_copy(update={"date_leg_pad_days": 0})),
                 data_dir / "date_windows_unpadded.jsonl",
-                as_of,
                 settings.date_leg_model,
                 settings.date_leg_pad_days,
             )
@@ -469,6 +520,7 @@ async def open_stack(
                 embeddings=emb,
                 ce_calls=ce_calls,
                 render_orders=render_orders,
+                render_captures=render_captures,
             )
             _hook_list_episodes(stack)
             _capture_formatters(stack)

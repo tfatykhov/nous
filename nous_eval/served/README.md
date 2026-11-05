@@ -82,7 +82,12 @@ Settings layers, later wins:
 5. the run's database and agent.
 
 Credential, endpoint and connection names are never applied from a layer and never recorded.
-After loading the layers the run checks the Settings object holds every applied value.
+A layer only collects what it asks for (a dotenv or `--set` string, a snapshot value); Settings
+parses and validates once, on the merged requests, so a cross-field validator sees the base and
+the arm together (a base `NOUS_CONTEXT_QUERY_MODE=conditional` plus an arm
+`NOUS_CONTEXT_SKIP_UNCHANGED_QUERY=true` runs with the skip on). The run then checks that the
+merged Settings hold every requested value, as each field parses it with no cross-field
+validator, and stops, naming the field, when a validator changed one.
 
 Prod resolves `vector_weight`, `rrf_k` and `cross_encoder_enabled` through the runtime overrides in
 `nous_system.config`; the run loads them from its database as `main.py` does, and an arm that sets
@@ -142,10 +147,25 @@ entry leg (spreading rows arrive as `graph_expanded`) and per rank band (1-10, 1
 Ranks are the positions the model reads: the order the formatter reported emitting (Heart Memory
 as grouped by session and date, then Graph-Connected and Brain Decisions, Parent Episode Context,
 stored examples), not the pipeline's `final_rank` (kept beside). Each call checks that order against
-the ids its output printed (`read_order_matches_text`; None when the output printed no id). The run
-records how many calls disagreed (`read_order_mismatches`) and how many rendered items no
-formatter section reported (`unplaced`); `judge` refuses a run where either is non-zero unless
-`--allow-unchecked`. A tool call that returned an error renders
+the ids its output printed (`read_order_matches_text`; None when the output printed no id).
+
+The text the judge sees for a recall item is what the formatter wrote for it, taken from the
+formatter's own output elements (each emission notes the element it was written at): a decision's
+outcome, category, stakes, confidence and pattern, a fact's date, recency and source tags and its
+merge-history lines, an exemplar's utterance as cut to 500 characters with its label, a parent
+episode's summary. The furniture that changes with rank, score or the finding leg is left out, so
+the same item shown by another arm keeps its label: the list number, an exemplar's similarity,
+the Heart Memory `[type]` tag (the judge gets the type apart), the `[via ...]` provenance tag and
+the `(id: ..., score ...)` trailer. A decision shown in two sections is judged on its first.
+Each call checks that the captured elements joined are the tool's output
+(`output_matches_capture`) and counts rendered items with no captured text (`text_unmatched`: an
+element of an unexpected shape, a parent line not found, or no elements captured).
+
+The run records how many calls disagreed (`read_order_mismatches`), how many rendered items no
+formatter section reported (`unplaced`), `text_unmatched`, and how many calls' output differed from
+the capture (`output_mismatches`); `judge` refuses a run where one is non-zero unless
+`--allow-unchecked`. The tool's output is what the eval measures; in a live turn the tool result
+may still pass through the dispatcher's output compression before the model reads it. A tool call that returned an error renders
 nothing and counts as a judged query with precision 0. Set `gold`: gold-in-served, gold-in-top-10,
 reciprocal rank, per gold type; an episode is served when its summary or any chunk of it is
 rendered, and the summary-only rates are reported beside (`served_summary`, `top10_summary`).
@@ -215,8 +235,9 @@ a runtime-backed setting (`vector_weight`, `rrf_k`, `cross_encoder_enabled`) cou
   retrieve with the same variants; the clone's own table is still read first, as prod does.
 - Date-window parses are fixed per (as-of date, query, model) in `date_windows_unpadded.jsonl`,
   stored unpadded and padded per run with its own `date_leg_pad_days`, and filled before any call is
-  measured, so latency excludes the parse and arms see the same windows. A query's as-of date is its
-  logged date, else `--as-of`.
+  measured, so latency excludes the parse and arms see the same windows. An input's as-of date is
+  its logged date, else `--as-of`; it travels with the input into the prefill, the warm pass and the
+  measured call, so two inputs with the same text and different dates each resolve against their own.
 - The inputs' fingerprint (`inputs_sha256`) covers each input's text, gold, effective as-of date,
   first-turn state and turn number; `compare` also lists differing `--as-of` and `--warm`.
 - Pre-turn builds use a fixed identity prompt and no conversation history, as the query-mode A/B

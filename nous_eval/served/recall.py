@@ -10,6 +10,7 @@ of its episode, so episode gold can count a chunk of the gold episode."""
 
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import logging
@@ -76,13 +77,96 @@ async def chunk_episodes(db: Any, chunk_ids: list[str]) -> dict[str, str]:
     return {r.cid: r.eid for r in rows}
 
 
-async def one_call(stack: Any, query: str) -> dict[str, Any]:
+# Rank, score and provenance furniture around an item's own text: the list number (an exemplar's
+# similarity with it) and the [via ...] tag of the leg or edge that found it.
+_NUMBER = re.compile(r"\d+\.(?: \[sim -?\d+\.\d+\])? ")
+_VIA = re.compile(r"\[via [^\]\n]*\] ")
+
+
+def _own_text(element: str, rid: str, rtype: str, exemplar: bool) -> str | None:
+    """An emitted element without its furniture; None when it does not have the expected shape."""
+    m = _NUMBER.match(element)
+    if m is None:
+        return None
+    body = element[m.end() :]
+    if exemplar:
+        return body
+    if body.startswith(f"[{rtype}] "):  # the Heart Memory type tag (the judge gets the type apart)
+        body = body[len(rtype) + 3 :]
+    v = _VIA.match(body)
+    if v is not None:
+        body = body[v.end() :]
+    cut = body.rfind(f" (id: {rid}")
+    if cut < 0 or "\n" in body[cut:] or not body.endswith(")"):
+        return None
+    return body[:cut]
+
+
+def item_texts(cap: dict, text_out: str) -> tuple[dict[str, str], dict[str, Any]]:
+    """Each served item's text as the formatter wrote it (``cap`` from stack._capture_render_order):
+    its element plus the merge-history lines under it, without the furniture that changes with
+    rank, score or the finding leg (list number, exemplar similarity, type tag, [via ...], the
+    (id: ..., score ...) trailer), so the same item shown elsewhere keeps its label. A parent
+    episode's text is its summary, checked present in the output. A row emitted twice (a decision
+    in two sections) keeps its first, where it is read. Checks: ``text_unmatched`` (an item with no
+    text: an element of an unexpected shape, a parent line not found, or no elements captured) and
+    ``output_matches_capture`` (the elements joined, plus the tool's own changed-tools note when it
+    adds one, are the tool's output; None when not captured)."""
+    lines, at = cap["lines"], cap["at"]
+    if lines is None:
+        n = len(dict.fromkeys(cap["emissions"])) + len(cap["parents"])
+        return {}, {"text_unmatched": n, "output_matches_capture": None}
+    starts = set(at)
+    texts: dict[str, str] = {}
+    unmatched = 0
+    for (rid, rtype), i in zip(cap["emissions"], at, strict=True):
+        key = f"{rtype}:{rid}"
+        if key in texts:
+            continue
+        own = _own_text(lines[i], rid, rtype, (rid, rtype) in cap["exemplar"])
+        if own is None:
+            unmatched += 1
+            continue
+        j = i + 1
+        while j < len(lines) and j not in starts and lines[j].startswith("   "):  # merge history
+            j += 1
+        texts[key] = "\n".join([own, *lines[i + 1 : j]])
+    for ep_id, summary in cap["parents"]:
+        key = f"episode:{ep_id}"
+        if key in texts:
+            continue
+        if f"- ({ep_id[:8]}) {summary}" in lines:
+            texts[key] = summary
+        else:
+            unmatched += 1
+    return texts, {"text_unmatched": unmatched, "output_matches_capture": _tool_text("\n".join(lines)) == text_out}
+
+
+def _tool_text(formatted: str) -> str:
+    """recall_deep's output for a query-only call with this formatter text: the text, then the
+    tool's changed-tools note when the text names a changed tool (nous.tool_names)."""
+    try:
+        from nous.tool_names import changed_tools_note
+    except ImportError:  # code that predates the note
+        return formatted
+    note = changed_tools_note(formatted)
+    return f"{formatted}\n\n{note}" if note else formatted
+
+
+def input_day(it: dict) -> datetime.date | None:
+    """The date an input's relative date phrases resolve against (its ``as_of``)."""
+    return datetime.date.fromisoformat(it["as_of"]) if it.get("as_of") else None
+
+
+async def one_call(stack: Any, query: str, day: datetime.date | None = None) -> dict[str, Any]:
     rl = stack.recorder
     rl._entries.clear()
     stack.ce_calls.clear()
     stack.render_orders.clear()
+    stack.render_captures.clear()
     if stack.date_parser is not None:
         stack.date_parser.last = None
+        stack.date_parser.day = day
     t0 = time.perf_counter()
     res = await stack.tools["recall_deep"](query=query, limit=10, memory_types=None)
     wall = (time.perf_counter() - t0) * 1000
@@ -91,6 +175,11 @@ async def one_call(stack: Any, query: str) -> dict[str, Any]:
     if tr is None:
         return {"error": "no retrieval trace", "is_error": bool(res.get("is_error"))}
     read_order = stack.render_orders[-1] if stack.render_orders else []
+    texts, text_checks = (
+        item_texts(stack.render_captures[-1], text_out)
+        if stack.render_captures
+        else ({}, {"text_unmatched": None, "output_matches_capture": None})
+    )
     cands = [c for c in (tr.get("candidates") or []) if c.get("disposition") == "rendered"]
     rendered, unplaced = order_rendered(cands, read_order)
     episodes = await chunk_episodes(stack.db, [str(c["id"]) for c in cands if c["type"] == "chunk"])
@@ -112,7 +201,9 @@ async def one_call(stack: Any, query: str) -> dict[str, Any]:
         "rendered": rendered,
         "unplaced": unplaced,
         "read_order_matches_text": text_order_agrees(text_out, read_order),
-        "contents": {f"{c['type']}:{c['id']}": (c.get("snippet") or "") for c in cands},
+        "contents": {k: texts[k] for k in (f"{c['type']}:{c['id']}" for c in cands) if k in texts},
+        "text_unmatched": sum(f"{c['type']}:{c['id']}" not in texts for c in cands),
+        "output_matches_capture": text_checks["output_matches_capture"],
         "legs": legs,
         "leg_errors": {n: lg["error"] for n, lg in legs.items() if lg.get("error")},
         "date": stack.date_parser.last if stack.date_parser is not None else None,
@@ -127,24 +218,28 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
     measured call per input, one row per input in ``rows_path``."""
     from nous_eval.served.stack import embedding_cache_size
 
-    prefill = await stack.date_parser.prefill([it["text"] for it in items]) if stack.date_parser else None
+    prefill = (
+        await stack.date_parser.prefill([(it["text"], input_day(it)) for it in items]) if stack.date_parser else None
+    )
     for it in items if warm < 0 else items[:warm]:
         try:
-            await one_call(stack, it["text"])
+            await one_call(stack, it["text"], input_day(it))
         except Exception:  # noqa: BLE001 - a warm-up failure shows up again in the measured call
             pass
-    n_err = n_mismatch = n_unchecked = n_unplaced = 0
+    n_err = n_mismatch = n_unchecked = n_unplaced = n_text_unmatched = n_output_mismatch = 0
     before = embedding_cache_size(stack.embeddings)
     with rows_path.open("w", encoding="utf-8") as f:
         for i, it in enumerate(items):
             try:
-                r = await one_call(stack, it["text"])
+                r = await one_call(stack, it["text"], input_day(it))
             except Exception as exc:  # noqa: BLE001 - recorded; the score counts error rows
                 r = {"error": f"{type(exc).__name__}: {exc}"[:300]}
             n_err += 1 if r.get("error") else 0
             n_mismatch += r.get("read_order_matches_text") is False
             n_unchecked += not r.get("error") and r.get("read_order_matches_text") is None
             n_unplaced += r.get("unplaced") or 0
+            n_text_unmatched += r.get("text_unmatched") or 0
+            n_output_mismatch += not r.get("error") and r.get("output_matches_capture") is not True
             row = {"key": it["key"], "set": it["set"], "text": it["text"], **r}
             if it.get("gold"):
                 row["gold"] = it["gold"]
@@ -161,6 +256,8 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
         "read_order_mismatches": n_mismatch,
         "read_order_unchecked": n_unchecked,
         "unplaced": n_unplaced,
+        "text_unmatched": n_text_unmatched,
+        "output_mismatches": n_output_mismatch,
     }
 
 

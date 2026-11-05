@@ -11,6 +11,10 @@ Layers, later wins:
 4. the arm's ``--set NOUS_NAME=VALUE`` overrides (one variable per arm);
 5. the database connection and agent id of the run.
 
+Layers only collect requests (an env string, or a snapshot value); Settings parses and validates
+once, on the merged configuration, so a cross-field validator sees base and arm together, and a
+validator that changed a requested value stops the run.
+
 Names that look like credentials, endpoints or connection fields are never taken from a layer
 (``NEVER_APPLY``) and never recorded. The record holds, for every applied field and a fixed list
 of retrieval knobs, the effective value and the layer it came from.
@@ -18,6 +22,7 @@ of retrieval knobs, the effective value and the layer it came from.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
@@ -80,6 +85,12 @@ def env_name_to_field() -> dict[str, str]:
     return _map()
 
 
+# A requested value: ("env", NOUS_NAME, string) as a dotenv or --set gives it, or ("init", value)
+# as a JSON snapshot or the eval disables give it. Layers only collect requests; Settings parses
+# and validates once.
+Request = tuple
+
+
 def _init_key(name: str) -> str:
     """The keyword Settings(...) accepts for a field: its alias when it has one (an aliased field
     passed by name is silently ignored, extra='ignore')."""
@@ -89,60 +100,61 @@ def _init_key(name: str) -> str:
     return alias if isinstance(alias, str) else name
 
 
-def _settings_from(values: dict[str, Any]) -> Any:
+@functools.cache
+def _field_parsed() -> type:
+    """Settings with its cross-field (model) validators replaced by no-ops: every field is read and
+    field-validated exactly as Settings reads it, and nothing is adjusted for another field."""
     from nous.config import Settings
+
+    validators = Settings.__pydantic_decorators__.model_validators
+    if any(d.info.mode != "after" for d in validators.values()):
+        raise RuntimeError("Settings has a before/wrap model validator; _field_parsed cannot neutralize it")
+    return type("_FieldParsed", (Settings,), {name: (lambda self: self) for name in validators})
+
+
+def _build(cls: type, requests: dict[str, Request]) -> Any:
+    """One construction of ``cls`` from the merged requests, every NOUS_*/DB_* variable hidden."""
     from nous_eval.env_pin import hidden_env
 
-    with hidden_env():
-        return Settings(_env_file=None, **{_init_key(k): v for k, v in values.items()})
-
-
-def _parse_env(env: dict[str, str]) -> dict[str, Any]:
-    """Typed values for NOUS_* names, parsed by Settings exactly as the deployed environment is."""
-    from nous.config import Settings
-    from nous_eval.env_pin import hidden_env
-
-    known = env_name_to_field()
+    env = {r[1]: r[2] for r in requests.values() if r[0] == "env"}
+    init = {_init_key(f): r[1] for f, r in requests.items() if r[0] == "init"}
     with hidden_env():
         os.environ.update(env)
-        parsed = Settings(_env_file=None)
-    return {known[name]: getattr(parsed, known[name]) for name in env}
+        return cls(_env_file=None, **init)
 
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def load_base_layer(path: Path) -> tuple[dict[str, Any], list[str]]:
-    """(typed values, ignored names) of one base file."""
+def load_base_layer(path: Path) -> tuple[dict[str, Request], list[str]]:
+    """(field -> request, ignored names) of one base file; nothing is parsed here."""
     from nous.config import Settings
 
     fields = Settings.model_fields
     if path.suffix.lower() == ".json":
         data = json.loads(path.read_text(encoding="utf-8"))
         raw = data.get("settings", data)
-        keep = {k: v for k, v in raw.items() if k in fields and not NEVER_APPLY.search(k)}
-        ignored = sorted(k for k in raw if k not in keep)
-        parsed = _settings_from(keep)
-        return {k: getattr(parsed, k) for k in keep}, ignored
+        keep = {k: ("init", v) for k, v in raw.items() if k in fields and not NEVER_APPLY.search(k)}
+        return keep, sorted(k for k in raw if k not in keep)
     from dotenv import dotenv_values
 
     known = env_name_to_field()
-    env: dict[str, str] = {}
+    out: dict[str, Request] = {}
     ignored = []
     for name, value in dotenv_values(path).items():  # a repeated name: the last value wins
         f = known.get(name.upper())
         if value is None or f is None or NEVER_APPLY.search(f):
             ignored.append(name)
         else:
-            env[name.upper()] = value
-    return _parse_env(env), sorted(set(ignored))
+            out[f] = ("env", name.upper(), value)
+    return out, sorted(set(ignored))
 
 
-def parse_overrides(pairs: list[str]) -> dict[str, Any]:
-    """``["NOUS_X=1", ...]`` -> typed ``{field: value}``. Unknown and never-applied names are errors."""
+def override_requests(pairs: list[str]) -> dict[str, Request]:
+    """``["NOUS_X=1", ...]`` -> field -> request. Unknown and never-applied names are errors."""
     known = env_name_to_field()
-    env: dict[str, str] = {}
+    out: dict[str, Request] = {}
     for pair in pairs:
         name, sep, value = pair.partition("=")
         name = name.strip().upper()
@@ -153,8 +165,15 @@ def parse_overrides(pairs: list[str]) -> dict[str, Any]:
             raise SystemExit(f"--set {name}: Settings has no such variable")
         if NEVER_APPLY.search(f):
             raise SystemExit(f"--set {name}: connection, credential and agent settings are not arm settings")
-        env[name] = value
-    return _parse_env(env)
+        out[f] = ("env", name, value)
+    return out
+
+
+def parse_overrides(pairs: list[str]) -> dict[str, Any]:
+    """``["NOUS_X=1", ...]`` -> typed ``{field: value}`` as requested (no cross-field validation)."""
+    requests = override_requests(pairs)
+    parsed = _build(_field_parsed(), requests)
+    return {f: getattr(parsed, f) for f in requests}
 
 
 def resolve(
@@ -164,29 +183,37 @@ def resolve(
     db: dict[str, Any],
     agent_id: str,
 ) -> ResolvedSettings:
-    """Apply the layers (module docstring) and check that the result holds every applied value."""
+    """Apply the layers (module docstring): collect each layer's raw requests (a later layer wins
+    per field), then parse and validate once, on the merged configuration, so a cross-field
+    validator sees the base and the arm together. Every requested value must survive: a
+    validator that changed one stops the run, naming it."""
+    from nous.config import Settings
     from nous_eval.retrieval_runner import _EVAL_DISABLE_FIELDS
 
-    typed: dict[str, Any] = {}
+    requests: dict[str, Request] = {}
     sources: dict[str, str] = {}
     ignored: dict[str, list[str]] = {}
     base_files = []
     for p in base_paths:
-        vals, ign = load_base_layer(p)
-        typed.update(vals)
-        sources.update(dict.fromkeys(vals, f"base:{p.name}"))
+        reqs, ign = load_base_layer(p)
+        requests.update(reqs)
+        sources.update(dict.fromkeys(reqs, f"base:{p.name}"))
         ignored[p.name] = ign
         base_files.append({"name": p.name, "sha256": _sha256(p)})
     for name, value in _EVAL_DISABLE_FIELDS:
         if name != "query_expansion_enabled":
-            typed[name] = value
+            requests[name] = ("init", value)
             sources[name] = "eval"
-    arm = parse_overrides(set_pairs)
-    typed.update(arm)
+    arm = override_requests(set_pairs)
+    requests.update(arm)
     sources.update(dict.fromkeys(arm, "arm"))
-    s = _settings_from(typed).model_copy(update={**db, "agent_id": agent_id})
-    for k, v in typed.items():  # pin the run: the object must hold what each layer applied
-        got = getattr(s, k)
-        if got != v:
-            raise SystemExit(f"setting {k} resolved to {got!r}, expected {v!r} ({sources[k]})")
-    return ResolvedSettings(s, sources, arm, ignored, base_files)
+    merged = _build(Settings, requests)
+    asked = _build(_field_parsed(), requests)  # the same requests, no cross-field adjustment
+    for f in requests:  # pin the run: the object must hold what each layer asked for
+        if getattr(merged, f) != getattr(asked, f):
+            raise SystemExit(
+                f"setting {f}: {sources[f]} asked for {getattr(asked, f)!r}, the merged Settings hold "
+                f"{getattr(merged, f)!r} (a validator changed it; set its prerequisite too)"
+            )
+    s = merged.model_copy(update={**db, "agent_id": agent_id})
+    return ResolvedSettings(s, sources, {f: getattr(s, f) for f in arm}, ignored, base_files)
