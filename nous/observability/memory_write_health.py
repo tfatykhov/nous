@@ -14,7 +14,8 @@ One row per agent per UTC day in ``nous_system.memory_write_health_daily`` (migr
 Rules (``RULES``): H1 hard delete, F1 source flood, S1 tier-1 stale deactivation, P1 person+preference inflow
 collapse, R1 rule inflow collapse, A1 admission reject spike. Episode balance, merge rate and card churn are
 metrics only. The findings go to the dashboard only (the check sets ``chat_delivery = False``) and never ask the
-agent to act (``needs_action=False``): the September 2026 hard deletes were made by the agent's own triage turn.
+agent to act (``needs_action=False``): a triage turn that judges a spike to be junk can delete rows, so the owner
+decides.
 
 H1 is latched. Its five counters only grow; it trips while any counter is above the baseline, which is the counters
 at the last acknowledgement (or zero, at the first observation). An acknowledgement is a ``nous_system.events`` row

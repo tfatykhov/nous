@@ -2,7 +2,7 @@
 
 Runs ``nous.observability.memory_write_health.run_once`` and turns each tripped rule into a finding. Owner's rules:
 the findings are for the dashboard only (``chat_delivery = False``: no Telegram at any urgency) and never hand the
-problem to the agent (``needs_action=False``; the September 2026 hard deletes were made by a triage turn). It runs in
+problem to the agent (``needs_action=False``; a triage turn that judges a spike to be junk can delete rows). It runs in
 quiet hours too (``urgent_override``) so the dashboard is current. A failed run raises: the runner counts a failure,
 writes no row and auto-resolves nothing.
 """
