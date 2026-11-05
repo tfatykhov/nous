@@ -21,7 +21,10 @@ from typing import Any
 
 logger = logging.getLogger("nous_eval.served")
 SNIPPET_CHARS = 1200
-_ID_RE = re.compile(r"\(id: ([0-9a-fA-F-]{36})")
+# A row's own trailer, as _format_pipeline_text prints it at the end of the row's line:
+# "(id: <uuid>, score: 0.512 [rrf])", or "(id: <uuid>)" for a decision with no raw score. An id an
+# item's own text quotes ("... the decision (id: <uuid>) ...") is not a row.
+_ROW_ID_RE = re.compile(r"\(id: ([0-9a-fA-F-]{36})(?:, score: [^()\n]*)?\)$", re.MULTILINE)
 
 
 def order_rendered(cands: list[dict], read_order: list[tuple[str, str]]) -> tuple[list[dict], int]:
@@ -49,10 +52,11 @@ def order_rendered(cands: list[dict], read_order: list[tuple[str, str]]) -> tupl
 
 
 def text_order_agrees(text: str, read_order: list[tuple[str, str]]) -> bool | None:
-    """The ids the output prints as ``(id: ...)``, in text order, follow the read order; None when
-    the output printed none of them (nothing to check, e.g. an error row)."""
+    """The ids the output prints in its rows' own ``(id: ...)`` trailers, in text order, follow the
+    read order; None when the output printed none of them (nothing to check, e.g. an error row).
+    Only a trailer that ends its line counts: an id quoted inside an item's text is not a row."""
     in_order = [i for _, i in read_order]
-    printed = [i for i in dict.fromkeys(_ID_RE.findall(text)) if i in set(in_order)]
+    printed = [i for i in dict.fromkeys(_ROW_ID_RE.findall(text)) if i in set(in_order)]
     if not printed:
         return None
     return printed == [i for i in dict.fromkeys(in_order) if i in set(printed)]

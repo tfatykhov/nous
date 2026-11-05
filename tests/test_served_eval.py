@@ -1044,6 +1044,20 @@ def test_read_order_follows_the_formatters_sections_not_final_rank() -> None:
     assert not recall.text_order_agrees(text, [("fact", uid[0]), ("fact", uid[1]), ("decision", uid[2])])
 
 
+def test_an_id_quoted_inside_an_items_text_is_not_a_row() -> None:
+    """An episode whose own text quotes a later row's id: only each row's own trailer, at the end
+    of its line, places an id; the quote must not make the read order look wrong."""
+    from nous_eval.served import recall
+
+    ep, dec = (str(uuid.uuid5(uuid.NAMESPACE_URL, n)) for n in ("episode", "decision"))
+    text = (
+        f"1. [episode] We revisited the decision (id: {dec}) and kept it. (id: {ep}, score: 0.512 [rrf])\n"
+        f"2. [decision] Keep the drip line | arch | low | confidence: 0.80 (id: {dec}, score: 0.433 [rrf])"
+    )
+    assert recall.text_order_agrees(text, [("episode", ep), ("decision", dec)]) is True
+    assert recall.text_order_agrees(text, [("decision", dec), ("episode", ep)]) is False
+
+
 def _pr(rid: str, rtype: str, desc: str, source: str = "heart", score: float = 0.5, rel: str | None = None, **meta):
     """A PipelineResult-shaped row for the real formatter."""
     return SimpleNamespace(
