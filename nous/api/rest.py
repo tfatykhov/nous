@@ -2240,7 +2240,8 @@ def create_app(
     async def dashboard_memory_write_health_acknowledge(request: Request) -> JSONResponse:
         """POST /dashboard/memory-write-health/acknowledge {rule, day?, note?} — P4: the owner accepts a rule's
         evidence (a deliberate restore or delete) and resets its baseline. Records who acknowledged what as an events
-        row. 400 for a bad rule, day or note; 409 with the check off."""
+        row. 415 unless the body is sent as application/json; 400 for a bad rule, day or note; 409 with the check
+        off."""
         from datetime import UTC, datetime
 
         from nous.api import memory_write_health_dashboard as mwh_dash
@@ -2248,6 +2249,11 @@ def create_app(
 
         if not settings.memory_write_health_enabled:
             return JSONResponse({"error": "memory write health is off"}, status_code=409)
+        # Content-Type is the CSRF control, as for /a2ui/action and /a2ui/push/register: Request.json() never checks
+        # it, but a cross-origin simple request (text/plain, a form) cannot carry application/json without a
+        # preflight, so another site cannot reset a rule's baseline from the owner's browser.
+        if "application/json" not in (request.headers.get("content-type", "") or ""):
+            return JSONResponse({"error": "Content-Type must be application/json"}, status_code=415)
         try:
             body = await request.json()
         except Exception:

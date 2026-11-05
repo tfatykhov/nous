@@ -95,7 +95,17 @@ async def test_with_the_check_off_it_answers_without_a_session(db, monkeypatch):
     monkeypatch.setattr(db, "session", boom)
     resp = await _call(app, "GET", "/dashboard/memory-write-health")
     assert resp.status_code == 200
-    assert resp.json() == dash.disabled_payload(30)
+    body = resp.json()
+    assert body.pop("as_of")
+    expected = dash.disabled_payload(30)
+    expected.pop("as_of")
+    assert body == expected
+
+
+def test_the_off_payload_has_the_same_keys_as_the_page():
+    off = dash.disabled_payload(30, now=datetime(2026, 11, 5, tzinfo=UTC))
+    assert off["enabled"] is False and off["rules"] == [] and off["as_of"] == "2026-11-05T00:00:00+00:00"
+    assert set(off) == {"enabled", "window_days", "as_of", "days", "live", "checks", "rules", "acknowledgements"}
 
 
 @pytest.mark.postgres_only
@@ -194,6 +204,40 @@ async def test_with_the_check_off_an_acknowledgement_is_a_409(db):
     assert resp.status_code == 409
 
 
+@pytest.mark.postgres_only
+@pytest.mark.parametrize(
+    "content_type",
+    ["text/plain", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x", None],
+)
+async def test_an_acknowledgement_needs_a_json_content_type_so_no_other_site_can_post_one(db, content_type):
+    """CSRF (Codex P2 on #859): a cross-origin simple request can send a JSON-looking body as text/plain or a form,
+    but not as application/json without a preflight. Such a request must write nothing, H1's baseline included."""
+    agent = _agent()
+    await _gone_fact(db, agent)
+    await mwh.run_once(db, agent)
+    headers = {"content-type": content_type} if content_type else {}
+
+    resp = await _call(
+        _app(db, _settings(agent)),
+        "POST",
+        "/dashboard/memory-write-health/acknowledge",
+        content=b'{"rule": "H1", "note": "cross-site"}',
+        headers=headers,
+    )
+
+    assert resp.status_code == 415
+    async with db.session() as s:
+        assert [a["actor"] for a in await mwh.load_acks(s, agent)] == ["system"]  # only the first-run baseline
+    assert {c.id: c.state for c in await _states_now(db, agent)}["H1"] == "tripped"
+
+
+async def _states_now(db, agent: str) -> list[mwh.RuleState]:
+    async with db.session() as s:
+        rows = await mwh.load_rows(s, agent, datetime.now(UTC).date() - timedelta(days=mwh.BACKFILL_DAYS - 1))
+        acks = await mwh.load_acks(s, agent)
+    return mwh.evaluate(rows, acks, datetime.now(UTC).date())
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # The companion card
 # ---------------------------------------------------------------------------------------------------------------------
@@ -223,6 +267,52 @@ def test_there_is_no_card_without_a_tripped_rule_and_no_model_can_build_one():
     with pytest.raises(ValueError):
         card.memory_write_health_card(_states(), TODAY)
     assert card.KIND not in TEMPLATES
+
+
+def _f1(source: str, count: int, day: str = "2026-11-05") -> mwh.RuleState:
+    return mwh.RuleState(
+        "F1",
+        "tripped",
+        value=count,
+        summary=f"fact flood from source {source}: {count} facts in a day against a median of 10 (owner decides)",
+        detail={"source": source, "day": day, "median": 10},
+    )
+
+
+def test_a_growing_flood_count_does_not_rebuild_the_card():
+    """The card is keyed on which rules trip (and F1's source and day), not on the running count of a flood day."""
+    model = lambda *states: card.memory_write_health_card(list(states), TODAY).data_model  # noqa: E731
+
+    assert model(_f1("user_direct", 150)) == model(_f1("user_direct", 400))
+    assert model(_f1("user_direct", 150)) != model(_f1("other", 150))
+    assert model(_f1("user_direct", 150)) != model(_f1("user_direct", 150, day="2026-11-04"))
+    assert model(_f1("user_direct", 150)) != model(_f1("user_direct", 150), mwh.RuleState("H1", "tripped", summary="x"))
+
+
+async def test_the_check_pushes_once_through_a_flood_day(monkeypatch):
+    counts = iter([150, 220, 400])
+
+    async def fake_run_once(database, agent_id, *, now=None):
+        return [_f1("enumerative_extractor", next(counts))]
+
+    pushed: list = []
+
+    async def push_built(built, **kw):
+        pushed.append(built)
+
+    async def live_data_model(key):
+        return pushed[-1].data_model if pushed else None
+
+    monkeypatch.setattr(mwh, "run_once", fake_run_once)
+    check = MemoryWriteHealthCheck(object(), "test-mwh-flood-day")
+    check.set_surface_service(
+        SimpleNamespace(push_built=push_built, live_data_model=live_data_model, close_by_dedup_key=AsyncMock())
+    )
+
+    for _ in range(3):
+        await check.run()
+
+    assert len(pushed) == 1
 
 
 async def _tap(router, surface, rule):
@@ -371,6 +461,48 @@ async def test_a_card_closed_while_its_rule_is_still_tripped_comes_back(db):
         assert live is not None and live["rules"] == {"H1": "tripped"}
     finally:
         async with db.session() as s:
+            await s.execute(delete(A2uiSurface).where(A2uiSurface.agent_id == agent))
+            await s.commit()
+
+
+@pytest.mark.postgres_only
+async def test_a_card_that_expires_while_h1_stays_latched_comes_back(db):
+    """Codex P2 on #859: H1 stays tripped with unchanged counters, so the card's text never changes; when the card
+    reaches its expiry (EXPIRES_IN, closed by the service's expiry sweep), the next run must push it again, Acknowledge
+    button included."""
+    from nous.a2ui.service import SurfaceService
+
+    agent = _agent()
+    service = SurfaceService(db, _settings(agent))
+    check = MemoryWriteHealthCheck(db, agent)
+    check.set_surface_service(service)
+    await _gone_fact(db, agent)
+    try:
+        await check.run()
+        async with db.session() as s:  # the card's expiry has come
+            await s.execute(
+                text(
+                    "UPDATE nous_system.a2ui_surfaces SET expires_at = now() - interval '1 minute' WHERE agent_id = :a"
+                ),
+                {"a": agent},
+            )
+            await s.commit()
+        assert await service.expire_sweep() == 1
+        assert await service.live_data_model(card.DEDUP_KEY) is None
+
+        result = await check.run()
+
+        assert [f.raw_data["rule"] for f in result.findings] == ["H1"]  # still latched, same counters
+        live = await service.live_data_model(card.DEDUP_KEY)
+        assert live is not None and live["rules"] == {"H1": "tripped"}
+        async with db.session() as s:
+            statuses = sorted(
+                (await s.execute(select(A2uiSurface.status).where(A2uiSurface.agent_id == agent))).scalars().all()
+            )
+        assert statuses == ["expired", "live"]
+    finally:
+        async with db.session() as s:
+            await s.execute(delete(A2uiAction).where(A2uiAction.agent_id == agent))
             await s.execute(delete(A2uiSurface).where(A2uiSurface.agent_id == agent))
             await s.commit()
 

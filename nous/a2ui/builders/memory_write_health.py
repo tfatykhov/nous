@@ -7,7 +7,9 @@ is not in ``TEMPLATES``, so ``push_surface`` cannot produce it. It lists the tri
 ``{"day": "<UTC day>", "rules": {rule_id: "tripped" | "acknowledged"}}``: the handler takes the rule and the day from
 the card, never from the tap. The check pushes it under ``DEDUP_KEY`` with priority 0 and ``notify=False``, so it
 replaces itself in place and never pings the phone or Telegram (owner: these alerts are for the dashboard and the
-companion only).
+companion only). The summaries carry the counts as of the push: the check rebuilds the card when the set of tripped
+rules changes (for F1, its source and day), when the UTC day turns, or when the live card is gone, not when a count
+grows.
 """
 
 from __future__ import annotations
@@ -40,8 +42,20 @@ def tripped_rules(states: Iterable[Any]) -> dict[str, list[str]]:
     return out
 
 
+def fingerprint(states: Iterable[Any]) -> str:
+    """Which rules trip, and for F1 which source on which day: not the counts in the summaries, so a flood that keeps
+    growing through the day does not rebuild the card every hour (the dashboard has the running numbers)."""
+    keys = sorted(
+        f"{s.id}:{s.detail.get('source', '')}:{s.detail.get('day', '')}" if s.id == "F1" else s.id
+        for s in states
+        if s.state == TRIPPED
+    )
+    return hashlib.sha256(json.dumps(keys).encode()).hexdigest()[:16]
+
+
 def memory_write_health_card(states: Iterable[Any], day: date) -> BuiltSurface:
     """The card for the tripped rules among ``states`` on UTC ``day``. Raises ``ValueError`` when none tripped."""
+    states = list(states)
     rules = tripped_rules(states)
     if not rules:
         raise ValueError("a memory write-health card needs at least one tripped rule")
@@ -59,8 +73,8 @@ def memory_write_health_card(states: Iterable[Any], day: date) -> BuiltSurface:
             "day": day.isoformat(),
             "rules": dict.fromkeys(rules, TRIPPED),
             "status": dict.fromkeys(rules, STATUS_TEXT[TRIPPED]),
-            # What the card's text shows, so a producer can compare the live card with a rebuilt one before pushing.
-            "fingerprint": hashlib.sha256(json.dumps(list(rules.items())).encode()).hexdigest()[:16],
+            # Which rules the card shows, so a producer can compare the live card with a rebuilt one before pushing.
+            "fingerprint": fingerprint(states),
         }
     )
     children: list[str] = ["header", "intro"]

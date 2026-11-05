@@ -1063,7 +1063,11 @@ def _register_memory_write_health_handlers(router: ActionRouter) -> None:
     """The owner's Acknowledge on the memory write-health card (``builders/memory_write_health.py``). No agent tool
     reaches it. The rule must be one the card offered and still shows as tripped, and the day is the card's own: the
     tap names only the rule. The acknowledgement is the same one ``POST /dashboard/memory-write-health/acknowledge``
-    records (``nous.observability.memory_write_health.acknowledge``)."""
+    records (``nous.observability.memory_write_health.acknowledge``).
+
+    "Still tripped" is the card's truth, not a fresh evaluation: the rules are not run again here, so a rule that
+    cleared on its own after the card was built can still be acknowledged from it. That records a harmless
+    acknowledgement for the card's day, and the check's next run rebuilds or closes the card."""
     from nous.observability import memory_write_health as mwh
 
     from .builders.memory_write_health import ACK_ACTION, ACKNOWLEDGED, STATUS_TEXT, TRIPPED

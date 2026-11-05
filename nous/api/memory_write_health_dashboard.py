@@ -22,8 +22,18 @@ def parse_window(raw: str | None) -> int:
     return DAYS_DEFAULT if raw is None or raw == "" else parse_days(raw)
 
 
-def disabled_payload(days: int) -> dict[str, Any]:
-    return {"enabled": False, "window_days": days, "days": [], "live": None, "checks": [], "acknowledgements": []}
+def disabled_payload(days: int, *, now: datetime | None = None) -> dict[str, Any]:
+    """The page with the check off: the same keys as with it on, every list empty."""
+    return {
+        "enabled": False,
+        "window_days": days,
+        "as_of": (now or datetime.now(UTC)).isoformat(),
+        "days": [],
+        "live": None,
+        "checks": [],
+        "rules": [],
+        "acknowledgements": [],
+    }
 
 
 def _ack_out(ack: dict[str, Any]) -> dict[str, Any]:
