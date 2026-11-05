@@ -200,6 +200,7 @@ nous/
 │   ├── hand_labels_draft.py    # AI-drafted hand-label qrels
 │   ├── multi_turn_eval.py      # F051.4: walks LongMemEval haystacks via dispatcher; per-config metrics
 │   ├── beam/                   # PR-M: `python -m nous_eval.beam {ingest,answer,score}` — BEAM via the prod write path, pre-turn or recall_deep answers, BEAM's judge
+│   ├── served/                 # `python -m nous_eval.served {recall,preturn,compare}` — judged precision of what recall_deep and the pre-turn build serve, one arm per run on a clone, paired bootstrap
 │   ├── run_history.py          # F051 Phase 1 finish (#365/#366/#367): persists eval_runs to EVAL DB
 │   └── regression.py           # `python -m nous_eval.regression` — compares latest run vs N-day-old baseline, exits non-zero on regression
 ├── tests/                      # 1750+ tests across 91 files
