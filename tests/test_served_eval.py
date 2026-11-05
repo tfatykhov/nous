@@ -1240,7 +1240,7 @@ def test_compare_lists_as_of_and_warm(tmp_path: Path) -> None:
     assert diff["n_variables"] == 2
 
 
-def test_explicit_outputs_must_be_untracked(tmp_path: Path) -> None:
+async def test_explicit_outputs_must_be_untracked(tmp_path: Path) -> None:
     import subprocess
 
     repo = tmp_path / "repo"
@@ -1251,32 +1251,40 @@ def test_explicit_outputs_must_be_untracked(tmp_path: Path) -> None:
         cli._check_out_file(repo / "queries.jsonl")
     assert cli._check_out_file(repo / "ignored" / "queries.jsonl")
     assert cli._check_out_file(tmp_path / "outside" / "gold.jsonl")
-    for argv in (
-        [
-            "recall",
-            "queries",
-            "--data-dir",
-            str(tmp_path / "d"),
-            "--out",
-            str(repo / "q.jsonl"),
-            "--db-name",
-            "nous_eval_x",
-        ],
-        [
-            "preturn",
-            "gold",
-            "--data-dir",
-            str(tmp_path / "d"),
-            "--type",
-            "fact",
-            "--out",
-            str(repo / "g.jsonl"),
-            "--db-name",
-            "nous_eval_x",
-        ],
+    # The commands, not cli.main: main configures the process's logging for a CLI run, which would
+    # leak into every later test that asserts on log records.
+    for cmd, argv in (
+        (
+            cli.cmd_queries,
+            [
+                "recall",
+                "queries",
+                "--data-dir",
+                str(tmp_path / "d"),
+                "--out",
+                str(repo / "q.jsonl"),
+                "--db-name",
+                "nous_eval_x",
+            ],
+        ),
+        (
+            cli.cmd_gold,
+            [
+                "preturn",
+                "gold",
+                "--data-dir",
+                str(tmp_path / "d"),
+                "--type",
+                "fact",
+                "--out",
+                str(repo / "g.jsonl"),
+                "--db-name",
+                "nous_eval_x",
+            ],
+        ),
     ):
         with pytest.raises(SystemExit):  # refused before any database or LLM is touched
-            cli.main(argv)
+            await cmd(cli.parse_args(argv))
 
 
 @pytest.mark.parametrize("name", ["postgres", "template0", "template1"])
