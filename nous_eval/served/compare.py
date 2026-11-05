@@ -53,7 +53,6 @@ def differences(ma: dict, mb: dict) -> dict[str, Any]:
         "inputs_sha256",
         "as_of",
         "warm",
-        "db_template",
         "judge_model",
         "agent",
         "base_files",
@@ -61,6 +60,11 @@ def differences(ma: dict, mb: dict) -> dict[str, Any]:
     ):
         if ma.get(k) != mb.get(k):
             out[k] = {"a": ma.get(k), "b": mb.get(k)}
+    # The database a run read: its template (a clone's generated name is not a variable), or the
+    # scratch database it ran on directly (--db-name).
+    da, db_ = _database(ma), _database(mb)
+    if da != db_:
+        out["database"] = {"a": da, "b": db_}
     # The effective runtime knobs (vector_weight, rrf_k, cross_encoder_enabled), counted only where
     # no settings difference already explains them: an arm that sets rrf_k shows one change, not two.
     # arm_wins (which stored override an arm beat) is provenance, not a variable.
@@ -71,6 +75,10 @@ def differences(ma: dict, mb: dict) -> dict[str, Any]:
             out[f"runtime.{k}"] = {"a": ea.get(k), "b": eb.get(k)}
     out["n_variables"] = len(settings) + sum(1 for k in out if k not in ("settings", "n_variables"))
     return out
+
+
+def _database(meta: dict) -> str | None:
+    return f"template {meta['db_template']}" if meta.get("db_template") else meta.get("db_name")
 
 
 def _delta(pairs: list[tuple[float, float]], stat=mean) -> dict[str, Any]:

@@ -240,6 +240,7 @@ class Stack:
     ce_calls: list = field(default_factory=list)
     render_orders: list = field(default_factory=list)  # one per recall_deep call: [(type, id), ...] as read
     render_captures: list = field(default_factory=list)  # one per recall_deep call: the formatter's elements
+    source_session: str | None = None  # the conversation the input being run came from (runners set it)
     formatter_calls: list = field(default_factory=list)  # the pre-turn build's section formatter calls
     listed_episodes: list = field(default_factory=list)  # the build's last heart.list_episodes result
 
@@ -326,6 +327,29 @@ def _capture_render_order(sink: list, captures: list | None = None) -> Any:
 
     tools_mod._format_pipeline_text = wrapped
     return orig
+
+
+def _route_source_session(stack: Any) -> None:
+    """Hand ``stack.source_session`` to the producers' own own-session boundary: recall_deep's
+    ``own_session_exclusions`` (#854; the closure imports it at call time) and the pre-turn
+    build's ``_is_own_session_episode`` (#857; a module global). Prod passes the calling
+    session's id; the replay keeps the build and tool session ids it always used (fresh, so the
+    copy's end-of-conversation state, F055 residual activation, working memory, cache hints and
+    the unchanged-query memo, stays out), and only this boundary sees the source conversation."""
+    import nous.api.retrieval_pipeline as rp
+    import nous.cognitive.context as ctx_mod
+
+    orig_exclusions = rp.own_session_exclusions
+    orig_is_own = ctx_mod._is_own_session_episode
+
+    async def exclusions(heart: Any, session_id: str | None) -> Any:
+        return await orig_exclusions(heart, stack.source_session)
+
+    def is_own(episode: Any, session_id: str | None) -> bool:
+        return orig_is_own(episode, stack.source_session)
+
+    rp.own_session_exclusions = exclusions
+    ctx_mod._is_own_session_episode = is_own
 
 
 def _capture_formatters(stack: Stack) -> None:
@@ -432,7 +456,9 @@ async def open_stack(
 ):
     """Yield a Stack bound to ``settings``; ``embeddings``/``llm`` are injectable for tests;
     ``migrate=False`` skips applying pending migrations (a test database migrated by hand)."""
+    import nous.api.retrieval_pipeline as rp_mod
     import nous.api.tools as tools_mod
+    import nous.cognitive.context as ctx_mod
     import nous.heart.heart as hh
     import nous.heart.search as search_mod
     from nous.api.tools import create_nous_tools
@@ -463,6 +489,7 @@ async def open_stack(
     render_captures: list = []
     orig_ce = hh.cross_encoder_rerank
     orig_format = tools_mod._format_pipeline_text
+    orig_boundary = (rp_mod.own_session_exclusions, ctx_mod._is_own_session_episode)
     leaf_seen: dict = {n[len("_resolve_") :]: defaultdict(int) for n in _LEAF_RESOLVERS}
     originals: dict = {}
     recorder = RetrievalLogger(candidate_sample_rate=1.0, snippet_chars=snippet_chars, max_candidates=2000, ring_size=4)
@@ -524,6 +551,7 @@ async def open_stack(
             )
             _hook_list_episodes(stack)
             _capture_formatters(stack)
+            _route_source_session(stack)
             yield stack
     finally:
         set_active(None)
@@ -531,6 +559,7 @@ async def open_stack(
             setattr(search_mod, name, fn)
         hh.cross_encoder_rerank = orig_ce
         tools_mod._format_pipeline_text = orig_format
+        rp_mod.own_session_exclusions, ctx_mod._is_own_session_episode = orig_boundary
         RuntimeConfig.reset()
         env.__exit__(None, None, None)
         cache.save(emb)

@@ -234,15 +234,17 @@ def _gold_file(path: Path, gtype: str, rows: list[tuple[str, str, str]]) -> Path
 def test_inputs_keys_sets_and_hash(tmp_path: Path) -> None:
     q = tmp_path / "q.jsonl"
     q.write_text(
-        json.dumps({"key": "Q000", "query": "alpha", "logged_at": "2026-10-01T10:00:00+00:00"}) + "\n", encoding="utf-8"
+        json.dumps({"key": "Q000", "query": "alpha", "logged_at": "2026-10-01T10:00:00+00:00", "session_id": "chat-s1"})
+        + "\n",
+        encoding="utf-8",
     )
     gf = _gold_file(tmp_path / "f.jsonl", "fact", [("A000", "where is alpha", "f-1")])
     ge = _gold_file(tmp_path / "e.jsonl", "episode", [("A000", "what happened", "e-1")])
     items = inputs.recall_items(q, [gf, ge], "2026-11-05")
-    assert [(i["key"], i["set"], i["as_of"]) for i in items] == [
-        ("Q000", "prod", "2026-10-01"),
-        ("gf-A000", "gold", "2026-11-05"),
-        ("ge-A000", "gold", "2026-11-05"),
+    assert [(i["key"], i["set"], i["as_of"], i["source_session"]) for i in items] == [
+        ("Q000", "prod", "2026-10-01", "chat-s1"),  # the logged call's own conversation
+        ("gf-A000", "gold", "2026-11-05", None),  # a gold question has none
+        ("ge-A000", "gold", "2026-11-05", None),
     ]
     assert items[1]["gold"]["ids"] == ["f-1"]
     h = inputs.inputs_sha256(items)
@@ -303,6 +305,7 @@ def test_preturn_items_from_prompts_file(tmp_path: Path) -> None:
     assert items[0]["complete"] and items[1]["complete"]
     # pre_turn's first turn: turn 1 of a session that does not run as a subtask
     assert [i["first_turn"] for i in items] == [False, False, True, False]
+    assert [i["source_session"] for i in items] == ["dynamic-check-x", "subtask-y", "dag-summary-z", None]
 
 
 def test_check_code_refuses_split_roots_other_roots_and_dirty() -> None:
@@ -365,6 +368,15 @@ def test_path_arguments_resolve_against_the_starting_directory(tmp_path: Path, m
     assert args.data_dir == tmp_path / "d" and args.queries == tmp_path / "d" / "q.jsonl"
     assert args.base == [tmp_path / "b.json"] and args.gold == [tmp_path / "g.jsonl"]
     assert args.warm == -1  # every input is warmed by default
+
+
+def test_clone_names_are_bounded_valid_and_distinct() -> None:
+    tag = "a" * 40  # the longest tag --tag accepts
+    names = {db.clone_name(f"{entry}_{t}") for entry in ("recall", "preturn") for t in (tag, tag[:-1] + "b")}
+    assert len(names) == 4
+    for n in names:
+        assert db.check_ident(n) == n and len(n) <= 63 and n.startswith(db.CLONE_PREFIX)
+    assert db.clone_name("recall_Base-1") == "nous_eval_served_run_recall_base_1"  # short names unchanged
 
 
 async def test_database_guards() -> None:
@@ -792,6 +804,18 @@ async def _seed_corpus(agent: str) -> dict[str, str]:
             )
             await heart.end_episode(ep.id, "success")
             ids["episode"] = str(ep.id)
+            own = await heart.start_episode(  # the logged prompts' own conversation, still ongoing
+                EpisodeInput(
+                    title="Larkspur garden watering check",
+                    summary="Checking the Larkspur garden watering schedule and irrigation right now.",
+                    trigger="unit_test",
+                    participants=["owner"],
+                    tags=["garden"],
+                    session_id="subtask-smoke",
+                ),
+                dedup=False,
+            )
+            ids["own_episode"] = str(own.id)
         brain = Brain(database, s, emb)
         d = await brain.record(
             RecordInput(
@@ -849,7 +873,12 @@ async def test_offline_smoke_both_entry_points(tmp_path: Path, db, monkeypatch: 
         ids = await _seed_corpus(agent)
         (data / "queries.jsonl").write_text(
             json.dumps(
-                {"key": "Q000", "query": "Larkspur garden watering schedule", "logged_at": "2026-10-01T09:00:00+00:00"}
+                {
+                    "key": "Q000",
+                    "query": "Larkspur garden watering schedule",
+                    "logged_at": "2026-10-01T09:00:00+00:00",
+                    "session_id": "subtask-smoke",
+                }
             )
             + "\n"
             + json.dumps({"key": "Q001", "query": "finance invoices mailbox"})
@@ -925,8 +954,16 @@ async def test_offline_smoke_both_entry_points(tmp_path: Path, db, monkeypatch: 
         # the read order came from the formatter and agrees with the ids the output printed
         assert all(r["read_order_matches_text"] and r["unplaced"] == 0 for r in recall_rows)
         assert [it["rank"] for it in larkspur["rendered"]] == list(range(1, len(larkspur["rendered"]) + 1))
+        # the logged call's own ongoing episode is left out, as prod leaves it out (#854)
+        assert larkspur["own_session_excluded"] >= 1
+        assert f"episode:{ids['own_episode']}" not in judge.rendered_keys(larkspur)
+        # a gold question has no source conversation, so the same episode stays recallable there
+        assert any(f"episode:{ids['own_episode']}" in judge.rendered_keys(r) for r in recall_rows if r["set"] == "gold")
         preturn_rows = judge.read_jsonl(data / "runs" / "preturn" / "a" / "rows.jsonl")
         assert {r["key"]: r["first_turn"] for r in preturn_rows if r["set"] == "prod"} == {"B000": False}
+        b000 = next(r for r in preturn_rows if r["key"] == "B000")
+        assert b000["own_session_excluded"] >= 1  # the build's own-session filter saw the source (#857)
+        assert f"episode:{ids['own_episode']}" not in b000["rendered"]
         for entry in ("recall", "preturn"):
             run = json.loads((data / "runs" / entry / "a" / "meta.json").read_text(encoding="utf-8"))["run"]
             assert run["embeddings_added_while_measuring"] is None  # the mock embedder has no cache
@@ -1198,6 +1235,104 @@ async def test_one_query_text_on_two_dates_runs_each_on_its_own_date(tmp_path: P
     assert ends == [d1, d2, d1, d2]  # the warm pass, then the measured pass, each on its own date
 
 
+async def test_recall_hands_each_inputs_source_session_to_the_own_session_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """recall_deep is called with no session (so F055 residual state stays cold, as before), and
+    the pipeline's own own_session_exclusions receives the input's source session, in the warm
+    pass and the measured pass; the trace's own_session drops are counted per row and per run."""
+    import nous.api.retrieval_pipeline as rp
+    from nous_eval.served import recall
+    from nous_eval.served.stack import _route_source_session
+
+    received: list = []
+
+    async def fake_exclusions(heart, session_id):
+        received.append(session_id)
+        return None
+
+    import nous.cognitive.context as ctx_mod
+
+    monkeypatch.setattr(rp, "own_session_exclusions", fake_exclusions)
+    monkeypatch.setattr(ctx_mod, "_is_own_session_episode", ctx_mod._is_own_session_episode)  # restored after
+    stack = SimpleNamespace(
+        db=None,
+        recorder=SimpleNamespace(_entries=[]),
+        ce_calls=[],
+        render_orders=[],
+        render_captures=[],
+        date_parser=None,
+        embeddings=None,
+        source_session=None,
+    )
+    _route_source_session(stack)
+    tool_sessions: list = []
+
+    async def recall_deep(query, limit, memory_types, _session_id=None):
+        tool_sessions.append(_session_id)
+        await rp.own_session_exclusions(None, _session_id)  # as the closure looks it up at call time
+        drops = [{"type": "episode", "id": "e1", "disposition": "filter_dropped", "disposition_stage": "own_session"}]
+        stack.recorder._entries.append({"candidates": drops if query == "q1" else [], "legs": []})
+        return {"content": [{"type": "text", "text": "x"}]}
+
+    stack.tools = {"recall_deep": recall_deep}
+    items = [
+        {"key": "Q1", "set": "prod", "text": "q1", "source_session": "chat-a"},
+        {"key": "Q2", "set": "prod", "text": "q2", "source_session": "chat-b"},
+        {"key": "G1", "set": "gold", "text": "g1"},
+    ]
+    stats = await recall.run(stack, items, tmp_path / "rows.jsonl", warm=-1)
+    assert received == ["chat-a", "chat-b", None, "chat-a", "chat-b", None]
+    assert tool_sessions == [None] * 6
+    rows = [json.loads(line) for line in (tmp_path / "rows.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [r["own_session_excluded"] for r in rows] == [1, 0, 0]
+    assert stats["own_session_queries"] == 1 and stats["own_session_rows"] == 1
+
+
+def test_preturn_boundary_sees_the_source_session_not_the_build_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    import nous.cognitive.context as ctx_mod
+    from nous_eval.served.stack import _route_source_session
+
+    monkeypatch.setattr(ctx_mod, "_is_own_session_episode", ctx_mod._is_own_session_episode)  # restored after
+    stack = SimpleNamespace(source_session=None)
+    _route_source_session(stack)
+    ongoing = SimpleNamespace(session_id="chat-a", active=True)
+    ended = SimpleNamespace(session_id="chat-a", active=False)
+    stack.source_session = "chat-a"
+    assert ctx_mod._is_own_session_episode(ongoing, "chat-a-served") is True
+    assert ctx_mod._is_own_session_episode(ended, "chat-a-served") is False
+    stack.source_session = None  # a gold question: no source conversation
+    assert ctx_mod._is_own_session_episode(ongoing, "chat-a-served") is False
+
+
+async def test_preturn_runner_passes_each_inputs_source_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nous_eval.served import preturn
+
+    calls: list = []
+
+    async def fake_build(stack, text, session_id, *, turn_number, first_turn=False, source_session=None):
+        calls.append((session_id, source_session))
+        return {"legs": [], "tokens_by_label": {"User Profile": 1}, "system_prompt": "p", "own_session_excluded": 1}
+
+    monkeypatch.setattr(preturn, "build_one", fake_build)
+    items = [
+        {"key": "B000", "set": "prod", "text": "t", "session": "chat-a", "source_session": "chat-a",
+         "turn_number": 1, "first_turn": True},
+        {"key": "gd-1", "set": "gold", "text": "g", "session": "u-1", "source_session": None,
+         "turn_number": 2, "first_turn": False},
+    ]  # fmt: skip
+    stats = await preturn.run(SimpleNamespace(embeddings=None), items, tmp_path / "rows.jsonl", warm=-1)
+    assert calls == [
+        ("chat-a-warm", "chat-a"),
+        ("u-1-warm", None),
+        ("chat-a-served", "chat-a"),  # build ids stay fresh: no conversation state from the copy
+        ("u-1-served", None),
+    ]
+    assert stats["own_session_queries"] == 2 and stats["own_session_rows"] == 2
+
+
 class _CachingEmbedder:
     """Caches like EmbeddingProvider: one entry per distinct text, kept in ``_cache``."""
 
@@ -1221,7 +1356,7 @@ async def test_measured_calls_hit_a_warm_cache_whichever_run_came_first(
     emb = _CachingEmbedder({it["text"]: [1.0] for it in items} if prefilled else None)
     stack = SimpleNamespace(embeddings=emb, date_parser=None)
 
-    async def fake_call(stack, query, day=None):
+    async def fake_call(stack, query, day=None, session=None):
         await stack.embeddings.embed(query)
         return {"wall_ms": 1.0, "chars": 4, "rendered": [], "contents": {}}
 
@@ -1303,7 +1438,7 @@ def test_fingerprint_covers_as_of_first_turn_and_turn_number(tmp_path: Path) -> 
     gf = _gold_file(tmp_path / "f.jsonl", "fact", [("A000", "where is alpha", "f-1")])
     base = inputs.preturn_items(None, [gf], "2026-11-05")
     h = inputs.inputs_sha256(base)
-    for change in ({"as_of": "2026-11-06"}, {"first_turn": True}, {"turn_number": 1}):
+    for change in ({"as_of": "2026-11-06"}, {"first_turn": True}, {"turn_number": 1}, {"source_session": "s"}):
         assert inputs.inputs_sha256([{**base[0], **change}]) != h, change
 
 
@@ -1316,6 +1451,23 @@ def test_compare_lists_as_of_and_warm(tmp_path: Path) -> None:
     diff = compare.differences(ma, mb)
     assert diff["as_of"] == {"a": "2026-11-05", "b": "2026-11-06"} and diff["warm"] == {"a": -1, "b": 10}
     assert diff["n_variables"] == 2
+
+
+def test_compare_sees_a_different_direct_database_but_not_a_clone_name(tmp_path: Path) -> None:
+    rows = _arm_rows(12)
+    ma = json.loads((_write_run(tmp_path, "a", rows) / "meta.json").read_text(encoding="utf-8"))
+    direct = {**ma, "db_template": None}
+    diff = compare.differences({**direct, "db_name": "nous_eval_x"}, {**direct, "db_name": "nous_eval_y"})
+    assert diff["database"] == {"a": "nous_eval_x", "b": "nous_eval_y"} and diff["n_variables"] == 1
+    cloned = {**ma, "db_template": "nous_eval_served_tpl_x"}
+    diff = compare.differences(
+        {**cloned, "db_name": "nous_eval_served_run_recall_a"}, {**cloned, "db_name": "nous_eval_served_run_recall_b"}
+    )
+    assert "database" not in diff and diff["n_variables"] == 0  # generated clone names are not a variable
+    diff = compare.differences(
+        {**cloned, "db_name": "nous_eval_served_run_recall_a"}, {**direct, "db_name": "nous_eval_x"}
+    )
+    assert diff["database"] == {"a": "template nous_eval_served_tpl_x", "b": "nous_eval_x"}
 
 
 async def test_explicit_outputs_must_be_untracked(tmp_path: Path) -> None:

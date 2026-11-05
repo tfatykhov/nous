@@ -153,12 +153,22 @@ def _tool_text(formatted: str) -> str:
     return f"{formatted}\n\n{note}" if note else formatted
 
 
+def own_session_dropped(candidates: list[dict]) -> int:
+    """Candidates the producer itself dropped as the calling conversation's own rows (#854/#857)."""
+    return sum(1 for c in candidates if c.get("disposition_stage") == "own_session")
+
+
 def input_day(it: dict) -> datetime.date | None:
     """The date an input's relative date phrases resolve against (its ``as_of``)."""
     return datetime.date.fromisoformat(it["as_of"]) if it.get("as_of") else None
 
 
-async def one_call(stack: Any, query: str, day: datetime.date | None = None) -> dict[str, Any]:
+async def one_call(
+    stack: Any, query: str, day: datetime.date | None = None, session: str | None = None
+) -> dict[str, Any]:
+    """One recall_deep call as the logged one ran: ``day`` its as-of date, ``session`` the
+    conversation it came from (only the own-session boundary sees it, stack._route_source_session)."""
+    stack.source_session = session
     rl = stack.recorder
     rl._entries.clear()
     stack.ce_calls.clear()
@@ -201,6 +211,7 @@ async def one_call(stack: Any, query: str, day: datetime.date | None = None) -> 
         "rendered": rendered,
         "unplaced": unplaced,
         "read_order_matches_text": text_order_agrees(text_out, read_order),
+        "own_session_excluded": own_session_dropped(tr.get("candidates") or []),
         "contents": {k: texts[k] for k in (f"{c['type']}:{c['id']}" for c in cands) if k in texts},
         "text_unmatched": sum(f"{c['type']}:{c['id']}" not in texts for c in cands),
         "output_matches_capture": text_checks["output_matches_capture"],
@@ -223,15 +234,16 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
     )
     for it in items if warm < 0 else items[:warm]:
         try:
-            await one_call(stack, it["text"], input_day(it))
+            await one_call(stack, it["text"], input_day(it), it.get("source_session"))
         except Exception:  # noqa: BLE001 - a warm-up failure shows up again in the measured call
             pass
     n_err = n_mismatch = n_unchecked = n_unplaced = n_text_unmatched = n_output_mismatch = 0
+    n_own_queries = n_own_rows = 0
     before = embedding_cache_size(stack.embeddings)
     with rows_path.open("w", encoding="utf-8") as f:
         for i, it in enumerate(items):
             try:
-                r = await one_call(stack, it["text"], input_day(it))
+                r = await one_call(stack, it["text"], input_day(it), it.get("source_session"))
             except Exception as exc:  # noqa: BLE001 - recorded; the score counts error rows
                 r = {"error": f"{type(exc).__name__}: {exc}"[:300]}
             n_err += 1 if r.get("error") else 0
@@ -240,6 +252,8 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
             n_unplaced += r.get("unplaced") or 0
             n_text_unmatched += r.get("text_unmatched") or 0
             n_output_mismatch += not r.get("error") and r.get("output_matches_capture") is not True
+            n_own_queries += bool(r.get("own_session_excluded"))
+            n_own_rows += r.get("own_session_excluded") or 0
             row = {"key": it["key"], "set": it["set"], "text": it["text"], **r}
             if it.get("gold"):
                 row["gold"] = it["gold"]
@@ -258,6 +272,8 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
         "unplaced": n_unplaced,
         "text_unmatched": n_text_unmatched,
         "output_mismatches": n_output_mismatch,
+        "own_session_queries": n_own_queries,
+        "own_session_rows": n_own_rows,
     }
 
 
@@ -292,6 +308,11 @@ async def extract_queries(db: Any, agent: str, days: int) -> list[dict[str, Any]
     for r in rows:
         if (r.query or "").strip():
             nq = re.sub(r"\s+", " ", r.query.strip().lower())
-            latest[nq] = {"query": r.query, "logged_at": r.timestamp.isoformat(), "kind": _kind(r.session_id or "")}
+            latest[nq] = {
+                "query": r.query,
+                "logged_at": r.timestamp.isoformat(),
+                "session_id": r.session_id,
+                "kind": _kind(r.session_id or ""),
+            }
     vals = sorted(latest.items(), key=lambda kv: hashlib.sha1(kv[0].encode()).hexdigest())
     return [{"key": f"Q{i:03d}", **v} for i, (_, v) in enumerate(vals)]

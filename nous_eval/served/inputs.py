@@ -3,8 +3,9 @@
 
 Files (all under the untracked data directory):
 
-- recall_deep queries, JSONL: ``{"key", "query", "logged_at"?}``; ``logged_at`` fixes the
-  date a relative date phrase is resolved against.
+- recall_deep queries, JSONL: ``{"key", "query", "logged_at"?, "session_id"?}``; ``logged_at``
+  fixes the date a relative date phrase is resolved against, ``session_id`` is the conversation
+  the logged call came from (``source_session``: its ongoing episode is left out, as prod does).
 - pre-turn prompts, the query-mode A/B's ``prod_templated_prompts.json``
   (``{"prompts": [{"kind", "group", "group_rows", "session_id", "logged_query", "full_text",
   "recovered"}]}``), keyed ``B000``.. in file order.
@@ -42,6 +43,7 @@ def gold_items(paths: list[Path], as_of: str) -> list[dict[str, Any]]:
                     "set": "gold",
                     "text": r["question"],
                     "as_of": as_of,
+                    "source_session": None,  # a gold question was never asked in a conversation
                     "kind": "chat",
                     "gold": {
                         "type": gtype,
@@ -65,6 +67,7 @@ def recall_items(queries: Path | None, gold: list[Path], as_of: str) -> list[dic
                     "text": q["query"],
                     "kind": q.get("kind"),
                     "as_of": (q.get("logged_at") or "")[:10] or as_of,
+                    "source_session": q.get("session_id"),
                 }
             )
     return _unique(items + gold_items(gold, as_of))
@@ -81,6 +84,7 @@ def preturn_items(prompts: Path | None, gold: list[Path], as_of: str) -> list[di
                     "set": "prod",
                     "text": p["full_text"] or p["logged_query"],
                     "session": p["session_id"],
+                    "source_session": p["session_id"],
                     "kind": p["kind"],
                     "group": f"{p['kind']}:{p['group']}",
                     "complete": bool(p.get("recovered") or len(p["logged_query"]) < 500),
@@ -113,7 +117,8 @@ def sample(items: list[dict], n: int, seed: int) -> list[dict]:
 
 def inputs_sha256(items: list[dict]) -> str:
     """What compare checks to know two runs answered the same inputs: each input's text and gold,
-    and what changes how it is run (its effective as-of date, first-turn state and turn number)."""
+    and what changes how it is run (its effective as-of date, source conversation, first-turn state
+    and turn number)."""
     h = hashlib.sha256()
     for it in sorted(items, key=lambda x: x["key"]):
         fields = [
@@ -122,6 +127,7 @@ def inputs_sha256(items: list[dict]) -> str:
             it["text"],
             it.get("gold"),
             it.get("as_of"),
+            it.get("source_session"),
             it.get("first_turn"),
             it.get("turn_number"),
         ]

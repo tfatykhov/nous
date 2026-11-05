@@ -63,8 +63,11 @@ python -m nous_eval.served cost --data-dir $D [--run <tag>]
 (`nous_eval*`, `nous_test*`, `beam*`; `--i-know-this-is-scratch` for a test database named
 otherwise) instead of a clone. A prod copy (`nous_prod*`), a served template or another run's clone
 (`nous_eval_served_*`), and the server's `postgres`, `template0` and `template1` are refused as
-`--db-name` whatever flag is passed, and a run drops only the clone it created. Path arguments are
-resolved against the directory the command started in. Every explicit output file
+`--db-name` whatever flag is passed, and a run drops only the clone it created. A clone is named
+`nous_eval_served_run_<entry>_<tag>`; a name over Postgres' 63-character limit keeps its first 54
+characters plus 8 hex of a hash of the full name, so every tag `--tag` accepts (up to 40
+characters) gives a valid, distinct name. Path arguments are resolved against the directory the
+command started in. Every explicit output file
 (`queries --out`, `gold --out`, `compare --out`) must be one git would not track, checked before
 anything is read from the database or asked of an LLM.
 
@@ -99,7 +102,9 @@ those leaf resolvers return at the start and counts every value they return duri
 of retrieval knobs), the base files' sha256, the runtime overrides, the leaf values, the code root's
 HEAD, branch and dirty-file count, a sha256 of this package's files (the instrument), the inputs'
 sha256, gold validity, cross-encoder device, and table writes during the run. `compare` lists every
-difference between two runs before the numbers and says whether exactly one thing differs.
+difference between two runs before the numbers and says whether exactly one thing differs. The
+database counts as one: a clone's template (its generated name is not a variable), or the scratch
+database a `--db-name` run read directly.
 
 ## Pinned code
 
@@ -238,8 +243,21 @@ a runtime-backed setting (`vector_weight`, `rrf_k`, `cross_encoder_enabled`) cou
   measured, so latency excludes the parse and arms see the same windows. An input's as-of date is
   its logged date, else `--as-of`; it travels with the input into the prefill, the warm pass and the
   measured call, so two inputs with the same text and different dates each resolve against their own.
+- Each logged input keeps the conversation it came from (`source_session`: a recall query's
+  `session_id` from `retrieval_log`, a pre-turn prompt's session). Prod passes that session to
+  recall_deep and to the pre-turn build, and both leave its ongoing episode and that episode's
+  dialogue chunks out (`own_session_exclusions`, #854; `_is_own_session_episode`, #857). The replay
+  hands the source session to exactly those two functions and keeps its own session ids (none for
+  recall_deep, a fresh `<session>-served` / `-warm` id per build): the copy holds each
+  conversation's state at the end of the dump, not at the logged turn, so the real id would also
+  bring in later turns' F055 residual activation and working memory, cache hints, and an
+  unchanged-query memo the warm and measured passes would share. Gold questions have no source
+  conversation. Each row counts the candidates its trace dropped as `own_session`
+  (`own_session_excluded`); the run records how many inputs had one (`own_session_queries`) and
+  how many rows were left out (`own_session_rows`).
 - The inputs' fingerprint (`inputs_sha256`) covers each input's text, gold, effective as-of date,
-  first-turn state and turn number; `compare` also lists differing `--as-of` and `--warm`.
+  source conversation, first-turn state and turn number; `compare` also lists differing `--as-of`
+  and `--warm`.
 - Pre-turn builds use a fixed identity prompt and no conversation history, as the query-mode A/B
   did. An input is a first turn as pre_turn would compute it for a fresh session: a turn-1 prompt
   whose kind does not run as a subtask (`subtask`, `dynamic`, `heartbeat` do); gold questions are

@@ -69,9 +69,20 @@ def plan_like_pre_turn(stack: Any, text: str, frame: Any, is_first_turn: bool) -
 
 
 async def build_one(
-    stack: Any, text: str, session_id: str, *, turn_number: int, first_turn: bool = False
+    stack: Any,
+    text: str,
+    session_id: str,
+    *,
+    turn_number: int,
+    first_turn: bool = False,
+    source_session: str | None = None,
 ) -> dict[str, Any]:
-    """One pre-turn context build; what reached the model, by id, plus its cost."""
+    """One pre-turn context build; what reached the model, by id, plus its cost. ``session_id``
+    is the build's own (fresh) id; ``source_session`` the conversation the prompt came from,
+    which only the own-session boundary sees (stack._route_source_session)."""
+    from nous_eval.served.recall import own_session_dropped
+
+    stack.source_session = source_session
     agent = stack.settings.agent_id
     frame = await stack.frames.select(agent, text)
     plan, temporal_boost = plan_like_pre_turn(stack, text, frame, first_turn)
@@ -122,6 +133,7 @@ async def build_one(
         "legs": legs,
         "rendered": [f"{t}:{i}" for t, i in read["order"]],
         "dropped": dict(dropped),
+        "own_session_excluded": own_session_dropped(cands),
         "contents": {f"{t}:{i}": read["texts"][(t, i)][:1200] for t, i in read["order"]},
         "tokens_total": sum(by_label.values()),
         "tokens_memory": sum(v for k, v in by_label.items() if k in MEMORY_LABELS),
@@ -331,7 +343,14 @@ async def build_item(stack: Any, it: dict, profile_seen: list[bool], attempts: i
     for attempt in range(attempts):
         sid = f"{it['session']}-served" + (f"-r{attempt}" if attempt else "")
         try:
-            res = await build_one(stack, it["text"], sid, turn_number=it["turn_number"], first_turn=it["first_turn"])
+            res = await build_one(
+                stack,
+                it["text"],
+                sid,
+                turn_number=it["turn_number"],
+                first_turn=it["first_turn"],
+                source_session=it.get("source_session"),
+            )
             errs = [lg["name"] for lg in res["legs"] if lg.get("error")]
             has_profile = "User Profile" in res["tokens_by_label"]
             if errs or (profile_seen and profile_seen[0] and not has_profile):
@@ -361,12 +380,17 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
     for it in items if warm < 0 else items[:warm]:
         try:
             await build_one(
-                stack, it["text"], f"{it['session']}-warm", turn_number=it["turn_number"], first_turn=it["first_turn"]
+                stack,
+                it["text"],
+                f"{it['session']}-warm",
+                turn_number=it["turn_number"],
+                first_turn=it["first_turn"],
+                source_session=it.get("source_session"),
             )
         except Exception:  # noqa: BLE001 - a warm-up failure shows up again in the measured build
             pass
     profile_seen: list[bool] = []
-    n_err = n_recent_unparsed = 0
+    n_err = n_recent_unparsed = n_own_queries = n_own_rows = 0
     checks = dict.fromkeys((*READ_CHECKS, *READ_NOTES), 0)
     before = embedding_cache_size(stack.embeddings)
     with rows_path.open("w", encoding="utf-8") as f:
@@ -376,6 +400,8 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
             for k in checks:
                 checks[k] += r.get(k) or 0
             n_recent_unparsed += r.get("recent_parsed") is False
+            n_own_queries += bool(r.get("own_session_excluded"))
+            n_own_rows += r.get("own_session_excluded") or 0
             row = {
                 "key": it["key"],
                 "set": it["set"],
@@ -397,4 +423,6 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
         "embeddings_added_while_measuring": None if before is None else after - before,
         **checks,
         "recent_unparsed": n_recent_unparsed,
+        "own_session_queries": n_own_queries,
+        "own_session_rows": n_own_rows,
     }

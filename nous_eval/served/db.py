@@ -14,6 +14,7 @@ the clone it created, by the exact name it created.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any
 
@@ -44,7 +45,13 @@ def check_scratch(name: str, *, any_scratch_name: bool = False) -> str:
 
 
 def clone_name(tag: str) -> str:
-    return check_ident(CLONE_PREFIX + re.sub(r"[^a-z0-9_]", "_", tag.lower()))[:63]
+    """The clone's database name: the prefix and the tag (lower-cased, other characters as _); a
+    name over Postgres' 63-character limit keeps its first 54 characters plus 8 hex of a hash of
+    the full name, so long tags stay valid and distinct."""
+    name = CLONE_PREFIX + re.sub(r"[^a-z0-9_]", "_", tag.lower())
+    if len(name) > 63:
+        name = f"{name[:54]}_{hashlib.sha1(name.encode()).hexdigest()[:8]}"
+    return check_ident(name)
 
 
 def _admin_engine(conn: dict[str, Any]):
