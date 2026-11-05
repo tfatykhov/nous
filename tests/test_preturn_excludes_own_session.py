@@ -2,7 +2,7 @@
 
 From turn 2 on, the episode search of ``ContextEngine.build`` can return the
 calling session's ongoing episode, whose summary echoes this conversation. It is
-dropped from "Past Episodes" with the trace reason ``own_session_episode``. Same
+dropped from "Past Episodes" with the trace reason ``own_session``. Same
 boundary as ``own_session_exclusions`` (recall_deep): an ended episode of a
 reused session id, and another session's ongoing episode, stay. "Recent
 Conversations" reads only ended episodes, so it cannot show the ongoing one.
@@ -106,7 +106,7 @@ async def test_turn_two_leaves_out_the_sessions_ongoing_episode(setup):
     assert "ONGOINGX" not in _section(result, "Past Episodes")
     assert ids["ONGOINGX"] not in result.recalled_ids["episode"]
     gone = _cands(result)[ids["ONGOINGX"]]
-    assert (gone["disposition"], gone["disposition_stage"]) == ("filter_dropped", "own_session_episode")
+    assert (gone["disposition"], gone["disposition_stage"]) == ("filter_dropped", "own_session")
 
 
 @pytest.mark.asyncio
@@ -137,7 +137,7 @@ async def test_no_session_id_filters_nothing(setup):
     result = await _build(db, agent, heart, None, temporal=False)
     assert _section(result, "Past Episodes")
     assert ids["ONGOINGX"] in _cands(result)  # searched, and not dropped as own-session
-    assert not [c for c in _cands(result).values() if c.get("disposition_stage") == "own_session_episode"]
+    assert not [c for c in _cands(result).values() if c.get("disposition_stage") == "own_session"]
 
 
 @pytest.mark.asyncio

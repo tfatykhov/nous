@@ -1860,7 +1860,7 @@ class ContextEngine:
                 # such filter: list_recent reads only ended episodes.
                 _before = episodes
                 episodes = [e for e in episodes if not _is_own_session_episode(e, session_id)]
-                _tr_filtered(_before, episodes, "episode", FILTER_DROPPED, "own_session_episode")
+                _tr_filtered(_before, episodes, "episode", FILTER_DROPPED, "own_session")
                 # 008.6: Exclude episodes already shown in temporal tier
                 if _temporal_episode_ids:
                     _before = episodes
