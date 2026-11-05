@@ -12,6 +12,8 @@ companion only).
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Iterable
 from datetime import date, timedelta
 from typing import Any
@@ -57,6 +59,8 @@ def memory_write_health_card(states: Iterable[Any], day: date) -> BuiltSurface:
             "day": day.isoformat(),
             "rules": dict.fromkeys(rules, TRIPPED),
             "status": dict.fromkeys(rules, STATUS_TEXT[TRIPPED]),
+            # What the card's text shows, so a producer can compare the live card with a rebuilt one before pushing.
+            "fingerprint": hashlib.sha256(json.dumps(list(rules.items())).encode()).hexdigest()[:16],
         }
     )
     children: list[str] = ["header", "intro"]
@@ -88,8 +92,3 @@ def memory_write_health_card(states: Iterable[Any], day: date) -> BuiltSurface:
             components.append(Divider(f"{base}_div"))
     s.add(Column("root", children=children, align="stretch"), *components)
     return s.build()
-
-
-def signature(states: Iterable[Any]) -> tuple[tuple[str, tuple[str, ...]], ...]:
-    """What the card shows, for "has it changed since the last push"."""
-    return tuple((rule, tuple(lines)) for rule, lines in tripped_rules(states).items())

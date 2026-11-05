@@ -335,7 +335,11 @@ async def test_a_failed_card_push_does_not_fail_the_check(monkeypatch):
         return _states(("H1", "rows vanished"))
 
     monkeypatch.setattr(mwh, "run_once", fake_run_once)
-    surfaces = SimpleNamespace(push_built=AsyncMock(side_effect=RuntimeError("down")), close_by_dedup_key=AsyncMock())
+    surfaces = SimpleNamespace(
+        live_data_model=AsyncMock(return_value=None),
+        push_built=AsyncMock(side_effect=RuntimeError("down")),
+        close_by_dedup_key=AsyncMock(),
+    )
     check = MemoryWriteHealthCheck(object(), "test-mwh-push-fail")
     check.set_surface_service(surfaces)
 
@@ -343,7 +347,32 @@ async def test_a_failed_card_push_does_not_fail_the_check(monkeypatch):
 
     assert [f.raw_data["rule"] for f in result.findings] == ["H1"]
     await check.run()
-    assert surfaces.push_built.await_count == 2  # not marked as shown, so retried
+    assert surfaces.push_built.await_count == 2  # still no live card, so tried again
+
+
+@pytest.mark.postgres_only
+async def test_a_card_closed_while_its_rule_is_still_tripped_comes_back(db):
+    """An expiry, a restart's invalidation or a stale tap can close the card while a rule still trips; the next run
+    must push it again even though what it shows has not changed."""
+    from nous.a2ui.service import SurfaceService
+
+    agent = _agent()
+    service = SurfaceService(db, _settings(agent))
+    check = MemoryWriteHealthCheck(db, agent)
+    check.set_surface_service(service)
+    await _gone_fact(db, agent)
+    try:
+        await check.run()
+        assert await service.close_by_dedup_key(card.DEDUP_KEY)  # e.g. the restart invalidation
+
+        await check.run()
+
+        live = await service.live_data_model(card.DEDUP_KEY)
+        assert live is not None and live["rules"] == {"H1": "tripped"}
+    finally:
+        async with db.session() as s:
+            await s.execute(delete(A2uiSurface).where(A2uiSurface.agent_id == agent))
+            await s.commit()
 
 
 async def test_without_the_companion_the_check_keeps_no_card(monkeypatch):

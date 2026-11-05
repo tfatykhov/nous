@@ -53,9 +53,6 @@ class MemoryWriteHealthCheck(BaseCheck):
         self._db = database
         self._agent_id = agent_id
         self._surfaces: Any = None
-        # What the live companion card shows, as this process last pushed it; None until the first sync, so a
-        # restart re-syncs (the service expires heartbeat cards at start).
-        self._card_shown: tuple | None = None
 
     def set_surface_service(self, surfaces: Any) -> None:
         """Bind the companion's surface service; without one the check keeps no card."""
@@ -68,25 +65,22 @@ class MemoryWriteHealthCheck(BaseCheck):
         return CheckResult(has_updates=bool(findings), findings=findings)
 
     async def _sync_card(self, states: list[mwh.RuleState]) -> None:
-        """Push, replace or close the companion card when what it should show changed. Never fails the check: the
-        dashboard and the finding store already hold the result."""
+        """Make the live companion card match the tripped rules: push it when none is live or the live one differs
+        (a tap, an expiry or a restart can change or close it), close it when nothing trips. Compared with the live
+        card, not with what this process last pushed. Never fails the check: the dashboard and the finding store
+        already hold the result."""
         if self._surfaces is None:
             return
         from nous.a2ui.builders import memory_write_health as card  # only with the companion on
 
-        shown = card.signature(states)
-        if shown == self._card_shown:
-            return
         try:
-            if shown:
-                await self._surfaces.push_built(
-                    card.memory_write_health_card(states, mwh.utc_day(datetime.now(UTC))),
-                    dedup_key=card.DEDUP_KEY,
-                    notify=False,
-                    telegram_ping=False,
-                )
-            else:
-                await self._surfaces.close_by_dedup_key(card.DEDUP_KEY, status="resolved")
-            self._card_shown = shown
+            live = await self._surfaces.live_data_model(card.DEDUP_KEY)
+            if not card.tripped_rules(states):
+                if live is not None:
+                    await self._surfaces.close_by_dedup_key(card.DEDUP_KEY, status="resolved")
+                return
+            built = card.memory_write_health_card(states, mwh.utc_day(datetime.now(UTC)))
+            if live != built.data_model:
+                await self._surfaces.push_built(built, dedup_key=card.DEDUP_KEY, notify=False, telegram_ping=False)
         except Exception:
             logger.warning("Memory write health: the companion card could not be updated", exc_info=True)
