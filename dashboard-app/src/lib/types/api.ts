@@ -1816,3 +1816,70 @@ export interface JobFixRow {
   old_task: string | null;
   task: string | null;
 }
+
+// ── Memory write health (P4): GET /dashboard/memory-write-health ─────────────
+// Shape of nous/api/memory_write_health_dashboard.py. Counts and fixed text only.
+
+export type MwhRuleId = 'H1' | 'F1' | 'S1' | 'P1' | 'R1' | 'A1';
+export type MwhState = 'ok' | 'tripped' | 'acknowledged' | 'no_data';
+
+export interface MwhAckMeta { day: string; at: string | null; actor: string | null; note: string | null; }
+
+export interface MwhCheck {
+  id: MwhRuleId;
+  name: string;
+  state: MwhState;
+  value: number | null;
+  threshold: number | null;
+  urgency: 'high' | 'normal' | 'low';
+  /** Fixed text with numbers and source labels; empty unless tripped. */
+  summary: string;
+  /** F1: source, day, median. P1/R1: window_sum, prior_mean, prior_sums. A1: rejected, admitted, days. H1: since_baseline. */
+  detail: Record<string, unknown>;
+  acknowledged: MwhAckMeta | null;
+}
+
+export interface MwhDayMetrics {
+  facts_by_source: Record<string, number>;
+  max_facts_one_episode: number;
+  tier1_inflow: Record<'person' | 'preference' | 'rule', { all: number; non_enum: number }>;
+  deactivated: Record<string, number>;
+  deactivated_tier1_stale: number;
+  admission_rejected: number;
+  episodes_started: number;
+  episodes_ended: number;
+  sleep_missing_endpoint: number;
+  profile_card_rewrites: number;
+  /** Only on days the check observed live. */
+  live?: MwhLive;
+  counters?: Record<string, number>;
+  rules?: Record<string, MwhState>;
+}
+
+export interface MwhLive {
+  observed_at: string;
+  facts_total: number;
+  episodes_total: number;
+  vanished_fact_ids: number;
+  vanished_episode_ids: number;
+  dangling_edges: number;
+  sleep_missing_endpoint_total: number;
+  open_episodes: number;
+  open_episodes_over_24h: number;
+  ledger_oldest: string | null;
+  profile_card: { entries: number; tokens: number; changed_frac: number } | null;
+}
+
+export interface MwhAck { rule: MwhRuleId; day: string; note: string; actor: string; at: string | null; }
+
+export interface MemoryWriteHealthData {
+  enabled: boolean;
+  window_days: number;
+  as_of?: string;
+  days: { day: string; metrics: MwhDayMetrics }[];
+  /** The latest observation, with its day and H1's running counters; null before the first run. */
+  live: (MwhLive & { day: string; counters: Record<string, number> }) | null;
+  checks: MwhCheck[];
+  rules?: { id: MwhRuleId; name: string; urgency: string }[];
+  acknowledgements: MwhAck[];
+}

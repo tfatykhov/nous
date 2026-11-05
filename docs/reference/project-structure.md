@@ -146,7 +146,7 @@ nous/
 │   │   ├── actions.py          # Action gate: allowlist → nonce → rate → censor
 │   │   ├── push.py             # F097 FCM leg (data-only messages)
 │   │   ├── intention_keys.py   # F099 Phase 3a: the reserved intention: dedup keys (leaf)
-│   │   ├── dsl.py / builders/  # Template-first surface construction (`builders/check_audit.py`: the owner's weekly spot-check card, built by the server only and not in `TEMPLATES`)
+│   │   ├── dsl.py / builders/  # Template-first surface construction (`builders/check_audit.py`: the owner's weekly spot-check card, built by the server only and not in `TEMPLATES`; `builders/memory_write_health.py`: P4's card, an Acknowledge button per tripped rule, server-built, priority 0, never a ping)
 │   │   └── catalogs/           # A2UI v1.0 vendored @ pinned commit d9086fb
 │   ├── security/
 │   │   └── secrets.py          # scan_secrets: shared by send_email (refuse) and the F098 result memory writer (skip)
@@ -155,6 +155,7 @@ nous/
 │       ├── intention_routes.py # F099 Phase 2d: the four owner-action routes (decide, answer, list), thin over ContinuationRunner
 │       ├── intention_dashboard.py # F099 Phase 3c: GET /dashboard/intentions queries (the tree and the metrics), read-only, Postgres-only
 │       ├── autonomy_dashboard.py # Autonomy scoreboard: GET /dashboard/autonomy data (taps, approval cards, grades, task scores, inventory, warn classes), read-only
+│       ├── memory_write_health_dashboard.py # P4: GET /dashboard/memory-write-health data (rollup, rules evaluated now, acknowledgements) and the acknowledge body parser
 │       ├── job_fix_dashboard.py # The scoreboard's job_fixes section: every check-and-fix record, read-only, Postgres-only
 │       ├── guard_dashboard.py   # The scoreboard's guards section (F107 phase 2/3): guarded schedules and heartbeat checks, guard outcomes and shadow misses in the window, read-only, Postgres-only
 │       ├── mcp.py              # MCP server (nous_chat, nous_decide, etc.)
