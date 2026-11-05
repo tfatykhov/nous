@@ -2,7 +2,12 @@
 -> IntentClassifier.classify -> plan_retrieval -> deictic/recap adjustments -> ContextEngine.build).
 What reached the model is read from the F091 retrieval trace (candidates with disposition
 ``rendered``, in each section's render order), plus the Session Profile intent-leg facts whose text
-reached that section. Ported from the query-mode A/B harness (eval/query-mode-ab, 082135ea).
+reached that section. A procedure's text is the block it was rendered as (body, or catalog line),
+not its name. Ported from the query-mode A/B harness (eval/query-mode-ab, 082135ea).
+
+First turn: pre_turn computes ``is_first_turn`` as no earlier turn in the session, no active
+episode, and not a subtask turn. Each replay is a fresh session, so an input is a first turn when
+its ``first_turn`` says so (inputs.py: a turn-1 prompt of a kind that does not run as a subtask).
 """
 
 from __future__ import annotations
@@ -58,12 +63,15 @@ def plan_like_pre_turn(stack: Any, text: str, frame: Any, is_first_turn: bool) -
     return plan, temporal_boost
 
 
-async def build_one(stack: Any, text: str, session_id: str, *, turn_number: int) -> dict[str, Any]:
+async def build_one(
+    stack: Any, text: str, session_id: str, *, turn_number: int, first_turn: bool = False
+) -> dict[str, Any]:
     """One pre-turn context build; what reached the model, by id, plus its cost."""
     agent = stack.settings.agent_id
     frame = await stack.frames.select(agent, text)
-    plan, temporal_boost = plan_like_pre_turn(stack, text, frame, False)
+    plan, temporal_boost = plan_like_pre_turn(stack, text, frame, first_turn)
     stack.intent_leg_hits.clear()
+    stack.procedure_text.clear()
     t0 = time.monotonic()
     br = await stack.ctx.build(
         agent,
@@ -73,7 +81,7 @@ async def build_one(stack: Any, text: str, session_id: str, *, turn_number: int)
         conversation_messages=[],
         retrieval_plan=plan,
         temporal_boost=temporal_boost,
-        is_first_turn=False,
+        is_first_turn=first_turn,
         turn_number=turn_number,
     )
     ms = (time.monotonic() - t0) * 1000
@@ -94,7 +102,11 @@ async def build_one(stack: Any, text: str, session_id: str, *, turn_number: int)
         if profile_leg and body.strip()[:40] in profile_leg and key not in order:
             order.append(key)
             snippets[key] = body
-    contents = {f"{t}:{i}": (br.recalled_content_map.get(i) or snippets.get((t, i)) or "")[:1200] for t, i in order}
+    shown = {("procedure", k): v for k, v in stack.procedure_text.items()}  # the rendered block, not the name
+    contents = {
+        f"{t}:{i}": (shown.get((t, i)) or br.recalled_content_map.get(i) or snippets.get((t, i)) or "")[:1200]
+        for t, i in order
+    }
     by_label: dict[str, int] = defaultdict(int)
     for sec in br.sections:
         by_label[sec.label] += sec.token_estimate
@@ -119,6 +131,7 @@ async def build_one(stack: Any, text: str, session_id: str, *, turn_number: int)
         "tokens_by_label": dict(by_label),
         "system_prompt": br.system_prompt,
         "build_ms": round(ms, 1),
+        "first_turn": first_turn,
     }
 
 
@@ -133,7 +146,7 @@ async def build_item(stack: Any, it: dict, profile_seen: list[bool], attempts: i
     for attempt in range(attempts):
         sid = f"{it['session']}-served" + (f"-r{attempt}" if attempt else "")
         try:
-            res = await build_one(stack, it["text"], sid, turn_number=it["turn_number"])
+            res = await build_one(stack, it["text"], sid, turn_number=it["turn_number"], first_turn=it["first_turn"])
             errs = [lg["name"] for lg in res["legs"] if lg.get("error")]
             has_profile = "User Profile" in res["tokens_by_label"]
             if errs or (profile_seen and profile_seen[0] and not has_profile):
@@ -155,14 +168,21 @@ async def build_item(stack: Any, it: dict, profile_seen: list[bool], attempts: i
 
 
 async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> dict[str, Any]:
-    """Warm up on the first ``warm`` inputs (discarded, own session ids), then one build per input."""
-    for it in items[:warm]:
+    """A warm pass (discarded, own session ids) over the first ``warm`` inputs, every input when
+    ``warm`` < 0, so every query a build embeds is cached before anything is measured; then one
+    build per input."""
+    from nous_eval.served.stack import embedding_cache_size
+
+    for it in items if warm < 0 else items[:warm]:
         try:
-            await build_one(stack, it["text"], f"{it['session']}-warm", turn_number=it["turn_number"])
+            await build_one(
+                stack, it["text"], f"{it['session']}-warm", turn_number=it["turn_number"], first_turn=it["first_turn"]
+            )
         except Exception:  # noqa: BLE001 - a warm-up failure shows up again in the measured build
             pass
     profile_seen: list[bool] = []
     n_err = 0
+    before = embedding_cache_size(stack.embeddings)
     with rows_path.open("w", encoding="utf-8") as f:
         for i, it in enumerate(items):
             r = await build_item(stack, it, profile_seen)
@@ -181,4 +201,9 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
             if (i + 1) % 25 == 0:
                 f.flush()
                 logger.info("preturn %d/%d", i + 1, len(items))
-    return {"n": len(items), "errors": n_err}
+    after = embedding_cache_size(stack.embeddings)
+    return {
+        "n": len(items),
+        "errors": n_err,
+        "embeddings_added_while_measuring": None if before is None else after - before,
+    }

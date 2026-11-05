@@ -28,6 +28,9 @@ from typing import Any
 logger = logging.getLogger("nous_eval.served")
 
 PRIMARY_MODEL = "claude-sonnet-5-5"
+# Thinking shares this cap with the JSON reply; at 4000 a 25-item call that thought long could end
+# without its JSON (then retried, then left unlabelled). Billing is per token used, not per cap.
+JUDGE_MAX_TOKENS = 8000
 AGREEMENT_MODEL = "claude-opus-5-5"
 
 # $ per million tokens: input, output, cache write, cache read (Anthropic list prices, 2026-10).
@@ -229,6 +232,18 @@ async def make_llm_client() -> Any:
     return client
 
 
+def judge_payload(model: str, system: str, user: str, max_tokens: int) -> dict[str, Any]:
+    """The request body every judge and gold call sends (the Claude Code preamble at block 0)."""
+    from nous_eval._oat_preamble import with_oat_preamble
+
+    return {
+        "model": model,
+        "system": with_oat_preamble(system),
+        "messages": [{"role": "user", "content": user}],
+        "max_tokens": max_tokens,
+    }
+
+
 async def llm_json(
     client: Any,
     limiter: Any,
@@ -241,21 +256,12 @@ async def llm_json(
     purpose: str,
     run: str,
 ) -> Any:
-    """One call; returns the first parseable JSON object in the reply. temperature 0 and a
-    4000-token cap (Sonnet 5.5 thinks by default), as the earlier harnesses sent."""
-    from nous_eval._oat_preamble import call_with_retries, with_oat_preamble
+    """One call; returns the first parseable JSON object in the reply. No sampling parameter
+    (``temperature`` is rejected by the current API version on every model; Sonnet 5.5 and Opus
+    5.5 think by default, so it bought no determinism: the label cache does that)."""
+    from nous_eval._oat_preamble import call_with_retries
 
-    res = await call_with_retries(
-        client,
-        {
-            "model": model,
-            "system": with_oat_preamble(system),
-            "messages": [{"role": "user", "content": user}],
-            "max_tokens": max_tokens,
-            "temperature": 0.0,
-        },
-        rate_limiter=limiter,
-    )
+    res = await call_with_retries(client, judge_payload(model, system, user, max_tokens), rate_limiter=limiter)
     if ledger is not None:
         ledger.add(purpose, run, model, getattr(res, "usage", None))
     text = "".join(b.get("text", "") for b in res.content if b.get("type") == "text")
@@ -325,7 +331,7 @@ async def judge_units(
                         system,
                         user,
                         model=model,
-                        max_tokens=4000,
+                        max_tokens=JUDGE_MAX_TOKENS,
                         ledger=ledger,
                         purpose=f"judge:{entry}",
                         run=run,

@@ -61,7 +61,8 @@ def _db_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--i-know-this-is-scratch",
         action="store_true",
-        help="--db-name may be a database whose name is not nous_eval*/nous_test*/beam*",
+        help="--db-name may be a test database not named nous_eval*/nous_test*/beam* (CI's is 'nous'); "
+        "never a prod copy, a served template or a clone",
     )
 
 
@@ -103,7 +104,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
             help="date relative dates resolve against when an input has no logged date",
         )
         r.add_argument("--n", type=int, default=0, help="smoke: a fixed-seed sample of n inputs")
-        r.add_argument("--warm", type=int, default=10, help="warm-up inputs, results discarded")
+        r.add_argument(
+            "--warm",
+            type=int,
+            default=-1,
+            help="warm-pass inputs, results discarded (default -1: every input, so every measured call is warm)",
+        )
         _settings_args(r)
         _db_args(r)
         _code_args(r)
@@ -196,17 +202,28 @@ def _strip_code_arg(argv: list[str]) -> list[str]:
     return out
 
 
-def _maybe_reexec(args: argparse.Namespace, argv: list[str]) -> int | None:
-    """With --code, run this command again inside the pinned root; None when already there."""
+def _absolutize(args: argparse.Namespace) -> None:
+    """Every filesystem argument resolved against the working directory the command started in,
+    before anything changes directory (a run moves into its data dir)."""
+    for name, value in vars(args).items():
+        if isinstance(value, Path):
+            setattr(args, name, value.resolve())
+        elif isinstance(value, list) and value and all(isinstance(v, Path) for v in value):
+            setattr(args, name, [v.resolve() for v in value])
+
+
+def _maybe_reexec(args: argparse.Namespace, argv: list[str], cwd: Path) -> int | None:
+    """With --code, run this command again inside the pinned root, from the same working
+    directory, so a relative path argument means the same file; None when already there."""
     if not getattr(args, "code", None) or args.pinned_root:
         return None
     repo = pin.imported_roots()[0]
     root = pin.resolve_code_root(
         args.code, repo=repo, worktree_base=args.worktree_dir or repo.parent / "nous-served-wt"
     )
-    data_dir = _check_data_dir(args.data_dir)
+    _check_data_dir(args.data_dir)
     print(f"pinned code: {root}")
-    return pin.reexec(root, _strip_code_arg(argv), cwd=data_dir)
+    return pin.reexec(root, _strip_code_arg(argv), cwd=cwd)
 
 
 def _db_conn(args: argparse.Namespace) -> dict[str, Any]:
@@ -241,13 +258,12 @@ class _Prepared:
         os.chdir(self.data_dir)
         self.conn = _db_conn(args)
         self.template = args.db_template
+        self.created: str | None = None
         if self.template:
             self.db_name = dbm.clone_name(f"{entry}_{tag}")
         else:
-            self.db_name = (
-                dbm.check_ident(args.db_name) if args.i_know_this_is_scratch else dbm.check_scratch(args.db_name)
-            )
-        self.keep = bool(args.keep_db) or not self.template
+            self.db_name = dbm.check_scratch(args.db_name, any_scratch_name=args.i_know_this_is_scratch)
+        self.keep = bool(args.keep_db)
         self.resolved = st.resolve(
             args.base,
             args.set,
@@ -259,14 +275,14 @@ class _Prepared:
         from nous_eval.served import db as dbm
 
         if self.template:
-            await dbm.create_clone(self.conn, self.template, self.db_name)
+            self.created = await dbm.create_clone(self.conn, self.template, self.db_name)
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
         from nous_eval.served import db as dbm
 
-        if not self.keep:
-            await dbm.drop_clone(self.conn, self.db_name)
+        if self.created and not self.keep:  # only the clone this run created, by its exact name
+            await dbm.drop_clone(self.conn, self.db_name, created=self.created)
 
 
 # ---------------------------------------------------------------------------
@@ -525,7 +541,9 @@ def _compact(x: Any) -> Any:
 def main(argv: list[str] | None = None, **inject: Any) -> int:
     """Entry point; ``inject`` passes test doubles (embeddings, llm, client) to the commands."""
     argv = list(sys.argv[1:] if argv is None else argv)
+    cwd = Path.cwd()
     args = parse_args(argv)
+    _absolutize(args)
     _quiet()
     if args.entry == "compare":
         return cmd_compare(args)
@@ -537,7 +555,7 @@ def main(argv: list[str] | None = None, **inject: Any) -> int:
         )
         return 0
     if args.cmd in ("run", "queries", "gold"):
-        code = _maybe_reexec(args, argv)
+        code = _maybe_reexec(args, argv, cwd)
         if code is not None:
             return code
     if args.cmd == "run":

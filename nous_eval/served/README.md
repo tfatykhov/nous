@@ -14,7 +14,9 @@ A run is one arm on one entry point. `compare` pairs two runs. Developer-only, l
 ## Data stays out of the repo
 
 Every input, output, label and cache lives in a data directory that git must ignore (the CLI
-refuses a tracked one). Nothing the CLI prints contains query or memory text. Tests use
+refuses one git would track). A directory inside a clone of this repo needs an ignore rule first:
+the repo's `.gitignore` has none for eval data, so add the directory to `.git/info/exclude` (or
+keep the data outside the clone). Nothing the CLI prints contains query or memory text. Tests use
 synthetic fixtures only.
 
 ```
@@ -26,7 +28,7 @@ synthetic fixtures only.
   judge/<model>.jsonl          the shared label cache, one file per judge model
   cost_ledger.jsonl            one row per LLM call: purpose, run, model, usage
   embedding_cache.jsonl        query embeddings (float32), shared by every run
-  date_windows.jsonl           date-window parses, keyed (as-of date, query, model)
+  date_windows_unpadded.jsonl  date-window parses (unpadded), keyed (as-of date, query, model)
   runs/<entry>/<tag>/          meta.json, rows.jsonl, scores.json
 ```
 
@@ -57,7 +59,10 @@ python -m nous_eval.served cost --data-dir $D [--run <tag>]
 ```
 
 `--n 20` runs a fixed-seed sample (a smoke). `--db-name` runs on a scratch database directly
-(`nous_eval*`, `nous_test*`, `beam*`) instead of a clone.
+(`nous_eval*`, `nous_test*`, `beam*`; `--i-know-this-is-scratch` for a test database named
+otherwise) instead of a clone. A prod copy (`nous_prod*`), a served template or another run's clone
+(`nous_eval_served_*`) is refused as `--db-name` whatever flag is passed, and a run drops only the
+clone it created. Path arguments are resolved against the directory the command started in.
 
 ## What one variable means here
 
@@ -91,10 +96,12 @@ difference between two runs before the numbers and says whether exactly one thin
 
 `--code` takes a directory or a commit (checked out once into a detached worktree under
 `--worktree-dir`, default `<repo>/../nous-served-wt/<sha12>`). The CLI then re-runs itself there
-(`python -m nous_eval.served` with `PYTHONPATH` = that root, `NOUS_*`/`DB_*` removed from the
-environment, the data dir as working directory). `nous` and `nous_eval` must come from the same
-root, so the stack wiring (which mirrors `main.py`) moves with the code under test. Uncommitted
-changes are refused unless `--allow-dirty`.
+(`python -P -m nous_eval.served` from the same working directory, with `PYTHONPATH` = that root,
+`NOUS_*`/`DB_*` removed from the environment and `PYTHONHASHSEED=0`; `-P` keeps the working
+directory off `sys.path`). `nous` and `nous_eval` must come from the same root, so the stack wiring
+(which mirrors `main.py`) moves with the code under test. Uncommitted changes under `nous/`,
+`nous_eval/`, `sql/`, `pyproject.toml` or `uv.lock` are refused unless `--allow-dirty`. The
+instrument hash covers this package and the `nous_eval` modules it imports.
 
 ## The database
 
@@ -108,8 +115,10 @@ and the keyed leg's own tracking.
 
 Sonnet 5.5 labels each rendered item relevant or not, with the earlier harnesses' prompts
 (recall_deep: the fusion/spreading A/B prompt, items shown to 800 characters, 25 per call;
-pre-turn: the query-mode A/B prompt, 700 characters, 30 per call), `temperature` 0, through
-`nous.api.anthropic_client` with the Claude Code preamble. A label is keyed by what the judge saw:
+pre-turn: the query-mode A/B prompt, 700 characters, 30 per call), through
+`nous.api.anthropic_client` with the Claude Code preamble. The request carries `model`, `system`,
+`messages` and `max_tokens` (8000, shared with default-on thinking) and no sampling parameter:
+the current API version rejects one, and the label cache, not the sampler, makes labels repeatable. A label is keyed by what the judge saw:
 (entry point, query or prompt as shown, item type, item text as shown). Arms that render the same
 item for the same query share one label; a label already cached is never asked again. A query's
 pending items go to the judge in label-key (hash) order, not render order: judged in render
@@ -126,12 +135,19 @@ recall_deep, set `prod` (precision metrics on queries whose every rendered item 
 precision of the rendered list (mean of per-query precision, and micro), relevant items in the top
 10, P@10, MRR, items, rendered tokens (output characters / 4), wall latency p50/p95, precision per
 entry leg (spreading rows arrive as `graph_expanded`) and per rank band (1-10, 11-30, 31-60, 61+).
-Ranks are render positions. Set `gold`: gold-in-served, gold-in-top-10, reciprocal rank, per gold
-type.
+Ranks are the positions the model reads: the order the formatter reported emitting (Heart Memory
+as grouped by session and date, then Graph-Connected and Brain Decisions, Parent Episode Context,
+stored examples), not the pipeline's `final_rank` (kept beside). Each call checks that order against
+the ids its output printed (`read_order_matches_text`). A tool call that returned an error renders
+nothing and counts as a judged query with precision 0. Set `gold`: gold-in-served, gold-in-top-10,
+reciprocal rank, per gold type; an episode is served when its summary or any chunk of it is
+rendered, and the summary-only rates are reported beside (`served_summary`, `top10_summary`).
 
 Pre-turn, set `prod`: micro precision overall and per item type (the sections), items and relevant
-items per build, total and memory tokens, build latency. Set `gold`: gold-in-context (the gold item
-rendered, or its text in the system prompt) and reciprocal rank among rendered items of its type.
+items per build, total and memory tokens, build latency. A procedure is judged on the text it was
+rendered as (its body block, or its catalog line), not its name. Set `gold`: gold-in-context (the
+gold item rendered, or its text in the system prompt) and reciprocal rank among rendered items of
+its type.
 
 `score --keys <file>` restricts a summary to a key subset.
 
@@ -158,12 +174,23 @@ resamples). The win condition, from the precision plan with the review's explici
    relevant-in-top-10 too (`--top10-loss-tolerance`, default 0);
 3. p95 latency grows by at most `--max-p95-regression` (default 0.20) of A's p95.
 
+A check that could not be measured (no gold rows in both runs, no query judged in both) fails the
+win, named in `why_not`. Each run's labels come from its own data dir and judge model. A change to
+a runtime-backed setting (`vector_weight`, `rrf_k`, `cross_encoder_enabled`) counts as one variable.
+
 ## Caveats
 
 - Latency is measured where the run runs (the cross-encoder on that machine's CPU), not on the
   prod host.
-- Date-window parses are fixed per (as-of date, query, model) in `date_windows.jsonl` and filled
-  before any call is measured, so latency excludes the parse and arms see the same windows. A
-  query's as-of date is its logged date, else `--as-of`.
+- Every run makes a warm pass over all its inputs (results discarded) before the measured pass,
+  so each measured call finds its query embedded, the cross-encoder loaded and the buffers warm,
+  whichever arm ran first; `meta.json` records `embeddings_added_while_measuring` (0 expected).
+  A run takes about twice as long as its measured pass.
+- Date-window parses are fixed per (as-of date, query, model) in `date_windows_unpadded.jsonl`,
+  stored unpadded and padded per run with its own `date_leg_pad_days`, and filled before any call is
+  measured, so latency excludes the parse and arms see the same windows. A query's as-of date is its
+  logged date, else `--as-of`.
 - Pre-turn builds use a fixed identity prompt and no conversation history, as the query-mode A/B
-  did.
+  did. An input is a first turn as pre_turn would compute it for a fresh session: a turn-1 prompt
+  whose kind does not run as a subtask (`subtask`, `dynamic`, `heartbeat` do); gold questions are
+  later turns.

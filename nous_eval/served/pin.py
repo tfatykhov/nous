@@ -36,18 +36,34 @@ def imported_roots() -> tuple[Path, Path]:
     return Path(nous.__file__).resolve().parent.parent, Path(nous_eval.__file__).resolve().parent.parent
 
 
+# The nous_eval modules a run imports besides the served package: part of the instrument.
+_INSTRUMENT_DEPS = (
+    "beam/harness.py",
+    "beam/arms.py",
+    "retrieval_runner.py",
+    "env_pin.py",
+    "_oat_preamble.py",
+    "schema_preflight.py",
+    "config.py",
+)
+
+
 def served_hash() -> str:
-    """sha256 over the served package's .py files (name and bytes, sorted): the instrument."""
+    """sha256 over the instrument's files (relative name and bytes, sorted): the served package's
+    .py files and the nous_eval modules it imports."""
+    pkg = Path(__file__).resolve().parent
+    files = sorted(pkg.glob("*.py")) + [pkg.parent / d for d in _INSTRUMENT_DEPS]
     h = hashlib.sha256()
-    for p in sorted(Path(__file__).resolve().parent.glob("*.py")):
-        h.update(p.name.encode() + b"\0" + p.read_bytes() + b"\0")
+    for p in sorted(files, key=lambda f: f.relative_to(pkg.parent).as_posix()):
+        h.update(p.relative_to(pkg.parent).as_posix().encode() + b"\0" + p.read_bytes() + b"\0")
     return h.hexdigest()
 
 
 def code_info() -> dict[str, Any]:
-    """HEAD, branch and dirty-file count (nous/, nous_eval/, sql/) of the imported root."""
+    """HEAD, branch and dirty-file count (nous/, nous_eval/, sql/, pyproject.toml, uv.lock) of the
+    imported root."""
     nous_root, eval_root = imported_roots()
-    dirty = _git(nous_root, "status", "--porcelain", "--", "nous", "nous_eval", "sql")
+    dirty = _git(nous_root, "status", "--porcelain", "--", "nous", "nous_eval", "sql", "pyproject.toml", "uv.lock")
     return {
         "root": str(nous_root),
         "nous_eval_root": str(eval_root),
@@ -67,7 +83,8 @@ def check_code(info: dict[str, Any], *, expected_root: str | None, allow_dirty: 
         raise SystemExit(f"imported nous from {info['root']}, expected the pinned root {expected_root}")
     if info["dirty_files"] and not allow_dirty:
         raise SystemExit(
-            f"{info['dirty_files']} uncommitted file(s) under nous/, nous_eval/ or sql/ in {info['root']}; "
+            f"{info['dirty_files']} uncommitted file(s) under nous/, nous_eval/, sql/, pyproject.toml or uv.lock "
+            f"in {info['root']}; "
             "commit, pin a commit with --code, or pass --allow-dirty"
         )
 
@@ -105,6 +122,8 @@ def child_env(code_root: Path) -> dict[str, str]:
 
 
 def reexec(code_root: Path, argv: list[str], *, cwd: Path) -> int:
-    """Run ``python -m nous_eval.served <argv> --pinned-root <code_root>`` inside the pinned root."""
-    cmd = [sys.executable, "-m", "nous_eval.served", *argv, "--pinned-root", str(code_root)]
+    """Run ``python -P -m nous_eval.served <argv> --pinned-root <code_root>`` from ``cwd``: ``-P``
+    keeps the working directory off ``sys.path``, so only PYTHONPATH (the pinned root) supplies
+    ``nous`` and ``nous_eval`` whatever directory the command was started from."""
+    cmd = [sys.executable, "-P", "-m", "nous_eval.served", *argv, "--pinned-root", str(code_root)]
     return subprocess.run(cmd, cwd=str(cwd), env=child_env(code_root)).returncode

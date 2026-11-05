@@ -10,6 +10,9 @@ Precision deltas use the queries fully labelled in both runs. The win condition 
    relevant-in-top-10 with its own tolerance;
 3. p95 latency grows by at most max_p95_regression (a fraction of A's p95).
 
+A check that could not be measured (no gold rows, no query judged in both runs) fails the win
+and is named in ``why_not``. Each run's labels come from its own data dir and judge model.
+
 Before the numbers it lists what differs between the runs (settings, code, instrument, inputs),
 because a comparison is one variable only when exactly one thing differs.
 """
@@ -20,7 +23,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from nous_eval.served.judge import LabelCache, cache_path
+from nous_eval.served.judge import PRIMARY_MODEL, LabelCache, cache_path
 from nous_eval.served.score import (
     load_run,
     ok_rows,
@@ -46,17 +49,17 @@ def differences(ma: dict, mb: dict) -> dict[str, Any]:
     for k in ("head", "dirty_files", "served_sha256"):
         if ca.get(k) != cb.get(k):
             out[f"code.{k}"] = {"a": ca.get(k), "b": cb.get(k)}
-    for k in (
-        "inputs_sha256",
-        "db_template",
-        "judge_model",
-        "agent",
-        "runtime_config",
-        "base_files",
-        "python_hash_seed",
-    ):
+    for k in ("inputs_sha256", "db_template", "judge_model", "agent", "base_files", "python_hash_seed"):
         if ma.get(k) != mb.get(k):
             out[k] = {"a": ma.get(k), "b": mb.get(k)}
+    # The effective runtime knobs (vector_weight, rrf_k, cross_encoder_enabled), counted only where
+    # no settings difference already explains them: an arm that sets rrf_k shows one change, not two.
+    # arm_wins (which stored override an arm beat) is provenance, not a variable.
+    ea = (ma.get("runtime_config") or {}).get("effective") or {}
+    eb = (mb.get("runtime_config") or {}).get("effective") or {}
+    for k in sorted(set(ea) | set(eb)):
+        if ea.get(k) != eb.get(k) and k not in settings:
+            out[f"runtime.{k}"] = {"a": ea.get(k), "b": eb.get(k)}
     out["n_variables"] = len(settings) + sum(1 for k in out if k not in ("settings", "n_variables"))
     return out
 
@@ -129,8 +132,12 @@ def compare(
     if ma["entry"] != mb["entry"]:
         raise SystemExit(f"runs of different entry points: {ma['entry']} vs {mb['entry']}")
     entry = ma["entry"]
-    cache = LabelCache(cache_path(Path(ma["data_dir"]), ma.get("judge_model", "claude-sonnet-5-5")))
-    labels = {"a": row_labels(entry, rows_a, cache), "b": row_labels(entry, rows_b, cache)}
+    labels = {
+        side: row_labels(
+            entry, rows, LabelCache(cache_path(Path(meta["data_dir"]), meta.get("judge_model", PRIMARY_MODEL)))
+        )
+        for side, meta, rows in (("a", ma, rows_a), ("b", mb, rows_b))
+    }
     shared, every, full = _paired(entry, rows_a, rows_b, labels, keys)
     rep: dict[str, Any] = {
         "entry": entry,
@@ -162,7 +169,7 @@ def compare(
     m["latency_ms"] = _latency([x[lat_field] for x, _ in every], [y[lat_field] for _, y in every])
     rep["prod"] = m
     gold = _gold_pairs(entry, rows_a, rows_b, keys)
-    gm = ("served", "top10", "rr") if entry == "recall" else ("gic", "rr")
+    gm = ("served", "top10", "rr", "served_summary") if entry == "recall" else ("gic", "rr")
     rep["gold"] = {
         t: {"n": len(ps), **{f: _delta([(x[f], y[f]) for x, y in ps]) for f in gm}} for t, ps in gold.items()
     }
@@ -224,9 +231,15 @@ def win_condition(
         "ci_ms": p95["ci"],
         "max_growth": max_p95_regression,
     }
-    decided = [c["pass"] for c in checks.values() if c["pass"] is not None]
+    # Nothing measured is not a pass: plan lesson 1 measures gold on every arm, and a precision
+    # claim needs judged queries.
+    missing = [name for name, c in checks.items() if c["pass"] is None]
+    if not prec:
+        missing.append("no query fully judged in both runs")
+    reasons = [f"not measured: {x}" for x in missing] + [n for n, c in checks.items() if c["pass"] is False]
     return {
         "checks": checks,
-        "win": bool(decided) and all(decided),
+        "win": not reasons,
+        "why_not": reasons,
         "one_variable": rep["differences"]["n_variables"] == 1,
     }

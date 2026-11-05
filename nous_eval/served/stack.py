@@ -9,8 +9,10 @@ when their flags are on, Brain, the agent tools and the ContextEngine.
 Read-path writes that would make results depend on query order are held off identically for
 every arm: fact access tracking (recall_count UPDATEs, which also add HNSW tuples and drift later
 approximate searches) and the keyed leg's own tracking. The date-window parser is wrapped by a
-store shared across runs, keyed (as-of date, query, model): the parse a query gets is fixed once
-and every later run reuses it, so latency excludes the parse and arms see the same windows.
+store shared across runs, keyed (as-of date, query, model) and holding the unpadded window: the
+parse a query gets is fixed once and every later run reuses it, so latency excludes the parse
+and arms see the same windows. Two formatters are observed, not changed: recall_deep's (the
+order the model reads its items) and the pre-turn procedure renderers (the text a procedure got).
 """
 
 from __future__ import annotations
@@ -82,10 +84,14 @@ class EmbedDiskCache:
 class CachedDateParser:
     """Stands in for ``heart.date_window_parser``: the code's own gate, then a persistent window
     store keyed (as-of date, query, model). A miss parses once (the pinned code's LLM parse, up to
-    three tries on a transient failure) against the query's as-of date, not today."""
+    three tries on a transient failure) against the query's as-of date, not today.
 
-    def __init__(self, inner: Any, path: Path, as_of: dict[str, datetime.date], model: str) -> None:
-        self.inner, self.path, self.as_of, self.model = inner, path, as_of, model
+    The store holds the UNPADDED window: ``inner`` must parse with ``date_leg_pad_days`` 0, and
+    each run applies its own ``pad_days`` on the way out, so an arm that changes the padding is
+    not served another arm's padded window."""
+
+    def __init__(self, inner: Any, path: Path, as_of: dict[str, datetime.date], model: str, pad_days: int) -> None:
+        self.inner, self.path, self.as_of, self.model, self.pad_days = inner, path, as_of, model, pad_days
         self.store = {d["sk"]: d for d in read_jsonl(path)}
         self.last: dict[str, Any] | None = None
 
@@ -105,10 +111,16 @@ class CachedDateParser:
         if rec is None:
             rec = await self._fetch(query, day, sk)
         if rec["window"]:
-            self.last["window"] = rec["window"]
-            return DateWindow(
-                start=datetime.date.fromisoformat(rec["window"][0]), end=datetime.date.fromisoformat(rec["window"][1])
-            )
+            pad = datetime.timedelta(days=self.pad_days)
+            try:
+                w = DateWindow(
+                    start=datetime.date.fromisoformat(rec["window"][0]) - pad,
+                    end=datetime.date.fromisoformat(rec["window"][1]) + pad,
+                )
+            except OverflowError:  # as DateWindowParser: a confirmed but unusable window
+                return None
+            self.last["window"] = [w.start.isoformat(), w.end.isoformat()]
+            return w
         return None
 
     async def prefill(self, queries: list[str]) -> dict[str, int]:
@@ -166,9 +178,74 @@ class Stack:
     leaf_start: dict
     leaf_seen: dict
     date_parser: CachedDateParser | None
+    embeddings: Any = None
     ce_calls: list = field(default_factory=list)
     intent_leg_hits: list = field(default_factory=list)
-    ce_env: dict = field(default_factory=dict)
+    render_orders: list = field(default_factory=list)  # one per recall_deep call: [(type, id), ...] as read
+    procedure_text: dict = field(default_factory=dict)  # procedure id -> the text the pre-turn build rendered
+
+
+def embedding_cache_size(provider: Any) -> int | None:
+    """Entries in the provider's in-memory cache (it only grows: capacity is raised to 1M), so the
+    growth over a phase counts the embedding API requests made in it; None for a test double."""
+    cache = getattr(provider, "_cache", None)
+    return len(cache) if cache is not None else None
+
+
+def render_order(results: list, emitted: list, parent_episodes: list | None) -> list[tuple[str, str]]:
+    """The order the model reads ``recall_deep``'s items, from what ``_format_pipeline_text``
+    reported emitting: Heart Memory (session-grouped and date-ordered as rendered), Graph-Connected
+    and Brain Decisions, then the Parent Episode Context section, then the stored-examples block.
+    A row emitted twice (a decision in two sections) keeps its first place."""
+    exemplar = {
+        (str(r.id), r.type) for r in results if (getattr(r, "metadata", None) or {}).get("retrieval_leg") == "exemplar"
+    }
+    keys = [(str(i), t) for i, t in emitted]
+    order = [k for k in keys if k not in exemplar]
+    order += [(str(ep_id), "episode") for ep_id, _ in (parent_episodes or ())]
+    order += [k for k in keys if k in exemplar]
+    return [(t, i) for i, t in dict.fromkeys(order)]
+
+
+def _capture_render_order(sink: list) -> Any:
+    """Wrap ``nous.api.tools._format_pipeline_text`` (the recall_deep closure looks it up by name
+    at call time) so every call records its read order in ``sink``."""
+    import nous.api.tools as tools_mod
+
+    orig = tools_mod._format_pipeline_text
+
+    def wrapped(*a: Any, **kw: Any) -> str:
+        emitted = kw.get("emitted_out")
+        if emitted is None:
+            emitted = kw["emitted_out"] = []
+        text = orig(*a, **kw)
+        parents = kw.get("parent_episodes", a[3] if len(a) > 3 else None)
+        sink.append(render_order(a[0] if a else kw["results"], emitted, parents))
+        return text
+
+    tools_mod._format_pipeline_text = wrapped
+    return orig
+
+
+def _capture_procedure_text(stack: Stack) -> None:
+    """Record the text each rendered procedure got: its body block (Recommended Procedures) or its
+    catalog line (Known Procedures). ``recalled_content_map`` holds only the name."""
+    ctx = stack.ctx
+    orig_bodies, orig_lines = ctx._format_procedure_bodies, ctx._format_procedures
+
+    def bodies(details: list, per_item_cap: int) -> list[str]:
+        blocks = orig_bodies(details, per_item_cap)
+        for p, block in zip(details, blocks, strict=False):
+            stack.procedure_text[str(getattr(p, "id", ""))] = block
+        return blocks
+
+    def lines(procedures: list) -> str:
+        for p in procedures:
+            stack.procedure_text[str(getattr(p, "id", ""))] = orig_lines([p])
+        return orig_lines(procedures)
+
+    ctx._format_procedure_bodies = bodies
+    ctx._format_procedures = lines
 
 
 def make_embeddings(settings: Any) -> Any:
@@ -247,6 +324,7 @@ async def open_stack(
 ):
     """Yield a Stack bound to ``settings``; ``embeddings``/``llm`` are injectable for tests;
     ``migrate=False`` skips applying pending migrations (a test database migrated by hand)."""
+    import nous.api.tools as tools_mod
     import nous.heart.heart as hh
     import nous.heart.search as search_mod
     from nous.api.tools import create_nous_tools
@@ -273,7 +351,9 @@ async def open_stack(
     db = Database(settings)
     await db.connect()
     ce_calls: list = []
+    render_orders: list = []
     orig_ce = hh.cross_encoder_rerank
+    orig_format = tools_mod._format_pipeline_text
     leaf_seen: dict = {n[len("_resolve_") :]: defaultdict(int) for n in _LEAF_RESOLVERS}
     originals: dict = {}
     recorder = RetrievalLogger(candidate_sample_rate=1.0, snippet_chars=snippet_chars, max_candidates=2000, ring_size=4)
@@ -281,6 +361,7 @@ async def open_stack(
     env.__enter__()
     try:
         _install_ce_timer(ce_calls)
+        _capture_render_order(render_orders)
         runtime = await load_runtime_config(db, settings, pinned)
         leaf_start = {n[len("_resolve_") :]: getattr(search_mod, n)() for n in _LEAF_RESOLVERS}
         eff = runtime["effective"]
@@ -303,7 +384,11 @@ async def open_stack(
             from nous.heart.date_window import DateWindowParser
 
             date_parser = CachedDateParser(
-                DateWindowParser(llm, settings), data_dir / "date_windows.jsonl", as_of, settings.date_leg_model
+                DateWindowParser(llm, settings.model_copy(update={"date_leg_pad_days": 0})),
+                data_dir / "date_windows_unpadded.jsonl",
+                as_of,
+                settings.date_leg_model,
+                settings.date_leg_pad_days,
             )
             heart.date_window_parser = date_parser
         _hold_read_writes(heart)
@@ -324,15 +409,19 @@ async def open_stack(
                 leaf_start=leaf_start,
                 leaf_seen=leaf_seen,
                 date_parser=date_parser,
+                embeddings=emb,
                 ce_calls=ce_calls,
+                render_orders=render_orders,
             )
             _hook_intent_leg(stack)
+            _capture_procedure_text(stack)
             yield stack
     finally:
         set_active(None)
         for name, fn in originals.items():
             setattr(search_mod, name, fn)
         hh.cross_encoder_rerank = orig_ce
+        tools_mod._format_pipeline_text = orig_format
         RuntimeConfig.reset()
         env.__exit__(None, None, None)
         cache.save(emb)

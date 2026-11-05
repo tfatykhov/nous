@@ -23,7 +23,7 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from nous_eval.served.judge import PRIMARY_MODEL, CostLedger, llm_json
+from nous_eval.served.judge import JUDGE_MAX_TOKENS, PRIMARY_MODEL, CostLedger, llm_json
 
 GEN_SYSTEM = "You write realistic chat messages for an evaluation. Reply with JSON only."
 _RULES = """Rules:
@@ -151,7 +151,10 @@ async def generate(
     stats: dict[str, int] = defaultdict(int)
     stats["sampled"] = len(rows)
     if gold_type == "fact":  # facts in context whatever the query cannot tell arms apart
-        prompts = [(await build_one(stack, p, str(uuid.uuid4()), turn_number=2))["system_prompt"] for p in PROBES]
+        prompts = [
+            (await build_one(stack, q, str(uuid.uuid4()), turn_number=2, first_turn=False))["system_prompt"]
+            for q in PROBES
+        ]
         kept = [r for r in rows if not all(r.content.strip()[:60] in p for p in prompts)]
         stats["always_in_context"] = len(rows) - len(kept)
         rows = kept
@@ -168,7 +171,7 @@ async def generate(
             GEN_SYSTEM,
             PROMPTS[gold_type].format(items=listing),
             model=PRIMARY_MODEL,
-            max_tokens=4000,
+            max_tokens=JUDGE_MAX_TOKENS,
             ledger=ledger,
             purpose=f"gold:{gold_type}",
             run=run,

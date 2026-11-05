@@ -2,9 +2,10 @@
 
 recall_deep (rows of set ``prod``, judged): precision of the rendered list (mean of per-query
 precision, and micro), relevant items in the top 10, P@10, MRR, items, rendered tokens (output
-characters / 4), wall latency p50/p95, precision per entry leg and per rank band (ranks are
-render positions). Rows of set
-``gold``: gold-in-served, gold-in-top-10 and reciprocal rank, per gold type.
+characters / 4), wall latency p50/p95, precision per entry leg and per rank band (ranks are the
+positions the model reads). Rows of set ``gold``: gold-in-served, gold-in-top-10 and reciprocal
+rank, per gold type; episode gold is served by its summary or by any chunk of it, and the
+summary-only rates are reported beside.
 
 Pre-turn (rows of set ``prod``, judged): micro precision overall and per item type (= section),
 items and relevant items per build, total and memory tokens, build latency. Rows of set
@@ -12,7 +13,8 @@ items and relevant items per build, total and memory tokens, build latency. Rows
 reciprocal rank among rendered items of its type, per gold type.
 
 Precision metrics use only rows whose every rendered item has a label; token and latency
-metrics use every row without an error.
+metrics use every row without an error. A row whose tool call returned an error (``is_error``,
+nothing rendered) is fully labelled by that rule and counts as precision 0.0 in the mean.
 """
 
 from __future__ import annotations
@@ -54,8 +56,8 @@ def row_labels(entry: str, rows: list[dict], cache: LabelCache) -> dict[str, lis
 
 
 def recall_row(row: dict, labs: list[bool | None]) -> dict[str, Any]:
-    """Ranks are render positions (1-based), what the model reads: the trace's final_rank has gaps
-    (ranked candidates that were not rendered) and is empty for rows appended after ranking."""
+    """Ranks are read positions (1-based): the runner stores ``rendered`` in the order the model
+    reads it (the formatter's sections and grouping), not in the pipeline's final_rank order."""
     ren = row["rendered"]
     ranks = list(range(1, len(ren) + 1))
     top = [x for r, x in zip(ranks, labs) if r <= 10]
@@ -99,14 +101,30 @@ def _gold_hit(row: dict) -> tuple[int | None, list[str]]:
 
 
 def recall_gold_row(row: dict) -> dict[str, Any]:
+    """Gold served, in the top 10, and its reciprocal read rank. An episode is served when its
+    summary or any chunk of it is rendered (``*_summary``: the summary alone, so the asymmetry
+    between an arm that keeps chunks and one that keeps summaries shows)."""
     g = row["gold"]
     gold = {f"{g['type']}:{i}" for i in g["ids"]}
-    keys = rendered_keys(row)
-    pos = next((i + 1 for i, k in enumerate(keys) if k in gold), None)
+    ids = set(g["ids"])
+    ren = row["rendered"]
+    pos_item = next((i + 1 for i, it in enumerate(ren) if it["k"] in gold), None)
+    pos_any = pos_item
+    if g["type"] == "episode":
+        pos_any = next(
+            (
+                i + 1
+                for i, it in enumerate(ren)
+                if it["k"] in gold or (it["k"].startswith("chunk:") and it.get("episode") in ids)
+            ),
+            None,
+        )
     return {
-        "served": float(pos is not None),
-        "top10": float(pos is not None and pos <= 10),
-        "rr": 1.0 / pos if pos else 0.0,
+        "served": float(pos_any is not None),
+        "top10": float(pos_any is not None and pos_any <= 10),
+        "rr": 1.0 / pos_any if pos_any else 0.0,
+        "served_summary": float(pos_item is not None),
+        "top10_summary": float(pos_item is not None and pos_item <= 10),
         "tokens": row["chars"] / 4.0,
         "ms": float(row["wall_ms"]),
     }
@@ -206,7 +224,7 @@ def summarize_recall(rows: list[dict], labels: dict[str, list], keys: set[str] |
     out["gold"] = _gold_summary(
         gold,
         recall_gold_row,
-        ("served", "top10", "rr"),
+        ("served", "top10", "rr", "served_summary", "top10_summary"),
         n_invalid=sum(1 for r in rows if r.get("set") == "gold" and not r["gold"].get("valid", True)),
     )
     return out

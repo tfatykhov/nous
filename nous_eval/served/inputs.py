@@ -25,6 +25,9 @@ from typing import Any
 from nous_eval.served.judge import read_jsonl
 
 GOLD_TYPES = ("fact", "episode", "decision")
+# Prompt kinds (session-id prefixes) whose turns run as subtasks (pre_turn is_subtask=True: the
+# subtask worker and executor, heartbeat checks), so pre_turn never treats them as a first turn.
+SUBTASK_KINDS = frozenset({"subtask", "dynamic", "heartbeat"})
 
 
 def gold_items(paths: list[Path], as_of: str) -> list[dict[str, Any]]:
@@ -83,10 +86,11 @@ def preturn_items(prompts: Path | None, gold: list[Path], as_of: str) -> list[di
                     "group": f"{p['kind']}:{p['group']}",
                     "complete": bool(p.get("recovered") or len(p["logged_query"]) < 500),
                     "turn_number": 1,
+                    "first_turn": p["kind"] not in SUBTASK_KINDS,  # turn 1 of a fresh session
                 }
             )
     for g in gold_items(gold, as_of):  # chat questions: a later turn of a fresh session (query-mode A/B)
-        g.update(session=str(uuid.uuid5(uuid.NAMESPACE_URL, f"served-{g['key']}")), turn_number=2)
+        g.update(session=str(uuid.uuid5(uuid.NAMESPACE_URL, f"served-{g['key']}")), turn_number=2, first_turn=False)
         items.append(g)
     return _unique(items)
 

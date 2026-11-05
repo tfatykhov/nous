@@ -1,7 +1,12 @@
 """recall_deep entry point: each input goes through the real ``recall_deep`` tool closure
-(``create_nous_tools``) with ``limit=10`` and no memory-type filter, as the agent calls it; what
-it rendered is read from the F091 retrieval trace (candidates with disposition ``rendered``,
-in final-rank order, each with its entry leg)."""
+(``create_nous_tools``) with ``limit=10`` and no memory-type filter, as the agent calls it.
+
+What it rendered is read from the F091 retrieval trace (candidates with disposition
+``rendered``, each with its entry leg), in the order the model READS them: the order the
+formatter reported emitting (``stack.render_order``), which follows its sections and its session
+grouping and date ordering, not the pipeline's ``final_rank`` (kept as its own field). Every call
+also checks that order against the ids the output text prints. A rendered chunk carries the id
+of its episode, so episode gold can count a chunk of the gold episode."""
 
 from __future__ import annotations
 
@@ -15,12 +20,64 @@ from typing import Any
 
 logger = logging.getLogger("nous_eval.served")
 SNIPPET_CHARS = 1200
+_ID_RE = re.compile(r"\(id: ([0-9a-fA-F-]{36})")
+
+
+def order_rendered(cands: list[dict], read_order: list[tuple[str, str]]) -> tuple[list[dict], int]:
+    """Rendered candidates in read order, ``rank`` = 1-based read position. A candidate the
+    formatter did not report (none expected) goes last, in final-rank order, and is counted."""
+    pos = {k: i for i, k in enumerate(read_order)}
+    placed = sorted(
+        (c for c in cands if (c["type"], str(c["id"])) in pos), key=lambda c: pos[(c["type"], str(c["id"]))]
+    )
+    unplaced = sorted(
+        (c for c in cands if (c["type"], str(c["id"])) not in pos),
+        key=lambda c: (c.get("final_rank") is None, c.get("final_rank") or 0),
+    )
+    out = [
+        {
+            "k": f"{c['type']}:{c['id']}",
+            "leg": c.get("entry_leg"),
+            "rank": i + 1,
+            "final_rank": c.get("final_rank"),
+            "score": c.get("entry_score"),
+        }
+        for i, c in enumerate(placed + unplaced)
+    ]
+    return out, len(unplaced)
+
+
+def text_order_agrees(text: str, read_order: list[tuple[str, str]]) -> bool:
+    """The ids the output prints as ``(id: ...)``, in text order, follow the read order."""
+    in_order = [i for _, i in read_order]
+    printed = [i for i in dict.fromkeys(_ID_RE.findall(text)) if i in set(in_order)]
+    return printed == [i for i in dict.fromkeys(in_order) if i in set(printed)]
+
+
+async def chunk_episodes(db: Any, chunk_ids: list[str]) -> dict[str, str]:
+    """chunk id -> its episode id (heart.episode_chunks)."""
+    if not chunk_ids:
+        return {}
+    from sqlalchemy import text
+
+    async with db.session() as s:
+        rows = (
+            await s.execute(
+                text(
+                    "SELECT id::text AS cid, episode_id::text AS eid FROM heart.episode_chunks "
+                    "WHERE id::text = ANY(:ids)"
+                ),
+                {"ids": chunk_ids},
+            )
+        ).all()
+    return {r.cid: r.eid for r in rows}
 
 
 async def one_call(stack: Any, query: str) -> dict[str, Any]:
     rl = stack.recorder
     rl._entries.clear()
     stack.ce_calls.clear()
+    stack.render_orders.clear()
     if stack.date_parser is not None:
         stack.date_parser.last = None
     t0 = time.perf_counter()
@@ -30,8 +87,13 @@ async def one_call(stack: Any, query: str) -> dict[str, Any]:
     tr = rl._entries[-1] if rl._entries else None
     if tr is None:
         return {"error": "no retrieval trace", "is_error": bool(res.get("is_error"))}
-    rendered = [c for c in (tr.get("candidates") or []) if c.get("disposition") == "rendered"]
-    rendered.sort(key=lambda c: (c.get("final_rank") is None, c.get("final_rank") or 0))
+    read_order = stack.render_orders[-1] if stack.render_orders else []
+    cands = [c for c in (tr.get("candidates") or []) if c.get("disposition") == "rendered"]
+    rendered, unplaced = order_rendered(cands, read_order)
+    episodes = await chunk_episodes(stack.db, [str(c["id"]) for c in cands if c["type"] == "chunk"])
+    for it in rendered:
+        if it["k"].startswith("chunk:"):
+            it["episode"] = episodes.get(it["k"].split(":", 1)[1])
     legs = {
         lg["name"]: {k: lg.get(k) for k in ("attempted", "n_returned", "n_dropped", "skip_reason", "error")}
         for lg in tr.get("legs", [])
@@ -44,16 +106,10 @@ async def one_call(stack: Any, query: str) -> dict[str, Any]:
         "text_sha": hashlib.sha1(text_out.encode("utf-8")).hexdigest()[:16],
         "truncated": tr.get("truncated"),
         "n_candidates": tr.get("n_candidates"),
-        "rendered": [
-            {
-                "k": f"{c['type']}:{c['id']}",
-                "leg": c.get("entry_leg"),
-                "rank": c.get("final_rank"),
-                "score": c.get("entry_score"),
-            }
-            for c in rendered
-        ],
-        "contents": {f"{c['type']}:{c['id']}": (c.get("snippet") or "") for c in rendered},
+        "rendered": rendered,
+        "unplaced": unplaced,
+        "read_order_matches_text": text_order_agrees(text_out, read_order),
+        "contents": {f"{c['type']}:{c['id']}": (c.get("snippet") or "") for c in cands},
         "legs": legs,
         "leg_errors": {n: lg["error"] for n, lg in legs.items() if lg.get("error")},
         "date": stack.date_parser.last if stack.date_parser is not None else None,
@@ -62,16 +118,20 @@ async def one_call(stack: Any, query: str) -> dict[str, Any]:
 
 
 async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> dict[str, Any]:
-    """Fill the date-window store for every input, warm up on the first ``warm`` inputs (results
-    discarded: buffers, embedding cache, the cross-encoder load), then one call per input; one
-    row per input in ``rows_path``."""
+    """Fill the date-window store for every input, then a warm pass (results discarded) over the
+    first ``warm`` inputs, every input when ``warm`` < 0: it embeds every query and loads the
+    cross-encoder, so no measured call pays for a cache miss whichever arm ran first. Then one
+    measured call per input, one row per input in ``rows_path``."""
+    from nous_eval.served.stack import embedding_cache_size
+
     prefill = await stack.date_parser.prefill([it["text"] for it in items]) if stack.date_parser else None
-    for it in items[:warm]:
+    for it in items if warm < 0 else items[:warm]:
         try:
             await one_call(stack, it["text"])
         except Exception:  # noqa: BLE001 - a warm-up failure shows up again in the measured call
             pass
     n_err = 0
+    before = embedding_cache_size(stack.embeddings)
     with rows_path.open("w", encoding="utf-8") as f:
         for i, it in enumerate(items):
             try:
@@ -86,7 +146,13 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
             if (i + 1) % 25 == 0:
                 f.flush()
                 logger.info("recall %d/%d", i + 1, len(items))
-    return {"n": len(items), "errors": n_err, "date_prefill": prefill}
+    after = embedding_cache_size(stack.embeddings)
+    return {
+        "n": len(items),
+        "errors": n_err,
+        "date_prefill": prefill,
+        "embeddings_added_while_measuring": None if before is None else after - before,
+    }
 
 
 def _kind(session_id: str) -> str:

@@ -253,6 +253,15 @@ def test_preturn_items_from_prompts_file(tmp_path: Path) -> None:
                         "full_text": "full text",
                         "recovered": True,
                     },
+                    {
+                        "kind": "dag",
+                        "group": "i",
+                        "group_rows": 1,
+                        "session_id": "dag-summary-z",
+                        "logged_query": "summarise the run",
+                        "full_text": None,
+                        "recovered": False,
+                    },
                 ]
             }
         ),
@@ -263,9 +272,12 @@ def test_preturn_items_from_prompts_file(tmp_path: Path) -> None:
     assert [(i["key"], i["text"], i["turn_number"]) for i in items] == [
         ("B000", "short", 1),
         ("B001", "full text", 1),
+        ("B002", "summarise the run", 1),
         ("gd-D000", "why did we pick it", 2),
     ]
     assert items[0]["complete"] and items[1]["complete"]
+    # pre_turn's first turn: turn 1 of a session that does not run as a subtask
+    assert [i["first_turn"] for i in items] == [False, False, True, False]
 
 
 def test_check_code_refuses_split_roots_other_roots_and_dirty() -> None:
@@ -292,17 +304,67 @@ def test_reexec_strips_code_and_child_env_hides_nous_vars(monkeypatch: pytest.Mo
     env = pin.child_env(tmp_path)
     assert "NOUS_RRF_K" not in env and "DB_NAME" not in env and env["PYTHONPATH"] == str(tmp_path)
     assert env["PYTHONHASHSEED"] == "0"
+    seen = {}
+
+    def fake_run(cmd, cwd, env):
+        seen.update(cmd=cmd, cwd=cwd)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(pin.subprocess, "run", fake_run)
+    assert pin.reexec(tmp_path, ["recall", "run"], cwd=tmp_path / "start") == 0
+    # -P: the working directory never shadows the pinned root on sys.path
+    assert seen["cmd"][1:4] == ["-P", "-m", "nous_eval.served"] and seen["cwd"] == str(tmp_path / "start")
 
 
-def test_database_guards() -> None:
-    assert db.clone_name("recall_Base-1") == "nous_eval_served_recall_base_1"
+def test_path_arguments_resolve_against_the_starting_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    args = cli.parse_args(
+        [
+            "recall",
+            "run",
+            "--data-dir",
+            "d",
+            "--tag",
+            "t",
+            "--queries",
+            "d/q.jsonl",
+            "--base",
+            "b.json",
+            "--gold",
+            "g.jsonl",
+            "--db-name",
+            "nous_eval_x",
+        ]
+    )
+    cli._absolutize(args)
+    assert args.data_dir == tmp_path / "d" and args.queries == tmp_path / "d" / "q.jsonl"
+    assert args.base == [tmp_path / "b.json"] and args.gold == [tmp_path / "g.jsonl"]
+    assert args.warm == -1  # every input is warmed by default
+
+
+async def test_database_guards() -> None:
+    assert db.clone_name("recall_Base-1") == "nous_eval_served_run_recall_base_1"
     for ok in ("nous_eval_x", "nous_test_p0", "beam_1"):
         assert db.check_scratch(ok) == ok
-    for bad in ("nous", "nous_prod_20261105", "postgres"):
+    assert db.check_scratch("nous", any_scratch_name=True) == "nous"  # CI's test database
+    for bad in ("nous", "postgres"):
         with pytest.raises(SystemExit):
             db.check_scratch(bad)
+    # a prod copy, a served template or another run's clone: refused whatever the flag says
+    for bad in ("nous_prod_x", "nous_eval_served_tpl_x", "nous_eval_served_run_x"):
+        for flag in (False, True):
+            with pytest.raises(SystemExit):
+                db.check_scratch(bad, any_scratch_name=flag)
     with pytest.raises(SystemExit):
         db.check_ident('x"; DROP DATABASE y; --')
+    conn = {"db_user": "u", "db_password": "p", "db_host": "h", "db_port": 1}
+    for name, created in (
+        ("nous_eval_served_tpl_x", None),
+        ("nous_eval_served_run_a", "nous_eval_served_run_b"),
+        ("nous_eval_served_tpl_x", "nous_eval_served_tpl_x"),
+    ):
+        with pytest.raises(SystemExit, match="not the clone this run created"):
+            await db.drop_clone(conn, name, created=created)
 
 
 # ---------------------------------------------------------------------------
@@ -407,10 +469,10 @@ async def test_judge_units_batches_by_the_entry_points_chunk_size(tmp_path: Path
         run="r",
         min_interval_s=0.0,
     )
-    assert counts["jobs"] == 2 and [p["max_tokens"] for p in client.calls] == [4000, 4000]  # 25 + 5
-    assert client.calls[0]["temperature"] == 0.0 and client.calls[0]["system"][0]["text"].startswith(
-        "You are Claude Code"
-    )
+    assert counts["jobs"] == 2 and [p["max_tokens"] for p in client.calls] == [judge.JUDGE_MAX_TOKENS] * 2  # 25 + 5
+    # no sampling parameter: the current API version rejects it, and thinking models ignore it
+    assert set(client.calls[0]) == {"model", "system", "messages", "max_tokens"}
+    assert client.calls[0]["system"][0]["text"].startswith("You are Claude Code")
     assert judge.CostLedger(tmp_path / "l.jsonl").summary()["usd_total"] == pytest.approx(
         2 * (1000 * 2 + 100 * 10) / 1e6
     )
@@ -474,7 +536,15 @@ def test_gold_rows() -> None:
         set="gold",
         gold={"type": "fact", "ids": ["7"], "valid": True},
     )
-    assert score.recall_gold_row(row) == {"served": 1.0, "top10": 1.0, "rr": 0.5, "tokens": 100.0, "ms": 100.0}
+    assert score.recall_gold_row(row) == {
+        "served": 1.0,
+        "top10": 1.0,
+        "rr": 0.5,
+        "served_summary": 1.0,
+        "top10_summary": 1.0,
+        "tokens": 100.0,
+        "ms": 100.0,
+    }
     pre = {
         "key": "gd-D1",
         "set": "gold",
@@ -827,6 +897,14 @@ async def test_offline_smoke_both_entry_points(tmp_path: Path, db, monkeypatch: 
         larkspur = next(r for r in recall_rows if r["key"] == "Q000")
         assert any(k == f"fact:{ids['fact']}" for k in judge.rendered_keys(larkspur))
         assert all(it["leg"] for it in larkspur["rendered"])
+        # the read order came from the formatter and agrees with the ids the output printed
+        assert all(r["read_order_matches_text"] and r["unplaced"] == 0 for r in recall_rows)
+        assert [it["rank"] for it in larkspur["rendered"]] == list(range(1, len(larkspur["rendered"]) + 1))
+        preturn_rows = judge.read_jsonl(data / "runs" / "preturn" / "a" / "rows.jsonl")
+        assert {r["key"]: r["first_turn"] for r in preturn_rows if r["set"] == "prod"} == {"B000": False}
+        for entry in ("recall", "preturn"):
+            run = json.loads((data / "runs" / entry / "a" / "meta.json").read_text(encoding="utf-8"))["run"]
+            assert run["embeddings_added_while_measuring"] is None  # the mock embedder has no cache
     finally:
         leftover = await _purge_agent(db, agent)
     assert leftover == []
@@ -839,3 +917,215 @@ def test_label_cache_appends_whole_lines_and_keeps_the_first_label(tmp_path: Pat
     lines = (tmp_path / "judge" / "m.jsonl").read_text(encoding="utf-8").splitlines()
     assert [json.loads(x)["k"] for x in lines] == ["k1", "k2", "k3"]
     assert judge.LabelCache(cache.path).labels == {"k1": True, "k2": False, "k3": True}
+
+
+def test_episode_gold_is_served_by_a_chunk_of_the_episode() -> None:
+    row = _recall_row(
+        "ge-A1",
+        "q",
+        [("fact:1", "heart_primary", "c"), ("chunk:c9", "chunk", "c"), ("chunk:c7", "chunk", "c")],
+        set="gold",
+        gold={"type": "episode", "ids": ["e5"], "valid": True},
+    )
+    row["rendered"][1]["episode"] = "e4"
+    row["rendered"][2]["episode"] = "e5"
+    m = score.recall_gold_row(row)
+    assert (m["served"], m["rr"], m["served_summary"]) == (1.0, pytest.approx(1 / 3), 0.0)
+    row["rendered"].append({"k": "episode:e5", "leg": "heart_primary", "rank": 4})
+    m = score.recall_gold_row(row)
+    assert (m["served"], m["rr"], m["served_summary"], m["top10_summary"]) == (1.0, pytest.approx(1 / 3), 1.0, 1.0)
+    # a fact gold is never served by a chunk
+    row["gold"] = {"type": "fact", "ids": ["c7"], "valid": True}
+    assert score.recall_gold_row(row)["served"] == 0.0
+
+
+def _result(rid: str, rtype: str, **meta) -> SimpleNamespace:
+    return SimpleNamespace(id=rid, type=rtype, metadata=meta)
+
+
+def test_read_order_follows_the_formatters_sections_not_final_rank() -> None:
+    """A decision ranked 2nd by the pipeline is read after the Heart Memory section; a parent
+    episode comes after the decisions; an exemplar row comes last."""
+    from nous_eval.served import recall
+    from nous_eval.served.stack import render_order
+
+    results = [
+        _result("d1", "decision"),
+        _result("f1", "fact"),
+        _result("f2", "fact"),
+        _result("x1", "fact", retrieval_leg="exemplar"),
+    ]
+    emitted = [("f2", "fact"), ("f1", "fact"), ("d1", "decision"), ("d1", "decision"), ("x1", "fact")]
+    order = render_order(results, emitted, [("p1", "parent summary")])
+    assert order == [("fact", "f2"), ("fact", "f1"), ("decision", "d1"), ("episode", "p1"), ("fact", "x1")]
+    cands = [
+        {"type": "decision", "id": "d1", "final_rank": 1, "entry_leg": "brain"},
+        {"type": "fact", "id": "f1", "final_rank": 2, "entry_leg": "heart_primary"},
+        {"type": "fact", "id": "f2", "final_rank": 3, "entry_leg": "heart_primary"},
+        {"type": "episode", "id": "p1", "final_rank": None, "entry_leg": "parent_episode"},
+        {"type": "fact", "id": "x1", "final_rank": 4, "entry_leg": "heart_primary"},
+        {"type": "fact", "id": "zz", "final_rank": 5, "entry_leg": "keyed"},
+    ]
+    rendered, unplaced = recall.order_rendered(cands, order)
+    assert [(it["k"], it["rank"], it["final_rank"]) for it in rendered] == [
+        ("fact:f2", 1, 3),
+        ("fact:f1", 2, 2),
+        ("decision:d1", 3, 1),
+        ("episode:p1", 4, None),
+        ("fact:x1", 5, 4),
+        ("fact:zz", 6, 5),
+    ]
+    assert unplaced == 1
+    uid = ["00000000-0000-0000-0000-00000000000" + str(i) for i in range(3)]
+    text = f"1. [fact] b (id: {uid[1]}, score: 1)\n2. [fact] a (id: {uid[0]}, score: 1)\n1. dec (id: {uid[2]})"
+    assert recall.text_order_agrees(text, [("fact", uid[1]), ("fact", uid[0]), ("decision", uid[2])])
+    assert not recall.text_order_agrees(text, [("fact", uid[0]), ("fact", uid[1]), ("decision", uid[2])])
+
+
+def test_capture_render_order_wraps_the_formatter_and_restores_nothing_else(monkeypatch: pytest.MonkeyPatch) -> None:
+    import nous.api.tools as tools_mod
+    from nous_eval.served.stack import _capture_render_order
+
+    def fake_format(results, stats, search_types, parent_episodes=None, emitted_out=None, **kw):
+        for r in reversed(results):  # a formatter whose order is not the input order
+            emitted_out.append((r.id, r.type))
+        return "text"
+
+    monkeypatch.setattr(tools_mod, "_format_pipeline_text", fake_format)
+    sink: list = []
+    orig = _capture_render_order(sink)
+    assert orig is fake_format
+    out = tools_mod._format_pipeline_text(
+        [_result("a", "fact"), _result("b", "chunk")],
+        None,
+        ["all"],
+        parent_episodes=[("e1", "s")],
+        session_group_heart=True,
+    )
+    assert out == "text" and sink == [[("chunk", "b"), ("fact", "a"), ("episode", "e1")]]
+
+
+def test_procedure_text_is_the_rendered_block() -> None:
+    from nous_eval.served.stack import _capture_procedure_text
+
+    class Ctx:
+        def _format_procedure_bodies(self, details, per_item_cap):
+            return [f"### {p.name}\n\n{p.body}" for p in details]
+
+        def _format_procedures(self, procedures):
+            return "\n".join(f"- **{p.name}**: {p.body}" for p in procedures)
+
+    stack = SimpleNamespace(ctx=Ctx(), procedure_text={})
+    _capture_procedure_text(stack)
+    procs = [
+        SimpleNamespace(id="p1", name="deploy", body="run the steps"),
+        SimpleNamespace(id="p2", name="b", body="x"),
+    ]
+    assert stack.ctx._format_procedure_bodies(procs, 100)[0] == "### deploy\n\nrun the steps"
+    assert stack.procedure_text["p1"] == "### deploy\n\nrun the steps"
+    stack.ctx._format_procedures(procs)
+    assert stack.procedure_text["p2"] == "- **b**: x"
+
+
+async def test_date_store_holds_the_unpadded_window_and_each_arm_pads_its_own(tmp_path: Path) -> None:
+    import datetime
+
+    from nous.heart.date_window import DateWindow
+    from nous_eval.served.stack import CachedDateParser
+
+    class Inner:
+        calls = 0
+
+        async def _parse_llm(self, query, day):
+            Inner.calls += 1
+            return True, DateWindow(start=datetime.date(2026, 10, 5), end=datetime.date(2026, 10, 11))
+
+    q = "what did we change last week"
+    as_of = {q: datetime.date(2026, 10, 14)}
+    path = tmp_path / "w.jsonl"
+    two = CachedDateParser(Inner(), path, as_of, "m", pad_days=2)
+    w2 = await two.parse(q, datetime.date(2030, 1, 1))
+    assert (w2.start, w2.end) == (datetime.date(2026, 10, 3), datetime.date(2026, 10, 13))
+    zero = CachedDateParser(Inner(), path, as_of, "m", pad_days=0)  # a later arm, same store file
+    w0 = await zero.parse(q, datetime.date(2030, 1, 1))
+    assert (w0.start, w0.end) == (datetime.date(2026, 10, 5), datetime.date(2026, 10, 11)) and Inner.calls == 1
+    assert json.loads(path.read_text(encoding="utf-8"))["window"] == ["2026-10-05", "2026-10-11"]
+
+
+class _CachingEmbedder:
+    """Caches like EmbeddingProvider: one entry per distinct text, kept in ``_cache``."""
+
+    def __init__(self, cache: dict | None = None) -> None:
+        self._cache = cache if cache is not None else {}
+
+    async def embed(self, text: str) -> list[float]:
+        self._cache.setdefault(text, [1.0])
+        return self._cache[text]
+
+
+@pytest.mark.parametrize("prefilled", [False, True])
+async def test_measured_calls_hit_a_warm_cache_whichever_run_came_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prefilled: bool
+) -> None:
+    """A/A by construction: after the default warm pass, the measured pass makes no embedding
+    request, whether this run found the shared cache empty (first arm) or full (a later arm)."""
+    from nous_eval.served import recall
+
+    items = [{"key": f"Q{i}", "set": "prod", "text": f"query {i}"} for i in range(30)]
+    emb = _CachingEmbedder({it["text"]: [1.0] for it in items} if prefilled else None)
+    stack = SimpleNamespace(embeddings=emb, date_parser=None)
+
+    async def fake_call(stack, query):
+        await stack.embeddings.embed(query)
+        return {"wall_ms": 1.0, "chars": 4, "rendered": [], "contents": {}}
+
+    monkeypatch.setattr(recall, "one_call", fake_call)
+    stats = await recall.run(stack, items, tmp_path / "rows.jsonl", warm=-1)
+    assert stats["embeddings_added_while_measuring"] == 0
+    cold = await recall.run(
+        SimpleNamespace(embeddings=_CachingEmbedder(), date_parser=None), items, tmp_path / "rows2.jsonl", warm=10
+    )
+    assert cold["embeddings_added_while_measuring"] == 20  # what a partial warm-up left to the measured pass
+
+
+def test_compare_reads_each_runs_labels_from_its_own_data_dir(tmp_path: Path) -> None:
+    rows = _arm_rows(12)
+    da, dbb = tmp_path / "a", tmp_path / "b"
+    for d in (da, dbb):
+        _label_all(d, "recall", rows, {"good", "gold"})
+    rows_b = [dict(r, contents={k: v + " (b)" for k, v in r["contents"].items()}) for r in rows]
+    _label_all(dbb, "recall", rows_b, {"good", "gold"})
+    rep = compare.compare(_write_run(da, "a", rows), _write_run(dbb, "b", rows_b), gold_loss_tolerance=0.0)
+    assert rep["n_judged_both"] == 20 and rep["prod"]["prec"]["delta"] == 0.0
+
+
+def test_one_runtime_setting_change_is_one_variable(tmp_path: Path) -> None:
+    rows = _arm_rows(12)
+    _label_all(tmp_path, "recall", rows, {"good", "gold"})
+    a = _write_run(tmp_path, "a", rows, settings_rec={"rrf_k": {"value": 30, "source": "base"}})
+    b = _write_run(tmp_path, "b", rows, settings_rec={"rrf_k": {"value": 20, "source": "arm"}})
+    for d, k, wins in ((a, 30, []), (b, 20, ["rrf_k"])):
+        meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+        meta["runtime_config"] = {
+            "db_overrides": {"rrf_k": 30},
+            "arm_wins": wins,
+            "effective": {"rrf_k": k, "vector_weight": 0.5},
+        }
+        (d / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    diff = compare.differences(*(json.loads((d / "meta.json").read_text(encoding="utf-8")) for d in (a, b)))
+    assert diff["n_variables"] == 1 and list(diff["settings"]) == ["rrf_k"]
+
+
+def test_win_is_false_when_gold_or_judged_rows_are_missing(tmp_path: Path) -> None:
+    rows = [r for r in _arm_rows(12) if r["set"] == "prod"]  # no gold rows
+    cheaper = [dict(r, chars=r["chars"] // 2) for r in rows]  # tokens improve, nothing else changes
+    _label_all(tmp_path, "recall", rows, {"good"})
+    rep = compare.compare(_write_run(tmp_path, "a", rows), _write_run(tmp_path, "b", cheaper), gold_loss_tolerance=0.0)
+    assert rep["win"]["checks"]["precision_or_tokens_improve"]["pass"] is True
+    assert rep["win"]["win"] is False and "not measured: gold_non_inferior" in rep["win"]["why_not"]
+    unjudged = tmp_path / "u"
+    rep = compare.compare(
+        _write_run(unjudged, "a", _arm_rows(12)), _write_run(unjudged, "b", _arm_rows(10)), gold_loss_tolerance=1.0
+    )
+    assert rep["n_judged_both"] == 0 and rep["win"]["win"] is False
+    assert "not measured: no query fully judged in both runs" in rep["win"]["why_not"]
