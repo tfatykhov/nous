@@ -1340,6 +1340,13 @@ async def create_components(settings: Settings) -> dict:
                 registry.register(drift_check)
                 logger.info("F035.3: BehaviorDriftCheck registered (interval=%ds)", drift_check.interval)
 
+            # Precision plan P4: memory write health (dashboard-only findings)
+            if settings.memory_write_health_enabled:
+                from nous.heartbeat.memory_write_health_check import MemoryWriteHealthCheck
+
+                registry.register(MemoryWriteHealthCheck(database, settings.agent_id))
+                logger.info("P4: MemoryWriteHealthCheck registered")
+
             # F034.5: Create dynamic check loader
             from nous.heartbeat import check_guard
             from nous.heartbeat.dynamic import DynamicCheckLoader

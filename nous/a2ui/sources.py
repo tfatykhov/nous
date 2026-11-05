@@ -744,7 +744,9 @@ def build_default_registry(
     if heartbeat_runner is not None and getattr(heartbeat_runner, "finding_store", None):
 
         async def heartbeat_findings(params: dict) -> list[dict]:
-            items = heartbeat_runner.finding_store.get_digest_items()
+            # A check with chat_delivery=False (the memory write-health check) is for the owner's dashboard only:
+            # its findings are not handed to the model, which composes cards from this source.
+            items = [t for t in heartbeat_runner.finding_store.get_digest_items() if t.finding.chat_delivery]
             return [
                 {
                     "fingerprint": t.fingerprint,
