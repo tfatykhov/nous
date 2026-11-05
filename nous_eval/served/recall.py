@@ -109,7 +109,8 @@ def item_texts(cap: dict, text_out: str) -> tuple[dict[str, str], dict[str, Any]
     (id: ..., score ...) trailer), so the same item shown elsewhere keeps its label. A parent
     episode's text is its summary, checked present in the output. A row emitted twice (a decision
     in two sections) keeps its first, where it is read. A call that emitted nothing (an empty
-    result, "No results found.") is checked on the formatter's returned text. Checks:
+    result, "No results found.") is checked on the formatter's returned text, which must then print
+    no item (no "(id: "). Checks:
     ``text_unmatched`` (an item with no
     text: an element of an unexpected shape, a parent line not found, or no elements captured) and
     ``output_matches_capture`` (the elements joined, plus the tool's own changed-tools note when it
@@ -124,7 +125,9 @@ def item_texts(cap: dict, text_out: str) -> tuple[dict[str, str], dict[str, Any]
         for ep_id, summary in cap["parents"]:
             if formatted is not None and f"- ({ep_id[:8]}) {summary}" in formatted:
                 texts[f"episode:{ep_id}"] = summary
-        ok = None if formatted is None else _tool_text(formatted) == text_out
+        # The comparison alone only checks the tool's note on the formatter's own text; an empty
+        # result must also print no item, or the model read items the capture never saw.
+        ok = None if formatted is None else "(id: " not in formatted and _tool_text(formatted) == text_out
         return texts, {"text_unmatched": len(cap["parents"]) - len(texts), "output_matches_capture": ok}
     starts = set(at)
     texts: dict[str, str] = {}
