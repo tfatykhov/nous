@@ -152,7 +152,8 @@ entry leg (spreading rows arrive as `graph_expanded`) and per rank band (1-10, 1
 Ranks are the positions the model reads: the order the formatter reported emitting (Heart Memory
 as grouped by session and date, then Graph-Connected and Brain Decisions, Parent Episode Context,
 stored examples), not the pipeline's `final_rank` (kept beside). Each call checks that order against
-the ids its output printed (`read_order_matches_text`; None when the output printed no id).
+the ids its rows print in their own `(id: ...)` trailers, at the end of each row's line; an id an
+item's text quotes is not a row (`read_order_matches_text`; None when the output printed no id).
 
 The text the judge sees for a recall item is what the formatter wrote for it, taken from the
 formatter's own output elements (each emission notes the element it was written at): a decision's
