@@ -415,6 +415,29 @@ async def test_judge_units_batches_by_the_entry_points_chunk_size(tmp_path: Path
     )
 
 
+async def test_judge_sees_items_in_rank_blind_order(tmp_path: Path) -> None:
+    """Two arms ranking the same items differently produce the same judge calls: the calls must not
+    group a query's top items together (the judge grades items against their call-mates)."""
+    items = [(f"fact:{i}", "heart_primary", f"item number {i} about larkspur") for i in range(30)]
+    prompts = []
+    for order in (items, list(reversed(items))):
+        client = FakeJudgeClient()
+        await judge.judge_units(
+            "recall",
+            judge.units_for_rows("recall", [_recall_row("Q1", "larkspur", order)]),
+            model="m",
+            cache=judge.LabelCache(tmp_path / f"c{len(prompts)}.jsonl"),
+            client=client,
+            ledger=judge.CostLedger(tmp_path / "l.jsonl"),
+            run="r",
+            min_interval_s=0.0,
+        )
+        prompts.append(sorted(p["messages"][0]["content"] for p in client.calls))
+    assert prompts[0] == prompts[1]
+    first_call = re.findall(r"item number (\d+)", prompts[0][0] + prompts[0][1])
+    assert sorted(map(int, first_call)) == list(range(30)) and first_call[:5] != ["0", "1", "2", "3", "4"]
+
+
 # ---------------------------------------------------------------------------
 # scorer and compare
 # ---------------------------------------------------------------------------

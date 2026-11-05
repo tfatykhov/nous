@@ -288,5 +288,5 @@ def summarize(run_dir: Path, *, alt_model: str | None = None, keys: set[str] | N
             "alt_model": alt_model,
             **kappa(prim, {k: v for k, v in alt.labels.items() if k in keys_here}),
         }
-    out["cost"] = CostLedger(data_dir / "cost_ledger.jsonl").summary(run=meta["tag"])
+    out["cost"] = CostLedger(data_dir / "cost_ledger.jsonl").summary(run=meta["tag"], purpose=f"judge:{entry}")
     return out

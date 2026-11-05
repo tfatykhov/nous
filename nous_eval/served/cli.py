@@ -150,6 +150,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     k = sub.add_parser("cost", help="LLM spend recorded in a data dir")
     k.add_argument("--data-dir", type=Path, required=True)
     k.add_argument("--run", default=None)
+    k.add_argument("--purpose", default=None, help="a purpose prefix: judge:recall, judge:preturn, gold")
     return ap.parse_args(argv)
 
 
@@ -384,7 +385,7 @@ async def cmd_judge(args: argparse.Namespace, *, client: Any = None) -> int:
     finally:
         if owns:
             await client.close()
-    spend = ledger.summary(run=meta["tag"])["usd_total"]
+    spend = ledger.summary(run=meta["tag"], purpose=f"judge:{meta['entry']}")["usd_total"]
     print(f"judge {args.model}: {len(units)} queries, {counts}; run spend {spend} USD")
     return 0 if not counts.get("failed_calls") else 3
 
@@ -528,7 +529,11 @@ def main(argv: list[str] | None = None, **inject: Any) -> int:
     if args.entry == "compare":
         return cmd_compare(args)
     if args.entry == "cost":
-        print(json.dumps(CostLedger(args.data_dir / "cost_ledger.jsonl").summary(run=args.run), indent=1))
+        print(
+            json.dumps(
+                CostLedger(args.data_dir / "cost_ledger.jsonl").summary(run=args.run, purpose=args.purpose), indent=1
+            )
+        )
         return 0
     if args.cmd in ("run", "queries", "gold"):
         code = _maybe_reexec(args, argv)

@@ -111,7 +111,11 @@ Sonnet 5.5 labels each rendered item relevant or not, with the earlier harnesses
 pre-turn: the query-mode A/B prompt, 700 characters, 30 per call), `temperature` 0, through
 `nous.api.anthropic_client` with the Claude Code preamble. A label is keyed by what the judge saw:
 (entry point, query or prompt as shown, item type, item text as shown). Arms that render the same
-item for the same query share one label; a label already cached is never asked again. Opus 5.5
+item for the same query share one label; a label already cached is never asked again. A query's
+pending items go to the judge in label-key (hash) order, not render order: judged in render
+order, the top items share one call and the tail another, and the judge grades each item against
+its call-mates (measured on a 250-query baseline: top-10 items labelled stricter, the tail more
+lenient, than in mixed calls). Opus 5.5
 judges a fixed-seed sample of a run's queries (`judge --model claude-opus-5-5 --sample N`);
 `score` reports raw agreement and Cohen's kappa on the pairs both labelled. Every call's usage
 goes to the cost ledger, priced at list prices in `judge.PRICES`.

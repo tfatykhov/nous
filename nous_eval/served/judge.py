@@ -2,8 +2,9 @@
 
 A label is keyed by what the judge saw: (entry point, the query or prompt as shown, the item's
 type, the item text as shown), hashed. Two arms that render the same item for the same query
-share its label; an item whose rendered text changed is judged again. Labels are arm-blind: the
-judge sees one query and its items in a fixed order, never which arm produced them.
+share its label; an item whose rendered text changed is judged again. Labels are arm-blind and
+rank-blind: the judge sees one query and its pending items in label-key (hash) order, never
+which arm produced them or where they ranked.
 
 The prompts are the ones the earlier harnesses used, verbatim: the recall_deep prompt from the
 fusion/spreading A/Bs, the pre-turn prompt from the query-mode A/B. Calls go through
@@ -177,11 +178,15 @@ class CostLedger:
                 + "\n"
             )
 
-    def summary(self, run: str | None = None) -> dict[str, Any]:
-        """Calls, tokens and list-price dollars per model, for one run or all."""
+    def summary(self, run: str | None = None, purpose: str | None = None) -> dict[str, Any]:
+        """Calls, tokens and list-price dollars per model, for one run tag and/or one purpose
+        prefix (``judge:recall``), or all. Tags are per entry point, so a recall run and a
+        pre-turn run may share one: filter by purpose too."""
         out: dict[str, Any] = {}
         for r in read_jsonl(self.path):
             if run is not None and r.get("run") != run:
+                continue
+            if purpose is not None and not str(r.get("purpose", "")).startswith(purpose):
                 continue
             m = out.setdefault(r["model"], {"calls": 0, "input": 0, "output": 0, "cache_write": 0, "cache_read": 0})
             u = r.get("usage") or {}
@@ -288,6 +293,11 @@ async def judge_units(
             if cache.get(it["key"]) is None and it["key"] not in seen:
                 seen.add(it["key"])
                 todo.append(it)
+        # Rank-blind order: by label key (a hash), not render order. Judged in render order, a
+        # query's top items share one call and its tail items another, and the judge grades each
+        # call against its neighbours: measured, top-10 items came out stricter and the tail
+        # more lenient than in mixed calls.
+        todo.sort(key=lambda it: it["key"])
         jobs += [(u, todo[b : b + chunk]) for b in range(0, len(todo), chunk)]
     counts = defaultdict(int)
     counts["jobs"] = len(jobs)
