@@ -2114,3 +2114,20 @@ class ProfileCard(Base):
     tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class MemoryWriteHealthDaily(Base):
+    """Migration 099: the daily memory write-health rollup, one row per agent per UTC day.
+
+    Written by ``nous.observability.memory_write_health`` (the hourly ``memory_write_health`` heartbeat check); the
+    current day's row is overwritten on each run. Read by the dashboard and by the ``db_query`` reader.
+    """
+
+    __tablename__ = "memory_write_health_daily"
+    __table_args__ = ({"schema": "nous_system"},)
+
+    agent_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    metrics: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    metrics_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

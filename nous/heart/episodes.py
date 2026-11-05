@@ -642,6 +642,8 @@ class EpisodeManager:
                 started_at=e.started_at,
                 tags=e.tags or [],
                 score=scores.get(e.id),
+                session_id=e.session_id,
+                active=e.active,
             )
             for eid in ids
             if (e := episodes.get(eid)) is not None

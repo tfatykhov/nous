@@ -485,6 +485,45 @@ def failure_note(stats: PipelineStats) -> str | None:
     return f"Note: {'; '.join(parts)}; results may be incomplete."
 
 
+def disabled_legs(settings: "Settings") -> frozenset[str]:
+    """``recall_deep_disabled_legs`` as a set; empty for a settings stand-in without it."""
+    v = getattr(settings, "recall_deep_disabled_legs", None)
+    return frozenset(v) if isinstance(v, (list, tuple, set, frozenset)) else frozenset()
+
+
+# The recall_deep text's sections and the scope that shows each. One rule for
+# the formatter (``tools._format_pipeline_text``) and for recall_deep_max_items,
+# so a row the text will not show never takes one of its slots.
+def text_section(r: PipelineResult) -> str | None:
+    """The section of the recall_deep text ``r`` renders in, before scope:
+    ``examples`` (an exemplar-leg row), ``heart`` (Heart Memory),
+    ``graph_decisions`` (Graph-Connected Decisions), ``brain`` and
+    ``brain_graph`` (Brain Decisions' search hits and graph rows), or None for
+    a row no section shows."""
+    meta = r.metadata
+    if meta.get("retrieval_leg") == "exemplar":
+        return "examples"
+    if r.source == "heart" or meta.get("stage_origin") == "heart_graph_memory":
+        return "heart"
+    if r.source == "graph_expanded" and r.type == "decision" and meta.get("stage_origin") == "heart_graph":
+        return "graph_decisions"
+    if r.source == "brain":
+        return "brain"
+    if r.source in ("graph_expanded", "spreading_activation") and meta.get("stage_origin") == "brain_graph":
+        return "brain_graph"
+    return None
+
+
+def section_shown(section: str | None, search_types: list[str]) -> bool:
+    """Whether the recall_deep text shows ``section`` on a call scoped to ``search_types``."""
+    search_all = "all" in search_types
+    if section == "heart":
+        return search_all or any(t in search_types for t in ("episode", "fact", "procedure", "censor"))
+    if section in ("brain", "brain_graph"):
+        return search_all or "decision" in search_types
+    return section in ("graph_decisions", "examples")
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -610,6 +649,7 @@ async def run_recall_pipeline(
 
     # Build flat PipelineResult list in stage order
     results: list[PipelineResult] = []
+    disabled = disabled_legs(settings)
 
     def _tr_entries(leg: str, start: int) -> None:
         """F091: register everything appended since ``start`` under ``leg``."""
@@ -617,28 +657,36 @@ async def run_recall_pipeline(
             tr.add(r.id, r.type, leg, score=r.score, rank=offset + 1,
                    content=r.description)
 
-    _m = len(results)
-    results.extend(_heart_results_to_pipeline(acc.heart_results))
-    _tr_entries("heart_primary", _m)
+    # recall_deep_disabled_legs: the rows of a disabled leg that still ran,
+    # recorded dropped at the end (see the drain before finalize).
+    disabled_rows: dict[str, list[PipelineResult]] = {}
+
+    def _merge_leg(leg: str, rows: list[PipelineResult]) -> None:
+        """Append one leg's rows, registered under ``leg``. A leg in
+        recall_deep_disabled_legs still ran if its stage did (it seeds the
+        graph legs), but its rows are left out here, so they take no slot.
+        ``attempted`` and ``n_returned`` stay the stage's own answer (set by
+        the loop below)."""
+        if leg in disabled:
+            tr.leg(leg, attempted=False, skip_reason="disabled")
+            disabled_rows[leg] = rows
+            return
+        start = len(results)
+        results.extend(rows)
+        _tr_entries(leg, start)
+
+    _merge_leg("heart_primary", _heart_results_to_pipeline(acc.heart_results))
     # F067: episode chunks appended to Heart section (same source tag,
     # naturally co-displayed). Empty when feature flag is off.
-    _m = len(results)
-    results.extend(_chunks_to_pipeline(acc.chunk_results))
-    _tr_entries("chunk", _m)
-    _m = len(results)
-    results.extend(_heart_graph_to_pipeline(acc.heart_graph_decisions, settings))
-    _tr_entries("heart_graph", _m)
+    _merge_leg("chunk", _chunks_to_pipeline(acc.chunk_results))
+    _merge_leg("heart_graph", _heart_graph_to_pipeline(acc.heart_graph_decisions, settings))
     # Path A: non-decision neighbors land in the same stage-order slot as the
     # decision-only graph results so subsequent ``rerank_by_score`` reorders
     # them uniformly with everything else.
-    _m = len(results)
-    results.extend(_heart_graph_memory_to_pipeline(
+    _merge_leg("heart_graph_memory", _heart_graph_memory_to_pipeline(
         acc.heart_graph_memory_neighbors, settings,
     ))
-    _tr_entries("heart_graph_memory", _m)
-    _m = len(results)
-    results.extend(_decisions_to_pipeline(acc.decision_results))
-    _tr_entries("brain", _m)
+    _merge_leg("brain", _decisions_to_pipeline(acc.decision_results))
     # P1.1: batch-resolve source_episode_id for fact-type results so the
     # formatter can session-group the Heart section. Episodes already carry
     # their id as the session; chunks got their episode_id from the chunk
@@ -921,6 +969,12 @@ async def run_recall_pipeline(
         results = _apply_spreading_budget(results, settings, tr)
         n_budget_cut = before - len(results)
 
+    # recall_deep_max_items / recall_deep_type_min: after every filter, so a
+    # filtered row takes no slot; before the lookups below, so only served rows
+    # cost one, and before the reactivation read, so a cut row is not treated
+    # as co-retrieved. Off (0) returns ``results`` itself.
+    results = _apply_max_items(results, settings, tr, memory_types or ["all"])
+
     # K-6: the dated sources of the top merged facts. After every sort and
     # filter, so the slots go to facts that are served; scores are untouched.
     if getattr(settings, "recall_merge_history_enabled", False):
@@ -1014,6 +1068,11 @@ async def run_recall_pipeline(
         tr.leg("brain_graph", attempted=True,
                n_returned=len(acc.graph_expanded) - _n_spread,
                counted_in="graph_expanded")
+    # recall_deep_disabled_legs that _run_stages did not run at all (the
+    # merged legs are marked in _merge_leg; parent_episode by the tool).
+    for _leg_name in ("keyed", "keyed_r2", "exemplar", "graph_expanded"):
+        if _leg_name in disabled:
+            tr.leg(_leg_name, attempted=False, skip_reason="disabled")
     for _stage, _n_err in acc.stage_errors.items():
         # ``stage_errors`` is not purely errors: Stage 2b files its
         # corroboration counter there (``*_duplicates``, documented at :1343 as
@@ -1069,6 +1128,22 @@ async def run_recall_pipeline(
         tr.drop(_cid, "chunk", _CHUNK_DROP_DISPOSITIONS.get(_stage, UNACCOUNTED),
                 f"chunk_{_stage}")
 
+    # recall_deep_disabled_legs: a disabled leg that ran had its rows left out
+    # at the merge. Registered last, like the chunk discards, so a row another
+    # leg served keeps that leg's name (first-wins) and is skipped here; every
+    # other row is recorded dropped, and n_dropped counts all of the leg's rows
+    # (the chunk leg's on top of its merge discards).
+    if disabled_rows:
+        _served_keys = {(r.id, r.type) for r in results}
+        for _leg_name, _rows in disabled_rows.items():
+            for offset, r in enumerate(_rows):
+                if (r.id, r.type) in _served_keys:
+                    continue
+                tr.add(r.id, r.type, _leg_name, score=r.score, rank=offset + 1, content=r.description)
+                tr.drop(r.id, r.type, FILTER_DROPPED, "recall_deep_disabled_legs")
+            _prior = len(acc.chunk_dropped) if _leg_name == "chunk" else 0
+            tr.leg(_leg_name, attempted=False, n_dropped=_prior + len(_rows))
+
     tr.finalize(results, duration_ms=(time.monotonic() - _t0) * 1000.0)
 
     stats = PipelineStats(
@@ -1121,6 +1196,9 @@ async def _run_stages(
 ) -> _PipelineAccumulator:
     acc = _PipelineAccumulator()
     tr = trace if trace is not None else NULL_TRACE
+    # recall_deep_disabled_legs: the legs below whose output nothing else reads
+    # (keyed, keyed_r2, exemplar, graph_expanded) are not run at all.
+    disabled = disabled_legs(settings)
 
     # Determine which types to search
     search_types = memory_types or ["all"]
@@ -1329,7 +1407,8 @@ async def _run_stages(
     # (codex P2): a memory_types=["episode"] request has no fact-shaped
     # consumer for these hits, so skip the vocab lookup + DB query entirely.
     # ------------------------------------------------------------------
-    if getattr(settings, "keyed_fact_leg_enabled", False) and (
+    # Disabling "keyed" skips both rounds: round 2 hops from round 1's hits.
+    if getattr(settings, "keyed_fact_leg_enabled", False) and "keyed" not in disabled and (
         search_all or "fact" in search_types
     ):
         try:
@@ -1357,7 +1436,7 @@ async def _run_stages(
         # non-empty, which also guarantees `vocab`/`candidates` above ran to
         # completion without raising.
         rounds = getattr(settings, "keyed_fact_leg_rounds", 1)
-        if rounds >= 2 and acc.keyed_results:
+        if rounds >= 2 and acc.keyed_results and "keyed_r2" not in disabled:
             acc.attempted_legs.add("keyed_r2")
             try:
                 acc.keyed_r2_ran = True
@@ -1508,6 +1587,7 @@ async def _run_stages(
     # ------------------------------------------------------------------
     if (
         getattr(settings, "exemplar_mode_enabled", False)
+        and "exemplar" not in disabled
         and (search_all or "fact" in search_types)
         and _is_classification_shaped(query, getattr(settings, "exemplar_max_query_words", 64))
     ):
@@ -1869,7 +1949,13 @@ async def _run_stages(
 
     # F022: graph expansion — expand top decisions (heart seeds also
     # fire spreading even with zero decision hits / no decision scope).
-    if settings.graph_recall_enabled and (decision_results or heart_fact_seeds):
+    # Not run when graph_expanded is disabled: its rows are its only output
+    # (with spreading_rescore_existing_enabled, also that rescore).
+    if (
+        settings.graph_recall_enabled
+        and (decision_results or heart_fact_seeds)
+        and "graph_expanded" not in disabled
+    ):
         seen_ids: set[UUID] = {d.id for d in decision_results}
         # Rows earlier legs already serve. Spreading excludes (or rescores)
         # them; the 1-hop fallback skips them.
@@ -2305,6 +2391,49 @@ def _apply_spreading_budget(
     for i, r in enumerate(results):
         if r.source == "spreading_activation" and i not in keep:
             tr.drop(r.id, r.type, BUDGET_TRUNCATED, "spreading_budget")
+        else:
+            out.append(r)
+    return out
+
+
+def _apply_max_items(
+    results: list[PipelineResult], settings: "Settings", tr: Any, search_types: list[str]
+) -> list[PipelineResult]:
+    """recall_deep_max_items with recall_deep_type_min floors.
+
+    Only rows the text shows on a call scoped to ``search_types`` count
+    (``text_section`` / ``section_shown``, the formatter's own rule); the rest
+    are left in place and take no slot. The legs score on different scales,
+    so this does not re-sort: it keeps shown rows by their place in
+    ``results``, the pipeline's final order. Each floored type first keeps its
+    first n shown rows (all of them when fewer exist); the slots left of k go
+    to the remaining shown rows in order. When the floors add up to more than
+    k, the floors win. Survivors keep their relative order; every cut row is
+    recorded ``SLICED_OFF``. Off (k <= 0), or nothing to cut, returns
+    ``results`` itself.
+    """
+    k = getattr(settings, "recall_deep_max_items", 0)
+    if not isinstance(k, int) or isinstance(k, bool) or k <= 0:
+        return results
+    shown = [i for i, r in enumerate(results) if section_shown(text_section(r), search_types)]
+    if len(shown) <= k:
+        return results
+    floors = getattr(settings, "recall_deep_type_min", None)
+    keep: set[int] = set()
+    for rtype, n in (floors.items() if isinstance(floors, dict) else ()):
+        keep.update([i for i in shown if results[i].type == rtype][:n])
+    room = k - len(keep)
+    for i in shown:
+        if room <= 0:
+            break
+        if i not in keep:
+            keep.add(i)
+            room -= 1
+    cut = set(shown) - keep
+    out: list[PipelineResult] = []
+    for i, r in enumerate(results):
+        if i in cut:
+            tr.drop(r.id, r.type, SLICED_OFF, "recall_deep_max_items")
         else:
             out.append(r)
     return out

@@ -94,6 +94,7 @@ nous/
 │   │   ├── dynamic.py          # DynamicCheck + DynamicCheckLoader (F034.5)
 │   │   ├── check_guard.py      # F107 phase 3: a dynamic check's run guard (metadata.guard, the schedule guard's allowlist and rules; timeout fit, is_action receipt, check_guard_* events)
 │   │   ├── fault_detector.py   # ProcessFaultCheck + RetrievalCanaryCheck (#653, land-dark)
+│   │   ├── memory_write_health_check.py # P4 MemoryWriteHealthCheck: hourly, quiet hours too, findings off chat (chat_delivery False) and never actionable
 │   │   ├── work_queue.py       # F064.6 WorkQueueCheck (file_jsonl adapter)
 │   │   ├── finding_store.py    # F034.1 finding lifecycle persistence
 │   │   ├── tuner.py            # F034.3 self-tuning pass
@@ -114,6 +115,7 @@ nous/
 │   │   ├── task_score_job.py   # Task scores: the one-shot scoring pass (`python -m nous.observability.task_score_job`), the only writer of `scoring.task_scores` and `scoring.scorer_heartbeat` (migration 088, its one-row-per-agent liveness record)
 │   │   ├── autonomy_inventory.py # Autonomy inventory: per tool, successes by who was in the loop (owner present, approved, autonomous), and censor activity
 │   │   ├── drift.py            # Drift detection
+│   │   ├── memory_write_health.py # P4: the daily write-health rollup (migration 099), its six rules, the latched hard-delete detector and its acknowledgements (events of type memory_write_health_ack); the one table here the db_query reader may read (owner's call)
 │   │   └── snapshots.py        # Graph hub snapshots
 │   ├── audits/                 # Scorer v5: the owner's sampled audits of completion checks
 │   │   └── check_audit.py      # CheckAuditSampler (weekly loop started from main.py, off unless NOUS_CHECK_AUDIT_ENABLED); `__init__.py` holds the shared `AUDIT_VERDICT_ACTION`
@@ -144,7 +146,7 @@ nous/
 │   │   ├── actions.py          # Action gate: allowlist → nonce → rate → censor
 │   │   ├── push.py             # F097 FCM leg (data-only messages)
 │   │   ├── intention_keys.py   # F099 Phase 3a: the reserved intention: dedup keys (leaf)
-│   │   ├── dsl.py / builders/  # Template-first surface construction (`builders/check_audit.py`: the owner's weekly spot-check card, built by the server only and not in `TEMPLATES`)
+│   │   ├── dsl.py / builders/  # Template-first surface construction (`builders/check_audit.py`: the owner's weekly spot-check card, built by the server only and not in `TEMPLATES`; `builders/memory_write_health.py`: P4's card, an Acknowledge button per tripped rule, server-built, priority 0, never a ping)
 │   │   └── catalogs/           # A2UI v1.0 vendored @ pinned commit d9086fb
 │   ├── security/
 │   │   └── secrets.py          # scan_secrets: shared by send_email (refuse) and the F098 result memory writer (skip)
@@ -153,6 +155,7 @@ nous/
 │       ├── intention_routes.py # F099 Phase 2d: the four owner-action routes (decide, answer, list), thin over ContinuationRunner
 │       ├── intention_dashboard.py # F099 Phase 3c: GET /dashboard/intentions queries (the tree and the metrics), read-only, Postgres-only
 │       ├── autonomy_dashboard.py # Autonomy scoreboard: GET /dashboard/autonomy data (taps, approval cards, grades, task scores, inventory, warn classes), read-only
+│       ├── memory_write_health_dashboard.py # P4: GET /dashboard/memory-write-health data (rollup, rules evaluated now, acknowledgements) and the acknowledge body parser
 │       ├── job_fix_dashboard.py # The scoreboard's job_fixes section: every check-and-fix record, read-only, Postgres-only
 │       ├── guard_dashboard.py   # The scoreboard's guards section (F107 phase 2/3): guarded schedules and heartbeat checks, guard outcomes and shadow misses in the window, read-only, Postgres-only
 │       ├── mcp.py              # MCP server (nous_chat, nous_decide, etc.)

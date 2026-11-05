@@ -1216,7 +1216,10 @@ async def test_backfill_min_cosine_blocks_end_to_end(
         base_emb = await mock_embeddings.embed("J6 floor seed")
         await _insert_fact(session, agent_id, "J6 floor seed fact text", base_emb)
         for i in range(2):
-            near = await mock_embeddings.embed_near("J6 floor seed", noise=0.005)
+            # embed_near seeds its noise on (text, noise): equal arguments would make the two
+            # candidates exact twins (cosine 1.0), and the floor admits 1.0 whenever the
+            # backfill happens to pick a candidate rather than the seed as its orphan.
+            near = await mock_embeddings.embed_near("J6 floor seed", noise=0.005 + 0.001 * i)
             await _insert_fact(session, agent_id, f"J6 floor candidate {i}", near)
         await session.commit()
 

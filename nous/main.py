@@ -1284,6 +1284,7 @@ async def create_components(settings: Settings) -> dict:
     # F034: Heartbeat proactive monitoring
     dynamic_loader = None
     heartbeat_runner = None
+    memory_write_health_check = None  # P4: bound to the companion's surface service below, when there is one
     if settings.heartbeat_enabled:
         try:
             from nous.heartbeat.checks import (
@@ -1339,6 +1340,14 @@ async def create_components(settings: Settings) -> dict:
                 )
                 registry.register(drift_check)
                 logger.info("F035.3: BehaviorDriftCheck registered (interval=%ds)", drift_check.interval)
+
+            # Precision plan P4: memory write health (dashboard-only findings)
+            if settings.memory_write_health_enabled:
+                from nous.heartbeat.memory_write_health_check import MemoryWriteHealthCheck
+
+                memory_write_health_check = MemoryWriteHealthCheck(database, settings.agent_id)
+                registry.register(memory_write_health_check)
+                logger.info("P4: MemoryWriteHealthCheck registered")
 
             # F034.5: Create dynamic check loader
             from nous.heartbeat import check_guard
@@ -1469,6 +1478,9 @@ async def create_components(settings: Settings) -> dict:
         # config: it records the reason and reports itself unconfigured.
         push_service = PushService(database, settings)
         surface_service = SurfaceService(database, settings, heart=heart, push=push_service)
+        if memory_write_health_check is not None:
+            # P4: the companion card with an Acknowledge button per tripped rule (priority 0, never a ping).
+            memory_write_health_check.set_surface_service(surface_service)
         if continuation_runner is not None:
             # F099 Phase 3a: the owner's cards. The runner (and its publisher) were built earlier and need the service
             # only for the card leg; a deployment without the companion never binds one, and every card step is a no-op.

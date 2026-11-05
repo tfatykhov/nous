@@ -778,6 +778,10 @@ class HeartbeatRunner:
                 if result.has_updates:
                     for f in result.findings:
                         f.check_name = check.name
+                        # Before the finding store copies it: the digest and the accumulation alert read the
+                        # stored finding.
+                        if not check.chat_delivery:
+                            f.chat_delivery = False
                     all_findings.extend(result.findings)
                     for f in result.findings:
                         current_fingerprints.setdefault(check.name, set()).add(f.fingerprint())
@@ -1006,7 +1010,9 @@ class HeartbeatRunner:
                     )
                     # Send accumulation alert via Telegram
                     ack_items = [
-                        t for t in self._finding_store.get_digest_items() if t.finding.check_name == check_name
+                        t
+                        for t in self._finding_store.get_digest_items()
+                        if t.finding.check_name == check_name and t.finding.chat_delivery
                     ]
                     if ack_items:
                         lines = [f"[Heartbeat] Accumulation alert: {check_name} ({len(ack_items)} findings)"]
@@ -1024,7 +1030,7 @@ class HeartbeatRunner:
         urgency_order = {"high": 0, "normal": 1, "low": 2}
         findings.sort(key=lambda f: urgency_order.get(f.urgency, 1))
 
-        high_findings = [f for f in findings if f.urgency == "high"]
+        high_findings = [f for f in findings if f.urgency == "high" and f.chat_delivery]
 
         # High urgency: immediate Telegram notification
         if high_findings:
@@ -1294,7 +1300,7 @@ class HeartbeatRunner:
         if self._finding_store is None:
             return
 
-        items = self._finding_store.get_digest_items()
+        items = [item for item in self._finding_store.get_digest_items() if item.finding.chat_delivery]
         if not items:
             return
 

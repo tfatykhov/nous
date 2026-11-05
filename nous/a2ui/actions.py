@@ -20,7 +20,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -153,6 +153,7 @@ class ActionRouter:
         _register_phase2_handlers(self)
         _register_intention_handlers(self)
         _register_audit_handlers(self)
+        _register_memory_write_health_handlers(self)
         _register_default_functions(self)
         _register_micro_app_handlers(self)
         _register_micro_app_functions(self)
@@ -1056,6 +1057,50 @@ def _register_audit_handlers(router: ActionRouter) -> None:
         )
 
     router.register(AUDIT_VERDICT_ACTION, audit_verdict, mutating=True)
+
+
+def _register_memory_write_health_handlers(router: ActionRouter) -> None:
+    """The owner's Acknowledge on the memory write-health card (``builders/memory_write_health.py``). No agent tool
+    reaches it. The rule must be one the card offered and still shows as tripped, and the day is the card's own: the
+    tap names only the rule. The acknowledgement is the same one ``POST /dashboard/memory-write-health/acknowledge``
+    records (``nous.observability.memory_write_health.acknowledge``).
+
+    "Still tripped" is the card's truth, not a fresh evaluation: the rules are not run again here, so a rule that
+    cleared on its own after the card was built can still be acknowledged from it. That records a harmless
+    acknowledgement for the card's day, and the check's next run rebuilds or closes the card."""
+    from nous.observability import memory_write_health as mwh
+
+    from .builders.memory_write_health import ACK_ACTION, ACKNOWLEDGED, STATUS_TEXT, TRIPPED
+
+    async def acknowledge(ctx: ActionContext) -> ActionResult:
+        model = ctx.surface.data_model or {}
+        offered = model.get("rules")
+        rule = (ctx.context if isinstance(ctx.context, dict) else {}).get("rule")
+        if not isinstance(offered, dict) or not isinstance(rule, str) or rule not in offered:
+            return ActionResult(ok=False, message="that rule is not on this card")
+        if offered[rule] != TRIPPED:
+            return ActionResult(ok=False, message=f"{rule} is already acknowledged")
+        try:
+            day = date.fromisoformat(str(model.get("day")))
+        except ValueError:
+            return ActionResult(ok=False, message="this card has no day")
+        actor = clean_actor(f"companion:{ctx.actor}", default="companion")
+        try:
+            async with router._db.session() as session:
+                await mwh.acknowledge(
+                    session, router._settings.agent_id, rule, day, "acknowledged on the companion", actor
+                )
+                await session.commit()
+        except mwh.AcknowledgeError as exc:
+            return ActionResult(ok=False, message=str(exc))
+        pointer = _escape_pointer(rule)
+        return ActionResult(
+            message=f"{rule} acknowledged",
+            data_patches=[(f"/rules/{pointer}", ACKNOWLEDGED), (f"/status/{pointer}", STATUS_TEXT[ACKNOWLEDGED])],
+            resolve_surface=all(v != TRIPPED for k, v in offered.items() if k != rule),
+        )
+
+    router.register(ACK_ACTION, acknowledge, mutating=True)
 
 
 def _register_default_functions(router: ActionRouter) -> None:
