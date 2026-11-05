@@ -169,7 +169,9 @@ element of an unexpected shape, a parent line not found, or no elements captured
 The run records how many calls disagreed (`read_order_mismatches`), how many rendered items no
 formatter section reported (`unplaced`), `text_unmatched`, and how many calls' output differed from
 the capture (`output_mismatches`). A call that returned nothing ("No results found.") emits no
-element; its check reads the formatter's returned text, it scores as a query with 0 items, and it is
+element; its check reads the formatter's returned text, which must print no item (an `(id: ...)`
+in it with nothing emitted is a mismatch: the model read an item neither the capture nor the trace
+saw), it scores as a query with 0 items, and it is
 counted apart (`empty_results`, in the run record and in the scores); `judge` refuses a run where one is non-zero unless
 `--allow-unchecked`. The tool's output is what the eval measures; in a live turn the tool result
 may still pass through the dispatcher's output compression before the model reads it. A tool call that returned an error renders

@@ -1123,6 +1123,18 @@ def test_an_empty_recall_output_matches_its_capture(monkeypatch: pytest.MonkeyPa
     assert checks["output_matches_capture"] is False
 
 
+def test_an_empty_capture_whose_output_prints_items_is_a_mismatch() -> None:
+    """Nothing emitted, but the formatter's text prints an item: the model read an item the
+    capture (and the trace, which reads the same emissions) never saw. Not an empty result."""
+    from nous_eval.served import recall
+
+    fid = str(uuid.uuid5(uuid.NAMESPACE_URL, "printed"))
+    formatted = f"=== Heart Memory ===\n1. [fact] a fact (id: {fid}, score: 0.500 [rrf])"
+    cap = {"lines": None, "at": [], "emissions": [], "exemplar": set(), "parents": [], "formatted": formatted}
+    texts, checks = recall.item_texts(cap, formatted)
+    assert texts == {} and checks["output_matches_capture"] is False
+
+
 async def test_a_query_a_cut_emptied_is_counted_scored_and_judged(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
