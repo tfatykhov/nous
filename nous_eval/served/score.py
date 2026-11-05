@@ -189,6 +189,7 @@ def summarize_recall(rows: list[dict], labels: dict[str, list], keys: set[str] |
             "unlabelled_items": sum(p["unlab"] for p in every),
             "leg_error_rows": sum(1 for r in prod if r.get("leg_errors")),
             "tool_error_rows": sum(1 for r in prod if r.get("is_error")),
+            "empty_results": sum(1 for r in prod if not r.get("rendered")),
             "items_mean": mean([p["n"] for p in every]),
             "tokens_mean": mean([p["tokens"] for p in every]),
             "latency_ms": {

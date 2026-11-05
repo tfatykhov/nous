@@ -338,10 +338,12 @@ class DegradedBuild(Exception):
 
 
 async def build_item(stack: Any, it: dict, profile_seen: list[bool], attempts: int = 4) -> dict[str, Any]:
-    """One input; a failed or degraded build retries under a fresh session id."""
+    """One input, under its own replay session (``<session>-<key>-served``: two prompts logged in one
+    conversation are replayed independently and must not share per-session state such as the
+    unchanged-query memo); a failed or degraded build retries under a fresh session id."""
     last = ""
     for attempt in range(attempts):
-        sid = f"{it['session']}-served" + (f"-r{attempt}" if attempt else "")
+        sid = f"{it['session']}-{it['key']}-served" + (f"-r{attempt}" if attempt else "")
         try:
             res = await build_one(
                 stack,
@@ -382,7 +384,7 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
             await build_one(
                 stack,
                 it["text"],
-                f"{it['session']}-warm",
+                f"{it['session']}-{it['key']}-warm",
                 turn_number=it["turn_number"],
                 first_turn=it["first_turn"],
                 source_session=it.get("source_session"),

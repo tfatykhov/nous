@@ -321,6 +321,7 @@ def _capture_render_order(sink: list, captures: list | None = None) -> Any:
                         if (getattr(r, "metadata", None) or {}).get("retrieval_leg") == "exemplar"
                     },
                     "parents": [(str(e), s) for e, s in (parents or ())],
+                    "formatted": text,  # the formatter's return value (all of it when nothing was emitted)
                 }
             )
         return text

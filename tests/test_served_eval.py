@@ -1103,6 +1103,88 @@ def test_recall_judges_each_items_emitted_text_not_the_trace_snippet(monkeypatch
     assert not [t for t in texts.values() if "(id: " in t or "score" in t]
 
 
+def test_an_empty_recall_output_matches_its_capture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A recall that returns nothing writes no element, so no emission reads the formatter's frame;
+    its "No results found." text is still the tool output, and nothing is unmatched."""
+    import nous.api.tools as tools_mod
+    from nous_eval.served import recall
+    from nous_eval.served.stack import _capture_render_order
+
+    monkeypatch.setattr(tools_mod, "_format_pipeline_text", tools_mod._format_pipeline_text)  # restored after
+    orders: list = []
+    captures: list = []
+    _capture_render_order(orders, captures)
+    stats = SimpleNamespace(contradiction_edges=[], n_stage_errors={}, stage_error_msgs={})
+    text = tools_mod._format_pipeline_text([], stats, ["all"], parent_episodes=None, emitted_out=[])
+    assert "No results found." in text and orders == [[]]
+    texts, checks = recall.item_texts(captures[-1], text)
+    assert texts == {} and checks == {"text_unmatched": 0, "output_matches_capture": True}
+    _, checks = recall.item_texts(captures[-1], text + " (changed)")
+    assert checks["output_matches_capture"] is False
+
+
+async def test_a_query_a_cut_emptied_is_counted_scored_and_judged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A precision-cut arm that leaves one query with no items: the run's checks pass, the row is
+    counted in empty_results, judge does not refuse the run, and the row scores 0 served items."""
+    import nous.api.tools as tools_mod
+    from nous_eval.served import recall
+    from nous_eval.served.stack import _capture_render_order
+
+    monkeypatch.setattr(tools_mod, "_format_pipeline_text", tools_mod._format_pipeline_text)  # restored after
+    stack = SimpleNamespace(
+        db=None,
+        recorder=SimpleNamespace(_entries=[]),
+        ce_calls=[],
+        render_orders=[],
+        render_captures=[],
+        date_parser=None,
+        embeddings=None,
+        source_session=None,
+    )
+    _capture_render_order(stack.render_orders, stack.render_captures)
+    fid = str(uuid.uuid5(uuid.NAMESPACE_URL, "kept"))
+    stats = SimpleNamespace(contradiction_edges=[], n_stage_errors={}, stage_error_msgs={})
+
+    async def recall_deep(query, limit, memory_types):
+        kept = [] if query == "emptied by the cut" else [_pr(fid, "fact", "a kept fact")]
+        text = tools_mod._format_pipeline_text(kept, stats, ["all"], emitted_out=[])
+        cands = [{"type": "fact", "id": fid, "disposition": "rendered", "entry_leg": "heart_primary"}] if kept else []
+        stack.recorder._entries.append({"candidates": cands, "legs": []})
+        return {"content": [{"type": "text", "text": text}]}
+
+    stack.tools = {"recall_deep": recall_deep}
+    items = [
+        {"key": "Q1", "set": "prod", "text": "kept query"},
+        {"key": "Q2", "set": "prod", "text": "emptied by the cut"},
+    ]
+    run_dir = tmp_path / "runs" / "recall" / "cut"
+    run_dir.mkdir(parents=True)
+    stats_run = await recall.run(stack, items, run_dir / "rows.jsonl", warm=0)
+    assert stats_run["empty_results"] == 1
+    assert stats_run["output_mismatches"] == 0 and stats_run["text_unmatched"] == 0
+    meta = {
+        "entry": "recall",
+        "tag": "cut",
+        "arm": "cut",
+        "data_dir": str(tmp_path),
+        "judge_model": "m",
+        "code": {"head": "abc", "dirty_files": 0, "served_sha256": "s"},
+        "settings": {},
+        "inputs_sha256": "i",
+        "run": stats_run,
+    }
+    (run_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    assert (
+        await cli.cmd_judge(cli.parse_args(["recall", "judge", str(run_dir), "--model", "m"]), client=FakeJudgeClient())
+        == 0
+    )
+    out = score.summarize(run_dir, alt_model=None)
+    assert out["prod"]["n_judged"] == 2 and out["prod"]["empty_results"] == 1
+    assert out["prod"]["items_mean"] == 0.5  # the emptied query serves 0 items
+
+
 def test_item_texts_count_what_they_cannot_place() -> None:
     from nous_eval.served import recall
 
@@ -1305,6 +1387,40 @@ def test_preturn_boundary_sees_the_source_session_not_the_build_id(monkeypatch: 
     assert ctx_mod._is_own_session_episode(ongoing, "chat-a-served") is False
 
 
+async def test_two_prompts_of_one_conversation_do_not_share_the_unchanged_query_memo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With skip_unchanged on, the build skips memory when its session searched the same query
+    within the TTL. Two prompts logged in one conversation are replayed independently, so each
+    gets its own replay session (warm and measured); the conversation still reaches the
+    own-session boundary as source_session."""
+    from collections import OrderedDict
+
+    from nous.cognitive.context import ContextEngine
+    from nous_eval.served import preturn
+
+    engine = ContextEngine.__new__(ContextEngine)  # only its unchanged-query memo is used
+    engine._last_query_by_session = OrderedDict()
+    seen: list = []
+
+    async def fake_build(stack, text, session_id, *, turn_number, first_turn=False, source_session=None):
+        skipped = engine._query_unchanged(session_id, (text,), 300.0)
+        engine._record_searched_query(session_id, (text,))
+        seen.append((session_id, source_session, skipped))
+        return {"legs": [], "tokens_by_label": {"User Profile": 1}, "system_prompt": "p", "skipped": skipped}
+
+    monkeypatch.setattr(preturn, "build_one", fake_build)
+    items = [
+        {"key": f"B00{i}", "set": "prod", "text": "check the garden", "session": "heartbeat-x",
+         "source_session": "heartbeat-x", "turn_number": 1, "first_turn": False}
+        for i in (0, 1)
+    ]  # fmt: skip
+    await preturn.run(SimpleNamespace(embeddings=None), items, tmp_path / "rows.jsonl", warm=-1)
+    assert len({sid for sid, _, _ in seen}) == 4  # two inputs x (warm, measured)
+    assert all(src == "heartbeat-x" for _, src, _ in seen)
+    assert not [x for x in seen if x[2]]  # no build reused another input's search
+
+
 async def test_preturn_runner_passes_each_inputs_source_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1325,10 +1441,10 @@ async def test_preturn_runner_passes_each_inputs_source_session(
     ]  # fmt: skip
     stats = await preturn.run(SimpleNamespace(embeddings=None), items, tmp_path / "rows.jsonl", warm=-1)
     assert calls == [
-        ("chat-a-warm", "chat-a"),
-        ("u-1-warm", None),
-        ("chat-a-served", "chat-a"),  # build ids stay fresh: no conversation state from the copy
-        ("u-1-served", None),
+        ("chat-a-B000-warm", "chat-a"),
+        ("u-1-gd-1-warm", None),
+        ("chat-a-B000-served", "chat-a"),  # build ids stay fresh and per input: no state from the copy
+        ("u-1-gd-1-served", None),
     ]
     assert stats["own_session_queries"] == 2 and stats["own_session_rows"] == 2
 

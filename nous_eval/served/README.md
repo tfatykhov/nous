@@ -168,7 +168,9 @@ element of an unexpected shape, a parent line not found, or no elements captured
 
 The run records how many calls disagreed (`read_order_mismatches`), how many rendered items no
 formatter section reported (`unplaced`), `text_unmatched`, and how many calls' output differed from
-the capture (`output_mismatches`); `judge` refuses a run where one is non-zero unless
+the capture (`output_mismatches`). A call that returned nothing ("No results found.") emits no
+element; its check reads the formatter's returned text, it scores as a query with 0 items, and it is
+counted apart (`empty_results`, in the run record and in the scores); `judge` refuses a run where one is non-zero unless
 `--allow-unchecked`. The tool's output is what the eval measures; in a live turn the tool result
 may still pass through the dispatcher's output compression before the model reads it. A tool call that returned an error renders
 nothing and counts as a judged query with precision 0. Set `gold`: gold-in-served, gold-in-top-10,
@@ -248,7 +250,8 @@ a runtime-backed setting (`vector_weight`, `rrf_k`, `cross_encoder_enabled`) cou
   recall_deep and to the pre-turn build, and both leave its ongoing episode and that episode's
   dialogue chunks out (`own_session_exclusions`, #854; `_is_own_session_episode`, #857). The replay
   hands the source session to exactly those two functions and keeps its own session ids (none for
-  recall_deep, a fresh `<session>-served` / `-warm` id per build): the copy holds each
+  recall_deep; per build a fresh `<session>-<key>-served` / `-warm` id, one per input, so two prompts
+  of one conversation never share the unchanged-query memo): the copy holds each
   conversation's state at the end of the dump, not at the logged turn, so the real id would also
   bring in later turns' F055 residual activation and working memory, cache hints, and an
   unchanged-query memo the warm and measured passes would share. Gold questions have no source

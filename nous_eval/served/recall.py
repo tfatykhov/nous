@@ -108,14 +108,24 @@ def item_texts(cap: dict, text_out: str) -> tuple[dict[str, str], dict[str, Any]
     rank, score or the finding leg (list number, exemplar similarity, type tag, [via ...], the
     (id: ..., score ...) trailer), so the same item shown elsewhere keeps its label. A parent
     episode's text is its summary, checked present in the output. A row emitted twice (a decision
-    in two sections) keeps its first, where it is read. Checks: ``text_unmatched`` (an item with no
+    in two sections) keeps its first, where it is read. A call that emitted nothing (an empty
+    result, "No results found.") is checked on the formatter's returned text. Checks:
+    ``text_unmatched`` (an item with no
     text: an element of an unexpected shape, a parent line not found, or no elements captured) and
     ``output_matches_capture`` (the elements joined, plus the tool's own changed-tools note when it
     adds one, are the tool's output; None when not captured)."""
     lines, at = cap["lines"], cap["at"]
-    if lines is None:
+    if lines is None and cap["emissions"]:  # items were written, but not where we could read them
         n = len(dict.fromkeys(cap["emissions"])) + len(cap["parents"])
         return {}, {"text_unmatched": n, "output_matches_capture": None}
+    if lines is None:  # an empty result: nothing emitted, the formatter's text is the whole output
+        formatted = cap.get("formatted")
+        texts = {}
+        for ep_id, summary in cap["parents"]:
+            if formatted is not None and f"- ({ep_id[:8]}) {summary}" in formatted:
+                texts[f"episode:{ep_id}"] = summary
+        ok = None if formatted is None else _tool_text(formatted) == text_out
+        return texts, {"text_unmatched": len(cap["parents"]) - len(texts), "output_matches_capture": ok}
     starts = set(at)
     texts: dict[str, str] = {}
     unmatched = 0
@@ -238,7 +248,7 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
         except Exception:  # noqa: BLE001 - a warm-up failure shows up again in the measured call
             pass
     n_err = n_mismatch = n_unchecked = n_unplaced = n_text_unmatched = n_output_mismatch = 0
-    n_own_queries = n_own_rows = 0
+    n_own_queries = n_own_rows = n_empty = 0
     before = embedding_cache_size(stack.embeddings)
     with rows_path.open("w", encoding="utf-8") as f:
         for i, it in enumerate(items):
@@ -253,6 +263,7 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
             n_text_unmatched += r.get("text_unmatched") or 0
             n_output_mismatch += not r.get("error") and r.get("output_matches_capture") is not True
             n_own_queries += bool(r.get("own_session_excluded"))
+            n_empty += not r.get("error") and not r.get("rendered")
             n_own_rows += r.get("own_session_excluded") or 0
             row = {"key": it["key"], "set": it["set"], "text": it["text"], **r}
             if it.get("gold"):
@@ -274,6 +285,7 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
         "output_mismatches": n_output_mismatch,
         "own_session_queries": n_own_queries,
         "own_session_rows": n_own_rows,
+        "empty_results": n_empty,
     }
 
 
