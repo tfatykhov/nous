@@ -2224,6 +2224,10 @@ class Settings(BaseSettings):
     drift_detection_enabled: bool = True
     drift_detection_interval: int = 3600
 
+    # Precision plan P4: the hourly memory write-health check (nous/heartbeat/memory_write_health_check.py) and
+    # its daily rollup. Its findings go to the dashboard only, never to Telegram.
+    memory_write_health_enabled: bool = True
+
     # Fault detector (decision 28f021a0): detect silent failures in periodic
     # memory processes.  Master flag defaults OFF — land-dark.
     fault_detector_enabled: bool = Field(

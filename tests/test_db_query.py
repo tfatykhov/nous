@@ -455,6 +455,7 @@ def test_the_tool_description_teaches_the_limits():
         "SELECT id, status, task FROM heart.subtasks ORDER BY created_at DESC LIMIT 10",
         "heart.facts",
         "nous_system.execution_ledger",
+        "nous_system.memory_write_health_daily",
     ):
         assert needed in description, needed
     assert DB_QUERY_SCHEMA["required"] == ["sql"] and DB_QUERY_SCHEMA["properties"]["sql"]["type"] == "string"

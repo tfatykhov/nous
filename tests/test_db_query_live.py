@@ -50,6 +50,7 @@ SPEC_TABLES = {
     "nous_system.dynamic_checks",
     "nous_system.execution_ledger",
     "nous_system.events",
+    "nous_system.memory_write_health_daily",
 }
 
 

@@ -103,6 +103,8 @@ services:
       - NOUS_PROFILE_CARD_MAX_ENTRIES=${NOUS_PROFILE_CARD_MAX_ENTRIES:-25}
       - NOUS_PROFILE_CARD_SOURCE_LIMIT=${NOUS_PROFILE_CARD_SOURCE_LIMIT:-80}
       - NOUS_PROFILE_CARD_EPISODES=${NOUS_PROFILE_CARD_EPISODES:-5}
+      # P4 memory write health: the hourly check and its daily rollup, dashboard-only findings. On by default; the kill switch.
+      - NOUS_MEMORY_WRITE_HEALTH_ENABLED=${NOUS_MEMORY_WRITE_HEALTH_ENABLED:-true}
       # H-7: turn-aware chunks for new episodes' transcripts (needs NOUS_EPISODE_CHUNKS_ENABLED). Lands dark.
       - NOUS_EPISODE_CHUNK_TURN_AWARE=${NOUS_EPISODE_CHUNK_TURN_AWARE:-false}
       # E-17: how many untagged (chat) episodes the pre-turn diversity stage keeps; 0 = no cap. 2 = as before.
