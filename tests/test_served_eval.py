@@ -1417,3 +1417,21 @@ def test_the_changed_tools_note_is_section_furniture_not_an_item() -> None:
     read = _read(stack, [("Related Decisions", f"{text}\n{note}")], {("decision", "d1")})
     assert read["order"] == [("decision", "d1")] and read["unmatched_segments"] == 0
     assert preturn.strip_tools_note("- a line\nNote: not the tools note.") == "- a line\nNote: not the tools note."
+
+
+def test_a_fragment_the_trace_dropped_is_judged_as_shown_and_not_counted_untraced() -> None:
+    from nous_eval.served.stack import _capture_formatters
+
+    stack = SimpleNamespace(ctx=_engine(), formatter_calls=[])
+    _capture_formatters(stack)
+    eps = [
+        SimpleNamespace(id=f"e{i}", summary=f"session number {i} " + "y" * 60, outcome="success", started_at=None)
+        for i in range(2)
+    ]
+    full = stack.ctx._format_episodes(eps)
+    first = full.split("\n")[0]
+    cut = stack.ctx._truncate_to_budget(full, (len(first) + 1 + 8 + 3) // 4)  # e1 keeps a few characters
+    # the trace dropped e1 (its content probe is not in the text), the text still shows its start
+    read = _read(stack, [("Past Episodes", cut)], {("episode", "e0")})
+    assert read["order"] == [("episode", "e0"), ("episode", "e1")] and read["texts"][("episode", "e1")].endswith("...")
+    assert read["untraced"] == 0 and read["fragment_untraced"] == 1

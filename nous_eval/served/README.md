@@ -167,7 +167,9 @@ Per build checks, summed per run, each expected 0; `judge` refuses a run where o
 (in the text, not rendered per the trace), `unmatched_segments` (section text no item produced)
 and `sections_not_in_prompt`. `budget_cut_but_traced` is recorded, not refused: the item's line
 was cut by the section budget, but the trace's approximate budget check (a 40-character content
-probe) found its content elsewhere and kept it rendered. The text decides. Set `gold`: gold-in-context (the
+probe) found its content elsewhere and kept it rendered. `fragment_untraced` is its mirror, also
+recorded, not refused: the budget left only the start of an item's line (such as `- [succ...`),
+the trace's probe dropped it, and it is judged as shown. The text decides. Set `gold`: gold-in-context (the
 gold item rendered, or its text in the system prompt) and reciprocal rank among rendered items of
 its type.
 

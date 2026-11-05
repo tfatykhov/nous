@@ -149,7 +149,7 @@ _SECTION_POOLS = {
 # What each build checks; a run sums them and ``judge`` refuses a run where any is non-zero.
 READ_CHECKS = ("unplaced", "untraced", "unmatched_segments", "sections_not_in_prompt")
 # Recorded per build and summed per run, not a refusal: see read_items.
-READ_NOTES = ("budget_cut_but_traced",)
+READ_NOTES = ("budget_cut_but_traced", "fragment_untraced")
 
 
 def formatter_lines(calls: list) -> dict[str, list[tuple[tuple[str, str], str]]]:
@@ -262,7 +262,16 @@ def read_items(
     missing_items = [(t, i) for t, i in traced if (t, i) not in texts]
     unplaced = sorted(f"{t}:{i}" for t, i in missing_items if (t, i) not in formatted)
     cut = sorted(f"{t}:{i}" for t, i in missing_items if (t, i) in formatted)
-    untraced = sorted(f"{t}:{i}" for t, i in texts if (t, i) not in traced)
+    # The mirror case: the budget left only the start of an item's line (a fragment such as
+    # "- [succ..."), so the trace's content probe dropped it. It is in the text and is judged as
+    # shown; it is recorded, not counted as untraced.
+    whole = defaultdict(set)
+    for pool in pools.values():
+        for k, line in pool:
+            whole[k].add(line)
+    fragments = {k for k in texts if k in whole and texts[k] not in whole[k]}
+    untraced = sorted(f"{t}:{i}" for t, i in texts if (t, i) not in traced and (t, i) not in fragments)
+    fragment_untraced = sorted(f"{t}:{i}" for t, i in texts if (t, i) not in traced and (t, i) in fragments)
     problems += [{"check": "unplaced", "item": k} for k in unplaced]
     problems += [{"check": "untraced", "item": k} for k in untraced]
     return {
@@ -273,7 +282,10 @@ def read_items(
         "unmatched_segments": sum(1 for x in problems if x["check"] == "unmatched_segments"),
         "sections_not_in_prompt": missing,
         "budget_cut_but_traced": len(cut),
-        "problems": problems + [{"check": "budget_cut_but_traced", "item": k} for k in cut],
+        "fragment_untraced": len(fragment_untraced),
+        "problems": problems
+        + [{"check": "budget_cut_but_traced", "item": k} for k in cut]
+        + [{"check": "fragment_untraced", "item": k} for k in fragment_untraced],
     }
 
 
