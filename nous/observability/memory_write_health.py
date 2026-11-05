@@ -9,7 +9,7 @@ One row per agent per UTC day in ``nous_system.memory_write_health_daily`` (migr
 - on a day the check ran, ``live``: point-in-time values from its last run that day (row totals, ledger ids with no
   row, dangling edges, open episodes, the profile card), which cannot be recomputed later;
 - on the same days, ``counters``: running totals of every rise in the hard-delete signals since the first
-  observation, and ``rules``: the state of each rule at that run.
+  observation, and ``rules``: the state of each rule at that run (``rule_states``).
 
 Rules (``RULES``): H1 hard delete, F1 source flood, S1 tier-1 stale deactivation, P1 person+preference inflow
 collapse, R1 rule inflow collapse, A1 admission reject spike. Episode balance, merge rate and card churn are
@@ -565,13 +565,13 @@ def _collapse(
     if current is None or any(p is None for p in priors):
         return RuleState(rule, "no_data")
     mean = sum(priors) / len(priors)  # type: ignore[arg-type]
-    threshold = round(t["ratio"] * mean, 2)
+    threshold = t["ratio"] * mean  # compared unrounded; rounded only for display
     zero_days = int(t["zero_days"])
     zero_run = _window_sum(rows, today, zero_days, cats)
     detail = {"window_sum": current, "prior_mean": round(mean, 2), "prior_sums": priors, "categories": list(cats)}
     tripped_ratio = mean >= t["min_mean"] and current <= threshold
     tripped_zero = zero_run == 0 and sum(priors) > 0  # type: ignore[arg-type]
-    state = RuleState(rule, "ok", value=current, threshold=threshold, detail=detail)
+    state = RuleState(rule, "ok", value=current, threshold=round(threshold, 2), detail=detail)
     if not (tripped_ratio or tripped_zero):
         return state
     cut = ack["cut_day"] if ack else None
@@ -600,11 +600,11 @@ def _a1(rows: Mapping[date, Mapping[str, Any]], today: date, ack: Mapping[str, A
     rejected = sum(int(_get(rows, d, "admission_rejected") or 0) for d in kept)
     admitted = sum(sum((_get(rows, d, "facts_by_source") or {}).values()) for d in kept)
     attempts = rejected + admitted
-    rate = round(rejected / attempts, 3) if attempts else 0.0
+    rate = rejected / attempts if attempts else 0.0  # compared unrounded; rounded only for display
     state = RuleState(
         "A1",
         "ok",
-        value=rate,
+        value=round(rate, 3),
         threshold=t["min_rate"],
         detail={"rejected": rejected, "admitted": admitted, "days": len(kept)},
         acknowledged=_ack_meta(ack) if len(kept) < len([d for d in days if d in rows]) else None,
@@ -626,6 +626,17 @@ def evaluate(rows: Mapping[date, Mapping[str, Any]], acks: Iterable[Mapping[str,
         _collapse("R1", rows, today, index.get("R1")),
         _a1(rows, today, index.get("A1")),
     ]
+
+
+def rule_states(states: Iterable[RuleState]) -> dict[str, str]:
+    """The states to store with a run: one per rule, and for F1 one per source label it reports (``F1:<label>``).
+    F1 reports every tripped label, or else its one closest label (``F1`` alone when it has no data), so two labels
+    flooding on one day are both kept."""
+    out: dict[str, str] = {}
+    for s in states:
+        source = s.detail.get("source") if s.id == "F1" else None
+        out[f"F1:{source}" if source else s.id] = s.state
+    return out
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -706,8 +717,7 @@ async def run_once(database: Any, agent_id: str, *, now: datetime | None = None)
             baseline = await _seed_baseline(session, agent_id, today, counters, live)
             acks.append({**baseline, "day": today, "at": now})
         states = evaluate(rows, acks, today)
-        # F1 yields either its tripped labels or its one closest label, so one state per rule id here.
-        rows[today]["rules"] = {s.id: s.state for s in states}
+        rows[today]["rules"] = rule_states(states)
         for d in computed:
             await _upsert(session, agent_id, d, rows[d], now)
         await session.commit()

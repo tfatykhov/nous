@@ -601,6 +601,61 @@ def test_an_a1_acknowledgement_drops_the_days_up_to_it():
     assert _one(mwh.evaluate(rows, [_ack("A1", TODAY - timedelta(days=1))], TODAY), "A1").state == "ok"
 
 
+def test_a1_compares_the_unrounded_rate():
+    """1499 of 2000 is 0.7495: below 0.75, though it rounds to 0.75 at three places (Codex P2 on #858)."""
+
+    def a1(rejected: int, admitted: int):
+        rows = {TODAY: _row(admission_rejected=rejected, facts_by_source={"user_direct": admitted})}
+        return _one(mwh.evaluate(rows, [], TODAY), "A1")
+
+    below = a1(1499, 501)
+    assert below.state == "ok" and below.value == 0.75  # shown rounded, judged unrounded
+    assert a1(1500, 500).state == "tripped"
+
+
+def test_the_collapse_rules_compare_the_unrounded_threshold(monkeypatch):
+    """With a ratio whose threshold rounds up across the window sum, the unrounded one decides."""
+    monkeypatch.setitem(mwh.THRESHOLDS["P1"], "ratio", 0.4996)  # 0.4996 x mean 10 = 4.996, rounded 5.0
+    rows = _rows(80, lambda i: _inflow(person=10 if i >= 14 and i % 14 == 0 else (5 if i == 0 else 0)))
+
+    p1 = _one(mwh.evaluate(rows, [], TODAY), "P1")
+
+    assert p1.detail["prior_sums"] == [10, 10, 10, 10] and p1.value == 5
+    assert p1.state == "ok" and p1.threshold == 5.0
+
+
+def test_the_stored_rule_states_keep_every_f1_label():
+    rows = _rows(15, lambda i: {"facts_by_source": {"user_direct": 150, "other": 150} if i == 0 else {}})
+    states = mwh.evaluate(rows, [], TODAY)
+
+    stored = mwh.rule_states(states)
+
+    assert stored["F1:user_direct"] == stored["F1:other"] == "tripped"
+    assert {k for k in stored if not k.startswith("F1")} == {"H1", "S1", "P1", "R1", "A1"}
+    quiet = mwh.rule_states(mwh.evaluate(_rows(15, lambda i: {}), [], TODAY))
+    assert [k for k in quiet if k.startswith("F1")] and all(v != "tripped" for v in quiet.values())
+
+
+@pytest.mark.postgres_only
+async def test_a_run_stores_both_labels_flooding_on_one_day(db):
+    agent = _agent()
+    async with db.session() as s:
+        await s.execute(
+            text(
+                """INSERT INTO heart.facts (agent_id, content, source, active)
+                   SELECT :a, 'flood ' || g, CASE WHEN g % 2 = 0 THEN 'user_direct' ELSE 'https://example.com' END, true
+                     FROM generate_series(1, 300) g"""
+            ),
+            {"a": agent},
+        )
+        await s.commit()
+
+    await _run(db, agent)
+
+    rules = (await _rows_of(db, agent))[datetime.now(UTC).date()]["rules"]
+    assert rules["F1:user_direct"] == rules["F1:other"] == "tripped"
+
+
 def test_h1_is_measured_against_the_latest_acknowledgement():
     counters = {
         "vanished_fact_ids": 3,

@@ -23,9 +23,10 @@ class BaseCheck(ABC):
     timeout: int = 30  # max seconds per run
     active: bool = True
     urgent_override: bool = False  # if True, runs even during quiet hours
-    # False keeps every finding of the check off chat (Telegram) at any urgency: the runner stamps it on the
-    # findings, and the urgent send, the accumulation alert and the daily digest skip them. They still reach the
-    # finding store, GET /heartbeat/findings and the dashboard.
+    # False makes every finding of the check owner-only, for the dashboard: the runner stamps it on the findings;
+    # the urgent send, the accumulation alert and the daily digest (Telegram) skip them, and the a2ui
+    # heartbeat_findings source and push_surface do not hand them to the model. They still reach the finding store,
+    # GET /heartbeat/findings and the dashboard.
     chat_delivery: bool = True
 
     def __init__(self) -> None:

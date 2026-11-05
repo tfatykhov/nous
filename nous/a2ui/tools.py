@@ -503,6 +503,10 @@ def register_a2ui_tools(
                 row = dict(item)
                 fp = str(row.get("fingerprint") or "")
                 tracked = store.get_tracked(fp) if fp else None
+                if tracked is not None and not tracked.finding.chat_delivery:
+                    # A check with chat_delivery=False (memory write health) is for the owner's dashboard only:
+                    # the model may not put its findings on a card.
+                    return _tool_error(f"Finding {fp} is for the owner's dashboard only and cannot go on a card.")
                 if tracked is not None:
                     # Caller supplied a REAL fingerprint: adopt it unchanged.
                     if fp in within_push_fps:

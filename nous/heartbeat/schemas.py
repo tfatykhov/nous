@@ -29,7 +29,8 @@ class Finding:
     needs_action: bool = False
     raw_data: dict[str, Any] = field(default_factory=dict)
     check_name: str = ""
-    # False: never sent to chat (Telegram), at any urgency. The runner sets it from BaseCheck.chat_delivery.
+    # False: owner-only, for the dashboard: never sent to chat (Telegram) at any urgency, never handed to the model
+    # through a2ui. The runner sets it from BaseCheck.chat_delivery.
     chat_delivery: bool = True
 
     def fingerprint(self) -> str:

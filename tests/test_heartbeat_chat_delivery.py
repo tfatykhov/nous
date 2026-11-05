@@ -213,3 +213,56 @@ async def test_the_control_accumulation_alert_is_sent():
     await runner._triage([findings[0]])
 
     assert "Accumulation alert" in _sent_text(runner)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# a2ui: the model is not handed an owner-only finding (owner: dashboard only)
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def _acknowledged_pair() -> tuple[FindingStore, str, str]:
+    """A store holding one write-health finding (owner-only) and one ordinary finding, both acknowledged."""
+    store = _store()
+    owner_only = Finding(
+        source=mwh.SOURCE, summary=H1_SUMMARY, urgency="high", check_name="memory_write_health", chat_delivery=False
+    )
+    ordinary = Finding(source="disk", summary="disk almost full", urgency="normal", check_name="disk_check")
+    for f in (owner_only, ordinary):
+        store.ingest(f)
+        store.acknowledge(f.fingerprint())
+    return store, owner_only.fingerprint(), ordinary.fingerprint()
+
+
+async def test_the_heartbeat_findings_source_leaves_owner_only_findings_out():
+    from types import SimpleNamespace
+
+    from nous.a2ui.sources import build_default_registry
+
+    store, owner_only, ordinary = _acknowledged_pair()
+    registry = build_default_registry(heartbeat_runner=SimpleNamespace(finding_store=store))
+
+    out = await registry.resolve([{"key": "f", "source": "heartbeat_findings", "params": {}}])
+
+    assert [row["fingerprint"] for row in out["f"]] == [ordinary]
+    assert "vanished" not in str(out)
+
+
+async def test_push_surface_refuses_to_put_an_owner_only_finding_on_a_card():
+    from types import SimpleNamespace
+
+    from nous.a2ui.tools import register_a2ui_tools
+    from nous.api.tools import ToolDispatcher
+
+    store, owner_only, ordinary = _acknowledged_pair()
+    service = SimpleNamespace(push_built=AsyncMock(return_value="surface-1"))
+    dispatcher = ToolDispatcher()
+    register_a2ui_tools(dispatcher, service, heartbeat_runner=SimpleNamespace(finding_store=store))
+
+    content, is_error = await dispatcher.dispatch(
+        "push_surface",
+        {"template": "heartbeat_findings", "params": {"findings": [{"fingerprint": owner_only}]}},
+    )
+
+    assert is_error and "dashboard only" in str(content)
+    service.push_built.assert_not_awaited()
+    assert store.get_tracked(owner_only).state == FindingState.ACKNOWLEDGED  # untouched
