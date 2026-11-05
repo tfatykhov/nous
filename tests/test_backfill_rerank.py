@@ -299,12 +299,12 @@ async def test_ce_rerank_replaces_score_with_sigmoid(install_fake):
 
 
 # ---------------------------------------------------------------------------
-# 10. Single candidate bypass (F042 len<=1 short-circuit)
+# 10. Single candidate bypass (the adapter returns a lone candidate before F042)
 # ---------------------------------------------------------------------------
 
 
 async def test_ce_rerank_single_candidate_bypass(install_fake):
-    """With one candidate, F042 short-circuits → fake model never called; tuple passes through."""
+    """With one candidate, the adapter returns before F042 → fake model never called; tuple passes through."""
     fake = FakeModel()
     install_fake(fake)
     settings = make_settings(ce_backfill_min_score=0.0)
@@ -316,7 +316,7 @@ async def test_ce_rerank_single_candidate_bypass(install_fake):
         content_map={_uuid(1): "alpha"},
         settings=settings,
     )
-    # F042 short-circuits for len<=1 → adapter never invokes model.predict.
+    # The adapter returns a lone candidate itself → model.predict is never invoked.
     assert fake.call_count == 0
     # Output contains the sole candidate with its original RRF score intact.
     assert len(out) == 1

@@ -8,6 +8,7 @@ reranker module to inject a deterministic fake model.
 from __future__ import annotations
 
 import asyncio
+import math
 from uuid import UUID
 
 import pytest
@@ -116,22 +117,23 @@ async def test_reranker_empty_list(monkeypatch):
 
 
 async def test_reranker_single_item(monkeypatch):
-    """One candidate → returns it unchanged (no rerank)."""
-    fake = FakeModel()
+    """One candidate → scored like any head row: it carries its sigmoid, in a new list."""
+    fake = FakeModel(score_fn=lambda q, d: 2.0)
     install_fake_model(monkeypatch, fake)
 
     lonely = make_result(1, "solo", score=0.42)
+    candidates = [lonely]
     out = await cross_encoder_rerank(
         query="anything",
-        candidates=[lonely],
+        candidates=candidates,
         text_fn=lambda r: r.summary,
         **DEFAULT_KWARGS,
     )
 
-    assert len(out) == 1
-    assert out[0] is lonely
-    assert out[0].score == 0.42
-    assert fake.call_count == 0
+    assert out is not candidates
+    assert out == [lonely]
+    assert out[0].score == pytest.approx(1 / (1 + math.exp(-2.0)))
+    assert fake.call_count == 1
 
 
 # ---------------------------------------------------------------------------

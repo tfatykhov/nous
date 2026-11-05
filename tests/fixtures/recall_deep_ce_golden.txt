@@ -1,0 +1,42 @@
+=== Heart Memory ===
+-- Session 00000102 --
+1. [chunk] user: the Grundfos pump is leaking. assistant: replace the shaft seal before the irrigation season. (id: 00000202-0000-4000-8000-000000000202, score: 0.989 [chunk])
+2. [episode] Talked about Grundfos pump maintenance before the irrigation season. (id: 00000102-0000-4000-8000-000000000102, score: 0.859 [rrf])
+3. [fact] [via keyed] The irrigation pump is a Grundfos unit. [2026-06-01] (id: 00000303-0000-4000-8000-000000000303, score: 0.550 [keyed band])
+4. [fact] [via keyed] Valley Supply services the Grundfos unit every spring. (id: 00000304-0000-4000-8000-000000000304, score: 0.545 [keyed band])
+-- Session 00000101 --
+5. [episode] Planned the orchard irrigation schedule: drip lines, twice a week. (id: 00000101-0000-4000-8000-000000000101, score: 0.979 [rrf])
+6. [chunk] user: when should the orchard irrigation run? assistant: twice a week in summer, early morning. (id: 00000201-0000-4000-8000-000000000201, score: 0.954 [chunk])
+-- Other --
+7. [fact] Filler record 19d: the barn roof needs paint. (id: 00000419-0000-4000-8000-000000000419, score: 0.982 [rrf])
+8. [fact] Filler record 13d: the barn roof needs paint. (id: 00000413-0000-4000-8000-000000000413, score: 0.979 [rrf])
+9. [fact] Filler record 15d: the barn roof needs paint. (id: 00000415-0000-4000-8000-000000000415, score: 0.978 [rrf])
+10. [fact] Filler record 23d: the barn roof needs paint. (id: 00000423-0000-4000-8000-000000000423, score: 0.962 [rrf])
+11. [fact] Filler record 5d: the barn roof needs paint. (id: 00000405-0000-4000-8000-000000000405, score: 0.930 [rrf])
+12. [fact] Filler record 4d: the barn roof needs paint. (id: 00000404-0000-4000-8000-000000000404, score: 0.925 [rrf])
+13. [fact] Filler record 12d: the barn roof needs paint. (id: 00000412-0000-4000-8000-000000000412, score: 0.912 [rrf])
+14. [fact] Filler record 7d: the barn roof needs paint. (id: 00000407-0000-4000-8000-000000000407, score: 0.908 [rrf])
+15. [fact] [via co_occurred] Mulch keeps the soil moist between the rows. (id: 00000306-0000-4000-8000-000000000306, score: 0.560 [graph])
+16. [fact] [via supports] The orchard irrigation runs twice a week in summer. (id: 00000301-0000-4000-8000-000000000301, score: 0.560 [graph])
+17. [fact] [via keyed] The warranty on that unit runs until 2028. (id: 00000307-0000-4000-8000-000000000307, score: 0.540 [keyed band])
+18. [fact] [via keyed-hop] Valley Supply shuts early on Fridays. (id: 00000305-0000-4000-8000-000000000305, score: 0.505 [keyed band])
+
+=== Graph-Connected Decisions ===
+1. [via supports] Chose Grundfos drip irrigation for the orchard over sprinklers (id: 00000501-0000-4000-8000-000000000501, score: 0.560 [graph])
+
+=== Brain Decisions ===
+1. Chose Grundfos drip irrigation for the orchard over sprinklers | architecture | medium | confidence: 0.80 (id: 00000501-0000-4000-8000-000000000501, score: 0.977 [rrf])
+2. Filler decision 9d about the fence line | process | low | confidence: 0.50 (id: 00000609-0000-4000-8000-000000000609, score: 0.954 [rrf])
+3. Filler decision 11d about the fence line | process | low | confidence: 0.50 (id: 00000611-0000-4000-8000-000000000611, score: 0.942 [rrf])
+4. Filler decision 1d about the fence line | process | low | confidence: 0.50 (id: 00000601-0000-4000-8000-000000000601, score: 0.920 [rrf])
+5. [success] Replace the Grundfos pump seal before the season | process | low | confidence: 0.70 (id: 00000502-0000-4000-8000-000000000502, score: 0.913 [rrf])
+6. Filler decision 7d about the fence line | process | low | confidence: 0.50 (id: 00000607-0000-4000-8000-000000000607, score: 0.910 [rrf])
+7. Filler decision 8d about the fence line | process | low | confidence: 0.50 (id: 00000608-0000-4000-8000-000000000608, score: 0.900 [rrf])
+8. Filler decision 5d about the fence line | process | low | confidence: 0.50 (id: 00000605-0000-4000-8000-000000000605, score: 0.890 [rrf])
+9. Filler decision 2d about the fence line | process | low | confidence: 0.50 (id: 00000602-0000-4000-8000-000000000602, score: 0.880 [rrf])
+10. Filler decision 10d about the fence line | process | low | confidence: 0.50 (id: 00000610-0000-4000-8000-000000000610, score: 0.862 [rrf])
+11. [via graph: related_to] Budget the barn repairs for next year (id: 00000503-0000-4000-8000-000000000503, score: 0.560 [graph])
+
+=== Parent Episode Context ===
+- (00000101) Planned the orchard irrigation schedule: drip lines, twice a week.
+- (00000102) Talked about Grundfos pump maintenance before the irrigation season.

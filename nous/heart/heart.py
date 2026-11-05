@@ -1374,12 +1374,16 @@ class Heart:
         # otherwise let later memory types be excluded from reranking even
         # when their scores are higher than earlier types').
         ce_enabled = RuntimeConfig.get().get_cross_encoder_enabled(self.settings)
+        # cross_encoder_order_only: the CE does not rerank here, before the cut,
+        # so the MMR gate and the selection below run exactly as with the CE
+        # off; it reorders only the selected set, after the cut (further down).
+        ce_order_only = ce_enabled and getattr(self.settings, "cross_encoder_order_only", False) is True
         # F030.1: Track whether CE actually reordered the head; the MMR gate
         # below uses this to skip diversity re-ranking when CE has already
         # produced a relevance-ordered head. Default False so that CE-disabled
         # / CE-failed paths still get MMR's cold-path diversity.
         ce_reordered = False
-        if ce_enabled and len(merged) > 1 and CROSS_ENCODER_AVAILABLE:
+        if ce_enabled and not ce_order_only and len(merged) > 1 and CROSS_ENCODER_AVAILABLE:
             merged.sort(key=lambda r: r.score, reverse=True)
             try:
                 pre_ce_head = [r.id for r in merged[: self.settings.cross_encoder_max_candidates]]
@@ -1480,6 +1484,37 @@ class Heart:
         if _pre_cut is not None:
             _kept = {(r.id, r.type) for r in merged}
             dropped_out.extend(r for r in _pre_cut if (r.id, r.type) not in _kept)
+
+        # cross_encoder_order_only: the set above is the CE-off selection; the
+        # CE reorders only it. Each reranked row carries its CE sigmoid, the
+        # same per-(query, text) score the pre-cut rerank gives it, and the
+        # list is sorted by score as the CE path's sort above does, so every
+        # consumer of Heart's scores and order sees the CE's, within this set.
+        # A lone selected row is scored too, as the pre-cut rerank scores it.
+        if ce_order_only and merged and CROSS_ENCODER_AVAILABLE:
+            try:
+                pre_ce_order = [r.id for r in merged]
+                reranked = await cross_encoder_rerank(
+                    query=query,
+                    candidates=merged,
+                    text_fn=lambda r: r.summary or "",
+                    model_name=self.settings.cross_encoder_model,
+                    max_candidates=self.settings.cross_encoder_max_candidates,
+                    text_limit=self.settings.cross_encoder_text_limit,
+                )
+                # The reranker hands back the same list when it scored nothing
+                # (load or predict failure): keep the selection order, MMR's
+                # included, rather than re-sort it by the selection scores.
+                if reranked is not merged:
+                    merged = reranked
+                    merged.sort(key=lambda r: r.score, reverse=True)
+                logger.info(
+                    "Cross-encoder (order only): reordered the %d selected, reordered=%s",
+                    len(merged),
+                    pre_ce_order != [r.id for r in merged],
+                )
+            except Exception as exc:
+                logger.warning("Cross-encoder order-only rerank failed, keeping the selection order: %s", exc)
 
         # F027 access tracking for the facts this recall returns.
         returned_fact_ids = [r.id for r in merged if r.type == "fact"]

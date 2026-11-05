@@ -2148,6 +2148,12 @@ class Settings(BaseSettings):
     cross_encoder_model: str = "BAAI/bge-reranker-v2-m3"
     cross_encoder_max_candidates: int = 30
     cross_encoder_text_limit: int = 512
+    # With the CE on, heart.recall reranks the merged head BEFORE its [:limit]
+    # cut, so the CE's order decides which rows are served. True: Heart selects
+    # exactly the rows it would with the CE off (RRF order, MMR gate, the same
+    # cut), then the CE reorders only those, each carrying its CE sigmoid score.
+    # No effect with the CE off. False (default): today's behavior, unchanged.
+    cross_encoder_order_only: bool = False
 
     # F024: Critic Agent
     critic_enabled: bool = True
