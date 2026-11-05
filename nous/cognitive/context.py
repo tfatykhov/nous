@@ -258,6 +258,20 @@ def _is_abandoned_episode(episode) -> bool:
     return (getattr(episode, "outcome", None) or "ongoing") == "abandoned"
 
 
+def _is_own_session_episode(episode, session_id: str | None) -> bool:
+    """The calling conversation's ongoing episode: it echoes the conversation itself.
+
+    Same boundary as ``own_session_exclusions`` (recall_deep): ``active`` only, since
+    ``_end`` clears it, so an ended episode of a reused session id is a past
+    conversation and stays.
+    """
+    return (
+        bool(session_id)
+        and getattr(episode, "session_id", None) == session_id
+        and getattr(episode, "active", None) is True
+    )
+
+
 class ContextEngine:
     """Assembles context from Brain and Heart within token budgets."""
 
@@ -1841,6 +1855,12 @@ class ContextEngine:
                 _before = episodes
                 episodes = [e for e in episodes if not _is_abandoned_episode(e)]
                 _tr_filtered(_before, episodes, "episode", FILTER_DROPPED, "abandoned_episode")
+                # The search admits ongoing episodes, so from turn 2 on it can
+                # return this conversation's own. "Recent Conversations" needs no
+                # such filter: list_recent reads only ended episodes.
+                _before = episodes
+                episodes = [e for e in episodes if not _is_own_session_episode(e, session_id)]
+                _tr_filtered(_before, episodes, "episode", FILTER_DROPPED, "own_session_episode")
                 # 008.6: Exclude episodes already shown in temporal tier
                 if _temporal_episode_ids:
                     _before = episodes
