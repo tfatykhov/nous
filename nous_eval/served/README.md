@@ -61,8 +61,11 @@ python -m nous_eval.served cost --data-dir $D [--run <tag>]
 `--n 20` runs a fixed-seed sample (a smoke). `--db-name` runs on a scratch database directly
 (`nous_eval*`, `nous_test*`, `beam*`; `--i-know-this-is-scratch` for a test database named
 otherwise) instead of a clone. A prod copy (`nous_prod*`), a served template or another run's clone
-(`nous_eval_served_*`) is refused as `--db-name` whatever flag is passed, and a run drops only the
-clone it created. Path arguments are resolved against the directory the command started in.
+(`nous_eval_served_*`), and the server's `postgres`, `template0` and `template1` are refused as
+`--db-name` whatever flag is passed, and a run drops only the clone it created. Path arguments are
+resolved against the directory the command started in. Every explicit output file
+(`queries --out`, `gold --out`, `compare --out`) must be one git would not track, checked before
+anything is read from the database or asked of an LLM.
 
 ## What one variable means here
 
@@ -138,14 +141,21 @@ entry leg (spreading rows arrive as `graph_expanded`) and per rank band (1-10, 1
 Ranks are the positions the model reads: the order the formatter reported emitting (Heart Memory
 as grouped by session and date, then Graph-Connected and Brain Decisions, Parent Episode Context,
 stored examples), not the pipeline's `final_rank` (kept beside). Each call checks that order against
-the ids its output printed (`read_order_matches_text`). A tool call that returned an error renders
+the ids its output printed (`read_order_matches_text`; None when the output printed no id). The run
+records how many calls disagreed (`read_order_mismatches`) and how many rendered items no
+formatter section reported (`unplaced`); `judge` refuses a run where either is non-zero unless
+`--allow-unchecked`. A tool call that returned an error renders
 nothing and counts as a judged query with precision 0. Set `gold`: gold-in-served, gold-in-top-10,
 reciprocal rank, per gold type; an episode is served when its summary or any chunk of it is
 rendered, and the summary-only rates are reported beside (`served_summary`, `top10_summary`).
 
 Pre-turn, set `prod`: micro precision overall and per item type (the sections), items and relevant
-items per build, total and memory tokens, build latency. A procedure is judged on the text it was
-rendered as (its body block, or its catalog line), not its name. Set `gold`: gold-in-context (the
+items per build, total and memory tokens, build latency. Items are ordered as the model reads
+them: section by section in the order the build emitted its sections (Recent Conversations
+before Past Episodes), each section in its own order. Each item is judged on the text it was
+rendered as: a procedure's body block or catalog line, not its name; an episode shown only in
+Recent Conversations, its block there (a title line, plus a summary only on a first turn or under
+temporal boost), not its full summary. Set `gold`: gold-in-context (the
 gold item rendered, or its text in the system prompt) and reciprocal rank among rendered items of
 its type.
 
@@ -190,6 +200,8 @@ a runtime-backed setting (`vector_weight`, `rrf_k`, `cross_encoder_enabled`) cou
   stored unpadded and padded per run with its own `date_leg_pad_days`, and filled before any call is
   measured, so latency excludes the parse and arms see the same windows. A query's as-of date is its
   logged date, else `--as-of`.
+- The inputs' fingerprint (`inputs_sha256`) covers each input's text, gold, effective as-of date,
+  first-turn state and turn number; `compare` also lists differing `--as-of` and `--warm`.
 - Pre-turn builds use a fixed identity prompt and no conversation history, as the query-mode A/B
   did. An input is a first turn as pre_turn would compute it for a fresh session: a turn-1 prompt
   whose kind does not run as a subtask (`subtask`, `dynamic`, `heartbeat` do); gold questions are

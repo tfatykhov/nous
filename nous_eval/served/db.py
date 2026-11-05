@@ -5,9 +5,11 @@ bytes, and keeps the template untouched: reads write too (working memory, retrie
 access counters), and sessions commit per call, so a rolled-back transaction cannot isolate a
 run. The template needs no other connection open while it is copied.
 
-Never written: a prod copy (``nous_prod*``) and anything under ``nous_eval_served_`` other than
-this run's own clone (templates, other runs' clones). ``--db-name`` refuses those names whatever
-other flag is passed, and a run drops only the clone it created, by the exact name it created.
+Never written: a prod copy (``nous_prod*``), the server's own databases (``postgres``,
+``template0``, ``template1``: migrating template1 would seed every later CREATE DATABASE) and
+anything under ``nous_eval_served_`` other than this run's own clone (templates, other runs'
+clones). ``--db-name`` refuses those names whatever other flag is passed, and a run drops only
+the clone it created, by the exact name it created.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import re
 from typing import Any
 
 SCRATCH_RE = re.compile(r"^(nous_eval|nous_test|beam)")
-PROTECTED_RE = re.compile(r"^(nous_prod|nous_eval_served_)")
+PROTECTED_RE = re.compile(r"^(nous_prod|nous_eval_served_)|^(postgres|template0|template1)$")
 _IDENT_RE = re.compile(r"^[a-z0-9_]{1,63}$")
 CLONE_PREFIX = "nous_eval_served_run_"
 

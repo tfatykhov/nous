@@ -113,10 +113,20 @@ def sample(items: list[dict], n: int, seed: int) -> list[dict]:
 
 
 def inputs_sha256(items: list[dict]) -> str:
-    """What compare checks to know two runs answered the same inputs."""
+    """What compare checks to know two runs answered the same inputs: each input's text and gold,
+    and what changes how it is run (its effective as-of date, first-turn state and turn number)."""
     h = hashlib.sha256()
     for it in sorted(items, key=lambda x: x["key"]):
-        h.update(json.dumps([it["key"], it["set"], it["text"], it.get("gold")], sort_keys=True).encode() + b"\n")
+        fields = [
+            it["key"],
+            it["set"],
+            it["text"],
+            it.get("gold"),
+            it.get("as_of"),
+            it.get("first_turn"),
+            it.get("turn_number"),
+        ]
+        h.update(json.dumps(fields, sort_keys=True).encode() + b"\n")
     return h.hexdigest()
 
 

@@ -1129,3 +1129,180 @@ def test_win_is_false_when_gold_or_judged_rows_are_missing(tmp_path: Path) -> No
     )
     assert rep["n_judged_both"] == 0 and rep["win"]["win"] is False
     assert "not measured: no query fully judged in both runs" in rep["win"]["why_not"]
+
+
+# ---------------------------------------------------------------------------
+# round 3: pre-turn read order and rendered text, fingerprints, output guards, run checks
+# ---------------------------------------------------------------------------
+
+
+def test_preturn_items_are_ordered_by_section_with_recent_before_past() -> None:
+    from nous_eval.served import preturn
+
+    labels = [
+        "User Profile",
+        "Related Decisions",
+        "Relevant Facts",
+        "Session Profile",
+        "Recommended Procedures",
+        "Recent Conversations",
+        "Past Episodes",
+    ]
+    recalled = {"decision": ["d1"], "fact": ["f1", "f2"], "procedure": ["p1"], "episode": ["e9", "e2"]}
+    # final ranks that put Past Episodes first, as the old trace-rank order did
+    rendered = [
+        ("episode", "e9", 1),
+        ("episode", "e2", 2),
+        ("episode", "e5", 3),
+        ("fact", "f2", 4),
+        ("fact", "f1", 5),
+        ("decision", "d1", 6),
+        ("procedure", "p1", 7),
+        ("fact", "s1", 8),
+        ("fact", "zz", 9),
+    ]
+    order, unplaced = preturn.section_order(labels, recalled, ["e5", "e2"], ["s1"], rendered)
+    assert order == [
+        ("decision", "d1"),
+        ("fact", "f1"),
+        ("fact", "f2"),
+        ("fact", "s1"),
+        ("procedure", "p1"),
+        ("episode", "e5"),
+        ("episode", "e2"),
+        ("episode", "e9"),
+        ("fact", "zz"),
+    ]
+    assert unplaced == 1  # zz: no section claimed it
+    # a gold episode shown first in Recent Conversations reads at rank 1 among episodes
+    row = {
+        "rendered": [f"{t}:{i}" for t, i in order],
+        "gold": {"type": "episode", "ids": ["e5"]},
+        "tokens_total": 1,
+        "gold_text_in_prompt": False,
+    }
+    assert score.preturn_gold_row(row)["rr"] == 1.0
+
+
+def _episode(eid: str, title: str, *, summary: str = "s", outcome: str = "success") -> SimpleNamespace:
+    return SimpleNamespace(id=eid, title=title, summary=summary, outcome=outcome)
+
+
+def test_recent_conversations_blocks_pair_with_the_episodes_the_build_kept() -> None:
+    from nous_eval.served import preturn
+
+    listed = [_episode("e1", "garden plan"), _episode("e2", "dropped", outcome="abandoned"), _episode("e3", "invoices")]
+    text = "- [Nov 04 10:00] garden plan\n  Planned the beds.\n- [Nov 04 09:00] invoices"
+    ids, blocks, ok = preturn.recent_episodes(listed, text)
+    assert ok and ids == ["e1", "e3"]
+    assert blocks == {"e1": "- [Nov 04 10:00] garden plan\n  Planned the beds.", "e3": "- [Nov 04 09:00] invoices"}
+    ids, blocks, ok = preturn.recent_episodes(listed, "- [Nov 04 10:00] garden plan")  # one block, two episodes
+    assert not ok and blocks == {} and ids == ["e1", "e3"]
+    assert preturn.recent_episodes([], "") == ([], {}, True)
+
+
+def test_items_are_judged_on_the_text_they_were_rendered_as() -> None:
+    from nous_eval.served import preturn
+
+    order = [("procedure", "p1"), ("episode", "e1"), ("episode", "e2"), ("fact", "f1")]
+    texts = preturn.item_texts(
+        order,
+        {"p1": "### deploy\n\nrun the steps"},
+        {"e1": "- [Nov 04 10:00] garden plan", "e2": "- [Nov 04 09:00] invoices"},
+        ["e2"],  # e2 is also in Past Episodes: judged on that rendering
+        {"p1": "deploy", "e1": "full summary e1", "e2": "full summary e2", "f1": "fact text"},
+        {("fact", "f1"): "snippet"},
+    )
+    assert texts == {
+        "procedure:p1": "### deploy\n\nrun the steps",
+        "episode:e1": "- [Nov 04 10:00] garden plan",
+        "episode:e2": "full summary e2",
+        "fact:f1": "fact text",
+    }
+
+
+def test_fingerprint_covers_as_of_first_turn_and_turn_number(tmp_path: Path) -> None:
+    gf = _gold_file(tmp_path / "f.jsonl", "fact", [("A000", "where is alpha", "f-1")])
+    base = inputs.preturn_items(None, [gf], "2026-11-05")
+    h = inputs.inputs_sha256(base)
+    for change in ({"as_of": "2026-11-06"}, {"first_turn": True}, {"turn_number": 1}):
+        assert inputs.inputs_sha256([{**base[0], **change}]) != h, change
+
+
+def test_compare_lists_as_of_and_warm(tmp_path: Path) -> None:
+    rows = _arm_rows(12)
+    _label_all(tmp_path, "recall", rows, {"good", "gold"})
+    ma = json.loads((_write_run(tmp_path, "a", rows) / "meta.json").read_text(encoding="utf-8"))
+    mb = {**ma, "as_of": "2026-11-06", "warm": 10}
+    ma.update(as_of="2026-11-05", warm=-1)
+    diff = compare.differences(ma, mb)
+    assert diff["as_of"] == {"a": "2026-11-05", "b": "2026-11-06"} and diff["warm"] == {"a": -1, "b": 10}
+    assert diff["n_variables"] == 2
+
+
+def test_explicit_outputs_must_be_untracked(tmp_path: Path) -> None:
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".gitignore").write_text("ignored/\n", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        cli._check_out_file(repo / "queries.jsonl")
+    assert cli._check_out_file(repo / "ignored" / "queries.jsonl")
+    assert cli._check_out_file(tmp_path / "outside" / "gold.jsonl")
+    for argv in (
+        [
+            "recall",
+            "queries",
+            "--data-dir",
+            str(tmp_path / "d"),
+            "--out",
+            str(repo / "q.jsonl"),
+            "--db-name",
+            "nous_eval_x",
+        ],
+        [
+            "preturn",
+            "gold",
+            "--data-dir",
+            str(tmp_path / "d"),
+            "--type",
+            "fact",
+            "--out",
+            str(repo / "g.jsonl"),
+            "--db-name",
+            "nous_eval_x",
+        ],
+    ):
+        with pytest.raises(SystemExit):  # refused before any database or LLM is touched
+            cli.main(argv)
+
+
+@pytest.mark.parametrize("name", ["postgres", "template0", "template1"])
+def test_server_databases_are_never_a_run_database(name: str) -> None:
+    for flag in (False, True):
+        with pytest.raises(SystemExit):
+            db.check_scratch(name, any_scratch_name=flag)
+
+
+def test_read_order_check_is_none_when_nothing_printed_an_id() -> None:
+    from nous_eval.served import recall
+
+    assert recall.text_order_agrees("recall_deep failed: timeout", [("fact", "x")]) is None
+
+
+async def test_judge_refuses_a_run_whose_read_order_checks_failed(tmp_path: Path) -> None:
+    rows = _arm_rows(12)
+    run = _write_run(tmp_path, "r", rows)
+    meta = json.loads((run / "meta.json").read_text(encoding="utf-8"))
+    meta["run"] = {"read_order_mismatches": 2, "unplaced": 0}
+    (run / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(SystemExit, match="run checks failed"):
+        await cli.cmd_judge(cli.parse_args(["recall", "judge", str(run), "--model", "m"]), client=FakeJudgeClient())
+    assert (
+        await cli.cmd_judge(
+            cli.parse_args(["recall", "judge", str(run), "--model", "m", "--allow-unchecked"]), client=FakeJudgeClient()
+        )
+        == 0
+    )

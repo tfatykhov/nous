@@ -119,6 +119,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         j.add_argument("--sample", type=int, default=0, help="judge only this many queries (fixed seed)")
         j.add_argument("--sets", default="prod", help="comma list of input sets to judge")
         j.add_argument("--concurrency", type=int, default=4)
+        j.add_argument("--allow-unchecked", action="store_true", help="judge a run whose read-order checks failed")
         j.add_argument("--env-file", type=Path)
         s = e.add_parser("score", help="metrics of one run -> scores.json")
         s.add_argument("run_dir", type=Path)
@@ -378,6 +379,13 @@ async def cmd_judge(args: argparse.Namespace, *, client: Any = None) -> int:
     from nous_eval.served.score import load_run
 
     meta, rows = load_run(args.run_dir)
+    run = meta.get("run") or {}
+    failed = {k: run.get(k) for k in ("read_order_mismatches", "unplaced", "recent_unparsed") if run.get(k)}
+    if failed and not args.allow_unchecked:
+        raise SystemExit(
+            f"run checks failed {failed}: ranks or item text may not be what the model read; "
+            "fix the run, or pass --allow-unchecked to judge it anyway"
+        )
     sets = set(args.sets.split(","))
     units = units_for_rows(meta["entry"], [r for r in rows if r.get("set") in sets])
     units = sample_units(units, args.sample, SEED + 1)
@@ -424,6 +432,8 @@ def cmd_score(args: argparse.Namespace) -> int:
 def cmd_compare(args: argparse.Namespace) -> int:
     from nous_eval.served.compare import compare
 
+    if args.out:
+        _check_out_file(args.out)
     rep = compare(
         args.run_a,
         args.run_b,
@@ -475,10 +485,19 @@ def render_compare(rep: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _check_out_file(path: Path) -> Path:
+    """An explicit output file must be one git would not track (it holds prod text or numbers)."""
+    from nous_eval.beam.arms import check_out_dir
+
+    check_out_dir(path)
+    return path
+
+
 async def cmd_queries(args: argparse.Namespace) -> int:
     from nous.storage.database import Database
     from nous_eval.served.recall import extract_queries
 
+    _check_out_file(args.out)
     prep = _Prepared(args, "queries", args.tag)
     async with prep:
         db = Database(prep.resolved.settings)
@@ -497,6 +516,7 @@ async def cmd_gold(args: argparse.Namespace, *, embeddings: Any = None, llm: Any
     from nous_eval.served import preturn
     from nous_eval.served.stack import open_stack
 
+    _check_out_file(args.out)
     prep = _Prepared(args, "gold", args.tag)
     ledger = CostLedger(prep.data_dir / "cost_ledger.jsonl")
     async with prep:

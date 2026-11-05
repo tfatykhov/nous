@@ -49,7 +49,16 @@ def differences(ma: dict, mb: dict) -> dict[str, Any]:
     for k in ("head", "dirty_files", "served_sha256"):
         if ca.get(k) != cb.get(k):
             out[f"code.{k}"] = {"a": ca.get(k), "b": cb.get(k)}
-    for k in ("inputs_sha256", "db_template", "judge_model", "agent", "base_files", "python_hash_seed"):
+    for k in (
+        "inputs_sha256",
+        "as_of",
+        "warm",
+        "db_template",
+        "judge_model",
+        "agent",
+        "base_files",
+        "python_hash_seed",
+    ):
         if ma.get(k) != mb.get(k):
             out[k] = {"a": ma.get(k), "b": mb.get(k)}
     # The effective runtime knobs (vector_weight, rrf_k, cross_encoder_enabled), counted only where

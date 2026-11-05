@@ -47,10 +47,13 @@ def order_rendered(cands: list[dict], read_order: list[tuple[str, str]]) -> tupl
     return out, len(unplaced)
 
 
-def text_order_agrees(text: str, read_order: list[tuple[str, str]]) -> bool:
-    """The ids the output prints as ``(id: ...)``, in text order, follow the read order."""
+def text_order_agrees(text: str, read_order: list[tuple[str, str]]) -> bool | None:
+    """The ids the output prints as ``(id: ...)``, in text order, follow the read order; None when
+    the output printed none of them (nothing to check, e.g. an error row)."""
     in_order = [i for _, i in read_order]
     printed = [i for i in dict.fromkeys(_ID_RE.findall(text)) if i in set(in_order)]
+    if not printed:
+        return None
     return printed == [i for i in dict.fromkeys(in_order) if i in set(printed)]
 
 
@@ -130,7 +133,7 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
             await one_call(stack, it["text"])
         except Exception:  # noqa: BLE001 - a warm-up failure shows up again in the measured call
             pass
-    n_err = 0
+    n_err = n_mismatch = n_unchecked = n_unplaced = 0
     before = embedding_cache_size(stack.embeddings)
     with rows_path.open("w", encoding="utf-8") as f:
         for i, it in enumerate(items):
@@ -139,6 +142,9 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
             except Exception as exc:  # noqa: BLE001 - recorded; the score counts error rows
                 r = {"error": f"{type(exc).__name__}: {exc}"[:300]}
             n_err += 1 if r.get("error") else 0
+            n_mismatch += r.get("read_order_matches_text") is False
+            n_unchecked += not r.get("error") and r.get("read_order_matches_text") is None
+            n_unplaced += r.get("unplaced") or 0
             row = {"key": it["key"], "set": it["set"], "text": it["text"], **r}
             if it.get("gold"):
                 row["gold"] = it["gold"]
@@ -152,6 +158,9 @@ async def run(stack: Any, items: list[dict], rows_path: Path, *, warm: int) -> d
         "errors": n_err,
         "date_prefill": prefill,
         "embeddings_added_while_measuring": None if before is None else after - before,
+        "read_order_mismatches": n_mismatch,
+        "read_order_unchecked": n_unchecked,
+        "unplaced": n_unplaced,
     }
 
 

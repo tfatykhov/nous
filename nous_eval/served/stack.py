@@ -183,6 +183,7 @@ class Stack:
     intent_leg_hits: list = field(default_factory=list)
     render_orders: list = field(default_factory=list)  # one per recall_deep call: [(type, id), ...] as read
     procedure_text: dict = field(default_factory=dict)  # procedure id -> the text the pre-turn build rendered
+    listed_episodes: list = field(default_factory=list)  # the build's last heart.list_episodes result
 
 
 def embedding_cache_size(provider: Any) -> int | None:
@@ -414,6 +415,7 @@ async def open_stack(
                 render_orders=render_orders,
             )
             _hook_intent_leg(stack)
+            _hook_list_episodes(stack)
             _capture_procedure_text(stack)
             yield stack
     finally:
@@ -428,6 +430,18 @@ async def open_stack(
         if owns_llm:
             await llm.close()
         await db.disconnect()
+
+
+def _hook_list_episodes(stack: Stack) -> None:
+    """Keep the episodes Recent Conversations was built from (the build calls list_episodes once)."""
+    orig = stack.heart.list_episodes
+
+    async def list_episodes(*a: Any, **kw: Any) -> Any:
+        res = await orig(*a, **kw)
+        stack.listed_episodes = list(res or [])
+        return res
+
+    stack.heart.list_episodes = list_episodes
 
 
 def _hook_intent_leg(stack: Stack) -> None:
