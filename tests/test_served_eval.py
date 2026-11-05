@@ -1058,6 +1058,22 @@ def test_an_id_quoted_inside_an_items_text_is_not_a_row() -> None:
     assert recall.text_order_agrees(text, [("decision", dec), ("episode", ep)]) is False
 
 
+def test_an_id_quoted_at_the_end_of_a_merge_history_line_is_not_a_row() -> None:
+    """A merge-history source line (three-space indent) that ends with a quoted id is part of the
+    fact above it, not a row of its own."""
+    from nous_eval.served import recall
+
+    fact, ep, dec = (str(uuid.uuid5(uuid.NAMESPACE_URL, n)) for n in ("fact", "episode", "decision"))
+    text = (
+        f"1. [fact] Water at six (id: {fact}, score: 0.600 [rrf])\n"
+        "   history (merged from 2 facts, newest first):\n"
+        f"   - [learned 2026-01-02] follows the drip-line decision (id: {dec})\n"
+        f"2. [episode] Set up the timer (id: {ep}, score: 0.500 [rrf])\n"
+        f"3. [decision] Use a drip line | arch | low | confidence: 0.80 (id: {dec})"
+    )
+    assert recall.text_order_agrees(text, [("fact", fact), ("episode", ep), ("decision", dec)]) is True
+
+
 def _pr(rid: str, rtype: str, desc: str, source: str = "heart", score: float = 0.5, rel: str | None = None, **meta):
     """A PipelineResult-shaped row for the real formatter."""
     return SimpleNamespace(

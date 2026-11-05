@@ -23,8 +23,10 @@ logger = logging.getLogger("nous_eval.served")
 SNIPPET_CHARS = 1200
 # A row's own trailer, as _format_pipeline_text prints it at the end of the row's line:
 # "(id: <uuid>, score: 0.512 [rrf])", or "(id: <uuid>)" for a decision with no raw score. An id an
-# item's own text quotes ("... the decision (id: <uuid>) ...") is not a row.
-_ROW_ID_RE = re.compile(r"\(id: ([0-9a-fA-F-]{36})(?:, score: [^()\n]*)?\)$", re.MULTILINE)
+# item's own text quotes ("... the decision (id: <uuid>) ...") is not a row, nor is one ending a
+# three-space sub-line (a fact's merge-history lines). A quote ending an inner line of a multi-line
+# item (a chunk) is the one case still counted.
+_ROW_ID_RE = re.compile(r"^(?! {3}).*\(id: ([0-9a-fA-F-]{36})(?:, score: [^()\n]*)?\)$", re.MULTILINE)
 
 
 def order_rendered(cands: list[dict], read_order: list[tuple[str, str]]) -> tuple[list[dict], int]:
