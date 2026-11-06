@@ -5,9 +5,10 @@ For each session, in file order:
 1. With sleep on, a sleep cycle runs first when the session starts on a later day
    than the previous one ended: prod sleeps between days, not between turns. Sleep
    reflection reads the episodes started in the last ``sleep_reflection_hours`` of
-   wall-clock time; before each cycle that window is widened to reach back exactly
-   that many hours before the simulated sleep time (later sessions are not stored
-   yet), so reflection sees the episodes prod's would.
+   wall-clock time; before each cycle that window is widened to reach back that many
+   hours before the simulated sleep time (later sessions are not stored yet), so
+   reflection sees the episodes prod's would. The widened number also reaches the
+   reflection prompt's "past N hours" text, which prod code formats from it.
 2. The dialogue (both roles) is stored as one dated episode through the write path
    (``beam.harness.ingest_transcript``).
 3. ``extracted_memories`` lists the active facts this session left, read right after
@@ -17,15 +18,17 @@ For each session, in file order:
 4. Each update point (``is_update`` with original memories) gets the top 10 of a
    fact search on its text as ``memories_from_system``, with access tracking off:
    the search is the evaluator's probe, not a read the agent made.
-
-In both scored lists "the user"/"User" becomes the persona's name (``name_owner``):
-the store holds one person's memories and Nous writes its owner as "the user",
-while HaluMem's judge requires the gold point's name and scores "User works at X"
-0 against "Martin Mark works at X" (the reference adapters told Mem0 to write names).
-Nous's own text is kept in the session's ``nous`` record. The question context is
-left as recalled: its header names the user.
 5. Each question gets the ``recall_deep`` text as context and is answered by the
-   answer model with HaluMem's answer prompt.
+   answer model with HaluMem's answer prompt. That is a read the user asked for, so
+   it tracks access (recall counts) as prod's recall_deep does.
+
+In both scored lists the owner convention becomes the persona's name
+(``name_owner``): the store holds one person's memories and Nous writes its owner as
+"the user", while HaluMem's judge requires the gold point's name and scores "User
+works at X" 0 against "Martin Mark works at X" (the reference adapters told Mem0 to
+write names). "user" as a common noun ("user experience", "user-centered") is left
+alone. Nous's own text is kept in the session's ``nous`` record. The question
+context is left as recalled: its header names the user.
 
 The output dict has the reference adapters' shape, so HaluMem's ``evaluation.py``
 scores it unchanged.
@@ -51,14 +54,28 @@ from nous_eval.halumem import corpus
 logger = logging.getLogger(__name__)
 
 UPDATE_TOP_K = 10  # the reference adapters' update search
-_OWNER_RE = re.compile(r"\b(?:the user|user)('s)?\b", re.IGNORECASE)
+
+# Nouns "user" modifies when it is a common noun, not the owner ("user experience").
+_USER_COMPOUND = (
+    r"(?:experiences?|friendly|friendliness|feedback|testing|tests?|needs|centered|centric|satisfaction"
+    r"|engagement|driven|interfaces?|interactions?|expectations|adoption|reviews?|training|surveys?"
+    r"|insights?|data|interviews?|focused|preferences|customization|base|research|journeys?|behaviou?rs?"
+    r"|retention|acquisition|growth|privacy|accessibility|onboarding|metrics|personas?|stor(?:y|ies)"
+    r"|flows?|stud(?:y|ies)|groups?|requirements|input|accounts?|profiles?|perspectives?)\b"
+)
+_SENTENCE_START = r"(?:^|(?<=[.!?;:]\s))"
+_OWNER_RE = re.compile(
+    rf"(?i:\bthe user's)\b|{_SENTENCE_START}User's\b"  # possessive: the owner
+    rf"|(?i:\bthe user)\b(?!-)(?!\s+(?i:{_USER_COMPOUND}))"  # "the user", not "the user experience"
+    rf"|{_SENTENCE_START}User\b(?!-)(?!\s+(?i:{_USER_COMPOUND}))"  # a sentence starting "User ..."
+)
 
 Answer = Callable[[str], Awaitable[str]]
 
 
 def name_owner(text: str, name: str) -> str:
     """``"The user's colleague"`` -> ``"<name>'s colleague"`` (see the module docstring)."""
-    return _OWNER_RE.sub(lambda m: name + (m.group(1) or ""), text)
+    return _OWNER_RE.sub(lambda m: name + ("'s" if m.group(0).endswith("'s") else ""), text)
 
 
 def _ms(t0: float) -> float:

@@ -5,9 +5,16 @@
            cycle between days); writes the adapter output HaluMem scores, one file
            per user under ``<out-dir>/results/nous-<version>/tmp/``, merged into
            ``nous_eval_results.jsonl`` next to it. A user whose file exists is
-           skipped, so a run resumes; run.json must match to resume.
+           skipped, so a run resumes; run.json must match to resume. A user that
+           stopped part-way is run again under a fresh agent id (``-a2``, ...); the
+           partial agent is left in the scratch DB.
     score  HaluMem's own ``evaluation.py`` (from ``--halumem-dir``, unchanged) on that
-           file, with its judge model; results land in the same directory.
+           file, with its judge model; results land in the same directory. It caches
+           each user's judgements in ``tmp2/``: ``run`` deletes a user's cache when it
+           rewrites that user. HaluMem's aggregator divides by the number of
+           interference, update and question records, so a ``--limit-sessions`` run
+           without all three fails in ``score`` (the per-user records in ``tmp2/`` are
+           still written).
 
 Answers use HaluMem's answer prompt (PROMPT_MEMZERO) and memory template
 (TEMPLATE_MEM0), read from the HaluMem checkout without running it. Several users
@@ -45,7 +52,21 @@ JUDGE_ENV = {
     "WAIT_TIME_LOWER": "10",
     "WAIT_TIME_UPPER": "30",
 }
-RESUME_KEYS = ("arm", "agent_tag", "sleep", "answer_model", "override_names", "settings", "eval_overrides", "data")
+RESUME_KEYS = (
+    "arm",
+    "agent_tag",
+    "sleep",
+    "answer_model",
+    "override_names",
+    "settings",
+    "eval_overrides",
+    "data",
+    "limit_sessions",
+    "halumem_revision",
+    "update_top_k",
+    "recall_deep_limit",
+    "owner_named",
+)
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -108,6 +129,42 @@ def result_dir(args: argparse.Namespace) -> Path:
 
 def agent_id(user_uuid: str, tag: str) -> str:
     return f"halumem-{user_uuid[:8]}-{tag}"
+
+
+def next_agent_id(base: str, used: set[str]) -> str:
+    """``base``, or the first ``base-a<n>`` (n >= 2) with no episodes yet."""
+    if base not in used:
+        return base
+    n = 2
+    while f"{base}-a{n}" in used:
+        n += 1
+    return f"{base}-a{n}"
+
+
+async def fresh_agent_id(settings: Any, base: str) -> str:
+    """An agent id for ``base`` that holds no episodes (a user that stopped part-way left some)."""
+    from sqlalchemy import text as sa_text
+
+    from nous.storage.database import Database
+
+    db = Database(settings)
+    await db.connect()
+    try:
+        async with db.session() as s:
+            used = set(
+                (
+                    await s.execute(
+                        sa_text("SELECT DISTINCT agent_id FROM heart.episodes WHERE agent_id = :b OR agent_id LIKE :p"),
+                        {"b": base, "p": f"{base}-a%"},
+                    )
+                ).scalars()
+            )
+    finally:
+        await db.disconnect()
+    chosen = next_agent_id(base, used)
+    if chosen != base:
+        logger.warning("%s already has episodes from a run that stopped part-way; using %s", base, chosen)
+    return chosen
 
 
 def select_users(users: list[dict[str, Any]], spec: str) -> list[dict[str, Any]]:
@@ -203,6 +260,9 @@ async def cmd_run(
             if prepare:
                 await harness.prepare_db(settings)
                 prepare = False
+            fresh = await fresh_agent_id(settings, settings.agent_id)
+            if fresh != settings.agent_id:
+                settings = arms.build_settings(db_url, fresh, overrides)
             counter.take()
             async with harness.open_stack(
                 settings, llm=counter, embeddings=embeddings, sleep=args.sleep, pinned=beam_run.pinned_fields(overrides)
@@ -220,6 +280,7 @@ async def cmd_run(
                 result["nous_run"]["rows"] = await harness.count_rows(stack)
             result["nous_run"]["anthropic_usage"] = counter.take()
             path.write_text(json.dumps(result, ensure_ascii=False, default=str), encoding="utf-8")
+            (out / "tmp2" / f"{user['uuid']}.json").unlink(missing_ok=True)  # evaluation.py's judgement cache
             written.append(user["uuid"])
             logger.info("user %s done: %s", user["uuid"], result["nous_run"])
     finally:

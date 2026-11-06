@@ -176,9 +176,19 @@ def test_reflection_window_reaches_back_from_the_simulated_sleep() -> None:
     ("text", "expected"),
     [
         ("User is employed as a director.", "Ada Lark is employed as a director."),
+        ("User's monthly income is 15700 USD.", "Ada Lark's monthly income is 15700 USD."),
         ("The user's colleague Joshua helps.", "Ada Lark's colleague Joshua helps."),
         ("Joshua is the user's friend; the user agrees.", "Joshua is Ada Lark's friend; Ada Lark agrees."),
+        ("The user dislikes snakes. User likes dogs.", "Ada Lark dislikes snakes. Ada Lark likes dogs."),
+        ("The user's experience matters.", "Ada Lark's experience matters."),
+        # "user" as a common noun stays.
         ("Other users and a username stay.", "Other users and a username stay."),
+        ("Ada focuses on user experience and user feedback.", "Ada focuses on user experience and user feedback."),
+        ("She improves the user experience.", "She improves the user experience."),
+        ("User experience is her field.", "User experience is her field."),
+        ("She favours user-centered design.", "She favours user-centered design."),
+        ("She is a user of Slack.", "She is a user of Slack."),
+        ("The user-friendly app helps.", "The user-friendly app helps."),
     ],
 )
 def test_name_owner(text: str, expected: str) -> None:
@@ -285,13 +295,32 @@ async def test_offline_run_writes_the_adapter_output(tmp_path: Path, db) -> None
 
         # A second run resumes: the user's file exists, so nothing is ingested again.
         assert await halumem_run.cmd_run(args, llm=llm, embeddings=MockEmbeddingProvider(), answer=fake_answer) == []
-        # Another arm into the same out-dir is refused.
-        other = halumem_run.parse_args([*argv, "--set", "NOUS_FACT_DEDUP_THRESHOLD=0.9"])
-        with pytest.raises(SystemExit, match="other settings"):
-            await halumem_run.cmd_run(other, llm=llm, embeddings=MockEmbeddingProvider(), answer=fake_answer)
+        # Another arm, or a session limit, into the same out-dir is refused.
+        for extra in (["--set", "NOUS_FACT_DEDUP_THRESHOLD=0.9"], ["--limit-sessions", "1"]):
+            other = halumem_run.parse_args([*argv, *extra])
+            with pytest.raises(SystemExit, match="other settings"):
+                await halumem_run.cmd_run(other, llm=llm, embeddings=MockEmbeddingProvider(), answer=fake_answer)
+
+        # A user that stopped part-way (its agent has episodes, its file is missing) runs again under
+        # a fresh agent id, and the judge cache for that user is dropped.
+        (result_dir / "tmp" / f"{user['uuid']}.json").unlink()
+        (result_dir / "tmp2").mkdir()
+        (result_dir / "tmp2" / f"{user['uuid']}.json").write_text("{}", encoding="utf-8")
+        llm = FakeLLM()
+        written = await halumem_run.cmd_run(args, llm=llm, embeddings=MockEmbeddingProvider(), answer=fake_answer)
+        assert written == [user["uuid"]]
+        rerun = json.loads((result_dir / "tmp" / f"{user['uuid']}.json").read_text(encoding="utf-8"))
+        assert rerun["nous_run"]["agent_id"] == f"{agent}-a2"
+        assert not (result_dir / "tmp2" / f"{user['uuid']}.json").exists()
     finally:
-        leftover = await purge_agent(db, agent)
+        leftover = await purge_agent(db, agent) + await purge_agent(db, f"{agent}-a2")
     assert leftover == []
+
+
+def test_next_agent_id_skips_ids_with_episodes() -> None:
+    assert halumem_run.next_agent_id("halumem-x-t", set()) == "halumem-x-t"
+    assert halumem_run.next_agent_id("halumem-x-t", {"halumem-x-t"}) == "halumem-x-t-a2"
+    assert halumem_run.next_agent_id("halumem-x-t", {"halumem-x-t", "halumem-x-t-a2"}) == "halumem-x-t-a3"
 
 
 @pytest.mark.postgres_only
