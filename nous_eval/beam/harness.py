@@ -385,10 +385,17 @@ def is_trivial(session: Session, min_chars: int) -> bool:
 
 
 async def ingest_session(stack: Stack, conv: Conversation, session: Session, since: datetime) -> None:
+    session_id = f"beam-{conv.bucket}-{conv.conv_id}-b{session.batch}-s{session.index}"
+    await ingest_transcript(stack, session_id, session, session.started_at + SESSION_LENGTH, since)
+
+
+async def ingest_transcript(stack: Stack, session_id: str, session: Session, ended: datetime, since: datetime) -> Any:
+    """One dated session through the write path (see the module docstring); returns its episode id.
+
+    Facts written while it is processed get the time ``ended``."""
     from nous.heart.schemas import EpisodeInput
 
     settings, heart = stack.settings, stack.heart
-    session_id = f"beam-{conv.bucket}-{conv.conv_id}-b{session.batch}-s{session.index}"
     first_user = next((m.content for m in session.messages if m.role == "user"), session.messages[0].content)
     frame = await stack.frames.select(FRAME_AGENT, first_user)
     episode = await heart.start_episode(
@@ -401,7 +408,6 @@ async def ingest_session(stack: Stack, conv: Conversation, session: Session, sin
     )
     await _set_episode_times(stack, episode.id, session.started_at)
     transcript = render_transcript(session, settings.transcript_message_max_chars)
-    ended = session.started_at + SESSION_LENGTH
     if is_trivial(session, settings.episode_min_content_length):
         await heart.deactivate_episode(episode.id)
     else:
@@ -430,6 +436,7 @@ async def ingest_session(stack: Stack, conv: Conversation, session: Session, sin
     await stack.bus.emit(event)
     await stack.bus.drain(heart._pending_emits, stack.brain._pending_emits)
     await date_new_facts(stack, since, ended)
+    return episode.id
 
 
 async def run_sleep(stack: Stack, since: datetime, when: datetime) -> None:
