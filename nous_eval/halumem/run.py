@@ -186,13 +186,6 @@ def checkout_revision(halumem_dir: Path) -> str:
     return out.stdout.strip() or "unknown"
 
 
-def write_atomic(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` so a reader, or a resume after a crash, never sees a partial file."""
-    part = path.with_name(path.name + ".part")
-    part.write_text(text, encoding="utf-8")
-    os.replace(part, path)
-
-
 def data_fingerprint(path: Path) -> str:
     with path.open("rb") as f:
         return hashlib.file_digest(f, "sha256").hexdigest()
@@ -202,7 +195,7 @@ def merge_results(directory: Path, order: list[str]) -> int:
     """Rewrite the merged JSONL from the per-user files, in data order; returns the user count."""
     files = {p.stem: p for p in (directory / "tmp").glob("*.json")}
     lines = [files[u].read_text(encoding="utf-8").strip() for u in order if u in files]
-    write_atomic(directory / f"{FRAME}_eval_results.jsonl", "".join(x + "\n" for x in lines))
+    beam_run.write_atomic(directory / f"{FRAME}_eval_results.jsonl", "".join(x + "\n" for x in lines))
     return len(lines)
 
 
@@ -297,7 +290,7 @@ async def cmd_run(
                 )
                 result["nous_run"]["rows"] = await harness.count_rows(stack)
             result["nous_run"]["anthropic_usage"] = counter.take()
-            write_atomic(path, json.dumps(result, ensure_ascii=False, default=str))
+            beam_run.write_atomic(path, json.dumps(result, ensure_ascii=False, default=str))
             (out / "tmp2" / f"{user['uuid']}.json").unlink(missing_ok=True)  # evaluation.py's judgement cache
             written.append(user["uuid"])
             logger.info("user %s done: %s", user["uuid"], result["nous_run"])

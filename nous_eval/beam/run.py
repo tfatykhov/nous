@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -114,9 +115,22 @@ def _row_key(row: dict[str, Any]) -> tuple[str, str, int]:
     return row["conversation"], row["ability"], row["index"]
 
 
+def write_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` through a temporary file of this write's own, so a reader, a
+    parallel writer or a resume after a crash never sees a partial file."""
+    fd, part = tempfile.mkstemp(dir=path.parent, prefix=f"{path.name}.", suffix=".part")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(part, path)
+    except BaseException:
+        Path(part).unlink(missing_ok=True)
+        raise
+
+
 def _write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+    write_atomic(path, json.dumps(data, indent=2, default=str))
 
 
 def _require_db(args: argparse.Namespace) -> str:

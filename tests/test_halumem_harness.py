@@ -15,6 +15,7 @@ from pathlib import Path
 import pytest
 from test_beam_harness import PLAN_DETAIL, FakeLLM, purge_agent
 
+from nous_eval.beam import run as beam_run
 from nous_eval.halumem import corpus, runner
 from nous_eval.halumem import run as halumem_run
 
@@ -222,10 +223,35 @@ def test_merge_follows_data_order_and_skips_missing_users(tmp_path: Path) -> Non
 
 def test_write_atomic_leaves_no_part_file(tmp_path: Path) -> None:
     (tmp_path / "tmp").mkdir()
-    halumem_run.write_atomic(tmp_path / "tmp" / "a.json", json.dumps({"uuid": "a"}))
-    (tmp_path / "tmp" / "b.json.part").write_text("{trunc", encoding="utf-8")  # a write a crash cut short
-    assert sorted(p.name for p in (tmp_path / "tmp").iterdir()) == ["a.json", "b.json.part"]
+    beam_run.write_atomic(tmp_path / "tmp" / "a.json", json.dumps({"uuid": "a"}))
+    (tmp_path / "tmp" / "b.json.123.part").write_text("{trunc", encoding="utf-8")  # a write a crash cut short
+    assert sorted(p.name for p in (tmp_path / "tmp").iterdir()) == ["a.json", "b.json.123.part"]
     assert halumem_run.merge_results(tmp_path, ["a", "b"]) == 1
+
+
+def test_each_atomic_write_has_its_own_part_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Parallel processes merge into one file: no two writes may share a temporary file."""
+    parts: list[str] = []
+    real_replace = beam_run.os.replace
+
+    def replace(src: str, dst: Path) -> None:
+        parts.append(src)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(beam_run.os, "replace", replace)
+    beam_run.write_atomic(tmp_path / "m.jsonl", "first")
+    beam_run.write_atomic(tmp_path / "m.jsonl", "second")
+    assert len(set(parts)) == 2 and all(Path(p).parent == tmp_path for p in parts)
+    assert (tmp_path / "m.jsonl").read_text(encoding="utf-8") == "second"
+    assert [p.name for p in tmp_path.iterdir()] == ["m.jsonl"]
+
+
+def test_run_json_is_written_atomically(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """run.json (the resume check, runtime config) goes through the same atomic write."""
+    calls: list[Path] = []
+    monkeypatch.setattr(beam_run, "write_atomic", lambda path, text: calls.append(path))
+    halumem_run._check_resume(tmp_path / "run.json", {"data": "x"})
+    assert calls == [tmp_path / "run.json"]
 
 
 def test_resume_refuses_another_corpus(tmp_path: Path) -> None:
