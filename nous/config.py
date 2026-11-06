@@ -2071,6 +2071,10 @@ class Settings(BaseSettings):
     admission_recency_lambda: float = 0.01
     admission_utility_model: str = ""
     admission_utility_llm_enabled: bool = True
+    # Admission confidence as ROUGE-L precision of the fact against its source (the share of
+    # the fact's words found there, in order) instead of F1, whose recall term divides by the
+    # length of the whole session transcript and so scores every fact near 0.
+    admission_confidence_precision: bool = False
 
     # F026: Execution Integrity
     execution_ledger_enabled: bool = True

@@ -84,6 +84,50 @@ class TestRougeL:
         assert score == 0.5  # Neutral fallback
 
 
+class TestRougeLPrecision:
+    """confidence_precision: the share of the fact's tokens found, in order, in the source."""
+
+    # A session transcript: the fact is said once among thousands of other words.
+    TRANSCRIPT = " ".join(
+        ["filler"] * 3000 + ["Tim mentioned he prefers dark mode for coding"] + ["more"] * 3000
+    )
+
+    def test_grounded_fact_in_a_long_transcript(self):
+        fact = "Tim prefers dark mode"
+        assert _controller()._rouge_l_score(fact, self.TRANSCRIPT) < 0.01  # F1: recall divides by 6,000+ tokens
+        assert _controller(confidence_precision=True)._rouge_l_score(fact, self.TRANSCRIPT) == 1.0
+
+    def test_partly_grounded_fact(self):
+        ctrl = _controller(confidence_precision=True)
+        assert ctrl._rouge_l_score("Tim prefers light mode", self.TRANSCRIPT) == pytest.approx(0.75)
+
+    def test_order_counts(self):
+        ctrl = _controller(confidence_precision=True)
+        assert ctrl._rouge_l_score("mode dark prefers Tim", "Tim prefers dark mode") == pytest.approx(0.25)
+
+    def test_ungrounded_fact(self):
+        ctrl = _controller(confidence_precision=True)
+        assert ctrl._rouge_l_score("Alice owns a sailboat", self.TRANSCRIPT) == 0.0
+
+    def test_empty_stays_neutral(self):
+        ctrl = _controller(confidence_precision=True)
+        assert ctrl._rouge_l_score("", "hello world") == 0.5
+        assert ctrl._rouge_l_score("hello world", "") == 0.5
+
+    @pytest.mark.asyncio
+    async def test_composite_counts_the_grounding(self):
+        """The same candidate against the same transcript: precision adds the confidence weight that F1 lost."""
+        fact = _fact(content="Tim prefers dark mode", source="fact_extractor")
+        common = dict(utility_llm_enabled=False, shadow_mode=False)
+        f1 = await _controller(**common).score(fact, None, 0.5, self.TRANSCRIPT, None)
+        precision = await _controller(confidence_precision=True, **common).score(fact, None, 0.5, self.TRANSCRIPT, None)
+        assert f1.scores["confidence"] < 0.01
+        assert precision.scores["confidence"] == 1.0
+        assert precision.composite_score - f1.composite_score == pytest.approx(
+            DEFAULT_WEIGHTS["confidence"] * (1.0 - f1.scores["confidence"])
+        )
+
+
 class TestLCS:
     def test_empty(self):
         ctrl = _controller()

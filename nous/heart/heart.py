@@ -113,6 +113,7 @@ class Heart:
                 utility_llm_enabled=settings.admission_utility_llm_enabled,
                 utility_llm_model=settings.admission_utility_model or settings.background_model,
                 shadow_mode=settings.admission_shadow_mode,
+                confidence_precision=settings.admission_confidence_precision,
             )
             # LLM client injected post-init (same pattern as EventBus)
             admission_controller = AdmissionController(config=admission_config)

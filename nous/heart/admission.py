@@ -150,6 +150,10 @@ class AdmissionConfig:
     utility_llm_enabled: bool = True
     utility_llm_model: str = ""  # Empty = use background_model fallback
     shadow_mode: bool = False
+    # Confidence as ROUGE-L precision (the share of the fact's tokens found, in order, in
+    # the source) instead of F1. F1's recall term divides by the source length, and the
+    # extractor's source is the whole session transcript, so F1 scores every fact near 0.
+    confidence_precision: bool = False
 
 
 class AdmissionLLMClient:
@@ -224,7 +228,8 @@ class AdmissionController:
     # ------------------------------------------------------------------
 
     def _rouge_l_score(self, fact_text: str, source_text: str) -> float:
-        """Compute ROUGE-L F1 between fact and source text.
+        """Compute ROUGE-L F1 between fact and source text, or its precision with
+        ``config.confidence_precision``.
 
         Lightweight implementation — whitespace tokenization, no external deps.
         """
@@ -237,6 +242,8 @@ class AdmissionController:
         lcs_len = self._lcs_length(fact_tokens, source_tokens)
 
         precision = lcs_len / len(fact_tokens)
+        if self.config.confidence_precision:
+            return precision
         recall = lcs_len / len(source_tokens)
 
         if precision + recall == 0:
