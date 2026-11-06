@@ -176,3 +176,18 @@ async def test_w8_concurrent_distinct_event_dates_two_rows(heart):
         assert await _active_count(heart, content) == 2
     finally:
         await _cleanup(heart, content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("on", [False, True])
+async def test_confidence_precision_setting_reaches_the_controller(db, mock_embeddings, on):
+    """NOUS_ADMISSION_CONFIDENCE_PRECISION is read into the controller Heart builds (off by default)."""
+    from nous.config import Settings
+    from nous.heart import Heart
+
+    assert Settings().admission_confidence_precision is False
+    h = Heart(db, Settings(admission_confidence_precision=on), embedding_provider=mock_embeddings)
+    try:
+        assert h.facts._admission_controller.config.confidence_precision is on
+    finally:
+        await h.close()

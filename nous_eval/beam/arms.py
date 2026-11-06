@@ -82,6 +82,7 @@ ARM_SETTINGS = frozenset(
         "fact_dedup_tiebreaker_enabled", "admission_control_enabled", "admission_shadow_mode", "admission_threshold",
         "admission_w_utility", "admission_w_confidence", "admission_w_novelty", "admission_w_recency",
         "admission_w_type_prior", "admission_recency_lambda", "admission_utility_llm_enabled",
+        "admission_confidence_precision",
         "supersession_lineage_mode", "supersession_key_resolution_enabled", "supersession_policy",
         "supersession_key_candidates_cap", "supersession_sweep_max_pairs", "same_slot_conflict_routing_enabled",
         "entity_keys_max_per_fact", "entity_key_min_chars", "contradiction_detection",
