@@ -246,6 +246,44 @@ def test_each_atomic_write_has_its_own_part_file(tmp_path: Path, monkeypatch: py
     assert [p.name for p in tmp_path.iterdir()] == ["m.jsonl"]
 
 
+def test_atomic_write_waits_out_a_reader_then_gives_up_cleanly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows refuses a rename onto a file another process has open: retry briefly, and on
+    giving up leave no temporary file behind."""
+    real_replace = beam_run.os.replace
+    refusals = iter([PermissionError("in use")] * 2)
+
+    def busy_then_free(src: str, dst: Path) -> None:
+        err = next(refusals, None)
+        if err:
+            raise err
+        real_replace(src, dst)
+
+    monkeypatch.setattr(beam_run.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(beam_run.os, "replace", busy_then_free)
+    beam_run.write_atomic(tmp_path / "m.jsonl", "done")
+    assert (tmp_path / "m.jsonl").read_text(encoding="utf-8") == "done"
+
+    def always_busy(src: str, dst: Path) -> None:
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(beam_run.os, "replace", always_busy)
+    with pytest.raises(PermissionError):
+        beam_run.write_atomic(tmp_path / "m.jsonl", "lost")
+    assert [p.name for p in tmp_path.iterdir()] == ["m.jsonl"]
+    assert (tmp_path / "m.jsonl").read_text(encoding="utf-8") == "done"
+
+
+def test_score_refuses_a_run_with_no_user_results(tmp_path: Path) -> None:
+    args = halumem_run.parse_args(
+        ["score", "--halumem-dir", str(tmp_path / "HaluMem"), "--version", "v", "--out-dir", str(tmp_path / "o")]
+    )
+    out = halumem_run.result_dir(args)
+    (out / "tmp").mkdir(parents=True)
+    (out / "run.json").write_text(json.dumps({"data_users": ["a"]}), encoding="utf-8")
+    with pytest.raises(SystemExit, match="no per-user results"):
+        halumem_run.cmd_score(args)
+
+
 def test_run_json_is_written_atomically(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """run.json (the resume check, runtime config) goes through the same atomic write."""
     calls: list[Path] = []

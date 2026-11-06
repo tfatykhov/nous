@@ -122,10 +122,23 @@ def write_atomic(path: Path, text: str) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(text)
-        os.replace(part, path)
+        _replace(part, path)
     except BaseException:
         Path(part).unlink(missing_ok=True)
         raise
+
+
+def _replace(src: str, dst: Path, attempts: int = 5) -> None:
+    """``os.replace``, retried for about 1.5 s: on Windows it fails while another process
+    (a parallel run's merge, a judge) has ``dst`` open."""
+    for attempt in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(0.1 * 2**attempt)
 
 
 def _write_json(path: Path, data: Any) -> None:

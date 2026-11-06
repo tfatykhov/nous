@@ -299,7 +299,10 @@ async def cmd_run(
             await judge.close()
         if owns_llm:
             await llm.close()
-        merge_results(out, [u["uuid"] for u in all_users])
+        try:
+            merge_results(out, [u["uuid"] for u in all_users])
+        except OSError as e:  # e.g. a judge holds the merged file open; score rebuilds it anyway
+            logger.warning("could not rewrite the merged results (%s); score rebuilds them", e)
     return written
 
 
@@ -325,6 +328,8 @@ def cmd_score(args: argparse.Namespace) -> Path:
     # merge written can predate another process's user.
     info = json.loads((out / "run.json").read_text(encoding="utf-8"))
     n_users = merge_results(out, info.get("data_users") or sorted(p.stem for p in (out / "tmp").glob("*.json")))
+    if not n_users:
+        raise SystemExit(f"no per-user results in {out / 'tmp'}; run first")
     key = Settings().openai_api_key
     if not key:
         raise SystemExit("OPENAI_API_KEY is required for the HaluMem judge")
