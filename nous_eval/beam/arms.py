@@ -49,6 +49,7 @@ ARM_SETTINGS = frozenset(
         "exemplar_mode_enabled", "exemplar_top_k", "exemplar_leg_score", "exemplar_min_similarity",
         "exemplar_max_query_words", "mmr_enabled", "mmr_diversity_weight", "mmr_skip_after_ce",
         "coherent_ranking_enabled", "cross_encoder_enabled", "cross_encoder_max_candidates", "cross_encoder_text_limit",
+        "cross_encoder_order_only", "recall_deep_disabled_legs", "recall_deep_section_order",
         "residual_activation_enabled", "residual_decay_mode", "residual_decay_per_turn", "residual_power_law_alpha",
         "residual_activation_floor", "residual_top_k_carried", "residual_top_n_seeds", "residual_seed_weight",
         "residual_boost_weight", "query_expansion_enabled", "query_expansion_timeout_seconds",
