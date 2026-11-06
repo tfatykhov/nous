@@ -55,13 +55,15 @@ logger = logging.getLogger(__name__)
 
 UPDATE_TOP_K = 10  # the reference adapters' update search
 
-# Nouns "user" modifies when it is a common noun, not the owner ("user experience").
+# Nouns "user" modifies when it is a common noun, not the owner ("user experience"). A plural
+# that is also a verb ("needs", "reviews", "experiences") and a past tense ("focused") are left
+# out: after "the user" they are the owner's verb ("the user needs to ...").
 _USER_COMPOUND = (
-    r"(?:experiences?|friendly|friendliness|feedback|testing|tests?|needs|centered|centric|satisfaction"
-    r"|engagement|driven|interfaces?|interactions?|expectations|adoption|reviews?|training|surveys?"
-    r"|insights?|data|interviews?|focused|preferences|customization|base|research|journeys?|behaviou?rs?"
+    r"(?:experience|friendly|friendliness|feedback|testing|test|need|centric|satisfaction"
+    r"|engagement|driven|interface|interactions?|expectations|adoption|review|training|survey"
+    r"|insights?|data|interview|preferences|customization|base|research|journey|behaviou?rs?"
     r"|retention|acquisition|growth|privacy|accessibility|onboarding|metrics|personas?|stor(?:y|ies)"
-    r"|flows?|stud(?:y|ies)|groups?|requirements|input|accounts?|profiles?|perspectives?)\b"
+    r"|flow|study|group|requirements|input|account|profile|perspectives?)\b"
 )
 _SENTENCE_START = r"(?:^|(?<=[.!?;:]\s))"
 _OWNER_RE = re.compile(

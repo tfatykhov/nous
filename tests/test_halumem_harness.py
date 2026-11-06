@@ -181,7 +181,15 @@ def test_reflection_window_reaches_back_from_the_simulated_sleep() -> None:
         ("Joshua is the user's friend; the user agrees.", "Joshua is Ada Lark's friend; Ada Lark agrees."),
         ("The user dislikes snakes. User likes dogs.", "Ada Lark dislikes snakes. Ada Lark likes dogs."),
         ("The user's experience matters.", "Ada Lark's experience matters."),
+        # A verb that is also a plural noun or a past tense is the owner's.
+        ("The user needs to avoid peanuts.", "Ada Lark needs to avoid peanuts."),
+        ("User reviews contracts for a living.", "Ada Lark reviews contracts for a living."),
+        (
+            "The user experiences migraines; the user focused on sleep.",
+            "Ada Lark experiences migraines; Ada Lark focused on sleep.",
+        ),
         # "user" as a common noun stays.
+        ("She ran the user interview and the user test.", "She ran the user interview and the user test."),
         ("Other users and a username stay.", "Other users and a username stay."),
         ("Ada focuses on user experience and user feedback.", "Ada focuses on user experience and user feedback."),
         ("She improves the user experience.", "She improves the user experience."),
@@ -210,6 +218,42 @@ def test_merge_follows_data_order_and_skips_missing_users(tmp_path: Path) -> Non
     assert halumem_run.merge_results(tmp_path, ["a", "c", "b"]) == 2
     lines = (tmp_path / "nous_eval_results.jsonl").read_text(encoding="utf-8").splitlines()
     assert [json.loads(x)["uuid"] for x in lines] == ["a", "b"]
+
+
+def test_write_atomic_leaves_no_part_file(tmp_path: Path) -> None:
+    (tmp_path / "tmp").mkdir()
+    halumem_run.write_atomic(tmp_path / "tmp" / "a.json", json.dumps({"uuid": "a"}))
+    (tmp_path / "tmp" / "b.json.part").write_text("{trunc", encoding="utf-8")  # a write a crash cut short
+    assert sorted(p.name for p in (tmp_path / "tmp").iterdir()) == ["a.json", "b.json.part"]
+    assert halumem_run.merge_results(tmp_path, ["a", "b"]) == 1
+
+
+def test_resume_refuses_another_corpus(tmp_path: Path) -> None:
+    run_path = tmp_path / "run.json"
+    halumem_run._check_resume(run_path, {"data": "HaluMem-Medium.jsonl", "data_sha256": "aaa"})
+    halumem_run._check_resume(run_path, {"data": "HaluMem-Medium.jsonl", "data_sha256": "aaa"})
+    with pytest.raises(SystemExit, match="data_sha256"):
+        halumem_run._check_resume(run_path, {"data": "HaluMem-Medium.jsonl", "data_sha256": "bbb"})
+
+
+def test_score_rebuilds_the_merge_from_every_user_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two parallel runs: the merge the slower one wrote last lacks the other's user; score merges again."""
+    args = halumem_run.parse_args(
+        ["score", "--halumem-dir", str(tmp_path / "HaluMem"), "--version", "v", "--out-dir", str(tmp_path / "o")]
+    )
+    out = halumem_run.result_dir(args)
+    (out / "tmp").mkdir(parents=True)
+    (out / "run.json").write_text(json.dumps({"data_users": ["a", "b", "c"]}), encoding="utf-8")
+    for u in ("b", "a"):
+        (out / "tmp" / f"{u}.json").write_text(json.dumps({"uuid": u}), encoding="utf-8")
+    (out / "nous_eval_results.jsonl").write_text(json.dumps({"uuid": "b"}) + "\n", encoding="utf-8")
+    ran: list[list[str]] = []
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(halumem_run.subprocess, "run", lambda cmd, **_: ran.append(cmd))
+    halumem_run.cmd_score(args)
+    lines = (out / "nous_eval_results.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(x)["uuid"] for x in lines] == ["a", "b"]
+    assert ran[0][-1] == "2"
 
 
 def test_judge_command_runs_halumem_main_isolated() -> None:

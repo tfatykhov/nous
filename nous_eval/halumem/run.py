@@ -5,11 +5,13 @@
            cycle between days); writes the adapter output HaluMem scores, one file
            per user under ``<out-dir>/results/nous-<version>/tmp/``, merged into
            ``nous_eval_results.jsonl`` next to it. A user whose file exists is
-           skipped, so a run resumes; run.json must match to resume. A user that
+           skipped, so a run resumes; run.json (settings and the corpus's sha256)
+           must match to resume. Files are written whole or not at all. A user that
            stopped part-way is run again under a fresh agent id (``-a2``, ...); the
            partial agent is left in the scratch DB.
     score  HaluMem's own ``evaluation.py`` (from ``--halumem-dir``, unchanged) on that
-           file, with its judge model; results land in the same directory. It caches
+           file, rebuilt first from every per-user file (parallel runs each merge only
+           what they saw), with its judge model; results land in the same directory. It caches
            each user's judgements in ``tmp2/``: ``run`` deletes a user's cache when it
            rewrites that user. HaluMem's aggregator divides by the number of
            interference, update and question records, so a ``--limit-sessions`` run
@@ -27,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -61,6 +64,7 @@ RESUME_KEYS = (
     "settings",
     "eval_overrides",
     "data",
+    "data_sha256",
     "limit_sessions",
     "halumem_revision",
     "update_top_k",
@@ -182,11 +186,23 @@ def checkout_revision(halumem_dir: Path) -> str:
     return out.stdout.strip() or "unknown"
 
 
+def write_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` so a reader, or a resume after a crash, never sees a partial file."""
+    part = path.with_name(path.name + ".part")
+    part.write_text(text, encoding="utf-8")
+    os.replace(part, path)
+
+
+def data_fingerprint(path: Path) -> str:
+    with path.open("rb") as f:
+        return hashlib.file_digest(f, "sha256").hexdigest()
+
+
 def merge_results(directory: Path, order: list[str]) -> int:
     """Rewrite the merged JSONL from the per-user files, in data order; returns the user count."""
     files = {p.stem: p for p in (directory / "tmp").glob("*.json")}
     lines = [files[u].read_text(encoding="utf-8").strip() for u in order if u in files]
-    (directory / f"{FRAME}_eval_results.jsonl").write_text("".join(x + "\n" for x in lines), encoding="utf-8")
+    write_atomic(directory / f"{FRAME}_eval_results.jsonl", "".join(x + "\n" for x in lines))
     return len(lines)
 
 
@@ -226,6 +242,8 @@ async def cmd_run(
             "sleep": args.sleep,
             "answer_model": args.answer_model,
             "data": args.data.name,
+            "data_sha256": data_fingerprint(args.data),
+            "data_users": [u["uuid"] for u in all_users],
             "limit_sessions": args.limit_sessions,
             "halumem_revision": checkout_revision(args.halumem_dir),
             "answer_prompt": ANSWER_PROMPT_NAME,
@@ -279,7 +297,7 @@ async def cmd_run(
                 )
                 result["nous_run"]["rows"] = await harness.count_rows(stack)
             result["nous_run"]["anthropic_usage"] = counter.take()
-            path.write_text(json.dumps(result, ensure_ascii=False, default=str), encoding="utf-8")
+            write_atomic(path, json.dumps(result, ensure_ascii=False, default=str))
             (out / "tmp2" / f"{user['uuid']}.json").unlink(missing_ok=True)  # evaluation.py's judgement cache
             written.append(user["uuid"])
             logger.info("user %s done: %s", user["uuid"], result["nous_run"])
@@ -308,10 +326,12 @@ def cmd_score(args: argparse.Namespace) -> Path:
     from nous.config import Settings
 
     out = result_dir(args)
-    merged = out / f"{FRAME}_eval_results.jsonl"
-    if not merged.exists():
-        raise SystemExit(f"no {merged}; run first")
-    n_users = sum(1 for line in merged.read_text(encoding="utf-8").splitlines() if line.strip())
+    if not (out / "run.json").exists():
+        raise SystemExit(f"no {out / 'run.json'}; run first")
+    # Rebuilt from the per-user files: parallel runs each merge what they saw, and the last
+    # merge written can predate another process's user.
+    info = json.loads((out / "run.json").read_text(encoding="utf-8"))
+    n_users = merge_results(out, info.get("data_users") or sorted(p.stem for p in (out / "tmp").glob("*.json")))
     key = Settings().openai_api_key
     if not key:
         raise SystemExit("OPENAI_API_KEY is required for the HaluMem judge")
