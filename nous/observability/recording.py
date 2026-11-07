@@ -45,20 +45,27 @@ class BoundedWriter:
         self._pending: set[asyncio.Task] = set()
         self._saturated = False  # warn once per stretch of backpressure drops, count every one
 
-    def submit(self, make_write: Callable[[], Awaitable[None]]) -> bool:
+    def _count(self, field: str, stats: RecorderStats | None) -> None:
+        """Bump one counter in the writer's totals and, when given, in the caller's own stats."""
+        setattr(self.stats, field, getattr(self.stats, field) + 1)
+        if stats is not None and stats is not self.stats:
+            setattr(stats, field, getattr(stats, field) + 1)
+
+    def submit(self, make_write: Callable[[], Awaitable[None]], stats: RecorderStats | None = None) -> bool:
         """Schedule one write. Returns False, and counts it, when it is dropped.
 
         Takes a factory, not a coroutine: the write's coroutine is created only once a slot is held, so a dropped
-        or never-started write leaves nothing un-awaited. Never raises.
+        or never-started write leaves nothing un-awaited. The write's outcome is counted in the writer's ``stats``
+        and also in ``stats`` when given (the submitting recorder's own counters). Never raises.
         """
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            self.stats.dropped_error += 1
+            self._count("dropped_error", stats)
             logger.warning("F108: %s write dropped: no running event loop", self.name)
             return False
         if len(self._pending) >= self._max_pending:
-            self.stats.dropped_backpressure += 1
+            self._count("dropped_backpressure", stats)
             if not self._saturated:
                 self._saturated = True
                 logger.warning(
@@ -68,24 +75,24 @@ class BoundedWriter:
                 )
             return False
         self._saturated = False
-        task = loop.create_task(self._bounded(make_write))
+        task = loop.create_task(self._bounded(make_write, stats))
         self._pending.add(task)
         task.add_done_callback(self._pending.discard)
         return True
 
-    async def _bounded(self, make_write: Callable[[], Awaitable[None]]) -> None:
+    async def _bounded(self, make_write: Callable[[], Awaitable[None]], stats: RecorderStats | None) -> None:
         """One write, within the concurrency cap and the timeout. Never raises (cancellation still propagates)."""
         try:
             async with self._slots:
                 await asyncio.wait_for(make_write(), timeout=self._timeout_s)
         except TimeoutError:
-            self.stats.dropped_timeout += 1
+            self._count("dropped_timeout", stats)
             logger.warning("F108: %s write timed out after %ss", self.name, self._timeout_s)
         except Exception as exc:
-            self.stats.dropped_error += 1
+            self._count("dropped_error", stats)
             logger.warning("F108: %s write failed: %r", self.name, exc)
         else:
-            self.stats.written += 1
+            self._count("written", stats)
 
     async def drain(self, timeout_s: float) -> None:
         """Wait up to ``timeout_s`` for the pending writes (shutdown, before the pool closes). Never raises.

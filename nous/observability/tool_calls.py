@@ -103,11 +103,12 @@ class ToolCallRecorder:
         self._input_cap = settings.tool_input_max_chars
         self._result_cap = settings.tool_result_preview_chars
         self._reason_cap = settings.tool_reason_max_chars
+        self._stats = RecorderStats()
 
     @property
     def stats(self) -> RecorderStats:
-        """The shared writer's counters."""
-        return self._writer.stats
+        """This recorder's own counters (the shared writer's ``stats`` are the totals of every recorder)."""
+        return self._stats
 
     def record(self, rec: ToolCallRecord) -> None:
         """Redact and clip the record's text, then schedule its INSERT. Synchronous; never raises."""
@@ -121,10 +122,11 @@ class ToolCallRecorder:
             if rec.error_text is not None:
                 params["error_text"] = detail_text(rec.error_text, ERROR_TEXT_MAX_CHARS)
         except Exception as exc:
-            self._writer.stats.dropped_error += 1
+            # Never reached the writer, so only this recorder counts it.
+            self._stats.dropped_error += 1
             logger.warning("F108: tool-call record for %s not written: %r", getattr(rec, "tool_name", "?"), exc)
             return
-        self._writer.submit(lambda: self._insert(params))
+        self._writer.submit(lambda: self._insert(params), stats=self._stats)
 
     async def _insert(self, params: dict[str, Any]) -> None:
         async with self._database.session() as session:

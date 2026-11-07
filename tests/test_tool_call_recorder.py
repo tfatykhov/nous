@@ -203,6 +203,62 @@ async def test_concurrency_is_bounded():
     assert writer.stats.written == 12
 
 
+async def test_two_callers_sharing_a_writer_keep_separate_counts():
+    writer = BoundedWriter("test", timeout_s=0.05, max_pending=4)
+    mine, theirs = RecorderStats(), RecorderStats()
+
+    async def ok() -> None:
+        return None
+
+    async def broken() -> None:
+        raise RuntimeError("write failed")
+
+    async def slow() -> None:
+        await asyncio.sleep(1.0)
+
+    assert writer.submit(ok, stats=mine) is True
+    assert writer.submit(ok, stats=mine) is True
+    assert writer.submit(broken, stats=mine) is True
+    assert writer.submit(slow, stats=theirs) is True
+    assert writer.submit(ok, stats=theirs) is False  # the cap of 4 is shared
+    await writer.drain(2.0)
+    assert mine.as_dict() == {
+        "written": 2,
+        "dropped_timeout": 0,
+        "dropped_error": 1,
+        "dropped_backpressure": 0,
+        "unlabelled": 0,
+    }
+    assert theirs.as_dict() == {
+        "written": 0,
+        "dropped_timeout": 1,
+        "dropped_error": 0,
+        "dropped_backpressure": 1,
+        "unlabelled": 0,
+    }
+    assert writer.stats.as_dict() == {
+        "written": 2,
+        "dropped_timeout": 1,
+        "dropped_error": 1,
+        "dropped_backpressure": 1,
+        "unlabelled": 0,
+    }
+
+
+async def test_recorders_sharing_a_writer_count_their_own_writes():
+    writer = BoundedWriter("test")
+    first = ToolCallRecorder(writer, _BrokenDatabase(), "test-awv-broken-1", _SETTINGS)
+    second = ToolCallRecorder(writer, _BrokenDatabase(), "test-awv-broken-2", _SETTINGS)
+    first.record(_record())
+    first.record(_record(call_index=1))
+    second.record(_record())
+    await writer.drain(1.0)
+    assert first.stats is not writer.stats
+    assert first.stats.dropped_error == 2
+    assert second.stats.dropped_error == 1
+    assert writer.stats.dropped_error == 3
+
+
 async def test_drain_with_nothing_pending_returns():
     writer = BoundedWriter("test")
     await writer.drain(0.1)
@@ -249,6 +305,8 @@ def test_work_kind_mapping():
     for kind in CONTEXT_KINDS:
         assert work_kind_for(kind) in WORK_KINDS, kind
     assert work_kind_for("dag_node") == "workflow_step"
+    # Not in the plan's paragraph; ruled by the lead: an owner-approved proposal is intention work.
+    assert work_kind_for("approved_action") == "intention"
     expected = {
         "interactive": "conversation",
         "mcp": "conversation",
