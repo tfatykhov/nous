@@ -37,7 +37,8 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # Create workspace directory
 RUN mkdir -p /tmp/nous-workspace
 
-# Copy source BEFORE pip install (F5: non-editable install)
+# pyproject.toml alone first: the dependency layers below depend on it and nothing else, so a source change
+# does not reinstall them. The package itself is installed after the source is copied (F5: non-editable install).
 COPY pyproject.toml .
 
 # Headless Chromium for Playwright (the agent's web research and web-app testing). The browser and its
@@ -51,11 +52,19 @@ RUN pip install --no-cache-dir "$(python -c "import tomllib; print(next(d for d 
     && rm -rf /var/lib/apt/lists/* \
     && chmod -R a+rX /opt/ms-playwright
 
+# Third-party dependencies, read from pyproject.toml alone: the core list plus the runtime, agent and rerank
+# extras, the same set `pip install ".[runtime,agent,rerank]"` resolves. This layer (F042: [rerank] pulls
+# sentence-transformers + torch, ~2GB) is rebuilt only when pyproject.toml changes. The rerank model itself
+# (~90MB) is downloaded on first use into $HF_HOME and persisted via the huggingface_cache volume defined in
+# docker-compose.yml.
+RUN python -c "import tomllib; p = tomllib.load(open('pyproject.toml', 'rb'))['project']; print('\n'.join(p['dependencies'] + [d for e in ('runtime', 'agent', 'rerank') for d in p['optional-dependencies'][e]]))" \
+      > /tmp/requirements.txt \
+    && pip install --no-cache-dir -r /tmp/requirements.txt \
+    && rm /tmp/requirements.txt
+
 COPY nous/ nous/
-# F042: [rerank] pulls sentence-transformers + torch (~2GB). The model
-# itself (~90MB) is downloaded on first use into $HF_HOME and persisted
-# via the huggingface_cache volume defined in docker-compose.yml.
-RUN pip install --no-cache-dir ".[runtime,agent,rerank]"
+# The package itself; its dependencies are installed above.
+RUN pip install --no-cache-dir --no-deps .
 
 COPY sql/ sql/
 COPY static/ static/
