@@ -18,6 +18,7 @@ from nous.api.db_query import (
     DB_QUERY_SCHEMA,
     MAX_CELL_CHARS,
     MAX_COLUMNS,
+    MAX_LOGGED_TABLES,
     MAX_OUTPUT_CHARS,
     MAX_ROWS,
     MAX_SQL_CHARS,
@@ -27,6 +28,7 @@ from nous.api.db_query import (
     check_query_shape,
     format_result,
     reader_connect_args,
+    referenced_tables,
     register_db_query_tool,
     run_db_query,
 )
@@ -185,6 +187,43 @@ def test_shape_refuses_unterminated_quotes_and_unbalanced_parentheses(sql):
     with pytest.raises(QueryRefused) as refused:
         check_query_shape(sql)
     assert "SELECT or WITH" in str(refused.value)
+
+
+# -- the tables a statement names (for the log line) -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        ("select 1", []),
+        ("SELECT id FROM heart.subtasks", ["heart.subtasks"]),
+        (
+            "select f.id from heart.facts f join brain.decisions d on true, nous_system.dag_nodes n",
+            ["brain.decisions", "heart.facts", "nous_system.dag_nodes"],
+        ),
+        ("SELECT * FROM Heart.Facts JOIN HEART . EPISODES e ON true", ["heart.episodes", "heart.facts"]),
+        ("select a.x from heart.facts a, heart.facts b where heart.facts.id = a.id", ["heart.facts"]),
+        ("select column_name from INFORMATION_SCHEMA.columns", ["information_schema.columns"]),
+        # a function call is not a table, with or without a space before its parenthesis
+        ("select heart.similarity(x) , brain.score (y) from heart.facts", ["heart.facts"]),
+        # schemas outside the list are not logged, nor is a schema name that is only a suffix of a word
+        ("select public.similarity('a', 'b') from scoring.task_scores, my_heart.facts, pg_catalog.pg_class", []),
+        ("select n$1 from nous_system.events", ["nous_system.events"]),
+    ],
+)
+def test_referenced_tables_are_the_schema_qualified_names(sql, expected):
+    assert referenced_tables(sql) == expected
+
+
+@pytest.mark.parametrize("sql", [None, 42, b"select 1 from heart.facts", ["heart.facts"]])
+def test_referenced_tables_of_something_not_text_is_empty(sql):
+    assert referenced_tables(sql) == []
+
+
+def test_referenced_tables_are_capped():
+    sql = "select 1 from " + ", ".join(f"heart.t{i:02d}" for i in range(MAX_LOGGED_TABLES + 3))
+    assert referenced_tables(sql) == [f"heart.t{i:02d}" for i in range(MAX_LOGGED_TABLES)]
+    assert MAX_LOGGED_TABLES == 12
 
 
 # -- the result text -------------------------------------------------------------------------------------------------
@@ -372,6 +411,26 @@ async def test_a_result_that_reads_like_an_error_is_not_one(monkeypatch):
     assert answer == ("Error: x\n1\n(1 row)", False)
 
 
+async def test_the_log_line_names_the_tables_and_never_the_statement(monkeypatch, caplog):
+    async def one_row(settings, sql):
+        return ["id"], [[Cell("1", 1)]], False
+
+    monkeypatch.setattr(db_query, "execute_readonly", one_row)
+    settings = _settings(reader_db_password="readerpassword1")
+    sql = "select id from heart.subtasks s join heart.facts f on f.content = 'needle-literal' limit 5"
+    with caplog.at_level("INFO", logger="nous.api.db_query"):
+        await answer_db_query(settings, sql)
+        await answer_db_query(settings, "select 1")
+        await answer_db_query(settings, None)  # refused: not text
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("db_query sha256=")]
+    assert len(lines) == 3, lines
+    head = r"db_query sha256=[0-9a-f]{12} len=\d+ rows=[-\d]+ ms=\d+ "
+    assert re.fullmatch(head + r"tables=heart\.facts,heart\.subtasks ok", lines[0]), lines[0]
+    assert "needle-literal" not in lines[0] and "select" not in lines[0]
+    assert re.fullmatch(head + "tables=- ok", lines[1]), lines[1]
+    assert re.fullmatch(head + "tables=- refused", lines[2]), lines[2]
+
+
 @pytest.mark.postgres_only
 async def test_registered_when_the_probe_passes(reader_settings):
     dispatcher = ToolDispatcher()
@@ -458,6 +517,9 @@ def test_the_tool_description_teaches_the_limits():
         "nous_system.memory_write_health_daily",
     ):
         assert needed in description, needed
+    # it says first what it is for, and sends questions about earlier conversations to memory search
+    assert description.startswith("For live state and exact rows: tasks, schedules, DAG runs")
+    assert "call recall_deep first" in description and "cannot read conversation transcripts" in description
     assert DB_QUERY_SCHEMA["required"] == ["sql"] and DB_QUERY_SCHEMA["properties"]["sql"]["type"] == "string"
 
 
