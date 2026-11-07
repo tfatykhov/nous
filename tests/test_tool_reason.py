@@ -21,6 +21,7 @@ from test_runner_authorization import _run_loop, _runner, _settings
 from test_runner_background import _MockBrain, _MockCognitive, _MockHeart
 
 from nous.api.execution_context import ExecutionContext
+from nous.api.idempotency import idempotency_key
 from nous.api.mcp import create_mcp_server
 from nous.api.models import ApiResponse
 from nous.api.runner import AgentRunner
@@ -293,6 +294,33 @@ async def test_dispatch_strips_reason_defensively():
     text, is_error = await d.dispatch("loose", {"reason": 'Because.\n<parameter name="query">leaked'})
     assert is_error and "missing required argument(s): query" in text, text
     assert seen == {}
+
+
+def test_repaired_args_drop_reason_like_dispatch():
+    """Harness 2b derives the idempotency key (and the compensation snapshot) from ``repaired_args``, which must be
+    exactly what the handler receives: two calls that differ only in their reason repair to the same arguments."""
+    d = ToolDispatcher()
+    d.register(
+        "send_email",
+        _handler({}, "send"),
+        {
+            "type": "object",
+            "properties": {"to": {"type": "string"}, "subject": {"type": "string"}, "body": {"type": "string"}},
+            "required": ["to", "subject", "body"],
+        },
+    )
+    base = {"to": "a@example.com", "subject": "s", "body": "b"}
+    first = d.repaired_args("send_email", {**base, "reason": "Tell the owner the deploy is done"})
+    second = d.repaired_args("send_email", {**base, "reason": "Reply to the owner's question"})
+    assert first == second == base
+    ctx = ExecutionContext(kind="subtask", session_id="s1", subtask_id=uuid.uuid4())
+    key = idempotency_key(ctx, "send_email", first)
+    assert key is not None and key == idempotency_key(ctx, "send_email", second)
+    # The runner reads the handler's arguments through repaired_args too; a schema that declares reason keeps it.
+    r, _ = _real()
+    assert r._handler_args("recall_deep", {"query": "q", "reason": "why"}) == {"query": "q"}
+    censor = {"trigger_pattern": "x", "reason": "Blocks x"}
+    assert r._handler_args("create_censor", censor) == censor
 
 
 @pytest.mark.asyncio
