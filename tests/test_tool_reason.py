@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import copy
 import json
+import uuid
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from mcp.types import ListToolsRequest
+from sqlalchemy import text
 from test_runner_authorization import _run_loop, _runner, _settings
 from test_runner_background import _MockBrain, _MockCognitive, _MockHeart
 
@@ -23,9 +26,18 @@ from nous.api.models import ApiResponse
 from nous.api.runner import AgentRunner
 from nous.api.subtask_tools import SUBMIT_FINAL_REPORT_SCHEMA
 from nous.api.tools import ToolDispatcher, register_nous_tools
+from nous.cognitive.ledger_store import detail_text
 from nous.handlers.continuation_runner import RESOLVE_INTENTION_SCHEMA
 from nous.identity.protocol import COMPLETE_INITIATION_SCHEMA, STORE_IDENTITY_SCHEMA
-from nous.observability.tool_calls import REASON_DESCRIPTION, add_reason_field, own_reason_tools, split_reason
+from nous.observability.recording import BoundedWriter
+from nous.observability.tool_calls import (
+    REASON_DESCRIPTION,
+    ToolCallRecord,
+    ToolCallRecorder,
+    add_reason_field,
+    own_reason_tools,
+    split_reason,
+)
 
 CTX = ExecutionContext(kind="interactive", session_id="s1")
 # A token the ledger's redaction masks (an sk- key needs 20+ characters after the prefix).
@@ -193,6 +205,52 @@ def test_split_reason_cases(tool_input, want_input, want_reason):
         assert reason == want_reason
     if not isinstance(tool_input, dict):
         assert out is tool_input
+
+
+# detail_text's own output is longer than its cap, and a second pass at a cap below about 2 x the redaction scan pad
+# cuts it again (one marker, less text): 100 is such a cap, 500 (the default) is not.
+REASON_CAPS = pytest.mark.parametrize("cap", [100, 500])
+
+
+@REASON_CAPS
+def test_a_split_reason_passes_the_recorder_clip_unchanged(cap):
+    """The recorder runs ``detail_text(reason, cap)`` again: a reason within the cap is not cut a second time."""
+    _, reason = split_reason("recall_deep", {"reason": LONG}, frozenset(), cap)
+    assert len(reason) == cap and reason.count("[middle cut]") == 1
+    assert detail_text(reason, cap) == reason
+
+
+@REASON_CAPS
+@pytest.mark.postgres_only
+async def test_recorder_stores_a_split_reason_unchanged(db, cap):
+    agent = f"test-awv-reason-{uuid.uuid4().hex[:12]}"
+    writer = BoundedWriter("test")
+    caps = SimpleNamespace(tool_input_max_chars=2000, tool_result_preview_chars=500, tool_reason_max_chars=cap)
+    recorder = ToolCallRecorder(writer, db, agent, caps)
+    _, reason = split_reason("recall_deep", {"query": "q", "reason": LONG}, frozenset(), caps.tool_reason_max_chars)
+    try:
+        recorder.record(
+            ToolCallRecord(
+                call_index=0,
+                work_kind="conversation",
+                tool_name="recall_deep",
+                tool_name_called="recall_deep",
+                outcome="ran",
+                reason=reason,
+            )
+        )
+        await writer.drain(5.0)
+        async with db.engine.connect() as conn:
+            stored = (
+                await conn.execute(
+                    text("SELECT reason FROM nous_system.tool_call_log WHERE agent_id = :a"), {"a": agent}
+                )
+            ).scalar_one()
+        assert stored == reason
+        assert stored.count("[middle cut]") == 1  # no second, nested marker
+    finally:
+        async with db.engine.begin() as conn:
+            await conn.execute(text("DELETE FROM nous_system.tool_call_log WHERE agent_id = :a"), {"a": agent})
 
 
 def _handler(seen: dict, key: str):
