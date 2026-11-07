@@ -2325,6 +2325,16 @@ class Settings(BaseSettings):
     context_log_max_total: int = 50
     context_log_retention_days: int = 30
 
+    # F108: Agent work view, Phase 1 (recording). The log writes one row per tool call (nous_system.tool_call_log)
+    # and one per turn (nous_system.agent_turn_log). The reason field asks the model why it calls a tool; it works
+    # with or without the log. The caps bound what a row keeps: the call's input, its result preview and the reason.
+    tool_call_log_enabled: bool = False
+    tool_reason_enabled: bool = False
+    tool_call_retention_days: int = 30
+    tool_input_max_chars: int = 2000
+    tool_result_preview_chars: int = 500
+    tool_reason_max_chars: int = 500
+
     # F091: Retrieval telemetry. Master flag ships ON — header rows, leg
     # summaries and graph expansions are cheap, and a telemetry system that
     # lands dark measures nothing. The expensive part is the per-candidate

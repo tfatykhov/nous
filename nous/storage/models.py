@@ -2131,3 +2131,74 @@ class MemoryWriteHealthDaily(Base):
     metrics: Mapped[dict] = mapped_column(JSONB, nullable=False)
     metrics_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ToolCallLog(Base):
+    """Migration 100 (F108): one tool call the model asked for, refused and gated calls included.
+
+    Written by the runner's recorder while ``NOUS_TOOL_CALL_LOG_ENABLED`` is on. ``call_index`` is the call's 0-based
+    place in its turn across stream segments; ``tool_name`` is canonical, ``tool_name_called`` what the model sent;
+    ``input_text``, ``result_preview`` and ``reason`` are redacted and capped by the writer. ``turn_id`` names an
+    ``AgentTurnLog`` row (no foreign key: the turn row is written after its calls). Read by the app and by the
+    ``db_query`` reader. The indexes are in the migration.
+    """
+
+    __tablename__ = "tool_call_log"
+    __table_args__ = ({"schema": "nous_system"},)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    turn_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    turn_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    call_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    work_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    context_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
+    subtask_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    dag_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    dag_node_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    tool_name_called: Mapped[str] = mapped_column(Text, nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input_text: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    result_preview: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    is_error: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    refused_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    ledger_entry_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+
+
+class AgentTurnLog(Base):
+    """Migration 100 (F108): one agent turn; ``id`` is the turn's ``turn_id``, supplied by the runner.
+
+    Written when the turn ends, while ``NOUS_TOOL_CALL_LOG_ENABLED`` is on. ``trigger_text`` and ``reply_text`` are
+    redacted and capped by the writer; it holds message text, so the ``db_query`` reader does not read it. Turn numbers
+    repeat after compaction: order turns by ``started_at``. The indexes are in the migration.
+    """
+
+    __tablename__ = "agent_turn_log"
+    __table_args__ = ({"schema": "nous_system"},)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    turn_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    work_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    context_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
+    frame_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trigger_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    memory_context: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    critic: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    claim_check: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    reply_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tool_call_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

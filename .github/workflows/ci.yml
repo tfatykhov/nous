@@ -129,7 +129,7 @@ jobs:
           psql -f sql/init.sql
           psql -f sql/seed.sql
 
-      - name: Apply the migrations up to 099 (as the superuser, with the application's migrator)
+      - name: Apply the migrations up to 100 (as the superuser, with the application's migrator)
         env:
           DB_HOST: localhost
           DB_PORT: "5432"
@@ -137,8 +137,9 @@ jobs:
           DB_PASSWORD: nous_dev_password
           DB_NAME: nous
         # db_roles.sql needs the tables the scorer reads: 087 and 088 (scoring), 090 (nous_system.check_audits),
-        # and every table the reader reads: 099 (nous_system.memory_write_health_daily)
-        run: python scripts/ci/apply_migrations.py --max-version 99
+        # and every table the reader reads: 099 (nous_system.memory_write_health_daily) and 100
+        # (nous_system.tool_call_log)
+        run: python scripts/ci/apply_migrations.py --max-version 100
 
       - name: Create the database roles and check them
         env:
@@ -149,14 +150,18 @@ jobs:
           docker exec -i -e NOUS_APP_DB_PASSWORD -e NOUS_SCORER_DB_PASSWORD -e NOUS_READER_DB_PASSWORD ${{ job.services.postgres.id }} psql -U nous -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/db_roles.sql
           docker exec -i ${{ job.services.postgres.id }} psql -U nous_admin -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/verify_db_roles.sql
 
-      - name: Undo migration 099 so the application role applies it
-        # 099 went in above as the superuser because db_roles.sql names its table. Drop the table and its record as
-        # the administrator, so the next step applies 099 as nous_app, as a deployment does; the role script's re-run
+      - name: Undo migrations 099 and 100 so the application role applies them
+        # 099 and 100 went in above as the superuser because db_roles.sql names a table of each. Drop their tables
+        # (all of them: 100 creates with IF NOT EXISTS, so a leftover table would be skipped) and their records as the
+        # administrator, so the next step applies both as nous_app, as a deployment does; the role script's re-run
         # then grants the reader again and verify checks it.
         run: >-
           docker exec -i ${{ job.services.postgres.id }} psql -U nous_admin -d nous -X -v ON_ERROR_STOP=1
           -c "DROP TABLE nous_system.memory_write_health_daily"
           -c "DELETE FROM nous_system.schema_migrations WHERE version = '099'"
+          -c "DROP TABLE nous_system.tool_call_log"
+          -c "DROP TABLE nous_system.agent_turn_log"
+          -c "DELETE FROM nous_system.schema_migrations WHERE version = '100'"
 
       - name: Apply every later migration as the application role
         env:

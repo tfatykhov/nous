@@ -472,7 +472,7 @@ DB_QUERY_SCHEMA: dict[str, Any] = {
         "brain.intentions, brain.intention_arrivals, brain.intention_proposals, brain.decisions, heart.subtasks, "
         "heart.schedules, heart.facts, heart.episodes, nous_system.execution_dags, nous_system.dag_nodes, "
         "nous_system.dag_edges, nous_system.dynamic_checks, nous_system.execution_ledger, nous_system.events, "
-        "nous_system.memory_write_health_daily. "
+        "nous_system.memory_write_health_daily, nous_system.tool_call_log. "
         "Some columns are not readable (embeddings, search vectors, raw transcripts, lease tokens): name columns, "
         "not SELECT *. List them with SELECT column_name, data_type FROM information_schema.columns WHERE "
         "table_schema = 'heart' AND table_name = 'facts'. Use schema-qualified names (heart.subtasks, "
