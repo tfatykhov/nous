@@ -71,6 +71,7 @@ from nous.config import Settings
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput
 from nous.observability.context_logger import HEARTBEAT_CALL_TYPE
+from nous.observability.tool_calls import add_reason_field
 from nous.tool_names import CHANGED_TOOLS, canonical_tool_names
 
 logger = logging.getLogger(__name__)
@@ -539,6 +540,10 @@ class AgentRunner:
             ]
         if extra_tools:
             tools = [*tools, *(schema for schema, _executor in extra_tools.values())]
+        if self._settings.tool_reason_enabled:
+            # F108: the model says why it calls each tool. Added to these offered copies only, after the extra
+            # tools so they get it too; the dispatcher's schemas and its per-frame cache never see it.
+            tools = add_reason_field(tools)
         return tools
 
     def _authorize_tool_call(

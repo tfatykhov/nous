@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 from dataclasses import dataclass, fields
 from datetime import datetime
@@ -53,6 +54,62 @@ def work_kind_for(context_kind: str) -> str:
     """The kind of work a turn of this ``ExecutionContext.kind`` is. An unknown kind counts as a background check,
     like ``background`` (a turn whose caller named no kind): ``work_kind`` is NOT NULL and recording never fails."""
     return _WORK_KIND_BY_CONTEXT.get(context_kind, "background_check")
+
+
+# The reason field (NOUS_TOOL_REASON_ENABLED): every tool offered to the model requires a short reason for the call.
+# It is added to the offered copies only (AgentRunner._offered_tools), never to the dispatcher's schemas.
+# split_reason takes it out of a call's input for the recorder, and ToolDispatcher.dispatch drops any that still
+# reaches a handler whose registered schema does not declare it.
+REASON_DESCRIPTION = "One sentence: why this tool, for this step."
+_REASON_PROPERTY: dict[str, str] = {"type": "string", "description": REASON_DESCRIPTION}
+
+
+def _declared_reason(tool: dict[str, Any]) -> Any:
+    return ((tool.get("input_schema") or {}).get("properties") or {}).get("reason")
+
+
+def add_reason_field(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``tools`` with a required string ``reason`` in each input schema. Each changed schema is a deep copy: the
+    dispatcher's schemas (returned by reference with its schema cache off) and the caller's extra-tool schemas are
+    never touched. A tool whose schema already declares ``reason`` is returned unchanged."""
+    out: list[dict[str, Any]] = []
+    for tool in tools:
+        if _declared_reason(tool) is not None:
+            out.append(tool)
+            continue
+        schema = copy.deepcopy(tool.get("input_schema") or {"type": "object"})
+        schema["properties"] = {**(schema.get("properties") or {}), "reason": dict(_REASON_PROPERTY)}
+        schema["required"] = [*(schema.get("required") or []), "reason"]
+        out.append({**tool, "input_schema": schema})
+    return out
+
+
+def own_reason_tools(offered: list[dict[str, Any]]) -> frozenset[str]:
+    """Names of the offered tools whose own schema declares ``reason`` (``create_censor``, an F061 extra tool), so
+    the argument is theirs and stays in the call. The ``reason`` ``add_reason_field`` adds is not counted, so the
+    answer is the same for the offered list before or after the field is added."""
+    return frozenset(tool["name"] for tool in offered if _declared_reason(tool) not in (None, _REASON_PROPERTY))
+
+
+def split_reason(
+    tool_name: str, tool_input: Any, own_reason_tools: frozenset[str], max_chars: int
+) -> tuple[Any, str | None]:
+    """``(input without reason, cleaned reason)`` for one call. A tool in ``own_reason_tools`` keeps ``reason`` in
+    its input, and the reason is still returned. The reason is whitespace-collapsed, redacted and clipped to
+    ``max_chars``; None when it is missing, not a string or blank. An input that is not a dict is returned as it is,
+    with None. ``tool_input`` is never changed. For an alias the caller passes the TARGET name."""
+    if not isinstance(tool_input, dict):
+        return tool_input, None
+    raw = tool_input.get("reason")
+    rest = tool_input if tool_name in own_reason_tools else {k: v for k, v in tool_input.items() if k != "reason"}
+    if not isinstance(raw, str):
+        return rest, None
+    collapsed = " ".join(raw.split())
+    if not collapsed:
+        return rest, None
+    # detail_text keeps head and tail with a marker between, so over the cap its result is longer than the cap.
+    # Both windows are redacted before that, so the slice cannot uncover a secret.
+    return rest, detail_text(collapsed, max_chars)[:max_chars]
 
 
 @dataclass(frozen=True, slots=True)
