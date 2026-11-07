@@ -197,6 +197,26 @@ def check_query_shape(sql: str) -> str:
     return sql.strip()
 
 
+MAX_LOGGED_TABLES = 12
+# A schema-qualified name in a logged schema. The name is matched whole (the first lookahead), so a function
+# call such as heart.f( is left out rather than cut back to a shorter name that passes the second.
+_TABLE_NAME = re.compile(
+    r"\b(brain|heart|nous_system|information_schema)\s*\.\s*([a-z_][a-z0-9_$]*)(?![a-z0-9_$])(?!\s*\()",
+    re.IGNORECASE,
+)
+
+
+def referenced_tables(sql: str) -> list[str]:
+    """The ``schema.name`` tables ``sql`` names in ``brain``, ``heart``, ``nous_system`` and
+    ``information_schema``: lowercased, sorted, without duplicates, at most ``MAX_LOGGED_TABLES``. Names only,
+    for the log line. A plain scan of the text, so a name inside a string literal or a comment counts too.
+    Anything that is not text has none."""
+    if not isinstance(sql, str):
+        return []
+    found = {f"{schema}.{name}".lower() for schema, name in _TABLE_NAME.findall(sql)}
+    return sorted(found)[:MAX_LOGGED_TABLES]
+
+
 # -- the result text -------------------------------------------------------------------------------------------------
 
 # Characters that would start a new line (or read as one) in the result text: escaped so a value cannot forge a row.
@@ -402,7 +422,7 @@ async def answer_db_query(settings: Settings, sql: str) -> QueryAnswer:
     """The tool: check the statement's shape, run it as the reader and return the rows as compact text. Every
     failure comes back as one line starting with ``Error:`` and ``is_error`` set; it never raises. The flag comes
     from how the call ended, never from the text (a column may be named ``Error: x``). Logs one line per call with
-    a hash of the statement, never its text."""
+    a hash of the statement and the tables it names (``referenced_tables``), never its text."""
     started = time.monotonic()
     outcome, rows = "ok", "-"
     try:
@@ -426,11 +446,12 @@ async def answer_db_query(settings: Settings, sql: str) -> QueryAnswer:
     finally:
         text = sql if isinstance(sql, str) else repr(sql)
         logger.info(
-            "db_query sha256=%s len=%d rows=%s ms=%d %s",
+            "db_query sha256=%s len=%d rows=%s ms=%d tables=%s %s",
             hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12],
             len(text),
             rows,
             int((time.monotonic() - started) * 1000),
+            ",".join(referenced_tables(sql)) or "-",
             outcome,
         )
 
@@ -444,6 +465,9 @@ async def run_db_query(settings: Settings, sql: str) -> str:
 
 DB_QUERY_SCHEMA: dict[str, Any] = {
     "description": (
+        "For live state and exact rows: tasks, schedules, DAG runs, intentions, decisions and their status, the "
+        "ledger, events, counts. For what was said, learned or decided earlier, call recall_deep first: db_query "
+        "matches exact text only and cannot read conversation transcripts. "
         "Run one read-only SQL query on Nous's own database; the rows come back as text. Readable tables: "
         "brain.intentions, brain.intention_arrivals, brain.intention_proposals, brain.decisions, heart.subtasks, "
         "heart.schedules, heart.facts, heart.episodes, nous_system.execution_dags, nous_system.dag_nodes, "

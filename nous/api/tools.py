@@ -2883,10 +2883,11 @@ _LEARN_FACT_PARAMS = _schema_params(_LEARN_FACT_SCHEMA)
 _RECALL_DEEP_SCHEMA: dict[str, Any] = {
     "type": "object",
     "description": (
-        "Search your memory by meaning: past conversations, facts and decisions (procedures and censors when "
-        "named in memory_types). Use it before asking the user about anything from earlier sessions. Pass "
-        "hours to list the latest conversations in time order ('what did we discuss lately'); pass query, "
-        "hours or both."
+        "Search your memory by meaning; call it first for anything said, learned or decided earlier: what the "
+        "user told you, results and plans from past conversations, past decisions. It searches facts, decisions "
+        "and past conversations and ranks what it finds (procedures and censors when named in memory_types). "
+        "Use it before asking the user about anything from earlier sessions. Pass hours to list the latest "
+        "conversations in time order ('what did we discuss lately'); pass query, hours or both."
     ),
     "properties": {
         "query": {"type": "string", "description": "What to look for, in plain words"},
