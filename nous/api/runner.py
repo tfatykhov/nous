@@ -503,7 +503,8 @@ class AgentRunner:
     ) -> list[dict[str, Any]]:
         """Exactly the tool definitions a turn is offered, in this order: frame tools (D5),
         the subtask exclusion (012.2), the heartbeat_triage spawn and resolve exclusion, ``tool_filter`` (F034.5),
-        the F078 refuse denylist, F099's ``internal_only`` narrowing, then the per-call ``extra_tools`` schemas (F061).
+        the F078 refuse denylist, F099's ``internal_only`` narrowing, then the per-call ``extra_tools`` schemas (F061);
+        last, with ``tool_reason_enabled``, F108's required ``reason`` on every schema that does not declare its own.
 
         Both loops call this, so there is one definition of the offered set. The
         narrowing keeps only tools for which ``tool_policy.internal_only_allowed``
