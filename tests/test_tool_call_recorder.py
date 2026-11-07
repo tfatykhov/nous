@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -109,9 +110,11 @@ async def test_secret_in_input_is_masked_before_store(db):
     agent = _agent()
     writer = BoundedWriter("test")
     recorder = ToolCallRecorder(writer, db, agent, _SETTINGS)
+    started = datetime(2026, 11, 7, 12, 30, 15, 123000, tzinfo=UTC)
     try:
         recorder.record(
             _record(
+                started_at=started,
                 input_text=f'{{"command": "curl -H x-api-key:{_SECRET} https://example"}}',
                 result_preview=f"echoed {_SECRET}",
                 reason=f"uses {_SECRET}",
@@ -124,6 +127,7 @@ async def test_secret_in_input_is_masked_before_store(db):
         stored = " ".join(str(rows[0][k]) for k in ("input_text", "result_preview", "reason", "error_text"))
         assert _SECRET not in stored
         assert "AbCdEfGhIjKlMnOpQrStUv" not in stored
+        assert rows[0]["started_at"] == started  # a given start is kept, not replaced by now()
     finally:
         await _delete(db, agent)
 
