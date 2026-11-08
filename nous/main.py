@@ -143,6 +143,99 @@ async def _retrieval_log_retention_loop(settings: Settings, database: Database) 
             logger.debug("F091: retrieval retention sweep failed", exc_info=True)
 
 
+def _build_context_logger(settings: Settings, database: Database) -> Any:
+    """F035.4: the context logger, its in-memory ring and its ``context_log`` writes.
+
+    F108 cutover: with ``NOUS_MODEL_CALL_LOG_ENABLED`` on, the model-call table is the one recorder, so the logger
+    writes no ``context_log`` row (no INSERT, no response UPDATE). Its ring stays: the context endpoints' table view
+    serves a call's full payload and section text from it when the text store has none. Dropping the setting brings
+    the writes back; the retention sweep keeps running either way, so the old rows age out."""
+    from nous.observability.context_logger import ContextLogger
+
+    async def _write_context_log(entry):
+        try:
+            async with database.session() as s:
+                from sqlalchemy import text
+
+                await s.execute(
+                    text(
+                        "INSERT INTO nous_system.context_log "
+                        "(id, agent_id, session_id, turn_number, call_type, model, frame_id, trace_id, "
+                        "token_breakdown, total_tokens_est, context_window_size, utilization_pct, "
+                        "sections_present, tools_count, tool_names, messages_count, message_roles, "
+                        "loaded_facts, loaded_decisions, loaded_procedures, loaded_episodes, recent_conversations) "
+                        "VALUES (:id, :agent_id, :sid, :turn, :ctype, :model, :frame, :trace, "
+                        ":breakdown, :total, :window, :util, :sections, :tools_c, :tool_names, "
+                        ":msg_c, :msg_roles, :facts, :decisions, :procedures, :episodes, :conversations)"
+                    ),
+                    {
+                        "id": entry.id,
+                        "agent_id": settings.agent_id,
+                        "sid": entry.session_id,
+                        "turn": entry.turn_number,
+                        "ctype": entry.call_type,
+                        "model": entry.model,
+                        "frame": entry.frame_id,
+                        "trace": entry.trace_id,
+                        "breakdown": json.dumps(entry.token_breakdown),
+                        "total": entry.total_tokens_est,
+                        "window": entry.context_window_size,
+                        "util": entry.utilization_pct,
+                        "sections": entry.sections_present,
+                        "tools_c": entry.tools_count,
+                        "tool_names": entry.tool_names,
+                        "msg_c": entry.messages_count,
+                        "msg_roles": json.dumps(entry.message_roles),
+                        "facts": entry.loaded_facts,
+                        "decisions": entry.loaded_decisions,
+                        "procedures": entry.loaded_procedures,
+                        "episodes": entry.loaded_episodes,
+                        "conversations": entry.recent_conversations,
+                    },
+                )
+                await s.commit()
+        except Exception:
+            logger.debug("F035.4: context log write failed", exc_info=True)
+
+    async def _update_context_log(entry):
+        # Audit OB-3: persist the response-side columns set by
+        # update_response (the INSERT at log() time predates the response).
+        try:
+            async with database.session() as s:
+                from sqlalchemy import text
+
+                await s.execute(
+                    text(
+                        "UPDATE nous_system.context_log SET "
+                        "input_tokens_actual = :in_tok, output_tokens = :out_tok, "
+                        "cache_creation = :cc, cache_read = :cr, "
+                        "duration_ms = :dur, stop_reason = :stop "
+                        "WHERE id = :id"
+                    ),
+                    {
+                        "in_tok": entry.input_tokens_actual,
+                        "out_tok": entry.output_tokens,
+                        "cc": entry.cache_creation_tokens,
+                        "cr": entry.cache_read_tokens,
+                        "dur": entry.duration_ms,
+                        "stop": entry.stop_reason,
+                        "id": entry.id,
+                    },
+                )
+                await s.commit()
+        except Exception:
+            logger.debug("OB-3: context log response update failed", exc_info=True)
+
+    cutover = settings.model_call_log_enabled
+    return ContextLogger(
+        db_writer=None if cutover else _write_context_log,
+        full_payload_enabled=settings.context_log_full_payload,
+        ring_size=settings.context_log_ring_size,
+        max_total=settings.context_log_max_total,
+        db_updater=None if cutover else _update_context_log,
+    )
+
+
 async def _context_log_retention_loop(settings: Settings, database: Database) -> None:
     """Delete context-log and behavior-snapshot rows that are past their retention."""
     while True:
@@ -1246,89 +1339,7 @@ async def create_components(settings: Settings) -> dict:
     context_logger = None
     context_log_retention_task = None
     if settings.context_log_enabled:
-        from nous.observability.context_logger import ContextLogger
-
-        async def _write_context_log(entry):
-            try:
-                async with database.session() as s:
-                    from sqlalchemy import text
-
-                    await s.execute(
-                        text(
-                            "INSERT INTO nous_system.context_log "
-                            "(id, agent_id, session_id, turn_number, call_type, model, frame_id, trace_id, "
-                            "token_breakdown, total_tokens_est, context_window_size, utilization_pct, "
-                            "sections_present, tools_count, tool_names, messages_count, message_roles, "
-                            "loaded_facts, loaded_decisions, loaded_procedures, loaded_episodes, recent_conversations) "
-                            "VALUES (:id, :agent_id, :sid, :turn, :ctype, :model, :frame, :trace, "
-                            ":breakdown, :total, :window, :util, :sections, :tools_c, :tool_names, "
-                            ":msg_c, :msg_roles, :facts, :decisions, :procedures, :episodes, :conversations)"
-                        ),
-                        {
-                            "id": entry.id,
-                            "agent_id": settings.agent_id,
-                            "sid": entry.session_id,
-                            "turn": entry.turn_number,
-                            "ctype": entry.call_type,
-                            "model": entry.model,
-                            "frame": entry.frame_id,
-                            "trace": entry.trace_id,
-                            "breakdown": json.dumps(entry.token_breakdown),
-                            "total": entry.total_tokens_est,
-                            "window": entry.context_window_size,
-                            "util": entry.utilization_pct,
-                            "sections": entry.sections_present,
-                            "tools_c": entry.tools_count,
-                            "tool_names": entry.tool_names,
-                            "msg_c": entry.messages_count,
-                            "msg_roles": json.dumps(entry.message_roles),
-                            "facts": entry.loaded_facts,
-                            "decisions": entry.loaded_decisions,
-                            "procedures": entry.loaded_procedures,
-                            "episodes": entry.loaded_episodes,
-                            "conversations": entry.recent_conversations,
-                        },
-                    )
-                    await s.commit()
-            except Exception:
-                logger.debug("F035.4: context log write failed", exc_info=True)
-
-        async def _update_context_log(entry):
-            # Audit OB-3: persist the response-side columns set by
-            # update_response (the INSERT at log() time predates the response).
-            try:
-                async with database.session() as s:
-                    from sqlalchemy import text
-
-                    await s.execute(
-                        text(
-                            "UPDATE nous_system.context_log SET "
-                            "input_tokens_actual = :in_tok, output_tokens = :out_tok, "
-                            "cache_creation = :cc, cache_read = :cr, "
-                            "duration_ms = :dur, stop_reason = :stop "
-                            "WHERE id = :id"
-                        ),
-                        {
-                            "in_tok": entry.input_tokens_actual,
-                            "out_tok": entry.output_tokens,
-                            "cc": entry.cache_creation_tokens,
-                            "cr": entry.cache_read_tokens,
-                            "dur": entry.duration_ms,
-                            "stop": entry.stop_reason,
-                            "id": entry.id,
-                        },
-                    )
-                    await s.commit()
-            except Exception:
-                logger.debug("OB-3: context log response update failed", exc_info=True)
-
-        context_logger = ContextLogger(
-            db_writer=_write_context_log,
-            full_payload_enabled=settings.context_log_full_payload,
-            ring_size=settings.context_log_ring_size,
-            max_total=settings.context_log_max_total,
-            db_updater=_update_context_log,
-        )
+        context_logger = _build_context_logger(settings, database)
         runner.set_context_logger(context_logger)
         logger.info("F035.4: ContextLogger wired (full_payload=%s)", settings.context_log_full_payload)
 
@@ -1340,6 +1351,20 @@ async def create_components(settings: Settings) -> dict:
             context_log_retention_task = asyncio.create_task(
                 _context_log_retention_loop(settings, database), name="context-log-retention"
             )
+
+    # F108 cutover: while NOUS_MODEL_CALL_LOG_ENABLED is on, the context endpoints read the model-call table (a call's
+    # payload and section text from the text store, else from the ring by the row's id); off, they read the ring as
+    # before, and nothing reads the new tables.
+    context_view = None
+    if settings.model_call_log_enabled:
+        from nous.observability.context_view import TableContextView
+
+        context_view = TableContextView(database, settings.agent_id, text_store, context_logger)
+        logger.info("F108: the context endpoints read model_call_log; ContextLogger writes no context_log rows")
+    elif context_logger is not None:
+        from nous.observability.context_view import RingContextView
+
+        context_view = RingContextView(context_logger)
 
     # F108: the agent work view's recording: one tool_call_log row per tool call and one agent_turn_log row per turn,
     # through the shared work_view_writer built with the model-call recorder above.
@@ -1886,6 +1911,7 @@ async def create_components(settings: Settings) -> dict:
         "dag_orchestrator": dag_orchestrator,
         "continuation_runner": continuation_runner,
         "context_logger": context_logger,
+        "context_view": context_view,
         "context_log_retention_task": context_log_retention_task,
         "work_view_writer": work_view_writer,
         "tool_call_recorder": tool_call_recorder,
@@ -2172,6 +2198,7 @@ def build_app(settings: Settings) -> Starlette:
         tool_call_recorder=_lazy_component(components, "tool_call_recorder"),
         model_call_recorder=_lazy_component(components, "model_call_recorder"),
         model_call_text_store=_lazy_component(components, "model_call_text_store"),
+        context_view=_lazy_component(components, "context_view"),
     )
 
     if settings.mcp_enabled:

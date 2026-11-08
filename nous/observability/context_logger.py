@@ -90,11 +90,13 @@ class ContextLogEntry:
         preamble: str = "",
         sections: dict[str, str] | None = None,
         stats: ContextStats | None = None,
+        entry_id: str | None = None,
     ) -> ContextLogEntry:
         """The entry for one call. ``sections`` and ``stats`` are the estimate a caller already made from these
         inputs (``system_sections`` then ``analyze_sections``, as the runner does once per call); without them the
-        entry makes it."""
-        entry_id = uuid4().hex[:16]
+        entry makes it. ``entry_id`` is the id of the call's ``model_call_log`` row when one records it (F108: the
+        table view finds the ring's payload and section text by it); without one the entry makes its own."""
+        entry_id = entry_id or uuid4().hex[:16]
         # analyze_context's estimate, from sections parsed once: the entry keeps their text too.
         if sections is None or stats is None:
             sections = system_sections(system_prompt, preamble)
@@ -304,6 +306,7 @@ class ContextLogger:
         preamble: str = "",
         sections: dict[str, str] | None = None,
         stats: ContextStats | None = None,
+        entry_id: str | None = None,
     ) -> ContextLogEntry:
         entry = ContextLogEntry.from_payload(
             session_id=session_id,
@@ -319,6 +322,7 @@ class ContextLogger:
             preamble=preamble,
             sections=sections,
             stats=stats,
+            entry_id=entry_id,
         )
         self._entries.append(entry)
         self._entries_by_id[entry.id] = entry
