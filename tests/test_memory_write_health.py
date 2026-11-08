@@ -792,7 +792,7 @@ async def test_the_retention_sweeps_never_delete_a_ledger_event(db, monkeypatch)
     for loop_fn in (
         main_mod._context_log_retention_loop,
         main_mod._retrieval_log_retention_loop,
-        main_mod._tool_call_retention_loop,
+        main_mod._work_view_retention_loop,
     ):
         counting = _Counting()
         stop = {"now": False}

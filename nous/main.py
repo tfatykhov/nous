@@ -181,7 +181,7 @@ def _work_view_sweeps(settings: Settings) -> tuple[bool, bool]:
     )
 
 
-async def _tool_call_retention_loop(settings: Settings, database: Database) -> None:
+async def _work_view_retention_loop(settings: Settings, database: Database) -> None:
     """F108: delete this agent's work-view rows that are past their retention, at startup and then daily: the
     tool-call and turn rows while the tool-call log is on, the model-call rows while the model-call log is on, each
     by its own retention and in its own try, so one failing sweep never skips the other."""
@@ -1299,10 +1299,10 @@ async def create_components(settings: Settings) -> dict:
         logger.info("F108: tool-call recorder wired (retention %d days)", settings.tool_call_retention_days)
 
     # One retention loop sweeps each work-view log that is on, by its own retention (0 days means no sweep).
-    tool_call_retention_task = None
+    work_view_retention_task = None
     if any(_work_view_sweeps(settings)):
-        tool_call_retention_task = asyncio.create_task(
-            _tool_call_retention_loop(settings, database), name="tool-call-retention"
+        work_view_retention_task = asyncio.create_task(
+            _work_view_retention_loop(settings, database), name="work-view-retention"
         )
 
     # F099 Phase 2c: the continuation runner. None unless NOUS_CONTINUATION_ENABLED is on (and
@@ -1836,7 +1836,7 @@ async def create_components(settings: Settings) -> dict:
         "work_view_writer": work_view_writer,
         "tool_call_recorder": tool_call_recorder,
         "model_call_recorder": model_call_recorder,
-        "tool_call_retention_task": tool_call_retention_task,
+        "work_view_retention_task": work_view_retention_task,
         "result_reconciler_task": result_reconciler_task,
         "retrieval_log_retention_task": retrieval_log_retention_task,
         "retrieval_logger": retrieval_logger,
@@ -1918,12 +1918,12 @@ async def shutdown_components(components: dict) -> None:
         except (asyncio.CancelledError, Exception):
             pass
 
-    # F108: stop the tool-call retention sweep
-    tool_call_retention_task = components.get("tool_call_retention_task")
-    if tool_call_retention_task:
-        tool_call_retention_task.cancel()
+    # F108: stop the work-view retention sweep
+    work_view_retention_task = components.get("work_view_retention_task")
+    if work_view_retention_task:
+        work_view_retention_task.cancel()
         try:
-            await tool_call_retention_task
+            await work_view_retention_task
         except (asyncio.CancelledError, Exception):
             pass
 

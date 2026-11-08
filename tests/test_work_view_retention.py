@@ -164,12 +164,12 @@ def test_sweep_failure_logs_warning(monkeypatch, caplog):
 
     async def scenario() -> None:
         database.tried = asyncio.Event()
-        task = asyncio.create_task(main._tool_call_retention_loop(settings, database))
+        task = asyncio.create_task(main._work_view_retention_loop(settings, database))
         try:
             await asyncio.wait_for(database.tried.wait(), 5)
             await asyncio.sleep(0.05)  # let the failed pass log
         finally:
-            await main.shutdown_components({"tool_call_retention_task": task})
+            await main.shutdown_components({"work_view_retention_task": task})
         assert task.done()
 
     with caplog.at_level(logging.DEBUG, logger="nous.main"):
@@ -240,7 +240,7 @@ def test_create_components_wires_one_writer_and_the_recorder_only_when_the_log_i
         try:
             writer = components["work_view_writer"]
             recorder = components["tool_call_recorder"]
-            task = components["tool_call_retention_task"]
+            task = components["work_view_retention_task"]
             if enabled:
                 assert isinstance(writer, BoundedWriter) and writer.name == "work_view"
                 assert (writer._timeout_s, writer._max_pending) == (30.0, 500)

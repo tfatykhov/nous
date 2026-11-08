@@ -168,12 +168,12 @@ def _loop_settings(**overrides: Any) -> SimpleNamespace:
 
 async def _one_startup_pass(settings: SimpleNamespace, database: _Database) -> None:
     """Start the loop, let its startup pass finish, and stop it (its next pass is an hour away)."""
-    task = asyncio.create_task(main._tool_call_retention_loop(settings, database))
+    task = asyncio.create_task(main._work_view_retention_loop(settings, database))
     try:
         await asyncio.wait_for(database.passes.wait(), 5)
         await asyncio.sleep(0.05)  # let the rest of the pass run
     finally:
-        await main.shutdown_components({"tool_call_retention_task": task})
+        await main.shutdown_components({"work_view_retention_task": task})
     assert task.done()
 
 
@@ -337,7 +337,7 @@ def test_wiring_off_by_default(monkeypatch):
             seen.update(_hooks(components))
             seen["writer"] = components["work_view_writer"]
             seen["model_call_recorder"] = components["model_call_recorder"]
-            seen["retention_task"] = components["tool_call_retention_task"]
+            seen["retention_task"] = components["work_view_retention_task"]
         finally:
             await main.shutdown_components(components)
 
@@ -404,7 +404,7 @@ def test_wiring_on_sets_recorder_on_both_clients(monkeypatch, tool_log):
                 assert isinstance(tool_recorder, ToolCallRecorder) and tool_recorder._writer is writer
             else:
                 assert tool_recorder is None and components["runner"]._tool_call_recorder is None
-            task = components["tool_call_retention_task"]
+            task = components["work_view_retention_task"]
             assert isinstance(task, asyncio.Task) and not task.done()
             seen["task"] = task
             seen["api_client"] = components["api_client"]

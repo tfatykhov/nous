@@ -4,7 +4,7 @@
 started more than ``NOUS_TOOL_CALL_RETENTION_DAYS`` days ago; ``sweep_model_calls`` deletes its
 ``nous_system.model_call_log`` rows that started more than ``NOUS_MODEL_CALL_RETENTION_DAYS`` days ago, and their
 ``model_call_attempt`` rows go with them (``ON DELETE CASCADE``). main.py runs each once a day while its log is on
-(``_tool_call_retention_loop``). Both raise on failure; the loop logs it at WARNING.
+(``_work_view_retention_loop``). Both raise on failure; the loop logs it at WARNING.
 """
 
 from __future__ import annotations
