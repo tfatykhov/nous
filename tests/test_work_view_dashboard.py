@@ -1355,3 +1355,15 @@ async def test_trace_query_failure_is_a_plain_500(client, monkeypatch, caplog):
     resp = await client.get(trace_path("sess-x"))
     assert resp.status_code == 500 and resp.json() == {"error": "work view query failed"}
     assert any(r.levelname == "WARNING" and r.exc_info for r in caplog.records)
+
+
+@pytest.mark.postgres_only
+async def test_trace_unrenderable_payload_is_the_plain_500(client, monkeypatch, caplog):
+    # jsonb takes a number like 1e400, which decodes to inf, and Starlette renders with allow_nan=False.
+    async def unrenderable(*args, **kwargs):
+        return {"enabled": True, "critic": {"score": float("inf")}}
+
+    monkeypatch.setattr(wv, "get_trace", unrenderable)
+    resp = await client.get(trace_path("sess-x"))
+    assert resp.status_code == 500 and resp.json() == {"error": "work view query failed"}
+    assert any(r.levelname == "WARNING" and r.exc_info for r in caplog.records)

@@ -2316,12 +2316,12 @@ def create_app(
                     **query,
                     model_calls_enabled=settings.model_call_log_enabled,
                 )
+            if data is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            return JSONResponse(data)
         except Exception:
             logger.warning("dashboard_work_trace: the work view query failed", exc_info=True)
             return JSONResponse({"error": "work view query failed"}, status_code=500)
-        if data is None:
-            return JSONResponse({"error": "not found"}, status_code=404)
-        return JSONResponse(data)
 
     async def dashboard_memory_write_health_acknowledge(request: Request) -> JSONResponse:
         """POST /dashboard/memory-write-health/acknowledge {rule, day?, note?} — P4: the owner accepts a rule's
