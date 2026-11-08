@@ -610,6 +610,15 @@ _UPSERT_BUCKET = text(
 _BUCKET_NAMESPACE = uuid.UUID("6b1f7c1e-5d0a-4c55-9a0e-f108b0c4e7a1")
 
 
+def _shallow_message(message: Any) -> Any:
+    """``message`` copied two container levels deep: the message dict, and its content list with each block dict
+    copied. The strings inside are shared, not copied."""
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return dict(message) if isinstance(message, dict) else message
+    return {**message, "content": [dict(block) if isinstance(block, dict) else block for block in content]}
+
+
 def _json_param(value: Any) -> str | None:
     """A JSONB parameter: SQL NULL for None, else the JSON text."""
     return None if value is None else json.dumps(value, ensure_ascii=False, default=str)
@@ -818,10 +827,13 @@ class ModelCallScope:
             self._recorder._submit_call(params, attempts, sent)
 
     def _text_snapshot(self) -> tuple[dict[str, Any], Any, list[Any] | None] | None:
-        """What the text write needs, taken now: ``(sent, response_content, stream_events)``. The runner appends the
-        response and the tool results to the payload's ``messages`` list right after the call returns, before the
-        write runs, so the lists are copied here; only references, no text is copied or serialised. None when the
-        text is not stored, or when the snapshot fails (counted and logged; the numbers row is written anyway)."""
+        """What the text write needs, taken now: ``(sent, response_content, stream_events)``. Right after the call
+        returns, before the write runs, the runner appends the response and the tool results to the payload's
+        ``messages`` list, and compaction (``prune_tool_results``) rewrites an aged tool result's content in place:
+        the payload holds the runner's own message dicts. So the lists are copied here, and each message down to its
+        content blocks (``_shallow_message``); no string is copied or serialised. A change made deeper than a content
+        block (inside a block's own content list) is out of reach of this copy; nothing makes one today. None when
+        the text is not stored, or when the snapshot fails (counted and logged; the numbers row is written anyway)."""
         payload = self._text_payload
         if payload is None:
             return None
@@ -829,7 +841,9 @@ class ModelCallScope:
             sent: dict[str, Any] = {}
             for key in ("system", "messages", "tools"):
                 value = payload.get(key)
-                if value is not None:
+                if key == "messages" and isinstance(value, list):
+                    sent[key] = [_shallow_message(message) for message in value]
+                elif value is not None:
                     sent[key] = list(value) if isinstance(value, list) else value
             content = self._response_content
             return sent, list(content) if isinstance(content, list) else content, self._stream_events

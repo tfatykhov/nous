@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import threading
+import time
 import uuid
 from types import SimpleNamespace
 
@@ -205,6 +206,28 @@ def test_base64_attachment_replaced():
     assert body.count("[base64 3072 bytes]") == 2, body
     assert json.loads(body)["content"][0]["source"]["data"] == "[base64 3072 bytes]"  # still JSON
     assert small in prepare_block(parts[1][2], 200_000)[1]  # 1 KB or less is kept
+
+
+def test_a_lone_surrogate_is_replaced_so_the_body_is_storable():
+    digest, body = prepare_block("bytes \udcff here", 1000)
+    assert body == "bytes ? here"
+    assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()
+    assert model_call_text._raw_key("bytes \udcff here") == model_call_text._raw_key("bytes \udcfe here")
+
+
+async def test_two_concurrent_misses_on_one_block_are_counted_once(monkeypatch):
+    store = TextStore(BoundedWriter("test"), None, "a", _settings())
+    real = model_call_text.prepare_block
+
+    def slow(raw, max_chars):
+        time.sleep(0.2)  # both writes are past the LRU lookup before either inserts
+        return real(raw, max_chars)
+
+    monkeypatch.setattr(model_call_text, "prepare_block", slow)
+    big = "big " * 6000
+    first, second = await asyncio.wait_for(asyncio.gather(store._prepare(big), store._prepare(big)), 10)
+    assert first == second and len(store._lru) == 1
+    assert store._lru_chars == sum(len(body) for _, body in store._lru.values())
 
 
 def test_text_requires_numbers_flag(caplog):
@@ -506,6 +529,49 @@ async def test_stored_messages_are_the_ones_sent(db):
 
 
 @pytest.mark.postgres_only
+async def test_stored_tool_result_is_the_one_sent_when_compaction_clears_it_after(db):
+    """The runner's payload holds the runner's own message dicts, and compaction (``prune_tool_results``) rewrites an
+    aged tool result's content in place right after the call, before the text write runs."""
+    agent = _agent()
+    writer, store, recorder = _stack(db, agent)
+    result = {"type": "tool_result", "tool_use_id": "toolu_1", "content": "a.txt b.txt c.txt"}
+    messages = [
+        {"role": "user", "content": "list the files"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "bash", "input": {}}]},
+        {"role": "user", "content": [result]},
+    ]
+    payload = _payload(messages)
+    try:
+        _record(recorder, payload, "c1", _text_reply("three files"))
+        payload["messages"][2]["content"][0]["content"] = "[cleared]"  # in place, before the write runs
+        payload["messages"][2]["content"].append({"type": "text", "text": "added after"})
+        payload["messages"][1]["role"] = "changed"
+        await asyncio.wait_for(writer.drain(5.0), 10)
+        loaded = await store.load(await _call_id(db, agent, "c1"))
+        stored = [json.loads(m) for m in loaded["messages"]]
+        assert stored[2] == {"role": "user", "content": [{**result, "content": "a.txt b.txt c.txt"}]}
+        assert stored[1]["role"] == "assistant"
+    finally:
+        await _delete(db, agent)
+
+
+@pytest.mark.postgres_only
+async def test_a_lone_surrogate_never_drops_the_text(db):
+    """Bash output decoded with ``surrogateescape`` can carry a lone surrogate, which UTF-8 cannot encode: the block is
+    stored with a replacement character instead of failing the whole call's text."""
+    agent = _agent()
+    writer, store, recorder = _stack(db, agent)
+    try:
+        _record(recorder, _payload([{"role": "user", "content": "bytes \udcff here"}]), "c1", _text_reply("ok"))
+        await asyncio.wait_for(writer.drain(5.0), 10)
+        loaded = await store.load(await _call_id(db, agent, "c1"))
+        assert json.loads(loaded["messages"][0])["content"] == "bytes ? here"
+        assert store.stats.written == 1 and store.stats.dropped_error == 0
+    finally:
+        await _delete(db, agent)
+
+
+@pytest.mark.postgres_only
 async def test_store_touches_existing_block_created_at(db):
     agent = _agent()
     writer, store, recorder = _stack(db, agent)
@@ -595,7 +661,9 @@ async def test_exit_does_no_redaction_or_serialisation(db, monkeypatch):
 
 
 @pytest.mark.postgres_only
-async def test_a_big_block_is_prepared_off_the_loop(db, monkeypatch):
+async def test_a_big_block_is_prepared_in_a_thread(db, monkeypatch):
+    """A block over ``BIG_BLOCK_CHARS`` is hashed and redacted in a worker thread, the small ones on the loop. This
+    proves the thread, not a free loop: the regex work holds the GIL, so the thread shares the CPU with the loop."""
     agent = _agent()
     writer, store, recorder = _stack(db, agent)
     threads: dict[int, bool] = {}
@@ -609,7 +677,7 @@ async def test_a_big_block_is_prepared_off_the_loop(db, monkeypatch):
     try:
         _record(recorder, _payload([{"role": "user", "content": "big " * 6000}]), "c1", _text_reply("hi"))
         await asyncio.wait_for(writer.drain(5.0), 10)
-        on_loop = {size > model_call_text.OFF_LOOP_CHARS: flag for size, flag in threads.items()}
+        on_loop = {size > model_call_text.BIG_BLOCK_CHARS: flag for size, flag in threads.items()}
         assert on_loop == {True: False, False: True}, threads  # the big block in a thread, the small ones not
     finally:
         await _delete(db, agent)

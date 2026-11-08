@@ -10,8 +10,12 @@ ever stored: no header, no auth, no other payload key.
 The text write is chained from the call's numbers write (``ModelCallRecorder``): it is submitted once the
 ``model_call_log`` row is committed, as a write of its own through the same ``BoundedWriter``, with its own pending
 cap (``TEXT_MAX_PENDING``), so a text failure never touches the numbers row. All the work happens in that write:
-the scope's exit only takes references. Redaction and hashing of a block over ``OFF_LOOP_CHARS`` run in a thread, and
-a block seen recently is not redacted again (an LRU keyed by the sha256 of the raw text).
+the scope's exit only copies containers (lists and dicts, never a string). A block over ``BIG_BLOCK_CHARS`` is hashed
+and redacted in a thread, but CPython's regex engine holds the GIL, so that thread shares the CPU with the event loop
+rather than freeing it: redacting a big block still stalls the loop for about as long. What keeps the steady state
+cheap is the LRU, keyed by the sha256 of the raw text: a block sent again (the earlier messages, the system prompt,
+the tools) is not redacted again, so each call redacts only its new blocks. Freeing the loop for regex work would
+take a process pool or a cheaper redactor (a follow-up).
 """
 
 from __future__ import annotations
@@ -33,8 +37,9 @@ logger = logging.getLogger(__name__)
 
 # At most this many text writes pending in the shared writer; past it a new one is dropped and counted.
 TEXT_MAX_PENDING = 50
-# A block longer than this is redacted and hashed in a thread, off the event loop.
-OFF_LOOP_CHARS = 20_000
+# A block longer than this is hashed and redacted in a thread. The regex work holds the GIL, so the thread shares the
+# CPU with the event loop rather than freeing it (see the module docstring).
+BIG_BLOCK_CHARS = 20_000
 # The recently prepared blocks kept, keyed by the sha256 of their raw text: at most this many, and at most this many
 # characters of body in all (a long session re-sends all its earlier messages on every call).
 LRU_MAX_BLOCKS = 1024
@@ -55,6 +60,8 @@ CONTENT_EVENTS = frozenset(
 # A base64 attachment over 1 KB: an image or document block's ``source.data`` in a block's JSON, or a data URL.
 _BASE64_FIELD = re.compile(r'("data"\s*:\s*")([A-Za-z0-9+/]{1025,}={0,2})(")')
 _DATA_URL = re.compile(r"(data:[\w.+-]+/[\w.+-]+;base64,)([A-Za-z0-9+/]{1025,}={0,2})")
+# How a character UTF-8 cannot encode (a lone surrogate) is handled, by the body and by the LRU key alike.
+_UNENCODABLE = "replace"
 
 # The touch on conflict locks the block's row and makes it "used now", so the sweep's DELETE of an unreferenced old
 # block waits for this transaction and then no longer matches it: a ref is never inserted for a just-deleted block.
@@ -133,10 +140,13 @@ def prepare_block(raw: str, max_chars: int) -> tuple[str, str]:
     """``(hash, body)`` of one block: base64 attachments over 1 KB replaced by ``[base64 N bytes]``, redacted
     (``redact_output``), cut at ``max_chars`` with a ``[truncated N chars]`` marker (N: the characters past the cap),
     and the sha256 hex of that final body. Over the cap only the head and a scan pad are redacted, and the pad is
-    dropped after, so a secret the cut splits is not kept in part (as ``detail_text`` does)."""
+    dropped after, so a secret the cut splits is not kept in part (as ``detail_text`` does). A lone surrogate (bash
+    output decoded with ``surrogateescape``), which UTF-8 and Postgres cannot hold, becomes ``?`` first, so the body
+    is always storable."""
     # Imported here: nous.cognitive imports nous.observability, whose package imports the model-call recorder.
     from nous.cognitive.ledger_store import redact_output, redaction_scan_pad
 
+    raw = raw.encode("utf-8", _UNENCODABLE).decode("utf-8")
     raw = _BASE64_FIELD.sub(lambda m: m.group(1) + _base64_marker(m.group(2)) + m.group(3), raw)
     raw = _DATA_URL.sub(lambda m: m.group(1) + _base64_marker(m.group(2)), raw)
     if len(raw) <= max_chars:
@@ -269,18 +279,23 @@ class TextStore:
         return loaded
 
     async def _prepare(self, raw: str) -> tuple[str, str]:
-        """``prepare_block`` of ``raw``, from the LRU when the same raw text was prepared recently; a block over
-        ``OFF_LOOP_CHARS`` is hashed and prepared in a thread. The LRU is only touched here, on the event loop."""
-        off_loop = len(raw) > OFF_LOOP_CHARS
-        key = await asyncio.to_thread(_raw_key, raw) if off_loop else _raw_key(raw)
+        """``prepare_block`` of ``raw``, from the LRU when the same raw text was prepared recently. A block over
+        ``BIG_BLOCK_CHARS`` is hashed and prepared in a thread, which shares the CPU with the loop rather than freeing
+        it (the regex work holds the GIL); the LRU is what spares a block sent again. The LRU is only touched here, on
+        the event loop. Two writes may miss the same block at once: the second insert replaces the first and is
+        counted once."""
+        big = len(raw) > BIG_BLOCK_CHARS
+        key = await asyncio.to_thread(_raw_key, raw) if big else _raw_key(raw)
         cached = self._lru.get(key)
         if cached is not None:
             self._lru.move_to_end(key)
             return cached
-        if off_loop:
+        if big:
             prepared = await asyncio.to_thread(prepare_block, raw, self._max_chars)
         else:
             prepared = prepare_block(raw, self._max_chars)
+        if key in self._lru:
+            self._lru_chars -= len(self._lru.pop(key)[1])
         self._lru[key] = prepared
         self._lru_chars += len(prepared[1])
         while self._lru and (len(self._lru) > LRU_MAX_BLOCKS or self._lru_chars > LRU_MAX_CHARS):
@@ -290,4 +305,4 @@ class TextStore:
 
 
 def _raw_key(raw: str) -> bytes:
-    return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).digest()
+    return hashlib.sha256(raw.encode("utf-8", _UNENCODABLE)).digest()
