@@ -507,9 +507,10 @@ class ModelCallScope:
     """One model call being recorded: a synchronous context manager, so it works in coroutines and generators.
 
     Built by ``ModelCallRecorder.scope``. The client reports the call with ``finish(response)`` or ``fail(exc)``,
-    streamed usage with ``observe_stream_event`` and each HTTP attempt with ``attempt``. At exit the row is written:
-    ``cancelled`` on ``CancelledError`` or ``GeneratorExit`` when neither was reported, ``error`` for any other
-    exception, else what was reported (``ok`` when nothing was). Exit never raises and never swallows the exception.
+    streamed usage with ``observe_stream_event`` and each HTTP attempt with ``attempt``. At exit the row is written.
+    A reported status stands (the call completed or failed, whatever its caller did next); when neither was
+    reported, exit labels the call ``cancelled`` on ``CancelledError`` or ``GeneratorExit``, ``error`` for any other
+    exception and ``ok`` when there was none. Exit never raises and never swallows the exception.
     """
 
     def __init__(self, recorder: ModelCallRecorder, payload: Any, ctx: CallContext | None, call_kind: str) -> None:
