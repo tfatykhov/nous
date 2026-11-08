@@ -162,6 +162,7 @@ nous/
 │       ├── intention_dashboard.py # F099 Phase 3c: GET /dashboard/intentions queries (the tree and the metrics), read-only, Postgres-only
 │       ├── autonomy_dashboard.py # Autonomy scoreboard: GET /dashboard/autonomy data (taps, approval cards, grades, task scores, inventory, warn classes), read-only
 │       ├── memory_write_health_dashboard.py # P4: GET /dashboard/memory-write-health data (rollup, rules evaluated now, acknowledgements) and the acknowledge body parser
+│       ├── work_view_dashboard.py # F108 Phase 2: the Work view's read-only endpoints (GET /dashboard/work/sessions): parameters and cursors, the SQL over agent_turn_log and tool_call_log, TOOL_LANES and WORK_KIND_GROUP
 │       ├── job_fix_dashboard.py # The scoreboard's job_fixes section: every check-and-fix record, read-only, Postgres-only
 │       ├── guard_dashboard.py   # The scoreboard's guards section (F107 phase 2/3): guarded schedules and heartbeat checks, guard outcomes and shadow misses in the window, read-only, Postgres-only
 │       ├── mcp.py              # MCP server (nous_chat, nous_decide, etc.)
