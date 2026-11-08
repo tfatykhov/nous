@@ -135,11 +135,31 @@ SECTION_MARKERS: dict[str, str] = {
     "[DIAGNOSTIC OBSERVATIONS]": "diagnostic_nudges",  # critic.py format_nudges
 }
 
-_MARKER_PATTERNS = sorted(SECTION_MARKERS.keys(), key=len, reverse=True)
+# The sections whose body renders stored or authored text, not text the builder writes: an unknown ``## `` line inside
+# one is part of that text (an identity's ``## Character``, a skill's ``## Steps``, a fact), not a new section.
+FREE_TEXT_SECTIONS: frozenset[str] = frozenset(
+    {
+        "identity",  # the identity sections in the DB (identity/manager.py assemble_prompt)
+        "user_profile",  # profile facts, or the profile card's lines
+        "censors",  # censor patterns, reasons and instructions
+        "frame",  # the frame row's description and questions
+        "working_memory",  # current task (the user's input), open threads, items
+        "related_decisions",  # decision descriptions
+        "relevant_facts",  # fact contents
+        "session_profile",  # fact contents
+        "known_procedures",  # procedure names and descriptions
+        "procedure_catalog",  # procedure names and descriptions
+        "recommended_procedures",  # skill bodies, newlines kept
+        "past_episodes",  # episode summaries
+        "recent_conversations",  # episode titles, summaries and open threads
+        "cached_results",  # cached tool inputs
+        "execution_ledger",  # tool key arguments and error result summaries
+        "corrections",  # quoted claims from the agent's own reply
+        "active_guidance",  # censor guidance text
+    }
+)
 
-# Sections whose text carries its own ``## `` headings: the identity prompt (identity/manager.py assemble_prompt) and
-# the skill bodies shown in full. An unknown heading inside one stays part of it.
-_NESTED_HEADING_SECTIONS = frozenset({"identity", "recommended_procedures"})
+_MARKER_PATTERNS = sorted(SECTION_MARKERS.keys(), key=len, reverse=True)
 
 
 def _section_start(line: str, current_name: str) -> str | None:
@@ -147,20 +167,26 @@ def _section_start(line: str, current_name: str) -> str | None:
     for marker in _MARKER_PATTERNS:
         if line.strip().startswith(marker):
             return SECTION_MARKERS[marker]
-    if line.startswith("## ") and current_name not in _NESTED_HEADING_SECTIONS:
+    if line.startswith("## ") and current_name not in FREE_TEXT_SECTIONS:
         return re.sub(r"[^a-z0-9]+", "_", line[3:].lower()).strip("_") or None
     return None
+
+
+def _add_section(sections: dict[str, str], name: str, body: str) -> None:
+    """Add ``body`` to section ``name``: a name met again keeps its earlier text too, so both are counted."""
+    sections[name] = f"{sections[name]}\n\n{body}" if name in sections else body
 
 
 def parse_system_sections(system_prompt: str) -> dict[str, str]:
     """Split system prompt into named sections.
 
     A heading in ``SECTION_MARKERS`` starts the section it names; any other ``## Title Case`` heading starts the
-    section ``title_case`` (outside ``_NESTED_HEADING_SECTIONS``), so it is never folded into the one before it."""
+    section ``title_case`` (outside ``FREE_TEXT_SECTIONS``), so it is never folded into the one before it. A name met
+    twice holds both texts. Text before the first heading is ``other``."""
     if not system_prompt:
         return {}
     sections: dict[str, str] = {}
-    current_name = "preamble"
+    current_name = ""  # the text before the first heading; no heading is named ""
     current_lines: list[str] = []
     for line in system_prompt.split("\n"):
         name = _section_start(line, current_name)
@@ -170,15 +196,15 @@ def parse_system_sections(system_prompt: str) -> dict[str, str]:
         if current_lines:
             text = "\n".join(current_lines).strip()
             if text:
-                sections[current_name] = text
+                _add_section(sections, current_name, text)
         current_name = name
         current_lines = []
     if current_lines:
         text = "\n".join(current_lines).strip()
         if text:
-            sections[current_name] = text
-    if "preamble" in sections:
-        sections["other"] = sections.pop("preamble")
+            _add_section(sections, current_name, text)
+    if "" in sections:
+        _add_section(sections, "other", sections.pop(""))
     return sections
 
 
@@ -248,7 +274,8 @@ def system_sections(system_blocks: str | list[dict[str, Any]] | None, preamble: 
     other."""
     preamble = preamble.strip()
     sections = {"preamble": preamble} if preamble else {}
-    sections.update(parse_system_sections(_system_text(system_blocks)))
+    for name, body in parse_system_sections(_system_text(system_blocks)).items():
+        _add_section(sections, name, body)
     return sections
 
 

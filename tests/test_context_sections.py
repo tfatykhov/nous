@@ -25,6 +25,7 @@ from nous.config import Settings
 from nous.heart.schemas import ProcedureSummary
 from nous.observability.context_logger import ContextLogEntry
 from nous.observability.model_calls import (
+    FREE_TEXT_SECTIONS,
     SECTION_MARKERS,
     _estimate_messages_tokens,
     analyze_context,
@@ -37,42 +38,102 @@ from nous.observability.model_calls import (
 
 
 def test_unknown_heading_is_reported_as_itself():
+    """An unknown heading between builder sections (none of them free text) is a section of its own."""
     prompt = (
-        "## Relevant Facts\n- [user] likes tea\n"
+        "## Current Date/Time\nnow\n"
         "## Foo\nbar baz\n"
         "## Brand New Thing (v2)\nsomething else\n"
-        "## Current Frame\ntask"
+        "## Context Safety\nbe careful"
     )
     sections = parse_system_sections(prompt)
     assert sections == {
-        "relevant_facts": "- [user] likes tea",
+        "datetime": "now",
         "foo": "bar baz",
         "brand_new_thing_v2": "something else",
-        "frame": "task",
+        "context_safety": "be careful",
     }
     # a deeper heading is content, not a section
-    assert parse_system_sections("## Past Episodes\n- [success] one\n### detail\nmore") == {
-        "past_episodes": "- [success] one\n### detail\nmore"
+    assert parse_system_sections("## Tools Outrank Memory\nfollow the tool\n### detail\nmore") == {
+        "tools_outrank_memory": "follow the tool\n### detail\nmore"
     }
 
 
-def test_headings_inside_the_identity_and_skill_bodies_stay_in_their_section():
-    """The identity prompt carries its own ``## Character`` ... headings (identity/manager.py ``assemble_prompt``) and a
-    recommended skill's body is rendered verbatim: an unknown heading inside either stays part of it, so the
-    ``identity`` and ``recommended_procedures`` numbers the dashboards show do not collapse. A heading in the table
-    still starts its section."""
+# Each section whose body renders stored or authored text, and where that text comes from.
+EXPECTED_FREE_TEXT = {
+    "identity",  # identity_override: the identity sections in the DB (identity/manager.py assemble_prompt)
+    "user_profile",  # profile facts or the profile card's lines (heart facts)
+    "censors",  # censor trigger patterns, reasons and instructions (heart censors)
+    "frame",  # the frame row's description and questions (cognitive/frames.py _frame_to_selection)
+    "working_memory",  # current task (the user's input), open threads, items (heart working memory)
+    "related_decisions",  # decision descriptions (brain)
+    "relevant_facts",  # fact contents, verbatim up to the format cap (heart facts)
+    "session_profile",  # fact contents (the profile intent leg)
+    "known_procedures",  # procedure names and descriptions (heart procedures)
+    "procedure_catalog",  # procedure names and descriptions (heart procedures)
+    "recommended_procedures",  # skill bodies, newlines kept (_format_procedure_bodies)
+    "past_episodes",  # episode summaries (heart episodes)
+    "recent_conversations",  # episode titles, summaries and open threads (heart episodes)
+    "cached_results",  # cached tool inputs (tool_cache.get_cache_hints)
+    "execution_ledger",  # tool key arguments and error result summaries (execution_ledger.py _build_section)
+    "corrections",  # quoted claims from the agent's own reply (claim_verifier.py _build_correction)
+    "active_guidance",  # censor guidance text (layer.py, censor_injected)
+}
+
+
+def test_free_text_sections_are_the_audited_set():
+    assert FREE_TEXT_SECTIONS == EXPECTED_FREE_TEXT
+    assert FREE_TEXT_SECTIONS <= set(SECTION_MARKERS.values())
+
+
+_MARKER_FOR = {name: marker for marker, name in SECTION_MARKERS.items()}
+
+
+@pytest.mark.parametrize("name", sorted(EXPECTED_FREE_TEXT))
+def test_an_unknown_heading_inside_free_text_stays_in_its_section(name):
+    """Stored text can carry its own ``## `` lines (an identity's ``## Character``, a skill's ``## Steps``, a fact or a
+    cached markdown file): such a line stays part of the section, so its number does not collapse. A heading in the
+    table still starts its section."""
+    prompt = f"{_MARKER_FOR[name]}\nfirst line\n## Some Heading\nmore text\n## Context Safety\nbe careful"
+    assert parse_system_sections(prompt) == {
+        name: "first line\n## Some Heading\nmore text",
+        "context_safety": "be careful",
+    }
+
+
+def test_the_identity_prompts_own_headings_are_one_identity_section():
+    prompt = "## Identity\n\n## Character\nCurious.\n\n## Values\nHonest.\n\n## Current Date/Time\nnow"
+    assert parse_system_sections(prompt) == {
+        "identity": "## Character\nCurious.\n\n## Values\nHonest.",
+        "datetime": "now",
+    }
+
+
+def test_a_repeated_section_name_adds_its_text_never_replaces_it():
+    """A name met twice, from a repeated marker or a repeated fallback heading, holds both texts, so the estimate
+    counts both. The leading text ("other") and the preamble merge the same way with a heading of their name."""
     prompt = (
-        "## Identity\n\n## Character\nCurious.\n\n## Values\nHonest.\n\n"
-        "## Recommended Procedures\n\n### deploy (ops)\n## Steps\n1. build\n\n"
-        "## Past Episodes\n- [success] shipped\n"
-        "## Foo\nbar"
+        "## Relevant Facts\n- [a] one\n"
+        "## Context Safety\nbe careful\n"
+        "## Foo\nx\n"
+        "## Relevant Facts\n- [b] two\n"
+        "## Current Date/Time\nnow\n"
+        "## Foo\ny"
     )
     sections = parse_system_sections(prompt)
-    assert sections["identity"] == "## Character\nCurious.\n\n## Values\nHonest."
-    assert sections["recommended_procedures"] == "### deploy (ops)\n## Steps\n1. build"
-    assert sections["past_episodes"] == "- [success] shipped"
-    assert sections["foo"] == "bar"
-    assert set(sections) == {"identity", "recommended_procedures", "past_episodes", "foo"}
+    assert sections == {
+        "relevant_facts": "- [a] one\n\n- [b] two",
+        "context_safety": "be careful",
+        "foo": "x\n\ny",
+        "datetime": "now",
+    }
+    stats = analyze_context(prompt, [], None, 200_000)
+    assert stats.loaded_facts == 2
+    assert stats.section_tokens_est["relevant_facts"] == len("- [a] one\n\n- [b] two") // 4
+    # the leading text and a "## Other" heading are one section; so are block 0 and a "## Preamble" heading
+    assert parse_system_sections("lead\n## Other\nz") == {"other": "z\n\nlead"}
+    stats = analyze_context("## Preamble\nq", [], None, 200_000, preamble="P")
+    assert stats.sections_present == ["preamble"]
+    assert stats.section_tokens_est["preamble"] == len("P\n\nq") // 4
 
 
 MISSING_HEADINGS = {
@@ -323,7 +384,8 @@ async def _build_memory_side():
                     category="person",
                 )
             ]
-        return [_Fact("The dashboard reads the model call table", id="f1", subject="dashboard", score=0.9)]
+        # a stored fact whose text has a heading line of its own
+        return [_Fact("The dashboard reads the table\n## Some Heading\nnot a section", id="f1", subject="dashboard")]
 
     heart.search_facts.side_effect = search_facts
     heart.search_procedures.return_value = [_procedure("deploy")]
@@ -374,9 +436,11 @@ def _headings(prompt: str) -> list[str]:
 async def test_context_builder_headings_are_all_known():
     """Two builds between them render every section ContextEngine has (some are alternatives: the catalog or the
     awareness cue, the Memory Retrieval Notice only with no facts, Retrieval Failures only with a failed leg). Every
-    heading the parser sees is in the marker table; none is named by the fallback."""
+    heading the parser sees is in the marker table; none is named by the fallback. The headings inside stored text (the
+    identity prompt's own, and one in a fact) stay inside their section: the identity is one ``identity`` section."""
     known = set(SECTION_MARKERS.values())
     rendered: set[str] = set()
+    inside = {"## Character": "identity", "## Values": "identity", "## Some Heading": "relevant_facts"}
     for result in (await _build_catalog_side(), await _build_memory_side()):
         rendered |= {s.label for s in result.sections}
         sections = parse_system_sections(result.system_prompt)
@@ -384,12 +448,14 @@ async def test_context_builder_headings_are_all_known():
         # each section the engine rendered is one the parser names from the table
         for s in result.sections:
             assert SECTION_MARKERS.get(f"## {s.label}") in sections, s.label
-        # every top-level heading line starts a table section; the identity prompt's own headings stay inside it
+        # every top-level heading line starts a table section; a heading in stored text stays inside its section
         for heading in _headings(result.system_prompt):
-            if heading in ("## Character", "## Values"):
-                assert heading in sections["identity"]
+            if heading in inside:
+                assert heading in sections[inside[heading]], heading
                 continue
             assert any(heading.startswith(marker) for marker in SECTION_MARKERS), heading
+        assert "## Character\nCurious and careful.\n\n## Values\nHonesty over comfort." in sections["identity"]
+    assert "## Some Heading\nnot a section" in sections["relevant_facts"]  # the second build has the fact
     # the fixture really turns every section on: a new section in context.py must be added to a build here
     assert rendered == _section_labels_in_source()
 
