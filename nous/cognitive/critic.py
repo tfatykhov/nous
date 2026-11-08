@@ -208,6 +208,7 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
                     "You are a cognitive routing classifier. Respond only with JSON.",
                     prompt,
                     max_tokens=512,
+                    purpose="critic",
                 ),
                 timeout=timeout_s,
             )

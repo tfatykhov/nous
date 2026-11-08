@@ -246,6 +246,7 @@ class KnowledgeExtractor:
             system_prompt="You are extracting knowledge from a conversation before it is compacted.",
             user_message=prompt,
             max_tokens=1500,
+            purpose="knowledge_extractor",
         )
 
         if not text:

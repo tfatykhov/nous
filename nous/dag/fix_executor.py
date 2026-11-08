@@ -267,7 +267,7 @@ async def choose_action_llm(
 
     try:
         tool_input = await asyncio.wait_for(
-            call_with_tool_choice(llm_client, payload),
+            call_with_tool_choice(llm_client, payload, purpose="dag_fix"),
             timeout=timeout_seconds,
         )
     except UnusableToolReply as e:

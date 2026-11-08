@@ -333,6 +333,7 @@ class StrategyCardDistiller:
             tool_description="Emit the distilled strategy card",
             output_schema=_CARD_SCHEMA,
             max_tokens=512,
+            purpose="strategy_card",
         )
         if not card:
             logger.warning(

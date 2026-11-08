@@ -876,6 +876,7 @@ class ProcedureLearner:
             system_prompt="You are analyzing patterns to extract reusable procedures for an AI agent.",
             user_message=prompt,
             max_tokens=1500,
+            purpose="procedure_learner",
         )
 
         if not text:

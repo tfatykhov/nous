@@ -526,6 +526,7 @@ class FactManager:
             tool_description="Classify the relationship between two facts.",
             output_schema=_SUPERSESSION_CLASSIFIER_SCHEMA,
             max_tokens=300,
+            purpose="contradiction",
         )
 
     async def is_distinct_fact(self, existing_content: str, candidate_content: str) -> bool | None:
@@ -557,6 +558,7 @@ class FactManager:
                 tool_description="Decide whether two facts are duplicates or distinct.",
                 output_schema=_DEDUP_TIEBREAKER_SCHEMA,
                 max_tokens=100,
+                purpose="contradiction",
             )
         except Exception:
             logger.warning("F377 dedup tiebreaker call failed; failing open", exc_info=True)

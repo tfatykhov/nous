@@ -1437,6 +1437,7 @@ async def create_components(settings: Settings) -> dict:
                         "You are an email triage classifier.",
                         prompt,
                         max_tokens=16,
+                        purpose="email_classify",
                     )
                     return resp or ""
 

@@ -755,6 +755,7 @@ class EpisodeSummarizer:
             system_prompt="You are summarizing a conversation episode for an AI agent's long-term memory.",
             user_message=prompt,
             max_tokens=max_tokens,
+            purpose="episode_summarizer",
         )
 
         if not text:

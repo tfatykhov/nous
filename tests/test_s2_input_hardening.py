@@ -366,7 +366,7 @@ class TestKnowledgeExtractorHardening:
         ke = _knowledge_extractor()
         captured = {}
 
-        async def fake_llm(client, model, system_prompt, user_message, max_tokens=800):
+        async def fake_llm(client, model, system_prompt, user_message, max_tokens=800, **_kw):
             captured["prompt"] = user_message
             return "[]"
 
@@ -382,7 +382,7 @@ class TestKnowledgeExtractorHardening:
         ke = _knowledge_extractor(extraction_input_hardening_enabled=False)
         captured = {}
 
-        async def fake_llm(client, model, system_prompt, user_message, max_tokens=800):
+        async def fake_llm(client, model, system_prompt, user_message, max_tokens=800, **_kw):
             captured["prompt"] = user_message
             return "[]"
 

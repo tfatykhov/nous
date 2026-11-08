@@ -405,8 +405,9 @@ class CallContext:
 
 def context_kwargs(client: Any, ctx: CallContext) -> dict[str, Any]:
     """The keyword arguments that pass ``ctx`` to ``client.call``: ``{"call_context": ctx}`` for a client that takes
-    it (``supports_call_context``), else none, so a test double that takes only the payload keeps working."""
-    return {"call_context": ctx} if getattr(client, "supports_call_context", False) else {}
+    it (``supports_call_context`` is True), else none, so a test double that takes only the payload keeps working. A
+    ``MagicMock`` answers every attribute with a truthy mock, so only ``True`` itself counts."""
+    return {"call_context": ctx} if getattr(client, "supports_call_context", False) is True else {}
 
 
 # The fallback a caller sets around calls it cannot pass a context to (model_call_context). A scope reads it once,

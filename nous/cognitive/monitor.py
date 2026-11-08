@@ -356,6 +356,8 @@ class MonitorEngine:
                 "You are a correction analysis system. Respond only with JSON.",
                 prompt,
                 max_tokens=correction_max_tokens,
+                purpose="correction_extractor",
+                session_id=session_id,
             )
             if not raw:
                 return None

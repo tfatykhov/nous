@@ -141,6 +141,7 @@ class OutcomeDetector:
                 "You are an outcome signal classifier. Respond only with JSON.",
                 prompt,
                 max_tokens=512,
+                purpose="outcome_detector",
             )
             if not raw:
                 return self._detect_heuristic(summary)

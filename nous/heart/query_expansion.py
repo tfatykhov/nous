@@ -352,7 +352,7 @@ class QueryExpander:
 
         try:
             tool_input = await asyncio.wait_for(
-                call_with_tool_choice(self._llm, payload),
+                call_with_tool_choice(self._llm, payload, purpose="query_expansion"),
                 timeout=self._settings.query_expansion_timeout_seconds,
             )
         except asyncio.CancelledError:
