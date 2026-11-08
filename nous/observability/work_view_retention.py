@@ -43,13 +43,13 @@ _DELETE_TEXT_REFS = text(
 # again is kept, and its new ref never meets a deleted block.
 _DELETE_UNREFERENCED_BLOCKS = text(
     "WITH unused AS ("
-    " SELECT b.hash FROM nous_system.model_text_block b"
+    " SELECT b.agent_id, b.hash FROM nous_system.model_text_block b"
     " WHERE b.agent_id = :agent_id AND b.created_at < now() - interval '1 hour'"
     " AND NOT EXISTS (SELECT 1 FROM nous_system.model_call_block_ref r"
     " WHERE r.agent_id = b.agent_id AND r.block_hash = b.hash)"
     " ORDER BY b.hash FOR UPDATE"
     ") "
-    "DELETE FROM nous_system.model_text_block t USING unused u WHERE t.agent_id = :agent_id AND t.hash = u.hash"
+    "DELETE FROM nous_system.model_text_block t USING unused u WHERE t.agent_id = u.agent_id AND t.hash = u.hash"
 )
 
 

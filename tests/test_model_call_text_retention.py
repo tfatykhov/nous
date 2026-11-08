@@ -169,6 +169,11 @@ async def test_unreferenced_old_block_is_deleted(db):
     try:
         old = await _insert_block(db, mine, "a block no call sends any more", timedelta(hours=2))
         fresh = await _insert_block(db, mine, "a block a store has just written", timedelta(minutes=10))
+        # Another agent: an old call whose ref is past the retention, and an old block no call references.
+        their_call = await _insert_call(db, other, 10, attempts=0)
+        await _store(db, other).store(their_call, [("system", 0, _SYSTEM_PROMPT)])
+        await _age(db, other, refs_of=their_call, refs=timedelta(days=10), blocks=timedelta(hours=2))
+        [their_system] = await _hashes(db, other)
         await _insert_block(db, other, "a block no call sends any more", timedelta(hours=2))
 
         deleted = await sweep_model_call_text(db, mine, 7)
@@ -176,8 +181,9 @@ async def test_unreferenced_old_block_is_deleted(db):
         assert deleted == {"model_call_block_ref": 0, "model_text_block": 1}
         # A block no store has used for an hour goes; a block used within the hour stays.
         assert await _hashes(db, mine) == {fresh}
-        # Another agent's old block survives: its own process sweeps it, by its own retention.
-        assert await _hashes(db, other) == {old}
+        # Another agent's old ref and old blocks survive: its own process sweeps them, by its own retention.
+        assert await _refs(db, their_call) == [("system", 0, their_system)]
+        assert await _hashes(db, other) == {old, their_system}
     finally:
         await _delete(db, mine, other)
 
