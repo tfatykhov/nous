@@ -275,6 +275,19 @@ def test_a_lone_surrogate_is_replaced_so_the_body_is_storable():
     assert model_call_text._raw_key("bytes \udcff here") == model_call_text._raw_key("bytes \udcfe here")
 
 
+async def test_a_plain_block_never_lends_its_body_to_a_json_block_with_the_same_text():
+    """A text system block can hold exactly the JSON of a message. Plain, its escaped secret is out of the patterns'
+    reach; as JSON its strings are redacted first. The LRU keys on the kind too, so the JSON block never gets the
+    plain block's body."""
+    store = TextStore(BoundedWriter("test"), None, "a", _settings())
+    [(_, _, raw, is_json)] = split_payload({"messages": [{"role": "user", "content": _NESTED}]}, None)
+
+    await store._prepare(raw, False)
+    _, body = await store._prepare(raw, is_json)
+
+    assert is_json and "hunter2" not in body, body
+
+
 async def test_two_concurrent_misses_on_one_block_are_counted_once(monkeypatch):
     store = TextStore(BoundedWriter("test"), None, "a", _settings())
     real = model_call_text.prepare_block
