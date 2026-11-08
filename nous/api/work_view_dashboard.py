@@ -172,7 +172,8 @@ def disabled_sessions(days: int) -> dict[str, Any]:
 
 # A session is the window's turns of one non-NULL session_id. Its calls are the tool_call_log rows of those turns
 # (joined on turn_id), so a call with no turn row and a turn with no session are never counted. Its kind, first
-# message and parent come from its first turn (started_at, then id). Unreferenced CTEs are not run.
+# message and parent come from its first turn (started_at, then id). Unreferenced CTEs are not run. tool_counts is
+# MATERIALIZED so the page's per-row tools lookup reads the aggregate once instead of re-aggregating every call.
 _SESSIONS_CTE = """
 WITH turns AS (
     SELECT t.id, t.session_id, t.parent_session_id, t.work_kind, t.context_kind, t.trigger_text,
@@ -182,7 +183,10 @@ WITH turns AS (
       AND t.started_at >= now() - make_interval(days => :days)
 ),
 first_turn AS (
-    SELECT DISTINCT ON (session_id) session_id, parent_session_id, work_kind, context_kind, trigger_text
+    SELECT DISTINCT ON (session_id) session_id, parent_session_id, work_kind, context_kind, trigger_text,
+           CASE WHEN work_kind = ANY(CAST(:conversation_kinds AS text[])) THEN 'conversation'
+                WHEN work_kind = ANY(CAST(:task_kinds AS text[])) THEN 'task'
+                ELSE 'background' END AS kind
     FROM turns
     ORDER BY session_id, started_at, id
 ),
@@ -207,6 +211,11 @@ repeats AS (
     GROUP BY session_id, turn_id, tool_name, input_text
     HAVING count(*) >= 2
 ),
+tool_counts AS MATERIALIZED (
+    SELECT session_id, tool_name, count(*)::int AS calls
+    FROM calls
+    GROUP BY session_id, tool_name
+),
 first_subtask AS (
     SELECT DISTINCT ON (session_id) session_id, subtask_id
     FROM calls
@@ -221,10 +230,7 @@ grouped AS (
 ),
 listed AS (
     SELECT g.session_id, g.started_at, g.ended_at, g.turns, g.f_many,
-           f.parent_session_id, f.work_kind, f.context_kind, f.trigger_text AS first_message,
-           CASE WHEN f.work_kind = ANY(CAST(:conversation_kinds AS text[])) THEN 'conversation'
-                WHEN f.work_kind = ANY(CAST(:task_kinds AS text[])) THEN 'task'
-                ELSE 'background' END AS kind,
+           f.parent_session_id, f.work_kind, f.context_kind, f.trigger_text AS first_message, f.kind,
            coalesce(cs.tool_calls, 0) AS tool_calls, coalesce(cs.errors, 0) AS errors,
            coalesce(cs.f_error, false) AS f_error, (r.session_id IS NOT NULL) AS f_repeat,
            coalesce(cs.f_asked, false) AS f_asked, coalesce(cs.f_changed, false) AS f_changed
@@ -247,8 +253,11 @@ titled AS (
 )
 """
 
+# Counts need only the turns: no call is read.
 _COUNTS_SQL = (
-    _SESSIONS_CTE + "SELECT kind, count(*)::int AS sessions, sum(turns)::int AS turns FROM listed GROUP BY kind"
+    _SESSIONS_CTE
+    + "SELECT f.kind, count(*)::int AS sessions, sum(g.turns)::int AS turns "
+    + "FROM grouped g JOIN first_turn f ON f.session_id = g.session_id GROUP BY f.kind"
 )
 _TOOL_NAMES_SQL = _SESSIONS_CTE + "SELECT DISTINCT tool_name FROM calls ORDER BY tool_name"
 # Fixed column per lens (the lens is validated against FLAGS before it gets here).
@@ -258,7 +267,9 @@ _LENS_COLUMN = {flag: f"f_{flag}" for flag in FLAGS}
 def _page_sql(*, tool: bool, q: bool, lens: str | None, before: bool) -> str:
     where = ["kind = ANY(CAST(:kinds AS text[]))"]
     if tool:
-        where.append("EXISTS (SELECT 1 FROM calls c WHERE c.session_id = titled.session_id AND c.tool_name = :tool)")
+        where.append(
+            "EXISTS (SELECT 1 FROM tool_counts tc WHERE tc.session_id = titled.session_id AND tc.tool_name = :tool)"
+        )
     if q:
         where.append("(title ILIKE :q ESCAPE '\\' OR first_message ILIKE :q ESCAPE '\\')")
     if lens is not None:
@@ -280,8 +291,8 @@ FROM (
 LEFT JOIN LATERAL (
     SELECT array_agg(x.tool_name ORDER BY x.calls DESC, x.tool_name) AS tool_list,
            array_agg(x.calls ORDER BY x.calls DESC, x.tool_name) AS tool_counts
-    FROM (SELECT c.tool_name, count(*)::int AS calls FROM calls c WHERE c.session_id = p.session_id
-          GROUP BY c.tool_name ORDER BY calls DESC, c.tool_name LIMIT :tools_cap) x
+    FROM (SELECT tc.tool_name, tc.calls FROM tool_counts tc WHERE tc.session_id = p.session_id
+          ORDER BY tc.calls DESC, tc.tool_name LIMIT :tools_cap) x
 ) tl ON true
 ORDER BY p.started_at DESC, p.session_id DESC
 """
