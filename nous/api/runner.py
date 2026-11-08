@@ -2501,6 +2501,10 @@ class AgentRunner:
             except Exception as exc:
                 logger.warning("F108: context estimate failed (%s); this call has no estimate", type(exc).__name__)
 
+        # F108: one id for this call's row and its ring entry, so the model-call table's view finds the ring's payload
+        # and section text by the row's id. Only a call that is recorded gets one: otherwise the ring keeps its own ids.
+        call_id = uuid4() if records and call_context is not None and stats is not None else None
+
         # F035.4: Log context metadata (entry_id stored locally, NOT in payload). A failed estimate is not tried again
         # here: the call gets no ring entry, as when the entry itself failed.
         if self._context_logger and stats is not None:
@@ -2519,6 +2523,7 @@ class AgentRunner:
                     preamble=preamble,
                     sections=sections,
                     stats=stats,
+                    entry_id=None if call_id is None else str(call_id),
                 )
                 self._last_context_entry_id = _entry.id
                 # F036: Attach cache break info to context log entry
@@ -2538,7 +2543,10 @@ class AgentRunner:
                     cache_break_components=list(cache_break.components_changed),
                     cache_break_tokens_lost=cache_break.estimated_tokens_lost,
                 )
-            call_context = dataclasses.replace(call_context, stats=stats)
+            call_context = dataclasses.replace(call_context, stats=stats, call_id=call_id)
+        elif isinstance(call_context, CallContext) and call_context.call_id is not None:
+            # No id minted (no estimate, or nothing records): one the input carried names another call's row.
+            call_context = dataclasses.replace(call_context, call_id=None)
 
         return payload, call_context
 

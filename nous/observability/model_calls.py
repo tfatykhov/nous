@@ -411,6 +411,7 @@ class CallContext:
     stats: ContextStats | None = None  # runner calls only: sections, estimates, loaded_* counts, cache_break
     group_id: UUID | None = None
     is_fallback: bool = False
+    call_id: UUID | None = None  # the row's id, when the caller names it (the runner: its ring entry has the same id)
 
 
 def context_kwargs(client: Any, ctx: CallContext) -> dict[str, Any]:
@@ -795,7 +796,7 @@ class ModelCallScope:
         if http_status is None and self._attempts:
             http_status = self._attempts[-1]["http_status"]
         params: dict[str, Any] = {
-            "id": uuid.uuid4(),
+            "id": ctx.call_id if isinstance(ctx.call_id, uuid.UUID) else uuid.uuid4(),
             "agent_id": self._recorder._agent_id,
             "started_at": self._started_at,
             "purpose": self._purpose,

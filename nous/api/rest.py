@@ -66,7 +66,8 @@ from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
 from nous.heart.result_inbox import derive_channel
-from nous.observability.context_logger import HEARTBEAT_CALL_TYPE
+from nous.observability.context_view import RingContextView
+from nous.observability.model_calls import QUIET_PURPOSES
 from nous.observability.retrieval_logger import RETRIEVAL_PATHS as _RETRIEVAL_PATHS
 from nous.observability.snapshots import (
     SNAPSHOT_METRICS_VERSION,
@@ -104,8 +105,17 @@ def create_app(
     tool_call_recorder: Any | None = None,
     model_call_recorder: Any | None = None,
     model_call_text_store: Any | None = None,
+    context_view: Any | None = None,
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
+
+    def _context_view() -> Any | None:
+        """F108: what the context endpoints read: the view main.py built (the model-call table while
+        NOUS_MODEL_CALL_LOG_ENABLED is on), else the ring of ``context_logger``, else None. Truthiness, not
+        ``is not None``: main.py passes lazy proxies, which are falsy while their component is None."""
+        if context_view:
+            return context_view
+        return RingContextView(context_logger) if context_logger else None
 
     def _parse_attachments(body: dict) -> list[Attachment]:
         from nous.api.attachments import classify_attachment, sanitize_filename, validate_base64_size
@@ -1991,11 +2001,15 @@ def create_app(
             logger.debug("dashboard_observability: drift_trends failed", exc_info=True)
             result["drift_trends"] = {}
 
-        # 6. Context log (last 10 calls, heartbeat calls left out)
-        if context_logger is not None:
-            entries = context_logger.get_recent(limit=10, exclude_call_type=HEARTBEAT_CALL_TYPE)
+        # 6. Context log (last 10 calls, the quiet ones left out: heartbeat and background checks). The model-call
+        # table's view reads the database, so it can fail like the sections above; WARNING, not DEBUG, so a broken
+        # table read shows in the logs, not only as an empty list.
+        view = _context_view()
+        try:
+            entries = await view.recent(None, 10, QUIET_PURPOSES) if view else []
             result["context_log"] = [e.to_dict() for e in entries]
-        else:
+        except Exception:
+            logger.warning("dashboard_observability: context_log failed", exc_info=True)
             result["context_log"] = []
 
         # 7. F108 recording counters (in-memory, since the process started); each null while its log is off.
@@ -2010,14 +2024,21 @@ def create_app(
 
     async def dashboard_cache(request: Request) -> JSONResponse:
         """GET /dashboard/cache - Prompt cache efficiency metrics (F036.1)."""
-        if context_logger is None:
+        view = _context_view()
+        if view is None:
             return JSONResponse({"error": "Context logging not enabled"}, status_code=503)
 
-        # Heartbeat calls left out: the numbers describe the chat prompt's cache.
-        entries = context_logger.get_recent(limit=200, exclude_call_type=HEARTBEAT_CALL_TYPE)
+        # Heartbeat and background checks left out: the numbers describe the chat prompt's cache. The model-call
+        # table's view reads the database: a fault is a 503 in this endpoint's error shape (the ring cannot fail).
+        try:
+            entries = await view.recent(None, 200, QUIET_PURPOSES)
+        except Exception:
+            logger.warning("dashboard_cache: the model-call log read failed", exc_info=True)
+            return JSONResponse({"error": "Model-call log unavailable"}, status_code=503)
 
-        # Filter to entries that have actual token data (API has responded)
-        calls = [e for e in entries if e.input_tokens_actual is not None]
+        # Filter to entries that have actual token data (API has responded). F108: from the model-call table, failed
+        # calls count too (they have no tokens); the ring's entries have no status.
+        calls = [e for e in entries if e.input_tokens_actual is not None or getattr(e, "status", None) == "error"]
 
         total_calls = len(calls)
         # Anthropic API reports input_tokens as non-cached only.
@@ -2093,17 +2114,23 @@ def create_app(
             })
         session_list.sort(key=lambda x: x["calls"], reverse=True)
 
+        summary = {
+            "total_calls": total_calls,
+            "total_input_tokens": total_input,
+            "total_cache_read": total_cache_read,
+            "total_cache_created": total_cache_created,
+            "overall_hit_rate": round(total_cache_read / total_input * 100, 1) if total_input > 0 else 0,
+            "total_breaks": total_breaks,
+            "break_rate": round(total_breaks / total_calls * 100, 1) if total_calls > 0 else 0,
+            "tokens_lost_to_breaks": total_break_tokens,
+        }
+        if view.reads_table:
+            # F108: the failed calls among total_calls, and the table's own input total (its generated column).
+            summary["error_calls"] = sum(1 for e in calls if e.status == "error")
+            summary["input_total"] = sum(e.input_total_tokens or 0 for e in calls)
+
         return JSONResponse({
-            "summary": {
-                "total_calls": total_calls,
-                "total_input_tokens": total_input,
-                "total_cache_read": total_cache_read,
-                "total_cache_created": total_cache_created,
-                "overall_hit_rate": round(total_cache_read / total_input * 100, 1) if total_input > 0 else 0,
-                "total_breaks": total_breaks,
-                "break_rate": round(total_breaks / total_calls * 100, 1) if total_calls > 0 else 0,
-                "tokens_lost_to_breaks": total_break_tokens,
-            },
+            "summary": summary,
             "break_components": component_counts,
             "sessions": session_list,
             "timeline": timeline,
@@ -3219,41 +3246,45 @@ def create_app(
     async def context_log_list(request: Request) -> JSONResponse:
         session_id = request.query_params.get("session_id")
         limit = int(request.query_params.get("limit", "20"))
-        if context_logger is None:
+        view = _context_view()
+        if view is None:
             return JSONResponse({"entries": []})
-        # Without a session_id, heartbeat calls are left out; a heartbeat session asked for by id is not.
-        exclude = None if session_id else HEARTBEAT_CALL_TYPE
-        entries = context_logger.get_recent(session_id=session_id, limit=limit, exclude_call_type=exclude)
+        # Without a session_id, heartbeat and background-check calls are left out; one asked for by id is not.
+        exclude = frozenset() if session_id else QUIET_PURPOSES
+        entries = await view.recent(session_id, limit, exclude)
         return JSONResponse({"entries": [e.to_dict() for e in entries]})
 
     async def context_log_detail(request: Request) -> JSONResponse:
         entry_id = request.path_params["id"]
-        if context_logger is None:
+        view = _context_view()
+        if view is None:
             return JSONResponse({"error": "Not enabled"}, status_code=404)
-        entry = context_logger.get_entry(entry_id)
+        entry = await view.get(entry_id)
         if not entry:
             return JSONResponse({"error": "Not found"}, status_code=404)
         return JSONResponse(entry.to_dict())
 
     async def context_log_payload(request: Request) -> JSONResponse:
         entry_id = request.path_params["id"]
-        if context_logger is None:
+        view = _context_view()
+        if view is None:
             return JSONResponse({"error": "Not enabled"}, status_code=404)
-        payload = context_logger.get_payload(entry_id)
+        payload = await view.payload(entry_id)
         if not payload:
             return JSONResponse({"error": "Not captured"}, status_code=404)
         return JSONResponse(payload)
 
     async def context_log_sections(request: Request) -> JSONResponse:
         entry_id = request.path_params["id"]
-        if context_logger is None:
+        view = _context_view()
+        if view is None:
             return JSONResponse({"error": "Not enabled"}, status_code=404)
-        entry = context_logger.get_entry(entry_id)
+        entry = await view.get(entry_id)
         if not entry:
             return JSONResponse({"error": "Not found"}, status_code=404)
         return JSONResponse({
             "sections": entry.token_breakdown,
-            "sections_text": entry.sections_text,
+            "sections_text": await view.sections_text(entry_id),
             "total_tokens_est": entry.total_tokens_est,
             "sections_present": entry.sections_present,
         })
@@ -3261,10 +3292,11 @@ def create_app(
     async def context_diff(request: Request) -> JSONResponse:
         a_id = request.query_params.get("a")
         b_id = request.query_params.get("b")
-        if not context_logger or not a_id or not b_id:
+        view = _context_view()
+        if not view or not a_id or not b_id:
             return JSONResponse({"error": "Missing parameters"}, status_code=400)
-        a = context_logger.get_entry(a_id)
-        b = context_logger.get_entry(b_id)
+        a = await view.get(a_id)
+        b = await view.get(b_id)
         if not a or not b:
             return JSONResponse({"error": "Not found"}, status_code=404)
         token_delta = {}

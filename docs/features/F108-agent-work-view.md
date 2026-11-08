@@ -1,6 +1,6 @@
 # F108: Agent Work View
 
-**Status:** PR 3 in progress (Phase 1, recording). PR 1 (#870, merged) records tool calls and turns; PR 2 (#871, merged) records the model-call numbers; PR 3 records the model-call text. Every setting defaults off: `NOUS_TOOL_CALL_LOG_ENABLED` and `NOUS_TOOL_REASON_ENABLED` (PR 1), `NOUS_MODEL_CALL_LOG_ENABLED` (PR 2), `NOUS_MODEL_CALL_TEXT_ENABLED` (PR 3). Later PRs add the cutover from `context_log`, the views and the tool notes.
+**Status:** Phase 1 complete, flags off. Phase 1 is the recording. PR 1 (#870, merged) records tool calls and turns. PR 2 (#871, merged) records the model-call numbers. PR 3 (#872, merged) records the model-call text. PR 4, the last PR of Phase 1, makes the model-call table the one recorder: the context endpoints read it, and `context_log` gets no more rows. Every setting defaults off: `NOUS_TOOL_CALL_LOG_ENABLED` and `NOUS_TOOL_REASON_ENABLED` (PR 1), `NOUS_MODEL_CALL_LOG_ENABLED` (PR 2; the cutover in PR 4), `NOUS_MODEL_CALL_TEXT_ENABLED` (PR 3). Phase 2 (the Work and Model calls views, the navigation) and Phase 3 (tool notes) follow.
 
 ## Problem
 
@@ -128,6 +128,45 @@ The numbers follow from prod in a later PR.
 - **The redaction thread does not free the loop** (above); a process pool or a cheaper redactor would.
 - **A change deeper than a content block** made to a message after the call would reach the stored text. Nothing makes one today.
 
+## What PR 4 changes: one recorder, the context endpoints read it
+
+PR 4 is the last PR of Phase 1. It adds no setting: `NOUS_MODEL_CALL_LOG_ENABLED` is the cutover.
+
+### With `NOUS_MODEL_CALL_LOG_ENABLED` on
+
+- **One recorder.** `model_call_log` is the one record of the main loop's model calls. The F035.4 `ContextLogger` (`NOUS_CONTEXT_LOG_ENABLED`) keeps its in-memory ring but writes no `context_log` row and no response update (`_build_context_logger` in `main.py` gives it no writer). The `context_log` retention sweep keeps running, so the old rows age out in their 30 days.
+- **The endpoints read the table.** `/context/log`, `/context/log/{id}`, `/context/log/{id}/payload`, `/context/log/{id}/sections`, `/context/diff`, `/dashboard/cache` and `/dashboard/observability`'s `context_log` read `model_call_log` through a `TableContextView` (`nous/observability/context_view.py`). They show the runner's own calls only (`MAIN_LOOP_PURPOSES`), never a background helper's. The lists asked for without a session id leave out the heartbeat's and the background checks' calls (`QUIET_PURPOSES`), as they left out the ring's `heartbeat` calls. The views survive a restart, list failed calls, and show the duration, trace id, gate and reflection calls that the ring lacked.
+- **Same shapes, a few keys more.** Every key keeps its name and meaning. `id` is the row's UUID, `call_type` carries the purpose, and `input_tokens_actual` stays the uncached input. Each entry adds `input_total_tokens`, `status`, `purpose`, `attempts` and `turn_id`. `/dashboard/cache` counts failed calls in `total_calls` and adds `error_calls` and `input_total`. No field the dashboard reads changes type, so the dashboard is unchanged (see the [REST API](../reference/rest-api.md)).
+- **Payload and section text.** A call's payload and section text come from the stored text when `NOUS_MODEL_CALL_TEXT_ENABLED` stored it: redacted, the payload with its `response`, and the section text parsed from the stored system blocks as the runner parsed the prompt. Otherwise they come from the ring, as before: the full payload when `NOUS_CONTEXT_LOG_FULL_PAYLOAD` captured it, and the section text. The runner gives a recorded call's ring entry the row's id (`CallContext.call_id`), so the ring is found by it. Without either, the payload is 404 `Not captured`, as before.
+
+### With it off
+
+Every endpoint reads the ring through a `RingContextView`, exactly as before PR 4: same keys, same values, `context_log` rows written as before. Nothing reads the new tables, and a ring entry's id is its own 16 characters.
+
+### The recording bugs
+
+The design's 15 recording bugs are fixed by the new recorder, not patched in the old one. `tests/test_recording_bug_regressions.py` pins each one, `test_bug1_*` to `test_bug15_*`. Each drives a real runner, the critic or a background helper over a real Anthropic client whose HTTP goes to a stubbed API. The rows are read back from Postgres and, where the bug was about what the dashboard showed, through the endpoints.
+
+### Rollout order
+
+Each setting needs its compose pass-through line and its `.env` line (see Turning it on). Turn them on one at a time, in this order:
+
+1. `NOUS_TOOL_CALL_LOG_ENABLED`: tool-call and turn rows.
+2. `NOUS_TOOL_REASON_ENABLED`: the `reason` field on every offered tool.
+3. `NOUS_MODEL_CALL_LOG_ENABLED`: the model-call rows, and the cutover. The context endpoints read the table from here on, and `context_log` gets no new rows.
+4. `NOUS_MODEL_CALL_TEXT_ENABLED`: the full text, which also serves the context endpoints' payload and section text.
+
+### Rollback
+
+Drop the setting's `.env` line and restart. For `NOUS_MODEL_CALL_LOG_ENABLED`, that brings back the ring path and the `context_log` writer, with no data step. The `context_log` sweep never stopped. The `model_call_log` rows are kept, unswept until the setting is on again. The text needs the numbers, so it stops with them.
+
+### Known limits
+
+- **The ring fallback is the ring's.** It holds at most 10 payloads per session and 50 in all, in memory: with the text off, a call from before a restart has no payload or section text, as before.
+- **Ties.** Calls are listed newest first by start time, then by id, so two calls that start within one tick of the clock are listed in either order.
+- **Stored section text is redacted** and a block over the cap is cut with a marker, so a section's text can be shorter than its estimate. `/context/log/{id}/sections` loads the call's whole stored text to read its system blocks.
+- **The Observability view still shows the uncached input** (`input_tokens_actual`) beside the estimate. `input_total_tokens` is there for the Phase 2 Model calls view; the dashboard is not changed in Phase 1.
+
 ## How the rows are written
 
 - **One bounded writer.** `main.py` builds one `BoundedWriter` (`nous/observability/recording.py`) when `NOUS_TOOL_CALL_LOG_ENABLED` or `NOUS_MODEL_CALL_LOG_ENABLED` is on, never two, and hands it to the `ToolCallRecorder` and the `ModelCallRecorder`. A write is a factory scheduled fire-and-forget: at most 4 writes hold a pool connection at once, each is cut off after 30 s, and past 500 pending writes a new one is dropped (the model-call text has a pending cap of its own, 50). `record`, `record_turn`, a scope's exit and `record_bucket` are synchronous and never raise, so recording never fails or slows a turn or a model call.
@@ -178,7 +217,7 @@ The model-call text (PR 3) is not in these figures: its size, with the dedup, is
 
 ## Reference
 
-- Settings: [environment variables](../reference/environment-variables.md) (`NOUS_TOOL_CALL_LOG_ENABLED`, `NOUS_TOOL_REASON_ENABLED`, `NOUS_TOOL_CALL_RETENTION_DAYS`, `NOUS_TOOL_INPUT_MAX_CHARS`, `NOUS_TOOL_RESULT_PREVIEW_CHARS`, `NOUS_TOOL_REASON_MAX_CHARS`, `NOUS_MODEL_CALL_LOG_ENABLED`, `NOUS_MODEL_CALL_RETENTION_DAYS`, `NOUS_MODEL_CALL_TEXT_ENABLED`, `NOUS_MODEL_CALL_TEXT_BLOCK_MAX_CHARS`, `NOUS_MODEL_CALL_TEXT_RETENTION_DAYS`).
-- Endpoint: [REST API](../reference/rest-api.md) (`GET /dashboard/observability`, `recording`).
+- Settings: [environment variables](../reference/environment-variables.md) (`NOUS_TOOL_CALL_LOG_ENABLED`, `NOUS_TOOL_REASON_ENABLED`, `NOUS_TOOL_CALL_RETENTION_DAYS`, `NOUS_TOOL_INPUT_MAX_CHARS`, `NOUS_TOOL_RESULT_PREVIEW_CHARS`, `NOUS_TOOL_REASON_MAX_CHARS`, `NOUS_MODEL_CALL_LOG_ENABLED`, `NOUS_MODEL_CALL_RETENTION_DAYS`, `NOUS_MODEL_CALL_TEXT_ENABLED`, `NOUS_MODEL_CALL_TEXT_BLOCK_MAX_CHARS`, `NOUS_MODEL_CALL_TEXT_RETENTION_DAYS`; the cutover's effect on `NOUS_CONTEXT_LOG_ENABLED`).
+- Endpoints: [REST API](../reference/rest-api.md) (`GET /dashboard/observability`, `recording` and `context_log`; `/dashboard/cache`; `/context/log*`; `/context/diff`).
 - Reader: [database roles](../reference/database-roles.md) and [agent tools](../reference/agent-tools.md) (`db_query`).
-- Code: `nous/observability/recording.py`, `nous/observability/tool_calls.py`, `nous/observability/model_calls.py`, `nous/observability/model_call_text.py`, `nous/observability/work_view_retention.py`, `nous/api/runner.py` (`_note_tool_call`, `_note_turn`, the call contexts), `nous/api/anthropic_client.py` (`set_recorder`, the scopes and attempts), `nous/browser/loop.py`, `nous/brain/embeddings.py` and `nous/heart/reranker.py` (`set_recorder`), `nous/main.py` (wiring, retention loop, shutdown).
+- Code: `nous/observability/recording.py`, `nous/observability/tool_calls.py`, `nous/observability/model_calls.py`, `nous/observability/model_call_text.py`, `nous/observability/context_view.py` (the views the context endpoints read), `nous/observability/work_view_retention.py`, `nous/api/runner.py` (`_note_tool_call`, `_note_turn`, the call contexts), `nous/api/anthropic_client.py` (`set_recorder`, the scopes and attempts), `nous/browser/loop.py`, `nous/brain/embeddings.py` and `nous/heart/reranker.py` (`set_recorder`), `nous/main.py` (wiring, `_build_context_logger`, retention loop, shutdown).
