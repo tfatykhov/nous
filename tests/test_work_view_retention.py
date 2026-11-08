@@ -29,7 +29,8 @@ from nous.observability.work_view_retention import sweep_tool_calls
 ROOT = Path(__file__).resolve().parents[1]
 _SETTINGS = SimpleNamespace(tool_input_max_chars=2000, tool_result_preview_chars=500, tool_reason_max_chars=500)
 DB_QUERY_EXCEPTION = (
-    "dashboards read these tables, the agent never does, except `tool_call_log`, which `db_query` may read"
+    "dashboards read these tables, the agent never does, except `tool_call_log`, `model_call_log` and "
+    "`model_call_attempt`, which `db_query` may read"
 )
 
 
@@ -361,6 +362,8 @@ ENV_ROWS = {
     "NOUS_TOOL_INPUT_MAX_CHARS": "2000",
     "NOUS_TOOL_RESULT_PREVIEW_CHARS": "500",
     "NOUS_TOOL_REASON_MAX_CHARS": "500",
+    "NOUS_MODEL_CALL_LOG_ENABLED": "false",
+    "NOUS_MODEL_CALL_RETENTION_DAYS": "30",
 }
 
 

@@ -104,8 +104,9 @@ nous/
 │   │   ├── manager.py          # Identity section CRUD
 │   │   ├── protocol.py         # Initiation protocol
 │   │   └── tools.py            # Identity-related tools
-│   ├── observability/          # Telemetry writers — dashboards read these tables, the agent never does, except `tool_call_log`, which `db_query` may read
-│   │   ├── context_logger.py   # F035.4 per-turn context payload log
+│   ├── observability/          # Telemetry writers — dashboards read these tables, the agent never does, except `tool_call_log`, `model_call_log` and `model_call_attempt`, which `db_query` may read
+│   │   ├── context_logger.py   # F035.4 per-turn context payload log (its context estimate lives in model_calls.py)
+│   │   ├── model_calls.py      # F108: ModelCallRecorder (one model_call_log row per model call with its model_call_attempt rows, embedding and rerank calls counted per minute), CallContext and the purpose vocabulary, model_call_context (the fallback label), and the context estimate (analyze_context, ContextStats, parse_system_sections)
 │   │   ├── recording.py        # F108: BoundedWriter, the one bounded fire-and-forget writer every work-view recorder shares (built in main.py), and RecorderStats, its counters
 │   │   ├── tool_calls.py       # F108: ToolCallRecorder (one tool_call_log row per tool call, one agent_turn_log row per turn, text redacted and capped), the reason field (add_reason_field, split_reason) and work kinds
 │   │   ├── work_view_retention.py # F108: sweep_tool_calls, the daily agent-scoped delete of tool_call_log and agent_turn_log rows past NOUS_TOOL_CALL_RETENTION_DAYS
@@ -118,7 +119,7 @@ nous/
 │   │   ├── task_score_job.py   # Task scores: the one-shot scoring pass (`python -m nous.observability.task_score_job`), the only writer of `scoring.task_scores` and `scoring.scorer_heartbeat` (migration 088, its one-row-per-agent liveness record)
 │   │   ├── autonomy_inventory.py # Autonomy inventory: per tool, successes by who was in the loop (owner present, approved, autonomous), and censor activity
 │   │   ├── drift.py            # Drift detection
-│   │   ├── memory_write_health.py # P4: the daily write-health rollup (migration 099), its six rules, the latched hard-delete detector and its acknowledgements (events of type memory_write_health_ack); one of the two tables here the db_query reader may read (owner's call; the other is `tool_call_log`)
+│   │   ├── memory_write_health.py # P4: the daily write-health rollup (migration 099), its six rules, the latched hard-delete detector and its acknowledgements (events of type memory_write_health_ack); one of the tables here the db_query reader may read (owner's call; the others are `tool_call_log`, `model_call_log` and `model_call_attempt`)
 │   │   └── snapshots.py        # Graph hub snapshots
 │   ├── audits/                 # Scorer v5: the owner's sampled audits of completion checks
 │   │   └── check_audit.py      # CheckAuditSampler (weekly loop started from main.py, off unless NOUS_CHECK_AUDIT_ENABLED); `__init__.py` holds the shared `AUDIT_VERDICT_ACTION`

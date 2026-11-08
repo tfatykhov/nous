@@ -5,9 +5,11 @@ from datetime import date, datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    REAL,
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     Date,
     DateTime,
     Float,
@@ -2202,3 +2204,92 @@ class AgentTurnLog(Base):
     tool_call_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ModelCallLog(Base):
+    """Migration 101 (F108): one model call, or one minute of embedding or rerank calls (``call_count``).
+
+    Written by the clients' recorder while ``NOUS_MODEL_CALL_LOG_ENABLED`` is on. ``purpose`` is ``unlabelled`` when the
+    caller named none; ``label_source`` says where it came from (``explicit``, ``context`` or ``none``). ``input_total``
+    is computed by the database. ``error_text`` is redacted and capped by the writer. The context columns are the
+    runner's estimate (``section_tokens_est`` is ``context_log.token_breakdown`` renamed: a ``token_`` prefix trips the
+    reader's credential check). ``turn_id`` names an ``AgentTurnLog`` row (no foreign key). Read by the app and by the
+    ``db_query`` reader. The indexes are in the migration.
+    """
+
+    __tablename__ = "model_call_log"
+    __table_args__ = ({"schema": "nous_system"},)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    group_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    is_fallback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    purpose: Mapped[str] = mapped_column(Text, nullable=False)
+    label_source: Mapped[str] = mapped_column(Text, nullable=False)
+    call_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str | None] = mapped_column(Text, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    parent_session_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    turn_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    turn_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    frame_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    subtask_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    dag_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    trace_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stop_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input_uncached: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_read: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_write: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_total: Mapped[int | None] = mapped_column(
+        Integer,
+        Computed("coalesce(input_uncached,0)+coalesce(cache_read,0)+coalesce(cache_write,0)", persisted=True),
+        nullable=True,
+    )
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    attempts: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=1, server_default="1")
+    call_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    section_tokens_est: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    total_tokens_est: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    context_window_size: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    utilization_pct: Mapped[float | None] = mapped_column(REAL, nullable=True)
+    sections_present = mapped_column(ARRAY(Text), nullable=True)
+    tools_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tool_names = mapped_column(ARRAY(Text), nullable=True)
+    messages_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    message_roles: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    loaded_facts: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    loaded_decisions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    loaded_procedures: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    loaded_episodes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    recent_conversations: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_break: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    cache_break_components = mapped_column(ARRAY(Text), nullable=True)
+    cache_break_tokens_lost: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class ModelCallAttempt(Base):
+    """Migration 101 (F108): one HTTP attempt of a model call (its retries are its attempts), deleted with the call.
+
+    ``error_text`` is redacted and capped by the writer. Read by the app and by the ``db_query`` reader.
+    """
+
+    __tablename__ = "model_call_attempt"
+    __table_args__ = ({"schema": "nous_system"},)
+
+    call_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("nous_system.model_call_log.id", ondelete="CASCADE"), primary_key=True
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    attempt_no: Mapped[int] = mapped_column(SmallInteger, primary_key=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_text: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -52,6 +52,8 @@ SPEC_TABLES = {
     "nous_system.events",
     "nous_system.memory_write_health_daily",
     "nous_system.tool_call_log",
+    "nous_system.model_call_log",
+    "nous_system.model_call_attempt",
 }
 
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -11,6 +10,16 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
+
+# The estimate moved to model_calls.py (F108); these names stay importable from here.
+from nous.observability.model_calls import (  # noqa: F401
+    SECTION_MARKERS,
+    _analyze,
+    _estimate_messages_tokens,
+    _estimate_tokens,
+    analyze_context,
+    parse_system_sections,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,80 +32,6 @@ DB_WRITE_CONCURRENCY = 4
 # The call_type of a model call made on a forked runner (the heartbeat's checks, triage and
 # callbacks). Those calls share this ring with chat, so the chat views leave them out.
 HEARTBEAT_CALL_TYPE = "heartbeat"
-
-# Section markers in system prompt -> internal names
-SECTION_MARKERS: dict[str, str] = {
-    "## Current Date/Time": "datetime",
-    "## Identity": "identity",
-    "## User Profile": "user_profile",
-    "## Context Safety": "context_safety",
-    "## Active Censors": "censors",
-    "## Current Frame": "frame",
-    "## Working Memory": "working_memory",
-    "## Related Decisions": "related_decisions",
-    "## Relevant Facts": "relevant_facts",
-    "## Session Profile": "session_profile",
-    "## Known Procedures": "known_procedures",
-    "## Procedure Catalog": "procedure_catalog",        # F079 catalog-first breadth
-    "## Recommended Procedures": "recommended_procedures",  # F079 option C Critic pointer
-    "## Past Episodes": "past_episodes",
-    "## Recent Conversations": "recent_conversations",
-    "## Tool Instructions": "frame_instructions",
-    "[Execution Ledger]": "execution_ledger",
-    "[Previous Turn Corrections]": "corrections",
-    "## Output Formatting": "telegram_format",
-}
-
-_MARKER_PATTERNS = sorted(SECTION_MARKERS.keys(), key=len, reverse=True)
-
-
-def parse_system_sections(system_prompt: str) -> dict[str, str]:
-    """Split system prompt into named sections."""
-    if not system_prompt:
-        return {}
-    sections: dict[str, str] = {}
-    current_name = "preamble"
-    current_lines: list[str] = []
-    for line in system_prompt.split("\n"):
-        matched = False
-        for marker in _MARKER_PATTERNS:
-            if line.strip().startswith(marker):
-                if current_lines:
-                    text = "\n".join(current_lines).strip()
-                    if text:
-                        sections[current_name] = text
-                current_name = SECTION_MARKERS[marker]
-                current_lines = []
-                matched = True
-                break
-        if not matched:
-            current_lines.append(line)
-    if current_lines:
-        text = "\n".join(current_lines).strip()
-        if text:
-            sections[current_name] = text
-    if "preamble" in sections:
-        sections["other"] = sections.pop("preamble")
-    return sections
-
-
-def _estimate_tokens(text: str) -> int:
-    return len(text) // 4 if text else 0
-
-
-def _estimate_messages_tokens(messages: list[dict]) -> int:
-    total = 0
-    for msg in messages:
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            total += _estimate_tokens(content)
-        elif isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict):
-                    total += _estimate_tokens(block.get("text", ""))
-                    if "input" in block:
-                        total += _estimate_tokens(json.dumps(block["input"]))
-    return total
 
 
 @dataclass
@@ -160,56 +95,9 @@ class ContextLogEntry:
         trace_id: str | None = None,
     ) -> ContextLogEntry:
         entry_id = uuid4().hex[:16]
+        # analyze_context's estimate, from sections parsed once: the entry keeps their text too.
         sections = parse_system_sections(system_prompt)
-        token_breakdown = {name: _estimate_tokens(text) for name, text in sections.items()}
-        tools_list = tools or []
-        token_breakdown["tools_definition"] = _estimate_tokens(json.dumps(tools_list))
-        token_breakdown["messages"] = _estimate_messages_tokens(messages)
-        total = sum(token_breakdown.values())
-        utilization = (total / context_window * 100) if context_window else 0.0
-
-        role_counts: dict[str, int] = {}
-        for msg in messages:
-            role = msg.get("role", "unknown")
-            role_counts[role] = role_counts.get(role, 0) + 1
-
-        # Heuristic memory item counts from section content (one bullet per item).
-        def _count_items(key: str, marker: str | None = None) -> int:
-            text = sections.get(key, "")
-            if not text.strip():
-                return 0
-            if marker is not None:
-                # Count only TOP-LEVEL item lines. The formatter emits exactly one
-                # item per line starting with `marker`; an embedded "\n- " inside a
-                # verbatim-interpolated field (e.g. a multiline episode summary or
-                # procedure description) is NOT a delivered item. (codex PR #485)
-                return sum(1 for ln in text.split("\n") if ln.startswith(marker))
-            # Legacy heuristic for facts/decisions (mixed "- [subj]"/bare "- " bullets).
-            return text.count("\n-") + 1
-
-        # F079 Phase 0: previously-unpopulated counters (the columns + INSERT already
-        # existed; only the population was missing, so procedure/episode delivery was
-        # invisible on the dashboard).
-        # Count items in the RENDERED (post-truncation) section — that is what the
-        # model actually received. NOTE: deliberately NOT the pre-truncation
-        # `recalled_*_ids` counts, which over-state delivery (they're collected before
-        # `_truncate_to_budget` and include episodes that `_format_episodes` skips,
-        # e.g. abandoned ones) — codex PR #485 P1. Top-level item marker keeps the
-        # common embedded-bullet case from inflating the count; a field that embeds a
-        # literal marker-shaped line ("\n- **x**") is a known, rare telemetry
-        # approximation (same limitation the facts/decisions counters have always had).
-        facts_count = _count_items("relevant_facts")
-        decisions_count = _count_items("related_decisions")
-        # F079: procedures arrive either as the passive "Known Procedures" list (- **name**)
-        # or the catalog-first "Procedure Catalog" (- name (domain)); count whichever rendered.
-        procedures_count = (
-            _count_items("known_procedures", "- **")  # context.py:1047
-            + _count_items("procedure_catalog", "- ")
-        )
-        episodes_count = _count_items("past_episodes", "- [")        # context.py:1063
-        recent_conversations_count = _count_items("recent_conversations", "- [")  # context.py:609
-
-        tool_names = [t.get("name", "") for t in tools_list]
+        stats = _analyze(sections, messages, tools, context_window)
 
         return cls(
             id=entry_id,
@@ -220,20 +108,20 @@ class ContextLogEntry:
             model=model,
             frame_id=frame_id,
             trace_id=trace_id,
-            token_breakdown=token_breakdown,
-            total_tokens_est=total,
-            context_window_size=context_window,
-            utilization_pct=round(utilization, 2),
-            sections_present=list(sections.keys()),
-            tools_count=len(tools_list),
-            tool_names=tool_names,
-            messages_count=len(messages),
-            message_roles=role_counts,
-            loaded_facts=facts_count,
-            loaded_decisions=decisions_count,
-            loaded_procedures=procedures_count,
-            loaded_episodes=episodes_count,
-            recent_conversations=recent_conversations_count,
+            token_breakdown=stats.section_tokens_est,
+            total_tokens_est=stats.total_tokens_est,
+            context_window_size=stats.context_window_size,
+            utilization_pct=stats.utilization_pct,
+            sections_present=stats.sections_present,
+            tools_count=stats.tools_count,
+            tool_names=stats.tool_names,
+            messages_count=stats.messages_count,
+            message_roles=stats.message_roles,
+            loaded_facts=stats.loaded_facts,
+            loaded_decisions=stats.loaded_decisions,
+            loaded_procedures=stats.loaded_procedures,
+            loaded_episodes=stats.loaded_episodes,
+            recent_conversations=stats.recent_conversations,
             sections_text=sections,
         )
 

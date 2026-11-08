@@ -1,0 +1,733 @@
+"""F108: the model-call recorder — one ``nous_system.model_call_log`` row per model call, its retries in
+``nous_system.model_call_attempt``, and the context estimate the runner's calls carry.
+
+A client wraps each call in ``ModelCallRecorder.scope(payload, ctx, call_kind)``: a synchronous context manager, so it
+works in coroutines and in (async) generators alike. The scope names the call's purpose once, when it is built: the
+caller's explicit ``CallContext`` first, else the fallback a caller set with ``model_call_context``, else
+``unlabelled`` (counted). While it is open the scope is the active one (``_ACTIVE_SCOPE``), so a client's HTTP response
+hook can add each attempt to it. At exit it builds the row and hands it, with its attempts, to the shared
+``BoundedWriter`` as one transaction. Nothing here raises into a call or reads the rows back; the dashboards and
+``db_query`` do. Embedding and rerank calls are counted per minute instead (``record_bucket``).
+
+The context estimate (``analyze_context``, ``parse_system_sections``) moved here from ``context_logger.py``, which
+re-exports it unchanged.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar, Token
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import text
+
+from nous.observability.recording import BoundedWriter, RecorderStats
+
+logger = logging.getLogger(__name__)
+
+# What a model call was for. Anything else is recorded as ``unlabelled`` and counted (``RecorderStats.unlabelled``).
+PURPOSES: frozenset[str] = frozenset(
+    {
+        "chat",
+        "subtask",
+        "heartbeat",
+        "background_check",
+        "continuation",
+        "dag_summary",
+        "mcp",
+        "action_gate",
+        "reflection",
+        "critic",
+        "epistemic_gate",
+        "query_expansion",
+        "date_window",
+        "admission_utility",
+        "contradiction",
+        "actionability",
+        "profile_card",
+        "episode_summarizer",
+        "fact_extractor",
+        "knowledge_extractor",
+        "enumerative_extractor",
+        "correction_extractor",
+        "outcome_detector",
+        "procedure_learner",
+        "strategy_card",
+        "sleep_reflection",
+        "sleep_contradiction",
+        "sleep_merge",
+        "job_fix",
+        "a2ui_compose",
+        "dag_fix",
+        "pdf_transcription",
+        "email_classify",
+        "browser_task",
+        "embedding",
+        "rerank",
+        "unlabelled",
+    }
+)
+# The runner's own calls: what /context/log*, /dashboard/cache and /dashboard/observability list.
+MAIN_LOOP_PURPOSES: frozenset[str] = frozenset(
+    {
+        "chat",
+        "subtask",
+        "heartbeat",
+        "background_check",
+        "continuation",
+        "dag_summary",
+        "mcp",
+        "action_gate",
+        "reflection",
+    }
+)
+# The main-loop calls the chat views leave out (they replace the old HEARTBEAT_CALL_TYPE exclusion).
+QUIET_PURPOSES: frozenset[str] = frozenset({"heartbeat", "background_check"})
+
+# A call's and an attempt's error text, redacted and clipped (the tool-call log uses the same cap).
+ERROR_TEXT_MAX_CHARS = 1000
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The context estimate (moved from context_logger.py; ContextLogEntry.from_payload uses it)
+# ---------------------------------------------------------------------------------------------------------------------
+
+# Section markers in system prompt -> internal names
+SECTION_MARKERS: dict[str, str] = {
+    "## Current Date/Time": "datetime",
+    "## Identity": "identity",
+    "## User Profile": "user_profile",
+    "## Context Safety": "context_safety",
+    "## Active Censors": "censors",
+    "## Current Frame": "frame",
+    "## Working Memory": "working_memory",
+    "## Related Decisions": "related_decisions",
+    "## Relevant Facts": "relevant_facts",
+    "## Session Profile": "session_profile",
+    "## Known Procedures": "known_procedures",
+    "## Procedure Catalog": "procedure_catalog",        # F079 catalog-first breadth
+    "## Recommended Procedures": "recommended_procedures",  # F079 option C Critic pointer
+    "## Past Episodes": "past_episodes",
+    "## Recent Conversations": "recent_conversations",
+    "## Tool Instructions": "frame_instructions",
+    "[Execution Ledger]": "execution_ledger",
+    "[Previous Turn Corrections]": "corrections",
+    "## Output Formatting": "telegram_format",
+}
+
+_MARKER_PATTERNS = sorted(SECTION_MARKERS.keys(), key=len, reverse=True)
+
+
+def parse_system_sections(system_prompt: str) -> dict[str, str]:
+    """Split system prompt into named sections."""
+    if not system_prompt:
+        return {}
+    sections: dict[str, str] = {}
+    current_name = "preamble"
+    current_lines: list[str] = []
+    for line in system_prompt.split("\n"):
+        matched = False
+        for marker in _MARKER_PATTERNS:
+            if line.strip().startswith(marker):
+                if current_lines:
+                    text = "\n".join(current_lines).strip()
+                    if text:
+                        sections[current_name] = text
+                current_name = SECTION_MARKERS[marker]
+                current_lines = []
+                matched = True
+                break
+        if not matched:
+            current_lines.append(line)
+    if current_lines:
+        text = "\n".join(current_lines).strip()
+        if text:
+            sections[current_name] = text
+    if "preamble" in sections:
+        sections["other"] = sections.pop("preamble")
+    return sections
+
+
+def _estimate_tokens(text: str) -> int:
+    return len(text) // 4 if text else 0
+
+
+def _estimate_messages_tokens(messages: list[dict]) -> int:
+    total = 0
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total += _estimate_tokens(content)
+        elif isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    total += _estimate_tokens(block.get("text", ""))
+                    if "input" in block:
+                        total += _estimate_tokens(json.dumps(block["input"]))
+    return total
+
+
+@dataclass(frozen=True, slots=True)
+class ContextStats:
+    """What one model call's context holds, estimated from its payload (the runner's calls only).
+
+    ``section_tokens_est`` is ``context_log.token_breakdown`` renamed (a ``token_`` prefix trips the db_query
+    reader's credential check). The ``cache_break`` fields are the runner's to set, with ``dataclasses.replace``."""
+
+    section_tokens_est: dict[str, int]
+    total_tokens_est: int
+    context_window_size: int
+    utilization_pct: float
+    sections_present: list[str]
+    tools_count: int
+    tool_names: list[str]
+    messages_count: int
+    message_roles: dict[str, int]
+    loaded_facts: int = 0
+    loaded_decisions: int = 0
+    loaded_procedures: int = 0
+    loaded_episodes: int = 0
+    recent_conversations: int = 0
+    cache_break: bool = False
+    cache_break_components: list[str] = field(default_factory=list)
+    cache_break_tokens_lost: int = 0
+
+
+def _system_text(system_blocks: str | list[dict[str, Any]] | None) -> str:
+    """The system prompt as one string: a list of blocks is joined by a blank line, as the runner flattens it."""
+    if isinstance(system_blocks, str):
+        return system_blocks
+    if not system_blocks:
+        return ""
+    return "\n\n".join(b["text"] for b in system_blocks if isinstance(b, dict) and b.get("text"))
+
+
+def _analyze(
+    sections: dict[str, str], messages: list[dict], tools: list[dict] | None, context_window: int
+) -> ContextStats:
+    """The estimate from already-parsed sections (``ContextLogEntry.from_payload`` keeps the sections' text too)."""
+    section_tokens = {name: _estimate_tokens(text) for name, text in sections.items()}
+    tools_list = tools or []
+    section_tokens["tools_definition"] = _estimate_tokens(json.dumps(tools_list))
+    section_tokens["messages"] = _estimate_messages_tokens(messages)
+    total = sum(section_tokens.values())
+    utilization = (total / context_window * 100) if context_window else 0.0
+
+    role_counts: dict[str, int] = {}
+    for msg in messages:
+        role = msg.get("role", "unknown")
+        role_counts[role] = role_counts.get(role, 0) + 1
+
+    # Heuristic memory item counts from section content (one bullet per item).
+    def _count_items(key: str, marker: str | None = None) -> int:
+        text = sections.get(key, "")
+        if not text.strip():
+            return 0
+        if marker is not None:
+            # Count only TOP-LEVEL item lines. The formatter emits exactly one
+            # item per line starting with `marker`; an embedded "\n- " inside a
+            # verbatim-interpolated field (e.g. a multiline episode summary or
+            # procedure description) is NOT a delivered item. (codex PR #485)
+            return sum(1 for ln in text.split("\n") if ln.startswith(marker))
+        # Legacy heuristic for facts/decisions (mixed "- [subj]"/bare "- " bullets).
+        return text.count("\n-") + 1
+
+    # F079 Phase 0: previously-unpopulated counters (the columns + INSERT already
+    # existed; only the population was missing, so procedure/episode delivery was
+    # invisible on the dashboard).
+    # Count items in the RENDERED (post-truncation) section — that is what the
+    # model actually received. NOTE: deliberately NOT the pre-truncation
+    # `recalled_*_ids` counts, which over-state delivery (they're collected before
+    # `_truncate_to_budget` and include episodes that `_format_episodes` skips,
+    # e.g. abandoned ones) — codex PR #485 P1. Top-level item marker keeps the
+    # common embedded-bullet case from inflating the count; a field that embeds a
+    # literal marker-shaped line ("\n- **x**") is a known, rare telemetry
+    # approximation (same limitation the facts/decisions counters have always had).
+    return ContextStats(
+        section_tokens_est=section_tokens,
+        total_tokens_est=total,
+        context_window_size=context_window,
+        utilization_pct=round(utilization, 2),
+        sections_present=list(sections.keys()),
+        tools_count=len(tools_list),
+        tool_names=[t.get("name", "") for t in tools_list],
+        messages_count=len(messages),
+        message_roles=role_counts,
+        loaded_facts=_count_items("relevant_facts"),
+        loaded_decisions=_count_items("related_decisions"),
+        # F079: procedures arrive either as the passive "Known Procedures" list (- **name**)
+        # or the catalog-first "Procedure Catalog" (- name (domain)); count whichever rendered.
+        loaded_procedures=(
+            _count_items("known_procedures", "- **")  # context.py:1047
+            + _count_items("procedure_catalog", "- ")
+        ),
+        loaded_episodes=_count_items("past_episodes", "- ["),  # context.py:1063
+        recent_conversations=_count_items("recent_conversations", "- ["),  # context.py:609
+    )
+
+
+def analyze_context(
+    system_blocks: str | list[dict[str, Any]] | None,
+    messages: list[dict],
+    tools: list[dict] | None,
+    context_window: int,
+) -> ContextStats:
+    """Estimate what a call's context holds: tokens per system-prompt section, for the tool definitions and for the
+    messages (4 characters a token), the tools and message roles, and the memory items each section delivered. Pure.
+    ``system_blocks`` is the system prompt as a string or as the payload's list of text blocks."""
+    return _analyze(parse_system_sections(_system_text(system_blocks)), messages, tools, context_window)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The call context
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class CallContext:
+    """Who made a model call and why: the ``model_call_log`` columns a caller knows and the client does not."""
+
+    purpose: str = "unlabelled"
+    session_id: str | None = None
+    parent_session_id: str | None = None
+    turn_id: UUID | None = None
+    turn_number: int | None = None
+    frame_id: str | None = None
+    subtask_id: UUID | None = None
+    dag_id: UUID | None = None
+    trace_id: str | None = None
+    stats: ContextStats | None = None  # runner calls only: sections, estimates, loaded_* counts, cache_break
+    group_id: UUID | None = None
+    is_fallback: bool = False
+
+
+def context_kwargs(client: Any, ctx: CallContext) -> dict[str, Any]:
+    """The keyword arguments that pass ``ctx`` to ``client.call``: ``{"call_context": ctx}`` for a client that takes
+    it (``supports_call_context``), else none, so a test double that takes only the payload keeps working."""
+    return {"call_context": ctx} if getattr(client, "supports_call_context", False) else {}
+
+
+# The fallback a caller sets around calls it cannot pass a context to (model_call_context). A scope reads it once,
+# when it is built.
+_FALLBACK_CALL_CONTEXT: ContextVar[CallContext | None] = ContextVar("f108_fallback_call_context", default=None)
+# The scope that is open in this context, so a client's HTTP response hook can add attempts to it. A different
+# variable from the fallback, with a different job.
+_ACTIVE_SCOPE: ContextVar[ModelCallScope | None] = ContextVar("f108_active_model_call_scope", default=None)
+
+
+def _reset(var: ContextVar[Any], token: Token[Any]) -> None:
+    """Undo a ``set``. A generator closed from another Context cannot reset there; recording must not raise."""
+    try:
+        var.reset(token)
+    except ValueError:
+        pass
+
+
+@contextmanager
+def model_call_context(**fields: Any) -> Iterator[CallContext]:
+    """Within the block, a model call made without an explicit context is labelled with
+    ``CallContext(**fields)`` (``label_source='context'``)."""
+    ctx = CallContext(**fields)
+    token = _FALLBACK_CALL_CONTEXT.set(ctx)
+    try:
+        yield ctx
+    finally:
+        _reset(_FALLBACK_CALL_CONTEXT, token)
+
+
+def current_fallback() -> CallContext | None:
+    """The context ``model_call_context`` set around this code, or None."""
+    return _FALLBACK_CALL_CONTEXT.get()
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _clip_error(text_: str) -> str:
+    # Imported here: nous.cognitive imports nous.observability, which imports this module through context_logger.
+    from nous.cognitive.ledger_store import detail_text
+
+    return detail_text(text_, ERROR_TEXT_MAX_CHARS)
+
+
+def _get(obj: Any, name: str) -> Any:
+    """``obj[name]`` for a dict (a raw response or event), else ``obj.name``; None when missing."""
+    if isinstance(obj, dict):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _http_status_of(exc: BaseException) -> int | None:
+    """The HTTP status an SDK error (``status_code``) or an httpx error (``response.status_code``) carries."""
+    for status in (getattr(exc, "status_code", None), getattr(getattr(exc, "response", None), "status_code", None)):
+        if isinstance(status, int) and not isinstance(status, bool):
+            return status
+    return None
+
+
+# The API's usage keys -> the row's columns.
+_USAGE_COLUMNS: dict[str, str] = {
+    "input_tokens": "input_uncached",
+    "cache_read_input_tokens": "cache_read",
+    "cache_creation_input_tokens": "cache_write",
+    "output_tokens": "output_tokens",
+}
+_INPUT_USAGE_KEYS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+
+_CALL_COLUMNS: tuple[str, ...] = (
+    "id",
+    "agent_id",
+    "group_id",
+    "is_fallback",
+    "started_at",
+    "purpose",
+    "label_source",
+    "call_kind",
+    "model",
+    "session_id",
+    "parent_session_id",
+    "turn_id",
+    "turn_number",
+    "frame_id",
+    "subtask_id",
+    "dag_id",
+    "trace_id",
+    "status",
+    "http_status",
+    "error_text",
+    "stop_reason",
+    "input_uncached",
+    "cache_read",
+    "cache_write",
+    "output_tokens",
+    "duration_ms",
+    "attempts",
+    "section_tokens_est",
+    "total_tokens_est",
+    "context_window_size",
+    "utilization_pct",
+    "sections_present",
+    "tools_count",
+    "tool_names",
+    "messages_count",
+    "message_roles",
+    "loaded_facts",
+    "loaded_decisions",
+    "loaded_procedures",
+    "loaded_episodes",
+    "recent_conversations",
+    "cache_break",
+    "cache_break_components",
+    "cache_break_tokens_lost",
+)
+_CTX_COLUMNS = (
+    "session_id",
+    "parent_session_id",
+    "turn_id",
+    "turn_number",
+    "frame_id",
+    "subtask_id",
+    "dag_id",
+    "trace_id",
+    "group_id",
+    "is_fallback",
+)
+_STATS_COLUMNS = (
+    "section_tokens_est",
+    "total_tokens_est",
+    "context_window_size",
+    "utilization_pct",
+    "sections_present",
+    "tools_count",
+    "tool_names",
+    "messages_count",
+    "message_roles",
+    "loaded_facts",
+    "loaded_decisions",
+    "loaded_procedures",
+    "loaded_episodes",
+    "recent_conversations",
+    "cache_break",
+    "cache_break_components",
+    "cache_break_tokens_lost",
+)
+_JSON_COLUMNS = frozenset({"section_tokens_est", "message_roles"})
+_ARRAY_COLUMNS = frozenset({"sections_present", "tool_names", "cache_break_components"})
+
+
+def _call_value(column: str) -> str:
+    if column in _JSON_COLUMNS:
+        return f"CAST(:{column} AS jsonb)"
+    if column in _ARRAY_COLUMNS:
+        return f"CAST(:{column} AS text[])"
+    return f":{column}"
+
+
+_INSERT_CALL = text(
+    f"INSERT INTO nous_system.model_call_log ({', '.join(_CALL_COLUMNS)}) VALUES ("
+    + ", ".join(_call_value(c) for c in _CALL_COLUMNS)
+    + ")"
+)
+_INSERT_ATTEMPT = text(
+    "INSERT INTO nous_system.model_call_attempt "
+    "(call_id, agent_id, attempt_no, started_at, duration_ms, http_status, error_type, error_text) "
+    "VALUES (:call_id, :agent_id, :attempt_no, :started_at, :duration_ms, :http_status, :error_type, :error_text)"
+)
+# One row per (minute, purpose, model, status): the id is derived from that key, so the primary key merges a
+# minute's calls and concurrent writes of one bucket wait for each other instead of adding a second row.
+_UPSERT_BUCKET = text(
+    "INSERT INTO nous_system.model_call_log "
+    "(id, agent_id, started_at, purpose, label_source, call_kind, model, status, input_uncached, duration_ms, "
+    "call_count) "
+    "VALUES (:id, :agent_id, :started_at, :purpose, 'explicit', :call_kind, :model, :status, :tokens, :duration_ms, 1) "
+    "ON CONFLICT (id) DO UPDATE SET "
+    "call_count = model_call_log.call_count + 1, "
+    "input_uncached = CASE WHEN model_call_log.input_uncached IS NULL AND EXCLUDED.input_uncached IS NULL THEN NULL "
+    "ELSE coalesce(model_call_log.input_uncached, 0) + coalesce(EXCLUDED.input_uncached, 0) END, "
+    "duration_ms = coalesce(model_call_log.duration_ms, 0) + coalesce(EXCLUDED.duration_ms, 0)"
+)
+_BUCKET_NAMESPACE = uuid.UUID("6b1f7c1e-5d0a-4c55-9a0e-f108b0c4e7a1")
+
+
+def _json_param(value: Any) -> str | None:
+    """A JSONB parameter: SQL NULL for None, else the JSON text."""
+    return None if value is None else json.dumps(value, ensure_ascii=False, default=str)
+
+
+class ModelCallScope:
+    """One model call being recorded: a synchronous context manager, so it works in coroutines and generators.
+
+    Built by ``ModelCallRecorder.scope``. The client reports the call with ``finish(response)`` or ``fail(exc)``,
+    streamed usage with ``observe_stream_event`` and each HTTP attempt with ``attempt``. At exit the row is written:
+    ``cancelled`` on ``CancelledError`` or ``GeneratorExit`` when neither was reported, ``error`` for any other
+    exception, else what was reported (``ok`` when nothing was). Exit never raises and never swallows the exception.
+    """
+
+    def __init__(self, recorder: ModelCallRecorder, payload: Any, ctx: CallContext | None, call_kind: str) -> None:
+        self._recorder = recorder
+        self._call_kind = call_kind
+        self._model = payload.get("model") if isinstance(payload, dict) else None
+        # The purpose is named once, now: a fallback set or changed later does not move this call.
+        self._ctx, self._label_source, self._purpose = recorder._resolve(ctx)
+        self._started_at = _utcnow()
+        self._t0 = time.perf_counter()
+        self._usage: dict[str, int] = {}
+        self._stop_reason: str | None = None
+        self._status: str | None = None
+        self._http_status: int | None = None
+        self._error_text: str | None = None
+        self._attempts: list[dict[str, Any]] = []
+        self._token: Token[ModelCallScope | None] | None = None
+        self._written = False
+
+    def __enter__(self) -> ModelCallScope:
+        self._token = _ACTIVE_SCOPE.set(self)
+        return self
+
+    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: Any) -> bool:
+        try:
+            if self._token is not None:
+                _reset(_ACTIVE_SCOPE, self._token)
+                self._token = None
+            if self._status is None and exc_type is not None:
+                if issubclass(exc_type, asyncio.CancelledError | GeneratorExit):
+                    self._status = "cancelled"
+                elif exc is not None:
+                    self.fail(exc)
+            self._write()
+        except Exception as err:
+            self._recorder._stats.dropped_error += 1
+            logger.warning("F108: model-call record not written (%s)", type(err).__name__)
+        return False
+
+    def attempt(
+        self, http_status: int | None, error_type: str | None, error_text: str | None, duration_ms: float | None
+    ) -> None:
+        """Add one HTTP attempt (the call's retries are its attempts). Its error text is redacted and clipped. An
+        attempt reported after the row was written is ignored."""
+        if self._written:
+            return
+        now = _utcnow()
+        self._attempts.append(
+            {
+                "attempt_no": len(self._attempts) + 1,
+                "started_at": now - timedelta(milliseconds=duration_ms) if duration_ms else now,
+                "duration_ms": None if duration_ms is None else round(duration_ms),
+                "http_status": http_status,
+                "error_type": error_type,
+                "error_text": None if error_text is None else _clip_error(error_text),
+            }
+        )
+
+    def _merge_usage(self, usage: Any, keys: tuple[str, ...]) -> None:
+        """Keep the largest count seen for each of ``keys`` (a later event never lowers one)."""
+        if not isinstance(usage, dict):
+            return
+        for key in keys:
+            value = usage.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                self._usage[key] = max(value, self._usage.get(key, value))
+
+    def observe_stream_event(self, event: Any) -> None:
+        """Take the usage a stream reports: the input counts from ``message_start``, the output count and the stop
+        reason from ``done`` (``message_delta``)."""
+        kind = _get(event, "type")
+        if kind == "message_start":
+            self._merge_usage(_get(event, "usage"), _INPUT_USAGE_KEYS)
+        elif kind == "done":
+            self._merge_usage(_get(event, "usage"), ("output_tokens",))
+            stop = _get(event, "stop_reason")
+            if stop:
+                self._stop_reason = stop
+
+    def finish(self, response: Any) -> None:
+        """The call returned ``response`` (an ``ApiResponse`` or the raw response dict): take its usage and stop
+        reason; the status is ``ok``."""
+        self._merge_usage(_get(response, "usage"), tuple(_USAGE_COLUMNS))
+        stop = _get(response, "stop_reason")
+        if stop:
+            self._stop_reason = stop
+        self._status = "ok"
+
+    def fail(self, exc: BaseException) -> None:
+        """The call failed with ``exc``: status ``error``, the HTTP status it carries, its text redacted and
+        clipped."""
+        self._status = "error"
+        self._http_status = _http_status_of(exc)
+        try:
+            message = f"{type(exc).__name__}: {exc}"
+        except Exception:
+            message = type(exc).__name__
+        self._error_text = _clip_error(message)
+
+    def _write(self) -> None:
+        if self._written:
+            return
+        self._written = True
+        ctx = self._ctx
+        http_status = self._http_status
+        if http_status is None and self._attempts:
+            http_status = self._attempts[-1]["http_status"]
+        params: dict[str, Any] = {
+            "id": uuid.uuid4(),
+            "agent_id": self._recorder._agent_id,
+            "started_at": self._started_at,
+            "purpose": self._purpose,
+            "label_source": self._label_source,
+            "call_kind": self._call_kind,
+            "model": self._model,
+            "status": self._status or "ok",
+            "http_status": http_status,
+            "error_text": self._error_text,
+            "stop_reason": self._stop_reason,
+            "duration_ms": round((time.perf_counter() - self._t0) * 1000),
+            "attempts": max(1, len(self._attempts)),
+        }
+        for key, column in _USAGE_COLUMNS.items():
+            params[column] = self._usage.get(key)
+        for column in _CTX_COLUMNS:
+            params[column] = getattr(ctx, column)
+        stats = ctx.stats
+        for column in _STATS_COLUMNS:
+            params[column] = None if stats is None else getattr(stats, column)
+        params["cache_break"] = bool(params["cache_break"])
+        for column in _JSON_COLUMNS:
+            params[column] = _json_param(params[column])
+        attempts = [{**a, "call_id": params["id"], "agent_id": params["agent_id"]} for a in self._attempts]
+        self._recorder._submit_call(params, attempts)
+
+
+class ModelCallRecorder:
+    """Writes model-call rows through the shared ``BoundedWriter`` (built in main.py, never here)."""
+
+    def __init__(self, writer: BoundedWriter, database: Any, agent_id: str, settings: Any) -> None:
+        self._writer = writer
+        self._database = database
+        self._agent_id = agent_id
+        self._settings = settings
+        self._stats = RecorderStats()
+        self._warned_purposes: set[str] = set()
+
+    @property
+    def stats(self) -> RecorderStats:
+        """This recorder's own counters (the shared writer's ``stats`` are the totals of every recorder)."""
+        return self._stats
+
+    def scope(self, payload: dict[str, Any], ctx: CallContext | None, call_kind: str) -> ModelCallScope:
+        """A scope for one call of ``call_kind`` (``call``, ``stream``, ``aggregated``, ``browser_step``) sending
+        ``payload`` (its ``model`` is recorded). Its purpose is ``ctx``'s, else the ``model_call_context``
+        fallback's, else ``unlabelled``."""
+        return ModelCallScope(self, payload, ctx, call_kind)
+
+    def record_bucket(
+        self, purpose: str, model: str | None, tokens: int | None, duration_ms: float, status: str
+    ) -> None:
+        """Count one embedding or rerank call in its minute's row: one row per (minute, purpose, model, status),
+        ``call_count`` calls, ``input_uncached`` their summed tokens (NULL while none reported any) and
+        ``duration_ms`` their summed time. A failed call (``status='error'``) gets a row of its own. Synchronous;
+        never raises."""
+        try:
+            resolved = self._label(purpose)
+            minute = _utcnow().replace(second=0, microsecond=0)
+            call_kind = "rerank" if purpose == "rerank" else "embedding"
+            key = "|".join((self._agent_id, minute.isoformat(), resolved, model or "", status, call_kind))
+            params = {
+                "id": uuid.uuid5(_BUCKET_NAMESPACE, key),
+                "agent_id": self._agent_id,
+                "started_at": minute,
+                "purpose": resolved,
+                "call_kind": call_kind,
+                "model": model,
+                "status": status,
+                "tokens": tokens,
+                "duration_ms": round(duration_ms),
+            }
+        except Exception as exc:
+            self._stats.dropped_error += 1
+            logger.warning("F108: %s bucket not written (%s)", purpose, type(exc).__name__)
+            return
+        self._writer.submit(lambda: self._upsert_bucket(params), stats=self._stats)
+
+    def _label(self, purpose: Any) -> str:
+        """``purpose`` when it is one of ``PURPOSES``, else ``unlabelled``; every unlabelled call is counted, and an
+        unknown name is logged once."""
+        if purpose in PURPOSES and purpose != "unlabelled":
+            return purpose
+        self._stats.unlabelled += 1
+        if purpose != "unlabelled" and str(purpose) not in self._warned_purposes:
+            self._warned_purposes.add(str(purpose))
+            logger.warning("F108: model call with unknown purpose %r recorded as unlabelled", purpose)
+        return "unlabelled"
+
+    def _resolve(self, ctx: CallContext | None) -> tuple[CallContext, str, str]:
+        """``(context, label_source, purpose)`` for a new scope: the explicit context, else the fallback, else none."""
+        if ctx is not None:
+            base, source = ctx, "explicit"
+        else:
+            fallback = _FALLBACK_CALL_CONTEXT.get()
+            base, source = (fallback, "context") if fallback is not None else (CallContext(), "none")
+        return base, source, self._label(base.purpose)
+
+    def _submit_call(self, params: dict[str, Any], attempts: list[dict[str, Any]]) -> None:
+        self._writer.submit(lambda: self._insert_call(params, attempts), stats=self._stats)
+
+    async def _insert_call(self, params: dict[str, Any], attempts: list[dict[str, Any]]) -> None:
+        async with self._database.session() as session:
+            await session.execute(_INSERT_CALL, params)
+            if attempts:
+                await session.execute(_INSERT_ATTEMPT, attempts)
+            await session.commit()
+
+    async def _upsert_bucket(self, params: dict[str, Any]) -> None:
+        async with self._database.session() as session:
+            await session.execute(_UPSERT_BUCKET, params)
+            await session.commit()
