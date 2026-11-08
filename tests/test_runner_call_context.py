@@ -302,6 +302,11 @@ _BRIEF_MAPPING = {
 _KNOWINGLY_UNLABELLED = frozenset({"approved_action"})
 
 
+def test_the_knowingly_unlabelled_kinds_are_real_kinds():
+    """A kind removed from ExecutionContext must leave this list too."""
+    assert _KNOWINGLY_UNLABELLED <= set(CONTEXT_KINDS)
+
+
 @pytest.mark.parametrize("kind", CONTEXT_KINDS)
 def test_every_execution_context_kind_has_a_purpose(kind):
     """A kind added to ExecutionContext later fails here until it is mapped, or listed as calling no model."""
@@ -475,6 +480,7 @@ async def test_compaction_summary_is_recorded_as_compaction_with_its_turn(path):
         preset=_preset(trace_id=_TRACE),
         NOUS_COMPACTION_THRESHOLD=10,
         NOUS_KEEP_RECENT_TOKENS=5,
+        compaction_structured_facts_enabled=True,  # the default: the summary call, then its structured-facts call
     )
 
     async def pre_compaction(**_: Any) -> None:
@@ -489,9 +495,9 @@ async def test_compaction_summary_is_recorded_as_compaction_with_its_turn(path):
         ],
     )
     assert await _drive(r, path) == "done"
-    rows = await _until_rows(client, 2)
+    rows = await _until_rows(client, 3)
+    assert [row["purpose"] for row in rows] == ["compaction", "compaction", "chat"]
     *summaries, chat = rows
-    assert summaries and {row["purpose"] for row in summaries} == {"compaction"}
     assert chat["purpose"] == "chat" and chat["call_kind"] == ("call" if path == "run_turn" else "stream")
     for row in summaries:
         assert (row["label_source"], row["call_kind"], row["model"]) == (

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -618,17 +619,30 @@ async def test_a_cancelled_embedding_or_rerank_is_a_cancelled_bucket_call(monkey
         await asyncio.wait_for(provider.embed("x"), 0.1)
     await provider.close()
 
+    # The rerank runs in a default-executor thread the cancel cannot stop: it waits on an event the test sets in its
+    # finally, so the thread ends with the test instead of running on past it.
+    release, finished = threading.Event(), threading.Event()
+
+    def slow_predict(pairs: list[tuple[str, str]]) -> list[float]:
+        release.wait(_GUARD_S)
+        finished.set()
+        return [1.0] * len(pairs)
+
     slow = _FakeCrossEncoder()
-    slow.predict = lambda pairs: time.sleep(0.3) or [1.0] * len(pairs)  # type: ignore[method-assign]
+    slow.predict = slow_predict  # type: ignore[method-assign]
     monkeypatch.setattr(reranker_mod, "_load_cross_encoder", lambda name: slow)
     reranker_mod.set_recorder(buckets)
-    with pytest.raises(TimeoutError):
-        await asyncio.wait_for(
-            cross_encoder_rerank(
-                "query", _candidates(), lambda c: c.text, model_name=_RERANK_MODEL, max_candidates=3, text_limit=100
-            ),
-            0.1,
-        )
+    try:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                cross_encoder_rerank(
+                    "query", _candidates(), lambda c: c.text, model_name=_RERANK_MODEL, max_candidates=3, text_limit=100
+                ),
+                0.1,
+            )
+    finally:
+        release.set()
+    assert await asyncio.to_thread(finished.wait, _GUARD_S)  # the executor thread has ended
     assert [(c[0], c[2], c[4]) for c in buckets.calls] == [
         ("embedding", None, "cancelled"),
         ("rerank", None, "cancelled"),

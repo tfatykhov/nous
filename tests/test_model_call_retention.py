@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import logging
 import uuid
 from types import SimpleNamespace
@@ -238,6 +239,10 @@ def _spy_constructions(monkeypatch) -> dict[str, list[Any]]:
     class _Writer(BoundedWriter):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
+            # the concurrency it was built with, defaults applied (the writer keeps it only inside its semaphore)
+            bound = inspect.signature(BoundedWriter.__init__).bind(self, *args, **kwargs)
+            bound.apply_defaults()
+            self.built_concurrency = bound.arguments["concurrency"]
             built["writers"].append(self)
 
     class _Recorder(ModelCallRecorder):
@@ -391,7 +396,8 @@ def test_wiring_on_sets_recorder_on_both_clients(monkeypatch, tool_log):
             recorder = components["model_call_recorder"]
             seen["recorder"] = recorder
             assert built["writers"] == [writer], "one shared writer, never two"
-            assert writer.name == "work_view" and (writer._timeout_s, writer._max_pending) == (30.0, 500)
+            assert writer.name == "work_view"
+            assert (writer.built_concurrency, writer._timeout_s, writer._max_pending) == (4, 30.0, 500)
             assert built["model_recorders"] == [recorder]
             assert recorder._writer is writer and recorder._database is components["database"]
             assert (recorder._agent_id, recorder._settings) == (settings.agent_id, settings)
