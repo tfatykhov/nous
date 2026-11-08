@@ -8,7 +8,8 @@ caller's explicit ``CallContext`` first, else the fallback a caller set with ``m
 active one (``_ACTIVE_SCOPE``), so a client's HTTP response hook can add each attempt to it; a stream binds only
 around opening the stream, never across a ``yield``. At exit the scope builds the row and hands it, with its attempts,
 to the shared ``BoundedWriter`` as one transaction. Nothing here raises into a call or reads the rows back; the
-dashboards and ``db_query`` do. Embedding and rerank calls are counted per minute instead (``record_bucket``).
+dashboards and ``db_query`` do. Embedding and rerank calls are counted per minute instead (``record_bucket``). With a
+text store (``model_call_text``), the call's text is handed to it once the row is committed.
 
 The context estimate (``analyze_context``, ``parse_system_sections``) moved here from ``context_logger.py``, which
 re-exports it unchanged.
@@ -33,6 +34,7 @@ from uuid import UUID
 from sqlalchemy import text
 
 from nous.api.preamble import CLAUDE_CODE_PREAMBLE
+from nous.observability.model_call_text import CONTENT_EVENTS, TextStore
 from nous.observability.recording import BoundedWriter, RecorderStats
 
 logger = logging.getLogger(__name__)
@@ -641,6 +643,12 @@ class ModelCallScope:
         self._error_text: str | None = None
         self._attempts: list[dict[str, Any]] = []
         self._written = False
+        # The call's text, when the recorder stores it: references only (the payload as handed over, the response's
+        # content, a stream's content events). Exit snapshots them; the text write does all the work.
+        keep_text = recorder._text is not None and isinstance(payload, dict)
+        self._text_payload: dict[str, Any] | None = payload if keep_text else None
+        self._response_content: Any = None
+        self._stream_events: list[Any] | None = [] if keep_text else None
 
     def __enter__(self) -> ModelCallScope:
         return self
@@ -736,6 +744,8 @@ class ModelCallScope:
                 self._status = "error"
                 if self._error_text is None:
                     self._error_text = _clip_error(str(_get(event, "text") or "stream error"))
+            elif kind in CONTENT_EVENTS and self._stream_events is not None:
+                self._stream_events.append(event)  # the response's text, rebuilt by the text write
         except Exception as exc:
             self._lost("stream event", exc)
 
@@ -748,6 +758,8 @@ class ModelCallScope:
             stop = _get(response, "stop_reason")
             if stop:
                 self._stop_reason = stop
+            if self._text_payload is not None:
+                self._response_content = _get(response, "content")
         except Exception as exc:
             self._lost("response", exc)
 
@@ -799,17 +811,53 @@ class ModelCallScope:
         for column in _JSON_COLUMNS:
             params[column] = _json_param(params[column])
         attempts = [{**a, "call_id": params["id"], "agent_id": params["agent_id"]} for a in self._attempts]
-        self._recorder._submit_call(params, attempts)
+        sent = self._text_snapshot()
+        if sent is None:
+            self._recorder._submit_call(params, attempts)
+        else:
+            self._recorder._submit_call(params, attempts, sent)
+
+    def _text_snapshot(self) -> tuple[dict[str, Any], Any, list[Any] | None] | None:
+        """What the text write needs, taken now: ``(sent, response_content, stream_events)``. The runner appends the
+        response and the tool results to the payload's ``messages`` list right after the call returns, before the
+        write runs, so the lists are copied here; only references, no text is copied or serialised. None when the
+        text is not stored, or when the snapshot fails (counted and logged; the numbers row is written anyway)."""
+        payload = self._text_payload
+        if payload is None:
+            return None
+        try:
+            sent: dict[str, Any] = {}
+            for key in ("system", "messages", "tools"):
+                value = payload.get(key)
+                if value is not None:
+                    sent[key] = list(value) if isinstance(value, list) else value
+            content = self._response_content
+            return sent, list(content) if isinstance(content, list) else content, self._stream_events
+        except Exception as exc:
+            self._recorder._text.stats.dropped_error += 1
+            logger.warning("F108: model-call text not recorded (%s)", type(exc).__name__)
+            return None
 
 
 class ModelCallRecorder:
-    """Writes model-call rows through the shared ``BoundedWriter`` (built in main.py, never here)."""
+    """Writes model-call rows through the shared ``BoundedWriter`` (built in main.py, never here).
 
-    def __init__(self, writer: BoundedWriter, database: Any, agent_id: str, settings: Any) -> None:
+    With an enabled ``text_store``, each call's text is handed to it once the call's row is committed (its refs need
+    the row): a write of its own, so a text failure never touches the row."""
+
+    def __init__(
+        self,
+        writer: BoundedWriter,
+        database: Any,
+        agent_id: str,
+        settings: Any,
+        text_store: TextStore | None = None,
+    ) -> None:
         self._writer = writer
         self._database = database
         self._agent_id = agent_id
         self._settings = settings
+        self._text = text_store if text_store is not None and text_store.enabled else None
         self._stats = RecorderStats()
         self._warned_purposes: set[str] = set()
         self._warned_late = False
@@ -902,15 +950,21 @@ class ModelCallRecorder:
                 "not recorded"
             )
 
-    def _submit_call(self, params: dict[str, Any], attempts: list[dict[str, Any]]) -> None:
-        self._writer.submit(lambda: self._insert_call(params, attempts), stats=self._stats)
+    def _submit_call(
+        self, params: dict[str, Any], attempts: list[dict[str, Any]], sent: tuple[Any, ...] | None = None
+    ) -> None:
+        self._writer.submit(lambda: self._insert_call(params, attempts, sent), stats=self._stats)
 
-    async def _insert_call(self, params: dict[str, Any], attempts: list[dict[str, Any]]) -> None:
+    async def _insert_call(
+        self, params: dict[str, Any], attempts: list[dict[str, Any]], sent: tuple[Any, ...] | None = None
+    ) -> None:
         async with self._database.session() as session:
             await session.execute(_INSERT_CALL, params)
             if attempts:
                 await session.execute(_INSERT_ATTEMPT, attempts)
             await session.commit()
+        if sent is not None and self._text is not None:
+            self._text.submit(params["id"], *sent)  # after the commit: the text's refs need this row
 
     async def _upsert_bucket(self, params: dict[str, Any]) -> None:
         async with self._database.session() as session:

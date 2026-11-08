@@ -78,6 +78,9 @@ async def test_all_tables_exist(db):
         # F108 agent work view: one row per model call, one row per HTTP attempt of a call (migration 101)
         ("nous_system", "model_call_log"),
         ("nous_system", "model_call_attempt"),
+        # F108 agent work view: model-call text blocks by hash, and each call's blocks in order (migration 102)
+        ("nous_system", "model_text_block"),
+        ("nous_system", "model_call_block_ref"),
         # Task scores, in a schema of their own (migration 087)
         ("scoring", "task_scores"),
         # The scoring command's heartbeat, one row per agent (migration 088)

@@ -14,6 +14,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     SmallInteger,
@@ -2293,3 +2294,48 @@ class ModelCallAttempt(Base):
     http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class ModelTextBlock(Base):
+    """Migration 102 (F108): one block of model-call text (a system block, a message, the tool list or a response),
+    stored once per agent under the sha256 hex of its body.
+
+    Written by the model-call text store while ``NOUS_MODEL_CALL_TEXT_ENABLED`` (and the numbers) are on. ``body`` is
+    redacted, its base64 attachments replaced and cut at ``NOUS_MODEL_CALL_TEXT_BLOCK_MAX_CHARS`` by the writer.
+    ``created_at`` means last used: every store that sends the block again touches it. Not read by the ``db_query``
+    reader.
+    """
+
+    __tablename__ = "model_text_block"
+    __table_args__ = ({"schema": "nous_system"},)
+
+    agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    hash: Mapped[str] = mapped_column(Text, primary_key=True)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    size_chars: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ModelCallBlockRef(Base):
+    """Migration 102 (F108): one block of a model call, in order (``part`` then ``ord``), deleted with the call.
+
+    ``part`` is ``system``, ``messages``, ``tools`` or ``response``. Not read by the ``db_query`` reader. The indexes
+    are in the migration.
+    """
+
+    __tablename__ = "model_call_block_ref"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["agent_id", "block_hash"], ["nous_system.model_text_block.agent_id", "nous_system.model_text_block.hash"]
+        ),
+        {"schema": "nous_system"},
+    )
+
+    call_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("nous_system.model_call_log.id", ondelete="CASCADE"), primary_key=True
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    part: Mapped[str] = mapped_column(Text, primary_key=True)
+    ord: Mapped[int] = mapped_column(Integer, primary_key=True)
+    block_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

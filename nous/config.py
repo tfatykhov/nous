@@ -2338,6 +2338,11 @@ class Settings(BaseSettings):
     # (nous_system.model_call_attempt), and one row per minute of embedding or rerank calls.
     model_call_log_enabled: bool = False
     model_call_retention_days: int = 30
+    # F108, the model-call text: each call's system blocks, messages, tool list and response, redacted, stored once per
+    # agent by hash (nous_system.model_text_block) and listed per call (nous_system.model_call_block_ref). Needs the
+    # numbers on (the text hangs off the model_call_log row). A block is cut at the cap.
+    model_call_text_enabled: bool = False
+    model_call_text_block_max_chars: int = 200000
 
     # F091: Retrieval telemetry. Master flag ships ON — header rows, leg
     # summaries and graph expansions are cheap, and a telemetry system that

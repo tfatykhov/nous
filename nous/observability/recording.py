@@ -45,7 +45,9 @@ class BoundedWriter:
         self._slots = asyncio.Semaphore(concurrency)
         # asyncio's loop keeps only a WEAK reference to a task: hold a strong one until it is done.
         self._pending: set[asyncio.Task] = set()
-        self._saturated = False  # warn once per stretch of backpressure drops, count every one
+        # The writes pending per kind: each kind is held to its own cap, so one kind never crowds out another.
+        self._pending_by_kind: dict[str, int] = {}
+        self._saturated: set[str] = set()  # the kinds dropping now: warn once per stretch of drops, count every one
 
     def _count(self, field: str, stats: RecorderStats | None) -> None:
         """Bump one counter in the writer's totals and, when given, in the caller's own stats."""
@@ -53,12 +55,22 @@ class BoundedWriter:
         if stats is not None and stats is not self.stats:
             setattr(stats, field, getattr(stats, field) + 1)
 
-    def submit(self, make_write: Callable[[], Awaitable[None]], stats: RecorderStats | None = None) -> bool:
+    def submit(
+        self,
+        make_write: Callable[[], Awaitable[None]],
+        stats: RecorderStats | None = None,
+        *,
+        kind: str = "default",
+        max_pending: int | None = None,
+    ) -> bool:
         """Schedule one write. Returns False, and counts it, when it is dropped.
 
         Takes a factory, not a coroutine: the write's coroutine is created only once a slot is held, so a dropped
         or never-started write leaves nothing un-awaited. The write's outcome is counted in the writer's ``stats``
-        and also in ``stats`` when given (the submitting recorder's own counters). Never raises.
+        and also in ``stats`` when given (the submitting recorder's own counters). A write is dropped
+        (``dropped_backpressure``) when ``max_pending`` writes of its ``kind`` are already pending (the writer's own
+        cap when not given): the model-call text is a kind of its own with a smaller cap, and its writes never count
+        against the other writes' cap. All kinds share the concurrency cap. Never raises.
         """
         try:
             loop = asyncio.get_running_loop()
@@ -66,21 +78,29 @@ class BoundedWriter:
             self._count("dropped_error", stats)
             logger.warning("F108: %s write dropped: no running event loop", self.name)
             return False
-        if len(self._pending) >= self._max_pending:
+        cap = self._max_pending if max_pending is None else max_pending
+        if self._pending_by_kind.get(kind, 0) >= cap:
             self._count("dropped_backpressure", stats)
-            if not self._saturated:
-                self._saturated = True
+            if kind not in self._saturated:
+                self._saturated.add(kind)
                 logger.warning(
-                    "F108: %s writer has %d writes pending; dropping new writes until it catches up",
+                    "F108: %s writer has %d %s writes pending; dropping new ones until it catches up",
                     self.name,
-                    self._max_pending,
+                    cap,
+                    kind,
                 )
             return False
-        self._saturated = False
+        self._saturated.discard(kind)
         task = loop.create_task(self._bounded(make_write, stats))
         self._pending.add(task)
-        task.add_done_callback(self._pending.discard)
+        self._pending_by_kind[kind] = self._pending_by_kind.get(kind, 0) + 1
+        task.add_done_callback(lambda done: self._finished(done, kind))
         return True
+
+    def _finished(self, task: asyncio.Task, kind: str) -> None:
+        """A write is done: it no longer counts as pending."""
+        self._pending.discard(task)
+        self._pending_by_kind[kind] -= 1
 
     async def _bounded(self, make_write: Callable[[], Awaitable[None]], stats: RecorderStats | None) -> None:
         """One write, within the concurrency cap and the timeout. Never raises (cancellation still propagates)."""
