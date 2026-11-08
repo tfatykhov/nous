@@ -302,6 +302,35 @@ async def test_stream_error_event_records_error(backend, where, db, monkeypatch)
 
 
 @pytest.mark.postgres_only
+async def test_httpx_stream_non_200_attempt_carries_the_api_error(db, monkeypatch):
+    """The httpx stream's non-200 attempt carries the API's error type and message, as ``call``'s does; a body that
+    is not JSON gives ``http_error`` and the status with the body's text."""
+    agent = _agent()
+    writer, recorder = _recorder(db, agent)
+    not_json = httpx.Response(400, content=b"<html>bad request</html>")
+    api = _Api(stream=[_error(429, "rate_limit_error", "slow down", retry_soon=True), _stream(), not_json])
+    client = await _client("httpx", api, monkeypatch, recorder)
+    try:
+        for _ in range(2):
+            [e async for e in client.stream(dict(_PAYLOAD), call_context=CallContext(purpose="chat"))]
+        await writer.drain(5.0)
+        retried, refused = await _rows(db, agent)
+        assert [(a["http_status"], a["error_type"], a["error_text"]) for a in await _attempts(db, retried["id"])] == [
+            (429, "rate_limit_error", "slow down"),
+            (200, None, None),
+        ]
+        [attempt] = await _attempts(db, refused["id"])
+        assert (attempt["http_status"], attempt["error_type"], attempt["error_text"]) == (
+            400,
+            "http_error",
+            "HTTP 400: <html>bad request</html>",
+        )
+    finally:
+        await client.close()
+        await _delete(db, agent)
+
+
+@pytest.mark.postgres_only
 @pytest.mark.parametrize("backend", BACKENDS)
 async def test_stream_consumer_stops_early_records_cancelled(backend, db, monkeypatch):
     agent = _agent()

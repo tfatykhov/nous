@@ -176,7 +176,11 @@ async def test_browser_step_records_usage_and_attempts(db, tmp_path, monkeypatch
         assert (row["status"], row["http_status"], row["attempts"], row["stop_reason"]) == ("ok", 200, 2, "end_turn")
         assert (row["input_uncached"], row["cache_read"], row["cache_write"], row["output_tokens"]) == (4, 6000, 70, 9)
         assert row["input_total"] == 6074 and row["call_count"] == 1
-        assert [a["http_status"] for a in await _attempts(db, row["id"])] == [429, 200]
+        # the retried 429 carries the API's error type and message, as the shared client's attempts do
+        assert [(a["http_status"], a["error_type"], a["error_text"]) for a in await _attempts(db, row["id"])] == [
+            (429, "rate_limit_error", "slow down"),
+            (200, None, None),
+        ]
     finally:
         await _delete(db, agent)
 

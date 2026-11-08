@@ -22,8 +22,6 @@ from contextlib import (
     AbstractAsyncContextManager,
     AbstractContextManager,
     asynccontextmanager,
-    nullcontext,
-    suppress,
 )
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,7 +41,7 @@ from nous.browser.session import (
     check_resolution,
     host_problem,
 )
-from nous.observability.model_calls import CallContext, ModelCallRecorder, ModelCallScope
+from nous.observability.model_calls import CallContext, ModelCallRecorder, ModelCallScope, open_scope
 
 logger = logging.getLogger(__name__)
 
@@ -266,18 +264,11 @@ def _auth_headers(settings: Any) -> dict[str, str]:
     return headers
 
 
-def _open_scope(recorder: ModelCallRecorder | None, payload: dict[str, Any]) -> AbstractContextManager[Any]:
-    """The scope of one browser step's API call, for a ``with``: a ``ModelCallScope``, or None when nothing records
-    (no recorder, or one that could not open a scope, which is logged and counted)."""
-    if recorder is None:
-        return nullcontext()
-    try:
-        return recorder.scope(payload, _CALL_CONTEXT, "browser_step")
-    except Exception as exc:
-        logger.warning("F108: browser step not recorded (%s)", type(exc).__name__)
-        with suppress(Exception):
-            recorder.stats.dropped_error += 1
-        return nullcontext()
+def _open_scope(
+    recorder: ModelCallRecorder | None, payload: dict[str, Any]
+) -> AbstractContextManager[ModelCallScope | None]:
+    """The scope of one browser step's API call, for a ``with`` (``model_calls.open_scope``)."""
+    return open_scope(recorder, payload, _CALL_CONTEXT, "browser_step")
 
 
 def make_api_caller(
@@ -343,21 +334,27 @@ def make_api_caller(
                     continue
                 raise BrowserApiError(f"Anthropic API request failed: {type(e).__name__}") from e
             status = response.status_code
-            if scope is not None:
-                scope.attempt(status, None, None, _ms_since(t0))
             if status == 200:
+                if scope is not None:
+                    scope.attempt(status, None, None, _ms_since(t0))
                 try:
                     return response.json()
                 except ValueError as e:
                     raise BrowserApiError("Anthropic API returned a body that is not JSON") from e
+            # The error before the retry, so each attempt carries the API's error type and message (as the shared
+            # client's attempts do), not only the final one.
+            try:
+                error = response.json().get("error", {})
+                error_type, error_msg = error.get("type", "unknown"), error.get("message", "")
+                detail = f"{error_type} - {error_msg}"
+            except Exception:
+                error_type, error_msg = "http_error", f"HTTP {status}: {response.text[:500]}"
+                detail = response.text[:300]
+            if scope is not None:
+                scope.attempt(status, error_type, error_msg, _ms_since(t0))
             retry = _should_retry(status, response.headers) and attempt < retries
             if retry and await pause(attempt, response, f"answered {status}"):
                 continue
-            try:
-                error = response.json().get("error", {})
-                detail = f"{error.get('type', 'unknown')} - {error.get('message', '')}"
-            except Exception:
-                detail = response.text[:300]
             if status == 429:
                 why = "with no time left in the task's budget to wait" if retry else f"after {attempt + 1} attempts"
                 raise BrowserApiError(f"Rate limited by the Anthropic API (429) {why}; try again later: {detail}")
@@ -460,7 +457,9 @@ async def run_browser_task(
         )
         state = BrowserTaskResult("timeout", "", run_id)
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as http:
-            recording = {} if _recorder is None else {"recorder": _recorder}  # F108: passed only when one is set
+            # F108: passed only when one is set, so a caller factory with a fixed keyword signature keeps working
+            # (tests/test_browser_task.py::TestTeardownReserve's fake_caller takes no `recorder`).
+            recording = {} if _recorder is None else {"recorder": _recorder}
             api = call_api or make_api_caller(settings, http, deadline=clock.time() + timeout, **recording)
             try:
                 await asyncio.wait_for(

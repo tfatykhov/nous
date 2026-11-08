@@ -23,7 +23,7 @@ import re
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -680,7 +680,7 @@ class ModelCallScope:
         attempt reported after the row was written is not recorded; it is counted (``dropped_late``). Never raises:
         a client's response hook calls it."""
         if self._written:
-            self._recorder._late_attempt()
+            self._recorder._late_report()
             return
         try:
             now = _utcnow()
@@ -710,7 +710,11 @@ class ModelCallScope:
         """Take what a stream reports, before the client yields the event: the input counts from ``message_start``;
         the output count and the stop reason from ``done`` (``message_delta``), which also reports ``ok``, as does
         ``message_stop`` (the response is complete, so a consumer that stops now does not make it ``cancelled``); an
-        ``error`` event reports ``error`` with the event's text (the first error's text is kept). Never raises."""
+        ``error`` event reports ``error`` with the event's text (the first error's text is kept). An event observed
+        after the row was written is not taken; it is counted (``dropped_late``), as a late attempt is. Never raises."""
+        if self._written:
+            self._recorder._late_report()
+            return
         try:
             kind = _get(event, "type")
             if kind == "message_start":
@@ -859,32 +863,38 @@ class ModelCallRecorder:
     def _resolve(self, ctx: CallContext | None) -> tuple[CallContext, str, str]:
         """``(context, label_source, purpose)`` for a new scope: the explicit context, else the fallback, else none.
 
-        Never raises: a context that is not a ``CallContext``, a purpose that is not a string, or any fault here gives
-        an empty context labelled ``unlabelled`` (``none``), counted, and the type of the fault logged once."""
+        Never raises: a ``CallContext`` whose purpose is not a string keeps its other fields (session, turn, frame,
+        trace) and is labelled ``unlabelled`` (``none``); a context that is not a ``CallContext``, or any fault here,
+        gives an empty context labelled the same. Either is counted, and the type of the fault logged once."""
         try:
             if ctx is not None:
                 base, source = ctx, "explicit"
             else:
                 fallback = _FALLBACK_CALL_CONTEXT.get()
                 base, source = (fallback, "context") if fallback is not None else (CallContext(), "none")
-            if not isinstance(base, CallContext) or not isinstance(base.purpose, str):
-                raise TypeError("a model-call context must be a CallContext with a string purpose")
-            return base, source, self._label(base.purpose)
+            if not isinstance(base, CallContext):
+                raise TypeError("a model-call context must be a CallContext")
+            if isinstance(base.purpose, str):
+                return base, source, self._label(base.purpose)
+            # Only the purpose is bad: the row keeps the rest of the context (the purpose column is the third value).
+            kept, fault_name = base, TypeError.__name__
         except Exception as exc:
-            self._stats.unlabelled += 1
-            fault = f"bad context: {type(exc).__name__}"
-            if fault not in self._warned_purposes:
-                self._warned_purposes.add(fault)
-                logger.warning("F108: bad model-call context (%s) recorded as unlabelled", type(exc).__name__)
-            return CallContext(), "none", "unlabelled"
+            kept, fault_name = CallContext(), type(exc).__name__
+        self._stats.unlabelled += 1
+        fault = f"bad context: {fault_name}"
+        if fault not in self._warned_purposes:
+            self._warned_purposes.add(fault)
+            logger.warning("F108: bad model-call context (%s) recorded as unlabelled", fault_name)
+        return kept, "none", "unlabelled"
 
-    def _late_attempt(self) -> None:
-        """Count an attempt reported after its call's row was written; log the first one."""
+    def _late_report(self) -> None:
+        """Count an attempt or a stream event reported after its call's row was written; log the first one."""
         self._stats.dropped_late += 1
         if not self._warned_late:
             self._warned_late = True
             logger.warning(
-                "F108: a model-call attempt was reported after its call was written; it is counted, not recorded"
+                "F108: a model-call attempt or stream event was reported after its call was written; it is counted, "
+                "not recorded"
             )
 
     def _submit_call(self, params: dict[str, Any], attempts: list[dict[str, Any]]) -> None:
@@ -901,3 +911,19 @@ class ModelCallRecorder:
         async with self._database.session() as session:
             await session.execute(_UPSERT_BUCKET, params)
             await session.commit()
+
+
+def open_scope(
+    recorder: ModelCallRecorder | None, payload: Any, ctx: CallContext | None, call_kind: str
+) -> AbstractContextManager[ModelCallScope | None]:
+    """The scope of one call, for a ``with``: it gives a ``ModelCallScope``, or None when nothing records (no
+    recorder, or one that could not open a scope, which is logged at WARNING and counted). Never raises."""
+    if recorder is None:
+        return nullcontext()
+    try:
+        return recorder.scope(payload, ctx, call_kind)
+    except Exception as exc:
+        logger.warning("F108: model call not recorded (%s, %s)", call_kind, type(exc).__name__)
+        with suppress(Exception):
+            recorder.stats.dropped_error += 1
+        return nullcontext()

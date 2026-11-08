@@ -713,10 +713,18 @@ async def test_a_failed_attempt_is_logged_and_counted(db, monkeypatch, caplog):
 async def test_a_bad_call_context_never_raises_and_is_recorded_unlabelled(db, monkeypatch, caplog):
     agent = _agent()
     writer, recorder = _recorder(db, agent)
+    turn_id = uuid.uuid4()
     bad_contexts = [
         {"purpose": "chat", "session_id": "not-a-call-context"},  # not a CallContext
         CallContext(purpose=["chat"], session_id="unhashable-purpose"),  # type: ignore[arg-type]
-        CallContext(purpose=42, session_id="int-purpose"),  # type: ignore[arg-type]
+        CallContext(
+            purpose=42,  # type: ignore[arg-type]
+            session_id="int-purpose",
+            frame_id="conversation",
+            turn_number=3,
+            turn_id=turn_id,
+            trace_id="0123456789ab",
+        ),
     ]
     try:
         with caplog.at_level(logging.WARNING, logger=_LOGGER):
@@ -739,11 +747,23 @@ async def test_a_bad_call_context_never_raises_and_is_recorded_unlabelled(db, mo
         assert "bad model-call context (TypeError)" in caplog.text
         assert "bad model-call context (RuntimeError)" in caplog.text
         await writer.drain(5.0)
-        rows = await _rows(db, agent)
-        assert sorted(r["output_tokens"] for r in rows) == [1, 2, 3, 4, 5]
-        assert {(r["purpose"], r["label_source"], r["session_id"], r["status"]) for r in rows} == {
-            ("unlabelled", "none", None, "ok")
+        rows = {r["output_tokens"]: r for r in await _rows(db, agent)}
+        assert sorted(rows) == [1, 2, 3, 4, 5]
+        assert {(r["purpose"], r["label_source"], r["status"]) for r in rows.values()} == {("unlabelled", "none", "ok")}
+        # a CallContext whose only fault is its purpose keeps the rest; anything else records an empty context
+        assert {n: r["session_id"] for n, r in rows.items()} == {
+            1: None,
+            2: "unhashable-purpose",
+            3: "int-purpose",
+            4: "bad-fallback",
+            5: None,
         }
+        assert (rows[3]["frame_id"], rows[3]["turn_number"], rows[3]["turn_id"], rows[3]["trace_id"]) == (
+            "conversation",
+            3,
+            turn_id,
+            "0123456789ab",
+        )
         assert recorder.stats.written == 5 and recorder.stats.dropped_error == 0
     finally:
         await _delete(db, agent)
@@ -766,3 +786,19 @@ def test_a_late_attempt_is_counted_and_logged_once(caplog):
     assert recorder.stats.as_dict()["dropped_late"] == 3
     assert writer.stats.dropped_late == 0
     assert recorder.stats.dropped_error == 2  # the two rows, dropped for want of a loop
+
+
+def test_a_late_stream_event_is_counted_and_logged_once(caplog):
+    """A stream event observed after the row was written is counted ``dropped_late``, as a late attempt is, and
+    the one warning covers both."""
+    writer = BoundedWriter("test")
+    recorder = ModelCallRecorder(writer, None, "agent", _SETTINGS)
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        with recorder.scope(_PAYLOAD, CallContext(purpose="chat"), "stream") as scope:
+            scope.observe_stream_event(StreamEvent(type="message_start", usage={"input_tokens": 2}))
+        scope.observe_stream_event(StreamEvent(type="done", stop_reason="end_turn", usage={"output_tokens": 5}))
+        scope.observe_stream_event(StreamEvent(type="error", text="late"))
+        scope.attempt(200, None, None, 3)
+    assert recorder.stats.dropped_late == 3
+    assert caplog.text.count("reported after its call was written") == 1
+    assert scope._status == "error" and scope._stop_reason is None  # the cut-off stream's status, not the late done

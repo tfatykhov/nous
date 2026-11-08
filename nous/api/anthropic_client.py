@@ -20,7 +20,7 @@ import random
 import time
 import weakref
 from collections.abc import AsyncGenerator
-from contextlib import AbstractContextManager, nullcontext, suppress
+from contextlib import AbstractContextManager, nullcontext
 from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -29,7 +29,7 @@ import httpx
 from nous.api.model_caps import with_default_thinking
 from nous.api.models import ApiResponse
 from nous.config import Settings
-from nous.observability.model_calls import active_scope
+from nous.observability.model_calls import active_scope, open_scope
 
 if TYPE_CHECKING:
     from nous.observability.model_calls import CallContext, ModelCallRecorder, ModelCallScope
@@ -122,18 +122,8 @@ class _ModelCallRecording:
     def _open_scope(
         self, payload: dict[str, Any], call_context: CallContext | None, call_kind: str
     ) -> AbstractContextManager[ModelCallScope | None]:
-        """The scope of one call, for a ``with``: it gives a ``ModelCallScope``, or None when nothing records (no
-        recorder, or one that could not open a scope, which is logged and counted)."""
-        recorder = self._recorder
-        if recorder is None:
-            return nullcontext()
-        try:
-            return recorder.scope(payload, call_context, call_kind)
-        except Exception as exc:
-            logger.warning("F108: model call not recorded (%s)", type(exc).__name__)
-            with suppress(Exception):
-                recorder.stats.dropped_error += 1
-            return nullcontext()
+        """The scope of one call, for a ``with`` (``model_calls.open_scope`` with this client's recorder)."""
+        return open_scope(self._recorder, payload, call_context, call_kind)
 
 
 # ---------------------------------------------------------------------------
@@ -653,7 +643,15 @@ class HttpxAnthropicClient(_ModelCallRecording):
                             error_body = await response.aread()
                             error_text = error_body.decode()[:500]
                             if scope is not None:
-                                scope.attempt(response.status_code, None, error_text, _ms_since(t0))
+                                # the API's error type and message, parsed as ``_call`` parses them
+                                try:
+                                    error = json.loads(error_body).get("error", {})
+                                    error_type = error.get("type", "unknown")
+                                    error_msg = error.get("message", "unknown error")
+                                except Exception:
+                                    error_type = "http_error"
+                                    error_msg = f"HTTP {response.status_code}: {error_text}"
+                                scope.attempt(response.status_code, error_type, error_msg, _ms_since(t0))
                                 reported = True
                             logger.info(
                                 "Anthropic streaming API %d: %s (request_id=%s)",
