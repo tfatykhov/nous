@@ -1,6 +1,6 @@
 """The maintenance loops that nous/main.py starts end only when their own task is cancelled.
 
-``create_components`` starts five loops (execution-ledger maintenance, two
+``create_components`` starts six loops (execution-ledger maintenance, three
 retention sweeps, the companion surface sweep and the F098 result reconciler) and ``shutdown_components``
 cancels them. Each test runs one of them, through the coroutine production
 runs, with stand-ins for what it sweeps.
@@ -153,6 +153,7 @@ def _settings(**overrides: Any) -> SimpleNamespace:
         "execution_ledger_pending_unknown_after_seconds": 3600,
         "retrieval_telemetry_retention_days": 14,
         "context_log_retention_days": 30,
+        "tool_call_retention_days": 30,
         "a2ui_sweep_interval_seconds": TICK,
     }
     values.update(overrides)
@@ -217,9 +218,10 @@ class _Database:
         self.left_with.append(exc_type)
         return False
 
-    async def execute(self, statement: Any, params: dict) -> None:
+    async def execute(self, statement: Any, params: dict) -> SimpleNamespace:
         await self._first()
         self.executed.append((str(statement), tuple(sorted(params.items()))))
+        return SimpleNamespace(rowcount=0)
 
     async def commit(self) -> None:
         self.commits += 1
@@ -298,6 +300,19 @@ def _context_log_retention(first: str | None) -> _Loop:
     )
 
 
+def _tool_call_retention(first: str | None) -> _Loop:
+    went_on = asyncio.Event()
+    settings, database = _settings(), _Database(went_on, _First(first))
+    return _Loop(
+        "tool-call retention loop",
+        "tool_call_retention_task",
+        lambda: main._tool_call_retention_loop(settings, database),
+        went_on,
+        "F108: tool-call retention sweep failed",
+        {"database": database},
+    )
+
+
 def _surface_sweep(first: str | None) -> _Loop:
     went_on = asyncio.Event()
     settings, surfaces = _settings(), _Surfaces(went_on, _First(first))
@@ -343,6 +358,7 @@ LOOPS = [
     _execution_ledger_prune,
     _retrieval_log_retention,
     _context_log_retention,
+    _tool_call_retention,
     _surface_sweep,
     _result_reconciler,
 ]
@@ -539,6 +555,34 @@ def test_the_context_log_sweep_deletes_old_rows_of_both_tables_every_interval(mo
     ]
 
 
+def test_the_tool_call_sweep_deletes_this_agents_old_rows_of_both_tables_every_interval(monkeypatch):
+    _short_intervals(monkeypatch)
+    loop = _tool_call_retention(None)
+    database = loop.parts["database"]
+
+    async def scenario() -> None:
+        await loop.start()
+        await _until(lambda: database.commits >= 3, "the sweep was not run again")
+        await _stop(loop)
+
+    _run(scenario)
+
+    params = (("agent_id", "test"), ("d", 30))
+    assert database.executed[:2] == [
+        (
+            "DELETE FROM nous_system.tool_call_log "
+            "WHERE agent_id = :agent_id AND started_at < now() - make_interval(days => :d)",
+            params,
+        ),
+        (
+            "DELETE FROM nous_system.agent_turn_log "
+            "WHERE agent_id = :agent_id AND started_at < now() - make_interval(days => :d)",
+            params,
+        ),
+    ]
+    assert set(database.executed) == set(database.executed[:2])
+
+
 def test_the_surface_sweep_invalidates_heartbeat_surfaces_once_and_expires_every_interval(monkeypatch):
     _short_intervals(monkeypatch)
     loop = _surface_sweep(None)
@@ -564,6 +608,7 @@ def test_a_loop_waits_its_interval_between_two_passes(build, monkeypatch):
         "execution_ledger_task": lambda: loop.parts["cards"].swept,
         "retrieval_log_retention_task": lambda: loop.parts["database"].commits,
         "context_log_retention_task": lambda: loop.parts["database"].commits,
+        "tool_call_retention_task": lambda: loop.parts["database"].commits,
         "a2ui_sweep_task": lambda: loop.parts["surfaces"].expired,
         "result_reconciler_task": lambda: loop.parts["reconciler"].ticks,
     }[loop.key]
@@ -579,11 +624,14 @@ def test_a_loop_waits_its_interval_between_two_passes(build, monkeypatch):
     assert passes() < 100, passes()
 
 
-def test_the_retrieval_log_sweep_runs_at_startup_before_its_first_wait(monkeypatch):
+@pytest.mark.parametrize(
+    "build", [_retrieval_log_retention, _tool_call_retention], ids=["retrieval log", "tool-call log"]
+)
+def test_the_sweep_runs_at_startup_before_its_first_wait(build, monkeypatch):
     """A process restarted every day would never prune under a loop that
     waits first."""
     _short_intervals(monkeypatch, 3600)
-    loop = _retrieval_log_retention(None)
+    loop = build(None)
     database = loop.parts["database"]
 
     async def scenario() -> None:
@@ -649,6 +697,11 @@ def test_create_components_starts_each_loop_behind_its_own_switch_with_its_own_c
             ["settings", "database"],
             ["settings.retrieval_telemetry_enabled", "getattr(settings, 'retrieval_telemetry_retention_days', 0) > 0"],
         ),
+        (
+            "_tool_call_retention_loop",
+            ["settings", "database"],
+            ["settings.tool_call_log_enabled", "settings.tool_call_retention_days > 0"],
+        ),
     ], f"create_components starts its loops differently: {started}"
 
 
@@ -701,7 +754,9 @@ def test_a_ledger_pass_cancelled_from_within_again_and_again_is_tried_again_once
 
 
 @pytest.mark.parametrize(
-    "build", [_retrieval_log_retention, _context_log_retention], ids=["retrieval log", "context log"]
+    "build",
+    [_retrieval_log_retention, _context_log_retention, _tool_call_retention],
+    ids=["retrieval log", "context log", "tool-call log"],
 )
 def test_a_retention_sweep_cancelled_from_within_commits_nothing_and_is_run_again_after_the_interval(
     build, monkeypatch

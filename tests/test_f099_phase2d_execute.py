@@ -166,7 +166,7 @@ def test_the_loop_reaches_the_bracket_only_through_the_shared_helper():
     assert "_dispatch_with_ledger(" in source and "_open_for_call(" not in source
     helper = inspect.getsource(AgentRunner._dispatch_with_ledger)
     assert "_open_for_call(" in helper and "_ledger_close(" in helper and "_after_compensable_call(" in helper
-    assert {"text", "is_error", "suppressed", "send_key"} == set(Dispatched._fields)
+    assert {"text", "is_error", "suppressed", "send_key", "ledger_entry_id"} == set(Dispatched._fields)
 
 
 # ---- lead addendum 1 (2d-1 review m5): the handler's own required parameters ----------------------------------

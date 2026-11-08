@@ -290,6 +290,7 @@ READER_TABLES = {
     "nous_system.execution_ledger",
     "nous_system.events",
     "nous_system.memory_write_health_daily",
+    "nous_system.tool_call_log",
 }
 # The column names db_roles.sql refuses to grant unless excluded; tests/test_db_query_live.py uses the same rule.
 CREDENTIAL_NAME = (
@@ -401,12 +402,14 @@ READER_VERIFY_LABELS = (
     "reader cannot read scoring.task_scores",
     "reader reads an allowed table",
     "reader reads the memory write-health rollup",
+    "reader reads the tool-call records",
+    "reader cannot read the turn records",
     "reader cannot read an embedding",
     "reader cannot read a push token",
     "reader cannot INSERT",
     "reader cannot read a server file",
     "reader cannot run a program",
-    "reader holds SELECT on columns of exactly 15 tables and nothing else",
+    "reader holds SELECT on columns of exactly 16 tables and nothing else",
     "reader reads no vector, tsvector or credential-named column",
     "reader reads nothing in public",
     "the reader's relations are plain tables without row policies",
@@ -428,8 +431,8 @@ def test_verify_has_reader_checks():
     assert reader_rows.count("'nous_reader', ") >= 7, reader_rows
     assert "SET ROLE" not in reader_rows and "SESSION AUTHORIZATION" not in reader_rows
     assert "tests/test_db_query_live.py" in VERIFY
-    # the reader's 15 tables are counted with column privileges (a column grant gives no table-level SELECT)
-    assert "has_any_column_privilege(''nous_reader'', c.oid, ''SELECT'')) = 15" in VERIFY
+    # the reader's 16 tables are counted with column privileges (a column grant gives no table-level SELECT)
+    assert "has_any_column_privilege(''nous_reader'', c.oid, ''SELECT'')) = 16" in VERIFY
 
 
 def test_the_reader_credential_rule_is_the_same_in_the_script_and_the_live_test():

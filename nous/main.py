@@ -48,6 +48,8 @@ logger = logging.getLogger(__name__)
 _RETENTION_SWEEP_INTERVAL_SECONDS = 86400
 # Seconds the execution-ledger maintenance loop waits after a pass that failed.
 _EXECUTION_LEDGER_RETRY_SECONDS = 60
+# F108: seconds shutdown waits for the work-view writer's pending rows before the pool closes.
+_WORK_VIEW_DRAIN_SECONDS = 5.0
 
 
 async def _execution_ledger_maintenance_loop(
@@ -168,6 +170,36 @@ async def _context_log_retention_loop(settings: Settings, database: Database) ->
             logger.exception("OB-1: retention sweep was cancelled from within — the loop continues")
         except Exception:
             logger.debug("OB-1: retention sweep failed", exc_info=True)
+
+
+async def _tool_call_retention_loop(settings: Settings, database: Database) -> None:
+    """F108: delete this agent's tool-call and turn rows that are past their retention, at startup and then daily."""
+    from nous.observability.work_view_retention import sweep_tool_calls
+
+    # Sweep once at startup, THEN daily, as the retrieval-log loop does: a process restarted more often than once a
+    # day would never prune under a sleep-first loop.
+    first = True
+    while True:
+        try:
+            if first:
+                first = False
+            else:
+                await asyncio.sleep(_RETENTION_SWEEP_INTERVAL_SECONDS)
+            days = settings.tool_call_retention_days
+            deleted = await sweep_tool_calls(database, settings.agent_id, days)
+            logger.info(
+                "F108: tool_call_log/agent_turn_log retention sweep (>%dd, agent=%s) deleted %s",
+                days,
+                settings.agent_id,
+                deleted,
+            )
+        except asyncio.CancelledError:
+            if cancel_requested():
+                break
+            logger.exception("F108: tool-call retention sweep was cancelled from within — the loop continues")
+        except Exception:
+            # WARNING, not DEBUG: a sweep that keeps failing lets both tables grow without bound.
+            logger.warning("F108: tool-call retention sweep failed", exc_info=True)
 
 
 async def _a2ui_sweep_loop(settings: Settings, surface_service: SurfaceService) -> None:
@@ -1207,6 +1239,27 @@ async def create_components(settings: Settings) -> dict:
                 _context_log_retention_loop(settings, database), name="context-log-retention"
             )
 
+    # F108: the agent work view's recording: one tool_call_log row per tool call and one agent_turn_log row per turn.
+    # work_view_writer is the ONE bounded writer every work-view recorder shares (the model-call recorder is to be
+    # handed this same writer), so recording holds at most 4 pool connections in all and never blocks a turn.
+    work_view_writer = None
+    tool_call_recorder = None
+    tool_call_retention_task = None
+    if settings.tool_call_log_enabled:
+        from nous.observability.recording import BoundedWriter
+        from nous.observability.tool_calls import ToolCallRecorder
+
+        work_view_writer = BoundedWriter("work_view", concurrency=4, timeout_s=30.0, max_pending=500)
+        tool_call_recorder = ToolCallRecorder(work_view_writer, database, settings.agent_id, settings)
+        runner.set_tool_call_recorder(tool_call_recorder)
+        logger.info("F108: tool-call recorder wired (retention %d days)", settings.tool_call_retention_days)
+
+        # A retention of 0 days would delete every row, so it means no sweep.
+        if settings.tool_call_retention_days > 0:
+            tool_call_retention_task = asyncio.create_task(
+                _tool_call_retention_loop(settings, database), name="tool-call-retention"
+            )
+
     # F099 Phase 2c: the continuation runner. None unless NOUS_CONTINUATION_ENABLED is on (and
     # CONTINUATION_RUNNER_READY, True since PR-2e), so the reconciler's pass below and the shutdown see none.
     continuation_runner = await _build_continuation_runner(
@@ -1734,6 +1787,9 @@ async def create_components(settings: Settings) -> dict:
         "continuation_runner": continuation_runner,
         "context_logger": context_logger,
         "context_log_retention_task": context_log_retention_task,
+        "work_view_writer": work_view_writer,
+        "tool_call_recorder": tool_call_recorder,
+        "tool_call_retention_task": tool_call_retention_task,
         "result_reconciler_task": result_reconciler_task,
         "retrieval_log_retention_task": retrieval_log_retention_task,
         "retrieval_logger": retrieval_logger,
@@ -1812,6 +1868,15 @@ async def shutdown_components(components: dict) -> None:
         retention_task.cancel()
         try:
             await retention_task
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    # F108: stop the tool-call retention sweep
+    tool_call_retention_task = components.get("tool_call_retention_task")
+    if tool_call_retention_task:
+        tool_call_retention_task.cancel()
+        try:
+            await tool_call_retention_task
         except (asyncio.CancelledError, Exception):
             pass
 
@@ -1909,6 +1974,12 @@ async def shutdown_components(components: dict) -> None:
     if brain:
         await brain.close()
 
+    # F108: the work-view rows still pending land before the pool closes. Every producer of turns has stopped by
+    # here. drain() never raises; a write still running at the deadline keeps its own 30 s timeout and is logged.
+    work_view_writer = components.get("work_view_writer")
+    if work_view_writer is not None:
+        await work_view_writer.drain(_WORK_VIEW_DRAIN_SECONDS)
+
     database = components.get("database")
     if database:
         await database.disconnect()  # F1: disconnect() not close()
@@ -1983,6 +2054,7 @@ def build_app(settings: Settings) -> Starlette:
         action_router=_lazy_component(components, "action_router"),
         dag_orchestrator=_lazy_component(components, "dag_orchestrator"),
         continuation_runner=_lazy_component(components, "continuation_runner"),
+        tool_call_recorder=_lazy_component(components, "tool_call_recorder"),
     )
 
     if settings.mcp_enabled:

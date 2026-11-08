@@ -131,15 +131,22 @@ def test_every_required_check_runs_on_every_pull_request_and_comes_from_actions(
     assert all(c.get("integration_id") == GITHUB_ACTIONS_APP_ID for c in checks), checks
 
 
-def test_migration_099_is_applied_again_as_the_application_role() -> None:
-    # db_roles.sql names 099's table, so 099 goes in as the superuser before the roles exist; the job undoes it as the
-    # administrator and lets the application role apply it, as a deployment does.
+def test_migrations_099_and_100_are_applied_again_as_the_application_role() -> None:
+    # db_roles.sql names tables of 099 and 100, so both go in as the superuser before the roles exist; the job undoes
+    # them as the administrator and lets the application role apply them, as a deployment does.
     text = (WORKFLOWS / "ci.yml").read_text()
+    assert "run: python scripts/ci/apply_migrations.py --max-version 100\n" in _step(
+        "Apply the migrations up to 100 (as the superuser, with the application's migrator)"
+    )
     roles = text.index("- name: Create the database roles and check them\n")
-    undo = text.index("- name: Undo migration 099 so the application role applies it\n")
+    undo = text.index("- name: Undo migrations 099 and 100 so the application role applies them\n")
     later = text.index("- name: Apply every later migration as the application role\n")
     assert roles < undo < later
-    step = _step("Undo migration 099 so the application role applies it")
+    step = _step("Undo migrations 099 and 100 so the application role applies them")
     assert "psql -U nous_admin -d nous -X -v ON_ERROR_STOP=1" in step, step
     assert "DROP TABLE nous_system.memory_write_health_daily" in step, step
     assert "DELETE FROM nous_system.schema_migrations WHERE version = '099'" in step, step
+    # every table 100 creates, so nous_app applies all of it again (CREATE TABLE IF NOT EXISTS skips a leftover)
+    assert "DROP TABLE nous_system.tool_call_log" in step, step
+    assert "DROP TABLE nous_system.agent_turn_log" in step, step
+    assert "DELETE FROM nous_system.schema_migrations WHERE version = '100'" in step, step

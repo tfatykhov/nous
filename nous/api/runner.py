@@ -9,16 +9,18 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import itertools
 import json
 import logging
 import time
 import weakref
 from collections import OrderedDict
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, NamedTuple
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from nous.api import attachment_store, tool_policy
 from nous.api.anthropic_client import (
@@ -71,6 +73,15 @@ from nous.config import Settings
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput
 from nous.observability.context_logger import HEARTBEAT_CALL_TYPE
+from nous.observability.tool_calls import (
+    ToolCallRecord,
+    ToolCallRecorder,
+    TurnRecord,
+    add_reason_field,
+    own_reason_tools,
+    split_reason,
+    work_kind_for,
+)
 from nous.tool_names import CHANGED_TOOLS, canonical_tool_names
 
 logger = logging.getLogger(__name__)
@@ -141,13 +152,15 @@ class Suppressed:
 
 class Dispatched(NamedTuple):
     """What ``AgentRunner._dispatch_with_ledger`` came to: the call's text and whether it is an error, the
-    suppression that stood in for a keyed send the ledger already held (None when the call ran), and the
-    idempotency key it ran under (None for an unkeyed tool)."""
+    suppression that stood in for a keyed send the ledger already held (None when the call ran), the
+    idempotency key it ran under (None for an unkeyed tool), and the durable ledger row of the call (None when
+    none was opened)."""
 
     text: str
     is_error: bool
     suppressed: Suppressed | None
     send_key: str | None
+    ledger_entry_id: UUID | None
 
 
 class SingleCall(NamedTuple):
@@ -408,6 +421,8 @@ class AgentRunner:
         self._current_call_type: str = "chat"
         self._fork_call_type: str | None = None  # set by fork(): every call of a fork logs under it
         self._last_context_entry_id: str | None = None
+        # F108: one record per tool call the model asked for (set_tool_call_recorder); None records nothing.
+        self._tool_call_recorder: ToolCallRecorder | None = None
 
         # F026: Execution Integrity
         self._ledgers: dict[str, ExecutionLedger] = {}
@@ -490,6 +505,118 @@ class AgentRunner:
             return tool_name, tool_input, None, alias.note
         return alias.target, alias.translate(tool_input), alias.note, None
 
+    def _alias_target(self, tool_name: str) -> str:
+        """The tool a call to ``tool_name`` becomes: an old name's target, else the name itself (a retired name
+        too). Only the name: no event, no translated input (``_resolve_alias`` does both, once, afterwards). F108:
+        ``split_reason`` judges under this name whether ``reason`` is the tool's own argument."""
+        if tool_name not in CHANGED_TOOLS or self._dispatcher is None:
+            return tool_name
+        alias = self._dispatcher.alias_for(tool_name)
+        return alias.target if alias is not None and alias.target is not None else tool_name
+
+    def _note_tool_call(
+        self,
+        ctx: ExecutionContext,
+        *,
+        turn_id: UUID | None,
+        turn_number: int | None,
+        call_index: int,
+        name_called: str,
+        name: str,
+        tool_input: Any,
+        reason: str | None,
+        outcome: str,
+        result_text: str | None,
+        is_error: bool,
+        refused_by: str | None,
+        duration_ms: int | None,
+        ledger_entry_id: UUID | None,
+        session_id: str | None,
+        started_at: datetime | None,
+    ) -> None:
+        """F108: hand one tool call to the recorder. ``result_text`` is the call's text as its ``ToolResult``
+        keeps it: the result preview of a call that worked, the error text of one that did not. Never raises:
+        recording must not change a turn. The caller checks ``self._tool_call_recorder`` first."""
+        try:
+            self._tool_call_recorder.record(
+                ToolCallRecord(
+                    call_index=call_index,
+                    work_kind=work_kind_for(ctx.kind),
+                    tool_name=name,
+                    tool_name_called=name_called,
+                    outcome=outcome,
+                    session_id=session_id,
+                    parent_session_id=ctx.parent_session_id,
+                    turn_id=turn_id,
+                    turn_number=turn_number,
+                    context_kind=ctx.kind,
+                    subtask_id=ctx.subtask_id,
+                    dag_id=ctx.dag_id,
+                    dag_node_id=ctx.dag_node_id,
+                    reason=reason,
+                    input_text=json.dumps(tool_input, ensure_ascii=False, default=str),
+                    result_preview="" if is_error else (result_text or ""),
+                    is_error=is_error,
+                    error_text=(result_text or "") if is_error else None,
+                    refused_by=refused_by,
+                    duration_ms=duration_ms,
+                    started_at=started_at,
+                    ledger_entry_id=ledger_entry_id,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 -- recording must not change a turn
+            # The type only: an exception message can echo the call's arguments.
+            logger.warning("F108: tool-call record for %s not written (%s)", name, type(exc).__name__)
+
+    def _note_turn(
+        self,
+        ctx: ExecutionContext,
+        *,
+        turn_id: UUID,
+        session_id: str,
+        turn_number: int | None,
+        turn_context: TurnContext,
+        trigger: str,
+        reply: str,
+        error: str | None,
+        claim_check: dict | None,
+        call_indexes: Iterator[int],
+        started_at: datetime | None,
+    ) -> None:
+        """F108: hand the turn's record to the recorder where the turn ends. ``call_indexes`` is the turn's call
+        counter; its next value is the number of tool calls the turn recorded. ``trigger`` is what the turn was
+        given (the user's message, or a background turn's trigger). Never raises: recording must not change a turn.
+        The caller checks ``self._tool_call_recorder`` first."""
+        try:
+            self._tool_call_recorder.record_turn(
+                TurnRecord(
+                    id=turn_id,
+                    work_kind=work_kind_for(ctx.kind),
+                    session_id=session_id,
+                    parent_session_id=ctx.parent_session_id,
+                    turn_number=turn_number,
+                    context_kind=ctx.kind,
+                    frame_id=turn_context.frame.frame_id,
+                    trigger_text=trigger,
+                    memory_context={
+                        "decision": turn_context.recalled_decision_ids,
+                        "fact": turn_context.recalled_fact_ids,
+                        "procedure": turn_context.recalled_procedure_ids,
+                        "episode": turn_context.recalled_episode_ids,
+                    },
+                    critic=turn_context.critic_verdict,
+                    claim_check=claim_check,
+                    reply_text=reply,
+                    error=error,
+                    tool_call_count=next(call_indexes),
+                    started_at=started_at,
+                    ended_at=datetime.now(UTC),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 -- recording must not change a turn
+            # The type only: an exception message can echo the turn's text.
+            logger.warning("F108: turn record not written (%s)", type(exc).__name__)
+
     def _offered_tools(
         self,
         ctx: ExecutionContext,
@@ -502,7 +629,8 @@ class AgentRunner:
     ) -> list[dict[str, Any]]:
         """Exactly the tool definitions a turn is offered, in this order: frame tools (D5),
         the subtask exclusion (012.2), the heartbeat_triage spawn and resolve exclusion, ``tool_filter`` (F034.5),
-        the F078 refuse denylist, F099's ``internal_only`` narrowing, then the per-call ``extra_tools`` schemas (F061).
+        the F078 refuse denylist, F099's ``internal_only`` narrowing, then the per-call ``extra_tools`` schemas (F061);
+        last, with ``tool_reason_enabled``, F108's required ``reason`` on every schema that does not declare its own.
 
         Both loops call this, so there is one definition of the offered set. The
         narrowing keeps only tools for which ``tool_policy.internal_only_allowed``
@@ -539,6 +667,10 @@ class AgentRunner:
             ]
         if extra_tools:
             tools = [*tools, *(schema for schema, _executor in extra_tools.values())]
+        if self._settings.tool_reason_enabled:
+            # F108: the model says why it calls each tool. Added to these offered copies only, after the extra
+            # tools so they get it too; the dispatcher's schemas and its per-frame cache never see it.
+            tools = add_reason_field(tools)
         return tools
 
     def _authorize_tool_call(
@@ -1429,6 +1561,13 @@ class AgentRunner:
             for fork in self._forks:
                 fork.set_context_logger(ctx_logger)
 
+    def set_tool_call_recorder(self, rec: ToolCallRecorder | None) -> None:
+        """F108: the recorder every tool call is handed to (None records nothing). Propagated to the forks, as
+        the snapshot store is: the heartbeat's checks run on one, and a fork made later copies it."""
+        self._tool_call_recorder = rec
+        for fork in self._forks:
+            fork.set_tool_call_recorder(rec)
+
     def _get_context_window_size(self) -> int:
         """Get configured or auto-detected context window size."""
         return self._settings._get_context_window(self._settings.model)
@@ -1464,6 +1603,7 @@ class AgentRunner:
         forked._workspace_dir = self._workspace_dir
         forked._action_review_pusher = self._action_review_pusher
         forked._root_cancelled = self._root_cancelled  # F099 2e: and set_cancelled_roots propagates a later view
+        forked._tool_call_recorder = self._tool_call_recorder  # F108: and set_tool_call_recorder propagates a later one
         # F035.4: the heartbeat's checks, triage and callbacks run on a fork; sharing
         # the logger gives their model calls context_log rows. It was withheld after the
         # April 2026 triage hang (0d1d45e3), when the logger's fire-and-forget writes held
@@ -1563,6 +1703,7 @@ class AgentRunner:
         # and is mid-turn — the new turn would be orphaned. The lock is
         # released automatically on every exit path (return, raise).
         async with self._get_session_lock(session_id):
+            _turn_started = datetime.now(UTC) if self._tool_call_recorder else None  # F108: the turn row's start
             conversation = await self._get_or_create_conversation(session_id)
 
             # 2. Pre-turn (F4: plumb conversation_messages for dedup)
@@ -1603,10 +1744,30 @@ class AgentRunner:
             # 3. Append user message (text-only; upgraded to multimodal after censor check)
             conversation.messages.append(Message(role="user", content=user_message, text_content=user_message))
             usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+            # F108: the turn's own id, a local like the number (numbers repeat after compaction, ids never do),
+            # minted before the censor check so a blocked turn has its row too.
+            _turn_id = uuid4()
+            # F108: the turn's call counter, here so the turn row can count the calls of a turn that raised.
+            _call_indexes = itertools.count()
 
             # 3b. Censor block check — skip LLM if input was blocked
             if turn_context.censor_blocked:
                 response_text = turn_context.censor_block_reason or "I can't process that request."
+                if self._tool_call_recorder:
+                    self._note_turn(
+                        _ctx,
+                        turn_id=_turn_id,
+                        session_id=session_id,
+                        # The number the main path takes below, at the same point (after the user message).
+                        turn_number=(len(conversation.messages) + 1) // 2,
+                        turn_context=turn_context,
+                        trigger=user_message,
+                        reply=response_text,
+                        error=None,
+                        claim_check=None,
+                        call_indexes=_call_indexes,
+                        started_at=_turn_started,
+                    )
                 conversation.messages.append(Message(role="assistant", content=response_text))
                 turn_result = TurnResult(response_text=response_text)
                 await self._cognitive.post_turn(
@@ -1777,6 +1938,8 @@ class AgentRunner:
                             frame_id=turn_context.frame.frame_id,
                             session_id=session_id,
                             turn_number=_turn_number_local,  # F091, see capture above
+                            turn_id=_turn_id,  # F108
+                            call_indexes=_call_indexes,  # F108
                             is_subtask=is_subtask,
                             max_tool_calls=max_tool_calls,
                             model_override=model_override,
@@ -1807,6 +1970,23 @@ class AgentRunner:
                 response_text = "I encountered an error processing your request. Please try again."
                 conversation.messages.append(Message(role="assistant", content=response_text))
                 _caught_exc = e
+            except asyncio.CancelledError:
+                # F108: a cancelled turn skips post_turn (the cancel propagates at once), but still ends in a row.
+                if self._tool_call_recorder:
+                    self._note_turn(
+                        _ctx,
+                        turn_id=_turn_id,
+                        session_id=session_id,
+                        turn_number=_turn_number_local,
+                        turn_context=turn_context,
+                        trigger=user_message,
+                        reply=response_text,
+                        error="cancelled",
+                        claim_check=None,
+                        call_indexes=_call_indexes,
+                        started_at=_turn_started,
+                    )
+                raise
             else:
                 _caught_exc = None
                 # F024 F4/F5: record memory on the SUCCESS path only (needs
@@ -1822,8 +2002,25 @@ class AgentRunner:
                         )
 
             # F026: Post-response claim verification + ghost planning detection
+            _claim_check: dict | None = None  # F108: the claim check's result, for the turn row
             if _caught_exc is None:
-                self._verify_claims(session_id, response_text, tool_results, ledger)
+                _claim_check = self._verify_claims(session_id, response_text, tool_results, ledger)
+
+            # F108: the turn row, before post_turn so a post_turn that raises cannot skip it.
+            if self._tool_call_recorder:
+                self._note_turn(
+                    _ctx,
+                    turn_id=_turn_id,
+                    session_id=session_id,
+                    turn_number=_turn_number_local,
+                    turn_context=turn_context,
+                    trigger=user_message,
+                    reply=response_text,
+                    error=error,
+                    claim_check=_claim_check,
+                    call_indexes=_call_indexes,
+                    started_at=_turn_started,
+                )
 
             # 7. Post-turn (always called, even on error)
             turn_result = TurnResult(
@@ -2259,6 +2456,7 @@ class AgentRunner:
         # awaited. The async generator keeps the lock until exhausted, so
         # the consumer driving the for-loop also extends the protection.
         async with self._get_session_lock(session_id):
+            _turn_started = datetime.now(UTC) if self._tool_call_recorder else None  # F108: see run_turn
             conversation = await self._get_or_create_conversation(session_id)
 
             # Pre-turn with conversation dedup (F4)
@@ -2285,10 +2483,26 @@ class AgentRunner:
 
             # Append user message (text-only; upgraded to multimodal after censor check)
             conversation.messages.append(Message(role="user", content=user_message, text_content=user_message))
+            _stream_turn_id = uuid4()  # F108: see run_turn
+            call_indexes = itertools.count()  # F108: the place of each call in the turn, across every segment
 
             # Censor block check — yield block message and return
             if turn_context.censor_blocked:
                 block_msg = turn_context.censor_block_reason or "I can't process that request."
+                if self._tool_call_recorder:
+                    self._note_turn(
+                        _ctx,
+                        turn_id=_stream_turn_id,
+                        session_id=session_id,
+                        turn_number=(len(conversation.messages) + 1) // 2,  # F108: see run_turn
+                        turn_context=turn_context,
+                        trigger=user_message,
+                        reply=block_msg,
+                        error=None,
+                        claim_check=None,
+                        call_indexes=call_indexes,
+                        started_at=_turn_started,
+                    )
                 conversation.messages.append(Message(role="assistant", content=block_msg))
                 turn_result = TurnResult(response_text=block_msg)
                 await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
@@ -2393,6 +2607,8 @@ class AgentRunner:
             )
             # Harness Phase 1a: exactly what the model is offered this turn.
             offered_names = frozenset(t["name"] for t in tools)
+            # F108: the offered tools whose own schema declares reason keep it in their input.
+            own_reasons = own_reason_tools(tools) if self._settings.tool_reason_enabled else frozenset()
             messages = self._format_messages(conversation)
 
             # F036: Compactor needs flat string for token estimation
@@ -2449,6 +2665,8 @@ class AgentRunner:
             total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
             response_text = ""
             error = None
+            _claim_check: dict | None = None  # F108: the claim check's result, for the turn row
+            _consumer_closed = False  # F108: the consumer closed this generator mid-turn, for the turn row
 
             # F071: scope the per-turn exclusion set to the streaming tool
             # loop — recall_deep can be dispatched inside the for-turn
@@ -2677,6 +2895,19 @@ class AgentRunner:
                     # Execute tools (P1-2: all results in single user message)
                     tool_results_for_message: list[dict[str, Any]] = []
                     for tc in tool_calls:
+                        # F108: the call's place in the turn and its start, and its reason split out of the input
+                        # before anything below reads it (the assistant message above keeps what the model emitted).
+                        call_index = next(call_indexes)
+                        call_started = datetime.now(UTC) if self._tool_call_recorder else None
+                        call_input, reason = tc.get("input", {}), None
+                        if self._settings.tool_reason_enabled:
+                            call_input, reason = split_reason(
+                                self._alias_target(tc["name"]),
+                                call_input,
+                                own_reasons,
+                                self._settings.tool_reason_max_chars,
+                            )
+
                         # Malformed tool-input JSON: never dispatch a blanked-args
                         # call (it can only fail downstream with a misleading
                         # TypeError). Still emit a tool_result so this tool_use
@@ -2699,13 +2930,32 @@ class AgentRunner:
                                     duration_ms=0,
                                 )
                             )
+                            if self._tool_call_recorder:
+                                self._note_tool_call(
+                                    _ctx,
+                                    turn_id=_stream_turn_id,
+                                    turn_number=_stream_turn_number,
+                                    call_index=call_index,
+                                    name_called=tc["name"],
+                                    name=self._alias_target(tc["name"]),
+                                    tool_input=call_input,
+                                    reason=reason,
+                                    outcome="bad_input",
+                                    result_text=tc["input_error"],
+                                    is_error=True,
+                                    refused_by=None,
+                                    duration_ms=0,
+                                    ledger_entry_id=None,
+                                    session_id=session_id,
+                                    started_at=call_started,
+                                )
                             yield StreamEvent(type="tool_end", tool_name=tc["name"])
                             continue
 
                         # An old tool name becomes the call to its target before any check (tc is left as
                         # the model emitted it); a retired name runs nothing and reaches no ledger.
                         tool_name, tool_input, alias_note, retired = self._resolve_alias(
-                            _ctx, tc["name"], tc.get("input", {}), session_id
+                            _ctx, tc["name"], call_input, session_id
                         )
                         if retired is not None:
                             tool_results_for_message.append(
@@ -2716,6 +2966,25 @@ class AgentRunner:
                                     tool_name=tool_name, arguments=tool_input, result=None, error=retired, duration_ms=0
                                 )
                             )
+                            if self._tool_call_recorder:
+                                self._note_tool_call(
+                                    _ctx,
+                                    turn_id=_stream_turn_id,
+                                    turn_number=_stream_turn_number,
+                                    call_index=call_index,
+                                    name_called=tc["name"],
+                                    name=tool_name,
+                                    tool_input=tool_input,
+                                    reason=reason,
+                                    outcome="retired",
+                                    result_text=retired,
+                                    is_error=True,
+                                    refused_by=None,
+                                    duration_ms=0,
+                                    ledger_entry_id=None,
+                                    session_id=session_id,
+                                    started_at=call_started,
+                                )
                             yield StreamEvent(type="tool_end", tool_name=tool_name)
                             continue
 
@@ -2746,6 +3015,25 @@ class AgentRunner:
                                     duration_ms=0,
                                 )
                             )
+                            if self._tool_call_recorder:
+                                self._note_tool_call(
+                                    _ctx,
+                                    turn_id=_stream_turn_id,
+                                    turn_number=_stream_turn_number,
+                                    call_index=call_index,
+                                    name_called=tc["name"],
+                                    name=tool_name,
+                                    tool_input=tool_input,
+                                    reason=reason,
+                                    outcome="refused",
+                                    result_text=refusal_text,
+                                    is_error=True,
+                                    refused_by=refusal.code,
+                                    duration_ms=0,
+                                    ledger_entry_id=None,
+                                    session_id=session_id,
+                                    started_at=call_started,
+                                )
                             if ledger:
                                 ledger.record(tool_name, tool_input, refusal.text, "blocked")
                             await self._ledger_blocked(
@@ -2969,6 +3257,35 @@ class AgentRunner:
                                 duration_ms=duration_ms,
                             )
                         )
+                        if self._tool_call_recorder:
+                            # A gated call opened no ledger row and was never suppressed: test gated first, since
+                            # entry_id and suppressed are bound only on the dispatch branch.
+                            self._note_tool_call(
+                                _ctx,
+                                turn_id=_stream_turn_id,
+                                turn_number=_stream_turn_number,
+                                call_index=call_index,
+                                name_called=tc["name"],
+                                name=tool_name,
+                                tool_input=dispatch_input,
+                                reason=reason,
+                                outcome=(
+                                    "gated"
+                                    if gated
+                                    else "suppressed"
+                                    if suppressed is not None
+                                    else "error"
+                                    if is_error
+                                    else "ran"
+                                ),
+                                result_text=result_text,
+                                is_error=is_error,
+                                refused_by="action_gate" if gated else None,
+                                duration_ms=duration_ms,
+                                ledger_entry_id=None if gated else entry_id,
+                                session_id=session_id,
+                                started_at=call_started,
+                            )
 
                         yield StreamEvent(type="tool_end", tool_name=tool_name)
 
@@ -3017,11 +3334,16 @@ class AgentRunner:
                 logger.info("Stream cancelled (client disconnect) for session %s", session_id)
                 error = "cancelled"
                 _caught_exc = None
+            except GeneratorExit:
+                # F108: the consumer closed the generator mid-turn (aclose()). The turn row says "cancelled", as for a
+                # client disconnect. Only the row: post_turn gets what it got before. GeneratorExit must propagate.
+                _consumer_closed = True
+                raise
             else:
                 _caught_exc = None
 
                 # F026: Post-response claim verification (streaming: warn+inject only)
-                self._verify_claims(session_id, response_text, all_tool_results, ledger)
+                _claim_check = self._verify_claims(session_id, response_text, all_tool_results, ledger)
 
                 # F024 F4/F5: record memory on the SUCCESS path only (needs
                 # response_text). Fix A: link the fact to the active episode so
@@ -3048,6 +3370,21 @@ class AgentRunner:
                         if conversation.messages[i].role == "user":
                             conversation.messages[i] = compact_message_for_history(conversation.messages[i])
                             break
+                # F108: the turn row on every exit, before post_turn (see run_turn).
+                if self._tool_call_recorder:
+                    self._note_turn(
+                        _ctx,
+                        turn_id=_stream_turn_id,
+                        session_id=session_id,
+                        turn_number=_stream_turn_number,
+                        turn_context=turn_context,
+                        trigger=user_message,
+                        reply=response_text,
+                        error="cancelled" if _consumer_closed else error,
+                        claim_check=_claim_check,
+                        call_indexes=call_indexes,
+                        started_at=_turn_started,
+                    )
                 # ALWAYS call post_turn (review P1: guaranteed cleanup).
                 # Shield from cancellation to prevent DB connection pool leaks —
                 # CancelledError during post_turn's DB ops leaves sessions checked
@@ -3250,7 +3587,7 @@ class AgentRunner:
             if _write_lock2 is not None:
                 # Held until an orphaned worker thread finishes.
                 release_write_path_lock_after(_write_lock2, outcome.write_worker)
-        return Dispatched(result_text, is_error, suppressed, send_key)
+        return Dispatched(result_text, is_error, suppressed, send_key, entry_id)
 
     async def execute_single_call(self, ctx: ExecutionContext, tool_name: str, tool_input: dict) -> SingleCall:
         """Run ONE call the owner approved (F099 2d), with no model in between.
@@ -3267,16 +3604,59 @@ class AgentRunner:
             raise ValueError(f"execute_single_call runs an approved_action context, not {ctx.kind!r}")
         if not self._dispatcher:
             raise RuntimeError("No tool dispatcher set -- call set_dispatcher() first")
+        # F108: an approved call may run in another turn, or none: its record gets an id of its own, no turn number.
+        # No model wrote this call here, so there is no reason to split out.
+        name_called, turn_id = tool_name, uuid4()
+        call_started = datetime.now(UTC) if self._tool_call_recorder else None
         tool_name, tool_input, alias_note, retired = self._resolve_alias(ctx, tool_name, tool_input, ctx.session_id)
         if retired is not None:
+            if self._tool_call_recorder:
+                self._note_tool_call(
+                    ctx,
+                    turn_id=turn_id,
+                    turn_number=None,
+                    call_index=0,
+                    name_called=name_called,
+                    name=tool_name,
+                    tool_input=tool_input,
+                    reason=None,
+                    outcome="retired",
+                    result_text=retired,
+                    is_error=True,
+                    refused_by=None,
+                    duration_ms=0,
+                    ledger_entry_id=None,
+                    session_id=ctx.session_id,
+                    started_at=call_started,
+                )
             return SingleCall(retired, True, None)
         if alias_note is not None:
             # A proposal stored under the old name declares the old name: the call it becomes is the one approved.
             ctx = dataclasses.replace(ctx, declared_tools=tuple(canonical_tool_names(ctx.declared_tools or ())))
         refusal = self._authorize_tool_call(ctx, tool_name, frozenset({tool_name}), ctx.session_id, tool_input)
         if refusal is not None:
+            if self._tool_call_recorder:
+                self._note_tool_call(
+                    ctx,
+                    turn_id=turn_id,
+                    turn_number=None,
+                    call_index=0,
+                    name_called=name_called,
+                    name=tool_name,
+                    tool_input=tool_input,
+                    reason=None,
+                    outcome="refused",
+                    result_text=_with_alias_note(alias_note, refusal.text),
+                    is_error=True,
+                    refused_by=refusal.code,
+                    duration_ms=0,
+                    ledger_entry_id=None,
+                    session_id=ctx.session_id,
+                    started_at=call_started,
+                )
             await self._ledger_blocked(ctx, tool_name, tool_input, None, refusal.code)
             return SingleCall(_with_alias_note(alias_note, refusal.text), True, None)
+        start_time = time.monotonic()
         dispatched = await self._dispatch_with_ledger(
             ctx,
             tool_name,
@@ -3288,6 +3668,27 @@ class AgentRunner:
             turn_number=None,
             is_background=ctx.is_background,
         )
+        if self._tool_call_recorder:
+            self._note_tool_call(
+                ctx,
+                turn_id=turn_id,
+                turn_number=None,
+                call_index=0,
+                name_called=name_called,
+                name=tool_name,
+                tool_input=tool_input,
+                reason=None,
+                outcome=(
+                    "suppressed" if dispatched.suppressed is not None else "error" if dispatched.is_error else "ran"
+                ),
+                result_text=_with_alias_note(alias_note, dispatched.text),
+                is_error=dispatched.is_error,
+                refused_by=None,
+                duration_ms=int((time.monotonic() - start_time) * 1000),
+                ledger_entry_id=dispatched.ledger_entry_id,
+                session_id=ctx.session_id,
+                started_at=call_started,
+            )
         return SingleCall(_with_alias_note(alias_note, dispatched.text), dispatched.is_error, dispatched.send_key)
 
     async def _tool_loop(
@@ -3317,6 +3718,8 @@ class AgentRunner:
         turn_number: int | None = None,
         context: ExecutionContext | None = None,  # harness Phase 1a
         usage_out: dict[str, int] | None = None,  # F099 2e: see run_turn
+        turn_id: UUID | None = None,  # F108: minted by run_turn; a caller that passes none gets a fresh one
+        call_indexes: Iterator[int] | None = None,  # F108: run_turn's counter (it counts a turn that raised)
     ) -> tuple[str, list[ToolResult], dict[str, int], list[str]]:
         """Run the tool use loop until completion or max_turns.
 
@@ -3346,6 +3749,9 @@ class AgentRunner:
             refuse_active=refuse_active,
             extra_tools=extra_tools,
         )
+        # F108: the offered tools whose own schema declares reason keep it in their input.
+        own_reasons = own_reason_tools(offered_tools) if self._settings.tool_reason_enabled else frozenset()
+        turn_id = turn_id if turn_id is not None else uuid4()
 
         # Build initial messages from conversation history
         # The latest user message is already in conversation.messages
@@ -3353,6 +3759,8 @@ class AgentRunner:
 
         all_tool_results: list[ToolResult] = []
         keys_this_turn: set[str] = set()  # harness 2b: keys this invocation dispatched
+        # F108: the place of each call in the turn, across every iteration.
+        call_indexes = call_indexes if call_indexes is not None else itertools.count()
         all_thinking_blocks: list[str] = []  # Accumulated across iterations
         # F061: include tool_calls counter so the hardened executor's per-attempt
         # accumulator can populate heart.subtasks.tool_calls_made (was missing).
@@ -3521,6 +3929,18 @@ class AgentRunner:
                     tool_name = block["name"]
                     tool_input = block.get("input", {})
                     tool_use_id = block["id"]
+                    # F108: the call's place in the turn and its start, and its reason split out of the input
+                    # before anything below reads it (the block itself, in the assistant message, is left as is).
+                    call_index = next(call_indexes)
+                    call_started = datetime.now(UTC) if self._tool_call_recorder else None
+                    reason: str | None = None
+                    if self._settings.tool_reason_enabled:
+                        tool_input, reason = split_reason(
+                            self._alias_target(tool_name),
+                            tool_input,
+                            own_reasons,
+                            self._settings.tool_reason_max_chars,
+                        )
 
                     # Malformed tool-input JSON (#598): the aggregator could not
                     # parse this call's streamed input and blanked it to {}.
@@ -3550,6 +3970,25 @@ class AgentRunner:
                                 duration_ms=0,
                             )
                         )
+                        if self._tool_call_recorder:
+                            self._note_tool_call(
+                                ctx,
+                                turn_id=turn_id,
+                                turn_number=turn_number,
+                                call_index=call_index,
+                                name_called=block["name"],
+                                name=self._alias_target(tool_name),
+                                tool_input=tool_input,
+                                reason=reason,
+                                outcome="bad_input",
+                                result_text=input_error,
+                                is_error=True,
+                                refused_by=None,
+                                duration_ms=0,
+                                ledger_entry_id=None,
+                                session_id=session_id,
+                                started_at=call_started,
+                            )
                         continue
 
                     # An old tool name becomes the call to its target before any check (the block is left as
@@ -3566,6 +4005,25 @@ class AgentRunner:
                                 tool_name=tool_name, arguments=tool_input, result=None, error=retired, duration_ms=0
                             )
                         )
+                        if self._tool_call_recorder:
+                            self._note_tool_call(
+                                ctx,
+                                turn_id=turn_id,
+                                turn_number=turn_number,
+                                call_index=call_index,
+                                name_called=block["name"],
+                                name=tool_name,
+                                tool_input=tool_input,
+                                reason=reason,
+                                outcome="retired",
+                                result_text=retired,
+                                is_error=True,
+                                refused_by=None,
+                                duration_ms=0,
+                                ledger_entry_id=None,
+                                session_id=session_id,
+                                started_at=call_started,
+                            )
                         continue
 
                     # Harness: was this tool offered this iteration, and may this context use it?
@@ -3589,6 +4047,25 @@ class AgentRunner:
                                 duration_ms=0,
                             )
                         )
+                        if self._tool_call_recorder:
+                            self._note_tool_call(
+                                ctx,
+                                turn_id=turn_id,
+                                turn_number=turn_number,
+                                call_index=call_index,
+                                name_called=block["name"],
+                                name=tool_name,
+                                tool_input=tool_input,
+                                reason=reason,
+                                outcome="refused",
+                                result_text=refusal_text,
+                                is_error=True,
+                                refused_by=refusal.code,
+                                duration_ms=0,
+                                ledger_entry_id=None,
+                                session_id=session_id,
+                                started_at=call_started,
+                            )
                         if ledger:
                             ledger.record(tool_name, tool_input, refusal.text, "blocked")
                         await self._ledger_blocked(
@@ -3649,6 +4126,7 @@ class AgentRunner:
                     if not gated:
                         start_time = time.monotonic()
                         suppressed: Suppressed | None = None  # harness 2b: set by _open_for_call
+                        ledger_entry_id: UUID | None = None  # F108: an extra tool opens no ledger row
                         # F061: per-call dispatch override for extra_tools.
                         # Routes submit_final_report (and any other per-run
                         # tool) to the executor passed by the subtask harness
@@ -3678,6 +4156,7 @@ class AgentRunner:
                             )
                             result_text, is_error = dispatched.text, dispatched.is_error
                             suppressed = dispatched.suppressed
+                            ledger_entry_id = dispatched.ledger_entry_id
                         duration_ms = int((time.monotonic() - start_time) * 1000)
 
                         # F026: Record in execution ledger (post-dispatch). A
@@ -3747,6 +4226,35 @@ class AgentRunner:
                             duration_ms=duration_ms,
                         )
                     )
+                    if self._tool_call_recorder:
+                        # A gated call opened no ledger row and was never suppressed: test gated first, since
+                        # ledger_entry_id and suppressed are bound only on the dispatch branch.
+                        self._note_tool_call(
+                            ctx,
+                            turn_id=turn_id,
+                            turn_number=turn_number,
+                            call_index=call_index,
+                            name_called=block["name"],
+                            name=tool_name,
+                            tool_input=tool_input,
+                            reason=reason,
+                            outcome=(
+                                "gated"
+                                if gated
+                                else "suppressed"
+                                if suppressed is not None
+                                else "error"
+                                if is_error
+                                else "ran"
+                            ),
+                            result_text=result_text,
+                            is_error=is_error,
+                            refused_by="action_gate" if gated else None,
+                            duration_ms=duration_ms,
+                            ledger_entry_id=None if gated else ledger_entry_id,
+                            session_id=session_id,
+                            started_at=call_started,
+                        )
 
                     # F061 PR-3 Codex review P2: stop dispatching remaining
                     # tool_use blocks once a successful terminal extra tool
@@ -4256,13 +4764,17 @@ Rules:
         response_text: str,
         tool_results: list[ToolResult],
         ledger: ExecutionLedger,
-    ) -> None:
+    ) -> dict | None:
         """F026: Post-response claim verification and ghost planning detection.
 
         Note: Spec says block-and-rerun for external claims, but streaming
         can't unsend yielded text. Both paths use inject-correction-for-next-turn.
         Accepted limitation from plan review.
+
+        Returns the claim check's result as logged (``f026_claim_verification``), for the F108 turn row; None
+        when no claim verifier runs.
         """
+        claim_check: dict | None = None
         # Audit CL-4 (2026-06-09, review follow-up): only SUCCESSFUL tool calls
         # this turn can ground an action claim. A blocked/errored bash or
         # web_fetch must not let "I pushed the code" verify — mirrors the
@@ -4289,30 +4801,27 @@ Rules:
                 ledger,
                 turn_evidence=turn_evidence,
             )
-            self._log_f026_decision(
-                "f026_claim_verification",
-                {
-                    "verified": verification.verified,
-                    "claim_count": len(verification.claims),
-                    "claims": [
-                        {"kind": c.kind, "evidence": c.evidence, "text": c.text[:120]} for c in verification.claims
-                    ],
-                    "turn": ledger.current_turn if ledger is not None else None,
-                    "violation_count": len(verification.violations),
-                    "violations": [
-                        {
-                            "claimed_text": v.claimed_text[:200],
-                            "expected_tool": v.expected_tool,
-                            "found_in_turn": v.found_in_turn,
-                            "found_in_ledger": v.found_in_ledger,
-                        }
-                        for v in verification.violations
-                    ],
-                    "tool_names_this_turn": turn_tool_names,
-                    "mode": self._settings.claim_verification_mode,
-                },
-                session_id=session_id,
-            )
+            claim_check = {
+                "verified": verification.verified,
+                "claim_count": len(verification.claims),
+                "claims": [
+                    {"kind": c.kind, "evidence": c.evidence, "text": c.text[:120]} for c in verification.claims
+                ],
+                "turn": ledger.current_turn if ledger is not None else None,
+                "violation_count": len(verification.violations),
+                "violations": [
+                    {
+                        "claimed_text": v.claimed_text[:200],
+                        "expected_tool": v.expected_tool,
+                        "found_in_turn": v.found_in_turn,
+                        "found_in_ledger": v.found_in_ledger,
+                    }
+                    for v in verification.violations
+                ],
+                "tool_names_this_turn": turn_tool_names,
+                "mode": self._settings.claim_verification_mode,
+            }
+            self._log_f026_decision("f026_claim_verification", claim_check, session_id=session_id)
             if verification.verified:
                 logger.info("F026 claims: verified (%d tools this turn)", len(turn_tool_names))
             else:
@@ -4337,6 +4846,7 @@ Rules:
                     logger.warning("Ghost planning detected (warn) in session %s", session_id)
                 else:
                     logger.debug("Ghost planning detected (shadow) in session %s", session_id)
+        return claim_check
 
     async def _get_or_create_conversation(self, session_id: str) -> Conversation:
         """Get existing or create new conversation with LRU eviction.

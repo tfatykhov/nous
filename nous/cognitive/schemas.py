@@ -206,6 +206,8 @@ class TurnContext(BaseModel):
     diagnostic_nudges: str = ""  # F024: Critic diagnostic observations
     censor_injected_context: dict[str, str] = Field(default_factory=dict)  # F031: censor_id -> action results
     sections_by_tier: dict[str, str] = Field(default_factory=dict)  # F036: tier -> joined text
+    # F108: the data of this turn's critic_classified event (the turn record keeps a copy); None when no critic ran.
+    critic_verdict: dict | None = None
 
 
 class ToolResult(BaseModel):

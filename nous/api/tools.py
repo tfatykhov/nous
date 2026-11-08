@@ -457,6 +457,11 @@ class ToolDispatcher:
         <parameter> tag inside another string arg recovered. The ONE repair --
         ``dispatch`` runs it, and ``repaired_args`` exposes its result."""
         schema = self._schemas.get(name) or {}
+        if "reason" in args and "reason" not in (schema.get("properties") or {}):
+            # F108: the reason the model gives for a call (offered on every tool) is the runner's to record, not the
+            # handler's. The runner takes it out first; this second line of defence runs before the salvage, and so
+            # before dispatch's type check, and an idempotency key derived from repaired_args never sees it.
+            args = {k: v for k, v in args.items() if k != "reason"}
         missing = [k for k in schema.get("required") or [] if k not in args]
         salvaged_keys: list[str] = []
         if missing and self._arg_salvage_enabled:

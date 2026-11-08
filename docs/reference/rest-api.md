@@ -67,6 +67,7 @@ Documented routes served by `nous/api/rest.py`, which is the full list. Part of 
 | GET | `/dashboard/density` | Graph density dashboard data (F040) |
 | GET | `/dashboard/retrieval` | F091 recent retrievals + window-level disposition/leg rollup |
 | GET | `/dashboard/retrieval/{entry_id}` | F091 one retrieval's candidates (grouped by disposition) + graph-expansion edges |
+| GET | `/dashboard/observability` | F035 observability: `event_bus` (bus stats and queue depth), `recent_traces` (last 10), `recent_modifications` (last 24 h), `drift` (latest behaviour snapshot), `drift_trends` (7 days), `context_log` (last 10 model calls, heartbeat calls left out) and, F108, `recording`: `{"tool_calls": {written, dropped_timeout, dropped_error, dropped_backpressure, unlabelled}}`, the tool-call recorder's counters since the process started (`RecorderStats`), or `{"tool_calls": null}` while `NOUS_TOOL_CALL_LOG_ENABLED` is off |
 | GET | `/dashboard/consolidation` | F035.6 recent consolidation cycles (sleep audit diff) |
 | GET | `/dashboard/consolidation/{cycle_id}` | F035.6 one cycle's per-action diffs |
 | GET | `/dashboard/execution` | Harness dashboard: the durable execution ledger (`window`, `context`, `status`, `effect`, `q`, `limit`, `before` keyset); `attention` = keyed sends with an unknown outcome |
