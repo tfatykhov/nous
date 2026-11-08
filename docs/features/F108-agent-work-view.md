@@ -1,6 +1,6 @@
 # F108: Agent Work View
 
-**Status:** PR 2 in progress (Phase 1, recording). PR 1 (#870, merged) records tool calls and turns; PR 2 records the model-call numbers. Every setting defaults off: `NOUS_TOOL_CALL_LOG_ENABLED` and `NOUS_TOOL_REASON_ENABLED` (PR 1), `NOUS_MODEL_CALL_LOG_ENABLED` (PR 2). Later PRs add the full model-call text, the views and the tool notes.
+**Status:** PR 3 in progress (Phase 1, recording). PR 1 (#870, merged) records tool calls and turns; PR 2 (#871, merged) records the model-call numbers; PR 3 records the model-call text. Every setting defaults off: `NOUS_TOOL_CALL_LOG_ENABLED` and `NOUS_TOOL_REASON_ENABLED` (PR 1), `NOUS_MODEL_CALL_LOG_ENABLED` (PR 2), `NOUS_MODEL_CALL_TEXT_ENABLED` (PR 3). Later PRs add the cutover from `context_log`, the views and the tool notes.
 
 ## Problem
 
@@ -84,23 +84,71 @@ Measured in prod after deploy, with the flags turned on: rows per hour, the `unl
 - **Background calls inside a turn:** the critic, the epistemic gate, the date window, query expansion, admission and the like carry a purpose but no turn id; only the monitor and attachment sites pass a session.
 - **Out of scope:** model calls made by `scripts/` and `nous_eval/` are not recorded.
 
+## What PR 3 records (`NOUS_MODEL_CALL_TEXT_ENABLED`)
+
+### Model-call text (`nous_system.model_text_block` and `nous_system.model_call_block_ref`, migration 102)
+
+The full text of each recorded model call: what it sent and what it got back (`TextStore`, `nous/observability/model_call_text.py`). A call's system blocks (a text block as its text), its messages (JSON), its tool list (JSON) and its response's content (JSON) are each one block. A stream's response is rebuilt from its content events. Nothing else of the payload is stored: no header, no auth, no other key.
+
+Each block's body:
+
+- has every base64 attachment over 1 KB (an image or document `source.data`, a data URL) replaced by `[base64 N bytes]`;
+- is redacted with the ledger's redaction (`redact_output`);
+- is cut at `NOUS_MODEL_CALL_TEXT_BLOCK_MAX_CHARS` (200,000) characters and then ends with `[truncated N chars]`. Over the cap only the head and a scan pad are redacted, and the pad is dropped, so a secret the cut splits is not kept in part.
+
+A block is stored once per agent, under the sha256 of that body (`model_text_block`), so a block that repeats (the system prompt, the tool list, the earlier messages of a session) is stored once. Each call lists its blocks in order (`model_call_block_ref`: the part, `system`, `messages`, `tools` or `response`, then `ord`), and its refs are deleted with its `model_call_log` row. The text is kept 7 days (see Retention).
+
+### How the text is written
+
+- **After the numbers.** The text write is submitted once the call's `model_call_log` row is committed (its refs need that row), as a write of its own through the same `BoundedWriter`, with its own pending cap of 50: a text write past it is dropped and counted, never counts against the other writes' 500, and never evicts a numbers write. A text failure never touches the numbers row.
+- **Nothing at the call's exit but copies of containers.** The scope's exit copies the lists, and each message down to its content blocks, never a string: the runner appends to the message list, and compaction rewrites an aged tool result in place right after the call. Serialising, redacting and hashing all run in the write.
+- **One transaction per call.** The write upserts the call's distinct blocks in hash order, then inserts its refs. A block already stored is touched (`created_at = now()`), so `created_at` means "last used".
+- **Redaction is the cost.** It takes about 0.35 ms per KB. A block over 20,000 characters is redacted in a thread, but CPython's regex engine holds the GIL, so that thread shares the CPU with the event loop rather than freeing it. What keeps the steady state cheap is an LRU of the recently prepared blocks (at most 1,024 blocks and 4,000,000 characters): a block sent again is not redacted again, so a call redacts only its new blocks. Measured in the Task 14 review on a 374 KB context: 1 to 5 ms of loop time per call with a warm LRU, about 140 ms cold (process start) in stalls of at most one block each.
+
+### Wiring
+
+`main.py` builds the `TextStore` on the shared writer and hands it to the `ModelCallRecorder` only when both `NOUS_MODEL_CALL_LOG_ENABLED` and `NOUS_MODEL_CALL_TEXT_ENABLED` are on. With the text on and the numbers off, it builds no store, logs one WARNING at startup and records no text.
+
+### Measured
+
+Measured in prod after deploy, with the text on, from the block and ref tables. Over a window (an hour, then a day):
+
+- **Bytes per call, with dedup:** the growth of `pg_total_relation_size` of `model_text_block` and `model_call_block_ref` (heap, TOAST and indexes) over the window, divided by the calls whose refs were written in it (`count(DISTINCT call_id)` of the refs created in the window). Only a block not stored before adds to the size, so the figure includes the dedup.
+- **GB per week:** the bytes per call times the calls per week (about 14,400 main-loop calls, plus the background calls the numbers table counts). The sweep keeps 7 days of it.
+
+The numbers follow from prod in a later PR.
+
+### Known limits
+
+- **What is stored is the content sent, not its exact bytes.** `cache_control` is left out of every block, a user message sent as one text block is stored as its string, and JSON keys are sorted, so that a block hashes the same from call to call (the runner moves the cache marker and sends the same message in both shapes). Where the cache breakpoints were is not stored: the numbers row (cache reads and writes, the cache break) and the runner's fixed breakpoint placement answer that. If a view ever needs it, a per-ref flag would keep the dedup.
+- **A rebuilt stream** follows `_aggregate`'s rules in code of its own. Its thinking blocks have no `signature`. A stream retried in the middle of its body, after some events were yielded, mixes both attempts' content, as the runner sees it.
+- **Counters.** The store counts its own writes (`TextStore.stats`), which no endpoint shows yet. A text write lost because its call's numbers write was dropped (backpressure, timeout or error) is counted only in the numbers counters (`recording.model_calls`): the text could not have been stored without its row.
+- **Shared slots.** Text writes share the writer's 4 concurrent writes, so under heavy text load a numbers write can wait behind the text writes queued before it (at most 50; about 2 s in the worst cold case). It is never dropped because of text.
+- **Every call sends every distinct block's body to Postgres,** because the upsert touches each block: about the size of the call's context per call, over the local socket. A follow-up could touch the stored blocks first and send only the missing bodies.
+- **The redaction thread does not free the loop** (above); a process pool or a cheaper redactor would.
+- **A change deeper than a content block** made to a message after the call would reach the stored text. Nothing makes one today.
+
 ## How the rows are written
 
-- **One bounded writer.** `main.py` builds one `BoundedWriter` (`nous/observability/recording.py`) when `NOUS_TOOL_CALL_LOG_ENABLED` or `NOUS_MODEL_CALL_LOG_ENABLED` is on, never two, and hands it to the `ToolCallRecorder` and the `ModelCallRecorder`. A write is a factory scheduled fire-and-forget: at most 4 writes hold a pool connection at once, each is cut off after 30 s, and past 500 pending writes a new one is dropped. `record`, `record_turn`, a scope's exit and `record_bucket` are synchronous and never raise, so recording never fails or slows a turn or a model call.
+- **One bounded writer.** `main.py` builds one `BoundedWriter` (`nous/observability/recording.py`) when `NOUS_TOOL_CALL_LOG_ENABLED` or `NOUS_MODEL_CALL_LOG_ENABLED` is on, never two, and hands it to the `ToolCallRecorder` and the `ModelCallRecorder`. A write is a factory scheduled fire-and-forget: at most 4 writes hold a pool connection at once, each is cut off after 30 s, and past 500 pending writes a new one is dropped (the model-call text has a pending cap of its own, 50). `record`, `record_turn`, a scope's exit and `record_bucket` are synchronous and never raise, so recording never fails or slows a turn or a model call.
 - **Counted, never silent.** Every outcome is counted (`written`, `dropped_timeout`, `dropped_error`, `dropped_backpressure`) and every failure is logged at WARNING. `GET /dashboard/observability` returns each recorder's counters, `recording.tool_calls` and `recording.model_calls` (each null while its log is off). The model-call recorder also counts `unlabelled` calls and `dropped_late` reports (an HTTP attempt or a stream event reported after its call's row was written).
 - **Shutdown.** `shutdown_components` clears the model-call hooks, then waits up to 5 s for the pending writes immediately before `database.disconnect()`, after every producer of turns has stopped.
-- **Off means nothing.** With both logs off, no writer, recorder or sweep is built, the clients and hooks hold no recorder, and nothing is recorded. Each log is off on its own: with only the model-call log on, the runner records no tool calls, and the other way round. The runner computes a call's context estimate once, and only when the old `/context/log*` ring or a recording client takes it.
+- **Off means nothing.** With both logs off, no writer, recorder or sweep is built, the clients and hooks hold no recorder, and nothing is recorded. Each log is off on its own: with only the model-call log on, the runner records no tool calls, and the other way round. With the text off, no text store or text sweep is built and a scope keeps nothing for it. The runner computes a call's context estimate once, and only when the old `/context/log*` ring or a recording client takes it.
 - **The estimate changed for every reader.** Even with every flag off, the old `/context/log*` ring, the dashboard utilisation and the Telegram `/context` estimates rise after PR 2: the preamble, tool results and the sections formerly folded into their neighbour now count. This is telemetry only, not a regression.
 
 ## Retention
 
 Tool-call and turn rows are kept `NOUS_TOOL_CALL_RETENTION_DAYS` (30) days. A loop (`_work_view_retention_loop` in `main.py`, started with either log) deletes this agent's `tool_call_log` and `agent_turn_log` rows that started earlier, in one transaction (`sweep_tool_calls`, `nous/observability/work_view_retention.py`). It is agent-scoped, so one agent never deletes the rows of another that keeps them longer, and both tables index `(agent_id, started_at)` for it. The first pass runs at startup and the next ones once a day, as for the retrieval-log sweep, so a process restarted more often than once a day still sweeps. A failed sweep logs a WARNING and is tried again a day later. A retention of 0 or less means no sweep of that log.
 
-Model-call rows (calls and minute buckets) are kept `NOUS_MODEL_CALL_RETENTION_DAYS` (30) days. While the model-call log is on, the same loop deletes this agent's older `model_call_log` rows (`sweep_model_calls`, agent-scoped, on `(agent_id, started_at)`); their attempts go with them (`ON DELETE CASCADE`). Each log's sweep runs in a try of its own, so one failing sweep never skips the other.
+Model-call rows (calls and minute buckets) are kept `NOUS_MODEL_CALL_RETENTION_DAYS` (30) days. While the model-call log is on, the same loop deletes this agent's older `model_call_log` rows (`sweep_model_calls`, agent-scoped, on `(agent_id, started_at)`); their attempts go with them (`ON DELETE CASCADE`).
+
+Model-call text is kept `NOUS_MODEL_CALL_TEXT_RETENTION_DAYS` (7) days. While both the model-call log and the text are on, the same loop deletes this agent's refs older than that, then its blocks that no call references and no store has used for an hour, in one transaction (`sweep_model_call_text`, agent-scoped). A store touches every block it sends, so a block in use is never old. The sweep locks the blocks it deletes in hash order, the order a store upserts them in, so a sweep and a store never deadlock, and a block a store touches while the sweep waits for it is kept: its new ref never meets a deleted block. The numbers rows are untouched and keep their own 30 days; a call's refs go with its row, so the text is never kept longer than its numbers.
+
+Each sweep runs in a try of its own, so one failing sweep never skips another.
 
 ## Who reads the rows
 
-The dashboards, and Nous itself: the `db_query` reader (`nous_reader`, `scripts/ops/db_roles.sql` section 5d) may read `tool_call_log`, `model_call_log` and `model_call_attempt`, so Nous can look up its own tool calls, their reasons and its own model calls. It never reads `agent_turn_log`, which holds message text. This is the one exception to "dashboards read the observability tables, the agent never does".
+The dashboards, and Nous itself: the `db_query` reader (`nous_reader`, `scripts/ops/db_roles.sql` section 5d) may read `tool_call_log`, `model_call_log` and `model_call_attempt`, so Nous can look up its own tool calls, their reasons and its own model calls. It never reads `agent_turn_log`, which holds message text, nor the model-call text (`model_text_block` and `model_call_block_ref`, the full prompts and responses): `db_roles.sql` lists none of them. This is the one exception to "dashboards read the observability tables, the agent never does".
 
 ## Non-goals
 
@@ -122,13 +170,15 @@ Over 30 days that is 22,500 to 120,000 tool-call rows (about 30 MB typical, 520 
 
 The daily sweep deletes one day's rows, about 1,250 to 6,100. Deletes of that size need only autovacuum: the dead rows are reclaimed and their space reused by the next days' inserts, so the tables stay near their 30-day size. No partitioning is needed.
 
+The model-call text (PR 3) is not in these figures: its size, with the dedup, is measured in prod after deploy (see What PR 3 records, Measured).
+
 ## Turning it on
 
-`docker-compose.yml` passes `NOUS_*` variables one by one and is a code-owner path, so this PR does not change it. To turn recording on, the owner adds pass-through lines for the settings to the `nous` service (`- NOUS_TOOL_CALL_LOG_ENABLED=${NOUS_TOOL_CALL_LOG_ENABLED:-false}`, `- NOUS_TOOL_REASON_ENABLED=${NOUS_TOOL_REASON_ENABLED:-false}`, and any cap or retention that should differ from its default) and sets the values in the host `.env`; a value only in `.env` never reaches the container. Migration 100 is applied by the application at start, before `scripts/ops/db_roles.sql` is run again to grant the reader `tool_call_log` (see [database roles](../reference/database-roles.md)). The model-call numbers need `- NOUS_MODEL_CALL_LOG_ENABLED=${NOUS_MODEL_CALL_LOG_ENABLED:-false}` (and `NOUS_MODEL_CALL_RETENTION_DAYS` if it should differ from 30) the same way; migration 101 is applied at start, before `db_roles.sql` is run again to grant the reader `model_call_log` and `model_call_attempt`.
+`docker-compose.yml` passes `NOUS_*` variables one by one and is a code-owner path, so this PR does not change it. To turn recording on, the owner adds pass-through lines for the settings to the `nous` service (`- NOUS_TOOL_CALL_LOG_ENABLED=${NOUS_TOOL_CALL_LOG_ENABLED:-false}`, `- NOUS_TOOL_REASON_ENABLED=${NOUS_TOOL_REASON_ENABLED:-false}`, and any cap or retention that should differ from its default) and sets the values in the host `.env`; a value only in `.env` never reaches the container. Migration 100 is applied by the application at start, before `scripts/ops/db_roles.sql` is run again to grant the reader `tool_call_log` (see [database roles](../reference/database-roles.md)). The model-call numbers need `- NOUS_MODEL_CALL_LOG_ENABLED=${NOUS_MODEL_CALL_LOG_ENABLED:-false}` (and `NOUS_MODEL_CALL_RETENTION_DAYS` if it should differ from 30) the same way; migration 101 is applied at start, before `db_roles.sql` is run again to grant the reader `model_call_log` and `model_call_attempt`. The text needs `- NOUS_MODEL_CALL_TEXT_ENABLED=${NOUS_MODEL_CALL_TEXT_ENABLED:-false}` as well as the numbers line (and `NOUS_MODEL_CALL_TEXT_RETENTION_DAYS` or `NOUS_MODEL_CALL_TEXT_BLOCK_MAX_CHARS` if they should differ from 7 and 200,000); migration 102 is applied at start and needs no `db_roles.sql` run, since the reader reads neither text table.
 
 ## Reference
 
-- Settings: [environment variables](../reference/environment-variables.md) (`NOUS_TOOL_CALL_LOG_ENABLED`, `NOUS_TOOL_REASON_ENABLED`, `NOUS_TOOL_CALL_RETENTION_DAYS`, `NOUS_TOOL_INPUT_MAX_CHARS`, `NOUS_TOOL_RESULT_PREVIEW_CHARS`, `NOUS_TOOL_REASON_MAX_CHARS`, `NOUS_MODEL_CALL_LOG_ENABLED`, `NOUS_MODEL_CALL_RETENTION_DAYS`).
+- Settings: [environment variables](../reference/environment-variables.md) (`NOUS_TOOL_CALL_LOG_ENABLED`, `NOUS_TOOL_REASON_ENABLED`, `NOUS_TOOL_CALL_RETENTION_DAYS`, `NOUS_TOOL_INPUT_MAX_CHARS`, `NOUS_TOOL_RESULT_PREVIEW_CHARS`, `NOUS_TOOL_REASON_MAX_CHARS`, `NOUS_MODEL_CALL_LOG_ENABLED`, `NOUS_MODEL_CALL_RETENTION_DAYS`, `NOUS_MODEL_CALL_TEXT_ENABLED`, `NOUS_MODEL_CALL_TEXT_BLOCK_MAX_CHARS`, `NOUS_MODEL_CALL_TEXT_RETENTION_DAYS`).
 - Endpoint: [REST API](../reference/rest-api.md) (`GET /dashboard/observability`, `recording`).
 - Reader: [database roles](../reference/database-roles.md) and [agent tools](../reference/agent-tools.md) (`db_query`).
-- Code: `nous/observability/recording.py`, `nous/observability/tool_calls.py`, `nous/observability/model_calls.py`, `nous/observability/work_view_retention.py`, `nous/api/runner.py` (`_note_tool_call`, `_note_turn`, the call contexts), `nous/api/anthropic_client.py` (`set_recorder`, the scopes and attempts), `nous/browser/loop.py`, `nous/brain/embeddings.py` and `nous/heart/reranker.py` (`set_recorder`), `nous/main.py` (wiring, retention loop, shutdown).
+- Code: `nous/observability/recording.py`, `nous/observability/tool_calls.py`, `nous/observability/model_calls.py`, `nous/observability/model_call_text.py`, `nous/observability/work_view_retention.py`, `nous/api/runner.py` (`_note_tool_call`, `_note_turn`, the call contexts), `nous/api/anthropic_client.py` (`set_recorder`, the scopes and attempts), `nous/browser/loop.py`, `nous/brain/embeddings.py` and `nous/heart/reranker.py` (`set_recorder`), `nous/main.py` (wiring, retention loop, shutdown).

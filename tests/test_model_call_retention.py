@@ -147,7 +147,7 @@ class _Database:
         if table in self.fail_on:
             self.passes.set()
             raise ConnectionError(f"{table} is down in this test")
-        self.deleted.append((table, params["d"]))
+        self.deleted.append((table, params.get("d")))
         return SimpleNamespace(rowcount=0)
 
     async def commit(self) -> None:
@@ -162,6 +162,8 @@ def _loop_settings(**overrides: Any) -> SimpleNamespace:
         "tool_call_retention_days": 30,
         "model_call_log_enabled": True,
         "model_call_retention_days": 7,
+        "model_call_text_enabled": False,
+        "model_call_text_retention_days": 7,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -310,6 +312,7 @@ def _boot(monkeypatch, scenario_checks, **flags: Any) -> None:
                 async with database.session() as session:
                     for statement in (
                         "DELETE FROM nous_system.model_call_log WHERE agent_id = :a",
+                        "DELETE FROM nous_system.model_text_block WHERE agent_id = :a",
                         "DELETE FROM heart.rubric_versions WHERE agent_id = :a",
                         "DELETE FROM nous_system.agents WHERE id = :a",
                     ):

@@ -159,6 +159,8 @@ def test_sweep_failure_logs_warning(monkeypatch, caplog):
         tool_call_retention_days=30,
         model_call_log_enabled=False,
         model_call_retention_days=30,
+        model_call_text_enabled=False,
+        model_call_text_retention_days=7,
     )
     database = _FailingDatabase()
 
@@ -379,6 +381,7 @@ ENV_ROWS = {
     "NOUS_MODEL_CALL_RETENTION_DAYS": "30",
     "NOUS_MODEL_CALL_TEXT_ENABLED": "false",
     "NOUS_MODEL_CALL_TEXT_BLOCK_MAX_CHARS": "200000",
+    "NOUS_MODEL_CALL_TEXT_RETENTION_DAYS": "7",
 }
 
 
