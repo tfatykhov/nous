@@ -230,9 +230,7 @@ async def test_stream_events_merge_usage_max_per_key(db):
             scope.observe_stream_event(StreamEvent(type="text_delta", text="hi"))
             # a later event never lowers a count, and done gives the output only
             scope.observe_stream_event(
-                StreamEvent(
-                    type="done", stop_reason="tool_use", usage={"output_tokens": 77, "input_tokens": 0}
-                )
+                StreamEvent(type="done", stop_reason="tool_use", usage={"output_tokens": 77, "input_tokens": 0})
             )
         await writer.drain(5.0)
         [row] = await _rows(db, agent)
@@ -263,9 +261,10 @@ async def test_unknown_purpose_becomes_unlabelled_and_counted(db):
         by_source = {(r["purpose"], r["label_source"]) for r in rows}
         assert by_source == {("unlabelled", "explicit"), ("unlabelled", "none"), ("critic", "explicit")}
         # an explicit context keeps its session even when its purpose is not one of ours
-        assert next(r for r in rows if r["label_source"] == "explicit" and r["purpose"] == "unlabelled")[
-            "session_id"
-        ] == "s-x"
+        assert (
+            next(r for r in rows if r["label_source"] == "explicit" and r["purpose"] == "unlabelled")["session_id"]
+            == "s-x"
+        )
     finally:
         await _delete(db, agent)
 

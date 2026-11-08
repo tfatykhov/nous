@@ -113,7 +113,7 @@ SECTION_MARKERS: dict[str, str] = {
     "## Relevant Facts": "relevant_facts",
     "## Session Profile": "session_profile",
     "## Known Procedures": "known_procedures",
-    "## Procedure Catalog": "procedure_catalog",        # F079 catalog-first breadth
+    "## Procedure Catalog": "procedure_catalog",  # F079 catalog-first breadth
     "## Recommended Procedures": "recommended_procedures",  # F079 option C Critic pointer
     "## Past Episodes": "past_episodes",
     "## Recent Conversations": "recent_conversations",
@@ -553,20 +553,23 @@ class ModelCallScope:
         self, http_status: int | None, error_type: str | None, error_text: str | None, duration_ms: float | None
     ) -> None:
         """Add one HTTP attempt (the call's retries are its attempts). Its error text is redacted and clipped. An
-        attempt reported after the row was written is ignored."""
+        attempt reported after the row was written is ignored. Never raises: a client's response hook calls it."""
         if self._written:
             return
-        now = _utcnow()
-        self._attempts.append(
-            {
-                "attempt_no": len(self._attempts) + 1,
-                "started_at": now - timedelta(milliseconds=duration_ms) if duration_ms else now,
-                "duration_ms": None if duration_ms is None else round(duration_ms),
-                "http_status": http_status,
-                "error_type": error_type,
-                "error_text": None if error_text is None else _clip_error(error_text),
-            }
-        )
+        try:
+            now = _utcnow()
+            self._attempts.append(
+                {
+                    "attempt_no": len(self._attempts) + 1,
+                    "started_at": now - timedelta(milliseconds=duration_ms) if duration_ms else now,
+                    "duration_ms": None if duration_ms is None else round(duration_ms),
+                    "http_status": http_status,
+                    "error_type": error_type,
+                    "error_text": None if error_text is None else _clip_error(str(error_text)),
+                }
+            )
+        except Exception as exc:
+            logger.warning("F108: model-call attempt not recorded (%s)", type(exc).__name__)
 
     def _merge_usage(self, usage: Any, keys: tuple[str, ...]) -> None:
         """Keep the largest count seen for each of ``keys`` (a later event never lowers one)."""
