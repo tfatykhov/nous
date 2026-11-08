@@ -633,6 +633,88 @@ async def test_payload_and_section_text_come_from_the_text_store_when_text_on(db
         await delete_rows(db, agent)
 
 
+async def test_flag_off_endpoints_serve_the_base_bytes():
+    """With the flag off the context endpoints answer byte for byte what the base code (b82e940e) answered: each
+    expected body below is that code's expression over the same ring, rendered by the same JSONResponse."""
+    from starlette.responses import JSONResponse
+
+    ring = ContextLogger(full_payload_enabled=True)
+    for i, (sid, call_type) in enumerate([("c", "chat"), ("h", "heartbeat"), ("t", "subtask"), ("c", "chat")]):
+        entry = ring.log(
+            session_id=sid,
+            turn_number=i,
+            call_type=call_type,
+            model="m",
+            system_prompt=f"## Current Date/Time\nnow\n\n## Relevant Facts\n- fact {i}",
+            messages=[{"role": "user", "content": "x" * (10 * i)}],
+            tools=[{"name": f"tool{i}"}],
+            frame_id="f",
+            context_window=1000,
+            payload={"sid": sid, "i": i},
+        )
+        ring.update_response(entry.id, input_tokens=i, output_tokens=2, cache_read=100, stop_reason="end_turn")
+    newest, oldest = ring.get_recent()[0], ring.get_recent()[-1]
+
+    def base_diff(a: Any, b: Any) -> dict[str, Any]:
+        token_delta = {}
+        for s in set(a.token_breakdown) | set(b.token_breakdown):
+            d = b.token_breakdown.get(s, 0) - a.token_breakdown.get(s, 0)
+            if d != 0:
+                token_delta[s] = d
+        return {
+            "a": a.id,
+            "b": b.id,
+            "token_delta": {"total": b.total_tokens_est - a.total_tokens_est, "by_section": token_delta},
+            "sections_added": [s for s in b.sections_present if s not in a.sections_present],
+            "sections_removed": [s for s in a.sections_present if s not in b.sections_present],
+            "tools_added": [t for t in b.tool_names if t not in a.tool_names],
+            "tools_removed": [t for t in a.tool_names if t not in b.tool_names],
+            "messages_delta": b.messages_count - a.messages_count,
+        }
+
+    expected = {
+        "/context/log": {
+            "entries": [e.to_dict() for e in ring.get_recent(session_id=None, limit=20, exclude_call_type="heartbeat")]
+        },
+        "/context/log?session_id=h&limit=5": {
+            "entries": [e.to_dict() for e in ring.get_recent(session_id="h", limit=5, exclude_call_type=None)]
+        },
+        "/context/log?limit=1": {
+            "entries": [e.to_dict() for e in ring.get_recent(session_id=None, limit=1, exclude_call_type="heartbeat")]
+        },
+        f"/context/log/{oldest.id}": oldest.to_dict(),
+        f"/context/log/{oldest.id}/payload": ring.get_payload(oldest.id),
+        f"/context/log/{oldest.id}/sections": {
+            "sections": oldest.token_breakdown,
+            "sections_text": oldest.sections_text,
+            "total_tokens_est": oldest.total_tokens_est,
+            "sections_present": oldest.sections_present,
+        },
+        f"/context/diff?a={oldest.id}&b={newest.id}": base_diff(oldest, newest),
+    }
+    async with rest(context_logger=ring) as http:
+        for path, body in expected.items():
+            got = await http.get(path)
+            assert (got.status_code, got.content) == (200, JSONResponse(body).body), path
+        observability = (await http.get("/dashboard/observability")).json()["context_log"]
+        base = [e.to_dict() for e in ring.get_recent(limit=10, exclude_call_type="heartbeat")]
+        assert json.dumps(observability) == json.dumps(base)
+        for path, status, body in [
+            ("/context/log/nope", 404, {"error": "Not found"}),
+            ("/context/log/nope/payload", 404, {"error": "Not captured"}),
+            ("/context/log/nope/sections", 404, {"error": "Not found"}),
+            ("/context/diff?a=x", 400, {"error": "Missing parameters"}),
+            (f"/context/diff?a={oldest.id}&b=nope", 404, {"error": "Not found"}),
+        ]:
+            got = await http.get(path)
+            assert (got.status_code, got.content) == (status, JSONResponse(body).body), path
+    async with rest() as http:  # no context log at all
+        assert (await http.get("/context/log")).json() == {"entries": []}
+        assert (await http.get("/dashboard/cache")).status_code == 503
+        assert (await http.get("/context/log/x")).json() == {"error": "Not enabled"}
+        assert (await http.get("/dashboard/observability")).json()["context_log"] == []
+
+
 def test_ring_view_is_the_ring_unchanged():
     """The ring path returns the ring's own entries and payloads: what every endpoint served before PR 4."""
     ring = ContextLogger(full_payload_enabled=True)
