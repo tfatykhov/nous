@@ -81,6 +81,7 @@ from nous.observability.model_calls import (
     context_kwargs,
     current_fallback,
     model_call_context,
+    payload_preamble,
 )
 from nous.observability.tool_calls import (
     ToolCallRecord,
@@ -2475,8 +2476,9 @@ class AgentRunner:
         if self._settings.effort != "high" and not is_legacy_haiku(effective_model):
             payload["output_config"] = {"effort": self._settings.effort}
 
-        # F108: system block 0 (the Claude Code preamble) is sent too, so both estimates below count it.
-        preamble = system_blocks[0]["text"]
+        # F108: system block 0 (the Claude Code preamble) is sent too, so both estimates below count it. Any other
+        # block 0 would be in flat_system_prompt already (payload_preamble gives ""), so it is never counted twice.
+        preamble = payload_preamble(system_blocks)
 
         # F035.4: Log context metadata (entry_id stored locally, NOT in payload)
         if self._context_logger:

@@ -106,7 +106,7 @@ nous/
 │   │   └── tools.py            # Identity-related tools
 │   ├── observability/          # Telemetry writers — dashboards read these tables, the agent never does, except `tool_call_log`, `model_call_log` and `model_call_attempt`, which `db_query` may read
 │   │   ├── context_logger.py   # F035.4 per-turn context payload log (its context estimate lives in model_calls.py)
-│   │   ├── model_calls.py      # F108: ModelCallRecorder (one model_call_log row per model call with its model_call_attempt rows, embedding and rerank calls counted per minute), CallContext and the purpose vocabulary, model_call_context (the fallback label), and the context estimate (analyze_context, analyze_sections, ContextStats, parse_system_sections)
+│   │   ├── model_calls.py      # F108: ModelCallRecorder (one model_call_log row per model call with its model_call_attempt rows, embedding and rerank calls counted per minute), CallContext and the purpose vocabulary, model_call_context (the fallback label), and the context estimate (analyze_context, analyze_sections, ContextStats, parse_system_sections, system_sections)
 │   │   ├── recording.py        # F108: BoundedWriter, the one bounded fire-and-forget writer every work-view recorder shares (built in main.py), and RecorderStats, its counters
 │   │   ├── tool_calls.py       # F108: ToolCallRecorder (one tool_call_log row per tool call, one agent_turn_log row per turn, text redacted and capped), the reason field (add_reason_field, split_reason) and work kinds
 │   │   ├── work_view_retention.py # F108: sweep_tool_calls, the daily agent-scoped delete of tool_call_log and agent_turn_log rows past NOUS_TOOL_CALL_RETENTION_DAYS

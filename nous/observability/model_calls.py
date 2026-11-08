@@ -32,6 +32,7 @@ from uuid import UUID
 
 from sqlalchemy import text
 
+from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.observability.recording import BoundedWriter, RecorderStats
 
 logger = logging.getLogger(__name__)
@@ -133,7 +134,16 @@ SECTION_MARKERS: dict[str, str] = {
     "## Retrieval Failures": "retrieval_failures",
     "## Active Guidance": "active_guidance",  # layer.py: censor guidance for this turn
     "[DIAGNOSTIC OBSERVATIONS]": "diagnostic_nudges",  # critic.py format_nudges
+    # layer.py's blocks without a ## heading: subtask results (result_inbox off), the result inbox (on), hub shifts
+    "=== Completed Subtask ===": "subtask_results",
+    "=== Blocked Subtask ===": "subtask_results",
+    "=== Failed Subtask ===": "subtask_results",
+    "=== Background Results ===": "background_results",
+    "[graph] Hub shift:": "hub_shift",  # a line prefix (LINE_MARKERS)
 }
+
+# Markers that begin a content line instead of being a heading: the line is part of the section it starts.
+LINE_MARKERS: tuple[str, ...] = ("[graph] Hub shift:",)
 
 # The sections whose body renders stored or authored text, not text the builder writes: an unknown ``## `` line inside
 # one is part of that text (an identity's ``## Character``, a skill's ``## Steps``, a fact), not a new section.
@@ -156,6 +166,9 @@ FREE_TEXT_SECTIONS: frozenset[str] = frozenset(
         "execution_ledger",  # tool key arguments and error result summaries
         "corrections",  # quoted claims from the agent's own reply
         "active_guidance",  # censor guidance text
+        "subtask_results",  # subtask tasks, results, summaries, findings and errors
+        "background_results",  # finished subtask and DAG titles and bodies
+        "hub_shift",  # graph entity labels
     }
 )
 
@@ -163,11 +176,13 @@ _MARKER_PATTERNS = sorted(SECTION_MARKERS.keys(), key=len, reverse=True)
 
 
 def _section_start(line: str, current_name: str) -> str | None:
-    """The section ``line`` starts, or None: a marker in the table, else any other ``## Title`` as ``title``."""
+    """The section ``line`` starts, or None: a marker in the table, else any other ``## Title`` as ``title``. The text
+    before the first heading (``current_name`` ``""``) is free text too: on layer.py's degraded path it is the identity
+    prompt alone, with its own ``## `` headings."""
     for marker in _MARKER_PATTERNS:
         if line.strip().startswith(marker):
             return SECTION_MARKERS[marker]
-    if line.startswith("## ") and current_name not in FREE_TEXT_SECTIONS:
+    if line.startswith("## ") and current_name and current_name not in FREE_TEXT_SECTIONS:
         return re.sub(r"[^a-z0-9]+", "_", line[3:].lower()).strip("_") or None
     return None
 
@@ -182,7 +197,7 @@ def parse_system_sections(system_prompt: str) -> dict[str, str]:
 
     A heading in ``SECTION_MARKERS`` starts the section it names; any other ``## Title Case`` heading starts the
     section ``title_case`` (outside ``FREE_TEXT_SECTIONS``), so it is never folded into the one before it. A name met
-    twice holds both texts. Text before the first heading is ``other``."""
+    twice holds both texts. Text before the first heading is ``other``. A ``LINE_MARKERS`` line is content."""
     if not system_prompt:
         return {}
     sections: dict[str, str] = {}
@@ -190,7 +205,8 @@ def parse_system_sections(system_prompt: str) -> dict[str, str]:
     current_lines: list[str] = []
     for line in system_prompt.split("\n"):
         name = _section_start(line, current_name)
-        if name is None:
+        is_content = name is not None and line.strip().startswith(LINE_MARKERS)
+        if name is None or (is_content and name == current_name):
             current_lines.append(line)
             continue
         if current_lines:
@@ -198,7 +214,7 @@ def parse_system_sections(system_prompt: str) -> dict[str, str]:
             if text:
                 _add_section(sections, current_name, text)
         current_name = name
-        current_lines = []
+        current_lines = [line] if is_content else []
     if current_lines:
         text = "\n".join(current_lines).strip()
         if text:
@@ -266,6 +282,13 @@ def _system_text(system_blocks: str | list[dict[str, Any]] | None) -> str:
     if not system_blocks:
         return ""
     return "\n\n".join(b["text"] for b in system_blocks if isinstance(b, dict) and b.get("text"))
+
+
+def payload_preamble(system_blocks: list[dict[str, Any]]) -> str:
+    """The payload's system block 0 when it is the Claude Code preamble, else "". The runner's flat prompt holds every
+    other block, so any other block 0 is counted there, with the rest, and never twice."""
+    head = system_blocks[0] if system_blocks else None
+    return CLAUDE_CODE_PREAMBLE if isinstance(head, dict) and head.get("text") == CLAUDE_CODE_PREAMBLE else ""
 
 
 def system_sections(system_blocks: str | list[dict[str, Any]] | None, preamble: str = "") -> dict[str, str]:

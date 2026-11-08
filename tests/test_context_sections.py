@@ -26,10 +26,12 @@ from nous.heart.schemas import ProcedureSummary
 from nous.observability.context_logger import ContextLogEntry
 from nous.observability.model_calls import (
     FREE_TEXT_SECTIONS,
+    LINE_MARKERS,
     SECTION_MARKERS,
     _estimate_messages_tokens,
     analyze_context,
     parse_system_sections,
+    payload_preamble,
 )
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -77,6 +79,9 @@ EXPECTED_FREE_TEXT = {
     "execution_ledger",  # tool key arguments and error result summaries (execution_ledger.py _build_section)
     "corrections",  # quoted claims from the agent's own reply (claim_verifier.py _build_correction)
     "active_guidance",  # censor guidance text (layer.py, censor_injected)
+    "subtask_results",  # subtask tasks, results, summaries, findings (layer.py _format_subtask_results)
+    "background_results",  # finished subtask and DAG titles and bodies (result_inbox.py format_inbox_messages)
+    "hub_shift",  # graph entity labels (brain/hub_snapshots.py format_hub_shift_block)
 }
 
 
@@ -93,9 +98,11 @@ def test_an_unknown_heading_inside_free_text_stays_in_its_section(name):
     """Stored text can carry its own ``## `` lines (an identity's ``## Character``, a skill's ``## Steps``, a fact or a
     cached markdown file): such a line stays part of the section, so its number does not collapse. A heading in the
     table still starts its section."""
-    prompt = f"{_MARKER_FOR[name]}\nfirst line\n## Some Heading\nmore text\n## Context Safety\nbe careful"
+    marker = _MARKER_FOR[name]
+    head = f"{marker}\n" if marker.startswith(LINE_MARKERS) else ""  # a line marker's line is part of its section
+    prompt = f"{marker}\nfirst line\n## Some Heading\nmore text\n## Context Safety\nbe careful"
     assert parse_system_sections(prompt) == {
-        name: "first line\n## Some Heading\nmore text",
+        name: f"{head}first line\n## Some Heading\nmore text",
         "context_safety": "be careful",
     }
 
@@ -105,6 +112,86 @@ def test_the_identity_prompts_own_headings_are_one_identity_section():
     assert parse_system_sections(prompt) == {
         "identity": "## Character\nCurious.\n\n## Values\nHonest.",
         "datetime": "now",
+    }
+
+
+def test_text_before_any_heading_is_free_text():
+    """layer.py's degraded path (the context build failed) sends the identity prompt alone, with no ``## Identity``:
+    its own ``## Character`` lines stay in the leading text instead of splitting it. A table heading still starts its
+    section."""
+    identity = "## Character\nCurious.\n\n## Values\nHonest."
+    assert parse_system_sections(identity) == {"other": identity}
+    assert parse_system_sections("lead\n## Foo\nbar\n## Current Date/Time\nnow") == {
+        "other": "lead\n## Foo\nbar",
+        "datetime": "now",
+    }
+
+
+def _subtask(status: str, **fields) -> SimpleNamespace:
+    base = {"id": uuid4(), "task": "check the deploy", "result": None, "error": None, "final_outcome": None}
+    return SimpleNamespace(status=status, **{**base, "report_jsonb": None, **fields})
+
+
+def test_a_subtask_result_with_a_heading_stays_in_subtask_results():
+    """The default path (``result_inbox_enabled`` off): layer.py appends ``=== Completed/Blocked/Failed Subtask ===``
+    blocks after the context sections. Each block is ``subtask_results``, the repeated blocks add up, and a ``## ``
+    line in a result stays inside."""
+    from nous.cognitive.layer import _format_subtask_results
+
+    block = _format_subtask_results(
+        [
+            _subtask("completed", result="Deployed.\n## Heading\nall green"),
+            _subtask("failed", error="timeout"),
+            _subtask("completed", final_outcome="incomplete_blocked", report_jsonb={"blocked_reason": "no access"}),
+        ]
+    )
+    sections = parse_system_sections(f"## Retrieval Failures\nNote: decision recall failed.\n\n{block}")
+    assert set(sections) == {"retrieval_failures", "subtask_results"}
+    assert sections["retrieval_failures"] == "Note: decision recall failed."
+    body = sections["subtask_results"]
+    assert "Result: Deployed.\n## Heading\nall green" in body
+    assert "Error: timeout" in body and "Blocked: no access" in body
+    stats = analyze_context(f"## Retrieval Failures\nNote.\n\n{block}", [], None, 200_000)
+    assert stats.section_tokens_est["subtask_results"] == len(body) // 4
+
+
+def test_a_background_result_with_a_heading_stays_in_background_results():
+    """The inbox path (``result_inbox_enabled`` on): the ``=== Background Results ===`` block is
+    ``background_results``, and a ``## `` line in a result body stays inside."""
+    from datetime import UTC, datetime
+
+    from nous.heart.result_inbox import format_inbox_messages
+
+    row = SimpleNamespace(
+        created_at=datetime.now(UTC),
+        msg_type="RESULT",
+        source_kind="subtask",
+        source_id=uuid4(),
+        title="Deploy check",
+        body="Deployed.\n## Heading\nall green",
+    )
+    block = format_inbox_messages([row], 5)
+    sections = parse_system_sections(f"## Current Date/Time\nnow\n\n{block}")
+    assert set(sections) == {"datetime", "background_results"}
+    assert "Title: Deploy check\nDeployed.\n## Heading\nall green\n</result_message>" in sections["background_results"]
+
+
+def test_a_hub_shift_notice_is_its_own_section():
+    """Each ``[graph] Hub shift:`` line is content (the marker is a line prefix, not a heading): the lines are the
+    section ``hub_shift``, counted, not folded into the section before them."""
+    from nous.brain.hub_snapshots import format_hub_shift_block
+
+    block = format_hub_shift_block(
+        [
+            {"kind": "entered", "label": "[entity] Toronto", "rank": 3, "degree": 12},
+            {"kind": "left", "label": "[entity] Ottawa", "degree": 4},
+        ]
+    )
+    sections = parse_system_sections(f"## Current Date/Time\nnow\n\n{block}")
+    assert sections == {"datetime": "now", "hub_shift": block}
+    # a line that merely mentions the marker later in it is not one
+    assert parse_system_sections("## Current Date/Time\nsee [graph] Hub shift: x") == {
+        "datetime": "see [graph] Hub shift: x"
     }
 
 
@@ -130,9 +217,12 @@ def test_a_repeated_section_name_adds_its_text_never_replaces_it():
     assert stats.loaded_facts == 2
     assert stats.section_tokens_est["relevant_facts"] == len("- [a] one\n\n- [b] two") // 4
     # the leading text and a "## Other" heading are one section; so are block 0 and a "## Preamble" heading
-    assert parse_system_sections("lead\n## Other\nz") == {"other": "z\n\nlead"}
-    stats = analyze_context("## Preamble\nq", [], None, 200_000, preamble="P")
-    assert stats.sections_present == ["preamble"]
+    assert parse_system_sections("lead\n## Current Date/Time\nnow\n## Other\nz") == {
+        "datetime": "now",
+        "other": "z\n\nlead",
+    }
+    stats = analyze_context("## Current Date/Time\nnow\n## Preamble\nq", [], None, 200_000, preamble="P")
+    assert stats.sections_present == ["preamble", "datetime"]
     assert stats.section_tokens_est["preamble"] == len("P\n\nq") // 4
 
 
@@ -146,6 +236,12 @@ MISSING_HEADINGS = {
     "## Retrieval Failures": "retrieval_failures",
     "## Active Guidance": "active_guidance",
     "[DIAGNOSTIC OBSERVATIONS]": "diagnostic_nudges",  # the critic's nudges (critic.py format_nudges)
+    # layer.py's unheaded injections
+    "=== Completed Subtask ===": "subtask_results",
+    "=== Blocked Subtask ===": "subtask_results",
+    "=== Failed Subtask ===": "subtask_results",
+    "=== Background Results ===": "background_results",
+    "[graph] Hub shift:": "hub_shift",  # a line prefix: the line is part of the section
 }
 
 
@@ -154,7 +250,8 @@ def test_known_missing_headings_have_names(heading, name):
     # in the table itself, not only named by the generic fallback
     assert SECTION_MARKERS[heading] == name
     sections = parse_system_sections(f"## Relevant Facts\n- one\n{heading}\nits text")
-    assert sections == {"relevant_facts": "- one", name: "its text"}
+    head = f"{heading}\n" if heading.startswith(LINE_MARKERS) else ""
+    assert sections == {"relevant_facts": "- one", name: f"{head}its text"}
 
 
 def test_existing_section_names_are_unchanged():
@@ -215,6 +312,20 @@ def test_preamble_block_is_counted():
     assert entry.token_breakdown == stats.section_tokens_est
     assert entry.total_tokens_est == stats.total_tokens_est
     assert entry.sections_text["preamble"] == CLAUDE_CODE_PREAMBLE
+
+
+def test_block_0_is_the_preamble_only_when_it_is_the_claude_code_preamble():
+    """The runner's flat prompt holds every system block but the Claude Code preamble. A block 0 that is anything else
+    is already in the flat prompt, so it is not the section ``preamble`` and is counted there, never twice."""
+    flat = "## Identity\nI am Nous."
+    with_preamble = [{"type": "text", "text": CLAUDE_CODE_PREAMBLE}, {"type": "text", "text": flat}]
+    assert payload_preamble(with_preamble) == CLAUDE_CODE_PREAMBLE
+    without = [{"type": "text", "text": flat}]  # block 0 is the flat prompt itself
+    assert payload_preamble(without) == ""
+    assert payload_preamble([]) == ""
+    once = analyze_context(flat, [], None, 200_000, preamble=payload_preamble(without))
+    assert "preamble" not in once.section_tokens_est
+    assert once.total_tokens_est == analyze_context(flat, [], None, 200_000).total_tokens_est
 
 
 def test_tool_result_content_counts_in_message_estimate():
@@ -419,7 +530,11 @@ def _section_labels_in_source() -> set[str]:
         func = node.func
         if (func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)) != "ContextSection":
             continue
-        (label,) = [k.value for k in node.keywords if k.arg == "label"]
+        labels_given = [k.value for k in node.keywords if k.arg == "label"]
+        assert len(labels_given) == 1, (
+            f"context.py:{node.lineno}: a ContextSection takes its label as a keyword, so its heading can be checked"
+        )
+        label = labels_given[0]
         assert isinstance(label, ast.Constant) and isinstance(label.value, str), (
             f"context.py:{node.lineno}: a ContextSection label must be a string literal, so its heading can be checked"
         )
@@ -428,8 +543,13 @@ def _section_labels_in_source() -> set[str]:
 
 
 def _headings(prompt: str) -> list[str]:
-    """The prompt's heading lines: ``## `` at the start of a line, and ``[Execution Ledger]``-style headers."""
-    return [ln.rstrip() for ln in prompt.split("\n") if ln.startswith("## ") or re.fullmatch(r"\[[A-Z][^\]]*\]", ln)]
+    """The prompt's heading lines: ``## `` at the start of a line, ``[Execution Ledger]``-style headers and
+    ``=== Completed Subtask ===``-style headers."""
+    return [
+        ln.rstrip()
+        for ln in prompt.split("\n")
+        if ln.startswith("## ") or re.fullmatch(r"\[[A-Z][^\]]*\]", ln) or re.fullmatch(r"=== .* ===", ln)
+    ]
 
 
 @pytest.mark.asyncio
@@ -466,9 +586,10 @@ async def test_context_builder_headings_are_all_known():
 
 
 def _heading_literals(tree: ast.AST) -> tuple[list[tuple[int, str]], list[int]]:
-    """The ``## `` heading of every string literal (and f-string whose literal part comes first) that begins with
-    ``## ``, as (line, heading); and the lines of f-strings whose heading is all placeholder (``f"## {label}"``).
-    Docstrings and bare string statements are left out, and so are the literal parts of an f-string on their own."""
+    """Every heading line in the string literals and f-strings: each line, of every literal part, that starts with
+    ``## `` or is a ``=== X ===`` header, as (line, heading); and the lines of f-strings whose ``## `` heading is all
+    placeholder (``f"## {label}"``). A line that goes on from a placeholder is not a line start. Docstrings and bare
+    string statements are left out, and so are the literal parts of an f-string on their own."""
     skip: set[int] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Expr) and isinstance(node.value, (ast.Constant, ast.JoinedStr)):
@@ -481,19 +602,47 @@ def _heading_literals(tree: ast.AST) -> tuple[list[tuple[int, str]], list[int]]:
         if id(node) in skip:
             continue
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            text = node.value
-        elif isinstance(node, ast.JoinedStr) and node.values and isinstance(node.values[0], ast.Constant):
-            text = str(node.values[0].value)
+            parts: list[ast.expr] = [node]
+        elif isinstance(node, ast.JoinedStr):
+            parts = list(node.values)
         else:
             continue
-        if not text.startswith("## "):
-            continue
-        heading = text.split("\n", 1)[0].rstrip()
-        if heading == "##":
-            dynamic.append(node.lineno)
-        else:
-            static.append((node.lineno, heading))
+        for i, part in enumerate(parts):
+            if not (isinstance(part, ast.Constant) and isinstance(part.value, str)):
+                continue
+            lines = part.value.split("\n")
+            for j, line in enumerate(lines):
+                if j == 0 and i > 0:
+                    continue  # the rest of a line a placeholder began
+                heading = line.rstrip()
+                if line.startswith("## ") and heading == "##" and j == len(lines) - 1 and i + 1 < len(parts):
+                    dynamic.append(node.lineno)
+                elif line.startswith("## ") or re.fullmatch(r"=== .* ===", heading):
+                    static.append((node.lineno, heading))
     return static, dynamic
+
+
+def test_the_source_scan_sees_a_heading_on_any_line():
+    """The guard's own check: a heading after a newline, in an implicit concatenation, in an f-string or in a
+    triple-quoted string is caught; a docstring is not; an all-placeholder heading is dynamic."""
+    caught = [
+        'x = "## Foo\\n"',
+        'x = "\\n\\n" + "## Foo\\n"',
+        'x = f"## Foo {y}"',
+        'x = "\\n\\n## Foo\\n"',
+        'x = ("intro\\n\\n" "## Foo\\n")',
+        'x = f"\\n## Foo {y}"',
+        'x = """\n## Foo\nbody"""',
+        'x = f"{y}\\n## Foo\\n"',
+        'x = "\\n=== Foo ===\\n"',
+    ]
+    for source in caught:
+        static, dynamic = _heading_literals(ast.parse(source))
+        assert [h for _, h in static] == ["=== Foo ===" if "===" in source else "## Foo"], source
+        assert dynamic == [], source
+    assert _heading_literals(ast.parse('def f():\n    """## Foo\n\n## Bar"""\n')) == ([], [])
+    assert _heading_literals(ast.parse('x = f"## {label}\\n\\n{body}"')) == ([], [1])
+    assert _heading_literals(ast.parse('x = "see ## Foo inline"')) == ([], [])
 
 
 def test_context_builder_headings_are_all_known_in_source():
@@ -511,4 +660,11 @@ def test_context_builder_headings_are_all_known_in_source():
     for label in _section_labels_in_source():
         assert f"## {label}" in SECTION_MARKERS, label
     # the scan sees the headings it is meant to see
-    assert {"## Active Guidance", "## Tool Instructions", "## Output Formatting (Telegram)"} <= set(found)
+    assert {
+        "## Active Guidance",
+        "## Tool Instructions",
+        "## Output Formatting (Telegram)",
+        "=== Completed Subtask ===",
+        "=== Blocked Subtask ===",
+        "=== Failed Subtask ===",
+    } <= set(found)
