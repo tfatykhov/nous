@@ -3217,7 +3217,9 @@ class AgentRunner:
                         # F026: Action gating (pre-dispatch)
                         gated = False
                         if self._action_gate and ledger:
-                            with self._gate_call_context(_stream_call_context):  # F108: no yield inside
+                            # F108: this `with` must hold no yield. It sets a ContextVar (the gate call's fallback)
+                            # and resets it, and a generator resumed after a yield runs in a fresh context.
+                            with self._gate_call_context(_stream_call_context):
                                 gate_result = await self._action_gate.check(
                                     tool_name,
                                     dispatch_input,

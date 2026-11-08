@@ -352,6 +352,17 @@ async def test_dynamic_check_is_background_check_not_heartbeat():
     assert [row["purpose"] for row in client.rows] == ["background_check", "heartbeat"]
 
 
+@pytest.mark.asyncio
+async def test_a_chat_kind_on_a_fork_is_recorded_unlabelled():
+    """A fork has nobody in the loop: a turn there that names a chat kind is shown as ``unlabelled``, not passed
+    off as chat, and not as the old ring's blanket ``heartbeat``."""
+    client = _SpyClient()
+    fork = _runner(client).fork(client)
+    await asyncio.wait_for(_run_loop(fork, context=ExecutionContext(kind="interactive", session_id="s1")), 10)
+    (row,) = client.rows
+    assert (row["purpose"], row["label_source"], row["session_id"]) == ("unlabelled", "explicit", "s1")
+
+
 # ---------------------------------------------------------------------------------------------------------------------
 # Bug 8: the gate and the reflection
 # ---------------------------------------------------------------------------------------------------------------------
@@ -383,6 +394,42 @@ async def test_gate_row_is_action_gate_with_tokens():
     assert (gate["input_uncached"], gate["output_tokens"]) == (41, 9)
     # The gate checks this turn's tool call: it carries the turn, not the chat or subtask label.
     assert (gate["session_id"], gate["turn_id"], gate["turn_number"], gate["trace_id"]) == ("s1", turn_id, 4, _TRACE)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", PATHS)
+async def test_gate_row_carries_the_turn_on_both_paths(path):
+    """Both gate sites: run_turn's (in _tool_loop) and stream_chat's, whose turn context must reach the gate's call
+    although stream_chat is a generator resumed in a fresh context after each yield."""
+    replies = [_tool_use("send_email"), _text()]
+
+    def reply(payload: dict[str, Any]) -> ApiResponse:
+        if "safety gate" in json.dumps(payload["system"]):
+            return ApiResponse(
+                content=[{"type": "text", "text": '{"approved": true, "reason": "fine"}'}],
+                stop_reason="end_turn",
+                usage=dict(_GATE_USAGE),
+            )
+        return replies.pop(0)
+
+    client = _SpyClient(reply, segments=[_tool_segment("send_email"), _text_segment()])
+    r = _runner(client, offered=("send_email",), preset=_preset(trace_id=_TRACE), action_gating_enabled=True)
+    assert await _drive(r, path) == "done"
+    chat_1, gate, chat_2 = await _until_rows(client, 3)
+    assert [row["purpose"] for row in (chat_1, gate, chat_2)] == ["chat", "action_gate", "chat"]
+    assert (gate["label_source"], gate["call_kind"], gate["input_uncached"], gate["output_tokens"]) == (
+        "explicit",
+        "call",
+        41,
+        9,
+    )
+    assert gate["turn_id"] is not None and gate["turn_id"] == chat_1["turn_id"] == chat_2["turn_id"]
+    assert (gate["session_id"], gate["turn_number"], gate["frame_id"], gate["trace_id"]) == (
+        "s1",
+        1,
+        "conversation",
+        _TRACE,
+    )
 
 
 @pytest.mark.asyncio
