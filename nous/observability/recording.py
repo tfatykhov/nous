@@ -26,6 +26,8 @@ class RecorderStats:
     dropped_error: int = 0
     dropped_backpressure: int = 0
     unlabelled: int = 0
+    # A model call's HTTP attempt reported after the call's row was written: counted, not recorded.
+    dropped_late: int = 0
 
     def as_dict(self) -> dict[str, int]:
         """The counters as a plain dict (the observability endpoint's shape)."""

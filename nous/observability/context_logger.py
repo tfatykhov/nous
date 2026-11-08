@@ -14,10 +14,10 @@ from uuid import uuid4
 # The estimate moved to model_calls.py (F108); these names stay importable from here.
 from nous.observability.model_calls import (  # noqa: F401
     SECTION_MARKERS,
-    _analyze,
     _estimate_messages_tokens,
     _estimate_tokens,
     analyze_context,
+    analyze_sections,
     parse_system_sections,
 )
 
@@ -97,7 +97,7 @@ class ContextLogEntry:
         entry_id = uuid4().hex[:16]
         # analyze_context's estimate, from sections parsed once: the entry keeps their text too.
         sections = parse_system_sections(system_prompt)
-        stats = _analyze(sections, messages, tools, context_window)
+        stats = analyze_sections(sections, messages, tools, context_window)
 
         return cls(
             id=entry_id,

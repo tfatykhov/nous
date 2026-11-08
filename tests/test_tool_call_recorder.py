@@ -228,6 +228,7 @@ async def test_two_callers_sharing_a_writer_keep_separate_counts():
         "dropped_error": 1,
         "dropped_backpressure": 0,
         "unlabelled": 0,
+        "dropped_late": 0,
     }
     assert theirs.as_dict() == {
         "written": 0,
@@ -235,6 +236,7 @@ async def test_two_callers_sharing_a_writer_keep_separate_counts():
         "dropped_error": 0,
         "dropped_backpressure": 1,
         "unlabelled": 0,
+        "dropped_late": 0,
     }
     assert writer.stats.as_dict() == {
         "written": 2,
@@ -242,6 +244,7 @@ async def test_two_callers_sharing_a_writer_keep_separate_counts():
         "dropped_error": 1,
         "dropped_backpressure": 1,
         "unlabelled": 0,
+        "dropped_late": 0,
     }
 
 
@@ -278,13 +281,16 @@ def test_submit_without_a_loop_is_counted_not_raised():
 
 
 def test_stats_as_dict():
-    stats = RecorderStats(written=1, dropped_timeout=2, dropped_error=3, dropped_backpressure=4, unlabelled=5)
+    stats = RecorderStats(
+        written=1, dropped_timeout=2, dropped_error=3, dropped_backpressure=4, unlabelled=5, dropped_late=6
+    )
     assert stats.as_dict() == {
         "written": 1,
         "dropped_timeout": 2,
         "dropped_error": 3,
         "dropped_backpressure": 4,
         "unlabelled": 5,
+        "dropped_late": 6,
     }
 
 

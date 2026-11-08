@@ -310,7 +310,14 @@ def _recorder() -> ToolCallRecorder:
     return recorder
 
 
-COUNTERS = {"written": 7, "dropped_timeout": 1, "dropped_error": 0, "dropped_backpressure": 2, "unlabelled": 0}
+COUNTERS = {
+    "written": 7,
+    "dropped_timeout": 1,
+    "dropped_error": 0,
+    "dropped_backpressure": 2,
+    "unlabelled": 0,
+    "dropped_late": 0,
+}
 
 
 def test_observability_endpoint_reports_recording_counters():

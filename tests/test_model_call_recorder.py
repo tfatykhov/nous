@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import logging
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -20,7 +21,7 @@ from sqlalchemy import text
 
 from nous.api.anthropic_client import StreamEvent
 from nous.api.models import ApiResponse
-from nous.observability import model_calls
+from nous.observability import context_logger, model_calls
 from nous.observability.context_logger import ContextLogEntry
 from nous.observability.model_calls import (
     MAIN_LOOP_PURPOSES,
@@ -30,9 +31,11 @@ from nous.observability.model_calls import (
     ContextStats,
     ModelCallRecorder,
     analyze_context,
+    analyze_sections,
     context_kwargs,
     current_fallback,
     model_call_context,
+    parse_system_sections,
 )
 from nous.observability.recording import BoundedWriter
 
@@ -638,3 +641,102 @@ def test_analyze_context_matches_old_context_log_entry():
         "\n\n".join(b["text"] for b in blocks), MESSAGES, TOOLS, 200_000
     )
     assert analyze_context(None, [], None, 0).total_tokens_est == 0
+    # the shared core is public: from_payload calls it with the sections it parsed itself
+    assert analyze_sections(parse_system_sections(SYSTEM), MESSAGES, TOOLS, 200_000) == stats
+    assert not hasattr(context_logger, "_analyze")
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Fix round 1: every failure counted, a bad context never raises, a late attempt counted
+# ---------------------------------------------------------------------------------------------------------------------
+
+_LOGGER = "nous.observability.model_calls"
+
+
+def _ok(output: int) -> ApiResponse:
+    return ApiResponse(content=[], stop_reason="end_turn", usage={"output_tokens": output})
+
+
+@pytest.mark.postgres_only
+async def test_a_failed_attempt_is_logged_and_counted(db, monkeypatch, caplog):
+    agent = _agent()
+    writer, recorder = _recorder(db, agent)
+
+    def broken_redaction(_text: str) -> str:
+        raise RuntimeError("redaction broke")
+
+    monkeypatch.setattr(model_calls, "_clip_error", broken_redaction)
+    try:
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            with recorder.scope(_PAYLOAD, CallContext(purpose="chat"), "call") as scope:
+                scope.attempt(529, "overloaded_error", "Overloaded", 10)  # the response hook's call: never raises
+                scope.finish(_ok(3))
+        assert recorder.stats.dropped_error == 1
+        assert "model-call attempt not recorded (RuntimeError)" in caplog.text
+        await writer.drain(5.0)
+        [row] = await _rows(db, agent)
+        # the call itself is still recorded, without the lost attempt
+        assert (row["status"], row["output_tokens"], row["attempts"]) == ("ok", 3, 1)
+        assert await _attempts(db, row["id"]) == []
+        assert (recorder.stats.written, recorder.stats.dropped_error) == (1, 1)
+    finally:
+        await _delete(db, agent)
+
+
+@pytest.mark.postgres_only
+async def test_a_bad_call_context_never_raises_and_is_recorded_unlabelled(db, monkeypatch, caplog):
+    agent = _agent()
+    writer, recorder = _recorder(db, agent)
+    bad_contexts = [
+        {"purpose": "chat", "session_id": "not-a-call-context"},  # not a CallContext
+        CallContext(purpose=["chat"], session_id="unhashable-purpose"),  # type: ignore[arg-type]
+        CallContext(purpose=42, session_id="int-purpose"),  # type: ignore[arg-type]
+    ]
+    try:
+        with caplog.at_level(logging.WARNING, logger=_LOGGER):
+            for output, ctx in enumerate(bad_contexts, start=1):
+                with recorder.scope(_PAYLOAD, ctx, "call") as scope:  # type: ignore[arg-type]
+                    scope.finish(_ok(output))
+            # a bad purpose through the fallback
+            with model_call_context(purpose={"chat": 1}, session_id="bad-fallback"):
+                with recorder.scope(_PAYLOAD, None, "call") as scope:
+                    scope.finish(_ok(4))
+
+            # any exception while naming the purpose
+            def broken_label(_purpose: object) -> str:
+                raise RuntimeError("label broke")
+
+            monkeypatch.setattr(recorder, "_label", broken_label)
+            with recorder.scope(_PAYLOAD, CallContext(purpose="chat", session_id="label-raises"), "call") as scope:
+                scope.finish(_ok(5))
+        assert recorder.stats.unlabelled == 5
+        assert "bad model-call context (TypeError)" in caplog.text
+        assert "bad model-call context (RuntimeError)" in caplog.text
+        await writer.drain(5.0)
+        rows = await _rows(db, agent)
+        assert sorted(r["output_tokens"] for r in rows) == [1, 2, 3, 4, 5]
+        assert {(r["purpose"], r["label_source"], r["session_id"], r["status"]) for r in rows} == {
+            ("unlabelled", "none", None, "ok")
+        }
+        assert recorder.stats.written == 5 and recorder.stats.dropped_error == 0
+    finally:
+        await _delete(db, agent)
+
+
+def test_a_late_attempt_is_counted_and_logged_once(caplog):
+    writer = BoundedWriter("test")
+    recorder = ModelCallRecorder(writer, None, "agent", _SETTINGS)
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        with recorder.scope(_PAYLOAD, CallContext(purpose="chat"), "call") as first:
+            first.attempt(200, None, None, 5)
+        # reported after the row was written (no loop here, so the write itself is dropped and counted)
+        first.attempt(529, "overloaded_error", "late", 7)
+        first.attempt(529, "overloaded_error", "later", 9)
+        with recorder.scope(_PAYLOAD, CallContext(purpose="chat"), "call") as second:
+            pass
+        second.attempt(200, None, None, 1)
+    assert recorder.stats.dropped_late == 3
+    assert caplog.text.count("reported after its call was written") == 1
+    assert recorder.stats.as_dict()["dropped_late"] == 3
+    assert writer.stats.dropped_late == 0
+    assert recorder.stats.dropped_error == 2  # the two rows, dropped for want of a loop

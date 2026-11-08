@@ -210,7 +210,7 @@ def _system_text(system_blocks: str | list[dict[str, Any]] | None) -> str:
     return "\n\n".join(b["text"] for b in system_blocks if isinstance(b, dict) and b.get("text"))
 
 
-def _analyze(
+def analyze_sections(
     sections: dict[str, str], messages: list[dict], tools: list[dict] | None, context_window: int
 ) -> ContextStats:
     """The estimate from already-parsed sections (``ContextLogEntry.from_payload`` keeps the sections' text too)."""
@@ -283,7 +283,7 @@ def analyze_context(
     """Estimate what a call's context holds: tokens per system-prompt section, for the tool definitions and for the
     messages (4 characters a token), the tools and message roles, and the memory items each section delivered. Pure.
     ``system_blocks`` is the system prompt as a string or as the payload's list of text blocks."""
-    return _analyze(parse_system_sections(_system_text(system_blocks)), messages, tools, context_window)
+    return analyze_sections(parse_system_sections(_system_text(system_blocks)), messages, tools, context_window)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -554,8 +554,10 @@ class ModelCallScope:
         self, http_status: int | None, error_type: str | None, error_text: str | None, duration_ms: float | None
     ) -> None:
         """Add one HTTP attempt (the call's retries are its attempts). Its error text is redacted and clipped. An
-        attempt reported after the row was written is ignored. Never raises: a client's response hook calls it."""
+        attempt reported after the row was written is not recorded; it is counted (``dropped_late``). Never raises:
+        a client's response hook calls it."""
         if self._written:
+            self._recorder._late_attempt()
             return
         try:
             now = _utcnow()
@@ -570,6 +572,7 @@ class ModelCallScope:
                 }
             )
         except Exception as exc:
+            self._recorder._stats.dropped_error += 1
             logger.warning("F108: model-call attempt not recorded (%s)", type(exc).__name__)
 
     def _merge_usage(self, usage: Any, keys: tuple[str, ...]) -> None:
@@ -660,6 +663,7 @@ class ModelCallRecorder:
         self._settings = settings
         self._stats = RecorderStats()
         self._warned_purposes: set[str] = set()
+        self._warned_late = False
 
     @property
     def stats(self) -> RecorderStats:
@@ -704,22 +708,44 @@ class ModelCallRecorder:
     def _label(self, purpose: Any) -> str:
         """``purpose`` when it is one of ``PURPOSES``, else ``unlabelled``; every unlabelled call is counted, and an
         unknown name is logged once."""
-        if purpose in PURPOSES and purpose != "unlabelled":
+        if isinstance(purpose, str) and purpose in PURPOSES and purpose != "unlabelled":
             return purpose
         self._stats.unlabelled += 1
-        if purpose != "unlabelled" and str(purpose) not in self._warned_purposes:
-            self._warned_purposes.add(str(purpose))
+        if purpose != "unlabelled" and repr(purpose) not in self._warned_purposes:
+            self._warned_purposes.add(repr(purpose))
             logger.warning("F108: model call with unknown purpose %r recorded as unlabelled", purpose)
         return "unlabelled"
 
     def _resolve(self, ctx: CallContext | None) -> tuple[CallContext, str, str]:
-        """``(context, label_source, purpose)`` for a new scope: the explicit context, else the fallback, else none."""
-        if ctx is not None:
-            base, source = ctx, "explicit"
-        else:
-            fallback = _FALLBACK_CALL_CONTEXT.get()
-            base, source = (fallback, "context") if fallback is not None else (CallContext(), "none")
-        return base, source, self._label(base.purpose)
+        """``(context, label_source, purpose)`` for a new scope: the explicit context, else the fallback, else none.
+
+        Never raises: a context that is not a ``CallContext``, a purpose that is not a string, or any fault here gives
+        an empty context labelled ``unlabelled`` (``none``), counted, and the type of the fault logged once."""
+        try:
+            if ctx is not None:
+                base, source = ctx, "explicit"
+            else:
+                fallback = _FALLBACK_CALL_CONTEXT.get()
+                base, source = (fallback, "context") if fallback is not None else (CallContext(), "none")
+            if not isinstance(base, CallContext) or not isinstance(base.purpose, str):
+                raise TypeError("a model-call context must be a CallContext with a string purpose")
+            return base, source, self._label(base.purpose)
+        except Exception as exc:
+            self._stats.unlabelled += 1
+            fault = f"bad context: {type(exc).__name__}"
+            if fault not in self._warned_purposes:
+                self._warned_purposes.add(fault)
+                logger.warning("F108: bad model-call context (%s) recorded as unlabelled", type(exc).__name__)
+            return CallContext(), "none", "unlabelled"
+
+    def _late_attempt(self) -> None:
+        """Count an attempt reported after its call's row was written; log the first one."""
+        self._stats.dropped_late += 1
+        if not self._warned_late:
+            self._warned_late = True
+            logger.warning(
+                "F108: a model-call attempt was reported after its call was written; it is counted, not recorded"
+            )
 
     def _submit_call(self, params: dict[str, Any], attempts: list[dict[str, Any]]) -> None:
         self._writer.submit(lambda: self._insert_call(params, attempts), stats=self._stats)
