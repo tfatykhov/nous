@@ -170,7 +170,7 @@ async def review_change(llm_client: LLMClient, model: str, old: str, new: str) -
     """A fresh-context review of changed job instructions: (accepted, refusal reason). Fails closed."""
     unusable = (False, "no usable answer")
     answer = await call_background_llm(
-        llm_client, model, _CHANGE_REVIEW_SYSTEM, _CHANGE_REVIEW_PROMPT.format(old=old, new=new)
+        llm_client, model, _CHANGE_REVIEW_SYSTEM, _CHANGE_REVIEW_PROMPT.format(old=old, new=new), purpose="job_fix"
     )
     if not answer:
         return unusable

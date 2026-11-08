@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import itertools
 import json
 import logging
@@ -16,6 +17,7 @@ import time
 import weakref
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, Callable, Iterator
+from contextlib import AbstractContextManager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -73,6 +75,16 @@ from nous.config import Settings
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput
 from nous.observability.context_logger import HEARTBEAT_CALL_TYPE
+from nous.observability.model_calls import (
+    CallContext,
+    ContextStats,
+    analyze_sections,
+    context_kwargs,
+    current_fallback,
+    model_call_context,
+    payload_preamble,
+    system_sections,
+)
 from nous.observability.tool_calls import (
     ToolCallRecord,
     ToolCallRecorder,
@@ -204,6 +216,59 @@ CURRENT_TURN_EXCLUDE_IDS: ContextVar[dict[str, set[str]] | None] = ContextVar(
 # KNOWN LIMITATION comment further down), so a value set inside it is invisible
 # to any tool dispatched after the first yielded event — and a tool call always
 # yields tool_start before dispatch. Explicit threading works on both paths.
+
+# F108: what a turn's model calls are for, by the kind of turn (ExecutionContext.kind). The model-call rows are
+# labelled with it, so the same rule as F091 applies: the runner passes it with each call (``_call_context``).
+_PURPOSE_BY_KIND: dict[str, str] = {
+    "interactive": "chat",
+    "agent_action": "chat",
+    "mcp": "mcp",
+    "subtask": "subtask",
+    "dag_node": "subtask",
+    "scheduled": "subtask",
+    "heartbeat_triage": "heartbeat",
+    "heartbeat_check": "background_check",
+    "heartbeat_callback": "background_check",
+    "background": "background_check",
+    "dag_summary": "dag_summary",
+    "continuation": "continuation",
+}
+
+# F108: how long closing a stream the runner abandoned may take (``_stream_with_keepalive``), so a client stream
+# whose close hangs cannot hold up the turn or shutdown.
+_STREAM_CLOSE_TIMEOUT_SECONDS = 2.0
+
+
+def purpose_for_context(ctx_kind: str, forked: bool) -> str:
+    """F108: the purpose of a model call made in a turn of ``ctx_kind`` (``model_calls.PURPOSES``).
+
+    A kind with no mapping (an ExecutionContext kind added later, or ``approved_action``, which calls no model) is
+    ``unlabelled``, so it shows on the dashboard instead of passing for another kind. ``forked``: the runner is a
+    fork, which serves the heartbeat and has nobody in the loop, so a chat kind there is ``unlabelled`` too."""
+    purpose = _PURPOSE_BY_KIND.get(ctx_kind, "unlabelled")
+    if forked and purpose == "chat":
+        return "unlabelled"
+    return purpose
+
+
+def _trace_id_of(turn_context: Any) -> str | None:
+    """F108: the turn's trace id (``TurnContext.trace_id``), or None. Only a string reaches a row, so a mock turn
+    context's attribute never does (post_turn reads it the same way)."""
+    trace_id = getattr(turn_context, "trace_id", None)
+    return trace_id if isinstance(trace_id, str) else None
+
+
+async def _close_stream(stream: Any) -> None:
+    """F108: close a stream generator the runner stops reading, now: an ``async for`` that is left early does not
+    close its iterator, and the client records the call when its stream's body exits. Bounded, and a fault in the
+    close is not the turn's: logged, never raised. A cancellation still propagates."""
+    aclose = getattr(stream, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        await asyncio.wait_for(aclose(), _STREAM_CLOSE_TIMEOUT_SECONDS)
+    except Exception as exc:
+        logger.warning("F108: closing the model stream failed (%s)", type(exc).__name__)
 
 
 def _build_exclude_ids(
@@ -420,6 +485,7 @@ class AgentRunner:
         self._current_frame_id: str = "unknown"
         self._current_call_type: str = "chat"
         self._fork_call_type: str | None = None  # set by fork(): every call of a fork logs under it
+        self._is_fork = False  # F108: set by fork() (purpose_for_context)
         self._last_context_entry_id: str | None = None
         # F108: one record per tool call the model asked for (set_tool_call_recorder); None records nothing.
         self._tool_call_recorder: ToolCallRecorder | None = None
@@ -1517,14 +1583,53 @@ class AgentRunner:
         """F026: Call a Haiku-class model for Tier 3 action gating."""
         if not self._api:
             return '{"approved": true, "reason": "api-not-initialized"}'
+        # F108: ActionGate passes only the prompt, so the loop that asked for the check sets the turn's context
+        # around it (``_gate_call_context``); the call is labelled action_gate whatever that context's purpose.
+        turn = current_fallback()
         resp = await self._call_api(
             system_prompt="You are a safety gate. Respond only with JSON.",
             messages=[{"role": "user", "content": prompt}],
             tools=None,
             skip_thinking=True,
             model_override=self._settings.action_gating_model,
+            call_context=CallContext(purpose="action_gate")
+            if turn is None
+            else dataclasses.replace(turn, purpose="action_gate", stats=None),
         )
         return self._extract_text(resp.content)
+
+    @staticmethod
+    def _call_context(
+        ctx: ExecutionContext,
+        *,
+        purpose: str,
+        session_id: str | None,
+        turn_id: UUID | None,
+        turn_number: int | None,
+        frame_id: str | None,
+        trace_id: str | None = None,
+    ) -> CallContext:
+        """F108: the context a turn's model calls carry, built from the turn's own locals and its ExecutionContext,
+        never from the runner's instance fields, which a concurrent session overwrites (bug 6)."""
+        return CallContext(
+            purpose=purpose,
+            session_id=session_id,
+            parent_session_id=ctx.parent_session_id,
+            turn_id=turn_id,
+            turn_number=turn_number,
+            frame_id=frame_id,
+            subtask_id=ctx.subtask_id,
+            dag_id=ctx.dag_id,
+            trace_id=trace_id,
+        )
+
+    @staticmethod
+    def _gate_call_context(call_context: CallContext) -> AbstractContextManager[CallContext]:
+        """F108: around an F026 gate check, the turn's context for the gate's model call (``_call_gate_model``).
+        ActionGate takes no context, so it rides in the ``model_call_context`` fallback, which the gate's call reads
+        in the same context. Wrap only the awaited check, never a ``yield``."""
+        fields = {f.name: getattr(call_context, f.name) for f in dataclasses.fields(call_context)}
+        return model_call_context(**{**fields, "purpose": "action_gate"})
 
     def _get_session_lock(self, session_id: str) -> asyncio.Lock:
         """Per-session lock for serializing run_turn / stream_chat against
@@ -1614,6 +1719,9 @@ class AgentRunner:
         # The heartbeat is the only caller of fork(); its calls log as "heartbeat",
         # so they stay out of the chat views of the shared ring.
         forked._fork_call_type = HEARTBEAT_CALL_TYPE
+        # F108: the model-call rows take their purpose from each turn's kind instead (a dynamic check is a
+        # background_check, not heartbeat); the fork only rules out chat.
+        forked._is_fork = True
         self._forks.add(forked)
         return forked
 
@@ -1851,6 +1959,16 @@ class AgentRunner:
             _turn_number_local = self._current_turn_number
             self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
             self._current_call_type = "subtask" if is_subtask else "chat"
+            # F108: a history summary made for this turn is recorded with the turn, as compaction.
+            _compaction_call_context = self._call_context(
+                _ctx,
+                purpose="compaction",
+                session_id=session_id,
+                turn_id=_turn_id,
+                turn_number=_turn_number_local,
+                frame_id=turn_context.frame.frame_id if turn_context.frame else None,
+                trace_id=_trace_id_of(turn_context),
+            )
 
             # 4-6. Build system prompt and run tool loop
             response_text = ""
@@ -1905,7 +2023,9 @@ class AgentRunner:
                                     await self._compactor.compact(
                                         conversation,
                                         messages,
-                                        call_api=self._call_api,
+                                        call_api=functools.partial(
+                                            self._call_api, call_context=_compaction_call_context
+                                        ),
                                         cut_point=cut_point,
                                     )
                                     await self._save_conversation(_agent_id, session_id, conversation)
@@ -1940,6 +2060,7 @@ class AgentRunner:
                             turn_number=_turn_number_local,  # F091, see capture above
                             turn_id=_turn_id,  # F108
                             call_indexes=_call_indexes,  # F108
+                            trace_id=_trace_id_of(turn_context),  # F108: on the turn's model-call rows
                             is_subtask=is_subtask,
                             max_tool_calls=max_tool_calls,
                             model_override=model_override,
@@ -2106,6 +2227,8 @@ class AgentRunner:
                     messages=[{"role": "user", "content": reflection_prompt}],
                     tools=None,
                     skip_thinking=True,
+                    # F108: the session's end-of-conversation lessons; no turn runs it
+                    call_context=CallContext(purpose="reflection", session_id=session_id),
                 )
                 # Extract text from response
                 reflection = self._extract_text(api_response.content)
@@ -2176,8 +2299,34 @@ class AgentRunner:
         model_override: str | None = None,
         tool_choice: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Build Anthropic Messages API request payload.
+        """Build Anthropic Messages API request payload (``_build_api_payload_and_context`` without a context)."""
+        payload, _ctx = self._build_api_payload_and_context(
+            system_prompt,
+            messages,
+            tools,
+            stream=stream,
+            skip_thinking=skip_thinking,
+            model_override=model_override,
+            tool_choice=tool_choice,
+        )
+        return payload
 
+    def _build_api_payload_and_context(
+        self,
+        system_prompt: str | dict[str, str],
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        stream: bool = False,
+        skip_thinking: bool = False,
+        model_override: str | None = None,
+        tool_choice: dict[str, Any] | None = None,
+        call_context: CallContext | None = None,
+    ) -> tuple[dict[str, Any], CallContext | None]:
+        """Build Anthropic Messages API request payload, and ``call_context`` with this call's context estimate.
+
+        F108: the estimate (``ContextStats``, with the F036 cache break computed here) is attached to the context
+        passed down to a client that records its calls (``records_calls``), so the call's own row gets it; None stays
+        None. It is computed once, and only when the row or the F035.4 ring takes it.
         Shared by _call_api and _call_api_stream to avoid divergence.
         skip_thinking=True omits thinking params (for utility calls like reflection).
         model_override replaces the default model (used by compaction summarization).
@@ -2330,8 +2479,25 @@ class AgentRunner:
         if self._settings.effort != "high" and not is_legacy_haiku(effective_model):
             payload["output_config"] = {"effort": self._settings.effort}
 
-        # F035.4: Log context metadata (entry_id stored locally, NOT in payload)
-        if self._context_logger:
+        # F108: system block 0 (the Claude Code preamble) is sent too, so the estimate counts it. Any other block 0
+        # would be in flat_system_prompt already (payload_preamble gives ""), so it is never counted twice.
+        preamble = payload_preamble(system_blocks)
+
+        # F108: the context estimate runs once per call, and only when something consumes it: the F035.4 ring below,
+        # or the call's own row (a client that records its calls). Both get this one parse.
+        records = call_context is not None and getattr(self._api, "records_calls", False) is True
+        sections: dict[str, str] | None = None
+        stats: ContextStats | None = None
+        if self._context_logger or records:
+            try:
+                sections = system_sections(flat_system_prompt, preamble)
+                stats = analyze_sections(sections, messages, tools, self._get_context_window_size())
+            except Exception as exc:
+                logger.warning("F108: context estimate failed (%s); this call has no estimate", type(exc).__name__)
+
+        # F035.4: Log context metadata (entry_id stored locally, NOT in payload). A failed estimate is not tried again
+        # here: the call gets no ring entry, as when the entry itself failed.
+        if self._context_logger and stats is not None:
             try:
                 _entry = self._context_logger.log(
                     session_id=self._current_session_id,
@@ -2344,6 +2510,9 @@ class AgentRunner:
                     frame_id=self._current_frame_id,
                     context_window=self._get_context_window_size(),
                     payload=payload if self._settings.context_log_full_payload else None,
+                    preamble=preamble,
+                    sections=sections,
+                    stats=stats,
                 )
                 self._last_context_entry_id = _entry.id
                 # F036: Attach cache break info to context log entry
@@ -2354,7 +2523,18 @@ class AgentRunner:
             except Exception:
                 logger.debug("F035.4: context log failed", exc_info=True)
 
-        return payload
+        # F108: the same estimate for the call's own row, on the context passed down (never the shared fields).
+        if records and call_context is not None and stats is not None:
+            if cache_break:
+                stats = dataclasses.replace(
+                    stats,
+                    cache_break=True,
+                    cache_break_components=list(cache_break.components_changed),
+                    cache_break_tokens_lost=cache_break.estimated_tokens_lost,
+                )
+            call_context = dataclasses.replace(call_context, stats=stats)
+
+        return payload, call_context
 
     async def _call_api(
         self,
@@ -2365,6 +2545,7 @@ class AgentRunner:
         model_override: str | None = None,
         is_background: bool = False,
         tool_choice: dict[str, Any] | None = None,
+        call_context: CallContext | None = None,
     ) -> ApiResponse:
         """Call Anthropic Messages API via configured backend.
 
@@ -2375,43 +2556,53 @@ class AgentRunner:
         call_streaming_aggregated() to avoid idle-connection drops on long runs.
         F061: tool_choice (None default) lets the subtask executor force a
         terminal tool call on the penultimate turn.
+        F108: call_context says who makes the call (``_call_context``); it reaches a client that takes one, with
+        this call's context estimate.
         """
         if not self._api:
             raise RuntimeError("API client not initialized -- call start() first")
 
-        payload = self._build_api_payload(
+        payload, call_context = self._build_api_payload_and_context(
             system_prompt,
             messages,
             tools,
             skip_thinking=skip_thinking,
             model_override=model_override,
             tool_choice=tool_choice,
+            call_context=call_context,
         )
         if is_background:
             if self._settings.api_background_streaming_enabled:
-                return await self._api.call_streaming_aggregated(payload)
+                return await self._api.call_streaming_aggregated(payload, **context_kwargs(self._api, call_context))
             logger.warning(
                 "F048: is_background=True but NOUS_API_BACKGROUND_STREAMING_ENABLED=false; "
                 "falling back to non-streaming call() — idle-connection drops may recur"
             )
-        return await self._api.call(payload)
+        return await self._api.call(payload, **context_kwargs(self._api, call_context))
 
     async def _call_api_stream(
         self,
         system_prompt: str | dict[str, str],
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        call_context: CallContext | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         """Call Anthropic API with streaming via configured backend.
 
-        Yields StreamEvent objects from the underlying client.
+        Yields StreamEvent objects from the underlying client. F108: call_context as in ``_call_api``.
         """
         if not self._api:
             raise RuntimeError("API client not initialized -- call start() first")
 
-        payload = self._build_api_payload(system_prompt, messages, tools, stream=True)
-        async for event in self._api.stream(payload):
-            yield event
+        payload, call_context = self._build_api_payload_and_context(
+            system_prompt, messages, tools, stream=True, call_context=call_context
+        )
+        stream = self._api.stream(payload, **context_kwargs(self._api, call_context))
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            await _close_stream(stream)  # F108: leaving the loop early does not close the client's stream
 
     # ------------------------------------------------------------------
     # Streaming chat
@@ -2578,6 +2769,17 @@ class AgentRunner:
             _stream_turn_number = self._current_turn_number
             self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
             self._current_call_type = "chat"
+            # F108: this turn's model calls carry their context explicitly, from these locals: a ContextVar set here
+            # is gone after the first yield (see F091 NOTE), and the shared fields above are for the ring only.
+            _stream_call_context = self._call_context(
+                _ctx,
+                purpose=purpose_for_context(_ctx.kind, self._is_fork),
+                session_id=session_id,
+                turn_id=_stream_turn_id,
+                turn_number=_stream_turn_number,
+                frame_id=turn_context.frame.frame_id if turn_context.frame else None,
+                trace_id=_trace_id_of(turn_context),
+            )
 
             corrections = self._pending_corrections.pop(session_id, None)
             system_prompt = self._build_system_prompt(
@@ -2641,7 +2843,11 @@ class AgentRunner:
                                 await self._compactor.compact(
                                     conversation,
                                     messages,
-                                    call_api=self._call_api,
+                                    # F108: the summary call is recorded with this turn, as compaction
+                                    call_api=functools.partial(
+                                        self._call_api,
+                                        call_context=dataclasses.replace(_stream_call_context, purpose="compaction"),
+                                    ),
                                     cut_point=cut_point,
                                 )
                                 # 008.1 Phase 3: Persist state after compaction
@@ -2712,6 +2918,7 @@ class AgentRunner:
                         system_prompt=system_prompt,
                         messages=messages,
                         tools=tools if tools else None,
+                        call_context=_stream_call_context,
                     ):
                         if event.type == "error":
                             error = event.text
@@ -3054,12 +3261,15 @@ class AgentRunner:
                         # F026: Action gating (pre-dispatch)
                         gated = False
                         if self._action_gate and ledger:
-                            gate_result = await self._action_gate.check(
-                                tool_name,
-                                dispatch_input,
-                                ledger,
-                                user_message=user_message,
-                            )
+                            # F108: this `with` must hold no yield. It sets a ContextVar (the gate call's fallback)
+                            # and resets it, and a generator resumed after a yield runs in a fresh context.
+                            with self._gate_call_context(_stream_call_context):
+                                gate_result = await self._action_gate.check(
+                                    tool_name,
+                                    dispatch_input,
+                                    ledger,
+                                    user_message=user_message,
+                                )
                             self._log_f026_decision(
                                 "f026_action_gate",
                                 {
@@ -3315,6 +3525,7 @@ class AgentRunner:
                             system_prompt=system_prompt,
                             messages=messages,
                             tools=None,
+                            call_context=_stream_call_context,
                         )
                         response_text = self._extract_text(final.content)
                     except Exception:
@@ -3720,6 +3931,7 @@ class AgentRunner:
         usage_out: dict[str, int] | None = None,  # F099 2e: see run_turn
         turn_id: UUID | None = None,  # F108: minted by run_turn; a caller that passes none gets a fresh one
         call_indexes: Iterator[int] | None = None,  # F108: run_turn's counter (it counts a turn that raised)
+        trace_id: str | None = None,  # F108: the turn's trace (TurnContext.trace_id), on its model-call rows
     ) -> tuple[str, list[ToolResult], dict[str, int], list[str]]:
         """Run the tool use loop until completion or max_turns.
 
@@ -3752,6 +3964,16 @@ class AgentRunner:
         # F108: the offered tools whose own schema declares reason keep it in their input.
         own_reasons = own_reason_tools(offered_tools) if self._settings.tool_reason_enabled else frozenset()
         turn_id = turn_id if turn_id is not None else uuid4()
+        # F108: what every model call of this turn carries (the shared _current_* fields are for the ring only).
+        call_context = self._call_context(
+            ctx,
+            purpose=purpose_for_context(ctx.kind, self._is_fork),
+            session_id=session_id,
+            turn_id=turn_id,
+            turn_number=turn_number,
+            frame_id=frame_id,
+            trace_id=trace_id,
+        )
 
         # Build initial messages from conversation history
         # The latest user message is already in conversation.messages
@@ -3863,7 +4085,7 @@ class AgentRunner:
             }
             if tool_choice_arg is not None:
                 _call_kwargs["tool_choice"] = tool_choice_arg
-            api_response = await self._call_api(**_call_kwargs)
+            api_response = await self._call_api(**_call_kwargs, call_context=call_context)
 
             # F035.4: Update context log with response metadata
             if self._context_logger and self._last_context_entry_id and api_response.usage:
@@ -4083,12 +4305,13 @@ class AgentRunner:
                     # F026: Action gating (pre-dispatch)
                     gated = False
                     if self._action_gate and ledger:
-                        gate_result = await self._action_gate.check(
-                            tool_name,
-                            tool_input,
-                            ledger,
-                            user_message=user_message,
-                        )
+                        with self._gate_call_context(call_context):  # F108: the gate's call carries the turn
+                            gate_result = await self._action_gate.check(
+                                tool_name,
+                                tool_input,
+                                ledger,
+                                user_message=user_message,
+                            )
                         self._log_f026_decision(
                             "f026_action_gate",
                             {
@@ -4296,6 +4519,7 @@ class AgentRunner:
                     tools=None,
                     model_override=model_override,
                     is_background=is_background,
+                    call_context=call_context,
                 )
                 if final.usage:
                     total_usage["input_tokens"] += final.usage.get("input_tokens", 0)
@@ -4331,6 +4555,7 @@ class AgentRunner:
                 tools=None,
                 model_override=model_override,
                 is_background=is_background,
+                call_context=call_context,
             )
             if final_response.usage:
                 total_usage["input_tokens"] += final_response.usage.get("input_tokens", 0)
@@ -4879,14 +5104,17 @@ Rules:
         system_prompt: str,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        call_context: CallContext | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         """Wrap _call_api_stream with keepalive events during initial wait.
 
         Emits keepalives every keepalive_interval seconds until the first
         real event arrives from Anthropic. After that, events flow directly.
+        F108: closing this wrapper closes the client's stream too, so a segment the runner abandons (an ``error``
+        event) ends its recorded call now, not at a later garbage-collection hop.
         """
         interval = self._settings.keepalive_interval
-        stream = self._call_api_stream(system_prompt, messages, tools)
+        stream = self._call_api_stream(system_prompt, messages, tools, call_context=call_context)
 
         # Wait for first event with keepalives — use a persistent task
         # to avoid cancelling the generator's __anext__ on timeout
@@ -4923,6 +5151,8 @@ Rules:
                     await next_task
                 except (asyncio.CancelledError, StopAsyncIteration):
                     pass
+            # F108: after the pending step is done (closing a running generator raises).
+            await _close_stream(stream)
 
     def _maybe_inject_episode_id(
         self,

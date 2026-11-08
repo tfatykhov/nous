@@ -304,7 +304,7 @@ async def test_correction_prompt_uses_input_max_chars(heart, brain, monkeypatch,
     """(a) prompt sent to LLM contains chars past position 1000 when correction_input_max_chars=5000."""
     captured: dict = {}
 
-    async def fake_call_background_llm(client, model, system_prompt, user_message, max_tokens=800):
+    async def fake_call_background_llm(client, model, system_prompt, user_message, max_tokens=800, **_kw):
         captured["user_message"] = user_message
         captured["max_tokens"] = max_tokens
         return '{"principle": "Always use uv, not pip when managing deps.", "subject": "tooling", "is_censor": false, "censor_pattern": "", "confidence": 0.9}'
@@ -349,7 +349,7 @@ async def test_correction_max_tokens_from_settings(heart, brain, monkeypatch):
     """(b) max_tokens kwarg passed to call_background_llm equals settings.correction_max_tokens."""
     captured: dict = {}
 
-    async def fake_call_background_llm(client, model, system_prompt, user_message, max_tokens=800):
+    async def fake_call_background_llm(client, model, system_prompt, user_message, max_tokens=800, **_kw):
         captured["max_tokens"] = max_tokens
         return '{"principle": "Always use uv, not pip when managing deps.", "subject": "tooling", "is_censor": false, "censor_pattern": "", "confidence": 0.9}'
 
@@ -378,13 +378,13 @@ async def test_correction_min_principle_chars_from_settings(heart, brain, monkey
     PRINCIPLE_25 = "Always use uv, not pip."   # 23 chars — below old hardcoded 30, above new 20
     PRINCIPLE_15 = "Use uv always."            # 14 chars — below new default 20
 
-    async def fake_llm_25(client, model, system_prompt, user_message, max_tokens=800):
+    async def fake_llm_25(client, model, system_prompt, user_message, max_tokens=800, **_kw):
         return (
             f'{{"principle": "{PRINCIPLE_25}", "subject": "tooling", '
             f'"is_censor": false, "censor_pattern": "", "confidence": 0.9}}'
         )
 
-    async def fake_llm_15(client, model, system_prompt, user_message, max_tokens=800):
+    async def fake_llm_15(client, model, system_prompt, user_message, max_tokens=800, **_kw):
         return (
             f'{{"principle": "{PRINCIPLE_15}", "subject": "tooling", '
             f'"is_censor": false, "censor_pattern": "", "confidence": 0.9}}'

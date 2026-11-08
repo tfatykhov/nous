@@ -970,6 +970,7 @@ class SleepHandler:
                 # 2,078-2,510 tokens and Opus 5.5 up to 3,310; at 1,500 the call
                 # stopped before its facts on every model measured.
                 max_tokens=6000,
+                purpose="sleep_reflection",
             )
 
             if not reflection:
@@ -1340,6 +1341,7 @@ class SleepHandler:
                     # for tail headroom — max_tokens is a ceiling, so the extra
                     # costs nothing unless a generation actually needs it.
                     max_tokens=1000,
+                    purpose="sleep_contradiction",
                 )
 
                 if not resolution:
@@ -1960,6 +1962,7 @@ class SleepHandler:
                     # (cluster path not separately measured); the ceiling costs
                     # nothing unless hit.
                     max_tokens=1000,
+                    purpose="sleep_merge",
                 )
 
                 # Per-action event for retrospective audit (sleep eval

@@ -191,6 +191,7 @@ class DateWindowParser:
                     tool_description="Extract the time period a question asks about.",
                     output_schema=_WINDOW_SCHEMA,
                     max_tokens=256,
+                    purpose="date_window",
                 ),
                 timeout=float(self._settings.date_leg_timeout_seconds),
             )

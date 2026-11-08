@@ -167,6 +167,7 @@ class CorrectionExtractor:
                 "from user corrections. Respond only with JSON.",
                 prompt,
                 max_tokens=512,
+                purpose="correction_extractor",
             )
             if not raw:
                 return None

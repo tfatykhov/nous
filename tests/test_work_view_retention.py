@@ -29,7 +29,8 @@ from nous.observability.work_view_retention import sweep_tool_calls
 ROOT = Path(__file__).resolve().parents[1]
 _SETTINGS = SimpleNamespace(tool_input_max_chars=2000, tool_result_preview_chars=500, tool_reason_max_chars=500)
 DB_QUERY_EXCEPTION = (
-    "dashboards read these tables, the agent never does, except `tool_call_log`, which `db_query` may read"
+    "dashboards read these tables, the agent never does, except `tool_call_log`, `model_call_log` and "
+    "`model_call_attempt`, which `db_query` may read"
 )
 
 
@@ -152,17 +153,23 @@ class _FailingDatabase:
 
 def test_sweep_failure_logs_warning(monkeypatch, caplog):
     monkeypatch.setattr(main, "_RETENTION_SWEEP_INTERVAL_SECONDS", 0.01)
-    settings = SimpleNamespace(agent_id="test", tool_call_retention_days=30)
+    settings = SimpleNamespace(
+        agent_id="test",
+        tool_call_log_enabled=True,
+        tool_call_retention_days=30,
+        model_call_log_enabled=False,
+        model_call_retention_days=30,
+    )
     database = _FailingDatabase()
 
     async def scenario() -> None:
         database.tried = asyncio.Event()
-        task = asyncio.create_task(main._tool_call_retention_loop(settings, database))
+        task = asyncio.create_task(main._work_view_retention_loop(settings, database))
         try:
             await asyncio.wait_for(database.tried.wait(), 5)
             await asyncio.sleep(0.05)  # let the failed pass log
         finally:
-            await main.shutdown_components({"tool_call_retention_task": task})
+            await main.shutdown_components({"work_view_retention_task": task})
         assert task.done()
 
     with caplog.at_level(logging.DEBUG, logger="nous.main"):
@@ -233,7 +240,7 @@ def test_create_components_wires_one_writer_and_the_recorder_only_when_the_log_i
         try:
             writer = components["work_view_writer"]
             recorder = components["tool_call_recorder"]
-            task = components["tool_call_retention_task"]
+            task = components["work_view_retention_task"]
             if enabled:
                 assert isinstance(writer, BoundedWriter) and writer.name == "work_view"
                 assert (writer._timeout_s, writer._max_pending) == (30.0, 500)
@@ -309,13 +316,20 @@ def _recorder() -> ToolCallRecorder:
     return recorder
 
 
-COUNTERS = {"written": 7, "dropped_timeout": 1, "dropped_error": 0, "dropped_backpressure": 2, "unlabelled": 0}
+COUNTERS = {
+    "written": 7,
+    "dropped_timeout": 1,
+    "dropped_error": 0,
+    "dropped_backpressure": 2,
+    "unlabelled": 0,
+    "dropped_late": 0,
+}
 
 
 def test_observability_endpoint_reports_recording_counters():
     data = _observability(tool_call_recorder=_recorder())
 
-    assert data["recording"] == {"tool_calls": COUNTERS}
+    assert data["recording"] == {"tool_calls": COUNTERS, "model_calls": None}
     # Additive: the existing keys are all still there.
     assert set(data) == {
         "event_bus",
@@ -329,7 +343,7 @@ def test_observability_endpoint_reports_recording_counters():
 
 
 def test_observability_endpoint_reports_null_when_recording_is_off():
-    assert _observability()["recording"] == {"tool_calls": None}
+    assert _observability()["recording"] == {"tool_calls": None, "model_calls": None}
 
 
 def test_observability_endpoint_reads_the_recorder_through_the_apps_lazy_proxy():
@@ -338,10 +352,10 @@ def test_observability_endpoint_reads_the_recorder_through_the_apps_lazy_proxy()
     components: dict[str, Any] = {"tool_call_recorder": None}
     proxy = main._lazy_component(components, "tool_call_recorder")
 
-    assert _observability(tool_call_recorder=proxy)["recording"] == {"tool_calls": None}
+    assert _observability(tool_call_recorder=proxy)["recording"] == {"tool_calls": None, "model_calls": None}
 
     components["tool_call_recorder"] = _recorder()
-    assert _observability(tool_call_recorder=proxy)["recording"] == {"tool_calls": COUNTERS}
+    assert _observability(tool_call_recorder=proxy)["recording"] == {"tool_calls": COUNTERS, "model_calls": None}
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -361,6 +375,8 @@ ENV_ROWS = {
     "NOUS_TOOL_INPUT_MAX_CHARS": "2000",
     "NOUS_TOOL_RESULT_PREVIEW_CHARS": "500",
     "NOUS_TOOL_REASON_MAX_CHARS": "500",
+    "NOUS_MODEL_CALL_LOG_ENABLED": "false",
+    "NOUS_MODEL_CALL_RETENTION_DAYS": "30",
 }
 
 

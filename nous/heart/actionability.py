@@ -221,6 +221,7 @@ class ActionabilityClassifier:
             tool_description="Classify fact as actionable or not.",
             output_schema=_LLM_CLASSIFIER_SCHEMA,
             max_tokens=200,
+            purpose="actionability",
         )
 
         # Validate response shape — missing or None verdict defaults to safe

@@ -463,6 +463,7 @@ class SurfaceComposer:
                     # truncated JSON response burns a repair round on a
                     # response the model got RIGHT but could not finish.
                     max_tokens=16000,
+                    purpose="a2ui_compose",
                 ),
                 timeout=float(self._settings.a2ui_compose_timeout_seconds),
             )

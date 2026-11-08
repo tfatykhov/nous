@@ -291,7 +291,9 @@ class MonitorEngine:
             for pair_id, pair in shown.items()
         )
 
-        result = await self._procedure_learner._call_llm(_MONITOR_RECOVERY_PROMPT.format(pairs=pairs_text))
+        result = await self._procedure_learner._call_llm(
+            _MONITOR_RECOVERY_PROMPT.format(pairs=pairs_text), purpose="procedure_learner"
+        )
         if not result:
             return  # the call failed: keep the pairs for the next recovery turn
         proc_input = self._procedure_learner._gated_procedure_input(
@@ -356,6 +358,8 @@ class MonitorEngine:
                 "You are a correction analysis system. Respond only with JSON.",
                 prompt,
                 max_tokens=correction_max_tokens,
+                purpose="correction_extractor",
+                session_id=session_id,
             )
             if not raw:
                 return None

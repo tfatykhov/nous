@@ -6,13 +6,16 @@ Each handler registers itself on specific event types during __init__.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import re
+import uuid
 from typing import Any, Protocol, runtime_checkable
 
 from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.config import Settings
+from nous.observability.model_calls import CallContext, context_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +28,7 @@ logger = logging.getLogger(__name__)
 class LLMClient(Protocol):
     """Minimal protocol matching AnthropicClient.call()."""
 
-    async def call(self, payload: dict[str, Any]) -> Any: ...
+    async def call(self, payload: dict[str, Any], *, call_context: CallContext | None = None) -> Any: ...
 
 
 async def call_background_llm(
@@ -34,12 +37,16 @@ async def call_background_llm(
     system_prompt: str,
     user_message: str,
     max_tokens: int = 800,
+    *,
+    purpose: str = "unlabelled",
+    session_id: str | None = None,
 ) -> str | None:
     """Call LLM for background tasks using the same API contract as the runner.
 
     Builds a proper payload with system blocks + cache_control (on the
     preamble and the system prompt only), then delegates to client.call()
-    which handles auth, retries, HTTP/2, and beta headers.
+    which handles auth, retries, HTTP/2, and beta headers. ``purpose`` (one of
+    ``PURPOSES``) and ``session_id`` label the call's ``model_call_log`` row.
 
     Returns the text content from the response, or None on failure.
     """
@@ -73,7 +80,8 @@ async def call_background_llm(
     }
 
     try:
-        response = await client.call(payload)
+        ctx = CallContext(purpose=purpose, session_id=session_id)
+        response = await client.call(payload, **context_kwargs(client, ctx))
         # Extract text from response content blocks
         for block in response.content:
             if isinstance(block, dict) and block.get("type") == "text":
@@ -137,7 +145,9 @@ def _tool_input(response: Any, payload: dict[str, Any]) -> dict[str, Any]:
     raise UnusableToolReply(f"stop_reason={stop_reason}, blocks={blocks}, missing={missing}")
 
 
-async def call_with_tool_choice(client: LLMClient, payload: dict[str, Any]) -> dict[str, Any]:
+async def call_with_tool_choice(
+    client: LLMClient, payload: dict[str, Any], *, purpose: str = "unlabelled"
+) -> dict[str, Any]:
     """Send a request that forces its one tool, or asks for it where the model rejects forcing; return the call's input.
 
     The first request for a model is ``payload`` exactly. If the API answers that a
@@ -145,11 +155,15 @@ async def call_with_tool_choice(client: LLMClient, payload: dict[str, Any]) -> d
     and every later request for it go without tool_choice, the system prompt asking for
     the tool. Any other error is raised, and a reply that is no whole call of the tool
     raises UnusableToolReply.
+
+    Each request is labelled ``purpose``; the requests of one call share a ``group_id``,
+    and the one asking for the tool in the prompt is marked ``is_fallback``.
     """
     model = payload["model"]
+    forced = CallContext(purpose=purpose, group_id=uuid.uuid4())
     if model not in _REJECTS_FORCED_TOOL_CHOICE:
         try:
-            response = await client.call(payload)
+            response = await client.call(payload, **context_kwargs(client, forced))
         except Exception as e:
             if not _rejects_forced_tool_choice(e):
                 raise
@@ -157,7 +171,8 @@ async def call_with_tool_choice(client: LLMClient, payload: dict[str, Any]) -> d
             logger.info("Model %s rejects a forced tool_choice; asking for the tool in the prompt", model)
         else:
             return _tool_input(response, payload)
-    return _tool_input(await client.call(_asking_for_the_tool(payload)), payload)
+    asked = dataclasses.replace(forced, is_fallback=True)
+    return _tool_input(await client.call(_asking_for_the_tool(payload), **context_kwargs(client, asked)), payload)
 
 
 async def call_background_llm_structured(
@@ -169,13 +184,15 @@ async def call_background_llm_structured(
     tool_description: str,
     output_schema: dict[str, Any],
     max_tokens: int = 1500,
+    *,
+    purpose: str = "unlabelled",
 ) -> dict[str, Any] | None:
     """Call LLM using tool_use trick for structured JSON output.
 
     Defines a fake tool whose input_schema matches the desired output schema,
     then forces the model to "call" it via tool_choice; on a model that rejects
     a forced tool_choice, call_with_tool_choice asks for the tool in the system
-    prompt instead.
+    prompt instead. ``purpose`` (one of ``PURPOSES``) labels the call.
 
     Returns the structured dict, or None on failure: an error, or a reply cut off
     at max_tokens, refused, without a tool call or without a required key.
@@ -218,7 +235,7 @@ async def call_background_llm_structured(
     }
 
     try:
-        return await call_with_tool_choice(client, payload)
+        return await call_with_tool_choice(client, payload, purpose=purpose)
     except UnusableToolReply as e:
         logger.warning("Structured LLM call %s (model=%s) not used: %s", tool_name, model, e)
         return None

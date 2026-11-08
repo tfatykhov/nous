@@ -526,6 +526,7 @@ class ProfileCardWriter:
                 tool_description="Store the whole profile card. Every line cites the source facts it states.",
                 output_schema=_CARD_SCHEMA,
                 max_tokens=LLM_MAX_TOKENS,
+                purpose="profile_card",
             )
             entries, counts = settle_entries(
                 reply.get("entries") if reply else None,

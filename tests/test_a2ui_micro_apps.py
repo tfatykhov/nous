@@ -82,7 +82,7 @@ class _ScriptedLLM:
         self.responses = list(responses)
         self.calls: list[str] = []
 
-    async def __call__(self, client, model, system_prompt, user_message, max_tokens=800):
+    async def __call__(self, client, model, system_prompt, user_message, max_tokens=800, **_kw):
         self.calls.append(user_message)
         return self.responses.pop(0) if self.responses else None
 

@@ -330,7 +330,7 @@ async def test_missing_reason_still_runs():
     calls = {"n": 0}
 
     async def fake_call_api(
-        system_prompt, messages, tools=None, skip_thinking=False, model_override=None, is_background=False
+        system_prompt, messages, tools=None, skip_thinking=False, model_override=None, is_background=False, **_
     ):
         offered_to_model.append(tools or [])
         calls["n"] += 1

@@ -18,7 +18,11 @@ import shutil
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import (
+    AbstractAsyncContextManager,
+    AbstractContextManager,
+    asynccontextmanager,
+)
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -26,7 +30,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from nous.api.anthropic_client import _retry_delay, _should_retry
+from nous.api.anthropic_client import _ms_since, _retry_delay, _should_retry
 from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.browser.executor import BrowserActionError, BrowserExecutor, ConfirmationRequired, consequential_url
 from nous.browser.session import (
@@ -37,12 +41,16 @@ from nous.browser.session import (
     check_resolution,
     host_problem,
 )
+from nous.observability.model_calls import CallContext, ModelCallRecorder, ModelCallScope, open_scope
 
 logger = logging.getLogger(__name__)
 
 # One browser task at a time in this process: each is a full Chromium. A second call waits within its own
 # time budget, then returns `busy`.
 _BROWSER_SLOT = asyncio.Semaphore(1)
+# F108: the recorder each task's API caller reports to (set_recorder, from main.py); None records nothing.
+_recorder: ModelCallRecorder | None = None
+_CALL_CONTEXT = CallContext(purpose="browser_task")
 # Run directories under <workspace>/browser-task/: older ones are pruned when a task starts.
 KEEP_RUNS = 50
 KEEP_RUN_DAYS = 7
@@ -141,6 +149,12 @@ class BrowserExecutorLike(Protocol):
 
 ApiCaller = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 BrowserFactory = Callable[[DomainAllowlist, Path], AbstractAsyncContextManager[BrowserExecutorLike]]
+
+
+def set_recorder(recorder: ModelCallRecorder | None) -> None:
+    """Record each browser step's API call from now on through ``recorder`` (``make_api_caller``); None stops."""
+    global _recorder
+    _recorder = recorder
 
 
 def validate_model(model: str) -> None:
@@ -250,14 +264,29 @@ def _auth_headers(settings: Any) -> dict[str, str]:
     return headers
 
 
-def make_api_caller(settings: Any, http: httpx.AsyncClient, deadline: float | None = None) -> ApiCaller:
+def _open_scope(
+    recorder: ModelCallRecorder | None, payload: dict[str, Any]
+) -> AbstractContextManager[ModelCallScope | None]:
+    """The scope of one browser step's API call, for a ``with`` (``model_calls.open_scope``)."""
+    return open_scope(recorder, payload, _CALL_CONTEXT, "browser_step")
+
+
+def make_api_caller(
+    settings: Any,
+    http: httpx.AsyncClient,
+    deadline: float | None = None,
+    recorder: ModelCallRecorder | None = None,
+) -> ApiCaller:
     """POST /v1/messages with the payload as is. The shared client's SDK backend (prod's default) would drop
     `toolset_name`, `context_management` and the top-level `cache_control`, so the browser loop has its own.
     tests/test_fix_x_preamble_first.py lists this module as one that may talk to the API directly.
 
     `deadline` is the task's end on the event loop's clock. A retry pause is capped so that the retry still
     starts RETRY_WINDOW_SECONDS before it; with no time left the call fails at once, and a rate limit says so
-    instead of running into the task's timeout."""
+    instead of running into the task's timeout.
+
+    F108: with `recorder`, each call is one `browser_step` row (purpose `browser_task`) with the response's usage
+    and stop reason, and each HTTP try one of its attempts. Recording only reads; the request is unchanged."""
     headers = _auth_headers(settings)
     url = f"{settings.api_base_url.rstrip('/')}/v1/messages"
     retries = 2
@@ -282,10 +311,21 @@ def make_api_caller(settings: Any, http: httpx.AsyncClient, deadline: float | No
         return True
 
     async def call(payload: dict[str, Any]) -> dict[str, Any]:
+        with _open_scope(recorder, payload) as scope:
+            response = await send(payload, scope)
+            if scope is not None:
+                scope.finish(response)
+            return response
+
+    async def send(payload: dict[str, Any], scope: ModelCallScope | None) -> dict[str, Any]:
+        """`call`'s retry loop; each HTTP try is reported to `scope` when the call is recorded."""
         for attempt in range(retries + 1):
+            t0 = time.perf_counter()
             try:
                 response = await http.post(url, json=payload, headers=headers)
             except httpx.HTTPError as e:
+                if scope is not None:
+                    scope.attempt(None, type(e).__name__, str(e), _ms_since(t0))
                 if (
                     attempt < retries
                     and isinstance(e, httpx.TimeoutException)
@@ -295,18 +335,26 @@ def make_api_caller(settings: Any, http: httpx.AsyncClient, deadline: float | No
                 raise BrowserApiError(f"Anthropic API request failed: {type(e).__name__}") from e
             status = response.status_code
             if status == 200:
+                if scope is not None:
+                    scope.attempt(status, None, None, _ms_since(t0))
                 try:
                     return response.json()
                 except ValueError as e:
                     raise BrowserApiError("Anthropic API returned a body that is not JSON") from e
+            # The error before the retry, so each attempt carries the API's error type and message (as the shared
+            # client's attempts do), not only the final one.
+            try:
+                error = response.json().get("error", {})
+                error_type, error_msg = error.get("type", "unknown"), error.get("message", "unknown error")
+                detail = f"{error_type} - {error.get('message', '')}"  # the raised error's text, unchanged
+            except Exception:
+                error_type, error_msg = "http_error", f"HTTP {status}: {response.text[:500]}"
+                detail = response.text[:300]
+            if scope is not None:
+                scope.attempt(status, error_type, error_msg, _ms_since(t0))
             retry = _should_retry(status, response.headers) and attempt < retries
             if retry and await pause(attempt, response, f"answered {status}"):
                 continue
-            try:
-                error = response.json().get("error", {})
-                detail = f"{error.get('type', 'unknown')} - {error.get('message', '')}"
-            except Exception:
-                detail = response.text[:300]
             if status == 429:
                 why = "with no time left in the task's budget to wait" if retry else f"after {attempt + 1} attempts"
                 raise BrowserApiError(f"Rate limited by the Anthropic API (429) {why}; try again later: {detail}")
@@ -409,7 +457,10 @@ async def run_browser_task(
         )
         state = BrowserTaskResult("timeout", "", run_id)
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as http:
-            api = call_api or make_api_caller(settings, http, deadline=clock.time() + timeout)
+            # F108: passed only when one is set, so a caller factory with a fixed keyword signature keeps working
+            # (tests/test_browser_task.py::TestTeardownReserve's fake_caller takes no `recorder`).
+            recording = {} if _recorder is None else {"recorder": _recorder}
+            api = call_api or make_api_caller(settings, http, deadline=clock.time() + timeout, **recording)
             try:
                 await asyncio.wait_for(
                     _run(goal, allowlist, start_url, steps_cap, model, api, factory, runs_dir / run_id, state), timeout

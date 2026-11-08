@@ -9,6 +9,11 @@ place on the head of the candidate list.
 Graceful degradation: if `sentence-transformers` is not installed the module
 still imports successfully (CROSS_ENCODER_AVAILABLE=False) and callers should
 short-circuit before calling cross_encoder_rerank.
+
+F108: with a recorder set (`set_recorder`), each rerank that runs the model is
+counted in its minute's `rerank` bucket: its time, and `error` when the
+model failed to load or predict. A rerank has no tokens, so the bucket's
+token count stays NULL (the candidate count is not recorded).
 """
 
 from __future__ import annotations
@@ -16,10 +21,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 from functools import lru_cache
-from typing import Callable, TypeVar
+from typing import TYPE_CHECKING, Callable, TypeVar
+
+if TYPE_CHECKING:
+    from nous.observability.model_calls import ModelCallRecorder
 
 logger = logging.getLogger(__name__)
+
+# F108: the recorder each rerank reports to (set_recorder, from main.py); None records nothing.
+_recorder: ModelCallRecorder | None = None
 
 try:
     from sentence_transformers import CrossEncoder  # noqa: F401
@@ -33,6 +45,26 @@ except ImportError:
     )
 
 T = TypeVar("T")
+
+
+def set_recorder(recorder: ModelCallRecorder | None) -> None:
+    """Count each rerank from now on in ``recorder``'s per-minute ``rerank`` bucket; None stops."""
+    global _recorder
+    _recorder = recorder
+
+
+def _record(model_name: str, started: float, status: str) -> None:
+    """One rerank into its bucket: the time since ``started``, no tokens. Never raises (``record_bucket`` does
+    not)."""
+    recorder = _recorder
+    if recorder is not None:
+        recorder.record_bucket(
+            purpose="rerank",
+            model=model_name,
+            tokens=None,
+            duration_ms=(time.perf_counter() - started) * 1000,
+            status=status,
+        )
 
 
 @lru_cache(maxsize=1)
@@ -124,6 +156,7 @@ async def cross_encoder_rerank(
         return candidates
 
     # Load model (lazy, cached).
+    started = time.perf_counter()
     try:
         model = _load_cross_encoder(model_name)
     except Exception as exc:  # noqa: BLE001
@@ -132,17 +165,23 @@ async def cross_encoder_rerank(
             model_name,
             exc,
         )
+        _record(model_name, started, "error")
         return candidates
 
     # Run prediction in a thread to avoid blocking the event loop.
     try:
         scores = await asyncio.to_thread(model.predict, pairs)
+    except asyncio.CancelledError:
+        _record(model_name, started, "cancelled")
+        raise
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Cross-encoder predict failed: %s — returning unranked",
             exc,
         )
+        _record(model_name, started, "error")
         return candidates
+    _record(model_name, started, "ok")
 
     # Mutate head scores in place.
     for pair_idx, raw_score in zip(pair_indices, scores):

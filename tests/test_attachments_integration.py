@@ -249,7 +249,7 @@ async def test_stream_chat_with_image_sends_blocks_and_compacts(runner_with_fake
 
     sent: dict = {}
 
-    async def _fake_stream(system_prompt, messages, tools=None):
+    async def _fake_stream(system_prompt, messages, tools=None, **_):
         sent["messages"] = messages  # outgoing payload as built before the loop
         yield StreamEvent(type="text_delta", text="Looks like a tiny PNG dot.")
         yield StreamEvent(type="done", stop_reason="end_turn")

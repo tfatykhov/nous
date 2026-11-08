@@ -659,6 +659,7 @@ class FactExtractor:
             system_prompt="You are extracting facts from an AI agent's conversation summary.",
             user_message=prompt,
             max_tokens=1500,
+            purpose="fact_extractor",
         )
 
         if not text:

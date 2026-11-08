@@ -516,6 +516,8 @@ def test_the_tool_description_teaches_the_limits():
         "nous_system.execution_ledger",
         "nous_system.memory_write_health_daily",
         "nous_system.tool_call_log",
+        "nous_system.model_call_log",
+        "nous_system.model_call_attempt",
     ):
         assert needed in description, needed
     # it says first what it is for, and sends questions about earlier conversations to memory search

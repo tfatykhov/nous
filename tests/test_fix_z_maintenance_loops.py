@@ -153,7 +153,10 @@ def _settings(**overrides: Any) -> SimpleNamespace:
         "execution_ledger_pending_unknown_after_seconds": 3600,
         "retrieval_telemetry_retention_days": 14,
         "context_log_retention_days": 30,
+        "tool_call_log_enabled": True,
         "tool_call_retention_days": 30,
+        "model_call_log_enabled": False,
+        "model_call_retention_days": 30,
         "a2ui_sweep_interval_seconds": TICK,
     }
     values.update(overrides)
@@ -305,8 +308,8 @@ def _tool_call_retention(first: str | None) -> _Loop:
     settings, database = _settings(), _Database(went_on, _First(first))
     return _Loop(
         "tool-call retention loop",
-        "tool_call_retention_task",
-        lambda: main._tool_call_retention_loop(settings, database),
+        "work_view_retention_task",
+        lambda: main._work_view_retention_loop(settings, database),
         went_on,
         "F108: tool-call retention sweep failed",
         {"database": database},
@@ -608,7 +611,7 @@ def test_a_loop_waits_its_interval_between_two_passes(build, monkeypatch):
         "execution_ledger_task": lambda: loop.parts["cards"].swept,
         "retrieval_log_retention_task": lambda: loop.parts["database"].commits,
         "context_log_retention_task": lambda: loop.parts["database"].commits,
-        "tool_call_retention_task": lambda: loop.parts["database"].commits,
+        "work_view_retention_task": lambda: loop.parts["database"].commits,
         "a2ui_sweep_task": lambda: loop.parts["surfaces"].expired,
         "result_reconciler_task": lambda: loop.parts["reconciler"].ticks,
     }[loop.key]
@@ -697,11 +700,7 @@ def test_create_components_starts_each_loop_behind_its_own_switch_with_its_own_c
             ["settings", "database"],
             ["settings.retrieval_telemetry_enabled", "getattr(settings, 'retrieval_telemetry_retention_days', 0) > 0"],
         ),
-        (
-            "_tool_call_retention_loop",
-            ["settings", "database"],
-            ["settings.tool_call_log_enabled", "settings.tool_call_retention_days > 0"],
-        ),
+        ("_work_view_retention_loop", ["settings", "database"], ["any(_work_view_sweeps(settings))"]),
     ], f"create_components starts its loops differently: {started}"
 
 

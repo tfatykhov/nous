@@ -444,7 +444,8 @@ class ProcedureLearner:
 
                 # Extract procedure via LLM
                 procedure_data = await self._call_llm(
-                    _DECISION_CLUSTER_PROMPT.format(decisions="\n".join(decision_texts))
+                    _DECISION_CLUSTER_PROMPT.format(decisions="\n".join(decision_texts)),
+                    purpose="procedure_learner",
                 )
                 if not procedure_data:
                     continue
@@ -569,7 +570,7 @@ class ProcedureLearner:
                 )
                 allowed_ids = dict(lesson_sources[i] for i in cluster_indices)
                 procedure_data = await self._call_llm(
-                    _EPISODE_LESSON_PROMPT.format(lessons=lessons_text)
+                    _EPISODE_LESSON_PROMPT.format(lessons=lessons_text), purpose="procedure_learner"
                 )
                 if not procedure_data:
                     continue
@@ -628,7 +629,8 @@ class ProcedureLearner:
                         effectiveness=proc_detail.effectiveness,
                         last_activated=proc_detail.last_activated,
                         activation_count=proc_detail.activation_count,
-                    )
+                    ),
+                    purpose="procedure_learner",
                 )
                 if not review_data:
                     continue
@@ -847,6 +849,7 @@ class ProcedureLearner:
                 description=_one_line(proc_input.description or ""),
                 existing=existing,
             ),
+            purpose="procedure_coverage",
             counts=counts,
         )
         if not answer or str(answer.get("verdict") or "").strip().upper() != "COVERED":
@@ -864,8 +867,13 @@ class ProcedureLearner:
         except ValueError:
             return None
 
-    async def _call_llm(self, prompt: str, *, counts: dict[str, int] | None = None) -> dict[str, Any] | None:
-        """Call Anthropic API and parse JSON response; failures count in ``counts`` (None: the learner's)."""
+    async def _call_llm(
+        self, prompt: str, *, purpose: str = "procedure_learner", counts: dict[str, int] | None = None
+    ) -> dict[str, Any] | None:
+        """Call Anthropic API and parse JSON response; failures count in ``counts`` (None: the learner's).
+
+        ``purpose`` labels the call: ``procedure_learner`` to distil or review a procedure,
+        ``procedure_coverage`` to ask whether a stored procedure already teaches a new lesson."""
         counts = counts if counts is not None else self._gate_counts
         if not self._llm:
             return None
@@ -876,6 +884,7 @@ class ProcedureLearner:
             system_prompt="You are analyzing patterns to extract reusable procedures for an AI agent.",
             user_message=prompt,
             max_tokens=1500,
+            purpose=purpose,
         )
 
         if not text:

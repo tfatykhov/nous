@@ -159,6 +159,7 @@ class EpistemicClassifier:
                     ),
                     output_schema=_EPISTEMIC_TOOL["input_schema"],
                     max_tokens=64,
+                    purpose="epistemic_gate",
                 ),
                 timeout=self._settings.epistemic_gate_timeout_seconds,
             )

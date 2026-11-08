@@ -31,7 +31,7 @@ nous/
 │   │   ├── brain.py            # Core: record, query, review, calibrate
 │   │   ├── bridge.py           # Structure + function descriptions
 │   │   ├── calibration.py      # Brier scores, confidence tracking
-│   │   ├── embeddings.py       # pgvector embedding provider
+│   │   ├── embeddings.py       # pgvector embedding provider (F108: set_recorder counts each embeddings request in a minute bucket)
 │   │   ├── graph_linker.py     # Cross-type auto-linking (common-template embedding)
 │   │   ├── guardrails.py       # CEL expression guardrails
 │   │   ├── intentions.py       # F099: brain.intentions — spec, wake-policy defaults, lineage (a fire only under an open container), in-transaction insert, legacy close
@@ -104,11 +104,12 @@ nous/
 │   │   ├── manager.py          # Identity section CRUD
 │   │   ├── protocol.py         # Initiation protocol
 │   │   └── tools.py            # Identity-related tools
-│   ├── observability/          # Telemetry writers — dashboards read these tables, the agent never does, except `tool_call_log`, which `db_query` may read
-│   │   ├── context_logger.py   # F035.4 per-turn context payload log
-│   │   ├── recording.py        # F108: BoundedWriter, the one bounded fire-and-forget writer every work-view recorder shares (built in main.py), and RecorderStats, its counters
+│   ├── observability/          # Telemetry writers — dashboards read these tables, the agent never does, except `tool_call_log`, `model_call_log` and `model_call_attempt`, which `db_query` may read
+│   │   ├── context_logger.py   # F035.4 per-turn context payload log (its context estimate lives in model_calls.py)
+│   │   ├── model_calls.py      # F108: ModelCallRecorder (one model_call_log row per model call with its model_call_attempt rows, embedding and rerank calls counted per minute), CallContext and the purpose vocabulary, model_call_context (the fallback label), and the context estimate (analyze_context, analyze_sections, ContextStats, parse_system_sections, payload_preamble, system_sections). main.py builds the recorder when NOUS_MODEL_CALL_LOG_ENABLED is on and hands it to both Anthropic clients, the embedder, the browser task loop and the reranker
+│   │   ├── recording.py        # F108: BoundedWriter, the one bounded fire-and-forget writer every work-view recorder shares (built in main.py when either work-view log is on), and RecorderStats, its counters
 │   │   ├── tool_calls.py       # F108: ToolCallRecorder (one tool_call_log row per tool call, one agent_turn_log row per turn, text redacted and capped), the reason field (add_reason_field, split_reason) and work kinds
-│   │   ├── work_view_retention.py # F108: sweep_tool_calls, the daily agent-scoped delete of tool_call_log and agent_turn_log rows past NOUS_TOOL_CALL_RETENTION_DAYS
+│   │   ├── work_view_retention.py # F108: the daily agent-scoped deletes main.py's retention loop runs: sweep_tool_calls (tool_call_log and agent_turn_log rows past NOUS_TOOL_CALL_RETENTION_DAYS) and sweep_model_calls (model_call_log rows past NOUS_MODEL_CALL_RETENTION_DAYS, their attempts by cascade)
 │   │   ├── retrieval_logger.py # F091 retrieval telemetry (RETRIEVAL_PATHS lives here)
 │   │   ├── retrieval_trace.py  # F091 write-only trace collector + NullTrace
 │   │   ├── process_recorder.py # #653 nous_system.process_run_log writer (fail-open)
@@ -118,7 +119,7 @@ nous/
 │   │   ├── task_score_job.py   # Task scores: the one-shot scoring pass (`python -m nous.observability.task_score_job`), the only writer of `scoring.task_scores` and `scoring.scorer_heartbeat` (migration 088, its one-row-per-agent liveness record)
 │   │   ├── autonomy_inventory.py # Autonomy inventory: per tool, successes by who was in the loop (owner present, approved, autonomous), and censor activity
 │   │   ├── drift.py            # Drift detection
-│   │   ├── memory_write_health.py # P4: the daily write-health rollup (migration 099), its six rules, the latched hard-delete detector and its acknowledgements (events of type memory_write_health_ack); one of the two tables here the db_query reader may read (owner's call; the other is `tool_call_log`)
+│   │   ├── memory_write_health.py # P4: the daily write-health rollup (migration 099), its six rules, the latched hard-delete detector and its acknowledgements (events of type memory_write_health_ack); one of the tables here the db_query reader may read (owner's call; the others are `tool_call_log`, `model_call_log` and `model_call_attempt`)
 │   │   └── snapshots.py        # Graph hub snapshots
 │   ├── audits/                 # Scorer v5: the owner's sampled audits of completion checks
 │   │   └── check_audit.py      # CheckAuditSampler (weekly loop started from main.py, off unless NOUS_CHECK_AUDIT_ENABLED); `__init__.py` holds the shared `AUDIT_VERDICT_ACTION`
@@ -137,7 +138,7 @@ nous/
 │   │   ├── egress.py           # Egress proxy: allowlist + resolved-address check on every connection
 │   │   ├── chromium-as-user.sh # Runs Chromium as the unprivileged nous-browser user (setpriv)
 │   │   ├── executor.py         # browser_toolset member calls -> Playwright; confirmation guard
-│   │   ├── loop.py             # Inner agent loop, pinned model, own /v1/messages caller
+│   │   ├── loop.py             # Inner agent loop, pinned model, own /v1/messages caller (F108: module-level set_recorder records each step as a browser_step call)
 │   │   └── tools.py            # browser_task registration
 │   ├── a2ui/                   # F092 companion surfaces
 │   │   ├── service.py          # SurfaceService: authoritative state + outbox deltas

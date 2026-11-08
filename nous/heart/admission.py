@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 
 from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.heart.schemas import FactInput
+from nous.observability.model_calls import CallContext, context_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +202,9 @@ class AdmissionLLMClient:
             ],
         }
 
-        response = await self._client.call(payload)
+        response = await self._client.call(
+            payload, **context_kwargs(self._client, CallContext(purpose="admission_utility"))
+        )
         for block in response.content:
             if isinstance(block, dict) and block.get("type") == "text":
                 return block.get("text", "")

@@ -46,7 +46,7 @@ def _one_tool_call_then_done(tool_name: str):
     calls = {"n": 0}
 
     async def fake_call_api(
-        system_prompt, messages, tools=None, skip_thinking=False, model_override=None, is_background=False
+        system_prompt, messages, tools=None, skip_thinking=False, model_override=None, is_background=False, **_
     ):
         calls["n"] += 1
         if calls["n"] == 1:
@@ -71,7 +71,7 @@ def _tool_calls_then_done_with(tool_name: str, tool_input: dict, *, times: int):
     calls = {"n": 0}
 
     async def fake_call_api(
-        system_prompt, messages, tools=None, skip_thinking=False, model_override=None, is_background=False
+        system_prompt, messages, tools=None, skip_thinking=False, model_override=None, is_background=False, **_
     ):
         calls["n"] += 1
         if calls["n"] <= times:
@@ -411,7 +411,7 @@ async def test_refuse_active_strips_previously_unclassified_tools():
     sent: list[set[str]] = []
 
     async def capture(
-        system_prompt, messages, tools=None, skip_thinking=False, model_override=None, is_background=False
+        system_prompt, messages, tools=None, skip_thinking=False, model_override=None, is_background=False, **_
     ):
         sent.append({t["name"] for t in tools or []})
         return ApiResponse(content=[{"type": "text", "text": "done"}], stop_reason="end_turn")

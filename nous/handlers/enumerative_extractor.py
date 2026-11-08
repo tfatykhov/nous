@@ -407,6 +407,7 @@ class EnumerativeExtractor:
             tool_description="Report every atomic factual statement in the chunk.",
             output_schema=_EXTRACTION_SCHEMA_INTERVALS if intervals else _EXTRACTION_SCHEMA,
             max_tokens=4000,
+            purpose="enumerative_extractor",
         )
         if result is None or not isinstance(result.get("facts"), list):
             # API/helper failure or malformed response — caller treats None as a loud

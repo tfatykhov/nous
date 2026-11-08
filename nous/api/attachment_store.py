@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 
 from nous.api.attachments import sanitize_filename
 from nous.api.preamble import CLAUDE_CODE_PREAMBLE
+from nous.observability.model_calls import CallContext, context_kwargs
 
 if TYPE_CHECKING:
     from nous.api.models import Attachment
@@ -228,7 +229,10 @@ async def _transcribe_and_ingest_pdf(raw: bytes, heart: "Heart", settings: "Sett
                 {"type": "text", "text": "Transcribe this document's full text verbatim."},
             ]}],
         }
-        resp = await llm_client.call(payload)
+        resp = await llm_client.call(
+            payload,
+            **context_kwargs(llm_client, CallContext(purpose="pdf_transcription", session_id=session_id)),
+        )
         text, stop_reason = _parse_transcription_response(resp)
         if stop_reason == "max_tokens":
             logger.warning("PDF transcription truncated for %s (raise max_tokens or add paging)", filename)
