@@ -54,6 +54,9 @@ class _Spy:
             raise RuntimeError("recorder down")
         self.records.append(rec)
 
+    def record_turn(self, rec) -> None:
+        """Turn records are tests/test_turn_record.py's to check; here they are dropped."""
+
 
 class _Store(_FakeStore):
     """A durable ledger whose rows have UUIDs; keeps the input each row was opened with."""

@@ -1,13 +1,15 @@
-"""F108: the tool-call recorder — one ``nous_system.tool_call_log`` row per tool call the model asked for.
+"""F108: the tool-call recorder — one ``nous_system.tool_call_log`` row per tool call the model asked for, and one
+``nous_system.agent_turn_log`` row per turn.
 
-``record`` is synchronous and never raises: it redacts and clips the free-text fields with the ledger's
-``detail_text`` (head and tail kept, secrets masked before the cut), then hands one parameterised INSERT to the shared
-``BoundedWriter``. Nothing here reads the rows; the dashboards and ``db_query`` do.
+``record`` and ``record_turn`` are synchronous and never raise: they redact and clip the free-text fields with the
+ledger's ``detail_text`` (head and tail kept, secrets masked before the cut), then hand one parameterised statement to
+the shared ``BoundedWriter``. Nothing here reads the rows; the dashboards and ``db_query`` do.
 """
 
 from __future__ import annotations
 
 import copy
+import json
 import logging
 from dataclasses import dataclass, fields
 from datetime import datetime
@@ -48,6 +50,10 @@ _WORK_KIND_BY_CONTEXT: dict[str, str] = {
 }
 # A tool error's text has no setting of its own: the model-call log clips its error text at the same length.
 ERROR_TEXT_MAX_CHARS = 1000
+# The turn row's bounds: what started the turn, the reply, and the recalled ids kept per kind of memory.
+TRIGGER_TEXT_MAX_CHARS = 500
+REPLY_TEXT_MAX_CHARS = 1000
+MEMORY_IDS_PER_KIND = 50
 
 
 def work_kind_for(context_kind: str) -> str:
@@ -150,8 +156,72 @@ _INSERT = text(
 )
 
 
+@dataclass(frozen=True, slots=True)
+class TurnRecord:
+    """One turn, as the runner saw it at the turn's end: the ``agent_turn_log`` columns except ``agent_id`` (the
+    recorder's). ``id`` is the turn's ``turn_id``, the one its tool-call rows carry. Text and JSON fields are given
+    raw; the recorder redacts and clips them. ``memory_context`` maps a kind of memory (decision, fact, procedure,
+    episode) to the ids recalled into the turn's context. ``started_at`` None means the time the row is written."""
+
+    id: UUID
+    work_kind: str
+    session_id: str | None = None
+    parent_session_id: str | None = None
+    turn_number: int | None = None
+    context_kind: str | None = None
+    frame_id: str | None = None
+    trigger_text: str | None = None
+    memory_context: dict[str, list[str]] | None = None
+    critic: dict[str, Any] | None = None
+    claim_check: dict[str, Any] | None = None
+    reply_text: str | None = None
+    error: str | None = None
+    tool_call_count: int | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+
+
+_TURN_COLUMNS: tuple[str, ...] = ("agent_id", *(f.name for f in fields(TurnRecord)))
+_TURN_JSON_COLUMNS = frozenset({"memory_context", "critic", "claim_check"})
+
+
+def _turn_value(column: str) -> str:
+    if column == "started_at":
+        return "COALESCE(:started_at, now())"
+    if column in _TURN_JSON_COLUMNS:
+        return f"CAST(:{column} AS jsonb)"
+    return f":{column}"
+
+
+# An UPSERT on the turn id, so a retried write leaves one row.
+_UPSERT_TURN = text(
+    f"INSERT INTO nous_system.agent_turn_log ({', '.join(_TURN_COLUMNS)}) VALUES ("
+    + ", ".join(_turn_value(c) for c in _TURN_COLUMNS)
+    + ") ON CONFLICT (id) DO UPDATE SET "
+    + ", ".join(f"{c} = EXCLUDED.{c}" for c in _TURN_COLUMNS if c != "id")
+)
+
+
+def _redacted_json(value: Any) -> Any:
+    """``value`` with every string in it redacted and clipped like an error text. The critic's rationale and the
+    claim check's quoted claims are model text that can carry a secret the reply's own redaction would mask."""
+    if isinstance(value, str):
+        return detail_text(value, ERROR_TEXT_MAX_CHARS)
+    if isinstance(value, dict):
+        return {k: _redacted_json(v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_redacted_json(v) for v in value]
+    return value
+
+
+def _json_param(value: Any) -> str | None:
+    """A JSONB parameter: SQL NULL for None, else the JSON text."""
+    return None if value is None else json.dumps(value, ensure_ascii=False, default=str)
+
+
 class ToolCallRecorder:
-    """Writes ``ToolCallRecord`` rows through the shared ``BoundedWriter`` (built in main.py, never here)."""
+    """Writes ``ToolCallRecord`` and ``TurnRecord`` rows through the shared ``BoundedWriter`` (built in main.py,
+    never here)."""
 
     def __init__(self, writer: BoundedWriter, database: Any, agent_id: str, settings: Any) -> None:
         self._writer = writer
@@ -185,7 +255,37 @@ class ToolCallRecorder:
             return
         self._writer.submit(lambda: self._insert(params), stats=self._stats)
 
+    def record_turn(self, rec: TurnRecord) -> None:
+        """Redact and clip the turn's text, keep at most ``MEMORY_IDS_PER_KIND`` ids per kind of memory, then
+        schedule its UPSERT on ``id``. Synchronous; never raises."""
+        try:
+            params = {f.name: getattr(rec, f.name) for f in fields(rec)}
+            params["agent_id"] = self._agent_id
+            if rec.trigger_text is not None:
+                params["trigger_text"] = detail_text(rec.trigger_text, TRIGGER_TEXT_MAX_CHARS)
+            if rec.reply_text is not None:
+                params["reply_text"] = detail_text(rec.reply_text, REPLY_TEXT_MAX_CHARS)
+            if rec.error is not None:
+                params["error"] = detail_text(rec.error, ERROR_TEXT_MAX_CHARS)
+            memory = rec.memory_context
+            if memory is not None:
+                memory = {kind: list(ids)[:MEMORY_IDS_PER_KIND] for kind, ids in memory.items()}
+            params["memory_context"] = _json_param(memory)
+            params["critic"] = _json_param(_redacted_json(rec.critic))
+            params["claim_check"] = _json_param(_redacted_json(rec.claim_check))
+        except Exception as exc:
+            # Never reached the writer, so only this recorder counts it. The type only: the message can echo text.
+            self._stats.dropped_error += 1
+            logger.warning("F108: turn record not written (%s)", type(exc).__name__)
+            return
+        self._writer.submit(lambda: self._upsert_turn(params), stats=self._stats)
+
     async def _insert(self, params: dict[str, Any]) -> None:
         async with self._database.session() as session:
             await session.execute(_INSERT, params)
+            await session.commit()
+
+    async def _upsert_turn(self, params: dict[str, Any]) -> None:
+        async with self._database.session() as session:
+            await session.execute(_UPSERT_TURN, params)
             await session.commit()

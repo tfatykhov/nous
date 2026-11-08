@@ -581,6 +581,8 @@ class CognitiveLayer:
 
         # Issue #229: Initialize critic skills (populated only in advised mode)
         _critic_skills: list[str] = []
+        # F108: the critic_classified event's data, kept on the TurnContext; None when the critic does not run.
+        _critic_verdict: dict | None = None
 
         # Track user messages for frustration detection (F024) and correction detection (F039)
         if (self._critic and self._settings.critic_enabled) or self._settings.correction_extraction_enabled:
@@ -671,23 +673,24 @@ class CognitiveLayer:
                         logger.warning("F024 Critic skill activation failed: %s", skill_name)
 
             # Emit critic_classified event
+            _critic_verdict = {
+                "heuristic_frame": heuristic_frame.frame_id,
+                "critic_frame": critic_result.recommended_frame,
+                "routing": critic_result.routing.value,
+                "rationale": critic_result.rationale,
+                "latency_ms": critic_result.latency_ms,
+                "mode": self._settings.critic_mode,
+                "agreed": heuristic_frame.frame_id == critic_result.recommended_frame,
+                "skills": critic_result.skills,
+                "activated_skills": activated_skill_ids,
+            }
             if self._bus:
                 try:
                     await self._bus.emit(Event(
                         type="critic_classified",
                         agent_id=agent_id,
                         session_id=session_id,
-                        data={
-                            "heuristic_frame": heuristic_frame.frame_id,
-                            "critic_frame": critic_result.recommended_frame,
-                            "routing": critic_result.routing.value,
-                            "rationale": critic_result.rationale,
-                            "latency_ms": critic_result.latency_ms,
-                            "mode": self._settings.critic_mode,
-                            "agreed": heuristic_frame.frame_id == critic_result.recommended_frame,
-                            "skills": critic_result.skills,
-                            "activated_skills": activated_skill_ids,
-                        },
+                        data=_critic_verdict,
                     ))
                 except Exception:
                     pass  # non-critical
@@ -1172,6 +1175,7 @@ class CognitiveLayer:
             diagnostic_nudges=_diagnostic_nudges,
             censor_injected_context=censor_injected,
             sections_by_tier=sections_by_tier,
+            critic_verdict=_critic_verdict,
         )
 
     async def post_turn(

@@ -15,7 +15,7 @@ import logging
 import time
 import weakref
 from collections import OrderedDict
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -76,6 +76,7 @@ from nous.observability.context_logger import HEARTBEAT_CALL_TYPE
 from nous.observability.tool_calls import (
     ToolCallRecord,
     ToolCallRecorder,
+    TurnRecord,
     add_reason_field,
     own_reason_tools,
     split_reason,
@@ -566,6 +567,55 @@ class AgentRunner:
         except Exception as exc:  # noqa: BLE001 -- recording must not change a turn
             # The type only: an exception message can echo the call's arguments.
             logger.warning("F108: tool-call record for %s not written (%s)", name, type(exc).__name__)
+
+    def _note_turn(
+        self,
+        ctx: ExecutionContext,
+        *,
+        turn_id: UUID,
+        session_id: str,
+        turn_number: int | None,
+        turn_context: TurnContext,
+        trigger: str,
+        reply: str,
+        error: str | None,
+        claim_check: dict | None,
+        call_indexes: Iterator[int],
+        started_at: datetime | None,
+    ) -> None:
+        """F108: hand the turn's record to the recorder where the turn ends. ``call_indexes`` is the turn's call
+        counter; its next value is the number of tool calls the turn recorded. ``trigger`` is what the turn was
+        given (the user's message, or a background turn's trigger). Never raises: recording must not change a turn.
+        The caller checks ``self._tool_call_recorder`` first."""
+        try:
+            self._tool_call_recorder.record_turn(
+                TurnRecord(
+                    id=turn_id,
+                    work_kind=work_kind_for(ctx.kind),
+                    session_id=session_id,
+                    parent_session_id=ctx.parent_session_id,
+                    turn_number=turn_number,
+                    context_kind=ctx.kind,
+                    frame_id=turn_context.frame.frame_id,
+                    trigger_text=trigger,
+                    memory_context={
+                        "decision": turn_context.recalled_decision_ids,
+                        "fact": turn_context.recalled_fact_ids,
+                        "procedure": turn_context.recalled_procedure_ids,
+                        "episode": turn_context.recalled_episode_ids,
+                    },
+                    critic=turn_context.critic_verdict,
+                    claim_check=claim_check,
+                    reply_text=reply,
+                    error=error,
+                    tool_call_count=next(call_indexes),
+                    started_at=started_at,
+                    ended_at=datetime.now(UTC),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 -- recording must not change a turn
+            # The type only: an exception message can echo the turn's text.
+            logger.warning("F108: turn record not written (%s)", type(exc).__name__)
 
     def _offered_tools(
         self,
@@ -1653,6 +1703,7 @@ class AgentRunner:
         # and is mid-turn — the new turn would be orphaned. The lock is
         # released automatically on every exit path (return, raise).
         async with self._get_session_lock(session_id):
+            _turn_started = datetime.now(UTC) if self._tool_call_recorder else None  # F108: the turn row's start
             conversation = await self._get_or_create_conversation(session_id)
 
             # 2. Pre-turn (F4: plumb conversation_messages for dedup)
@@ -1780,6 +1831,8 @@ class AgentRunner:
             _turn_number_local = self._current_turn_number
             # F108: the turn's own id, a local like the number (numbers repeat after compaction, ids never do).
             _turn_id = uuid4()
+            # F108: the turn's call counter, here so the turn row can count the calls of a turn that raised.
+            _call_indexes = itertools.count()
             self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
             self._current_call_type = "subtask" if is_subtask else "chat"
 
@@ -1870,6 +1923,7 @@ class AgentRunner:
                             session_id=session_id,
                             turn_number=_turn_number_local,  # F091, see capture above
                             turn_id=_turn_id,  # F108
+                            call_indexes=_call_indexes,  # F108
                             is_subtask=is_subtask,
                             max_tool_calls=max_tool_calls,
                             model_override=model_override,
@@ -1900,6 +1954,23 @@ class AgentRunner:
                 response_text = "I encountered an error processing your request. Please try again."
                 conversation.messages.append(Message(role="assistant", content=response_text))
                 _caught_exc = e
+            except asyncio.CancelledError:
+                # F108: a cancelled turn skips post_turn (the cancel propagates at once), but still ends in a row.
+                if self._tool_call_recorder:
+                    self._note_turn(
+                        _ctx,
+                        turn_id=_turn_id,
+                        session_id=session_id,
+                        turn_number=_turn_number_local,
+                        turn_context=turn_context,
+                        trigger=user_message,
+                        reply=response_text,
+                        error="cancelled",
+                        claim_check=None,
+                        call_indexes=_call_indexes,
+                        started_at=_turn_started,
+                    )
+                raise
             else:
                 _caught_exc = None
                 # F024 F4/F5: record memory on the SUCCESS path only (needs
@@ -1915,8 +1986,25 @@ class AgentRunner:
                         )
 
             # F026: Post-response claim verification + ghost planning detection
+            _claim_check: dict | None = None  # F108: the claim check's result, for the turn row
             if _caught_exc is None:
-                self._verify_claims(session_id, response_text, tool_results, ledger)
+                _claim_check = self._verify_claims(session_id, response_text, tool_results, ledger)
+
+            # F108: the turn row, before post_turn so a post_turn that raises cannot skip it.
+            if self._tool_call_recorder:
+                self._note_turn(
+                    _ctx,
+                    turn_id=_turn_id,
+                    session_id=session_id,
+                    turn_number=_turn_number_local,
+                    turn_context=turn_context,
+                    trigger=user_message,
+                    reply=response_text,
+                    error=error,
+                    claim_check=_claim_check,
+                    call_indexes=_call_indexes,
+                    started_at=_turn_started,
+                )
 
             # 7. Post-turn (always called, even on error)
             turn_result = TurnResult(
@@ -2352,6 +2440,7 @@ class AgentRunner:
         # awaited. The async generator keeps the lock until exhausted, so
         # the consumer driving the for-loop also extends the protection.
         async with self._get_session_lock(session_id):
+            _turn_started = datetime.now(UTC) if self._tool_call_recorder else None  # F108: see run_turn
             conversation = await self._get_or_create_conversation(session_id)
 
             # Pre-turn with conversation dedup (F4)
@@ -2546,6 +2635,7 @@ class AgentRunner:
             total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
             response_text = ""
             error = None
+            _claim_check: dict | None = None  # F108: the claim check's result, for the turn row
 
             # F071: scope the per-turn exclusion set to the streaming tool
             # loop — recall_deep can be dispatched inside the for-turn
@@ -3217,7 +3307,7 @@ class AgentRunner:
                 _caught_exc = None
 
                 # F026: Post-response claim verification (streaming: warn+inject only)
-                self._verify_claims(session_id, response_text, all_tool_results, ledger)
+                _claim_check = self._verify_claims(session_id, response_text, all_tool_results, ledger)
 
                 # F024 F4/F5: record memory on the SUCCESS path only (needs
                 # response_text). Fix A: link the fact to the active episode so
@@ -3244,6 +3334,21 @@ class AgentRunner:
                         if conversation.messages[i].role == "user":
                             conversation.messages[i] = compact_message_for_history(conversation.messages[i])
                             break
+                # F108: the turn row on every exit, before post_turn (see run_turn).
+                if self._tool_call_recorder:
+                    self._note_turn(
+                        _ctx,
+                        turn_id=_stream_turn_id,
+                        session_id=session_id,
+                        turn_number=_stream_turn_number,
+                        turn_context=turn_context,
+                        trigger=user_message,
+                        reply=response_text,
+                        error=error,
+                        claim_check=_claim_check,
+                        call_indexes=call_indexes,
+                        started_at=_turn_started,
+                    )
                 # ALWAYS call post_turn (review P1: guaranteed cleanup).
                 # Shield from cancellation to prevent DB connection pool leaks —
                 # CancelledError during post_turn's DB ops leaves sessions checked
@@ -3578,6 +3683,7 @@ class AgentRunner:
         context: ExecutionContext | None = None,  # harness Phase 1a
         usage_out: dict[str, int] | None = None,  # F099 2e: see run_turn
         turn_id: UUID | None = None,  # F108: minted by run_turn; a caller that passes none gets a fresh one
+        call_indexes: Iterator[int] | None = None,  # F108: run_turn's counter (it counts a turn that raised)
     ) -> tuple[str, list[ToolResult], dict[str, int], list[str]]:
         """Run the tool use loop until completion or max_turns.
 
@@ -3617,7 +3723,8 @@ class AgentRunner:
 
         all_tool_results: list[ToolResult] = []
         keys_this_turn: set[str] = set()  # harness 2b: keys this invocation dispatched
-        call_indexes = itertools.count()  # F108: the place of each call in the turn, across every iteration
+        # F108: the place of each call in the turn, across every iteration.
+        call_indexes = call_indexes if call_indexes is not None else itertools.count()
         all_thinking_blocks: list[str] = []  # Accumulated across iterations
         # F061: include tool_calls counter so the hardened executor's per-attempt
         # accumulator can populate heart.subtasks.tool_calls_made (was missing).
@@ -4621,13 +4728,17 @@ Rules:
         response_text: str,
         tool_results: list[ToolResult],
         ledger: ExecutionLedger,
-    ) -> None:
+    ) -> dict | None:
         """F026: Post-response claim verification and ghost planning detection.
 
         Note: Spec says block-and-rerun for external claims, but streaming
         can't unsend yielded text. Both paths use inject-correction-for-next-turn.
         Accepted limitation from plan review.
+
+        Returns the claim check's result as logged (``f026_claim_verification``), for the F108 turn row; None
+        when no claim verifier runs.
         """
+        claim_check: dict | None = None
         # Audit CL-4 (2026-06-09, review follow-up): only SUCCESSFUL tool calls
         # this turn can ground an action claim. A blocked/errored bash or
         # web_fetch must not let "I pushed the code" verify — mirrors the
@@ -4654,30 +4765,27 @@ Rules:
                 ledger,
                 turn_evidence=turn_evidence,
             )
-            self._log_f026_decision(
-                "f026_claim_verification",
-                {
-                    "verified": verification.verified,
-                    "claim_count": len(verification.claims),
-                    "claims": [
-                        {"kind": c.kind, "evidence": c.evidence, "text": c.text[:120]} for c in verification.claims
-                    ],
-                    "turn": ledger.current_turn if ledger is not None else None,
-                    "violation_count": len(verification.violations),
-                    "violations": [
-                        {
-                            "claimed_text": v.claimed_text[:200],
-                            "expected_tool": v.expected_tool,
-                            "found_in_turn": v.found_in_turn,
-                            "found_in_ledger": v.found_in_ledger,
-                        }
-                        for v in verification.violations
-                    ],
-                    "tool_names_this_turn": turn_tool_names,
-                    "mode": self._settings.claim_verification_mode,
-                },
-                session_id=session_id,
-            )
+            claim_check = {
+                "verified": verification.verified,
+                "claim_count": len(verification.claims),
+                "claims": [
+                    {"kind": c.kind, "evidence": c.evidence, "text": c.text[:120]} for c in verification.claims
+                ],
+                "turn": ledger.current_turn if ledger is not None else None,
+                "violation_count": len(verification.violations),
+                "violations": [
+                    {
+                        "claimed_text": v.claimed_text[:200],
+                        "expected_tool": v.expected_tool,
+                        "found_in_turn": v.found_in_turn,
+                        "found_in_ledger": v.found_in_ledger,
+                    }
+                    for v in verification.violations
+                ],
+                "tool_names_this_turn": turn_tool_names,
+                "mode": self._settings.claim_verification_mode,
+            }
+            self._log_f026_decision("f026_claim_verification", claim_check, session_id=session_id)
             if verification.verified:
                 logger.info("F026 claims: verified (%d tools this turn)", len(turn_tool_names))
             else:
@@ -4702,6 +4810,7 @@ Rules:
                     logger.warning("Ghost planning detected (warn) in session %s", session_id)
                 else:
                     logger.debug("Ghost planning detected (shadow) in session %s", session_id)
+        return claim_check
 
     async def _get_or_create_conversation(self, session_id: str) -> Conversation:
         """Get existing or create new conversation with LRU eviction.
