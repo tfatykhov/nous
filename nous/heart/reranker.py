@@ -11,9 +11,9 @@ still imports successfully (CROSS_ENCODER_AVAILABLE=False) and callers should
 short-circuit before calling cross_encoder_rerank.
 
 F108: with a recorder set (`set_recorder`), each rerank that runs the model is
-counted in its minute's `rerank` bucket: its time and the number of
-candidates scored (in the bucket's token count), `error` when the model
-failed to load or predict.
+counted in its minute's `rerank` bucket: its time, and `error` when the
+model failed to load or predict. A rerank has no tokens, so the bucket's
+token count stays NULL (the candidate count is not recorded).
 """
 
 from __future__ import annotations
@@ -53,15 +53,15 @@ def set_recorder(recorder: ModelCallRecorder | None) -> None:
     _recorder = recorder
 
 
-def _record(model_name: str, scored: int, started: float, status: str) -> None:
-    """One rerank into its bucket: ``scored`` candidates, the time since ``started``. Never raises
-    (``record_bucket`` does not)."""
+def _record(model_name: str, started: float, status: str) -> None:
+    """One rerank into its bucket: the time since ``started``, no tokens. Never raises (``record_bucket`` does
+    not)."""
     recorder = _recorder
     if recorder is not None:
         recorder.record_bucket(
             purpose="rerank",
             model=model_name,
-            tokens=scored,
+            tokens=None,
             duration_ms=(time.perf_counter() - started) * 1000,
             status=status,
         )
@@ -165,23 +165,23 @@ async def cross_encoder_rerank(
             model_name,
             exc,
         )
-        _record(model_name, len(pairs), started, "error")
+        _record(model_name, started, "error")
         return candidates
 
     # Run prediction in a thread to avoid blocking the event loop.
     try:
         scores = await asyncio.to_thread(model.predict, pairs)
     except asyncio.CancelledError:
-        _record(model_name, len(pairs), started, "cancelled")
+        _record(model_name, started, "cancelled")
         raise
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "Cross-encoder predict failed: %s — returning unranked",
             exc,
         )
-        _record(model_name, len(pairs), started, "error")
+        _record(model_name, started, "error")
         return candidates
-    _record(model_name, len(pairs), started, "ok")
+    _record(model_name, started, "ok")
 
     # Mutate head scores in place.
     for pair_idx, raw_score in zip(pair_indices, scores):

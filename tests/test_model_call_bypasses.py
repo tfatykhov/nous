@@ -4,8 +4,8 @@ The browser task loop posts to the Messages API through its own httpx client (``
 one ``browser_step`` row, purpose ``browser_task``, and each HTTP try one of its attempts. Embeddings
 (``nous/brain/embeddings.py``) and the cross-encoder (``nous/heart/reranker.py``) are counted per minute in a bucket
 row (``ModelCallRecorder.record_bucket``): one bucket call per embeddings HTTP request, its retries included, with its
-``usage.total_tokens``; one per rerank, with the number of candidates scored. Recording never changes what is sent,
-returned or raised, and a recorder fault never raises.
+``usage.total_tokens``; one per rerank, with its time and no tokens (the candidate count is not recorded). Recording
+never changes what is sent, returned or raised, and a recorder fault never raises.
 
 The row tests write ``nous_system.model_call_log`` and ``nous_system.model_call_attempt`` in real Postgres under their
 own agent id and delete their rows afterwards. Every request goes to an ``httpx.MockTransport`` stub; nothing reaches
@@ -489,14 +489,14 @@ def fake_cross_encoder(monkeypatch):
 
 
 @pytest.mark.postgres_only
-async def test_rerank_records_duration_and_candidate_count_in_bucket(db, monkeypatch, fake_cross_encoder):
+async def test_rerank_records_duration_and_call_count_with_no_tokens(db, monkeypatch, fake_cross_encoder):
     agent = _agent()
     writer, recorder = _recorder(db, agent)
     monkeypatch.setattr(model_calls, "_utcnow", lambda: _MINUTE + timedelta(seconds=40))
     plain = [(c.name, c.score) for c in await _rerank(_candidates())]
     reranker_mod.set_recorder(recorder)
     try:
-        # The head is 3 candidates, one with no text: 2 pairs are scored. The order and scores are unchanged.
+        # The order and scores are the same as with no recorder.
         assert [(c.name, c.score) for c in await _rerank(_candidates())] == plain
         assert [c.name for c in await _rerank(_candidates())] == ["b", "a", "empty", "c"]
         await writer.drain(5.0)
@@ -508,7 +508,8 @@ async def test_rerank_records_duration_and_candidate_count_in_bucket(db, monkeyp
             _RERANK_MODEL,
             "ok",
         )
-        assert (row["call_count"], row["input_uncached"]) == (2, 4)
+        # A rerank has no tokens: the candidates are not counted in the token columns.
+        assert (row["call_count"], row["input_uncached"], row["input_total"]) == (2, None, 0)
         assert row["duration_ms"] >= 20  # two reranks of at least 10 ms each
     finally:
         await _delete(db, agent)
@@ -538,8 +539,8 @@ async def test_rerank_records_failures_and_nothing_when_no_model_runs(monkeypatc
     unloaded = _candidates()
     assert await _rerank(unloaded) is unloaded
     assert [(c[0], c[1], c[2], c[4]) for c in buckets.calls] == [
-        ("rerank", _RERANK_MODEL, 2, "error"),
-        ("rerank", _RERANK_MODEL, 2, "error"),
+        ("rerank", _RERANK_MODEL, None, "error"),
+        ("rerank", _RERANK_MODEL, None, "error"),
     ]
     assert buckets.calls[0][3] >= 10
 
@@ -626,5 +627,5 @@ async def test_a_cancelled_embedding_or_rerank_is_a_cancelled_bucket_call(monkey
         )
     assert [(c[0], c[2], c[4]) for c in buckets.calls] == [
         ("embedding", None, "cancelled"),
-        ("rerank", 2, "cancelled"),
+        ("rerank", None, "cancelled"),
     ]
