@@ -26,6 +26,12 @@ sub-batch gets the larger _EMBED_BATCH_BUDGET_S, and its failure does not start
 the window: a large healthy batch can be slow, and that says nothing about one
 query. A read-path embed_batch(fail_fast=True) behaves like embed(): the window
 applies, and each sub-batch gets the single-text budget and can open it.
+
+F108: with a recorder set (``set_recorder``), each embeddings HTTP request (an
+embed() miss or one embed_batch sub-batch, its retries included) is counted
+once in its minute's ``embedding`` bucket: its final status, its
+``usage.total_tokens`` and its time. A cache hit sends nothing and records
+nothing.
 """
 
 from __future__ import annotations
@@ -39,9 +45,12 @@ import time
 from array import array
 from collections import OrderedDict
 from collections.abc import Iterator, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
+
+if TYPE_CHECKING:
+    from nous.observability.model_calls import ModelCallRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +130,13 @@ async def reembed_rows(embedder: Any, rows: Sequence[tuple[Any, str]], what: str
     return vectors
 
 
+def _total_tokens(body: Any) -> int | None:
+    """The response body's ``usage.total_tokens``, or None when it has none."""
+    usage = body.get("usage") if isinstance(body, dict) else None
+    tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
+    return tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else None
+
+
 def _retry_after_seconds(response: httpx.Response) -> float | None:
     """The response's Retry-After in seconds, or None when absent or not a number."""
     value = response.headers.get("Retry-After")
@@ -134,6 +150,9 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
 
 class EmbeddingProvider:
     """Async embedding generation using the OpenAI embeddings API."""
+
+    # F108: the recorder each request reports to (set_recorder); None records nothing.
+    _recorder: ModelCallRecorder | None = None
 
     def __init__(
         self,
@@ -217,6 +236,34 @@ class EmbeddingProvider:
     # ------------------------------------------------------------------
     # API
     # ------------------------------------------------------------------
+
+    def set_recorder(self, recorder: ModelCallRecorder | None) -> None:
+        """Count each embeddings request from now on in ``recorder``'s per-minute ``embedding`` bucket; None stops."""
+        self._recorder = recorder
+
+    async def _request(self, payload: dict, *, batch: bool = False) -> Any:
+        """``_post_with_retry`` and the response's parsed body. With a recorder set, the request is counted once,
+        with its final status, its ``usage.total_tokens`` and its time, retries included."""
+        recorder = self._recorder
+        if recorder is None:
+            return (await self._post_with_retry(payload, batch=batch)).json()
+        started = time.perf_counter()
+        status, tokens = "error", None
+        try:
+            body = (await self._post_with_retry(payload, batch=batch)).json()
+            status, tokens = "ok", _total_tokens(body)
+            return body
+        except asyncio.CancelledError:
+            status = "cancelled"
+            raise
+        finally:
+            recorder.record_bucket(
+                purpose="embedding",
+                model=self.model,
+                tokens=tokens,
+                duration_ms=(time.perf_counter() - started) * 1000,
+                status=status,
+            )
 
     async def _post_with_retry(self, payload: dict, *, batch: bool = False) -> httpx.Response:
         """POST to the embeddings endpoint within one wall-clock budget.
@@ -308,12 +355,12 @@ class EmbeddingProvider:
         if cached is not None:
             return cached
         with self._fail_fast_gate(fail_fast):
-            response = await self._post_with_retry({
+            body = await self._request({
                 "model": self.model,
                 "input": text,
                 "dimensions": self.dimensions,
             })
-        vec = response.json()["data"][0]["embedding"]
+        vec = body["data"][0]["embedding"]
         self._cache_put(key, vec)
         return vec
 
@@ -378,11 +425,11 @@ class EmbeddingProvider:
                     sub_texts = miss_texts[start:end]
                     n_batches += 1
 
-                    response = await self._post_with_retry(
+                    body = await self._request(
                         {"model": self.model, "input": sub_texts, "dimensions": self.dimensions},
                         batch=not fail_fast,
                     )
-                    data = response.json()["data"]
+                    data = body["data"]
                     vectors = [
                         item["embedding"] for item in sorted(data, key=lambda x: x["index"])
                     ]

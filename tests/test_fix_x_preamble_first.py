@@ -270,7 +270,10 @@ _DIRECT_API_MODULES: dict[str, str] = {
         "sdk), drops toolset_name, context_management and the top-level cache_control the browser toolset "
         "needs. Its auth headers are the httpx client's (test_browser_task.py::TestApiCaller compares them), "
         "and test_every_request_opens_with_the_preamble pins CLAUDE_CODE_PREAMBLE at system block 0 of every "
-        "request it builds. It leaves thinking at the model default on purpose (no with_default_thinking)."
+        "request it builds. It leaves thinking at the model default on purpose (no with_default_thinking). "
+        "F108: with a recorder (make_api_caller's recorder, from loop.set_recorder) each call is one browser_step "
+        "row and each HTTP try one of its attempts; recording reads the response and never changes the request "
+        "(test_model_call_bypasses.py::test_browser_loop_still_opens_with_the_preamble)."
     ),
 }
 

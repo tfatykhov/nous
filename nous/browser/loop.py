@@ -18,7 +18,13 @@ import shutil
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import (
+    AbstractAsyncContextManager,
+    AbstractContextManager,
+    asynccontextmanager,
+    nullcontext,
+    suppress,
+)
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -26,7 +32,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from nous.api.anthropic_client import _retry_delay, _should_retry
+from nous.api.anthropic_client import _ms_since, _retry_delay, _should_retry
 from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.browser.executor import BrowserActionError, BrowserExecutor, ConfirmationRequired, consequential_url
 from nous.browser.session import (
@@ -37,12 +43,16 @@ from nous.browser.session import (
     check_resolution,
     host_problem,
 )
+from nous.observability.model_calls import CallContext, ModelCallRecorder, ModelCallScope
 
 logger = logging.getLogger(__name__)
 
 # One browser task at a time in this process: each is a full Chromium. A second call waits within its own
 # time budget, then returns `busy`.
 _BROWSER_SLOT = asyncio.Semaphore(1)
+# F108: the recorder each task's API caller reports to (set_recorder, from main.py); None records nothing.
+_recorder: ModelCallRecorder | None = None
+_CALL_CONTEXT = CallContext(purpose="browser_task")
 # Run directories under <workspace>/browser-task/: older ones are pruned when a task starts.
 KEEP_RUNS = 50
 KEEP_RUN_DAYS = 7
@@ -141,6 +151,12 @@ class BrowserExecutorLike(Protocol):
 
 ApiCaller = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 BrowserFactory = Callable[[DomainAllowlist, Path], AbstractAsyncContextManager[BrowserExecutorLike]]
+
+
+def set_recorder(recorder: ModelCallRecorder | None) -> None:
+    """Record each browser step's API call from now on through ``recorder`` (``make_api_caller``); None stops."""
+    global _recorder
+    _recorder = recorder
 
 
 def validate_model(model: str) -> None:
@@ -250,14 +266,36 @@ def _auth_headers(settings: Any) -> dict[str, str]:
     return headers
 
 
-def make_api_caller(settings: Any, http: httpx.AsyncClient, deadline: float | None = None) -> ApiCaller:
+def _open_scope(recorder: ModelCallRecorder | None, payload: dict[str, Any]) -> AbstractContextManager[Any]:
+    """The scope of one browser step's API call, for a ``with``: a ``ModelCallScope``, or None when nothing records
+    (no recorder, or one that could not open a scope, which is logged and counted)."""
+    if recorder is None:
+        return nullcontext()
+    try:
+        return recorder.scope(payload, _CALL_CONTEXT, "browser_step")
+    except Exception as exc:
+        logger.warning("F108: browser step not recorded (%s)", type(exc).__name__)
+        with suppress(Exception):
+            recorder.stats.dropped_error += 1
+        return nullcontext()
+
+
+def make_api_caller(
+    settings: Any,
+    http: httpx.AsyncClient,
+    deadline: float | None = None,
+    recorder: ModelCallRecorder | None = None,
+) -> ApiCaller:
     """POST /v1/messages with the payload as is. The shared client's SDK backend (prod's default) would drop
     `toolset_name`, `context_management` and the top-level `cache_control`, so the browser loop has its own.
     tests/test_fix_x_preamble_first.py lists this module as one that may talk to the API directly.
 
     `deadline` is the task's end on the event loop's clock. A retry pause is capped so that the retry still
     starts RETRY_WINDOW_SECONDS before it; with no time left the call fails at once, and a rate limit says so
-    instead of running into the task's timeout."""
+    instead of running into the task's timeout.
+
+    F108: with `recorder`, each call is one `browser_step` row (purpose `browser_task`) with the response's usage
+    and stop reason, and each HTTP try one of its attempts. Recording only reads; the request is unchanged."""
     headers = _auth_headers(settings)
     url = f"{settings.api_base_url.rstrip('/')}/v1/messages"
     retries = 2
@@ -282,10 +320,21 @@ def make_api_caller(settings: Any, http: httpx.AsyncClient, deadline: float | No
         return True
 
     async def call(payload: dict[str, Any]) -> dict[str, Any]:
+        with _open_scope(recorder, payload) as scope:
+            response = await send(payload, scope)
+            if scope is not None:
+                scope.finish(response)
+            return response
+
+    async def send(payload: dict[str, Any], scope: ModelCallScope | None) -> dict[str, Any]:
+        """`call`'s retry loop; each HTTP try is reported to `scope` when the call is recorded."""
         for attempt in range(retries + 1):
+            t0 = time.perf_counter()
             try:
                 response = await http.post(url, json=payload, headers=headers)
             except httpx.HTTPError as e:
+                if scope is not None:
+                    scope.attempt(None, type(e).__name__, str(e), _ms_since(t0))
                 if (
                     attempt < retries
                     and isinstance(e, httpx.TimeoutException)
@@ -294,6 +343,8 @@ def make_api_caller(settings: Any, http: httpx.AsyncClient, deadline: float | No
                     continue
                 raise BrowserApiError(f"Anthropic API request failed: {type(e).__name__}") from e
             status = response.status_code
+            if scope is not None:
+                scope.attempt(status, None, None, _ms_since(t0))
             if status == 200:
                 try:
                     return response.json()
@@ -409,7 +460,8 @@ async def run_browser_task(
         )
         state = BrowserTaskResult("timeout", "", run_id)
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10.0)) as http:
-            api = call_api or make_api_caller(settings, http, deadline=clock.time() + timeout)
+            recording = {} if _recorder is None else {"recorder": _recorder}  # F108: passed only when one is set
+            api = call_api or make_api_caller(settings, http, deadline=clock.time() + timeout, **recording)
             try:
                 await asyncio.wait_for(
                     _run(goal, allowlist, start_url, steps_cap, model, api, factory, runs_dir / run_id, state), timeout
