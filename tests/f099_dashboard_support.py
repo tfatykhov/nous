@@ -171,3 +171,39 @@ async def put_context_log(
             },
         )
         await s.commit()
+
+
+async def put_model_call(
+    env,
+    session_id: str,
+    *,
+    output: int,
+    inp: int = 10,
+    cw: int = 0,
+    cr: int = 0,
+    ago: float = 60,
+    agent: str | None = None,
+    purpose: str = "continuation",
+) -> None:
+    """A nous_system.model_call_log row (F108): one model call of ``session_id``, as the recorder writes it once
+    NOUS_MODEL_CALL_LOG_ENABLED cuts context_log over."""
+    async with env.db.session() as s:
+        await s.execute(
+            text(
+                "INSERT INTO nous_system.model_call_log (id, agent_id, started_at, purpose, label_source, call_kind, "
+                "model, session_id, status, input_uncached, output_tokens, cache_write, cache_read) VALUES "
+                "(:id, :a, :ts, :purpose, 'explicit', 'call', 'test-model', :sid, 'ok', :i, :o, :cw, :cr)"
+            ),
+            {
+                "id": uuid.uuid4(),
+                "a": agent or env.agent,
+                "ts": utcnow() - timedelta(seconds=ago),
+                "purpose": purpose,
+                "sid": session_id,
+                "i": inp,
+                "o": output,
+                "cw": cw,
+                "cr": cr,
+            },
+        )
+        await s.commit()

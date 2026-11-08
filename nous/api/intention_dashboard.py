@@ -1,10 +1,10 @@
 """F099 Phase 3c: the intentions dashboard (contract 4.9): every root as a tree, and the metrics beside it.
 
 Read-only and agent-scoped. Postgres-only: arrays (``ANY``), ``FILTER``, a raw read of ``nous_system.context_log``
-(which has no ORM model). The harness precedent (``harness_dashboard.py``) keeps its queries beside the route in
-its own module for the same reason. Model-authored text (``intent``, ``note``, a proposal's ``rationale``,
-``arguments`` and ``result``, an owner row's ``title``) is returned RAW, as ``GET /intentions`` returns it: the
-view renders it as text nodes only.
+(which has no ORM model) and, since the F108 cutover, of ``nous_system.model_call_log`` beside it. The harness
+precedent (``harness_dashboard.py``) keeps its queries beside the route in its own module for the same reason.
+Model-authored text (``intent``, ``note``, a proposal's ``rationale``, ``arguments`` and ``result``, an owner row's
+``title``) is returned RAW, as ``GET /intentions`` returns it: the view renders it as text nodes only.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from sqlalchemy.orm import aliased
 from nous.api.harness_dashboard import window_start
 from nous.brain import continuation
 from nous.heart.result_inbox import _percentile
+from nous.observability.model_calls import MAIN_LOOP_PURPOSES
 from nous.storage.models import Decision, Intention, IntentionArrival, IntentionProposal, ResultInbox
 
 LIMIT_MAX = 200
@@ -290,16 +291,35 @@ METRIC_KEYS = (
     "token_spend",
 )
 
+# F108 PR 4: the runner's calls are context_log rows while NOUS_MODEL_CALL_LOG_ENABLED is off and model_call_log
+# rows once it is on (the cutover), so both queries read both tables, with no flag check. A call is in one table only:
+# both fill only if PR 2's flag is on without PR 4's cutover, which a deploy of main never does. The model_call_log side
+# keeps the calls context_log held: every call through AgentRunner._call_api, the main loop's and its history
+# summaries (compaction), never a background helper's.
+_RUNNER_PURPOSES = sorted(MAIN_LOOP_PURPOSES | {"compaction"})
 _CONTEXT_LOG_ACTIVE_SQL = text(
-    "SELECT DISTINCT session_id FROM nous_system.context_log "
-    "WHERE agent_id = :a AND session_id LIKE :p AND timestamp >= :since"
-)
+    "SELECT DISTINCT session_id FROM ("
+    "SELECT session_id FROM nous_system.context_log "
+    "WHERE agent_id = :a AND session_id LIKE :p AND timestamp >= :since "
+    "UNION ALL "
+    "SELECT session_id FROM nous_system.model_call_log "
+    "WHERE agent_id = :a AND session_id LIKE :p AND started_at >= :since AND purpose = ANY(:purposes)"
+    ") AS calls"
+).bindparams(bindparam("purposes", type_=ARRAY(Text)))
 _CONTEXT_LOG_SUMS_SQL = text(
-    "SELECT session_id, coalesce(sum(input_tokens_actual), 0) AS input_uncached, "
-    "coalesce(sum(output_tokens), 0) AS output, "
-    "coalesce(sum(cache_creation), 0) AS cache_write, coalesce(sum(cache_read), 0) AS cache_read, count(*) AS calls "
-    "FROM nous_system.context_log WHERE agent_id = :a AND session_id = ANY(:sessions) GROUP BY session_id"
-).bindparams(bindparam("sessions", type_=ARRAY(Text)))
+    "SELECT session_id, coalesce(sum(input_uncached), 0) AS input_uncached, "
+    "coalesce(sum(output), 0) AS output, "
+    "coalesce(sum(cache_write), 0) AS cache_write, coalesce(sum(cache_read), 0) AS cache_read, count(*) AS calls "
+    "FROM ("
+    "SELECT session_id, input_tokens_actual AS input_uncached, output_tokens AS output, "
+    "cache_creation AS cache_write, cache_read "
+    "FROM nous_system.context_log WHERE agent_id = :a AND session_id = ANY(:sessions) "
+    "UNION ALL "
+    "SELECT session_id, input_uncached, output_tokens, cache_write, cache_read "
+    "FROM nous_system.model_call_log "
+    "WHERE agent_id = :a AND session_id = ANY(:sessions) AND purpose = ANY(:purposes)"
+    ") AS calls GROUP BY session_id"
+).bindparams(bindparam("sessions", type_=ARRAY(Text)), bindparam("purposes", type_=ARRAY(Text)))
 
 
 def _root_of_session(session_id: str) -> UUID | None:
@@ -333,7 +353,9 @@ async def _token_spend(session: AsyncSession, agent_id: str, *, since: datetime)
             )
         ).scalars()
     )
-    active = await session.execute(_CONTEXT_LOG_ACTIVE_SQL, {"a": agent_id, "p": f"{prefix}%", "since": since})
+    active = await session.execute(
+        _CONTEXT_LOG_ACTIVE_SQL, {"a": agent_id, "p": f"{prefix}%", "since": since, "purposes": _RUNNER_PURPOSES}
+    )
     for (sid,) in active.all():
         if (rid := _root_of_session(sid)) is not None:
             cohort.add(rid)
@@ -343,7 +365,8 @@ async def _token_spend(session: AsyncSession, agent_id: str, *, since: datetime)
     intents: dict[UUID, str] = {}
     if ids:
         logged = await session.execute(
-            _CONTEXT_LOG_SUMS_SQL, {"a": agent_id, "sessions": [f"{prefix}{i}" for i in ids]}
+            _CONTEXT_LOG_SUMS_SQL,
+            {"a": agent_id, "sessions": [f"{prefix}{i}" for i in ids], "purposes": _RUNNER_PURPOSES},
         )
         for row in logged.all():
             sums[_root_of_session(row.session_id)] = {

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from f099_dashboard_support import put_arrivals, put_context_log, put_intention
+from f099_dashboard_support import put_arrivals, put_context_log, put_intention, put_model_call
 from f099_support import CONT, env_factory, set_intention  # noqa: F401
 
 from nous.api import intention_dashboard
@@ -82,3 +82,46 @@ async def test_a_session_id_that_is_not_a_root_is_skipped(env_factory):  # noqa:
     await put_context_log(env, "intent-not-a-uuid", output=5)
     spend = await _spend(env)
     assert spend["roots_counted"] == 0 and spend["context_log"]["calls"] == 0
+
+
+# F108 PR 4: with NOUS_MODEL_CALL_LOG_ENABLED the runner's calls go to model_call_log, not context_log.
+
+
+async def test_calls_recorded_only_in_model_call_log_are_counted(env_factory):  # noqa: F811
+    """After the cutover a continuation root's calls are model_call_log rows: they pick the root (no arrival needed)
+    and fill the column, as context_log rows did. Only the calls context_log held count (the runner's own, its
+    history summaries included); a background helper's call, another agent's and a non-root session's do not."""
+    env = await env_factory(**CONT)
+    root = await put_intention(env)
+    await put_arrivals(env, root, [{"tokens": (100, 40)}])
+    for purpose, output in (("continuation", 40), ("continuation", 30), ("action_gate", 9), ("compaction", 21)):
+        await put_model_call(env, f"intent-{root.id}", output=output, inp=90, cw=5, cr=200, purpose=purpose)
+    await put_model_call(env, f"intent-{root.id}", output=500, purpose="critic")  # a background helper's call
+    await put_model_call(env, f"intent-{root.id}", output=777, agent="someone-else")  # another agent
+    await put_model_call(env, "chat-1", output=999, purpose="chat")  # not a continuation turn
+    only_calls = await put_intention(env)
+    await put_model_call(env, f"intent-{only_calls.id}", output=42)  # picks its root, as a context_log row would
+    spend = await _spend(env)
+    assert spend["roots_counted"] == 2
+    assert spend["context_log"] == {
+        "input_uncached": 4 * 90 + 10,  # the root's four calls, and only_calls' one (the helper's default input)
+        "output": 40 + 30 + 9 + 21 + 42,
+        "cache_write": 4 * 5,
+        "cache_read": 4 * 200,
+        "calls": 5,
+    }
+    assert spend["unattributed_output"] == 142 - 40  # never negative for want of the old table's rows
+    by_root = {r["root_id"]: r for r in spend["top_roots"]}
+    assert by_root[str(root.id)]["context_log"]["calls"] == 4
+    assert by_root[str(root.id)]["unattributed_output"] == 100 - 40
+
+
+async def test_a_call_in_each_table_counts_once_each(env_factory):  # noqa: F811
+    """Across the cutover a root has rows in both tables, one per call: each counts once, in its own table."""
+    env = await env_factory(**CONT)
+    root = await put_intention(env)
+    await put_context_log(env, f"intent-{root.id}", output=11, inp=7, cw=3, cr=100, ago=7200)  # before the cutover
+    await put_model_call(env, f"intent-{root.id}", output=13, inp=5, cw=2, cr=50)  # after it
+    spend = await _spend(env)
+    assert spend["roots_counted"] == 1
+    assert spend["context_log"] == {"input_uncached": 12, "output": 24, "cache_write": 5, "cache_read": 150, "calls": 2}
