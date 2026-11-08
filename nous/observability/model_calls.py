@@ -47,6 +47,7 @@ PURPOSES: frozenset[str] = frozenset(
         "mcp",
         "action_gate",
         "reflection",
+        "compaction",  # a turn's history summary (ConversationCompactor); not a main-loop call
         "critic",
         "epistemic_gate",
         "query_expansion",

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import itertools
 import json
 import logging
@@ -245,6 +246,13 @@ def purpose_for_context(ctx_kind: str, forked: bool) -> str:
     if forked and purpose == "chat":
         return "unlabelled"
     return purpose
+
+
+def _trace_id_of(turn_context: Any) -> str | None:
+    """F108: the turn's trace id (``TurnContext.trace_id``), or None. Only a string reaches a row, so a mock turn
+    context's attribute never does (post_turn reads it the same way)."""
+    trace_id = getattr(turn_context, "trace_id", None)
+    return trace_id if isinstance(trace_id, str) else None
 
 
 async def _close_stream(stream: Any) -> None:
@@ -1948,6 +1956,16 @@ class AgentRunner:
             _turn_number_local = self._current_turn_number
             self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
             self._current_call_type = "subtask" if is_subtask else "chat"
+            # F108: a history summary made for this turn is recorded with the turn, as compaction.
+            _compaction_call_context = self._call_context(
+                _ctx,
+                purpose="compaction",
+                session_id=session_id,
+                turn_id=_turn_id,
+                turn_number=_turn_number_local,
+                frame_id=turn_context.frame.frame_id if turn_context.frame else None,
+                trace_id=_trace_id_of(turn_context),
+            )
 
             # 4-6. Build system prompt and run tool loop
             response_text = ""
@@ -2002,7 +2020,9 @@ class AgentRunner:
                                     await self._compactor.compact(
                                         conversation,
                                         messages,
-                                        call_api=self._call_api,
+                                        call_api=functools.partial(
+                                            self._call_api, call_context=_compaction_call_context
+                                        ),
                                         cut_point=cut_point,
                                     )
                                     await self._save_conversation(_agent_id, session_id, conversation)
@@ -2037,7 +2057,7 @@ class AgentRunner:
                             turn_number=_turn_number_local,  # F091, see capture above
                             turn_id=_turn_id,  # F108
                             call_indexes=_call_indexes,  # F108
-                            trace_id=getattr(turn_context, "trace_id", None),  # F108: on the turn's model-call rows
+                            trace_id=_trace_id_of(turn_context),  # F108: on the turn's model-call rows
                             is_subtask=is_subtask,
                             max_tool_calls=max_tool_calls,
                             model_override=model_override,
@@ -2738,7 +2758,7 @@ class AgentRunner:
                 turn_id=_stream_turn_id,
                 turn_number=_stream_turn_number,
                 frame_id=turn_context.frame.frame_id if turn_context.frame else None,
-                trace_id=getattr(turn_context, "trace_id", None),
+                trace_id=_trace_id_of(turn_context),
             )
 
             corrections = self._pending_corrections.pop(session_id, None)
@@ -2803,7 +2823,11 @@ class AgentRunner:
                                 await self._compactor.compact(
                                     conversation,
                                     messages,
-                                    call_api=self._call_api,
+                                    # F108: the summary call is recorded with this turn, as compaction
+                                    call_api=functools.partial(
+                                        self._call_api,
+                                        call_context=dataclasses.replace(_stream_call_context, purpose="compaction"),
+                                    ),
                                     cut_point=cut_point,
                                 )
                                 # 008.1 Phase 3: Persist state after compaction

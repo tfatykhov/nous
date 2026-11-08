@@ -20,6 +20,7 @@ from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
@@ -293,11 +294,16 @@ _BRIEF_MAPPING = {
     "dag_summary": "dag_summary",
     "continuation": "continuation",
 }
+# The kinds whose turns call no model, so they have no purpose of their own (an approved action runs one declared
+# tool with no model). A kind belongs in _BRIEF_MAPPING or here; the runner records the rest as unlabelled.
+_KNOWINGLY_UNLABELLED = frozenset({"approved_action"})
 
 
 @pytest.mark.parametrize("kind", CONTEXT_KINDS)
 def test_every_execution_context_kind_has_a_purpose(kind):
-    """A kind added to ExecutionContext later fails here until it is mapped (or is knowingly ``unlabelled``)."""
+    """A kind added to ExecutionContext later fails here until it is mapped, or listed as calling no model."""
+    assert kind in _BRIEF_MAPPING or kind in _KNOWINGLY_UNLABELLED, f"{kind!r} has no purpose: map it or list it"
+    assert not (kind in _BRIEF_MAPPING and kind in _KNOWINGLY_UNLABELLED), kind
     for forked in (False, True):
         assert runner_module.purpose_for_context(kind, forked) in PURPOSES
     assert runner_module.purpose_for_context(kind, False) == _BRIEF_MAPPING.get(kind, "unlabelled")
@@ -306,6 +312,14 @@ def test_every_execution_context_kind_has_a_purpose(kind):
 def test_an_unknown_kind_is_unlabelled_not_chat():
     assert runner_module.purpose_for_context("some_new_kind", False) == "unlabelled"
     assert runner_module.purpose_for_context("some_new_kind", True) == "unlabelled"
+
+
+def test_only_a_string_trace_id_reaches_a_row():
+    """A mock turn context's attribute is not a trace id (post_turn applies the same rule)."""
+    assert runner_module._trace_id_of(_preset(trace_id=_TRACE)) == _TRACE
+    assert runner_module._trace_id_of(_preset()) is None
+    assert runner_module._trace_id_of(MagicMock()) is None
+    assert runner_module._trace_id_of(object()) is None
 
 
 def test_a_fork_never_labels_a_call_chat():
@@ -445,6 +459,50 @@ async def test_reflection_row_has_tokens():
     assert (row["purpose"], row["label_source"], row["status"]) == ("reflection", "explicit", "ok")
     assert row["session_id"] == "s1"
     assert (row["input_uncached"], row["cache_read"], row["output_tokens"]) == (3, 2000, 7)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", PATHS)
+async def test_compaction_summary_is_recorded_as_compaction_with_its_turn(path):
+    """The compactor gets the runner's call with the turn's context bound, so its summary calls are ``compaction``
+    rows of this turn, not unlabelled ones. Thresholds are tiny, so the turn compacts the earlier exchange first."""
+    client = _SpyClient(segments=[_text_segment()])
+    r = _runner(
+        client,
+        preset=_preset(trace_id=_TRACE),
+        NOUS_COMPACTION_THRESHOLD=10,
+        NOUS_KEEP_RECENT_TOKENS=5,
+    )
+
+    async def pre_compaction(**_: Any) -> None:
+        pass
+
+    r._cognitive.pre_compaction = pre_compaction
+    r._conversations["s1"] = Conversation(
+        session_id="s1",
+        messages=[
+            Message(role="user", content="An earlier question about the deploy. " * 10),
+            Message(role="assistant", content="An earlier answer about the deploy. " * 10),
+        ],
+    )
+    assert await _drive(r, path) == "done"
+    rows = await _until_rows(client, 2)
+    *summaries, chat = rows
+    assert summaries and {row["purpose"] for row in summaries} == {"compaction"}
+    assert chat["purpose"] == "chat" and chat["call_kind"] == ("call" if path == "run_turn" else "stream")
+    for row in summaries:
+        assert (row["label_source"], row["call_kind"], row["model"]) == (
+            "explicit",
+            "call",
+            r._settings.background_model,
+        )
+        assert (row["session_id"], row["turn_id"], row["turn_number"], row["trace_id"]) == (
+            "s1",
+            chat["turn_id"],
+            chat["turn_number"],
+            _TRACE,
+        )
+    assert chat["turn_id"] is not None
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -675,3 +733,25 @@ def test_every_runner_call_api_site_passes_call_context():
     assert missing == []
     # the gate, the reflection, both loops' calls and finals, the stream helper and the keepalive wrapper
     assert helper_sites >= 8 and client_sites == 3
+
+
+def test_the_runner_never_hands_out_its_call_api_without_a_context():
+    """``self._call_api`` passed as a value (the compactor's ``call_api``) is called elsewhere, where the guard above
+    cannot see it: it must go out as ``functools.partial(self._call_api, call_context=...)``."""
+    tree = ast.parse(Path(runner_module.__file__).read_text(encoding="utf-8"))
+    called: set[int] = set()
+    bound: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        called.add(id(node.func))
+        if ast.unparse(node.func) in {"functools.partial", "partial"} and node.args:
+            if any(k.arg == "call_context" for k in node.keywords):
+                bound.add(id(node.args[0]))
+    values = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and ast.unparse(node) == "self._call_api" and id(node) not in called
+    ]
+    assert [node.lineno for node in values if id(node) not in bound] == []
+    assert len(values) == 2  # the compactor's call_api, in run_turn and in stream_chat
