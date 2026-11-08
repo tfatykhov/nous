@@ -117,11 +117,13 @@ async def test_calls_recorded_only_in_model_call_log_are_counted(env_factory):  
 
 
 async def test_a_call_in_each_table_counts_once_each(env_factory):  # noqa: F811
-    """Across the cutover a root has rows in both tables, one per call: each counts once, in its own table."""
+    """Across the cutover a root has rows in both tables, one per call: each counts once, in its own table, even when
+    two calls report the very same numbers (a UNION that dropped duplicates would merge them)."""
     env = await env_factory(**CONT)
     root = await put_intention(env)
     await put_context_log(env, f"intent-{root.id}", output=11, inp=7, cw=3, cr=100, ago=7200)  # before the cutover
-    await put_model_call(env, f"intent-{root.id}", output=13, inp=5, cw=2, cr=50)  # after it
+    for _ in range(2):  # after it, two calls with the same numbers as the one before
+        await put_model_call(env, f"intent-{root.id}", output=11, inp=7, cw=3, cr=100)
     spend = await _spend(env)
     assert spend["roots_counted"] == 1
-    assert spend["context_log"] == {"input_uncached": 12, "output": 24, "cache_write": 5, "cache_read": 150, "calls": 2}
+    assert spend["context_log"] == {"input_uncached": 21, "output": 33, "cache_write": 9, "cache_read": 300, "calls": 3}
