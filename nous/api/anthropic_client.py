@@ -5,6 +5,10 @@ Provides AnthropicClient protocol with two implementations:
 - SdkAnthropicClient: wraps official anthropic.AsyncAnthropic SDK
 
 Runner builds payloads via _build_api_payload(); clients consume them.
+
+F108: with a recorder set (``set_recorder``), each call is one ``model_call_log`` row and each HTTP try one
+``model_call_attempt``. The SDK retries inside one request, so its attempts come from a response hook on its own
+``httpx.AsyncClient``; an SDK transport error with no HTTP response shows only in the call's final error.
 """
 
 from __future__ import annotations
@@ -13,15 +17,22 @@ import asyncio
 import json
 import logging
 import random
+import time
+import weakref
 from collections.abc import AsyncGenerator
+from contextlib import AbstractContextManager, nullcontext, suppress
 from email.utils import parsedate_to_datetime
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import httpx
 
 from nous.api.model_caps import with_default_thinking
 from nous.api.models import ApiResponse
 from nous.config import Settings
+from nous.observability.model_calls import active_scope
+
+if TYPE_CHECKING:
+    from nous.observability.model_calls import CallContext, ModelCallRecorder, ModelCallScope
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +78,56 @@ class AnthropicClient(Protocol):
 
     async def start(self) -> None: ...
     async def close(self) -> None: ...
-    async def call(self, payload: dict[str, Any]) -> ApiResponse: ...
-    async def stream(self, payload: dict[str, Any]) -> AsyncGenerator[StreamEvent, None]: ...
-    async def call_streaming_aggregated(self, payload: dict[str, Any]) -> ApiResponse: ...
+    async def call(self, payload: dict[str, Any], *, call_context: CallContext | None = None) -> ApiResponse: ...
+    async def stream(
+        self, payload: dict[str, Any], *, call_context: CallContext | None = None
+    ) -> AsyncGenerator[StreamEvent, None]: ...
+    async def call_streaming_aggregated(
+        self, payload: dict[str, Any], *, call_context: CallContext | None = None
+    ) -> ApiResponse: ...
+
+
+# ---------------------------------------------------------------------------
+# F108: model-call recording, shared by both clients
+# ---------------------------------------------------------------------------
+
+
+def _ms_since(t0: float) -> float:
+    return (time.perf_counter() - t0) * 1000
+
+
+def _bound(scope: ModelCallScope | None) -> AbstractContextManager[Any]:
+    """``scope.bind_for_request()``, or nothing to bind when the call is not recorded."""
+    return nullcontext() if scope is None else scope.bind_for_request()
+
+
+class _ModelCallRecording:
+    """What both clients share to record their calls: ``set_recorder`` and one scope per call."""
+
+    # Callers pass a CallContext only to a client that says it takes one (model_calls.context_kwargs).
+    supports_call_context = True
+    _recorder: ModelCallRecorder | None = None
+
+    def set_recorder(self, recorder: ModelCallRecorder | None) -> None:
+        """Record each call from now on through ``recorder`` (one ``model_call_log`` row, its HTTP attempts); None
+        stops recording."""
+        self._recorder = recorder
+
+    def _open_scope(
+        self, payload: dict[str, Any], call_context: CallContext | None, call_kind: str
+    ) -> AbstractContextManager[ModelCallScope | None]:
+        """The scope of one call, for a ``with``: it gives a ``ModelCallScope``, or None when nothing records (no
+        recorder, or one that could not open a scope, which is logged and counted)."""
+        recorder = self._recorder
+        if recorder is None:
+            return nullcontext()
+        try:
+            return recorder.scope(payload, call_context, call_kind)
+        except Exception as exc:
+            logger.warning("F108: model call not recorded (%s)", type(exc).__name__)
+            with suppress(Exception):
+                recorder.stats.dropped_error += 1
+            return nullcontext()
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +394,7 @@ def _parse_sse_event(data: dict[str, Any]) -> StreamEvent | None:
 # ---------------------------------------------------------------------------
 
 
-class HttpxAnthropicClient:
+class HttpxAnthropicClient(_ModelCallRecording):
     """Anthropic API client using direct httpx calls.
 
     Extracted from runner.py — preserves all retry logic, SSE parsing,
@@ -444,19 +502,30 @@ class HttpxAnthropicClient:
             await self._http.aclose()
             self._http = None
 
-    async def call(self, payload: dict[str, Any]) -> ApiResponse:
+    async def call(self, payload: dict[str, Any], *, call_context: CallContext | None = None) -> ApiResponse:
         """Call Anthropic Messages API with retry and exponential backoff.
 
         The full payload dict is passed through to the API by design —
         this includes tools, tool_choice, and any other API parameters
-        the caller sets.
+        the caller sets. With a recorder set, the call is recorded with
+        ``call_context`` (F108).
         """
         if not self._http:
             raise RuntimeError("httpx client not initialized -- call start() first")
 
         payload = with_default_thinking(payload)
+        with self._open_scope(payload, call_context, "call") as scope:
+            response = await self._call(payload, scope)
+            if scope is not None:
+                scope.finish(response)
+            return response
+
+    async def _call(self, payload: dict[str, Any], scope: ModelCallScope | None) -> ApiResponse:
+        """``call``'s retry loop (``self._http`` is started); each HTTP try is reported to ``scope`` when the call is
+        recorded."""
         last_error: Exception | None = None
         for attempt in range(_MAX_RETRIES + 1):
+            t0 = time.perf_counter()
             try:
                 response = await self._http.post(
                     "/v1/messages", json=payload,
@@ -464,6 +533,8 @@ class HttpxAnthropicClient:
                 )
 
                 if response.status_code == 200:
+                    if scope is not None:
+                        scope.attempt(200, None, None, _ms_since(t0))
                     data = response.json()
                     return ApiResponse(
                         content=data["content"],
@@ -478,6 +549,8 @@ class HttpxAnthropicClient:
                 except Exception:
                     error_type = "http_error"
                     error_msg = f"HTTP {response.status_code}: {response.text[:500]}"
+                if scope is not None:
+                    scope.attempt(response.status_code, error_type, error_msg, _ms_since(t0))
 
                 logger.info(
                     "Anthropic API %d %s: %s (request_id=%s)",
@@ -514,6 +587,8 @@ class HttpxAnthropicClient:
                 break
 
             except httpx.TimeoutException as e:
+                if scope is not None:
+                    scope.attempt(None, type(e).__name__, str(e), _ms_since(t0))
                 last_error = RuntimeError(f"API request timed out: {e}")
                 if attempt < _MAX_RETRIES:
                     delay = _retry_delay(attempt)
@@ -521,6 +596,8 @@ class HttpxAnthropicClient:
                     await asyncio.sleep(delay)
                     continue
             except httpx.HTTPError as e:
+                if scope is not None:
+                    scope.attempt(None, type(e).__name__, str(e), _ms_since(t0))
                 last_error = RuntimeError(f"HTTP error: {e}")
                 break
 
@@ -531,12 +608,18 @@ class HttpxAnthropicClient:
         payload: dict[str, Any],
         *,
         timeout: httpx.Timeout | None = None,
+        call_context: CallContext | None = None,
+        _scope: ModelCallScope | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
         """Call Anthropic API with streaming enabled. Yields StreamEvent objects.
 
         F048: accepts an optional per-call ``timeout`` override. Used by
         ``call_streaming_aggregated`` to honor the background 600s read timeout
         without mutating the client-wide default.
+
+        F108: with a recorder set, the stream is recorded with ``call_context``;
+        ``call_streaming_aggregated`` passes its own scope as ``_scope``, so its
+        stream is reported to that one call instead of being a second.
         """
         if not self._http:
             raise RuntimeError("httpx client not initialized -- call start() first")
@@ -550,68 +633,96 @@ class HttpxAnthropicClient:
         if timeout is not None:
             stream_kwargs["timeout"] = timeout
 
-        for attempt in range(_MAX_RETRIES + 1):
-            try:
-                async with self._http.stream(
-                    "POST", "/v1/messages", json=payload,
-                    headers={"X-Stainless-Retry-Count": str(attempt)},
-                    **stream_kwargs,
-                ) as response:
-                    if response.status_code != 200:
-                        error_body = await response.aread()
-                        error_text = error_body.decode()[:500]
-                        logger.info(
-                            "Anthropic streaming API %d: %s (request_id=%s)",
-                            response.status_code,
-                            error_text,
-                            response.headers.get("request-id", "n/a"),
-                        )
-                        if response.status_code >= 500:
+        with self._open_scope(payload, call_context, "stream") if _scope is None else nullcontext(_scope) as scope:
+            for attempt in range(_MAX_RETRIES + 1):
+                t0 = time.perf_counter()
+                reported = False  # this try's attempt: one per HTTP try, even when its body then fails
+                try:
+                    async with self._http.stream(
+                        "POST", "/v1/messages", json=payload,
+                        headers={"X-Stainless-Retry-Count": str(attempt)},
+                        **stream_kwargs,
+                    ) as response:
+                        if response.status_code != 200:
+                            error_body = await response.aread()
+                            error_text = error_body.decode()[:500]
+                            if scope is not None:
+                                scope.attempt(response.status_code, None, error_text, _ms_since(t0))
+                                reported = True
                             logger.info(
-                                "Anthropic streaming API response headers: %s",
-                                dict(response.headers),
-                            )
-
-                        if _should_retry(response.status_code, response.headers) and attempt < _MAX_RETRIES:
-                            delay = _retry_delay(attempt, response)
-                            logger.warning(
-                                "Streaming API error %d, retry %d/%d in %.1fs",
+                                "Anthropic streaming API %d: %s (request_id=%s)",
                                 response.status_code,
-                                attempt + 1,
-                                _MAX_RETRIES,
-                                delay,
+                                error_text,
+                                response.headers.get("request-id", "n/a"),
                             )
-                            await asyncio.sleep(delay)
-                            continue
+                            if response.status_code >= 500:
+                                logger.info(
+                                    "Anthropic streaming API response headers: %s",
+                                    dict(response.headers),
+                                )
 
-                        yield StreamEvent(type="error", text=error_text)
+                            if _should_retry(response.status_code, response.headers) and attempt < _MAX_RETRIES:
+                                delay = _retry_delay(attempt, response)
+                                logger.warning(
+                                    "Streaming API error %d, retry %d/%d in %.1fs",
+                                    response.status_code,
+                                    attempt + 1,
+                                    _MAX_RETRIES,
+                                    delay,
+                                )
+                                await asyncio.sleep(delay)
+                                continue
+
+                            event = StreamEvent(type="error", text=error_text)
+                            if scope is not None:
+                                scope.observe_stream_event(event)
+                            yield event
+                            return
+
+                        if scope is not None:
+                            scope.attempt(200, None, None, _ms_since(t0))
+                            reported = True
+                        async for line in response.aiter_lines():
+                            if not line.startswith("data: "):
+                                continue
+                            data = json.loads(line[6:])
+                            event = _parse_sse_event(data)
+                            if event:
+                                if scope is not None:
+                                    scope.observe_stream_event(event)
+                                if event.type == "error":
+                                    yield event
+                                    return
+                                yield event
                         return
 
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        data = json.loads(line[6:])
-                        event = _parse_sse_event(data)
-                        if event:
-                            if event.type == "error":
-                                yield event
-                                return
-                            yield event
+                except httpx.TimeoutException as e:
+                    if scope is not None and not reported:
+                        scope.attempt(None, type(e).__name__, str(e), _ms_since(t0))
+                    if attempt < _MAX_RETRIES:
+                        delay = _retry_delay(attempt)
+                        logger.warning(
+                            "Streaming API timeout, retry %d/%d in %.1fs: %s", attempt + 1, _MAX_RETRIES, delay, e
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    event = StreamEvent(type="error", text=f"Stream timeout: {e}")
+                    if scope is not None:
+                        scope.observe_stream_event(event)
+                    yield event
+                    return
+                except httpx.HTTPError as e:
+                    if scope is not None and not reported:
+                        scope.attempt(None, type(e).__name__, str(e), _ms_since(t0))
+                    event = StreamEvent(type="error", text=f"Stream HTTP error: {e}")
+                    if scope is not None:
+                        scope.observe_stream_event(event)
+                    yield event
                     return
 
-            except httpx.TimeoutException as e:
-                if attempt < _MAX_RETRIES:
-                    delay = _retry_delay(attempt)
-                    logger.warning("Streaming API timeout, retry %d/%d in %.1fs: %s", attempt + 1, _MAX_RETRIES, delay, e)
-                    await asyncio.sleep(delay)
-                    continue
-                yield StreamEvent(type="error", text=f"Stream timeout: {e}")
-                return
-            except httpx.HTTPError as e:
-                yield StreamEvent(type="error", text=f"Stream HTTP error: {e}")
-                return
-
-    async def call_streaming_aggregated(self, payload: dict[str, Any]) -> ApiResponse:
+    async def call_streaming_aggregated(
+        self, payload: dict[str, Any], *, call_context: CallContext | None = None
+    ) -> ApiResponse:
         """Background-path call: stream under the hood, return an aggregated ApiResponse.
 
         F048 Mechanism B. Uses streaming SSE to keep the TCP socket warm with
@@ -622,11 +733,22 @@ class HttpxAnthropicClient:
         Retry semantics are intentionally weaker than ``call()``: the outer
         heartbeat / subtask layers own whole-turn retries, and this method
         relies on ``stream()``'s built-in HTTP-error retry loop.
+
+        F108: with a recorder set, the call is recorded with ``call_context``
+        as one call (``call_kind='aggregated'``) whose attempts are its stream's.
         """
         if not self._http:
             raise RuntimeError("httpx client not initialized -- call start() first")
 
         payload = with_default_thinking(payload)
+        with self._open_scope(payload, call_context, "aggregated") as scope:
+            response = await self._aggregate(payload, scope)
+            if scope is not None:
+                scope.finish(response)
+            return response
+
+    async def _aggregate(self, payload: dict[str, Any], scope: ModelCallScope | None) -> ApiResponse:
+        """``call_streaming_aggregated``'s body: stream (reported to ``scope``) and rebuild the response."""
         bg_timeout = httpx.Timeout(
             connect=self._settings.api_timeout_connect,
             read=self._settings.api_background_timeout_read,
@@ -647,7 +769,7 @@ class HttpxAnthropicClient:
         usage: dict[str, int] = {}
         terminal_seen = False  # F048: detect truncation mid-stream
 
-        async for event in self.stream(payload, timeout=bg_timeout):
+        async for event in self.stream(payload, timeout=bg_timeout, _scope=scope):
             if event.type == "message_start":
                 if event.usage:
                     # Captures input_tokens + cache_read/creation_input_tokens
@@ -796,7 +918,7 @@ class HttpxAnthropicClient:
 # ---------------------------------------------------------------------------
 
 
-class SdkAnthropicClient:
+class SdkAnthropicClient(_ModelCallRecording):
     """Anthropic API client using the official anthropic Python SDK.
 
     Uses anthropic.AsyncAnthropic with native retries, proper Python
@@ -882,8 +1004,12 @@ class SdkAnthropicClient:
             ),
             socket_options=sock_opts,
         )
+        # F108: the SDK retries inside one request, so these hooks report each of its HTTP attempts to the call
+        # bound in this context. They do nothing while no call is bound, as when no recorder is set.
+        self._attempt_started: weakref.WeakKeyDictionary[httpx.Request, float] = weakref.WeakKeyDictionary()
         kwargs["http_client"] = httpx.AsyncClient(
             transport=sdk_transport, mounts=sdk_mounts,
+            event_hooks={"request": [self._on_request], "response": [self._on_response]},
         )
 
         self._client = AsyncAnthropic(**kwargs)
@@ -901,35 +1027,66 @@ class SdkAnthropicClient:
             await self._client.close()
             self._client = None
 
-    async def call(self, payload: dict[str, Any]) -> ApiResponse:
-        """Call Anthropic Messages API via SDK."""
+    async def _on_request(self, request: httpx.Request) -> None:
+        """F108: note when an HTTP attempt of a bound call starts (``_on_response`` reports it). Never raises."""
+        try:
+            if active_scope() is not None:
+                self._attempt_started[request] = time.perf_counter()
+        except Exception as exc:
+            logger.warning("F108: an HTTP attempt's start was not noted (%s)", type(exc).__name__)
+
+    async def _on_response(self, response: httpx.Response) -> None:
+        """F108: report this HTTP attempt to the call bound in this context (``bind_for_request``): its status and
+        its time to the response headers (the body is not read here). Never raises: the SDK would take a raise for
+        a failed request and retry it."""
+        try:
+            scope = active_scope()
+            if scope is None:
+                return
+            t0 = self._attempt_started.pop(response.request, None)
+            scope.attempt(response.status_code, None, None, None if t0 is None else _ms_since(t0))
+        except Exception as exc:
+            logger.warning("F108: an HTTP attempt was not recorded (%s)", type(exc).__name__)
+
+    async def call(self, payload: dict[str, Any], *, call_context: CallContext | None = None) -> ApiResponse:
+        """Call Anthropic Messages API via SDK. With a recorder set, the call is recorded with ``call_context``
+        (F108)."""
         if not self._client:
             raise RuntimeError("SDK client not initialized -- call start() first")
 
         kwargs = self._payload_to_kwargs(with_default_thinking(payload))
 
-        try:
-            message = await self._client.messages.create(**kwargs)
-        except Exception as e:
-            self._log_sdk_error(e)
-            raise RuntimeError(f"Anthropic SDK error: {e}") from e
+        # Bound for the whole call: the response hook reports each of the SDK's retries to it.
+        with self._open_scope(payload, call_context, "call") as scope, _bound(scope):
+            try:
+                message = await self._client.messages.create(**kwargs)
+            except Exception as e:
+                if scope is not None:
+                    scope.fail(e)  # the SDK error carries the HTTP status; the RuntimeError below does not
+                self._log_sdk_error(e)
+                raise RuntimeError(f"Anthropic SDK error: {e}") from e
 
-        # Convert SDK Message to our ApiResponse
-        content = self._message_to_content(message)
-        return ApiResponse(
-            content=content,
-            stop_reason=message.stop_reason,
-            usage={
-                "input_tokens": message.usage.input_tokens,
-                "output_tokens": message.usage.output_tokens,
-                "cache_creation_input_tokens": getattr(message.usage, "cache_creation_input_tokens", 0),
-                "cache_read_input_tokens": getattr(message.usage, "cache_read_input_tokens", 0),
-            }
-            if message.usage
-            else None,
-        )
+            # Convert SDK Message to our ApiResponse
+            content = self._message_to_content(message)
+            response = ApiResponse(
+                content=content,
+                stop_reason=message.stop_reason,
+                usage={
+                    "input_tokens": message.usage.input_tokens,
+                    "output_tokens": message.usage.output_tokens,
+                    "cache_creation_input_tokens": getattr(message.usage, "cache_creation_input_tokens", 0),
+                    "cache_read_input_tokens": getattr(message.usage, "cache_read_input_tokens", 0),
+                }
+                if message.usage
+                else None,
+            )
+            if scope is not None:
+                scope.finish(response)
+            return response
 
-    async def stream(self, payload: dict[str, Any]) -> AsyncGenerator[StreamEvent, None]:
+    async def stream(
+        self, payload: dict[str, Any], *, call_context: CallContext | None = None
+    ) -> AsyncGenerator[StreamEvent, None]:
         """Stream Anthropic Messages API via SDK. Yields StreamEvent objects.
 
         Uses messages.create(stream=True) which returns AsyncStream[RawMessageStreamEvent]
@@ -942,6 +1099,8 @@ class SdkAnthropicClient:
         ``messages.stream()`` with ``get_final_message()`` — but only to grab the
         final aggregated Message object, not to iterate parsed events. The
         warning above applies only to raw-event consumers.
+
+        F108: with a recorder set, the stream is recorded with ``call_context``.
         """
         if not self._client:
             raise RuntimeError("SDK client not initialized -- call start() first")
@@ -949,20 +1108,30 @@ class SdkAnthropicClient:
         kwargs = self._payload_to_kwargs(with_default_thinking(payload))
         kwargs["stream"] = True
 
-        try:
-            raw_stream = await self._client.messages.create(**kwargs)
-            async for event in raw_stream:
-                converted = self._convert_sdk_event(event)
-                if converted is not None:
-                    if converted.type == "error":
+        with self._open_scope(payload, call_context, "stream") as scope:
+            try:
+                # Bound only while the stream opens, which is where the SDK retries, and never across a yield:
+                # see model_calls._ACTIVE_SCOPE.
+                with _bound(scope):
+                    raw_stream = await self._client.messages.create(**kwargs)
+                async for event in raw_stream:
+                    converted = self._convert_sdk_event(event)
+                    if converted is not None:
+                        if scope is not None:
+                            scope.observe_stream_event(converted)
+                        if converted.type == "error":
+                            yield converted
+                            return
                         yield converted
-                        return
-                    yield converted
-        except Exception as e:
-            self._log_sdk_error(e)
-            yield StreamEvent(type="error", text=f"SDK stream error: {e}")
+            except Exception as e:
+                if scope is not None:
+                    scope.fail(e)
+                self._log_sdk_error(e)
+                yield StreamEvent(type="error", text=f"SDK stream error: {e}")
 
-    async def call_streaming_aggregated(self, payload: dict[str, Any]) -> ApiResponse:
+    async def call_streaming_aggregated(
+        self, payload: dict[str, Any], *, call_context: CallContext | None = None
+    ) -> ApiResponse:
         """Background-path call via SDK: stream + aggregate into a full Message.
 
         F048 Mechanism B for the SDK backend.
@@ -973,6 +1142,8 @@ class SdkAnthropicClient:
         fully-aggregated Message object, NOT the raw event stream — so the
         high-level parsed event shape never touches our code path and the
         warning does not apply.
+
+        F108: with a recorder set, the call is recorded with ``call_context``.
         """
         if not self._client:
             raise RuntimeError("SDK client not initialized -- call start() first")
@@ -984,25 +1155,32 @@ class SdkAnthropicClient:
         # Explicit timeout (SDK expects float seconds, not an httpx.Timeout).
         kwargs["timeout"] = float(self._settings.api_background_timeout_read)
 
-        try:
-            async with self._client.messages.stream(**kwargs) as s:
-                message = await s.get_final_message()
-        except Exception as e:
-            self._log_sdk_error(e)
-            raise RuntimeError(f"Anthropic SDK streaming error: {e}") from e
+        # Bound for the whole call: the response hook reports each of the SDK's retries to it.
+        with self._open_scope(payload, call_context, "aggregated") as scope, _bound(scope):
+            try:
+                async with self._client.messages.stream(**kwargs) as s:
+                    message = await s.get_final_message()
+            except Exception as e:
+                if scope is not None:
+                    scope.fail(e)  # the SDK error carries the HTTP status; the RuntimeError below does not
+                self._log_sdk_error(e)
+                raise RuntimeError(f"Anthropic SDK streaming error: {e}") from e
 
-        return ApiResponse(
-            content=self._message_to_content(message),
-            stop_reason=message.stop_reason,
-            usage={
-                "input_tokens": message.usage.input_tokens,
-                "output_tokens": message.usage.output_tokens,
-                "cache_creation_input_tokens": getattr(message.usage, "cache_creation_input_tokens", 0),
-                "cache_read_input_tokens": getattr(message.usage, "cache_read_input_tokens", 0),
-            }
-            if message.usage
-            else None,
-        )
+            response = ApiResponse(
+                content=self._message_to_content(message),
+                stop_reason=message.stop_reason,
+                usage={
+                    "input_tokens": message.usage.input_tokens,
+                    "output_tokens": message.usage.output_tokens,
+                    "cache_creation_input_tokens": getattr(message.usage, "cache_creation_input_tokens", 0),
+                    "cache_read_input_tokens": getattr(message.usage, "cache_read_input_tokens", 0),
+                }
+                if message.usage
+                else None,
+            )
+            if scope is not None:
+                scope.finish(response)
+            return response
 
     @staticmethod
     def _log_sdk_error(e: Exception) -> None:
@@ -1217,12 +1395,17 @@ class SdkAnthropicClient:
 # ---------------------------------------------------------------------------
 
 
-def create_client(settings: Settings) -> AnthropicClient:
-    """Create the appropriate AnthropicClient based on settings.api_backend."""
+def create_client(settings: Settings, recorder: ModelCallRecorder | None = None) -> AnthropicClient:
+    """Create the appropriate AnthropicClient based on settings.api_backend; with ``recorder``, its calls are
+    recorded (F108)."""
     backend = settings.api_backend
+    client: SdkAnthropicClient | HttpxAnthropicClient
     if backend == "sdk":
-        return SdkAnthropicClient(settings)
+        client = SdkAnthropicClient(settings)
     elif backend == "httpx":
-        return HttpxAnthropicClient(settings)
+        client = HttpxAnthropicClient(settings)
     else:
         raise ValueError(f"Unknown api_backend: {backend!r} (expected 'sdk' or 'httpx')")
+    if recorder is not None:
+        client.set_recorder(recorder)
+    return client

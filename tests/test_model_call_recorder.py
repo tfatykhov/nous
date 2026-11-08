@@ -398,12 +398,16 @@ async def test_attempts_rows_written_and_count_matches(db):
     try:
         assert model_calls._ACTIVE_SCOPE.get() is None
         with recorder.scope(_PAYLOAD, CallContext(purpose="chat"), "call") as scope:
-            # what the SDK client's response hook does: append to the scope that is active
-            active = model_calls._ACTIVE_SCOPE.get()
-            assert active is scope
-            active.attempt(529, "overloaded_error", f"Overloaded {_SECRET}", 812.4)
-            active.attempt(529, "overloaded_error", "x" * 3000, 640)
-            active.attempt(200, None, None, 1500)
+            # a scope is the active one only while a client's request is bound to it
+            assert model_calls._ACTIVE_SCOPE.get() is None
+            with scope.bind_for_request():
+                # what the SDK client's response hook does: append to the scope that is active
+                active = model_calls.active_scope()
+                assert active is scope
+                active.attempt(529, "overloaded_error", f"Overloaded {_SECRET}", 812.4)
+                active.attempt(529, "overloaded_error", "x" * 3000, 640)
+                active.attempt(200, None, None, 1500)
+            assert model_calls._ACTIVE_SCOPE.get() is None
             scope.finish({"stop_reason": "end_turn", "usage": dict(_USAGE)})  # a raw response dict works too
         assert model_calls._ACTIVE_SCOPE.get() is None
         await writer.drain(5.0)
@@ -437,7 +441,7 @@ async def test_two_concurrent_scopes_do_not_cross(db):
 
     async def call(session: str, entered: asyncio.Event, wait_for: asyncio.Event, output: int, status: int) -> None:
         with model_call_context(purpose="critic" if session == "A" else "reflection", session_id=session):
-            with recorder.scope(_PAYLOAD, None, "call") as scope:
+            with recorder.scope(_PAYLOAD, None, "call") as scope, scope.bind_for_request():
                 entered.set()
                 await wait_for.wait()
                 model_calls._ACTIVE_SCOPE.get().attempt(status, None, None, 10)

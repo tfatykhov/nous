@@ -4,10 +4,11 @@
 A client wraps each call in ``ModelCallRecorder.scope(payload, ctx, call_kind)``: a synchronous context manager, so it
 works in coroutines and in (async) generators alike. The scope names the call's purpose once, when it is built: the
 caller's explicit ``CallContext`` first, else the fallback a caller set with ``model_call_context``, else
-``unlabelled`` (counted). While it is open the scope is the active one (``_ACTIVE_SCOPE``), so a client's HTTP response
-hook can add each attempt to it. At exit it builds the row and hands it, with its attempts, to the shared
-``BoundedWriter`` as one transaction. Nothing here raises into a call or reads the rows back; the dashboards and
-``db_query`` do. Embedding and rerank calls are counted per minute instead (``record_bucket``).
+``unlabelled`` (counted). While the client's HTTP request runs inside ``scope.bind_for_request()`` the scope is the
+active one (``_ACTIVE_SCOPE``), so a client's HTTP response hook can add each attempt to it; a stream binds only
+around opening the stream, never across a ``yield``. At exit the scope builds the row and hands it, with its attempts,
+to the shared ``BoundedWriter`` as one transaction. Nothing here raises into a call or reads the rows back; the
+dashboards and ``db_query`` do. Embedding and rerank calls are counted per minute instead (``record_bucket``).
 
 The context estimate (``analyze_context``, ``parse_system_sections``) moved here from ``context_logger.py``, which
 re-exports it unchanged.
@@ -318,8 +319,10 @@ def context_kwargs(client: Any, ctx: CallContext) -> dict[str, Any]:
 # The fallback a caller sets around calls it cannot pass a context to (model_call_context). A scope reads it once,
 # when it is built.
 _FALLBACK_CALL_CONTEXT: ContextVar[CallContext | None] = ContextVar("f108_fallback_call_context", default=None)
-# The scope that is open in this context, so a client's HTTP response hook can add attempts to it. A different
-# variable from the fallback, with a different job.
+# The scope whose HTTP request is in flight in this context (``ModelCallScope.bind_for_request``), so a client's HTTP
+# response hook can add attempts to it. A different variable from the fallback, with a different job. It is never
+# held across a ``yield``: a variable set in an async generator's body stays set in its consumer's context while the
+# generator is suspended, and another request's hook would then add its attempt to the stream's scope.
 _ACTIVE_SCOPE: ContextVar[ModelCallScope | None] = ContextVar("f108_active_model_call_scope", default=None)
 
 
@@ -346,6 +349,11 @@ def model_call_context(**fields: Any) -> Iterator[CallContext]:
 def current_fallback() -> CallContext | None:
     """The context ``model_call_context`` set around this code, or None."""
     return _FALLBACK_CALL_CONTEXT.get()
+
+
+def active_scope() -> ModelCallScope | None:
+    """The scope whose HTTP request is in flight in this context (``ModelCallScope.bind_for_request``), or None."""
+    return _ACTIVE_SCOPE.get()
 
 
 def _utcnow() -> datetime:
@@ -507,10 +515,13 @@ class ModelCallScope:
     """One model call being recorded: a synchronous context manager, so it works in coroutines and generators.
 
     Built by ``ModelCallRecorder.scope``. The client reports the call with ``finish(response)`` or ``fail(exc)``,
-    streamed usage with ``observe_stream_event`` and each HTTP attempt with ``attempt``. At exit the row is written.
+    streamed events with ``observe_stream_event`` (a ``done`` or ``message_stop`` reports ``ok``, an ``error`` event
+    reports ``error``) and each HTTP attempt with ``attempt``, or binds the scope around its request
+    (``bind_for_request``) so its HTTP response hook can report the attempts. At exit the row is written.
     A reported status stands (the call completed or failed, whatever its caller did next); when neither was
     reported, exit labels the call ``cancelled`` on ``CancelledError`` or ``GeneratorExit``, ``error`` for any other
-    exception and ``ok`` when there was none. Exit never raises and never swallows the exception.
+    exception and ``ok`` when there was none. Nothing here raises into the client, and exit never swallows the
+    exception.
     """
 
     def __init__(self, recorder: ModelCallRecorder, payload: Any, ctx: CallContext | None, call_kind: str) -> None:
@@ -527,18 +538,13 @@ class ModelCallScope:
         self._http_status: int | None = None
         self._error_text: str | None = None
         self._attempts: list[dict[str, Any]] = []
-        self._token: Token[ModelCallScope | None] | None = None
         self._written = False
 
     def __enter__(self) -> ModelCallScope:
-        self._token = _ACTIVE_SCOPE.set(self)
         return self
 
     def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: Any) -> bool:
         try:
-            if self._token is not None:
-                _reset(_ACTIVE_SCOPE, self._token)
-                self._token = None
             if self._status is None and exc_type is not None:
                 if issubclass(exc_type, asyncio.CancelledError | GeneratorExit):
                     self._status = "cancelled"
@@ -549,6 +555,21 @@ class ModelCallScope:
             self._recorder._stats.dropped_error += 1
             logger.warning("F108: model-call record not written (%s)", type(err).__name__)
         return False
+
+    @contextmanager
+    def bind_for_request(self) -> Iterator[ModelCallScope]:
+        """Make this the active scope (``active_scope()``) for the block: wrap the HTTP request itself, its retries
+        included, and never a ``yield`` (see ``_ACTIVE_SCOPE``)."""
+        token = _ACTIVE_SCOPE.set(self)
+        try:
+            yield self
+        finally:
+            _reset(_ACTIVE_SCOPE, token)
+
+    def _lost(self, what: str, exc: Exception) -> None:
+        """Count and log a report that could not be taken (the call goes on; the row may miss a part)."""
+        self._recorder._stats.dropped_error += 1
+        logger.warning("F108: model-call %s not recorded (%s)", what, type(exc).__name__)
 
     def attempt(
         self, http_status: int | None, error_type: str | None, error_text: str | None, duration_ms: float | None
@@ -572,8 +593,7 @@ class ModelCallScope:
                 }
             )
         except Exception as exc:
-            self._recorder._stats.dropped_error += 1
-            logger.warning("F108: model-call attempt not recorded (%s)", type(exc).__name__)
+            self._lost("attempt", exc)
 
     def _merge_usage(self, usage: Any, keys: tuple[str, ...]) -> None:
         """Keep the largest count seen for each of ``keys`` (a later event never lowers one)."""
@@ -585,36 +605,54 @@ class ModelCallScope:
                 self._usage[key] = max(value, self._usage.get(key, value))
 
     def observe_stream_event(self, event: Any) -> None:
-        """Take the usage a stream reports: the input counts from ``message_start``, the output count and the stop
-        reason from ``done`` (``message_delta``)."""
-        kind = _get(event, "type")
-        if kind == "message_start":
-            self._merge_usage(_get(event, "usage"), _INPUT_USAGE_KEYS)
-        elif kind == "done":
-            self._merge_usage(_get(event, "usage"), ("output_tokens",))
-            stop = _get(event, "stop_reason")
-            if stop:
-                self._stop_reason = stop
+        """Take what a stream reports, before the client yields the event: the input counts from ``message_start``;
+        the output count and the stop reason from ``done`` (``message_delta``), which also reports ``ok``, as does
+        ``message_stop`` (the response is complete, so a consumer that stops now does not make it ``cancelled``); an
+        ``error`` event reports ``error`` with the event's text (the first error's text is kept). Never raises."""
+        try:
+            kind = _get(event, "type")
+            if kind == "message_start":
+                self._merge_usage(_get(event, "usage"), _INPUT_USAGE_KEYS)
+            elif kind == "done":
+                self._merge_usage(_get(event, "usage"), ("output_tokens",))
+                stop = _get(event, "stop_reason")
+                if stop:
+                    self._stop_reason = stop
+                self._status = self._status or "ok"
+            elif kind == "message_stop":
+                self._status = self._status or "ok"
+            elif kind == "error":
+                self._status = "error"
+                if self._error_text is None:
+                    self._error_text = _clip_error(str(_get(event, "text") or "stream error"))
+        except Exception as exc:
+            self._lost("stream event", exc)
 
     def finish(self, response: Any) -> None:
         """The call returned ``response`` (an ``ApiResponse`` or the raw response dict): take its usage and stop
-        reason; the status is ``ok``."""
-        self._merge_usage(_get(response, "usage"), tuple(_USAGE_COLUMNS))
-        stop = _get(response, "stop_reason")
-        if stop:
-            self._stop_reason = stop
+        reason; the status is ``ok``. Never raises."""
         self._status = "ok"
+        try:
+            self._merge_usage(_get(response, "usage"), tuple(_USAGE_COLUMNS))
+            stop = _get(response, "stop_reason")
+            if stop:
+                self._stop_reason = stop
+        except Exception as exc:
+            self._lost("response", exc)
 
     def fail(self, exc: BaseException) -> None:
         """The call failed with ``exc``: status ``error``, the HTTP status it carries, its text redacted and
-        clipped."""
+        clipped. Never raises: a client calls it while it handles the exception it will raise."""
         self._status = "error"
-        self._http_status = _http_status_of(exc)
         try:
-            message = f"{type(exc).__name__}: {exc}"
-        except Exception:
-            message = type(exc).__name__
-        self._error_text = _clip_error(message)
+            self._http_status = _http_status_of(exc)
+            try:
+                message = f"{type(exc).__name__}: {exc}"
+            except Exception:
+                message = type(exc).__name__
+            self._error_text = _clip_error(message)
+        except Exception as err:
+            self._lost("error", err)
 
     def _write(self) -> None:
         if self._written:
