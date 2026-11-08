@@ -172,22 +172,46 @@ async def _context_log_retention_loop(settings: Settings, database: Database) ->
             logger.debug("OB-1: retention sweep failed", exc_info=True)
 
 
-def _work_view_sweeps(settings: Settings) -> tuple[bool, bool]:
-    """F108: ``(tool calls, model calls)``, which work-view logs the retention loop sweeps: a log that is on, with a
-    retention of at least one day (0 days would delete every row, so it means no sweep)."""
+def _work_view_sweeps(settings: Settings) -> tuple[bool, bool, bool]:
+    """F108: ``(tool calls, model calls, model-call text)``, which work-view records the retention loop sweeps: a log
+    that is on, with a retention of at least one day (0 days would delete every row, so it means no sweep). The text
+    is swept by its retention whatever ``NOUS_MODEL_CALL_TEXT_ENABLED`` says, so text turned off still goes on time."""
     return (
         settings.tool_call_log_enabled and settings.tool_call_retention_days > 0,
         settings.model_call_log_enabled and settings.model_call_retention_days > 0,
+        settings.model_call_text_retention_days > 0,
     )
+
+
+async def _work_view_retention_needed(settings: Settings, database: Database) -> bool:
+    """F108: whether to start the work-view retention loop: while a log is swept; while the text is kept by a
+    retention and is being recorded (both text settings on), even on an empty database; and otherwise, when nothing
+    can write new text, while this agent still has text (one EXISTS query at startup), so text stored before the
+    text was turned off is never kept past its retention. A failed check starts the loop."""
+    tool_calls, model_calls, model_call_text = _work_view_sweeps(settings)
+    if tool_calls or model_calls:
+        return True
+    if not model_call_text:
+        return False
+    if settings.model_call_log_enabled and settings.model_call_text_enabled:
+        return True
+    from nous.observability.work_view_retention import has_model_call_text
+
+    try:
+        return await has_model_call_text(database, settings.agent_id)
+    except Exception:
+        logger.warning("F108: could not check for model-call text to sweep; the retention loop starts", exc_info=True)
+        return True
 
 
 async def _work_view_retention_loop(settings: Settings, database: Database) -> None:
     """F108: delete this agent's work-view rows that are past their retention, at startup and then daily: the
-    tool-call and turn rows while the tool-call log is on, the model-call rows while the model-call log is on, each
-    by its own retention and in its own try, so one failing sweep never skips the other."""
-    from nous.observability.work_view_retention import sweep_model_calls, sweep_tool_calls
+    tool-call and turn rows while the tool-call log is on, the model-call rows while the model-call log is on, the
+    model-call text whatever its flag says, each by its own retention and in its own try, so one failing sweep never
+    skips another."""
+    from nous.observability.work_view_retention import sweep_model_call_text, sweep_model_calls, sweep_tool_calls
 
-    tool_calls, model_calls = _work_view_sweeps(settings)
+    tool_calls, model_calls, model_call_text = _work_view_sweeps(settings)
     # Sweep once at startup, THEN daily, as the retrieval-log loop does: a process restarted more often than once a
     # day would never prune under a sleep-first loop.
     first = True
@@ -222,6 +246,18 @@ async def _work_view_retention_loop(settings: Settings, database: Database) -> N
                     )
                 except Exception:
                     logger.warning("F108: model-call retention sweep failed", exc_info=True)
+            if model_call_text:
+                try:
+                    days = settings.model_call_text_retention_days
+                    deleted = await sweep_model_call_text(database, settings.agent_id, days)
+                    logger.info(
+                        "F108: model-call text retention sweep (>%dd, agent=%s) deleted %s",
+                        days,
+                        settings.agent_id,
+                        deleted,
+                    )
+                except Exception:
+                    logger.warning("F108: model-call text retention sweep failed", exc_info=True)
         except asyncio.CancelledError:
             if cancel_requested():
                 break
@@ -441,6 +477,7 @@ async def create_components(settings: Settings) -> dict:
     # embedder, the browser task loop and the reranker. The last two are module-level, so per process.
     work_view_writer = None
     model_call_recorder = None
+    text_store = None
     if settings.tool_call_log_enabled or settings.model_call_log_enabled:
         from nous.observability.recording import BoundedWriter
 
@@ -450,12 +487,28 @@ async def create_components(settings: Settings) -> dict:
         from nous.heart import reranker
         from nous.observability.model_calls import ModelCallRecorder
 
-        model_call_recorder = ModelCallRecorder(work_view_writer, database, settings.agent_id, settings)
+        # The text (prompt and response blocks) goes through the same writer, with its own pending cap.
+        if settings.model_call_text_enabled:
+            from nous.observability.model_call_text import TextStore
+
+            text_store = TextStore(work_view_writer, database, settings.agent_id, settings)
+        model_call_recorder = ModelCallRecorder(
+            work_view_writer, database, settings.agent_id, settings, text_store=text_store
+        )
         if embedding_provider is not None:
             embedding_provider.set_recorder(model_call_recorder)
         browser_loop.set_recorder(model_call_recorder)
         reranker.set_recorder(model_call_recorder)
-        logger.info("F108: model-call recorder wired (retention %d days)", settings.model_call_retention_days)
+        logger.info(
+            "F108: model-call recorder wired (retention %d days; text %s)",
+            settings.model_call_retention_days,
+            f"on, retention {settings.model_call_text_retention_days} days" if text_store is not None else "off",
+        )
+    elif settings.model_call_text_enabled:
+        logger.warning(
+            "F108: NOUS_MODEL_CALL_TEXT_ENABLED is on but NOUS_MODEL_CALL_LOG_ENABLED is off: the text hangs off the "
+            "model-call row, so no model-call text is recorded"
+        )
 
     brain = Brain(database, settings, embedding_provider)
     heart = Heart(database, settings, embedding_provider, owns_embeddings=False)  # F4
@@ -1298,9 +1351,10 @@ async def create_components(settings: Settings) -> dict:
         runner.set_tool_call_recorder(tool_call_recorder)
         logger.info("F108: tool-call recorder wired (retention %d days)", settings.tool_call_retention_days)
 
-    # One retention loop sweeps each work-view log that is on, by its own retention (0 days means no sweep).
+    # One retention loop sweeps each work-view log that is on, by its own retention (0 days means no sweep), and the
+    # model-call text whatever its flag says. With every log off it starts only while this agent still has text.
     work_view_retention_task = None
-    if any(_work_view_sweeps(settings)):
+    if await _work_view_retention_needed(settings, database):
         work_view_retention_task = asyncio.create_task(
             _work_view_retention_loop(settings, database), name="work-view-retention"
         )
@@ -1836,6 +1890,7 @@ async def create_components(settings: Settings) -> dict:
         "work_view_writer": work_view_writer,
         "tool_call_recorder": tool_call_recorder,
         "model_call_recorder": model_call_recorder,
+        "model_call_text_store": text_store,
         "work_view_retention_task": work_view_retention_task,
         "result_reconciler_task": result_reconciler_task,
         "retrieval_log_retention_task": retrieval_log_retention_task,
@@ -2116,6 +2171,7 @@ def build_app(settings: Settings) -> Starlette:
         continuation_runner=_lazy_component(components, "continuation_runner"),
         tool_call_recorder=_lazy_component(components, "tool_call_recorder"),
         model_call_recorder=_lazy_component(components, "model_call_recorder"),
+        model_call_text_store=_lazy_component(components, "model_call_text_store"),
     )
 
     if settings.mcp_enabled:

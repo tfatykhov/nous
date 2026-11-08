@@ -157,6 +157,8 @@ def _settings(**overrides: Any) -> SimpleNamespace:
         "tool_call_retention_days": 30,
         "model_call_log_enabled": False,
         "model_call_retention_days": 30,
+        # 0: no text sweep in these loops (it runs whatever the text flag says; tests/test_model_call_text_retention.py)
+        "model_call_text_retention_days": 0,
         "a2ui_sweep_interval_seconds": TICK,
     }
     values.update(overrides)
@@ -700,7 +702,11 @@ def test_create_components_starts_each_loop_behind_its_own_switch_with_its_own_c
             ["settings", "database"],
             ["settings.retrieval_telemetry_enabled", "getattr(settings, 'retrieval_telemetry_retention_days', 0) > 0"],
         ),
-        ("_work_view_retention_loop", ["settings", "database"], ["any(_work_view_sweeps(settings))"]),
+        (
+            "_work_view_retention_loop",
+            ["settings", "database"],
+            ["await _work_view_retention_needed(settings, database)"],
+        ),
     ], f"create_components starts its loops differently: {started}"
 
 

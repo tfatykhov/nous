@@ -69,7 +69,7 @@ from nous.cognitive.execution_ledger import (
     redact_error_text,
 )
 from nous.cognitive.layer import CognitiveLayer
-from nous.cognitive.ledger_store import DuplicateSend, HeldKey, LedgerStore, LedgerWriteError
+from nous.cognitive.ledger_store import DuplicateSend, HeldKey, LedgerStore, LedgerWriteError, redact_structure
 from nous.cognitive.schemas import ToolResult, TurnContext, TurnResult
 from nous.config import Settings
 from nous.heart.heart import Heart
@@ -620,7 +620,13 @@ class AgentRunner:
                     dag_id=ctx.dag_id,
                     dag_node_id=ctx.dag_node_id,
                     reason=reason,
-                    input_text=json.dumps(tool_input, ensure_ascii=False, default=str),
+                    # The input's strings are redacted before it is serialised (redact_structure says why); the
+                    # recorder redacts and clips the JSON text as well.
+                    input_text=json.dumps(
+                        redact_structure(tool_input, self._settings.tool_input_max_chars),
+                        ensure_ascii=False,
+                        default=str,
+                    ),
                     result_preview="" if is_error else (result_text or ""),
                     is_error=is_error,
                     error_text=(result_text or "") if is_error else None,

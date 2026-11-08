@@ -260,6 +260,24 @@ def redact_output(text: str) -> str:
     return _redact_detail(text)
 
 
+def redact_structure(value: Any, cap: int | None = None) -> Any:
+    """A copy of ``value`` with every string in it redacted, at any depth of dicts, lists and tuples (a tuple comes
+    back as a list, the same JSON): through ``redact_output``, or with ``cap`` through ``detail_text(s, cap)``, which
+    also bounds the scan (head and tail kept). Dict keys and anything not a string are kept as they are.
+
+    Redact a structure BEFORE serialising it: in JSON, a string that itself holds JSON (a curl body in a tool input,
+    a tool result) has its quotes escaped, and the patterns keyed on a name (``"password": "..."``) no longer match.
+    A string alone carries no key, so callers still redact the serialised text too: that masks a credential-named
+    key of the structure itself."""
+    if isinstance(value, str):
+        return redact_output(value) if cap is None else detail_text(value, cap)
+    if isinstance(value, dict):
+        return {k: redact_structure(v, cap) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [redact_structure(v, cap) for v in value]
+    return value
+
+
 def redaction_scan_pad() -> int:
     """How many characters at a cut edge redaction cannot vouch for: a secret
     split by the cut matches nothing, so the last this-many characters of a
@@ -299,7 +317,9 @@ def detail_input(tool_name: str, tool_input: dict[str, Any]) -> str:
     elif tool_name == "run_python":
         code = tool_input.get("code")
     if not isinstance(code, str):
-        code = json.dumps(tool_input, ensure_ascii=False, indent=2, sort_keys=True, default=str)
+        # The strings first, then the JSON text (redact_structure says why).
+        structure = redact_structure(tool_input, DETAIL_INPUT_CHARS)
+        code = json.dumps(structure, ensure_ascii=False, indent=2, sort_keys=True, default=str)
     return detail_text(code, DETAIL_INPUT_CHARS)
 
 

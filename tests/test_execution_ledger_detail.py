@@ -353,3 +353,30 @@ def test_a_service_account_variable_is_collected_as_a_secret(monkeypatch):
     value = "eyJ" + uuid.uuid4().hex * 4
     _set_secret(monkeypatch, value, name="GOOGLE_SERVICE_ACCOUNT_JSON")
     assert value in ledger_store._own_secrets()
+
+
+# ---- a secret inside a JSON string (F108, the structure is redacted before it is serialised) ----------------------
+
+_NESTED = '{"password":"hunter2"}'  # JSON inside a string: serialised, its quotes are escaped
+
+
+def test_redact_structure_masks_json_inside_a_string_and_keeps_the_shape():
+    value = {"password": "hunter2", "items": [_NESTED, ("curl -d " + _NESTED,)], "n": 3, "flag": None}
+
+    out = ledger_store.redact_structure(value)
+
+    assert "hunter2" not in json.dumps(out["items"])
+    # a string alone carries no key: the serialised text's own redaction masks a credential-named key
+    assert out["password"] == "hunter2"
+    assert "hunter2" not in ledger_store.redact_output(json.dumps(out))
+    assert out["n"] == 3 and out["flag"] is None and list(out) == ["password", "items", "n", "flag"]
+    assert value["items"][0] == _NESTED  # a copy: the input is untouched
+    # with a cap, each string is redacted and bounded as detail_text does
+    long = "x" * 5000 + _NESTED
+    assert ledger_store.redact_structure([long], 100) == [detail_text(long, 100)]
+
+
+def test_a_secret_inside_a_json_string_is_masked_in_the_stored_input():
+    stored = ledger_store.detail_input("write_file", {"path": "/tmp/a", "content": _NESTED})
+
+    assert "hunter2" not in stored and json.loads(stored)["path"] == "/tmp/a"

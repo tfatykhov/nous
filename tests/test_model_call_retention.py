@@ -147,7 +147,7 @@ class _Database:
         if table in self.fail_on:
             self.passes.set()
             raise ConnectionError(f"{table} is down in this test")
-        self.deleted.append((table, params["d"]))
+        self.deleted.append((table, params.get("d")))
         return SimpleNamespace(rowcount=0)
 
     async def commit(self) -> None:
@@ -162,6 +162,10 @@ def _loop_settings(**overrides: Any) -> SimpleNamespace:
         "tool_call_retention_days": 30,
         "model_call_log_enabled": True,
         "model_call_retention_days": 7,
+        "model_call_text_enabled": False,
+        # 0: no text sweep here. The text is swept whatever its flag says; its own tests turn the sweep on
+        # (tests/test_model_call_text_retention.py).
+        "model_call_text_retention_days": 0,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -255,10 +259,11 @@ def _spy_constructions(monkeypatch) -> dict[str, list[Any]]:
     return built
 
 
-def _boot(monkeypatch, scenario_checks, **flags: Any) -> None:
+def _boot(monkeypatch, scenario_checks, seed_rows: Any = None, **flags: Any) -> None:
     """Boot create_components with the heartbeat client built but its loop never started (no tick, no model call),
     an embedding provider, and ``flags``; run ``scenario_checks(components, settings)``, which shuts down, then delete
-    the boot's rows."""
+    the boot's rows. ``seed_rows(connection, agent_id)``, when given, writes the boot agent's rows before the boot
+    reads any."""
     from nous.config import Settings
     from nous.heartbeat.runner import HeartbeatRunner
 
@@ -270,6 +275,8 @@ def _boot(monkeypatch, scenario_checks, **flags: Any) -> None:
             await connection.execute(
                 text("INSERT INTO nous_system.agents (id, name, config) VALUES (:id, 'x', '{}')"), {"id": agent_id}
             )
+            if seed_rows is not None:
+                await seed_rows(connection, agent_id)
 
     async def never_start(self: HeartbeatRunner) -> None:
         return None
@@ -310,6 +317,7 @@ def _boot(monkeypatch, scenario_checks, **flags: Any) -> None:
                 async with database.session() as session:
                     for statement in (
                         "DELETE FROM nous_system.model_call_log WHERE agent_id = :a",
+                        "DELETE FROM nous_system.model_text_block WHERE agent_id = :a",
                         "DELETE FROM heart.rubric_versions WHERE agent_id = :a",
                         "DELETE FROM nous_system.agents WHERE id = :a",
                     ):
@@ -499,11 +507,11 @@ MODEL_COUNTERS = {
 def test_unlabelled_counter_in_observability_endpoint():
     data = _observability(model_call_recorder=_model_recorder())
 
-    assert data["recording"] == {"tool_calls": None, "model_calls": MODEL_COUNTERS}
+    assert data["recording"] == {"tool_calls": None, "model_calls": MODEL_COUNTERS, "model_call_text": None}
 
 
 def test_observability_endpoint_reports_null_model_calls_when_the_model_log_is_off():
-    assert _observability()["recording"] == {"tool_calls": None, "model_calls": None}
+    assert _observability()["recording"] == {"tool_calls": None, "model_calls": None, "model_call_text": None}
 
 
 def test_observability_endpoint_reads_the_model_recorder_through_the_apps_lazy_proxy():

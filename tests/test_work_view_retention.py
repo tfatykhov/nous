@@ -159,6 +159,8 @@ def test_sweep_failure_logs_warning(monkeypatch, caplog):
         tool_call_retention_days=30,
         model_call_log_enabled=False,
         model_call_retention_days=30,
+        model_call_text_enabled=False,
+        model_call_text_retention_days=7,
     )
     database = _FailingDatabase()
 
@@ -329,7 +331,7 @@ COUNTERS = {
 def test_observability_endpoint_reports_recording_counters():
     data = _observability(tool_call_recorder=_recorder())
 
-    assert data["recording"] == {"tool_calls": COUNTERS, "model_calls": None}
+    assert data["recording"] == {"tool_calls": COUNTERS, "model_calls": None, "model_call_text": None}
     # Additive: the existing keys are all still there.
     assert set(data) == {
         "event_bus",
@@ -343,7 +345,7 @@ def test_observability_endpoint_reports_recording_counters():
 
 
 def test_observability_endpoint_reports_null_when_recording_is_off():
-    assert _observability()["recording"] == {"tool_calls": None, "model_calls": None}
+    assert _observability()["recording"] == {"tool_calls": None, "model_calls": None, "model_call_text": None}
 
 
 def test_observability_endpoint_reads_the_recorder_through_the_apps_lazy_proxy():
@@ -352,10 +354,18 @@ def test_observability_endpoint_reads_the_recorder_through_the_apps_lazy_proxy()
     components: dict[str, Any] = {"tool_call_recorder": None}
     proxy = main._lazy_component(components, "tool_call_recorder")
 
-    assert _observability(tool_call_recorder=proxy)["recording"] == {"tool_calls": None, "model_calls": None}
+    assert _observability(tool_call_recorder=proxy)["recording"] == {
+        "tool_calls": None,
+        "model_calls": None,
+        "model_call_text": None,
+    }
 
     components["tool_call_recorder"] = _recorder()
-    assert _observability(tool_call_recorder=proxy)["recording"] == {"tool_calls": COUNTERS, "model_calls": None}
+    assert _observability(tool_call_recorder=proxy)["recording"] == {
+        "tool_calls": COUNTERS,
+        "model_calls": None,
+        "model_call_text": None,
+    }
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -377,6 +387,9 @@ ENV_ROWS = {
     "NOUS_TOOL_REASON_MAX_CHARS": "500",
     "NOUS_MODEL_CALL_LOG_ENABLED": "false",
     "NOUS_MODEL_CALL_RETENTION_DAYS": "30",
+    "NOUS_MODEL_CALL_TEXT_ENABLED": "false",
+    "NOUS_MODEL_CALL_TEXT_BLOCK_MAX_CHARS": "200000",
+    "NOUS_MODEL_CALL_TEXT_RETENTION_DAYS": "7",
 }
 
 
