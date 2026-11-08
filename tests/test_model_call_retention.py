@@ -294,6 +294,10 @@ def _boot(monkeypatch, scenario_checks, **flags: Any) -> None:
             components = await main.create_components(settings)
             await scenario_checks(components, settings)
         finally:
+            # The browser loop's and the reranker's hooks are process-wide: a boot that failed before its shutdown
+            # must not leave them set for the tests that run after it.
+            browser_loop.set_recorder(None)
+            reranker.set_recorder(None)
             from nous.storage.database import Database
 
             database = Database(settings)
@@ -407,12 +411,13 @@ def test_wiring_on_sets_recorder_on_both_clients(monkeypatch, tool_log):
             seen["embedder"] = components["embedding_provider"]
         finally:
             await main.shutdown_components(components)
+            seen["module_hooks_after_shutdown"] = (browser_loop._recorder, reranker._recorder)
 
     _boot(monkeypatch, checks, model_call_log_enabled=True, tool_call_log_enabled=tool_log)
 
     assert seen["task"].done()
     # Shutdown clears the hooks before the writer drains, so no recorder outlives its writer.
-    assert (browser_loop._recorder, reranker._recorder) == (None, None)
+    assert seen["module_hooks_after_shutdown"] == (None, None)
     assert (seen["api_client"]._recorder, seen["embedder"]._recorder) == (None, None)
 
 
