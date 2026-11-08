@@ -2295,6 +2295,34 @@ def create_app(
             logger.warning("dashboard_work_sessions: the work view query failed", exc_info=True)
             return JSONResponse({"error": "work view query failed"}, status_code=500)
 
+    async def dashboard_work_trace(request: Request) -> JSONResponse:
+        """GET /dashboard/work/sessions/{session_id} — F108: one session's trace, its turns oldest first (``limit``
+        per page after the ``after`` cursor), each with its tool calls and main-loop model calls. Read-only. With the
+        tool-call log off: 200 {"enabled": false} and no session; unknown or another agent's session: 404."""
+        from nous.api import work_view_dashboard as wv
+
+        try:
+            query = wv.parse_trace_query(request.query_params)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        if not settings.tool_call_log_enabled:
+            return JSONResponse(wv.disabled_trace())
+        try:
+            async with database.session() as session:
+                data = await wv.get_trace(
+                    session,
+                    settings.agent_id,
+                    request.path_params["session_id"],
+                    **query,
+                    model_calls_enabled=settings.model_call_log_enabled,
+                )
+        except Exception:
+            logger.warning("dashboard_work_trace: the work view query failed", exc_info=True)
+            return JSONResponse({"error": "work view query failed"}, status_code=500)
+        if data is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(data)
+
     async def dashboard_memory_write_health_acknowledge(request: Request) -> JSONResponse:
         """POST /dashboard/memory-write-health/acknowledge {rule, day?, note?} — P4: the owner accepts a rule's
         evidence (a deliberate restore or delete) and resets its baseline. Records who acknowledged what as an events
@@ -3825,6 +3853,7 @@ def create_app(
         Route("/dashboard/cache", dashboard_cache),
         # F108: Work view
         Route("/dashboard/work/sessions", dashboard_work_sessions),
+        Route("/dashboard/work/sessions/{session_id}", dashboard_work_trace),
         # F038: DAG orchestration dashboard
         Route("/dashboard/dag", dashboard_dag),
         Route("/dashboard/execution", dashboard_execution),

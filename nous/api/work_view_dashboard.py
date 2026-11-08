@@ -10,15 +10,22 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from nous.api.harness_dashboard import _is_tombstone
 
 DAYS_DEFAULT = 7
 DAYS_MAX = 30
 SESSIONS_LIMIT_DEFAULT = 50
 SESSIONS_LIMIT_MAX = 100
+TRACE_LIMIT_DEFAULT = 100
+TRACE_LIMIT_MAX = 200
+MODEL_CALLS_PER_TURN = 20
 TOOLS_PER_SESSION = 12
 TITLE_TASK_CHARS = 100
 TITLE_TRIGGER_CHARS = 80
@@ -138,6 +145,18 @@ def parse_sessions_query(params: Mapping[str, str]) -> dict[str, Any]:
     }
 
 
+def parse_trace_query(params: Mapping[str, str]) -> dict[str, Any]:
+    """The ``limit`` and ``after`` keyword arguments of :func:`get_trace` from the request's query. The cursor's key
+    is a turn id, so it must be a UUID (returned in its canonical form). Raises ValueError on a bad value."""
+    after = parse_cursor(params.get("after"))
+    if after is not None:
+        try:
+            after = (after[0], str(UUID(after[1])))
+        except ValueError as exc:
+            raise ValueError("cursor key must be a turn id (a UUID)") from exc
+    return {"limit": parse_limit(params.get("limit"), TRACE_LIMIT_DEFAULT, TRACE_LIMIT_MAX), "after": after}
+
+
 def _like_pattern(q: str) -> str:
     """A case-insensitive substring pattern for ``ILIKE ... ESCAPE '\\'`` that matches ``%``, ``_`` and ``\\``
     literally."""
@@ -150,6 +169,8 @@ def _iso(ts: datetime | None) -> str | None:
 
 
 async def _set_timeout(session: AsyncSession) -> None:
+    # SET LOCAL binds the transaction the session autobegan; it holds only while the caller runs every statement in
+    # that one transaction, so never commit (or open a second session) between the statements of a handler.
     await session.execute(text("SET LOCAL statement_timeout = '10s'"))
 
 
@@ -382,4 +403,271 @@ async def get_sessions(
         "tool_names": tool_names,
         "sessions": [_session_out(row) for row in rows],
         "next_before": next_before,
+    }
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# GET /dashboard/work/sessions/{session_id}
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def disabled_trace() -> dict[str, Any]:
+    """The trace with the tool-call log off: the same keys as with it on, every list empty."""
+    return {"enabled": False, "session": None, "turns": [], "next_after": None}
+
+
+# A trace's turns: the session's turn rows, and, as synthetic turns, the turn ids of the session's calls that have no
+# turn row (execute_single_call writes its calls under a turn id of their own and never a turn row). The two parts
+# are disjoint (NOT EXISTS), hence UNION ALL. The header and the page both read this union, so the header's counts
+# agree with the body. A synthetic turn starts and ends at its first call.
+_TRACE_TURNS_CTE = """
+WITH trace_turns AS (
+    SELECT t.id, t.started_at, coalesce(t.ended_at, t.started_at) AS last_at, true AS has_turn_row
+    FROM nous_system.agent_turn_log t
+    WHERE t.agent_id = :agent AND t.session_id = :sid
+    UNION ALL
+    SELECT c.turn_id, min(c.started_at), min(c.started_at), false
+    FROM nous_system.tool_call_log c
+    WHERE c.agent_id = :agent AND c.session_id = :sid AND c.turn_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM nous_system.agent_turn_log t WHERE t.id = c.turn_id AND t.agent_id = :agent)
+    GROUP BY c.turn_id
+)
+"""
+
+# The session's header. Its calls are the calls of the union's turns (joined on turn_id), as in the list. kind,
+# work_kind and parent come from the first turn row (as in the list), or from the first call when the session has no
+# turn row. The title follows the list's rule.
+_TRACE_HEADER_SQL = (
+    _TRACE_TURNS_CTE
+    + """,
+trace_calls AS (
+    SELECT c.turn_id, c.call_index, c.is_error, c.subtask_id, c.work_kind, c.parent_session_id,
+           tt.started_at AS turn_started_at
+    FROM nous_system.tool_call_log c
+    JOIN trace_turns tt ON tt.id = c.turn_id
+    WHERE c.agent_id = :agent
+),
+first_turn AS (
+    SELECT t.parent_session_id, t.work_kind, t.trigger_text
+    FROM nous_system.agent_turn_log t
+    WHERE t.agent_id = :agent AND t.session_id = :sid
+    ORDER BY t.started_at, t.id
+    LIMIT 1
+),
+first_call AS (
+    SELECT parent_session_id, work_kind FROM trace_calls ORDER BY turn_started_at, turn_id, call_index LIMIT 1
+),
+first_subtask AS (
+    SELECT subtask_id FROM trace_calls WHERE subtask_id IS NOT NULL
+    ORDER BY turn_started_at, turn_id, call_index LIMIT 1
+)
+SELECT
+    (EXISTS (SELECT 1 FROM nous_system.agent_turn_log WHERE agent_id = :agent AND session_id = :sid)
+     OR EXISTS (SELECT 1 FROM nous_system.tool_call_log WHERE agent_id = :agent AND session_id = :sid)) AS known,
+    tt.turns, tt.started_at, tt.ended_at, tc.tool_calls, tc.errors,
+    coalesce(ft.work_kind, fc.work_kind) AS work_kind,
+    CASE WHEN ft.work_kind IS NOT NULL THEN ft.parent_session_id ELSE fc.parent_session_id END AS parent_session_id,
+    coalesce(
+        (SELECT e.title FROM heart.episodes e
+         WHERE e.agent_id = :agent AND e.session_id = :sid AND e.active AND coalesce(e.title, '') <> ''
+         ORDER BY e.started_at DESC LIMIT 1),
+        left(st.task, :task_chars),
+        left(nullif(ft.trigger_text, ''), :trigger_chars),
+        :no_title) AS title
+FROM (SELECT count(*)::int AS turns, min(started_at) AS started_at, max(last_at) AS ended_at FROM trace_turns) tt
+CROSS JOIN (SELECT count(*)::int AS tool_calls, (count(*) FILTER (WHERE is_error))::int AS errors
+            FROM trace_calls) tc
+LEFT JOIN first_turn ft ON true
+LEFT JOIN first_call fc ON true
+LEFT JOIN first_subtask fs ON true
+LEFT JOIN heart.subtasks st ON st.id = fs.subtask_id AND st.agent_id = :agent
+"""
+)
+
+
+def _trace_page_sql(*, after: bool) -> str:
+    """The page's turns: keyset and LIMIT on the union, then the turn row's columns by primary key (NULL for a
+    synthetic turn)."""
+    where = "WHERE (started_at, id) > (CAST(:after_ts AS timestamptz), CAST(:after_id AS uuid))" if after else ""
+    return (
+        _TRACE_TURNS_CTE
+        + """
+SELECT p.id, p.started_at, p.has_turn_row, t.turn_number, t.ended_at, t.frame_id, t.trigger_text, t.memory_context,
+       t.critic, t.claim_check, t.reply_text, t.error, t.tool_call_count
+FROM (SELECT id, started_at, has_turn_row FROM trace_turns
+      """
+        + where
+        + """
+      ORDER BY started_at, id
+      LIMIT :fetch) p
+LEFT JOIN nous_system.agent_turn_log t ON t.id = p.id AND t.agent_id = :agent
+ORDER BY p.started_at, p.id
+"""
+    )
+
+
+# The page's calls in (turn_id, call_index) order, each with its execution_ledger row when this agent has one.
+_TRACE_CALLS_SQL = """
+SELECT c.id, c.turn_id, c.call_index, c.tool_name, c.tool_name_called, c.reason, c.input_text, c.result_preview,
+       c.outcome, c.is_error, c.error_text, c.refused_by, c.duration_ms, c.started_at,
+       l.id AS ledger_id, l.status AS ledger_status, l.side_effect_type, l.external_ref, l.idempotency_key, l.key_args
+FROM nous_system.tool_call_log c
+LEFT JOIN nous_system.execution_ledger l ON l.id = c.ledger_entry_id AND l.agent_id = :agent
+WHERE c.agent_id = :agent AND c.turn_id = ANY(CAST(:turn_ids AS uuid[]))
+ORDER BY c.turn_id, c.call_index, c.id
+"""
+
+# The model calls that carry one of the page's turn ids (main-loop calls: background calls carry no turn id), the
+# first few of each turn.
+_TRACE_MODEL_CALLS_SQL = """
+SELECT id, turn_id, purpose, model, status, input_total, output_tokens
+FROM (
+    SELECT m.id, m.turn_id, m.purpose, m.model, m.status, m.input_total, m.output_tokens, m.started_at,
+           row_number() OVER (PARTITION BY m.turn_id ORDER BY m.started_at, m.id) AS n
+    FROM nous_system.model_call_log m
+    WHERE m.agent_id = :agent AND m.turn_id = ANY(CAST(:turn_ids AS uuid[]))
+) x
+WHERE n <= :per_turn
+ORDER BY turn_id, started_at, id
+"""
+
+
+def _ledger_out(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    if row["ledger_id"] is None:
+        return None
+    return {
+        "id": str(row["ledger_id"]),
+        "status": row["ledger_status"],
+        "side_effect_type": row["side_effect_type"],
+        "external_ref": row["external_ref"],
+        "tombstone": _is_tombstone(
+            SimpleNamespace(
+                idempotency_key=row["idempotency_key"], status=row["ledger_status"], key_args=row["key_args"]
+            )
+        ),
+    }
+
+
+def _call_out(row: Mapping[str, Any]) -> dict[str, Any]:
+    tool = row["tool_name"]
+    return {
+        "id": str(row["id"]),
+        "call_index": row["call_index"],
+        "tool": tool,
+        "tool_called": row["tool_name_called"] if row["tool_name_called"] != tool else None,
+        "lane": lane_of(tool),
+        "reason": row["reason"],
+        "input": row["input_text"],
+        "result": row["result_preview"],
+        "outcome": row["outcome"],
+        "is_error": row["is_error"],
+        "error": row["error_text"],
+        "refused_by": row["refused_by"],
+        "duration_ms": row["duration_ms"],
+        "started_at": _iso(row["started_at"]),
+        "ledger": _ledger_out(row),
+    }
+
+
+def _turn_out(row: Mapping[str, Any], calls: list[dict[str, Any]], model_calls: list[dict[str, Any]]) -> dict[str, Any]:
+    count = row["tool_call_count"]
+    return {
+        "turn_id": str(row["id"]),
+        "turn_number": row["turn_number"],
+        "has_turn_row": row["has_turn_row"],
+        "started_at": _iso(row["started_at"]),
+        "ended_at": _iso(row["ended_at"]),
+        "frame_id": row["frame_id"],
+        "trigger": row["trigger_text"],
+        "memory": row["memory_context"],
+        "critic": row["critic"],
+        "claim_check": row["claim_check"],
+        "reply": row["reply_text"],
+        "error": row["error"],
+        # The runner's count when the turn row has one, else the calls listed (a synthetic turn has no count).
+        "tool_call_count": count if count is not None else len(calls),
+        "model_calls": model_calls,
+        "calls": calls,
+    }
+
+
+async def get_trace(
+    session: AsyncSession,
+    agent_id: str,
+    session_id: str,
+    *,
+    limit: int,
+    after: tuple[datetime, str] | None,
+    model_calls_enabled: bool,
+) -> dict[str, Any] | None:
+    """One session's trace: its header and ``limit`` turns after ``after``, oldest first, each with its calls and
+    (when the model-call log is on) its main-loop model calls. None when this agent has no turn row and no call of
+    the session."""
+    await _set_timeout(session)
+    header = (
+        (
+            await session.execute(
+                text(_TRACE_HEADER_SQL),
+                {
+                    "agent": agent_id,
+                    "sid": session_id,
+                    "task_chars": TITLE_TASK_CHARS,
+                    "trigger_chars": TITLE_TRIGGER_CHARS,
+                    "no_title": NO_TITLE,
+                },
+            )
+        )
+        .mappings()
+        .one()
+    )
+    if not header["known"]:
+        return None
+
+    params: dict[str, Any] = {"agent": agent_id, "sid": session_id, "fetch": limit + 1}
+    if after is not None:
+        params["after_ts"], params["after_id"] = after
+    rows = list((await session.execute(text(_trace_page_sql(after=after is not None)), params)).mappings())
+    next_after = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        next_after = format_cursor(rows[-1]["started_at"], str(rows[-1]["id"]))
+
+    turn_ids = [row["id"] for row in rows]
+    calls: dict[str, list[dict[str, Any]]] = {str(t): [] for t in turn_ids}
+    model_calls: dict[str, list[dict[str, Any]]] = {str(t): [] for t in turn_ids}
+    if turn_ids:
+        ids = {"agent": agent_id, "turn_ids": turn_ids}
+        for row in (await session.execute(text(_TRACE_CALLS_SQL), ids)).mappings():
+            calls[str(row["turn_id"])].append(_call_out(row))
+        if model_calls_enabled:
+            per_turn = {**ids, "per_turn": MODEL_CALLS_PER_TURN}
+            for row in (await session.execute(text(_TRACE_MODEL_CALLS_SQL), per_turn)).mappings():
+                model_calls[str(row["turn_id"])].append(
+                    {
+                        "id": str(row["id"]),
+                        "purpose": row["purpose"],
+                        "model": row["model"],
+                        "status": row["status"],
+                        "input_total": row["input_total"],
+                        "output_tokens": row["output_tokens"],
+                    }
+                )
+
+    work_kind = header["work_kind"]
+    return {
+        "enabled": True,
+        "session": {
+            "session_id": session_id,
+            "parent_session_id": header["parent_session_id"],
+            "kind": WORK_KIND_GROUP.get(work_kind or "", "background"),
+            "work_kind": work_kind,
+            "title": header["title"],
+            "started_at": _iso(header["started_at"]),
+            "ended_at": _iso(header["ended_at"]),
+            "turns": header["turns"],
+            "tool_calls": header["tool_calls"],
+            "errors": header["errors"],
+        },
+        "turns": [_turn_out(row, calls[str(row["id"])], model_calls[str(row["id"])]) for row in rows],
+        "next_after": next_after,
     }
