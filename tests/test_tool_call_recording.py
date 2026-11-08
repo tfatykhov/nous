@@ -298,6 +298,57 @@ async def test_gated_call_is_recorded():
     assert gated.ledger_entry_id is None and gated.duration_ms == 0
 
 
+EMAIL = {"to": "a@x.io", "subject": "s", "body": "b", "reason": "Tell the owner."}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", PATHS)
+async def test_suppressed_send_is_recorded(path, monkeypatch):
+    """A keyed send whose idempotency key is already held (``DuplicateSend``) is not dispatched: its record says
+    "suppressed", and it has no ledger row of its own (the harness writes a blocked row, whose id the loop never
+    gets). ``run_turn`` runs a subtask turn, which the real ``idempotency_key`` keys. ``stream_chat``'s turns are
+    always interactive, which it never keys, so that path is given a key: its suppressed branch is under test."""
+    from test_runner_ledger import _held
+
+    import nous.api.runner as runner_module
+
+    spy, store = _Spy(), _Store()
+    store.duplicate = _held("success")
+    r, calls = _runner(recorder=spy, store=store)
+
+    async def send_email(**kwargs):
+        calls.append(("send_email", kwargs))
+        return {"content": [{"type": "text", "text": "sent"}]}
+
+    props = {name: {"type": "string"} for name in ("to", "subject", "body")}
+    r._dispatcher.register("send_email", send_email, {"type": "object", "properties": props})
+    if path == "run_turn":
+        r._call_api, _sent = _scripted_api([[("t1", "send_email", EMAIL)]])
+        context = ExecutionContext(kind="subtask", session_id="s1", subtask_id=uuid.uuid4())
+        try:
+            await r.run_turn("s1", "go", context=context)
+        finally:
+            r._api_shared = True
+            await r.close()
+    else:
+        real_key = runner_module.idempotency_key
+        monkeypatch.setattr(
+            runner_module,
+            "idempotency_key",
+            lambda ctx, name, args, **kw: "forced:send" if name == "send_email" else real_key(ctx, name, args, **kw),
+        )
+        await _drive(r, path, [[("t1", "send_email", EMAIL)]])
+
+    assert calls == []  # never dispatched
+    assert ("blocked", "send_email", "duplicate") in store.events
+    (rec,) = spy.records
+    assert rec.outcome == "suppressed" and rec.tool_name == "send_email"
+    # The held send succeeded in an earlier turn: "already sent", not an error.
+    assert rec.is_error is False and rec.error_text is None and "Already sent" in rec.result_preview
+    assert rec.ledger_entry_id is None and rec.refused_by is None
+    assert rec.reason == "Tell the owner."
+
+
 @pytest.mark.asyncio
 async def test_alias_call_records_both_names():
     spy = _Spy()

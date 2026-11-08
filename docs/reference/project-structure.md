@@ -118,7 +118,7 @@ nous/
 │   │   ├── task_score_job.py   # Task scores: the one-shot scoring pass (`python -m nous.observability.task_score_job`), the only writer of `scoring.task_scores` and `scoring.scorer_heartbeat` (migration 088, its one-row-per-agent liveness record)
 │   │   ├── autonomy_inventory.py # Autonomy inventory: per tool, successes by who was in the loop (owner present, approved, autonomous), and censor activity
 │   │   ├── drift.py            # Drift detection
-│   │   ├── memory_write_health.py # P4: the daily write-health rollup (migration 099), its six rules, the latched hard-delete detector and its acknowledgements (events of type memory_write_health_ack); the one table here the db_query reader may read (owner's call)
+│   │   ├── memory_write_health.py # P4: the daily write-health rollup (migration 099), its six rules, the latched hard-delete detector and its acknowledgements (events of type memory_write_health_ack); one of the two tables here the db_query reader may read (owner's call; the other is `tool_call_log`)
 │   │   └── snapshots.py        # Graph hub snapshots
 │   ├── audits/                 # Scorer v5: the owner's sampled audits of completion checks
 │   │   └── check_audit.py      # CheckAuditSampler (weekly loop started from main.py, off unless NOUS_CHECK_AUDIT_ENABLED); `__init__.py` holds the shared `AUDIT_VERDICT_ACTION`

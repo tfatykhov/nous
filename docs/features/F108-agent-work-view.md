@@ -18,6 +18,11 @@ The input, result preview, reason and error text are redacted with the execution
 
 `execute_single_call` (one owner-approved call run with no model in between) writes its tool-call row under a turn id of its own, with no turn number, and no turn row.
 
+Two gaps in the tool-call rows:
+
+- **A dispatch exception that escapes the tool loop writes no tool row.** `ToolDispatcher.dispatch` turns a tool's own exception into an error result, so only two kinds escape: a cancellation (or the stream closed) in the middle of the call, and a failure of the ledger plumbing around it. The execution ledger closes such a call `unknown`; `tool_call_log` has no row for it.
+- **A call blocked because its compensation snapshot could not be taken is recorded as `error`** (with `refused_by` null and the `ledger_entry_id` of its row), while its execution-ledger row says `blocked`.
+
 ### Turns (`nous_system.agent_turn_log`, migration 100)
 
 One row per turn, `id` = the turn's id, so a turn's tool calls join on `tool_call_log.turn_id`. Written when the turn ends, before `post_turn` (`ToolCallRecorder.record_turn`, an upsert on `id`). It holds what started the turn (the message or the background trigger, at most 500 characters), the memory already in the context (the ids of the recalled facts, decisions, procedures and episodes, at most 50 per kind), the critic's verdict for the turn (the `critic_classified` event's data, or null when the critic did not run), the claim check (the `f026_claim_verification` result, or null), the reply (at most 1,000 characters), the error (at most 1,000; `cancelled` for a cancelled turn), the number of tool calls, and the start and end times. Every text, and every string inside the critic and claim-check JSON, is redacted before it is cut. Turn numbers repeat after compaction, so a trace is ordered by `agent_turn_log.started_at`, then by `(turn_id, call_index)`.
@@ -28,7 +33,7 @@ Turn paths that write no turn row (they also skip `post_turn`):
 - `run_turn`: the attachment ingest or the execution-ledger setup raises or is cancelled, or recording the attachment fact (after the turn's try) raises or is cancelled.
 - `stream_chat`: the attachment ingest, the execution-ledger setup, the system-prompt build, the offered-tool list or the compaction raises or is cancelled (before the turn's try).
 
-A `stream_chat` turn whose consumer closes the generator (rather than cancelling it) writes its row with no error.
+A `stream_chat` turn whose consumer closes the generator (`aclose()`) rather than cancelling it writes its row with the error `cancelled`, as a cancelled turn does; `post_turn` is given what it was given before.
 
 ### The reason field (`NOUS_TOOL_REASON_ENABLED`)
 
@@ -43,7 +48,7 @@ Every tool offered to the model gets a required string `reason`: "One sentence: 
 
 ## Retention
 
-Rows are kept `NOUS_TOOL_CALL_RETENTION_DAYS` (30) days. A daily loop (`_tool_call_retention_loop` in `main.py`, started with the log) deletes this agent's `tool_call_log` and `agent_turn_log` rows that started earlier, in one transaction (`sweep_tool_calls`, `nous/observability/work_view_retention.py`). It is agent-scoped, so one agent never deletes the rows of another that keeps them longer, and both tables index `(agent_id, started_at)` for it. A failed sweep logs a WARNING and is tried again a day later. As for the context-log sweep, the first pass runs a day after start, so a process restarted more often than once a day does not sweep. A retention of 0 or less starts no sweep.
+Rows are kept `NOUS_TOOL_CALL_RETENTION_DAYS` (30) days. A loop (`_tool_call_retention_loop` in `main.py`, started with the log) deletes this agent's `tool_call_log` and `agent_turn_log` rows that started earlier, in one transaction (`sweep_tool_calls`, `nous/observability/work_view_retention.py`). It is agent-scoped, so one agent never deletes the rows of another that keeps them longer, and both tables index `(agent_id, started_at)` for it. The first pass runs at startup and the next ones once a day, as for the retrieval-log sweep, so a process restarted more often than once a day still sweeps. A failed sweep logs a WARNING and is tried again a day later. A retention of 0 or less starts no sweep.
 
 ## Who reads the rows
 
@@ -65,7 +70,7 @@ Measured inputs (production, 2026-11-07): since 2026-10-27, 161 conversation tur
 
 Bytes per row are bounded by the caps. A tool-call row is about 250 bytes of fixed columns plus at most 2,016 characters of input, 516 of result preview, 500 of reason and 1,016 of error text (errors only): at most about 4.3 KB, typically 1 KB (a bash check's input is a few hundred characters). A turn row is about 200 bytes plus at most 516 characters of trigger, 1,016 of reply and 1,016 of error, the memory ids (at most 4 x 50 ids, about 8 KB at the cap, typically under 1 KB) and the critic and claim-check JSON (each string at most 1,000 characters): typically 2 to 3 KB. PostgreSQL compresses a row over about 2 KB, so the largest rows take less than this.
 
-Over 30 days that is 22,500 to 120,000 tool-call rows (about 30 MB typical, 520 MB if every row hit every cap) and 15,000 to 63,000 turn rows (about 100 MB typical), plus their indexes: about 100 to 300 MB in all at steady state. For comparison, `context_log` holds about 1.6 KB a row (44,226 rows, 72 MB, since 2026-10-04).
+Over 30 days that is 22,500 to 120,000 tool-call rows (about 30 MB typical, 520 MB if every row hit every cap) and 15,000 to 63,000 turn rows (about 100 MB typical), plus their indexes: typically about 100 to 300 MB in all at steady state. The capped worst case, every row at every cap at the top of both ranges, is about 1.3 GB: 120,000 tool-call rows at 4.3 KB (520 MB) and 63,000 turn rows at about 12 KB (750 MB; the claim-check JSON has no cap on its number of entries, so a turn with many claims can exceed even this), before compression. For comparison, `context_log` holds about 1.6 KB a row (44,226 rows, 72 MB, since 2026-10-04).
 
 The daily sweep deletes one day's rows, about 1,250 to 6,100. Deletes of that size need only autovacuum: the dead rows are reclaimed and their space reused by the next days' inserts, so the tables stay near their 30-day size. No partitioning is needed.
 

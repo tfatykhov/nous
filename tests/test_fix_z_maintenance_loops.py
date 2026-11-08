@@ -624,11 +624,14 @@ def test_a_loop_waits_its_interval_between_two_passes(build, monkeypatch):
     assert passes() < 100, passes()
 
 
-def test_the_retrieval_log_sweep_runs_at_startup_before_its_first_wait(monkeypatch):
+@pytest.mark.parametrize(
+    "build", [_retrieval_log_retention, _tool_call_retention], ids=["retrieval log", "tool-call log"]
+)
+def test_the_sweep_runs_at_startup_before_its_first_wait(build, monkeypatch):
     """A process restarted every day would never prune under a loop that
     waits first."""
     _short_intervals(monkeypatch, 3600)
-    loop = _retrieval_log_retention(None)
+    loop = build(None)
     database = loop.parts["database"]
 
     async def scenario() -> None:

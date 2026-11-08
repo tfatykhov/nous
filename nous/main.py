@@ -173,12 +173,18 @@ async def _context_log_retention_loop(settings: Settings, database: Database) ->
 
 
 async def _tool_call_retention_loop(settings: Settings, database: Database) -> None:
-    """F108: delete this agent's tool-call and turn rows that are past their retention, once a day."""
+    """F108: delete this agent's tool-call and turn rows that are past their retention, at startup and then daily."""
     from nous.observability.work_view_retention import sweep_tool_calls
 
+    # Sweep once at startup, THEN daily, as the retrieval-log loop does: a process restarted more often than once a
+    # day would never prune under a sleep-first loop.
+    first = True
     while True:
         try:
-            await asyncio.sleep(_RETENTION_SWEEP_INTERVAL_SECONDS)  # daily
+            if first:
+                first = False
+            else:
+                await asyncio.sleep(_RETENTION_SWEEP_INTERVAL_SECONDS)
             days = settings.tool_call_retention_days
             deleted = await sweep_tool_calls(database, settings.agent_id, days)
             logger.info(

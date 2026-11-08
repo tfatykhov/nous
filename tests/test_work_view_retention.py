@@ -228,6 +228,7 @@ def test_create_components_wires_one_writer_and_the_recorder_only_when_the_log_i
     )
 
     async def boot() -> None:
+        # With the log on, the retention loop sweeps at startup: a real DELETE, scoped to this test's own agent.
         components = await main.create_components(settings)
         try:
             writer = components["work_view_writer"]

@@ -195,7 +195,8 @@ def _api_then(exc: BaseException):
 
 
 def _stream_then(exc: BaseException | None, *, error_event: str | None = None):
-    """A fake ``_call_api_stream``: one lookup call, then a partial reply ended by ``exc`` or an error event."""
+    """A fake ``_call_api_stream``: one lookup call, then a partial reply ended by ``exc`` or an error event (neither:
+    the reply ends well)."""
     n = {"calls": 0}
 
     async def fake_stream(*args, **kwargs):
@@ -209,6 +210,9 @@ def _stream_then(exc: BaseException | None, *, error_event: str | None = None):
         yield StreamEvent(type="text_delta", text="partial")
         if error_event is not None:
             yield StreamEvent(type="error", text=error_event)
+            return
+        if exc is None:
+            yield StreamEvent(type="done", stop_reason="end_turn")
             return
         raise exc
 
@@ -268,6 +272,28 @@ async def test_stream_error_event_ends_in_a_row():
 
 
 @pytest.mark.asyncio
+async def test_stream_closed_by_its_consumer_ends_in_a_cancelled_row():
+    """The consumer closes the generator in the middle of the reply (``aclose()``, as rest.py's pump may): the row says
+    "cancelled", as for a client disconnect, and the GeneratorExit is not swallowed (``aclose()`` returns)."""
+    spy = _TurnSpy()
+    r, _calls = _turn_runner(spy)
+    r._call_api_stream = _stream_then(None)
+    stream = r.stream_chat("s1", "go")
+    try:
+        async for event in stream:
+            if event.type == "text_delta" and event.text == "partial":
+                break
+        await stream.aclose()
+    finally:
+        r._api_shared = True
+        await r.close()
+    (turn,) = spy.turns
+    assert turn.error == "cancelled"
+    assert turn.tool_call_count == 1 == len(spy.records)
+    assert spy.records[0].turn_id == turn.id
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("path", PATHS)
 async def test_recorder_failure_does_not_change_the_turn(path):
     class _Broken(_TurnSpy):
@@ -289,9 +315,17 @@ class _Bus:
         self.events.append(event)
 
 
+def _layer(settings):
+    """The shared mocked layer, with its active-episode warm stubbed: the real one queries the mocked database, whose
+    result mock leaves an un-awaited coroutine behind (a RuntimeWarning per call). These tests need no episode."""
+    layer = _mock_layer(settings)
+    layer.warm_active_episode = AsyncMock(return_value=None)
+    return layer
+
+
 @pytest.mark.asyncio
 async def test_critic_verdict_is_the_emitted_event_data():
-    layer = _mock_layer(_layer_settings(critic_enabled=True, critic_mode="shadow"))
+    layer = _layer(_layer_settings(critic_enabled=True, critic_mode="shadow"))
     layer._bus = _Bus()
     result = CriticResult(
         routing=RoutingMode.SINGLE_ADVISED, recommended_frame="decision", rationale="Weighs options", latency_ms=90
@@ -309,7 +343,7 @@ async def test_critic_verdict_is_the_emitted_event_data():
 
 @pytest.mark.asyncio
 async def test_critic_verdict_is_none_when_the_critic_is_off():
-    layer = _mock_layer(_layer_settings(critic_enabled=False))
+    layer = _layer(_layer_settings(critic_enabled=False))
     ctx = await layer.pre_turn(agent_id="test", session_id="s1", user_input="hi there how are you", session=None)
     assert ctx.critic_verdict is None
 

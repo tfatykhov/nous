@@ -2666,6 +2666,7 @@ class AgentRunner:
             response_text = ""
             error = None
             _claim_check: dict | None = None  # F108: the claim check's result, for the turn row
+            _consumer_closed = False  # F108: the consumer closed this generator mid-turn, for the turn row
 
             # F071: scope the per-turn exclusion set to the streaming tool
             # loop — recall_deep can be dispatched inside the for-turn
@@ -3333,6 +3334,11 @@ class AgentRunner:
                 logger.info("Stream cancelled (client disconnect) for session %s", session_id)
                 error = "cancelled"
                 _caught_exc = None
+            except GeneratorExit:
+                # F108: the consumer closed the generator mid-turn (aclose()). The turn row says "cancelled", as for a
+                # client disconnect. Only the row: post_turn gets what it got before. GeneratorExit must propagate.
+                _consumer_closed = True
+                raise
             else:
                 _caught_exc = None
 
@@ -3374,7 +3380,7 @@ class AgentRunner:
                         turn_context=turn_context,
                         trigger=user_message,
                         reply=response_text,
-                        error=error,
+                        error="cancelled" if _consumer_closed else error,
                         claim_check=_claim_check,
                         call_indexes=call_indexes,
                         started_at=_turn_started,
