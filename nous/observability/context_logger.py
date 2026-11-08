@@ -19,6 +19,7 @@ from nous.observability.model_calls import (  # noqa: F401
     analyze_context,
     analyze_sections,
     parse_system_sections,
+    system_sections,
 )
 
 logger = logging.getLogger(__name__)
@@ -93,10 +94,11 @@ class ContextLogEntry:
         frame_id: str,
         context_window: int,
         trace_id: str | None = None,
+        preamble: str = "",
     ) -> ContextLogEntry:
         entry_id = uuid4().hex[:16]
         # analyze_context's estimate, from sections parsed once: the entry keeps their text too.
-        sections = parse_system_sections(system_prompt)
+        sections = system_sections(system_prompt, preamble)
         stats = analyze_sections(sections, messages, tools, context_window)
 
         return cls(
@@ -300,6 +302,7 @@ class ContextLogger:
         context_window: int,
         payload: dict | None = None,
         trace_id: str | None = None,
+        preamble: str = "",
     ) -> ContextLogEntry:
         entry = ContextLogEntry.from_payload(
             session_id=session_id,
@@ -312,6 +315,7 @@ class ContextLogger:
             frame_id=frame_id,
             context_window=context_window,
             trace_id=trace_id,
+            preamble=preamble,
         )
         self._entries.append(entry)
         self._entries_by_id[entry.id] = entry

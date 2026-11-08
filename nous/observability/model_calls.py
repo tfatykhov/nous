@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import Iterator
@@ -123,32 +124,55 @@ SECTION_MARKERS: dict[str, str] = {
     "[Execution Ledger]": "execution_ledger",
     "[Previous Turn Corrections]": "corrections",
     "## Output Formatting": "telegram_format",
+    "## Recall Before Clarifying": "recall_before_clarifying",
+    "## Tools Outrank Memory": "tools_outrank_memory",
+    "## Procedure Awareness": "procedure_awareness",
+    "## Epistemic Routing": "epistemic_routing",
+    "## Cached Results": "cached_results",
+    "## Memory Retrieval Notice": "memory_retrieval_notice",
+    "## Retrieval Failures": "retrieval_failures",
+    "## Active Guidance": "active_guidance",  # layer.py: censor guidance for this turn
+    "[DIAGNOSTIC OBSERVATIONS]": "diagnostic_nudges",  # critic.py format_nudges
 }
 
 _MARKER_PATTERNS = sorted(SECTION_MARKERS.keys(), key=len, reverse=True)
 
+# Sections whose text carries its own ``## `` headings: the identity prompt (identity/manager.py assemble_prompt) and
+# the skill bodies shown in full. An unknown heading inside one stays part of it.
+_NESTED_HEADING_SECTIONS = frozenset({"identity", "recommended_procedures"})
+
+
+def _section_start(line: str, current_name: str) -> str | None:
+    """The section ``line`` starts, or None: a marker in the table, else any other ``## Title`` as ``title``."""
+    for marker in _MARKER_PATTERNS:
+        if line.strip().startswith(marker):
+            return SECTION_MARKERS[marker]
+    if line.startswith("## ") and current_name not in _NESTED_HEADING_SECTIONS:
+        return re.sub(r"[^a-z0-9]+", "_", line[3:].lower()).strip("_") or None
+    return None
+
 
 def parse_system_sections(system_prompt: str) -> dict[str, str]:
-    """Split system prompt into named sections."""
+    """Split system prompt into named sections.
+
+    A heading in ``SECTION_MARKERS`` starts the section it names; any other ``## Title Case`` heading starts the
+    section ``title_case`` (outside ``_NESTED_HEADING_SECTIONS``), so it is never folded into the one before it."""
     if not system_prompt:
         return {}
     sections: dict[str, str] = {}
     current_name = "preamble"
     current_lines: list[str] = []
     for line in system_prompt.split("\n"):
-        matched = False
-        for marker in _MARKER_PATTERNS:
-            if line.strip().startswith(marker):
-                if current_lines:
-                    text = "\n".join(current_lines).strip()
-                    if text:
-                        sections[current_name] = text
-                current_name = SECTION_MARKERS[marker]
-                current_lines = []
-                matched = True
-                break
-        if not matched:
+        name = _section_start(line, current_name)
+        if name is None:
             current_lines.append(line)
+            continue
+        if current_lines:
+            text = "\n".join(current_lines).strip()
+            if text:
+                sections[current_name] = text
+        current_name = name
+        current_lines = []
     if current_lines:
         text = "\n".join(current_lines).strip()
         if text:
@@ -174,6 +198,12 @@ def _estimate_messages_tokens(messages: list[dict]) -> int:
                     total += _estimate_tokens(block.get("text", ""))
                     if "input" in block:
                         total += _estimate_tokens(json.dumps(block["input"]))
+                    if block.get("type") == "tool_result":
+                        result = block.get("content", "")
+                        if isinstance(result, str):
+                            total += _estimate_tokens(result)
+                        elif isinstance(result, list):
+                            total += sum(_estimate_tokens(b.get("text", "")) for b in result if isinstance(b, dict))
     return total
 
 
@@ -210,6 +240,16 @@ def _system_text(system_blocks: str | list[dict[str, Any]] | None) -> str:
     if not system_blocks:
         return ""
     return "\n\n".join(b["text"] for b in system_blocks if isinstance(b, dict) and b.get("text"))
+
+
+def system_sections(system_blocks: str | list[dict[str, Any]] | None, preamble: str = "") -> dict[str, str]:
+    """The system prompt's sections, the estimate's input. ``preamble`` is the payload's system block 0 (the Claude
+    Code preamble), which the runner's flat prompt leaves out: it is the section ``preamble``, counted like any
+    other."""
+    preamble = preamble.strip()
+    sections = {"preamble": preamble} if preamble else {}
+    sections.update(parse_system_sections(_system_text(system_blocks)))
+    return sections
 
 
 def analyze_sections(
@@ -281,11 +321,13 @@ def analyze_context(
     messages: list[dict],
     tools: list[dict] | None,
     context_window: int,
+    preamble: str = "",
 ) -> ContextStats:
     """Estimate what a call's context holds: tokens per system-prompt section, for the tool definitions and for the
     messages (4 characters a token), the tools and message roles, and the memory items each section delivered. Pure.
-    ``system_blocks`` is the system prompt as a string or as the payload's list of text blocks."""
-    return analyze_sections(parse_system_sections(_system_text(system_blocks)), messages, tools, context_window)
+    ``system_blocks`` is the system prompt as a string or as a list of text blocks (joined by a blank line);
+    ``preamble`` is system block 0, counted as the section ``preamble`` (``system_sections``)."""
+    return analyze_sections(system_sections(system_blocks, preamble), messages, tools, context_window)
 
 
 # ---------------------------------------------------------------------------------------------------------------------

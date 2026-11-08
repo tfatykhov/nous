@@ -2475,6 +2475,9 @@ class AgentRunner:
         if self._settings.effort != "high" and not is_legacy_haiku(effective_model):
             payload["output_config"] = {"effort": self._settings.effort}
 
+        # F108: system block 0 (the Claude Code preamble) is sent too, so both estimates below count it.
+        preamble = system_blocks[0]["text"]
+
         # F035.4: Log context metadata (entry_id stored locally, NOT in payload)
         if self._context_logger:
             try:
@@ -2489,6 +2492,7 @@ class AgentRunner:
                     frame_id=self._current_frame_id,
                     context_window=self._get_context_window_size(),
                     payload=payload if self._settings.context_log_full_payload else None,
+                    preamble=preamble,
                 )
                 self._last_context_entry_id = _entry.id
                 # F036: Attach cache break info to context log entry
@@ -2502,7 +2506,9 @@ class AgentRunner:
         # F108: the same estimate for the call's own row, on the context passed down (never the shared fields).
         if call_context is not None:
             try:
-                stats = analyze_context(flat_system_prompt, messages, tools, self._get_context_window_size())
+                stats = analyze_context(
+                    flat_system_prompt, messages, tools, self._get_context_window_size(), preamble=preamble
+                )
                 if cache_break:
                     stats = dataclasses.replace(
                         stats,

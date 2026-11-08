@@ -37,6 +37,7 @@ from nous.api.runner import AgentRunner, Conversation, Message
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.cognitive.execution_ledger import ExecutionLedger
 from nous.cognitive.schemas import FrameSelection, TurnContext, TurnResult
+from nous.observability.context_logger import ContextLogger
 from nous.observability.model_calls import PURPOSES, CallContext, ModelCallRecorder
 
 _USAGE = {"input_tokens": 3, "cache_read_input_tokens": 2000, "cache_creation_input_tokens": 50, "output_tokens": 7}
@@ -606,9 +607,11 @@ async def test_stats_travel_with_the_call():
             r._tool_loop(system_prompt=prompt, conversation=conv, frame_id="conversation", session_id="s1"), 10
         )
     first, second = client.rows
-    assert first["sections_present"] == ["identity", "relevant_facts", "datetime"]
+    # system block 0, the Claude Code preamble, is counted first (Task 10)
+    assert first["sections_present"] == ["preamble", "identity", "relevant_facts", "datetime"]
     sections = json.loads(first["section_tokens_est"])
-    assert {"identity", "relevant_facts", "datetime", "tools_definition", "messages"} <= set(sections)
+    assert {"preamble", "identity", "relevant_facts", "datetime", "tools_definition", "messages"} <= set(sections)
+    assert sections["preamble"] == len(runner_module.CLAUDE_CODE_PREAMBLE) // 4
     assert first["total_tokens_est"] == sum(sections.values())
     assert (first["tools_count"], first["tool_names"], first["messages_count"]) == (1, ["lookup"], 1)
     assert first["loaded_facts"] == 2 and first["context_window_size"] == r._get_context_window_size()
@@ -616,6 +619,44 @@ async def test_stats_travel_with_the_call():
     assert second["cache_break"] is True and second["cache_break_components"] == ["static_identity"]
     assert second["cache_break_tokens_lost"] == len(changed["static"]) // 4
     assert json.loads(second["section_tokens_est"])["identity"] > sections["identity"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("split", [True, False], ids=["tier_split", "flat"])
+async def test_the_ring_and_the_row_carry_the_same_estimate(split):
+    """The old /context/log* ring and the call's own row come from one core, so they give the same numbers, the
+    preamble included, on both system-prompt paths and on a call whose messages carry a tool result."""
+    client = _SpyClient(reply=lambda payload: _text() if len(payload["messages"]) > 1 else _tool_use())
+    r = _runner(client)
+    ring = ContextLogger()
+    r.set_context_logger(ring)
+    system: str | dict[str, str] = "## Identity\nI am Nous.\n## Relevant Facts\n- [a] one"
+    if split:
+        system = {"static": "## Identity\nI am Nous.", "semi_stable": "## Relevant Facts\n- [a] one", "dynamic": ""}
+    conv = Conversation(session_id="s1", messages=[Message(role="user", content="go")])
+    await asyncio.wait_for(
+        r._tool_loop(system_prompt=system, conversation=conv, frame_id="conversation", session_id="s1"), 10
+    )
+    assert len(client.rows) == len(ring.get_recent()) == 2  # the tool call, then the answer after the tool result
+    for row, entry in zip(client.rows, reversed(ring.get_recent())):
+        assert json.loads(row["section_tokens_est"]) == entry.token_breakdown
+        assert json.loads(row["message_roles"]) == entry.message_roles
+        for name in (
+            "total_tokens_est",
+            "context_window_size",
+            "utilization_pct",
+            "sections_present",
+            "tools_count",
+            "tool_names",
+            "messages_count",
+            "loaded_facts",
+            "loaded_decisions",
+            "loaded_procedures",
+            "loaded_episodes",
+            "recent_conversations",
+        ):
+            assert row[name] == getattr(entry, name), name
+        assert entry.token_breakdown["preamble"] == len(runner_module.CLAUDE_CODE_PREAMBLE) // 4
 
 
 # ---------------------------------------------------------------------------------------------------------------------

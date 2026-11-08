@@ -540,7 +540,10 @@ def test_scope_outside_a_loop_drops_the_row_counts_it_and_never_raises():
     assert model_calls._ACTIVE_SCOPE.get() is None
 
 
-# The old ContextLogEntry.from_payload gave these for this payload (captured before the estimate moved).
+# The old ContextLogEntry.from_payload gave these for this payload (captured before the estimate moved), except where
+# Task 10 changed the estimate on purpose: the tool_result's content ("PR 1 shipped", 12 characters) now counts, so
+# messages went 16 -> 19, total_tokens_est 149 -> 152 and utilization_pct 0.07 -> 0.08 (152 / 200,000). Every section
+# heading here is in the marker table, so no section changed.
 SYSTEM = (
     "You are Nous, a cognitive agent.\n\n"
     "## Current Date/Time\n2026-11-07 12:00 UTC\n"
@@ -583,11 +586,11 @@ OLD_ENTRY = {
         "execution_ledger": 3,
         "other": 8,
         "tools_definition": 56,
-        "messages": 16,
+        "messages": 19,  # was 16: the tool_result's content counts (Task 10)
     },
-    "total_tokens_est": 149,
+    "total_tokens_est": 152,  # was 149
     "context_window_size": 200000,
-    "utilization_pct": 0.07,
+    "utilization_pct": 0.08,  # was 0.07
     "sections_present": [
         "datetime",
         "relevant_facts",
@@ -625,7 +628,7 @@ def test_analyze_context_matches_old_context_log_entry():
         frame_id="f",
         context_window=200_000,
     )
-    # the entry is what it was before the estimate moved
+    # the entry is what it was before the estimate moved (with Task 10's changes, above)
     for name, value in OLD_ENTRY.items():
         assert getattr(entry, name) == value, name
     # and the stats give the same fields (the section estimates under their new name)
@@ -648,6 +651,25 @@ def test_analyze_context_matches_old_context_log_entry():
     # the shared core is public: from_payload calls it with the sections it parsed itself
     assert analyze_sections(parse_system_sections(SYSTEM), MESSAGES, TOOLS, 200_000) == stats
     assert not hasattr(context_logger, "_analyze")
+    # with the preamble (system block 0) the two still agree, field for field
+    preamble = "You are Claude Code, Anthropic's official CLI for Claude."
+    with_preamble = analyze_context(SYSTEM, MESSAGES, TOOLS, 200_000, preamble=preamble)
+    entry = ContextLogEntry.from_payload(
+        session_id="s",
+        turn_number=1,
+        call_type="chat",
+        model="m",
+        system_prompt=SYSTEM,
+        messages=MESSAGES,
+        tools=TOOLS,
+        frame_id="f",
+        context_window=200_000,
+        preamble=preamble,
+    )
+    assert with_preamble.section_tokens_est == entry.token_breakdown == {"preamble": 14, **stats.section_tokens_est}
+    for name in OLD_ENTRY.keys() - {"token_breakdown"}:
+        assert getattr(with_preamble, name) == getattr(entry, name), name
+    assert with_preamble.total_tokens_est == stats.total_tokens_est + 14
 
 
 # ---------------------------------------------------------------------------------------------------------------------
