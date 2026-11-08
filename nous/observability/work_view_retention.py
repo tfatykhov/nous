@@ -6,7 +6,9 @@ started more than ``NOUS_TOOL_CALL_RETENTION_DAYS`` days ago; ``sweep_model_call
 ``model_call_attempt`` rows go with them (``ON DELETE CASCADE``); ``sweep_model_call_text`` deletes its
 ``nous_system.model_call_block_ref`` rows older than ``NOUS_MODEL_CALL_TEXT_RETENTION_DAYS`` days, then its
 ``nous_system.model_text_block`` rows that no call references and no store has used for an hour. main.py runs each
-once a day while its log is on (``_work_view_retention_loop``). All raise on failure; the loop logs it at WARNING.
+once a day (``_work_view_retention_loop``): the first two while their log is on, the text one whatever its flag says,
+so text turned off still goes on time (``has_model_call_text`` decides whether the loop starts with every log off).
+All raise on failure; the loop logs it at WARNING.
 """
 
 from __future__ import annotations
@@ -51,6 +53,8 @@ _DELETE_UNREFERENCED_BLOCKS = text(
     ") "
     "DELETE FROM nous_system.model_text_block t USING unused u WHERE t.agent_id = u.agent_id AND t.hash = u.hash"
 )
+# Whether the agent has any text: a ref names a block (foreign key), so the blocks alone answer (primary key prefix).
+_TEXT_EXISTS = text("SELECT EXISTS (SELECT 1 FROM nous_system.model_text_block WHERE agent_id = :agent_id)")
 
 
 async def sweep_tool_calls(database: Any, agent_id: str, days: int) -> dict[str, int]:
@@ -98,3 +102,9 @@ async def sweep_model_call_text(database: Any, agent_id: str, days: int) -> dict
         blocks = await session.execute(_DELETE_UNREFERENCED_BLOCKS, {"agent_id": agent_id})
         await session.commit()
     return {"model_call_block_ref": refs.rowcount, "model_text_block": blocks.rowcount}
+
+
+async def has_model_call_text(database: Any, agent_id: str) -> bool:
+    """Whether ``agent_id`` has any model-call text stored (one EXISTS query). Raises whatever the database raises."""
+    async with database.session() as session:
+        return bool((await session.execute(_TEXT_EXISTS, {"agent_id": agent_id})).scalar())

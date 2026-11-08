@@ -38,7 +38,7 @@ from tests.test_model_call_retention import (
     _one_startup_pass,
     _run,
 )
-from tests.test_work_view_retention import ROOT
+from tests.test_work_view_retention import ROOT, _FailingDatabase, _observability
 
 _SYSTEM_PROMPT = "You are Nous. Keep what you learn."
 _TEXT_TABLES = ("model_text_block", "model_call_block_ref")
@@ -441,17 +441,20 @@ _TEXT_SWEEP = [("model_call_block_ref", 3), ("model_text_block", None)]  # the b
     ("overrides", "expected"),
     [
         ({"model_call_text_enabled": True}, [*_TOOL_TABLES, ("model_call_log", 7), *_TEXT_SWEEP]),
+        # Text turned off is still deleted on time: the sweep goes by its retention, whatever the text flag says.
+        ({}, [*_TOOL_TABLES, ("model_call_log", 7), *_TEXT_SWEEP]),
+        ({"model_call_log_enabled": False}, [*_TOOL_TABLES, *_TEXT_SWEEP]),
         ({"model_call_text_enabled": True, "model_call_retention_days": 0}, [*_TOOL_TABLES, *_TEXT_SWEEP]),
         (
             {"model_call_text_enabled": True, "model_call_text_retention_days": 0},
             [*_TOOL_TABLES, ("model_call_log", 7)],
         ),
-        ({"model_call_text_enabled": True, "model_call_log_enabled": False}, _TOOL_TABLES),
-        ({}, [*_TOOL_TABLES, ("model_call_log", 7)]),
     ],
-    ids=["text on", "numbers kept 0 days", "text kept 0 days", "text on, numbers off", "text off"],
+    ids=["text on", "text off", "numbers off", "numbers kept 0 days", "text kept 0 days"],
 )
-def test_the_loop_sweeps_the_text_by_its_own_switch_and_retention(monkeypatch, caplog, overrides, expected):
+def test_the_loop_sweeps_the_text_by_its_retention_whatever_the_text_flag_says(
+    monkeypatch, caplog, overrides, expected
+):
     monkeypatch.setattr(main, "_RETENTION_SWEEP_INTERVAL_SECONDS", 3600)
     database = _Database()
     settings = _loop_settings(**{"model_call_text_retention_days": 3, **overrides})
@@ -489,6 +492,120 @@ def test_a_failed_text_sweep_logs_a_warning_and_the_others_still_run(monkeypatch
     # WARNING, never DEBUG: a sweep that keeps failing lets the text grow without bound.
     assert {r.levelno for r in failed} == {logging.WARNING}
     assert all(r.exc_info for r in failed)
+
+
+def _logs_off(agent: str, **overrides: Any) -> SimpleNamespace:
+    """Every work-view log off, the text off, and the text kept 7 days."""
+    values = {"agent_id": agent, "tool_call_log_enabled": False, "model_call_log_enabled": False}
+    return _loop_settings(**{**values, "model_call_text_retention_days": 7, **overrides})
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize(
+    ("text_left", "overrides", "expected"),
+    [
+        (True, {}, True),
+        (False, {}, False),
+        (True, {"model_call_text_retention_days": 0}, False),
+    ],
+    ids=["text left", "no text", "text left, kept 0 days"],
+)
+async def test_with_every_log_off_the_loop_starts_only_while_text_is_left(db, text_left, overrides, expected):
+    agent = _agent()
+    try:
+        if text_left:
+            await _insert_block(db, agent, "a block from when the text was on", timedelta(days=10))
+
+        assert await main._work_view_retention_needed(_logs_off(agent, **overrides), db) is expected
+    finally:
+        await _delete(db, agent)
+
+
+async def test_with_a_log_on_the_loop_starts_without_asking_the_database():
+    database = MagicMock()
+
+    assert await main._work_view_retention_needed(_logs_off("a", tool_call_log_enabled=True), database) is True
+    database.session.assert_not_called()
+
+
+def test_a_failed_check_for_text_starts_the_loop(caplog):
+    """The check cannot tell whether text is left: the loop starts, so text is never kept past its retention."""
+
+    async def scenario() -> None:
+        assert await main._work_view_retention_needed(_logs_off("a"), _FailingDatabase()) is True
+
+    with caplog.at_level(logging.DEBUG, logger="nous.main"):
+        _run(scenario)
+
+    warned = [r for r in caplog.records if r.name == "nous.main" and r.levelno == logging.WARNING]
+    assert warned and all(r.exc_info for r in warned), [r.getMessage() for r in caplog.records]
+
+
+async def _text_left(database: Any, agent: str) -> tuple[int, int]:
+    """``agent``'s refs and blocks, once the sweep has deleted them all (10 s at most), else as they are then."""
+
+    async def counts() -> tuple[int, int]:
+        async with database.session() as session:
+            row = await session.execute(
+                text(
+                    "SELECT (SELECT count(*) FROM nous_system.model_call_block_ref WHERE agent_id = :a), "
+                    "(SELECT count(*) FROM nous_system.model_text_block WHERE agent_id = :a)"
+                ),
+                {"a": agent},
+            )
+            return tuple(row.one())
+
+    for _ in range(200):
+        left = await counts()
+        if left == (0, 0):
+            return left
+        await asyncio.sleep(0.05)
+    return await counts()
+
+
+@pytest.mark.postgres_only
+def test_text_left_after_the_text_is_turned_off_is_deleted(monkeypatch):
+    """Every log flag off, and the agent still has text from when it was on: the boot starts the loop, whose first
+    pass deletes the old refs and blocks."""
+    seen: dict[str, Any] = {}
+
+    async def seed(connection: Any, agent_id: str) -> None:
+        call_id = uuid.uuid4()
+        await connection.execute(
+            text(
+                "INSERT INTO nous_system.model_call_log (id, agent_id, purpose, label_source, call_kind, status, "
+                "started_at) VALUES (:id, :a, 'chat', 'explicit', 'call', 'ok', now() - interval '10 days')"
+            ),
+            {"id": call_id, "a": agent_id},
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO nous_system.model_text_block (agent_id, hash, body, size_chars, created_at) "
+                "VALUES (:a, :h, 'an old prompt', 13, now() - interval '10 days')"
+            ),
+            {"a": agent_id, "h": "a" * 64},
+        )
+        await connection.execute(
+            text(
+                "INSERT INTO nous_system.model_call_block_ref (call_id, agent_id, part, ord, block_hash, created_at) "
+                "VALUES (:c, :a, 'system', 0, :h, now() - interval '10 days')"
+            ),
+            {"c": call_id, "a": agent_id, "h": "a" * 64},
+        )
+
+    async def checks(components: dict, settings: Any) -> None:
+        try:
+            seen["task"] = components["work_view_retention_task"]
+            seen["store"] = components["model_call_text_store"]
+            seen["left"] = await _text_left(components["database"], settings.agent_id)
+        finally:
+            await main.shutdown_components(components)
+
+    _boot(monkeypatch, checks, seed_rows=seed)
+
+    assert isinstance(seen["task"], asyncio.Task) and seen["task"].done()
+    assert seen["store"] is None
+    assert seen["left"] == (0, 0)
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -529,6 +646,7 @@ def test_text_store_is_wired_on_the_shared_writer_when_both_flags_are_on(monkeyp
             assert recorder._text is store and store.enabled
             assert store._writer is writer and store._database is components["database"]
             assert store._agent_id == settings.agent_id
+            assert components["model_call_text_store"] is store
             task = components["work_view_retention_task"]
             assert isinstance(task, asyncio.Task) and not task.done()
             seen["task"] = task
@@ -551,6 +669,7 @@ def test_text_on_without_the_numbers_warns_once_and_wires_nothing(monkeypatch, c
         try:
             seen["writer"] = components["work_view_writer"]
             seen["recorder"] = components["model_call_recorder"]
+            seen["store"] = components["model_call_text_store"]
             seen["task"] = components["work_view_retention_task"]
         finally:
             await main.shutdown_components(components)
@@ -558,7 +677,8 @@ def test_text_on_without_the_numbers_warns_once_and_wires_nothing(monkeypatch, c
     with caplog.at_level(logging.INFO):
         _boot(monkeypatch, checks, model_call_text_enabled=True)
 
-    assert built == [] and seen == {"writer": None, "recorder": None, "task": None}
+    # No loop either: the boot agent has no text left to sweep.
+    assert built == [] and seen == {"writer": None, "recorder": None, "store": None, "task": None}
     # Exactly one WARNING at startup, though no recorder and no store is built.
     warned = _text_warnings(caplog)
     assert len(warned) == 1, [r.getMessage() for r in warned]
@@ -573,14 +693,57 @@ def test_numbers_on_without_the_text_builds_no_text_store(monkeypatch, caplog):
     async def checks(components: dict, settings: Any) -> None:
         try:
             seen["text"] = components["model_call_recorder"]._text
+            seen["store"] = components["model_call_text_store"]
         finally:
             await main.shutdown_components(components)
 
     with caplog.at_level(logging.INFO):
         _boot(monkeypatch, checks, model_call_log_enabled=True)
 
-    assert built == [] and seen == {"text": None}
+    assert built == [] and seen == {"text": None, "store": None}
     assert _text_warnings(caplog) == []
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# /dashboard/observability
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+TEXT_COUNTERS = {
+    "written": 5,
+    "dropped_timeout": 0,
+    "dropped_error": 1,
+    "dropped_backpressure": 2,
+    "unlabelled": 0,
+    "dropped_late": 0,
+}
+
+
+def _counted_store() -> TextStore:
+    store = _store(None, "a")
+    store.stats.written, store.stats.dropped_error, store.stats.dropped_backpressure = 5, 1, 2
+    return store
+
+
+def test_observability_endpoint_reports_the_text_counters():
+    data = _observability(model_call_text_store=_counted_store())
+
+    assert data["recording"] == {"tool_calls": None, "model_calls": None, "model_call_text": TEXT_COUNTERS}
+
+
+def test_observability_endpoint_reports_null_text_counters_while_the_text_is_off():
+    assert _observability()["recording"]["model_call_text"] is None
+
+
+def test_observability_endpoint_reads_the_text_store_through_the_apps_lazy_proxy():
+    """main.py hands create_app a lazy proxy, which is never None: with the text off its component is None."""
+    components: dict[str, Any] = {"model_call_text_store": None}
+    proxy = main._lazy_component(components, "model_call_text_store")
+
+    assert _observability(model_call_text_store=proxy)["recording"]["model_call_text"] is None
+
+    components["model_call_text_store"] = _counted_store()
+    assert _observability(model_call_text_store=proxy)["recording"]["model_call_text"] == TEXT_COUNTERS
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -595,5 +758,7 @@ def test_the_text_setting_rows_name_the_wiring_and_the_sweep():
         for name in ("NOUS_MODEL_CALL_TEXT_ENABLED", "NOUS_MODEL_CALL_TEXT_RETENTION_DAYS")
     }
     assert "come with the rest of F108 PR 3" not in rows["NOUS_MODEL_CALL_TEXT_ENABLED"]
+    assert "`recording.model_call_text`" in rows["NOUS_MODEL_CALL_TEXT_ENABLED"]
+    assert "whatever `NOUS_MODEL_CALL_TEXT_ENABLED` says" in rows["NOUS_MODEL_CALL_TEXT_RETENTION_DAYS"]
     for name, row in rows.items():
         assert "sweep_model_call_text" in row and "main.py" in row, name

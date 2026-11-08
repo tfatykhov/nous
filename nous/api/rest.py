@@ -103,6 +103,7 @@ def create_app(
     continuation_runner: Any | None = None,
     tool_call_recorder: Any | None = None,
     model_call_recorder: Any | None = None,
+    model_call_text_store: Any | None = None,
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
 
@@ -2002,6 +2003,7 @@ def create_app(
         result["recording"] = {
             "tool_calls": tool_call_recorder.stats.as_dict() if tool_call_recorder else None,
             "model_calls": model_call_recorder.stats.as_dict() if model_call_recorder else None,
+            "model_call_text": model_call_text_store.stats.as_dict() if model_call_text_store else None,
         }
 
         return JSONResponse(result)
