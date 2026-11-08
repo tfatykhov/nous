@@ -181,8 +181,9 @@ def _section_start(line: str, current_name: str) -> str | None:
     """The section ``line`` starts, or None: a marker in the table, else any other ``## Title`` as ``title``. The text
     before the first heading (``current_name`` ``""``) is free text too: on layer.py's degraded path it is the identity
     prompt alone, with its own ``## `` headings."""
+    stripped = line.strip()
     for marker in _MARKER_PATTERNS:
-        if line.strip().startswith(marker):
+        if stripped.startswith(marker):
             return SECTION_MARKERS[marker]
     if line.startswith("## ") and current_name and current_name not in FREE_TEXT_SECTIONS:
         return re.sub(r"[^a-z0-9]+", "_", line[3:].lower()).strip("_") or None

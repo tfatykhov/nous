@@ -77,11 +77,13 @@ from nous.heart.schemas import FactInput
 from nous.observability.context_logger import HEARTBEAT_CALL_TYPE
 from nous.observability.model_calls import (
     CallContext,
-    analyze_context,
+    ContextStats,
+    analyze_sections,
     context_kwargs,
     current_fallback,
     model_call_context,
     payload_preamble,
+    system_sections,
 )
 from nous.observability.tool_calls import (
     ToolCallRecord,
@@ -2323,7 +2325,8 @@ class AgentRunner:
         """Build Anthropic Messages API request payload, and ``call_context`` with this call's context estimate.
 
         F108: the estimate (``ContextStats``, with the F036 cache break computed here) is attached to the context
-        passed down to the client, so the call's own row gets it; None stays None.
+        passed down to a client that records its calls (``records_calls``), so the call's own row gets it; None stays
+        None. It is computed once, and only when the row or the F035.4 ring takes it.
         Shared by _call_api and _call_api_stream to avoid divergence.
         skip_thinking=True omits thinking params (for utility calls like reflection).
         model_override replaces the default model (used by compaction summarization).
@@ -2476,9 +2479,21 @@ class AgentRunner:
         if self._settings.effort != "high" and not is_legacy_haiku(effective_model):
             payload["output_config"] = {"effort": self._settings.effort}
 
-        # F108: system block 0 (the Claude Code preamble) is sent too, so both estimates below count it. Any other
-        # block 0 would be in flat_system_prompt already (payload_preamble gives ""), so it is never counted twice.
+        # F108: system block 0 (the Claude Code preamble) is sent too, so the estimate counts it. Any other block 0
+        # would be in flat_system_prompt already (payload_preamble gives ""), so it is never counted twice.
         preamble = payload_preamble(system_blocks)
+
+        # F108: the context estimate runs once per call, and only when something consumes it: the F035.4 ring below,
+        # or the call's own row (a client that records its calls). Both get this one parse.
+        records = call_context is not None and getattr(self._api, "records_calls", False) is True
+        sections: dict[str, str] | None = None
+        stats: ContextStats | None = None
+        if self._context_logger or records:
+            try:
+                sections = system_sections(flat_system_prompt, preamble)
+                stats = analyze_sections(sections, messages, tools, self._get_context_window_size())
+            except Exception as exc:
+                logger.warning("F108: context estimate failed (%s), call recorded without it", type(exc).__name__)
 
         # F035.4: Log context metadata (entry_id stored locally, NOT in payload)
         if self._context_logger:
@@ -2495,6 +2510,8 @@ class AgentRunner:
                     context_window=self._get_context_window_size(),
                     payload=payload if self._settings.context_log_full_payload else None,
                     preamble=preamble,
+                    sections=sections,
+                    stats=stats,
                 )
                 self._last_context_entry_id = _entry.id
                 # F036: Attach cache break info to context log entry
@@ -2506,21 +2523,15 @@ class AgentRunner:
                 logger.debug("F035.4: context log failed", exc_info=True)
 
         # F108: the same estimate for the call's own row, on the context passed down (never the shared fields).
-        if call_context is not None:
-            try:
-                stats = analyze_context(
-                    flat_system_prompt, messages, tools, self._get_context_window_size(), preamble=preamble
+        if records and call_context is not None and stats is not None:
+            if cache_break:
+                stats = dataclasses.replace(
+                    stats,
+                    cache_break=True,
+                    cache_break_components=list(cache_break.components_changed),
+                    cache_break_tokens_lost=cache_break.estimated_tokens_lost,
                 )
-                if cache_break:
-                    stats = dataclasses.replace(
-                        stats,
-                        cache_break=True,
-                        cache_break_components=list(cache_break.components_changed),
-                        cache_break_tokens_lost=cache_break.estimated_tokens_lost,
-                    )
-                call_context = dataclasses.replace(call_context, stats=stats)
-            except Exception as exc:
-                logger.warning("F108: context estimate failed (%s), call recorded without it", type(exc).__name__)
+            call_context = dataclasses.replace(call_context, stats=stats)
 
         return payload, call_context
 

@@ -648,6 +648,7 @@ async def test_create_client_wires_recorder_only_when_given(backend, monkeypatch
     settings = _settings(backend)
     plain = anthropic_client.create_client(settings)
     assert plain.supports_call_context is True
+    assert plain.records_calls is False  # the runner computes no context estimate for it
     assert context_kwargs(plain, CallContext(purpose="chat")) == {"call_context": CallContext(purpose="chat")}
 
     def fresh_api(**_: Any) -> tuple[httpx.MockTransport, dict]:
@@ -656,6 +657,7 @@ async def test_create_client_wires_recorder_only_when_given(backend, monkeypatch
     monkeypatch.setattr(anthropic_client, "_build_transport_with_env_proxies", fresh_api)
     recorder, rows = _memory_recorder(monkeypatch)
     wired = anthropic_client.create_client(settings, recorder=recorder)
+    assert wired.records_calls is True
     for client in (plain, wired):
         await client.start()
         try:

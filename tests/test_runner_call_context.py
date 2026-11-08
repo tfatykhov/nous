@@ -37,6 +37,7 @@ from nous.api.runner import AgentRunner, Conversation, Message
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.cognitive.execution_ledger import ExecutionLedger
 from nous.cognitive.schemas import FrameSelection, TurnContext, TurnResult
+from nous.observability import model_calls
 from nous.observability.context_logger import ContextLogger
 from nous.observability.model_calls import PURPOSES, CallContext, ModelCallRecorder
 
@@ -67,6 +68,7 @@ class _SpyClient:
     has exited, so a test can see when a stream was closed."""
 
     supports_call_context = True
+    records_calls = True  # as a real client with a recorder: the runner attaches the context estimate
 
     def __init__(
         self,
@@ -657,6 +659,55 @@ async def test_the_ring_and_the_row_carry_the_same_estimate(split):
         ):
             assert row[name] == getattr(entry, name), name
         assert entry.token_breakdown["preamble"] == len(runner_module.CLAUDE_CODE_PREAMBLE) // 4
+
+
+def _count_estimates(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Count the estimate's two passes wherever they are reached from (the runner, the ring's entry): the
+    system-prompt parse and the message walk, both looked up in model_calls at call time."""
+    counts = {"parse": 0, "walk": 0}
+    for name, key in (("parse_system_sections", "parse"), ("_estimate_messages_tokens", "walk")):
+        real = getattr(model_calls, name)
+
+        def spy(*args: Any, _real: Any = real, _key: str = key, **kwargs: Any) -> Any:
+            counts[_key] += 1
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(model_calls, name, spy)
+    return counts
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ring_on,records", [(False, False), (True, False), (False, True), (True, True)], ids=["off", "ring", "row", "both"]
+)
+async def test_the_estimate_runs_once_per_call_and_only_when_consumed(monkeypatch, ring_on, records):
+    """The context estimate runs once per model call when the ring or the client's recorder consumes it, and not at
+    all when neither does (flags off, no ring): the row's context then carries no stats."""
+    counts = _count_estimates(monkeypatch)
+    client = _SpyClient(reply=lambda payload: _text() if len(payload["messages"]) > 1 else _tool_use())
+    client.records_calls = records
+    r = _runner(client)
+    if ring_on:
+        r.set_context_logger(ContextLogger())
+    conv = Conversation(session_id="s1", messages=[Message(role="user", content="go")])
+    await asyncio.wait_for(
+        r._tool_loop(
+            system_prompt="## Identity\nI am Nous.", conversation=conv, frame_id="conversation", session_id="s1"
+        ),
+        10,
+    )
+    calls = len(client.contexts)
+    assert calls == 2  # the tool call, then the answer after the tool result
+    expected = calls if (ring_on or records) else 0
+    assert counts == {"parse": expected, "walk": expected}
+    assert all(ctx is not None and ctx.purpose == "chat" for ctx in client.contexts)
+    assert [ctx.stats is not None for ctx in client.contexts] == [records] * calls
+    if ring_on:
+        assert len(r._context_logger.get_recent()) == calls
+    if ring_on and records:
+        for ctx, entry in zip(client.contexts, reversed(r._context_logger.get_recent())):
+            assert ctx.stats.section_tokens_est == entry.token_breakdown
+            assert ctx.stats.total_tokens_est == entry.total_tokens_est
 
 
 # ---------------------------------------------------------------------------------------------------------------------

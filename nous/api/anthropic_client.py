@@ -113,6 +113,12 @@ class _ModelCallRecording:
         stops recording."""
         self._recorder = recorder
 
+    @property
+    def records_calls(self) -> bool:
+        """Whether this client records its calls now: the runner computes a call's context estimate only for one
+        that does (or for the ContextLogger ring)."""
+        return self._recorder is not None
+
     def _open_scope(
         self, payload: dict[str, Any], call_context: CallContext | None, call_kind: str
     ) -> AbstractContextManager[ModelCallScope | None]:

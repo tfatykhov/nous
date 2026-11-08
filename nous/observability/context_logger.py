@@ -14,6 +14,7 @@ from uuid import uuid4
 # The estimate moved to model_calls.py (F108); these names stay importable from here.
 from nous.observability.model_calls import (  # noqa: F401
     SECTION_MARKERS,
+    ContextStats,
     _estimate_messages_tokens,
     _estimate_tokens,
     analyze_context,
@@ -95,11 +96,17 @@ class ContextLogEntry:
         context_window: int,
         trace_id: str | None = None,
         preamble: str = "",
+        sections: dict[str, str] | None = None,
+        stats: ContextStats | None = None,
     ) -> ContextLogEntry:
+        """The entry for one call. ``sections`` and ``stats`` are the estimate a caller already made from these
+        inputs (``system_sections`` then ``analyze_sections``, as the runner does once per call); without them the
+        entry makes it."""
         entry_id = uuid4().hex[:16]
         # analyze_context's estimate, from sections parsed once: the entry keeps their text too.
-        sections = system_sections(system_prompt, preamble)
-        stats = analyze_sections(sections, messages, tools, context_window)
+        if sections is None or stats is None:
+            sections = system_sections(system_prompt, preamble)
+            stats = analyze_sections(sections, messages, tools, context_window)
 
         return cls(
             id=entry_id,
@@ -303,6 +310,8 @@ class ContextLogger:
         payload: dict | None = None,
         trace_id: str | None = None,
         preamble: str = "",
+        sections: dict[str, str] | None = None,
+        stats: ContextStats | None = None,
     ) -> ContextLogEntry:
         entry = ContextLogEntry.from_payload(
             session_id=session_id,
@@ -316,6 +325,8 @@ class ContextLogger:
             context_window=context_window,
             trace_id=trace_id,
             preamble=preamble,
+            sections=sections,
+            stats=stats,
         )
         self._entries.append(entry)
         self._entries_by_id[entry.id] = entry
