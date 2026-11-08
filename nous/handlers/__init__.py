@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 class LLMClient(Protocol):
     """Minimal protocol matching AnthropicClient.call()."""
 
-    async def call(self, payload: dict[str, Any]) -> Any: ...
+    async def call(self, payload: dict[str, Any], *, call_context: CallContext | None = None) -> Any: ...
 
 
 async def call_background_llm(

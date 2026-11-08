@@ -558,7 +558,7 @@ class FactManager:
                 tool_description="Decide whether two facts are duplicates or distinct.",
                 output_schema=_DEDUP_TIEBREAKER_SCHEMA,
                 max_tokens=100,
-                purpose="contradiction",
+                purpose="fact_dedup",
             )
         except Exception:
             logger.warning("F377 dedup tiebreaker call failed; failing open", exc_info=True)

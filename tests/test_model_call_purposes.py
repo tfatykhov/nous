@@ -4,8 +4,10 @@ The three background helpers (``call_background_llm``, ``call_background_llm_str
 take a keyword ``purpose`` and pass it to the client as a ``CallContext`` through ``context_kwargs``, so a client
 double that takes only the payload keeps working. ``call_with_tool_choice`` gives its requests one ``group_id`` and
 marks the request that asks for the tool in the prompt ``is_fallback``. Every model call site in ``nous/`` passes a
-purpose from ``PURPOSES``: the source guard below fails on a new site that passes none, and on a site whose purpose
-is not written there unless it is reviewed.
+purpose from ``PURPOSES``. The source guard below takes every call of a helper and every method call named ``call``,
+``stream`` or ``call_streaming_aggregated``, whatever its receiver is called: a site that passes no purpose fails
+unless it is reviewed as one that passes none by design, and a site whose purpose is not written there as a literal
+fails unless it is reviewed.
 """
 
 from __future__ import annotations
@@ -154,6 +156,59 @@ async def test_the_correction_monitor_labels_its_call_with_its_session():
 
 
 @pytest.mark.asyncio
+async def test_the_dedup_tiebreaker_is_fact_dedup_not_contradiction():
+    from nous.heart.facts import FactManager
+
+    facts = FactManager(MagicMock(), None, "test-agent")
+    facts._llm = client = _Client()
+
+    await facts.is_distinct_fact("The user lives in Lisbon.", "The user's home is Lisbon.")
+
+    [(_payload, ctx)] = client.calls
+    assert ctx.purpose == "fact_dedup"
+
+
+@pytest.mark.asyncio
+async def test_the_procedure_learner_labels_distilling_and_the_covered_check_apart():
+    from test_procedure_learner import _covered_setup, _llm_answers
+
+    # A probe hit below the no-check line: the lesson is distilled, then the model is asked whether it is covered.
+    learner, _heart, llm_client, _summaries, detail, extraction = _covered_setup(0.6, ["auto:decision_cluster"])
+    llm_client.supports_call_context = True
+    _llm_answers(llm_client, extraction, {"verdict": "COVERED", "id": str(detail.id)[:8]})
+
+    stats = await learner.run_sleep_learning()
+
+    assert stats["covered"] == 1
+    purposes = [c.kwargs["call_context"].purpose for c in llm_client.call.call_args_list]
+    assert purposes == ["procedure_learner", "procedure_coverage"]
+
+
+def test_the_llm_client_protocol_takes_the_context_the_helpers_pass():
+    import inspect
+    import typing
+
+    from nous.api.anthropic_client import HttpxAnthropicClient, SdkAnthropicClient
+    from nous.handlers import LLMClient
+
+    declared = inspect.signature(LLMClient.call).parameters["call_context"]
+    assert declared.kind is inspect.Parameter.KEYWORD_ONLY and declared.default is None
+    assert typing.get_type_hints(LLMClient.call)["call_context"] == CallContext | None
+    for client in (HttpxAnthropicClient, SdkAnthropicClient):
+        assert inspect.signature(client.call).parameters["call_context"] == declared
+
+
+def test_the_is_fallback_column_comment_names_the_fallback_path():
+    sql = (Path(nous.__file__).resolve().parent.parent / "sql/migrations/101_model_call_log.sql").read_text("utf-8")
+    comment = " ".join(line.removeprefix("--").strip() for line in sql.splitlines() if line.startswith("--"))
+    assert (
+        "is_fallback marks a call made on a fallback path (a re-send that asks for the tool in the prompt, "
+        "or a fallback model)"
+    ) in comment
+    assert not [line for line in sql.splitlines() if line.lstrip().startswith("--") and ";" in line]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("run", "expected"), _HELPER_RUNS)
 async def test_a_helper_called_without_a_purpose_is_unlabelled(run, expected):
     # The default keeps the tests that call the helpers working; the recorder counts what it labels unlabelled.
@@ -246,15 +301,12 @@ async def test_the_helpers_send_the_payload_they_sent_before():
 
 _HELPERS = frozenset({"call_background_llm", "call_background_llm_structured", "call_with_tool_choice"})
 _CLIENT_METHODS = frozenset({"call", "stream", "call_streaming_aggregated"})
-_CLIENT_NAME_PARTS = ("client", "llm", "api")
-# The clients themselves: each method opens its call's scope with the context it was given, so a call inside them
-# is part of the call being recorded, not a new one (its own stream, the SDK's messages.stream, the httpx stream).
-_SKIPPED_MODULES = frozenset({"nous/api/anthropic_client.py"})
 
-# Sites that pass a purpose they do not write as a literal: keyed by (module, enclosing function, called expression),
-# the value is how many such calls the function makes and why each still carries a purpose. A new site that does
-# this fails the guard until it is reviewed and added here; one that moves, goes away or is added beside a reviewed
-# one fails it too.
+# Both lists below are keyed by (module, enclosing function, called expression); the value is how many such calls the
+# function makes and why each is right. A new site fails the guard until it is reviewed and added; one that moves,
+# goes away or is added beside a reviewed one fails it too.
+
+# Sites that pass a purpose they do not write as a literal.
 _REVIEWED_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
     ("nous/handlers/__init__.py", "call_background_llm", "client.call"): (
         1,
@@ -281,31 +333,44 @@ _REVIEWED_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "the call context its caller built; the runner's own guard checks every caller",
     ),
+    ("nous/handlers/procedure_learner.py", "ProcedureLearner._call_llm", "call_background_llm"): (
+        1,
+        "the purpose its caller names: procedure_learner for distilling and reviewing procedures, "
+        "procedure_coverage for the covered check",
+    ),
+}
+
+# Calls named like a model call that pass no purpose, by design: the clients' own internals, which run inside the
+# scope their method opened with its call context, and receivers that are not model clients.
+_NO_PURPOSE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
+    ("nous/api/anthropic_client.py", "HttpxAnthropicClient.stream", "self._http.stream"): (
+        1,
+        "the HTTP request of a stream() call, inside the scope stream() opened with its call_context",
+    ),
+    ("nous/api/anthropic_client.py", "HttpxAnthropicClient._aggregate", "self.stream"): (
+        1,
+        "hands stream() the scope call_streaming_aggregated() opened (_scope=), so the aggregated call is one row",
+    ),
+    ("nous/api/anthropic_client.py", "SdkAnthropicClient.call_streaming_aggregated", "self._client.messages.stream"): (
+        1,
+        "the SDK request of the call, inside the scope call_streaming_aggregated() opened with its call_context",
+    ),
+    ("nous/telegram_bot.py", "NousTelegramBot._chat_streaming", "self._http.stream"): (
+        1,
+        "not a model client: a plain httpx client posting to Nous's own REST endpoint /chat/stream",
+    ),
 }
 
 _Site = tuple[str, str, str]
 
 
-def _last_name(node: ast.expr) -> str:
-    """The last name of the expression a method is called on: ``self._api`` -> ``_api``, ``f().x`` -> ``x``."""
-    if isinstance(node, ast.Attribute):
-        return node.attr
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Call):
-        return _last_name(node.func)
-    return ""
-
-
 def _is_model_call(call: ast.Call) -> bool:
-    """A call of a background helper, or of a client method on a name that reads as a model client."""
+    """A call of a background helper, or any method call named like a client's (whatever the receiver is called)."""
     func = call.func
     if isinstance(func, ast.Name):
         return func.id in _HELPERS
     if isinstance(func, ast.Attribute):
-        if func.attr in _HELPERS:
-            return True
-        return func.attr in _CLIENT_METHODS and any(p in _last_name(func.value).lower() for p in _CLIENT_NAME_PARTS)
+        return func.attr in _HELPERS or func.attr in _CLIENT_METHODS
     return False
 
 
@@ -368,26 +433,32 @@ def _scan_nous() -> tuple[list[tuple[_Site, int]], Counter[_Site]]:
     not_literal: Counter[_Site] = Counter()
     for path in sorted(root.rglob("*.py")):
         module = path.relative_to(root.parent).as_posix()
-        if module in _SKIPPED_MODULES:
-            continue
         m, n = _scan(ast.parse(path.read_text(encoding="utf-8")), module)
         missing += m
         not_literal += n
     return missing, not_literal
 
 
-def _unreviewed(not_literal: Counter[_Site]) -> tuple[dict[_Site, int], dict[_Site, int]]:
-    reviewed = {site: count for site, (count, _reason) in _REVIEWED_SITES.items()}
-    new = {site: n for site, n in not_literal.items() if reviewed.get(site) != n}
-    gone = {site: n for site, n in reviewed.items() if not_literal.get(site) != n}
+def _unreviewed(
+    found: Counter[_Site], reviewed_sites: dict[_Site, tuple[int, str]]
+) -> tuple[dict[_Site, int], dict[_Site, int]]:
+    """``(sites found that the list does not hold with that count, listed sites not found with their count)``."""
+    reviewed = {site: count for site, (count, _reason) in reviewed_sites.items()}
+    new = {site: n for site, n in found.items() if reviewed.get(site) != n}
+    gone = {site: n for site, n in reviewed.items() if found.get(site) != n}
     return new, gone
 
 
 def test_every_model_call_site_names_a_purpose():
-    """Every model call in nous/ passes a purpose; one not written at the site as a literal is reviewed."""
+    """Every model call in nous/ passes a purpose; one that passes none, or none written as a literal, is reviewed."""
     missing, not_literal = _scan_nous()
-    new, gone = _unreviewed(not_literal)
-    assert missing == [], f"model calls without a purpose (pass purpose= from PURPOSES): {missing}"
+    new, gone = _unreviewed(Counter(site for site, _line in missing), _NO_PURPOSE_SITES)
+    lines = {site: [line for s, line in missing if s == site] for site in new}
+    assert not new and not gone, (
+        f"model calls without a purpose (pass purpose= from PURPOSES, or review _NO_PURPOSE_SITES): "
+        f"unreviewed or changed: {new} at lines {lines}; reviewed but not found: {gone}"
+    )
+    new, gone = _unreviewed(not_literal, _REVIEWED_SITES)
     assert not new and not gone, (
         f"sites passing a purpose that is not a literal changed; review _REVIEWED_SITES. "
         f"unreviewed or changed: {new}; reviewed but not found: {gone}"
@@ -396,7 +467,8 @@ def test_every_model_call_site_names_a_purpose():
 
 def test_the_guard_fails_for_a_new_site():
     # Mutation check on source text, so nothing in the tree is touched: a new unlabelled helper call and a new client
-    # call each fail; a second call beside a reviewed one, or a reviewed one gone, changes the count.
+    # call each fail, whatever the client is called or however it is reached; a second call beside a reviewed one, or
+    # a reviewed one gone, changes the count.
     source = (
         "async def summarise(client):\n"
         "    await call_background_llm(client, 'm', 's', 'u')\n"
@@ -407,16 +479,23 @@ def test_the_guard_fails_for_a_new_site():
         "    await self._llm.call(payload, **context_kwargs(self._llm, CallContext()))\n"
         "    await self._llm.call(payload, **context_kwargs(self._llm, CallContext(purpose='critic')))\n"
         "    await self._llm.stream(payload, **context_kwargs(self._llm, ctx))\n"
+        "    await self._model.call(payload)\n"
+        "    c = self._llm\n"
+        "    await c.call(payload)\n"
+        "    await (await self._get_client()).call(payload)\n"
+        "    await self.clients['x'].stream(payload)\n"
+        "    await self._backend.call_streaming_aggregated(payload)\n"
     )
     missing, not_literal = _scan(ast.parse(source), "nous/x.py")
-    assert [line for _site, line in missing] == [2, 3, 6, 7]
+    assert [line for _site, line in missing] == [2, 3, 6, 7, 10, 12, 13, 14, 15]
     assert not_literal == Counter({("nous/x.py", "classify", "self._llm.stream"): 1})
 
-    reviewed_site = ("nous/handlers/__init__.py", "call_background_llm", "client.call")
-    _missing, real = _scan_nous()
-    assert _unreviewed(real) == ({}, {})
-    assert _unreviewed(real + Counter({reviewed_site: 1}))[0] == {reviewed_site: 2}
-    assert _unreviewed(real - Counter({reviewed_site: 1}))[1] == {reviewed_site: 1}
+    real_missing, real = _scan_nous()
+    for found, listed in ((real, _REVIEWED_SITES), (Counter(s for s, _line in real_missing), _NO_PURPOSE_SITES)):
+        site = next(iter(listed))
+        assert _unreviewed(found, listed) == ({}, {})
+        assert _unreviewed(found + Counter({site: 1}), listed)[0] == {site: listed[site][0] + 1}
+        assert _unreviewed(found - Counter({site: 1}), listed)[1] == {site: listed[site][0]}
 
 
 def test_every_purpose_literal_is_in_the_vocabulary():

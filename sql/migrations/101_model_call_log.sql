@@ -9,7 +9,8 @@
 -- attempts is the number of HTTP attempts, one row each in model_call_attempt. Embedding and rerank calls are
 -- counted per minute instead: one row per minute, purpose, model and status, call_count calls, their tokens and
 -- durations summed. group_id joins calls that are one logical call (a re-send), is_fallback marks a call made on a
--- fallback model. The context columns (section_tokens_est to cache_break_tokens_lost) are the runner's estimate of
+-- fallback path (a re-send that asks for the tool in the prompt, or a fallback model). The context columns
+-- (section_tokens_est to cache_break_tokens_lost) are the runner's estimate of
 -- what the call's context held: section_tokens_est is context_log.token_breakdown renamed, because a column that
 -- starts with token_ is refused by the reader's credential check. turn_id names an agent_turn_log row with no
 -- foreign key (the turn row is written when the turn ends). No column holds message text.

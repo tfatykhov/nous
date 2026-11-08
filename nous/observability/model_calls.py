@@ -56,6 +56,7 @@ PURPOSES: frozenset[str] = frozenset(
         "date_window",
         "admission_utility",
         "contradiction",
+        "fact_dedup",  # the write-time dedup tiebreaker (FactManager.is_distinct_fact)
         "actionability",
         "profile_card",
         "episode_summarizer",
@@ -65,6 +66,7 @@ PURPOSES: frozenset[str] = frozenset(
         "correction_extractor",
         "outcome_detector",
         "procedure_learner",
+        "procedure_coverage",  # does a stored procedure already teach this new lesson (ProcedureLearner)
         "strategy_card",
         "sleep_reflection",
         "sleep_contradiction",

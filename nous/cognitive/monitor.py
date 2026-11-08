@@ -291,7 +291,9 @@ class MonitorEngine:
             for pair_id, pair in shown.items()
         )
 
-        result = await self._procedure_learner._call_llm(_MONITOR_RECOVERY_PROMPT.format(pairs=pairs_text))
+        result = await self._procedure_learner._call_llm(
+            _MONITOR_RECOVERY_PROMPT.format(pairs=pairs_text), purpose="procedure_learner"
+        )
         if not result:
             return  # the call failed: keep the pairs for the next recovery turn
         proc_input = self._procedure_learner._gated_procedure_input(
