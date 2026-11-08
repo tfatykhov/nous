@@ -191,13 +191,16 @@ _TOOL_TABLES = [("tool_call_log", 30), ("agent_turn_log", 30)]
     ],
     ids=["both logs", "tool log only", "model log only", "tool retention 0", "model retention 0"],
 )
-def test_the_loop_sweeps_each_log_by_its_own_switch_and_retention(monkeypatch, overrides, expected):
+def test_the_loop_sweeps_each_log_by_its_own_switch_and_retention(monkeypatch, caplog, overrides, expected):
     monkeypatch.setattr(main, "_RETENTION_SWEEP_INTERVAL_SECONDS", 3600)
     database = _Database()
 
-    _run(lambda: _one_startup_pass(_loop_settings(**overrides), database))
+    with caplog.at_level(logging.DEBUG, logger="nous.main"):
+        _run(lambda: _one_startup_pass(_loop_settings(**overrides), database))
 
     assert database.deleted == expected
+    # A log that is off, or kept 0 days, is not tried at all: no sweep refused for 0 days and logged every day.
+    assert not [r for r in caplog.records if "retention sweep failed" in r.getMessage()]
 
 
 @pytest.mark.parametrize(
@@ -347,6 +350,29 @@ def test_wiring_off_by_default(monkeypatch):
         "model_call_recorder": None,
         "retention_task": None,
     }
+
+
+@pytest.mark.postgres_only
+def test_wiring_with_only_the_tool_log_builds_the_writer_and_no_model_recorder(monkeypatch):
+    built = _spy_constructions(monkeypatch)
+    seen: dict[str, Any] = {}
+
+    async def checks(components: dict, settings: Any) -> None:
+        try:
+            seen.update(_hooks(components))
+            seen["model_call_recorder"] = components["model_call_recorder"]
+            writer = components["work_view_writer"]
+            assert built["writers"] == [writer]
+            assert components["tool_call_recorder"]._writer is writer
+        finally:
+            await main.shutdown_components(components)
+
+    _boot(monkeypatch, checks, tool_call_log_enabled=True)
+
+    assert built["model_recorders"] == []
+    assert seen == dict.fromkeys(
+        ("api_client", "heartbeat_client", "embedder", "browser_loop", "reranker", "model_call_recorder")
+    )
 
 
 @pytest.mark.postgres_only
