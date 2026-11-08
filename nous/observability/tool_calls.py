@@ -18,7 +18,7 @@ from uuid import UUID
 
 from sqlalchemy import text
 
-from nous.cognitive.ledger_store import detail_text
+from nous.cognitive.ledger_store import detail_text, redact_structure
 from nous.observability.recording import BoundedWriter, RecorderStats
 
 logger = logging.getLogger(__name__)
@@ -121,8 +121,10 @@ def split_reason(
 @dataclass(frozen=True, slots=True)
 class ToolCallRecord:
     """One tool call, as the runner saw it: the ``tool_call_log`` columns except ``id`` and ``agent_id`` (the
-    recorder's). Text fields are given raw; the recorder redacts and clips them. ``started_at`` None means the time
-    the row is written."""
+    recorder's). Text fields are given raw; the recorder redacts and clips them. ``input_text`` is the input as JSON,
+    serialised by the runner after its strings were redacted (``redact_structure``): a string holding JSON is escaped
+    in the JSON text, where the patterns cannot see its secrets. ``started_at`` None means the time the row is
+    written."""
 
     call_index: int
     work_kind: str
@@ -205,13 +207,7 @@ _UPSERT_TURN = text(
 def _redacted_json(value: Any) -> Any:
     """``value`` with every string in it redacted and clipped like an error text. The critic's rationale and the
     claim check's quoted claims are model text that can carry a secret the reply's own redaction would mask."""
-    if isinstance(value, str):
-        return detail_text(value, ERROR_TEXT_MAX_CHARS)
-    if isinstance(value, dict):
-        return {k: _redacted_json(v) for k, v in value.items()}
-    if isinstance(value, list | tuple):
-        return [_redacted_json(v) for v in value]
-    return value
+    return redact_structure(value, ERROR_TEXT_MAX_CHARS)
 
 
 def _json_param(value: Any) -> str | None:

@@ -1,7 +1,8 @@
 """F108: the model-call text — what a model call sent and got back, kept as blocks addressed by their hash.
 
-A call's system blocks, its messages, its tool list and its response are each one block. A block's body is redacted,
-its base64 attachments replaced by a marker, and cut at ``NOUS_MODEL_CALL_TEXT_BLOCK_MAX_CHARS``; it is stored once per
+A call's system blocks, its messages, its tool list and its response are each one block. A block's body is redacted
+(a JSON block's strings first, then its serialised text: ``prepare_block``), its base64 attachments replaced by a
+marker, and cut at ``NOUS_MODEL_CALL_TEXT_BLOCK_MAX_CHARS``; it is stored once per
 agent under the sha256 of that body (``nous_system.model_text_block``), so a block that repeats (the system prompt,
 the tool list, the earlier messages of a session) is stored once. Each call lists its blocks in order
 (``nous_system.model_call_block_ref``). Nothing outside the system blocks, the messages, the tools and the response is
@@ -59,6 +60,7 @@ CONTENT_EVENTS = frozenset(
 
 # A base64 attachment over 1 KB: an image or document block's ``source.data`` in a block's JSON, or a data URL.
 _BASE64_FIELD = re.compile(r'("data"\s*:\s*")([A-Za-z0-9+/]{1025,}={0,2})(")')
+_BASE64_VALUE = re.compile(r"[A-Za-z0-9+/]{1025,}={0,2}")
 _DATA_URL = re.compile(r"(data:[\w.+-]+/[\w.+-]+;base64,)([A-Za-z0-9+/]{1025,}={0,2})")
 # How a character UTF-8 cannot encode (a lone surrogate) is handled, by the body and by the LRU key alike.
 _UNENCODABLE = "replace"
@@ -107,28 +109,29 @@ def _message(message: Any) -> Any:
     return {**message, "content": content}
 
 
-def split_payload(payload: dict[str, Any], response_content: list[dict] | None) -> list[tuple[str, int, str]]:
-    """The blocks of one call as ``(part, ord, text)``, in order: one per system block (a text block as its text), one
-    per message (JSON), one for the tool list (JSON) and one for the response's content (JSON) when there is one.
-    Only ``system``, ``messages`` and ``tools`` are read from ``payload``."""
-    parts: list[tuple[str, int, str]] = []
+def split_payload(payload: dict[str, Any], response_content: list[dict] | None) -> list[tuple[str, int, str, bool]]:
+    """The blocks of one call as ``(part, ord, text, is_json)``, in order: one per system block (a text block as its
+    text), one per message (JSON), one for the tool list (JSON) and one for the response's content (JSON) when there
+    is one. ``is_json`` is False only for a text system block. Only ``system``, ``messages`` and ``tools`` are read
+    from ``payload``."""
+    parts: list[tuple[str, int, str, bool]] = []
     system = payload.get("system")
     if isinstance(system, str):
         if system:
-            parts.append(("system", 0, system))
+            parts.append(("system", 0, system, False))
     elif isinstance(system, list):
         for i, block in enumerate(system):
             if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
-                parts.append(("system", i, block["text"]))
+                parts.append(("system", i, block["text"], False))
             else:
-                parts.append(("system", i, _json(_without_cache_control(block))))
+                parts.append(("system", i, _json(_without_cache_control(block)), True))
     for i, message in enumerate(payload.get("messages") or []):
-        parts.append(("messages", i, _json(_message(message))))
+        parts.append(("messages", i, _json(_message(message)), True))
     tools = payload.get("tools")
     if tools:
-        parts.append(("tools", 0, _json([_without_cache_control(tool) for tool in tools])))
+        parts.append(("tools", 0, _json([_without_cache_control(tool) for tool in tools]), True))
     if response_content is not None:
-        parts.append(("response", 0, _json(response_content)))
+        parts.append(("response", 0, _json(response_content), True))
     return parts
 
 
@@ -136,17 +139,44 @@ def _base64_marker(data: str) -> str:
     return f"[base64 {len(data.rstrip('=')) * 3 // 4} bytes]"
 
 
-def prepare_block(raw: str, max_chars: int) -> tuple[str, str]:
+def _without_base64(value: Any) -> Any:
+    """``value`` (a parsed JSON block) with its base64 attachments over 1 KB replaced by the marker: a ``data`` value
+    that is all base64 (an image or document ``source.data``), and every data URL in a string."""
+    if isinstance(value, str):
+        return _DATA_URL.sub(lambda m: m.group(1) + _base64_marker(m.group(2)), value)
+    if isinstance(value, dict):
+        return {
+            k: _base64_marker(v)
+            if k == "data" and isinstance(v, str) and _BASE64_VALUE.fullmatch(v)
+            else _without_base64(v)
+            for k, v in value.items()
+        }
+    if isinstance(value, list):
+        return [_without_base64(v) for v in value]
+    return value
+
+
+def prepare_block(raw: str, max_chars: int, is_json: bool = False) -> tuple[str, str]:
     """``(hash, body)`` of one block: base64 attachments over 1 KB replaced by ``[base64 N bytes]``, redacted
     (``redact_output``), cut at ``max_chars`` with a ``[truncated N chars]`` marker (N: the characters past the cap),
     and the sha256 hex of that final body. Over the cap only the head and a scan pad are redacted, and the pad is
     dropped after, so a secret the cut splits is not kept in part (as ``detail_text`` does). A lone surrogate (bash
     output decoded with ``surrogateescape``), which UTF-8 and Postgres cannot hold, becomes ``?`` first, so the body
-    is always storable."""
+    is always storable.
+
+    A JSON block (``is_json``) is parsed back into a structure of its own (nothing the runner holds is read here,
+    which may be a thread), its base64 replaced, and every string in it redacted and bounded by ``max_chars``
+    (``redact_structure``: a string over the cap keeps its head and tail around a middle-cut marker) BEFORE it is
+    serialised again: in the JSON text, a string that holds JSON has its quotes escaped and the patterns cannot see
+    its secrets. The serialised text is then redacted as a plain block is, which masks a credential-named key of the
+    block itself."""
     # Imported here: nous.cognitive imports nous.observability, whose package imports the model-call recorder.
-    from nous.cognitive.ledger_store import redact_output, redaction_scan_pad
+    from nous.cognitive.ledger_store import redact_output, redact_structure, redaction_scan_pad
 
     raw = raw.encode("utf-8", _UNENCODABLE).decode("utf-8")
+    if is_json:
+        clean = redact_structure(_without_base64(json.loads(raw)), max_chars)
+        raw = _json(clean).encode("utf-8", _UNENCODABLE).decode("utf-8")
     raw = _BASE64_FIELD.sub(lambda m: m.group(1) + _base64_marker(m.group(2)) + m.group(3), raw)
     raw = _DATA_URL.sub(lambda m: m.group(1) + _base64_marker(m.group(2)), raw)
     if len(raw) <= max_chars:
@@ -205,7 +235,7 @@ class TextStore:
         self._agent_id = agent_id
         self._max_chars = settings.model_call_text_block_max_chars
         self._stats = RecorderStats()
-        self._lru: OrderedDict[bytes, tuple[str, str]] = OrderedDict()
+        self._lru: OrderedDict[tuple[bool, bytes], tuple[str, str]] = OrderedDict()
         self._lru_chars = 0
         self.enabled = bool(settings.model_call_text_enabled and settings.model_call_log_enabled)
         if settings.model_call_text_enabled and not settings.model_call_log_enabled:
@@ -245,13 +275,13 @@ class TextStore:
             self._stats.dropped_error += 1
             logger.warning("F108: model-call text not written (%s)", type(exc).__name__)
 
-    async def store(self, call_id: uuid.UUID, parts: list[tuple[str, int, str]]) -> None:
+    async def store(self, call_id: uuid.UUID, parts: list[tuple[str, int, str, bool]]) -> None:
         """Store ``parts`` (``split_payload``) as the blocks of call ``call_id``: upsert each block (a block already
         stored is touched, so it counts as used now), then insert the call's refs, in one transaction."""
         refs: list[dict[str, Any]] = []
         blocks: dict[str, str] = {}
-        for part, ord_, raw in parts:
-            digest, body = await self._prepare(raw)
+        for part, ord_, raw, is_json in parts:
+            digest, body = await self._prepare(raw, is_json)
             blocks[digest] = body
             refs.append(
                 {"call_id": call_id, "agent_id": self._agent_id, "part": part, "ord": ord_, "block_hash": digest}
@@ -278,22 +308,24 @@ class TextStore:
             loaded.setdefault(part, []).append(body)
         return loaded
 
-    async def _prepare(self, raw: str) -> tuple[str, str]:
-        """``prepare_block`` of ``raw``, from the LRU when the same raw text was prepared recently. A block over
+    async def _prepare(self, raw: str, is_json: bool = False) -> tuple[str, str]:
+        """``prepare_block`` of ``raw``, from the LRU when the same raw text (of the same kind, plain or JSON) was
+        prepared recently. A block over
         ``BIG_BLOCK_CHARS`` is hashed and prepared in a thread, which shares the CPU with the loop rather than freeing
         it (the regex work holds the GIL); the LRU is what spares a block sent again. The LRU is only touched here, on
         the event loop. Two writes may miss the same block at once: the second insert replaces the first and is
         counted once."""
         big = len(raw) > BIG_BLOCK_CHARS
-        key = await asyncio.to_thread(_raw_key, raw) if big else _raw_key(raw)
+        digest = await asyncio.to_thread(_raw_key, raw) if big else _raw_key(raw)
+        key = (is_json, digest)
         cached = self._lru.get(key)
         if cached is not None:
             self._lru.move_to_end(key)
             return cached
         if big:
-            prepared = await asyncio.to_thread(prepare_block, raw, self._max_chars)
+            prepared = await asyncio.to_thread(prepare_block, raw, self._max_chars, is_json)
         else:
-            prepared = prepare_block(raw, self._max_chars)
+            prepared = prepare_block(raw, self._max_chars, is_json)
         if key in self._lru:
             self._lru_chars -= len(self._lru.pop(key)[1])
         self._lru[key] = prepared

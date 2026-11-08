@@ -139,7 +139,7 @@ async def _delete(db, agent: str) -> None:
 def test_split_payload_gives_one_block_per_system_block_message_tools_and_response():
     messages = [{"role": "user", "content": "hello"}, {"role": "assistant", "content": _text_reply("hi")}]
     parts = split_payload(_payload(messages), _text_reply("done"))
-    assert [(part, ord_) for part, ord_, _ in parts] == [
+    assert [(part, ord_) for part, ord_, _, _ in parts] == [
         ("system", 0),
         ("system", 1),
         ("messages", 0),
@@ -153,11 +153,13 @@ def test_split_payload_gives_one_block_per_system_block_message_tools_and_respon
     assert [t["name"] for t in json.loads(parts[4][2])] == ["recall_deep", "bash"]
     assert json.loads(parts[5][2]) == _text_reply("done")
     # cache_control is a caching marker, not content: never part of a block
-    assert not [body for _, _, body in parts if "cache_control" in body]
+    assert not [body for _, _, body, _ in parts if "cache_control" in body]
+    # a text system block is plain text; every other block is JSON, redacted as a structure before it is serialised
+    assert [is_json for *_, is_json in parts] == [False, False, True, True, True, True]
     # no response, no response block; a string system prompt is one block
     plain = split_payload({"system": "be brief", "messages": messages}, None)
-    assert [(part, ord_, body) for part, ord_, body in plain][0] == ("system", 0, "be brief")
-    assert [part for part, _, _ in plain] == ["system", "messages", "messages"]
+    assert plain[0] == ("system", 0, "be brief", False)
+    assert [part for part, *_ in plain] == ["system", "messages", "messages"]
 
 
 def test_block_over_cap_is_truncated_with_marker():
@@ -201,11 +203,69 @@ def test_base64_attachment_replaced():
     small = base64.b64encode(b"tiny").decode()
     small_message = {"role": "user", "content": [{"type": "text", "text": f"data:image/png;base64,{small}"}]}
     parts = split_payload({"messages": [message, small_message]}, None)
-    _, body = prepare_block(parts[0][2], 200_000)
+    _, body = prepare_block(parts[0][2], 200_000, parts[0][3])
     assert data not in body and data[:200] not in body
     assert body.count("[base64 3072 bytes]") == 2, body
     assert json.loads(body)["content"][0]["source"]["data"] == "[base64 3072 bytes]"  # still JSON
-    assert small in prepare_block(parts[1][2], 200_000)[1]  # 1 KB or less is kept
+    assert small in prepare_block(parts[1][2], 200_000, parts[1][3])[1]  # 1 KB or less is kept
+
+
+_NESTED = '{"password":"hunter2"}'  # JSON inside a string: serialised, its quotes are escaped
+
+
+def _json_secret_call(password: str = "hunter2") -> tuple[dict, list[dict]]:
+    """A call whose message text, tool input, tool result and response all hold a password inside a JSON string,
+    and whose response's tool input is a structured ``{"password": ...}``."""
+    nested = _NESTED.replace("hunter2", password)
+    messages = [
+        {"role": "user", "content": f"send {nested} to the API"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "t1", "name": "bash", "input": {"command": f"curl -d '{nested}' x"}}
+            ],
+        },
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": f"echo {nested}"}]},
+    ]
+    response = [
+        {"type": "text", "text": f"I sent {nested}"},
+        {"type": "tool_use", "id": "t2", "name": "http_post", "input": {"password": password}},
+    ]
+    return _payload(messages), response
+
+
+def test_json_inside_a_string_is_masked_in_every_block():
+    payload, response = _json_secret_call()
+    bodies = [prepare_block(text_, 200_000, is_json)[1] for _, _, text_, is_json in split_payload(payload, response)]
+
+    assert not [body for body in bodies if "hunter2" in body], bodies
+    # the response's {"password": ...}: the string alone carries no key, the serialised pass masks it
+    assert '"password": [REDACTED]' in bodies[-1], bodies[-1]
+
+
+def test_base64_is_replaced_before_the_strings_are_redacted():
+    """A string over the cap is cut in its middle when it is redacted: base64 cut there would no longer be
+    recognised, so it is replaced first."""
+    data = base64.b64encode(bytes(range(256)) * 12).decode()  # 4,096 characters
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}}
+    message = {"role": "user", "content": [image, {"type": "text", "text": f"the login is {_NESTED}"}]}
+    [(_, _, text_, is_json)] = split_payload({"messages": [message]}, None)
+
+    _, body = prepare_block(text_, 3000, is_json)
+
+    assert "[base64 3072 bytes]" in body and data[:100] not in body and data[-100:] not in body, body
+    assert "hunter2" not in body
+
+
+def test_a_string_over_the_cap_inside_a_block_is_cut_in_its_middle_then_the_block_at_the_cap():
+    text_ = "head " + "x" * 5000 + " tail"
+    [(_, _, raw, is_json)] = split_payload({"messages": [{"role": "user", "content": text_}]}, None)
+
+    _, body = prepare_block(raw, 1000, is_json)
+
+    # the string is redacted over a head and a tail window around a marker, then the block is cut at the cap
+    assert body.startswith('{"content": "head xxx') and "[middle cut]" in body, body
+    assert re.search(r"\[truncated \d+ chars\]$", body), body
 
 
 def test_a_lone_surrogate_is_replaced_so_the_body_is_storable():
@@ -219,9 +279,9 @@ async def test_two_concurrent_misses_on_one_block_are_counted_once(monkeypatch):
     store = TextStore(BoundedWriter("test"), None, "a", _settings())
     real = model_call_text.prepare_block
 
-    def slow(raw, max_chars):
+    def slow(raw, max_chars, is_json=False):
         time.sleep(0.2)  # both writes are past the LRU lookup before either inserts
-        return real(raw, max_chars)
+        return real(raw, max_chars, is_json)
 
     monkeypatch.setattr(model_call_text, "prepare_block", slow)
     big = "big " * 6000
@@ -324,6 +384,23 @@ async def test_repeated_system_prompt_is_stored_once(db):
         assert {b["size_chars"] for b in blocks.values()} == {len(b["body"]) for b in blocks.values()}
         assert all(h == hashlib.sha256(b["body"].encode("utf-8")).hexdigest() for h, b in blocks.items())
         assert store.stats.written == 2 and store.stats.dropped_error == 0
+    finally:
+        await _delete(db, agent)
+
+
+@pytest.mark.postgres_only
+async def test_a_secret_inside_a_json_string_never_reaches_a_block(db):
+    agent = _agent()
+    writer, store, recorder = _stack(db, agent)
+    try:
+        for session, password in (("c1", "hunter2"), ("c2", "swordfish")):
+            payload, response = _json_secret_call(password)
+            _record(recorder, payload, session, response)
+        await asyncio.wait_for(writer.drain(5.0), 10)
+        bodies = " ".join(b["body"] for b in (await _blocks(db, agent)).values())
+        assert "hunter2" not in bodies and "swordfish" not in bodies, bodies
+        # two calls that differ only in the masked password store the same blocks
+        assert await _refs(db, await _call_id(db, agent, "c1")) == await _refs(db, await _call_id(db, agent, "c2"))
     finally:
         await _delete(db, agent)
 
@@ -669,9 +746,9 @@ async def test_a_big_block_is_prepared_in_a_thread(db, monkeypatch):
     threads: dict[int, bool] = {}
     real = model_call_text.prepare_block
 
-    def spy(raw, max_chars):
+    def spy(raw, max_chars, is_json=False):
         threads[len(raw)] = threading.current_thread() is threading.main_thread()
-        return real(raw, max_chars)
+        return real(raw, max_chars, is_json)
 
     monkeypatch.setattr(model_call_text, "prepare_block", spy)
     try:

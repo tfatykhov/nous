@@ -147,8 +147,8 @@ async def test_block_referenced_by_a_recent_call_survives(db):
         old_call = await _insert_call(db, agent, 10, attempts=0)
         new_call = await _insert_call(db, agent, 1, attempts=0)
         store = _store(db, agent)
-        await store.store(old_call, [("system", 0, _SYSTEM_PROMPT), ("messages", 0, "the old question")])
-        await store.store(new_call, [("system", 0, _SYSTEM_PROMPT), ("messages", 0, "the new question")])
+        await store.store(old_call, [("system", 0, _SYSTEM_PROMPT, False), ("messages", 0, "the old question", False)])
+        await store.store(new_call, [("system", 0, _SYSTEM_PROMPT, False), ("messages", 0, "the new question", False)])
         new_question, system = (row[2] for row in await _refs(db, new_call))  # ordered by part: messages, system
         # The old call's refs are 10 days old, and no block was used in the last hour: only a ref keeps a block.
         await _age(db, agent, refs_of=old_call, refs=timedelta(days=10), blocks=timedelta(hours=2))
@@ -171,7 +171,7 @@ async def test_unreferenced_old_block_is_deleted(db):
         fresh = await _insert_block(db, mine, "a block a store has just written", timedelta(minutes=10))
         # Another agent: an old call whose ref is past the retention, and an old block no call references.
         their_call = await _insert_call(db, other, 10, attempts=0)
-        await _store(db, other).store(their_call, [("system", 0, _SYSTEM_PROMPT)])
+        await _store(db, other).store(their_call, [("system", 0, _SYSTEM_PROMPT, False)])
         await _age(db, other, refs_of=their_call, refs=timedelta(days=10), blocks=timedelta(hours=2))
         [their_system] = await _hashes(db, other)
         await _insert_block(db, other, "a block no call sends any more", timedelta(hours=2))
@@ -193,7 +193,7 @@ async def test_numbers_row_survives_text_sweep(db):
     agent = _agent()
     try:
         call = await _insert_call(db, agent, 10, attempts=1)
-        await _store(db, agent).store(call, [("system", 0, _SYSTEM_PROMPT), ("response", 0, "an answer")])
+        await _store(db, agent).store(call, [("system", 0, _SYSTEM_PROMPT, False), ("response", 0, "an answer", False)])
         await _age(db, agent, refs_of=call, refs=timedelta(days=10), blocks=timedelta(days=10))
 
         deleted = await sweep_model_call_text(db, agent, 7)
@@ -311,10 +311,10 @@ async def test_sweep_is_safe_against_a_concurrent_store(db, first):
     try:
         old_call = await _insert_call(db, agent, 10, attempts=0)
         new_call = await _insert_call(db, agent, 0, attempts=0)
-        await _store(db, agent).store(old_call, [("system", 0, _SYSTEM_PROMPT)])
+        await _store(db, agent).store(old_call, [("system", 0, _SYSTEM_PROMPT, False)])
         await _age(db, agent, refs_of=old_call, refs=timedelta(days=10), blocks=timedelta(days=10))
         [digest] = await _hashes(db, agent)
-        parts = [("system", 0, _SYSTEM_PROMPT)]
+        parts = [("system", 0, _SYSTEM_PROMPT, False)]
 
         if first == "store":
             store_task = asyncio.create_task(_store(gate, agent).store(new_call, parts))

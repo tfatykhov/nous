@@ -252,6 +252,21 @@ async def test_ran_call_is_recorded_with_reason_and_ledger_link():
 
 
 @pytest.mark.asyncio
+async def test_a_secret_inside_a_json_string_of_the_input_is_masked():
+    """Serialised, a string that holds JSON has its quotes escaped and the key patterns no longer match it: the
+    input's strings are redacted before the input is serialised."""
+    spy = _Spy()
+    r, _calls = _runner(recorder=spy)
+    tool_input = {"q": 'curl -d {"password":"hunter2"}', "body": '{"password":"hunter2"}'}
+    r._call_api, _sent = _scripted_api([[("t1", "lookup", tool_input)]])
+    await _run_loop(r)
+
+    (rec,) = spy.records
+    assert "hunter2" not in rec.input_text, rec.input_text
+    assert json.loads(rec.input_text)["q"].startswith("curl -d ")  # still the call's input, as JSON
+
+
+@pytest.mark.asyncio
 async def test_error_call_records_error_text_and_flag():
     spy = _Spy()
     r, _calls = _runner(recorder=spy, store=_Store())
