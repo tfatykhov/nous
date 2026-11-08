@@ -393,9 +393,11 @@ async def test_sessions_tools_errors_and_flags(client, db, agent_id, cleanup):
         db, agent_id, t2, 1, session_id="sess-S", tool="write_file", input_text="y", ledger_entry_id=uuid.uuid4()
     )
 
-    # A quiet session: the same call in two turns is no repeat, an approval is no ask, 9 calls is not many.
+    # A quiet session: the same call in two turns is no repeat, an approval is no ask, an ask outside
+    # resolve_intention is no ask, 9 calls is not many.
     q1 = await insert_turn(db, agent_id, "sess-T", started_at=base + timedelta(minutes=2), tool_call_count=9)
     await insert_call(db, agent_id, q1, 0, session_id="sess-T", tool="bash", input_text="pwd")
+    await insert_call(db, agent_id, q1, 1, session_id="sess-T", tool="write_file", input_text='{"decision": "ask"}')
     q2 = await insert_turn(db, agent_id, "sess-T", started_at=base + timedelta(minutes=3), turn_number=2)
     await insert_call(db, agent_id, q2, 0, session_id="sess-T", tool="bash", input_text="pwd")
     await insert_call(
@@ -412,7 +414,7 @@ async def test_sessions_tools_errors_and_flags(client, db, agent_id, cleanup):
         {"tool": "resolve_intention", "calls": 1, "lane": "acts"},
         {"tool": "write_file", "calls": 1, "lane": "workspace"},
     ]
-    assert t["flags"] == [] and (t["tool_calls"], t["errors"]) == (3, 0)
+    assert t["flags"] == [] and (t["tool_calls"], t["errors"]) == (4, 0)
     assert body["tool_names"] == ["bash", "read_file", "resolve_intention", "write_file"]
 
     for lens in ("error", "repeat", "many", "asked", "changed"):
