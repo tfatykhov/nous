@@ -2002,13 +2002,14 @@ def create_app(
             result["drift_trends"] = {}
 
         # 6. Context log (last 10 calls, the quiet ones left out: heartbeat and background checks). The model-call
-        # table's view reads the database, so it can fail like the sections above.
+        # table's view reads the database, so it can fail like the sections above; WARNING, not DEBUG, so a broken
+        # table read shows in the logs, not only as an empty list.
         view = _context_view()
         try:
             entries = await view.recent(None, 10, QUIET_PURPOSES) if view else []
             result["context_log"] = [e.to_dict() for e in entries]
         except Exception:
-            logger.debug("dashboard_observability: context_log failed", exc_info=True)
+            logger.warning("dashboard_observability: context_log failed", exc_info=True)
             result["context_log"] = []
 
         # 7. F108 recording counters (in-memory, since the process started); each null while its log is off.
@@ -2027,8 +2028,13 @@ def create_app(
         if view is None:
             return JSONResponse({"error": "Context logging not enabled"}, status_code=503)
 
-        # Heartbeat and background checks left out: the numbers describe the chat prompt's cache.
-        entries = await view.recent(None, 200, QUIET_PURPOSES)
+        # Heartbeat and background checks left out: the numbers describe the chat prompt's cache. The model-call
+        # table's view reads the database: a fault is a 503 in this endpoint's error shape (the ring cannot fail).
+        try:
+            entries = await view.recent(None, 200, QUIET_PURPOSES)
+        except Exception:
+            logger.warning("dashboard_cache: the model-call log read failed", exc_info=True)
+            return JSONResponse({"error": "Model-call log unavailable"}, status_code=503)
 
         # Filter to entries that have actual token data (API has responded). F108: from the model-call table, failed
         # calls count too (they have no tokens); the ring's entries have no status.

@@ -109,8 +109,9 @@ _GET = text(
     "WHERE id = :id AND agent_id = :agent_id AND purpose = ANY(CAST(:purposes AS text[]))"
 )
 _MAIN_LOOP = sorted(MAIN_LOOP_PURPOSES)
-# The most entries one read returns: the ring's size, which bounded every list before. A limit the caller passes is
-# held to 0 to this (a negative LIMIT is an error in Postgres).
+# The most entries one read returns: the number /dashboard/cache asks for, and the most the ring's entry list ever
+# held (``ContextLogger._entries``, a deque of 200; its full payloads are capped apart, at ``context_log_max_total``,
+# 50). A limit the caller passes is held to 0 to this (a negative LIMIT is an error in Postgres).
 MAX_RECENT = 200
 
 

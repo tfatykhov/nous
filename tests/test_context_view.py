@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -36,10 +37,11 @@ from nous.api.rest import create_app
 from nous.cognitive.schemas import FrameSelection, TurnContext
 from nous.config import Settings
 from nous.handlers import call_background_llm
+from nous.observability import model_calls
 from nous.observability.context_logger import ContextLogger
 from nous.observability.context_view import RingContextView, TableContextView
 from nous.observability.model_call_text import TextStore
-from nous.observability.model_calls import ModelCallRecorder
+from nous.observability.model_calls import CallContext, ModelCallRecorder
 from nous.observability.recording import BoundedWriter
 
 MODEL = "claude-sonnet-5-5"
@@ -634,6 +636,82 @@ async def test_payload_and_section_text_come_from_the_text_store_when_text_on(db
             assert {"preamble", "datetime", "working_memory"} <= set(sections["sections_text"])
             assert list(sections["sections_text"]) == sections["sections_present"] == row["sections_present"]
             assert secret not in sections["sections_text"]["working_memory"]
+    finally:
+        await client.close()
+        await delete_rows(db, agent)
+
+
+@pytest.mark.postgres_only
+async def test_another_agents_call_is_not_found(db, monkeypatch):
+    """A row is read only under its own agent id: another agent's call, its text stored, is 404 on every by-id
+    endpoint and absent from the lists, while its own agent's view serves it."""
+    owner, other = new_agent(), new_agent()
+    writer, recorder, owner_store = recorder_for(db, owner, text_on=True)
+    client = await real_client(StubApi(), monkeypatch, recorder)
+    try:
+        await turn(_runner(client))
+        await settle(writer)
+        [row] = await model_rows(db, owner)
+        call_id = str(row["id"])
+        _, _, other_store = recorder_for(db, other, text_on=True)
+        async with rest(view=TableContextView(db, other, other_store, None)) as http:
+            for path in (
+                f"/context/log/{call_id}",
+                f"/context/log/{call_id}/payload",
+                f"/context/log/{call_id}/sections",
+            ):
+                assert (await http.get(path)).status_code == 404, path
+            assert (await http.get("/context/log")).json() == {"entries": []}
+            assert (await http.get("/dashboard/cache")).json()["summary"]["total_calls"] == 0
+        async with rest(view=TableContextView(db, owner, owner_store, None)) as http:
+            for path in (
+                f"/context/log/{call_id}",
+                f"/context/log/{call_id}/payload",
+                f"/context/log/{call_id}/sections",
+            ):
+                assert (await http.get(path)).status_code == 200, path
+    finally:
+        await client.close()
+        await delete_rows(db, owner)
+
+
+async def test_a_table_read_fault_is_503_on_cache_and_a_warning_on_observability(caplog):
+    """A database fault on the table path: /dashboard/cache answers 503 in its error shape, and the observability
+    page keeps its other sections, with an empty context_log and a WARNING that says why."""
+    view = TableContextView(_NoDatabase(), new_agent(), None, None)
+    async with rest(view=view) as http:
+        got = await http.get("/dashboard/cache")
+        assert (got.status_code, got.json()) == (503, {"error": "Model-call log unavailable"})
+        with caplog.at_level(logging.DEBUG, logger="nous.api.rest"):
+            observability = await http.get("/dashboard/observability")
+    assert observability.status_code == 200 and observability.json()["context_log"] == []
+    said = [(r.levelno, r.getMessage()) for r in caplog.records if "context_log" in r.getMessage()]
+    assert said == [(logging.WARNING, "dashboard_observability: context_log failed")]
+
+
+@pytest.mark.postgres_only
+async def test_a_failed_estimate_never_passes_on_a_stale_call_id(db, monkeypatch):
+    """An id names one call's row. When the estimate fails no id is minted, and a context that already carries one
+    loses it, so two calls made with the same context are two rows, neither under the stale id."""
+
+    def broken_parse(_prompt: str) -> dict[str, str]:
+        raise ValueError("parse broke")
+
+    monkeypatch.setattr(model_calls, "parse_system_sections", broken_parse)
+    agent = new_agent()
+    writer, recorder, _ = recorder_for(db, agent)
+    client = await real_client(StubApi(), monkeypatch, recorder)
+    stale = uuid.uuid4()
+    try:
+        r = _runner(client)
+        ctx = CallContext(purpose="chat", session_id="s1", call_id=stale)
+        for _ in range(2):
+            await asyncio.wait_for(r._call_api("sys", [{"role": "user", "content": "go"}], call_context=ctx), WAIT)
+        await settle(writer)
+        rows = await model_rows(db, agent)
+        assert len(rows) == 2 and stale not in {row["id"] for row in rows}
+        assert all(row["section_tokens_est"] is None for row in rows)  # the estimate did fail
+        assert (recorder.stats.written, recorder.stats.dropped_error) == (2, 0)
     finally:
         await client.close()
         await delete_rows(db, agent)

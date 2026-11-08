@@ -2544,6 +2544,9 @@ class AgentRunner:
                     cache_break_tokens_lost=cache_break.estimated_tokens_lost,
                 )
             call_context = dataclasses.replace(call_context, stats=stats, call_id=call_id)
+        elif isinstance(call_context, CallContext) and call_context.call_id is not None:
+            # No id minted (no estimate, or nothing records): one the input carried names another call's row.
+            call_context = dataclasses.replace(call_context, call_id=None)
 
         return payload, call_context
 
