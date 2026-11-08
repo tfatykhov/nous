@@ -758,7 +758,13 @@ async def test_the_retention_sweeps_never_delete_a_ledger_event(db, monkeypatch)
         )
         await s.commit()
     settings = Settings(
-        agent_id=agent, retrieval_telemetry_retention_days=1, context_log_retention_days=1, tool_call_retention_days=1
+        agent_id=agent,
+        retrieval_telemetry_retention_days=1,
+        context_log_retention_days=1,
+        tool_call_log_enabled=True,
+        tool_call_retention_days=1,
+        model_call_log_enabled=True,
+        model_call_retention_days=1,
     )
 
     class _Counting:

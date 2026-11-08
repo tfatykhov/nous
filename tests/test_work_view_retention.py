@@ -153,7 +153,13 @@ class _FailingDatabase:
 
 def test_sweep_failure_logs_warning(monkeypatch, caplog):
     monkeypatch.setattr(main, "_RETENTION_SWEEP_INTERVAL_SECONDS", 0.01)
-    settings = SimpleNamespace(agent_id="test", tool_call_retention_days=30)
+    settings = SimpleNamespace(
+        agent_id="test",
+        tool_call_log_enabled=True,
+        tool_call_retention_days=30,
+        model_call_log_enabled=False,
+        model_call_retention_days=30,
+    )
     database = _FailingDatabase()
 
     async def scenario() -> None:
@@ -323,7 +329,7 @@ COUNTERS = {
 def test_observability_endpoint_reports_recording_counters():
     data = _observability(tool_call_recorder=_recorder())
 
-    assert data["recording"] == {"tool_calls": COUNTERS}
+    assert data["recording"] == {"tool_calls": COUNTERS, "model_calls": None}
     # Additive: the existing keys are all still there.
     assert set(data) == {
         "event_bus",
@@ -337,7 +343,7 @@ def test_observability_endpoint_reports_recording_counters():
 
 
 def test_observability_endpoint_reports_null_when_recording_is_off():
-    assert _observability()["recording"] == {"tool_calls": None}
+    assert _observability()["recording"] == {"tool_calls": None, "model_calls": None}
 
 
 def test_observability_endpoint_reads_the_recorder_through_the_apps_lazy_proxy():
@@ -346,10 +352,10 @@ def test_observability_endpoint_reads_the_recorder_through_the_apps_lazy_proxy()
     components: dict[str, Any] = {"tool_call_recorder": None}
     proxy = main._lazy_component(components, "tool_call_recorder")
 
-    assert _observability(tool_call_recorder=proxy)["recording"] == {"tool_calls": None}
+    assert _observability(tool_call_recorder=proxy)["recording"] == {"tool_calls": None, "model_calls": None}
 
     components["tool_call_recorder"] = _recorder()
-    assert _observability(tool_call_recorder=proxy)["recording"] == {"tool_calls": COUNTERS}
+    assert _observability(tool_call_recorder=proxy)["recording"] == {"tool_calls": COUNTERS, "model_calls": None}
 
 
 # ---------------------------------------------------------------------------------------------------------------------

@@ -172,10 +172,22 @@ async def _context_log_retention_loop(settings: Settings, database: Database) ->
             logger.debug("OB-1: retention sweep failed", exc_info=True)
 
 
-async def _tool_call_retention_loop(settings: Settings, database: Database) -> None:
-    """F108: delete this agent's tool-call and turn rows that are past their retention, at startup and then daily."""
-    from nous.observability.work_view_retention import sweep_tool_calls
+def _work_view_sweeps(settings: Settings) -> tuple[bool, bool]:
+    """F108: ``(tool calls, model calls)``, which work-view logs the retention loop sweeps: a log that is on, with a
+    retention of at least one day (0 days would delete every row, so it means no sweep)."""
+    return (
+        settings.tool_call_log_enabled and settings.tool_call_retention_days > 0,
+        settings.model_call_log_enabled and settings.model_call_retention_days > 0,
+    )
 
+
+async def _tool_call_retention_loop(settings: Settings, database: Database) -> None:
+    """F108: delete this agent's work-view rows that are past their retention, at startup and then daily: the
+    tool-call and turn rows while the tool-call log is on, the model-call rows while the model-call log is on, each
+    by its own retention and in its own try, so one failing sweep never skips the other."""
+    from nous.observability.work_view_retention import sweep_model_calls, sweep_tool_calls
+
+    tool_calls, model_calls = _work_view_sweeps(settings)
     # Sweep once at startup, THEN daily, as the retrieval-log loop does: a process restarted more often than once a
     # day would never prune under a sleep-first loop.
     first = True
@@ -185,21 +197,35 @@ async def _tool_call_retention_loop(settings: Settings, database: Database) -> N
                 first = False
             else:
                 await asyncio.sleep(_RETENTION_SWEEP_INTERVAL_SECONDS)
-            days = settings.tool_call_retention_days
-            deleted = await sweep_tool_calls(database, settings.agent_id, days)
-            logger.info(
-                "F108: tool_call_log/agent_turn_log retention sweep (>%dd, agent=%s) deleted %s",
-                days,
-                settings.agent_id,
-                deleted,
-            )
+            if tool_calls:
+                try:
+                    days = settings.tool_call_retention_days
+                    deleted = await sweep_tool_calls(database, settings.agent_id, days)
+                    logger.info(
+                        "F108: tool_call_log/agent_turn_log retention sweep (>%dd, agent=%s) deleted %s",
+                        days,
+                        settings.agent_id,
+                        deleted,
+                    )
+                except Exception:
+                    # WARNING, not DEBUG: a sweep that keeps failing lets both tables grow without bound.
+                    logger.warning("F108: tool-call retention sweep failed", exc_info=True)
+            if model_calls:
+                try:
+                    days = settings.model_call_retention_days
+                    deleted = await sweep_model_calls(database, settings.agent_id, days)
+                    logger.info(
+                        "F108: model_call_log retention sweep (>%dd, agent=%s) deleted %s",
+                        days,
+                        settings.agent_id,
+                        deleted,
+                    )
+                except Exception:
+                    logger.warning("F108: model-call retention sweep failed", exc_info=True)
         except asyncio.CancelledError:
             if cancel_requested():
                 break
-            logger.exception("F108: tool-call retention sweep was cancelled from within — the loop continues")
-        except Exception:
-            # WARNING, not DEBUG: a sweep that keeps failing lets both tables grow without bound.
-            logger.warning("F108: tool-call retention sweep failed", exc_info=True)
+            logger.exception("F108: work-view retention sweep was cancelled from within — the loop continues")
 
 
 async def _a2ui_sweep_loop(settings: Settings, surface_service: SurfaceService) -> None:
@@ -408,6 +434,29 @@ async def create_components(settings: Settings) -> dict:
             cache_size=settings.embedding_cache_size,
         )
 
+    # F108: the agent work view's recording. work_view_writer is the ONE bounded writer every work-view recorder
+    # shares (the model-call recorder here, the tool-call recorder once the runner exists), so recording holds at most
+    # 4 pool connections in all and never blocks a turn. The model-call recorder is built before the first model call
+    # (the identity seed below already embeds) and handed to every hook: both Anthropic clients (create_client), the
+    # embedder, the browser task loop and the reranker. The last two are module-level, so per process.
+    work_view_writer = None
+    model_call_recorder = None
+    if settings.tool_call_log_enabled or settings.model_call_log_enabled:
+        from nous.observability.recording import BoundedWriter
+
+        work_view_writer = BoundedWriter("work_view", concurrency=4, timeout_s=30.0, max_pending=500)
+    if settings.model_call_log_enabled:
+        from nous.browser import loop as browser_loop
+        from nous.heart import reranker
+        from nous.observability.model_calls import ModelCallRecorder
+
+        model_call_recorder = ModelCallRecorder(work_view_writer, database, settings.agent_id, settings)
+        if embedding_provider is not None:
+            embedding_provider.set_recorder(model_call_recorder)
+        browser_loop.set_recorder(model_call_recorder)
+        reranker.set_recorder(model_call_recorder)
+        logger.info("F108: model-call recorder wired (retention %d days)", settings.model_call_retention_days)
+
     brain = Brain(database, settings, embedding_provider)
     heart = Heart(database, settings, embedding_provider, owns_embeddings=False)  # F4
 
@@ -457,7 +506,7 @@ async def create_components(settings: Settings) -> dict:
     # Create shared API client for all LLM calls (handlers + runner + admission + critic)
     from nous.api.anthropic_client import create_client
 
-    api_client = create_client(settings)
+    api_client = create_client(settings, recorder=model_call_recorder)
     await api_client.start()
 
     # F050: wire QueryExpander into Heart (only if flag enabled).
@@ -1239,26 +1288,22 @@ async def create_components(settings: Settings) -> dict:
                 _context_log_retention_loop(settings, database), name="context-log-retention"
             )
 
-    # F108: the agent work view's recording: one tool_call_log row per tool call and one agent_turn_log row per turn.
-    # work_view_writer is the ONE bounded writer every work-view recorder shares (the model-call recorder is to be
-    # handed this same writer), so recording holds at most 4 pool connections in all and never blocks a turn.
-    work_view_writer = None
+    # F108: the agent work view's recording: one tool_call_log row per tool call and one agent_turn_log row per turn,
+    # through the shared work_view_writer built with the model-call recorder above.
     tool_call_recorder = None
-    tool_call_retention_task = None
     if settings.tool_call_log_enabled:
-        from nous.observability.recording import BoundedWriter
         from nous.observability.tool_calls import ToolCallRecorder
 
-        work_view_writer = BoundedWriter("work_view", concurrency=4, timeout_s=30.0, max_pending=500)
         tool_call_recorder = ToolCallRecorder(work_view_writer, database, settings.agent_id, settings)
         runner.set_tool_call_recorder(tool_call_recorder)
         logger.info("F108: tool-call recorder wired (retention %d days)", settings.tool_call_retention_days)
 
-        # A retention of 0 days would delete every row, so it means no sweep.
-        if settings.tool_call_retention_days > 0:
-            tool_call_retention_task = asyncio.create_task(
-                _tool_call_retention_loop(settings, database), name="tool-call-retention"
-            )
+    # One retention loop sweeps each work-view log that is on, by its own retention (0 days means no sweep).
+    tool_call_retention_task = None
+    if any(_work_view_sweeps(settings)):
+        tool_call_retention_task = asyncio.create_task(
+            _tool_call_retention_loop(settings, database), name="tool-call-retention"
+        )
 
     # F099 Phase 2c: the continuation runner. None unless NOUS_CONTINUATION_ENABLED is on (and
     # CONTINUATION_RUNNER_READY, True since PR-2e), so the reconciler's pass below and the shutdown see none.
@@ -1417,7 +1462,7 @@ async def create_components(settings: Settings) -> dict:
             )
 
             # Create dedicated API client for heartbeat (isolated connection pool)
-            heartbeat_api_client = create_client(settings)
+            heartbeat_api_client = create_client(settings, recorder=model_call_recorder)
             await heartbeat_api_client.start()
             logger.info("F034: Heartbeat API client created (isolated from main runner)")
 
@@ -1790,6 +1835,7 @@ async def create_components(settings: Settings) -> dict:
         "context_log_retention_task": context_log_retention_task,
         "work_view_writer": work_view_writer,
         "tool_call_recorder": tool_call_recorder,
+        "model_call_recorder": model_call_recorder,
         "tool_call_retention_task": tool_call_retention_task,
         "result_reconciler_task": result_reconciler_task,
         "retrieval_log_retention_task": retrieval_log_retention_task,
@@ -1975,6 +2021,19 @@ async def shutdown_components(components: dict) -> None:
     if brain:
         await brain.close()
 
+    # F108: no model-call recorder outlives its writer. The browser loop's and the reranker's hooks are module-level
+    # (per process), so they are cleared here, and so are the main client's and the embedder's. The heartbeat's client
+    # was closed and dropped with the heartbeat.
+    if components.get("model_call_recorder") is not None:
+        from nous.browser import loop as browser_loop
+        from nous.heart import reranker
+
+        browser_loop.set_recorder(None)
+        reranker.set_recorder(None)
+        for hooked in (components.get("api_client"), components.get("embedding_provider")):
+            if hooked is not None:
+                hooked.set_recorder(None)
+
     # F108: the work-view rows still pending land before the pool closes. Every producer of turns has stopped by
     # here. drain() never raises; a write still running at the deadline keeps its own 30 s timeout and is logged.
     work_view_writer = components.get("work_view_writer")
@@ -2056,6 +2115,7 @@ def build_app(settings: Settings) -> Starlette:
         dag_orchestrator=_lazy_component(components, "dag_orchestrator"),
         continuation_runner=_lazy_component(components, "continuation_runner"),
         tool_call_recorder=_lazy_component(components, "tool_call_recorder"),
+        model_call_recorder=_lazy_component(components, "model_call_recorder"),
     )
 
     if settings.mcp_enabled:
