@@ -1744,10 +1744,30 @@ class AgentRunner:
             # 3. Append user message (text-only; upgraded to multimodal after censor check)
             conversation.messages.append(Message(role="user", content=user_message, text_content=user_message))
             usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+            # F108: the turn's own id, a local like the number (numbers repeat after compaction, ids never do),
+            # minted before the censor check so a blocked turn has its row too.
+            _turn_id = uuid4()
+            # F108: the turn's call counter, here so the turn row can count the calls of a turn that raised.
+            _call_indexes = itertools.count()
 
             # 3b. Censor block check — skip LLM if input was blocked
             if turn_context.censor_blocked:
                 response_text = turn_context.censor_block_reason or "I can't process that request."
+                if self._tool_call_recorder:
+                    self._note_turn(
+                        _ctx,
+                        turn_id=_turn_id,
+                        session_id=session_id,
+                        # The number the main path takes below, at the same point (after the user message).
+                        turn_number=(len(conversation.messages) + 1) // 2,
+                        turn_context=turn_context,
+                        trigger=user_message,
+                        reply=response_text,
+                        error=None,
+                        claim_check=None,
+                        call_indexes=_call_indexes,
+                        started_at=_turn_started,
+                    )
                 conversation.messages.append(Message(role="assistant", content=response_text))
                 turn_result = TurnResult(response_text=response_text)
                 await self._cognitive.post_turn(
@@ -1829,10 +1849,6 @@ class AgentRunner:
             # between, and a concurrent session can overwrite the shared field
             # across any of them.
             _turn_number_local = self._current_turn_number
-            # F108: the turn's own id, a local like the number (numbers repeat after compaction, ids never do).
-            _turn_id = uuid4()
-            # F108: the turn's call counter, here so the turn row can count the calls of a turn that raised.
-            _call_indexes = itertools.count()
             self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
             self._current_call_type = "subtask" if is_subtask else "chat"
 
@@ -2467,10 +2483,26 @@ class AgentRunner:
 
             # Append user message (text-only; upgraded to multimodal after censor check)
             conversation.messages.append(Message(role="user", content=user_message, text_content=user_message))
+            _stream_turn_id = uuid4()  # F108: see run_turn
+            call_indexes = itertools.count()  # F108: the place of each call in the turn, across every segment
 
             # Censor block check — yield block message and return
             if turn_context.censor_blocked:
                 block_msg = turn_context.censor_block_reason or "I can't process that request."
+                if self._tool_call_recorder:
+                    self._note_turn(
+                        _ctx,
+                        turn_id=_stream_turn_id,
+                        session_id=session_id,
+                        turn_number=(len(conversation.messages) + 1) // 2,  # F108: see run_turn
+                        turn_context=turn_context,
+                        trigger=user_message,
+                        reply=block_msg,
+                        error=None,
+                        claim_check=None,
+                        call_indexes=call_indexes,
+                        started_at=_turn_started,
+                    )
                 conversation.messages.append(Message(role="assistant", content=block_msg))
                 turn_result = TurnResult(response_text=block_msg)
                 await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
@@ -2544,7 +2576,6 @@ class AgentRunner:
             # field is overwritten by any concurrent session, and this
             # generator awaits the model many times before dispatching a tool.
             _stream_turn_number = self._current_turn_number
-            _stream_turn_id = uuid4()  # F108: see run_turn
             self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
             self._current_call_type = "chat"
 
@@ -2630,7 +2661,6 @@ class AgentRunner:
 
             all_tool_results: list[ToolResult] = []
             keys_this_turn: set[str] = set()  # harness 2b: keys this invocation dispatched
-            call_indexes = itertools.count()  # F108: the place of each call in the turn, across every segment
             all_thinking_blocks: list[str] = []  # Accumulated across all tool loop iterations
             total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
             response_text = ""

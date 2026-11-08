@@ -156,6 +156,28 @@ async def test_no_recorder_writes_no_turn_row(path):
     assert await _drive(r, path, [[("t1", "lookup", {"q": "x"})]]) == "done"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", PATHS)
+async def test_censor_blocked_turn_writes_a_row(path):
+    """A turn an abort censor stops never reaches the model, but it ran post_turn, so it has its row."""
+    spy = _TurnSpy()
+    r, _calls = _runner(recorder=spy)
+    r._cognitive.preset = _context(censor_blocked=True, censor_block_reason="nope", critic_verdict=VERDICT)
+    if path == "run_turn":
+        text_out, _ctx, _usage = await r.run_turn("s1", "go")
+    else:
+        events = [e async for e in r.stream_chat("s1", "go")]
+        text_out = "".join(e.text or "" for e in events if e.type == "text")
+    r._api_shared = True
+    await r.close()
+    assert text_out == "nope"
+    (turn,) = spy.turns
+    assert (turn.trigger_text, turn.reply_text, turn.error, turn.claim_check) == ("go", "nope", None, None)
+    assert turn.tool_call_count == 0 and spy.records == []
+    assert turn.critic == VERDICT and turn.turn_number == 1 and isinstance(turn.id, uuid.UUID)
+    assert turn.started_at.tzinfo is not None and turn.ended_at.tzinfo is not None
+
+
 # ---- error and cancel still end in a row ----------------------------------------------------------------------
 
 
