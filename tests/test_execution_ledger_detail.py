@@ -1,6 +1,8 @@
 """Execution ledger detail capture (migration 086): the redacted call input and output."""
 
+import hashlib
 import json
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -380,3 +382,91 @@ def test_a_secret_inside_a_json_string_is_masked_in_the_stored_input():
     stored = ledger_store.detail_input("write_file", {"path": "/tmp/a", "content": _NESTED})
 
     assert "hunter2" not in stored and json.loads(stored)["path"] == "/tmp/a"
+
+
+# ---- a text near the cap keeps its head and tail (prod: the scan pad is 3148, the longest own secret) ----------------
+
+_PROD_PAD = 3148
+_CUT = "\n…[middle cut]…\n"
+_LENGTHS = pytest.mark.parametrize("n", [501, 600, 1500, 3000, 3600, 6000, 20000])
+
+
+@pytest.fixture
+def prod_pad(monkeypatch):
+    """The scan pad prod measured: it grows with the longest own secret (a service-account JSON)."""
+    monkeypatch.setattr(ledger_store, "redaction_scan_pad", lambda: _PROD_PAD)
+
+
+def _sample(n: int) -> str:
+    """``n`` characters of prose that redaction leaves alone, from ``HEAD-`` to ``-TAIL``."""
+    return ("HEAD-" + "lorem ipsum dolor sit amet\n" * (n // 27 + 1))[: n - 5] + "-TAIL"
+
+
+@_LENGTHS
+def test_a_text_over_the_cap_keeps_its_head_and_tail_at_the_prod_pad(prod_pad, n):
+    """Under the scan bound the windows cover the whole text: dropping the pad there emptied both sides."""
+    text = _sample(n)
+    out = detail_text(text, 500)
+    assert out != _CUT and out.count(_CUT) == 1
+    head, tail = out.split(_CUT)
+    assert len(head) == 250 and len(tail) == 250
+    assert text.startswith(head) and text.endswith(tail)
+    assert len(out) <= 500 + len(_CUT)
+
+
+@_LENGTHS
+@pytest.mark.parametrize("where", ["start", "head_cut", "tail_cut", "end"])
+def test_an_own_secret_is_masked_wherever_it_sits_at_the_prod_pad(prod_pad, own_secret, n, where):
+    filler = _sample(n - len(own_secret))
+    at = {
+        "start": 0,
+        "head_cut": 250 - len(own_secret) // 2,  # straddles the head's cut
+        "tail_cut": len(filler) - 250 + len(own_secret) // 2,  # straddles the tail's cut
+        "end": len(filler),
+    }[where]
+    text = filler[:at] + own_secret + filler[at:]
+    out = detail_text(text, 500)
+    assert _longest_shared_run(own_secret, out) is None
+    assert len(out) <= 500 + len(_CUT)
+    assert out.strip() and out != _CUT
+    if _CUT in out:  # masking can bring a text just over the cap back under it, kept whole
+        head, tail = out.split(_CUT)
+        assert head and tail
+    else:
+        assert out == text.replace(own_secret, SECRET_MASK)
+
+
+def test_redact_structure_keeps_a_mid_length_string_at_the_prod_pad(prod_pad):
+    long = _sample(1500)
+    [out] = ledger_store.redact_structure([long], 500)
+    assert out == detail_text(long, 500)
+    assert out.startswith("HEAD-") and out.endswith("-TAIL") and len(out) == 500 + len(_CUT)
+
+
+@pytest.mark.parametrize("lead", ["", "X"], ids=["at_the_edge", "one_char_in"])
+def test_a_long_text_that_opens_and_closes_with_a_long_own_secret_keeps_both_sides(monkeypatch, lead):
+    """An own secret longer than half the cap runs across the cut, so the first scans disagree from its start; the
+    side is settled one pad further in, where the secret is masked whole."""
+    secret = " ".join(f"qxzjk{i}" for i in range(500))  # ~4000 chars: the scan pad grows to its length
+    _set_secret(monkeypatch, secret)
+    prose = "the quick brown fox jumps over the lazy dog\n" * 1000
+    text = lead + secret + prose + secret + lead[::-1]
+    out = detail_text(text, 500)
+    head, tail = out.split(_CUT)
+    assert _longest_shared_run(secret, out, 12) is None
+    assert head.startswith(lead + SECRET_MASK + "the quick") and len(head) == 250
+    assert tail.endswith("lazy dog\n" + SECRET_MASK + lead[::-1]) and len(tail) == 250
+
+
+@pytest.mark.parametrize("pad", [None, _PROD_PAD], ids=["default_pad", "prod_pad"])
+def test_a_long_text_dense_with_masks_keeps_both_sides(monkeypatch, pad):
+    """``git log --format=%H``: each hash masks to fewer characters, so a window shrinks below the pad. Dropping the
+    pad in redacted characters then emptied both sides; it is dropped in raw characters."""
+    if pad is not None:
+        monkeypatch.setattr(ledger_store, "redaction_scan_pad", lambda: pad)
+    hashes = "".join(hashlib.sha1(str(i).encode()).hexdigest() + "\n" for i in range(2000))
+    out = detail_text(hashes, 500)
+    head, tail = out.split(_CUT)
+    assert "[REDACTED_HEX]" in head and "[REDACTED_HEX]" in tail
+    assert re.search(r"[0-9a-f]{4}", out) is None  # no part of a hash the cut split
+    assert len(out) <= 500 + len(_CUT)
