@@ -495,6 +495,9 @@ async def test_views_survive_restart(db, monkeypatch):
         assert [e.id for e in await restarted.recent(None, 20, frozenset())] == ids
         assert [e.id for e in await restarted.recent("s2", 20, frozenset())] == ids[:1]
         assert [e.id for e in await restarted.recent(None, 2, frozenset())] == ids[:2]
+        # a limit is held to 0 to MAX_RECENT (Postgres refuses a negative LIMIT)
+        assert await restarted.recent(None, -1, frozenset()) == []
+        assert [e.id for e in await restarted.recent(None, 10**9, frozenset())] == ids
         entry = await restarted.get(ids[1])
         assert entry is not None and (entry.session_id, entry.call_type, entry.input_tokens_actual) == ("s1", "chat", 3)
         async with rest(view=restarted) as http:

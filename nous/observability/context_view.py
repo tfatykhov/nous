@@ -109,6 +109,9 @@ _GET = text(
     "WHERE id = :id AND agent_id = :agent_id AND purpose = ANY(CAST(:purposes AS text[]))"
 )
 _MAIN_LOOP = sorted(MAIN_LOOP_PURPOSES)
+# The most entries one read returns: the ring's size, which bounded every list before. A limit the caller passes is
+# held to 0 to this (a negative LIMIT is an error in Postgres).
+MAX_RECENT = 200
 
 
 def _entry(row: Any) -> TableContextLogEntry:
@@ -208,7 +211,7 @@ class TableContextView:
         params: dict[str, Any] = {
             "agent_id": self._agent_id,
             "purposes": [p for p in _MAIN_LOOP if p not in exclude_purposes],
-            "limit": limit,
+            "limit": min(max(limit, 0), MAX_RECENT),
         }
         session = ""
         if session_id:
