@@ -16,6 +16,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -714,6 +715,66 @@ async def test_the_estimate_runs_once_per_call_and_only_when_consumed(monkeypatc
         for ctx, entry in zip(client.contexts, reversed(r._context_logger.get_recent())):
             assert ctx.stats.section_tokens_est == entry.token_breakdown
             assert ctx.stats.total_tokens_est == entry.total_tokens_est
+
+
+class _ClientWithoutRecordsCalls(_SpyClient):
+    """A client double that predates ``records_calls``: it has no such attribute at all."""
+
+    @property
+    def records_calls(self) -> bool:  # type: ignore[override]
+        raise AttributeError("records_calls")
+
+
+@pytest.mark.asyncio
+async def test_a_client_without_records_calls_gets_no_estimate(monkeypatch):
+    """The runner reads ``records_calls`` with a False default: with the ring off, a client that lacks it gets no
+    estimate and its contexts carry no stats."""
+    counts = _count_estimates(monkeypatch)
+    client = _ClientWithoutRecordsCalls()
+    assert not hasattr(client, "records_calls")
+    r = _runner(client)
+    conv = Conversation(session_id="s1", messages=[Message(role="user", content="go")])
+    await asyncio.wait_for(
+        r._tool_loop(
+            system_prompt="## Identity\nI am Nous.", conversation=conv, frame_id="conversation", session_id="s1"
+        ),
+        10,
+    )
+    assert len(client.contexts) == 1 and client.contexts[0].stats is None
+    assert counts == {"parse": 0, "walk": 0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("records", [False, True], ids=["ring only", "ring and row"])
+async def test_a_failing_estimate_runs_once_and_its_warning_is_true(monkeypatch, caplog, records):
+    """An estimate that raises is tried once per call (the ring does not try it again), the call goes on, neither the
+    ring nor the row gets an estimate, and the one WARNING claims no recorded call."""
+    tries = 0
+
+    def broken_parse(_prompt: str) -> dict[str, str]:
+        nonlocal tries
+        tries += 1
+        raise ValueError("parse broke")
+
+    monkeypatch.setattr(model_calls, "parse_system_sections", broken_parse)
+    client = _SpyClient()
+    client.records_calls = records
+    r = _runner(client)
+    r.set_context_logger(ContextLogger())
+    conv = Conversation(session_id="s1", messages=[Message(role="user", content="go")])
+    with caplog.at_level(logging.DEBUG, logger="nous.api.runner"):
+        await asyncio.wait_for(
+            r._tool_loop(
+                system_prompt="## Identity\nI am Nous.", conversation=conv, frame_id="conversation", session_id="s1"
+            ),
+            10,
+        )
+    assert len(client.contexts) == 1 and client.contexts[0].stats is None
+    assert tries == 1
+    assert r._context_logger.get_recent() == []
+    about_it = [(rec.levelno, rec.getMessage()) for rec in caplog.records if "estimate" in rec.getMessage()]
+    assert about_it == [(logging.WARNING, "F108: context estimate failed (ValueError); this call has no estimate")]
+    assert "recorded without it" not in caplog.text
 
 
 # ---------------------------------------------------------------------------------------------------------------------

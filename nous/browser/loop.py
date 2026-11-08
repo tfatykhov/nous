@@ -345,8 +345,8 @@ def make_api_caller(
             # client's attempts do), not only the final one.
             try:
                 error = response.json().get("error", {})
-                error_type, error_msg = error.get("type", "unknown"), error.get("message", "")
-                detail = f"{error_type} - {error_msg}"
+                error_type, error_msg = error.get("type", "unknown"), error.get("message", "unknown error")
+                detail = f"{error_type} - {error.get('message', '')}"  # the raised error's text, unchanged
             except Exception:
                 error_type, error_msg = "http_error", f"HTTP {status}: {response.text[:500]}"
                 detail = response.text[:300]

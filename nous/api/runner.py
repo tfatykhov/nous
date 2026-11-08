@@ -2493,10 +2493,11 @@ class AgentRunner:
                 sections = system_sections(flat_system_prompt, preamble)
                 stats = analyze_sections(sections, messages, tools, self._get_context_window_size())
             except Exception as exc:
-                logger.warning("F108: context estimate failed (%s), call recorded without it", type(exc).__name__)
+                logger.warning("F108: context estimate failed (%s); this call has no estimate", type(exc).__name__)
 
-        # F035.4: Log context metadata (entry_id stored locally, NOT in payload)
-        if self._context_logger:
+        # F035.4: Log context metadata (entry_id stored locally, NOT in payload). A failed estimate is not tried again
+        # here: the call gets no ring entry, as when the entry itself failed.
+        if self._context_logger and stats is not None:
             try:
                 _entry = self._context_logger.log(
                     session_id=self._current_session_id,

@@ -23,6 +23,7 @@ from nous.cognitive.context import ContextEngine
 from nous.cognitive.schemas import FrameSelection
 from nous.config import Settings
 from nous.heart.schemas import ProcedureSummary
+from nous.observability import model_calls
 from nous.observability.context_logger import ContextLogEntry
 from nous.observability.model_calls import (
     FREE_TEXT_SECTIONS,
@@ -105,6 +106,29 @@ def test_an_unknown_heading_inside_free_text_stays_in_its_section(name):
         name: f"{head}first line\n## Some Heading\nmore text",
         "context_safety": "be careful",
     }
+
+
+def _section_start_by_full_scan(line: str, current_name: str) -> str | None:
+    """``_section_start`` as written before its first-character pre-test: every marker tried on every line."""
+    for marker in sorted(SECTION_MARKERS, key=len, reverse=True):
+        if line.strip().startswith(marker):
+            return SECTION_MARKERS[marker]
+    if line.startswith("## ") and current_name and current_name not in FREE_TEXT_SECTIONS:
+        return re.sub(r"[^a-z0-9]+", "_", line[3:].lower()).strip("_") or None
+    return None
+
+
+def test_the_first_character_pre_test_never_changes_a_section_start():
+    """The pre-test skips the marker scan for a line no marker or ``## `` heading can start; on every kind of line,
+    each marker and heading with and without leading whitespace or trailing text, it answers as the full scan does."""
+    lines = ["", "   ", "\t", "- a bullet", "plain text", "#", "##", "## ", "#tag", "### deeper", "## Some Heading"]
+    lines += ["  ## Indented Heading", "=", "== not a block", "[", "[note] text", "[graph]", "  - [a] fact", "## ="]
+    for marker in SECTION_MARKERS:
+        lines += [marker, f"  {marker}", f"\t{marker} tail", f"{marker}  ", marker[:-1], f"x{marker}"]
+    for current in ("", "other", "datetime", "context_safety", *sorted(FREE_TEXT_SECTIONS)):
+        for line in lines:
+            expected = _section_start_by_full_scan(line, current)
+            assert model_calls._section_start(line, current) == expected, (line, current)
 
 
 def test_the_identity_prompts_own_headings_are_one_identity_section():

@@ -255,6 +255,25 @@ async def test_browser_recorder_fault_never_breaks_the_call(tmp_path, monkeypatc
     assert (failing.stats.written, failing.stats.dropped_error) == (0, 1)
 
 
+async def test_browser_attempt_without_an_api_message_says_unknown_error(tmp_path):
+    """An API error body with a type and no message: the attempt's text is ``unknown error``, as the shared client
+    records it; the error the loop raises is unchanged."""
+    rows: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+    recorder = ModelCallRecorder(SimpleNamespace(), None, _agent(), SimpleNamespace())
+    recorder._submit_call = lambda params, attempts: rows.append((params, attempts))  # type: ignore[method-assign]
+    _, refused = await _browser_call(
+        tmp_path, lambda r, n: httpx.Response(400, json={"error": {"type": "invalid_request_error"}}), recorder
+    )
+    assert isinstance(refused, BrowserApiError)
+    assert str(refused) == "Anthropic API error (400): invalid_request_error - "
+    [(_params, [attempt])] = rows
+    assert (attempt["http_status"], attempt["error_type"], attempt["error_text"]) == (
+        400,
+        "invalid_request_error",
+        "unknown error",
+    )
+
+
 async def test_run_browser_task_hands_the_set_recorder_to_its_caller(tmp_path, monkeypatch):
     """main.py wires the loop with ``loop.set_recorder``; ``run_browser_task`` passes it to the caller it builds."""
     handed: list[Any] = []

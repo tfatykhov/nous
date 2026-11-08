@@ -175,6 +175,9 @@ FREE_TEXT_SECTIONS: frozenset[str] = frozenset(
 )
 
 _MARKER_PATTERNS = sorted(SECTION_MARKERS.keys(), key=len, reverse=True)
+# The first characters a marker or a ``## `` heading can have: a line that starts with any other cannot start a section,
+# so the marker scan is skipped for it (most prompt lines are bullets or plain text).
+_SECTION_FIRST_CHARS = frozenset(marker[0] for marker in _MARKER_PATTERNS) | {"#"}
 
 
 def _section_start(line: str, current_name: str) -> str | None:
@@ -182,6 +185,8 @@ def _section_start(line: str, current_name: str) -> str | None:
     before the first heading (``current_name`` ``""``) is free text too: on layer.py's degraded path it is the identity
     prompt alone, with its own ``## `` headings."""
     stripped = line.strip()
+    if not stripped or stripped[0] not in _SECTION_FIRST_CHARS:
+        return None
     for marker in _MARKER_PATTERNS:
         if stripped.startswith(marker):
             return SECTION_MARKERS[marker]
