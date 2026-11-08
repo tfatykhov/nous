@@ -307,7 +307,8 @@ async def test_bug11_views_read_the_table(db, monkeypatch):
     """Bug 11: every dashboard view read the in-memory ring, so a restart emptied them. With the flag on the ring
     writes nothing to the database and the views read the table: after a restart (a new view, no ring) every call
     is still listed, and the cache numbers are the table's."""
-    async with recording(db, monkeypatch) as (agent, writer, client, _):
+    # each call takes longer than a clock tick, so the table orders them as the ring does
+    async with recording(db, monkeypatch, StubApi(delay=TICK)) as (agent, writer, client, _):
         ring = ContextLogger()  # main.py's ring with the flag on: no db_writer
         r = _runner(client)
         r.set_context_logger(ring)
@@ -351,7 +352,7 @@ async def test_bug12_tool_results_in_estimate(db, monkeypatch):
     """Bug 12: the message estimate ignored tool-result content, the largest part of a long tool loop. The call
     after a tool counts its result."""
     replies = iter([message(tool="lookup"), message()])
-    api = StubApi(lambda body: next(replies))
+    api = StubApi(lambda body: next(replies), delay=TICK)  # longer than a clock tick: the rows' order is the calls'
     async with recording(db, monkeypatch, api) as (agent, writer, client, _):
         r = _runner(client)
         r.set_dispatcher(_BigResults(["lookup"]))

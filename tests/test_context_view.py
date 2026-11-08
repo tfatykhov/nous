@@ -551,9 +551,9 @@ async def test_quiet_purposes_stay_out_of_chat_lists(db, monkeypatch):
 @pytest.mark.postgres_only
 async def test_background_helper_calls_never_appear_in_context_log_endpoint(db, monkeypatch):
     """The model-call table holds every call; the context endpoints show only the runner's own (MAIN_LOOP_PURPOSES):
-    not in the list, not by session, not by id."""
+    not in the list, not by session, not by id, and not their stored text."""
     agent = new_agent()
-    writer, recorder, _ = recorder_for(db, agent)
+    writer, recorder, store = recorder_for(db, agent, text_on=True)
     client = await real_client(StubApi(), monkeypatch, recorder)
     try:
         await turn(_runner(client), "s1")
@@ -564,7 +564,9 @@ async def test_background_helper_calls_never_appear_in_context_log_endpoint(db, 
         rows = await model_rows(db, agent)
         assert sorted(row["purpose"] for row in rows) == ["chat", "critic", "episode_summarizer"]
         hidden = [str(row["id"]) for row in rows if row["purpose"] != "chat"]
-        async with rest(view=TableContextView(db, agent, None, None)) as http:
+        for call_id in hidden:
+            assert await store.load(uuid.UUID(call_id))  # their text is stored: the endpoints must not serve it
+        async with rest(view=TableContextView(db, agent, store, None)) as http:
             for params in ({}, {"session_id": "s1"}):
                 listed = (await http.get("/context/log", params=params)).json()["entries"]
                 assert [e["purpose"] for e in listed] == ["chat"]
@@ -575,6 +577,7 @@ async def test_background_helper_calls_never_appear_in_context_log_endpoint(db, 
             for call_id in hidden:
                 assert (await http.get(f"/context/log/{call_id}")).status_code == 404
                 assert (await http.get(f"/context/log/{call_id}/payload")).status_code == 404
+                assert (await http.get(f"/context/log/{call_id}/sections")).status_code == 404
     finally:
         await client.close()
         await delete_rows(db, agent)
