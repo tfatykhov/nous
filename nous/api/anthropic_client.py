@@ -1054,7 +1054,8 @@ class SdkAnthropicClient(_ModelCallRecording):
         if not self._client:
             raise RuntimeError("SDK client not initialized -- call start() first")
 
-        kwargs = self._payload_to_kwargs(with_default_thinking(payload))
+        payload = with_default_thinking(payload)
+        kwargs = self._payload_to_kwargs(payload)
 
         # Bound for the whole call: the response hook reports each of the SDK's retries to it.
         with self._open_scope(payload, call_context, "call") as scope, _bound(scope):
@@ -1105,7 +1106,8 @@ class SdkAnthropicClient(_ModelCallRecording):
         if not self._client:
             raise RuntimeError("SDK client not initialized -- call start() first")
 
-        kwargs = self._payload_to_kwargs(with_default_thinking(payload))
+        payload = with_default_thinking(payload)
+        kwargs = self._payload_to_kwargs(payload)
         kwargs["stream"] = True
 
         with self._open_scope(payload, call_context, "stream") as scope:
@@ -1148,7 +1150,8 @@ class SdkAnthropicClient(_ModelCallRecording):
         if not self._client:
             raise RuntimeError("SDK client not initialized -- call start() first")
 
-        kwargs = self._payload_to_kwargs(with_default_thinking(payload))
+        payload = with_default_thinking(payload)
+        kwargs = self._payload_to_kwargs(payload)
         # messages.stream() does NOT accept the stream= kwarg that
         # _payload_to_kwargs may set; passing it would raise TypeError.
         kwargs.pop("stream", None)

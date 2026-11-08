@@ -520,8 +520,8 @@ class ModelCallScope:
     (``bind_for_request``) so its HTTP response hook can report the attempts. At exit the row is written.
     A reported status stands (the call completed or failed, whatever its caller did next); when neither was
     reported, exit labels the call ``cancelled`` on ``CancelledError`` or ``GeneratorExit``, ``error`` for any other
-    exception and ``ok`` when there was none. Nothing here raises into the client, and exit never swallows the
-    exception.
+    exception, and ``ok`` when there was none, except a ``stream`` that ended with no terminal event, which was cut
+    off: ``error``. Nothing here raises into the client, and exit never swallows the exception.
     """
 
     def __init__(self, recorder: ModelCallRecorder, payload: Any, ctx: CallContext | None, call_kind: str) -> None:
@@ -550,6 +550,11 @@ class ModelCallScope:
                     self._status = "cancelled"
                 elif exc is not None:
                     self.fail(exc)
+            elif self._status is None and self._call_kind == "stream":
+                # A stream that ended normally without done, message_stop or error was cut off (a consumer that
+                # stops early arrives as GeneratorExit instead).
+                self._status = "error"
+                self._error_text = "stream ended without a terminal event"
             self._write()
         except Exception as err:
             self._recorder._stats.dropped_error += 1

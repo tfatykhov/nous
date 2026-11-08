@@ -345,6 +345,58 @@ async def test_error_then_generator_exit_stays_error(backend, db, monkeypatch):
 
 @pytest.mark.postgres_only
 @pytest.mark.parametrize("backend", BACKENDS)
+async def test_stream_truncated_records_error(backend, db, monkeypatch):
+    """A stream whose body ends with no done, message_stop or error event was cut off: the caller gets the events
+    that came, as before, and the row says ``error``."""
+    agent = _agent()
+    writer, recorder = _recorder(db, agent)
+    client = await _client(backend, _Api(stream=[_stream(_SSE_OK[:3])]), monkeypatch, recorder)
+    try:
+        events = [e async for e in client.stream(dict(_PAYLOAD), call_context=CallContext(purpose="chat"))]
+        assert [e.type for e in events] == _STREAM_TYPES[:3]
+        await writer.drain(5.0)
+        [row] = await _rows(db, agent)
+        assert (row["status"], row["error_text"], row["stop_reason"]) == (
+            "error",
+            "stream ended without a terminal event",
+            None,
+        )
+        assert _usage(row) == (3, 2000, 50, None)
+        assert [a["http_status"] for a in await _attempts(db, row["id"])] == [200]
+    finally:
+        await client.close()
+        await _delete(db, agent)
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+async def test_the_scope_gets_the_payload_that_is_sent(backend, monkeypatch):
+    """Both backends open the scope on the payload after ``with_default_thinking``, the one the API receives."""
+    payload = {**_PAYLOAD, "model": "claude-haiku-5-5"}  # a model whose thinking is disabled by default
+    recorder, _rows_kept = _memory_recorder(monkeypatch)
+    seen: list[tuple[str, dict[str, Any]]] = []
+    real_scope = recorder.scope
+
+    def spy(scope_payload: dict[str, Any], ctx: Any, call_kind: str) -> Any:
+        seen.append((call_kind, scope_payload))
+        return real_scope(scope_payload, ctx, call_kind)
+
+    monkeypatch.setattr(recorder, "scope", spy)
+    api = _Api(call=[_ok_call()], stream=[_stream(), _stream()])
+    client = await _client(backend, api, monkeypatch, recorder)
+    try:
+        ctx = CallContext(purpose="chat")
+        await client.call(dict(payload), call_context=ctx)
+        [e async for e in client.stream(dict(payload), call_context=ctx)]
+        await client.call_streaming_aggregated(dict(payload), call_context=ctx)
+    finally:
+        await client.close()
+    assert [kind for kind, _ in seen] == ["call", "stream", "aggregated"]
+    assert all(p["thinking"] == {"type": "disabled"} for _, p in seen)
+    assert all(body["thinking"] == {"type": "disabled"} for body in api.bodies)  # what is sent is unchanged
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("backend", BACKENDS)
 async def test_done_then_generator_exit_stays_ok(backend, db, monkeypatch):
     """The response is complete at ``done``: a consumer that stops there (before ``message_stop``) leaves it ``ok``."""
     agent = _agent()

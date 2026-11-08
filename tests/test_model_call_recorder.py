@@ -443,7 +443,7 @@ async def test_two_concurrent_scopes_do_not_cross(db):
         with model_call_context(purpose="critic" if session == "A" else "reflection", session_id=session):
             with recorder.scope(_PAYLOAD, None, "call") as scope, scope.bind_for_request():
                 entered.set()
-                await wait_for.wait()
+                await asyncio.wait_for(wait_for.wait(), 10)  # bounded: a broken scope fails the test, never hangs it
                 model_calls._ACTIVE_SCOPE.get().attempt(status, None, None, 10)
                 await asyncio.sleep(0)
                 scope.finish(ApiResponse(content=[], stop_reason="end_turn", usage={"output_tokens": output}))
@@ -451,10 +451,10 @@ async def test_two_concurrent_scopes_do_not_cross(db):
     try:
         # A enters first, B enters while A waits, A finishes while B waits, then B finishes
         task_a = asyncio.create_task(call("A", a_in, a_go, 111, 200))
-        await a_in.wait()
+        await asyncio.wait_for(a_in.wait(), 10)
         b_go = asyncio.Event()
         task_b = asyncio.create_task(call("B", b_in, b_go, 222, 201))
-        await b_in.wait()
+        await asyncio.wait_for(b_in.wait(), 10)
         a_go.set()
         await task_a
         b_go.set()
