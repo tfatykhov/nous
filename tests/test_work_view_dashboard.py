@@ -464,6 +464,11 @@ async def test_sessions_title_prefers_episode_then_subtask_then_trigger(client, 
         await insert_turn(db, agent_id, "sess-T", started_at=base + timedelta(minutes=3), trigger=long_trigger)
         await insert_turn(db, agent_id, "sess-T", started_at=base + timedelta(minutes=4), trigger="second")
 
+        # Another agent's subtask never titles a session.
+        their_sub = await insert_subtask(db, other, "Another agent's subtask")
+        x = await insert_turn(db, agent_id, "sess-X", started_at=base + timedelta(minutes=5), trigger="trigger X")
+        await insert_call(db, agent_id, x, 0, session_id="sess-X", subtask_id=their_sub)
+
         by_id = _by_id(await get_json(client))
     finally:
         await delete_agent_rows(db, other)
@@ -473,6 +478,7 @@ async def test_sessions_title_prefers_episode_then_subtask_then_trigger(client, 
     assert by_id["sess-S"]["title"] == long_task[:100]
     assert by_id["sess-T"]["title"] == long_trigger[:80]
     assert by_id["sess-T"]["first_message"] == long_trigger
+    assert by_id["sess-X"]["title"] == "trigger X"
 
 
 @pytest.mark.postgres_only
@@ -660,6 +666,15 @@ async def test_sessions_ended_at_and_title_fallback(client, db, agent_id, cleanu
     assert datetime.fromisoformat(open_["ended_at"]) == base + timedelta(minutes=10)
     assert (long["title"], long["first_message"]) == ("(no title)", None)
     assert long["tools"] == [] and long["tool_calls"] == 0 and long["flags"] == []
+
+
+@pytest.mark.postgres_only
+async def test_sessions_run_under_a_10s_statement_timeout(db, agent_id):
+    async with db.session() as session:
+        await wv.get_sessions(
+            session, agent_id, kind="all", days=7, tool=None, q=None, lens=None, limit=50, before=None
+        )
+        assert (await session.execute(text("SHOW statement_timeout"))).scalar_one() == "10s"
 
 
 @pytest.mark.postgres_only

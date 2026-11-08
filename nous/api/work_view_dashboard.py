@@ -207,6 +207,12 @@ repeats AS (
     GROUP BY session_id, turn_id, tool_name, input_text
     HAVING count(*) >= 2
 ),
+first_subtask AS (
+    SELECT DISTINCT ON (session_id) session_id, subtask_id
+    FROM calls
+    WHERE subtask_id IS NOT NULL
+    ORDER BY session_id, turn_started_at, turn_id, call_index
+),
 grouped AS (
     SELECT t.session_id, min(t.started_at) AS started_at, max(t.last_at) AS ended_at, count(*) AS turns,
            coalesce(bool_or(t.tool_call_count >= :many), false) AS f_many
@@ -232,14 +238,12 @@ titled AS (
         (SELECT e.title FROM heart.episodes e
          WHERE e.agent_id = :agent AND e.session_id = l.session_id AND e.active AND coalesce(e.title, '') <> ''
          ORDER BY e.started_at DESC LIMIT 1),
-        (SELECT left(st.task, :task_chars) FROM heart.subtasks st
-         WHERE st.agent_id = :agent AND st.id = (
-             SELECT c.subtask_id FROM calls c
-             WHERE c.session_id = l.session_id AND c.subtask_id IS NOT NULL
-             ORDER BY c.turn_started_at, c.turn_id, c.call_index LIMIT 1)),
+        left(st.task, :task_chars),
         left(nullif(l.first_message, ''), :trigger_chars),
         :no_title) AS title
     FROM listed l
+    LEFT JOIN first_subtask fs ON fs.session_id = l.session_id
+    LEFT JOIN heart.subtasks st ON st.id = fs.subtask_id AND st.agent_id = :agent
 )
 """
 
