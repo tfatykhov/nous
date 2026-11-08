@@ -521,6 +521,17 @@ async def test_with_every_log_off_the_loop_starts_only_while_text_is_left(db, te
         await _delete(db, agent)
 
 
+@pytest.mark.postgres_only
+async def test_with_text_capture_on_the_loop_starts_on_an_empty_database(db):
+    """The numbers kept 0 days and the tool log off, so neither of their sweeps runs, but the text is being recorded:
+    an empty database now still has text tomorrow, so the loop must start."""
+    settings = _logs_off(
+        _agent(), model_call_log_enabled=True, model_call_retention_days=0, model_call_text_enabled=True
+    )
+
+    assert await main._work_view_retention_needed(settings, db) is True
+
+
 async def test_with_a_log_on_the_loop_starts_without_asking_the_database():
     database = MagicMock()
 

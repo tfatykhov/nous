@@ -184,14 +184,17 @@ def _work_view_sweeps(settings: Settings) -> tuple[bool, bool, bool]:
 
 
 async def _work_view_retention_needed(settings: Settings, database: Database) -> bool:
-    """F108: whether to start the work-view retention loop: while a log is swept, or, with every log off, while the
-    text is kept by a retention and this agent still has text (one EXISTS query at startup), so text stored before
-    the text was turned off is never kept past its retention. A failed check starts the loop."""
+    """F108: whether to start the work-view retention loop: while a log is swept; while the text is kept by a
+    retention and is being recorded (both text settings on), even on an empty database; and otherwise, when nothing
+    can write new text, while this agent still has text (one EXISTS query at startup), so text stored before the
+    text was turned off is never kept past its retention. A failed check starts the loop."""
     tool_calls, model_calls, model_call_text = _work_view_sweeps(settings)
     if tool_calls or model_calls:
         return True
     if not model_call_text:
         return False
+    if settings.model_call_log_enabled and settings.model_call_text_enabled:
+        return True
     from nous.observability.work_view_retention import has_model_call_text
 
     try:
