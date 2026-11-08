@@ -20,7 +20,7 @@ The input, result preview, reason and error text are redacted with the execution
 
 Two gaps in the tool-call rows:
 
-- **A dispatch exception that escapes the tool loop writes no tool row.** `ToolDispatcher.dispatch` turns a tool's own exception into an error result, so only two kinds escape: a cancellation (or the stream closed) in the middle of the call, and a failure of the ledger plumbing around it. The execution ledger closes such a call `unknown`; `tool_call_log` has no row for it.
+- **A dispatch exception that escapes the tool loop writes no tool row.** `ToolDispatcher.dispatch` turns a tool's own exception into an error result, so only two kinds escape: a cancellation (or the stream closed) in the middle of the call, and a failure of the ledger plumbing around it. The execution ledger closes a cancelled call `unknown` at once; after a plumbing failure the row stays `pending` until the ledger sweep marks it; `tool_call_log` has no row for either.
 - **A call blocked because its compensation snapshot could not be taken is recorded as `error`** (with `refused_by` null and the `ledger_entry_id` of its row), while its execution-ledger row says `blocked`.
 
 ### Turns (`nous_system.agent_turn_log`, migration 100)
