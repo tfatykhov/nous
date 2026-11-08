@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import itertools
 import json
 import logging
 import time
@@ -17,8 +18,9 @@ from collections import OrderedDict
 from collections.abc import AsyncGenerator, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, NamedTuple
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from nous.api import attachment_store, tool_policy
 from nous.api.anthropic_client import (
@@ -71,7 +73,14 @@ from nous.config import Settings
 from nous.heart.heart import Heart
 from nous.heart.schemas import FactInput
 from nous.observability.context_logger import HEARTBEAT_CALL_TYPE
-from nous.observability.tool_calls import add_reason_field
+from nous.observability.tool_calls import (
+    ToolCallRecord,
+    ToolCallRecorder,
+    add_reason_field,
+    own_reason_tools,
+    split_reason,
+    work_kind_for,
+)
 from nous.tool_names import CHANGED_TOOLS, canonical_tool_names
 
 logger = logging.getLogger(__name__)
@@ -142,13 +151,15 @@ class Suppressed:
 
 class Dispatched(NamedTuple):
     """What ``AgentRunner._dispatch_with_ledger`` came to: the call's text and whether it is an error, the
-    suppression that stood in for a keyed send the ledger already held (None when the call ran), and the
-    idempotency key it ran under (None for an unkeyed tool)."""
+    suppression that stood in for a keyed send the ledger already held (None when the call ran), the
+    idempotency key it ran under (None for an unkeyed tool), and the durable ledger row of the call (None when
+    none was opened)."""
 
     text: str
     is_error: bool
     suppressed: Suppressed | None
     send_key: str | None
+    ledger_entry_id: UUID | None
 
 
 class SingleCall(NamedTuple):
@@ -409,6 +420,8 @@ class AgentRunner:
         self._current_call_type: str = "chat"
         self._fork_call_type: str | None = None  # set by fork(): every call of a fork logs under it
         self._last_context_entry_id: str | None = None
+        # F108: one record per tool call the model asked for (set_tool_call_recorder); None records nothing.
+        self._tool_call_recorder: ToolCallRecorder | None = None
 
         # F026: Execution Integrity
         self._ledgers: dict[str, ExecutionLedger] = {}
@@ -490,6 +503,69 @@ class AgentRunner:
         if alias.target is None:
             return tool_name, tool_input, None, alias.note
         return alias.target, alias.translate(tool_input), alias.note, None
+
+    def _alias_target(self, tool_name: str) -> str:
+        """The tool a call to ``tool_name`` becomes: an old name's target, else the name itself (a retired name
+        too). Only the name: no event, no translated input (``_resolve_alias`` does both, once, afterwards). F108:
+        ``split_reason`` judges under this name whether ``reason`` is the tool's own argument."""
+        if tool_name not in CHANGED_TOOLS or self._dispatcher is None:
+            return tool_name
+        alias = self._dispatcher.alias_for(tool_name)
+        return alias.target if alias is not None and alias.target is not None else tool_name
+
+    def _note_tool_call(
+        self,
+        ctx: ExecutionContext,
+        *,
+        turn_id: UUID | None,
+        turn_number: int | None,
+        call_index: int,
+        name_called: str,
+        name: str,
+        tool_input: Any,
+        reason: str | None,
+        outcome: str,
+        result_text: str | None,
+        is_error: bool,
+        refused_by: str | None,
+        duration_ms: int | None,
+        ledger_entry_id: UUID | None,
+        session_id: str | None,
+        started_at: datetime | None,
+    ) -> None:
+        """F108: hand one tool call to the recorder. ``result_text`` is the call's text as its ``ToolResult``
+        keeps it: the result preview of a call that worked, the error text of one that did not. Never raises:
+        recording must not change a turn. The caller checks ``self._tool_call_recorder`` first."""
+        try:
+            self._tool_call_recorder.record(
+                ToolCallRecord(
+                    call_index=call_index,
+                    work_kind=work_kind_for(ctx.kind),
+                    tool_name=name,
+                    tool_name_called=name_called,
+                    outcome=outcome,
+                    session_id=session_id,
+                    parent_session_id=ctx.parent_session_id,
+                    turn_id=turn_id,
+                    turn_number=turn_number,
+                    context_kind=ctx.kind,
+                    subtask_id=ctx.subtask_id,
+                    dag_id=ctx.dag_id,
+                    dag_node_id=ctx.dag_node_id,
+                    reason=reason,
+                    input_text=json.dumps(tool_input, ensure_ascii=False, default=str),
+                    result_preview="" if is_error else (result_text or ""),
+                    is_error=is_error,
+                    error_text=(result_text or "") if is_error else None,
+                    refused_by=refused_by,
+                    duration_ms=duration_ms,
+                    started_at=started_at,
+                    ledger_entry_id=ledger_entry_id,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 -- recording must not change a turn
+            # The type only: an exception message can echo the call's arguments.
+            logger.warning("F108: tool-call record for %s not written (%s)", name, type(exc).__name__)
 
     def _offered_tools(
         self,
@@ -1435,6 +1511,13 @@ class AgentRunner:
             for fork in self._forks:
                 fork.set_context_logger(ctx_logger)
 
+    def set_tool_call_recorder(self, rec: ToolCallRecorder | None) -> None:
+        """F108: the recorder every tool call is handed to (None records nothing). Propagated to the forks, as
+        the snapshot store is: the heartbeat's checks run on one, and a fork made later copies it."""
+        self._tool_call_recorder = rec
+        for fork in self._forks:
+            fork.set_tool_call_recorder(rec)
+
     def _get_context_window_size(self) -> int:
         """Get configured or auto-detected context window size."""
         return self._settings._get_context_window(self._settings.model)
@@ -1470,6 +1553,7 @@ class AgentRunner:
         forked._workspace_dir = self._workspace_dir
         forked._action_review_pusher = self._action_review_pusher
         forked._root_cancelled = self._root_cancelled  # F099 2e: and set_cancelled_roots propagates a later view
+        forked._tool_call_recorder = self._tool_call_recorder  # F108: and set_tool_call_recorder propagates a later one
         # F035.4: the heartbeat's checks, triage and callbacks run on a fork; sharing
         # the logger gives their model calls context_log rows. It was withheld after the
         # April 2026 triage hang (0d1d45e3), when the logger's fire-and-forget writes held
@@ -1694,6 +1778,8 @@ class AgentRunner:
             # between, and a concurrent session can overwrite the shared field
             # across any of them.
             _turn_number_local = self._current_turn_number
+            # F108: the turn's own id, a local like the number (numbers repeat after compaction, ids never do).
+            _turn_id = uuid4()
             self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
             self._current_call_type = "subtask" if is_subtask else "chat"
 
@@ -1783,6 +1869,7 @@ class AgentRunner:
                             frame_id=turn_context.frame.frame_id,
                             session_id=session_id,
                             turn_number=_turn_number_local,  # F091, see capture above
+                            turn_id=_turn_id,  # F108
                             is_subtask=is_subtask,
                             max_tool_calls=max_tool_calls,
                             model_override=model_override,
@@ -2368,6 +2455,7 @@ class AgentRunner:
             # field is overwritten by any concurrent session, and this
             # generator awaits the model many times before dispatching a tool.
             _stream_turn_number = self._current_turn_number
+            _stream_turn_id = uuid4()  # F108: see run_turn
             self._current_frame_id = turn_context.frame.frame_id if turn_context.frame else "unknown"
             self._current_call_type = "chat"
 
@@ -2399,6 +2487,8 @@ class AgentRunner:
             )
             # Harness Phase 1a: exactly what the model is offered this turn.
             offered_names = frozenset(t["name"] for t in tools)
+            # F108: the offered tools whose own schema declares reason keep it in their input.
+            own_reasons = own_reason_tools(tools) if self._settings.tool_reason_enabled else frozenset()
             messages = self._format_messages(conversation)
 
             # F036: Compactor needs flat string for token estimation
@@ -2451,6 +2541,7 @@ class AgentRunner:
 
             all_tool_results: list[ToolResult] = []
             keys_this_turn: set[str] = set()  # harness 2b: keys this invocation dispatched
+            call_indexes = itertools.count()  # F108: the place of each call in the turn, across every segment
             all_thinking_blocks: list[str] = []  # Accumulated across all tool loop iterations
             total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
             response_text = ""
@@ -2683,6 +2774,19 @@ class AgentRunner:
                     # Execute tools (P1-2: all results in single user message)
                     tool_results_for_message: list[dict[str, Any]] = []
                     for tc in tool_calls:
+                        # F108: the call's place in the turn and its start, and its reason split out of the input
+                        # before anything below reads it (the assistant message above keeps what the model emitted).
+                        call_index = next(call_indexes)
+                        call_started = datetime.now(UTC) if self._tool_call_recorder else None
+                        call_input, reason = tc.get("input", {}), None
+                        if self._settings.tool_reason_enabled:
+                            call_input, reason = split_reason(
+                                self._alias_target(tc["name"]),
+                                call_input,
+                                own_reasons,
+                                self._settings.tool_reason_max_chars,
+                            )
+
                         # Malformed tool-input JSON: never dispatch a blanked-args
                         # call (it can only fail downstream with a misleading
                         # TypeError). Still emit a tool_result so this tool_use
@@ -2705,13 +2809,32 @@ class AgentRunner:
                                     duration_ms=0,
                                 )
                             )
+                            if self._tool_call_recorder:
+                                self._note_tool_call(
+                                    _ctx,
+                                    turn_id=_stream_turn_id,
+                                    turn_number=_stream_turn_number,
+                                    call_index=call_index,
+                                    name_called=tc["name"],
+                                    name=self._alias_target(tc["name"]),
+                                    tool_input=call_input,
+                                    reason=reason,
+                                    outcome="bad_input",
+                                    result_text=tc["input_error"],
+                                    is_error=True,
+                                    refused_by=None,
+                                    duration_ms=0,
+                                    ledger_entry_id=None,
+                                    session_id=session_id,
+                                    started_at=call_started,
+                                )
                             yield StreamEvent(type="tool_end", tool_name=tc["name"])
                             continue
 
                         # An old tool name becomes the call to its target before any check (tc is left as
                         # the model emitted it); a retired name runs nothing and reaches no ledger.
                         tool_name, tool_input, alias_note, retired = self._resolve_alias(
-                            _ctx, tc["name"], tc.get("input", {}), session_id
+                            _ctx, tc["name"], call_input, session_id
                         )
                         if retired is not None:
                             tool_results_for_message.append(
@@ -2722,6 +2845,25 @@ class AgentRunner:
                                     tool_name=tool_name, arguments=tool_input, result=None, error=retired, duration_ms=0
                                 )
                             )
+                            if self._tool_call_recorder:
+                                self._note_tool_call(
+                                    _ctx,
+                                    turn_id=_stream_turn_id,
+                                    turn_number=_stream_turn_number,
+                                    call_index=call_index,
+                                    name_called=tc["name"],
+                                    name=tool_name,
+                                    tool_input=tool_input,
+                                    reason=reason,
+                                    outcome="retired",
+                                    result_text=retired,
+                                    is_error=True,
+                                    refused_by=None,
+                                    duration_ms=0,
+                                    ledger_entry_id=None,
+                                    session_id=session_id,
+                                    started_at=call_started,
+                                )
                             yield StreamEvent(type="tool_end", tool_name=tool_name)
                             continue
 
@@ -2752,6 +2894,25 @@ class AgentRunner:
                                     duration_ms=0,
                                 )
                             )
+                            if self._tool_call_recorder:
+                                self._note_tool_call(
+                                    _ctx,
+                                    turn_id=_stream_turn_id,
+                                    turn_number=_stream_turn_number,
+                                    call_index=call_index,
+                                    name_called=tc["name"],
+                                    name=tool_name,
+                                    tool_input=tool_input,
+                                    reason=reason,
+                                    outcome="refused",
+                                    result_text=refusal_text,
+                                    is_error=True,
+                                    refused_by=refusal.code,
+                                    duration_ms=0,
+                                    ledger_entry_id=None,
+                                    session_id=session_id,
+                                    started_at=call_started,
+                                )
                             if ledger:
                                 ledger.record(tool_name, tool_input, refusal.text, "blocked")
                             await self._ledger_blocked(
@@ -2975,6 +3136,35 @@ class AgentRunner:
                                 duration_ms=duration_ms,
                             )
                         )
+                        if self._tool_call_recorder:
+                            # A gated call opened no ledger row and was never suppressed: test gated first, since
+                            # entry_id and suppressed are bound only on the dispatch branch.
+                            self._note_tool_call(
+                                _ctx,
+                                turn_id=_stream_turn_id,
+                                turn_number=_stream_turn_number,
+                                call_index=call_index,
+                                name_called=tc["name"],
+                                name=tool_name,
+                                tool_input=dispatch_input,
+                                reason=reason,
+                                outcome=(
+                                    "gated"
+                                    if gated
+                                    else "suppressed"
+                                    if suppressed is not None
+                                    else "error"
+                                    if is_error
+                                    else "ran"
+                                ),
+                                result_text=result_text,
+                                is_error=is_error,
+                                refused_by="action_gate" if gated else None,
+                                duration_ms=duration_ms,
+                                ledger_entry_id=None if gated else entry_id,
+                                session_id=session_id,
+                                started_at=call_started,
+                            )
 
                         yield StreamEvent(type="tool_end", tool_name=tool_name)
 
@@ -3256,7 +3446,7 @@ class AgentRunner:
             if _write_lock2 is not None:
                 # Held until an orphaned worker thread finishes.
                 release_write_path_lock_after(_write_lock2, outcome.write_worker)
-        return Dispatched(result_text, is_error, suppressed, send_key)
+        return Dispatched(result_text, is_error, suppressed, send_key, entry_id)
 
     async def execute_single_call(self, ctx: ExecutionContext, tool_name: str, tool_input: dict) -> SingleCall:
         """Run ONE call the owner approved (F099 2d), with no model in between.
@@ -3273,16 +3463,59 @@ class AgentRunner:
             raise ValueError(f"execute_single_call runs an approved_action context, not {ctx.kind!r}")
         if not self._dispatcher:
             raise RuntimeError("No tool dispatcher set -- call set_dispatcher() first")
+        # F108: an approved call may run in another turn, or none: its record gets an id of its own, no turn number.
+        # No model wrote this call here, so there is no reason to split out.
+        name_called, turn_id = tool_name, uuid4()
+        call_started = datetime.now(UTC) if self._tool_call_recorder else None
         tool_name, tool_input, alias_note, retired = self._resolve_alias(ctx, tool_name, tool_input, ctx.session_id)
         if retired is not None:
+            if self._tool_call_recorder:
+                self._note_tool_call(
+                    ctx,
+                    turn_id=turn_id,
+                    turn_number=None,
+                    call_index=0,
+                    name_called=name_called,
+                    name=tool_name,
+                    tool_input=tool_input,
+                    reason=None,
+                    outcome="retired",
+                    result_text=retired,
+                    is_error=True,
+                    refused_by=None,
+                    duration_ms=0,
+                    ledger_entry_id=None,
+                    session_id=ctx.session_id,
+                    started_at=call_started,
+                )
             return SingleCall(retired, True, None)
         if alias_note is not None:
             # A proposal stored under the old name declares the old name: the call it becomes is the one approved.
             ctx = dataclasses.replace(ctx, declared_tools=tuple(canonical_tool_names(ctx.declared_tools or ())))
         refusal = self._authorize_tool_call(ctx, tool_name, frozenset({tool_name}), ctx.session_id, tool_input)
         if refusal is not None:
+            if self._tool_call_recorder:
+                self._note_tool_call(
+                    ctx,
+                    turn_id=turn_id,
+                    turn_number=None,
+                    call_index=0,
+                    name_called=name_called,
+                    name=tool_name,
+                    tool_input=tool_input,
+                    reason=None,
+                    outcome="refused",
+                    result_text=_with_alias_note(alias_note, refusal.text),
+                    is_error=True,
+                    refused_by=refusal.code,
+                    duration_ms=0,
+                    ledger_entry_id=None,
+                    session_id=ctx.session_id,
+                    started_at=call_started,
+                )
             await self._ledger_blocked(ctx, tool_name, tool_input, None, refusal.code)
             return SingleCall(_with_alias_note(alias_note, refusal.text), True, None)
+        start_time = time.monotonic()
         dispatched = await self._dispatch_with_ledger(
             ctx,
             tool_name,
@@ -3294,6 +3527,27 @@ class AgentRunner:
             turn_number=None,
             is_background=ctx.is_background,
         )
+        if self._tool_call_recorder:
+            self._note_tool_call(
+                ctx,
+                turn_id=turn_id,
+                turn_number=None,
+                call_index=0,
+                name_called=name_called,
+                name=tool_name,
+                tool_input=tool_input,
+                reason=None,
+                outcome=(
+                    "suppressed" if dispatched.suppressed is not None else "error" if dispatched.is_error else "ran"
+                ),
+                result_text=_with_alias_note(alias_note, dispatched.text),
+                is_error=dispatched.is_error,
+                refused_by=None,
+                duration_ms=int((time.monotonic() - start_time) * 1000),
+                ledger_entry_id=dispatched.ledger_entry_id,
+                session_id=ctx.session_id,
+                started_at=call_started,
+            )
         return SingleCall(_with_alias_note(alias_note, dispatched.text), dispatched.is_error, dispatched.send_key)
 
     async def _tool_loop(
@@ -3323,6 +3577,7 @@ class AgentRunner:
         turn_number: int | None = None,
         context: ExecutionContext | None = None,  # harness Phase 1a
         usage_out: dict[str, int] | None = None,  # F099 2e: see run_turn
+        turn_id: UUID | None = None,  # F108: minted by run_turn; a caller that passes none gets a fresh one
     ) -> tuple[str, list[ToolResult], dict[str, int], list[str]]:
         """Run the tool use loop until completion or max_turns.
 
@@ -3352,6 +3607,9 @@ class AgentRunner:
             refuse_active=refuse_active,
             extra_tools=extra_tools,
         )
+        # F108: the offered tools whose own schema declares reason keep it in their input.
+        own_reasons = own_reason_tools(offered_tools) if self._settings.tool_reason_enabled else frozenset()
+        turn_id = turn_id if turn_id is not None else uuid4()
 
         # Build initial messages from conversation history
         # The latest user message is already in conversation.messages
@@ -3359,6 +3617,7 @@ class AgentRunner:
 
         all_tool_results: list[ToolResult] = []
         keys_this_turn: set[str] = set()  # harness 2b: keys this invocation dispatched
+        call_indexes = itertools.count()  # F108: the place of each call in the turn, across every iteration
         all_thinking_blocks: list[str] = []  # Accumulated across iterations
         # F061: include tool_calls counter so the hardened executor's per-attempt
         # accumulator can populate heart.subtasks.tool_calls_made (was missing).
@@ -3527,6 +3786,18 @@ class AgentRunner:
                     tool_name = block["name"]
                     tool_input = block.get("input", {})
                     tool_use_id = block["id"]
+                    # F108: the call's place in the turn and its start, and its reason split out of the input
+                    # before anything below reads it (the block itself, in the assistant message, is left as is).
+                    call_index = next(call_indexes)
+                    call_started = datetime.now(UTC) if self._tool_call_recorder else None
+                    reason: str | None = None
+                    if self._settings.tool_reason_enabled:
+                        tool_input, reason = split_reason(
+                            self._alias_target(tool_name),
+                            tool_input,
+                            own_reasons,
+                            self._settings.tool_reason_max_chars,
+                        )
 
                     # Malformed tool-input JSON (#598): the aggregator could not
                     # parse this call's streamed input and blanked it to {}.
@@ -3556,6 +3827,25 @@ class AgentRunner:
                                 duration_ms=0,
                             )
                         )
+                        if self._tool_call_recorder:
+                            self._note_tool_call(
+                                ctx,
+                                turn_id=turn_id,
+                                turn_number=turn_number,
+                                call_index=call_index,
+                                name_called=block["name"],
+                                name=self._alias_target(tool_name),
+                                tool_input=tool_input,
+                                reason=reason,
+                                outcome="bad_input",
+                                result_text=input_error,
+                                is_error=True,
+                                refused_by=None,
+                                duration_ms=0,
+                                ledger_entry_id=None,
+                                session_id=session_id,
+                                started_at=call_started,
+                            )
                         continue
 
                     # An old tool name becomes the call to its target before any check (the block is left as
@@ -3572,6 +3862,25 @@ class AgentRunner:
                                 tool_name=tool_name, arguments=tool_input, result=None, error=retired, duration_ms=0
                             )
                         )
+                        if self._tool_call_recorder:
+                            self._note_tool_call(
+                                ctx,
+                                turn_id=turn_id,
+                                turn_number=turn_number,
+                                call_index=call_index,
+                                name_called=block["name"],
+                                name=tool_name,
+                                tool_input=tool_input,
+                                reason=reason,
+                                outcome="retired",
+                                result_text=retired,
+                                is_error=True,
+                                refused_by=None,
+                                duration_ms=0,
+                                ledger_entry_id=None,
+                                session_id=session_id,
+                                started_at=call_started,
+                            )
                         continue
 
                     # Harness: was this tool offered this iteration, and may this context use it?
@@ -3595,6 +3904,25 @@ class AgentRunner:
                                 duration_ms=0,
                             )
                         )
+                        if self._tool_call_recorder:
+                            self._note_tool_call(
+                                ctx,
+                                turn_id=turn_id,
+                                turn_number=turn_number,
+                                call_index=call_index,
+                                name_called=block["name"],
+                                name=tool_name,
+                                tool_input=tool_input,
+                                reason=reason,
+                                outcome="refused",
+                                result_text=refusal_text,
+                                is_error=True,
+                                refused_by=refusal.code,
+                                duration_ms=0,
+                                ledger_entry_id=None,
+                                session_id=session_id,
+                                started_at=call_started,
+                            )
                         if ledger:
                             ledger.record(tool_name, tool_input, refusal.text, "blocked")
                         await self._ledger_blocked(
@@ -3655,6 +3983,7 @@ class AgentRunner:
                     if not gated:
                         start_time = time.monotonic()
                         suppressed: Suppressed | None = None  # harness 2b: set by _open_for_call
+                        ledger_entry_id: UUID | None = None  # F108: an extra tool opens no ledger row
                         # F061: per-call dispatch override for extra_tools.
                         # Routes submit_final_report (and any other per-run
                         # tool) to the executor passed by the subtask harness
@@ -3684,6 +4013,7 @@ class AgentRunner:
                             )
                             result_text, is_error = dispatched.text, dispatched.is_error
                             suppressed = dispatched.suppressed
+                            ledger_entry_id = dispatched.ledger_entry_id
                         duration_ms = int((time.monotonic() - start_time) * 1000)
 
                         # F026: Record in execution ledger (post-dispatch). A
@@ -3753,6 +4083,35 @@ class AgentRunner:
                             duration_ms=duration_ms,
                         )
                     )
+                    if self._tool_call_recorder:
+                        # A gated call opened no ledger row and was never suppressed: test gated first, since
+                        # ledger_entry_id and suppressed are bound only on the dispatch branch.
+                        self._note_tool_call(
+                            ctx,
+                            turn_id=turn_id,
+                            turn_number=turn_number,
+                            call_index=call_index,
+                            name_called=block["name"],
+                            name=tool_name,
+                            tool_input=tool_input,
+                            reason=reason,
+                            outcome=(
+                                "gated"
+                                if gated
+                                else "suppressed"
+                                if suppressed is not None
+                                else "error"
+                                if is_error
+                                else "ran"
+                            ),
+                            result_text=result_text,
+                            is_error=is_error,
+                            refused_by="action_gate" if gated else None,
+                            duration_ms=duration_ms,
+                            ledger_entry_id=None if gated else ledger_entry_id,
+                            session_id=session_id,
+                            started_at=call_started,
+                        )
 
                     # F061 PR-3 Codex review P2: stop dispatching remaining
                     # tool_use blocks once a successful terminal extra tool
