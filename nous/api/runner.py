@@ -1615,8 +1615,8 @@ class AgentRunner:
     @staticmethod
     def _gate_call_context(call_context: CallContext) -> AbstractContextManager[CallContext]:
         """F108: around an F026 gate check, the turn's context for the gate's model call (``_call_gate_model``).
-        ActionGate takes no context, so it rides in the ``model_call_context`` fallback, which ``asyncio.wait_for``
-        copies into the gate's task. Wrap only the awaited check, never a ``yield``."""
+        ActionGate takes no context, so it rides in the ``model_call_context`` fallback, which the gate's call reads
+        in the same context. Wrap only the awaited check, never a ``yield``."""
         fields = {f.name: getattr(call_context, f.name) for f in dataclasses.fields(call_context)}
         return model_call_context(**{**fields, "purpose": "action_gate"})
 

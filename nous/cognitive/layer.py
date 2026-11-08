@@ -1439,13 +1439,14 @@ class CognitiveLayer:
         }
         try:
             if self._bus:
+                _trace_id = getattr(turn_context, "trace_id", None)  # F108: minted by pre_turn
                 _turn_event = Event(
                     type="turn_completed",
                     agent_id=agent_id,
                     session_id=session_id,
                     data=event_data,
-                    # F108: the trace pre_turn minted, which the turn's model-call rows carry
-                    **({"event_id": turn_context.trace_id} if isinstance(turn_context.trace_id, str) else {}),
+                    # F108: the turn's model-call rows carry the same trace id
+                    **({"event_id": _trace_id} if isinstance(_trace_id, str) else {}),
                 )
                 _turn_event.trace_id = _turn_event.event_id  # Root event
                 await self._bus.emit(_turn_event)
