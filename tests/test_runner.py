@@ -1096,7 +1096,7 @@ async def test_tool_loop_preserves_thinking_blocks(mock_cognitive):
     # second call returns text (stop_reason=end_turn)
     call_count = 0
 
-    async def mock_call_api(system_prompt, messages, tools=None, skip_thinking=False, model_override=None, is_background=False):
+    async def mock_call_api(system_prompt, messages, tools=None, skip_thinking=False, model_override=None, is_background=False, **_):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -1144,7 +1144,7 @@ async def test_tool_loop_preserves_redacted_thinking(mock_cognitive):
 
     call_count = 0
 
-    async def mock_call_api(system_prompt, messages, tools=None, skip_thinking=False, model_override=None, is_background=False):
+    async def mock_call_api(system_prompt, messages, tools=None, skip_thinking=False, model_override=None, is_background=False, **_):
         nonlocal call_count
         call_count += 1
         if call_count == 1:

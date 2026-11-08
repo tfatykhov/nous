@@ -177,7 +177,7 @@ def _one_call(name: str, tool_input: dict):
     sent: list[list] = []
 
     async def fake_call_api(
-        system_prompt, messages, tools=None, skip_thinking=False, model_override=None, is_background=False
+        system_prompt, messages, tools=None, skip_thinking=False, model_override=None, is_background=False, **_
     ):
         sent.append(messages)
         if len(sent) == 1:

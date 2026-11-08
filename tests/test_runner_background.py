@@ -252,7 +252,7 @@ async def test_tool_loop_threads_is_background_to_all_iterations():
     recorded_is_background: list[bool] = []
 
     async def spy_call_api(system_prompt, messages, tools=None, skip_thinking=False,
-                          model_override=None, is_background=False):
+                          model_override=None, is_background=False, **_):
         nonlocal call_count
         call_count += 1
         recorded_is_background.append(is_background)

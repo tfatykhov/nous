@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 EventHandler = Callable[["Event"], Awaitable[None]]
 
 
+def new_event_id() -> str:
+    """A new event id: 12 hex characters. Also the id a turn's trace starts from (``TurnContext.trace_id``)."""
+    return uuid4().hex[:12]
+
+
 @dataclass
 class Event:
     """A typed event flowing through the bus."""
@@ -41,7 +46,7 @@ class Event:
     session_id: str | None = None
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     # F035.2: Causal chain fields
-    event_id: str = field(default_factory=lambda: uuid4().hex[:12])
+    event_id: str = field(default_factory=new_event_id)
     trace_id: str | None = None       # root cause identifier (shared across chain)
     caused_by: str | None = None      # event_id of the direct parent event
     # False when the producer already wrote this event's audit row inside its

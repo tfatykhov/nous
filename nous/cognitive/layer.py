@@ -31,7 +31,7 @@ from nous.cognitive.monitor import MonitorEngine
 from nous.cognitive.schemas import Assessment, BuildResult, SessionMetadata, TurnContext, TurnResult
 from nous.cognitive.usage_tracker import UsageTracker
 from nous.config import Settings
-from nous.events import Event, EventBus
+from nous.events import Event, EventBus, new_event_id
 from nous.heart.censor_actions import CensorActionExecutor
 from nous.heart.heart import Heart
 from nous.heart.result_inbox import format_inbox_messages
@@ -1176,6 +1176,7 @@ class CognitiveLayer:
             censor_injected_context=censor_injected,
             sections_by_tier=sections_by_tier,
             critic_verdict=_critic_verdict,
+            trace_id=new_event_id(),  # F108: the turn's trace (post_turn's turn_completed is its root)
         )
 
     async def post_turn(
@@ -1443,6 +1444,8 @@ class CognitiveLayer:
                     agent_id=agent_id,
                     session_id=session_id,
                     data=event_data,
+                    # F108: the trace pre_turn minted, which the turn's model-call rows carry
+                    **({"event_id": turn_context.trace_id} if isinstance(turn_context.trace_id, str) else {}),
                 )
                 _turn_event.trace_id = _turn_event.event_id  # Root event
                 await self._bus.emit(_turn_event)
