@@ -737,7 +737,7 @@ async def test_text_tables_indexes_and_no_credential_named_column(db):
         indexes.setdefault(table, set()).add(definition.split(" USING btree ", 1)[1])
     assert indexes == {
         "model_text_block": {"(agent_id, hash)"},
-        "model_call_block_ref": {"(call_id, part, ord)", "(created_at)", "(agent_id, block_hash)"},
+        "model_call_block_ref": {"(call_id, part, ord)", "(agent_id, created_at)", "(agent_id, block_hash)"},
     }, indexes
     # db_roles.sql section 5d refuses to grant a credential-looking column (these are not reader tables either)
     assert len(names) == 11 and not [n for n in names if re.search(CREDENTIAL_NAME, n.split(".", 1)[1])], names

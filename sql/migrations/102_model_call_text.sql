@@ -36,9 +36,9 @@ CREATE TABLE IF NOT EXISTS nous_system.model_call_block_ref (
     FOREIGN KEY (agent_id, block_hash) REFERENCES nous_system.model_text_block (agent_id, hash)
 );
 
--- The text sweep: refs older than the retention.
+-- The text sweep: this agent's refs older than the retention.
 CREATE INDEX IF NOT EXISTS idx_model_call_block_ref_created
-    ON nous_system.model_call_block_ref (created_at);
+    ON nous_system.model_call_block_ref (agent_id, created_at);
 
 -- Whether a block is still referenced (the sweep), and the foreign key's checks when a block is deleted.
 CREATE INDEX IF NOT EXISTS idx_model_call_block_ref_block

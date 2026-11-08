@@ -49,7 +49,8 @@ _DELETE_UNREFERENCED_BLOCKS = text(
     " WHERE b.agent_id = :agent_id AND b.created_at < now() - interval '1 hour'"
     " AND NOT EXISTS (SELECT 1 FROM nous_system.model_call_block_ref r"
     " WHERE r.agent_id = b.agent_id AND r.block_hash = b.hash)"
-    " ORDER BY b.hash FOR UPDATE"
+    # Byte order (COLLATE "C"), as the store's Python sort of the hex hashes, whatever the database's collation.
+    ' ORDER BY b.hash COLLATE "C" FOR UPDATE'
     ") "
     "DELETE FROM nous_system.model_text_block t USING unused u WHERE t.agent_id = u.agent_id AND t.hash = u.hash"
 )
