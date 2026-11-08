@@ -104,8 +104,11 @@ nous/
 │   │   ├── manager.py          # Identity section CRUD
 │   │   ├── protocol.py         # Initiation protocol
 │   │   └── tools.py            # Identity-related tools
-│   ├── observability/          # Telemetry writers — dashboards read these tables, the agent never does
+│   ├── observability/          # Telemetry writers — dashboards read these tables, the agent never does, except `tool_call_log`, which `db_query` may read
 │   │   ├── context_logger.py   # F035.4 per-turn context payload log
+│   │   ├── recording.py        # F108: BoundedWriter, the one bounded fire-and-forget writer every work-view recorder shares (built in main.py), and RecorderStats, its counters
+│   │   ├── tool_calls.py       # F108: ToolCallRecorder (one tool_call_log row per tool call, one agent_turn_log row per turn, text redacted and capped), the reason field (add_reason_field, split_reason) and work kinds
+│   │   ├── work_view_retention.py # F108: sweep_tool_calls, the daily agent-scoped delete of tool_call_log and agent_turn_log rows past NOUS_TOOL_CALL_RETENTION_DAYS
 │   │   ├── retrieval_logger.py # F091 retrieval telemetry (RETRIEVAL_PATHS lives here)
 │   │   ├── retrieval_trace.py  # F091 write-only trace collector + NullTrace
 │   │   ├── process_recorder.py # #653 nous_system.process_run_log writer (fail-open)

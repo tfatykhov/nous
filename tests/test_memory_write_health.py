@@ -757,7 +757,9 @@ async def test_the_retention_sweeps_never_delete_a_ledger_event(db, monkeypatch)
             {"id": event_id, "a": agent, "d": f'{{"fact_id": "{uuid4()}"}}'},
         )
         await s.commit()
-    settings = Settings(agent_id=agent, retrieval_telemetry_retention_days=1, context_log_retention_days=1)
+    settings = Settings(
+        agent_id=agent, retrieval_telemetry_retention_days=1, context_log_retention_days=1, tool_call_retention_days=1
+    )
 
     class _Counting:
         """The real database, with a signal once a loop's sweep has closed its session."""
@@ -781,7 +783,11 @@ async def test_the_retention_sweeps_never_delete_a_ledger_event(db, monkeypatch)
             return _Ctx()
 
     monkeypatch.setattr(main_mod, "_RETENTION_SWEEP_INTERVAL_SECONDS", 0)
-    for loop_fn in (main_mod._context_log_retention_loop, main_mod._retrieval_log_retention_loop):
+    for loop_fn in (
+        main_mod._context_log_retention_loop,
+        main_mod._retrieval_log_retention_loop,
+        main_mod._tool_call_retention_loop,
+    ):
         counting = _Counting()
         stop = {"now": False}
         monkeypatch.setattr(main_mod, "cancel_requested", lambda: stop["now"])

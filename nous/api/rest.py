@@ -101,6 +101,7 @@ def create_app(
     push_service: Any | None = None,
     dag_orchestrator: Any | None = None,
     continuation_runner: Any | None = None,
+    tool_call_recorder: Any | None = None,
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
 
@@ -1994,6 +1995,10 @@ def create_app(
             result["context_log"] = [e.to_dict() for e in entries]
         else:
             result["context_log"] = []
+
+        # 7. F108 recording counters (in-memory, since the process started); null while the tool-call log is off.
+        # Truthiness, not `is not None`: main.py passes a lazy proxy, which is falsy while its component is None.
+        result["recording"] = {"tool_calls": tool_call_recorder.stats.as_dict() if tool_call_recorder else None}
 
         return JSONResponse(result)
 
