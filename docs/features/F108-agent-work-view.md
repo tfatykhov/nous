@@ -73,22 +73,24 @@ The vocabulary is `PURPOSES` in `nous/observability/model_calls.py`; a name outs
 
 ### Measured
 
-> **PLACEHOLDER, filled in by the controller's live run (local eval stack, `NOUS_MODEL_CALL_LOG_ENABLED=true`, 10 minutes):** model-call rows per hour = `TBD`; `recording.model_calls.unlabelled` = `TBD` (expected 0; any other value names a call site that passes no purpose).
+Measured in prod after deploy, with the flags turned on: rows per hour, the `unlabelled` count and `dropped_backpressure`. The numbers follow in a later PR.
 
 ### Known gaps
 
 - **Rerank:** no candidate count is recorded; a rerank bucket carries its time and `call_count` only.
 - **Browser steps:** a `browser_step` row has no session, turn or trace id; nothing sets the call context around tool dispatch.
 - **SDK transport errors:** an SDK attempt that got no HTTP response leaves no attempt row; it appears only in the call's final error.
-- **Cut-off streams:** a stream that ends without a terminal event is recorded `error` ("stream ended without a terminal event").
+- **Cut-off streams:** a stream that ends without a terminal event is recorded `error`. A `stream` row's error text is `stream ended without a terminal event`; the httpx client's `aggregated` call raises instead, and its row carries that error: `RuntimeError: Anthropic streaming ended without terminal event (no 'message_delta' or 'message_stop'); response truncated`.
+- **Background calls inside a turn:** the critic, the epistemic gate, the date window, query expansion, admission and the like carry a purpose but no turn id; only the monitor and attachment sites pass a session.
 - **Out of scope:** model calls made by `scripts/` and `nous_eval/` are not recorded.
 
 ## How the rows are written
 
 - **One bounded writer.** `main.py` builds one `BoundedWriter` (`nous/observability/recording.py`) when `NOUS_TOOL_CALL_LOG_ENABLED` or `NOUS_MODEL_CALL_LOG_ENABLED` is on, never two, and hands it to the `ToolCallRecorder` and the `ModelCallRecorder`. A write is a factory scheduled fire-and-forget: at most 4 writes hold a pool connection at once, each is cut off after 30 s, and past 500 pending writes a new one is dropped. `record`, `record_turn`, a scope's exit and `record_bucket` are synchronous and never raise, so recording never fails or slows a turn or a model call.
-- **Counted, never silent.** Every outcome is counted (`written`, `dropped_timeout`, `dropped_error`, `dropped_backpressure`) and every failure is logged at WARNING. `GET /dashboard/observability` returns each recorder's counters, `recording.tool_calls` and `recording.model_calls` (each null while its log is off). The model-call recorder also counts `unlabelled` calls and `dropped_late` attempts (an HTTP attempt reported after its call's row was written).
+- **Counted, never silent.** Every outcome is counted (`written`, `dropped_timeout`, `dropped_error`, `dropped_backpressure`) and every failure is logged at WARNING. `GET /dashboard/observability` returns each recorder's counters, `recording.tool_calls` and `recording.model_calls` (each null while its log is off). The model-call recorder also counts `unlabelled` calls and `dropped_late` reports (an HTTP attempt or a stream event reported after its call's row was written).
 - **Shutdown.** `shutdown_components` clears the model-call hooks, then waits up to 5 s for the pending writes immediately before `database.disconnect()`, after every producer of turns has stopped.
-- **Off means nothing.** With both logs off, no writer, recorder or sweep is built, the clients and hooks hold no recorder, and nothing is recorded. Each log is off on its own: with only the model-call log on, the runner records no tool calls, and the other way round.
+- **Off means nothing.** With both logs off, no writer, recorder or sweep is built, the clients and hooks hold no recorder, and nothing is recorded. Each log is off on its own: with only the model-call log on, the runner records no tool calls, and the other way round. The runner computes a call's context estimate once, and only when the old `/context/log*` ring or a recording client takes it.
+- **The estimate changed for every reader.** Even with every flag off, the old `/context/log*` ring, the dashboard utilisation and the Telegram `/context` estimates rise after PR 2: the preamble, tool results and the sections formerly folded into their neighbour now count. This is telemetry only, not a regression.
 
 ## Retention
 
