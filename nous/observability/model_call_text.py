@@ -39,8 +39,6 @@ OFF_LOOP_CHARS = 20_000
 # characters of body in all (a long session re-sends all its earlier messages on every call).
 LRU_MAX_BLOCKS = 1024
 LRU_MAX_CHARS = 4_000_000
-# The parts of a call that are stored, in their order.
-PARTS = ("system", "messages", "tools", "response")
 # The stream events that carry the response's content (``response_from_events``).
 CONTENT_EVENTS = frozenset(
     {

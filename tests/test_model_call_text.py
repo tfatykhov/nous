@@ -171,9 +171,25 @@ def test_block_over_cap_is_truncated_with_marker():
 
 
 def test_a_secret_cut_by_the_cap_is_not_kept_in_part():
-    raw = "a " * 45 + _SECRET_A + " b" * 100  # the secret starts at character 90, the cap cuts it at 100
+    raw = "a " * 45 + _SECRET_A + " b" * 400  # the secret starts at character 90, the cap cuts it at 100
     _, body = prepare_block(raw, 100)
     assert "sk-ant" not in body and "AbCdEf" not in body, body
+    assert body.startswith("a a a") and body.endswith(f"[truncated {len(raw) - 100} chars]")
+
+
+def test_the_scan_pad_is_dropped_so_a_secret_cut_by_the_window_is_not_kept_in_part():
+    """Over the cap only the cap plus a scan pad is redacted: a secret the window's edge cuts matches nothing there,
+    and masking the secrets before it shrinks the text, so without dropping the pad its raw start would slide into
+    the kept part."""
+    pad = ledger_store.redaction_scan_pad()
+    masked = (_SECRET_A + " ") * 20  # each mask is shorter than its secret: the redacted window shrinks
+    cap = len(masked) + 10
+    edge = cap + pad  # where the redacted window ends
+    filler = "c " * ((edge - 6 - len(masked)) // 2) + "c" * ((edge - 6 - len(masked)) % 2)
+    raw = masked + filler + _SECRET_B + " d" * 200  # the window holds the first 6 characters of the second secret
+    assert raw[edge - 6 : edge] == "sk-ant"
+    _, body = prepare_block(raw, cap)
+    assert "sk-ant" not in body and "ZyXwVu" not in body and "AbCdEf" not in body, body
 
 
 def test_base64_attachment_replaced():
@@ -327,15 +343,18 @@ async def test_secret_masked_before_hash(db):
 
 
 @pytest.mark.postgres_only
-async def test_text_disabled_writes_no_blocks(db):
+async def test_text_disabled_writes_no_blocks(db, monkeypatch):
     agent = _agent()
     writer, store, recorder = _stack(db, agent, text_on=False)
+    handed: list[uuid.UUID] = []
+    monkeypatch.setattr(store, "submit", lambda call_id, *rest: handed.append(call_id))
     try:
         _record(recorder, _payload([{"role": "user", "content": "hello"}]), "c1", _text_reply("hi"))
         await asyncio.wait_for(writer.drain(5.0), 10)
         call_id = await _call_id(db, agent, "c1")  # the numbers row is written
         assert await _refs(db, call_id) == [] and await _blocks(db, agent) == {}
         assert store.stats.written == 0 and recorder.stats.written == 1
+        assert handed == []  # off: the recorder hands the store nothing, so no scope keeps text
     finally:
         await _delete(db, agent)
 
@@ -378,7 +397,7 @@ async def test_text_write_failure_keeps_the_numbers_row(db, monkeypatch, caplog)
 
 
 @pytest.mark.postgres_only
-async def test_oat_headers_are_not_in_the_payload_blocks(db):
+async def test_oat_headers_are_not_in_the_payload_blocks(db, monkeypatch):
     agent = _agent()
     writer, store, recorder = _stack(db, agent)
     payload = _payload(
@@ -388,9 +407,18 @@ async def test_oat_headers_are_not_in_the_payload_blocks(db):
         extra_headers={"Authorization": f"Bearer {_OAT}", "anthropic-beta": "oauth-2025-04-20"},
         stream=True,
     )
+    handed: list[set[str]] = []
+    real_submit = store.submit
+
+    def submit(call_id, sent, *rest):
+        handed.append(set(sent))
+        real_submit(call_id, sent, *rest)
+
+    monkeypatch.setattr(store, "submit", submit)
     try:
         _record(recorder, payload, "c1", _text_reply("hi"))
         await asyncio.wait_for(writer.drain(5.0), 10)
+        assert handed == [{"system", "messages", "tools"}]  # the scope keeps no other key, not even until the write
         call_id = await _call_id(db, agent, "c1")
         assert {part for part, _, _ in await _refs(db, call_id)} == {"system", "messages", "tools", "response"}
         bodies = " ".join(b["body"] for b in (await _blocks(db, agent)).values())
