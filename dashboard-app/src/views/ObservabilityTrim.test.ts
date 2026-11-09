@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup } from '@testing-library/svelte';
+import { render, screen, cleanup } from '@testing-library/svelte';
 import Observability from './Observability.svelte';
 
 // F108 Phase 2 T10: the last-call token breakdown and the recent API calls moved to the Model calls screen. The
@@ -53,12 +53,9 @@ describe('Observability after the Model calls move', () => {
   it('never fetches a call\'s context text or raw payload', async () => {
     render(Observability);
     await screen.findByRole('heading', { level: 2, name: 'Handler Health' });
-    // Open every disclosure and press every text/payload button there is: none should be left to press.
-    for (const b of screen.queryAllByRole('button', { name: /Show details for/ })) await fireEvent.click(b);
-    for (const name of ['View Context Text', 'View Raw Payload']) {
-      const b = screen.queryByRole('button', { name });
-      if (b) await fireEvent.click(b);
-    }
+    // The buttons that would fetch a call's text or payload are gone from the screen, so there is nothing to press.
+    expect(screen.queryAllByRole('button', { name: /Show details for/ })).toEqual([]);
+    for (const name of ['View Context Text', 'View Raw Payload']) expect(screen.queryByRole('button', { name })).toBeNull();
     await new Promise((r) => setTimeout(r, 0));
     expect(urls.filter((u) => u.includes('/context/log/'))).toEqual([]);
     expect(urls.every((u) => u.startsWith('/dashboard/observability'))).toBe(true);

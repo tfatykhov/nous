@@ -466,6 +466,25 @@ describe('Model calls fix round 1', () => {
     expect(container.querySelectorAll('a.row').length).toBe(1);
   });
 
+  it('Load more is refused while page one of the new filters is loading, so the old cursor is never used', async () => {
+    const cursor = '2026-11-07T00:00:00+00:00|' + ID2;
+    start('#/model-calls', () => ({ body: list([row(ID1), row(ID2)], { next_before: cursor }) }));
+    render(ModelCalls);
+    await screen.findByRole('button', { name: 'Load more' });
+    let release!: (b: unknown) => void;
+    const gate = new Promise<unknown>((r) => { release = r; });
+    respond = (u) => (u.includes('before=') ? { body: list([row(ID3)]) } : { gate });
+    const before = urls.length;
+    await fireEvent.click(screen.getByRole('button', { name: /embedding/ }));
+    await waitFor(() => expect(urls.length).toBe(before + 1));
+    const more = screen.getByRole('button', { name: 'Load more' }) as HTMLButtonElement;
+    expect(more.disabled).toBe(true);
+    await fireEvent.click(more);
+    expect(urls.slice(before).some((u) => u.includes('before='))).toBe(false);
+    release(list([row(ID1)], { next_before: cursor }));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Load more' }) as HTMLButtonElement).disabled).toBe(false));
+  });
+
   it('a block used by this call only still shows its token count', async () => {
     start(`#/model-calls/c/${ID1}`, (u) => (u === `/dashboard/model-calls/${ID1}` ? { body: detail() } : u.includes('/blocks/') ? { body: { part: 'response', ord: 0, size_chars: 5, body: 'x' } } : { body: list([row(ID1)]) }));
     const { container } = render(ModelCalls);

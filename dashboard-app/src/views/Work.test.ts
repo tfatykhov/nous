@@ -30,6 +30,10 @@ const PAGE1 = {
   sessions: [session('s/one', 'Gap Scout status check'), session('s-two', HOSTILE)],
   next_before: CURSOR,
 };
+const PATTERNS = {
+  enabled: true, window_days: 7, reason_coverage: { calls: 0, with_reason: 0 }, tools: [], failing: [],
+  wasted: { repeated_calls: 0, retried_and_failed_again: 0 },
+};
 const PAGE2 = { ...PAGE1, sessions: [session('s-three', 'Third page row')], next_before: null };
 
 let urls: string[] = [];
@@ -365,11 +369,12 @@ describe('Work host dispatch', () => {
     await screen.findByText('Gap Scout status check');
   });
 
-  it('shows a stub for patterns and does not fetch the list', async () => {
+  it('mounts the patterns view and does not fetch the list', async () => {
+    respond = () => ({ body: PATTERNS });
     go('#/work/patterns');
     render(Work);
-    expect(await screen.findByText('Patterns are not built yet.')).toBeTruthy();
-    expect(urls).toHaveLength(0);
+    expect(await screen.findByRole('heading', { name: 'What Nous uses, and what for' })).toBeTruthy();
+    expect(urls).toEqual(['/dashboard/work/patterns?days=7']);
   });
 
   it('mounts the trace for s/<id>/<turn>, fetching the decoded session', async () => {
@@ -398,12 +403,13 @@ describe('Work host dispatch', () => {
     expect(urls).toHaveLength(0);
   });
 
-  it('switches from the list to a stub when the hash changes', async () => {
+  it('switches from the list to the patterns view when the hash changes', async () => {
     go('#/work');
     render(Work);
     await screen.findByText('Gap Scout status check');
+    respond = () => ({ body: PATTERNS });
     go('#/work/patterns');
-    expect(await screen.findByText('Patterns are not built yet.')).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'What Nous uses, and what for' })).toBeTruthy();
     expect(screen.queryByText('Gap Scout status check')).toBeNull();
   });
 });

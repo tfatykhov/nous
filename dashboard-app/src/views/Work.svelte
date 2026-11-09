@@ -4,10 +4,11 @@
   import SubNav from '../lib/ui/SubNav.svelte';
   import Placeholder from '../lib/ui/Placeholder.svelte';
   import SessionList from './work/SessionList.svelte';
+  import Patterns from './work/Patterns.svelte';
   import Trace from './work/Trace.svelte';
 
   // F108 Work host: one screen, its views chosen by the sub path of #/work. The list keeps its filters in the
-  // hash query; Patterns and the change ledger are stubs until their tasks land.
+  // hash query; the change ledger is a stub until its task lands.
   const items = [
     { id: 'sessions', label: 'Sessions', href: routeHref('work') },
     { id: 'patterns', label: 'Patterns', href: routeHref('work', 'patterns') },
@@ -27,7 +28,7 @@
   {#if view?.view === 'sessions'}
     <SessionList />
   {:else if view?.view === 'patterns'}
-    <p class="gone" role="status">Patterns are not built yet.</p>
+    <Patterns />
   {:else if view?.view === 'changes'}
     <Placeholder route="changes" />
   {:else if view?.view === 'trace'}

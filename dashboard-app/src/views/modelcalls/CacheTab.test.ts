@@ -5,7 +5,7 @@ import Cache from '../Cache.svelte';
 import { initRouter } from '../../lib/router';
 
 // F108 Phase 2 T10: the Cache screen is the Model calls screen's second tab. Its rows link to the call's detail when
-// the row carries the model-call id (the endpoint sends none today: the links wait for it).
+// the row carries the model-call id (the endpoint sends it when the model-call log is on).
 const CALL = '55555555-5555-4555-8555-555555555555';
 
 const timelineRow = (over: Record<string, unknown> = {}) => ({
