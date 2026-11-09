@@ -82,14 +82,14 @@ describe('FullResult', () => {
   });
 
   it('an HTTP failure shows an error and Retry refetches', async () => {
-    respond = () => ({ status: 404 });
+    respond = () => ({ status: 500 });
     render(FullResult, { callId: 'c' });
     await fireEvent.click(btn());
-    expect(await screen.findByText('Could not load the full result.')).toBeTruthy();
+    expect(await screen.findByText('Could not load the full result.', {}, { timeout: 4000 })).toBeTruthy();
     respond = () => ({ body: { call_id: 'c', result: 'second try' } });
     await fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
     expect(await screen.findByText('second try')).toBeTruthy();
-    expect(urls).toHaveLength(2);
+    expect(urls).toHaveLength(3);
     expect(screen.queryByText('Could not load the full result.')).toBeNull();
   });
 
@@ -99,5 +99,44 @@ describe('FullResult', () => {
     await fireEvent.click(btn());
     await screen.findByText(HOSTILE);
     expect(container.querySelector('img')).toBeNull();
+  });
+
+  it('a 5xx is retried once (two requests) before the error shows', async () => {
+    respond = () => ({ status: 500 });
+    render(FullResult, { callId: 'c' });
+    await fireEvent.click(btn());
+    expect(await screen.findByText('Could not load the full result.', {}, { timeout: 4000 })).toBeTruthy();
+    expect(urls).toHaveLength(2);
+  });
+
+  it('a 404 shows the not-kept line, not the error', async () => {
+    respond = () => ({ status: 404, body: { error: 'not found' } });
+    render(FullResult, { callId: 'c' });
+    await fireEvent.click(btn());
+    expect(await screen.findByText('Full result not available (kept 7 days).')).toBeTruthy();
+    expect(screen.queryByText('Could not load the full result.')).toBeNull();
+    expect(urls).toHaveLength(1);
+  });
+
+  it('the toggle controls the panel by a sanitised id', async () => {
+    const { container } = render(FullResult, { callId: 'call/1 <x>' });
+    await fireEvent.click(btn());
+    await screen.findByText('x');
+    const id = btn().getAttribute('aria-controls')!;
+    expect(id).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(container.querySelector(`#${id}`)).toBeTruthy();
+  });
+
+  it('after Retry focus stays inside the panel', async () => {
+    respond = () => ({ status: 500 });
+    const { container } = render(FullResult, { callId: 'c' });
+    await fireEvent.click(btn());
+    const retry = await screen.findByRole('button', { name: 'Retry' }, { timeout: 4000 });
+    retry.focus();
+    respond = () => ({ body: { call_id: 'c', result: 'second try' } });
+    await fireEvent.click(retry);
+    await screen.findByText('second try');
+    const panel = container.querySelector(`#${btn().getAttribute('aria-controls')}`)!;
+    expect(panel.contains(document.activeElement)).toBe(true);
   });
 });
