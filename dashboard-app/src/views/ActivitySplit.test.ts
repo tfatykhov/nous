@@ -349,6 +349,19 @@ describe('Activity split', () => {
       expect(activityUrls()).toEqual(['/dashboard/activity?hours=168']);
     });
 
+    it(`${d.name}: fetches the activity once, as Activity did, and never polls it`, async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        render(d.view);
+        const s = await sectionOf(d.section);
+        await waitFor(() => expect(within(s).getByText(d.content)).toBeTruthy());
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+        expect(activityUrls()).toEqual(['/dashboard/activity?hours=168']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it(`${d.name}: a failed activity load says so in the section, offers a retry, and the rest of the screen stays`, async () => {
       failing = ['/dashboard/activity'];
       render(d.view);
