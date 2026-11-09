@@ -1,6 +1,6 @@
 # F108: Agent Work View
 
-**Status:** Phase 1 deployed, with all four settings on. Phase 2 complete. Phase 1 is the recording. PR 1 (#870) records tool calls and turns. PR 2 (#871) records the model-call numbers. PR 3 (#872) records the model-call text. PR 4 (#873), the last PR of Phase 1, makes the model-call table the one recorder: the context endpoints read it, and `context_log` gets no more rows. Every setting defaults off: `NOUS_TOOL_CALL_LOG_ENABLED` and `NOUS_TOOL_REASON_ENABLED` (PR 1), `NOUS_MODEL_CALL_LOG_ENABLED` (PR 2; the cutover in PR 4), `NOUS_MODEL_CALL_TEXT_ENABLED` (PR 3). Phase 2 is the views: the dashboard's Work and Model calls screens, their read-only endpoints, and the navigation in six groups (see [Phase 2: the views](#phase-2-the-views)). Phase 3 (tool notes) follows.
+**Status:** Phase 1 and Phase 2 deployed (all four recording flags on in prod); the full tool result is deployed; Phase 3 tool notes are built and ship off (`NOUS_TOOL_NOTES_ENABLED`, which needs `NOUS_TOOL_CALL_LOG_ENABLED`), to be enabled no earlier than about 2026-11-22. Phase 1 is the recording. PR 1 (#870) records tool calls and turns. PR 2 (#871) records the model-call numbers. PR 3 (#872) records the model-call text. PR 4 (#873), the last PR of Phase 1, makes the model-call table the one recorder: the context endpoints read it, and `context_log` gets no more rows. Every setting defaults off: `NOUS_TOOL_CALL_LOG_ENABLED` and `NOUS_TOOL_REASON_ENABLED` (PR 1), `NOUS_MODEL_CALL_LOG_ENABLED` (PR 2; the cutover in PR 4), `NOUS_MODEL_CALL_TEXT_ENABLED` (PR 3). Phase 2 is the views: the dashboard's Work and Model calls screens, their read-only endpoints, and the navigation in six groups (see [Phase 2: the views](#phase-2-the-views)). Phase 3 (tool notes) is described in [Phase 3: tool notes](#phase-3-tool-notes-nous_tool_notes_enabled-migration-103).
 
 ## Problem
 
@@ -63,7 +63,7 @@ Embeddings requests (`EmbeddingProvider`) and cross-encoder reranks (`nous/heart
 The vocabulary is `PURPOSES` in `nous/observability/model_calls.py`; a name outside it is recorded as `unlabelled` and counted. Today it holds:
 
 - the runner's own calls (`MAIN_LOOP_PURPOSES`): `chat`, `subtask`, `heartbeat`, `background_check`, `continuation`, `dag_summary`, `mcp`, `action_gate`, `reflection`;
-- background calls: `compaction`, `critic`, `epistemic_gate`, `query_expansion`, `date_window`, `admission_utility`, `contradiction`, `fact_dedup`, `actionability`, `profile_card`, `episode_summarizer`, `fact_extractor`, `knowledge_extractor`, `enumerative_extractor`, `correction_extractor`, `outcome_detector`, `procedure_learner`, `procedure_coverage`, `strategy_card`, `sleep_reflection`, `sleep_contradiction`, `sleep_merge`, `job_fix`, `a2ui_compose`, `dag_fix`, `pdf_transcription`, `email_classify`;
+- background calls: `compaction`, `critic`, `epistemic_gate`, `query_expansion`, `date_window`, `admission_utility`, `contradiction`, `fact_dedup`, `actionability`, `profile_card`, `episode_summarizer`, `fact_extractor`, `knowledge_extractor`, `enumerative_extractor`, `correction_extractor`, `outcome_detector`, `procedure_learner`, `procedure_coverage`, `strategy_card`, `sleep_reflection`, `sleep_contradiction`, `sleep_merge`, `job_fix`, `a2ui_compose`, `dag_fix`, `pdf_transcription`, `email_classify`, `tool_notes`;
 - the calls outside the two clients: `browser_task`, `embedding`, `rerank`;
 - `unlabelled`.
 
@@ -189,7 +189,7 @@ The full result of a call (`tool_call_log.result_text`, migration 104) goes by t
 
 ## Who reads the rows
 
-The dashboards, and Nous itself: the `db_query` reader (`nous_reader`, `scripts/ops/db_roles.sql` section 5d) may read `tool_call_log`, `model_call_log` and `model_call_attempt`, so Nous can look up its own tool calls, their reasons and its own model calls. It never reads `agent_turn_log`, which holds message text, nor the model-call text (`model_text_block` and `model_call_block_ref`, the full prompts and responses): `db_roles.sql` lists none of them. This is the one exception to "dashboards read the observability tables, the agent never does".
+The dashboards, and Nous itself: the `db_query` reader (`nous_reader`, `scripts/ops/db_roles.sql` section 5d) may read `tool_call_log`, `model_call_log` and `model_call_attempt`, so Nous can look up its own tool calls, their reasons and its own model calls. It never reads `agent_turn_log`, which holds message text, nor the model-call text (`model_text_block` and `model_call_block_ref`, the full prompts and responses): `db_roles.sql` lists none of them. This is the one exception to "dashboards read the observability tables, the agent never does". The tool-notes review (Phase 3) reads `tool_call_log` in the app, and `tool_note` is read and written by the app only: `db_roles.sql` lists it nowhere.
 
 The dashboard reads both text tables (`model_text_block` and `model_call_block_ref`) through the app role, never the reader: the model-call detail lists a call's blocks without their bodies (`GET /dashboard/model-calls/{call_id}`), and one block's body is read alone, on request (`GET /dashboard/model-calls/{call_id}/blocks/{part}/{ord}`).
 
@@ -235,6 +235,61 @@ Six routes are retired. An old link or bookmark lands on the screen's new home: 
 - **"Nous asked you a question"** finds only `resolve_intention` calls that decided `ask`; a workflow waiting on an answer is not counted.
 - **A trace's model calls** are the main loop's calls of that turn. A background helper inside a turn (`critic`, `epistemic_gate`, `query_expansion`, `date_window`, `admission_utility`) records a session but no turn, so the trace also links the session's whole set of model calls.
 - **A session with calls but no turn row** (for example one that starts with an owner-approved call) is not listed; its trace still opens by id. Every unlabelled Claude Code conversation shares the session id `mcp-session`, so it is one long row, paged in its trace.
+
+## Phase 3: tool notes (`NOUS_TOOL_NOTES_ENABLED`, migration 103)
+
+Phase 3 turns the tool mistakes that repeat in `tool_call_log` into short notes the agent can read. It ships off. It adds one table (`nous_system.tool_note`, migration 103), one setting, one sleep step, one procedure and one quiet owner card, and no agent tool.
+
+### Patterns
+
+`detect_patterns` (`nous/observability/tool_patterns.py`) finds repeated mistakes in code, not with a model. There are three kinds, each per tool, and each has a rate: its hits divided by that tool's calls over the same window.
+
+| Kind | A hit is |
+|---|---|
+| `error_repeat` | an error row whose normalised error text equals the pattern's |
+| `call_repeat` | a call with a previous identical call (same turn, tool and input) |
+| `retry_failed` | an error after an identical error (same turn, tool and input) |
+
+`call_repeat` and `retry_failed` use the same definition as the Work view's Patterns tab: the constants `REPEAT_KEY`, `PREV_ERROR_EXPR`, `REPEATED_SQL` and `RETRY_FAILED_SQL` are shared, and a test pins the two to the same counts. Turnless calls have no turn to repeat in. `normalise_error` lowercases the text and replaces ids, times, absolute paths, hex runs, numbers and quoted strings of 3 or more characters, collapses whitespace and cuts to 160 characters; an error with no text becomes `(no error text)` and is never offered.
+
+A pattern needs at least `MIN_HITS` (3) hits in the last `WINDOW_DAYS` (14) days. A tool with `ERROR_ROWS_CAP` (5,000) or more error rows in the window is skipped for `error_repeat` (counted as `capped`), since a bounded count never becomes a rate. A pattern's id is `kind:tool:` plus a short hash of its key. Its example (at most 200 characters) is redacted.
+
+A pattern is not offered to the review again while it has an active note or any `tool_note` row (a note, a declined row or a guard row) written or retired in the last `REREVIEW_DAYS` (14) days.
+
+### The review
+
+Once per sleep, after the job fixes, `ToolNotesReview` (`nous/handlers/tool_notes.py`) first judges the existing notes (see Keep or retire), then offers at most `MAX_CANDIDATES` (8) patterns, most hits first, to one model call: purpose `tool_notes`, model `NOUS_BACKGROUND_MODEL`, 1,500 output tokens. The prompt holds tool-call records only (the tool, the kind, hits and calls, the redacted example, and the tool's existing notes), redacted before it is formatted. It never mentions scores, outcome labels or the rubric: an example that holds such a word is withheld, and a pattern of a tool whose name holds one is left out (counted as rejected). The model is told to write nothing for a pattern it cannot explain from the records.
+
+The answer is checked strictly in code:
+
+- It must be an object with a `notes` list. Anything else counts as `llm_failed`, closes nothing, and the same patterns are offered again next sleep.
+- Each entry names an offered pattern once, with `write` or `skip`. The text is redacted, at most `NOTE_MAX_CHARS` (300) characters, and free of score words, of guard wording (the `GUARD_FRAGMENTS` as whole words, except "may not" and "may only", which are everyday words in a benign note) and of advice on getting around a refusal (`WORKAROUND_WORDS`). An entry that fails is dropped and counted as rejected.
+- A tool holds at most `NOTES_PER_TOOL` (3) notes and the agent `NOTES_TOTAL` (40). At a cap the entry must name the note it replaces (`replaces`; another tool's note only while the total cap binds and the entry's tool has room): the review rewrites or drops, never appends. The store checks the caps again in the transaction that writes.
+- An offered pattern that gets no stored note is closed with a `declined` row, so it is not offered again for 14 days.
+
+A stored note keeps the baseline of its pattern: the rate, hits and calls at the time it was written.
+
+### Guard patterns and the owner card
+
+`guard_cause` labels a call by a runner refusal code (`GUARD_CODES`: the ledger's refusal codes except `duplicate` and `offered_set`, which are model mistakes), by an unlabelled `refused` or `gated` outcome, or by guard wording in an error (`GUARD_FRAGMENTS`). Transient network failures such as "connection refused" are blanked first and are not guards; the ledger's "could not record this send" refusal is one. A pattern is a guard pattern when at least half of its hit rows carry a guard label. It never reaches the model and never becomes a note.
+
+Instead the owner gets one card on the companion (`tool_notes_guard`): the guard patterns of the window, unreported ones first and then reported ones to fill the slots, at most `MAX_PER_CARD` (10), each with its tool, the guard, its hits and calls and the redacted error. It has no button and no advice, is pushed with `notify` and `telegram_ping` off, replaces itself in place and expires in 14 days. It is pushed only when a guard pattern has no `guard` row of the last 14 days, so each pattern is reported at most once per 14 days; after a successful push the newly listed patterns get a `guard` row. A failed push writes nothing and logs one WARNING (tool names, never record text), so the next sleep tries again.
+
+### The procedure
+
+The notes reach the agent through one procedure named "Tool notes" (domain `tools`, tag `tool_notes`, a fixed description), listed in the procedure catalog like any other active procedure. Its body is rendered from the active notes by `get_procedure` (one `tool: note` line per note) and never stored. The procedure is active only while both `NOUS_TOOL_NOTES_ENABLED` and `NOUS_TOOL_CALL_LOG_ENABLED` are on and at least one note exists; with no note it is inactive, which costs no context at all. It is brought in line after every enabled sleep and at startup (so turning the flag off retires it at the next start), and `get_procedure` hides it while it is inactive or either flag is off. No agent tool is added.
+
+### Keep or retire
+
+Each sleep, before the review, every active note that has not been judged is judged once. When its tool has at least `JUDGE_AFTER_CALLS` (20) calls since the note was written and the note is at least `JUDGE_MIN_DAYS` (7) days old, the rate of the note's own pattern since then is compared with its baseline: strictly lower keeps the note (recorded as judged), otherwise it is retired as `no_improvement`. A note not judged after more than `STALE_DAYS` (30) days is retired as `unused`, including one whose `error_repeat` count is bounded by the 5,000-row cap and so can never be decided. Retired notes are soft deleted (`active` false) and keep the reason (a `no_improvement` note also keeps the calls, hits and rate it was judged on; an `unused` one has no numbers). The thresholds differ from the job lessons' 5 runs because a tool is called many times a day, in bursts: a rate over a handful of calls says nothing, while a job lesson is judged on whole runs of one job.
+
+### Sleep counts
+
+The step's counts are one nested dict, `sleep_stats["tool_notes"]`: `detected`, `capped`, `guard`, `offered`, `written`, `rewritten`, `declined`, `rejected`, `at_cap`, `llm_failed`, `retired`, `kept`. It adds no top-level integer, so the consolidation audit is unchanged.
+
+### Rollout
+
+The step needs sleep and the tool-call log; with the log off, `main.py` logs one WARNING and the step finds nothing. The flag is off by default. The owner enables it no earlier than about 2026-11-22 (two weeks of records), with `NOUS_TOOL_CALL_LOG_ENABLED` on: add `- NOUS_TOOL_NOTES_ENABLED=${NOUS_TOOL_NOTES_ENABLED:-false}` to the `nous` service in `docker-compose.yml` (a code-owner path, so the PR does not change it) and the `.env` line. Migration 103 is applied by the application at start and needs no `db_roles.sql` run: the reader reads neither the notes nor the guard rows. Rollback is removing the `.env` line; the next startup retires the procedure, and the stored notes stay as rows.
 
 ## Non-goals
 

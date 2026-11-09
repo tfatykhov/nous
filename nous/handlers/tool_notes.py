@@ -16,15 +16,17 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from nous.a2ui.builders.tool_notes_guard import DEDUP_KEY as GUARD_DEDUP_KEY
 from nous.a2ui.builders.tool_notes_guard import MAX_PER_CARD, tool_notes_guard_card
 from nous.cognitive.ledger_store import redact_output, redact_structure
 from nous.handlers import call_background_llm, parse_llm_json
-from nous.observability.tool_patterns import GUARD_FRAGMENTS, NO_ERROR_TEXT, Pattern, detect_patterns
+from nous.heart.schemas import ProcedureInput
+from nous.observability.tool_patterns import GUARD_FRAGMENTS, NO_ERROR_TEXT, Pattern, detect_patterns, pattern_counts
 from nous.storage.database import Database
+from nous.storage.models import Procedure
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +34,9 @@ NOTES_PER_TOOL = 3  # active notes of one tool
 NOTES_TOTAL = 40  # active notes in all
 NOTE_MAX_CHARS = 300  # also a CHECK in migration 103
 REREVIEW_DAYS = 14  # a pattern with a note row this recent is not offered to the review again
+JUDGE_AFTER_CALLS = 20  # calls of the tool since the note was written before it is judged
+JUDGE_MIN_DAYS = 7  # a note needs a week of exposure before its rate means anything
+STALE_DAYS = 30  # a note not judged by then is retired as unused
 CLOSE_REASONS = ("declined", "guard")  # why a pattern got an inactive row with no note
 
 
@@ -262,6 +267,18 @@ REVIEW_MAX_TOKENS = 1500
 # Words a note must never carry: notes and the review mention the tool-call records only.
 SCORE_WORDS = re.compile(r"\bscor(e|es|ed|ing)\b|\brubric\b|\bpenalt\w*|\bgrad(e|ed|es|ing)\b|outcome label", re.I)
 
+# Guard wording a note must never carry: the record fragments, word-bound, without "may not" and "may only" (they are
+# everyday words in a benign note; the guard classification of records still uses them). A stem ending in "authori"
+# is not closed on the right, a whole word may take a plural s.
+_NOTE_GUARD_WORDS = re.compile(
+    "|".join(
+        r"\b" + re.escape(f) + ("" if f.endswith("authori") else r"s?\b")
+        for f in GUARD_FRAGMENTS
+        if f not in ("may not", "may only")
+    ),
+    re.I,
+)
+
 # Words a note must never carry: advice on getting past a refusal (checked beside the guard fragments).
 WORKAROUND_WORDS = re.compile(
     r"\bbypass\w*|\bwork(?:ing)?[ -]?arounds?\b|\bcircumvent\w*|\bget(?:ting)? (?:around|past)\b|\bsudo\b"
@@ -353,7 +370,7 @@ def _entry(
     if not text_ or len(text_) > NOTE_MAX_CHARS or SCORE_WORDS.search(text_):
         return None
     # A note never speaks of a guard or of getting past one, whatever a record told the model.
-    if WORKAROUND_WORDS.search(text_) or any(f in text_.lower() for f in GUARD_FRAGMENTS):
+    if WORKAROUND_WORDS.search(text_) or _NOTE_GUARD_WORDS.search(text_):
         return None
     replaces: UUID | None = None
     if raw.get("replaces") is not None:
@@ -464,6 +481,79 @@ class ToolNotesReview:
         return len(new)
 
     async def run_sleep(self) -> dict[str, int]:
+        """Review the repeated mistakes, then bring the "Tool notes" procedure in line with the notes.
+
+        The sync is best effort and runs on every path of an enabled sleep: it never raises, and a failed sync is
+        retried by the next sleep (and by the startup sync).
+        """
+        counts = await self._review()
+        if self._settings.tool_notes_enabled:
+            try:
+                # Without the tool-call log the notes could never be judged or aged out, so none are served.
+                await sync_procedure(
+                    self._heart,
+                    ToolNoteStore(self._db, self._heart.agent_id),
+                    bool(self._settings.tool_call_log_enabled),
+                )
+            except Exception as exc:
+                logger.warning("tool notes: procedure sync failed (%s)", type(exc).__name__)
+        return counts
+
+    async def _judge(self, counts: dict[str, int], now: datetime) -> None:
+        """Keep or retire each active note that has not been judged yet; fill ``kept`` and ``retired``.
+
+        A note is judged once, when its tool has ``JUDGE_AFTER_CALLS`` calls since the note was written and the note
+        is at least ``JUDGE_MIN_DAYS`` old: kept only if the rate of its own pattern is strictly below its baseline,
+        else retired as ``no_improvement``. A note not judged within ``STALE_DAYS`` is retired as ``unused``. An
+        ``error_repeat`` count bounded by ``ERROR_ROWS_CAP`` is never decided on: that note waits for the next
+        sleep. A failure on one note logs a WARNING (no record text) and never stops the others.
+        """
+        agent_id = self._heart.agent_id
+        store = ToolNoteStore(self._db, agent_id)
+        try:
+            notes = await store.active()
+        except Exception as exc:
+            logger.warning("tool notes: reading the notes to judge failed (%s)", type(exc).__name__)
+            return
+        for note in notes:
+            try:
+                if note.judged is not None:
+                    continue
+                age = (now - note.created_at).total_seconds() / 86400
+                hits = calls = 0
+                if age >= JUDGE_MIN_DAYS:
+                    async with self._db.session() as session:
+                        found = await pattern_counts(
+                            session,
+                            agent_id,
+                            note.tool_name,
+                            note.pattern_kind,
+                            note.pattern_key,
+                            since=note.created_at,
+                            until=now,
+                        )
+                    if found is None:
+                        # Never decided on a bounded count; the stale rule below still applies (0 calls judge nothing).
+                        logger.warning("tool notes: %s has too many error rows to judge a note", note.tool_name)
+                    else:
+                        hits, calls = found
+                if age >= JUDGE_MIN_DAYS and calls >= JUDGE_AFTER_CALLS:
+                    rate = hits / calls
+                    if rate < note.baseline_rate:
+                        judged = {"at": now, "calls": calls, "hits": hits, "rate": rate, "days": age, "verdict": "kept"}
+                        await store.mark_judged(note.id, judged)
+                        counts["kept"] += 1
+                    else:
+                        reason = {"reason": "no_improvement", "after": {"calls": calls, "hits": hits, "rate": rate}}
+                        await store.retire(note.id, reason, now=now)
+                        counts["retired"] += 1
+                elif age > STALE_DAYS:  # older than the limit, so a note exactly 30 days old still has its day
+                    await store.retire(note.id, {"reason": "unused"}, now=now)
+                    counts["retired"] += 1
+            except Exception as exc:
+                logger.warning("tool notes: judging a note of %s failed (%s)", note.tool_name, type(exc).__name__)
+
+    async def _review(self) -> dict[str, int]:
         """Detect, offer at most ``MAX_CANDIDATES`` to one model call, store the notes, close the rest as declined."""
         counts = dict.fromkeys(_COUNT_KEYS, 0)
         # Both flags: without the tool-call log the old records must not be read (main.py also warns at start).
@@ -472,6 +562,7 @@ class ToolNotesReview:
         agent_id = self._heart.agent_id
         now = self._clock()
         store = ToolNoteStore(self._db, agent_id)
+        await self._judge(counts, now)  # first: a retired note frees its cap slot and starts its pattern's block
         async with self._db.session() as session:
             patterns, counts["capped"] = await detect_patterns(session, agent_id, now=now)
         counts["detected"] = len(patterns)
@@ -487,7 +578,7 @@ class ToolNotesReview:
         counts["rejected"] += len(named)
         offered = [p for p in rest if p not in named][:MAX_CANDIDATES]
         counts["offered"] = len(offered)
-        if not offered:
+        if not offered or self._llm is None:  # the judge above needs no model
             return counts
         answer = await call_background_llm(
             self._llm,
@@ -525,3 +616,65 @@ class ToolNotesReview:
                 await store.close(p, "declined", now=now)
                 counts["declined"] += 1
         return counts
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The "Tool notes" procedure: its body is rendered from the table by get_procedure, never stored
+# ---------------------------------------------------------------------------------------------------------------------
+
+TOOL_NOTES_PROCEDURE = "Tool notes"
+# not "auto:%", so the procedure learner never dedupes or retires the procedure
+TOOL_NOTES_TAG = "tool_notes"
+# Fixed (118 characters, under proc_catalog_desc_chars), so the cached catalog changes only when it appears or goes.
+TOOL_NOTES_DESCRIPTION = (
+    "Notes on past tool mistakes. Read before a tool you have not used lately, "
+    "after a tool fails, or when choosing a tool."
+)
+
+
+def is_tool_notes_procedure(detail: object) -> bool:
+    """True for the "Tool notes" procedure: its name (any case) and the ``tool_notes`` tag."""
+    name = getattr(detail, "name", None)
+    tags = getattr(detail, "tags", None)
+    if not isinstance(name, str) or not isinstance(tags, (list, tuple)):
+        return False
+    return name.lower() == TOOL_NOTES_PROCEDURE.lower() and TOOL_NOTES_TAG in tags
+
+
+def render_notes(notes: Sequence[Any]) -> list[str]:
+    """One ``tool: note`` line per note: tools sorted, the newest note first within a tool."""
+    ordered = sorted(notes, key=lambda n: n.created_at, reverse=True)  # stable: newest first
+    ordered.sort(key=lambda n: n.tool_name)
+    return [f"{n.tool_name}: {n.note_text}" for n in ordered]
+
+
+async def sync_procedure(heart: Any, store: ToolNoteStore, enabled: bool) -> None:
+    """Make the procedure active when ``enabled`` and a note exists, and inactive otherwise.
+
+    The row is found active or not by the ORM (``get_procedure_by_name`` and the name index are active-only, so a
+    second store would duplicate it) and is reactivated, never stored twice. Zero notes cost zero context.
+    """
+    want = enabled and bool(await store.active())
+    async with heart.db.session() as session:
+        row = (
+            await session.execute(
+                select(Procedure.id, Procedure.active)
+                .where(Procedure.agent_id == heart.agent_id)
+                .where(func.lower(Procedure.name) == TOOL_NOTES_PROCEDURE.lower())
+                .where(Procedure.tags.any(TOOL_NOTES_TAG))
+                .order_by(Procedure.created_at.desc())
+                .limit(1)
+            )
+        ).first()
+    if row is None:
+        if want:
+            await heart.store_procedure(
+                ProcedureInput(
+                    name=TOOL_NOTES_PROCEDURE, domain="tools", description=TOOL_NOTES_DESCRIPTION, tags=[TOOL_NOTES_TAG]
+                )
+            )
+    elif want and not row.active:
+        await heart.reactivate_procedure(row.id)
+    elif not want and row.active:
+        why = "tool_notes_empty" if enabled else "tool_notes_disabled"
+        await heart.retire_procedure(row.id, reason={"reason": why})

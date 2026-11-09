@@ -1079,6 +1079,18 @@ async def create_components(settings: Settings) -> dict:
                     logger.warning("NOUS_TOOL_NOTES_ENABLED needs NOUS_TOOL_CALL_LOG_ENABLED: tool notes stay idle")
             else:
                 logger.warning("NOUS_TOOL_NOTES_ENABLED needs sleep: tool notes stay off")
+        # The "Tool notes" procedure follows the flag and the notes at startup too, so turning the flag off retires it
+        # at once and turning it on shows existing notes before the first sleep. Best effort: a failure is logged.
+        try:
+            from nous.handlers.tool_notes import ToolNoteStore, sync_procedure
+
+            await sync_procedure(
+                heart,
+                ToolNoteStore(heart.db, heart.agent_id),
+                settings.tool_notes_enabled and settings.tool_call_log_enabled,
+            )
+        except Exception as exc:
+            logger.warning("Tool notes: procedure sync at startup failed (%s)", type(exc).__name__)
 
         # Profile card: a sleep phase rewrites the bounded profile card from the tier-1 facts (needs sleep)
         if settings.profile_card_writer_enabled:

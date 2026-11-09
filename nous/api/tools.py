@@ -43,6 +43,7 @@ from nous.brain.brain import Brain
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.brain.schemas import NON_PREDICTION_OUTCOMES, ReasonInput, RecordInput
 from nous.config import PROGRAMMATIC_TOOLS_TIMEOUT_GRACE_SECONDS, Settings
+from nous.handlers.tool_notes import ToolNoteStore, is_tool_notes_procedure, render_notes
 from nous.heart.exemplars import parse_label
 from nous.heart.heart import Heart
 from nous.heart.result_memory import schedule_subtask_memory
@@ -2380,6 +2381,14 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
             logger.exception("learn_skill tool failed")
             return _tool_error(f"Error learning skill: {e}")
 
+    def _tool_notes_hidden(detail: Any) -> bool:
+        """The tool notes procedure is served only while active and with NOUS_TOOL_NOTES_ENABLED on."""
+        return is_tool_notes_procedure(detail) and (
+            not getattr(detail, "active", False)
+            or not getattr(settings, "tool_notes_enabled", False)
+            or not getattr(settings, "tool_call_log_enabled", False)
+        )
+
     async def get_procedure(
         procedure_id: str,
     ) -> dict[str, Any]:
@@ -2408,9 +2417,10 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     detail = await heart.get_procedure(pid)
                 except ValueError:
                     detail = None  # well-formed UUID but no such row
-                if detail is not None and is_job_lesson(detail):
+                if detail is not None and (is_job_lesson(detail) or _tool_notes_hidden(detail)):
                     # A job lesson is shown only on its own job's runs. A Python check:
                     # ProcedureManager.get stays unfiltered for the learner and the job pathway.
+                    # The tool notes procedure is hidden while inactive or with its flag off.
                     detail = None
                 if detail is None:
                     # The id missed — but a procedure's NAME can itself be a UUID string
@@ -2418,8 +2428,14 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     detail = await heart.get_procedure_by_name(procedure_id)
             else:
                 detail = await heart.get_procedure_by_name(procedure_id)
+            if detail is not None and _tool_notes_hidden(detail):
+                detail = None
             if detail is None:
                 return {"content": [{"type": "text", "text": f"No procedure found for '{procedure_id}'."}]}
+            if is_tool_notes_procedure(detail):
+                # The body is the active notes, rendered now (a copy: nothing is stored on the row).
+                store = ToolNoteStore(heart.db, heart.agent_id)
+                detail = detail.model_copy(update={"implementation_notes": render_notes(await store.active())})
 
             lines = [
                 f"**{detail.name}** ({detail.domain or 'general'})",
