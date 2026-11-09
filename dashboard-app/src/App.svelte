@@ -9,6 +9,7 @@
   import Retrieval from './views/Retrieval.svelte';
   import Ledger from './views/Ledger.svelte';
   import Work from './views/Work.svelte';
+  import ModelCalls from './views/ModelCalls.svelte';
   import Subtasks from './views/Subtasks.svelte';
   import GraphView from './views/GraphView.svelte';
   import Overview from './views/Overview.svelte';
@@ -202,6 +203,8 @@
     <Ledger />
   {:else if $currentRoute === 'work'}
     <Work />
+  {:else if $currentRoute === 'model-calls'}
+    <ModelCalls />
   {:else if $currentRoute === 'cache'}
     <Cache />
   {:else if $currentRoute === 'density'}

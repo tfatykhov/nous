@@ -12,9 +12,10 @@ describe('router', () => {
   it('defaults to overview when hash empty', () => { initRouter(); expect(get(currentRoute)).toBe('overview'); });
   it('reads the hash route', () => { location.hash = '#/cache'; initRouter(); expect(get(currentRoute)).toBe('cache'); });
   it('falls back to overview on unknown route', () => { location.hash = '#/nope'; initRouter(); expect(get(currentRoute)).toBe('overview'); });
-  it('lists all 23 routes', () => { expect(ROUTES.length).toBe(23); });
+  it('lists all 24 routes', () => { expect(ROUTES.length).toBe(24); });
   it('includes the memory write health route', () => { expect(ROUTES).toContain('memory-write-health'); });
   it('includes the work route', () => { expect(ROUTES).toContain('work'); });
+  it('includes the model-calls route', () => { expect(ROUTES).toContain('model-calls'); });
   it('includes the autonomy route', () => { expect(ROUTES).toContain('autonomy'); });
   it('includes the intentions route', () => { expect(ROUTES).toContain('intentions'); });
   it('includes the harness route', () => { expect(ROUTES).toContain('harness'); });
@@ -31,8 +32,8 @@ describe('router', () => {
   });
 });
 
-// F108 Phase 2 grammar: #/<route>[/<sub>][?<query>]. `model-calls` joins ROUTES in a later
-// task; these use `work`, whose sub paths are the trace and the patterns.
+// F108 Phase 2 grammar: #/<route>[/<sub>][?<query>].
+// These use `work`, whose sub paths are the trace and the patterns.
 describe('router sub paths and query', () => {
   beforeEach(() => { location.hash = ''; initRouter(); });
 
@@ -108,34 +109,34 @@ describe('router sub paths and query', () => {
 
 describe('routeHref', () => {
   it('builds a bare route link', () => {
-    expect(routeHref('work')).toBe('#/work');
-    expect(routeHref('work', '')).toBe('#/work');
-    expect(routeHref('work', [])).toBe('#/work');
+    expect(routeHref('model-calls')).toBe('#/model-calls');
+    expect(routeHref('model-calls', '')).toBe('#/model-calls');
+    expect(routeHref('model-calls', [])).toBe('#/model-calls');
   });
 
   it('URL-encodes each array segment and joins them with /', () => {
-    expect(routeHref('work', ['c', 'a/b'])).toBe('#/work/c/a%2Fb');
+    expect(routeHref('model-calls', ['c', 'a/b'])).toBe('#/model-calls/c/a%2Fb');
   });
 
   it('uses a string sub as is', () => {
-    expect(routeHref('work', 's/abc%2Fdef/turn1')).toBe('#/work/s/abc%2Fdef/turn1');
+    expect(routeHref('model-calls', 's/abc%2Fdef/turn1')).toBe('#/model-calls/s/abc%2Fdef/turn1');
   });
 
   it('builds the query with URLSearchParams and leaves out an empty one', () => {
-    expect(routeHref('work', 'writes', { kind: 'task', lens: 'error' })).toBe('#/work/writes?kind=task&lens=error');
-    expect(routeHref('work', '', {})).toBe('#/work');
+    expect(routeHref('model-calls', 'writes', { kind: 'task', lens: 'error' })).toBe('#/model-calls/writes?kind=task&lens=error');
+    expect(routeHref('model-calls', '', {})).toBe('#/model-calls');
   });
 
   it('a keyset cursor with | and + survives the round trip through the hash', () => {
     const cursor = '2026-11-08T22:20:24.963805+00:00|0b6c5f2e-1d2a-4c3b-9e8f-7a6b5c4d3e2f';
-    const href = routeHref('work', ['s', 'mcp-session'], { before: cursor });
+    const href = routeHref('model-calls', ['c', 'mcp-session'], { before: cursor });
     expect(href).toContain('%2B');
     expect(href).toContain('%7C');
     expect(href).not.toContain('+00:00');
     initRouter();
     go(href);
-    expect(get(currentRoute)).toBe('work');
-    expect(get(currentSub)).toBe('s/mcp-session');
+    expect(get(currentRoute)).toBe('model-calls');
+    expect(get(currentSub)).toBe('c/mcp-session');
     expect(get(currentQuery).get('before')).toBe(cursor);
   });
 });

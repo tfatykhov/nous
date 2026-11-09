@@ -2,7 +2,7 @@
   import { apiGet, type ApiError } from '../../lib/api';
   import { makePollStore } from '../../lib/stores/registry';
   import { usePoll } from '../../lib/poll';
-  import { routeHref, ROUTES, type RouteName } from '../../lib/router';
+  import { routeHref, ROUTES } from '../../lib/router';
   import { fmtDuration, fmtTime, fmtTokens, getLastListQuery, laneColor } from '../../lib/work';
   import type { WorkCall, WorkTrace, WorkTurn } from '../../lib/types/api';
   import StaleBadge from '../../lib/ui/StaleBadge.svelte';
@@ -179,7 +179,7 @@
   });
 
   const modelCallsReady = () => (ROUTES as readonly string[]).includes('model-calls');
-  const modelCallsHref = (sub: string[] | undefined, query?: Record<string, string>) => routeHref('model-calls' as RouteName, sub, { ...query, days: '30' }); // the Work log keeps 30 days; the list defaults to 7
+  const modelCallsHref = (sub: string[] | undefined, query?: Record<string, string>) => routeHref('model-calls', sub, { ...query, days: '30' }); // the Work log keeps 30 days; the list defaults to 7
   const num = (n: number) => n.toLocaleString('en-US');
   const errorsText = (n: number) => (n === 0 ? 'No errors' : plural(n, 'error', 'errors'));
 </script>
