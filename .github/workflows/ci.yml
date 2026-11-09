@@ -155,7 +155,7 @@ jobs:
       - name: Undo migrations 099 to 104 so the application role applies them
         # 099 to 104 went in above as the superuser (db_roles.sql names a table of 099 to 101 and a column of 104). Drop
         # their tables (all of them: 100 and 101 create with IF NOT EXISTS, so a leftover table would be skipped, 101's
-        # attempts before the calls they reference, and 102's refs before the blocks they reference; 104 adds a column
+        # attempts and 102's refs before the calls they reference, and the refs before the blocks; 104 adds a column
         # to 100's table, which goes with it) and their records as the administrator, so the next step applies
         # them as nous_app, as a deployment does; the role script's re-run then grants the reader again and verify
         # checks it.
@@ -166,10 +166,10 @@ jobs:
           -c "DROP TABLE nous_system.tool_call_log"
           -c "DROP TABLE nous_system.agent_turn_log"
           -c "DELETE FROM nous_system.schema_migrations WHERE version = '100'"
+          -c "DROP TABLE nous_system.model_call_block_ref"
           -c "DROP TABLE nous_system.model_call_attempt"
           -c "DROP TABLE nous_system.model_call_log"
           -c "DELETE FROM nous_system.schema_migrations WHERE version = '101'"
-          -c "DROP TABLE nous_system.model_call_block_ref"
           -c "DROP TABLE nous_system.model_text_block"
           -c "DROP TABLE nous_system.tool_note"
           -c "DELETE FROM nous_system.schema_migrations WHERE version IN ('102', '103', '104')"

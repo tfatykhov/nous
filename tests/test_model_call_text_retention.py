@@ -789,6 +789,6 @@ def test_a_failed_full_result_sweep_logs_a_warning_and_the_others_still_run(monk
         _run(lambda: _one_startup_pass(settings, database))
 
     assert database.deleted == [*_TOOL_ROWS, ("model_call_log", 7), *_TEXT_SWEEP]
-    failed = [r for r in caplog.records if r.name == "nous.main" and "full-result sweep failed" in r.getMessage()]
+    failed = [r for r in caplog.records if r.name == "nous.main" and "full-result retention sweep failed" in r.getMessage()]
     assert failed, [r.getMessage() for r in caplog.records]
     assert {r.levelno for r in failed} == {logging.WARNING} and all(r.exc_info for r in failed)

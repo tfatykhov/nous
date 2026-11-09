@@ -418,7 +418,10 @@ async def test_an_error_stores_no_full_copy(db):
 
 
 @pytest.mark.postgres_only
-@pytest.mark.parametrize("where", ["start", "middle", "end", "straddling the preview cut", "straddling the cap"])
+@pytest.mark.parametrize(
+    "where",
+    ["start", "middle", "end", "straddling the preview cut", "straddling the head cut", "straddling the tail cut"],
+)
 async def test_a_bearer_token_is_never_stored_in_the_full_result(db, where):
     filler = "z " * 3000
     if where == "start":
@@ -429,8 +432,12 @@ async def test_a_bearer_token_is_never_stored_in_the_full_result(db, where):
         result = f"{filler} {_BEARER}"
     elif where == "straddling the preview cut":
         result = "a" * 230 + f" {_BEARER} " + filler  # the token runs over the preview's 250-character head
+    elif where == "straddling the head cut":
+        # the token starts at offset 9,981 and runs past 10,000, where the 20,000-character cap keeps its head
+        result = "b " * 4990 + f" {_BEARER} " + "c " * 8000
     else:
-        result = "b " * 9990 + f" {_BEARER} " + "c " * 9990  # centred on the 20,000-character cut
+        # the last 10,000 characters are kept as the tail: it starts inside the token
+        result = "b " * 8000 + f" {_BEARER} " + "c " * 4990
     row = await _record_one(db, result_preview=result)
     token = _BEARER.split(" ", 1)[1]
     assert token not in row["result_text"] and token not in row["result_preview"]

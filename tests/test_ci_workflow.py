@@ -158,6 +158,9 @@ def test_migrations_099_to_104_are_applied_again_as_the_application_role() -> No
     # 102 to 104: the text refs before the blocks they reference (foreign key), then the notes; 104 adds a column
     # to tool_call_log, which the drop of 100 above already removed
     refs = step.index("DROP TABLE nous_system.model_call_block_ref")
+    # the refs also reference model_call_log (ON DELETE CASCADE foreign key): they go before the calls and the attempts
+    assert refs < step.index("DROP TABLE nous_system.model_call_log"), step
+    assert refs < attempts, step
     assert refs < step.index("DROP TABLE nous_system.model_text_block"), step
     assert "DROP TABLE nous_system.tool_note" in step, step
     assert "DELETE FROM nous_system.schema_migrations WHERE version IN ('102', '103', '104')" in step, step

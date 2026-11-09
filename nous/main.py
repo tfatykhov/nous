@@ -344,7 +344,7 @@ async def _work_view_retention_loop(settings: Settings, database: Database) -> N
                             cleared,
                         )
                     except Exception:
-                        logger.warning("F108: tool-call full-result sweep failed", exc_info=True)
+                        logger.warning("F108: tool-call full-result retention sweep failed", exc_info=True)
             if model_calls:
                 try:
                     days = settings.model_call_retention_days
