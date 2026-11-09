@@ -6,6 +6,7 @@ agent id of the test's own, and the ``cleanup`` fixture deletes them afterwards.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -2684,6 +2685,13 @@ async def test_model_call_text_status(db, agent_id, cleanup, text_store):
         never_swept = await wv.get_model_call(session, agent_id, old, text_store=text_store, text_retention_days=0)
         three_days = await wv.get_model_call(session, agent_id, old, text_store=text_store, text_retention_days=3)
         nine_days = await wv.get_model_call(session, agent_id, old, text_store=text_store, text_retention_days=9)
+        numbers = await wv.get_model_call(session, agent_id, stored, text_store=text_store, text_retention_days=7)
+    # get_model_call reads no text: the blocks are added after its session is closed.
+    assert (numbers["text_status"], numbers["blocks"]) == ("not_recorded", [])
+    numbers = await wv.add_model_call_blocks(numbers, text_store)
+    assert numbers["text_status"] == "ok" and [b["part"] for b in numbers["blocks"]] == ["system", "response"]
+    for detail in (never_swept, three_days, nine_days):
+        await wv.add_model_call_blocks(detail, text_store)  # no blocks: the status stands
     assert never_swept["text_status"] == "not_recorded"
     assert three_days["text_status"] == "expired"
     assert nine_days["text_status"] == "not_recorded"
@@ -2769,13 +2777,20 @@ async def test_detail_unknown_call_404(mct_client, db, agent_id, cleanup):
 async def test_detail_flag_off(db, agent_id, cleanup, monkeypatch, text_store):
     call_id = await insert_model_call(db, agent_id, purpose="chat", started_at=_hour_ago())
     await text_store.store(call_id, [("system", 0, "be brief", False)])
-    opened = 0
+    opened = open_now = most_open = 0
     real_session = db.session
 
-    def counting_session(*args, **kwargs):
-        nonlocal opened
+    @contextlib.asynccontextmanager
+    async def counting_session(*args, **kwargs):
+        nonlocal opened, open_now, most_open
         opened += 1
-        return real_session(*args, **kwargs)
+        open_now += 1
+        most_open = max(most_open, open_now)
+        try:
+            async with real_session(*args, **kwargs) as session:
+                yield session
+        finally:
+            open_now -= 1
 
     monkeypatch.setattr(db, "session", counting_session)
     # The model-call log off (the tool-call log on does not open the model-call endpoints).
@@ -2804,13 +2819,15 @@ async def test_detail_flag_off(db, agent_id, cleanup, monkeypatch, text_store):
         assert (await get_json(c, call_path(call_id)))["text_status"] == "off"
     assert opened == 1
 
-    # Both on: the handler's session, then the text store's (so the zeros above mean something).
+    # Both on: the handler's session, then the text store's (so the zeros above mean something), one after the
+    # other: a request never holds two connections at once.
     both_on = text_app(db, agent_id, text_store)
     async with AsyncClient(transport=ASGITransport(app=both_on), base_url="http://test") as c:
         assert (await get_json(c, call_path(call_id)))["text_status"] == "ok"
         assert opened == 3
         assert (await get_json(c, block_path(call_id, "system", 0)))["body"] == "be brief"
         assert opened == 4
+    assert (most_open, open_now) == (1, 0)
 
 
 @pytest.mark.postgres_only

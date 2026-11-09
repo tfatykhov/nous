@@ -1170,11 +1170,12 @@ async def get_model_call(
     text_retention_days: int,
 ) -> dict[str, Any] | None:
     """One model call of this agent: every list field and the call's context, its HTTP attempts, its context
-    sections (``section_tokens_est``, largest first), its turn, and, when ``text_store`` is given (the text is on),
-    its stored blocks without their bodies (``TextStore.describe``). None for an unknown or another agent's call.
+    sections (``section_tokens_est``, largest first) and its turn. None for an unknown or another agent's call.
 
-    ``text_status``: ``off`` without a store; ``ok`` when the call has blocks; ``expired`` when it has none and is
-    older than ``text_retention_days`` (0 means the text is never swept); else ``not_recorded``."""
+    ``text_status``: ``off`` without ``text_store``. With one (the text is on), the status of a call without stored
+    blocks: ``expired`` when it is older than ``text_retention_days`` (0 means the text is never swept), else
+    ``not_recorded``; ``blocks`` is empty. :func:`add_model_call_blocks`, awaited once this session is closed, lists
+    the call's blocks and makes the status ``ok`` when it has any."""
     params = {"agent": agent_id, "call_id": call_id, "error_chars": ERROR_PREVIEW_CHARS}
     await _set_timeout(session)
     row = (
@@ -1197,25 +1198,11 @@ async def get_model_call(
     ]
 
     if not text_store:
-        text_status, blocks = "off", []
+        text_status = "off"
+    elif text_retention_days > 0 and row["past_text_retention"]:
+        text_status = "expired"
     else:
-        # The store reads in a session of its own, under the same timeout (TextStore.describe).
-        blocks = [
-            {
-                "part": b.part,
-                "ord": b.ord,
-                "size_chars": b.size_chars,
-                "tokens_est": b.size_chars // 4,
-                "reused_by": b.reused_by,
-            }
-            for b in await text_store.describe(call_id)
-        ]
-        if blocks:
-            text_status = "ok"
-        elif text_retention_days > 0 and row["past_text_retention"]:
-            text_status = "expired"
-        else:
-            text_status = "not_recorded"
+        text_status = "not_recorded"
 
     sections = sorted((row["section_tokens_est"] or {}).items(), key=lambda item: (-item[1], item[0]))
     return {
@@ -1257,8 +1244,30 @@ async def get_model_call(
             }
         ),
         "text_status": text_status,
-        "blocks": blocks,
+        "blocks": [],
     }
+
+
+async def add_model_call_blocks(detail: dict[str, Any], text_store: Any | None) -> dict[str, Any]:
+    """``detail`` (from :func:`get_model_call`) with the call's stored blocks, without their bodies
+    (``TextStore.describe``), and ``text_status`` ``ok`` when it has any; unchanged with the text off. The store reads
+    in a session of its own, so await this after get_model_call's session is closed: a request then never holds two
+    connections at once."""
+    if not text_store:
+        return detail
+    blocks = [
+        {
+            "part": b.part,
+            "ord": b.ord,
+            "size_chars": b.size_chars,
+            "tokens_est": b.size_chars // 4,
+            "reused_by": b.reused_by,
+        }
+        for b in await text_store.describe(UUID(detail["call"]["id"]))
+    ]
+    if blocks:
+        detail["text_status"], detail["blocks"] = "ok", blocks
+    return detail
 
 
 async def get_block(text_store: Any, call_id: UUID, part: str, ord_: int) -> dict[str, Any] | None:

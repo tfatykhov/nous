@@ -2390,7 +2390,8 @@ def create_app(
                 )
             if data is None:
                 return JSONResponse({"error": "not found"}, status_code=404)
-            return JSONResponse(data)
+            # After the session above is closed: the text store reads in a session of its own.
+            return JSONResponse(await wv.add_model_call_blocks(data, text_store))
         except Exception:
             logger.warning("dashboard_model_call: the model call query failed", exc_info=True)
             return JSONResponse({"error": "work view query failed"}, status_code=500)
