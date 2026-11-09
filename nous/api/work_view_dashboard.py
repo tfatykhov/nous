@@ -570,7 +570,8 @@ ORDER BY p.started_at, p.id
 # The page's calls in (turn_id, call_index) order, each with its execution_ledger row when this agent has one.
 _TRACE_CALLS_SQL = """
 SELECT c.id, c.turn_id, c.call_index, c.tool_name, c.tool_name_called, c.reason, c.input_text, c.result_preview,
-       c.outcome, c.is_error, c.error_text, c.refused_by, c.duration_ms, c.started_at,
+       (c.result_text IS NOT NULL) AS result_full, c.outcome, c.is_error, c.error_text, c.refused_by, c.duration_ms,
+       c.started_at,
        l.id AS ledger_id, l.status AS ledger_status, l.side_effect_type, l.external_ref, l.idempotency_key, l.key_args
 FROM nous_system.tool_call_log c
 LEFT JOIN nous_system.execution_ledger l ON l.id = c.ledger_entry_id AND l.agent_id = :agent
@@ -622,6 +623,7 @@ def _call_out(row: Mapping[str, Any], ledger_persisted: bool) -> dict[str, Any]:
         "reason": row["reason"],
         "input": row["input_text"],
         "result": row["result_preview"],
+        "result_full": row["result_full"],
         "outcome": row["outcome"],
         "is_error": row["is_error"],
         "error": row["error_text"],
@@ -1299,6 +1301,24 @@ async def add_model_call_blocks(detail: dict[str, Any], text_store: Any | None) 
     if blocks:
         detail["text_status"], detail["blocks"] = "ok", blocks
     return detail
+
+
+# One call's stored full result: the primary key and the agent, nothing else (migration 104).
+_CALL_RESULT_SQL = """
+SELECT result_text FROM nous_system.tool_call_log
+WHERE id = CAST(:call_id AS uuid) AND agent_id = :agent
+"""
+
+
+async def get_call_result(session: AsyncSession, agent_id: str, call_id: UUID) -> dict[str, Any] | None:
+    """One tool call's full result: ``{"call_id", "result"}``, ``result`` the stored text (redacted when written, as
+    stored) or None where none is kept (the preview was whole, or the text was cleared by the retention). None when
+    this agent has no such call. One SELECT by ``(id, agent_id)`` under the statement timeout."""
+    await _set_timeout(session)
+    row = (await session.execute(text(_CALL_RESULT_SQL), {"call_id": str(call_id), "agent": agent_id})).first()
+    if row is None:
+        return None
+    return {"call_id": str(call_id), "result": row[0]}
 
 
 async def get_block(text_store: Any, call_id: UUID, part: str, ord_: int) -> dict[str, Any] | None:

@@ -135,7 +135,7 @@
 
 <header class="view-head">
   <div>
-    <h1>Harness</h1>
+    <h1>Guards</h1>
     <p class="subtitle">What each safety rule flagged — the evidence for moving it from warn to enforce</p>
   </div>
   <div class="head-right">

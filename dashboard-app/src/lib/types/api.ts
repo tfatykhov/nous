@@ -1985,6 +1985,14 @@ export interface WorkCall {
   duration_ms: number | null;
   started_at: string;
   ledger: WorkLedgerRef | null;
+  /** True when a longer, redacted copy of the result is kept (served by `/dashboard/work/calls/{id}/result`). */
+  result_full: boolean;
+}
+
+/** `GET /dashboard/work/calls/{call_id}/result`; a null result means it is no longer kept (7 days). */
+export interface WorkCallResult {
+  call_id: string;
+  result: string | null;
 }
 
 /** A main-loop model call that carries the turn's id. */

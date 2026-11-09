@@ -7,6 +7,7 @@
   import type { WorkCall, WorkTrace, WorkTurn } from '../../lib/types/api';
   import StaleBadge from '../../lib/ui/StaleBadge.svelte';
   import HoldUndo from '../../lib/ui/HoldUndo.svelte';
+  import FullResult from './FullResult.svelte';
 
   // F108 Work trace: one session, turn by turn. Every string here (messages, reasons, inputs, results, replies,
   // critic rationale) came from a model or a user and is shown as a text node only: no {@html}, no markdown.
@@ -278,6 +279,7 @@
                 <div class="input wrap">{c.input}</div>
                 {#if c.error}<p class="err wrap">{c.error}</p>{/if}
                 {#if c.result}<p class="got wrap"><span class="muted">Got:</span> {c.result}</p>{/if}
+                {#if c.result_full}<FullResult callId={c.id} />{/if}
                 {#if c.ledger && c.ledger.status === 'unknown' && c.ledger.held}
                   <HoldUndo id={c.ledger.id} />
                 {/if}

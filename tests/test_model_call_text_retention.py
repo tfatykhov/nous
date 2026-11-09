@@ -433,7 +433,10 @@ async def test_reader_cannot_select_text_tables(db, reader_role, reader_settings
 # ---------------------------------------------------------------------------------------------------------------------
 
 
-_TOOL_TABLES = [("tool_call_log", 30), ("agent_turn_log", 30)]
+_TOOL_ROWS = [("tool_call_log", 30), ("agent_turn_log", 30)]
+# The full-result sweep (UPDATE ... SET result_text = NULL) rides the tool-call branch, by the text retention.
+_RESULT_SWEEP = [("tool_call_log.result_text", 3)]
+_TOOL_TABLES = [*_TOOL_ROWS, *_RESULT_SWEEP]
 _TEXT_SWEEP = [("model_call_block_ref", 3), ("model_text_block", None)]  # the blocks go by the hour, not by days
 
 
@@ -444,13 +447,15 @@ _TEXT_SWEEP = [("model_call_block_ref", 3), ("model_text_block", None)]  # the b
         # Text turned off is still deleted on time: the sweep goes by its retention, whatever the text flag says.
         ({}, [*_TOOL_TABLES, ("model_call_log", 7), *_TEXT_SWEEP]),
         ({"model_call_log_enabled": False}, [*_TOOL_TABLES, *_TEXT_SWEEP]),
+        # The tool-call log off: no tool-call rows, so no full-result sweep either.
+        ({"tool_call_log_enabled": False}, [("model_call_log", 7), *_TEXT_SWEEP]),
         ({"model_call_text_enabled": True, "model_call_retention_days": 0}, [*_TOOL_TABLES, *_TEXT_SWEEP]),
         (
             {"model_call_text_enabled": True, "model_call_text_retention_days": 0},
-            [*_TOOL_TABLES, ("model_call_log", 7)],
+            [*_TOOL_ROWS, ("model_call_log", 7)],
         ),
     ],
-    ids=["text on", "text off", "numbers off", "numbers kept 0 days", "text kept 0 days"],
+    ids=["text on", "text off", "numbers off", "tool log off", "numbers kept 0 days", "text kept 0 days"],
 )
 def test_the_loop_sweeps_the_text_by_its_retention_whatever_the_text_flag_says(
     monkeypatch, caplog, overrides, expected
@@ -773,3 +778,41 @@ def test_the_text_setting_rows_name_the_wiring_and_the_sweep():
     assert "whatever `NOUS_MODEL_CALL_TEXT_ENABLED` says" in rows["NOUS_MODEL_CALL_TEXT_RETENTION_DAYS"]
     for name, row in rows.items():
         assert "sweep_model_call_text" in row and "main.py" in row, name
+
+
+def test_a_failed_full_result_sweep_logs_a_warning_and_the_others_still_run(monkeypatch, caplog):
+    monkeypatch.setattr(main, "_RETENTION_SWEEP_INTERVAL_SECONDS", 3600)
+    database = _Database(fail_on=("tool_call_log.result_text",))
+    settings = _loop_settings(model_call_text_enabled=True, model_call_text_retention_days=3)
+
+    with caplog.at_level(logging.DEBUG, logger="nous.main"):
+        _run(lambda: _one_startup_pass(settings, database))
+
+    assert database.deleted == [*_TOOL_ROWS, ("model_call_log", 7), *_TEXT_SWEEP]
+    failed = [r for r in caplog.records if r.name == "nous.main" and "full-result retention sweep failed" in r.getMessage()]
+    assert failed, [r.getMessage() for r in caplog.records]
+    assert {r.levelno for r in failed} == {logging.WARNING} and all(r.exc_info for r in failed)
+
+
+def test_full_results_expire_even_when_tool_call_rows_are_kept_forever(monkeypatch, caplog):
+    """Rows retention 0 (rows kept) with the tool log on: the recorder still writes result_text, so the loop sweeps it
+    by the text retention, and that sweep alone is what starts the loop."""
+    monkeypatch.setattr(main, "_RETENTION_SWEEP_INTERVAL_SECONDS", 3600)
+    database = _Database()
+    settings = _loop_settings(
+        tool_call_retention_days=0, model_call_log_enabled=False, model_call_text_retention_days=3
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="nous.main"):
+        _run(lambda: _one_startup_pass(settings, database))
+
+    assert database.deleted == [*_RESULT_SWEEP, *_TEXT_SWEEP]
+    assert not [r for r in caplog.records if "retention sweep failed" in r.getMessage()]
+
+
+async def test_the_loop_starts_for_full_results_alone_without_asking_the_database():
+    database = MagicMock()
+    settings = _logs_off("a", tool_call_log_enabled=True, tool_call_retention_days=0)
+
+    assert await main._work_view_retention_needed(settings, database) is True
+    database.session.assert_not_called()

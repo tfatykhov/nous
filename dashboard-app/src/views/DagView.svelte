@@ -267,7 +267,7 @@
 
 <div class="view-head">
   <div>
-    <h1 class="view-title">DAG Orchestrator</h1>
+    <h1 class="view-title">Workflows</h1>
     <p class="view-subtitle">Unified execution DAGs, node progress, and graph visualization</p>
   </div>
   <StaleBadge state={$store} />

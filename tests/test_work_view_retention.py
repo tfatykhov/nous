@@ -403,3 +403,68 @@ def test_every_work_view_setting_has_its_row_with_the_code_default():
         assert f"| `{name}` | `{value}` |" in doc, name
     reason_row = next(line for line in doc.splitlines() if line.startswith("| `NOUS_TOOL_REASON_ENABLED` |"))
     assert "cache" in reason_row
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The full-result sweep: tool_call_log.result_text is cleared after the text retention, the rows stay
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+async def _insert_result_rows(db, agent: str, days_ago: int, *, result_text: str | None = "the full result") -> None:
+    async with db.engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO nous_system.tool_call_log (agent_id, call_index, work_kind, tool_name, tool_name_called, "
+                "outcome, result_preview, result_text, started_at) "
+                "VALUES (:a, 0, 'conversation', 'bash', 'bash', 'ran', 'the preview', :t, "
+                "now() - make_interval(days => :d))"
+            ),
+            {"a": agent, "t": result_text, "d": days_ago},
+        )
+
+
+async def _result_state(db, agent: str) -> list[tuple[int, str, str | None]]:
+    """``(age in days, preview, result_text)`` of the agent's tool-call rows, oldest first."""
+    async with db.engine.connect() as conn:
+        rows = await conn.execute(
+            text(
+                "SELECT extract(day FROM now() - started_at)::int, result_preview, result_text "
+                "FROM nous_system.tool_call_log WHERE agent_id = :a ORDER BY started_at"
+            ),
+            {"a": agent},
+        )
+        return [tuple(r) for r in rows]
+
+
+@pytest.mark.postgres_only
+async def test_sweep_tool_call_text_clears_only_old_text_of_this_agent_and_keeps_every_row(db):
+    from nous.observability.work_view_retention import sweep_tool_call_text
+
+    mine, other = _agent(), _agent()
+    try:
+        await _insert_result_rows(db, mine, 8)
+        await _insert_result_rows(db, mine, 6)
+        await _insert_result_rows(db, mine, 9, result_text=None)  # nothing to clear: not counted
+        await _insert_result_rows(db, other, 8)
+
+        cleared = await sweep_tool_call_text(db, mine, 7)
+
+        assert cleared == {"tool_call_log": 1}
+        assert await _result_state(db, mine) == [
+            (9, "the preview", None),
+            (8, "the preview", None),  # the row and its preview stay
+            (6, "the preview", "the full result"),
+        ]
+        assert await _result_state(db, other) == [(8, "the preview", "the full result")]
+    finally:
+        await _delete_rows(db, mine, other)
+
+
+@pytest.mark.parametrize("days", [0, -1])
+async def test_sweep_tool_call_text_refuses_a_retention_below_one_day(days):
+    from nous.observability.work_view_retention import sweep_tool_call_text
+
+    database = MagicMock()
+    with pytest.raises(ValueError):
+        await sweep_tool_call_text(database, "a", days)
+    database.session.assert_not_called()

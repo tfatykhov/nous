@@ -19,7 +19,13 @@ from nous.api.execution_context import CONTEXT_KINDS
 from nous.cognitive import ledger_store
 from nous.cognitive.ledger_store import detail_text
 from nous.observability.recording import BoundedWriter, RecorderStats
-from nous.observability.tool_calls import WORK_KINDS, ToolCallRecord, ToolCallRecorder, work_kind_for
+from nous.observability.tool_calls import (
+    RESULT_TEXT_MAX_CHARS,
+    WORK_KINDS,
+    ToolCallRecord,
+    ToolCallRecorder,
+    work_kind_for,
+)
 
 _SETTINGS = SimpleNamespace(tool_input_max_chars=2000, tool_result_preview_chars=500, tool_reason_max_chars=500)
 _CUT_MARKER = "\n…[middle cut]…\n"
@@ -356,3 +362,83 @@ def test_work_kind_mapping():
         assert work_kind_for(kind) == work_kind, kind
     # An unknown kind still gets a value: work_kind is NOT NULL and recording never fails.
     assert work_kind_for("no-such-kind") == "background_check"
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# result_text: the redacted full result of a call whose preview was cut
+# ---------------------------------------------------------------------------------------------------------------------
+
+_BEARER = "Bearer abcdEFGH1234ijklMNOP5678qrstUVWX9012"
+
+
+async def _record_one(db, **overrides) -> dict:
+    agent = _agent()
+    writer = BoundedWriter("test")
+    recorder = ToolCallRecorder(writer, db, agent, _SETTINGS)
+    try:
+        recorder.record(_record(**overrides))
+        await writer.drain(5.0)
+        rows = await _rows(db, agent)
+        assert len(rows) == 1
+        return rows[0]
+    finally:
+        await _delete(db, agent)
+
+
+@pytest.mark.postgres_only
+async def test_a_cut_preview_keeps_the_full_result_redacted_up_to_the_cap(db):
+    result = "head-" + "plain words here. " * 300 + "-tail"
+    row = await _record_one(db, result_preview=result)
+    assert row["result_preview"] == detail_text(result, 500)
+    assert row["result_text"] == detail_text(result, RESULT_TEXT_MAX_CHARS) == result  # under the cap: whole
+
+
+@pytest.mark.postgres_only
+async def test_a_huge_result_is_cut_at_20000_with_the_marker(db):
+    assert RESULT_TEXT_MAX_CHARS == 20_000
+    result = "HEAD" + "lorem ipsum. " * 8000 + "TAIL"
+    row = await _record_one(db, result_preview=result)
+    assert len(row["result_text"]) <= RESULT_TEXT_MAX_CHARS + len(_CUT_MARKER)
+    assert _CUT_MARKER in row["result_text"]
+    assert row["result_text"].startswith("HEAD") and row["result_text"].endswith("TAIL")
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("result", ["", "short", "ok. " * 125], ids=["empty", "short", "exactly the cap"])
+async def test_a_result_the_preview_holds_whole_stores_no_full_copy(db, result):
+    row = await _record_one(db, result_preview=result)
+    assert row["result_text"] is None
+    assert row["result_preview"] == result
+
+
+@pytest.mark.postgres_only
+async def test_an_error_stores_no_full_copy(db):
+    row = await _record_one(db, result_preview="boom " * 400, is_error=True, outcome="error", error_text="boom")
+    assert row["result_text"] is None
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize(
+    "where",
+    ["start", "middle", "end", "straddling the preview cut", "straddling the head cut", "straddling the tail cut"],
+)
+async def test_a_bearer_token_is_never_stored_in_the_full_result(db, where):
+    filler = "z " * 3000
+    if where == "start":
+        result = f"{_BEARER} {filler}"
+    elif where == "middle":
+        result = f"{filler} {_BEARER} {filler}"
+    elif where == "end":
+        result = f"{filler} {_BEARER}"
+    elif where == "straddling the preview cut":
+        result = "a" * 230 + f" {_BEARER} " + filler  # the token runs over the preview's 250-character head
+    elif where == "straddling the head cut":
+        # the token starts at offset 9,981 and runs past 10,000, where the 20,000-character cap keeps its head
+        result = "b " * 4990 + f" {_BEARER} " + "c " * 8000
+    else:
+        # the last 10,000 characters are kept as the tail: it starts inside the token
+        result = "b " * 8000 + f" {_BEARER} " + "c " * 4990
+    row = await _record_one(db, result_preview=result)
+    token = _BEARER.split(" ", 1)[1]
+    assert token not in row["result_text"] and token not in row["result_preview"]
+    assert row["result_text"] is not None

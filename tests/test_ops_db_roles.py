@@ -445,3 +445,11 @@ def test_the_reader_credential_rule_is_the_same_in_the_script_and_the_live_test(
     assert found and found.group(1) == CREDENTIAL_NAME
     # and verify's catalog check uses it too
     assert CREDENTIAL_NAME in VERIFY
+
+
+def test_the_reader_does_not_get_the_full_result_of_a_tool_call():
+    # migration 104: the uncut result (up to 20,000 characters, redacted when written) is for the dashboard only;
+    # the db_query reader keeps the 500-character preview. The grant is column by column, so the exclusion is the
+    # whole boundary, and an exclusion naming a missing column stops the run (deploy after the migrator).
+    rows = _reader_rows()
+    assert rows["nous_system.tool_call_log"] == {"result_text"}

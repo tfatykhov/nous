@@ -155,6 +155,7 @@ async def insert_call(
     refused_by: str | None = None,
     duration_ms: int | None = None,
     parent_session_id: str | None = None,
+    result_text: str | None = None,
 ) -> uuid.UUID:
     """One ``tool_call_log`` row; returns its id. ``tool_called`` (what the model sent) defaults to ``tool``."""
     async with db.engine.begin() as conn:
@@ -164,9 +165,9 @@ async def insert_call(
                     "INSERT INTO nous_system.tool_call_log (agent_id, session_id, turn_id, call_index, work_kind, "
                     "subtask_id, tool_name, tool_name_called, reason, input_text, outcome, is_error, "
                     "ledger_entry_id, started_at, result_preview, error_text, refused_by, duration_ms, "
-                    "parent_session_id) "
+                    "parent_session_id, result_text) "
                     "VALUES (:a, :s, :t, :i, :wk, :sub, :tool, :called, :reason, :input, :outcome, :err, :ledger, "
-                    ":start, :result, :error_text, :refused_by, :duration, :parent) RETURNING id"
+                    ":start, :result, :error_text, :refused_by, :duration, :parent, :result_text) RETURNING id"
                 ),
                 {
                     "a": agent_id,
@@ -182,6 +183,7 @@ async def insert_call(
                     "refused_by": refused_by,
                     "duration": duration_ms,
                     "parent": parent_session_id,
+                    "result_text": result_text,
                     "reason": reason,
                     "input": input_text,
                     "outcome": outcome,
@@ -983,6 +985,7 @@ async def test_trace_call_fields(client, db, agent_id, cleanup):
         "reason": "tell the owner",
         "input": '{"to": "owner"}',
         "result": "sent",
+        "result_full": False,
         "outcome": "ran",
         "is_error": False,
         "error": None,
@@ -1007,6 +1010,7 @@ async def test_trace_call_fields(client, db, agent_id, cleanup):
         "reason": None,
         "input": "rm -rf /tmp/x",
         "result": "",
+        "result_full": False,
         "outcome": "refused",
         "is_error": True,
         "error": "refused by the gate",
@@ -3019,3 +3023,92 @@ async def test_sessions_kind_any_lists_background_and_all_still_hides_it(client,
     assert set(_ids(await get_json(client, kind="any"))) == {"sess-conv", "sess-bg"}
     resp = await client.get(SESSIONS, params={"kind": "nope"})
     assert resp.status_code == 400 and "any" in resp.json()["error"]
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# GET /dashboard/work/calls/{call_id}/result (the call's full result) and result_full in the trace
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def result_path(call_id) -> str:
+    return f"/dashboard/work/calls/{call_id}/result"
+
+
+@pytest.mark.postgres_only
+async def test_trace_result_full_says_whether_the_full_result_is_stored(client, db, agent_id, cleanup):
+    base = _hour_ago()
+    turn = await insert_turn(db, agent_id, "sess-RF", started_at=base)
+    await insert_call(
+        db, agent_id, turn, 0, session_id="sess-RF", result="cut", result_text="the full text", started_at=base
+    )
+    await insert_call(db, agent_id, turn, 1, session_id="sess-RF", result="short", started_at=base)
+    await insert_call(db, agent_id, turn, 2, session_id="sess-RF", result="empty", result_text="", started_at=base)
+    body = await get_json(client, trace_path("sess-RF"))
+    calls = body["turns"][0]["calls"]
+    assert [c["result_full"] for c in calls] == [True, False, True]  # IS NOT NULL: an empty string counts
+    assert all("result_text" not in c for c in calls)  # the text itself is served by the endpoint only
+
+
+@pytest.mark.postgres_only
+async def test_call_result_returns_the_stored_text(client, db, agent_id, cleanup):
+    turn = await insert_turn(db, agent_id, "sess-R1", started_at=_hour_ago())
+    full = "line\n" * 100 + HOSTILE
+    call = await insert_call(db, agent_id, turn, 0, session_id="sess-R1", result="p", result_text=full)
+    resp = await client.get(result_path(call))
+    assert resp.status_code == 200
+    assert resp.json() == {"call_id": str(call), "result": full}
+
+
+@pytest.mark.postgres_only
+async def test_call_result_is_null_when_the_text_was_swept_or_never_stored(client, db, agent_id, cleanup):
+    turn = await insert_turn(db, agent_id, "sess-R2", started_at=_hour_ago())
+    call = await insert_call(db, agent_id, turn, 0, session_id="sess-R2", result="short")
+    resp = await client.get(result_path(call))
+    assert resp.status_code == 200
+    assert resp.json() == {"call_id": str(call), "result": None}
+
+
+@pytest.mark.postgres_only
+async def test_call_result_unknown_or_other_agents_call_is_404(client, db, agent_id, cleanup):
+    other = _agent()
+    try:
+        theirs = await insert_call(db, other, None, 0, session_id="sess-R3", result_text="theirs")
+        for call_id in (theirs, uuid.uuid4()):
+            resp = await client.get(result_path(call_id))
+            assert resp.status_code == 404 and resp.json() == {"error": "not found"}
+    finally:
+        await delete_agent_rows(db, other)
+
+
+@pytest.mark.postgres_only
+async def test_call_result_bad_id_is_400(client):
+    resp = await client.get(result_path("not-a-uuid"))
+    assert resp.status_code == 400 and resp.json() == {"error": "call id must be a UUID"}
+
+
+async def test_call_result_with_the_log_off_is_404_and_opens_no_session():
+    database = MagicMock()
+    settings = _settings(_agent(), tool_call_log_enabled=False)
+    async with AsyncClient(transport=ASGITransport(app=make_app(database, settings)), base_url="http://test") as c:
+        resp = await c.get(result_path(uuid.uuid4()))
+    assert resp.status_code == 404 and resp.json() == {"error": "not found"}
+    database.session.assert_not_called()
+
+
+@pytest.mark.postgres_only
+async def test_call_result_runs_under_a_10s_statement_timeout(db, agent_id):
+    async with db.session() as session:
+        assert await wv.get_call_result(session, agent_id, uuid.uuid4()) is None
+        assert (await session.execute(text("SHOW statement_timeout"))).scalar_one() == "10s"
+
+
+@pytest.mark.postgres_only
+async def test_call_result_query_failure_is_a_plain_500(client, monkeypatch, caplog):
+    async def boom(*args, **kwargs):
+        raise RuntimeError("secret detail from the database")
+
+    monkeypatch.setattr(wv, "get_call_result", boom)
+    resp = await client.get(result_path(uuid.uuid4()))
+    assert resp.status_code == 500 and resp.json() == {"error": "work view query failed"}
+    assert "secret detail" not in resp.text
+    assert any(r.levelname == "WARNING" and r.exc_info for r in caplog.records)

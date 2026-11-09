@@ -2400,6 +2400,29 @@ def create_app(
             logger.warning("dashboard_model_call: the model call query failed", exc_info=True)
             return JSONResponse({"error": "work view query failed"}, status_code=500)
 
+    async def dashboard_work_call_result(request: Request) -> JSONResponse:
+        """GET /dashboard/work/calls/{call_id}/result — F108: the full result of one tool call, as stored (the tool's
+        output before SmartCompress, redacted when written and cut at 20,000 characters), or null where none is kept.
+        Read-only. 400 for an id that is not a UUID. 404 for an unknown or another agent's call, and with the
+        tool-call log off (then no session is opened). 500 with the fixed work view error on a query failure."""
+        from nous.api import work_view_dashboard as wv
+
+        try:
+            call_id = wv.parse_call_id(request.path_params["call_id"])
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        if not settings.tool_call_log_enabled:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        try:
+            async with database.session() as session:
+                data = await wv.get_call_result(session, settings.agent_id, call_id)
+            if data is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            return JSONResponse(data)
+        except Exception:
+            logger.warning("dashboard_work_call_result: the work view query failed", exc_info=True)
+            return JSONResponse({"error": "work view query failed"}, status_code=500)
+
     async def dashboard_model_call_block(request: Request) -> JSONResponse:
         """GET /dashboard/model-calls/{call_id}/blocks/{part}/{ord} — F108: the body of one stored text block of a
         model call, as stored (redacted when written). Read-only. 400 for an id that is not a UUID or an ``ord`` that
@@ -3955,6 +3978,7 @@ def create_app(
         Route("/dashboard/work/sessions", dashboard_work_sessions),
         Route("/dashboard/work/sessions/{session_id}", dashboard_work_trace),
         Route("/dashboard/work/patterns", dashboard_work_patterns),
+        Route("/dashboard/work/calls/{call_id}/result", dashboard_work_call_result),
         Route("/dashboard/model-calls", dashboard_model_calls),
         Route("/dashboard/model-calls/{call_id}", dashboard_model_call),
         Route("/dashboard/model-calls/{call_id}/blocks/{part}/{ord}", dashboard_model_call_block),

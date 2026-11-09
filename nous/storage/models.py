@@ -2142,8 +2142,10 @@ class ToolCallLog(Base):
     Written by the runner's recorder while ``NOUS_TOOL_CALL_LOG_ENABLED`` is on. ``call_index`` is the call's 0-based
     place in its turn across stream segments; ``tool_name`` is canonical, ``tool_name_called`` what the model sent;
     ``input_text``, ``result_preview`` and ``reason`` are redacted and capped by the writer. ``turn_id`` names an
-    ``AgentTurnLog`` row (no foreign key: the turn row is written after its calls). Read by the app and by the
-    ``db_query`` reader. The indexes are in the migration.
+    ``AgentTurnLog`` row (no foreign key: the turn row is written after its calls). ``result_text`` (migration 104) is
+    the redacted full result of a call whose preview was cut, at most 20,000 characters, cleared after the model-call
+    text retention. Read by the app and by the ``db_query`` reader, which never reads ``result_text``. The indexes are
+    in the migration.
     """
 
     __tablename__ = "tool_call_log"
@@ -2168,6 +2170,7 @@ class ToolCallLog(Base):
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     input_text: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     result_preview: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    result_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     outcome: Mapped[str] = mapped_column(Text, nullable=False)
     is_error: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     error_text: Mapped[str | None] = mapped_column(Text, nullable=True)
