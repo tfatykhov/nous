@@ -231,7 +231,7 @@ Six routes are retired. An old link or bookmark lands on the screen's new home: 
 
 - **Patterns** shows tools by kind of work, their common reasons, the tools that fail most and the wasted steps. It does not group reasons by goal, show what Nous did after a failure, or show which memory a call was given: each needs reasons clustered or labelled first, so they move to Phase 3 (tool notes).
 - **"Nous asked you a question"** finds only `resolve_intention` calls that decided `ask`; a workflow waiting on an answer is not counted.
-- **A trace's model calls** are the main loop's calls of that turn. A background helper inside a turn (the critic, the epistemic gate, query expansion, the date window, admission) records a session but no turn, so the trace also links the session's whole set of model calls.
+- **A trace's model calls** are the main loop's calls of that turn. A background helper inside a turn (`critic`, `epistemic_gate`, `query_expansion`, `date_window`, `admission_utility`) records a session but no turn, so the trace also links the session's whole set of model calls.
 - **A session with calls but no turn row** (for example one that starts with an owner-approved call) is not listed; its trace still opens by id. Every unlabelled Claude Code conversation shares the session id `mcp-session`, so it is one long row, paged in its trace.
 
 ## Non-goals
