@@ -47,8 +47,11 @@
     return `${fmt(value)} (${sign}${delta} 7d)`;
   }
 
-  /** How many rows the 30-day daily timeseries counts in all (the growth summary line). */
-  function total30d(points: StatusTimeseriesPoint[]): number {
+  /**
+   * Rows the daily timeseries counts in all, for the growth summary line. The series has one point per calendar day
+   * from date(now − 30 days) through today (31 days), and counts rows by creation day, later deactivated ones included.
+   */
+  function seriesTotal(points: StatusTimeseriesPoint[]): number {
     return points.reduce((s, p) => s + p.count, 0);
   }
 
@@ -217,9 +220,9 @@
 
   <!-- ── Growth: one line; the charts are on Memory health's Growth tab ── -->
   <p class="growth-line">
-    Last 30 days: <strong>{fmt(total30d(db.timeseries.facts))}</strong> facts,
-    <strong>{fmt(total30d(db.timeseries.episodes))}</strong> episodes,
-    <strong>{fmt(total30d(db.timeseries.decisions))}</strong> decisions added.
+    Created in the last {db.timeseries.facts.length} days: <strong>{fmt(seriesTotal(db.timeseries.facts))}</strong> facts,
+    <strong>{fmt(seriesTotal(db.timeseries.episodes))}</strong> episodes,
+    <strong>{fmt(seriesTotal(db.timeseries.decisions))}</strong> decisions.
     <a href={routeHref('health', 'growth')}>Memory growth ›</a>
   </p>
 

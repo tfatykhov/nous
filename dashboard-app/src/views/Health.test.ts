@@ -76,10 +76,13 @@ const OBS = {
 
 let urls: string[] = [];
 let obs: Record<string, unknown> = OBS;
+/** While set, /dashboard/density answers only once it resolves (a slow density endpoint). */
+let densityGate: Promise<void> | null = null;
 function install() {
   urls = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     urls.push(url);
+    if (url === '/dashboard/density' && densityGate) await densityGate;
     const body =
       url === '/dashboard/health?days=30' ? HEALTH
       : url === '/dashboard/density' ? DENSITY
@@ -117,7 +120,7 @@ const statLabel = (label: string) => screen.queryAllByText(label, { selector: '.
 const statValue = (label: string) => screen.getByText(label, { selector: '.stat-label' }).previousElementSibling?.textContent?.trim();
 const GROWTH_HEADINGS = ['Memory growth (30 days)', 'Fact categories', 'Fact Growth Rate (7d)'];
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); obs = OBS; });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); obs = OBS; densityGate = null; });
 
 describe('Memory health: Graph tab', () => {
   for (const hash of ['#/health', '#/health/graph']) {
@@ -156,8 +159,40 @@ describe('Memory health: Graph tab', () => {
     render(Health);
     const rates = (await screen.findByRole('heading', { level: 2, name: 'Orphan Rate by Type' })).closest('section') as HTMLElement;
     expect(within(rates).getAllByRole('columnheader').map((c) => c.textContent?.trim())).toEqual(['Type', 'Total', 'Orphans', 'Rate']);
-    const fact = within(rates).getByText('fact').closest('tr') as HTMLElement;
-    expect(within(fact).getAllByRole('cell').map((c) => c.textContent?.trim())).toEqual(['fact', '10', '3', '30.0%']);
+    const fact = within(rates).getByText('facts').closest('tr') as HTMLElement;
+    expect(within(fact).getAllByRole('cell').map((c) => c.textContent?.trim())).toEqual(['facts', '10', '3', '30.0%']);
+  });
+
+  it('names the node types the same way in the orphan breakdown and the orphan rate table', async () => {
+    start('#/health/graph');
+    render(Health);
+    const rates = (await screen.findByRole('heading', { level: 2, name: 'Orphan Rate by Type' })).closest('section') as HTMLElement;
+    const breakdown = screen.getByRole('heading', { level: 2, name: 'Orphan Breakdown by Type' }).closest('section') as HTMLElement;
+    const inBreakdown = Array.from(breakdown.querySelectorAll('.orphan-type')).map((e) => e.textContent?.trim()).filter((t) => t !== 'Total');
+    const inRates = within(rates).getAllByRole('row').slice(1).map((r) => r.querySelector('td')?.textContent?.trim());
+    expect(inRates.sort()).toEqual(inBreakdown.sort());
+    expect(inRates.sort()).toEqual(['decisions', 'facts']);
+  });
+
+  it('labels the orphan trend as a running total that may differ from the count above', async () => {
+    start('#/health/graph');
+    render(Health);
+    const trend = (await screen.findByRole('heading', { level: 2, name: 'Orphan Nodes Over Time' })).closest('section') as HTMLElement;
+    expect(within(trend).getByText('Running total; may differ from the count above')).toBeTruthy();
+  });
+
+  it('shows Density\'s Loading… while /dashboard/density is still in flight', async () => {
+    let release!: () => void;
+    densityGate = new Promise<void>((r) => { release = r; });
+    start('#/health/graph');
+    render(Health);
+    await screen.findByRole('heading', { level: 2, name: 'Graph Density Over Time' });
+    // Health has loaded, so the one Loading… line left is Density's.
+    expect(screen.getAllByText('Loading…', { selector: 'p' })).toHaveLength(1);
+    expect(statLabel('Total Nodes')).toHaveLength(0);
+    release();
+    await waitFor(() => expect(statLabel('Total Nodes')).toHaveLength(1));
+    expect(screen.queryAllByText('Loading…', { selector: 'p' })).toHaveLength(0);
   });
 
   it('puts Density\'s totals and the overall orphan rate at the top, each number once, without the summary footer', async () => {
@@ -263,13 +298,14 @@ describe('Memory health: tabs', () => {
 });
 
 describe('Overview after the growth move', () => {
-  it('shows one growth summary line with the three 30-day counts, linking to the Growth tab', async () => {
+  it('shows one growth summary line with the three counts over the series\' window, linking to the Growth tab', async () => {
     start('#/overview');
     render(Overview);
     const link = await screen.findByRole('link', { name: 'Memory growth ›' });
     expect(link.getAttribute('href')).toBe('#/health/growth');
     expect(link.closest('p')?.textContent?.replace(/\s+/g, ' ').trim())
-      .toBe('Last 30 days: 1,234 facts, 2 episodes, 4 decisions added. Memory growth ›');
+      // The window is the series' own length (31 calendar days, today included, in the endpoint; 2 in this fixture).
+      .toBe('Created in the last 2 days: 1,234 facts, 2 episodes, 4 decisions. Memory growth ›');
     expect(screen.getAllByRole('link').filter((a) => a.getAttribute('href') === '#/health/growth')).toHaveLength(1);
   });
 

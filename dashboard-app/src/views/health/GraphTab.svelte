@@ -45,6 +45,11 @@
     return pct + ' (healthy)';
   }
 
+  /** Density keys node types in the singular; the orphan breakdown above it uses the plural. Show one name. */
+  const TYPE_LABEL: Record<string, string> = {
+    fact: 'facts', decision: 'decisions', episode: 'episodes', procedure: 'procedures', chunk: 'chunks',
+  };
+
   // ── Chart data builders ────────────────────────────────────────────────
 
   function shortDate(iso: string): string {
@@ -265,6 +270,8 @@
     Failed to load density data —
     <button class="retry-link" onclick={() => void density.refresh()}>retry</button>
   </p>
+{:else}
+  <p class="status-msg">Loading…</p>
 {/if}
 
 {#if $store.data}
@@ -285,7 +292,9 @@
       ? Math.round((autoEdges / totalEdges30d) * 100)
       : 0}
 
-    <!-- The orphan count is the banner's above, so it is not repeated here. -->
+    <!-- No "Orphan Nodes" card: the banner above is the direct orphan count. The card was the last point of the
+         orphan trend, a running sum whose backend query counts its boundary day twice (pre-existing, parked as a
+         follow-up), so it can differ from the banner. -->
     <StatGrid stats={[
       { label: 'Current Density', value: latestDensity.toFixed(1) },
       { label: 'Edges (30d)',     value: totalEdges30d },
@@ -323,6 +332,7 @@
       {#if d.orphan_trend.length > 0}
         <section class="chart-card">
           <h2>Orphan Nodes Over Time</h2>
+          <p class="chart-note">Running total; may differ from the count above</p>
           <Chart type="line" data={orphanChartData(d)} options={orphanOptions} height="220px" />
         </section>
       {/if}
@@ -383,7 +393,7 @@
         <tbody>
           {#each Object.entries(d.density_by_type) as [type, stats]}
             <tr>
-              <td class="type-cell">{type}</td>
+              <td class="type-cell">{TYPE_LABEL[type] ?? type}</td>
               <td>{stats.total.toLocaleString()}</td>
               <td>{stats.orphan.toLocaleString()}</td>
               <td><span class="badge {orphanRateClass(stats.orphan_rate)}">{(stats.orphan_rate * 100).toFixed(1)}%</span></td>
@@ -501,6 +511,12 @@
 
   .full-width {
     grid-column: 1 / -1;
+  }
+
+  .chart-note {
+    font-size: 0.75rem;
+    color: var(--muted);
+    margin: -0.5rem 0 0.75rem;
   }
 
   @media (max-width: 900px) {
