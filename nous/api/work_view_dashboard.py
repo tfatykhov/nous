@@ -2,8 +2,10 @@
 
 Pure functions of ``(session, agent_id, params)``: parameter parsing, SQL and shaping. ``nous/api/rest.py`` only
 routes to them. They read the Phase 1 tables (``nous_system.agent_turn_log`` and ``nous_system.tool_call_log``,
-migration 100) through the app's own session, agent-scoped, each statement under a 10-second timeout. The text they
-return was redacted when it was stored; it is returned as stored and never logged.
+migration 100; ``nous_system.model_call_log``, migration 101) and, for the trace and the titles,
+``nous_system.execution_ledger``, ``heart.episodes`` and ``heart.subtasks``, through the app's own session,
+agent-scoped, each statement under a 10-second timeout. The text they return was redacted when it was stored; it is
+returned as stored and never logged.
 """
 
 from __future__ import annotations
