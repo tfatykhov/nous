@@ -276,13 +276,20 @@ def _work_view_sweeps(settings: Settings) -> tuple[bool, bool, bool]:
     )
 
 
+def _tool_call_text_swept(settings: Settings) -> bool:
+    """F108: whether the loop clears ``tool_call_log.result_text``: while the tool-call log is on (the recorder writes
+    it) with a text retention of at least one day, whatever the row retention says (rows kept forever still lose the
+    full result)."""
+    return settings.tool_call_log_enabled and settings.model_call_text_retention_days > 0
+
+
 async def _work_view_retention_needed(settings: Settings, database: Database) -> bool:
     """F108: whether to start the work-view retention loop: while a log is swept; while the text is kept by a
     retention and is being recorded (both text settings on), even on an empty database; and otherwise, when nothing
     can write new text, while this agent still has text (one EXISTS query at startup), so text stored before the
     text was turned off is never kept past its retention. A failed check starts the loop."""
     tool_calls, model_calls, model_call_text = _work_view_sweeps(settings)
-    if tool_calls or model_calls:
+    if tool_calls or model_calls or _tool_call_text_swept(settings):
         return True
     if not model_call_text:
         return False
@@ -332,19 +339,19 @@ async def _work_view_retention_loop(settings: Settings, database: Database) -> N
                 except Exception:
                     # WARNING, not DEBUG: a sweep that keeps failing lets both tables grow without bound.
                     logger.warning("F108: tool-call retention sweep failed", exc_info=True)
-                if settings.model_call_text_retention_days > 0:
-                    # The full results go by the text retention, whatever the text flag says.
-                    try:
-                        days = settings.model_call_text_retention_days
-                        cleared = await sweep_tool_call_text(database, settings.agent_id, days)
-                        logger.info(
-                            "F108: tool_call_log result_text sweep (>%dd, agent=%s) cleared %s",
-                            days,
-                            settings.agent_id,
-                            cleared,
-                        )
-                    except Exception:
-                        logger.warning("F108: tool-call full-result retention sweep failed", exc_info=True)
+            if _tool_call_text_swept(settings):
+                # The full results go by the text retention, whatever the text flag says.
+                try:
+                    days = settings.model_call_text_retention_days
+                    cleared = await sweep_tool_call_text(database, settings.agent_id, days)
+                    logger.info(
+                        "F108: tool_call_log result_text sweep (>%dd, agent=%s) cleared %s",
+                        days,
+                        settings.agent_id,
+                        cleared,
+                    )
+                except Exception:
+                    logger.warning("F108: tool-call full-result retention sweep failed", exc_info=True)
             if model_calls:
                 try:
                     days = settings.model_call_retention_days

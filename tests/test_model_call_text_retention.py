@@ -792,3 +792,27 @@ def test_a_failed_full_result_sweep_logs_a_warning_and_the_others_still_run(monk
     failed = [r for r in caplog.records if r.name == "nous.main" and "full-result retention sweep failed" in r.getMessage()]
     assert failed, [r.getMessage() for r in caplog.records]
     assert {r.levelno for r in failed} == {logging.WARNING} and all(r.exc_info for r in failed)
+
+
+def test_full_results_expire_even_when_tool_call_rows_are_kept_forever(monkeypatch, caplog):
+    """Rows retention 0 (rows kept) with the tool log on: the recorder still writes result_text, so the loop sweeps it
+    by the text retention, and that sweep alone is what starts the loop."""
+    monkeypatch.setattr(main, "_RETENTION_SWEEP_INTERVAL_SECONDS", 3600)
+    database = _Database()
+    settings = _loop_settings(
+        tool_call_retention_days=0, model_call_log_enabled=False, model_call_text_retention_days=3
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="nous.main"):
+        _run(lambda: _one_startup_pass(settings, database))
+
+    assert database.deleted == [*_RESULT_SWEEP, *_TEXT_SWEEP]
+    assert not [r for r in caplog.records if "retention sweep failed" in r.getMessage()]
+
+
+async def test_the_loop_starts_for_full_results_alone_without_asking_the_database():
+    database = MagicMock()
+    settings = _logs_off("a", tool_call_log_enabled=True, tool_call_retention_days=0)
+
+    assert await main._work_view_retention_needed(settings, database) is True
+    database.session.assert_not_called()
