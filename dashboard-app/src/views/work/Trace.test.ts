@@ -14,7 +14,7 @@ const LEDGER = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 const call = (i: number, over: Record<string, unknown> = {}) => ({
   id: `call-${i}`, call_index: i, tool: 'recall_deep', tool_called: null, lane: 'memory',
   reason: `Reason ${i}`, input: `input ${i}`, result: `result ${i}`, outcome: 'ran', is_error: false,
-  error: null, refused_by: null, duration_ms: 1400, started_at: '2026-11-07T00:07:30+00:00', ledger: null, ...over,
+  error: null, refused_by: null, duration_ms: 1400, started_at: '2026-11-07T00:07:30+00:00', ledger: null, result_full: false, ...over,
 });
 const turn = (id: string, n: number | null, over: Record<string, unknown> = {}) => ({
   turn_id: id, turn_number: n, has_turn_row: true, started_at: '2026-11-07T00:07:00+00:00', ended_at: '2026-11-07T00:08:00+00:00',
@@ -444,6 +444,30 @@ describe('Work trace', () => {
       await screen.findByText('Reply 1 later');
       expect(urls[1]).not.toContain('after=');
       expect(container.querySelectorAll('article.turn')).toHaveLength(1);
+    });
+
+    it('no full-result button when result_full is false; a button when true', async () => {
+      respond = () => ({ body: trace([tn(T1, 1, { calls: [call(0), call(1, { result_full: true })] })]) });
+      render(Trace, { sessionId: 'sess/one' });
+      await screen.findByText('Reply 1');
+      expect(screen.getAllByRole('button', { name: 'Show full result' })).toHaveLength(1);
+    });
+
+    it('an open full result stays open across a poll that swaps the call objects, with no refetch', async () => {
+      const mk = () => trace([tn(T1, 1, { calls: [call(0, { result_full: true })] })]);
+      respond = (url) => (url.includes('/result') ? { body: { call_id: 'call-0', result: 'FULL BODY' } } : { body: mk() });
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      render(Trace, { sessionId: 'sess/one' });
+      await vi.advanceTimersByTimeAsync(0);
+      await fireEvent.click(await screen.findByRole('button', { name: 'Show full result' }));
+      await screen.findByText('FULL BODY');
+      const before = urls.filter((u) => u.includes('/result')).length;
+      const polls = urls.length;
+      await vi.advanceTimersByTimeAsync(15000);
+      expect(urls.length).toBeGreaterThan(polls);
+      expect(screen.getByText('FULL BODY')).toBeTruthy();
+      expect(screen.getByRole('button', { name: 'Hide full result' }).getAttribute('aria-expanded')).toBe('true');
+      expect(urls.filter((u) => u.includes('/result')).length).toBe(before);
     });
 
     it('a 404 on a poll stops polling', async () => {
