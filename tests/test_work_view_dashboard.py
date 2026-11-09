@@ -2989,3 +2989,33 @@ async def test_trace_ledger_ref_says_whether_it_holds_a_send(db, agent_id, clean
         body = (await c.get("/dashboard/work/sessions/sess-H")).json()
     held = [call["ledger"]["held"] for call in body["turns"][0]["calls"]]
     assert held == [persist, False, False]
+
+
+@pytest.mark.postgres_only
+async def test_sessions_tool_with_error_lens_needs_that_tool_to_have_failed(client, db, agent_id, cleanup):
+    base = _hour_ago()
+    # X succeeded and Y failed: the session is not a failure of X.
+    t1 = await insert_turn(db, agent_id, "sess-y-fails", started_at=base)
+    await insert_call(db, agent_id, t1, 0, session_id="sess-y-fails", tool="bash")
+    await insert_call(db, agent_id, t1, 1, session_id="sess-y-fails", tool="read_file", is_error=True, outcome="error")
+    # X itself failed, among other calls.
+    t2 = await insert_turn(db, agent_id, "sess-x-fails", started_at=base + timedelta(minutes=1))
+    await insert_call(db, agent_id, t2, 0, session_id="sess-x-fails", tool="bash", is_error=True, outcome="error")
+    await insert_call(db, agent_id, t2, 1, session_id="sess-x-fails", tool="read_file")
+
+    assert _ids(await get_json(client, tool="bash", lens="error")) == ["sess-x-fails"]
+    # Every other combination is unchanged: the lens alone is any failure, the tool alone is any use of it.
+    assert set(_ids(await get_json(client, lens="error"))) == {"sess-y-fails", "sess-x-fails"}
+    assert set(_ids(await get_json(client, tool="bash"))) == {"sess-y-fails", "sess-x-fails"}
+
+
+@pytest.mark.postgres_only
+async def test_sessions_kind_any_lists_background_and_all_still_hides_it(client, db, agent_id, cleanup):
+    base = _hour_ago()
+    await insert_turn(db, agent_id, "sess-conv", started_at=base, work_kind="conversation")
+    await insert_turn(db, agent_id, "sess-bg", started_at=base + timedelta(minutes=1), work_kind="heartbeat")
+
+    assert _ids(await get_json(client, kind="all")) == ["sess-conv"]
+    assert set(_ids(await get_json(client, kind="any"))) == {"sess-conv", "sess-bg"}
+    resp = await client.get(SESSIONS, params={"kind": "nope"})
+    assert resp.status_code == 400 and "any" in resp.json()["error"]

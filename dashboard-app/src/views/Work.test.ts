@@ -30,6 +30,10 @@ const PAGE1 = {
   sessions: [session('s/one', 'Gap Scout status check'), session('s-two', HOSTILE)],
   next_before: CURSOR,
 };
+const PATTERNS = {
+  enabled: true, window_days: 7, reason_coverage: { calls: 0, with_reason: 0 }, tools: [], failing: [],
+  wasted: { repeated_calls: 0, retried_and_failed_again: 0 },
+};
 const PAGE2 = { ...PAGE1, sessions: [session('s-three', 'Third page row')], next_before: null };
 
 let urls: string[] = [];
@@ -115,6 +119,21 @@ describe('Work sessions list', () => {
     expect(urls.slice(before).some((u) => u.includes('before='))).toBe(false);
     release();
     await waitFor(() => expect((screen.getByRole('button', { name: 'Load more' }) as HTMLButtonElement).disabled).toBe(false));
+  });
+
+  it('an Everything button after Background asks for kind=any and keeps it across filter changes', async () => {
+    render(Work);
+    await screen.findByText('Gap Scout status check');
+    const labels = Array.from(document.querySelectorAll('.seg button')).map((b) => b.textContent);
+    expect(labels).toEqual(['All but background', 'Conversations', 'Tasks', 'Background', 'Everything']);
+    await fireEvent.click(screen.getByRole('button', { name: 'Everything' }));
+    await waitFor(() => expect(lastParams().get('kind')).toBe('any'));
+    expect(location.hash).toContain('kind=any');
+    expect(screen.getByRole('button', { name: 'Everything' }).getAttribute('aria-pressed')).toBe('true');
+    await fireEvent.click(screen.getByRole('button', { name: 'A tool failed' }));
+    await waitFor(() => expect(lastParams().get('lens')).toBe('error'));
+    expect(lastParams().get('kind')).toBe('any');
+    expect(location.hash).toContain('kind=any');
   });
 
   it('kind buttons set aria-pressed and refetch with kind=', async () => {
@@ -313,16 +332,94 @@ describe('Work sessions list', () => {
     respond = () => ({ body: { enabled: false, window_days: 7, counts: { conversation: { sessions: 0, turns: 0 }, task: { sessions: 0, turns: 0 }, background: { sessions: 0, turns: 0 } }, tool_names: [], sessions: [], next_before: null } });
     const { container } = render(Work);
     expect(await screen.findByText('Tool-call recording is off. Set NOUS_TOOL_CALL_LOG_ENABLED to record what Nous does.')).toBeTruthy();
-    expect(screen.queryByText('No sessions match.')).toBeNull();
+    expect(screen.queryByText(/No sessions match/)).toBeNull();
     expect(container.querySelector('ul.sessions')).toBeNull();
     expect(container.querySelector('table')).toBeNull();
   });
 
-  it('says No sessions match. for an empty list with the log on', async () => {
+  it('says No sessions match, naming the window, for an empty list with the log on', async () => {
     respond = () => ({ body: { ...PAGE1, sessions: [], next_before: null } });
     render(Work);
-    expect(await screen.findByText('No sessions match.')).toBeTruthy();
+    expect(await screen.findByText('No sessions match in the last 7 days.')).toBeTruthy();
     expect(screen.queryByText(/recording is off/)).toBeNull();
+  });
+
+  // The window: Patterns links here with its own `days`, so a 30-day view of a failing tool opens a 30-day list.
+  describe('days in the URL', () => {
+    const echo = (url: string) => {
+      const days = new URL(url, 'http://x').searchParams.get('days');
+      return { ...(url.includes('before=') ? PAGE2 : PAGE1), window_days: days ? Number(days) : 7 };
+    };
+    beforeEach(() => { respond = (url) => ({ body: echo(url) }); });
+
+    it('passes a days value of 1-30 to the request and names it in the subtitle', async () => {
+      go('#/work?days=30');
+      render(Work);
+      await screen.findByText('Gap Scout status check');
+      expect(lastParams().get('days')).toBe('30');
+      expect(screen.getByText(/in the last 30 days/)).toBeTruthy();
+    });
+
+    it('accepts both ends of the range', async () => {
+      for (const d of ['1', '30']) {
+        cleanup();
+        install();
+        go(`#/work?days=${d}`);
+        render(Work);
+        await screen.findByText('Gap Scout status check');
+        expect(lastParams().get('days')).toBe(d);
+      }
+    });
+
+    it('keeps days across filter changes, in the hash and in the request', async () => {
+      go('#/work?days=30');
+      render(Work);
+      await screen.findByText('Gap Scout status check');
+      await fireEvent.click(screen.getByRole('button', { name: 'Tasks' }));
+      await waitFor(() => expect(lastParams().get('kind')).toBe('task'));
+      expect(lastParams().get('days')).toBe('30');
+      expect(new URLSearchParams(location.hash.split('?')[1]).get('days')).toBe('30');
+      await fireEvent.click(screen.getByRole('button', { name: 'A tool failed' }));
+      await waitFor(() => expect(lastParams().get('lens')).toBe('error'));
+      expect(lastParams().get('days')).toBe('30');
+      await fireEvent.change(screen.getByRole('combobox'), { target: { value: 'bash' } });
+      await waitFor(() => expect(lastParams().get('tool')).toBe('bash'));
+      expect(lastParams().get('days')).toBe('30');
+      expect(getLastListQuery()).toEqual({ kind: 'task', lens: 'error', tool: 'bash', days: '30' });
+    });
+
+    it('Load more asks for the next page of the same window', async () => {
+      go('#/work?days=14');
+      render(Work);
+      await screen.findByText('Gap Scout status check');
+      await fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+      await screen.findByText('Third page row');
+      expect(lastParams().get('before')).toBe(CURSOR);
+      expect(lastParams().get('days')).toBe('14');
+    });
+
+    it('names the window in the empty state', async () => {
+      respond = (url) => ({ body: { ...echo(url), sessions: [], next_before: null } });
+      go('#/work?days=30');
+      render(Work);
+      expect(await screen.findByText('No sessions match in the last 30 days.')).toBeTruthy();
+    });
+
+    it('ignores a days value outside 1-30 or not a whole number, and does not carry it into a filter change', async () => {
+      for (const bad of ['0', '31', '99', 'abc', '1.5', '-3', '']) {
+        cleanup();
+        install();
+        go(`#/work?days=${bad}`);
+        render(Work);
+        await screen.findByText('Gap Scout status check');
+        expect(lastParams().has('days')).toBe(false);
+        expect(screen.getByText(/in the last 7 days/)).toBeTruthy();
+        await fireEvent.click(screen.getByRole('button', { name: 'Tasks' }));
+        await waitFor(() => expect(lastParams().get('kind')).toBe('task'));
+        expect(lastParams().has('days')).toBe(false);
+        expect(location.hash).toBe('#/work?kind=task');
+      }
+    });
   });
 
   it('shows the StaleBadge error state when the request fails', async () => {
@@ -365,11 +462,12 @@ describe('Work host dispatch', () => {
     await screen.findByText('Gap Scout status check');
   });
 
-  it('shows a stub for patterns and does not fetch the list', async () => {
+  it('mounts the patterns view and does not fetch the list', async () => {
+    respond = () => ({ body: PATTERNS });
     go('#/work/patterns');
     render(Work);
-    expect(await screen.findByText('Patterns are not built yet.')).toBeTruthy();
-    expect(urls).toHaveLength(0);
+    expect(await screen.findByRole('heading', { name: 'What Nous uses, and what for' })).toBeTruthy();
+    expect(urls).toEqual(['/dashboard/work/patterns?days=7']);
   });
 
   it('mounts the trace for s/<id>/<turn>, fetching the decoded session', async () => {
@@ -398,12 +496,13 @@ describe('Work host dispatch', () => {
     expect(urls).toHaveLength(0);
   });
 
-  it('switches from the list to a stub when the hash changes', async () => {
+  it('switches from the list to the patterns view when the hash changes', async () => {
     go('#/work');
     render(Work);
     await screen.findByText('Gap Scout status check');
+    respond = () => ({ body: PATTERNS });
     go('#/work/patterns');
-    expect(await screen.findByText('Patterns are not built yet.')).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'What Nous uses, and what for' })).toBeTruthy();
     expect(screen.queryByText('Gap Scout status check')).toBeNull();
   });
 });

@@ -38,12 +38,13 @@ MANY_CALLS = 10
 NO_TITLE = "(no title)"
 
 KINDS: tuple[str, ...] = ("conversation", "task", "background")
-# ``all`` is what the list shows by default: conversations and tasks, background work hidden.
+# ``all`` is what the list shows by default: conversations and tasks, background work hidden. ``any`` is everything.
 KIND_FILTERS: dict[str, tuple[str, ...]] = {
     "all": ("conversation", "task"),
     "conversation": ("conversation",),
     "task": ("task",),
     "background": ("background",),
+    "any": ("conversation", "task", "background"),
 }
 # A session's flags, in the order they are listed.
 FLAGS: tuple[str, ...] = ("error", "repeat", "many", "asked", "changed")
@@ -346,7 +347,13 @@ def _page_sql(*, tool: bool, q: bool, lens: str | None, before: bool) -> str:
         )
     if q:
         where.append("(title ILIKE :q ESCAPE '\\' OR first_message ILIKE :q ESCAPE '\\')")
-    if lens is not None:
+    if lens == "error" and tool:
+        # A tool and the error lens together mean that tool failed, not that some other call of the session did.
+        where.append(
+            "EXISTS (SELECT 1 FROM calls c WHERE c.session_id = titled.session_id "
+            "AND c.tool_name = :tool AND c.is_error)"
+        )
+    elif lens is not None:
         where.append(_LENS_COLUMN[lens])
     if before:
         where.append("(started_at, session_id) < (CAST(:before_ts AS timestamptz), CAST(:before_key AS text))")

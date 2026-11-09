@@ -1,11 +1,11 @@
 <script lang="ts">
   import { SvelteSet } from 'svelte/reactivity';
-  import { apiGet, type ApiError } from '../lib/api';
+  import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
-  import type { ObservabilityData, ObsContextLogEntry } from '../lib/types/api';
+  import { routeHref } from '../lib/router';
+  import type { ObservabilityData } from '../lib/types/api';
   import StatGrid from '../lib/ui/StatGrid.svelte';
-  import DataTable from '../lib/ui/DataTable.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import Chart from '../lib/viz/Chart.svelte';
 
@@ -27,73 +27,6 @@
     } else {
       expandedTraces.add(traceId);
     }
-  }
-
-  // ── Context log expand/collapse (keyed by entry id) ──────────────────────
-  const expandedCtx = new SvelteSet<string>();
-
-  function toggleCtx(id: string) {
-    if (expandedCtx.has(id)) {
-      expandedCtx.delete(id);
-    } else {
-      expandedCtx.add(id);
-    }
-  }
-
-  // ── Recent-call drill-down: structured section text + raw payload ──────────
-  // Lazy-loaded from /context/log/{id}/sections and /context/log/{id}/payload
-  // ONLY on button click (never during render). State keyed by entry id:
-  //   ctx*[id] === undefined → not fetched, === null → loading, else → loaded.
-  type CtxView = 'sections' | 'payload';
-  interface CtxSections {
-    sections: Record<string, number>;
-    sections_text: Record<string, string>;
-  }
-  let ctxView = $state<Record<string, CtxView>>({});
-  let ctxSections = $state<Record<string, CtxSections | null>>({});
-  let ctxPayload = $state<Record<string, unknown>>({});
-  let ctxError = $state<Record<string, string>>({});
-
-  async function viewSections(id: string) {
-    ctxError[id] = '';
-    ctxView[id] = 'sections';
-    if (ctxSections[id] === undefined) {
-      ctxSections[id] = null; // loading
-      try {
-        ctxSections[id] = await apiGet<CtxSections>(
-          '/context/log/' + encodeURIComponent(id) + '/sections',
-        );
-      } catch (e) {
-        delete ctxSections[id];
-        ctxError[id] =
-          (e as ApiError).status === 404
-            ? 'Context text not available (entry expired or capture disabled).'
-            : 'Failed to load context text';
-      }
-    }
-  }
-
-  async function viewPayload(id: string) {
-    ctxError[id] = '';
-    ctxView[id] = 'payload';
-    if (ctxPayload[id] === undefined) {
-      ctxPayload[id] = null; // loading
-      try {
-        ctxPayload[id] = await apiGet<unknown>(
-          '/context/log/' + encodeURIComponent(id) + '/payload',
-        );
-      } catch (e) {
-        delete ctxPayload[id];
-        ctxError[id] =
-          (e as ApiError).status === 404
-            ? 'Raw payload was not captured (full-payload capture disabled or evicted).'
-            : 'Failed to load raw payload';
-      }
-    }
-  }
-
-  function hideCtx(id: string) {
-    delete ctxView[id];
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -133,49 +66,6 @@
     if (errorRate > 0.1) return '#f87171';
     if (errorRate > 0) return '#fbbf24';
     return '#4ade80';
-  }
-
-  const SECTION_COLORS: Record<string, string> = {
-    messages: '#60a5fa',
-    tools_definition: '#a78bfa',
-    identity: '#34d399',
-    working_memory: '#fb923c',
-    execution_ledger: '#f87171',
-    relevant_facts: '#fbbf24',
-    related_decisions: '#22d3ee',
-    frame_instructions: '#c084fc',
-    user_profile: '#38bdf8',
-    censors: '#f472b6',
-  };
-
-  function sectionColor(name: string): string {
-    return SECTION_COLORS[name] ?? '#6b6b8a';
-  }
-
-  // ── Context token doughnut ────────────────────────────────────────────────
-
-  function tokenDoughnutData(entry: ObsContextLogEntry) {
-    const breakdown = entry.token_breakdown ?? {};
-    const sorted = Object.entries(breakdown).sort(([, a], [, b]) => b - a);
-    const top = sorted.slice(0, 6);
-    const other = sorted.slice(6).reduce((s, [, v]) => s + v, 0);
-    const labels = top.map(([k]) => k);
-    const values = top.map(([, v]) => v);
-    if (other > 0) {
-      labels.push('other');
-      values.push(other);
-    }
-    const colors = [
-      '#60a5fa', '#a78bfa', '#34d399', '#fb923c', '#f87171', '#fbbf24', '#6b6b8a',
-    ];
-    return {
-      labels,
-      datasets: [{
-        data: values,
-        backgroundColor: colors.slice(0, labels.length),
-        borderWidth: 0,
-      }],
-    };
   }
 
   // ── Drift trend chart builders ────────────────────────────────────────────
@@ -224,23 +114,12 @@
     },
     plugins: { legend: { display: false } },
   };
-
-  // ── Recent-calls table columns ────────────────────────────────────────────
-
-  const ctxCols = [
-    { key: 'turn_fmt', label: 'Turn' },
-    { key: 'frame_id', label: 'Frame' },
-    { key: 'tokens_fmt', label: 'Tokens' },
-    { key: 'util_fmt', label: 'Util' },
-    { key: 'tools_count', label: 'Tools' },
-    { key: 'age_fmt', label: 'Age' },
-  ];
 </script>
 
 <header class="view-head">
   <div>
     <h1>Observability</h1>
-    <p class="subtitle">Event bus health, causal traces, behavioral drift, and context visibility</p>
+    <p class="subtitle">Event bus health, causal traces, and behavioral drift</p>
   </div>
   <StaleBadge state={$store} />
 </header>
@@ -422,148 +301,14 @@
     <p class="snapshot-ts">Snapshot: {fmtAgo(d.drift.timestamp)}</p>
   {/if}
 
-  <!-- ── Section 4: Context Visibility ── -->
-  <div class="chart-row">
-    <!-- Token doughnut for last call -->
-    <section class="chart-card">
-      <h2>Context Token Breakdown (Last Call)</h2>
-      {#if d.context_log.length > 0}
-        <Chart
-          type="doughnut"
-          data={tokenDoughnutData(d.context_log[0])}
-          options={{ cutout: '60%', plugins: { legend: { position: 'bottom', labels: { font: { size: 11 }, padding: 8 } } } }}
-          height="240px"
-        />
-      {:else}
-        <p class="empty">No API calls logged yet</p>
-      {/if}
-    </section>
-
-    <!-- Recent API calls table with expandable detail -->
-    <section class="chart-card">
-      <h2>Recent API Calls</h2>
-      {#if d.context_log.length > 0}
-        <DataTable
-          columns={ctxCols}
-          rows={d.context_log.map((e) => ({
-            ...e,
-            turn_fmt: 'T' + (e.turn_number ?? '?'),
-            tokens_fmt: '~' + fmtNum(e.total_tokens_est) + (e.input_tokens_actual != null ? ' / ' + fmtNum(e.input_tokens_actual) : ''),
-            util_fmt: (e.utilization_pct ?? 0).toFixed(1) + '%',
-            age_fmt: fmtAgo(e.timestamp),
-          }))}
-          mode="cards"
-          rowKey={(r: ObsContextLogEntry) => r.id}
-        >
-          {#snippet detail(row: ObsContextLogEntry)}
-            <div class="ctx-detail">
-              <!-- Token breakdown mini bars -->
-              {#if Object.keys(row.token_breakdown ?? {}).length > 0}
-                <div class="ctx-breakdown">
-                  <div class="ctx-breakdown-title">Token Breakdown</div>
-                  {#each Object.entries(row.token_breakdown).sort(([,a],[,b]) => b - a) as [section, tokens]}
-                    {@const pct = row.total_tokens_est > 0 ? (tokens / row.total_tokens_est * 100) : 0}
-                    <div class="ctx-bar-row">
-                      <span class="ctx-bar-label">{section}</span>
-                      <div class="ctx-bar-track">
-                        <div class="ctx-bar-fill" style="width:{pct.toFixed(1)}%;background:{sectionColor(section)}"></div>
-                      </div>
-                      <span class="ctx-bar-value">{fmtNum(tokens)} <span class="muted">({pct.toFixed(0)}%)</span></span>
-                    </div>
-                  {/each}
-                </div>
-              {/if}
-              <!-- Metadata grid -->
-              <div class="ctx-meta">
-                <div><span class="dl">Model</span> {row.model}</div>
-                <div><span class="dl">Call type</span> {row.call_type}</div>
-                <div><span class="dl">Window</span> {fmtNum(row.context_window_size)}</div>
-                <div><span class="dl">Messages</span> {row.messages_count}</div>
-                <div><span class="dl">Facts</span> {row.loaded_facts}</div>
-                <div><span class="dl">Decisions</span> {row.loaded_decisions}</div>
-                {#if row.output_tokens != null}
-                  <div><span class="dl">Output</span> {fmtNum(row.output_tokens)} tok</div>
-                {/if}
-                {#if row.duration_ms != null}
-                  <div><span class="dl">Duration</span> {(row.duration_ms / 1000).toFixed(1)}s</div>
-                {/if}
-                {#if row.cache_read != null}
-                  <div><span class="dl">Cache read</span> {fmtNum(row.cache_read)}</div>
-                {/if}
-                {#if row.stop_reason}
-                  <div><span class="dl">Stop</span> {row.stop_reason}</div>
-                {/if}
-              </div>
-              <!-- Sections + tools -->
-              {#if row.sections_present.length > 0}
-                <p class="ctx-tags">Sections: {row.sections_present.join(', ')}</p>
-              {/if}
-              {#if row.tool_names.length > 0}
-                <p class="ctx-tags">Tools: {row.tool_names.join(', ')}</p>
-              {/if}
-
-              <!-- Structured section text + raw payload (lazy-loaded on click) -->
-              <div class="ctx-actions">
-                <button
-                  type="button"
-                  class="ctx-btn"
-                  class:active={ctxView[row.id] === 'sections'}
-                  onclick={() => viewSections(row.id)}
-                >View Context Text</button>
-                <button
-                  type="button"
-                  class="ctx-btn"
-                  class:active={ctxView[row.id] === 'payload'}
-                  onclick={() => viewPayload(row.id)}
-                >View Raw Payload</button>
-                {#if ctxView[row.id]}
-                  <button type="button" class="ctx-btn ghost" onclick={() => hideCtx(row.id)}>Hide</button>
-                {/if}
-              </div>
-              {#if ctxError[row.id]}
-                <p class="ctx-err">{ctxError[row.id]}</p>
-              {/if}
-
-              {#if ctxView[row.id] === 'sections'}
-                {#if ctxSections[row.id] === null}
-                  <p class="ctx-loading muted">Loading…</p>
-                {:else if ctxSections[row.id]}
-                  {@const sec = ctxSections[row.id]!}
-                  {#if Object.keys(sec.sections_text ?? {}).length > 0}
-                    {#each Object.keys(sec.sections_text) as name}
-                      <details class="ctx-section">
-                        <summary>
-                          <span class="ctx-section-name">{name}</span>
-                          <span class="muted">{fmtNum((sec.sections ?? {})[name] ?? 0)} tokens</span>
-                        </summary>
-                        <pre class="ctx-pre">{sec.sections_text[name]}</pre>
-                      </details>
-                    {/each}
-                  {:else}
-                    <p class="ctx-loading muted">No section text available</p>
-                  {/if}
-                {/if}
-              {:else if ctxView[row.id] === 'payload'}
-                {#if ctxPayload[row.id] === null}
-                  <p class="ctx-loading muted">Loading…</p>
-                {:else if ctxPayload[row.id] !== undefined}
-                  <pre class="ctx-pre ctx-payload">{JSON.stringify(ctxPayload[row.id], null, 2)}</pre>
-                {/if}
-              {/if}
-            </div>
-          {/snippet}
-        </DataTable>
-      {:else}
-        <p class="empty">No API calls logged yet</p>
-      {/if}
-    </section>
-  </div>
-
 {:else if $store.error}
   <p class="status-msg error">Failed to load observability data — retrying…</p>
 {:else}
   <p class="status-msg">Loading…</p>
 {/if}
+
+<!-- The last call's token breakdown and the recent API calls are on the Model calls screen (F108). -->
+<p class="moved">Model calls moved to <a href={routeHref('model-calls')}>Model calls</a></p>
 
 <style>
   .view-head {
@@ -804,123 +549,15 @@
     margin: 0.375rem 0 0;
   }
 
-  /* ── Context detail ── */
-  .ctx-detail {
-    padding: 0.5rem 0;
+  .moved {
     font-size: 0.8125rem;
-  }
-
-  .ctx-breakdown {
-    margin-bottom: 0.75rem;
-  }
-
-  .ctx-breakdown-title {
-    font-size: 0.6875rem;
-    font-weight: 600;
     color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    margin-bottom: 0.375rem;
+    margin: 1rem 0 0;
   }
 
-  .ctx-bar-row {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 0.1875rem;
-    font-size: 0.75rem;
+  .moved a {
+    color: var(--accent-text);
   }
-
-  .ctx-bar-label {
-    min-width: 130px;
-    color: var(--muted);
-  }
-
-  .ctx-bar-track {
-    flex: 1;
-    height: 5px;
-    background: var(--border);
-    border-radius: 3px;
-    overflow: hidden;
-  }
-
-  .ctx-bar-fill {
-    height: 100%;
-    border-radius: 3px;
-  }
-
-  .ctx-bar-value {
-    min-width: 90px;
-    text-align: right;
-    color: var(--text);
-  }
-
-  .ctx-meta {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-    gap: 0.375rem 0.75rem;
-    font-size: 0.75rem;
-    margin-bottom: 0.5rem;
-  }
-
-  .ctx-tags {
-    font-size: 0.6875rem;
-    color: var(--muted);
-    margin: 0.25rem 0 0;
-    line-height: 1.5;
-  }
-
-  /* ── Recent-call drill-down (context text + raw payload) ── */
-  .ctx-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    margin-top: 0.75rem;
-  }
-  .ctx-btn {
-    font-size: 0.6875rem;
-    padding: 0.25rem 0.75rem;
-    background: var(--surface-2, var(--border));
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    cursor: pointer;
-    min-height: 28px;
-  }
-  .ctx-btn:hover { border-color: var(--accent); }
-  .ctx-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-  .ctx-btn.ghost { background: transparent; color: var(--muted); }
-  .ctx-err { color: var(--red); font-size: 0.6875rem; margin: 0.5rem 0 0; }
-  .ctx-loading { font-size: 0.75rem; margin: 0.5rem 0 0; }
-  .ctx-section { margin-top: 0.5rem; }
-  .ctx-section > summary {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    cursor: pointer;
-    font-size: 0.75rem;
-    padding: 0.25rem 0;
-  }
-  .ctx-section-name { font-weight: 600; color: #38bdf8; }
-  .ctx-pre {
-    max-height: 400px;
-    overflow: auto;
-    font-size: 0.6875rem;
-    line-height: 1.5;
-    padding: 0.5rem 0.75rem;
-    margin: 0.375rem 0 0;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    white-space: pre-wrap;
-    word-break: break-word;
-    color: var(--text);
-    font-family: var(--font-mono, monospace);
-  }
-  .ctx-payload { max-height: 500px; }
-
-  /* ── Shared ── */
-  .muted { color: var(--muted); }
 
   .empty {
     color: var(--muted);

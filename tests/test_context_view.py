@@ -120,6 +120,8 @@ CACHE_TIMELINE_KEYS = frozenset(
         "break_components",
     }
 )
+# F108 Phase 2: from the table, a timeline row also names its call (the dashboard links the row to it).
+TABLE_CACHE_TIMELINE_KEYS = frozenset({"id"})
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -462,7 +464,8 @@ async def test_table_view_response_shapes_match_ring_view(db, monkeypatch):
         assert _keys(table_r["cache"]["summary"]) == CACHE_SUMMARY_KEYS | TABLE_CACHE_SUMMARY_KEYS
         for r_ in (ring_r, table_r):
             assert {_keys(s) for s in r_["cache"]["sessions"]} == {CACHE_SESSION_KEYS}
-            assert {_keys(t) for t in r_["cache"]["timeline"]} == {CACHE_TIMELINE_KEYS}
+        assert {_keys(t) for t in ring_r["cache"]["timeline"]} == {CACHE_TIMELINE_KEYS}
+        assert {_keys(t) for t in table_r["cache"]["timeline"]} == {CACHE_TIMELINE_KEYS | TABLE_CACHE_TIMELINE_KEYS}
 
         # Same calls, same values, newest first, wherever both record the same thing.
         same = ENTRY_KEYS - {"timestamp", "duration_ms"}  # the ring never had a duration (bug 1)
@@ -479,6 +482,27 @@ async def test_table_view_response_shapes_match_ring_view(db, monkeypatch):
         }
         assert (table_r["cache"]["summary"]["error_calls"], table_r["cache"]["summary"]["input_total"]) == (0, 4 * 2053)
         assert ring_r["cache"]["sessions"] == table_r["cache"]["sessions"]
+    finally:
+        await client.close()
+        await delete_rows(db, agent)
+
+
+@pytest.mark.postgres_only
+async def test_cache_timeline_rows_carry_their_model_call_id_only_from_the_table(db, monkeypatch):
+    """With the model-call log on, each /dashboard/cache timeline row carries its model_call_log id, newest first
+    (the dashboard links the row to that call). Off, the ring's rows have no id key: a ring id names no call."""
+    agent = new_agent()
+    client, ring = await _both_ways(db, monkeypatch, agent)
+    try:
+        newest_first = [str(r["id"]) for r in reversed(await model_rows(db, agent))]
+        assert len(newest_first) == 4
+        async with rest(view=TableContextView(db, agent, None, ring)) as http:
+            table_timeline = (await http.get("/dashboard/cache")).json()["timeline"]
+        assert [t["id"] for t in table_timeline] == newest_first
+        async with rest(context_logger=ring) as http:
+            ring_timeline = (await http.get("/dashboard/cache")).json()["timeline"]
+        assert len(ring_timeline) == 4
+        assert [t for t in ring_timeline if "id" in t] == []
     finally:
         await client.close()
         await delete_rows(db, agent)

@@ -17,6 +17,7 @@
     { id: 'conversation', label: 'Conversations' },
     { id: 'task', label: 'Tasks' },
     { id: 'background', label: 'Background' },
+    { id: 'any', label: 'Everything' },
   ];
   const LENSES = [
     { id: 'error', label: 'A tool failed' },
@@ -27,16 +28,20 @@
   ];
   const KIND_LABEL: Record<string, string> = { conversation: 'Conversation', task: 'Task', background: 'Background' };
 
-  type Filters = { kind: string; lens: string; tool: string; q: string };
+  type Filters = { kind: string; lens: string; tool: string; q: string; days: string };
 
   function readFilters(query: URLSearchParams): Filters {
     const kind = query.get('kind') ?? 'all';
     const lens = query.get('lens') ?? '';
+    const days = query.get('days') ?? '';
     return {
       kind: KINDS.some((k) => k.id === kind) ? kind : 'all',
       lens: LENSES.some((l) => l.id === lens) ? lens : '',
       tool: query.get('tool') ?? '',
       q: query.get('q') ?? '',
+      // The window, a whole number of days from 1 to 30 (Patterns links here with its own); anything else is
+      // left out, so the server's default applies.
+      days: /^\d+$/.test(days) && Number(days) >= 1 && Number(days) <= 30 ? String(Number(days)) : '',
     };
   }
 
@@ -54,6 +59,7 @@
     if (f.lens) p.set('lens', f.lens);
     if (f.tool) p.set('tool', f.tool);
     if (f.q) p.set('q', f.q);
+    if (f.days) p.set('days', f.days);
     return p.toString();
   }
 
@@ -67,6 +73,7 @@
     if (filters.lens) q.lens = filters.lens;
     if (filters.tool) q.tool = filters.tool;
     if (filters.q) q.q = filters.q;
+    if (filters.days) q.days = filters.days;
     setLastListQuery(q);
   });
 
@@ -147,6 +154,7 @@
     if (f.lens) query.lens = f.lens;
     if (f.tool) query.tool = f.tool;
     if (f.q) query.q = f.q;
+    if (f.days) query.days = f.days;
     location.replace(routeHref('work', '', query)); // a filter is not a page: Back leaves the screen
   }
 
@@ -235,7 +243,7 @@
   </section>
 
   {#if sessions.length === 0}
-    <p class="empty">No sessions match.</p>
+    <p class="empty">No sessions match in the last {data.window_days} days.</p>
   {:else}
     <ul class="sessions" class:dim={$store.loading}>
       {#each sessions as s (s.session_id)}

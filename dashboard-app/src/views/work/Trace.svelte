@@ -2,7 +2,7 @@
   import { apiGet, type ApiError } from '../../lib/api';
   import { makePollStore } from '../../lib/stores/registry';
   import { usePoll } from '../../lib/poll';
-  import { routeHref, ROUTES, type RouteName } from '../../lib/router';
+  import { routeHref } from '../../lib/router';
   import { fmtDuration, fmtTime, fmtTokens, getLastListQuery, laneColor } from '../../lib/work';
   import type { WorkCall, WorkTrace, WorkTurn } from '../../lib/types/api';
   import StaleBadge from '../../lib/ui/StaleBadge.svelte';
@@ -178,8 +178,7 @@
     return [...by].map(([tool, u]) => ({ tool, ...u }));
   });
 
-  const modelCallsReady = () => (ROUTES as readonly string[]).includes('model-calls');
-  const modelCallsHref = (sub: string[] | undefined, query?: Record<string, string>) => routeHref('model-calls' as RouteName, sub, { ...query, days: '30' }); // the Work log keeps 30 days; the list defaults to 7
+  const modelCallsHref = (sub: string[] | undefined, query?: Record<string, string>) => routeHref('model-calls', sub, { ...query, days: '30' }); // the Work log keeps 30 days; the list defaults to 7
   const num = (n: number) => n.toLocaleString('en-US');
   const errorsText = (n: number) => (n === 0 ? 'No errors' : plural(n, 'error', 'errors'));
 </script>
@@ -207,7 +206,7 @@
         <span>{plural(s.turns, 'turn', 'turns')}</span>
         <span>{plural(s.tool_calls, 'tool call', 'tool calls')}</span>
         <span class:bad={s.errors > 0}>{errorsText(s.errors)}</span>
-        {#if modelCallsReady()}<a href={modelCallsHref(undefined, { session_id: s.session_id })}>all model calls of this conversation</a>{/if}
+        <a href={modelCallsHref(undefined, { session_id: s.session_id })}>all model calls of this conversation</a>
       </div>
     </header>
 
@@ -311,18 +310,14 @@
             <div class="row">
               <div class="side"></div>
               <div class="mcalls">
-                {#if modelCallsReady()}
-                  <a href={modelCallsHref(undefined, { turn_id: t.turn_id })}>{plural(t.model_calls.length, 'main-loop model call', 'main-loop model calls')}</a>
-                  <span class="muted">·</span>
-                  <a href={modelCallsHref(undefined, { session_id: s.session_id })}>all model calls of this conversation</a>
-                {:else}
-                  <span>{plural(t.model_calls.length, 'main-loop model call', 'main-loop model calls')}</span>
-                {/if}
+                <a href={modelCallsHref(undefined, { turn_id: t.turn_id })}>{plural(t.model_calls.length, 'main-loop model call', 'main-loop model calls')}</a>
+                <span class="muted">·</span>
+                <a href={modelCallsHref(undefined, { session_id: s.session_id })}>all model calls of this conversation</a>
                 <details>
                   <summary>List them</summary>
                   <ul>
                     {#each t.model_calls as m (m.id)}
-                      <li>{#if modelCallsReady()}<a href={modelCallsHref(['c', m.id])}>{m.model ?? 'unknown model'}</a>{:else}<span>{m.model ?? 'unknown model'}</span>{/if} <span class="muted">{m.purpose} · {m.status} · {fmtTokens(m.input_total)} in · {fmtTokens(m.output_tokens)} out</span></li>
+                      <li><a href={modelCallsHref(['c', m.id])}>{m.model ?? 'unknown model'}</a> <span class="muted">{m.purpose} · {m.status} · {fmtTokens(m.input_total)} in · {fmtTokens(m.output_tokens)} out</span></li>
                     {/each}
                   </ul>
                 </details>

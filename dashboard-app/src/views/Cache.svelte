@@ -2,11 +2,16 @@
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
+  import { routeHref } from '../lib/router';
   import type { CacheData } from '../lib/types/api';
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import DataTable from '../lib/ui/DataTable.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import Chart from '../lib/viz/Chart.svelte';
+
+  // Embedded as the Model calls screen's Cache tab: that screen's header is the title, so this view drops its h1
+  // (its subtitle and staleness badge stay).
+  let { embedded = false }: { embedded?: boolean } = $props();
 
   const store = usePoll(
     makePollStore<CacheData>(
@@ -57,7 +62,7 @@
 
 <header class="view-head">
   <div>
-    <h1>Cache</h1>
+    {#if !embedded}<h1>Cache</h1>{/if}
     <p class="subtitle">API cache performance, token savings, and break analysis</p>
   </div>
   <StaleBadge state={$store} />
@@ -169,7 +174,7 @@
           hit_rate_fmt: r.hit_rate + '%',
         }))}
         mode="cards"
-        rowKey={(r) => r.session_id}
+        rowKey={(r) => r.session_id ?? '—'}
       />
     {:else}
       <p class="empty">No session data available</p>
@@ -193,7 +198,15 @@
         }))}
         mode="cards"
         rowKey={(_, i) => String(i)}
-      />
+      >
+        {#snippet cell(r, c)}
+          {#if c.key === 'time_fmt' && r.id}
+            <a class="call-link" href={routeHref('model-calls', ['c', r.id])} aria-label={`Open the call at ${r.time_fmt}`}>{r.time_fmt}</a>
+          {:else}
+            {r[c.key]}
+          {/if}
+        {/snippet}
+      </DataTable>
     {:else}
       <p class="empty">No recent API calls</p>
     {/if}
@@ -254,6 +267,10 @@
     border-radius: 10px;
     padding: 1rem;
     margin-top: 1rem;
+  }
+
+  .call-link {
+    color: var(--accent-text);
   }
 
   .empty {

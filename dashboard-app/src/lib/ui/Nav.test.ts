@@ -56,3 +56,14 @@ describe('Nav Work item', () => {
     expect(work?.getAttribute('aria-current')).toBe('page');
   });
 });
+
+describe('Nav Model calls item', () => {
+  it('is a flat item right after Work', () => {
+    const { container } = render(Nav, { props: { currentRoute: 'model-calls' } });
+    const hrefs = Array.from(container.querySelectorAll('a.nav-link')).map((a) => a.getAttribute('href'));
+    expect(hrefs[hrefs.indexOf('#/work') + 1]).toBe('#/model-calls');
+    const item = container.querySelector('a[href="#/model-calls"]');
+    expect(item?.getAttribute('aria-label')).toBe('Model calls');
+    expect(item?.getAttribute('aria-current')).toBe('page');
+  });
+});

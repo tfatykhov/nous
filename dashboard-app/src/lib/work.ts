@@ -99,3 +99,57 @@ export function setLastListQuery(q: Record<string, string>): void {
 export function getLastListQuery(): Record<string, string> {
   return { ...lastListQuery };
 }
+
+/** What a `#/model-calls/<sub>` path shows. `notfound` covers an unknown path and a malformed `%` escape. */
+export type ModelCallsView =
+  | { view: 'list'; callId: string | null }
+  | { view: 'cache' }
+  | { view: 'notfound' };
+
+/** The view of a Model calls sub path (still URL-encoded): `''` the list, `c/<call id>` the list with that call open, `cache`. */
+export function parseModelCallsSub(sub: string): ModelCallsView {
+  const segs = sub.split('/');
+  while (segs.length > 0 && segs[segs.length - 1] === '') segs.pop();
+  if (segs.length === 0) return { view: 'list', callId: null };
+  if (segs.length === 1 && segs[0] === 'cache') return { view: 'cache' };
+  if (segs.length === 2 && segs[0] === 'c') {
+    const callId = safeDecode(segs[1]);
+    return callId ? { view: 'list', callId } : { view: 'notfound' };
+  }
+  return { view: 'notfound' };
+}
+
+/** The Model calls filters of a hash query. `days` is the window, kept as the link gave it (1 to 30), else ''. */
+export interface ModelCallFilters {
+  purpose: string;
+  model: string;
+  session_id: string;
+  turn_id: string;
+  status: string;
+  days: string;
+}
+
+export const MODEL_CALL_STATUSES = ['ok', 'error', 'cancelled', 'problem'] as const;
+
+export function modelCallFilters(query: URLSearchParams): ModelCallFilters {
+  const status = query.get('status') ?? '';
+  const days = query.get('days') ?? '';
+  const n = Number(days);
+  return {
+    purpose: query.get('purpose') ?? '',
+    model: query.get('model') ?? '',
+    session_id: query.get('session_id') ?? '',
+    turn_id: query.get('turn_id') ?? '',
+    status: (MODEL_CALL_STATUSES as readonly string[]).includes(status) ? status : '',
+    days: /^\d+$/.test(days) && n >= 1 && n <= 30 ? String(n) : '',
+  };
+}
+
+/** The non-empty filters as a query record: the list request's parameters and a link's query alike. */
+export function modelCallQuery(f: ModelCallFilters): Record<string, string> {
+  const q: Record<string, string> = {};
+  for (const k of ['purpose', 'model', 'session_id', 'turn_id', 'status', 'days'] as const) {
+    if (f[k]) q[k] = f[k];
+  }
+  return q;
+}
