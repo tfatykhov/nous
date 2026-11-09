@@ -167,7 +167,7 @@
 <!-- ── View header ───────────────────────────────────────────────────── -->
 <header class="view-head">
   <div>
-    <h1>Self-Modifying Rubric</h1>
+    <h1>Scoring</h1>
     <p class="subtitle">F024 Phase 3b — Evaluation dimensions, outcome signals, and evolution tracking</p>
   </div>
   <div class="head-actions">
