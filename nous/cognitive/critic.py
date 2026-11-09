@@ -46,7 +46,8 @@ class CriticAgent:
         "no i meant", "that's not", "try again",
     })
 
-    # After the message in the user turn: the JSON-only rule sat right after the message before the system/user split.
+    # Closes the user turn. In the old single-message prompt the JSON-only rule closed the prompt; after the split it
+    # closes the system block, so this repeats it last.
     _ANSWER_REMINDER = "Answer with the JSON object only, no other text."
 
     # The stable part of the prompt, sent as the cached system block; the user message goes in the user turn and is
@@ -104,10 +105,11 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
             # Name order, so the catalog (part of the cached system block) is byte-stable between calls.
             for s in sorted(summaries, key=lambda p: (p.name.casefold(), p.name)):
                 valid_names.add(s.name)
-                eff = f" (effectiveness: {s.effectiveness:.0%})" if s.effectiveness is not None else ""
-                desc = (s.description or "No description").replace("{", "{{").replace("}", "}}")
-                name_safe = s.name.replace("{", "{{").replace("}", "}}")
-                lines.append(f"- {name_safe} — {desc}{eff}")
+                # Banded to 10 points: every recalled procedure records an outcome, and an exact percent would change
+                # the cached block on most task turns.
+                eff = f" (effectiveness: ~{round(s.effectiveness, 1):.0%})" if s.effectiveness is not None else ""
+                # No brace escaping: the catalog is a .format() value, which str.format never re-parses.
+                lines.append(f"- {s.name} — {s.description or 'No description'}{eff}")
             return "\n".join(lines), valid_names
         except Exception:
             logger.warning("Failed to build skill catalog for Critic")

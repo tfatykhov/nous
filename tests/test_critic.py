@@ -443,7 +443,7 @@ class TestSkillCatalog:
         mock_pm.list_all = AsyncMock(return_value=([
             ProcedureSummary(id=uuid4(), name="code-review", domain="process",
                            description="Review pull requests", activation_count=5,
-                           effectiveness=0.85),
+                           effectiveness=0.84),
             ProcedureSummary(id=uuid4(), name="debug-strategy", domain="engineering",
                            description="Systematic debugging approach", activation_count=3,
                            effectiveness=None),
@@ -452,7 +452,7 @@ class TestSkillCatalog:
         catalog, valid_names = await agent._build_skill_catalog()
         assert "code-review" in catalog
         assert "Review pull requests" in catalog
-        assert "(effectiveness: 85%)" in catalog
+        assert "(effectiveness: ~80%)" in catalog
         assert "debug-strategy" in catalog
         assert valid_names == {"code-review", "debug-strategy"}
 
@@ -489,8 +489,9 @@ class TestSkillCatalog:
         assert valid_names == set()
 
     @pytest.mark.asyncio
-    async def test_catalog_escapes_curly_braces(self):
-        """Curly braces in descriptions are escaped for .format()."""
+    async def test_catalog_shows_braces_as_written(self):
+        """Curly braces in descriptions reach the model as written: the catalog is a .format() value, which
+        str.format never re-parses, so doubling them would show the model literal {{ and }}."""
         from nous.heart.procedures import ProcedureManager
         agent = CriticAgent(_settings())
         mock_pm = AsyncMock(spec=ProcedureManager)
@@ -501,10 +502,10 @@ class TestSkillCatalog:
         ], 1))
         agent._procedure_manager = mock_pm
         catalog, valid_names = await agent._build_skill_catalog()
-        # Should not raise when used in .format()
-        test_template = "Skills:\n{skill_catalog}"
-        formatted = test_template.format(skill_catalog=catalog)
-        assert "{{variable}}" in catalog
+        formatted = CriticAgent._SYSTEM_PROMPT.format(available_frames="- task", skill_catalog=catalog)
+        assert "- template-skill — Use {variable} syntax" in catalog
+        assert "- template-skill — Use {variable} syntax" in formatted
+        assert "{{" not in catalog
         assert "template-skill" in valid_names
 
 
@@ -672,6 +673,10 @@ class TestCriticPromptCache:
         assert "- task" in system
         assert message in user
         assert message not in system
+        # The template's own {{}} renders as {}, and a catalog description's braces show as written.
+        assert "6. per_frame_instructions: {} (reserved for future phases)" in system
+        assert "- beta — Use {variable} syntax" in system
+        assert "{{" not in system
         # The block holding the stable text is the one with the cache breakpoint.
         [stable] = [b for b in payload["system"] if "AVAILABLE FRAMES" in b["text"]]
         assert stable["cache_control"] == {"type": "ephemeral"}
@@ -714,9 +719,32 @@ class TestCriticPromptCache:
         assert [line.split(" — ")[0] for line in catalog_a.splitlines()] == [
             "- Alpha", "- alpha", "- beta", "- Zeta",
         ]
-        # Effectiveness is kept, and the catalog's braces stay escaped for .format().
-        assert "(effectiveness: 90%)" in catalog_a
-        assert "{{variable}}" in catalog_a
+        # Effectiveness is kept, banded to 10 points, and the description's braces show as written.
+        assert "- Alpha — Upper-case first (effectiveness: ~90%)" in catalog_a
+        assert "- beta — Use {variable} syntax" in catalog_a
+
+    @pytest.mark.asyncio
+    async def test_effectiveness_banded_to_10_points(self):
+        """Each recalled procedure records an outcome, which moves its effectiveness a point or two: within a 10-point
+        band the cached system block stays byte-identical, and a move to another band changes it."""
+        def procs(effectiveness: float) -> list[ProcedureSummary]:
+            return [ProcedureSummary(id=uuid4(), name="code-review", domain="process",
+                                     description="Review pull requests", activation_count=5,
+                                     effectiveness=effectiveness)]
+
+        agent, mock_api = _critic_with([procs(0.71), procs(0.74), procs(0.86)])
+        for _ in range(3):
+            await agent.classify(
+                user_message="Please review this pull request about the storage layer thoroughly",
+                heuristic_frame=_frame(),
+                available_frames=["task", "conversation"],
+            )
+
+        at_71, at_74, at_86 = (c.args[0] for c in mock_api.call.call_args_list)
+        assert "- code-review — Review pull requests (effectiveness: ~70%)" in _system_text(at_71)
+        assert json.dumps(at_71["system"]) == json.dumps(at_74["system"])
+        assert "- code-review — Review pull requests (effectiveness: ~90%)" in _system_text(at_86)
+        assert json.dumps(at_71["system"]) != json.dumps(at_86["system"])
 
     @pytest.mark.asyncio
     async def test_user_message_braces_are_safe(self):
