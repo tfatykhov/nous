@@ -14,7 +14,7 @@ export interface CacheSummary {
 }
 
 export interface CacheSession {
-  session_id: string;
+  session_id: string | null;
   calls: number;
   input_tokens: number;
   cache_read: number;
@@ -25,7 +25,7 @@ export interface CacheSession {
 
 export interface CacheTimelineEntry {
   timestamp: string;
-  session_id: string;
+  session_id: string | null;
   turn: number | null;
   model: string;
   input_tokens: number;
@@ -262,12 +262,12 @@ export interface ObsTrendPoint {
 
 export interface ObsContextLogEntry {
   id: string;
-  session_id: string;
+  session_id: string | null;
   turn_number: number | null;
   timestamp: string;
   call_type: string;
   model: string;
-  frame_id: string;
+  frame_id: string | null;
   trace_id: string | null;
   /** section name → estimated token count */
   token_breakdown: Record<string, number>;
@@ -1882,4 +1882,290 @@ export interface MemoryWriteHealthData {
   checks: MwhCheck[];
   rules?: { id: MwhRuleId; name: string; urgency: string }[];
   acknowledgements: MwhAck[];
+}
+
+// ── F108 Work view: GET /dashboard/work/sessions, /sessions/{session_id}, /patterns ──
+// Shapes of nous/api/work_view_dashboard.py. Ids are strings, timestamps UTC ISO strings. Text is
+// redacted at rest and rendered as text only. With the tool-call log off: `enabled` false, lists empty.
+
+export type WorkKind = 'conversation' | 'task' | 'background';
+export type WorkFlag = 'error' | 'repeat' | 'many' | 'asked' | 'changed';
+
+export interface WorkSession {
+  session_id: string;
+  parent_session_id: string | null;
+  kind: WorkKind;
+  /** Of the session's first turn. */
+  work_kind: string;
+  context_kind: string | null;
+  title: string;
+  first_message: string | null;
+  started_at: string;
+  /** Latest end (or start) of the session's turns; the code never returns null here. */
+  ended_at: string;
+  turns: number;
+  tool_calls: number;
+  errors: number;
+  /** By calls, most first, at most 12. `lane`: memory | live | workspace | acts | other. */
+  tools: { tool: string; calls: number; lane: string }[];
+  /** In this order when present. */
+  flags: WorkFlag[];
+}
+
+export interface WorkSessionsData {
+  enabled: boolean;
+  window_days: number;
+  /** The whole window; ignores kind, tool, q and lens. */
+  counts: Record<WorkKind, { sessions: number; turns: number }>;
+  tool_names: string[];
+  sessions: WorkSession[];
+  /** Keyset cursor `"<started_at ISO>|<session_id>"` for `before`; null on the last page. */
+  next_before: string | null;
+}
+
+export interface WorkTraceSession {
+  session_id: string;
+  parent_session_id: string | null;
+  kind: WorkKind;
+  /** Null only for a session whose calls all lack a turn id (no turn to take it from). */
+  work_kind: string | null;
+  title: string;
+  /** Null when the session has no turn at all (only calls without a turn id). */
+  started_at: string | null;
+  ended_at: string | null;
+  turns: number;
+  tool_calls: number;
+  errors: number;
+}
+
+/** The critic's verdict as stored (keys of the critic_classified event). */
+export interface WorkCritic {
+  critic_frame?: string;
+  heuristic_frame?: string;
+  agreed?: boolean;
+  rationale?: string;
+}
+
+export interface WorkClaimCheck {
+  verified?: boolean;
+  claim_count?: number;
+  violation_count?: number;
+}
+
+/** The execution_ledger row of a call that side-effected. */
+export interface WorkLedgerRef {
+  id: string;
+  /** pending | success | error | blocked | unknown */
+  status: string;
+  /** write | external | irreversible */
+  side_effect_type: string;
+  external_ref: string | null;
+  tombstone: boolean;
+}
+
+export interface WorkCall {
+  id: string;
+  call_index: number;
+  /** Canonical tool name. */
+  tool: string;
+  /** The name the model called, only when it differs (an alias). */
+  tool_called: string | null;
+  lane: string;
+  reason: string | null;
+  input: string;
+  result: string;
+  outcome: string;
+  is_error: boolean;
+  error: string | null;
+  refused_by: string | null;
+  duration_ms: number | null;
+  started_at: string;
+  ledger: WorkLedgerRef | null;
+}
+
+/** A main-loop model call that carries the turn's id. */
+export interface WorkTurnModelCall {
+  id: string;
+  purpose: string;
+  model: string | null;
+  status: string;
+  input_total: number | null;
+  output_tokens: number | null;
+}
+
+export interface WorkTurn {
+  turn_id: string;
+  turn_number: number | null;
+  /** False for a synthetic turn: calls under a turn id with no turn row (its text fields are null). */
+  has_turn_row: boolean;
+  started_at: string;
+  ended_at: string | null;
+  frame_id: string | null;
+  trigger: string | null;
+  /** Ids recalled into the turn's context, by kind of memory. */
+  memory: { decision: string[]; fact: string[]; procedure: string[]; episode: string[] } | null;
+  critic: WorkCritic | null;
+  claim_check: WorkClaimCheck | null;
+  reply: string | null;
+  error: string | null;
+  tool_call_count: number;
+  /** At most 20; [] when the model-call log is off. */
+  model_calls: WorkTurnModelCall[];
+  /** In call_index order. */
+  calls: WorkCall[];
+}
+
+export interface WorkTrace {
+  enabled: boolean;
+  /** Null only with the log off (an unknown session is a 404). */
+  session: WorkTraceSession | null;
+  /** Oldest first. */
+  turns: WorkTurn[];
+  /** Keyset cursor `"<turn started_at ISO>|<turn_id>"` for `after`; null on the last page. */
+  next_after: string | null;
+}
+
+export interface WorkPatternTool {
+  tool: string;
+  lane: string;
+  calls: number;
+  errors: number;
+  sessions: number;
+  by_kind: Record<WorkKind, { turns: number; calls: number }>;
+  /** Top 3 most frequent reasons. */
+  reasons: { text: string; count: number }[];
+}
+
+export interface WorkPatternsData {
+  enabled: boolean;
+  window_days: number;
+  reason_coverage: { calls: number; with_reason: number };
+  /** Top 30 tools. */
+  tools: WorkPatternTool[];
+  /** Tools with at least 20 calls, highest error rate first, top 8. */
+  failing: { tool: string; calls: number; errors: number; error_rate: number }[];
+  wasted: { repeated_calls: number; retried_and_failed_again: number };
+}
+
+// ── F108 Model calls: GET /dashboard/model-calls, /model-calls/{call_id}, /model-calls/{call_id}/blocks/{part}/{ord} ──
+// With the model-call log off: `enabled` false, lists empty, `call` null.
+
+export interface ModelCallPurpose {
+  purpose: string;
+  /** Sum of call_count: a minute bucket counts as its calls. */
+  calls: number;
+  input_total: number;
+  output_tokens: number;
+  errors: number;
+  /** Embedding/rerank minute buckets: counted here, listed only when the purpose filter names them. */
+  bucketed: boolean;
+}
+
+export interface ModelCallRow {
+  id: string;
+  started_at: string;
+  purpose: string;
+  label_source: string;
+  call_kind: string;
+  model: string | null;
+  /** ok | error | cancelled */
+  status: string;
+  http_status: number | null;
+  stop_reason: string | null;
+  input_uncached: number | null;
+  cache_read: number | null;
+  cache_write: number | null;
+  /** Null only when the call recorded no usage. */
+  input_total: number | null;
+  output_tokens: number | null;
+  duration_ms: number | null;
+  attempts: number;
+  /** Calls this row stands for (more than 1 for a minute bucket). */
+  call_count: number;
+  session_id: string | null;
+  turn_id: string | null;
+  turn_number: number | null;
+  /** Cut to 300 characters. */
+  error: string | null;
+  problem: string | null;
+}
+
+export interface ModelCallsData {
+  enabled: boolean;
+  text_enabled: boolean;
+  window_days: number;
+  /** The whole window; ignores the filters. */
+  purposes: ModelCallPurpose[];
+  calls: ModelCallRow[];
+  /** Keyset cursor `"<started_at ISO>|<id>"` for `before`; null on the last page. */
+  next_before: string | null;
+}
+
+export type ModelCallBlockPart = 'system' | 'messages' | 'tools' | 'response';
+
+/** A stored block of a call's text, without its body. */
+export interface ModelCallBlock {
+  part: ModelCallBlockPart;
+  ord: number;
+  size_chars: number;
+  /** size_chars // 4 */
+  tokens_est: number;
+  /** Distinct calls kept in about the last 7 days whose refs name this block (this call included). */
+  reused_by: number;
+}
+
+/** Every list field plus the call's context. */
+export interface ModelCallDetailCall extends ModelCallRow {
+  group_id: string | null;
+  is_fallback: boolean;
+  parent_session_id: string | null;
+  frame_id: string | null;
+  subtask_id: string | null;
+  dag_id: string | null;
+  trace_id: string | null;
+  /** The full error. */
+  error_text: string | null;
+  context_window_size: number | null;
+  total_tokens_est: number | null;
+  utilization_pct: number | null;
+  tools_count: number | null;
+  tool_names: string[] | null;
+  messages_count: number | null;
+  loaded_facts: number | null;
+  loaded_decisions: number | null;
+  loaded_procedures: number | null;
+  loaded_episodes: number | null;
+  cache_break: boolean;
+  cache_break_components: string[] | null;
+  cache_break_tokens_lost: number | null;
+}
+
+export interface ModelCallAttempt {
+  attempt_no: number;
+  started_at: string;
+  duration_ms: number | null;
+  http_status: number | null;
+  error_type: string | null;
+  error_text: string | null;
+}
+
+export interface ModelCallDetail {
+  enabled: boolean;
+  text_enabled: boolean;
+  /** Null only with the log off (an unknown call is a 404). */
+  call: ModelCallDetailCall | null;
+  attempts: ModelCallAttempt[];
+  /** Context sections, largest first. */
+  sections: { name: string; tokens_est: number }[];
+  turn: { turn_id: string; session_id: string | null; session_title: string | null } | null;
+  text_status: 'off' | 'ok' | 'expired' | 'not_recorded';
+  /** system, messages, tools, response, then ord. Bodies come from the block endpoint. */
+  blocks: ModelCallBlock[];
+}
+
+export interface ModelCallBlockBody {
+  part: ModelCallBlockPart;
+  ord: number;
+  size_chars: number;
+  body: string;
 }

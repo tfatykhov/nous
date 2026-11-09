@@ -163,7 +163,7 @@
         columns={sessionCols}
         rows={d.sessions.map((r) => ({
           ...r,
-          session_id_short: r.session_id.slice(0, 8),
+          session_id_short: (r.session_id ?? '').slice(0, 8) || '—',
           input_tokens_fmt: formatTokens(r.input_tokens),
           cache_read_fmt: formatTokens(r.cache_read),
           hit_rate_fmt: r.hit_rate + '%',
@@ -185,7 +185,7 @@
         rows={d.timeline.slice(0, 20).map((c) => ({
           ...c,
           time_fmt: formatTime(c.timestamp),
-          session_short: c.session_id.slice(0, 8),
+          session_short: (c.session_id ?? '').slice(0, 8) || '—',
           input_fmt: formatTokens(c.input_tokens),
           cache_read_fmt: formatTokens(c.cache_read),
           hit_rate_fmt: c.hit_rate + '%',
