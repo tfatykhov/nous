@@ -114,6 +114,13 @@ def attention_filter(agent_id: str):
     return and_(L.agent_id == agent_id, L.status == "unknown", L.idempotency_key.is_not(None))
 
 
+def holds(status: str, idempotency_key: str | None, ledger_persisted: bool) -> bool:
+    """Whether one ledger row is a send in doubt that a person can settle: the Python form of
+    :func:`attention_filter` (status ``unknown`` with an idempotency key) plus :func:`in_doubt`'s persistence rule
+    (with ledger persistence off no retry is refused, so nothing is held)."""
+    return ledger_persisted and status == "unknown" and idempotency_key is not None
+
+
 async def in_doubt(session: AsyncSession, agent_id: str, limit: int, *,
                    ledger_persisted: bool) -> tuple[int, list[Any]]:
     """Every send in doubt counted, and the newest ``limit`` of them — the

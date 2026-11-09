@@ -45,3 +45,14 @@ describe('Nav', () => {
     expect(get(currentRoute)).toBe('cache');
   });
 });
+
+describe('Nav Work item', () => {
+  it('is a flat item right after Execution', () => {
+    const { container } = render(Nav, { props: { currentRoute: 'work' } });
+    const hrefs = Array.from(container.querySelectorAll('a.nav-link')).map((a) => a.getAttribute('href'));
+    expect(hrefs[hrefs.indexOf('#/execution') + 1]).toBe('#/work');
+    const work = container.querySelector('a[href="#/work"]');
+    expect(work?.getAttribute('aria-label')).toBe('Work');
+    expect(work?.getAttribute('aria-current')).toBe('page');
+  });
+});

@@ -41,7 +41,7 @@ describe('status colours — one map for the DAG view and the graph', () => {
   });
 
   it('every status badge is readable: 4.5:1 (AA, 11px text) against its own tint', () => {
-    const statuses = [...DAG_NODE_STATUSES, 'partial'].map((s) => [`dag ${s}`, statusColor(s)] as const)
+    const statuses = [...DAG_NODE_STATUSES, 'partial'].map((s): readonly [string, string] => [`dag ${s}`, statusColor(s)])
       .concat(LEDGER_STATUSES.map((s) => [`ledger ${s}`, ledgerStatusColor(s)] as const));
     const failing = statuses.filter(([, hex]) => badgeContrast(hex) < 4.5)
       .map(([name, hex]) => `${name} ${hex} ${badgeContrast(hex).toFixed(2)}`);

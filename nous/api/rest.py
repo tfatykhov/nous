@@ -2315,6 +2315,7 @@ def create_app(
                     request.path_params["session_id"],
                     **query,
                     model_calls_enabled=settings.model_call_log_enabled,
+                    ledger_persisted=settings.execution_ledger_persist_enabled,
                 )
             if data is None:
                 return JSONResponse({"error": "not found"}, status_code=404)

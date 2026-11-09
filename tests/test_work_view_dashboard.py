@@ -995,6 +995,7 @@ async def test_trace_call_fields(client, db, agent_id, cleanup):
             "side_effect_type": "external",
             "external_ref": "msg-1",
             "tombstone": False,
+            "held": False,  # unknown but unkeyed: nothing to settle
         },
     }
     assert calls[1] == {
@@ -1022,6 +1023,7 @@ async def test_trace_call_fields(client, db, agent_id, cleanup):
         "side_effect_type": "write",
         "external_ref": None,
         "tombstone": True,
+        "held": False,
     }
 
 
@@ -2939,3 +2941,51 @@ async def test_disabled_payloads_have_the_enabled_keys(client, mc_client, db, ag
     for name, (disabled, enabled) in pairs.items():
         assert enabled["enabled"] is True and disabled["enabled"] is False, name
         _assert_same_keys(disabled, enabled, name)
+
+
+def test_holds_is_true_only_for_a_keyed_unknown_row_with_persistence_on():
+    from nous.api.harness_dashboard import holds
+
+    assert holds("unknown", "k-1", True) is True
+    assert holds("unknown", None, True) is False  # nothing for a person to settle
+    assert holds("unknown", "k-1", False) is False  # no LedgerStore: no retry is refused
+    assert holds("success", "k-1", True) is False
+    assert holds("error", "k-1", True) is False
+
+
+@pytest.mark.postgres_only
+async def test_holds_agrees_with_attention_filter_on_the_same_rows(db, agent_id, cleanup):
+    from sqlalchemy import select
+
+    from nous.api.harness_dashboard import attention_filter, holds
+    from nous.storage.models import ExecutionLedgerEntry as L
+
+    await insert_ledger(db, agent_id, status="unknown", idempotency_key="k-a", key_args={})
+    await insert_ledger(db, agent_id, status="unknown")
+    await insert_ledger(db, agent_id, status="success", idempotency_key="k-b", key_args={})
+    await insert_ledger(db, agent_id, status="error", idempotency_key="k-c", key_args={})
+    async with db.session() as session:
+        chosen = set((await session.execute(select(L.id).where(attention_filter(agent_id)))).scalars())
+        rows = list((await session.execute(select(L).where(L.agent_id == agent_id))).scalars())
+        assert len(rows) == 4 and len(chosen) == 1
+        for r in rows:
+            assert holds(r.status, r.idempotency_key, True) == (r.id in chosen)
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("persist", [True, False])
+async def test_trace_ledger_ref_says_whether_it_holds_a_send(db, agent_id, cleanup, persist):
+    base = _hour_ago()
+    turn = await insert_turn(db, agent_id, "sess-H", started_at=base)
+    keyed = await insert_ledger(db, agent_id, status="unknown", idempotency_key="k-1", key_args={})
+    unkeyed = await insert_ledger(db, agent_id, status="unknown")
+    settled = await insert_ledger(db, agent_id, status="success", idempotency_key="k-2", key_args={})
+    for i, led in enumerate((keyed, unkeyed, settled)):
+        await insert_call(
+            db, agent_id, turn, i, session_id="sess-H", tool="send_email", ledger_entry_id=led, started_at=base
+        )
+    settings = _settings(agent_id, tool_call_log_enabled=True, execution_ledger_persist_enabled=persist)
+    async with AsyncClient(transport=ASGITransport(app=make_app(db, settings)), base_url="http://test") as c:
+        body = (await c.get("/dashboard/work/sessions/sess-H")).json()
+    held = [call["ledger"]["held"] for call in body["turns"][0]["calls"]]
+    assert held == [persist, False, False]
