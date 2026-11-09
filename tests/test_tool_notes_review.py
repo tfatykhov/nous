@@ -259,7 +259,7 @@ HOSTILE = [
 async def test_hostile_answers_are_dropped_and_counted(db, agent_id, cleanup, name, entry):
     await seed_errors(db, agent_id, "bash", 4)
     store = ToolNoteStore(db, agent_id)
-    other_id = await store.add(pat(tool="web_fetch", key="other"), "another tool's note", now=NOW - timedelta(days=30))
+    other_id = await store.add(pat(tool="web_fetch", key="other"), "another tool's note", now=NOW - timedelta(days=10))
     if isinstance(entry, dict):
         entry = {
             k: (v.replace("{pid}", pid()).replace("{other_note}", str(other_id)) if isinstance(v, str) else v)
@@ -413,12 +413,12 @@ async def test_at_cap_needs_a_valid_replaces(db, agent_id, cleanup):
     assert len(await note_rows(db, agent_id, active=True)) == 4
 
     # a valid replaces rewrites
-    later2 = later + timedelta(days=REREVIEW_DAYS + 1)
-    await seed_errors(db, agent_id, "bash", 4, days_ago=-2 * REREVIEW_DAYS)
+    later2 = later + timedelta(days=REREVIEW_DAYS, hours=1)  # past the 14-day block, short of the 30-day stale age
+    await seed_errors(db, agent_id, "bash", 4, days_ago=-(2 * REREVIEW_DAYS))
     out = await make_review(
         db, agent_id, FakeClient({"notes": [write(pid(), "the new text", replaces=str(old[0]))]}), clock=later2
     ).run_sleep()
-    assert out["rewritten"] == 1 and out["written"] == 0
+    assert out["rewritten"] == 1 and out["written"] == 0 and out["kept"] == 3  # the judge keeps the bash notes
     active = await note_rows(db, agent_id, active=True)
     assert len(active) == 4 and "the new text" in [r["note_text"] for r in active]
     retired = [r for r in await note_rows(db, agent_id, active=False) if r["id"] == old[0]]
@@ -844,7 +844,7 @@ async def test_rate_fell_is_kept_and_judged_once(db, agent_id, cleanup):
     assert j["calls"] == 20 and j["hits"] == 2 and j["rate"] == pytest.approx(0.1) and j["verdict"] == "kept"
     assert j["days"] == pytest.approx(10, abs=0.01) and j["at"]
     # twenty more calls, all failing: a kept note is never judged again
-    await later_calls(db, agent_id, 20, 20, days_ago=0)
+    await later_calls(db, agent_id, 20, 20, days_ago=0.5)
     out = await judge_review(db, agent_id).run_sleep()
     assert out["kept"] == 0 and out["retired"] == 0
     r2 = await one_note(db, agent_id)
@@ -912,7 +912,8 @@ async def test_judge_skips_when_error_rows_exceed_cap(db, agent_id, cleanup, mon
     assert out["retired"] == 0 and out["kept"] == 0
     r = await one_note(db, agent_id)
     assert r["active"] and r["judged"] is None
-    assert any(rec.levelno == logging.WARNING and "bash" in rec.getMessage() for rec in caplog.records)
+    # skipped on purpose, not crashed and caught by the per-note handler
+    assert "too many error rows" in caplog.text and "judging a note" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -978,3 +979,44 @@ async def test_judge_off_when_flags_off(db, agent_id, cleanup):
     out = await make_review(db, agent_id, None, enabled=False).run_sleep()
     assert out["retired"] == 0
     assert (await one_note(db, agent_id))["active"]
+
+
+@pytest.mark.asyncio
+async def test_capped_stale_note_is_still_retired_unused(db, agent_id, cleanup, monkeypatch, caplog):
+    import nous.observability.tool_patterns as tp
+
+    monkeypatch.setattr(tp, "ERROR_ROWS_CAP", 3)
+    await add_aged(db, agent_id, days=31)
+    await later_calls(db, agent_id, 5, 20, days_ago=2)
+    with caplog.at_level(logging.WARNING):
+        out = await judge_review(db, agent_id).run_sleep()
+    assert out["retired"] == 1 and out["kept"] == 0
+    r = await one_note(db, agent_id)
+    assert not r["active"] and r["retired"]["reason"] == "unused"
+    assert "after" not in r["retired"]  # never decided on a bounded count
+
+
+@pytest.mark.asyncio
+async def test_stale_boundary_is_strictly_older_than_thirty_days(db, agent_id, cleanup):
+    store = ToolNoteStore(db, agent_id)
+    p = Pattern(kind="error_repeat", tool_name="bash", key="boom", hits=4, calls=10, guard=None, example="boom")
+    on = await store.add(p, "check the path first", now=NOW - timedelta(days=30))
+    await later_calls(db, agent_id, 1, 5, days_ago=2)
+    out = await judge_review(db, agent_id).run_sleep()
+    assert out["retired"] == 0 and (await one_note(db, agent_id))["active"]  # exactly 30 days: untouched
+    out = await make_review(db, agent_id, None, clock=NOW + timedelta(seconds=1)).run_sleep()
+    assert out["retired"] == 1  # 30 days and one second
+    r = await one_note(db, agent_id)
+    assert r["id"] == on and not r["active"] and r["retired"]["reason"] == "unused"
+
+
+@pytest.mark.asyncio
+async def test_judge_runs_before_the_review_sees_the_notes(db, agent_id, cleanup):
+    for k in range(3):  # bash is at its cap of 3; baseline rate 0 so no_improvement retires each of them
+        p = Pattern(kind="error_repeat", tool_name="bash", key=f"k{k}", hits=0, calls=10, guard=None, example="x")
+        await ToolNoteStore(db, agent_id).add(p, f"note {k}", now=NOW - timedelta(days=10))
+    await later_calls(db, agent_id, 4, 20)  # 20 calls; 4 hits of a new pattern "boom"
+    client = FakeClient({"notes": [write(pid())]})
+    out = await make_review(db, agent_id, client).run_sleep()
+    assert out["retired"] == 3 and out["written"] == 1 and out["at_cap"] == 0
+    assert [r["note_text"] for r in await note_rows(db, agent_id, active=True)] == ["check the path before you run it"]

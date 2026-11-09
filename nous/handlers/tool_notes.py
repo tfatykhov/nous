@@ -521,9 +521,10 @@ class ToolNotesReview:
                             until=now,
                         )
                     if found is None:
+                        # Never decided on a bounded count; the stale rule below still applies (0 calls judge nothing).
                         logger.warning("tool notes: %s has too many error rows to judge a note", note.tool_name)
-                        continue
-                    hits, calls = found
+                    else:
+                        hits, calls = found
                 if age >= JUDGE_MIN_DAYS and calls >= JUDGE_AFTER_CALLS:
                     rate = hits / calls
                     if rate < note.baseline_rate:
