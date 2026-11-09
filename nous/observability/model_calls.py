@@ -74,6 +74,7 @@ PURPOSES: frozenset[str] = frozenset(
         "sleep_contradiction",
         "sleep_merge",
         "job_fix",
+        "tool_notes",  # the sleep review of repeated tool mistakes (ToolNotesReview)
         "a2ui_compose",
         "dag_fix",
         "pdf_transcription",

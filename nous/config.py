@@ -2334,6 +2334,9 @@ class Settings(BaseSettings):
     tool_input_max_chars: int = 2000
     tool_result_preview_chars: int = 500
     tool_reason_max_chars: int = 500
+    # F108 Phase 3: tool notes. A sleep step reads the tool-call log for tool mistakes that repeat, asks one model call
+    # (purpose tool_notes) for at most 8 short notes, and keeps at most 3 per tool and 40 in all. Needs the tool-call log.
+    tool_notes_enabled: bool = False
     # F108, the model-call numbers: one row per model call (nous_system.model_call_log) with its HTTP attempts
     # (nous_system.model_call_attempt), and one row per minute of embedding or rerank calls.
     model_call_log_enabled: bool = False

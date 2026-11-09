@@ -81,6 +81,8 @@ async def test_all_tables_exist(db):
         # F108 agent work view: model-call text blocks by hash, and each call's blocks in order (migration 102)
         ("nous_system", "model_text_block"),
         ("nous_system", "model_call_block_ref"),
+        # F108 Phase 3: tool notes and the patterns closed to re-review (migration 103)
+        ("nous_system", "tool_note"),
         # Task scores, in a schema of their own (migration 087)
         ("scoring", "task_scores"),
         # The scoring command's heartbeat, one row per agent (migration 088)

@@ -72,6 +72,7 @@ nous/
 │   │   ├── episode_summarizer.py  # Episode summary generation
 │   │   ├── job_lessons.py         # JobLessonLearner: lessons from bad runs of recurring jobs
 │   │   ├── job_fixes.py           # JobFixer: check-and-fix for a recurring job that keeps failing
+│   │   ├── tool_notes.py          # F108 Phase 3: ToolNoteStore (the nous_system.tool_note table, migration 103), ToolNotesReview (the sleep step: one model call, the strict answer check, the owner card for guard patterns) and the review prompt: capped notes about repeated tool mistakes (3 per tool, 40 in all, 300 characters) and the declined and guard rows that keep a pattern from being re-reviewed for 14 days; the app is its only reader and writer
 │   │   ├── fact_extractor.py      # Fact extraction from conversations
 │   │   ├── knowledge_extractor.py # Pre-prune fact extraction
 │   │   ├── decision_reviewer.py   # Automated decision review
@@ -111,6 +112,7 @@ nous/
 │   │   ├── model_calls.py      # F108: ModelCallRecorder (one model_call_log row per model call with its model_call_attempt rows, embedding and rerank calls counted per minute), CallContext and the purpose vocabulary, model_call_context (the fallback label), and the context estimate (analyze_context, analyze_sections, ContextStats, parse_system_sections, payload_preamble, system_sections). main.py builds the recorder when NOUS_MODEL_CALL_LOG_ENABLED is on and hands it to both Anthropic clients, the embedder, the browser task loop and the reranker
 │   │   ├── recording.py        # F108: BoundedWriter, the one bounded fire-and-forget writer every work-view recorder shares (built in main.py when either work-view log is on), and RecorderStats, its counters
 │   │   ├── tool_calls.py       # F108: ToolCallRecorder (one tool_call_log row per tool call, one agent_turn_log row per turn, text redacted and capped), the reason field (add_reason_field, split_reason) and work kinds
+│   │   ├── tool_patterns.py    # F108 Phase 3: the one definition of a repeated or failed-again tool call (shared with the Patterns endpoint), error-text normalisation, guard classification and the pattern detection over tool_call_log
 │   │   ├── work_view_retention.py # F108: the daily agent-scoped deletes main.py's retention loop runs: sweep_tool_calls (tool_call_log and agent_turn_log rows past NOUS_TOOL_CALL_RETENTION_DAYS), sweep_model_calls (model_call_log rows past NOUS_MODEL_CALL_RETENTION_DAYS, their attempts by cascade) and sweep_model_call_text (model_call_block_ref rows past NOUS_MODEL_CALL_TEXT_RETENTION_DAYS, then the model_text_block rows no call references and no store used for an hour; whatever the text flag says, and has_model_call_text tells main.py whether to start the loop with every log off)
 │   │   ├── retrieval_logger.py # F091 retrieval telemetry (RETRIEVAL_PATHS lives here)
 │   │   ├── retrieval_trace.py  # F091 write-only trace collector + NullTrace
@@ -152,7 +154,7 @@ nous/
 │   │   ├── actions.py          # Action gate: allowlist → nonce → rate → censor
 │   │   ├── push.py             # F097 FCM leg (data-only messages)
 │   │   ├── intention_keys.py   # F099 Phase 3a: the reserved intention: dedup keys (leaf)
-│   │   ├── dsl.py / builders/  # Template-first surface construction (`builders/check_audit.py`: the owner's weekly spot-check card, built by the server only and not in `TEMPLATES`; `builders/memory_write_health.py`: P4's card, an Acknowledge button per tripped rule, server-built, priority 0, never a ping)
+│   │   ├── dsl.py / builders/  # Template-first surface construction (`builders/check_audit.py`: the owner's weekly spot-check card, built by the server only and not in `TEMPLATES`; `builders/memory_write_health.py`: P4's card, an Acknowledge button per tripped rule, server-built, priority 0, never a ping; `builders/tool_notes_guard.py`: F108's quiet card of the window's guard-caused tool patterns, server-built, no button, never a ping)
 │   │   └── catalogs/           # A2UI v1.0 vendored @ pinned commit d9086fb
 │   ├── security/
 │   │   └── secrets.py          # scan_secrets: shared by send_email (refuse) and the F098 result memory writer (skip)
