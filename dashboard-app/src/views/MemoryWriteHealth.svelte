@@ -11,6 +11,9 @@
   // GET /dashboard/memory-write-health: the daily write-health rollup and its rules. These findings never go to
   // Telegram: this page (and the companion card) is where they show. Acknowledge records who accepted a rule's
   // evidence (a deliberate restore or delete) and restarts that rule's baseline.
+  // Embedded in Memory health's Writes tab: that screen's header is the title, so this view drops its h1
+  // (its subtitle, window filter and staleness badge stay).
+  let { embedded = false }: { embedded?: boolean } = $props();
   let days = $state('30');
   const store = usePoll(
     makePollStore<MemoryWriteHealthData>(
@@ -53,7 +56,7 @@
 
 <header class="view-head">
   <div>
-    <h1>Memory write health</h1>
+    {#if !embedded}<h1>Memory write health</h1>{/if}
     <p class="subtitle">What the memory write paths stored each day, and the rules that watch them. Shown here and on the companion only, never on Telegram</p>
   </div>
   <div class="head-right">

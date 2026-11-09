@@ -5,6 +5,7 @@
   import type { StatusData, StatusTimeseriesPoint, ExecutionData } from '../lib/types/api';
   import { attentionPoll } from '../lib/stores/attention';
   import { fmtUtc, relUntil } from '../lib/harness';
+  import { routeHref } from '../lib/router';
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import Chart from '../lib/viz/Chart.svelte';
@@ -46,15 +47,9 @@
     return `${fmt(value)} (${sign}${delta} 7d)`;
   }
 
-  /** Convert [{date, count},...] arrays into Chart.js-ready {labels, datasets data}. */
-  function normalizeTimeseries(raw: { facts: StatusTimeseriesPoint[]; episodes: StatusTimeseriesPoint[]; decisions: StatusTimeseriesPoint[] }) {
-    const labels = raw.facts.map((p) => p.date.slice(5)); // MM-DD
-    return {
-      labels,
-      facts: raw.facts.map((p) => p.count),
-      episodes: raw.episodes.map((p) => p.count),
-      decisions: raw.decisions.map((p) => p.count),
-    };
+  /** How many rows the 30-day daily timeseries counts in all (the growth summary line). */
+  function total30d(points: StatusTimeseriesPoint[]): number {
+    return points.reduce((s, p) => s + p.count, 0);
   }
 
   /** Sort a Record<string, number> by value descending and return as {labels, values}. */
@@ -80,7 +75,6 @@
     return 'bad';
   }
 
-  const DOUGHNUT_COLORS = ['#60a5fa', '#34d399', '#a78bfa', '#fb923c', '#f87171', '#fbbf24', '#6b6b8a', '#e2e2f0'];
   const OUTCOME_COLORS: Record<string, string> = {
     success: '#34d399', partial: '#fbbf24', failure: '#f87171', pending: '#6b6b8a',
   };
@@ -105,7 +99,6 @@
   {@const db = d.dashboard}
   {@const deltas = db.deltas}
   {@const dist = db.distributions}
-  {@const ts = normalizeTimeseries(db.timeseries)}
 
   <!-- ── Needs your attention (harness dashboard §4.6) ─────────────────── -->
   {@const a = $attentionPoll.data}
@@ -222,56 +215,15 @@
     {/if}
   </section>
 
+  <!-- ── Growth: one line; the charts are on Memory health's Growth tab ── -->
+  <p class="growth-line">
+    Last 30 days: <strong>{fmt(total30d(db.timeseries.facts))}</strong> facts,
+    <strong>{fmt(total30d(db.timeseries.episodes))}</strong> episodes,
+    <strong>{fmt(total30d(db.timeseries.decisions))}</strong> decisions added.
+    <a href={routeHref('health', 'growth')}>Memory growth ›</a>
+  </p>
+
   <!-- ── Charts ───────────────────────────────────────────────────────── -->
-  <div class="chart-row">
-    <!-- Memory growth (line) -->
-    <section class="chart-card">
-      <h2>Memory growth (30 days)</h2>
-      {#if ts.labels.length > 0}
-        <Chart
-          type="line"
-          data={{
-            labels: ts.labels,
-            datasets: [
-              { label: 'Facts',     data: ts.facts,     borderColor: '#60a5fa', backgroundColor: 'rgba(96,165,250,0.10)', fill: true, borderWidth: 2, pointRadius: 1 },
-              { label: 'Episodes',  data: ts.episodes,  borderColor: '#34d399', backgroundColor: 'rgba(52,211,153,0.10)', fill: true, borderWidth: 2, pointRadius: 1 },
-              { label: 'Decisions', data: ts.decisions, borderColor: '#a78bfa', backgroundColor: 'rgba(167,139,250,0.10)', fill: true, borderWidth: 2, pointRadius: 1 },
-            ],
-          }}
-          options={{
-            scales: {
-              x: { ticks: { maxTicksLimit: 8 }, grid: { display: false } },
-              y: { beginAtZero: true, ticks: { precision: 0 } },
-            },
-            plugins: { legend: { position: 'bottom' } },
-          }}
-          height="240px"
-        />
-      {:else}
-        <p class="empty">No timeseries data</p>
-      {/if}
-    </section>
-
-    <!-- Fact categories (doughnut) -->
-    <section class="chart-card">
-      <h2>Fact categories</h2>
-      {#if Object.keys(dist.fact_categories).length > 0}
-        {@const fc = sortedDistribution(dist.fact_categories)}
-        <Chart
-          type="doughnut"
-          data={{
-            labels: fc.labels,
-            datasets: [{ data: fc.values, backgroundColor: DOUGHNUT_COLORS.slice(0, fc.labels.length), borderWidth: 0, hoverOffset: 4 }],
-          }}
-          options={{ cutout: '60%', plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } } }}
-          height="240px"
-        />
-      {:else}
-        <p class="empty">No facts categorized yet</p>
-      {/if}
-    </section>
-  </div>
-
   <div class="chart-row">
     <!-- Decision outcomes (doughnut) -->
     <section class="chart-card">
@@ -475,6 +427,10 @@
     margin-left: auto;
   }
   .detail-link:hover { text-decoration: underline; }
+
+  .growth-line { margin: 1rem 0 0; font-size: 0.875rem; color: var(--muted); }
+  .growth-line strong { color: var(--text); }
+  .growth-line a { color: var(--accent-text); font-weight: 600; text-decoration: none; margin-left: 0.25rem; }
 
   .chart-row {
     display: grid;

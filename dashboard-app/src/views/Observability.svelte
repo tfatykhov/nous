@@ -77,21 +77,6 @@
     });
   }
 
-  function factTrendData(points: { t: string; v: number }[]) {
-    return {
-      labels: trendLabels(points),
-      datasets: [{
-        label: 'Fact delta',
-        data: points.map((p) => p.v),
-        borderColor: '#60a5fa',
-        backgroundColor: 'rgba(96,165,250,0.1)',
-        fill: true,
-        borderWidth: 2,
-        pointRadius: 2,
-      }],
-    };
-  }
-
   function errorTrendData(points: { t: string; v: number }[]) {
     return {
       labels: trendLabels(points),
@@ -264,23 +249,14 @@
     </section>
   {/if}
 
-  <!-- Drift trends -->
-  {@const factPts = d.drift_trends?.fact_count_delta ?? []}
+  <!-- Drift trends (the fact growth rate is on Memory health's Growth tab, F108) -->
   {@const errPts = d.drift_trends?.handler_error_rate ?? []}
-  {#if factPts.length > 0 || errPts.length > 0}
+  {#if errPts.length > 0}
     <div class="chart-row">
-      {#if factPts.length > 0}
-        <section class="chart-card">
-          <h2>Fact Growth Rate (7d)</h2>
-          <Chart type="line" data={factTrendData(factPts)} options={trendLineOpts} height="180px" />
-        </section>
-      {/if}
-      {#if errPts.length > 0}
-        <section class="chart-card">
-          <h2>Handler Error Rate (7d)</h2>
-          <Chart type="line" data={errorTrendData(errPts)} options={trendLineOpts} height="180px" />
-        </section>
-      {/if}
+      <section class="chart-card">
+        <h2>Handler Error Rate (7d)</h2>
+        <Chart type="line" data={errorTrendData(errPts)} options={trendLineOpts} height="180px" />
+      </section>
     </div>
   {:else}
     <section class="chart-card">

@@ -8,6 +8,10 @@
   import DataTable from '../lib/ui/DataTable.svelte';
   import Chart from '../lib/viz/Chart.svelte';
 
+  // Embedded in Memory health's Writes tab: that screen's header is the title, so this view drops its h1
+  // (its subtitle, refresh button and staleness badge stay).
+  let { embedded = false }: { embedded?: boolean } = $props();
+
   // ── Main payload — loaded once (effectively: interval = MAX so it never auto-fires) ──
   const store = usePoll(
     makePollStore<AdmissionData>(
@@ -237,7 +241,7 @@
 <!-- ── Header ──────────────────────────────────────────────────────────── -->
 <header class="view-head">
   <div>
-    <h1>Admission Control</h1>
+    {#if !embedded}<h1>Admission Control</h1>{/if}
     <p class="subtitle">F023 Memory Admission — score analysis and threshold tuning</p>
   </div>
   <div class="head-right">
