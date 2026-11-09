@@ -290,7 +290,12 @@
 
 <!-- Upcoming Schedules, with the schedule numbers (moved from the Activity screen, F108) -->
 <section class="chart-card">
-  <h2>Upcoming Schedules</h2>
+  <div class="section-head">
+    <h2>Upcoming Schedules</h2>
+    <button class="refresh-btn" onclick={() => void activity.refresh()} disabled={$activity.loading}>
+      {$activity.loading ? 'Loading…' : 'Refresh'}
+    </button>
+  </div>
   {#if $activity.data}
     {@const ss = $activity.data.schedule_stats}
     <p class="caption">Numbers marked (7d) are the last 7 days, whatever the window above.</p>
@@ -420,6 +425,30 @@
   }
 
   /* ── Upcoming Schedules (from Activity) ──────────────────────── */
+  .section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .section-head h2 {
+    margin: 0;
+  }
+
+  .refresh-btn {
+    font-size: 0.8125rem;
+    padding: 0.25rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm, 6px);
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .refresh-btn:hover:not(:disabled) { background: var(--surface-hover); }
+  .refresh-btn:disabled { opacity: 0.5; cursor: default; }
+
   ul.item-list {
     list-style: none;
     margin: 0.75rem 0 0;

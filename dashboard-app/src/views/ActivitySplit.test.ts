@@ -109,13 +109,16 @@ const SESSIONS = {
 // Routed by URL: /dashboard/activity serves the four moved sections; each host answers from its own endpoint.
 let urls: string[] = [];
 let failing: string[] = [];
+let activityBody: unknown = ACTIVITY;
+let activityGate: Promise<void> | null = null;
 function install() {
   urls = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     urls.push(url);
     // A 4xx is not retried by apiGet, so a failure surfaces at once.
     if (failing.some((p) => url.startsWith(p))) return { ok: false, status: 400, json: async () => ({}) } as Response;
-    const body = url.startsWith('/dashboard/activity') ? ACTIVITY
+    if (url.startsWith('/dashboard/activity') && activityGate) await activityGate;
+    const body = url.startsWith('/dashboard/activity') ? activityBody
       : url.startsWith('/dashboard/execution') ? EXECUTION
       : url.startsWith('/dashboard/harness') ? HARNESS
       : url.startsWith('/dashboard/subtasks') ? SUBTASKS
@@ -146,6 +149,8 @@ const SLEEP_STATS = ['Last Sleep', 'Sleep Facts Created'];
 
 beforeEach(() => {
   failing = [];
+  activityBody = ACTIVITY;
+  activityGate = null;
   attentionOverride.set({});
   install();
   location.hash = '';
@@ -370,6 +375,48 @@ describe('Activity split', () => {
     render(Subtasks);
     expect(await screen.findByText('No upcoming schedules.')).toBeTruthy();
   });
+
+  // Fetch-once, so a section that loaded keeps a manual Refresh (Consolidation's header Refresh covers Sleep Activity).
+  const REFRESHED = {
+    ...ACTIVITY,
+    events: [{ type: 'censor_triggered', created_at: '2026-11-09T06:00:00+00:00', data: { censor_id: 'c-77', matched_text: 'DROP TABLE' } }],
+    censor_stats: { ...ACTIVITY.censor_stats, top_censors: [{ id: 'c-2', trigger_pattern: 'never post secrets', activations: 3 }] },
+    schedule_stats: { ...ACTIVITY.schedule_stats, next_fires: [{ id: 'sch-2', task: 'monthly invoice sweep', next_fire_at: '2099-02-01T09:00:00+00:00' }] },
+  };
+  const REFRESH_CASES = [
+    { name: 'Observability', view: Observability as unknown as Component, section: 'Event Timeline',
+      before: 'Censor c-9 fired — matched: rm -rf', after: 'Censor c-77 fired — matched: DROP TABLE' },
+    { name: 'Guards', view: Harness as unknown as Component, section: 'Most Active Censors',
+      before: 'never email the board', after: 'never post secrets' },
+    { name: 'Subtasks', view: Subtasks as unknown as Component, section: 'Upcoming Schedules',
+      before: 'weekly report digest', after: 'monthly invoice sweep' },
+  ];
+  for (const c of REFRESH_CASES) {
+    it(`${c.name}: after a good load, the section's Refresh fetches the activity again and shows the new data`, async () => {
+      render(c.view);
+      const s = await sectionOf(c.section);
+      await waitFor(() => expect(within(s).getByText(c.before)).toBeTruthy());
+      expect(activityUrls()).toHaveLength(1);
+      const button = within(s).getByRole('button', { name: 'Refresh' }) as HTMLButtonElement;
+      expect(button.disabled).toBe(false);
+
+      let release: () => void = () => {};
+      activityGate = new Promise<void>((r) => { release = r; });
+      activityBody = REFRESHED;
+      await fireEvent.click(button);
+      // In flight: the button says so and cannot be pressed again; the loaded rows stay on screen.
+      await waitFor(() => expect(button.textContent?.trim()).toBe('Loading…'));
+      expect(button.disabled).toBe(true);
+      expect(within(s).getByText(c.before)).toBeTruthy();
+      release();
+
+      await waitFor(() => expect(within(s).getByText(c.after)).toBeTruthy());
+      expect(within(s).queryByText(c.before)).toBeNull();
+      expect(activityUrls()).toEqual(['/dashboard/activity?hours=168', '/dashboard/activity?hours=168']);
+      await waitFor(() => expect(button.textContent?.trim()).toBe('Refresh'));
+      expect(button.disabled).toBe(false);
+    });
+  }
 
   for (const d of DESTS) {
     it(`${d.name}: only its own section, its own numbers, and one fetch of /dashboard/activity?hours=168`, async () => {

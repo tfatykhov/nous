@@ -327,7 +327,12 @@
 
 <!-- ── Event Timeline (moved from the Activity screen, F108) ── -->
 <section class="chart-card">
-  <h2>Event Timeline</h2>
+  <div class="section-head">
+    <h2>Event Timeline</h2>
+    <button class="refresh-btn" onclick={() => void activity.refresh()} disabled={$activity.loading}>
+      {$activity.loading ? 'Loading…' : 'Refresh'}
+    </button>
+  </div>
   {#if $activity.data}
     {@const d = $activity.data}
     {#if d.events.length > 0}
@@ -598,6 +603,30 @@
   }
 
   /* ── Event Timeline (from Activity) ── */
+  .section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .section-head h2 {
+    margin: 0;
+  }
+
+  .refresh-btn {
+    font-size: 0.8125rem;
+    padding: 0.25rem 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm, 6px);
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+  }
+  .refresh-btn:hover:not(:disabled) { background: var(--surface-hover); }
+  .refresh-btn:disabled { opacity: 0.5; cursor: default; }
+
   .timeline {
     display: flex;
     flex-direction: column;

@@ -280,7 +280,12 @@
 
 <!-- Most Active Censors, with the censor numbers (moved from the Activity screen, F108) -->
 <section class="panel censors">
-  <h2>Most Active Censors</h2>
+  <div class="section-head">
+    <h2>Most Active Censors</h2>
+    <button class="refresh-btn" onclick={() => void activity.refresh()} disabled={$activity.loading}>
+      {$activity.loading ? 'Loading…' : 'Refresh'}
+    </button>
+  </div>
   {#if $activity.data}
     {@const cs = $activity.data.censor_stats}
     <p class="small muted">Numbers marked (7d) are the last 7 days, whatever the window above. The count beside each censor is its all-time activations.</p>
@@ -364,6 +369,11 @@
   .empty.error { color: var(--red); }
   /* Most Active Censors (from Activity) */
   .censors { display: flex; flex-direction: column; gap: 0.75rem; }
+  .section-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+  .refresh-btn { font-size: 0.8125rem; padding: 0.25rem 0.75rem; border: 1px solid var(--border); border-radius: var(--radius-sm, 6px);
+    background: var(--surface); color: var(--text); cursor: pointer; }
+  .refresh-btn:hover:not(:disabled) { background: var(--surface-hover); }
+  .refresh-btn:disabled { opacity: 0.5; cursor: default; }
   ul.item-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0; }
   .item-row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.5rem 0;
     border-bottom: 1px solid var(--border); font-size: 0.8125rem; }
