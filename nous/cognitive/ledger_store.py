@@ -308,10 +308,10 @@ def detail_text(text: str, cap: int) -> str:
     """``text`` redacted and bounded to about ``cap`` characters.
 
     Over the cap, the head and the tail are kept with a marker between. Every
-    secret is masked BEFORE the cut, so the cut never keeps part of one. The
-    regexes never see more than 3 * (``cap`` + 2 * pad) characters of any
-    text, where pad (``redaction_scan_pad``) covers the longest own secret.
-    Two paths:
+    secret the redaction finds is masked BEFORE the cut, so the cut never
+    keeps part of one. The regexes never see more than 3 * (``cap`` + 2 * pad)
+    characters of any text, where pad (``redaction_scan_pad``) covers the
+    longest own secret. Two paths:
 
     - Up to ``cap`` + 2 * pad characters, the whole text is redacted once and
       the redacted text is cut: half of the cap from each end, or none of it
@@ -320,10 +320,22 @@ def detail_text(text: str, cap: int) -> str:
       those plus pad characters further in, and only what the two agree on is
       kept (``_settled_side``); a third scan, another pad in, runs only when
       that is short. So the pad is dropped in raw characters, not redacted
-      ones, and an own secret (at most pad long) can never empty a side. A
-      side is empty only when one pattern-matched run longer than
-      ``cap // 2`` + pad starts at the text's very edge and its masking
-      changes with the text past it.
+      ones: a side can be shorter than ``cap // 2`` where masks shrank it,
+      and an own secret (at most pad long) can never empty it. A pattern run
+      longer than ``cap // 2`` + pad at the text's very edge keeps its mask
+      alone (a hex run gives ``[REDACTED_HEX]``). A side is empty only when
+      that run is base64-like and the blob rule's path exception (3+ slashes
+      and no ``+``: left raw) flips across the three scans: masked, raw,
+      masked.
+
+    The windowed path cannot vouch for a labelled secret value longer than
+    the pad that no self-identifying rule (hex, base64 blob, key prefix)
+    matches, such as ``password=`` and 3,500 lowercase letters and digits.
+    When the label lies outside a side's scans (the tail's windows start
+    inside the value, or the value runs past both window edges), both scans
+    see the same unmasked text, agree, and keep it raw; whole-text redaction
+    would mask it. This is not a regression: the pad-drop rule this replaced
+    had the same blind spot.
 
     ``redact_structure`` cuts every string through this.
     """

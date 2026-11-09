@@ -1,7 +1,9 @@
 """Execution ledger detail capture (migration 086): the redacted call input and output."""
 
+import base64
 import hashlib
 import json
+import random
 import re
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -415,15 +417,18 @@ def test_a_text_over_the_cap_keeps_its_head_and_tail_at_the_prod_pad(prod_pad, n
 
 
 @_LENGTHS
-@pytest.mark.parametrize("where", ["start", "head_cut", "tail_cut", "end"])
+@pytest.mark.parametrize("where", ["start", "head_cut", "head_far_edge", "tail_far_edge", "tail_cut", "end"])
 def test_an_own_secret_is_masked_wherever_it_sits_at_the_prod_pad(prod_pad, own_secret, n, where):
     filler = _sample(n - len(own_secret))
     at = {
         "start": 0,
         "head_cut": 250 - len(own_secret) // 2,  # straddles the head's cut
+        "head_far_edge": 250 + _PROD_PAD - len(own_secret) // 2,  # straddles the head's second scan edge
+        "tail_far_edge": len(filler) - 250 - _PROD_PAD + len(own_secret) // 2,
         "tail_cut": len(filler) - 250 + len(own_secret) // 2,  # straddles the tail's cut
         "end": len(filler),
     }[where]
+    at = min(max(at, 0), len(filler))  # a far edge past a short text is its start or end
     text = filler[:at] + own_secret + filler[at:]
     out = detail_text(text, 500)
     assert _longest_shared_run(own_secret, out) is None
@@ -441,6 +446,21 @@ def test_redact_structure_keeps_a_mid_length_string_at_the_prod_pad(prod_pad):
     [out] = ledger_store.redact_structure([long], 500)
     assert out == detail_text(long, 500)
     assert out.startswith("HEAD-") and out.endswith("-TAIL") and len(out) == 500 + len(_CUT)
+
+
+def test_a_secret_across_the_second_scans_edge_is_masked_when_the_third_scan_runs(prod_pad, own_secret):
+    """A blob at the start masks to 15 characters, so the first two scans agree on less than half the cap and the
+    third scan runs. The secret straddles the second scan's edge (``half + pad``): only the third sees it whole, so
+    the two differ from its start and none of it is kept."""
+    blob = base64.b64encode(random.Random(7).randbytes(2475)).decode()  # one 3,300-character run, masked
+    assert "+" in blob[:250]  # not a path: masked in every window
+    lead = blob + " " + "the quick brown fox jumps over the lazy dog\n" * 600
+    at = 250 + _PROD_PAD - len(own_secret) // 2
+    text = lead[:at] + own_secret + lead[at:]
+    out = detail_text(text, 500)
+    head = out.split(_CUT)[0]
+    assert _longest_shared_run(own_secret, out) is None
+    assert head.startswith("[REDACTED_BLOB] the quick") and len(head) < 250
 
 
 @pytest.mark.parametrize("lead", ["", "X"], ids=["at_the_edge", "one_char_in"])
