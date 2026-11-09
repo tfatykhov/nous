@@ -1558,7 +1558,7 @@ def create_app(
     async def dashboard_graph(request: Request) -> JSONResponse:
         """GET /dashboard/graph - Graph visualization data."""
         try:
-            limit = min(int(request.query_params.get("limit", "200")), 2000)
+            limit = max(1, min(int(request.query_params.get("limit", "200")), 2000))
         except ValueError:
             return JSONResponse({"error": "limit must be an integer"}, status_code=400)
 

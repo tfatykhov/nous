@@ -169,29 +169,116 @@ async def get_dashboard_stats(session: AsyncSession, agent_id: str) -> dict:
 # ── Task 6: Graph data (GET /dashboard/graph) ───────────────────────────
 
 
+# When the graph has more links than the view draws (limit * 4), the view shows the newest third of that budget
+# ("recent" links) and then, for each memory those links touch, up to GRAPH_LINKS_PER_MEMORY of its other links,
+# preferring neighbours that have the most links overall. New memories then appear attached to the established
+# web through the memories they share, instead of as many small islands.
+GRAPH_LINKS_PER_MEMORY = 3
+
+_GRAPH_EDGE_COLUMNS = (
+    "e.id, e.source_id, e.target_id, e.source_type, e.target_type, "
+    "e.relation, e.weight, e.auto_linked, e.extraction_method, e.created_at"
+)
+
+_RECENT_EDGES_SQL = f"""
+    SELECT {_GRAPH_EDGE_COLUMNS}
+    FROM brain.graph_edges e
+    WHERE e.agent_id = :agent_id
+    ORDER BY e.created_at DESC, e.id DESC
+    LIMIT :recent_n
+"""
+
+# The recent links are passed in as the ids the first query returned, not recomputed: a link written between the
+# two statements would otherwise shift the window and return one link twice.
+_LINKED_EDGES_SQL = f"""
+    WITH recent AS (
+        SELECT id, source_id, target_id
+        FROM brain.graph_edges
+        WHERE agent_id = :agent_id AND id = ANY(:recent_ids)
+    ),
+    anchors AS (
+        SELECT source_id AS node_id FROM recent
+        UNION
+        SELECT target_id FROM recent
+    ),
+    degree AS (
+        SELECT node_id, COUNT(*) AS links
+        FROM (
+            SELECT source_id AS node_id FROM brain.graph_edges WHERE agent_id = :agent_id
+            UNION ALL
+            SELECT target_id FROM brain.graph_edges WHERE agent_id = :agent_id
+        ) ends
+        GROUP BY node_id
+    ),
+    ranked AS (
+        SELECT e.id,
+               COALESCE(d.links, 0) AS other_links,
+               ROW_NUMBER() OVER (
+                   PARTITION BY a.node_id
+                   ORDER BY COALESCE(d.links, 0) DESC, COALESCE(e.weight, 0) DESC, e.id
+               ) AS pick
+        FROM anchors a
+        JOIN brain.graph_edges e
+          ON e.agent_id = :agent_id AND (e.source_id = a.node_id OR e.target_id = a.node_id)
+        LEFT JOIN degree d
+          ON d.node_id = CASE WHEN e.source_id = a.node_id THEN e.target_id ELSE e.source_id END
+        WHERE e.id NOT IN (SELECT id FROM recent)
+    ),
+    linked AS (
+        SELECT id, MAX(other_links) AS other_links
+        FROM ranked
+        WHERE pick <= :per_memory
+        GROUP BY id
+        ORDER BY MAX(other_links) DESC, id
+        LIMIT :linked_n
+    )
+    SELECT {_GRAPH_EDGE_COLUMNS}
+    FROM brain.graph_edges e
+    JOIN linked l ON l.id = e.id
+    ORDER BY l.other_links DESC, e.id
+"""
+
+
 async def get_graph_data(
     session: AsyncSession, agent_id: str, *, limit: int = 200
 ) -> dict:
-    """Return nodes + edges for D3 graph visualization."""
-    max_edges = limit * 4
+    """Return nodes + edges for the graph view: every link when they fit in ``limit * 4``, else the newest third
+    of that budget plus each of their memories' links to its best-linked neighbours (``GRAPH_LINKS_PER_MEMORY``
+    each). An edge whose endpoint row no longer exists is left out, and so is a node left with no edge."""
+    max_edges = max(0, limit * 4)
 
-    # Fetch edges (limited)
     result = await session.execute(
-        text("""
-            SELECT id, source_id, target_id, source_type, target_type,
-                   relation, weight, auto_linked, extraction_method, created_at
-            FROM brain.graph_edges
-            WHERE agent_id = :agent_id
-            ORDER BY created_at DESC
-            LIMIT :max_edges
-        """),
-        {"agent_id": agent_id, "max_edges": max_edges},
+        text("SELECT COUNT(*) FROM brain.graph_edges WHERE agent_id = :agent_id"),
+        {"agent_id": agent_id},
     )
-    edges_raw = result.fetchall()
+    total_edges = result.scalar() or 0
+    all_links = total_edges <= max_edges
+
+    recent_n = max_edges if all_links else max_edges // 3  # max_edges is 0 or at least 4
+    result = await session.execute(text(_RECENT_EDGES_SQL), {"agent_id": agent_id, "recent_n": recent_n})
+    recent_raw = result.fetchall()
+    linked_raw = []
+    linked_n = max_edges - len(recent_raw)
+    if not all_links and recent_raw and linked_n > 0:
+        result = await session.execute(
+            text(_LINKED_EDGES_SQL),
+            {
+                "agent_id": agent_id,
+                "recent_ids": [e.id for e in recent_raw],
+                "per_memory": GRAPH_LINKS_PER_MEMORY,
+                "linked_n": linked_n,
+            },
+        )
+        linked_raw = result.fetchall()
+    recent_times = {str(e.id): e.created_at for e in recent_raw}
 
     edges = []
     node_ids: set[str] = set()
-    for e in edges_raw:
+    seen_edges: set[str] = set()
+    for e in [*recent_raw, *linked_raw]:
+        if str(e.id) in seen_edges:
+            continue
+        seen_edges.add(str(e.id))
         src = str(e.source_id)
         tgt = str(e.target_id)
         node_ids.add(src)
@@ -262,6 +349,15 @@ async def get_graph_data(
                     "category": row.category,
                 })
 
+    # An edge whose endpoint row is gone cannot be drawn; a node then left without an edge is not shown either.
+    found = {n["id"] for n in nodes}
+    edges = [e for e in edges if e["source"] in found and e["target"] in found]
+    drawn = {e["source"] for e in edges} | {e["target"] for e in edges}
+    nodes = [n for n in nodes if n["id"] in drawn]
+    shown_times = [recent_times[e["id"]] for e in edges if e["id"] in recent_times]
+    recent_shown = len(shown_times)
+    shown_times = [t for t in shown_times if t is not None]
+
     # Orphan counts (nodes with no edges at all — query source tables)
     orphan_counts: dict[str, int] = {}
     orphan_queries = [
@@ -289,13 +385,6 @@ async def get_graph_data(
         )
         orphan_counts[key] = result.scalar() or 0
 
-    # Total edge count
-    result = await session.execute(
-        text("SELECT COUNT(*) FROM brain.graph_edges WHERE agent_id = :agent_id"),
-        {"agent_id": agent_id},
-    )
-    total_edges = result.scalar() or 0
-
     return {
         "nodes": nodes,
         "edges": edges,
@@ -304,6 +393,12 @@ async def get_graph_data(
             "displayed_edges": len(edges),
             "node_count": len(nodes),
             "orphan_counts": orphan_counts,
+            "all_links": all_links,
+            "recent_edges": recent_shown,
+            "linked_edges": len(edges) - recent_shown,
+            "links_per_memory": GRAPH_LINKS_PER_MEMORY,
+            "recent_from": min(shown_times).isoformat() if shown_times else None,
+            "recent_to": max(shown_times).isoformat() if shown_times else None,
         },
     }
 

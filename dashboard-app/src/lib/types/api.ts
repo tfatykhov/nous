@@ -1093,6 +1093,16 @@ export interface GraphStats {
   node_count: number;
   /** key = 'decisions' | 'facts' | 'episodes' | 'procedures' | 'chunks' */
   orphan_counts: Record<string, number>;
+  /** Every link fit in the budget, so every link whose memories still exist is drawn. */
+  all_links: boolean;
+  /** Drawn edges among the newest links (all of them when every link fits). */
+  recent_edges: number;
+  /** Drawn edges added as links from those memories to their best-linked neighbours. */
+  linked_edges: number;
+  links_per_memory: number;
+  /** created_at range of the newest links drawn; null when none is drawn. */
+  recent_from: string | null;
+  recent_to: string | null;
 }
 
 /** Full response from GET /dashboard/graph?limit=500. */

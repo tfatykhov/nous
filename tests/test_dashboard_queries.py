@@ -291,16 +291,98 @@ class TestGetGraphData:
 
     @pytest.mark.asyncio
     async def test_edge_limit(self, session):
-        """Edges are bounded by limit * 4."""
+        """Over the budget (limit * 4) the view shows the newest third of it, then up to 3 more links per memory."""
         d1 = await _insert_decision(session)
         for _ in range(10):
             f = await _insert_fact(session)
             await _insert_edge(session, d1, f)
 
         data = await get_graph_data(session, AGENT_ID, limit=2)
-        # limit=2, max_edges=8
-        assert data["stats"]["displayed_edges"] == 8
-        assert data["stats"]["total_edges"] == 10
+        s = data["stats"]
+        # limit=2: budget 8, newest 8 // 3 = 2; d1's other 8 links offer 3 more (its cap), within the 6 left.
+        assert s["total_edges"] == 10
+        assert (s["recent_edges"], s["linked_edges"], s["displayed_edges"]) == (2, 3, 5)
+        assert s["links_per_memory"] == 3
+        assert s["recent_from"] is not None and s["recent_from"] <= s["recent_to"]
+
+    @pytest.mark.asyncio
+    async def test_every_edge_when_they_fit(self, session):
+        d1 = await _insert_decision(session)
+        for _ in range(3):
+            await _insert_edge(session, d1, await _insert_fact(session))
+
+        s = (await get_graph_data(session, AGENT_ID, limit=2))["stats"]
+        assert (s["total_edges"], s["displayed_edges"], s["recent_edges"], s["linked_edges"]) == (3, 3, 3, 0)
+
+    @pytest.mark.asyncio
+    async def test_new_memories_attach_through_their_best_linked_neighbour(self, session):
+        """Two new pairs that share an older, well-linked memory are drawn as one piece, not two islands."""
+        hub = await _insert_fact(session)
+        for _ in range(5):
+            await _insert_edge(session, hub, await _insert_fact(session), source_type="fact", days_ago=3)
+        a1, a2, b1, b2 = [await _insert_fact(session) for _ in range(4)]
+        await _insert_edge(session, a1, hub, source_type="fact", days_ago=2)
+        await _insert_edge(session, b1, hub, source_type="fact", days_ago=2)
+        for _ in range(3):  # a1 has more older neighbours than its cap; the poorly linked ones must lose to hub
+            await _insert_edge(session, a1, await _insert_fact(session), source_type="fact", days_ago=2)
+        await _insert_edge(session, a1, a2, source_type="fact")
+        await _insert_edge(session, b1, b2, source_type="fact")
+
+        data = await get_graph_data(session, AGENT_ID, limit=2)  # budget 8, newest 2
+        pairs = {frozenset((e["source"], e["target"])) for e in data["edges"]}
+        assert frozenset((str(a1), str(a2))) in pairs and frozenset((str(b1), str(b2))) in pairs
+        assert frozenset((str(a1), str(hub))) in pairs and frozenset((str(b1), str(hub))) in pairs
+        assert sum(1 for p in pairs if str(a1) in p and str(a2) not in p) == 3  # a1's cap
+        assert data["stats"]["recent_edges"] == 2 and data["stats"]["displayed_edges"] <= 8
+
+    @pytest.mark.asyncio
+    async def test_edge_to_a_missing_memory_is_left_out(self, session):
+        d1 = await _insert_decision(session)
+        f1 = await _insert_fact(session)
+        await _insert_edge(session, d1, f1)
+        await _insert_edge(session, d1, uuid.uuid4())  # its fact row no longer exists
+
+        data = await get_graph_data(session, AGENT_ID)
+        assert [(e["source"], e["target"]) for e in data["edges"]] == [(str(d1), str(f1))]
+        assert sorted(n["id"] for n in data["nodes"]) == sorted([str(d1), str(f1)])
+        s = data["stats"]
+        assert (s["displayed_edges"], s["total_edges"], s["all_links"], s["recent_edges"]) == (1, 2, True, 1)
+
+    @pytest.mark.asyncio
+    async def test_zero_budget_is_an_empty_graph(self, session):
+        d1 = await _insert_decision(session)
+        await _insert_edge(session, d1, await _insert_fact(session))
+
+        data = await get_graph_data(session, AGENT_ID, limit=0)
+        assert data["edges"] == [] and data["nodes"] == []
+        assert data["stats"]["total_edges"] == 1 and data["stats"]["all_links"] is False
+
+    @pytest.mark.asyncio
+    async def test_a_link_written_between_the_two_queries_is_not_returned_twice(self, session, monkeypatch):
+        """The linked query uses the recent links the first query returned, so a newer link written in between
+        cannot push one of them out of the window and back in as a linked edge."""
+        d1 = await _insert_decision(session)
+        facts = [await _insert_fact(session) for _ in range(10)]
+        for f in facts:
+            await _insert_edge(session, d1, f)
+        for _ in range(2):  # facts[-2] is the best-linked neighbour of d1, so it would be linked first
+            await _insert_edge(session, facts[-2], await _insert_fact(session), source_type="fact", days_ago=1)
+
+        real_execute = session.execute
+        wrote = []
+
+        async def execute(statement, *args, **kwargs):
+            result = await real_execute(statement, *args, **kwargs)
+            if not wrote and "LIMIT :recent_n" in str(statement):
+                wrote.append(True)
+                await _insert_edge(session, d1, await _insert_fact(session))  # newer than every recent link
+            return result
+
+        monkeypatch.setattr(session, "execute", execute)
+        data = await get_graph_data(session, AGENT_ID, limit=2)  # budget 8, newest 2
+        ids = [e["id"] for e in data["edges"]]
+        assert wrote and len(ids) == len(set(ids))
+        assert data["stats"]["displayed_edges"] == len(ids)
 
 
 # ── Compressed-chunk labels must not crash LEFT()-based truncation ──────
