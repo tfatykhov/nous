@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.api.harness_dashboard import _is_tombstone, holds
 from nous.observability.model_call_text import BLOCK_PARTS
+from nous.observability.tool_patterns import PREV_ERROR_EXPR, REPEAT_KEY, REPEATED_SQL, RETRY_FAILED_SQL
 
 DAYS_DEFAULT = 7
 DAYS_MAX = 30
@@ -76,9 +77,9 @@ def _kind_case_sql(col: str) -> str:
     )
 
 
-# A repeated call: two calls of one turn with the same tool and the same input. The sessions list's ``repeat`` flag
-# and the patterns' wasted steps both group on this key, so the two cannot drift apart.
-_REPEAT_KEY = "turn_id, tool_name, input_text"
+# A repeated call: two calls of one turn with the same tool and the same input. The sessions list's ``repeat`` flag,
+# the patterns' wasted steps and the tool notes all use the one definition in ``tool_patterns``.
+_REPEAT_KEY = REPEAT_KEY
 
 # A tool to what it touches (the mockups' map). Any other tool is lane ``other``. The colours live in the UI.
 TOOL_LANES: dict[str, str] = {
@@ -828,11 +829,11 @@ _PATTERNS_TOTALS_SQL = (
 SELECT cov.calls, cov.with_reason, w.repeated_calls, w.retried_and_failed_again
 FROM (SELECT count(*)::int AS calls, count(reason)::int AS with_reason FROM win) cov
 CROSS JOIN (
-    SELECT (count(*) FILTER (WHERE prev_error IS NOT NULL))::int AS repeated_calls,
-           (count(*) FILTER (WHERE is_error AND prev_error))::int AS retried_and_failed_again
+    SELECT (count(*) FILTER (WHERE {REPEATED_SQL}))::int AS repeated_calls,
+           (count(*) FILTER (WHERE {RETRY_FAILED_SQL}))::int AS retried_and_failed_again
     FROM (
         SELECT is_error,
-               lag(is_error) OVER (PARTITION BY {_REPEAT_KEY} ORDER BY call_index, id) AS prev_error
+               {PREV_ERROR_EXPR} AS prev_error
         FROM win
         WHERE turn_id IS NOT NULL
     ) x
