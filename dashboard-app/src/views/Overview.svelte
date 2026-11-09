@@ -120,7 +120,7 @@
       {:else}
         <div class="attn-cards">
           {#if a.questions_waiting > 0}
-            <a class="attn-card attn-waiting" href="#/dag" aria-labelledby="attn-q">
+            <a class="attn-card attn-waiting" href={routeHref('dag')} aria-labelledby="attn-q">
               <span class="attn-kicker">Questions</span>
               <span id="attn-q" class="attn-title">{a.questions_waiting} question{a.questions_waiting === 1 ? '' : 's'} waiting on you</span>
               {#if a.next}
@@ -156,7 +156,7 @@
             {:else} flagged <strong>{rule.warn_7d}</strong> (warn — the calls still ran){/if}
           {/each}.
         {/if}
-        <a href="#/harness">Open Harness</a>
+        <a href={routeHref('harness')}>Open Guards</a>
       </p>
     </section>
   {/if}

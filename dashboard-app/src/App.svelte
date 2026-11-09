@@ -1,7 +1,6 @@
 <script lang="ts">
   import { currentRoute, initRouter } from '$lib/router';
   import Nav from '$lib/ui/Nav.svelte';
-  import Placeholder from '$lib/ui/Placeholder.svelte';
   import DagView from './views/DagView.svelte';
   import Heartbeat from './views/Heartbeat.svelte';
   import Observability from './views/Observability.svelte';
@@ -168,8 +167,6 @@
   <!--
     Route switch: {#if} (not {#key}) so each view's component state
     (scroll, loaded data) survives tab switching.
-    When a view is migrated, replace <Placeholder> with the real component:
-      {#if $currentRoute === 'overview'}<OverviewView />{/if}
   -->
   {#if $currentRoute === 'overview'}
     <Overview />

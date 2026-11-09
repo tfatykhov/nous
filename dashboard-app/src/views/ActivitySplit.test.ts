@@ -232,6 +232,21 @@ describe('Overview ledger links', () => {
     expect(open.getAttribute('href')).toBe('#/work/changes');
     expect(document.querySelector('a[href="#/execution"]')).toBeNull();
   });
+
+  it('the questions card opens Workflows and the harness line says Open Guards, as the nav names them', async () => {
+    const base = globalThis.fetch;
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) =>
+      url.startsWith('/dashboard/attention')
+        ? ({ ok: true, status: 200, json: async () => ({ ...ATTENTION, questions_waiting: 2 }) } as Response)
+        : base(url, init)));
+    await attentionPoll.refresh();
+    render(Overview);
+    const questions = await screen.findByRole('link', { name: '2 questions waiting on you' });
+    expect(questions.getAttribute('href')).toBe('#/dag');
+    const guards = screen.getByRole('link', { name: 'Open Guards' });
+    expect(guards.getAttribute('href')).toBe('#/harness');
+    expect(screen.queryByText('Open Harness')).toBeNull();
+  });
 });
 
 type Dest = {

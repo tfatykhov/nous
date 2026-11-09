@@ -48,4 +48,15 @@ describe('retired routes', () => {
     }
     expect(hits).toEqual([]);
   });
+
+  // The companion (src/companion/) is a separate app with its own hash routes; it is not checked here.
+  it('dashboard links are built with routeHref, never a hand-written href="#/…"', () => {
+    const hits: string[] = [];
+    for (const f of files.filter((x) => !relative(SRC, x).replace(/\\/g, '/').startsWith('companion/'))) {
+      readFileSync(f, 'utf-8').split('\n').forEach((line, i) => {
+        if (/href=\{?\s*["'`]#\//.test(line)) hits.push(`${relative(SRC, f)}:${i + 1}: ${line.trim()}`);
+      });
+    }
+    expect(hits).toEqual([]);
+  });
 });
