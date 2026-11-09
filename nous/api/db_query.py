@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import asyncpg
 
-from nous.cognitive.ledger_store import SECRET_MASK, redact_output, redaction_scan_pad
+from nous.cognitive.ledger_store import SECRET_MASK, redact_output, redacted_head, redaction_scan_pad
 from nous.config import Settings
 
 if TYPE_CHECKING:
@@ -238,15 +238,14 @@ def _escape(text: str) -> str:
 
 def _render(cell: Cell) -> str:
     """A cell as shown: redacted first, then clipped to ``MAX_CELL_CHARS``, so a secret the clip would split is
-    masked whole. A cell the server cut also loses its last scan-pad characters after redaction: a secret split
-    by the server's cut matches no pattern, and masking earlier in the window pulls it toward the front."""
+    masked whole. A cell the server cut ends inside its value, perhaps inside a secret that then matches no
+    pattern: only the head that scans a pad apart agree on inside the window is shown (``redacted_head``), so the
+    pad is dropped in raw characters and masks that shrink the window cannot empty the preview."""
     if cell.text is None:
         return "NULL"
     total = cell.length if cell.length is not None else len(cell.text)
     cut = total > len(cell.text)
-    shown = redact_output(cell.text)
-    if cut:
-        shown = shown[: max(0, len(shown) - redaction_scan_pad())]
+    shown = redacted_head(cell.text, MAX_CELL_CHARS, complete=False) if cut else redact_output(cell.text)
     shown = _escape(shown)
     if not cut and len(shown) <= MAX_CELL_CHARS:
         return shown
@@ -369,8 +368,8 @@ async def execute_readonly(settings: Settings, sql: str) -> tuple[list[str], lis
     """
     if not settings.reader_db_password:
         raise ReaderUnavailable(NOT_CONFIGURED)
-    # The server's cut: a redaction window of four clips, plus the scan pad that _render drops from a cut cell.
-    clip = 4 * MAX_CELL_CHARS + redaction_scan_pad()
+    # The server's cut: one clip and two scan pads, the window _render needs to settle a whole clip of a cut cell.
+    clip = MAX_CELL_CHARS + 2 * redaction_scan_pad()
     async with _CALLS:
         conn: Any = None
 

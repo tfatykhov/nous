@@ -285,12 +285,13 @@ def redaction_scan_pad() -> int:
     return max([_DETAIL_SCAN_PAD, *map(len, _own_secrets())])
 
 
-def _settled_side(text: str, half: int, pad: int, tail: bool) -> str:
+def _settled_side(text: str, half: int, pad: int, tail: bool, third: bool = True) -> str:
     """Up to ``half`` characters of one side of the redacted ``text`` (the head, or with ``tail`` the tail) that text
     past the scanned window cannot change. Two scans, ``pad`` characters apart, keep only what they agree on: a
     secret the shorter one's edge splits, the longer one sees whole and masks, so they differ from its start. When
     that leaves less than ``half`` (masks shrank it, or a secret runs across the edge), one more scan a pad further
-    in settles the longer window the same way, and the longer result is kept: both are prefixes of the same scan."""
+    in (unless ``third`` is False) settles the longer window the same way, and the longer result is kept: both are
+    prefixes of the same scan."""
 
     def scan(reach: int) -> str:
         # the redacted ``reach`` characters at this side's end, read from that end inward
@@ -298,10 +299,33 @@ def _settled_side(text: str, half: int, pad: int, tail: bool) -> str:
 
     near, far = scan(half), scan(half + pad)
     kept = os.path.commonprefix([near, far])
-    if len(kept) < half:
+    if third and len(kept) < half:
         kept = max(kept, os.path.commonprefix([far, scan(half + 2 * pad)]), key=len)
     kept = kept[:half]
     return kept[::-1] if tail else kept
+
+
+def redacted_head(text: str, chars: int, *, complete: bool = True) -> str:
+    """At most ``chars`` characters from the start of ``text``, redacted, every secret the redaction finds masked
+    BEFORE the cut. A ``complete`` text of at most ``chars`` + 2 * pad characters is redacted whole, then cut; a
+    longer one is settled as ``detail_text``'s head is (``_settled_side``), so the regexes see at most
+    3 * ``chars`` + 3 * pad characters and masks that shrink it cannot empty it (``detail_text`` names the one case
+    that can).
+
+    ``complete`` False: ``text`` is a prefix someone else cut (``db_query``'s server-side window), and its end may
+    split a secret, so nothing within a pad of that end is ever kept. Every scan stays inside ``text``: ``chars``
+    shrinks to ``len(text)`` - pad when the window is narrower than ``chars`` + pad (nothing is kept when that
+    leaves nothing), and the third scan runs only when ``chars`` + 2 * pad fits. A caller fetches ``chars`` + 2 * pad
+    characters to keep all of ``chars`` under dense masking."""
+    pad = redaction_scan_pad()
+    if complete and len(text) <= chars + 2 * pad:
+        return _redact_detail(text)[:chars]
+    if not complete:
+        chars = min(chars, len(text) - pad)
+        if chars <= 0:
+            return ""
+        return _settled_side(text, chars, pad, tail=False, third=chars + 2 * pad <= len(text))
+    return _settled_side(text, chars, pad, tail=False)
 
 
 def detail_text(text: str, cap: int) -> str:

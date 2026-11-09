@@ -6,6 +6,9 @@ tests/test_db_query_live.py; the shape check here is a courtesy that gives the a
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import random
 import re
 import uuid
 from pathlib import Path
@@ -264,6 +267,33 @@ def test_a_cell_cut_by_the_server_hides_a_secret_the_cut_split():
     cut = format_result(["c"], [[Cell(window, len(window) + 5000)]], truncated=False)
     assert "PARTIAL" not in cut and "token=[REDACTED]" in cut
     assert re.search(r"…\[\+\d+ chars\]$", cut.splitlines()[1]), cut
+
+
+# A cut cell under dense masking. Prod's scan pad is 3148 (the longest own secret); dropping it from the REDACTED
+# window, which masks had shrunk below it, left no preview at all.
+_HASH_LINES = "".join(hashlib.sha1(str(i).encode()).hexdigest() + "\n" for i in range(3000))  # 123,000 characters
+_BLOB = base64.b64encode(random.Random(5).randbytes(150_000)).decode()  # one 200,000-character run
+
+
+@pytest.fixture(params=[None, 3148], ids=["default_pad", "prod_pad"])
+def scan_pad(request, monkeypatch) -> int:
+    if request.param is not None:
+        for module in (ledger_store, db_query):
+            monkeypatch.setattr(module, "redaction_scan_pad", lambda: request.param)
+    return ledger_store.redaction_scan_pad()
+
+
+@pytest.mark.parametrize("value", [_HASH_LINES, _BLOB], ids=["hash_lines", "one_blob"])
+@pytest.mark.parametrize("fetched", ["three_scans", "four_clips"])
+def test_a_cut_cell_keeps_a_preview_under_dense_masking(scan_pad, value, fetched):
+    # the server's window: room for three scans (what execute_readonly fetches), or the old four clips and a pad
+    window = {"three_scans": MAX_CELL_CHARS + 2 * scan_pad, "four_clips": 4 * MAX_CELL_CHARS + scan_pad}[fetched]
+    line = format_result(["c"], [[Cell(value[:window], len(value))]], truncated=False).splitlines()[1]
+    preview, marker, _ = line.partition("…[+")
+    assert marker and preview, line
+    assert "[REDACTED_HEX]" in preview or "[REDACTED_BLOB]" in preview
+    assert re.search(r"[0-9a-f]{4}|[A-Za-z0-9+/]{20}", preview) is None, preview  # no raw part of a hash or blob
+    assert len(preview) <= MAX_CELL_CHARS
 
 
 def test_newlines_in_a_cell_do_not_forge_a_row():
