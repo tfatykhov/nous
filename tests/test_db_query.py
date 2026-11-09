@@ -284,16 +284,41 @@ def scan_pad(request, monkeypatch) -> int:
 
 
 @pytest.mark.parametrize("value", [_HASH_LINES, _BLOB], ids=["hash_lines", "one_blob"])
-@pytest.mark.parametrize("fetched", ["three_scans", "four_clips"])
+@pytest.mark.parametrize("fetched", ["cell_window", "three_scans", "four_clips"])
 def test_a_cut_cell_keeps_a_preview_under_dense_masking(scan_pad, value, fetched):
-    # the server's window: room for three scans (what execute_readonly fetches), or the old four clips and a pad
-    window = {"three_scans": MAX_CELL_CHARS + 2 * scan_pad, "four_clips": 4 * MAX_CELL_CHARS + scan_pad}[fetched]
+    # the server's window: what execute_readonly fetches, the least that fits three scans, or the old four clips and
+    # a pad
+    window = {
+        "cell_window": db_query.cell_window(),
+        "three_scans": MAX_CELL_CHARS + 2 * scan_pad,
+        "four_clips": 4 * MAX_CELL_CHARS + scan_pad,
+    }[fetched]
     line = format_result(["c"], [[Cell(value[:window], len(value))]], truncated=False).splitlines()[1]
     preview, marker, _ = line.partition("…[+")
     assert marker and preview, line
     assert "[REDACTED_HEX]" in preview or "[REDACTED_BLOB]" in preview
     assert re.search(r"[0-9a-f]{4}|[A-Za-z0-9+/]{20}", preview) is None, preview  # no raw part of a hash or blob
     assert len(preview) <= MAX_CELL_CHARS
+
+
+def test_the_server_window_is_never_narrower_than_before(scan_pad):
+    """A cell the old window (four clips and a pad) held whole is still sent whole and redacted whole, and a cut
+    cell has room for three scans."""
+    assert db_query.cell_window() >= 4 * MAX_CELL_CHARS + scan_pad
+    assert db_query.cell_window() >= MAX_CELL_CHARS + 2 * scan_pad
+
+
+def test_a_labelled_password_the_old_window_held_whole_is_masked(scan_pad):
+    """A cut cell cannot vouch for a labelled value longer than the pad (detail_text says why). At the default pad a
+    1,416-character jsonb value arrived whole in the old window and was masked; a window of one clip and two pads
+    (1,012) cut it and showed the password."""
+    rng = random.Random(9)
+    password = "".join(rng.choice("ghijklmnopqrstuvwxyz") for _ in range(1400))  # no hex or base64 rule matches it
+    value = '{"password": "' + password + '"}'
+    line = format_result(["c"], [[Cell(value[: db_query.cell_window()], len(value))]], truncated=False)
+    assert not any(password[i : i + 8] in line for i in range(len(password) - 7)), line[:120]
+    if len(value) <= 4 * MAX_CELL_CHARS + scan_pad:
+        assert '{"password": [REDACTED]}' in line
 
 
 def test_newlines_in_a_cell_do_not_forge_a_row():

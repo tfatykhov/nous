@@ -236,6 +236,15 @@ def _escape(text: str) -> str:
     return _LINE_BREAKING.sub(one, text)
 
 
+def cell_window() -> int:
+    """How many characters of each cell the server sends: four clips and two scan pads. A value that fits arrives
+    whole and is redacted whole. A longer one is cut there, and the two pads leave room for the three scans
+    ``_render`` settles a cut cell with. It is never narrower than the four clips and one pad it replaced, so a cell
+    that once arrived whole still does: the cut path cannot vouch for a labelled value longer than the pad
+    (``detail_text`` says why)."""
+    return 4 * MAX_CELL_CHARS + 2 * redaction_scan_pad()
+
+
 def _render(cell: Cell) -> str:
     """A cell as shown: redacted first, then clipped to ``MAX_CELL_CHARS``, so a secret the clip would split is
     masked whole. A cell the server cut ends inside its value, perhaps inside a secret that then matches no
@@ -368,8 +377,7 @@ async def execute_readonly(settings: Settings, sql: str) -> tuple[list[str], lis
     """
     if not settings.reader_db_password:
         raise ReaderUnavailable(NOT_CONFIGURED)
-    # The server's cut: one clip and two scan pads, the window _render needs to settle a whole clip of a cut cell.
-    clip = MAX_CELL_CHARS + 2 * redaction_scan_pad()
+    clip = cell_window()
     async with _CALLS:
         conn: Any = None
 
