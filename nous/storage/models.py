@@ -2339,3 +2339,46 @@ class ModelCallBlockRef(Base):
     ord: Mapped[int] = mapped_column(Integer, primary_key=True)
     block_hash: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class ToolNote(Base):
+    """Migration 103 (F108): a note about a repeated tool mistake, or a closed (declined or guard) pattern row.
+
+    A closed row is inactive with an empty ``note_text`` and ``retired`` = ``{reason, at}``; it only blocks a
+    re-review. Caps count rows with ``active`` and a non-empty ``note_text``. Written and read by the app only;
+    ``ToolNoteStore`` owns every write. At most one active note per (agent, tool, kind, key).
+    """
+
+    __tablename__ = "tool_note"
+    __table_args__ = (
+        CheckConstraint("char_length(note_text) <= 300", name="tool_note_note_text_check"),
+        Index(
+            "uq_tool_note_active_pattern",
+            "agent_id",
+            "tool_name",
+            "pattern_kind",
+            "pattern_key",
+            unique=True,
+            postgresql_where=text("active"),
+            sqlite_where=text("active"),
+        ),
+        Index("idx_tool_note_agent_created", "agent_id", "created_at"),
+        {"schema": "nous_system"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    tool_name: Mapped[str] = mapped_column(Text, nullable=False)
+    pattern_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    pattern_key: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    note_text: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    baseline_rate: Mapped[float] = mapped_column(Float, nullable=False)
+    baseline_calls: Mapped[int] = mapped_column(Integer, nullable=False)
+    baseline_hits: Mapped[int] = mapped_column(Integer, nullable=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    retired: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    judged: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
