@@ -72,13 +72,13 @@ nous/
 │   │   ├── episode_summarizer.py  # Episode summary generation
 │   │   ├── job_lessons.py         # JobLessonLearner: lessons from bad runs of recurring jobs
 │   │   ├── job_fixes.py           # JobFixer: check-and-fix for a recurring job that keeps failing
-│   │   ├── tool_notes.py          # F108 Phase 3: ToolNoteStore (the nous_system.tool_note table, migration 103), ToolNotesReview (the sleep step: one model call, the strict answer check, the owner card for guard patterns) and the review prompt: capped notes about repeated tool mistakes (3 per tool, 40 in all, 300 characters) and the declined and guard rows that keep a pattern from being re-reviewed for 14 days; the app is its only reader and writer
+│   │   ├── tool_notes.py          # F108 Phase 3: ToolNoteStore (the nous_system.tool_note table, migration 103), ToolNotesReview (the sleep step: the keep-or-retire judge, one model call, the strict answer check, the owner card for guard patterns) and the review prompt, and the "Tool notes" procedure (`sync_procedure`, `render_notes`, rendered by `get_procedure`, never stored): capped notes about repeated tool mistakes (3 per tool, 40 in all, 300 characters) and the declined and guard rows that keep a pattern from being re-reviewed for 14 days; the app is its only reader and writer
 │   │   ├── fact_extractor.py      # Fact extraction from conversations
 │   │   ├── knowledge_extractor.py # Pre-prune fact extraction
 │   │   ├── decision_reviewer.py   # Automated decision review
 │   │   ├── strategy_card_distiller.py # Reasoning Maps L1: distils a strategy card from a reviewed decision (NOUS_STRATEGY_CARDS_ENABLED)
 │   │   ├── session_monitor.py     # Session timeout monitoring
-│   │   ├── sleep_handler.py       # Sleep/reflection handler
+│   │   ├── sleep_handler.py       # Sleep/reflection handler (its `tool_notes` phase runs `ToolNotesReview`; counts under `sleep_stats["tool_notes"]`)
 │   │   ├── subtask_worker.py      # Async subtask execution
 │   │   ├── schedule_guard.py      # F107: run-level guard for scheduled script jobs (a schedule's `metadata.guard` names an entry of the `NOUS_SCHEDULE_GUARD_COMMANDS` allowlist, which runs before the model turn; `exit0_quiet`: exit 0 + empty stdout + empty stderr completes the run without one in `mode: skip`; the default `shadow` mode only records it, and `acted_signals` defines whether the model acted)
 │   │   ├── continuation_runner.py # F099 Phase 2c: ContinuationRunner (the loop, the turn, resolve_intention, the follow-up and fallbacks), build_arrival_prompt; Phase 3a: the card settle step
@@ -105,7 +105,7 @@ nous/
 │   │   ├── manager.py          # Identity section CRUD
 │   │   ├── protocol.py         # Initiation protocol
 │   │   └── tools.py            # Identity-related tools
-│   ├── observability/          # Telemetry writers — dashboards read these tables, the agent never does, except `tool_call_log`, `model_call_log` and `model_call_attempt`, which `db_query` may read
+│   ├── observability/          # Telemetry writers — dashboards read these tables, the agent never does, except `tool_call_log`, `model_call_log` and `model_call_attempt`, which `db_query` may read. The tool-notes review (`nous/handlers/tool_notes.py`) also reads `tool_call_log`, and `tool_note` (migration 103) is read and written by the app only
 │   │   ├── context_logger.py   # F035.4 per-turn context payload log (its context estimate lives in model_calls.py); with NOUS_MODEL_CALL_LOG_ENABLED on it keeps its in-memory ring but writes no context_log row
 │   │   ├── context_view.py     # F108: what the context endpoints read. RingContextView (the in-memory ring, as before) while NOUS_MODEL_CALL_LOG_ENABLED is off; TableContextView (model_call_log rows of the runner's own calls, as ContextLogEntry objects with a few added keys; payload and section text from the text store, else the ring) while it is on. main.py builds one and hands it to create_app
 │   │   ├── model_call_text.py  # F108: the model-call text store. split_payload (a call's system blocks, messages, tool list and response as blocks), prepare_block (base64 replaced, redacted, cut, sha256 of the body), response_from_events (a stream's response rebuilt from its events), and TextStore (store: one transaction of hash-ordered block upserts that touch, then the call's refs; load; describe: a call's blocks without their bodies, with how many calls reuse each, for the dashboard; load_one: one block's body by its ref's primary key; an LRU of prepared blocks). main.py builds it when NOUS_MODEL_CALL_LOG_ENABLED and NOUS_MODEL_CALL_TEXT_ENABLED are both on and hands it to the ModelCallRecorder, which submits each call's text after its row commits
@@ -171,7 +171,7 @@ nous/
 │       ├── runner.py           # Agent runner (tool loop, streaming)
 │       ├── preamble.py         # CLAUDE_CODE_PREAMBLE: system block 0 of every Messages request (one definition)
 │       ├── model_caps.py       # What a model accepts, by version: legacy Haiku, Haiku 5+ thinking disabled by default
-│       ├── tools.py            # Tool dispatcher + registration
+│       ├── tools.py            # Tool dispatcher + registration; `get_procedure` renders the "Tool notes" procedure from `tool_note` and hides it while inactive or a flag is off
 │       ├── retrieval_pipeline.py # F051: run_recall_pipeline (shared by recall_deep + eval)
 │       ├── execution_context.py # Harness 1a: who is calling (interactive, dag_node, …)
 │       ├── tool_classes.py     # Harness 2a: every tool's class, declared once
