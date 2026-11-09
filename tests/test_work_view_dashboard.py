@@ -1723,3 +1723,29 @@ async def test_patterns_query_failure_is_a_plain_500(client, monkeypatch, caplog
     resp = await client.get(PATTERNS)
     assert resp.status_code == 500 and resp.json() == {"error": "work view query failed"}
     assert any(r.levelname == "WARNING" and r.exc_info for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Across the endpoints
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_sessions_repeat_flag_and_patterns_repeated_calls_agree(client, db, agent_id, cleanup):
+    """The list's ``repeat`` flag and the patterns' ``repeated_calls`` share one key (turn, tool, input), so they
+    agree on the same rows. Their populations differ by design: the list sees only the calls of turns that have a turn
+    row in the window, the patterns every call with a turn id. That is harmless, because execute_single_call mints a
+    turn id per call, so a turnless group never holds two calls."""
+    turn = await insert_turn(db, agent_id, "sess-X", started_at=_hour_ago())
+    await insert_call(db, agent_id, turn, 0, session_id="sess-X", tool="bash", input_text="ls")
+    await insert_call(db, agent_id, turn, 1, session_id="sess-X", tool="bash", input_text="ls -a")  # input differs
+
+    sessions, patterns = await get_json(client), await get_json(client, PATTERNS)
+    assert "repeat" not in sessions["sessions"][0]["flags"]
+    assert patterns["wasted"]["repeated_calls"] == 0
+
+    await insert_call(db, agent_id, turn, 2, session_id="sess-X", tool="bash", input_text="ls")  # the first, again
+
+    sessions, patterns = await get_json(client), await get_json(client, PATTERNS)
+    assert "repeat" in sessions["sessions"][0]["flags"]
+    assert patterns["wasted"]["repeated_calls"] == 1

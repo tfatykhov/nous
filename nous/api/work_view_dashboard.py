@@ -54,6 +54,25 @@ WORK_KIND_GROUP: dict[str, str] = {
     "heartbeat": "background",
     "background_check": "background",
 }
+# WORK_KIND_GROUP as the bound lists _kind_case_sql reads.
+_KIND_PARAMS: dict[str, list[str]] = {
+    "conversation_kinds": [k for k, g in WORK_KIND_GROUP.items() if g == "conversation"],
+    "task_kinds": [k for k, g in WORK_KIND_GROUP.items() if g == "task"],
+}
+
+
+def _kind_case_sql(col: str) -> str:
+    """The kind of work of the ``work_kind`` column ``col`` as SQL: WORK_KIND_GROUP through the bound lists of
+    ``_KIND_PARAMS``, anything else background. The sessions list and the patterns both use it."""
+    return (
+        f"CASE WHEN {col} = ANY(CAST(:conversation_kinds AS text[])) THEN 'conversation' "
+        f"WHEN {col} = ANY(CAST(:task_kinds AS text[])) THEN 'task' ELSE 'background' END"
+    )
+
+
+# A repeated call: two calls of one turn with the same tool and the same input. The sessions list's ``repeat`` flag
+# and the patterns' wasted steps both group on this key, so the two cannot drift apart.
+_REPEAT_KEY = "turn_id, tool_name, input_text"
 
 # A tool to what it touches (the mockups' map). Any other tool is lane ``other``. The colours live in the UI.
 TOOL_LANES: dict[str, str] = {
@@ -206,7 +225,7 @@ def disabled_sessions(days: int) -> dict[str, Any]:
 # (joined on turn_id), so a call with no turn row and a turn with no session are never counted. Its kind, first
 # message and parent come from its first turn (started_at, then id). Unreferenced CTEs are not run. tool_counts is
 # MATERIALIZED so the page's per-row tools lookup reads the aggregate once instead of re-aggregating every call.
-_SESSIONS_CTE = """
+_SESSIONS_CTE = f"""
 WITH turns AS (
     SELECT t.id, t.session_id, t.parent_session_id, t.work_kind, t.context_kind, t.trigger_text,
            t.tool_call_count, t.started_at, coalesce(t.ended_at, t.started_at) AS last_at
@@ -216,9 +235,7 @@ WITH turns AS (
 ),
 first_turn AS (
     SELECT DISTINCT ON (session_id) session_id, parent_session_id, work_kind, context_kind, trigger_text,
-           CASE WHEN work_kind = ANY(CAST(:conversation_kinds AS text[])) THEN 'conversation'
-                WHEN work_kind = ANY(CAST(:task_kinds AS text[])) THEN 'task'
-                ELSE 'background' END AS kind
+           {_kind_case_sql("work_kind")} AS kind
     FROM turns
     ORDER BY session_id, started_at, id
 ),
@@ -240,7 +257,7 @@ call_stats AS (
 repeats AS (
     SELECT DISTINCT session_id
     FROM calls
-    GROUP BY session_id, turn_id, tool_name, input_text
+    GROUP BY session_id, {_REPEAT_KEY}
     HAVING count(*) >= 2
 ),
 tool_counts AS MATERIALIZED (
@@ -374,8 +391,7 @@ async def get_sessions(
         "days": days,
         "ask_pattern": ASK_PATTERN,
         "many": MANY_CALLS,
-        "conversation_kinds": [k for k, g in WORK_KIND_GROUP.items() if g == "conversation"],
-        "task_kinds": [k for k, g in WORK_KIND_GROUP.items() if g == "task"],
+        **_KIND_PARAMS,
         "task_chars": TITLE_TASK_CHARS,
         "trigger_chars": TITLE_TRIGGER_CHARS,
         "no_title": NO_TITLE,
@@ -709,13 +725,10 @@ def disabled_patterns(days: int) -> dict[str, Any]:
 # The window's calls of this agent. Every patterns statement reads only this, so each is a range scan of
 # idx_tool_call_log_agent_started (agent_id, started_at DESC), never the whole table. A call's kind of work is its
 # own work_kind through WORK_KIND_GROUP; a blank reason is no reason.
-_PATTERNS_WINDOW_CTE = """
+_PATTERNS_WINDOW_CTE = f"""
 WITH win AS (
     SELECT c.id, c.turn_id, c.call_index, c.session_id, c.tool_name, c.input_text, c.is_error, c.started_at,
-           nullif(btrim(c.reason), '') AS reason,
-           CASE WHEN c.work_kind = ANY(CAST(:conversation_kinds AS text[])) THEN 'conversation'
-                WHEN c.work_kind = ANY(CAST(:task_kinds AS text[])) THEN 'task'
-                ELSE 'background' END AS kind
+           nullif(btrim(c.reason), '') AS reason, {_kind_case_sql("c.work_kind")} AS kind
     FROM nous_system.tool_call_log c
     WHERE c.agent_id = :agent AND c.started_at >= now() - make_interval(days => :days)
 )
@@ -775,7 +788,7 @@ LIMIT :failing_cap
 # in.
 _PATTERNS_TOTALS_SQL = (
     _PATTERNS_WINDOW_CTE
-    + """
+    + f"""
 SELECT cov.calls, cov.with_reason, w.repeated_calls, w.retried_and_failed_again
 FROM (SELECT count(*)::int AS calls, count(reason)::int AS with_reason FROM win) cov
 CROSS JOIN (
@@ -783,7 +796,7 @@ CROSS JOIN (
            (count(*) FILTER (WHERE is_error AND prev_error))::int AS retried_and_failed_again
     FROM (
         SELECT is_error,
-               lag(is_error) OVER (PARTITION BY turn_id, tool_name, input_text ORDER BY call_index, id) AS prev_error
+               lag(is_error) OVER (PARTITION BY {_REPEAT_KEY} ORDER BY call_index, id) AS prev_error
         FROM win
         WHERE turn_id IS NOT NULL
     ) x
@@ -798,8 +811,7 @@ async def get_patterns(session: AsyncSession, agent_id: str, *, days: int) -> di
     base = {
         "agent": agent_id,
         "days": days,
-        "conversation_kinds": [k for k, g in WORK_KIND_GROUP.items() if g == "conversation"],
-        "task_kinds": [k for k, g in WORK_KIND_GROUP.items() if g == "task"],
+        **_KIND_PARAMS,
     }
     await _set_timeout(session)
 
