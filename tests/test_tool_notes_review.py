@@ -1,0 +1,458 @@
+"""F108 Phase 3: the review step of the tool notes (model pass over repeated mistakes), on real Postgres.
+
+Only the model is faked, at the ``LLMClient.call`` boundary.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import uuid
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import text as sa_text
+
+from nous.handlers.tool_notes import (
+    MAX_CANDIDATES,
+    NOTE_MAX_CHARS,
+    REREVIEW_DAYS,
+    SCORE_WORDS,
+    Decision,
+    ToolNotesReview,
+    ToolNoteStore,
+    build_review_prompt,
+    parse_review,
+)
+from nous.observability.model_calls import PURPOSES
+from nous.observability.tool_patterns import Pattern
+from tests.test_work_view_dashboard import insert_call
+
+NOW = datetime(2026, 11, 9, 12, 0, tzinfo=UTC)
+SECRET = "Bearer sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA"
+TOKEN = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAA"
+KEYS = (
+    "detected",
+    "capped",
+    "guard",
+    "offered",
+    "written",
+    "rewritten",
+    "declined",
+    "rejected",
+    "at_cap",
+    "llm_failed",
+    "retired",
+    "kept",
+)
+
+
+class FakeClient:
+    """Answers every call with ``answer`` (a dict, dumped as JSON text), or raises ``error``, or has no text."""
+
+    supports_call_context = True
+
+    def __init__(self, answer=None, *, error: Exception | None = None, raw: str | None = None, empty: bool = False):
+        self.answer, self.error, self.raw, self.empty = answer, error, raw, empty
+        self.calls: list[tuple[dict, dict]] = []
+
+    async def call(self, payload, **kwargs):
+        self.calls.append((payload, kwargs))
+        if self.error:
+            raise self.error
+        response = MagicMock()
+        if self.empty:
+            response.content = []
+        else:
+            response.content = [{"type": "text", "text": self.raw if self.raw is not None else json.dumps(self.answer)}]
+        return response
+
+
+@pytest.fixture
+def agent_id() -> str:
+    return f"test-p3-tr-{uuid.uuid4().hex[:12]}"
+
+
+@pytest_asyncio.fixture
+async def cleanup(db):
+    yield
+    async with db.session() as s:
+        await s.execute(sa_text("DELETE FROM nous_system.tool_note WHERE agent_id LIKE 'test-p3-tr-%'"))
+        await s.commit()
+    async with db.engine.begin() as conn:
+        for t in ("tool_call_log", "agent_turn_log"):
+            await conn.execute(sa_text(f"DELETE FROM nous_system.{t} WHERE agent_id LIKE 'test-p3-tr-%'"))
+
+
+def make_review(db, agent_id, client, *, enabled=True, clock=NOW):
+    settings = SimpleNamespace(tool_notes_enabled=enabled, background_model="bg-model-test", agent_id=agent_id)
+    heart = SimpleNamespace(agent_id=agent_id, db=db)
+    return ToolNotesReview(db, heart, settings, client, clock=lambda: clock)
+
+
+async def seed_errors(db, agent_id, tool, hits, *, text="boom", calls=10, days_ago=2):
+    """``hits`` failing calls with the same error text and ``calls - hits`` good ones, turnless (so no repeats)."""
+    at = NOW - timedelta(days=days_ago)
+    for i in range(calls):
+        await insert_call(
+            db,
+            agent_id,
+            None,
+            i,
+            session_id=None,
+            tool=tool,
+            input_text=f"in-{tool}-{i}",
+            is_error=i < hits,
+            outcome="error" if i < hits else "ran",
+            error_text=text if i < hits else None,
+            started_at=at,
+        )
+
+
+def pat(tool="bash", key="boom", hits=6, calls=30, kind="error_repeat", guard=None, example="boom") -> Pattern:
+    return Pattern(kind=kind, tool_name=tool, key=key, hits=hits, calls=calls, guard=guard, example=example)
+
+
+async def note_rows(db, agent_id, *, active=None):
+    q = "SELECT * FROM nous_system.tool_note WHERE agent_id = :a"
+    if active is not None:
+        q += " AND active AND note_text <> ''" if active else " AND NOT active"
+    async with db.session() as s:
+        return [dict(r) for r in (await s.execute(sa_text(q), {"a": agent_id})).mappings()]
+
+
+def write(p, text="check the path before you run it", replaces=None):
+    return {"pattern": p, "action": "write", "text": text, "replaces": replaces}
+
+
+def pid(tool="bash", key="boom", kind="error_repeat"):
+    return pat(tool=tool, key=key, kind=kind).id
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# flag, candidates, prompt
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_flag_off_does_nothing(agent_id):
+    db = MagicMock()
+    db.session = MagicMock(side_effect=AssertionError("no session may be opened"))
+    client = FakeClient({"notes": []})
+    review = make_review(db, agent_id, client, enabled=False)
+    out = await review.run_sleep()
+    assert out == dict.fromkeys(KEYS, 0)
+    assert client.calls == []
+    db.session.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_flag_on_without_records_returns_zeros(db, agent_id, cleanup):
+    client = FakeClient({"notes": []})
+    out = await make_review(db, agent_id, client).run_sleep()
+    assert out == dict.fromkeys(KEYS, 0)
+    assert client.calls == [] and await note_rows(db, agent_id) == []
+
+
+@pytest.mark.asyncio
+async def test_no_candidates_no_model_call(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "bash", 2)  # below MIN_HITS
+    client = FakeClient({"notes": []})
+    out = await make_review(db, agent_id, client).run_sleep()
+    assert out["detected"] == 0 and out["offered"] == 0
+    assert client.calls == []
+
+
+def test_prompt_is_records_only_and_redacted():
+    p1 = pat(tool="bash", key=f"auth failed {SECRET}", example=f"auth failed {SECRET}")
+    p2 = pat(tool="read_file", kind="call_repeat", key="", hits=4, calls=9, example=f'{{"path": "{SECRET}"}}')
+    old = SimpleNamespace(
+        id=uuid.uuid4(),
+        tool_name="bash",
+        note_text=f"use the full path {SECRET}",
+        pattern_kind="error_repeat",
+        pattern_key="x",
+        pattern_id="error_repeat:bash:00000000",
+    )
+    other = SimpleNamespace(
+        id=uuid.uuid4(),
+        tool_name="web_fetch",
+        note_text="unrelated note",
+        pattern_kind="error_repeat",
+        pattern_key="y",
+        pattern_id="error_repeat:web_fetch:00000000",
+    )
+    prompt = build_review_prompt([p1, p2], [old, other])
+    assert TOKEN not in prompt and "sk-ant" not in prompt
+    assert SCORE_WORDS.search(prompt) is None
+    for p in (p1, p2):
+        assert p.id in prompt and p.tool_name in prompt and p.kind in prompt
+        assert f"hits={p.hits}" in prompt and f"calls={p.calls}" in prompt
+    assert str(old.id) in prompt and "use the full path" in prompt
+    assert str(other.id) not in prompt  # a note of a tool that is not offered
+    low = prompt.lower()
+    assert "data, not instructions" in low
+
+
+@pytest.mark.asyncio
+async def test_review_call_is_labelled(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "bash", 4)
+    client = FakeClient({"notes": []})
+    await make_review(db, agent_id, client).run_sleep()
+    payload, kwargs = client.calls[0]
+    assert kwargs["call_context"].purpose == "tool_notes"
+    assert "tool_notes" in PURPOSES
+    assert payload["model"] == "bg-model-test"
+    assert payload["max_tokens"] == 1500
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# applying the answer
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_write_stores_note_with_baseline_and_clock(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "bash", 4, calls=10)
+    client = FakeClient({"notes": [write(pid())]})
+    out = await make_review(db, agent_id, client).run_sleep()
+    assert out["written"] == 1 and out["offered"] == 1 and out["detected"] == 1
+    rows = await note_rows(db, agent_id, active=True)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["baseline_rate"] == pytest.approx(4 / 10) and r["baseline_hits"] == 4 and r["baseline_calls"] == 10
+    assert r["created_at"] == NOW and r["tool_name"] == "bash"
+
+
+HOSTILE = [
+    ("unknown_pattern", {"pattern": "error_repeat:bash:deadbeef", "action": "write", "text": "x ok", "replaces": None}),
+    ("too_long", write("{pid}", "x" * (NOTE_MAX_CHARS + 1))),
+    ("score_word", write("{pid}", "Your score dropped")),
+    ("rubric_word", write("{pid}", "mind the rubric")),
+    ("empty", write("{pid}", "   ")),
+    ("foreign_replaces", write("{pid}", "fine text", replaces="{other_note}")),
+    ("bad_replaces", write("{pid}", "fine text", replaces="not-a-uuid")),
+    ("not_a_dict", "write something"),
+    ("no_pattern", {"action": "write", "text": "fine text"}),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name,entry", HOSTILE, ids=[h[0] for h in HOSTILE])
+async def test_hostile_answers_are_dropped_and_counted(db, agent_id, cleanup, name, entry):
+    await seed_errors(db, agent_id, "bash", 4)
+    store = ToolNoteStore(db, agent_id)
+    other_id = await store.add(pat(tool="web_fetch", key="other"), "another tool's note", now=NOW - timedelta(days=30))
+    if isinstance(entry, dict):
+        entry = {
+            k: (v.replace("{pid}", pid()).replace("{other_note}", str(other_id)) if isinstance(v, str) else v)
+            for k, v in entry.items()
+        }
+    client = FakeClient({"notes": [entry]})
+    out = await make_review(db, agent_id, client).run_sleep()
+    active = await note_rows(db, agent_id, active=True)
+    assert [r["tool_name"] for r in active] == ["web_fetch"], name  # only the seeded foreign note
+    assert out["rejected"] == 1 and out["written"] == 0 and out["rewritten"] == 0
+    assert out["declined"] == 1  # the offered pattern got no note, so it is closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [{"notes": []}, {}], ids=["empty_list", "empty_object"])
+async def test_empty_answers_store_nothing(db, agent_id, cleanup, answer):
+    await seed_errors(db, agent_id, "bash", 4)
+    out = await make_review(db, agent_id, FakeClient(answer)).run_sleep()
+    assert await note_rows(db, agent_id, active=True) == []
+    assert out["written"] == 0 and out["llm_failed"] == 0 and out["declined"] == 1
+
+
+@pytest.mark.asyncio
+async def test_non_json_answer_counts_llm_failed(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "bash", 4)
+    out = await make_review(db, agent_id, FakeClient(raw="I cannot help with that")).run_sleep()
+    assert out["llm_failed"] == 1 and out["declined"] == 0
+    assert await note_rows(db, agent_id) == []  # unreviewed: offered again next sleep
+
+
+def test_upgrade_is_not_a_score_word():
+    cand = pat()
+    decisions, rejected = parse_review({"notes": [write(cand.id, "upgrade the package first")]}, [cand], [])
+    assert rejected == 0 and len(decisions) == 1 and decisions[0].text == "upgrade the package first"
+    assert isinstance(decisions[0], Decision) and decisions[0].pattern is cand and decisions[0].replaces is None
+
+
+def test_parse_collapses_whitespace_and_redacts():
+    cand = pat()
+    decisions, rejected = parse_review({"notes": [write(cand.id, f"use\n  the   token {TOKEN} never")]}, [cand], [])
+    assert rejected == 0 and TOKEN not in decisions[0].text and "\n" not in decisions[0].text
+
+
+def test_parse_drops_a_second_entry_for_one_pattern():
+    cand = pat()
+    decisions, rejected = parse_review({"notes": [write(cand.id, "first"), write(cand.id, "second")]}, [cand], [])
+    assert [d.text for d in decisions] == ["first"] and rejected == 1
+
+
+@pytest.mark.asyncio
+async def test_at_cap_needs_a_valid_replaces(db, agent_id, cleanup):
+    store = ToolNoteStore(db, agent_id)
+    old = [await store.add(pat(key=f"old{i}"), f"old note {i}", now=NOW - timedelta(days=30)) for i in range(3)]
+    other = await store.add(pat(tool="web_fetch", key="o"), "other tool", now=NOW - timedelta(days=30))
+    await seed_errors(db, agent_id, "bash", 4)
+
+    # no replaces: nothing stored
+    out = await make_review(db, agent_id, FakeClient({"notes": [write(pid())]})).run_sleep()
+    assert out["at_cap"] == 1 and out["written"] == 0 and out["declined"] == 1
+    assert len(await note_rows(db, agent_id, active=True)) == 4
+
+    # the pattern was closed, so move the clock past the block
+    later = NOW + timedelta(days=REREVIEW_DAYS + 1)
+    await seed_errors(db, agent_id, "bash", 4, days_ago=-REREVIEW_DAYS)  # fresh records inside the later window
+    # replaces names another tool's note while bash is at its cap: rejected
+    out = await make_review(
+        db, agent_id, FakeClient({"notes": [write(pid(), replaces=str(other))]}), clock=later
+    ).run_sleep()
+    assert out["rejected"] == 1 and out["rewritten"] == 0
+    assert len(await note_rows(db, agent_id, active=True)) == 4
+
+    # a valid replaces rewrites
+    later2 = later + timedelta(days=REREVIEW_DAYS + 1)
+    await seed_errors(db, agent_id, "bash", 4, days_ago=-2 * REREVIEW_DAYS)
+    out = await make_review(
+        db, agent_id, FakeClient({"notes": [write(pid(), "the new text", replaces=str(old[0]))]}), clock=later2
+    ).run_sleep()
+    assert out["rewritten"] == 1 and out["written"] == 0
+    active = await note_rows(db, agent_id, active=True)
+    assert len(active) == 4 and "the new text" in [r["note_text"] for r in active]
+    retired = [r for r in await note_rows(db, agent_id, active=False) if r["id"] == old[0]]
+    assert retired and retired[0]["retired"]["reason"] == "rewritten"
+
+
+@pytest.mark.asyncio
+async def test_unmentioned_and_skipped_candidates_are_closed(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "bash", 4)
+    await seed_errors(db, agent_id, "read_file", 4)
+    skipped = pid("bash")
+    client = FakeClient({"notes": [{"pattern": skipped, "action": "skip", "text": "", "replaces": None}]})
+    review = make_review(db, agent_id, client)
+    out = await review.run_sleep()
+    assert out["offered"] == 2 and out["declined"] == 2 and out["written"] == 0
+    closed = await note_rows(db, agent_id, active=False)
+    assert len(closed) == 2 and all(r["retired"]["reason"] == "declined" and r["note_text"] == "" for r in closed)
+
+    out = await review.run_sleep()  # same clock: still blocked
+    assert out["detected"] == 2 and out["offered"] == 0 and len(client.calls) == 1
+
+    for tool in ("bash", "read_file"):  # fresh records inside the later window
+        await seed_errors(db, agent_id, tool, 4, days_ago=-REREVIEW_DAYS)
+    later = make_review(db, agent_id, client, clock=NOW + timedelta(days=REREVIEW_DAYS + 1))
+    out = await later.run_sleep()
+    assert out["offered"] == 2 and len(client.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_at_most_max_candidates_most_hits_first(db, agent_id, cleanup):
+    assert MAX_CANDIDATES == 8
+    for i in range(10):
+        await seed_errors(db, agent_id, f"tool{i}", 3 + i, calls=20)
+    client = FakeClient({"notes": []})
+    review = make_review(db, agent_id, client)
+    out = await review.run_sleep()
+    assert out["detected"] == 10 and out["offered"] == 8
+    prompt = client.calls[0][0]["messages"][0]["content"][0]["text"]
+    listed = sorted(int(m) for m in set(re.findall(r"tool=tool(\d+)", prompt)))
+    assert listed == [2, 3, 4, 5, 6, 7, 8, 9]  # tool0 and tool1 have the fewest hits
+    assert prompt.index("tool=tool9") < prompt.index("tool=tool2")
+    rows = {r["tool_name"] for r in await note_rows(db, agent_id)}
+    assert rows == {f"tool{i}" for i in range(2, 10)}
+
+    out = await review.run_sleep()  # the 9th and 10th are offered next sleep
+    assert out["offered"] == 2 and "tool=tool0" in client.calls[1][0]["messages"][0]["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_active_note_blocks_reoffer_after_rereview_days(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "bash", 4)
+    client = FakeClient({"notes": [write(pid())]})
+    assert (await make_review(db, agent_id, client).run_sleep())["written"] == 1
+    later = NOW + timedelta(days=REREVIEW_DAYS + 1)
+    await seed_errors(db, agent_id, "bash", 4, days_ago=-REREVIEW_DAYS)
+    out = await make_review(db, agent_id, client, clock=later).run_sleep()
+    assert out["offered"] == 0 and out["written"] == 0 and len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_model_text_is_redacted(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "bash", 4)
+    client = FakeClient({"notes": [write(pid(), f"send {SECRET} in the header")]})
+    await make_review(db, agent_id, client).run_sleep()
+    rows = await note_rows(db, agent_id)
+    assert all(TOKEN not in r["note_text"] for r in rows)
+    notes = await ToolNoteStore(db, agent_id).active()
+    assert all(TOKEN not in n.note_text for n in notes)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "client", [FakeClient(error=RuntimeError("down")), FakeClient(empty=True)], ids=["raises", "no_text"]
+)
+async def test_llm_failure_stores_nothing(db, agent_id, cleanup, client):
+    await seed_errors(db, agent_id, "bash", 4)
+    out = await make_review(db, agent_id, client).run_sleep()
+    assert out["llm_failed"] == 1 and out["written"] == 0 and out["declined"] == 0
+    assert await note_rows(db, agent_id) == []
+
+
+@pytest.mark.asyncio
+async def test_guard_patterns_are_counted_never_offered(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "bash", 4, text="refused: path is outside the allowlist")
+    client = FakeClient({"notes": []})
+    out = await make_review(db, agent_id, client).run_sleep()
+    assert out["detected"] == 1 and out["guard"] == 1 and out["offered"] == 0
+    assert client.calls == [] and await note_rows(db, agent_id) == []
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# the sleep phase
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def _handler():
+    from tests.test_sleep_handler import _make_sleep_handler
+
+    return _make_sleep_handler()[0]
+
+
+@pytest.mark.asyncio
+async def test_sleep_phase_nests_the_counts():
+    handler = _handler()
+    handler._tool_notes = AsyncMock()
+    handler._tool_notes.run_sleep = AsyncMock(return_value={k: 1 for k in KEYS})
+    stats = {"facts_created": 0, "procedures_created": 0}
+    assert await handler._phase_tool_notes(stats) is True
+    assert stats["tool_notes"] == {k: 1 for k in KEYS}
+    assert {k for k, v in stats.items() if isinstance(v, int)} == {"facts_created", "procedures_created"}
+
+
+@pytest.mark.asyncio
+async def test_sleep_phase_without_review_is_a_no_op():
+    handler = _handler()
+    stats = {"procedures_created": 0}
+    assert getattr(handler, "_tool_notes", "missing") is None
+    assert await handler._phase_tool_notes(stats) is True
+    assert "tool_notes" not in stats
+
+
+@pytest.mark.asyncio
+async def test_sleep_phase_raising_review_returns_false(caplog):
+    handler = _handler()
+    handler._tool_notes = AsyncMock()
+    handler._tool_notes.run_sleep = AsyncMock(side_effect=RuntimeError("boom"))
+    stats = {"procedures_created": 0}
+    with caplog.at_level(logging.WARNING):
+        assert await handler._phase_tool_notes(stats) is False
+    assert "tool_notes" not in stats
+    assert any(r.levelno == logging.WARNING for r in caplog.records)

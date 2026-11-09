@@ -1043,6 +1043,18 @@ async def create_components(settings: Settings) -> dict:
             else:
                 logger.warning("NOUS_JOB_FIXES_ENABLED needs sleep: job fixes stay off")
 
+        # Tool notes: a sleep step turns repeated tool mistakes into capped notes (needs sleep and the tool-call log)
+        if settings.tool_notes_enabled:
+            if sleep_handler is not None:
+                from nous.handlers.tool_notes import ToolNotesReview
+
+                sleep_handler._tool_notes = ToolNotesReview(heart.db, heart, settings, api_client)
+                logger.info("Tool notes: ToolNotesReview wired into sleep handler")
+                if not settings.tool_call_log_enabled:
+                    logger.warning("NOUS_TOOL_NOTES_ENABLED needs NOUS_TOOL_CALL_LOG_ENABLED: tool notes stay idle")
+            else:
+                logger.warning("NOUS_TOOL_NOTES_ENABLED needs sleep: tool notes stay off")
+
         # Profile card: a sleep phase rewrites the bounded profile card from the tier-1 facts (needs sleep)
         if settings.profile_card_writer_enabled:
             if sleep_handler is not None:

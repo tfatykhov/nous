@@ -401,6 +401,7 @@ class SleepHandler:
         self._pending_emits: set[asyncio.Task] = set()
         self._procedure_learner = None  # F012: Set externally if enabled
         self._job_lessons = None  # Job lessons: set externally if enabled
+        self._tool_notes = None  # Tool notes review (F108 Phase 3): set externally if enabled
         self._job_fixer = None  # Job fixes: set externally if enabled
         self._profile_card_writer = None  # Profile card: set externally if enabled
         self._rubric_evolver = None  # F024-3b: Set externally if enabled
@@ -821,6 +822,12 @@ class SleepHandler:
                 success = await self._run_phase("job_fixes", lambda: self._phase_job_fixes(sleep_stats))
                 if success:
                     phases_completed.append("job_fixes")
+
+            # Optional: registered only when the tool notes review is wired. Not audited: it changes no memory count.
+            if not self._interrupted and self._tool_notes is not None:
+                success = await self._run_phase("tool_notes", lambda: self._phase_tool_notes(sleep_stats))
+                if success:
+                    phases_completed.append("tool_notes")
 
             if not self._interrupted:
                 success = await self._run_phase(
@@ -3114,6 +3121,30 @@ class SleepHandler:
             return True
         except Exception:
             logger.warning("Job fixes phase failed", exc_info=True)
+            return False
+
+    async def _phase_tool_notes(self, sleep_stats: dict) -> bool:
+        """Turn repeated tool mistakes into capped notes (one model call at most)."""
+        if self._tool_notes is None:
+            logger.debug("Sleep phase: tool_notes (no review configured)")
+            return True
+        try:
+            stats = await self._tool_notes.run_sleep()
+            keys = (
+                "detected", "capped", "guard", "offered", "written", "rewritten", "declined", "rejected",
+                "at_cap", "llm_failed", "retired", "kept",
+            )  # fmt: skip
+            counts = {key: stats.get(key, 0) for key in keys}
+            # Nested, not flat ints: the consolidation audit sums every top-level int.
+            sleep_stats["tool_notes"] = counts
+            logger.info(
+                "Sleep tool notes: %d detected, %d capped, %d guard, %d offered, %d written, %d rewritten, "
+                "%d declined, %d rejected, %d at_cap, %d llm_failed, %d retired, %d kept",
+                *counts.values(),
+            )
+            return True
+        except Exception:
+            logger.warning("Tool notes phase failed", exc_info=True)
             return False
 
     async def _phase_evolve_rubric(self, sleep_stats: dict) -> bool:
