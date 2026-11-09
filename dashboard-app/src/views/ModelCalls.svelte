@@ -30,7 +30,7 @@
   <SubNav {items} {current} label="Model calls views" />
 
   {#if state && (view?.view === 'list' || view?.view === 'cache')}
-    <h1>Model calls</h1>
+    <h1 class="page-h1">Model calls</h1>
   {/if}
 
   {#if state && view?.view === 'list'}
@@ -53,7 +53,6 @@
 <style>
   .mc { display: flex; flex-direction: column; gap: 1rem; }
   .gone { color: var(--muted); font-size: 0.9375rem; }
-  h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em; margin: 0.25rem 0; }
   .gone a, .back { color: var(--accent-text); }
   .split { display: block; }
   .detailcol { display: flex; flex-direction: column; gap: 1rem; min-width: 0; }

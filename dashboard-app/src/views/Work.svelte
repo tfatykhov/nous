@@ -2,16 +2,17 @@
   import { currentRoute, currentSub, routeHref } from '../lib/router';
   import { parseWorkSub } from '../lib/work';
   import SubNav from '../lib/ui/SubNav.svelte';
-  import Placeholder from '../lib/ui/Placeholder.svelte';
   import SessionList from './work/SessionList.svelte';
   import Patterns from './work/Patterns.svelte';
   import Trace from './work/Trace.svelte';
+  import Ledger from './Ledger.svelte';
 
   // F108 Work host: one screen, its views chosen by the sub path of #/work. The list keeps its filters in the
-  // hash query; the change ledger is a stub until its task lands.
+  // hash query; the Changes tab is the execution ledger, under this screen's title.
   const items = [
     { id: 'sessions', label: 'Sessions', href: routeHref('work') },
     { id: 'patterns', label: 'Patterns', href: routeHref('work', 'patterns') },
+    { id: 'changes', label: 'Changes', href: routeHref('work', 'changes') },
   ];
 
   // Route and sub are read together: a route change is announced after its sub and query are already set.
@@ -30,7 +31,10 @@
   {:else if view?.view === 'patterns'}
     <Patterns />
   {:else if view?.view === 'changes'}
-    <Placeholder route="changes" />
+    <div>
+      <h1 class="page-h1">Work</h1>
+      <Ledger embedded />
+    </div>
   {:else if view?.view === 'trace'}
     {#key view.sessionId}
       <Trace sessionId={view.sessionId} turnId={view.turn ?? undefined} />

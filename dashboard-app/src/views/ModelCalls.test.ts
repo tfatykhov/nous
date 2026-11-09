@@ -156,6 +156,15 @@ describe('Model calls list', () => {
     expect(lastList().searchParams.get('days')).toBe('30');
   });
 
+  it('a one-day window reads "1 day" in the chips caption and in the empty state', async () => {
+    go('#/model-calls?days=1');
+    respond = () => ({ body: list([], { window_days: 1 }) });
+    render(ModelCalls);
+    expect(await screen.findByText('No model calls in the last 1 day match.')).toBeTruthy();
+    expect(screen.getByText(/^Counts are calls in the last 1 day\./)).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/1 days/);
+  });
+
   it('the default empty state names 7 days', async () => {
     respond = () => ({ body: list([]) });
     render(ModelCalls);

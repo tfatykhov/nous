@@ -3,7 +3,7 @@
   import { makePollStore } from '../../lib/stores/registry';
   import { usePoll } from '../../lib/poll';
   import { currentRoute, currentSub, currentQuery, routeHref } from '../../lib/router';
-  import { laneColor } from '../../lib/work';
+  import { fmtDays, laneColor } from '../../lib/work';
   import type { WorkKind, WorkPatternsData } from '../../lib/types/api';
   import StaleBadge from '../../lib/ui/StaleBadge.svelte';
 
@@ -71,9 +71,9 @@
 
 <header class="head">
   <div>
-    <h1>What Nous uses, and what for</h1>
+    <h1 class="page-h1">What Nous uses, and what for</h1>
     <p class="subtitle">
-      Every tool across all sessions{data ? ` in the last ${data.window_days} days` : ''}. The sessions behind a failing tool are one click away.
+      Every tool across all sessions{data ? ` in the last ${fmtDays(data.window_days)}` : ''}. The sessions behind a failing tool are one click away.
     </p>
   </div>
   <div class="head-right">
@@ -146,7 +146,7 @@
   <div class="two">
     <section class="card" aria-labelledby="fail-h">
       <h2 id="fail-h">Tools that fail most</h2>
-      <span class="muted">Error rate per call, last {data.window_days} days</span>
+      <span class="muted">Error rate per call, last {fmtDays(data.window_days)}</span>
       {#if data.failing.length === 0}
         <p class="empty">No tool has 20 or more calls with errors in this window.</p>
       {:else}
@@ -183,7 +183,6 @@
 <style>
   .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
-  h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em; margin: 0.25rem 0; }
   h2 { font-size: 1.0625rem; font-weight: 600; margin: 0; }
   .subtitle { color: var(--muted); font-size: 0.9375rem; margin: 0; max-width: 75ch; }
   .muted { color: var(--muted); font-size: 0.8125rem; margin: 0; }

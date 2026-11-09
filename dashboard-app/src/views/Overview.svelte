@@ -5,6 +5,7 @@
   import type { StatusData, StatusTimeseriesPoint, ExecutionData } from '../lib/types/api';
   import { attentionPoll } from '../lib/stores/attention';
   import { fmtUtc, relUntil } from '../lib/harness';
+  import { routeHref } from '../lib/router';
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import Chart from '../lib/viz/Chart.svelte';
@@ -46,15 +47,12 @@
     return `${fmt(value)} (${sign}${delta} 7d)`;
   }
 
-  /** Convert [{date, count},...] arrays into Chart.js-ready {labels, datasets data}. */
-  function normalizeTimeseries(raw: { facts: StatusTimeseriesPoint[]; episodes: StatusTimeseriesPoint[]; decisions: StatusTimeseriesPoint[] }) {
-    const labels = raw.facts.map((p) => p.date.slice(5)); // MM-DD
-    return {
-      labels,
-      facts: raw.facts.map((p) => p.count),
-      episodes: raw.episodes.map((p) => p.count),
-      decisions: raw.decisions.map((p) => p.count),
-    };
+  /**
+   * Rows the daily timeseries counts in all, for the growth summary line. The series has one point per calendar day
+   * from date(now − 30 days) through today (31 days), and counts rows by creation day, later deactivated ones included.
+   */
+  function seriesTotal(points: StatusTimeseriesPoint[]): number {
+    return points.reduce((s, p) => s + p.count, 0);
   }
 
   /** Sort a Record<string, number> by value descending and return as {labels, values}. */
@@ -80,7 +78,6 @@
     return 'bad';
   }
 
-  const DOUGHNUT_COLORS = ['#60a5fa', '#34d399', '#a78bfa', '#fb923c', '#f87171', '#fbbf24', '#6b6b8a', '#e2e2f0'];
   const OUTCOME_COLORS: Record<string, string> = {
     success: '#34d399', partial: '#fbbf24', failure: '#f87171', pending: '#6b6b8a',
   };
@@ -105,7 +102,6 @@
   {@const db = d.dashboard}
   {@const deltas = db.deltas}
   {@const dist = db.distributions}
-  {@const ts = normalizeTimeseries(db.timeseries)}
 
   <!-- ── Needs your attention (harness dashboard §4.6) ─────────────────── -->
   {@const a = $attentionPoll.data}
@@ -124,7 +120,7 @@
       {:else}
         <div class="attn-cards">
           {#if a.questions_waiting > 0}
-            <a class="attn-card attn-waiting" href="#/dag" aria-labelledby="attn-q">
+            <a class="attn-card attn-waiting" href={routeHref('dag')} aria-labelledby="attn-q">
               <span class="attn-kicker">Questions</span>
               <span id="attn-q" class="attn-title">{a.questions_waiting} question{a.questions_waiting === 1 ? '' : 's'} waiting on you</span>
               {#if a.next}
@@ -134,7 +130,7 @@
             </a>
           {/if}
           {#if a.sends_in_doubt > 0}
-            <a class="attn-card attn-unknown" href="#/execution" aria-labelledby="attn-s">
+            <a class="attn-card attn-unknown" href={routeHref('work', 'changes')} aria-labelledby="attn-s">
               <span class="attn-kicker">Sends in doubt</span>
               <span id="attn-s" class="attn-title">{a.sends_in_doubt} send{a.sends_in_doubt === 1 ? '' : 's'} ended without confirming delivery</span>
               {#if a.latest_in_doubt}
@@ -149,9 +145,9 @@
       {/if}
       <p class="harness-line">
         {#if !a.harness.events_persisted}
-          Harness: not measured — event persistence is off.
+          Guards: not measured — event persistence is off.
         {:else}
-          Harness, last 7 days:
+          Guards, last 7 days:
           {#each [['Offered-tool rule', a.harness.offered_set], ['Context policy', a.harness.context_policy]] as [name, r], i (name)}
             {@const rule = r as { mode: string | null; warn_7d: number; refused_7d: number }}
             {i ? ' · ' : ''}{name}
@@ -160,7 +156,7 @@
             {:else} flagged <strong>{rule.warn_7d}</strong> (warn — the calls still ran){/if}
           {/each}.
         {/if}
-        <a href="#/harness">Open Harness</a>
+        <a href={routeHref('harness')}>Open Guards</a>
       </p>
     </section>
   {/if}
@@ -199,7 +195,7 @@
   <section class="chart-card integrity-section">
     <div class="section-title-row">
       <h2>Execution integrity</h2>
-      <a class="detail-link" href="#/execution">Open ledger &rsaquo;</a>
+      <a class="detail-link" href={routeHref('work', 'changes')}>Open ledger &rsaquo;</a>
     </div>
     {#if x && !x.modes.persist}
       <p class="muted">Ledger persistence is off (NOUS_EXECUTION_LEDGER_PERSIST_ENABLED) — no calls are recorded and sends are not de-duplicated, so there are no numbers to show.</p>
@@ -222,56 +218,15 @@
     {/if}
   </section>
 
+  <!-- ── Growth: one line; the charts are on Memory health's Growth tab ── -->
+  <p class="growth-line">
+    Created in the last {db.timeseries.facts.length} days: <strong>{fmt(seriesTotal(db.timeseries.facts))}</strong> facts,
+    <strong>{fmt(seriesTotal(db.timeseries.episodes))}</strong> episodes,
+    <strong>{fmt(seriesTotal(db.timeseries.decisions))}</strong> decisions.
+    <a href={routeHref('health', 'growth')}>Memory growth ›</a>
+  </p>
+
   <!-- ── Charts ───────────────────────────────────────────────────────── -->
-  <div class="chart-row">
-    <!-- Memory growth (line) -->
-    <section class="chart-card">
-      <h2>Memory growth (30 days)</h2>
-      {#if ts.labels.length > 0}
-        <Chart
-          type="line"
-          data={{
-            labels: ts.labels,
-            datasets: [
-              { label: 'Facts',     data: ts.facts,     borderColor: '#60a5fa', backgroundColor: 'rgba(96,165,250,0.10)', fill: true, borderWidth: 2, pointRadius: 1 },
-              { label: 'Episodes',  data: ts.episodes,  borderColor: '#34d399', backgroundColor: 'rgba(52,211,153,0.10)', fill: true, borderWidth: 2, pointRadius: 1 },
-              { label: 'Decisions', data: ts.decisions, borderColor: '#a78bfa', backgroundColor: 'rgba(167,139,250,0.10)', fill: true, borderWidth: 2, pointRadius: 1 },
-            ],
-          }}
-          options={{
-            scales: {
-              x: { ticks: { maxTicksLimit: 8 }, grid: { display: false } },
-              y: { beginAtZero: true, ticks: { precision: 0 } },
-            },
-            plugins: { legend: { position: 'bottom' } },
-          }}
-          height="240px"
-        />
-      {:else}
-        <p class="empty">No timeseries data</p>
-      {/if}
-    </section>
-
-    <!-- Fact categories (doughnut) -->
-    <section class="chart-card">
-      <h2>Fact categories</h2>
-      {#if Object.keys(dist.fact_categories).length > 0}
-        {@const fc = sortedDistribution(dist.fact_categories)}
-        <Chart
-          type="doughnut"
-          data={{
-            labels: fc.labels,
-            datasets: [{ data: fc.values, backgroundColor: DOUGHNUT_COLORS.slice(0, fc.labels.length), borderWidth: 0, hoverOffset: 4 }],
-          }}
-          options={{ cutout: '60%', plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } } }}
-          height="240px"
-        />
-      {:else}
-        <p class="empty">No facts categorized yet</p>
-      {/if}
-    </section>
-  </div>
-
   <div class="chart-row">
     <!-- Decision outcomes (doughnut) -->
     <section class="chart-card">
@@ -475,6 +430,10 @@
     margin-left: auto;
   }
   .detail-link:hover { text-decoration: underline; }
+
+  .growth-line { margin: 1rem 0 0; font-size: 0.875rem; color: var(--muted); }
+  .growth-line strong { color: var(--text); }
+  .growth-line a { color: var(--accent-text); font-weight: 600; text-decoration: none; margin-left: 0.25rem; }
 
   .chart-row {
     display: grid;

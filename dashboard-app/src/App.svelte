@@ -1,13 +1,10 @@
 <script lang="ts">
   import { currentRoute, initRouter } from '$lib/router';
   import Nav from '$lib/ui/Nav.svelte';
-  import Placeholder from '$lib/ui/Placeholder.svelte';
-  import Cache from './views/Cache.svelte';
   import DagView from './views/DagView.svelte';
   import Heartbeat from './views/Heartbeat.svelte';
   import Observability from './views/Observability.svelte';
   import Retrieval from './views/Retrieval.svelte';
-  import Ledger from './views/Ledger.svelte';
   import Work from './views/Work.svelte';
   import ModelCalls from './views/ModelCalls.svelte';
   import Subtasks from './views/Subtasks.svelte';
@@ -15,17 +12,13 @@
   import Overview from './views/Overview.svelte';
   import Browser from './views/Browser.svelte';
   import Decisions from './views/Decisions.svelte';
-  import Activity from './views/Activity.svelte';
   import Health from './views/Health.svelte';
-  import Admission from './views/Admission.svelte';
   import Rubric from './views/Rubric.svelte';
-  import Density from './views/Density.svelte';
   import Consolidation from './views/Consolidation.svelte';
   import Identity from './views/Identity.svelte';
   import Harness from './views/Harness.svelte';
   import Intentions from './views/Intentions.svelte';
   import Autonomy from './views/Autonomy.svelte';
-  import MemoryWriteHealth from './views/MemoryWriteHealth.svelte';
   import { usePoll } from '$lib/poll';
   import { attentionPoll, attentionCounts } from '$lib/stores/attention';
 
@@ -174,8 +167,6 @@
   <!--
     Route switch: {#if} (not {#key}) so each view's component state
     (scroll, loaded data) survives tab switching.
-    When a view is migrated, replace <Placeholder> with the real component:
-      {#if $currentRoute === 'overview'}<OverviewView />{/if}
   -->
   {#if $currentRoute === 'overview'}
     <Overview />
@@ -185,8 +176,6 @@
     <Browser />
   {:else if $currentRoute === 'decisions'}
     <Decisions />
-  {:else if $currentRoute === 'activity'}
-    <Activity />
   {:else if $currentRoute === 'heartbeat'}
     <Heartbeat />
   {:else if $currentRoute === 'observability'}
@@ -195,20 +184,12 @@
     <Retrieval />
   {:else if $currentRoute === 'health'}
     <Health />
-  {:else if $currentRoute === 'admission'}
-    <Admission />
   {:else if $currentRoute === 'rubric'}
     <Rubric />
-  {:else if $currentRoute === 'execution'}
-    <Ledger />
   {:else if $currentRoute === 'work'}
     <Work />
   {:else if $currentRoute === 'model-calls'}
     <ModelCalls />
-  {:else if $currentRoute === 'cache'}
-    <Cache />
-  {:else if $currentRoute === 'density'}
-    <Density />
   {:else if $currentRoute === 'consolidation'}
     <Consolidation />
   {:else if $currentRoute === 'dag'}
@@ -223,8 +204,6 @@
     <Intentions />
   {:else if $currentRoute === 'autonomy'}
     <Autonomy />
-  {:else if $currentRoute === 'memory-write-health'}
-    <MemoryWriteHealth />
   {/if}
 </main>
 

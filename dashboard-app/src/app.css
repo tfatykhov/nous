@@ -164,4 +164,12 @@
     white-space: nowrap;
     border-width: 0;
   }
+
+  /* The page title of the Work, Model calls and Memory health screens */
+  .page-h1 {
+    font-size: 1.75rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    margin: 0.25rem 0;
+  }
 }

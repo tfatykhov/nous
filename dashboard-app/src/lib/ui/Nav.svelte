@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { RouteName } from '$lib/router';
+  import { routeHref, type RouteName } from '$lib/router';
   import { attentionCounts } from '$lib/stores/attention';
 
   let {
@@ -14,6 +14,7 @@
 
   type NavItem = { id: RouteName; label: string; icon: string };
 
+  // Each item's label and icon; the order on screen is NAV_GROUPS' below.
   const NAV_ITEMS: NavItem[] = [
     {
       id: 'overview',
@@ -22,23 +23,18 @@
     },
     {
       id: 'graph',
-      label: 'Knowledge Graph',
+      label: 'Graph',
       icon: '<path d="M5 3a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2V5a2 2 0 00-2-2H5zm0 8a2 2 0 00-2 2v2a2 2 0 002 2h2a2 2 0 002-2v-2a2 2 0 00-2-2H5zm6-6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V5zm0 8a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/>',
     },
     {
       id: 'browser',
-      label: 'Memory Browser',
+      label: 'Browse',
       icon: '<path d="M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.669 0 3.218.51 4.5 1.385A7.962 7.962 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.255 0-2.443.29-3.5.804V14a1 1 0 11-2 0V4.804z"/>',
     },
     {
       id: 'decisions',
       label: 'Decisions',
       icon: '<path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>',
-    },
-    {
-      id: 'activity',
-      label: 'Activity',
-      icon: '<path fill-rule="evenodd" d="M11.3 1.046A1 1 0 0112 2v5h4a1 1 0 01.82 1.573l-7 10A1 1 0 018 18v-5H4a1 1 0 01-.82-1.573l7-10a1 1 0 011.12-.38z" clip-rule="evenodd"/>',
     },
     {
       id: 'heartbeat',
@@ -57,23 +53,13 @@
     },
     {
       id: 'health',
-      label: 'Graph Health',
+      label: 'Health',
       icon: '<path fill-rule="evenodd" d="M3 3a1 1 0 000 2v8a2 2 0 002 2h2.586l-1.293 1.293a1 1 0 101.414 1.414L10 15.414l2.293 2.293a1 1 0 001.414-1.414L12.414 15H15a2 2 0 002-2V5a1 1 0 100-2H3zm11.707 4.707a1 1 0 00-1.414-1.414L10 9.586 8.707 8.293a1 1 0 00-1.414 0l-2 2a1 1 0 101.414 1.414L8 10.414l1.293 1.293a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>',
     },
     {
-      id: 'admission',
-      label: 'Admission',
-      icon: '<path fill-rule="evenodd" d="M2.166 4.999A11.954 11.954 0 0010 1.944 11.954 11.954 0 0017.834 5c.11.65.166 1.32.166 2.001 0 5.225-3.34 9.67-8 11.317C5.34 16.67 2 12.225 2 7c0-.682.057-1.35.166-2.001zm11.541 3.708a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>',
-    },
-    {
       id: 'rubric',
-      label: 'Rubric',
+      label: 'Scoring',
       icon: '<path fill-rule="evenodd" d="M6 2a2 2 0 00-2 2v12a2 2 0 002 2h8a2 2 0 002-2V7.414A2 2 0 0015.414 6L12 2.586A2 2 0 0010.586 2H6zm5 6a1 1 0 10-2 0v2H7a1 1 0 100 2h2v2a1 1 0 102 0v-2h2a1 1 0 100-2h-2V8z" clip-rule="evenodd"/>',
-    },
-    {
-      id: 'execution',
-      label: 'Execution',
-      icon: '<path fill-rule="evenodd" d="M4 2a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2V4a2 2 0 00-2-2H4zm3 3a1 1 0 011-1h4a1 1 0 110 2H8a1 1 0 01-1-1zm0 4a1 1 0 011-1h8a1 1 0 110 2H8a1 1 0 01-1-1zm0 4a1 1 0 011-1h5a1 1 0 110 2H8a1 1 0 01-1-1zM5 6a1 1 0 100-2 1 1 0 000 2zm0 4a1 1 0 100-2 1 1 0 000 2zm0 4a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd"/>',
     },
     {
       id: 'work',
@@ -87,7 +73,7 @@
     },
     {
       id: 'harness',
-      label: 'Harness',
+      label: 'Guards',
       icon: '<path d="M5 4a1 1 0 00-2 0v7.268a2 2 0 000 3.464V16a1 1 0 102 0v-1.268a2 2 0 000-3.464V4zM11 4a1 1 0 10-2 0v1.268a2 2 0 000 3.464V16a1 1 0 102 0V8.732a2 2 0 000-3.464V4zM16 3a1 1 0 011 1v7.268a2 2 0 010 3.464V16a1 1 0 11-2 0v-1.268a2 2 0 010-3.464V4a1 1 0 011-1z"/>',
     },
     {
@@ -101,28 +87,13 @@
       icon: '<path d="M2 10a8 8 0 018-8v8h8a8 8 0 11-16 0z"/><path d="M12 2.252A8.014 8.014 0 0117.748 8H12V2.252z"/>',
     },
     {
-      id: 'memory-write-health',
-      label: 'Memory write health',
-      icon: '<path fill-rule="evenodd" d="M3 3a1 1 0 011-1h12a1 1 0 011 1v3a1 1 0 01-.293.707L13 10.414V15a1 1 0 01-.553.894l-4 2A1 1 0 017 17v-6.586L3.293 6.707A1 1 0 013 6V3z" clip-rule="evenodd"/>',
-    },
-    {
-      id: 'cache',
-      label: 'Cache',
-      icon: '<path d="M3 12v3c0 1.657 3.134 3 7 3s7-1.343 7-3v-3c0 1.657-3.134 3-7 3s-7-1.343-7-3z"/><path d="M3 7v3c0 1.657 3.134 3 7 3s7-1.343 7-3V7c0 1.657-3.134 3-7 3S3 8.657 3 7z"/><path d="M17 5c0 1.657-3.134 3-7 3S3 6.657 3 5s3.134-3 7-3 7 1.343 7 3z"/>',
-    },
-    {
-      id: 'density',
-      label: 'Density',
-      icon: '<path fill-rule="evenodd" d="M17.778 8.222c-4.296-4.296-11.26-4.296-15.556 0A1 1 0 01.808 6.808c5.076-5.076 13.308-5.076 18.384 0a1 1 0 01-1.414 1.414zM14.95 11.05a7 7 0 00-9.9 0 1 1 0 01-1.414-1.414 9 9 0 0112.728 0 1 1 0 01-1.414 1.414zM12.12 13.88a3 3 0 00-4.242 0 1 1 0 01-1.414-1.414 5 5 0 017.07 0 1 1 0 01-1.414 1.414zM10 16a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd"/>',
-    },
-    {
       id: 'consolidation',
       label: 'Consolidation',
       icon: '<path fill-rule="evenodd" d="M10 2a1 1 0 011 1v1.323l3.954 1.582 1.599-.8a1 1 0 01.894 1.79l-1.233.616 1.738 5.42a1 1 0 01-.285 1.05A3.989 3.989 0 0115 16a3.989 3.989 0 01-2.667-1.019 1 1 0 01-.285-1.05l1.715-5.349L11 7.677V16h2a1 1 0 110 2H7a1 1 0 110-2h2V7.677l-2.763 1.105 1.715 5.349a1 1 0 01-.285 1.05A3.989 3.989 0 015 16a3.989 3.989 0 01-2.667-1.019 1 1 0 01-.285-1.05l1.738-5.42-1.233-.617a1 1 0 01.894-1.788l1.599.799L9 4.323V3a1 1 0 011-1z" clip-rule="evenodd"/>',
     },
     {
       id: 'dag',
-      label: 'DAG Orchestrator',
+      label: 'Workflows',
       // DAG icon uses stroke not fill — rendered differently below
       icon: '__dag__',
     },
@@ -138,6 +109,21 @@
     },
   ];
 
+  // F108 Phase 2: six groups, in this order (the order of ROUTES). Overview stands alone; every other group has a
+  // heading, which is text, not a link.
+  const byId = new Map(NAV_ITEMS.map((item) => [item.id, item]));
+  const group = (heading: string | null, ids: RouteName[]) => ({ heading, items: ids.map((id) => byId.get(id)!) });
+  const NAV_GROUPS = [
+    group(null, ['overview']),
+    group('Memory', ['graph', 'browser', 'health', 'retrieval', 'consolidation']),
+    group('Execution', ['work', 'model-calls', 'dag', 'subtasks', 'heartbeat']),
+    group('Decisions', ['decisions', 'rubric']),
+    group('Autonomy', ['autonomy', 'intentions', 'harness']),
+    group('System', ['observability', 'identity']),
+  ];
+  // The sidebar and the mobile drawer each render a Nav: heading ids must differ between them.
+  const uid = $props.id();
+
   // Harness dashboard §4.6: counts that need a person — and their number is
   // part of the link's accessible name, not just a coloured pill.
   function badge(id: RouteName): { count: number; text: string; kind: string } | null {
@@ -145,7 +131,8 @@
     if (id === 'dag' && c.questions > 0) {
       return { count: c.questions, text: `${c.questions} question${c.questions === 1 ? '' : 's'} waiting`, kind: 'waiting' };
     }
-    if (id === 'execution' && c.sends > 0) {
+    // The sends in doubt are on Work's Changes tab.
+    if (id === 'work' && c.sends > 0) {
       return { count: c.sends, text: `${c.sends} send${c.sends === 1 ? '' : 's'} in doubt`, kind: 'unknown' };
     }
     return null;
@@ -153,34 +140,45 @@
 </script>
 
 <nav aria-label={navLabel}>
-  {#each NAV_ITEMS as item (item.id)}
-    {@const b = badge(item.id)}
-    <a
-      href="#/{item.id}"
-      class="nav-link"
-      class:active={currentRoute === item.id}
-      aria-label={b ? `${item.label}, ${b.text}` : item.label}
-      aria-current={currentRoute === item.id ? 'page' : undefined}
-      onclick={onnavigate}
+  {#each NAV_GROUPS as g, gi (gi)}
+    <div
+      class="nav-group"
+      role={g.heading ? 'group' : undefined}
+      aria-labelledby={g.heading ? `${uid}-group-${gi}` : undefined}
     >
-      {#if item.icon === '__dag__'}
-        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-          <circle cx="5" cy="6" r="2"/><circle cx="12" cy="6" r="2"/><circle cx="19" cy="18" r="2"/>
-          <circle cx="5" cy="18" r="2"/><circle cx="12" cy="18" r="2"/>
-          <line x1="5" y1="8" x2="5" y2="16"/><line x1="12" y1="8" x2="12" y2="16"/>
-          <line x1="7" y1="7" x2="17" y2="17"/><line x1="14" y1="7" x2="17" y2="16"/>
-        </svg>
-      {:else}
-        <svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-          <!-- icon strings are static SVG path data defined in NAV_ITEMS above; no user input reaches here -->
-          {@html item.icon}
-        </svg>
+      {#if g.heading}
+        <div class="nav-group-label" id="{uid}-group-{gi}">{g.heading}</div>
       {/if}
-      <span class="nav-label">{item.label}</span>
-      {#if b}
-        <span class="nav-badge nav-badge--{b.kind}" aria-hidden="true">{b.count}</span>
-      {/if}
-    </a>
+      {#each g.items as item (item.id)}
+        {@const b = badge(item.id)}
+        <a
+          href={routeHref(item.id)}
+          class="nav-link"
+          class:active={currentRoute === item.id}
+          aria-label={b ? `${item.label}, ${b.text}` : item.label}
+          aria-current={currentRoute === item.id ? 'page' : undefined}
+          onclick={onnavigate}
+        >
+          {#if item.icon === '__dag__'}
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+              <circle cx="5" cy="6" r="2"/><circle cx="12" cy="6" r="2"/><circle cx="19" cy="18" r="2"/>
+              <circle cx="5" cy="18" r="2"/><circle cx="12" cy="18" r="2"/>
+              <line x1="5" y1="8" x2="5" y2="16"/><line x1="12" y1="8" x2="12" y2="16"/>
+              <line x1="7" y1="7" x2="17" y2="17"/><line x1="14" y1="7" x2="17" y2="16"/>
+            </svg>
+          {:else}
+            <svg class="nav-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <!-- icon strings are static SVG path data defined in NAV_ITEMS above; no user input reaches here -->
+              {@html item.icon}
+            </svg>
+          {/if}
+          <span class="nav-label">{item.label}</span>
+          {#if b}
+            <span class="nav-badge nav-badge--{b.kind}" aria-hidden="true">{b.count}</span>
+          {/if}
+        </a>
+      {/each}
+    </div>
   {/each}
 </nav>
 
@@ -188,8 +186,23 @@
   nav {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 0.75rem;
     padding: 0.5rem 0.75rem;
+  }
+
+  .nav-group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .nav-group-label {
+    padding: 0 0.75rem 0.125rem;
+    color: var(--muted);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
   }
 
   .nav-link {

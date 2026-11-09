@@ -4,7 +4,7 @@
   import { makePollStore } from '../../lib/stores/registry';
   import { usePoll } from '../../lib/poll';
   import { currentRoute, currentSub, currentQuery, routeHref } from '../../lib/router';
-  import { fmtTime, laneColor, setLastListQuery, toolChips } from '../../lib/work';
+  import { fmtDays, fmtTime, laneColor, setLastListQuery, toolChips } from '../../lib/work';
   import type { WorkSession, WorkSessionsData } from '../../lib/types/api';
   import StatGrid from '../../lib/ui/StatGrid.svelte';
   import StaleBadge from '../../lib/ui/StaleBadge.svelte';
@@ -197,9 +197,9 @@
 
 <header class="head">
   <div>
-    <h1>Work</h1>
+    <h1 class="page-h1">Work</h1>
     <p class="subtitle">
-      Every conversation and task{data ? ` in the last ${data.window_days} days` : ''}, with the tools Nous used. Open one to see each step and why it took it.
+      Every conversation and task{data ? ` in the last ${fmtDays(data.window_days)}` : ''}, with the tools Nous used. Open one to see each step and why it took it.
     </p>
   </div>
   <div class="head-right">
@@ -243,7 +243,7 @@
   </section>
 
   {#if sessions.length === 0}
-    <p class="empty">No sessions match in the last {data.window_days} days.</p>
+    <p class="empty">No sessions match in the last {fmtDays(data.window_days)}.</p>
   {:else}
     <ul class="sessions" class:dim={$store.loading}>
       {#each sessions as s (s.session_id)}
@@ -287,7 +287,6 @@
 <style>
   .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; }
-  h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em; margin: 0.25rem 0; }
   .subtitle { color: var(--muted); font-size: 0.9375rem; margin: 0; max-width: 70ch; }
   .muted { color: var(--muted); font-size: 0.875rem; }
   .notice { padding: 0.75rem 1rem; border-radius: 8px; background: rgba(245, 158, 11, 0.08);

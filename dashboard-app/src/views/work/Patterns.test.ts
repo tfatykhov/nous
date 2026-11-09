@@ -105,6 +105,16 @@ describe('Work patterns', () => {
     expect(screen.getByRole('link', { name: /dag_create/ }).getAttribute('href')).toBe('#/work?tool=dag_create&lens=error&kind=any&days=30');
   });
 
+  it('a one-day window reads "1 day" in the subtitle and over the failing tools', async () => {
+    respond = () => ({ ...DATA, window_days: 1 });
+    go('#/work/patterns?days=1');
+    render(Work);
+    await screen.findByRole('link', { name: /learn_skill/ });
+    expect(screen.getByText(/Every tool across all sessions in the last 1 day\./)).toBeTruthy();
+    expect(screen.getByText('Error rate per call, last 1 day')).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/1 days/);
+  });
+
   it('says so when no tool has enough calls with errors', async () => {
     respond = () => ({ ...DATA, failing: [] });
     render(Work);
