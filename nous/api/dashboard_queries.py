@@ -188,13 +188,13 @@ _RECENT_EDGES_SQL = f"""
     LIMIT :recent_n
 """
 
+# The recent links are passed in as the ids the first query returned, not recomputed: a link written between the
+# two statements would otherwise shift the window and return one link twice.
 _LINKED_EDGES_SQL = f"""
     WITH recent AS (
         SELECT id, source_id, target_id
         FROM brain.graph_edges
-        WHERE agent_id = :agent_id
-        ORDER BY created_at DESC, id DESC
-        LIMIT :recent_n
+        WHERE agent_id = :agent_id AND id = ANY(:recent_ids)
     ),
     anchors AS (
         SELECT source_id AS node_id FROM recent
@@ -245,35 +245,40 @@ async def get_graph_data(
     """Return nodes + edges for the graph view: every link when they fit in ``limit * 4``, else the newest third
     of that budget plus each of their memories' links to its best-linked neighbours (``GRAPH_LINKS_PER_MEMORY``
     each). An edge whose endpoint row no longer exists is left out, and so is a node left with no edge."""
-    max_edges = limit * 4
+    max_edges = max(0, limit * 4)
 
     result = await session.execute(
         text("SELECT COUNT(*) FROM brain.graph_edges WHERE agent_id = :agent_id"),
         {"agent_id": agent_id},
     )
     total_edges = result.scalar() or 0
+    all_links = total_edges <= max_edges
 
-    recent_n = max_edges if total_edges <= max_edges else max(1, max_edges // 3)
+    recent_n = max_edges if all_links else max_edges // 3  # max_edges is 0 or at least 4
     result = await session.execute(text(_RECENT_EDGES_SQL), {"agent_id": agent_id, "recent_n": recent_n})
     recent_raw = result.fetchall()
     linked_raw = []
-    if total_edges > max_edges:
+    linked_n = max_edges - len(recent_raw)
+    if not all_links and recent_raw and linked_n > 0:
         result = await session.execute(
             text(_LINKED_EDGES_SQL),
             {
                 "agent_id": agent_id,
-                "recent_n": recent_n,
+                "recent_ids": [e.id for e in recent_raw],
                 "per_memory": GRAPH_LINKS_PER_MEMORY,
-                "linked_n": max_edges - len(recent_raw),
+                "linked_n": linked_n,
             },
         )
         linked_raw = result.fetchall()
-    recent_ids = {str(e.id) for e in recent_raw}
-    recent_times = [e.created_at for e in recent_raw if e.created_at is not None]
+    recent_times = {str(e.id): e.created_at for e in recent_raw}
 
     edges = []
     node_ids: set[str] = set()
+    seen_edges: set[str] = set()
     for e in [*recent_raw, *linked_raw]:
+        if str(e.id) in seen_edges:
+            continue
+        seen_edges.add(str(e.id))
         src = str(e.source_id)
         tgt = str(e.target_id)
         node_ids.add(src)
@@ -349,7 +354,9 @@ async def get_graph_data(
     edges = [e for e in edges if e["source"] in found and e["target"] in found]
     drawn = {e["source"] for e in edges} | {e["target"] for e in edges}
     nodes = [n for n in nodes if n["id"] in drawn]
-    recent_shown = sum(1 for e in edges if e["id"] in recent_ids)
+    shown_times = [recent_times[e["id"]] for e in edges if e["id"] in recent_times]
+    recent_shown = len(shown_times)
+    shown_times = [t for t in shown_times if t is not None]
 
     # Orphan counts (nodes with no edges at all — query source tables)
     orphan_counts: dict[str, int] = {}
@@ -386,11 +393,12 @@ async def get_graph_data(
             "displayed_edges": len(edges),
             "node_count": len(nodes),
             "orphan_counts": orphan_counts,
+            "all_links": all_links,
             "recent_edges": recent_shown,
             "linked_edges": len(edges) - recent_shown,
             "links_per_memory": GRAPH_LINKS_PER_MEMORY,
-            "recent_from": min(recent_times).isoformat() if recent_times else None,
-            "recent_to": max(recent_times).isoformat() if recent_times else None,
+            "recent_from": min(shown_times).isoformat() if shown_times else None,
+            "recent_to": max(shown_times).isoformat() if shown_times else None,
         },
     }
 

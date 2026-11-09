@@ -345,7 +345,44 @@ class TestGetGraphData:
         data = await get_graph_data(session, AGENT_ID)
         assert [(e["source"], e["target"]) for e in data["edges"]] == [(str(d1), str(f1))]
         assert sorted(n["id"] for n in data["nodes"]) == sorted([str(d1), str(f1)])
-        assert data["stats"]["displayed_edges"] == 1 and data["stats"]["total_edges"] == 2
+        s = data["stats"]
+        assert (s["displayed_edges"], s["total_edges"], s["all_links"], s["recent_edges"]) == (1, 2, True, 1)
+
+    @pytest.mark.asyncio
+    async def test_zero_budget_is_an_empty_graph(self, session):
+        d1 = await _insert_decision(session)
+        await _insert_edge(session, d1, await _insert_fact(session))
+
+        data = await get_graph_data(session, AGENT_ID, limit=0)
+        assert data["edges"] == [] and data["nodes"] == []
+        assert data["stats"]["total_edges"] == 1 and data["stats"]["all_links"] is False
+
+    @pytest.mark.asyncio
+    async def test_a_link_written_between_the_two_queries_is_not_returned_twice(self, session, monkeypatch):
+        """The linked query uses the recent links the first query returned, so a newer link written in between
+        cannot push one of them out of the window and back in as a linked edge."""
+        d1 = await _insert_decision(session)
+        facts = [await _insert_fact(session) for _ in range(10)]
+        for f in facts:
+            await _insert_edge(session, d1, f)
+        for _ in range(2):  # facts[-2] is the best-linked neighbour of d1, so it would be linked first
+            await _insert_edge(session, facts[-2], await _insert_fact(session), source_type="fact", days_ago=1)
+
+        real_execute = session.execute
+        wrote = []
+
+        async def execute(statement, *args, **kwargs):
+            result = await real_execute(statement, *args, **kwargs)
+            if not wrote and "LIMIT :recent_n" in str(statement):
+                wrote.append(True)
+                await _insert_edge(session, d1, await _insert_fact(session))  # newer than every recent link
+            return result
+
+        monkeypatch.setattr(session, "execute", execute)
+        data = await get_graph_data(session, AGENT_ID, limit=2)  # budget 8, newest 2
+        ids = [e["id"] for e in data["edges"]]
+        assert wrote and len(ids) == len(set(ids))
+        assert data["stats"]["displayed_edges"] == len(ids)
 
 
 # ── Compressed-chunk labels must not crash LEFT()-based truncation ──────
