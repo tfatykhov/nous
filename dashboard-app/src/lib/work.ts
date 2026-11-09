@@ -27,8 +27,21 @@ export function fmtDuration(ms: number | null): string {
 export function fmtTokens(n: number | null): string {
   if (n == null) return '—';
   if (n < 1000) return String(n);
-  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}K`;
+  // 999,950 and up round to 1.0M, never "1000.0K": the unit is chosen from the rounded value.
+  if (n < 999_950) return `${(n / 1000).toFixed(1)}K`;
   return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** `"Nov 7, 00:07 UTC"` from a UTC ISO timestamp; `"—"` for null, empty or unparsable input (never "Invalid Date"). */
+export function fmtTime(iso: string | null): string {
+  if (!iso) return '—';
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '—';
+  const d = new Date(t);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
 }
 
 /** One chip per tool, in first-seen order, its calls summed: `"bash ×3"` when called more than once. */
@@ -45,4 +58,40 @@ export function toolChips(tools: { tool: string; calls: number; lane: string }[]
 /** How many model calls a model-call row stands for: a minute bucket (embedding, rerank) holds `call_count`. */
 export function callsOf(c: { call_count: number }): number {
   return c.call_count;
+}
+
+/** What a `#/work/<sub>` path shows. `notfound` covers an unknown path and a malformed `%` escape. */
+export type WorkView =
+  | { view: 'sessions' }
+  | { view: 'patterns' }
+  | { view: 'changes' }
+  | { view: 'trace'; sessionId: string; turn: string | null }
+  | { view: 'notfound' };
+
+/** `decodeURIComponent` that gives null, not an exception, for a malformed `%` escape. */
+export function safeDecode(segment: string): string | null {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The view of a Work sub path (still URL-encoded, as `currentSub` holds it): `''` the sessions list, `patterns`,
+ * `changes`, `s/<session id>[/<turn id>]` the trace. A trailing slash is ignored; anything else is `notfound`.
+ */
+export function parseWorkSub(sub: string): WorkView {
+  const segs = sub.split('/');
+  while (segs.length > 0 && segs[segs.length - 1] === '') segs.pop();
+  if (segs.length === 0) return { view: 'sessions' };
+  if (segs.length === 1 && segs[0] === 'patterns') return { view: 'patterns' };
+  if (segs.length === 1 && segs[0] === 'changes') return { view: 'changes' };
+  if (segs[0] === 's' && (segs.length === 2 || segs.length === 3)) {
+    const sessionId = safeDecode(segs[1]);
+    const turn = segs.length === 3 ? safeDecode(segs[2]) : null;
+    if (!sessionId || (segs.length === 3 && !turn)) return { view: 'notfound' };
+    return { view: 'trace', sessionId, turn };
+  }
+  return { view: 'notfound' };
 }

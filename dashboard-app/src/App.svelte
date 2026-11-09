@@ -8,6 +8,7 @@
   import Observability from './views/Observability.svelte';
   import Retrieval from './views/Retrieval.svelte';
   import Ledger from './views/Ledger.svelte';
+  import Work from './views/Work.svelte';
   import Subtasks from './views/Subtasks.svelte';
   import GraphView from './views/GraphView.svelte';
   import Overview from './views/Overview.svelte';
@@ -199,6 +200,8 @@
     <Rubric />
   {:else if $currentRoute === 'execution'}
     <Ledger />
+  {:else if $currentRoute === 'work'}
+    <Work />
   {:else if $currentRoute === 'cache'}
     <Cache />
   {:else if $currentRoute === 'density'}

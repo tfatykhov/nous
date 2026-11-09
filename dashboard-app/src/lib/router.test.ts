@@ -12,8 +12,9 @@ describe('router', () => {
   it('defaults to overview when hash empty', () => { initRouter(); expect(get(currentRoute)).toBe('overview'); });
   it('reads the hash route', () => { location.hash = '#/cache'; initRouter(); expect(get(currentRoute)).toBe('cache'); });
   it('falls back to overview on unknown route', () => { location.hash = '#/nope'; initRouter(); expect(get(currentRoute)).toBe('overview'); });
-  it('lists all 22 routes', () => { expect(ROUTES.length).toBe(22); });
+  it('lists all 23 routes', () => { expect(ROUTES.length).toBe(23); });
   it('includes the memory write health route', () => { expect(ROUTES).toContain('memory-write-health'); });
+  it('includes the work route', () => { expect(ROUTES).toContain('work'); });
   it('includes the autonomy route', () => { expect(ROUTES).toContain('autonomy'); });
   it('includes the intentions route', () => { expect(ROUTES).toContain('intentions'); });
   it('includes the harness route', () => { expect(ROUTES).toContain('harness'); });
@@ -30,41 +31,41 @@ describe('router', () => {
   });
 });
 
-// F108 Phase 2 grammar: #/<route>[/<sub>][?<query>]. `work` and `model-calls` join ROUTES in later
-// tasks, so these use `health`, a route that stays.
+// F108 Phase 2 grammar: #/<route>[/<sub>][?<query>]. `model-calls` joins ROUTES in a later
+// task; these use `work`, whose sub paths are the trace and the patterns.
 describe('router sub paths and query', () => {
   beforeEach(() => { location.hash = ''; initRouter(); });
 
   it('splits the hash into route, sub (still URL-encoded) and query', () => {
-    go('#/health/s/abc%2Fdef/turn1?x=1');
-    expect(get(currentRoute)).toBe('health');
+    go('#/work/s/abc%2Fdef/turn1?x=1');
+    expect(get(currentRoute)).toBe('work');
     expect(get(currentSub)).toBe('s/abc%2Fdef/turn1');
     expect(get(currentQuery).toString()).toBe('x=1');
     expect(get(currentQuery).get('x')).toBe('1');
   });
 
   it('a bare route has an empty sub and an empty query', () => {
-    go('#/health/writes?x=1');
-    go('#/health');
-    expect(get(currentRoute)).toBe('health');
+    go('#/work/writes?x=1');
+    go('#/work');
+    expect(get(currentRoute)).toBe('work');
     expect(get(currentSub)).toBe('');
     expect(get(currentQuery).toString()).toBe('');
   });
 
   it('a trailing slash is an empty sub', () => {
-    go('#/health/');
+    go('#/work/');
     expect(get(currentSub)).toBe('');
   });
 
   it('a query with no sub', () => {
-    go('#/health?kind=task&lens=error');
+    go('#/work?kind=task&lens=error');
     expect(get(currentSub)).toBe('');
     expect(get(currentQuery).get('kind')).toBe('task');
     expect(get(currentQuery).get('lens')).toBe('error');
   });
 
   it('an unknown route falls back to overview with no sub and no query', () => {
-    go('#/health/writes?x=1');
+    go('#/work/writes?x=1');
     go('#/nope/a/b?y=2');
     expect(get(currentRoute)).toBe('overview');
     expect(get(currentSub)).toBe('');
@@ -72,9 +73,9 @@ describe('router sub paths and query', () => {
   });
 
   it('a page anchor leaves route, sub and query alone', () => {
-    go('#/health/writes?x=1');
+    go('#/work/writes?x=1');
     go('#main-content');
-    expect(get(currentRoute)).toBe('health');
+    expect(get(currentRoute)).toBe('work');
     expect(get(currentSub)).toBe('writes');
     expect(get(currentQuery).get('x')).toBe('1');
   });
@@ -85,17 +86,17 @@ describe('router sub paths and query', () => {
     const unsub = currentRoute.subscribe((r) => {
       seen.push(`${r}|${get(currentSub)}|${get(currentQuery).toString()}`);
     });
-    go('#/health/growth?d=7');
+    go('#/work/growth?d=7');
     unsub();
-    expect(seen).toEqual(['cache||', 'health|growth|d=7']);
+    expect(seen).toEqual(['cache||', 'work|growth|d=7']);
   });
 
   it('does not notify query subscribers when the query string is unchanged', () => {
-    go('#/health/graph?d=7');
+    go('#/work/graph?d=7');
     let calls = 0;
     const unsub = currentQuery.subscribe(() => { calls += 1; });
-    go('#/health/writes?d=7');
-    go('#/health/growth?d=7');
+    go('#/work/writes?d=7');
+    go('#/work/growth?d=7');
     unsub();
     expect(calls).toBe(1); // the subscribe call itself only
   });
@@ -107,33 +108,33 @@ describe('router sub paths and query', () => {
 
 describe('routeHref', () => {
   it('builds a bare route link', () => {
-    expect(routeHref('health')).toBe('#/health');
-    expect(routeHref('health', '')).toBe('#/health');
-    expect(routeHref('health', [])).toBe('#/health');
+    expect(routeHref('work')).toBe('#/work');
+    expect(routeHref('work', '')).toBe('#/work');
+    expect(routeHref('work', [])).toBe('#/work');
   });
 
   it('URL-encodes each array segment and joins them with /', () => {
-    expect(routeHref('health', ['c', 'a/b'])).toBe('#/health/c/a%2Fb');
+    expect(routeHref('work', ['c', 'a/b'])).toBe('#/work/c/a%2Fb');
   });
 
   it('uses a string sub as is', () => {
-    expect(routeHref('health', 's/abc%2Fdef/turn1')).toBe('#/health/s/abc%2Fdef/turn1');
+    expect(routeHref('work', 's/abc%2Fdef/turn1')).toBe('#/work/s/abc%2Fdef/turn1');
   });
 
   it('builds the query with URLSearchParams and leaves out an empty one', () => {
-    expect(routeHref('health', 'writes', { kind: 'task', lens: 'error' })).toBe('#/health/writes?kind=task&lens=error');
-    expect(routeHref('health', '', {})).toBe('#/health');
+    expect(routeHref('work', 'writes', { kind: 'task', lens: 'error' })).toBe('#/work/writes?kind=task&lens=error');
+    expect(routeHref('work', '', {})).toBe('#/work');
   });
 
   it('a keyset cursor with | and + survives the round trip through the hash', () => {
     const cursor = '2026-11-08T22:20:24.963805+00:00|0b6c5f2e-1d2a-4c3b-9e8f-7a6b5c4d3e2f';
-    const href = routeHref('health', ['s', 'mcp-session'], { before: cursor });
+    const href = routeHref('work', ['s', 'mcp-session'], { before: cursor });
     expect(href).toContain('%2B');
     expect(href).toContain('%7C');
     expect(href).not.toContain('+00:00');
     initRouter();
     go(href);
-    expect(get(currentRoute)).toBe('health');
+    expect(get(currentRoute)).toBe('work');
     expect(get(currentSub)).toBe('s/mcp-session');
     expect(get(currentQuery).get('before')).toBe(cursor);
   });

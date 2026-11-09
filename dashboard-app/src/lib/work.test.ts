@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { LANE_COLORS, laneColor, fmtDuration, fmtTokens, toolChips, callsOf } from './work';
+import { LANE_COLORS, laneColor, fmtDuration, fmtTokens, fmtTime, parseWorkSub, toolChips, callsOf } from './work';
 
 describe('fmtDuration', () => {
   it('shows a dash for no duration', () => { expect(fmtDuration(null)).toBe('—'); });
@@ -79,5 +79,43 @@ describe('callsOf', () => {
   it('counts a model-call row as its call_count (a minute bucket holds many calls)', () => {
     expect(callsOf({ call_count: 1 })).toBe(1);
     expect(callsOf({ call_count: 37 })).toBe(37);
+  });
+});
+
+describe('fmtTokens rounding at the unit boundary', () => {
+  it('rounds before choosing the unit', () => {
+    expect(fmtTokens(999_949)).toBe('999.9K');
+    expect(fmtTokens(999_950)).toBe('1.0M');
+    expect(fmtTokens(999_999)).toBe('1.0M');
+  });
+});
+
+describe('fmtTime', () => {
+  it('formats a UTC timestamp', () => {
+    expect(fmtTime('2026-11-07T00:07:12.5+00:00')).toBe('Nov 7, 00:07 UTC');
+    expect(fmtTime('2026-10-27T13:45:00Z')).toBe('Oct 27, 13:45 UTC');
+  });
+  it('shows a dash for null, empty or unparsable input, never Invalid Date', () => {
+    for (const v of [null, '', 'not a date', '2026-13-45']) {
+      expect(fmtTime(v)).toBe('—');
+    }
+  });
+});
+
+describe('parseWorkSub', () => {
+  it('maps the sub paths to views', () => {
+    expect(parseWorkSub('')).toEqual({ view: 'sessions' });
+    expect(parseWorkSub('/')).toEqual({ view: 'sessions' });
+    expect(parseWorkSub('patterns')).toEqual({ view: 'patterns' });
+    expect(parseWorkSub('changes')).toEqual({ view: 'changes' });
+  });
+  it('decodes a session id and a turn id', () => {
+    expect(parseWorkSub('s/abc%2Fdef')).toEqual({ view: 'trace', sessionId: 'abc/def', turn: null });
+    expect(parseWorkSub('s/abc%2Fdef/turn1')).toEqual({ view: 'trace', sessionId: 'abc/def', turn: 'turn1' });
+  });
+  it('treats a malformed escape or an unknown path as not found, without throwing', () => {
+    for (const sub of ['s/%E0%A4%A', 's/ok/%', 's/', 's//x', 'nope', 'patterns/x', 's/a/b/c']) {
+      expect(parseWorkSub(sub)).toEqual({ view: 'notfound' });
+    }
   });
 });
