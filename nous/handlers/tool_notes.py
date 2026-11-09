@@ -431,14 +431,18 @@ class ToolNotesReview:
     ) -> int:
         """Push the owner card when a guard-caused pattern of the window is new, and return how many were reported.
 
-        The card is the full state of the window: its top ``MAX_PER_CARD`` guard patterns by hits, new and already
-        reported alike, so a later card never hides an earlier one (it replaces the live card in place). It is pushed
-        only when one of them has no row of the last ``REREVIEW_DAYS`` days; after a successful push the new ones get
-        a ``guard`` row. Never raises. With no surface service, or when the push fails, nothing is written, 0 is
+        The card holds up to ``MAX_PER_CARD`` guard patterns of the window: the unreported ones first (most hits
+        first), then already reported ones to fill the slots, so a later card does not hide an earlier one unless
+        more than ``MAX_PER_CARD`` are live (it replaces the live card in place). It is pushed only when a pattern has
+        no row of the last ``REREVIEW_DAYS`` days; after a successful push the new ones get a ``guard`` row.
+        Never raises. With no surface service, or when the push fails, nothing is written, 0 is
         returned and one WARNING names the tools (never the record text), so the next sleep reports again.
         """
-        card = sorted(window, key=lambda p: (-p.hits, p.id))[:MAX_PER_CARD]
-        new = [p for p in card if p.id not in blocked]
+        ranked = sorted(window, key=lambda p: (-p.hits, p.id))
+        new = [p for p in ranked if p.id not in blocked][:MAX_PER_CARD]
+        # Unreported patterns take the slots first, so a low-ranked one is not shut out by the ten already shown.
+        shown = [p for p in ranked if p.id in blocked][: MAX_PER_CARD - len(new)]
+        card = sorted([*new, *shown], key=lambda p: (-p.hits, p.id))
         if not new:
             return 0
         tools = ", ".join(sorted({p.tool_name for p in new}))
@@ -462,7 +466,8 @@ class ToolNotesReview:
     async def run_sleep(self) -> dict[str, int]:
         """Detect, offer at most ``MAX_CANDIDATES`` to one model call, store the notes, close the rest as declined."""
         counts = dict.fromkeys(_COUNT_KEYS, 0)
-        if not self._settings.tool_notes_enabled:
+        # Both flags: without the tool-call log the old records must not be read (main.py also warns at start).
+        if not (self._settings.tool_notes_enabled and self._settings.tool_call_log_enabled):
             return counts
         agent_id = self._heart.agent_id
         now = self._clock()

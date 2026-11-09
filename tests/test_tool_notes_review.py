@@ -90,8 +90,10 @@ async def cleanup(db):
             await conn.execute(sa_text(f"DELETE FROM nous_system.{t} WHERE agent_id LIKE 'test-p3-tr-%'"))
 
 
-def make_review(db, agent_id, client, *, enabled=True, clock=NOW):
-    settings = SimpleNamespace(tool_notes_enabled=enabled, background_model="bg-model-test", agent_id=agent_id)
+def make_review(db, agent_id, client, *, enabled=True, clock=NOW, log=True):
+    settings = SimpleNamespace(
+        tool_notes_enabled=enabled, tool_call_log_enabled=log, background_model="bg-model-test", agent_id=agent_id
+    )
     heart = SimpleNamespace(agent_id=agent_id, db=db)
     return ToolNotesReview(db, heart, settings, client, clock=lambda: clock)
 
@@ -766,3 +768,29 @@ def test_card_labels_an_example_not_an_error():
     call = pat(tool="bash", key="", kind="call_repeat", hits=4, calls=10, guard="fragment", example="rm -r /x")
     out = card_text(tool_notes_guard_card([call]))
     assert "Example: rm -r /x" in out and "Error:" not in out
+
+
+@pytest.mark.asyncio
+async def test_unreported_patterns_take_the_card_slots_first(db, agent_id, cleanup):
+    for i in range(15):
+        await seed_errors(db, agent_id, f"tool{i:02d}", 20 - i, text=GUARD_TEXT, calls=25)
+    surfaces = FakeSurfaces()
+    out = await with_surfaces(make_review(db, agent_id, FakeClient({"notes": []})), surfaces).run_sleep()
+    assert out["guard"] == 10
+    later = with_surfaces(make_review(db, agent_id, FakeClient({"notes": []}), clock=NOW + timedelta(days=1)), surfaces)
+    out = await later.run_sleep()
+    card = card_text(surfaces.pushes[1][0])
+    assert out["guard"] == 5
+    assert all(f"tool{i:02d}" in card for i in [*range(10, 15), *range(0, 5)])
+    assert not any(f"tool{i:02d}" in card for i in range(5, 10))
+    assert len(await guard_rows(db, agent_id)) == 15
+
+
+@pytest.mark.asyncio
+async def test_tool_notes_stay_off_without_the_tool_call_log(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "bash", 4, text=GUARD_TEXT)
+    await seed_errors(db, agent_id, "web_fetch", 4, text="timeout waiting for host")
+    client, surfaces = FakeClient({"notes": []}), FakeSurfaces()
+    out = await with_surfaces(make_review(db, agent_id, client, log=False), surfaces).run_sleep()
+    assert set(out.values()) == {0}
+    assert client.calls == [] and surfaces.pushes == [] and await note_rows(db, agent_id) == []
