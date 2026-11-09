@@ -10,7 +10,7 @@ import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -2517,7 +2517,8 @@ async def test_model_call_detail_fields(mct_client, db, agent_id, cleanup):
         cache_break=True,
         cache_break_components=["system", "tools"],
         cache_break_tokens_lost=1234,
-        section_tokens_est={"identity": 500, "tools": 2000, "facts": 2000, "history": 9000},
+        # jsonb keeps shorter keys first, so "tools" comes back before "examples": only the sort puts them by name
+        section_tokens_est={"identity": 500, "tools": 2000, "examples": 2000, "history": 9000},
     )
     # Attempts written out of order; the first one failed.
     await insert_attempt(db, agent_id, call_id, 2, started_at=base + timedelta(seconds=2), duration_ms=3000)
@@ -2536,8 +2537,15 @@ async def test_model_call_detail_fields(mct_client, db, agent_id, cleanup):
     await insert_episode(db, agent_id, "sess-D", "Old title", started_at=base - timedelta(hours=2))
     await insert_episode(db, agent_id, "sess-D", "Plan the trip", started_at=base - timedelta(hours=1))
     await insert_episode(db, agent_id, "sess-D", "Deleted", started_at=base, active=False)
+    # Another agent's rows under the same session and call id are never read.
+    other = _agent()
+    try:
+        await insert_episode(db, other, "sess-D", "Not yours", started_at=base)
+        await insert_attempt(db, other, call_id, 3, started_at=base, error_text="not yours")
+        body = await get_json(mct_client, call_path(call_id))
+    finally:
+        await delete_agent_rows(db, other)  # the attempt goes with the call (ON DELETE CASCADE)
 
-    body = await get_json(mct_client, call_path(call_id))
     assert set(body) == {"enabled", "text_enabled", "call", "attempts", "sections", "turn", "text_status", "blocks"}
     assert body["enabled"] is True and body["text_enabled"] is True
 
@@ -2591,7 +2599,7 @@ async def test_model_call_detail_fields(mct_client, db, agent_id, cleanup):
     # Largest first; a tie goes by name.
     assert body["sections"] == [
         {"name": "history", "tokens_est": 9000},
-        {"name": "facts", "tokens_est": 2000},
+        {"name": "examples", "tokens_est": 2000},
         {"name": "tools", "tokens_est": 2000},
         {"name": "identity", "tokens_est": 500},
     ]
@@ -2612,6 +2620,24 @@ async def test_model_call_detail_fields(mct_client, db, agent_id, cleanup):
         "session_id": None,
         "session_title": None,
     }
+
+
+async def test_get_block_refuses_other_parts_and_ords_before_any_query():
+    store = MagicMock()
+    store.load_one = AsyncMock(return_value="a body")
+    call_id = uuid.uuid4()
+    for part, ord_ in (("secrets", 0), ("System", 0), ("", 0), ("system", -1), ("system", 2**31)):
+        assert await wv.get_block(store, call_id, part, ord_) is None, (part, ord_)
+    store.load_one.assert_not_called()
+    assert await wv.get_block(store, call_id, "tools", 2**31 - 1) == {
+        "part": "tools",
+        "ord": 2**31 - 1,
+        "size_chars": 6,
+        "body": "a body",
+    }
+    store.load_one.assert_awaited_once_with(call_id, "tools", 2**31 - 1)
+    store.load_one = AsyncMock(return_value=None)
+    assert await wv.get_block(store, call_id, "response", 0) is None
 
 
 @pytest.mark.postgres_only

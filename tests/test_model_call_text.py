@@ -945,15 +945,20 @@ async def test_describe_lists_blocks_with_reuse_counts(db):
     try:
         first, second = await _insert_call(db, agent), await _insert_call(db, agent)
         foreign = await _insert_call(db, other)
-        await store.store(first, [shared, ("response", 0, json.dumps(_text_reply("one")), True)])
+        # the first call sends the shared block twice: it still counts as one call
+        await store.store(first, [shared, ("system", 1, shared[2], False), ("response", 0, '"one"', True)])
         await store.store(second, [shared, ("response", 0, json.dumps(_text_reply("two")), True)])
         await other_store.store(foreign, [shared])  # the same block (same hash) under another agent
         blocks = await _blocks(db, agent)
+        expected = {
+            first: [("system", 0, 2), ("system", 1, 2), ("response", 0, 1)],
+            second: [("system", 0, 2), ("response", 0, 1)],
+        }
         for call_id in (first, second):
             infos = await store.describe(call_id)
             assert all(isinstance(i, model_call_text.BlockInfo) for i in infos)
             # the system block is named by both calls of this agent, the other agent's ref is not counted
-            assert [(i.part, i.ord, i.reused_by) for i in infos] == [("system", 0, 2), ("response", 0, 1)]
+            assert [(i.part, i.ord, i.reused_by) for i in infos] == expected[call_id]
             hashes = {(part, ord_): digest for part, ord_, digest in await _refs(db, call_id)}
             assert [i.size_chars for i in infos] == [len(blocks[hashes[(i.part, i.ord)]]["body"]) for i in infos]
         assert [(i.part, i.reused_by) for i in await other_store.describe(foreign)] == [("system", 1)]
