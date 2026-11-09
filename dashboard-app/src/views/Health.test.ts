@@ -110,8 +110,11 @@ const tabsNav = () => screen.getByRole('navigation', { name: 'Memory health view
 
 const GRAPH_HEADINGS = [
   'Graph Density Over Time', 'Edge Creation Rate', 'Node Degree Distribution', 'Orphan Nodes Over Time',
-  'Auto vs Manual Edges', 'Orphan Breakdown by Type', 'Edge Distribution', 'Backfill Progress (Last 7 Days)',
+  'Auto vs Manual Edges', 'Orphan Breakdown by Type', 'Orphan Rate by Type', 'Edge Distribution',
+  'Backfill Progress (Last 7 Days)',
 ];
+const statLabel = (label: string) => screen.queryAllByText(label, { selector: '.stat-label' });
+const statValue = (label: string) => screen.getByText(label, { selector: '.stat-label' }).previousElementSibling?.textContent?.trim();
 const GROWTH_HEADINGS = ['Memory growth (30 days)', 'Fact categories', 'Fact Growth Rate (7d)'];
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); obs = OBS; });
@@ -128,13 +131,12 @@ describe('Memory health: Graph tab', () => {
     });
   }
 
-  it('shows no <h2> twice, and Density\'s orphan-rate table is not repeated beside the orphan breakdown', async () => {
+  it('shows no <h2> twice', async () => {
     start('#/health/graph');
     render(Health);
     for (const name of GRAPH_HEADINGS) await waitFor(() => expect(h2(name)).toHaveLength(1));
     const texts = h2Texts();
     expect(new Set(texts).size).toBe(texts.length);
-    expect(h2('Orphan Rate by Type')).toHaveLength(0);
   });
 
   it('moves Density\'s tables with their rows, and keeps both sources\' staleness badges', async () => {
@@ -148,6 +150,39 @@ describe('Memory health: Graph tab', () => {
     expect(within(orphans).getByText('facts')).toBeTruthy();
     expect(container.querySelectorAll('.stale-badge')).toHaveLength(2);
   });
+
+  it('keeps Density\'s orphan rate by type, with the per-type totals and rates the breakdown does not show', async () => {
+    start('#/health/graph');
+    render(Health);
+    const rates = (await screen.findByRole('heading', { level: 2, name: 'Orphan Rate by Type' })).closest('section') as HTMLElement;
+    expect(within(rates).getAllByRole('columnheader').map((c) => c.textContent?.trim())).toEqual(['Type', 'Total', 'Orphans', 'Rate']);
+    const fact = within(rates).getByText('fact').closest('tr') as HTMLElement;
+    expect(within(fact).getAllByRole('cell').map((c) => c.textContent?.trim())).toEqual(['fact', '10', '3', '30.0%']);
+  });
+
+  it('puts Density\'s totals and the overall orphan rate at the top, each number once, without the summary footer', async () => {
+    start('#/health/graph');
+    render(Health);
+    const first = await screen.findByRole('heading', { level: 2, name: 'Graph Density Over Time' });
+    await waitFor(() => expect(statLabel('Total Nodes')).toHaveLength(1));
+    expect(statValue('Total Nodes')).toBe('18');
+    expect(statValue('Total Edges')).toBe('9');
+    expect(statValue('Avg Degree')).toBe('0.64');
+    expect(statValue('Connected Nodes')).toBe('14');
+    const banner = screen.getByText('Overall Orphan Rate').parentElement as HTMLElement;
+    expect(banner.textContent?.replace(/\s+/g, ' ')).toContain('Overall Orphan Rate 22.2% (moderate) (4 of 18 nodes unconnected)');
+    // Density's block comes first: before Health's stats and the first chart.
+    const top = screen.getByText('Total Nodes', { selector: '.stat-label' });
+    expect(top.compareDocumentPosition(banner) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(banner.compareDocumentPosition(screen.getByText('Current Density', { selector: '.stat-label' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(banner.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Health's other numbers stay; its orphan count is the banner's, so it is not shown again.
+    for (const label of ['Current Density', 'Edges (30d)', 'Auto-linked']) expect(statLabel(label)).toHaveLength(1);
+    expect(statLabel('Orphan Nodes')).toHaveLength(0);
+    // The footer only repeated the grid (connected nodes) and the banner (orphans).
+    expect(screen.queryByText(/Connected nodes:/)).toBeNull();
+    expect(screen.queryByText(/Total orphans:/)).toBeNull();
+  });
 });
 
 describe('Memory health: Writes tab', () => {
@@ -157,6 +192,11 @@ describe('Memory health: Writes tab', () => {
     const verdict = await screen.findByRole('heading', { level: 2, name: '1 rule tripped: you decide' });
     const sim = await screen.findByRole('heading', { level: 2, name: 'Threshold Simulator' });
     const rejected = screen.getByRole('heading', { level: 2, name: 'Rejected Facts' });
+    // A visible heading separates the two pages: after the write-health sections, before the admission ones.
+    const admission = screen.getByRole('heading', { level: 2, name: 'Admission' });
+    const acks = screen.getByRole('heading', { level: 2, name: 'Acknowledgements' });
+    expect(acks.compareDocumentPosition(admission) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(admission.compareDocumentPosition(sim) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(verdict.compareDocumentPosition(sim) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(sim.compareDocumentPosition(rejected) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(await screen.findByText('a rejected fact')).toBeTruthy();

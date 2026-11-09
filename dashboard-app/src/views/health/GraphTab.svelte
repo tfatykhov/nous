@@ -1,7 +1,7 @@
 <script lang="ts">
-  // F108 Memory health, Graph tab: Graph Health's charts (/dashboard/health) and Density's edge distribution and
-  // backfill tables (/dashboard/density). Density's "Orphan Rate by Type" is not repeated here: its orphan counts are
-  // the ones "Orphan Breakdown by Type" shows.
+  // F108 Memory health, Graph tab: Density's totals and overall orphan rate first, then Graph Health's charts
+  // (/dashboard/health), then Density's tables (/dashboard/density). "Orphan Rate by Type" stays beside "Orphan
+  // Breakdown by Type": the orphan counts agree, but only the former has each type's total and rate.
   import { apiGet } from '../../lib/api';
   import { makePollStore } from '../../lib/stores/registry';
   import { usePoll } from '../../lib/poll';
@@ -28,6 +28,21 @@
   function refreshAll() {
     void store.refresh();
     void density.refresh();
+  }
+
+  // ── From Density ───────────────────────────────────────────────────────
+
+  function orphanRateClass(rate: number): string {
+    if (rate > 0.40) return 'badge-bad';
+    if (rate > 0.15) return 'badge-warn';
+    return 'badge-good';
+  }
+
+  function orphanRateLabel(rate: number): string {
+    const pct = (rate * 100).toFixed(1) + '%';
+    if (rate > 0.40) return pct + ' (high)';
+    if (rate > 0.15) return pct + ' (moderate)';
+    return pct + ' (healthy)';
   }
 
   // ── Chart data builders ────────────────────────────────────────────────
@@ -227,6 +242,31 @@
   </div>
 </header>
 
+<!-- ── From Density: totals and the overall orphan rate ────────────────── -->
+{#if $density.data}
+  {@const d = $density.data}
+
+  <StatGrid stats={[
+    { label: 'Total Nodes',    value: d.total_nodes.toLocaleString() },
+    { label: 'Total Edges',    value: d.total_edges.toLocaleString() },
+    { label: 'Avg Degree',     value: d.avg_degree.toFixed(2) },
+    { label: 'Connected Nodes', value: d.connected_nodes.toLocaleString() },
+  ]} />
+
+  <!-- Orphan rate — single-card banner with colour badge; Density's staleness badge at its end -->
+  <div class="orphan-banner">
+    <span class="orphan-label">Overall Orphan Rate</span>
+    <span class="badge {orphanRateClass(d.orphan_rate)}">{orphanRateLabel(d.orphan_rate)}</span>
+    <span class="orphan-meta">({d.total_orphans.toLocaleString()} of {d.total_nodes.toLocaleString()} nodes unconnected)</span>
+    <span class="banner-stale"><StaleBadge state={$density} /></span>
+  </div>
+{:else if $density.error}
+  <p class="status-msg error">
+    Failed to load density data —
+    <button class="retry-link" onclick={() => void density.refresh()}>retry</button>
+  </p>
+{/if}
+
 {#if $store.data}
   {@const d = $store.data}
 
@@ -244,15 +284,12 @@
     {@const autoPercent = totalEdges30d > 0
       ? Math.round((autoEdges / totalEdges30d) * 100)
       : 0}
-    {@const latestOrphans = d.orphan_trend.length > 0
-      ? d.orphan_trend[d.orphan_trend.length - 1].count
-      : 0}
 
+    <!-- The orphan count is the banner's above, so it is not repeated here. -->
     <StatGrid stats={[
       { label: 'Current Density', value: latestDensity.toFixed(1) },
       { label: 'Edges (30d)',     value: totalEdges30d },
       { label: 'Auto-linked',     value: `${autoPercent}%` },
-      { label: 'Orphan Nodes',   value: latestOrphans },
     ]} />
 
     <!-- ── Chart grid ────────────────────────────────────────────────────── -->
@@ -329,16 +366,34 @@
   <p class="status-msg">Loading…</p>
 {/if}
 
-<!-- ── From Density: edge distribution and backfill ─────────────────────── -->
-<div class="view-head mt">
-  <p class="subtitle">Knowledge graph connectivity health and backfill progress</p>
-  <StaleBadge state={$density} />
-</div>
-
+<!-- ── From Density: orphan rate by type, edge distribution, backfill ──── -->
 {#if $density.data}
   {@const d = $density.data}
 
-  <div class="chart-grid">
+  <!-- ── Two-column tables ───────────────────────────────────────────────── -->
+  <div class="chart-grid mt">
+
+    <!-- Orphan rate by type -->
+    <section class="chart-card">
+      <h2>Orphan Rate by Type</h2>
+      <table class="data-table">
+        <thead>
+          <tr><th>Type</th><th>Total</th><th>Orphans</th><th>Rate</th></tr>
+        </thead>
+        <tbody>
+          {#each Object.entries(d.density_by_type) as [type, stats]}
+            <tr>
+              <td class="type-cell">{type}</td>
+              <td>{stats.total.toLocaleString()}</td>
+              <td>{stats.orphan.toLocaleString()}</td>
+              <td><span class="badge {orphanRateClass(stats.orphan_rate)}">{(stats.orphan_rate * 100).toFixed(1)}%</span></td>
+            </tr>
+          {:else}
+            <tr><td colspan="4" class="empty-cell">No data</td></tr>
+          {/each}
+        </tbody>
+      </table>
+    </section>
 
     <!-- Edge distribution -->
     <section class="chart-card">
@@ -360,35 +415,27 @@
       </table>
     </section>
 
-    <!-- ── Backfill progress ───────────────────────────────────────────────── -->
-    <section class="chart-card">
-      <h2>Backfill Progress (Last 7 Days)</h2>
-      <table class="data-table">
-        <thead>
-          <tr><th>Date</th><th>Auto-linked Edges</th></tr>
-        </thead>
-        <tbody>
-          {#each d.backfill_progress as row}
-            <tr>
-              <td>{row.date}</td>
-              <td>{row.edges.toLocaleString()}</td>
-            </tr>
-          {:else}
-            <tr><td colspan="2" class="empty-cell">No backfill activity</td></tr>
-          {/each}
-        </tbody>
-      </table>
-    </section>
-
   </div>
 
-{:else if $density.error}
-  <p class="status-msg error">
-    Failed to load density data —
-    <button class="retry-link" onclick={() => void density.refresh()}>retry</button>
-  </p>
-{:else}
-  <p class="status-msg">Loading…</p>
+  <!-- ── Backfill progress ───────────────────────────────────────────────── -->
+  <section class="chart-card mt">
+    <h2>Backfill Progress (Last 7 Days)</h2>
+    <table class="data-table">
+      <thead>
+        <tr><th>Date</th><th>Auto-linked Edges</th></tr>
+      </thead>
+      <tbody>
+        {#each d.backfill_progress as row}
+          <tr>
+            <td>{row.date}</td>
+            <td>{row.edges.toLocaleString()}</td>
+          </tr>
+        {:else}
+          <tr><td colspan="2" class="empty-cell">No backfill activity</td></tr>
+        {/each}
+      </tbody>
+    </table>
+  </section>
 {/if}
 
 <style>
@@ -533,9 +580,48 @@
     text-decoration: underline;
   }
 
-  .mt {
-    margin-top: 1.5rem;
+  .mt { margin-top: 1rem; }
+
+  /* ── Orphan banner (from Density) ────────────────────────── */
+  .orphan-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.625rem 1rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin: 1rem 0;
+    font-size: 0.8125rem;
+    flex-wrap: wrap;
   }
+
+  .orphan-label {
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .orphan-meta {
+    color: var(--muted);
+  }
+
+  .banner-stale {
+    margin-left: auto;
+  }
+
+  /* ── Badge (from Density) ────────────────────────────────── */
+  .badge {
+    display: inline-block;
+    padding: 0.15em 0.55em;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .badge-good { background: rgba(52, 211, 153, 0.15); color: #34d399; }
+  .badge-warn { background: rgba(251, 191, 36,  0.15); color: #fbbf24; }
+  .badge-bad  { background: rgba(248, 113, 113, 0.15); color: #f87171; }
 
   /* ── Data table (from Density) ───────────────────────────── */
   .data-table {
@@ -562,6 +648,11 @@
   .data-table tbody tr:last-child td { border-bottom: none; }
 
   .data-table tbody tr:hover td { background: var(--surface-hover); }
+
+  .type-cell {
+    font-weight: 500;
+    text-transform: capitalize;
+  }
 
   .empty-cell {
     text-align: center;
