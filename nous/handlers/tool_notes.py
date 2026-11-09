@@ -264,7 +264,8 @@ class ToolNoteStore:
 
 MAX_CANDIDATES = 8  # patterns offered to the model in one sleep, most hits first
 REVIEW_MAX_TOKENS = 1500
-TOOL_SPEC_MAX_CHARS = 1200  # one offered tool's description and parameters in the review prompt
+TOOL_SPEC_MAX_CHARS = 1200  # one offered tool's parameters and description in the review prompt
+PARAM_DESC_MAX_CHARS = 240  # one parameter's description in it
 # Words a note must never carry: notes and the review mention the tool-call records only.
 SCORE_WORDS = re.compile(r"\bscor(e|es|ed|ing)\b|\brubric\b|\bpenalt\w*|\bgrad(e|ed|es|ing)\b|outcome label", re.I)
 
@@ -314,22 +315,25 @@ class Decision:
 
 
 def tool_spec(definition: Mapping[str, Any]) -> str:
-    """One tool's description and parameters as the agent sees them, on one line, cut at ``TOOL_SPEC_MAX_CHARS``.
+    """One tool's parameters, then its description, as the agent sees them, on one line of at most
+    ``TOOL_SPEC_MAX_CHARS``.
 
-    ``definition`` is a dispatcher tool definition (``name``, ``description``, ``input_schema``). A spec holding a
-    word the notes must never carry is withheld.
+    ``definition`` is a dispatcher tool definition (``name``, ``description``, ``input_schema``). The parameters
+    come first and each one's description is cut at ``PARAM_DESC_MAX_CHARS``, so a long tool description is what the
+    cap cuts. A word the notes must never carry is masked, not the whole spec.
     """
     schema = definition.get("input_schema") or {}
     required = set(schema.get("required") or [])
-    parts = [" ".join(str(definition.get("description") or "").split())]
+    parts = []
     for name, prop in (schema.get("properties") or {}).items():
         prop = prop if isinstance(prop, Mapping) else {}
         head = f"{name} ({prop.get('type', 'any')}{', required' if name in required else ''})"
-        desc = " ".join(str(prop.get("description") or "").split())
+        desc = " ".join(str(prop.get("description") or "").split())[:PARAM_DESC_MAX_CHARS]
         parts.append(f"{head}: {desc}" if desc else head)
-    spec = " | ".join(p for p in parts if p)
-    if SCORE_WORDS.search(spec):
-        return "(description withheld)"
+    about = " ".join(str(definition.get("description") or "").split())
+    if about:
+        parts.append(f"about: {about}")
+    spec = SCORE_WORDS.sub("[…]", " | ".join(parts))
     return spec if len(spec) <= TOOL_SPEC_MAX_CHARS else spec[: TOOL_SPEC_MAX_CHARS - 1] + "…"
 
 
@@ -341,7 +345,8 @@ def build_review_prompt(
     """The user message of the review: each candidate, how each offered tool is called (from ``definitions``, the
     dispatcher's definitions by tool name, when given), and the existing notes of the tools offered.
 
-    Every string that came from a record or a note goes through ``redact_structure`` before it is formatted in.
+    Every string that came from a record, a note or a tool definition goes through ``redact_structure`` before it is
+    formatted in.
     """
     tools = {p.tool_name for p in candidates}
     # Record text that holds a word the notes must never carry is withheld: the pattern stays eligible.
@@ -370,9 +375,11 @@ def build_review_prompt(
             f"example={json.dumps(s['example'], ensure_ascii=False)}"
         )
     lines.append("")
-    specs = {t: tool_spec(definitions[t]) for t in sorted(tools) if definitions and t in definitions}
+    specs = redact_structure({t: tool_spec(definitions[t]) for t in sorted(tools) if definitions and t in definitions})
     if specs:
-        lines.append("How these tools are called (description, then each parameter), as the agent sees them:")
+        lines.append(
+            "How these tools are called (each parameter, then the tool's description), as the agent sees them:"
+        )
         lines += [f"tool={t}: {s}" for t, s in specs.items()]
         lines.append("")
     if safe["notes"]:

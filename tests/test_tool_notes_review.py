@@ -23,6 +23,7 @@ from nous.handlers.tool_notes import (
     MAX_CANDIDATES,
     NOTE_MAX_CHARS,
     NOTES_TOTAL,
+    PARAM_DESC_MAX_CHARS,
     REREVIEW_DAYS,
     SCORE_WORDS,
     TOOL_SPEC_MAX_CHARS,
@@ -236,18 +237,39 @@ def test_prompt_shows_how_an_offered_tool_is_called():
     p = pat(tool="get_procedure", key="missing procedure_id. provided: name", example="missing procedure_id")
     other = {"name": "web_fetch", "description": "Fetch a page.", "input_schema": {"properties": {}}}
     prompt = build_review_prompt([p], [], {"get_procedure": GET_PROCEDURE_DEF, "web_fetch": other})
-    assert "tool=get_procedure: Load a procedure's full body." in prompt
-    assert "procedure_id (string, required): The procedure's NAME, or its UUID." in prompt
+    assert (
+        "tool=get_procedure: procedure_id (string, required): The procedure's NAME, or its UUID. "
+        "| about: Load a procedure's full body." in prompt
+    )
     assert "tool=web_fetch" not in prompt  # not offered
     assert "How these tools are called" not in build_review_prompt([p], [])
     assert "description and parameters" in _REVIEW_SYSTEM and "must agree with them" in _REVIEW_SYSTEM
 
 
-def test_tool_spec_withholds_a_score_word_and_is_capped():
-    scored = {"name": "x", "description": "Returns the score of a run.", "input_schema": {}}
-    assert tool_spec(scored) == "(description withheld)"
-    long = {"name": "x", "description": "a " * 2000, "input_schema": {}}
+def test_tool_spec_masks_a_score_word_and_keeps_the_parameters():
+    scored = {
+        "name": "run_python",
+        "description": "Runs code; results are graded later.",
+        "input_schema": {"properties": {"code": {"type": "string", "description": "Python to run"}}},
+    }
+    assert tool_spec(scored) == "code (string): Python to run | about: Runs code; results are […] later."
+    p = pat(tool="run_python", example="SyntaxError")
+    assert SCORE_WORDS.search(build_review_prompt([p], [], {"run_python": scored})) is None
+
+
+def test_tool_spec_cuts_the_description_not_the_parameters():
+    """A long description (db_query's is about 1,400 characters) must not push its parameters past the cap."""
+    long = {
+        "name": "db_query",
+        "description": "Run one read-only query. " * 100,
+        "input_schema": {
+            "properties": {"sql": {"type": "string", "description": "One SELECT. " + "x" * 400}},
+            "required": ["sql"],
+        },
+    }
     spec = tool_spec(long)
+    assert spec.startswith("sql (string, required): One SELECT. ")
+    assert len(spec.split(" | about: ")[0]) == len("sql (string, required): ") + PARAM_DESC_MAX_CHARS
     assert len(spec) == TOOL_SPEC_MAX_CHARS and spec.endswith("…")
     bare = {"name": "x", "input_schema": {"properties": {"path": {}}, "required": ["path"]}}
     assert tool_spec(bare) == "path (any, required)"
