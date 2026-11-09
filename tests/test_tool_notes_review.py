@@ -238,6 +238,11 @@ HOSTILE = [
     ("too_long", write("{pid}", "x" * (NOTE_MAX_CHARS + 1))),
     ("score_word", write("{pid}", "Your score dropped")),
     ("rubric_word", write("{pid}", "mind the rubric")),
+    ("workaround", write("{pid}", "When the lineage check refuses, run with sudo --force")),
+    ("bypass_word", write("{pid}", "Bypass the check by quoting the path")),
+    ("work_around", write("{pid}", "Work around it with a temp file")),
+    ("guard_fragment", write("{pid}", "The target may not exist yet, retry later")),
+    ("no_verify", write("{pid}", "Commit with --no-verify")),
     ("empty", write("{pid}", "   ")),
     ("foreign_replaces", write("{pid}", "fine text", replaces="{other_note}")),
     ("bad_replaces", write("{pid}", "fine text", replaces="not-a-uuid")),
@@ -497,7 +502,7 @@ async def test_guard_patterns_are_counted_never_offered(db, agent_id, cleanup):
     await seed_errors(db, agent_id, "bash", 4, text="refused: path is outside the allowlist")
     client = FakeClient({"notes": []})
     out = await make_review(db, agent_id, client).run_sleep()
-    assert out["detected"] == 1 and out["guard"] == 1 and out["offered"] == 0
+    assert out["detected"] == 1 and out["guard"] == 0 and out["offered"] == 0
     assert client.calls == [] and await note_rows(db, agent_id) == []
 
 
@@ -583,12 +588,13 @@ async def test_owner_card_pushed_once(db, agent_id, cleanup):
 
 @pytest.mark.asyncio
 async def test_guard_on_a_score_named_tool_still_reaches_the_owner(db, agent_id, cleanup):
-    await seed_errors(db, agent_id, "rubric_tool", 4, text=GUARD_TEXT)
+    assert SCORE_WORDS.search("rubric")
+    await seed_errors(db, agent_id, "rubric", 4, text=GUARD_TEXT)
     surfaces = FakeSurfaces()
     client = FakeClient({"notes": []})
     out = await with_surfaces(make_review(db, agent_id, client), surfaces).run_sleep()
     assert out["guard"] == 1 and out["rejected"] == 0
-    assert len(surfaces.pushes) == 1 and "rubric_tool" in card_text(surfaces.pushes[0][0])
+    assert len(surfaces.pushes) == 1 and "rubric" in card_text(surfaces.pushes[0][0])
     assert client.calls == [] and len(await guard_rows(db, agent_id)) == 1
 
 
@@ -624,7 +630,7 @@ async def test_no_surface_service_writes_nothing(db, agent_id, cleanup, caplog):
     await seed_errors(db, agent_id, "bash", 4, text=GUARD_TEXT)
     with caplog.at_level(logging.WARNING, logger="nous.handlers.tool_notes"):
         out = await make_review(db, agent_id, FakeClient({"notes": []})).run_sleep()
-    assert out["guard"] == 1 and await note_rows(db, agent_id) == []
+    assert out["guard"] == 0 and await note_rows(db, agent_id) == []
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert len(warnings) == 1 and "bash" in warnings[0].getMessage()
     assert "allowlist" not in warnings[0].getMessage()
@@ -636,7 +642,7 @@ async def test_failed_push_writes_nothing_and_reports_next_sleep(db, agent_id, c
     bad = FakeSurfaces(error=RuntimeError(f"down {GUARD_TEXT}"))
     with caplog.at_level(logging.WARNING, logger="nous.handlers.tool_notes"):
         out = await with_surfaces(make_review(db, agent_id, FakeClient({"notes": []})), bad).run_sleep()
-    assert out["guard"] == 1 and await note_rows(db, agent_id) == []
+    assert out["guard"] == 0 and await note_rows(db, agent_id) == []
     warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert len(warnings) == 1 and "bash" in warnings[0].getMessage()
     assert "allowlist" not in warnings[0].getMessage() and "allowlist" not in str(warnings[0].exc_info)
@@ -695,3 +701,68 @@ async def test_sleep_phase_raising_review_returns_false(caplog):
         assert await handler._phase_tool_notes(stats) is False
     assert "tool_notes" not in stats
     assert any(r.levelno == logging.WARNING for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# the guard card is the full state of the window
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_card_caps_at_ten_and_reports_the_rest_on_a_later_sleep(db, agent_id, cleanup):
+    for i in range(10):
+        await seed_errors(db, agent_id, f"tool{i:02d}", 5, text=GUARD_TEXT)
+    await seed_errors(db, agent_id, "tool_late", 4, text=GUARD_TEXT)
+    surfaces = FakeSurfaces()
+    out = await with_surfaces(make_review(db, agent_id, FakeClient({"notes": []})), surfaces).run_sleep()
+    first = card_text(surfaces.pushes[0][0])
+    assert out["guard"] == 10 and all(f"tool{i:02d}" in first for i in range(10)) and "tool_late" not in first
+    assert len(await guard_rows(db, agent_id)) == 10
+    # 13 days on the first ten have left the window, and tool_late has fresh records: it is reported now.
+    await seed_errors(db, agent_id, "tool_late", 4, text=GUARD_TEXT, days_ago=-12)
+    later = with_surfaces(
+        make_review(db, agent_id, FakeClient({"notes": []}), clock=NOW + timedelta(days=13)), surfaces
+    )
+    out = await later.run_sleep()
+    assert out["guard"] == 1 and len(surfaces.pushes) == 2
+    assert "tool_late" in card_text(surfaces.pushes[1][0])
+    assert len(await guard_rows(db, agent_id)) == 11
+
+
+@pytest.mark.asyncio
+async def test_guard_count_is_zero_when_nothing_was_reported(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "bash", 4, text=GUARD_TEXT)
+    assert (await make_review(db, agent_id, FakeClient({"notes": []})).run_sleep())["guard"] == 0
+    bad = FakeSurfaces(error=RuntimeError("x"))
+    assert (await with_surfaces(make_review(db, agent_id, FakeClient({"notes": []})), bad).run_sleep())["guard"] == 0
+
+
+@pytest.mark.asyncio
+async def test_a_new_pattern_gives_a_card_that_still_lists_the_old_ones(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "bash", 4, text=GUARD_TEXT)
+    surfaces = FakeSurfaces()
+    await with_surfaces(make_review(db, agent_id, FakeClient({"notes": []})), surfaces).run_sleep()
+    await seed_errors(db, agent_id, "web_fetch", 4, text=GUARD_TEXT, days_ago=0)
+    later = with_surfaces(make_review(db, agent_id, FakeClient({"notes": []}), clock=NOW + timedelta(days=1)), surfaces)
+    out = await later.run_sleep()
+    card = card_text(surfaces.pushes[1][0])
+    assert out["guard"] == 1 and "bash" in card and "web_fetch" in card
+    rows = await guard_rows(db, agent_id)
+    assert sorted(r["tool_name"] for r in rows) == ["bash", "web_fetch"]  # one row each: bash is not written twice
+
+
+@pytest.mark.asyncio
+async def test_error_with_no_text_is_never_offered(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "bash", 5, text="")
+    client = FakeClient({"notes": []})
+    out = await make_review(db, agent_id, client).run_sleep()
+    assert out["detected"] == 1 and out["offered"] == 0 and out["rejected"] == 0
+    assert client.calls == [] and await note_rows(db, agent_id) == []
+
+
+def test_card_labels_an_example_not_an_error():
+    from nous.a2ui.builders.tool_notes_guard import tool_notes_guard_card
+
+    call = pat(tool="bash", key="", kind="call_repeat", hits=4, calls=10, guard="fragment", example="rm -r /x")
+    out = card_text(tool_notes_guard_card([call]))
+    assert "Example: rm -r /x" in out and "Error:" not in out

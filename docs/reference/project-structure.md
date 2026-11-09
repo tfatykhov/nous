@@ -72,7 +72,7 @@ nous/
 │   │   ├── episode_summarizer.py  # Episode summary generation
 │   │   ├── job_lessons.py         # JobLessonLearner: lessons from bad runs of recurring jobs
 │   │   ├── job_fixes.py           # JobFixer: check-and-fix for a recurring job that keeps failing
-│   │   ├── tool_notes.py          # F108 Phase 3: ToolNoteStore (the nous_system.tool_note table, migration 103): capped notes about repeated tool mistakes (3 per tool, 40 in all, 300 characters) and the declined and guard rows that keep a pattern from being re-reviewed for 14 days; the app is its only reader and writer
+│   │   ├── tool_notes.py          # F108 Phase 3: ToolNoteStore (the nous_system.tool_note table, migration 103), ToolNotesReview (the sleep step: one model call, the strict answer check, the owner card for guard patterns) and the review prompt: capped notes about repeated tool mistakes (3 per tool, 40 in all, 300 characters) and the declined and guard rows that keep a pattern from being re-reviewed for 14 days; the app is its only reader and writer
 │   │   ├── fact_extractor.py      # Fact extraction from conversations
 │   │   ├── knowledge_extractor.py # Pre-prune fact extraction
 │   │   ├── decision_reviewer.py   # Automated decision review
@@ -154,7 +154,7 @@ nous/
 │   │   ├── actions.py          # Action gate: allowlist → nonce → rate → censor
 │   │   ├── push.py             # F097 FCM leg (data-only messages)
 │   │   ├── intention_keys.py   # F099 Phase 3a: the reserved intention: dedup keys (leaf)
-│   │   ├── dsl.py / builders/  # Template-first surface construction (`builders/check_audit.py`: the owner's weekly spot-check card, built by the server only and not in `TEMPLATES`; `builders/memory_write_health.py`: P4's card, an Acknowledge button per tripped rule, server-built, priority 0, never a ping)
+│   │   ├── dsl.py / builders/  # Template-first surface construction (`builders/check_audit.py`: the owner's weekly spot-check card, built by the server only and not in `TEMPLATES`; `builders/memory_write_health.py`: P4's card, an Acknowledge button per tripped rule, server-built, priority 0, never a ping; `builders/tool_notes_guard.py`: F108's quiet card of the window's guard-caused tool patterns, server-built, no button, never a ping)
 │   │   └── catalogs/           # A2UI v1.0 vendored @ pinned commit d9086fb
 │   ├── security/
 │   │   └── secrets.py          # scan_secrets: shared by send_email (refuse) and the F098 result memory writer (skip)

@@ -14,7 +14,7 @@ from collections.abc import Sequence
 from datetime import timedelta
 
 from nous.cognitive.ledger_store import redact_output
-from nous.observability.tool_patterns import Pattern
+from nous.observability.tool_patterns import WINDOW_DAYS, Pattern
 
 from ..dsl import BuiltSurface, Column, Divider, Surface, Text
 
@@ -32,7 +32,7 @@ def _what(p: Pattern) -> str:
 
 def tool_notes_guard_card(findings: Sequence[Pattern]) -> BuiltSurface:
     """The card for guard-caused ``findings``. Raises ``ValueError`` when the list is empty."""
-    findings = list(findings)[:MAX_PER_CARD]
+    findings = list(findings)[:MAX_PER_CARD]  # the caller sends the window's patterns, most hits first
     if not findings:
         raise ValueError("a tool-notes guard card needs at least one pattern")
     title = f"Tool guards: {len(findings)} repeated pattern{'s' if len(findings) != 1 else ''}"
@@ -43,8 +43,8 @@ def tool_notes_guard_card(findings: Sequence[Pattern]) -> BuiltSurface:
         Text("header", f"## {title}"),
         Text(
             "intro",
-            "A guard stopped these tool calls again and again in the last 14 days. No note was written for them "
-            "and nothing was changed. The owner decides.",
+            f"A guard stopped these tool calls again and again in the last {WINDOW_DAYS} days. No note was written "
+            "for them and nothing was changed. The owner decides.",
             variant="caption",
         ),
     ]
@@ -55,7 +55,7 @@ def tool_notes_guard_card(findings: Sequence[Pattern]) -> BuiltSurface:
             Column(base, children=[f"{base}_h", f"{base}_d", f"{base}_e"]),
             Text(f"{base}_h", f"**{p.tool_name}**"),
             Text(f"{base}_d", f"Guard: {p.guard}. {p.hits} of {p.calls} calls.", variant="caption"),
-            Text(f"{base}_e", f"Error: {_what(p)}"),
+            Text(f"{base}_e", f"{'Error' if p.key else 'Example'}: {_what(p)}"),
         ]
         if i < len(findings) - 1:
             children.append(f"{base}_div")
