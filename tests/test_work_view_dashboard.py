@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -19,6 +20,8 @@ from sqlalchemy import text
 from nous.api import work_view_dashboard as wv
 from nous.api.rest import create_app
 from nous.config import Settings
+from nous.observability.model_call_text import TextStore
+from nous.observability.recording import BoundedWriter
 
 SESSIONS = "/dashboard/work/sessions"
 ZERO_COUNTS = {k: {"sessions": 0, "turns": 0} for k in ("conversation", "task", "background")}
@@ -59,7 +62,8 @@ async def delete_agent_rows(db, agent_id: str) -> None:
         for table in (
             "nous_system.tool_call_log",
             "nous_system.agent_turn_log",
-            "nous_system.model_call_log",
+            "nous_system.model_call_log",  # its attempts and text refs go with it (ON DELETE CASCADE)
+            "nous_system.model_text_block",  # after the refs: they reference the blocks
             "nous_system.execution_ledger",
             "heart.episodes",
             "heart.subtasks",
@@ -1963,6 +1967,7 @@ async def test_model_calls_numbers_and_input_total(mc_client, db, agent_id, clea
             "output_tokens": None,
             "duration_ms": None,
             "attempts": 1,
+            "call_count": 1,
             "session_id": None,
             "turn_id": None,
             "turn_number": None,
@@ -1986,6 +1991,7 @@ async def test_model_calls_numbers_and_input_total(mc_client, db, agent_id, clea
             "output_tokens": 612,
             "duration_ms": 4321,
             "attempts": 1,
+            "call_count": 1,
             "session_id": "sess-N",
             "turn_id": str(turn),
             "turn_number": 4,
@@ -2175,6 +2181,10 @@ async def test_model_calls_purposes_chips_ignore_filters_and_bucket_rows(mc_clie
         c for c in (await get_json(mc_client, MODEL_CALLS, purpose="embedding"))["calls"] if c["id"] == str(embed_ok)
     )
     assert (bucket["call_kind"], bucket["input_total"], bucket["output_tokens"]) == ("embedding", 1200, None)
+    # A bucket row shows how many calls it counts.
+    counts = {c["id"]: c["call_count"] for c in (await get_json(mc_client, MODEL_CALLS, purpose="embedding"))["calls"]}
+    assert counts == {str(embed_ok): 30, str(embed_err): 2}
+    assert [c["call_count"] for c in (await get_json(mc_client, MODEL_CALLS, purpose="rerank"))["calls"]] == [5]
     assert str(chat) in _call_ids(await get_json(mc_client, MODEL_CALLS, purpose="chat"))
 
 
@@ -2309,6 +2319,484 @@ async def test_model_calls_query_failure_is_a_plain_500(mc_client, monkeypatch, 
 
 
 # ---------------------------------------------------------------------------------------------------------------------
+# GET /dashboard/model-calls/{call_id} and /dashboard/model-calls/{call_id}/blocks/{part}/{ord}
+# ---------------------------------------------------------------------------------------------------------------------
+
+# The detail's call fields on top of a list item's.
+DETAIL_EXTRAS = {
+    "group_id",
+    "is_fallback",
+    "parent_session_id",
+    "frame_id",
+    "subtask_id",
+    "dag_id",
+    "trace_id",
+    "call_count",
+    "error_text",
+    "context_window_size",
+    "total_tokens_est",
+    "utilization_pct",
+    "tools_count",
+    "tool_names",
+    "messages_count",
+    "loaded_facts",
+    "loaded_decisions",
+    "loaded_procedures",
+    "loaded_episodes",
+    "cache_break",
+    "cache_break_components",
+    "cache_break_tokens_lost",
+}
+HOSTILE = '<script>alert("x")</script><img src=x onerror=alert(1)>'
+
+
+def call_path(call_id) -> str:
+    return f"{MODEL_CALLS}/{call_id}"
+
+
+def block_path(call_id, part: str, ord_) -> str:
+    return f"{MODEL_CALLS}/{call_id}/blocks/{part}/{ord_}"
+
+
+def make_text_store(db, agent_id: str) -> TextStore:
+    """A text store of ``agent_id``; the tests await its ``store`` instead of submitting through the writer."""
+    flags = SimpleNamespace(
+        model_call_log_enabled=True, model_call_text_enabled=True, model_call_text_block_max_chars=200_000
+    )
+    return TextStore(BoundedWriter("test"), db, agent_id, flags)
+
+
+def text_app(db, agent_id: str, store, *, log: bool = True, text_on: bool = True):
+    """The REST app with the model-call log ``log`` and its text setting ``text_on``, reading ``store``."""
+    settings = _settings(agent_id, model_call_log_enabled=log, model_call_text_enabled=text_on)
+    return create_app(MagicMock(), MagicMock(), MagicMock(), MagicMock(), db, settings, model_call_text_store=store)
+
+
+@pytest.fixture
+def text_store(db, agent_id) -> TextStore:
+    return make_text_store(db, agent_id)
+
+
+@pytest_asyncio.fixture
+async def mct_client(db, agent_id, text_store):
+    """The REST app with the model-call log and its text on, reading ``text_store``."""
+    app = text_app(db, agent_id, text_store)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        yield c
+
+
+async def update_model_call(db, call_id: uuid.UUID, **columns) -> None:
+    """Set the context columns ``insert_model_call`` leaves at their defaults (column names chosen by the test)."""
+    sets = ", ".join(
+        f"{name} = CAST(:{name} AS jsonb)" if name == "section_tokens_est" else f"{name} = :{name}" for name in columns
+    )
+    params = {k: json.dumps(v) if k == "section_tokens_est" else v for k, v in columns.items()}
+    async with db.engine.begin() as conn:
+        await conn.execute(
+            text(f"UPDATE nous_system.model_call_log SET {sets} WHERE id = :id"), {**params, "id": call_id}
+        )
+
+
+async def insert_attempt(
+    db,
+    agent_id: str,
+    call_id: uuid.UUID,
+    attempt_no: int,
+    *,
+    started_at: datetime,
+    duration_ms: int | None = None,
+    http_status: int | None = None,
+    error_type: str | None = None,
+    error_text: str | None = None,
+) -> None:
+    """One ``model_call_attempt`` row of call ``call_id``."""
+    async with db.engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO nous_system.model_call_attempt (call_id, agent_id, attempt_no, started_at, duration_ms, "
+                "http_status, error_type, error_text) VALUES (:c, :a, :n, :start, :duration, :http, :type, :error)"
+            ),
+            {
+                "c": call_id,
+                "a": agent_id,
+                "n": attempt_no,
+                "start": started_at,
+                "duration": duration_ms,
+                "http": http_status,
+                "type": error_type,
+                "error": error_text,
+            },
+        )
+
+
+async def stored_body(db, agent_id: str, call_id: uuid.UUID, part: str, ord_: int) -> str:
+    """The body stored for one block of a call, read straight from the tables."""
+    async with db.engine.connect() as conn:
+        return (
+            await conn.execute(
+                text(
+                    "SELECT b.body FROM nous_system.model_call_block_ref r JOIN nous_system.model_text_block b "
+                    "ON b.agent_id = r.agent_id AND b.hash = r.block_hash "
+                    "WHERE r.call_id = :c AND r.agent_id = :a AND r.part = :p AND r.ord = :o"
+                ),
+                {"c": call_id, "a": agent_id, "p": part, "o": ord_},
+            )
+        ).scalar_one()
+
+
+def _keys_anywhere(value) -> set[str]:
+    if isinstance(value, dict):
+        return set(value) | {k for v in value.values() for k in _keys_anywhere(v)}
+    if isinstance(value, list):
+        return {k for v in value for k in _keys_anywhere(v)}
+    return set()
+
+
+def test_parse_call_id():
+    call_id = uuid.uuid4()
+    assert wv.parse_call_id(str(call_id).upper()) == call_id
+    for raw in ("", "not-a-uuid", "123"):
+        with pytest.raises(ValueError):
+            wv.parse_call_id(raw)
+
+
+def test_disabled_model_call_has_the_detail_keys_and_nothing_in_them():
+    assert wv.disabled_model_call(False) == {
+        "enabled": False,
+        "text_enabled": False,
+        "call": None,
+        "attempts": [],
+        "sections": [],
+        "turn": None,
+        "text_status": "off",
+        "blocks": [],
+    }
+    assert wv.disabled_model_call(True)["text_enabled"] is True
+
+
+@pytest.mark.postgres_only
+async def test_model_call_detail_fields(mct_client, db, agent_id, cleanup):
+    base = _hour_ago()
+    turn, group, subtask, dag = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    long_error = "<b>upstream</b> " + "e" * 1000
+    call_id = await insert_model_call(
+        db,
+        agent_id,
+        turn_id=turn,
+        session_id="sess-D",
+        turn_number=3,
+        purpose="chat",
+        model="claude-opus-test",
+        stop_reason="end_turn",
+        duration_ms=5100,
+        attempts=2,
+        is_fallback=True,
+        error_text=long_error,
+        started_at=base,
+        **BRIEF_TOKENS,
+    )
+    await update_model_call(
+        db,
+        call_id,
+        group_id=group,
+        parent_session_id="sess-P",
+        frame_id="task",
+        subtask_id=subtask,
+        dag_id=dag,
+        trace_id="trace-1",
+        context_window_size=200_000,
+        total_tokens_est=54_000,
+        utilization_pct=27.5,
+        tools_count=2,
+        tool_names=["bash", "recall_deep"],
+        messages_count=5,
+        loaded_facts=3,
+        loaded_decisions=2,
+        loaded_procedures=1,
+        loaded_episodes=0,
+        cache_break=True,
+        cache_break_components=["system", "tools"],
+        cache_break_tokens_lost=1234,
+        section_tokens_est={"identity": 500, "tools": 2000, "facts": 2000, "history": 9000},
+    )
+    # Attempts written out of order; the first one failed.
+    await insert_attempt(db, agent_id, call_id, 2, started_at=base + timedelta(seconds=2), duration_ms=3000)
+    await insert_attempt(
+        db,
+        agent_id,
+        call_id,
+        1,
+        started_at=base,
+        duration_ms=2000,
+        http_status=529,
+        error_type="overloaded_error",
+        error_text="Overloaded",
+    )
+    # The session's title: its latest active titled episode.
+    await insert_episode(db, agent_id, "sess-D", "Old title", started_at=base - timedelta(hours=2))
+    await insert_episode(db, agent_id, "sess-D", "Plan the trip", started_at=base - timedelta(hours=1))
+    await insert_episode(db, agent_id, "sess-D", "Deleted", started_at=base, active=False)
+
+    body = await get_json(mct_client, call_path(call_id))
+    assert set(body) == {"enabled", "text_enabled", "call", "attempts", "sections", "turn", "text_status", "blocks"}
+    assert body["enabled"] is True and body["text_enabled"] is True
+
+    # Every list field, as the list shows it, plus the detail's own.
+    listed = next(c for c in (await get_json(mct_client, MODEL_CALLS))["calls"] if c["id"] == str(call_id))
+    assert set(body["call"]) == set(listed) | DETAIL_EXTRAS
+    assert {k: body["call"][k] for k in listed} == listed
+    assert listed["error"] == long_error[:300] and listed["problem"] == "Sent 2 times"
+    assert {k: body["call"][k] for k in DETAIL_EXTRAS} == {
+        "group_id": str(group),
+        "is_fallback": True,
+        "parent_session_id": "sess-P",
+        "frame_id": "task",
+        "subtask_id": str(subtask),
+        "dag_id": str(dag),
+        "trace_id": "trace-1",
+        "call_count": 1,
+        "error_text": long_error,  # in full, as stored
+        "context_window_size": 200_000,
+        "total_tokens_est": 54_000,
+        "utilization_pct": 27.5,
+        "tools_count": 2,
+        "tool_names": ["bash", "recall_deep"],
+        "messages_count": 5,
+        "loaded_facts": 3,
+        "loaded_decisions": 2,
+        "loaded_procedures": 1,
+        "loaded_episodes": 0,
+        "cache_break": True,
+        "cache_break_components": ["system", "tools"],
+        "cache_break_tokens_lost": 1234,
+    }
+    assert body["attempts"] == [
+        {
+            "attempt_no": 1,
+            "started_at": base.isoformat(),
+            "duration_ms": 2000,
+            "http_status": 529,
+            "error_type": "overloaded_error",
+            "error_text": "Overloaded",
+        },
+        {
+            "attempt_no": 2,
+            "started_at": (base + timedelta(seconds=2)).isoformat(),
+            "duration_ms": 3000,
+            "http_status": None,
+            "error_type": None,
+            "error_text": None,
+        },
+    ]
+    # Largest first; a tie goes by name.
+    assert body["sections"] == [
+        {"name": "history", "tokens_est": 9000},
+        {"name": "facts", "tokens_est": 2000},
+        {"name": "tools", "tokens_est": 2000},
+        {"name": "identity", "tokens_est": 500},
+    ]
+    assert body["turn"] == {"turn_id": str(turn), "session_id": "sess-D", "session_title": "Plan the trip"}
+    assert (body["text_status"], body["blocks"]) == ("not_recorded", [])
+
+    # A call with no turn has no turn; a turn whose session has no titled episode has no title; no sections: [].
+    bare = await insert_model_call(db, agent_id, purpose="critic", session_id="sess-D", started_at=base)
+    untitled = await insert_model_call(db, agent_id, turn_id=uuid.uuid4(), session_id="sess-U", started_at=base)
+    await insert_episode(db, agent_id, "sess-U", None, started_at=base)
+    sessionless = await insert_model_call(db, agent_id, turn_id=turn, started_at=base)
+    detail = await get_json(mct_client, call_path(bare))
+    assert (detail["turn"], detail["sections"], detail["attempts"]) == (None, [], [])
+    assert detail["call"]["error_text"] is None and detail["call"]["tool_names"] is None
+    assert (await get_json(mct_client, call_path(untitled)))["turn"]["session_title"] is None
+    assert (await get_json(mct_client, call_path(sessionless)))["turn"] == {
+        "turn_id": str(turn),
+        "session_id": None,
+        "session_title": None,
+    }
+
+
+@pytest.mark.postgres_only
+async def test_model_call_text_status(db, agent_id, cleanup, text_store):
+    eight_days_ago = datetime.now(UTC) - timedelta(days=8)
+    recent = await insert_model_call(db, agent_id, purpose="chat", started_at=_hour_ago())
+    stored = await insert_model_call(db, agent_id, purpose="chat", started_at=_hour_ago())
+    old = await insert_model_call(db, agent_id, purpose="chat", started_at=eight_days_ago)
+    old_kept = await insert_model_call(db, agent_id, purpose="chat", started_at=eight_days_ago)
+    await text_store.store(stored, [("system", 0, "be brief", False), ("response", 0, '[{"type": "text"}]', True)])
+    await text_store.store(old_kept, [("system", 0, "be brief", False)])  # older than the retention, not swept yet
+
+    async def status(call_id, store=text_store, **flags) -> tuple[str, bool, list]:
+        app = text_app(db, agent_id, store, **flags)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            body = await get_json(c, call_path(call_id))
+        return body["text_status"], body["text_enabled"], body["blocks"]
+
+    text_status, text_enabled, blocks = await status(stored)
+    assert (text_status, text_enabled) == ("ok", True)
+    assert [(b["part"], b["ord"], b["reused_by"]) for b in blocks] == [("system", 0, 2), ("response", 0, 1)]
+    assert await status(old_kept) == (
+        "ok",
+        True,
+        [{"part": "system", "ord": 0, "size_chars": 8, "tokens_est": 2, "reused_by": 2}],
+    )
+    assert await status(recent) == ("not_recorded", True, [])
+    assert await status(old) == ("expired", True, [])  # older than the 7-day text retention, no blocks
+    # The text setting off, or no store: off, even where blocks exist.
+    assert await status(stored, text_on=False) == ("off", False, [])
+    assert await status(stored, store=None) == ("off", False, [])
+    empty_proxy = MagicMock()
+    empty_proxy.__bool__.return_value = False
+    assert await status(stored, store=empty_proxy) == ("off", False, [])
+
+    # A retention of 0 days means the text is never swept: an old call with no blocks was not recorded.
+    async with db.session() as session:
+        never_swept = await wv.get_model_call(session, agent_id, old, text_store=text_store, text_retention_days=0)
+        three_days = await wv.get_model_call(session, agent_id, old, text_store=text_store, text_retention_days=3)
+        nine_days = await wv.get_model_call(session, agent_id, old, text_store=text_store, text_retention_days=9)
+    assert never_swept["text_status"] == "not_recorded"
+    assert three_days["text_status"] == "expired"
+    assert nine_days["text_status"] == "not_recorded"
+
+
+@pytest.mark.postgres_only
+async def test_model_call_blocks_are_metadata_only(mct_client, db, agent_id, cleanup, text_store):
+    call_id = await insert_model_call(db, agent_id, purpose="chat", started_at=_hour_ago())
+    big = ("The quick brown fox jumps over the lazy dog. " * 5000)[:200_000]
+    await text_store.store(
+        call_id,
+        [("system", 0, big, False), ("messages", 0, '{"role": "user", "content": "hi"}', True)],
+    )
+    resp = await mct_client.get(call_path(call_id))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "body" not in _keys_anywhere(body)
+    assert len(resp.content) < 10_000  # no block's text rides along under another key
+    message_chars = len(await stored_body(db, agent_id, call_id, "messages", 0))
+    assert body["blocks"] == [
+        {"part": "system", "ord": 0, "size_chars": 200_000, "tokens_est": 50_000, "reused_by": 1},
+        {"part": "messages", "ord": 0, "size_chars": message_chars, "tokens_est": message_chars // 4, "reused_by": 1},
+    ]
+
+
+@pytest.mark.postgres_only
+async def test_block_body_endpoint(mct_client, db, agent_id, cleanup, text_store):
+    call_id = await insert_model_call(db, agent_id, purpose="chat", started_at=_hour_ago())
+    message = {"role": "user", "content": HOSTILE}
+    await text_store.store(call_id, [("system", 0, HOSTILE, False), ("messages", 0, json.dumps(message), True)])
+
+    resp = await mct_client.get(block_path(call_id, "system", 0))
+    assert resp.status_code == 200 and resp.headers["content-type"].startswith("application/json")
+    assert await stored_body(db, agent_id, call_id, "system", 0) == HOSTILE  # nothing in it to redact
+    assert resp.json() == {"part": "system", "ord": 0, "size_chars": len(HOSTILE), "body": HOSTILE}  # verbatim
+    msg = await get_json(mct_client, block_path(call_id, "messages", 0))
+    assert msg["body"] == await stored_body(db, agent_id, call_id, "messages", 0)
+    assert json.loads(msg["body"]) == message and msg["size_chars"] == len(msg["body"])
+
+    # Another agent's call, with a block at the same address.
+    other = _agent()
+    try:
+        foreign = await insert_model_call(db, other, purpose="chat", started_at=_hour_ago())
+        await make_text_store(db, other).store(foreign, [("system", 0, "not yours", False)])
+        for path in (
+            block_path(call_id, "secrets", 0),  # not a part
+            block_path(call_id, "tools", 0),  # a part this call does not have
+            block_path(call_id, "system", 1),  # past the call's blocks
+            block_path(call_id, "messages", 7),
+            block_path(call_id, "system", 2**31),  # past the INT column: cannot exist
+            block_path(call_id, "system", "x"),  # not a number: no route
+            block_path(uuid.uuid4(), "system", 0),
+            block_path(foreign, "system", 0),
+        ):
+            assert (await mct_client.get(path)).status_code == 404, path
+    finally:
+        await delete_agent_rows(db, other)
+    resp = await mct_client.get(block_path("not-a-uuid", "system", 0))
+    assert resp.status_code == 400 and set(resp.json()) == {"error"}
+
+    # Text off (the setting, the store, or the model-call log): 404.
+    for store, flags in ((text_store, {"text_on": False}), (text_store, {"log": False}), (None, {})):
+        app = text_app(db, agent_id, store, **flags)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            assert (await c.get(block_path(call_id, "system", 0))).status_code == 404, (store, flags)
+
+
+@pytest.mark.postgres_only
+async def test_detail_unknown_call_404(mct_client, db, agent_id, cleanup):
+    other = _agent()
+    try:
+        foreign = await insert_model_call(db, other, purpose="chat", started_at=_hour_ago())
+        for call_id in (uuid.uuid4(), foreign):
+            resp = await mct_client.get(call_path(call_id))
+            assert resp.status_code == 404 and resp.json() == {"error": "not found"}
+    finally:
+        await delete_agent_rows(db, other)
+    resp = await mct_client.get(call_path("not-a-uuid"))
+    assert resp.status_code == 400 and set(resp.json()) == {"error"}
+
+
+@pytest.mark.postgres_only
+async def test_detail_flag_off(db, agent_id, cleanup, monkeypatch, text_store):
+    call_id = await insert_model_call(db, agent_id, purpose="chat", started_at=_hour_ago())
+    await text_store.store(call_id, [("system", 0, "be brief", False)])
+    opened = 0
+    real_session = db.session
+
+    def counting_session(*args, **kwargs):
+        nonlocal opened
+        opened += 1
+        return real_session(*args, **kwargs)
+
+    monkeypatch.setattr(db, "session", counting_session)
+    # The model-call log off (the tool-call log on does not open the model-call endpoints).
+    settings = _settings(
+        agent_id, model_call_log_enabled=False, model_call_text_enabled=True, tool_call_log_enabled=True
+    )
+    off = create_app(MagicMock(), MagicMock(), MagicMock(), MagicMock(), db, settings, model_call_text_store=text_store)
+    async with AsyncClient(transport=ASGITransport(app=off), base_url="http://test") as c:
+        assert await get_json(c, call_path(call_id)) == wv.disabled_model_call(True)
+        assert (await c.get(block_path(call_id, "system", 0))).status_code == 404
+        assert (await c.get(call_path("not-a-uuid"))).status_code == 400  # parsing still applies
+    # The text off: the detail opens one session for the call's numbers, the block endpoint none.
+    text_off = text_app(db, agent_id, text_store, text_on=False)
+    async with AsyncClient(transport=ASGITransport(app=text_off), base_url="http://test") as c:
+        assert (await c.get(block_path(call_id, "system", 0))).status_code == 404
+        assert opened == 0
+        assert (await get_json(c, call_path(call_id)))["text_status"] == "off"
+    assert opened == 1
+
+    # Both on: the handler's session, then the text store's (so the zeros above mean something).
+    both_on = text_app(db, agent_id, text_store)
+    async with AsyncClient(transport=ASGITransport(app=both_on), base_url="http://test") as c:
+        assert (await get_json(c, call_path(call_id)))["text_status"] == "ok"
+        assert opened == 3
+        assert (await get_json(c, block_path(call_id, "system", 0)))["body"] == "be brief"
+        assert opened == 4
+
+
+@pytest.mark.postgres_only
+async def test_model_call_detail_runs_under_a_10s_statement_timeout(db, agent_id, cleanup):
+    call_id = await insert_model_call(db, agent_id, purpose="chat", started_at=_hour_ago())
+    async with db.session() as session:
+        detail = await wv.get_model_call(session, agent_id, call_id, text_store=None, text_retention_days=7)
+        assert detail["call"]["id"] == str(call_id)
+        assert (await session.execute(text("SHOW statement_timeout"))).scalar_one() == "10s"
+
+
+@pytest.mark.postgres_only
+async def test_model_call_detail_and_block_failures_are_a_plain_500(mct_client, monkeypatch, caplog):
+    async def boom(*args, **kwargs):
+        raise RuntimeError("secret detail from the database")
+
+    monkeypatch.setattr(wv, "get_model_call", boom)
+    monkeypatch.setattr(wv, "get_block", boom)
+    call_id = uuid.uuid4()
+    for path in (call_path(call_id), block_path(call_id, "system", 0)):
+        caplog.clear()
+        resp = await mct_client.get(path)
+        assert resp.status_code == 500 and resp.json() == {"error": "work view query failed"}, path
+        assert any(r.levelname == "WARNING" and r.exc_info for r in caplog.records), path
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 # Across the endpoints
 # ---------------------------------------------------------------------------------------------------------------------
 
@@ -2346,12 +2834,13 @@ def _assert_same_keys(disabled: dict, enabled: dict, where: str = "payload") -> 
 @pytest.mark.postgres_only
 async def test_disabled_payloads_have_the_enabled_keys(client, mc_client, db, agent_id, cleanup):
     await insert_turn(db, agent_id, "sess-K", started_at=_hour_ago())
-    await insert_model_call(db, agent_id, purpose="chat", started_at=_hour_ago())
+    call_id = await insert_model_call(db, agent_id, purpose="chat", started_at=_hour_ago())
     pairs = {
         "sessions": (wv.disabled_sessions(7), await get_json(client)),
         "trace": (wv.disabled_trace(), await get_json(client, trace_path("sess-K"))),
         "patterns": (wv.disabled_patterns(7), await get_json(client, PATTERNS)),
         "model_calls": (wv.disabled_model_calls(7, False), await get_json(mc_client, MODEL_CALLS)),
+        "model_call": (wv.disabled_model_call(False), await get_json(mc_client, call_path(call_id))),
     }
     for name, (disabled, enabled) in pairs.items():
         assert enabled["enabled"] is True and disabled["enabled"] is False, name

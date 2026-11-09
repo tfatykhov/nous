@@ -2365,6 +2365,59 @@ def create_app(
             logger.warning("dashboard_model_calls: the model call query failed", exc_info=True)
             return JSONResponse({"error": "work view query failed"}, status_code=500)
 
+    async def dashboard_model_call(request: Request) -> JSONResponse:
+        """GET /dashboard/model-calls/{call_id} — F108: one model call: its numbers and context, its attempts, its
+        context sections, its turn, and its stored text blocks without their bodies. Read-only. With the model-call
+        log off: 200 {"enabled": false} and no session; unknown or another agent's call: 404."""
+        from nous.api import work_view_dashboard as wv
+
+        try:
+            call_id = wv.parse_call_id(request.path_params["call_id"])
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        # Truthiness, not ``is not None``: main.py passes a lazy proxy, falsy while its store is None.
+        text_store = model_call_text_store if settings.model_call_text_enabled and model_call_text_store else None
+        if not settings.model_call_log_enabled:
+            return JSONResponse(wv.disabled_model_call(text_store is not None))
+        try:
+            async with database.session() as session:
+                data = await wv.get_model_call(
+                    session,
+                    settings.agent_id,
+                    call_id,
+                    text_store=text_store,
+                    text_retention_days=settings.model_call_text_retention_days,
+                )
+            if data is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            return JSONResponse(data)
+        except Exception:
+            logger.warning("dashboard_model_call: the model call query failed", exc_info=True)
+            return JSONResponse({"error": "work view query failed"}, status_code=500)
+
+    async def dashboard_model_call_block(request: Request) -> JSONResponse:
+        """GET /dashboard/model-calls/{call_id}/blocks/{part}/{ord} — F108: the body of one stored text block of a
+        model call, as stored (redacted when written). Read-only. 404 when the call has no such block, is another
+        agent's, or the text (or the model-call log) is off; then no session is opened."""
+        from nous.api import work_view_dashboard as wv
+
+        try:
+            call_id = wv.parse_call_id(request.path_params["call_id"])
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        if not (settings.model_call_log_enabled and settings.model_call_text_enabled and model_call_text_store):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        try:
+            data = await wv.get_block(
+                model_call_text_store, call_id, request.path_params["part"], request.path_params["ord"]
+            )
+            if data is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            return JSONResponse(data)
+        except Exception:
+            logger.warning("dashboard_model_call_block: the model call text query failed", exc_info=True)
+            return JSONResponse({"error": "work view query failed"}, status_code=500)
+
     async def dashboard_memory_write_health_acknowledge(request: Request) -> JSONResponse:
         """POST /dashboard/memory-write-health/acknowledge {rule, day?, note?} — P4: the owner accepts a rule's
         evidence (a deliberate restore or delete) and resets its baseline. Records who acknowledged what as an events
@@ -3898,6 +3951,8 @@ def create_app(
         Route("/dashboard/work/sessions/{session_id}", dashboard_work_trace),
         Route("/dashboard/work/patterns", dashboard_work_patterns),
         Route("/dashboard/model-calls", dashboard_model_calls),
+        Route("/dashboard/model-calls/{call_id}", dashboard_model_call),
+        Route("/dashboard/model-calls/{call_id}/blocks/{part}/{ord:int}", dashboard_model_call_block),
         # F038: DAG orchestration dashboard
         Route("/dashboard/dag", dashboard_dag),
         Route("/dashboard/execution", dashboard_execution),

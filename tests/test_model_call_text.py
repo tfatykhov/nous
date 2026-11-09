@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import json
 import logging
@@ -911,3 +912,139 @@ async def test_text_tables_indexes_and_no_credential_named_column(db):
     }, indexes
     # db_roles.sql section 5d refuses to grant a credential-looking column (these are not reader tables either)
     assert len(names) == 11 and not [n for n in names if re.search(CREDENTIAL_NAME, n.split(".", 1)[1])], names
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Reading one call's blocks (the dashboard's model-call detail, F108 Phase 2)
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+async def _insert_call(db, agent: str) -> uuid.UUID:
+    """A bare ``model_call_log`` row of ``agent`` (the refs' foreign key); returns its id."""
+    async with db.engine.begin() as conn:
+        return (
+            await conn.execute(
+                text(
+                    "INSERT INTO nous_system.model_call_log (agent_id, purpose, label_source, call_kind, status) "
+                    "VALUES (:a, 'chat', 'explicit', 'call', 'ok') RETURNING id"
+                ),
+                {"a": agent},
+            )
+        ).scalar_one()
+
+
+def _store_only(db, agent: str) -> TextStore:
+    return TextStore(BoundedWriter("test"), db, agent, _settings())
+
+
+@pytest.mark.postgres_only
+async def test_describe_lists_blocks_with_reuse_counts(db):
+    agent, other = _agent(), _agent()
+    store, other_store = _store_only(db, agent), _store_only(db, other)
+    shared = ("system", 0, "You are a careful assistant.", False)
+    try:
+        first, second = await _insert_call(db, agent), await _insert_call(db, agent)
+        foreign = await _insert_call(db, other)
+        await store.store(first, [shared, ("response", 0, json.dumps(_text_reply("one")), True)])
+        await store.store(second, [shared, ("response", 0, json.dumps(_text_reply("two")), True)])
+        await other_store.store(foreign, [shared])  # the same block (same hash) under another agent
+        blocks = await _blocks(db, agent)
+        for call_id in (first, second):
+            infos = await store.describe(call_id)
+            assert all(isinstance(i, model_call_text.BlockInfo) for i in infos)
+            # the system block is named by both calls of this agent, the other agent's ref is not counted
+            assert [(i.part, i.ord, i.reused_by) for i in infos] == [("system", 0, 2), ("response", 0, 1)]
+            hashes = {(part, ord_): digest for part, ord_, digest in await _refs(db, call_id)}
+            assert [i.size_chars for i in infos] == [len(blocks[hashes[(i.part, i.ord)]]["body"]) for i in infos]
+        assert [(i.part, i.reused_by) for i in await other_store.describe(foreign)] == [("system", 1)]
+        assert await store.describe(foreign) == []  # another agent's call
+        assert await store.describe(uuid.uuid4()) == []
+        with pytest.raises(AttributeError):
+            infos[0].reused_by = 5  # frozen
+    finally:
+        await _delete(db, agent)
+        await _delete(db, other)
+
+
+@pytest.mark.postgres_only
+async def test_describe_order_is_system_messages_tools_response(db):
+    agent = _agent()
+    store = _store_only(db, agent)
+    try:
+        call_id = await _insert_call(db, agent)
+        # stored out of order; alphabetical would list messages, response, system, tools; ord 10 after ord 2
+        await store.store(
+            call_id,
+            [
+                ("tools", 0, "the tool list", False),
+                ("response", 0, "the answer", False),
+                ("messages", 10, "message ten", False),
+                ("system", 1, "system one", False),
+                ("messages", 2, "message two", False),
+                ("system", 0, "system zero", False),
+            ],
+        )
+        assert [(i.part, i.ord) for i in await store.describe(call_id)] == [
+            ("system", 0),
+            ("system", 1),
+            ("messages", 2),
+            ("messages", 10),
+            ("tools", 0),
+            ("response", 0),
+        ]
+    finally:
+        await _delete(db, agent)
+
+
+@pytest.mark.postgres_only
+async def test_load_one_returns_only_the_asked_block(db):
+    agent, other = _agent(), _agent()
+    store, other_store = _store_only(db, agent), _store_only(db, other)
+    message = {"role": "user", "content": "hello"}
+    try:
+        call_id = await _insert_call(db, agent)
+        foreign = await _insert_call(db, other)
+        await store.store(call_id, [("system", 0, "first block", False), ("messages", 0, json.dumps(message), True)])
+        await other_store.store(foreign, [("system", 0, "foreign block", False)])
+        assert await store.load_one(call_id, "system", 0) == "first block"
+        assert json.loads(await store.load_one(call_id, "messages", 0)) == message
+        assert await store.load_one(call_id, "system", 1) is None  # unknown ord
+        assert await store.load_one(call_id, "messages", 1) is None
+        assert await store.load_one(call_id, "tools", 0) is None  # a part this call does not have
+        assert await store.load_one(call_id, "secrets", 0) is None  # not a part
+        assert await store.load_one(foreign, "system", 0) is None  # another agent's call
+        assert await other_store.load_one(foreign, "system", 0) == "foreign block"
+        assert await store.load_one(uuid.uuid4(), "system", 0) is None
+    finally:
+        await _delete(db, agent)
+        await _delete(db, other)
+
+
+class _TimeoutProbe:
+    """A database whose sessions report their ``statement_timeout`` when the caller is done with them, in the same
+    transaction: what a ``SET LOCAL`` of the caller left."""
+
+    def __init__(self, db) -> None:
+        self._db = db
+        self.seen: list[str] = []
+
+    @contextlib.asynccontextmanager
+    async def session(self):
+        async with self._db.session() as session:
+            yield session
+            self.seen.append((await session.execute(text("SHOW statement_timeout"))).scalar_one())
+
+
+@pytest.mark.postgres_only
+async def test_describe_and_load_one_run_under_a_10s_statement_timeout(db):
+    agent = _agent()
+    probe = _TimeoutProbe(db)
+    store = TextStore(BoundedWriter("test"), probe, agent, _settings())
+    try:
+        call_id = await _insert_call(db, agent)
+        await _store_only(db, agent).store(call_id, [("system", 0, "a block", False)])
+        assert [i.part for i in await store.describe(call_id)] == ["system"]
+        assert await store.load_one(call_id, "system", 0) == "a block"
+        assert probe.seen == ["10s", "10s"]
+    finally:
+        await _delete(db, agent)

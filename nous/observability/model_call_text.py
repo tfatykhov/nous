@@ -28,6 +28,7 @@ import logging
 import re
 import uuid
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import text
@@ -81,6 +82,41 @@ _LOAD = text(
     "JOIN nous_system.model_text_block b ON b.agent_id = r.agent_id AND b.hash = r.block_hash "
     "WHERE r.call_id = :call_id AND r.agent_id = :agent_id ORDER BY r.part, r.ord"
 )
+
+# A call's parts, in the order a call sends them (and the dashboard lists them).
+BLOCK_PARTS: tuple[str, ...] = ("system", "messages", "tools", "response")
+_PART_ORDER = " ".join(
+    ["CASE r.part", *(f"WHEN '{part}' THEN {i}" for i, part in enumerate(BLOCK_PARTS)), f"ELSE {len(BLOCK_PARTS)} END"]
+)
+# The dashboard's reads (describe, load_one) run under the dashboard's statement timeout, in their own transaction.
+_READ_TIMEOUT = text("SET LOCAL statement_timeout = '10s'")
+# A call's blocks without their bodies. reused_by counts this agent's calls whose refs name the same block, on
+# idx_model_call_block_ref_block (agent_id, block_hash); refs the text sweep deleted no longer count.
+_DESCRIBE = text(
+    "SELECT r.part, r.ord, b.size_chars, "
+    "(SELECT count(DISTINCT o.call_id) FROM nous_system.model_call_block_ref o "
+    "WHERE o.agent_id = r.agent_id AND o.block_hash = r.block_hash) AS reused_by "
+    "FROM nous_system.model_call_block_ref r "
+    "JOIN nous_system.model_text_block b ON b.agent_id = r.agent_id AND b.hash = r.block_hash "
+    f"WHERE r.call_id = :call_id AND r.agent_id = :agent_id ORDER BY {_PART_ORDER}, r.ord"
+)
+# One block's body: the ref's primary key (call_id, part, ord), then the block's (agent_id, hash).
+_LOAD_ONE = text(
+    "SELECT b.body FROM nous_system.model_call_block_ref r "
+    "JOIN nous_system.model_text_block b ON b.agent_id = r.agent_id AND b.hash = r.block_hash "
+    "WHERE r.call_id = :call_id AND r.agent_id = :agent_id AND r.part = :part AND r.ord = :ord"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class BlockInfo:
+    """One block of a call, without its body: its place in the call, its length, and how many of the agent's calls
+    (this one included) sent the same block."""
+
+    part: str
+    ord: int
+    size_chars: int
+    reused_by: int
 
 
 def _json(value: Any) -> str:
@@ -306,6 +342,22 @@ class TextStore:
         for part, body in rows:
             loaded.setdefault(part, []).append(body)
         return loaded
+
+    async def describe(self, call_id: uuid.UUID) -> list[BlockInfo]:
+        """The blocks of call ``call_id`` without their bodies, in the order system, messages, tools, response, then
+        ``ord``; empty for a call with no text or another agent's call."""
+        async with self._database.session() as session:
+            await session.execute(_READ_TIMEOUT)
+            rows = (await session.execute(_DESCRIBE, {"call_id": call_id, "agent_id": self._agent_id})).all()
+        return [BlockInfo(part, ord_, size_chars, reused_by) for part, ord_, size_chars, reused_by in rows]
+
+    async def load_one(self, call_id: uuid.UUID, part: str, ord_: int) -> str | None:
+        """The body of one block of call ``call_id``, the one at ``(part, ord_)``; None when the call has no such
+        block or is another agent's."""
+        params = {"call_id": call_id, "agent_id": self._agent_id, "part": part, "ord": ord_}
+        async with self._database.session() as session:
+            await session.execute(_READ_TIMEOUT)
+            return (await session.execute(_LOAD_ONE, params)).scalar_one_or_none()
 
     async def _prepare(self, raw: str, is_json: bool = False) -> tuple[str, str]:
         """``prepare_block`` of ``raw``, from the LRU when the same raw text (of the same kind, plain or JSON) was

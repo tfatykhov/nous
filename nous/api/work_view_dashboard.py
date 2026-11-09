@@ -3,10 +3,11 @@ GET /dashboard/model-calls).
 
 Pure functions of ``(session, agent_id, params)``: parameter parsing, SQL and shaping. ``nous/api/rest.py`` only
 routes to them. They read the Phase 1 tables (``nous_system.agent_turn_log`` and ``nous_system.tool_call_log``,
-migration 100; ``nous_system.model_call_log``, migration 101) and, for the trace and the titles,
-``nous_system.execution_ledger``, ``heart.episodes`` and ``heart.subtasks``, through the app's own session,
-agent-scoped, each statement under a 10-second timeout. The text they return was redacted when it was stored; it is
-returned as stored and never logged.
+migration 100; ``nous_system.model_call_log`` and ``nous_system.model_call_attempt``, migration 101) and, for the
+trace and the titles, ``nous_system.execution_ledger``, ``heart.episodes`` and ``heart.subtasks``, through the app's own
+session, agent-scoped, each statement under a 10-second timeout. A model call's stored text (migration 102) is read
+only through its ``TextStore``: the detail lists its blocks without their bodies, and one block's body is read alone.
+The text they return was redacted when it was stored; it is returned as stored and never logged.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.api.harness_dashboard import _is_tombstone
+from nous.observability.model_call_text import BLOCK_PARTS
 
 DAYS_DEFAULT = 7
 DAYS_MAX = 30
@@ -947,6 +949,12 @@ GROUP BY m.purpose
 ORDER BY calls DESC, m.purpose
 """
 
+# What _model_call_out reads of a model_call_log row ``m``: a list item's columns (the detail reads them too).
+_MODEL_CALL_COLUMNS = f"""m.id, m.started_at, m.purpose, m.label_source, m.call_kind, m.model, m.status, m.http_status,
+       m.stop_reason, m.input_uncached, m.cache_read, m.cache_write, {input_total_sql("m")} AS input_total,
+       m.output_tokens, m.duration_ms, m.attempts, m.call_count, m.session_id, m.turn_id, m.turn_number, m.is_fallback,
+       left(m.error_text, :error_chars) AS error"""
+
 # A call with a problem: it failed, was sent more than once, was sent on a fallback path, or recorded no purpose.
 # _problem names the first of these; the two must list the same reasons.
 _PROBLEM_SQL = "(m.status = 'error' OR m.attempts > 1 OR m.is_fallback OR m.label_source = 'none')"
@@ -974,10 +982,7 @@ def _model_calls_page_sql(
         where.append("(m.started_at, m.id) < (CAST(:before_ts AS timestamptz), CAST(:before_id AS uuid))")
     return (
         f"""
-SELECT m.id, m.started_at, m.purpose, m.label_source, m.call_kind, m.model, m.status, m.http_status, m.stop_reason,
-       m.input_uncached, m.cache_read, m.cache_write, {input_total_sql("m")} AS input_total, m.output_tokens,
-       m.duration_ms, m.attempts, m.session_id, m.turn_id, m.turn_number, m.is_fallback,
-       left(m.error_text, :error_chars) AS error
+SELECT {_MODEL_CALL_COLUMNS}
 FROM nous_system.model_call_log m
 WHERE """
         + "\n  AND ".join(where)
@@ -1019,6 +1024,7 @@ def _model_call_out(row: Mapping[str, Any]) -> dict[str, Any]:
         "output_tokens": row["output_tokens"],
         "duration_ms": row["duration_ms"],
         "attempts": row["attempts"],
+        "call_count": row["call_count"],
         "session_id": row["session_id"],
         "turn_id": str(row["turn_id"]) if row["turn_id"] is not None else None,
         "turn_number": row["turn_number"],
@@ -1094,3 +1100,174 @@ async def get_model_calls(
         "calls": [_model_call_out(row) for row in rows],
         "next_before": next_before,
     }
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# GET /dashboard/model-calls/{call_id} and /dashboard/model-calls/{call_id}/blocks/{part}/{ord}
+# ---------------------------------------------------------------------------------------------------------------------
+
+# A block's ord is an INT column: a larger one cannot exist (and would not bind).
+BLOCK_ORD_MAX = 2**31 - 1
+
+
+def parse_call_id(raw: str) -> UUID:
+    """A model call id from the path. Raises ValueError unless it is a UUID."""
+    try:
+        return UUID(raw)
+    except ValueError as exc:
+        raise ValueError("call id must be a UUID") from exc
+
+
+def disabled_model_call(text_enabled: bool) -> dict[str, Any]:
+    """The model-call detail with the model-call log off: the same keys as with it on, nothing in them."""
+    return {
+        "enabled": False,
+        "text_enabled": text_enabled,
+        "call": None,
+        "attempts": [],
+        "sections": [],
+        "turn": None,
+        "text_status": "off",
+        "blocks": [],
+    }
+
+
+# One call by its primary key, agent-scoped, with the detail's columns, whether it is older than the text retention,
+# and its session's title (the latest active titled episode, as the sessions list's title reads it). The call's
+# session is its turn's: the runner stamps both from the same turn (Runner._call_context).
+_MODEL_CALL_DETAIL_SQL = f"""
+SELECT {_MODEL_CALL_COLUMNS},
+       m.group_id, m.parent_session_id, m.frame_id, m.subtask_id, m.dag_id, m.trace_id, m.error_text,
+       m.context_window_size, m.total_tokens_est, m.utilization_pct, m.tools_count, m.tool_names, m.messages_count,
+       m.loaded_facts, m.loaded_decisions, m.loaded_procedures, m.loaded_episodes, m.cache_break,
+       m.cache_break_components, m.cache_break_tokens_lost, m.section_tokens_est,
+       m.started_at < now() - make_interval(days => :retention_days) AS past_text_retention,
+       (SELECT e.title FROM heart.episodes e
+        WHERE e.agent_id = :agent AND e.session_id = m.session_id AND e.active AND coalesce(e.title, '') <> ''
+        ORDER BY e.started_at DESC LIMIT 1) AS session_title
+FROM nous_system.model_call_log m
+WHERE m.id = CAST(:call_id AS uuid) AND m.agent_id = :agent
+"""
+# The call's HTTP attempts, on the primary key (call_id, attempt_no).
+_MODEL_CALL_ATTEMPTS_SQL = """
+SELECT a.attempt_no, a.started_at, a.duration_ms, a.http_status, a.error_type, a.error_text
+FROM nous_system.model_call_attempt a
+WHERE a.call_id = CAST(:call_id AS uuid) AND a.agent_id = :agent
+ORDER BY a.attempt_no
+"""
+
+
+def _uuid_str(value: UUID | None) -> str | None:
+    return str(value) if value is not None else None
+
+
+async def get_model_call(
+    session: AsyncSession,
+    agent_id: str,
+    call_id: UUID,
+    *,
+    text_store: Any | None,
+    text_retention_days: int,
+) -> dict[str, Any] | None:
+    """One model call of this agent: every list field and the call's context, its HTTP attempts, its context
+    sections (``section_tokens_est``, largest first), its turn, and, when ``text_store`` is given (the text is on),
+    its stored blocks without their bodies (``TextStore.describe``). None for an unknown or another agent's call.
+
+    ``text_status``: ``off`` without a store; ``ok`` when the call has blocks; ``expired`` when it has none and is
+    older than ``text_retention_days`` (0 means the text is never swept); else ``not_recorded``."""
+    params = {"agent": agent_id, "call_id": call_id, "error_chars": ERROR_PREVIEW_CHARS}
+    await _set_timeout(session)
+    row = (
+        (await session.execute(text(_MODEL_CALL_DETAIL_SQL), {**params, "retention_days": text_retention_days}))
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        return None
+    attempts = [
+        {
+            "attempt_no": a["attempt_no"],
+            "started_at": _iso(a["started_at"]),
+            "duration_ms": a["duration_ms"],
+            "http_status": a["http_status"],
+            "error_type": a["error_type"],
+            "error_text": a["error_text"],
+        }
+        for a in (await session.execute(text(_MODEL_CALL_ATTEMPTS_SQL), params)).mappings()
+    ]
+
+    if not text_store:
+        text_status, blocks = "off", []
+    else:
+        # The store reads in a session of its own, under the same timeout (TextStore.describe).
+        blocks = [
+            {
+                "part": b.part,
+                "ord": b.ord,
+                "size_chars": b.size_chars,
+                "tokens_est": b.size_chars // 4,
+                "reused_by": b.reused_by,
+            }
+            for b in await text_store.describe(call_id)
+        ]
+        if blocks:
+            text_status = "ok"
+        elif text_retention_days > 0 and row["past_text_retention"]:
+            text_status = "expired"
+        else:
+            text_status = "not_recorded"
+
+    sections = sorted((row["section_tokens_est"] or {}).items(), key=lambda item: (-item[1], item[0]))
+    return {
+        "enabled": True,
+        "text_enabled": bool(text_store),
+        "call": {
+            **_model_call_out(row),
+            "group_id": _uuid_str(row["group_id"]),
+            "is_fallback": row["is_fallback"],
+            "parent_session_id": row["parent_session_id"],
+            "frame_id": row["frame_id"],
+            "subtask_id": _uuid_str(row["subtask_id"]),
+            "dag_id": _uuid_str(row["dag_id"]),
+            "trace_id": row["trace_id"],
+            "error_text": row["error_text"],
+            "context_window_size": row["context_window_size"],
+            "total_tokens_est": row["total_tokens_est"],
+            "utilization_pct": row["utilization_pct"],
+            "tools_count": row["tools_count"],
+            "tool_names": row["tool_names"],
+            "messages_count": row["messages_count"],
+            "loaded_facts": row["loaded_facts"],
+            "loaded_decisions": row["loaded_decisions"],
+            "loaded_procedures": row["loaded_procedures"],
+            "loaded_episodes": row["loaded_episodes"],
+            "cache_break": row["cache_break"],
+            "cache_break_components": row["cache_break_components"],
+            "cache_break_tokens_lost": row["cache_break_tokens_lost"],
+        },
+        "attempts": attempts,
+        "sections": [{"name": name, "tokens_est": tokens} for name, tokens in sections],
+        "turn": (
+            None
+            if row["turn_id"] is None
+            else {
+                "turn_id": str(row["turn_id"]),
+                "session_id": row["session_id"],
+                "session_title": row["session_title"],
+            }
+        ),
+        "text_status": text_status,
+        "blocks": blocks,
+    }
+
+
+async def get_block(text_store: Any, call_id: UUID, part: str, ord_: int) -> dict[str, Any] | None:
+    """One stored block of a model call, with its body (``TextStore.load_one``: a primary-key lookup of that block
+    alone, agent-scoped by the store). None, before any query, for a ``part`` outside system, messages, tools and
+    response or an ``ord_`` the column cannot hold; None when the call has no such block or is another agent's."""
+    if part not in BLOCK_PARTS or not 0 <= ord_ <= BLOCK_ORD_MAX:
+        return None
+    body = await text_store.load_one(call_id, part, ord_)
+    if body is None:
+        return None
+    return {"part": part, "ord": ord_, "size_chars": len(body), "body": body}
