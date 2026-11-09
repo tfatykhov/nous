@@ -69,8 +69,8 @@ describe('Model calls list', () => {
     const main = await screen.findByRole('button', { name: /main loop/ });
     expect(main.textContent).toContain('1,234');
     const emb = screen.getByRole('button', { name: /embedding/ });
-    expect(emb.textContent).toContain('per minute');
-    expect(main.textContent).not.toContain('per minute');
+    expect(emb.textContent).toContain('minute totals');
+    expect(main.textContent).not.toContain('minute totals');
     await fireEvent.click(emb);
     await waitFor(() => expect(lastList().searchParams.get('purpose')).toBe('embedding'));
     expect(location.hash).toBe('#/model-calls?purpose=embedding');
@@ -583,5 +583,92 @@ describe('Model calls fix round 1', () => {
     d.open = true; d.dispatchEvent(new Event('toggle'));
     await screen.findByText('sys text');
     expect(urls.filter((u) => u.includes('/blocks/system/0')).length).toBe(2);
+  });
+});
+
+describe('Model calls PR4 fix round', () => {
+  const ID0 = '00000000-0000-4000-8000-000000000000';
+  const cursor = '2026-11-07T00:00:00+00:00|' + ID2;
+  const hrefs = (c: HTMLElement) => Array.from(c.querySelectorAll('a.row')).map((a) => a.getAttribute('href')?.split('?')[0]);
+  const ids = (...xs: string[]) => xs.map((id) => `#/model-calls/c/${id}`);
+  beforeEach(() => { respond = () => ({ body: list([]) }); install(); location.hash = ''; initRouter(); go('#/model-calls'); });
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+  it('a row that falls off page one when newer calls arrive stays listed above the loaded pages', async () => {
+    let polls = 0;
+    respond = (u) => {
+      if (u.includes('before=')) return { body: list([row(ID3)]) };
+      polls += 1;
+      return { body: polls === 1 ? list([row(ID1), row(ID2)], { next_before: cursor }) : list([row(ID0), row(ID1)], { next_before: cursor }) };
+    };
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { container } = render(ModelCalls);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    await waitFor(() => expect(container.querySelectorAll('a.row').length).toBe(3));
+    await vi.advanceTimersByTimeAsync(60_000);
+    await waitFor(() => expect(polls).toBe(2));
+    await vi.advanceTimersByTimeAsync(50);
+    expect(hrefs(container)).toEqual(ids(ID0, ID1, ID2, ID3));
+  });
+
+  it('without a loaded page there is no seam: a poll replaces page one and the list does not grow', async () => {
+    let polls = 0;
+    respond = () => {
+      polls += 1;
+      return { body: polls === 1 ? list([row(ID1), row(ID2)], { next_before: cursor }) : list([row(ID0), row(ID1)], { next_before: cursor }) };
+    };
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { container } = render(ModelCalls);
+    await waitFor(() => expect(container.querySelectorAll('a.row').length).toBe(2));
+    await vi.advanceTimersByTimeAsync(60_000);
+    await waitFor(() => expect(polls).toBe(2));
+    await vi.advanceTimersByTimeAsync(50);
+    expect(hrefs(container)).toEqual(ids(ID0, ID1));
+  });
+
+  it('a filter change whose page one fails never folds the old filters\' rows into the new list', async () => {
+    let errorCalls = 0;
+    respond = (u) => {
+      if (u.includes('status=error')) {
+        errorCalls += 1;
+        return errorCalls <= 4 ? { status: 500, body: {} } : { body: list([row(ID0, { status: 'error' })]) };
+      }
+      if (u.includes('before=')) return { body: list([row(ID3)]) };
+      return { body: list([row(ID1), row(ID2)], { next_before: cursor }) };
+    };
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { container } = render(ModelCalls);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    await waitFor(() => expect(container.querySelectorAll('a.row').length).toBe(3));
+    await fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'error' } });
+    await vi.advanceTimersByTimeAsync(8_000); // apiGet gives up after 1 + 2 + 4 s
+    await waitFor(() => expect(errorCalls).toBe(4));
+    await vi.advanceTimersByTimeAsync(60_000);
+    await waitFor(() => expect(errorCalls).toBe(5));
+    await vi.advanceTimersByTimeAsync(50);
+    expect(hrefs(container)).toEqual(ids(ID0));
+  });
+
+  it('the Loading… cue shows for the first load but not for a background poll', async () => {
+    respond = () => ({ body: list([row(ID1)]) });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { container } = render(ModelCalls);
+    await waitFor(() => expect(container.querySelector('a.row')).not.toBeNull());
+    vi.stubGlobal('fetch', vi.fn(() => { urls.push('poll'); return new Promise<Response>(() => {}); }));
+    await vi.advanceTimersByTimeAsync(60_000);
+    await waitFor(() => expect(urls).toContain('poll'));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(container.querySelector('.loading')).toBeNull();
+  });
+
+  it('keeps the page heading while a call is open', async () => {
+    respond = (u) => ({ body: u.startsWith(`/dashboard/model-calls/${ID1}`) ? detail() : list([row(ID1)]) });
+    go(`#/model-calls/c/${ID1}`);
+    const { container } = render(ModelCalls);
+    await screen.findByRole('link', { name: /Back to calls/ });
+    // The list column is hidden on a phone while a call is open, so the heading must live outside it.
+    expect(container.querySelectorAll('h1')).toHaveLength(1);
+    expect(container.querySelector('.listcol h1')).toBeNull();
+    expect(screen.getByRole('heading', { level: 1, name: 'Model calls' })).toBeTruthy();
   });
 });

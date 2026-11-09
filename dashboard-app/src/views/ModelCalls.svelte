@@ -29,6 +29,10 @@
 <div class="mc">
   <SubNav {items} {current} label="Model calls views" />
 
+  {#if state && (view?.view === 'list' || view?.view === 'cache')}
+    <h1>Model calls</h1>
+  {/if}
+
   {#if state && view?.view === 'list'}
     <div class="split" class:open={callId !== null}>
       <div class="listcol"><CallList filters={state.filters} selectedId={callId} /></div>
@@ -40,10 +44,7 @@
       {/if}
     </div>
   {:else if view?.view === 'cache'}
-    <div>
-      <h1>Model calls</h1>
-      <Cache embedded />
-    </div>
+    <Cache embedded />
   {:else if view?.view === 'notfound'}
     <p class="gone" role="status">Nothing here. <a href={routeHref('model-calls')}>Back to calls</a></p>
   {/if}

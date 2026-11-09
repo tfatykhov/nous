@@ -224,6 +224,7 @@
   .waste p { margin: 0; font-size: 0.9375rem; line-height: 1.5; color: var(--muted); }
   .waste .big { font-size: 1.75rem; font-weight: 700; color: var(--text); min-width: 4rem; }
   @media (max-width: 768px) {
+    a.fail { min-height: 44px; }
     .two { grid-template-columns: minmax(0, 1fr); }
     .refresh, select { min-height: 44px; }
   }

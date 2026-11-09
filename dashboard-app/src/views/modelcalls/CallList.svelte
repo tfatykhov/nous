@@ -23,11 +23,25 @@
 
   let key = $derived(new URLSearchParams(modelCallQuery(filters)).toString());
 
+  // The page one the last fetch returned, with the filters it was fetched for. When a poll replaces page one, the
+  // rows that fell off it (newer calls pushed them past the seam) are folded into the front of the loaded pages, so
+  // the list has no gap. Only while a later page is loaded, and only for the same filters.
+  let lastPage: { key: string; calls: ModelCallRow[] } | null = null;
+
   const store = usePoll(
-    makePollStore<ModelCallsData>(
-      (signal) => apiGet<ModelCallsData>(`/dashboard/model-calls?${key}`, { signal }),
-      60000,
-    ),
+    makePollStore<ModelCallsData>((signal) => {
+      const k = key;
+      return apiGet<ModelCallsData>(`/dashboard/model-calls?${k}`, { signal }).then((d) => {
+        if (lastPage?.key === k && moreCursor !== undefined) {
+          const seen = new Set(d.calls.map((c) => c.id));
+          const have = new Set(extra.map((c) => c.id));
+          const fell = lastPage.calls.filter((c) => !seen.has(c.id) && !have.has(c.id));
+          if (fell.length > 0) extra = [...fell, ...extra];
+        }
+        lastPage = { key: k, calls: d.calls };
+        return d;
+      });
+    }, 60000),
   );
 
   let extra = $state<ModelCallRow[]>([]);
@@ -113,12 +127,9 @@
 
 <div class="list">
   <header class="head">
-    <div>
-      <h1>Model calls</h1>
-      <p class="subtitle">Every call Nous makes to a model, background ones included. Full prompt and response for 7 days, numbers for 30.</p>
-    </div>
+    <p class="subtitle">Every call Nous makes to a model, background ones included. Full prompt and response for 7 days, numbers for 30.</p>
     <div class="head-right">
-      {#if $store.loading}<span class="loading" role="status">Loading…</span>{/if}
+      {#if $store.loading && (!data || refetching)}<span class="loading" role="status">Loading…</span>{/if}
       <StaleBadge state={$store} />
     </div>
   </header>
@@ -130,7 +141,7 @@
       {#each data.purposes as p (p.purpose)}
         <button type="button" class="chip" class:on={filters.purpose === p.purpose} aria-pressed={filters.purpose === p.purpose}
           onclick={() => go({ purpose: filters.purpose === p.purpose ? '' : p.purpose })}>
-          {label(p.purpose)} <span class="n">{fmt(p.calls)}</span>{#if p.bucketed} <span class="note">per minute</span>{/if}
+          {label(p.purpose)} <span class="n">{fmt(p.calls)}</span>{#if p.bucketed} <span class="note">minute totals</span>{/if}
         </button>
       {/each}
     </section>
@@ -195,7 +206,6 @@
   .list { display: flex; flex-direction: column; gap: 0.875rem; min-width: 0; }
   .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; }
-  h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em; margin: 0.25rem 0; }
   .subtitle { color: var(--muted); font-size: 0.9375rem; margin: 0; max-width: 75ch; }
   .muted { color: var(--muted); font-size: 0.8125rem; margin: 0; }
   .loading { color: var(--muted); font-size: 0.8125rem; }
@@ -229,4 +239,7 @@
   .btn { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.875rem; min-height: 36px; }
   .btn:disabled { opacity: 0.6; cursor: default; }
   .err { color: var(--red); font-size: 0.875rem; }
+  @media (max-width: 768px) {
+    .chip, .btn, select { min-height: 44px; }
+  }
 </style>
