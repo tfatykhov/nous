@@ -247,6 +247,11 @@ calls AS (
     FROM nous_system.tool_call_log c
     JOIN turns t ON t.id = c.turn_id
     WHERE c.agent_id = :agent
+      -- Redundant, so it can only narrow the scan. The runner stamps a turn's start before any of its calls start
+      -- (both datetime.now), and a call written without a start gets now() when written, later still, so every
+      -- call of a window turn is itself in the window. Only a wall-clock step back between the two, at the very
+      -- edge of the window, could drop one.
+      AND c.started_at >= now() - make_interval(days => :days)
 ),
 call_stats AS (
     SELECT session_id, count(*) AS tool_calls, count(*) FILTER (WHERE is_error) AS errors,
@@ -475,6 +480,9 @@ trace_calls AS (
     FROM nous_system.tool_call_log c
     JOIN trace_turns tt ON tt.id = c.turn_id
     WHERE c.agent_id = :agent
+      -- Redundant, so it can only narrow the scan to the session's calls. The runner writes a turn's calls with
+      -- the turn's own session id (one turn-local value), and a synthetic turn is made of this session's calls.
+      AND c.session_id = :sid
 ),
 first_turn AS (
     SELECT t.parent_session_id, t.work_kind, t.trigger_text
