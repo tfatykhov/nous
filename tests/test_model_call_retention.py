@@ -143,7 +143,11 @@ class _Database:
         yield self
 
     async def execute(self, statement: Any, params: dict) -> SimpleNamespace:
-        table = str(statement).split("FROM nous_system.", 1)[1].split()[0]
+        sql = str(statement)
+        if "UPDATE nous_system." in sql:  # the full-result sweep: recorded as <table>.result_text
+            table = sql.split("UPDATE nous_system.", 1)[1].split()[0] + ".result_text"
+        else:
+            table = sql.split("FROM nous_system.", 1)[1].split()[0]
         if table in self.fail_on:
             self.passes.set()
             raise ConnectionError(f"{table} is down in this test")

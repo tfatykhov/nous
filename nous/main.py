@@ -302,7 +302,12 @@ async def _work_view_retention_loop(settings: Settings, database: Database) -> N
     tool-call and turn rows while the tool-call log is on, the model-call rows while the model-call log is on, the
     model-call text whatever its flag says, each by its own retention and in its own try, so one failing sweep never
     skips another."""
-    from nous.observability.work_view_retention import sweep_model_call_text, sweep_model_calls, sweep_tool_calls
+    from nous.observability.work_view_retention import (
+        sweep_model_call_text,
+        sweep_model_calls,
+        sweep_tool_call_text,
+        sweep_tool_calls,
+    )
 
     tool_calls, model_calls, model_call_text = _work_view_sweeps(settings)
     # Sweep once at startup, THEN daily, as the retrieval-log loop does: a process restarted more often than once a
@@ -327,6 +332,19 @@ async def _work_view_retention_loop(settings: Settings, database: Database) -> N
                 except Exception:
                     # WARNING, not DEBUG: a sweep that keeps failing lets both tables grow without bound.
                     logger.warning("F108: tool-call retention sweep failed", exc_info=True)
+                if settings.model_call_text_retention_days > 0:
+                    # The full results go by the text retention, whatever the text flag says.
+                    try:
+                        days = settings.model_call_text_retention_days
+                        cleared = await sweep_tool_call_text(database, settings.agent_id, days)
+                        logger.info(
+                            "F108: tool_call_log result_text sweep (>%dd, agent=%s) cleared %s",
+                            days,
+                            settings.agent_id,
+                            cleared,
+                        )
+                    except Exception:
+                        logger.warning("F108: tool-call full-result sweep failed", exc_info=True)
             if model_calls:
                 try:
                     days = settings.model_call_retention_days

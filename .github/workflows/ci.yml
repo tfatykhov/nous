@@ -129,7 +129,7 @@ jobs:
           psql -f sql/init.sql
           psql -f sql/seed.sql
 
-      - name: Apply the migrations up to 101 (as the superuser, with the application's migrator)
+      - name: Apply the migrations up to 104 (as the superuser, with the application's migrator)
         env:
           DB_HOST: localhost
           DB_PORT: "5432"
@@ -138,8 +138,10 @@ jobs:
           DB_NAME: nous
         # db_roles.sql needs the tables the scorer reads: 087 and 088 (scoring), 090 (nous_system.check_audits),
         # and every table the reader reads: 099 (nous_system.memory_write_health_daily), 100
-        # (nous_system.tool_call_log) and 101 (nous_system.model_call_log, nous_system.model_call_attempt)
-        run: python scripts/ci/apply_migrations.py --max-version 101
+        # (nous_system.tool_call_log) and 101 (nous_system.model_call_log, nous_system.model_call_attempt), and the
+        # column db_roles.sql excludes from the tool_call_log grant: 104 (tool_call_log.result_text). 102 and 103 go
+        # in on the way (the migrator applies every version up to the cap)
+        run: python scripts/ci/apply_migrations.py --max-version 104
 
       - name: Create the database roles and check them
         env:
@@ -150,10 +152,11 @@ jobs:
           docker exec -i -e NOUS_APP_DB_PASSWORD -e NOUS_SCORER_DB_PASSWORD -e NOUS_READER_DB_PASSWORD ${{ job.services.postgres.id }} psql -U nous -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/db_roles.sql
           docker exec -i ${{ job.services.postgres.id }} psql -U nous_admin -d nous -X -v ON_ERROR_STOP=1 -f - < scripts/ops/verify_db_roles.sql
 
-      - name: Undo migrations 099 to 101 so the application role applies them
-        # 099, 100 and 101 went in above as the superuser because db_roles.sql names a table of each. Drop their
-        # tables (all of them: 100 and 101 create with IF NOT EXISTS, so a leftover table would be skipped, and 101's
-        # attempts before the calls they reference) and their records as the administrator, so the next step applies
+      - name: Undo migrations 099 to 104 so the application role applies them
+        # 099 to 104 went in above as the superuser (db_roles.sql names a table of 099 to 101 and a column of 104). Drop
+        # their tables (all of them: 100 and 101 create with IF NOT EXISTS, so a leftover table would be skipped, 101's
+        # attempts before the calls they reference, and 102's refs before the blocks they reference; 104 adds a column
+        # to 100's table, which goes with it) and their records as the administrator, so the next step applies
         # them as nous_app, as a deployment does; the role script's re-run then grants the reader again and verify
         # checks it.
         run: >-
@@ -166,6 +169,10 @@ jobs:
           -c "DROP TABLE nous_system.model_call_attempt"
           -c "DROP TABLE nous_system.model_call_log"
           -c "DELETE FROM nous_system.schema_migrations WHERE version = '101'"
+          -c "DROP TABLE nous_system.model_call_block_ref"
+          -c "DROP TABLE nous_system.model_text_block"
+          -c "DROP TABLE nous_system.tool_note"
+          -c "DELETE FROM nous_system.schema_migrations WHERE version IN ('102', '103', '104')"
 
       - name: Apply every later migration as the application role
         env:

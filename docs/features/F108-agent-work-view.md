@@ -185,6 +185,8 @@ Model-call text is kept `NOUS_MODEL_CALL_TEXT_RETENTION_DAYS` (7) days, whatever
 
 Each sweep runs in a try of its own, so one failing sweep never skips another.
 
+The full result of a call (`tool_call_log.result_text`, migration 104) goes by the model-call text retention, `NOUS_MODEL_CALL_TEXT_RETENTION_DAYS` (7), not by the 30 days of the row: the same loop, in the tool-call branch, sets it to NULL on this agent's rows older than that (`sweep_tool_call_text`, an UPDATE), and the row and its 500-character preview stay. It is stored only when the preview was cut, as the tool's output before SmartCompress, redacted and cut at 20,000 characters (`RESULT_TEXT_MAX_CHARS`), and never for an error call. The reader never reads it (`db_roles.sql` excludes the column), and the trace marks a call that has one with `result_full`; `GET /dashboard/work/calls/{call_id}/result` returns it for one call. A limit: text written while the tool-call log was on and left behind when it was turned off is cleared only when the log is on again and the loop runs, or by the 30-day row delete; the other work-view rows behave the same.
+
 ## Who reads the rows
 
 The dashboards, and Nous itself: the `db_query` reader (`nous_reader`, `scripts/ops/db_roles.sql` section 5d) may read `tool_call_log`, `model_call_log` and `model_call_attempt`, so Nous can look up its own tool calls, their reasons and its own model calls. It never reads `agent_turn_log`, which holds message text, nor the model-call text (`model_text_block` and `model_call_block_ref`, the full prompts and responses): `db_roles.sql` lists none of them. This is the one exception to "dashboards read the observability tables, the agent never does".

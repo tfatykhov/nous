@@ -5,7 +5,9 @@ started more than ``NOUS_TOOL_CALL_RETENTION_DAYS`` days ago; ``sweep_model_call
 ``nous_system.model_call_log`` rows that started more than ``NOUS_MODEL_CALL_RETENTION_DAYS`` days ago, and their
 ``model_call_attempt`` rows go with them (``ON DELETE CASCADE``); ``sweep_model_call_text`` deletes its
 ``nous_system.model_call_block_ref`` rows older than ``NOUS_MODEL_CALL_TEXT_RETENTION_DAYS`` days, then its
-``nous_system.model_text_block`` rows that no call references and no store has used for an hour. main.py runs each
+``nous_system.model_text_block`` rows that no call references and no store has used for an hour;
+``sweep_tool_call_text`` sets ``tool_call_log.result_text`` (the full result of a call, migration 104) to NULL on rows
+older than ``NOUS_MODEL_CALL_TEXT_RETENTION_DAYS`` days and keeps the rows. main.py runs each
 once a day (``_work_view_retention_loop``): the first two while their log is on, the text one whatever its flag says,
 so text turned off still goes on time (``has_model_call_text`` decides whether the loop starts with every log off).
 All raise on failure; the loop logs it at WARNING.
@@ -32,6 +34,12 @@ _DELETE_TURNS = text(
 _DELETE_MODEL_CALLS = text(
     "DELETE FROM nous_system.model_call_log "
     "WHERE agent_id = :agent_id AND started_at < now() - make_interval(days => :d)"
+)
+# The full result (migration 104) goes by the text retention; the row and its preview stay. IS NOT NULL keeps the
+# rowcount to the rows cleared. It uses (agent_id, started_at DESC) like the delete above.
+_CLEAR_RESULT_TEXT = text(
+    "UPDATE nous_system.tool_call_log SET result_text = NULL "
+    "WHERE agent_id = :agent_id AND started_at < now() - make_interval(days => :d) AND result_text IS NOT NULL"
 )
 # The text (migration 102). A ref is as old as its call's text write; refs also go with their call (ON DELETE CASCADE).
 _DELETE_TEXT_REFS = text(
@@ -72,6 +80,19 @@ async def sweep_tool_calls(database: Any, agent_id: str, days: int) -> dict[str,
         turns = await session.execute(_DELETE_TURNS, params)
         await session.commit()
     return {"tool_call_log": calls.rowcount, "agent_turn_log": turns.rowcount}
+
+
+async def sweep_tool_call_text(database: Any, agent_id: str, days: int) -> dict[str, int]:
+    """Set ``agent_id``'s ``tool_call_log.result_text`` to NULL on rows that started more than ``days`` days ago.
+    The rows stay. Returns ``{"tool_call_log": rows cleared}``. Raises ``ValueError`` for ``days`` below 1 (a zero-day
+    interval would clear every row), and whatever the database raises (then nothing is cleared).
+    """
+    if days < 1:
+        raise ValueError(f"tool-call text retention must be at least 1 day, got {days}")
+    async with database.session() as session:
+        cleared = await session.execute(_CLEAR_RESULT_TEXT, {"agent_id": agent_id, "d": days})
+        await session.commit()
+    return {"tool_call_log": cleared.rowcount}
 
 
 async def sweep_model_calls(database: Any, agent_id: str, days: int) -> dict[str, int]:

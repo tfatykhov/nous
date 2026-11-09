@@ -547,7 +547,7 @@ BEGIN
             ('nous_system.execution_dags', ARRAY['token_budget']),
             ('nous_system.execution_ledger', ARRAY[]::text[]),
             ('nous_system.memory_write_health_daily', ARRAY[]::text[]),
-            ('nous_system.tool_call_log', ARRAY[]::text[]),
+            ('nous_system.tool_call_log', ARRAY['result_text']),
             ('nous_system.model_call_log', ARRAY[]::text[]),
             ('nous_system.model_call_attempt', ARRAY[]::text[])
 -- reader tables end

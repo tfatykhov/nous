@@ -48,6 +48,8 @@ _WORK_KIND_BY_CONTEXT: dict[str, str] = {
     "background": "background_check",
     "dag_summary": "background_check",
 }
+# The full result kept beside a cut preview (tool_call_log.result_text, migration 104): redacted, head and tail kept.
+RESULT_TEXT_MAX_CHARS = 20_000
 # A tool error's text has no setting of its own: the model-call log clips its error text at the same length.
 ERROR_TEXT_MAX_CHARS = 1000
 # The turn row's bounds: what started the turn, the reply, and the recalled ids kept per kind of memory.
@@ -148,6 +150,8 @@ class ToolCallRecord:
     duration_ms: int | None = None
     started_at: datetime | None = None
     ledger_entry_id: UUID | None = None
+    # The recorder's: it sets this from ``result_preview`` when that was cut. A caller leaves it None.
+    result_text: str | None = None
 
 
 _COLUMNS: tuple[str, ...] = ("agent_id", *(f.name for f in fields(ToolCallRecord)))
@@ -240,6 +244,12 @@ class ToolCallRecorder:
             params["agent_id"] = self._agent_id
             params["input_text"] = detail_text(rec.input_text, self._input_cap)
             params["result_preview"] = detail_text(rec.result_preview, self._result_cap)
+            # The full copy only where the preview lost text, and never for an error (error_text holds its message).
+            params["result_text"] = (
+                detail_text(rec.result_preview, RESULT_TEXT_MAX_CHARS)
+                if len(rec.result_preview) > self._result_cap and not rec.is_error
+                else None
+            )
             if rec.reason is not None:
                 params["reason"] = detail_text(rec.reason, self._reason_cap)
             if rec.error_text is not None:

@@ -213,6 +213,23 @@ async def test_reader_can_read_tool_call_log_but_not_turn_log(db, reader_role, r
             )
         ).all()
     assert (calls, turns) == (True, False)
+    # the full result of a call is not for the reader: column by column, the result_text column only
+    async with db.engine.connect() as conn:
+        granted = dict(
+            (
+                await conn.execute(
+                    text(
+                        "SELECT a.attname, has_column_privilege(:r, 'nous_system.tool_call_log', a.attname, 'SELECT') "
+                        "FROM pg_attribute a WHERE a.attrelid = 'nous_system.tool_call_log'::regclass "
+                        "AND a.attnum > 0 AND NOT a.attisdropped"
+                    ),
+                    {"r": reader_role},
+                )
+            ).all()
+        )
+    assert granted["result_text"] is False
+    assert granted["result_preview"] is True  # the positive control: the cut preview stays readable
+    assert [name for name, ok in granted.items() if not ok] == ["result_text"]
     # logged in as the reader
     conn = await asyncpg.connect(**reader_connect_args(reader_settings))
     try:
