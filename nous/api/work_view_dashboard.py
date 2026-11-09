@@ -1,4 +1,5 @@
-"""F108 Phase 2: the Work view's read-only endpoints (GET /dashboard/work/...).
+"""F108 Phase 2: the Work view's and the model-call view's read-only endpoints (GET /dashboard/work/... and
+GET /dashboard/model-calls).
 
 Pure functions of ``(session, agent_id, params)``: parameter parsing, SQL and shaping. ``nous/api/rest.py`` only
 routes to them. They read the Phase 1 tables (``nous_system.agent_turn_log`` and ``nous_system.tool_call_log``,
@@ -166,15 +167,21 @@ def parse_sessions_query(params: Mapping[str, str]) -> dict[str, Any]:
     }
 
 
+def _parse_uuid_cursor(raw: str | None, what: str) -> tuple[datetime, str] | None:
+    """A :func:`parse_cursor` cursor whose key is ``what`` (a UUID), the key returned in its canonical form."""
+    cursor = parse_cursor(raw)
+    if cursor is None:
+        return None
+    try:
+        return cursor[0], str(UUID(cursor[1]))
+    except ValueError as exc:
+        raise ValueError(f"cursor key must be a {what} (a UUID)") from exc
+
+
 def parse_trace_query(params: Mapping[str, str]) -> dict[str, Any]:
     """The ``limit`` and ``after`` keyword arguments of :func:`get_trace` from the request's query. The cursor's key
     is a turn id, so it must be a UUID (returned in its canonical form). Raises ValueError on a bad value."""
-    after = parse_cursor(params.get("after"))
-    if after is not None:
-        try:
-            after = (after[0], str(UUID(after[1])))
-        except ValueError as exc:
-            raise ValueError("cursor key must be a turn id (a UUID)") from exc
+    after = _parse_uuid_cursor(params.get("after"), "turn id")
     return {"limit": parse_limit(params.get("limit"), TRACE_LIMIT_DEFAULT, TRACE_LIMIT_MAX), "after": after}
 
 
@@ -867,4 +874,223 @@ async def get_patterns(session: AsyncSession, agent_id: str, *, days: int) -> di
             "repeated_calls": totals["repeated_calls"],
             "retried_and_failed_again": totals["retried_and_failed_again"],
         },
+    }
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# GET /dashboard/model-calls
+# ---------------------------------------------------------------------------------------------------------------------
+
+MODEL_CALLS_LIMIT_DEFAULT = 50
+MODEL_CALLS_LIMIT_MAX = 100
+ERROR_PREVIEW_CHARS = 300
+# The status filter: a stored status, or ``problem`` (the calls that have a ``problem`` text, see _PROBLEM_SQL).
+MODEL_CALL_STATUSES: tuple[str, ...] = ("ok", "error", "cancelled", "problem")
+# The call kinds the recorder counts per minute: one row per minute, purpose, model and status, holding call_count
+# calls, their tokens summed in input_uncached.
+BUCKET_CALL_KINDS: tuple[str, ...] = ("embedding", "rerank")
+
+
+def parse_model_calls_query(params: Mapping[str, str]) -> dict[str, Any]:
+    """The keyword arguments of :func:`get_model_calls`, all but ``text_enabled``, from the request's query. The
+    cursor's key is a call id, so it must be a UUID (returned in its canonical form). Raises ValueError on a bad
+    value."""
+    status = params.get("status") or None
+    if status is not None and status not in MODEL_CALL_STATUSES:
+        raise ValueError(f"status must be one of {', '.join(MODEL_CALL_STATUSES)}")
+    raw_turn = params.get("turn_id") or None
+    try:
+        turn_id = UUID(raw_turn) if raw_turn is not None else None
+    except ValueError as exc:
+        raise ValueError("turn_id must be a UUID") from exc
+    return {
+        "days": parse_days(params.get("days"), DAYS_DEFAULT, DAYS_MAX),
+        "purpose": params.get("purpose") or None,
+        "model": params.get("model") or None,
+        "session_id": params.get("session_id") or None,
+        "turn_id": turn_id,
+        "status": status,
+        "limit": parse_limit(params.get("limit"), MODEL_CALLS_LIMIT_DEFAULT, MODEL_CALLS_LIMIT_MAX),
+        "before": _parse_uuid_cursor(params.get("before"), "call id"),
+    }
+
+
+def disabled_model_calls(days: int, text_enabled: bool) -> dict[str, Any]:
+    """The model-call list with the model-call log off: the same keys as with it on, every list empty."""
+    return {
+        "enabled": False,
+        "text_enabled": text_enabled,
+        "window_days": days,
+        "purposes": [],
+        "calls": [],
+        "next_before": None,
+    }
+
+
+# This agent's model calls of the window. Every statement carries both bounds, so it is a range scan of
+# idx_model_call_log_agent_started (agent_id, started_at DESC), or, with a filter, of
+# idx_model_call_log_agent_purpose_started, idx_model_call_log_agent_session_started or idx_model_call_log_turn.
+_MODEL_CALLS_WINDOW = "m.agent_id = :agent AND m.started_at >= now() - make_interval(days => :days)"
+
+# The purpose chips: every call of the window, whatever the filters. A minute bucket counts as its call_count calls
+# (failed ones too); input_total sums the generated column, so a call with no usage adds 0, never null.
+_MODEL_CALL_PURPOSES_SQL = f"""
+SELECT m.purpose,
+       sum(m.call_count) AS calls,
+       sum(m.input_total) AS input_total,
+       coalesce(sum(m.output_tokens), 0) AS output_tokens,
+       coalesce(sum(m.call_count) FILTER (WHERE m.status = 'error'), 0) AS errors,
+       bool_or(m.call_kind = ANY(CAST(:bucket_kinds AS text[]))) AS bucketed
+FROM nous_system.model_call_log m
+WHERE {_MODEL_CALLS_WINDOW}
+GROUP BY m.purpose
+ORDER BY calls DESC, m.purpose
+"""
+
+# A call with a problem: it failed, was sent more than once, was sent on a fallback path, or recorded no purpose.
+# _problem names the first of these; the two must list the same reasons.
+_PROBLEM_SQL = "(m.status = 'error' OR m.attempts > 1 OR m.is_fallback OR m.label_source = 'none')"
+
+
+def _model_calls_page_sql(
+    *, purpose: bool, model: bool, session_id: bool, turn_id: bool, status: str | None, before: bool
+) -> str:
+    # Minute buckets are not calls of their own: the page lists them only when the purpose filter names theirs.
+    where = [
+        _MODEL_CALLS_WINDOW,
+        "m.purpose = :purpose" if purpose else "NOT m.call_kind = ANY(CAST(:bucket_kinds AS text[]))",
+    ]
+    if model:
+        where.append("m.model = :model")
+    if session_id:
+        where.append("m.session_id = :session_id")
+    if turn_id:
+        where.append("m.turn_id = CAST(:turn_id AS uuid)")
+    if status == "problem":
+        where.append(_PROBLEM_SQL)
+    elif status is not None:
+        where.append("m.status = :status")
+    if before:
+        where.append("(m.started_at, m.id) < (CAST(:before_ts AS timestamptz), CAST(:before_id AS uuid))")
+    return (
+        f"""
+SELECT m.id, m.started_at, m.purpose, m.label_source, m.call_kind, m.model, m.status, m.http_status, m.stop_reason,
+       m.input_uncached, m.cache_read, m.cache_write, {input_total_sql("m")} AS input_total, m.output_tokens,
+       m.duration_ms, m.attempts, m.session_id, m.turn_id, m.turn_number, m.is_fallback,
+       left(m.error_text, :error_chars) AS error
+FROM nous_system.model_call_log m
+WHERE """
+        + "\n  AND ".join(where)
+        + """
+ORDER BY m.started_at DESC, m.id DESC
+LIMIT :fetch
+"""
+    )
+
+
+def _problem(row: Mapping[str, Any]) -> str | None:
+    """What went wrong with a call, the first reason of _PROBLEM_SQL that applies, else None."""
+    if row["status"] == "error":
+        return f"Failed (HTTP {row['http_status']})" if row["http_status"] is not None else "Failed"
+    if row["attempts"] > 1:
+        return f"Sent {row['attempts']} times"
+    if row["is_fallback"]:
+        return "Sent again on a fallback path"
+    if row["label_source"] == "none":
+        return "No purpose recorded"
+    return None
+
+
+def _model_call_out(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row["id"]),
+        "started_at": _iso(row["started_at"]),
+        "purpose": row["purpose"],
+        "label_source": row["label_source"],
+        "call_kind": row["call_kind"],
+        "model": row["model"],
+        "status": row["status"],
+        "http_status": row["http_status"],
+        "stop_reason": row["stop_reason"],
+        "input_uncached": row["input_uncached"],
+        "cache_read": row["cache_read"],
+        "cache_write": row["cache_write"],
+        "input_total": row["input_total"],
+        "output_tokens": row["output_tokens"],
+        "duration_ms": row["duration_ms"],
+        "attempts": row["attempts"],
+        "session_id": row["session_id"],
+        "turn_id": str(row["turn_id"]) if row["turn_id"] is not None else None,
+        "turn_number": row["turn_number"],
+        "error": row["error"],
+        "problem": _problem(row),
+    }
+
+
+async def get_model_calls(
+    session: AsyncSession,
+    agent_id: str,
+    *,
+    days: int,
+    purpose: str | None,
+    model: str | None,
+    session_id: str | None,
+    turn_id: UUID | None,
+    status: str | None,
+    limit: int,
+    before: tuple[datetime, str] | None,
+    text_enabled: bool,
+) -> dict[str, Any]:
+    """The model-call list: this agent's model calls of the last ``days`` days, every purpose (read from
+    ``model_call_log``, not only the main loop's calls), newest first, ``limit`` per page after ``before``.
+    ``purposes`` covers the whole window and ignores the filters. ``text_enabled`` is passed through for the UI."""
+    base = {"agent": agent_id, "days": days, "bucket_kinds": list(BUCKET_CALL_KINDS)}
+    await _set_timeout(session)
+
+    purposes = [
+        {
+            "purpose": row["purpose"],
+            "calls": row["calls"],
+            "input_total": row["input_total"],
+            "output_tokens": row["output_tokens"],
+            "errors": row["errors"],
+            "bucketed": row["bucketed"],
+        }
+        for row in (await session.execute(text(_MODEL_CALL_PURPOSES_SQL), base)).mappings()
+    ]
+
+    params: dict[str, Any] = {**base, "error_chars": ERROR_PREVIEW_CHARS, "fetch": limit + 1}
+    if purpose is not None:
+        params["purpose"] = purpose
+    if model is not None:
+        params["model"] = model
+    if session_id is not None:
+        params["session_id"] = session_id
+    if turn_id is not None:
+        params["turn_id"] = turn_id
+    if status is not None and status != "problem":
+        params["status"] = status
+    if before is not None:
+        params["before_ts"], params["before_id"] = before
+    sql = _model_calls_page_sql(
+        purpose=purpose is not None,
+        model=model is not None,
+        session_id=session_id is not None,
+        turn_id=turn_id is not None,
+        status=status,
+        before=before is not None,
+    )
+    rows = list((await session.execute(text(sql), params)).mappings())
+
+    next_before = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        next_before = format_cursor(rows[-1]["started_at"], str(rows[-1]["id"]))
+    return {
+        "enabled": True,
+        "text_enabled": text_enabled,
+        "window_days": days,
+        "purposes": purposes,
+        "calls": [_model_call_out(row) for row in rows],
+        "next_before": next_before,
     }

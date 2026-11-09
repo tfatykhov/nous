@@ -248,7 +248,7 @@ async def insert_ledger(
 async def insert_model_call(
     db,
     agent_id: str,
-    turn_id: uuid.UUID | None,
+    turn_id: uuid.UUID | None = None,
     *,
     session_id: str | None = None,
     purpose: str = "main_loop",
@@ -259,21 +259,37 @@ async def insert_model_call(
     output_tokens: int | None = 20,
     started_at: datetime | None = None,
     cache_write: int | None = None,
+    label_source: str = "explicit",
+    call_kind: str = "call",
+    call_count: int = 1,
+    attempts: int = 1,
+    http_status: int | None = None,
+    is_fallback: bool = False,
+    error_text: str | None = None,
+    stop_reason: str | None = None,
+    duration_ms: int | None = None,
+    turn_number: int | None = None,
+    call_id: uuid.UUID | None = None,
 ) -> uuid.UUID:
     """One ``model_call_log`` row; returns its id. ``input_total`` is the table's generated column."""
     async with db.engine.begin() as conn:
         return (
             await conn.execute(
                 text(
-                    "INSERT INTO nous_system.model_call_log (agent_id, purpose, label_source, call_kind, model, "
+                    "INSERT INTO nous_system.model_call_log (id, agent_id, purpose, label_source, call_kind, model, "
                     "session_id, turn_id, status, input_uncached, cache_read, cache_write, output_tokens, "
-                    "started_at) "
-                    "VALUES (:a, :purpose, 'explicit', 'call', :model, :s, :t, :status, :uncached, :read, :write, "
-                    ":out, :start) RETURNING id"
+                    "started_at, call_count, attempts, http_status, is_fallback, error_text, stop_reason, "
+                    "duration_ms, turn_number) "
+                    "VALUES (:id, :a, :purpose, :label, :kind, :model, :s, :t, :status, :uncached, :read, :write, "
+                    ":out, :start, :count, :attempts, :http, :fallback, :error_text, :stop, :duration, :turn_number) "
+                    "RETURNING id"
                 ),
                 {
+                    "id": call_id or uuid.uuid4(),
                     "a": agent_id,
                     "purpose": purpose,
+                    "label": label_source,
+                    "kind": call_kind,
                     "model": model,
                     "s": session_id,
                     "t": turn_id,
@@ -283,6 +299,14 @@ async def insert_model_call(
                     "write": cache_write,
                     "out": output_tokens,
                     "start": started_at or datetime.now(UTC),
+                    "count": call_count,
+                    "attempts": attempts,
+                    "http": http_status,
+                    "fallback": is_fallback,
+                    "error_text": error_text,
+                    "stop": stop_reason,
+                    "duration": duration_ms,
+                    "turn_number": turn_number,
                 },
             )
         ).scalar_one()
@@ -1746,6 +1770,523 @@ async def test_patterns_query_failure_is_a_plain_500(client, monkeypatch, caplog
 
 
 # ---------------------------------------------------------------------------------------------------------------------
+# GET /dashboard/model-calls
+# ---------------------------------------------------------------------------------------------------------------------
+
+MODEL_CALLS = "/dashboard/model-calls"
+# The brief's numbers: a cached main-loop call.
+BRIEF_TOKENS = {"input_uncached": 2, "cache_read": 46077, "cache_write": 8453, "output_tokens": 612}
+NO_TOKENS = {"input_uncached": None, "cache_read": None, "cache_write": None, "output_tokens": None}
+
+
+@pytest_asyncio.fixture
+async def mc_client(db, agent_id):
+    """The REST app with the model-call log on (the tool-call log stays off: the model-call endpoints need only
+    their own flag)."""
+    app = make_app(db, _settings(agent_id, model_call_log_enabled=True))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        yield c
+
+
+def _call_ids(body: dict) -> list[str]:
+    return [c["id"] for c in body["calls"]]
+
+
+def _purposes(body: dict) -> dict[str, dict]:
+    return {p["purpose"]: p for p in body["purposes"]}
+
+
+def test_parse_model_calls_query():
+    assert wv.parse_model_calls_query({}) == {
+        "days": 7,
+        "purpose": None,
+        "model": None,
+        "session_id": None,
+        "turn_id": None,
+        "status": None,
+        "limit": 50,
+        "before": None,
+    }
+    turn, key = uuid.uuid4(), uuid.uuid4()
+    ts = datetime(2026, 11, 8, 10, 0, 0, 1, tzinfo=UTC)
+    assert wv.parse_model_calls_query(
+        {
+            "days": "30",
+            "purpose": "chat",
+            "model": "claude-x",
+            "session_id": "intent-x:y",
+            "turn_id": str(turn).upper(),
+            "status": "problem",
+            "limit": "100",
+            "before": wv.format_cursor(ts, str(key).upper()),
+        }
+    ) == {
+        "days": 30,
+        "purpose": "chat",
+        "model": "claude-x",
+        "session_id": "intent-x:y",
+        "turn_id": turn,
+        "status": "problem",
+        "limit": 100,
+        "before": (ts, str(key)),  # the canonical form of the id
+    }
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"days": "0"},
+        {"days": "31"},
+        {"limit": "0"},
+        {"limit": "101"},
+        {"status": "x"},
+        {"status": "OK"},
+        {"turn_id": "not-a-uuid"},
+        {"before": "garbage"},
+        {"before": "2026-11-08T10:00:00+00:00|not-a-uuid"},
+        {"before": f"2026-11-08T10:00:00|{uuid.UUID(int=1)}"},
+    ],
+)
+def test_parse_model_calls_query_refuses_bad_values(params):
+    with pytest.raises(ValueError):
+        wv.parse_model_calls_query(params)
+
+
+def test_disabled_model_calls_has_the_page_keys_and_nothing_in_them():
+    assert wv.disabled_model_calls(7, False) == {
+        "enabled": False,
+        "text_enabled": False,
+        "window_days": 7,
+        "purposes": [],
+        "calls": [],
+        "next_before": None,
+    }
+    assert wv.disabled_model_calls(30, True)["text_enabled"] is True
+
+
+@pytest.mark.postgres_only
+async def test_model_calls_flag_off(db, agent_id, cleanup, monkeypatch):
+    await insert_model_call(db, agent_id, purpose="chat", started_at=_hour_ago())
+    opened = 0
+    real_session = db.session
+
+    def counting_session(*args, **kwargs):
+        nonlocal opened
+        opened += 1
+        return real_session(*args, **kwargs)
+
+    monkeypatch.setattr(db, "session", counting_session)
+    # The tool-call log on does not open the model-call endpoint.
+    off = make_app(db, _settings(agent_id, model_call_log_enabled=False, tool_call_log_enabled=True))
+    async with AsyncClient(transport=ASGITransport(app=off), base_url="http://test") as c:
+        assert await get_json(c, MODEL_CALLS) == wv.disabled_model_calls(7, False)
+        assert await get_json(c, MODEL_CALLS, days="30") == wv.disabled_model_calls(30, False)
+        assert (await c.get(MODEL_CALLS, params={"status": "x"})).status_code == 400  # parsing still applies
+    assert opened == 0
+
+    # The counter does see the handler's session when the log is on (so the zero above means something).
+    on = make_app(db, _settings(agent_id, model_call_log_enabled=True))
+    async with AsyncClient(transport=ASGITransport(app=on), base_url="http://test") as c:
+        body = await get_json(c, MODEL_CALLS)
+    assert body["enabled"] is True and len(body["calls"]) == 1 and opened == 1
+
+
+@pytest.mark.postgres_only
+async def test_model_calls_text_enabled_needs_the_setting_and_a_store(db, agent_id, cleanup, monkeypatch):
+    def app(log: bool, text_on: bool, store):
+        settings = _settings(agent_id, model_call_log_enabled=log, model_call_text_enabled=text_on)
+        mocks = (MagicMock(), MagicMock(), MagicMock(), MagicMock())
+        return create_app(*mocks, db, settings, model_call_text_store=store)
+
+    # A lazy proxy whose component is None is falsy: the handler tests truthiness, not ``is not None``.
+    empty_proxy = MagicMock()
+    empty_proxy.__bool__.return_value = False
+    cases = [
+        (True, True, MagicMock(), True),
+        (True, True, None, False),
+        (True, True, empty_proxy, False),
+        (True, False, MagicMock(), False),
+        (False, True, MagicMock(), True),  # the flag-off payload still says whether text is on
+        (False, True, None, False),
+    ]
+    for log, text_on, store, expected in cases:
+        async with AsyncClient(transport=ASGITransport(app=app(log, text_on, store)), base_url="http://test") as c:
+            body = await get_json(c, MODEL_CALLS)
+        assert (body["enabled"], body["text_enabled"]) == (log, expected), (log, text_on, store)
+
+
+@pytest.mark.postgres_only
+async def test_model_calls_numbers_and_input_total(mc_client, db, agent_id, cleanup):
+    base = _hour_ago()
+    turn = uuid.uuid4()
+    ok = await insert_model_call(
+        db,
+        agent_id,
+        turn_id=turn,
+        session_id="sess-N",
+        turn_number=4,
+        purpose="chat",
+        model="claude-opus-test",
+        stop_reason="end_turn",
+        duration_ms=4321,
+        started_at=base,
+        **BRIEF_TOKENS,
+    )
+    failed = await insert_model_call(
+        db,
+        agent_id,
+        purpose="critic",
+        model=None,
+        status="error",
+        http_status=529,
+        error_text="overloaded",
+        started_at=base + timedelta(seconds=1),
+        **NO_TOKENS,
+    )
+    body = await get_json(mc_client, MODEL_CALLS)
+    assert body["enabled"] is True and body["window_days"] == 7 and body["next_before"] is None
+    assert body["calls"] == [
+        {
+            "id": str(failed),
+            "started_at": (base + timedelta(seconds=1)).isoformat(),
+            "purpose": "critic",
+            "label_source": "explicit",
+            "call_kind": "call",
+            "model": None,
+            "status": "error",
+            "http_status": 529,
+            "stop_reason": None,
+            "input_uncached": None,
+            "cache_read": None,
+            "cache_write": None,
+            "input_total": None,  # no usage recorded: null, never the generated column's 0
+            "output_tokens": None,
+            "duration_ms": None,
+            "attempts": 1,
+            "session_id": None,
+            "turn_id": None,
+            "turn_number": None,
+            "error": "overloaded",
+            "problem": "Failed (HTTP 529)",
+        },
+        {
+            "id": str(ok),
+            "started_at": base.isoformat(),
+            "purpose": "chat",
+            "label_source": "explicit",
+            "call_kind": "call",
+            "model": "claude-opus-test",
+            "status": "ok",
+            "http_status": None,
+            "stop_reason": "end_turn",
+            "input_uncached": 2,
+            "cache_read": 46077,
+            "cache_write": 8453,
+            "input_total": 54532,
+            "output_tokens": 612,
+            "duration_ms": 4321,
+            "attempts": 1,
+            "session_id": "sess-N",
+            "turn_id": str(turn),
+            "turn_number": 4,
+            "error": None,
+            "problem": None,
+        },
+    ]
+    # The chips count the failed call's tokens as zero, never null.
+    assert _purposes(body)["critic"] == {
+        "purpose": "critic",
+        "calls": 1,
+        "input_total": 0,
+        "output_tokens": 0,
+        "errors": 1,
+        "bucketed": False,
+    }
+    assert _purposes(body)["chat"] == {
+        "purpose": "chat",
+        "calls": 1,
+        "input_total": 54532,
+        "output_tokens": 612,
+        "errors": 0,
+        "bucketed": False,
+    }
+
+
+@pytest.mark.postgres_only
+async def test_model_calls_filters(mc_client, db, agent_id, cleanup):
+    base = _hour_ago()
+    turn = uuid.uuid4()
+    at = iter(base + timedelta(seconds=i) for i in range(20))
+    chat = await insert_model_call(
+        db, agent_id, turn_id=turn, session_id="sess-F", purpose="chat", model="m-a", started_at=next(at)
+    )
+    other_turn = await insert_model_call(
+        db, agent_id, turn_id=uuid.uuid4(), session_id="sess-F", purpose="chat", model="m-b", started_at=next(at)
+    )
+    critic = await insert_model_call(db, agent_id, session_id="sess-G", purpose="critic", started_at=next(at))
+    errored = await insert_model_call(db, agent_id, purpose="critic", status="error", started_at=next(at))
+    cancelled = await insert_model_call(db, agent_id, purpose="chat", status="cancelled", started_at=next(at))
+    resent = await insert_model_call(db, agent_id, purpose="chat", attempts=2, started_at=next(at))
+    fallback = await insert_model_call(db, agent_id, purpose="chat", is_fallback=True, started_at=next(at))
+    unlabelled = await insert_model_call(db, agent_id, purpose="unlabelled", label_source="none", started_at=next(at))
+
+    async def ids(**params) -> set[str]:
+        return set(_call_ids(await get_json(mc_client, MODEL_CALLS, **params)))
+
+    every = {chat, other_turn, critic, errored, cancelled, resent, fallback, unlabelled}
+    assert await ids() == {str(i) for i in every}
+    assert await ids(purpose="critic") == {str(critic), str(errored)}
+    assert await ids(model="m-b") == {str(other_turn)}
+    assert await ids(session_id="sess-F") == {str(chat), str(other_turn)}
+    assert await ids(turn_id=str(turn)) == {str(chat)}
+    assert await ids(status="ok") == {str(i) for i in every - {errored, cancelled}}
+    assert await ids(status="error") == {str(errored)}
+    assert await ids(status="cancelled") == {str(cancelled)}
+    # problem: a failure, a re-send, a fallback, or no purpose recorded (a cancelled call is not a problem).
+    assert await ids(status="problem") == {str(errored), str(resent), str(fallback), str(unlabelled)}
+    # Filters combine.
+    assert await ids(purpose="chat", status="problem") == {str(resent), str(fallback)}
+    assert await ids(session_id="sess-F", model="m-a", turn_id=str(turn), purpose="chat") == {str(chat)}
+    assert await ids(session_id="sess-nothing") == set()
+
+
+@pytest.mark.postgres_only
+async def test_model_calls_problem_text(mc_client, db, agent_id, cleanup):
+    base = _hour_ago()
+    # Each case also carries every later reason, so only "first match wins" gives the expected text.
+    later = {"attempts": 3, "is_fallback": True, "label_source": "none"}
+    cases = [
+        ("failed with a status", {"status": "error", "http_status": 529, **later}, "Failed (HTTP 529)"),
+        ("failed with no status", {"status": "error", **later}, "Failed"),
+        ("sent three times", later, "Sent 3 times"),
+        ("fallback", {"is_fallback": True, "label_source": "none"}, "Sent again on a fallback path"),
+        ("no purpose", {"label_source": "none"}, "No purpose recorded"),
+        ("fine", {}, None),
+        ("cancelled", {"status": "cancelled"}, None),
+        ("ok with an old status", {"http_status": 200}, None),
+    ]
+    ids = []
+    for i, (_, fields, _) in enumerate(cases):
+        ids.append(
+            str(await insert_model_call(db, agent_id, purpose="chat", started_at=base + timedelta(seconds=i), **fields))
+        )
+    body = await get_json(mc_client, MODEL_CALLS)
+    problem = {c["id"]: c["problem"] for c in body["calls"]}
+    got = [problem[i] for i in ids]
+    assert got == [expected for _, _, expected in cases], list(zip([n for n, _, _ in cases], got, strict=True))
+    # The status=problem filter and the problem text agree: a call is listed exactly when it has a problem.
+    listed = set(_call_ids(await get_json(mc_client, MODEL_CALLS, status="problem")))
+    assert listed == {i for i in ids if problem[i] is not None}
+
+
+@pytest.mark.postgres_only
+async def test_model_calls_purposes_chips_ignore_filters_and_bucket_rows(mc_client, db, agent_id, cleanup):
+    base = _hour_ago()
+    chat = await insert_model_call(db, agent_id, purpose="chat", session_id="sess-C", started_at=base, **BRIEF_TOKENS)
+    await insert_model_call(
+        db, agent_id, purpose="chat", status="error", started_at=base + timedelta(seconds=1), **NO_TOKENS
+    )
+    # Minute buckets: one row counts call_count calls, their tokens summed in input_uncached, no output tokens.
+    embed_ok = await insert_model_call(
+        db,
+        agent_id,
+        purpose="embedding",
+        call_kind="embedding",
+        call_count=30,
+        model="text-embedding-3-small",
+        input_uncached=1200,
+        cache_read=None,
+        output_tokens=None,
+        started_at=base.replace(second=0, microsecond=0),
+    )
+    embed_err = await insert_model_call(
+        db,
+        agent_id,
+        purpose="embedding",
+        call_kind="embedding",
+        call_count=2,
+        status="error",
+        model="text-embedding-3-small",
+        **NO_TOKENS,
+        started_at=base.replace(second=0, microsecond=0),
+    )
+    rerank = await insert_model_call(
+        db,
+        agent_id,
+        purpose="rerank",
+        call_kind="rerank",
+        call_count=5,
+        model=None,
+        **NO_TOKENS,
+        started_at=base.replace(second=0, microsecond=0),
+    )
+    expected_purposes = [
+        {"purpose": "embedding", "calls": 32, "input_total": 1200, "output_tokens": 0, "errors": 2, "bucketed": True},
+        {"purpose": "rerank", "calls": 5, "input_total": 0, "output_tokens": 0, "errors": 0, "bucketed": True},
+        {"purpose": "chat", "calls": 2, "input_total": 54532, "output_tokens": 612, "errors": 1, "bucketed": False},
+    ]
+
+    body = await get_json(mc_client, MODEL_CALLS)
+    assert body["purposes"] == expected_purposes  # most calls first
+    assert str(embed_ok) not in _call_ids(body) and str(rerank) not in _call_ids(body)
+    assert len(body["calls"]) == 2
+
+    # The chips ignore every filter.
+    for params in (
+        {"purpose": "chat"},
+        {"status": "error"},
+        {"session_id": "sess-C"},
+        {"model": "text-embedding-3-small"},
+        {"turn_id": str(uuid.uuid4())},
+        {"limit": "1"},
+    ):
+        assert (await get_json(mc_client, MODEL_CALLS, **params))["purposes"] == expected_purposes, params
+
+    # A purpose that names the buckets lists them; a model filter alone does not.
+    assert set(_call_ids(await get_json(mc_client, MODEL_CALLS, purpose="embedding"))) == {
+        str(embed_ok),
+        str(embed_err),
+    }
+    assert _call_ids(await get_json(mc_client, MODEL_CALLS, purpose="rerank")) == [str(rerank)]
+    assert _call_ids(await get_json(mc_client, MODEL_CALLS, model="text-embedding-3-small")) == []
+    bucket = next(
+        c for c in (await get_json(mc_client, MODEL_CALLS, purpose="embedding"))["calls"] if c["id"] == str(embed_ok)
+    )
+    assert (bucket["call_kind"], bucket["input_total"], bucket["output_tokens"]) == ("embedding", 1200, None)
+    assert str(chat) in _call_ids(await get_json(mc_client, MODEL_CALLS, purpose="chat"))
+
+
+@pytest.mark.postgres_only
+async def test_model_calls_window(mc_client, db, agent_id, cleanup):
+    recent = await insert_model_call(db, agent_id, purpose="chat", started_at=_hour_ago())
+    old = await insert_model_call(db, agent_id, purpose="critic", started_at=datetime.now(UTC) - timedelta(days=8))
+    week = await get_json(mc_client, MODEL_CALLS)
+    assert _call_ids(week) == [str(recent)] and set(_purposes(week)) == {"chat"}
+    month = await get_json(mc_client, MODEL_CALLS, days="30")
+    assert _call_ids(month) == [str(recent), str(old)] and set(_purposes(month)) == {"chat", "critic"}
+    assert month["window_days"] == 30
+    # A filter does not lift the window.
+    assert _call_ids(await get_json(mc_client, MODEL_CALLS, purpose="critic")) == []
+
+
+async def _all_model_call_pages(client, **params) -> tuple[list[str], int]:
+    """Every call id across the pages (following ``next_before``), and the number of pages."""
+    seen: list[str] = []
+    cursor = None
+    for pages in range(1, 21):  # bounded: a cursor bug must fail, not loop
+        body = await get_json(client, MODEL_CALLS, **params, **({"before": cursor} if cursor else {}))
+        seen += _call_ids(body)
+        cursor = body["next_before"]
+        if cursor is None:
+            return seen, pages
+    raise AssertionError(f"next_before never ended: {seen}")
+
+
+@pytest.mark.postgres_only
+async def test_model_calls_pagination_ties_and_agent_scope(mc_client, db, agent_id, cleanup):
+    tied = _hour_ago().replace(microsecond=987654)
+    tied_ids = sorted(uuid.uuid4() for _ in range(5))
+    for call_id in tied_ids:
+        await insert_model_call(db, agent_id, purpose="chat", started_at=tied, call_id=call_id)
+    newest = await insert_model_call(db, agent_id, purpose="chat", started_at=tied + timedelta(seconds=1))
+    expected = [str(newest)] + [str(i) for i in reversed(tied_ids)]  # started_at desc, then id desc
+
+    other = _agent()
+    try:
+        # Another agent's calls, at the same instant and on my session, turn and purpose.
+        turn = uuid.uuid4()
+        for _ in range(3):
+            await insert_model_call(db, other, turn_id=turn, session_id="sess-T", purpose="chat", started_at=tied)
+        await insert_model_call(db, other, purpose="theirs", started_at=tied)
+        seen, pages = await _all_model_call_pages(mc_client, limit="2")
+        assert seen == expected and pages == 3
+        seen, pages = await _all_model_call_pages(mc_client, limit="6")
+        assert seen == expected and pages == 1
+
+        first = await get_json(mc_client, MODEL_CALLS, limit="1")
+        assert first["next_before"] == wv.format_cursor(tied + timedelta(seconds=1), str(newest))
+        assert _purposes(first) == {
+            "chat": {
+                "purpose": "chat",
+                "calls": 6,
+                "input_total": 900,
+                "output_tokens": 120,
+                "errors": 0,
+                "bucketed": False,
+            }
+        }
+        assert (await get_json(mc_client, MODEL_CALLS, session_id="sess-T"))["calls"] == []
+        assert (await get_json(mc_client, MODEL_CALLS, turn_id=str(turn)))["calls"] == []
+    finally:
+        await delete_agent_rows(db, other)
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"turn_id": "not-a-uuid"},
+        {"status": "x"},
+        {"days": "31"},
+        {"days": "0"},
+        {"limit": "101"},
+        {"before": "garbage"},
+        {"before": "2026-11-08T10:00:00+00:00|not-a-uuid"},
+        {"before": f"2026-11-08T10:00:00|{uuid.UUID(int=1)}"},
+    ],
+)
+async def test_model_calls_bad_params_400(mc_client, params):
+    resp = await mc_client.get(MODEL_CALLS, params=params)
+    assert resp.status_code == 400 and set(resp.json()) == {"error"}
+
+
+@pytest.mark.postgres_only
+async def test_model_calls_error_text_cut_to_300(mc_client, db, agent_id, cleanup):
+    base = _hour_ago()
+    long_error = "<img src=x onerror=alert(1)>" + "e" * 2000
+    long_id = await insert_model_call(
+        db, agent_id, purpose="chat", status="error", error_text=long_error, started_at=base
+    )
+    exact_id = await insert_model_call(
+        db, agent_id, purpose="chat", status="error", error_text="x" * 300, started_at=base + timedelta(seconds=1)
+    )
+    body = await get_json(mc_client, MODEL_CALLS)
+    errors = {c["id"]: c["error"] for c in body["calls"]}
+    assert errors[str(long_id)] == long_error[:300]  # returned as stored, cut, not escaped
+    assert errors[str(exact_id)] == "x" * 300
+
+
+@pytest.mark.postgres_only
+async def test_model_calls_run_under_a_10s_statement_timeout(db, agent_id):
+    async with db.session() as session:
+        await wv.get_model_calls(
+            session,
+            agent_id,
+            days=7,
+            purpose=None,
+            model=None,
+            session_id=None,
+            turn_id=None,
+            status=None,
+            limit=50,
+            before=None,
+            text_enabled=False,
+        )
+        assert (await session.execute(text("SHOW statement_timeout"))).scalar_one() == "10s"
+
+
+@pytest.mark.postgres_only
+async def test_model_calls_query_failure_is_a_plain_500(mc_client, monkeypatch, caplog):
+    async def boom(*args, **kwargs):
+        raise RuntimeError("secret detail from the database")
+
+    monkeypatch.setattr(wv, "get_model_calls", boom)
+    resp = await mc_client.get(MODEL_CALLS)
+    assert resp.status_code == 500 and resp.json() == {"error": "work view query failed"}
+    assert any(r.levelname == "WARNING" and r.exc_info for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 # Across the endpoints
 # ---------------------------------------------------------------------------------------------------------------------
 
@@ -1781,12 +2322,14 @@ def _assert_same_keys(disabled: dict, enabled: dict, where: str = "payload") -> 
 
 
 @pytest.mark.postgres_only
-async def test_disabled_payloads_have_the_enabled_keys(client, db, agent_id, cleanup):
+async def test_disabled_payloads_have_the_enabled_keys(client, mc_client, db, agent_id, cleanup):
     await insert_turn(db, agent_id, "sess-K", started_at=_hour_ago())
+    await insert_model_call(db, agent_id, purpose="chat", started_at=_hour_ago())
     pairs = {
         "sessions": (wv.disabled_sessions(7), await get_json(client)),
         "trace": (wv.disabled_trace(), await get_json(client, trace_path("sess-K"))),
         "patterns": (wv.disabled_patterns(7), await get_json(client, PATTERNS)),
+        "model_calls": (wv.disabled_model_calls(7, False), await get_json(mc_client, MODEL_CALLS)),
     }
     for name, (disabled, enabled) in pairs.items():
         assert enabled["enabled"] is True and disabled["enabled"] is False, name
