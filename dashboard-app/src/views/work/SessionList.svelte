@@ -230,7 +230,7 @@
     </label>
     <label class="field grow">
       <span>Search</span>
-      <input type="search" placeholder="Title, your message or a reason" bind:value={qText} oninput={onSearch} />
+      <input type="search" placeholder="Title or any message" bind:value={qText} oninput={onSearch} />
     </label>
   </section>
 
@@ -252,10 +252,11 @@
             <span class="main">
               <span class="title">{s.title}</span>
               {#if s.first_message}<span class="first">{s.first_message}</span>{/if}
+              {#if s.last_message}<span class="latest"><span class="latest-label">Latest:</span> {s.last_message}</span>{/if}
             </span>
             <span class="meta">
               <span class="kind kind-{s.kind}">{KIND_LABEL[s.kind] ?? s.kind}</span>
-              <span class="when"><span class="vh">Started </span>{fmtTime(s.started_at)}</span>
+              <span class="when"><span class="vh">Last active </span>{fmtTime(s.ended_at)}</span>
               <span class="turns">{s.turns} {s.turns === 1 ? 'turn' : 'turns'}</span>
             </span>
             <span class="tools">
@@ -315,6 +316,8 @@
   .main { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
   .title { font-weight: 600; overflow-wrap: anywhere; }
   .first { color: var(--muted); font-size: 0.8125rem; overflow-wrap: anywhere; }
+  .latest { font-size: 0.8125rem; overflow-wrap: anywhere; }
+  .latest-label { color: var(--muted); }
   .meta { display: flex; flex-direction: column; gap: 0.25rem; align-items: flex-start; font-size: 0.8125rem; color: var(--muted); white-space: nowrap; }
   .kind { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 6px; font-size: 0.75rem; font-weight: 500; border: 1px solid var(--border); background: var(--bg); color: var(--muted); }
   .kind-conversation { color: #a99df9; }

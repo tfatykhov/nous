@@ -463,7 +463,7 @@ async def test_sessions_groups_turns_by_session_and_maps_kinds(client, db, agent
 
     body = await get_json(client)
     assert body["enabled"] is True and body["window_days"] == 7
-    assert _ids(body) == ["sess-B", "sess-A"]  # newest first; background hidden
+    assert _ids(body) == ["sess-B", "sess-A"]  # latest activity first; background hidden
     by_id = _by_id(body)
     assert (by_id["sess-A"]["kind"], by_id["sess-A"]["work_kind"], by_id["sess-A"]["turns"]) == (
         "conversation",
@@ -769,6 +769,43 @@ async def test_sessions_tool_filter_and_q(client, db, agent_id, cleanup):
 
 
 @pytest.mark.postgres_only
+async def test_sessions_continued_session_sorts_by_latest_turn(client, db, agent_id, cleanup):
+    """A chat that goes on in an older session (Telegram keeps one) comes first, shows its latest message and is
+    found by it."""
+    base = _hour_ago().replace(microsecond=0)
+    await insert_turn(db, agent_id, "sess-chat", started_at=base, trigger="Tracking ID: is it running?")
+    await insert_turn(
+        db,
+        agent_id,
+        "sess-chat",
+        started_at=base + timedelta(minutes=30),
+        trigger="Tell me about Minsky",
+        turn_number=2,
+    )
+    await insert_turn(
+        db,
+        agent_id,
+        "sess-task",
+        work_kind="subtask",
+        started_at=base + timedelta(minutes=10),
+        trigger="Convert to docx",
+    )
+
+    body = await get_json(client)
+    assert _ids(body) == ["sess-chat", "sess-task"]
+    chat, task = _by_id(body)["sess-chat"], _by_id(body)["sess-task"]
+    assert (chat["first_message"], chat["last_message"]) == ("Tracking ID: is it running?", "Tell me about Minsky")
+    assert task["last_message"] is None  # one turn: the first message already says it
+
+    assert _ids(await get_json(client, q="minsky")) == ["sess-chat"]  # a later turn's message, case-insensitive
+
+    first = await get_json(client, limit="1")
+    assert first["next_before"] == wv.format_cursor(base + timedelta(minutes=30), "sess-chat")
+    seen, pages = await _all_pages(client, limit="1")
+    assert seen == ["sess-chat", "sess-task"] and pages == 2
+
+
+@pytest.mark.postgres_only
 async def test_sessions_cursor_with_colon_and_dash_ids(client, db, agent_id, cleanup):
     tied = _hour_ago().replace(microsecond=654321)
     ids = ["subtask-ab12cd34", "intent-x:y", "mcp-session"]
@@ -801,7 +838,7 @@ async def test_sessions_ended_at_and_title_fallback(client, db, agent_id, cleanu
     assert datetime.fromisoformat(long["started_at"]) == base
     assert datetime.fromisoformat(long["ended_at"]) == base + timedelta(minutes=30)
     assert datetime.fromisoformat(open_["ended_at"]) == base + timedelta(minutes=10)
-    assert (long["title"], long["first_message"]) == ("(no title)", None)
+    assert (long["title"], long["first_message"], long["last_message"]) == ("(no title)", None, "later")
     assert long["tools"] == [] and long["tool_calls"] == 0 and long["flags"] == []
 
 

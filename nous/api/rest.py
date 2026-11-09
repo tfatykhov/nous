@@ -2280,8 +2280,8 @@ def create_app(
 
     async def dashboard_work_sessions(request: Request) -> JSONResponse:
         """GET /dashboard/work/sessions — F108: the Work list, the sessions of the last ``days`` days (default 7)
-        newest first, with their tools and flags. Read-only. With the tool-call log off: 200 {"enabled": false} and
-        no session."""
+        latest activity first, with their tools and flags. Read-only. With the tool-call log off: 200
+        {"enabled": false} and no session."""
         from nous.api import work_view_dashboard as wv
 
         try:
