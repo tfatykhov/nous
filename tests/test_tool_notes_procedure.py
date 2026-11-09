@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -338,3 +338,24 @@ async def test_get_procedure_serves_nothing_with_the_tool_call_log_off(env):
 def test_the_startup_sync_needs_both_flags():
     source = (Path(__file__).parent.parent / "nous" / "main.py").read_text(encoding="utf-8")
     assert "settings.tool_notes_enabled and settings.tool_call_log_enabled" in source
+
+
+@pytest.mark.asyncio
+async def test_retired_note_leaves_the_procedure_body(env):
+    created = NOW - timedelta(days=10)
+    n = await env.store.add(pat(tool="bash", key="boom", hits=4, calls=10), "check the path first", now=created)
+    await sync_procedure(env.heart, env.store, True)
+    assert (await procedure_rows(env))[0].active
+    for i in range(20):  # the mistake got no rarer
+        await insert_call(
+            env.db, env.agent_id, None, i, session_id=None, tool="bash", input_text=f"in-{i}",
+            is_error=i < 10, outcome="error" if i < 10 else "ran", error_text="boom" if i < 10 else None,
+            started_at=NOW - timedelta(days=1),
+        )  # fmt: skip
+    settings = SimpleNamespace(
+        tool_notes_enabled=True, tool_call_log_enabled=True, background_model="m", agent_id=env.agent_id
+    )
+    out = await ToolNotesReview(env.db, env.heart, settings, None, clock=lambda: NOW).run_sleep()
+    assert out["retired"] == 1
+    assert not (await procedure_rows(env))[0].active
+    assert n not in [x.id for x in await env.store.active()]

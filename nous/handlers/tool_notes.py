@@ -24,7 +24,7 @@ from nous.a2ui.builders.tool_notes_guard import MAX_PER_CARD, tool_notes_guard_c
 from nous.cognitive.ledger_store import redact_output, redact_structure
 from nous.handlers import call_background_llm, parse_llm_json
 from nous.heart.schemas import ProcedureInput
-from nous.observability.tool_patterns import GUARD_FRAGMENTS, NO_ERROR_TEXT, Pattern, detect_patterns
+from nous.observability.tool_patterns import GUARD_FRAGMENTS, NO_ERROR_TEXT, Pattern, detect_patterns, pattern_counts
 from nous.storage.database import Database
 from nous.storage.models import Procedure
 
@@ -34,6 +34,9 @@ NOTES_PER_TOOL = 3  # active notes of one tool
 NOTES_TOTAL = 40  # active notes in all
 NOTE_MAX_CHARS = 300  # also a CHECK in migration 103
 REREVIEW_DAYS = 14  # a pattern with a note row this recent is not offered to the review again
+JUDGE_AFTER_CALLS = 20  # calls of the tool since the note was written before it is judged
+JUDGE_MIN_DAYS = 7  # a note needs a week of exposure before its rate means anything
+STALE_DAYS = 30  # a note not judged by then is retired as unused
 CLOSE_REASONS = ("declined", "guard")  # why a pattern got an inactive row with no note
 
 
@@ -484,6 +487,59 @@ class ToolNotesReview:
                 logger.warning("tool notes: procedure sync failed (%s)", type(exc).__name__)
         return counts
 
+    async def _judge(self, counts: dict[str, int], now: datetime) -> None:
+        """Keep or retire each active note that has not been judged yet; fill ``kept`` and ``retired``.
+
+        A note is judged once, when its tool has ``JUDGE_AFTER_CALLS`` calls since the note was written and the note
+        is at least ``JUDGE_MIN_DAYS`` old: kept only if the rate of its own pattern is strictly below its baseline,
+        else retired as ``no_improvement``. A note not judged within ``STALE_DAYS`` is retired as ``unused``. An
+        ``error_repeat`` count bounded by ``ERROR_ROWS_CAP`` is never decided on: that note waits for the next
+        sleep. A failure on one note logs a WARNING (no record text) and never stops the others.
+        """
+        agent_id = self._heart.agent_id
+        store = ToolNoteStore(self._db, agent_id)
+        try:
+            notes = await store.active()
+        except Exception as exc:
+            logger.warning("tool notes: reading the notes to judge failed (%s)", type(exc).__name__)
+            return
+        for note in notes:
+            try:
+                if note.judged is not None:
+                    continue
+                age = (now - note.created_at).total_seconds() / 86400
+                hits = calls = 0
+                if age >= JUDGE_MIN_DAYS:
+                    async with self._db.session() as session:
+                        found = await pattern_counts(
+                            session,
+                            agent_id,
+                            note.tool_name,
+                            note.pattern_kind,
+                            note.pattern_key,
+                            since=note.created_at,
+                            until=now,
+                        )
+                    if found is None:
+                        logger.warning("tool notes: %s has too many error rows to judge a note", note.tool_name)
+                        continue
+                    hits, calls = found
+                if age >= JUDGE_MIN_DAYS and calls >= JUDGE_AFTER_CALLS:
+                    rate = hits / calls
+                    if rate < note.baseline_rate:
+                        judged = {"at": now, "calls": calls, "hits": hits, "rate": rate, "days": age, "verdict": "kept"}
+                        await store.mark_judged(note.id, judged)
+                        counts["kept"] += 1
+                    else:
+                        reason = {"reason": "no_improvement", "after": {"calls": calls, "hits": hits, "rate": rate}}
+                        await store.retire(note.id, reason, now=now)
+                        counts["retired"] += 1
+                elif age > STALE_DAYS:  # older than the limit, so a note exactly 30 days old still has its day
+                    await store.retire(note.id, {"reason": "unused"}, now=now)
+                    counts["retired"] += 1
+            except Exception as exc:
+                logger.warning("tool notes: judging a note of %s failed (%s)", note.tool_name, type(exc).__name__)
+
     async def _review(self) -> dict[str, int]:
         """Detect, offer at most ``MAX_CANDIDATES`` to one model call, store the notes, close the rest as declined."""
         counts = dict.fromkeys(_COUNT_KEYS, 0)
@@ -493,6 +549,7 @@ class ToolNotesReview:
         agent_id = self._heart.agent_id
         now = self._clock()
         store = ToolNoteStore(self._db, agent_id)
+        await self._judge(counts, now)  # first: a retired note frees its cap slot and starts its pattern's block
         async with self._db.session() as session:
             patterns, counts["capped"] = await detect_patterns(session, agent_id, now=now)
         counts["detected"] = len(patterns)
@@ -508,7 +565,7 @@ class ToolNotesReview:
         counts["rejected"] += len(named)
         offered = [p for p in rest if p not in named][:MAX_CANDIDATES]
         counts["offered"] = len(offered)
-        if not offered:
+        if not offered or self._llm is None:  # the judge above needs no model
             return counts
         answer = await call_background_llm(
             self._llm,

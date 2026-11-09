@@ -17,6 +17,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text as sa_text
 
+from nous.handlers import tool_notes as tool_notes_module
 from nous.handlers.tool_notes import (
     _REVIEW_SYSTEM,
     MAX_CANDIDATES,
@@ -392,8 +393,8 @@ def test_parse_drops_a_second_entry_for_one_pattern():
 @pytest.mark.asyncio
 async def test_at_cap_needs_a_valid_replaces(db, agent_id, cleanup):
     store = ToolNoteStore(db, agent_id)
-    old = [await store.add(pat(key=f"old{i}"), f"old note {i}", now=NOW - timedelta(days=30)) for i in range(3)]
-    other = await store.add(pat(tool="web_fetch", key="o"), "other tool", now=NOW - timedelta(days=30))
+    old = [await store.add(pat(key=f"old{i}"), f"old note {i}", now=NOW) for i in range(3)]
+    other = await store.add(pat(tool="web_fetch", key="o"), "other tool", now=NOW)
     await seed_errors(db, agent_id, "bash", 4)
 
     # no replaces: nothing stored
@@ -794,3 +795,186 @@ async def test_tool_notes_stay_off_without_the_tool_call_log(db, agent_id, clean
     out = await with_surfaces(make_review(db, agent_id, client, log=False), surfaces).run_sleep()
     assert set(out.values()) == {0}
     assert client.calls == [] and surfaces.pushes == [] and await note_rows(db, agent_id) == []
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# keep or retire: the judge runs first in the sleep
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+async def add_aged(db, agent_id, *, days, rate=0.4, tool="bash", key="boom", kind="error_repeat"):
+    """A note created ``days`` before NOW with baseline ``rate`` (out of 10 calls)."""
+    p = Pattern(kind=kind, tool_name=tool, key=key, hits=round(rate * 10), calls=10, guard=None, example=key)
+    return await ToolNoteStore(db, agent_id).add(p, "check the path first", now=NOW - timedelta(days=days))
+
+
+async def later_calls(db, agent_id, hits, calls, *, tool="bash", text="boom", days_ago=1):
+    await seed_errors(db, agent_id, tool, hits, text=text, calls=calls, days_ago=days_ago)
+
+
+async def one_note(db, agent_id):
+    rows = await note_rows(db, agent_id)
+    assert len(rows) == 1
+    return rows[0]
+
+
+def judge_review(db, agent_id):
+    return make_review(db, agent_id, None)
+
+
+@pytest.mark.asyncio
+async def test_fewer_than_judge_calls_is_left_alone(db, agent_id, cleanup):
+    await add_aged(db, agent_id, days=10)
+    await later_calls(db, agent_id, 0, 19)
+    out = await judge_review(db, agent_id).run_sleep()
+    assert out["retired"] == 0 and out["kept"] == 0
+    r = await one_note(db, agent_id)
+    assert r["active"] and r["judged"] is None
+
+
+@pytest.mark.asyncio
+async def test_rate_fell_is_kept_and_judged_once(db, agent_id, cleanup):
+    await add_aged(db, agent_id, days=10, rate=0.4)
+    await later_calls(db, agent_id, 2, 20)
+    out = await judge_review(db, agent_id).run_sleep()
+    assert out["kept"] == 1 and out["retired"] == 0
+    r = await one_note(db, agent_id)
+    assert r["active"]
+    j = r["judged"]
+    assert j["calls"] == 20 and j["hits"] == 2 and j["rate"] == pytest.approx(0.1) and j["verdict"] == "kept"
+    assert j["days"] == pytest.approx(10, abs=0.01) and j["at"]
+    # twenty more calls, all failing: a kept note is never judged again
+    await later_calls(db, agent_id, 20, 20, days_ago=0)
+    out = await judge_review(db, agent_id).run_sleep()
+    assert out["kept"] == 0 and out["retired"] == 0
+    r2 = await one_note(db, agent_id)
+    assert r2["active"] and r2["judged"] == j
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hits", [8, 12])  # 0.4 (equal) and 0.6 (higher) against a baseline of 0.4
+async def test_rate_equal_or_higher_is_retired(db, agent_id, cleanup, hits):
+    await add_aged(db, agent_id, days=10, rate=0.4)
+    await later_calls(db, agent_id, hits, 20)
+    out = await judge_review(db, agent_id).run_sleep()
+    assert out["retired"] == 1 and out["kept"] == 0
+    r = await one_note(db, agent_id)  # soft delete: the row is still there
+    assert not r["active"] and r["retired_at"] == NOW and r["judged"] is None
+    assert r["retired"]["reason"] == "no_improvement"
+    assert r["retired"]["after"] == {"calls": 20, "hits": hits, "rate": pytest.approx(hits / 20)}
+
+
+@pytest.mark.asyncio
+async def test_stale_unused_note_is_retired(db, agent_id, cleanup):
+    await add_aged(db, agent_id, days=31)
+    await later_calls(db, agent_id, 1, 5, days_ago=2)
+    out = await judge_review(db, agent_id).run_sleep()
+    assert out["retired"] == 1
+    r = await one_note(db, agent_id)
+    assert not r["active"] and r["retired"]["reason"] == "unused"
+
+
+@pytest.mark.asyncio
+async def test_note_under_the_stale_age_is_untouched(db, agent_id, cleanup):
+    await add_aged(db, agent_id, days=29)
+    await later_calls(db, agent_id, 1, 5, days_ago=2)
+    out = await judge_review(db, agent_id).run_sleep()
+    assert out["retired"] == 0 and out["kept"] == 0
+    assert (await one_note(db, agent_id))["active"]
+
+
+@pytest.mark.asyncio
+async def test_judge_waits_for_min_age(db, agent_id, cleanup):
+    await add_aged(db, agent_id, days=3)
+    await later_calls(db, agent_id, 0, 20, days_ago=1)
+    out = await judge_review(db, agent_id).run_sleep()
+    assert out["retired"] == 0 and out["kept"] == 0
+    assert (await one_note(db, agent_id))["judged"] is None
+    async with db.session() as s:  # the same note, now seven days old
+        await s.execute(
+            sa_text("UPDATE nous_system.tool_note SET created_at = :t WHERE agent_id = :a"),
+            {"t": NOW - timedelta(days=7), "a": agent_id},
+        )
+        await s.commit()
+    out = await judge_review(db, agent_id).run_sleep()
+    assert out["kept"] == 1
+
+
+@pytest.mark.asyncio
+async def test_judge_skips_when_error_rows_exceed_cap(db, agent_id, cleanup, monkeypatch, caplog):
+    import nous.observability.tool_patterns as tp
+
+    monkeypatch.setattr(tp, "ERROR_ROWS_CAP", 3)
+    await add_aged(db, agent_id, days=10)
+    await later_calls(db, agent_id, 5, 20)
+    with caplog.at_level(logging.WARNING):
+        out = await judge_review(db, agent_id).run_sleep()
+    assert out["retired"] == 0 and out["kept"] == 0
+    r = await one_note(db, agent_id)
+    assert r["active"] and r["judged"] is None
+    assert any(rec.levelno == logging.WARNING and "bash" in rec.getMessage() for rec in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_zero_calls_no_division_error(db, agent_id, cleanup):
+    await add_aged(db, agent_id, days=10)
+    out = await judge_review(db, agent_id).run_sleep()
+    assert out["retired"] == 0 and out["kept"] == 0
+    assert (await one_note(db, agent_id))["active"]
+
+
+@pytest.mark.asyncio
+async def test_judge_counts_only_its_own_pattern_after_creation(db, agent_id, cleanup):
+    await add_aged(db, agent_id, days=10, rate=0.4)
+    await seed_errors(db, agent_id, "bash", 8, text="boom", calls=20, days_ago=12)  # before created_at: ignored
+    await later_calls(db, agent_id, 2, 20)
+    # 20 more later calls, all failing with ANOTHER error: they add calls, not hits of this pattern
+    for i in range(20):
+        await insert_call(
+            db, agent_id, None, 100 + i, session_id=None, tool="bash", input_text=f"o-{i}", is_error=True,
+            outcome="error", error_text="other failure", started_at=NOW - timedelta(days=1),
+        )  # fmt: skip
+    out = await judge_review(db, agent_id).run_sleep()
+    assert out["kept"] == 1
+    j = (await one_note(db, agent_id))["judged"]
+    assert j["calls"] == 40 and j["hits"] == 2 and j["rate"] == pytest.approx(0.05)
+
+
+@pytest.mark.asyncio
+async def test_judge_runs_without_a_model(db, agent_id, cleanup):
+    await add_aged(db, agent_id, days=10)
+    await later_calls(db, agent_id, 8, 20)
+    await seed_errors(db, agent_id, "git", 5, text="fatal", calls=6)  # an offerable pattern, but no model
+    out = await make_review(db, agent_id, None).run_sleep()
+    assert out["retired"] == 1 and out["llm_failed"] == 0 and out["offered"] == 1
+    assert out["written"] == 0
+
+
+@pytest.mark.asyncio
+async def test_judge_failure_on_one_note_does_not_stop_the_loop(db, agent_id, cleanup, monkeypatch, caplog):
+    await add_aged(db, agent_id, days=10, tool="bash")
+    await add_aged(db, agent_id, days=10, tool="git", key="fatal")
+    await later_calls(db, agent_id, 8, 20, tool="bash")
+    await later_calls(db, agent_id, 8, 20, tool="git", text="fatal")
+    real = tool_notes_module.pattern_counts
+
+    async def flaky(session, agent, tool, *a, **kw):
+        if tool == "bash":
+            raise RuntimeError(f"db down {SECRET}")
+        return await real(session, agent, tool, *a, **kw)
+
+    monkeypatch.setattr(tool_notes_module, "pattern_counts", flaky)
+    with caplog.at_level(logging.WARNING):
+        out = await judge_review(db, agent_id).run_sleep()
+    assert out["retired"] == 1  # git was judged
+    assert TOKEN not in caplog.text and any(r.levelno == logging.WARNING for r in caplog.records)
+    assert len(await note_rows(db, agent_id, active=True)) == 1
+
+
+@pytest.mark.asyncio
+async def test_judge_off_when_flags_off(db, agent_id, cleanup):
+    await add_aged(db, agent_id, days=10)
+    await later_calls(db, agent_id, 8, 20)
+    out = await make_review(db, agent_id, None, enabled=False).run_sleep()
+    assert out["retired"] == 0
+    assert (await one_note(db, agent_id))["active"]
