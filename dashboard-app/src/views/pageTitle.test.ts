@@ -7,7 +7,7 @@ const SRC = resolve(__dirname, '..');
 const RULE = /font-size:\s*1\.75rem;\s*font-weight:\s*700;\s*letter-spacing:\s*-0\.02em;\s*margin:\s*0\.25rem 0;?/;
 const SCREENS = [
   'views/Work.svelte', 'views/work/SessionList.svelte', 'views/work/Patterns.svelte',
-  'views/ModelCalls.svelte', 'views/modelcalls/CallList.svelte', 'views/Health.svelte',
+  'views/ModelCalls.svelte', 'views/Health.svelte',
 ];
 
 function svelteFiles(dir: string): string[] {

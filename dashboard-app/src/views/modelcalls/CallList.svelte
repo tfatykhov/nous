@@ -3,7 +3,7 @@
   import { makePollStore } from '../../lib/stores/registry';
   import { usePoll } from '../../lib/poll';
   import { routeHref } from '../../lib/router';
-  import { fmtDuration, fmtTime, fmtTokens, modelCallFilters, modelCallQuery, type ModelCallFilters } from '../../lib/work';
+  import { fmtDays, fmtDuration, fmtTime, fmtTokens, modelCallFilters, modelCallQuery, type ModelCallFilters } from '../../lib/work';
   import type { ModelCallRow, ModelCallsData } from '../../lib/types/api';
   import StaleBadge from '../../lib/ui/StaleBadge.svelte';
 
@@ -155,7 +155,7 @@
         </button>
       {/each}
     </section>
-    <p class="muted">Counts are calls in the last {windowDays} days. Embedding and rerank calls are counted per minute.</p>
+    <p class="muted">Counts are calls in the last {fmtDays(windowDays)}. Embedding and rerank calls are counted per minute.</p>
 
     <section class="filters" aria-label="Filters">
       <label class="field">
@@ -174,7 +174,7 @@
     </section>
 
     {#if calls.length === 0}
-      <p class="empty">No model calls in the last {windowDays} days match.</p>
+      <p class="empty">No model calls in the last {fmtDays(windowDays)} match.</p>
     {:else}
       <ul class="calls" class:dim={refetching}>
         {#each calls as c (c.id)}
