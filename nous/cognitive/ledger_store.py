@@ -407,7 +407,10 @@ def redacted_head(text: str, chars: int, *, complete: bool = True) -> str:
     - It holds no character of an own secret: it is a prefix of the shorter scan, which ends a pad before the
       window's end, so its every own-secret character is masked.
     - Masks shrink both scans alike, so dense masking does not empty it. The regexes see 2 * ``len(text)``
-      characters; the caller bounds the window."""
+      characters; the caller bounds the window.
+    - A window that is one hex run, ended by a letter inside its last pad, gives an empty head: the whole window
+      leaves the run raw (no word boundary before the letter) and the shorter scan masks it, so they differ from
+      the start. That is safe: nothing is shown."""
     pad = redaction_scan_pad()
     if complete and len(text) <= chars + 2 * pad:
         return _redact_detail(text)[:chars]

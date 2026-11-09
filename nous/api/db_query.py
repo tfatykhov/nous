@@ -265,7 +265,8 @@ def _render(cell: Cell) -> str:
 def format_result(columns: Sequence[str], rows: Sequence[Sequence[Cell]], *, truncated: bool) -> str:
     """Rows as compact text: a header of column names, one line per row (cells joined by `` | ``), then a line
     with the row count. ``truncated`` says the query had more than ``MAX_ROWS`` rows. The whole text stays under
-    ``MAX_OUTPUT_CHARS``: rows past that are left out, and the last line says so."""
+    ``MAX_OUTPUT_CHARS``: rows past that are left out, and the last line says so. It touches no event-loop state
+    (compiled patterns, the cached own secrets, string work), so ``answer_db_query`` runs it in a worker thread."""
     header = " | ".join(_escape(redact_output(name)) for name in columns) if columns else "(no columns)"
     lines = [header]
     used = len(header) + 1
@@ -435,7 +436,10 @@ async def answer_db_query(settings: Settings, sql: str) -> QueryAnswer:
     try:
         columns, cells, truncated = await execute_readonly(settings, check_query_shape(sql))
         rows = str(len(cells))
-        return QueryAnswer(format_result(columns, cells, truncated=truncated), False)
+        # A page of cut cells is seconds of regex work (each redacted over its whole window and that window less a
+        # pad): a worker thread, as prepare_block prepares a big block. The regex work holds the GIL, so the thread
+        # shares the CPU with the loop, which keeps getting turns instead of stalling for the whole page.
+        return QueryAnswer(await asyncio.to_thread(format_result, columns, cells, truncated=truncated), False)
     except QueryRefused as exc:
         outcome = "refused"
         return _error(str(exc))
