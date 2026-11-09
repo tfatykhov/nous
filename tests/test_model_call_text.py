@@ -13,6 +13,7 @@ import base64
 import hashlib
 import json
 import logging
+import random
 import re
 import threading
 import time
@@ -193,6 +194,52 @@ def test_the_scan_pad_is_dropped_so_a_secret_cut_by_the_window_is_not_kept_in_pa
     assert raw[edge - 6 : edge] == "sk-ant"
     _, body = prepare_block(raw, cap)
     assert "sk-ant" not in body and "ZyXwVu" not in body and "AbCdEf" not in body, body
+
+
+# A block over the cap at 200,000 characters. Prod's scan pad is 3148 (the longest own secret); dropping it from the
+# REDACTED head lost text the block had room for, ~9k raw characters of mask-dense text, and all of a block that is
+# one base64 run.
+_PROSE = "the quick brown fox jumps over the lazy dog\n"
+_HASHES = "".join(hashlib.sha1(str(i).encode()).hexdigest() + "\n" for i in range(8000))  # 328,000 characters
+
+
+@pytest.fixture(params=[None, 3148], ids=["default_pad", "prod_pad"])
+def scan_pad(request, monkeypatch) -> int:
+    if request.param is not None:
+        monkeypatch.setattr(ledger_store, "redaction_scan_pad", lambda: request.param)
+    return ledger_store.redaction_scan_pad()
+
+
+def _head(body: str) -> str:
+    head, marker, _ = body.rpartition("\n[truncated ")
+    assert marker, body[-80:]
+    return head
+
+
+@pytest.mark.parametrize("size", [201_000, 260_000])
+def test_a_block_a_little_over_the_cap_keeps_the_whole_cap(scan_pad, size):
+    raw = (_PROSE * (size // len(_PROSE) + 1))[:size]
+    _, body = prepare_block(raw, 200_000)
+    assert _head(body) == raw[:200_000]
+    assert body.endswith(f"\n[truncated {size - 200_000} chars]")
+
+
+@pytest.mark.parametrize("size", [205_000, 300_000])
+def test_a_mask_dense_block_keeps_all_its_cap_settles(scan_pad, size):
+    raw = _HASHES[:size]
+    _, body = prepare_block(raw, 200_000)
+    head = _head(body)
+    # at least the redaction of the first 200,000 raw characters, less the hash the cap splits
+    assert len(head) >= len(ledger_store.redact_output(raw[:200_000])) - 40
+    assert ledger_store.redact_output(raw).startswith(head)
+    assert re.search(r"[0-9a-f]{4}", head) is None
+
+
+@pytest.mark.parametrize("size", [202_000, 300_000])
+def test_a_block_that_is_one_base64_run_keeps_its_prefix_and_mask(scan_pad, size):
+    blob = base64.b64encode(random.Random(3).randbytes(size)).decode()[:size]
+    _, body = prepare_block("Here is the file:\n" + blob, 200_000)
+    assert _head(body) == "Here is the file:\n[REDACTED_BLOB]"
 
 
 def test_base64_attachment_replaced():

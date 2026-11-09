@@ -159,8 +159,9 @@ def _without_base64(value: Any) -> Any:
 def prepare_block(raw: str, max_chars: int, is_json: bool = False) -> tuple[str, str]:
     """``(hash, body)`` of one block: base64 attachments over 1 KB replaced by ``[base64 N bytes]``, redacted
     (``redact_output``), cut at ``max_chars`` with a ``[truncated N chars]`` marker (N: the characters past the cap),
-    and the sha256 hex of that final body. Over the cap only the head and a scan pad are redacted, and the pad is
-    dropped after, so a secret the cut splits is not kept in part (as ``detail_text`` does). A lone surrogate (bash
+    and the sha256 hex of that final body. Over the cap the head is cut as ``redacted_head`` cuts it: redacted whole
+    within the cap and two scan pads, past that settled by scans a pad apart (as ``detail_text``'s head is), so a
+    secret the cut splits is not kept in part and masks that shrink the head cannot empty it. A lone surrogate (bash
     output decoded with ``surrogateescape``), which UTF-8 and Postgres cannot hold, becomes ``?`` first, so the body
     is always storable.
 
@@ -171,7 +172,7 @@ def prepare_block(raw: str, max_chars: int, is_json: bool = False) -> tuple[str,
     its secrets. The serialised text is then redacted as a plain block is, which masks a credential-named key of the
     block itself."""
     # Imported here: nous.cognitive imports nous.observability, whose package imports the model-call recorder.
-    from nous.cognitive.ledger_store import redact_output, redact_structure, redaction_scan_pad
+    from nous.cognitive.ledger_store import redact_output, redact_structure, redacted_head
 
     raw = raw.encode("utf-8", _UNENCODABLE).decode("utf-8")
     if is_json:
@@ -182,9 +183,7 @@ def prepare_block(raw: str, max_chars: int, is_json: bool = False) -> tuple[str,
     if len(raw) <= max_chars:
         body = redact_output(raw)
     else:
-        pad = redaction_scan_pad()
-        head = redact_output(raw[: max_chars + pad])
-        body = f"{head[: max(0, min(max_chars, len(head) - pad))]}\n[truncated {len(raw) - max_chars} chars]"
+        body = f"{redacted_head(raw, max_chars)}\n[truncated {len(raw) - max_chars} chars]"
     return hashlib.sha256(body.encode("utf-8")).hexdigest(), body
 
 
