@@ -1,11 +1,13 @@
-"""F108 Phase 2: the Work view's read-only endpoints (GET /dashboard/work/...).
+"""F108 Phase 2: the Work view's and the model-call view's read-only endpoints (GET /dashboard/work/... and
+GET /dashboard/model-calls).
 
 Pure functions of ``(session, agent_id, params)``: parameter parsing, SQL and shaping. ``nous/api/rest.py`` only
 routes to them. They read the Phase 1 tables (``nous_system.agent_turn_log`` and ``nous_system.tool_call_log``,
-migration 100; ``nous_system.model_call_log``, migration 101) and, for the trace and the titles,
-``nous_system.execution_ledger``, ``heart.episodes`` and ``heart.subtasks``, through the app's own session,
-agent-scoped, each statement under a 10-second timeout. The text they return was redacted when it was stored; it is
-returned as stored and never logged.
+migration 100; ``nous_system.model_call_log`` and ``nous_system.model_call_attempt``, migration 101) and, for the
+trace and the titles, ``nous_system.execution_ledger``, ``heart.episodes`` and ``heart.subtasks``, through the app's own
+session, agent-scoped, each statement under a 10-second timeout. A model call's stored text (migration 102) is read
+only through its ``TextStore``: the detail lists its blocks without their bodies, and one block's body is read alone.
+The text they return was redacted when it was stored; it is returned as stored and never logged.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.api.harness_dashboard import _is_tombstone
+from nous.observability.model_call_text import BLOCK_PARTS
 
 DAYS_DEFAULT = 7
 DAYS_MAX = 30
@@ -166,15 +169,21 @@ def parse_sessions_query(params: Mapping[str, str]) -> dict[str, Any]:
     }
 
 
+def _parse_uuid_cursor(raw: str | None, what: str) -> tuple[datetime, str] | None:
+    """A :func:`parse_cursor` cursor whose key is ``what`` (a UUID), the key returned in its canonical form."""
+    cursor = parse_cursor(raw)
+    if cursor is None:
+        return None
+    try:
+        return cursor[0], str(UUID(cursor[1]))
+    except ValueError as exc:
+        raise ValueError(f"cursor key must be a {what} (a UUID)") from exc
+
+
 def parse_trace_query(params: Mapping[str, str]) -> dict[str, Any]:
     """The ``limit`` and ``after`` keyword arguments of :func:`get_trace` from the request's query. The cursor's key
     is a turn id, so it must be a UUID (returned in its canonical form). Raises ValueError on a bad value."""
-    after = parse_cursor(params.get("after"))
-    if after is not None:
-        try:
-            after = (after[0], str(UUID(after[1])))
-        except ValueError as exc:
-            raise ValueError("cursor key must be a turn id (a UUID)") from exc
+    after = _parse_uuid_cursor(params.get("after"), "turn id")
     return {"limit": parse_limit(params.get("limit"), TRACE_LIMIT_DEFAULT, TRACE_LIMIT_MAX), "after": after}
 
 
@@ -197,6 +206,17 @@ def input_total_sql(alias: str) -> str:
     return (
         f"CASE WHEN num_nonnulls({alias}.input_uncached, {alias}.cache_read, {alias}.cache_write) > 0 "
         f"THEN {alias}.input_total END"
+    )
+
+
+def session_title_sql(session_expr: str) -> str:
+    """The episode title of session ``session_expr`` (a SQL expression) as a scalar subquery: the latest active
+    ``heart.episodes`` row of agent ``:agent`` with that ``session_id`` and a non-empty title, else NULL. The sessions
+    list, the trace header and the model-call detail all read a session's title through it."""
+    return (
+        "(SELECT e.title FROM heart.episodes e "
+        f"WHERE e.agent_id = :agent AND e.session_id = {session_expr} AND e.active AND coalesce(e.title, '') <> '' "
+        "ORDER BY e.started_at DESC LIMIT 1)"
     )
 
 
@@ -297,9 +317,7 @@ listed AS (
 ),
 titled AS (
     SELECT l.*, coalesce(
-        (SELECT e.title FROM heart.episodes e
-         WHERE e.agent_id = :agent AND e.session_id = l.session_id AND e.active AND coalesce(e.title, '') <> ''
-         ORDER BY e.started_at DESC LIMIT 1),
+        {session_title_sql("l.session_id")},
         left(st.task, :task_chars),
         left(nullif(l.first_message, ''), :trigger_chars),
         :no_title) AS title
@@ -473,7 +491,7 @@ WITH trace_turns AS (
 # turn row. The title follows the list's rule.
 _TRACE_HEADER_SQL = (
     _TRACE_TURNS_CTE
-    + """,
+    + f""",
 trace_calls AS (
     SELECT c.turn_id, c.call_index, c.is_error, c.subtask_id, c.work_kind, c.parent_session_id,
            tt.started_at AS turn_started_at
@@ -505,9 +523,7 @@ SELECT
     coalesce(ft.work_kind, fc.work_kind) AS work_kind,
     CASE WHEN ft.work_kind IS NOT NULL THEN ft.parent_session_id ELSE fc.parent_session_id END AS parent_session_id,
     coalesce(
-        (SELECT e.title FROM heart.episodes e
-         WHERE e.agent_id = :agent AND e.session_id = :sid AND e.active AND coalesce(e.title, '') <> ''
-         ORDER BY e.started_at DESC LIMIT 1),
+        {session_title_sql(":sid")},
         left(st.task, :task_chars),
         left(nullif(ft.trigger_text, ''), :trigger_chars),
         :no_title) AS title
@@ -868,3 +884,419 @@ async def get_patterns(session: AsyncSession, agent_id: str, *, days: int) -> di
             "retried_and_failed_again": totals["retried_and_failed_again"],
         },
     }
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# GET /dashboard/model-calls
+# ---------------------------------------------------------------------------------------------------------------------
+
+MODEL_CALLS_LIMIT_DEFAULT = 50
+MODEL_CALLS_LIMIT_MAX = 100
+ERROR_PREVIEW_CHARS = 300
+# The status filter: a stored status, or ``problem`` (the calls that have a ``problem`` text, see _PROBLEM_SQL).
+MODEL_CALL_STATUSES: tuple[str, ...] = ("ok", "error", "cancelled", "problem")
+# The call kinds the recorder counts per minute: one row per minute, purpose, model and status, holding call_count
+# calls, their tokens summed in input_uncached.
+BUCKET_CALL_KINDS: tuple[str, ...] = ("embedding", "rerank")
+
+
+def parse_model_calls_query(params: Mapping[str, str]) -> dict[str, Any]:
+    """The keyword arguments of :func:`get_model_calls`, all but ``text_enabled``, from the request's query. The
+    cursor's key is a call id, so it must be a UUID (returned in its canonical form). Raises ValueError on a bad
+    value."""
+    status = params.get("status") or None
+    if status is not None and status not in MODEL_CALL_STATUSES:
+        raise ValueError(f"status must be one of {', '.join(MODEL_CALL_STATUSES)}")
+    raw_turn = params.get("turn_id") or None
+    try:
+        turn_id = UUID(raw_turn) if raw_turn is not None else None
+    except ValueError as exc:
+        raise ValueError("turn_id must be a UUID") from exc
+    return {
+        "days": parse_days(params.get("days"), DAYS_DEFAULT, DAYS_MAX),
+        "purpose": params.get("purpose") or None,
+        "model": params.get("model") or None,
+        "session_id": params.get("session_id") or None,
+        "turn_id": turn_id,
+        "status": status,
+        "limit": parse_limit(params.get("limit"), MODEL_CALLS_LIMIT_DEFAULT, MODEL_CALLS_LIMIT_MAX),
+        "before": _parse_uuid_cursor(params.get("before"), "call id"),
+    }
+
+
+def disabled_model_calls(days: int, text_enabled: bool) -> dict[str, Any]:
+    """The model-call list with the model-call log off: the same keys as with it on, every list empty."""
+    return {
+        "enabled": False,
+        "text_enabled": text_enabled,
+        "window_days": days,
+        "purposes": [],
+        "calls": [],
+        "next_before": None,
+    }
+
+
+# This agent's model calls of the window. Every statement carries both bounds, so it is a range scan of
+# idx_model_call_log_agent_started (agent_id, started_at DESC), or, with a filter, of
+# idx_model_call_log_agent_purpose_started, idx_model_call_log_agent_session_started or idx_model_call_log_turn.
+_MODEL_CALLS_WINDOW = "m.agent_id = :agent AND m.started_at >= now() - make_interval(days => :days)"
+
+# The purpose chips: every call of the window, whatever the filters. A minute bucket counts as its call_count calls
+# (failed ones too); input_total sums the generated column, so a call with no usage adds 0, never null.
+_MODEL_CALL_PURPOSES_SQL = f"""
+SELECT m.purpose,
+       sum(m.call_count) AS calls,
+       sum(m.input_total) AS input_total,
+       coalesce(sum(m.output_tokens), 0) AS output_tokens,
+       coalesce(sum(m.call_count) FILTER (WHERE m.status = 'error'), 0) AS errors,
+       bool_or(m.call_kind = ANY(CAST(:bucket_kinds AS text[]))) AS bucketed
+FROM nous_system.model_call_log m
+WHERE {_MODEL_CALLS_WINDOW}
+GROUP BY m.purpose
+ORDER BY calls DESC, m.purpose
+"""
+
+# What _model_call_out reads of a model_call_log row ``m``: a list item's columns (the detail reads them too).
+_MODEL_CALL_COLUMNS = f"""m.id, m.started_at, m.purpose, m.label_source, m.call_kind, m.model, m.status, m.http_status,
+       m.stop_reason, m.input_uncached, m.cache_read, m.cache_write, {input_total_sql("m")} AS input_total,
+       m.output_tokens, m.duration_ms, m.attempts, m.call_count, m.session_id, m.turn_id, m.turn_number, m.is_fallback,
+       left(m.error_text, :error_chars) AS error"""
+
+# A call with a problem: it failed, was sent more than once, was sent on a fallback path, or recorded no purpose.
+# _problem names the first of these; the two must list the same reasons.
+_PROBLEM_SQL = "(m.status = 'error' OR m.attempts > 1 OR m.is_fallback OR m.label_source = 'none')"
+
+
+def _model_calls_page_sql(
+    *, purpose: bool, model: bool, session_id: bool, turn_id: bool, status: str | None, before: bool
+) -> str:
+    # Minute buckets are not calls of their own: the page lists them only when the purpose filter names theirs.
+    where = [
+        _MODEL_CALLS_WINDOW,
+        "m.purpose = :purpose" if purpose else "NOT m.call_kind = ANY(CAST(:bucket_kinds AS text[]))",
+    ]
+    if model:
+        where.append("m.model = :model")
+    if session_id:
+        where.append("m.session_id = :session_id")
+    if turn_id:
+        where.append("m.turn_id = CAST(:turn_id AS uuid)")
+    if status == "problem":
+        where.append(_PROBLEM_SQL)
+    elif status is not None:
+        where.append("m.status = :status")
+    if before:
+        where.append("(m.started_at, m.id) < (CAST(:before_ts AS timestamptz), CAST(:before_id AS uuid))")
+    return (
+        f"""
+SELECT {_MODEL_CALL_COLUMNS}
+FROM nous_system.model_call_log m
+WHERE """
+        + "\n  AND ".join(where)
+        + """
+ORDER BY m.started_at DESC, m.id DESC
+LIMIT :fetch
+"""
+    )
+
+
+def _problem(row: Mapping[str, Any]) -> str | None:
+    """What went wrong with a call, the first reason of _PROBLEM_SQL that applies, else None."""
+    if row["status"] == "error":
+        return f"Failed (HTTP {row['http_status']})" if row["http_status"] is not None else "Failed"
+    if row["attempts"] > 1:
+        return f"Sent {row['attempts']} times"
+    if row["is_fallback"]:
+        return "Sent again on a fallback path"
+    if row["label_source"] == "none":
+        return "No purpose recorded"
+    return None
+
+
+def _model_call_out(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row["id"]),
+        "started_at": _iso(row["started_at"]),
+        "purpose": row["purpose"],
+        "label_source": row["label_source"],
+        "call_kind": row["call_kind"],
+        "model": row["model"],
+        "status": row["status"],
+        "http_status": row["http_status"],
+        "stop_reason": row["stop_reason"],
+        "input_uncached": row["input_uncached"],
+        "cache_read": row["cache_read"],
+        "cache_write": row["cache_write"],
+        "input_total": row["input_total"],
+        "output_tokens": row["output_tokens"],
+        "duration_ms": row["duration_ms"],
+        "attempts": row["attempts"],
+        "call_count": row["call_count"],
+        "session_id": row["session_id"],
+        "turn_id": str(row["turn_id"]) if row["turn_id"] is not None else None,
+        "turn_number": row["turn_number"],
+        "error": row["error"],
+        "problem": _problem(row),
+    }
+
+
+async def get_model_calls(
+    session: AsyncSession,
+    agent_id: str,
+    *,
+    days: int,
+    purpose: str | None,
+    model: str | None,
+    session_id: str | None,
+    turn_id: UUID | None,
+    status: str | None,
+    limit: int,
+    before: tuple[datetime, str] | None,
+    text_enabled: bool,
+) -> dict[str, Any]:
+    """The model-call list: this agent's model calls of the last ``days`` days, every purpose (read from
+    ``model_call_log``, not only the main loop's calls), newest first, ``limit`` per page after ``before``.
+    ``purposes`` covers the whole window and ignores the filters. ``text_enabled`` is passed through for the UI."""
+    base = {"agent": agent_id, "days": days, "bucket_kinds": list(BUCKET_CALL_KINDS)}
+    await _set_timeout(session)
+
+    purposes = [
+        {
+            "purpose": row["purpose"],
+            "calls": row["calls"],
+            "input_total": row["input_total"],
+            "output_tokens": row["output_tokens"],
+            "errors": row["errors"],
+            "bucketed": row["bucketed"],
+        }
+        for row in (await session.execute(text(_MODEL_CALL_PURPOSES_SQL), base)).mappings()
+    ]
+
+    params: dict[str, Any] = {**base, "error_chars": ERROR_PREVIEW_CHARS, "fetch": limit + 1}
+    if purpose is not None:
+        params["purpose"] = purpose
+    if model is not None:
+        params["model"] = model
+    if session_id is not None:
+        params["session_id"] = session_id
+    if turn_id is not None:
+        params["turn_id"] = turn_id
+    if status is not None and status != "problem":
+        params["status"] = status
+    if before is not None:
+        params["before_ts"], params["before_id"] = before
+    sql = _model_calls_page_sql(
+        purpose=purpose is not None,
+        model=model is not None,
+        session_id=session_id is not None,
+        turn_id=turn_id is not None,
+        status=status,
+        before=before is not None,
+    )
+    rows = list((await session.execute(text(sql), params)).mappings())
+
+    next_before = None
+    if len(rows) > limit:
+        rows = rows[:limit]
+        next_before = format_cursor(rows[-1]["started_at"], str(rows[-1]["id"]))
+    return {
+        "enabled": True,
+        "text_enabled": text_enabled,
+        "window_days": days,
+        "purposes": purposes,
+        "calls": [_model_call_out(row) for row in rows],
+        "next_before": next_before,
+    }
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# GET /dashboard/model-calls/{call_id} and /dashboard/model-calls/{call_id}/blocks/{part}/{ord}
+# ---------------------------------------------------------------------------------------------------------------------
+
+# A block's ord is an INT column: a larger one cannot exist (and would not bind).
+BLOCK_ORD_MAX = 2**31 - 1
+
+
+def parse_call_id(raw: str) -> UUID:
+    """A model call id from the path. Raises ValueError unless it is a UUID."""
+    try:
+        return UUID(raw)
+    except ValueError as exc:
+        raise ValueError("call id must be a UUID") from exc
+
+
+def parse_block_ord(raw: str) -> int:
+    """A block's ``ord`` from the path: an integer (ASCII digits, an optional leading ``-``). Raises ValueError
+    otherwise. ``int()`` only ever parses the significant digits (leading zeros dropped), at most as many as
+    ``BLOCK_ORD_MAX`` has: an integer with more comes back as ``BLOCK_ORD_MAX + 1`` (past the INT column, whatever
+    its sign), so a huge digit string never reaches ``int()`` and :func:`get_block` refuses it like any other
+    ``ord`` outside the column."""
+    digits = raw.removeprefix("-")
+    if not (digits.isascii() and digits.isdigit()):
+        raise ValueError("ord must be an integer")
+    significant = digits.lstrip("0") or "0"
+    if len(significant) > len(str(BLOCK_ORD_MAX)):
+        return BLOCK_ORD_MAX + 1
+    return -int(significant) if raw.startswith("-") else int(significant)
+
+
+def disabled_model_call(text_enabled: bool) -> dict[str, Any]:
+    """The model-call detail with the model-call log off: the same keys as with it on, nothing in them."""
+    return {
+        "enabled": False,
+        "text_enabled": text_enabled,
+        "call": None,
+        "attempts": [],
+        "sections": [],
+        "turn": None,
+        "text_status": "off",
+        "blocks": [],
+    }
+
+
+# One call by its primary key, agent-scoped, with the detail's columns, whether it is older than the text retention,
+# and its session's title (session_title_sql, as the sessions list and the trace read it). The call's
+# session is its turn's: the runner stamps both from the same turn (Runner._call_context).
+_MODEL_CALL_DETAIL_SQL = f"""
+SELECT {_MODEL_CALL_COLUMNS},
+       m.group_id, m.parent_session_id, m.frame_id, m.subtask_id, m.dag_id, m.trace_id, m.error_text,
+       m.context_window_size, m.total_tokens_est, m.utilization_pct, m.tools_count, m.tool_names, m.messages_count,
+       m.loaded_facts, m.loaded_decisions, m.loaded_procedures, m.loaded_episodes, m.cache_break,
+       m.cache_break_components, m.cache_break_tokens_lost, m.section_tokens_est,
+       m.started_at < now() - make_interval(days => :retention_days) AS past_text_retention,
+       {session_title_sql("m.session_id")} AS session_title
+FROM nous_system.model_call_log m
+WHERE m.id = CAST(:call_id AS uuid) AND m.agent_id = :agent
+"""
+# The call's HTTP attempts, on the primary key (call_id, attempt_no).
+_MODEL_CALL_ATTEMPTS_SQL = """
+SELECT a.attempt_no, a.started_at, a.duration_ms, a.http_status, a.error_type, a.error_text
+FROM nous_system.model_call_attempt a
+WHERE a.call_id = CAST(:call_id AS uuid) AND a.agent_id = :agent
+ORDER BY a.attempt_no
+"""
+
+
+def _uuid_str(value: UUID | None) -> str | None:
+    return str(value) if value is not None else None
+
+
+async def get_model_call(
+    session: AsyncSession,
+    agent_id: str,
+    call_id: UUID,
+    *,
+    text_store: Any | None,
+    text_retention_days: int,
+) -> dict[str, Any] | None:
+    """One model call of this agent: every list field and the call's context, its HTTP attempts, its context
+    sections (``section_tokens_est``, largest first) and its turn. None for an unknown or another agent's call.
+
+    ``text_status``: ``off`` without ``text_store``. With one (the text is on), the status of a call without stored
+    blocks: ``expired`` when it is older than ``text_retention_days`` (0 means the text is never swept), else
+    ``not_recorded``; ``blocks`` is empty. :func:`add_model_call_blocks`, awaited once this session is closed, lists
+    the call's blocks and makes the status ``ok`` when it has any."""
+    params = {"agent": agent_id, "call_id": call_id, "error_chars": ERROR_PREVIEW_CHARS}
+    await _set_timeout(session)
+    row = (
+        (await session.execute(text(_MODEL_CALL_DETAIL_SQL), {**params, "retention_days": text_retention_days}))
+        .mappings()
+        .one_or_none()
+    )
+    if row is None:
+        return None
+    attempts = [
+        {
+            "attempt_no": a["attempt_no"],
+            "started_at": _iso(a["started_at"]),
+            "duration_ms": a["duration_ms"],
+            "http_status": a["http_status"],
+            "error_type": a["error_type"],
+            "error_text": a["error_text"],
+        }
+        for a in (await session.execute(text(_MODEL_CALL_ATTEMPTS_SQL), params)).mappings()
+    ]
+
+    if not text_store:
+        text_status = "off"
+    elif text_retention_days > 0 and row["past_text_retention"]:
+        text_status = "expired"
+    else:
+        text_status = "not_recorded"
+
+    sections = sorted((row["section_tokens_est"] or {}).items(), key=lambda item: (-item[1], item[0]))
+    return {
+        "enabled": True,
+        "text_enabled": bool(text_store),
+        "call": {
+            **_model_call_out(row),
+            "group_id": _uuid_str(row["group_id"]),
+            "is_fallback": row["is_fallback"],
+            "parent_session_id": row["parent_session_id"],
+            "frame_id": row["frame_id"],
+            "subtask_id": _uuid_str(row["subtask_id"]),
+            "dag_id": _uuid_str(row["dag_id"]),
+            "trace_id": row["trace_id"],
+            "error_text": row["error_text"],
+            "context_window_size": row["context_window_size"],
+            "total_tokens_est": row["total_tokens_est"],
+            "utilization_pct": row["utilization_pct"],
+            "tools_count": row["tools_count"],
+            "tool_names": row["tool_names"],
+            "messages_count": row["messages_count"],
+            "loaded_facts": row["loaded_facts"],
+            "loaded_decisions": row["loaded_decisions"],
+            "loaded_procedures": row["loaded_procedures"],
+            "loaded_episodes": row["loaded_episodes"],
+            "cache_break": row["cache_break"],
+            "cache_break_components": row["cache_break_components"],
+            "cache_break_tokens_lost": row["cache_break_tokens_lost"],
+        },
+        "attempts": attempts,
+        "sections": [{"name": name, "tokens_est": tokens} for name, tokens in sections],
+        "turn": (
+            None
+            if row["turn_id"] is None
+            else {
+                "turn_id": str(row["turn_id"]),
+                "session_id": row["session_id"],
+                "session_title": row["session_title"],
+            }
+        ),
+        "text_status": text_status,
+        "blocks": [],
+    }
+
+
+async def add_model_call_blocks(detail: dict[str, Any], text_store: Any | None) -> dict[str, Any]:
+    """``detail`` (from :func:`get_model_call`) with the call's stored blocks, without their bodies
+    (``TextStore.describe``), and ``text_status`` ``ok`` when it has any; unchanged with the text off. The store reads
+    in a session of its own, so await this after get_model_call's session is closed: a request then never holds two
+    connections at once."""
+    if not text_store:
+        return detail
+    blocks = [
+        {
+            "part": b.part,
+            "ord": b.ord,
+            "size_chars": b.size_chars,
+            "tokens_est": b.size_chars // 4,
+            "reused_by": b.reused_by,
+        }
+        for b in await text_store.describe(UUID(detail["call"]["id"]))
+    ]
+    if blocks:
+        detail["text_status"], detail["blocks"] = "ok", blocks
+    return detail
+
+
+async def get_block(text_store: Any, call_id: UUID, part: str, ord_: int) -> dict[str, Any] | None:
+    """One stored block of a model call, with its body (``TextStore.load_one``: a primary-key lookup of that block
+    alone, agent-scoped by the store). None, before any query, for a ``part`` outside system, messages, tools and
+    response or an ``ord_`` the column cannot hold; None when the call has no such block or is another agent's."""
+    if part not in BLOCK_PARTS or not 0 <= ord_ <= BLOCK_ORD_MAX:
+        return None
+    body = await text_store.load_one(call_id, part, ord_)
+    if body is None:
+        return None
+    return {"part": part, "ord": ord_, "size_chars": len(body), "body": body}

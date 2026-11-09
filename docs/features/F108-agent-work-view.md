@@ -189,6 +189,8 @@ Each sweep runs in a try of its own, so one failing sweep never skips another.
 
 The dashboards, and Nous itself: the `db_query` reader (`nous_reader`, `scripts/ops/db_roles.sql` section 5d) may read `tool_call_log`, `model_call_log` and `model_call_attempt`, so Nous can look up its own tool calls, their reasons and its own model calls. It never reads `agent_turn_log`, which holds message text, nor the model-call text (`model_text_block` and `model_call_block_ref`, the full prompts and responses): `db_roles.sql` lists none of them. This is the one exception to "dashboards read the observability tables, the agent never does".
 
+The dashboard reads both text tables (`model_text_block` and `model_call_block_ref`) through the app role, never the reader: the model-call detail lists a call's blocks without their bodies (`GET /dashboard/model-calls/{call_id}`), and one block's body is read alone, on request (`GET /dashboard/model-calls/{call_id}/blocks/{part}/{ord}`).
+
 ## Non-goals
 
 - The MCP server's own tools (`nous_recall`, `nous_status`, `nous_teach` in `nous/api/mcp.py`) are called directly by external agents. Those calls are not Nous's own work and are not recorded, and the MCP server's tool list does not get `reason`. `nous_chat` and `nous_decide` start a turn of Nous's own (context kind `mcp`), which is recorded like any other turn.

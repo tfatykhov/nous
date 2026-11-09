@@ -2343,6 +2343,82 @@ def create_app(
             logger.warning("dashboard_work_patterns: the work view query failed", exc_info=True)
             return JSONResponse({"error": "work view query failed"}, status_code=500)
 
+    async def dashboard_model_calls(request: Request) -> JSONResponse:
+        """GET /dashboard/model-calls — F108: every model call of the last ``days`` days (default 7), newest first,
+        filtered by purpose, model, session, turn or status, with the window's purpose chips. Read-only. With the
+        model-call log off: 200 {"enabled": false} and no session."""
+        from nous.api import work_view_dashboard as wv
+
+        try:
+            query = wv.parse_model_calls_query(request.query_params)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        # Truthiness, not ``is not None``: main.py passes a lazy proxy, falsy while its store is None.
+        text_enabled = bool(settings.model_call_text_enabled and model_call_text_store)
+        if not settings.model_call_log_enabled:
+            return JSONResponse(wv.disabled_model_calls(query["days"], text_enabled))
+        try:
+            async with database.session() as session:
+                data = await wv.get_model_calls(session, settings.agent_id, **query, text_enabled=text_enabled)
+            return JSONResponse(data)
+        except Exception:
+            logger.warning("dashboard_model_calls: the model call query failed", exc_info=True)
+            return JSONResponse({"error": "work view query failed"}, status_code=500)
+
+    async def dashboard_model_call(request: Request) -> JSONResponse:
+        """GET /dashboard/model-calls/{call_id} — F108: one model call: its numbers and context, its attempts, its
+        context sections, its turn, and its stored text blocks without their bodies. Read-only. With the model-call
+        log off: 200 {"enabled": false} and no session; unknown or another agent's call: 404."""
+        from nous.api import work_view_dashboard as wv
+
+        try:
+            call_id = wv.parse_call_id(request.path_params["call_id"])
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        # Truthiness, not ``is not None``: main.py passes a lazy proxy, falsy while its store is None.
+        text_store = model_call_text_store if settings.model_call_text_enabled and model_call_text_store else None
+        if not settings.model_call_log_enabled:
+            return JSONResponse(wv.disabled_model_call(text_store is not None))
+        try:
+            async with database.session() as session:
+                data = await wv.get_model_call(
+                    session,
+                    settings.agent_id,
+                    call_id,
+                    text_store=text_store,
+                    text_retention_days=settings.model_call_text_retention_days,
+                )
+            if data is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            # After the session above is closed: the text store reads in a session of its own.
+            return JSONResponse(await wv.add_model_call_blocks(data, text_store))
+        except Exception:
+            logger.warning("dashboard_model_call: the model call query failed", exc_info=True)
+            return JSONResponse({"error": "work view query failed"}, status_code=500)
+
+    async def dashboard_model_call_block(request: Request) -> JSONResponse:
+        """GET /dashboard/model-calls/{call_id}/blocks/{part}/{ord} — F108: the body of one stored text block of a
+        model call, as stored (redacted when written). Read-only. 400 for an id that is not a UUID or an ``ord`` that
+        is not an integer. 404 when the call has no such block, is another agent's, or the text (or the model-call
+        log) is off; then no session is opened."""
+        from nous.api import work_view_dashboard as wv
+
+        try:
+            call_id = wv.parse_call_id(request.path_params["call_id"])
+            ord_ = wv.parse_block_ord(request.path_params["ord"])
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        if not (settings.model_call_log_enabled and settings.model_call_text_enabled and model_call_text_store):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        try:
+            data = await wv.get_block(model_call_text_store, call_id, request.path_params["part"], ord_)
+            if data is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            return JSONResponse(data)
+        except Exception:
+            logger.warning("dashboard_model_call_block: the model call text query failed", exc_info=True)
+            return JSONResponse({"error": "work view query failed"}, status_code=500)
+
     async def dashboard_memory_write_health_acknowledge(request: Request) -> JSONResponse:
         """POST /dashboard/memory-write-health/acknowledge {rule, day?, note?} — P4: the owner accepts a rule's
         evidence (a deliberate restore or delete) and resets its baseline. Records who acknowledged what as an events
@@ -3875,6 +3951,9 @@ def create_app(
         Route("/dashboard/work/sessions", dashboard_work_sessions),
         Route("/dashboard/work/sessions/{session_id}", dashboard_work_trace),
         Route("/dashboard/work/patterns", dashboard_work_patterns),
+        Route("/dashboard/model-calls", dashboard_model_calls),
+        Route("/dashboard/model-calls/{call_id}", dashboard_model_call),
+        Route("/dashboard/model-calls/{call_id}/blocks/{part}/{ord}", dashboard_model_call_block),
         # F038: DAG orchestration dashboard
         Route("/dashboard/dag", dashboard_dag),
         Route("/dashboard/execution", dashboard_execution),
