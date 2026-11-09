@@ -321,6 +321,21 @@ def test_a_labelled_password_the_old_window_held_whole_is_masked(scan_pad):
         assert '{"password": [REDACTED]}' in line
 
 
+def test_a_periodic_own_secret_in_a_cell_leaves_no_fragment(monkeypatch, scan_pad):
+    """A self-overlapping secret run on past a whole copy: str.replace left the overhang raw, whole or cut."""
+    password = "s3cr3t! " * 8
+    monkeypatch.setenv("NOUS_TEST_TOKEN", password)
+    ledger_store._own_secrets.cache_clear()
+    try:
+        group = password * 3 + password[:24] + " "
+        for value in (group, "x " + group * 400):  # whole, and cut by the server
+            line = format_result(["c"], [[Cell(value[: db_query.cell_window()], len(value))]], truncated=False)
+            assert not any(password[i : i + 6] in line for i in range(len(password) - 5)), line[:200]
+    finally:
+        monkeypatch.delenv("NOUS_TEST_TOKEN")
+        ledger_store._own_secrets.cache_clear()
+
+
 def test_newlines_in_a_cell_do_not_forge_a_row():
     text = format_result(["a", "b"], [_cells("x\ny | z", "p\r\nq r\x0bs")], truncated=False)
     lines = text.splitlines()

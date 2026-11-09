@@ -242,6 +242,22 @@ def test_a_block_that_is_one_base64_run_keeps_its_prefix_and_mask(scan_pad, size
     assert _head(body) == "Here is the file:\n[REDACTED_BLOB]"
 
 
+def test_a_periodic_own_secret_in_a_block_leaves_no_fragment(monkeypatch, scan_pad):
+    """A self-overlapping secret run on past a whole copy: str.replace left the overhang raw, within the cap or over
+    it."""
+    password = "s3cr3t! " * 8
+    monkeypatch.setenv("NOUS_TEST_FAKE_TOKEN", password)
+    ledger_store._own_secrets.cache_clear()
+    try:
+        group = password * 3 + password[:24] + " "
+        for raw in (group, "x " + group * 1000):  # within the 200,000 cap, and 217,002 characters, over it
+            _, body = prepare_block(raw, 200_000)
+            assert not any(password[i : i + 6] in body for i in range(len(password) - 5)), body[:200]
+    finally:
+        monkeypatch.delenv("NOUS_TEST_FAKE_TOKEN")
+        ledger_store._own_secrets.cache_clear()
+
+
 def test_base64_attachment_replaced():
     data = base64.b64encode(bytes(range(256)) * 12).decode()  # 3,072 bytes, 4,096 characters
     image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": data}}

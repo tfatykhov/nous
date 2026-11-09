@@ -243,11 +243,73 @@ def _own_secrets() -> tuple[str, ...]:
     return tuple(sorted(values, key=len, reverse=True))
 
 
-def _redact_detail(text: str) -> str:
-    """Own secret values first, then the reviewed pattern redaction."""
+@lru_cache(maxsize=1024)
+def _period(value: str) -> int:
+    """The smallest p with ``value[i] == value[i + p]`` for every i (from the KMP failure function); computed once
+    per own secret that is found."""
+    fail = [0] * len(value)
+    k = 0
+    for i in range(1, len(value)):
+        while k and value[i] != value[k]:
+            k = fail[k - 1]
+        if value[i] == value[k]:
+            k += 1
+        fail[i] = k
+    return len(value) - fail[-1] if value else 1
+
+
+def _own_secret_spans(text: str) -> list[tuple[int, int]]:
+    """The stretches ``[start, end)`` of ``text`` that occurrences of this process's own secrets cover, any spelling:
+    sorted, merged where they overlap or touch.
+
+    Every occurrence counts, overlapping ones too, so whether a character is covered depends only on the text
+    within one secret's length of it, never on where a scan starts. ``str.replace`` masks non-overlapping matches
+    from the left instead: a window that starts inside a run of a self-overlapping secret (``'s3cr3t! ' * 8``,
+    repeated) masks the run at another alignment and leaves a raw stretch of it, at the window's end or wherever the
+    run ends, and even a whole text keeps the part of a run that only an overlapping occurrence covers.
+
+    Linear per spelling: from an occurrence, the next one a whole number of periods on needs only its new last
+    characters checked (any multiple of the period up to the secret's length is a period too), so a run of
+    overlapping occurrences is walked once, in strides as long as the secret allows, and the next search starts one
+    past the last occurrence."""
+    spans: list[tuple[int, int]] = []
     for secret in _own_secrets():
-        text = text.replace(secret, SECRET_MASK)
-    return redact_error_text(text)
+        size = len(secret)
+        at = text.find(secret)
+        while at != -1:
+            period = _period(secret)
+            end = at + size
+            for step in (size - size % period, period):
+                last = secret[size - step :]
+                while text.startswith(last, end):
+                    end += step
+            spans.append((at, end))
+            at = text.find(secret, end - size + 1)
+    spans.sort()
+    merged: list[tuple[int, int]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _masked(text: str, spans: list[tuple[int, int]]) -> str:
+    """``text`` with each of the sorted, disjoint stretches in ``spans`` replaced by one mask."""
+    parts: list[str] = []
+    at = 0
+    for start, end in spans:
+        parts += (text[at:start], SECRET_MASK)
+        at = end
+    parts.append(text[at:])
+    return "".join(parts)
+
+
+def _redact_detail(text: str) -> str:
+    """Own secret values first (every stretch their occurrences cover, ``_own_secret_spans``), then the reviewed
+    pattern redaction."""
+    return redact_error_text(_masked(text, _own_secret_spans(text)))
 
 
 def redact_output(text: str) -> str:
@@ -287,15 +349,33 @@ def redaction_scan_pad() -> int:
 
 def _settled_side(text: str, half: int, pad: int, tail: bool, third: bool = True) -> str:
     """Up to ``half`` characters of one side of the redacted ``text`` (the head, or with ``tail`` the tail) that text
-    past the scanned window cannot change. Two scans, ``pad`` characters apart, keep only what they agree on: a
-    secret the shorter one's edge splits, the longer one sees whole and masks, so they differ from its start. When
-    that leaves less than ``half`` (masks shrank it, or a secret runs across the edge), one more scan a pad further
-    in (unless ``third`` is False) settles the longer window the same way, and the longer result is kept: both are
-    prefixes of the same scan."""
+    past the scanned window cannot change. Each scan is a window from this side's end of ``text`` inward: ``near``
+    ``half`` characters long, ``far`` a pad longer, and (unless ``third`` is False) a third a pad longer still.
 
-    def scan(reach: int) -> str:
-        # the redacted ``reach`` characters at this side's end, read from that end inward
-        return _redact_detail(text[len(text) - reach :])[::-1] if tail else _redact_detail(text[:reach])
+    Own secrets, by position. Their stretches (``_own_secret_spans``) are found once, over the longest window, and
+    each scan masks the stretches that fall in it, cut at its edge. An own secret is at most pad long (pad is at
+    least the longest spelling). The longest window runs to the text's own end on one side and, on the other, at
+    least a pad past the edge of every scan whose start can be kept (``far`` when there is a third scan, else
+    ``near``). So it holds every occurrence that covers a character of those scans, and in them every such character
+    is masked, wherever a run of a periodic secret begins or ends. Only the longest window's inner edge can hold part
+    of one, and that scan is only compared against.
+
+    The patterns, by agreement. Two scans a pad apart keep only the start they agree on: a token the shorter one's
+    edge cuts, the longer one sees whole and masks, so they differ from its start. When that leaves less than
+    ``half`` (masks shrank it, or a token runs across the edge), ``far`` is settled against the third scan the same
+    way and the longer result is kept: both are prefixes of ``far``. So the kept side is always a prefix of a scan
+    whose own secrets are all masked, and it holds no character of one."""
+    reach = half + (2 if third else 1) * pad
+    region = text[max(0, len(text) - reach) :] if tail else text[:reach]
+    spans = _own_secret_spans(region)
+
+    def scan(size: int) -> str:
+        # the redacted ``size`` characters at this side's end, read from that end inward
+        if tail:
+            start = max(0, len(region) - size)
+            cut = [(max(s, start) - start, e - start) for s, e in spans if e > start]
+            return redact_error_text(_masked(region[start:], cut))[::-1]
+        return redact_error_text(_masked(region[:size], [(s, min(e, size)) for s, e in spans if s < size]))
 
     near, far = scan(half), scan(half + pad)
     kept = os.path.commonprefix([near, far])
