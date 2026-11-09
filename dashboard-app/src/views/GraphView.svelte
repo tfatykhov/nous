@@ -2,6 +2,7 @@
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
+  import { graphSliceText } from '../lib/graphSlice';
   import type {
     GraphData,
     GraphEdgeData,
@@ -298,7 +299,9 @@
 <div class="view-head">
   <div>
     <h1 class="view-title">Knowledge Graph</h1>
-    <p class="view-subtitle">Memory nodes and relationship edges across all types</p>
+    <p class="view-subtitle">
+      {$store.data ? graphSliceText($store.data.stats) : 'Memory nodes and the links between them.'}
+    </p>
   </div>
   <div class="head-actions">
     <StaleBadge state={$store} />
