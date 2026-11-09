@@ -2610,11 +2610,17 @@ async def test_model_call_detail_fields(mct_client, db, agent_id, cleanup):
     bare = await insert_model_call(db, agent_id, purpose="critic", session_id="sess-D", started_at=base)
     untitled = await insert_model_call(db, agent_id, turn_id=uuid.uuid4(), session_id="sess-U", started_at=base)
     await insert_episode(db, agent_id, "sess-U", None, started_at=base)
+    # A newer episode without a title does not hide an older titled one.
+    retitled = await insert_model_call(db, agent_id, turn_id=uuid.uuid4(), session_id="sess-T", started_at=base)
+    await insert_episode(db, agent_id, "sess-T", "Earlier title", started_at=base - timedelta(hours=1))
+    await insert_episode(db, agent_id, "sess-T", "", started_at=base)
+    await insert_episode(db, agent_id, "sess-T", None, started_at=base + timedelta(seconds=1))
     sessionless = await insert_model_call(db, agent_id, turn_id=turn, started_at=base)
     detail = await get_json(mct_client, call_path(bare))
     assert (detail["turn"], detail["sections"], detail["attempts"]) == (None, [], [])
     assert detail["call"]["error_text"] is None and detail["call"]["tool_names"] is None
     assert (await get_json(mct_client, call_path(untitled)))["turn"]["session_title"] is None
+    assert (await get_json(mct_client, call_path(retitled)))["turn"]["session_title"] == "Earlier title"
     assert (await get_json(mct_client, call_path(sessionless)))["turn"] == {
         "turn_id": str(turn),
         "session_id": None,
@@ -2781,6 +2787,15 @@ async def test_detail_flag_off(db, agent_id, cleanup, monkeypatch, text_store):
         assert await get_json(c, call_path(call_id)) == wv.disabled_model_call(True)
         assert (await c.get(block_path(call_id, "system", 0))).status_code == 404
         assert (await c.get(call_path("not-a-uuid"))).status_code == 400  # parsing still applies
+    # A lazy proxy whose store is None is falsy: the flag-off payload says the text is off.
+    empty_proxy = MagicMock()
+    empty_proxy.__bool__.return_value = False
+    off_proxy = create_app(
+        MagicMock(), MagicMock(), MagicMock(), MagicMock(), db, settings, model_call_text_store=empty_proxy
+    )
+    async with AsyncClient(transport=ASGITransport(app=off_proxy), base_url="http://test") as c:
+        assert await get_json(c, call_path(call_id)) == wv.disabled_model_call(False)
+        assert (await c.get(block_path(call_id, "system", 0))).status_code == 404
     # The text off: the detail opens one session for the call's numbers, the block endpoint none.
     text_off = text_app(db, agent_id, text_store, text_on=False)
     async with AsyncClient(transport=ASGITransport(app=text_off), base_url="http://test") as c:
