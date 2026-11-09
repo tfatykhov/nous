@@ -145,9 +145,9 @@
       {/if}
       <p class="harness-line">
         {#if !a.harness.events_persisted}
-          Harness: not measured — event persistence is off.
+          Guards: not measured — event persistence is off.
         {:else}
-          Harness, last 7 days:
+          Guards, last 7 days:
           {#each [['Offered-tool rule', a.harness.offered_set], ['Context policy', a.harness.context_policy]] as [name, r], i (name)}
             {@const rule = r as { mode: string | null; warn_7d: number; refused_7d: number }}
             {i ? ' · ' : ''}{name}

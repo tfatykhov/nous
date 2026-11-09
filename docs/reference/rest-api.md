@@ -57,7 +57,7 @@ Documented routes served by `nous/api/rest.py`, which is the full list. Part of 
 | GET | `/dashboard/graph` | Graph visualization data |
 | GET | `/dashboard/calibration` | Calibration dashboard data |
 | GET | `/dashboard/activity` | Activity data: events, censor, schedule and sleep numbers. The dashboard shows one section each on Observability (the event timeline), Guards (the censors), Subtasks (the schedules) and Consolidation (the sleeps); the Activity screen is retired (`#/activity` redirects to Observability) |
-| GET | `/dashboard/health` | Health dashboard data |
+| GET | `/dashboard/health` | Health dashboard data; the dashboard shows it on Memory health's Graph tab (`/dashboard/v2/#/health/graph`) |
 | GET | `/dashboard/rubric` | Rubric dashboard data |
 | GET | `/dashboard/admission` | Admission control dashboard data; the dashboard shows it on Memory health's Writes tab (`/dashboard/v2/#/health/writes`) |
 | GET | `/dashboard/admission/rejected` | Rejected admission entries |
