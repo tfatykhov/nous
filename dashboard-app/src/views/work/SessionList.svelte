@@ -230,7 +230,7 @@
     </label>
     <label class="field grow">
       <span>Search</span>
-      <input type="search" placeholder="Title, your message or a reason" bind:value={qText} oninput={onSearch} />
+      <input type="search" placeholder="Title or any message" bind:value={qText} oninput={onSearch} />
     </label>
   </section>
 

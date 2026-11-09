@@ -1902,7 +1902,7 @@ export interface WorkSession {
   context_kind: string | null;
   title: string;
   first_message: string | null;
-  /** The last turn's message; null for a one-turn session. */
+  /** The last turn's message; null for a one-turn session or when the last turn has no message. */
   last_message: string | null;
   started_at: string;
   /** Latest end (or start) of the session's turns; the code never returns null here. The list sorts by it. */
