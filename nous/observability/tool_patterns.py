@@ -74,13 +74,11 @@ GUARD_FRAGMENTS: tuple[str, ...] = (
 )
 
 
-# Phrases that carry a guard word but are transient failures, not guards: a network error (see
-# nous/cognitive/monitor.py) and the runner's "execution ledger could not record this send" (runner.py), which is
-# retryable. They are blanked before the fragment match.
+# Phrases that carry a guard word but are transient network failures, not guards (see nous/cognitive/monitor.py).
+# They are blanked before the fragment match.
 TRANSIENT_PHRASES: tuple[str, ...] = (
     "connectionrefusederror",
     "connection refused",
-    "send refused: the execution ledger could not record this send",
 )
 
 # ``duplicate`` and ``offered_set`` are model mistakes (a repeated call, a tool not offered), not guards.

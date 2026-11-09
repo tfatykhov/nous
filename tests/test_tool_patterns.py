@@ -126,7 +126,7 @@ def test_transient_network_errors_are_not_guards():
     assert guard_cause("error", None, f"{text}; Refused to write 'a': it is inside the undo journal") == "fragment"
 
 
-def test_runner_model_mistakes_and_ledger_failures_are_not_guards():
+def test_runner_model_mistakes_are_not_guards_and_a_ledger_failure_is():
     offered = "Tool error: 'x' is not available in this turn. Use only the tools offered to you."
     assert guard_cause("refused", "offered_set", offered) is None
     for text in (
@@ -142,5 +142,7 @@ def test_runner_model_mistakes_and_ledger_failures_are_not_guards():
         "Send refused: the execution ledger could not record this send, so a duplicate "
         "cannot be ruled out. Retry later."
     )
-    assert guard_cause("suppressed", None, ledger) is None
-    assert guard_cause("error", None, ledger) is None
+    # Still a guard label on purpose: a ledger that cannot record a send is an infrastructure fault only the owner
+    # can fix, so it goes to the owner card and a note to Nous could not help.
+    assert guard_cause("suppressed", None, ledger) == "fragment"
+    assert guard_cause("error", None, ledger) == "fragment"
