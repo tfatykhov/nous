@@ -2120,16 +2120,38 @@ async def test_model_calls_purposes_chips_ignore_filters_and_bucket_rows(mc_clie
         **NO_TOKENS,
         started_at=base.replace(second=0, microsecond=0),
     )
+    # One purpose with both kinds of row: an embedding whose purpose resolved to unlabelled, and an unlabelled call.
+    # Its chip is bucketed (some of its calls are counted per minute); the list still shows the call.
+    unlabelled_call = await insert_model_call(
+        db, agent_id, purpose="unlabelled", label_source="none", started_at=base + timedelta(seconds=2)
+    )
+    unlabelled_bucket = await insert_model_call(
+        db,
+        agent_id,
+        purpose="unlabelled",
+        call_kind="embedding",
+        call_count=3,
+        input_uncached=30,
+        cache_read=None,
+        output_tokens=None,
+        started_at=base.replace(second=0, microsecond=0),
+    )
     expected_purposes = [
         {"purpose": "embedding", "calls": 32, "input_total": 1200, "output_tokens": 0, "errors": 2, "bucketed": True},
         {"purpose": "rerank", "calls": 5, "input_total": 0, "output_tokens": 0, "errors": 0, "bucketed": True},
+        {"purpose": "unlabelled", "calls": 4, "input_total": 180, "output_tokens": 20, "errors": 0, "bucketed": True},
         {"purpose": "chat", "calls": 2, "input_total": 54532, "output_tokens": 612, "errors": 1, "bucketed": False},
     ]
 
     body = await get_json(mc_client, MODEL_CALLS)
     assert body["purposes"] == expected_purposes  # most calls first
     assert str(embed_ok) not in _call_ids(body) and str(rerank) not in _call_ids(body)
-    assert len(body["calls"]) == 2
+    assert str(unlabelled_bucket) not in _call_ids(body) and str(unlabelled_call) in _call_ids(body)
+    assert len(body["calls"]) == 3
+    assert set(_call_ids(await get_json(mc_client, MODEL_CALLS, purpose="unlabelled"))) == {
+        str(unlabelled_call),
+        str(unlabelled_bucket),
+    }
 
     # The chips ignore every filter.
     for params in (
