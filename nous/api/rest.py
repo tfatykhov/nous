@@ -2097,6 +2097,9 @@ def create_app(
                 "hit_rate": hit_rate,
                 "cache_break": e.cache_break,
                 "break_components": e.cache_break_components if e.cache_break else [],
+                # F108: from the model-call table, the row names its call (the dashboard links to it). A ring id
+                # names no call, so the ring's rows go without one.
+                **({"id": str(e.id)} if view.reads_table else {}),
             })
 
         # Session list sorted by calls descending
