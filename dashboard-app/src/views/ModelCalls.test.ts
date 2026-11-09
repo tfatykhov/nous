@@ -40,12 +40,15 @@ const detail = (over: Record<string, unknown> = {}) => ({
 });
 
 let urls: string[] = [];
-let respond: (url: string) => { status?: number; body?: unknown } = () => ({ body: list([]) });
+type Reply = { status?: number; body?: unknown; hang?: boolean; gate?: Promise<unknown> };
+let respond: (url: string) => Reply = () => ({ body: list([]) });
 function install() {
   urls = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     urls.push(url);
     const r = respond(url);
+    if (r.hang) return new Promise(() => {});
+    if (r.gate) return r.gate.then((body) => ({ ok: true, status: 200, json: async () => body }) as Response);
     const status = r.status ?? 200;
     return { ok: status < 400, status, json: async () => r.body } as Response;
   }));
@@ -381,5 +384,142 @@ describe('Model call detail', () => {
     expect(a.getAttribute('aria-current')).toBe('true');
     expect(b.getAttribute('aria-current')).toBeNull();
     expect(within(container as HTMLElement).getAllByRole('link').length).toBeGreaterThan(2);
+  });
+});
+
+describe('Model calls fix round 1', () => {
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); });
+  const start = (hash: string, r: (u: string) => Reply) => {
+    respond = r; install(); location.hash = ''; initRouter(); go(hash);
+  };
+
+  it('the detail says Loading… while its fetch is pending', async () => {
+    start(`#/model-calls/c/${ID1}`, (u) => (u === `/dashboard/model-calls/${ID1}` ? { hang: true } : { body: list([row(ID1)]) }));
+    const { container } = render(ModelCalls);
+    await waitFor(() => expect(container.querySelector('.detail')).toBeTruthy());
+    const msg = within(container.querySelector('.detail') as HTMLElement).getByText('Loading…');
+    expect(msg.getAttribute('role')).toBe('status');
+  });
+
+  it('the detail says it could not load after a failure that is not a 404', async () => {
+    start(`#/model-calls/c/${ID1}`, (u) => (u === `/dashboard/model-calls/${ID1}` ? { status: 400, body: {} } : { body: list([row(ID1)]) }));
+    render(ModelCalls);
+    const msg = await screen.findByText('Could not load this call.');
+    expect(msg.getAttribute('role')).toBe('alert');
+  });
+
+  it('two filter writes in one turn keep both', async () => {
+    start('#/model-calls', () => ({ body: list([row(ID1)]) }));
+    render(ModelCalls);
+    const sel = (await screen.findByLabelText('Status')) as HTMLSelectElement;
+    const chip = await screen.findByRole('button', { name: /main loop/ });
+    sel.value = 'error';
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    chip.click();
+    await waitFor(() => expect(location.hash).toContain('purpose=main_loop'));
+    expect(location.hash).toContain('status=error');
+  });
+
+  it('a poll whose page one overlaps a loaded page lists each call once', async () => {
+    const cursor = '2026-11-07T00:00:00+00:00|' + ID2;
+    let polls = 0;
+    start('#/model-calls', (u) => {
+      if (u.includes('before=')) return { body: list([row(ID3)]) };
+      polls += 1;
+      return { body: polls === 1 ? list([row(ID1), row(ID2)], { next_before: cursor }) : list([row(ID3), row(ID1), row(ID2)], { next_before: cursor }) };
+    });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { container } = render(ModelCalls);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    await waitFor(() => expect(container.querySelectorAll('a.row').length).toBe(3));
+    await vi.advanceTimersByTimeAsync(60_000);
+    await waitFor(() => expect(polls).toBe(2));
+    await vi.advanceTimersByTimeAsync(50);
+    const hrefs = Array.from(container.querySelectorAll('a.row')).map((a) => a.getAttribute('href'));
+    // page one is the fresh poll (new order), the loaded page adds nothing twice
+    expect(hrefs).toEqual([ID3, ID1, ID2].map((id) => `#/model-calls/c/${id}`));
+  });
+
+  it('a filter change drops the appended pages', async () => {
+    const cursor = '2026-11-07T00:00:00+00:00|' + ID2;
+    start('#/model-calls', (u) => {
+      if (u.includes('before=')) return { body: list([row(ID3)]) };
+      return { body: u.includes('purpose=embedding') ? list([row(ID1)]) : list([row(ID1), row(ID2)], { next_before: cursor }) };
+    });
+    const { container } = render(ModelCalls);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    await waitFor(() => expect(container.querySelectorAll('a.row').length).toBe(3));
+    await fireEvent.click(screen.getByRole('button', { name: /embedding/ }));
+    await waitFor(() => expect(container.querySelectorAll('a.row').length).toBe(1));
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
+  });
+
+  it('a Load more answer that lands after a filter change is dropped', async () => {
+    const cursor = '2026-11-07T00:00:00+00:00|' + ID2;
+    let release!: (b: unknown) => void;
+    const gate = new Promise<unknown>((r) => { release = r; });
+    start('#/model-calls', (u) => {
+      if (u.includes('before=')) return { gate };
+      return { body: u.includes('purpose=embedding') ? list([row(ID1)]) : list([row(ID1), row(ID2)], { next_before: cursor }) };
+    });
+    const { container } = render(ModelCalls);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    await waitFor(() => expect(urls.some((u) => u.includes('before='))).toBe(true));
+    await fireEvent.click(screen.getByRole('button', { name: /embedding/ }));
+    await waitFor(() => expect(container.querySelectorAll('a.row').length).toBe(1));
+    release(list([row(ID3)]));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(container.querySelectorAll('a.row').length).toBe(1);
+  });
+
+  it('a block used by this call only still shows its token count', async () => {
+    start(`#/model-calls/c/${ID1}`, (u) => (u === `/dashboard/model-calls/${ID1}` ? { body: detail() } : u.includes('/blocks/') ? { body: { part: 'response', ord: 0, size_chars: 5, body: 'x' } } : { body: list([row(ID1)]) }));
+    const { container } = render(ModelCalls);
+    await waitFor(() => expect(container.querySelector('details.block > summary')).toBeTruthy());
+    expect(container.querySelector('details.block > summary')!.textContent).toContain('about 1,000 tokens, this call only');
+  });
+
+  it('a background poll does not dim the list', async () => {
+    let polls = 0;
+    start('#/model-calls', () => { polls += 1; return polls === 1 ? { body: list([row(ID1)]) } : { hang: true }; });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { container } = render(ModelCalls);
+    await waitFor(() => expect(container.querySelector('a.row')).toBeTruthy());
+    await vi.advanceTimersByTimeAsync(60_000);
+    await waitFor(() => expect(polls).toBe(2));
+    expect(container.querySelector('ul.calls')!.classList.contains('dim')).toBe(false);
+  });
+
+  it('the clear-filter buttons have accessible names', async () => {
+    start(`#/model-calls?model=m1&session_id=s1&turn_id=${TURN}`, () => ({ body: list([row(ID1)]) }));
+    render(ModelCalls);
+    for (const n of ['Clear model filter', 'Clear session filter', 'Clear turn filter']) {
+      expect(await screen.findByRole('button', { name: n })).toBeTruthy();
+    }
+  });
+
+  it('an error row with no preview still offers full error', async () => {
+    start('#/model-calls', () => ({ body: list([row(ID1, { status: 'error', error: null })]) }));
+    render(ModelCalls);
+    expect((await screen.findByRole('link', { name: /full error/i })).getAttribute('href')).toBe(`#/model-calls/c/${ID1}`);
+  });
+
+  it('a failed block fetch can be retried by closing and opening', async () => {
+    let fails = 1;
+    start(`#/model-calls/c/${ID1}`, (u) => {
+      if (u === `/dashboard/model-calls/${ID1}`) return { body: detail() };
+      if (u.includes('/blocks/system/')) { if (fails-- > 0) return { status: 400, body: {} }; return { body: { part: 'system', ord: 0, size_chars: 3, body: 'sys text' } }; }
+      if (u.includes('/blocks/')) return { body: { part: 'x', ord: 0, size_chars: 1, body: 'x' } };
+      return { body: list([row(ID1)]) };
+    });
+    const { container } = render(ModelCalls);
+    await waitFor(() => expect(container.querySelectorAll('details.block').length).toBe(3));
+    const d = container.querySelectorAll<HTMLDetailsElement>('details.block')[0];
+    d.open = true; d.dispatchEvent(new Event('toggle'));
+    await screen.findByText(/Could not load this text/);
+    d.open = false; d.dispatchEvent(new Event('toggle'));
+    d.open = true; d.dispatchEvent(new Event('toggle'));
+    await screen.findByText('sys text');
+    expect(urls.filter((u) => u.includes('/blocks/system/0')).length).toBe(2);
   });
 });

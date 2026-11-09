@@ -117,6 +117,10 @@
         <p class="muted">{TEXT_SENTENCES[data.text_status] ?? TEXT_SENTENCES.not_recorded}</p>
       {/if}
     </section>
+  {:else if $store.error}
+    <p class="err" role="alert">Could not load this call.</p>
+  {:else}
+    <p class="muted" role="status">Loading…</p>
   {/if}
 </div>
 
@@ -131,6 +135,7 @@
   .made { font-size: 0.875rem; }
   .made a { color: var(--accent-text); }
   .gone { color: var(--muted); }
+  .err { color: var(--red); font-size: 0.875rem; margin: 0; }
   .notice { padding: 0.75rem 1rem; border-radius: 8px; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.4); font-size: 0.875rem; }
   .wrap { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
   pre.err { color: var(--red); font-family: var(--font-mono); font-size: 0.75rem; max-height: 320px; overflow: auto; }

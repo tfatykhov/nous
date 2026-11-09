@@ -3,7 +3,7 @@
   import { makePollStore } from '../../lib/stores/registry';
   import { usePoll } from '../../lib/poll';
   import { routeHref } from '../../lib/router';
-  import { fmtDuration, fmtTime, fmtTokens, modelCallQuery, type ModelCallFilters } from '../../lib/work';
+  import { fmtDuration, fmtTime, fmtTokens, modelCallFilters, modelCallQuery, type ModelCallFilters } from '../../lib/work';
   import type { ModelCallRow, ModelCallsData } from '../../lib/types/api';
   import StaleBadge from '../../lib/ui/StaleBadge.svelte';
 
@@ -45,6 +45,8 @@
   }
 
   // A filter change refetches page one and drops the appended pages. A poll does neither: it replaces page one only.
+  // True only while a refetch the user asked for (a filter change) is in flight: a background poll never dims.
+  let refetching = $state(false);
   let seenKey: string | null = null;
   $effect(() => {
     const k = key;
@@ -52,7 +54,8 @@
     if (k === seenKey) return;
     seenKey = k;
     resetPages();
-    void store.refresh();
+    refetching = true;
+    void store.refresh().finally(() => { refetching = false; });
   });
 
   let data = $derived($store.data);
@@ -85,7 +88,10 @@
 
   // Each control writes the hash with replace (a filter is not a page); the host turns it into new props.
   function go(patch: Partial<ModelCallFilters>) {
-    const query = modelCallQuery({ ...filters, ...patch });
+    // The base is the hash as the last write left it, not the props (they lag by one hashchange task): two writes in
+    // one turn keep both.
+    const base = modelCallFilters(new URLSearchParams(location.hash.split('?')[1] ?? ''));
+    const query = modelCallQuery({ ...base, ...patch });
     location.replace(routeHref('model-calls', selectedId ? ['c', selectedId] : '', query));
   }
 
@@ -147,7 +153,7 @@
     {#if calls.length === 0}
       <p class="empty">No model calls in the last {windowDays} days match.</p>
     {:else}
-      <ul class="calls" class:dim={$store.loading}>
+      <ul class="calls" class:dim={refetching}>
         {#each calls as c (c.id)}
           <li>
             <a class="row" href={href(c.id)} aria-current={c.id === selectedId ? 'true' : undefined}>

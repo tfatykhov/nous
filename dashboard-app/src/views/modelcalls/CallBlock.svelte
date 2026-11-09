@@ -30,7 +30,7 @@
   const meta = $derived(
     block.reused_by > 1
       ? `about ${block.tokens_est.toLocaleString('en-US')} tokens, sent in ${block.reused_by.toLocaleString('en-US')} calls in the last 7 days`
-      : 'this call only',
+      : `about ${block.tokens_est.toLocaleString('en-US')} tokens, this call only`,
   );
 </script>
 
