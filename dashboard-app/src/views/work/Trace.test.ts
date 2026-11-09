@@ -3,7 +3,7 @@ import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-li
 import Trace from './Trace.svelte';
 import Work from '../Work.svelte';
 import { setLastListQuery } from '../../lib/work';
-import { initRouter, ROUTES } from '../../lib/router';
+import { initRouter } from '../../lib/router';
 
 const HOSTILE = '<img src=x onerror=alert(1)>';
 const T1 = '11111111-1111-4111-8111-111111111111';
@@ -45,9 +45,8 @@ function install() {
 }
 
 describe('Work trace', () => {
-  const routes = ROUTES as unknown as string[];
-  beforeEach(() => { install(); location.hash = ''; initRouter(); routes.push('model-calls'); });
-  afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); const i = routes.indexOf('model-calls'); if (i >= 0) routes.splice(i, 1); });
+  beforeEach(() => { install(); location.hash = ''; initRouter(); });
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
   it('fetches the URL-encoded session and shows the header counts', async () => {
     respond = () => ({ body: trace([turn(T1, 1)]) });
@@ -156,15 +155,6 @@ describe('Work trace', () => {
     await screen.findByText('Reply 1');
     const link = within(container.querySelector('header') as HTMLElement).getByRole('link', { name: 'all model calls of this conversation' });
     expect(link.getAttribute('href')).toBe('#/model-calls?session_id=sess%2Fone&days=30');
-  });
-
-  it('with no model-calls route the trace links nothing to it', async () => {
-    routes.splice(routes.indexOf('model-calls'), 1);
-    respond = () => ({ body: trace([turn(T1, 1, { model_calls: [{ id: 'mc-1', purpose: 'main_loop', model: 'claude-x', status: 'ok', input_total: 1, output_tokens: 1 }] })]) });
-    const { container } = render(Trace, { sessionId: 'sess/one' });
-    await screen.findByText('Reply 1');
-    expect(container.querySelector('a[href^="#/model-calls"]')).toBeNull();
-    expect(container.textContent).toContain('1 main-loop model call');
   });
 
   it('caps the reasons per tool at 3 and folds the rest into "and N more"', async () => {
