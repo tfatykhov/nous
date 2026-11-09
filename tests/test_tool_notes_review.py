@@ -363,7 +363,7 @@ async def test_at_most_max_candidates_most_hits_first(db, agent_id, cleanup):
     out = await review.run_sleep()
     assert out["detected"] == 10 and out["offered"] == 8
     prompt = client.calls[0][0]["messages"][0]["content"][0]["text"]
-    listed = sorted(int(m) for m in set(re.findall(r"tool=tool(\d+)", prompt)))
+    listed = sorted(int(m) for m in set(re.findall(r"tool=tool(\d+)", prompt)))
     assert listed == [2, 3, 4, 5, 6, 7, 8, 9]  # tool0 and tool1 have the fewest hits
     assert prompt.index("tool=tool9") < prompt.index("tool=tool2")
     rows = {r["tool_name"] for r in await note_rows(db, agent_id)}
