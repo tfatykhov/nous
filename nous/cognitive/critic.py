@@ -46,18 +46,18 @@ class CriticAgent:
         "no i meant", "that's not", "try again",
     })
 
-    _CLASSIFICATION_PROMPT = """\
+    # The stable part of the prompt, sent as the cached system block; the user message goes in the user turn and is
+    # never passed through .format().
+    _SYSTEM_PROMPT = """\
 You are the Critic Agent for Nous, a cognitive AI system. Your role is to
 analyze the user's message and decide how Nous should process it.
+The message to classify is in the user turn, under USER MESSAGE.
 
 AVAILABLE FRAMES:
 {available_frames}
 
 AVAILABLE SKILLS:
 {skill_catalog}
-
-USER MESSAGE:
-{user_message}
 
 DECIDE:
 1. complexity: "simple" | "moderate" | "complex"
@@ -98,7 +98,8 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
                 return "No skills registered.", set()
             valid_names: set[str] = set()
             lines: list[str] = []
-            for s in summaries:
+            # Name order, so the catalog (part of the cached system block) is byte-stable between calls.
+            for s in sorted(summaries, key=lambda p: (p.name.casefold(), p.name)):
                 valid_names.add(s.name)
                 eff = f" (effectiveness: {s.effectiveness:.0%})" if s.effectiveness is not None else ""
                 desc = (s.description or "No description").replace("{", "{{").replace("}", "}}")
@@ -187,25 +188,28 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
         # Issue #216: Build skill catalog from registered procedures
         skill_catalog, valid_skill_names = await self._build_skill_catalog()
 
-        prompt = self._CLASSIFICATION_PROMPT.format(
-            available_frames="\n".join(f"- {f}" for f in available_frames),
+        # The frames come from an unordered query, and their order carries no meaning: sort them so the system block is
+        # byte-stable between calls.
+        frames = sorted(available_frames, key=lambda f: (f.casefold(), f))
+        system_prompt = self._SYSTEM_PROMPT.format(
+            available_frames="\n".join(f"- {f}" for f in frames),
             skill_catalog=skill_catalog,
-            user_message=user_message,
         )
+        prompt = "USER MESSAGE:\n" + user_message
 
         try:
             from nous.handlers import call_background_llm
 
             timeout_s = self._settings.critic_max_latency_ms / 1000.0
             logger.info(
-                "F024 Critic calling LLM: model=%s, timeout=%.1fs, prompt_len=%d",
-                self._settings.critic_model, timeout_s, len(prompt),
+                "F024 Critic calling LLM: model=%s, timeout=%.1fs, system_len=%d, prompt_len=%d",
+                self._settings.critic_model, timeout_s, len(system_prompt), len(prompt),
             )
             raw_text = await asyncio.wait_for(
                 call_background_llm(
                     self._api,
                     self._settings.critic_model,
-                    "You are a cognitive routing classifier. Respond only with JSON.",
+                    system_prompt,
                     prompt,
                     max_tokens=512,
                     purpose="critic",

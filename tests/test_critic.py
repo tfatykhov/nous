@@ -597,3 +597,138 @@ class TestSkillFiltering:
         assert result.skills == []
         # Verify list_all was NOT called (passthrough skips catalog)
         mock_pm.list_all.assert_not_called()
+
+
+# ---- Prompt caching: the stable part goes in the cached system block ----
+
+
+_VERDICT = json.dumps({
+    "complexity": "moderate", "routing": "single",
+    "frames": ["task"], "skills": [],
+    "rationale": "test", "per_frame_instructions": {},
+})
+
+
+def _procedures() -> list[ProcedureSummary]:
+    """Names whose casefold order differs from their raw order, so the sort key is exercised."""
+    return [
+        ProcedureSummary(id=uuid4(), name="Zeta", domain="general",
+                         description="Last letter", activation_count=1, effectiveness=0.5),
+        ProcedureSummary(id=uuid4(), name="alpha", domain="general",
+                         description="Lower-case first", activation_count=1, effectiveness=None),
+        ProcedureSummary(id=uuid4(), name="Alpha", domain="general",
+                         description="Upper-case first", activation_count=1, effectiveness=0.9),
+        ProcedureSummary(id=uuid4(), name="beta", domain="general",
+                         description="Use {variable} syntax", activation_count=1, effectiveness=None),
+    ]
+
+
+def _critic_with(procedure_lists: list[list[ProcedureSummary]]) -> tuple[CriticAgent, AsyncMock]:
+    """A critic whose procedure manager returns ``procedure_lists`` in turn, and whose client is faked."""
+    from nous.heart.procedures import ProcedureManager
+    agent = CriticAgent(_settings())
+    mock_pm = AsyncMock(spec=ProcedureManager)
+    mock_pm.list_all = AsyncMock(side_effect=[(procs, len(procs)) for procs in procedure_lists])
+    agent._procedure_manager = mock_pm
+    mock_api = AsyncMock()
+    mock_response = MagicMock()
+    mock_response.content = [{"type": "text", "text": _VERDICT}]
+    mock_api.call = AsyncMock(return_value=mock_response)
+    agent.set_api_client(mock_api)
+    return agent, mock_api
+
+
+def _system_text(payload: dict) -> str:
+    return "\n".join(block["text"] for block in payload["system"])
+
+
+def _user_text(payload: dict) -> str:
+    return "\n".join(
+        block["text"] for msg in payload["messages"] for block in msg["content"]
+    )
+
+
+class TestCriticPromptCache:
+    """The critic's stable prompt (frames, skills, DECIDE) rides in the cached system block."""
+
+    @pytest.mark.asyncio
+    async def test_critic_system_prompt_holds_the_stable_part(self):
+        agent, mock_api = _critic_with([_procedures()])
+        message = "Please review this pull request about the storage layer thoroughly"
+
+        await agent.classify(
+            user_message=message,
+            heuristic_frame=_frame(),
+            available_frames=["task", "conversation", "decision"],
+        )
+
+        payload = mock_api.call.call_args.args[0]
+        system = _system_text(payload)
+        user = _user_text(payload)
+        for marker in ("AVAILABLE FRAMES", "AVAILABLE SKILLS", "DECIDE"):
+            assert marker in system
+            assert marker not in user
+        assert "- Zeta — Last letter" in system
+        assert "- task" in system
+        assert message in user
+        assert message not in system
+        # The block holding the stable text is the one with the cache breakpoint.
+        [stable] = [b for b in payload["system"] if "AVAILABLE FRAMES" in b["text"]]
+        assert stable["cache_control"] == {"type": "ephemeral"}
+
+    @pytest.mark.asyncio
+    async def test_critic_system_prompt_is_byte_stable(self):
+        procs = _procedures()
+        frames = ["task", "conversation", "decision", "Debug"]
+        # The same procedures and frames, handed over in a different order the second time.
+        agent, mock_api = _critic_with([procs, list(reversed(procs))])
+
+        await agent.classify(
+            user_message="Please review this pull request about the storage layer thoroughly",
+            heuristic_frame=_frame(),
+            available_frames=frames,
+        )
+        await agent.classify(
+            user_message="Should we ship the release tonight or wait for the soak?",
+            heuristic_frame=_frame(),
+            available_frames=list(reversed(frames)),
+        )
+
+        first, second = (c.args[0] for c in mock_api.call.call_args_list)
+        assert "AVAILABLE SKILLS" in _system_text(first)
+        assert "- Zeta — Last letter" in _system_text(first)
+        assert json.dumps(first["system"]) == json.dumps(second["system"])
+        assert _user_text(first) != _user_text(second)
+
+    @pytest.mark.asyncio
+    async def test_skill_catalog_sorted(self):
+        procs = _procedures()
+        shuffled = [procs[2], procs[0], procs[3], procs[1]]
+        agent, _ = _critic_with([procs, shuffled])
+
+        catalog_a, names_a = await agent._build_skill_catalog()
+        catalog_b, names_b = await agent._build_skill_catalog()
+
+        assert catalog_a == catalog_b
+        assert names_a == names_b == {"Zeta", "alpha", "Alpha", "beta"}
+        assert [line.split(" — ")[0] for line in catalog_a.splitlines()] == [
+            "- Alpha", "- alpha", "- beta", "- Zeta",
+        ]
+        # Effectiveness is kept, and the catalog's braces stay escaped for .format().
+        assert "(effectiveness: 90%)" in catalog_a
+        assert "{{variable}}" in catalog_a
+
+    @pytest.mark.asyncio
+    async def test_user_message_braces_are_safe(self):
+        agent, mock_api = _critic_with([_procedures()])
+        message = "Please explain why {x} and }} and {0} and {} break the template here"
+
+        result = await agent.classify(
+            user_message=message,
+            heuristic_frame=_frame(),
+            available_frames=["task", "conversation"],
+        )
+
+        assert result.recommended_frame == "task"
+        payload = mock_api.call.call_args.args[0]
+        assert _user_text(payload) == "USER MESSAGE:\n" + message
