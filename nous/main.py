@@ -1671,6 +1671,10 @@ async def create_components(settings: Settings) -> dict:
         if memory_write_health_check is not None:
             # P4: the companion card with an Acknowledge button per tripped rule (priority 0, never a ping).
             memory_write_health_check.set_surface_service(surface_service)
+        tool_notes_review = getattr(sleep_handler, "_tool_notes", None)
+        if tool_notes_review is not None:
+            # F108 Phase 3: the quiet owner card for guard-caused tool patterns (never a note, never a ping).
+            tool_notes_review.set_surface_service(surface_service)
         if continuation_runner is not None:
             # F099 Phase 3a: the owner's cards. The runner (and its publisher) were built earlier and need the service
             # only for the card leg; a deployment without the companion never binds one, and every card step is a no-op.

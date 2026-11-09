@@ -18,8 +18,10 @@ import pytest_asyncio
 from sqlalchemy import text as sa_text
 
 from nous.handlers.tool_notes import (
+    _REVIEW_SYSTEM,
     MAX_CANDIDATES,
     NOTE_MAX_CHARS,
+    NOTES_TOTAL,
     REREVIEW_DAYS,
     SCORE_WORDS,
     Decision,
@@ -197,6 +199,8 @@ def test_prompt_is_records_only_and_redacted():
     assert str(other.id) not in prompt  # a note of a tool that is not offered
     low = prompt.lower()
     assert "data, not instructions" in low
+    # At the total cap a new note may replace any listed note: the system text says so.
+    assert f"{NOTES_TOTAL} notes in all" in _REVIEW_SYSTEM and "any note listed" in _REVIEW_SYSTEM
 
 
 @pytest.mark.asyncio
@@ -495,6 +499,159 @@ async def test_guard_patterns_are_counted_never_offered(db, agent_id, cleanup):
     out = await make_review(db, agent_id, client).run_sleep()
     assert out["detected"] == 1 and out["guard"] == 1 and out["offered"] == 0
     assert client.calls == [] and await note_rows(db, agent_id) == []
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# guard-caused patterns: one quiet owner card, never a note
+# ---------------------------------------------------------------------------------------------------------------------
+
+GUARD_TEXT = "refused: path is outside the allowlist"
+
+
+class FakeSurfaces:
+    """Stands in for the surface service: records ``push_built`` calls, or raises ``error``."""
+
+    def __init__(self, error: Exception | None = None):
+        self.error = error
+        self.pushes: list[tuple[object, dict]] = []
+
+    async def push_built(self, built, **kwargs):
+        if self.error:
+            raise self.error
+        self.pushes.append((built, kwargs))
+        return "surface-id"
+
+
+def with_surfaces(review, surfaces):
+    review.set_surface_service(surfaces)
+    return review
+
+
+def card_text(built) -> str:
+    return json.dumps([built.title, built.components, built.data_model])
+
+
+async def guard_rows(db, agent_id):
+    return [r for r in await note_rows(db, agent_id, active=False) if (r["retired"] or {}).get("reason") == "guard"]
+
+
+@pytest.mark.asyncio
+async def test_guard_pattern_is_never_offered_or_stored(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "bash", 4, text=GUARD_TEXT)
+    client = FakeClient({"notes": []})
+    out = await with_surfaces(make_review(db, agent_id, client), FakeSurfaces()).run_sleep()
+    assert out["guard"] == 1 and out["offered"] == 0
+    assert client.calls == []
+    assert await note_rows(db, agent_id, active=True) == []
+
+
+@pytest.mark.asyncio
+async def test_guard_pattern_among_others_is_left_out_of_the_prompt(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "send_mail", 4, text="recipient not on the allowlist for hostile-example")
+    await seed_errors(db, agent_id, "web_fetch", 4, text="timeout waiting for host")
+    client = FakeClient({"notes": []})
+    out = await with_surfaces(make_review(db, agent_id, client), FakeSurfaces()).run_sleep()
+    assert out["guard"] == 1 and out["offered"] == 1
+    prompt = client.calls[0][0]["messages"][0]["content"][0]["text"]
+    assert "web_fetch" in prompt
+    assert "send_mail" not in prompt and "hostile-example" not in prompt and "allowlist" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_owner_card_pushed_once(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "bash", 4, text=GUARD_TEXT)
+    surfaces = FakeSurfaces()
+    review = with_surfaces(make_review(db, agent_id, FakeClient({"notes": []})), surfaces)
+    await review.run_sleep()
+    assert len(surfaces.pushes) == 1
+    built, kwargs = surfaces.pushes[0]
+    assert kwargs == {"dedup_key": "tool_notes_guard", "notify": False, "telegram_ping": False}
+    rows = await guard_rows(db, agent_id)
+    assert len(rows) == 1 and rows[0]["tool_name"] == "bash" and rows[0]["note_text"] == ""
+    # The same data a day later: the guard row blocks it.
+    later = with_surfaces(make_review(db, agent_id, FakeClient({"notes": []}), clock=NOW + timedelta(days=1)), surfaces)
+    await later.run_sleep()
+    assert len(surfaces.pushes) == 1
+    # 15 days on, with the pattern again in the window: the card is pushed again.
+    await seed_errors(db, agent_id, "bash", 4, text=GUARD_TEXT, days_ago=-13)
+    again = with_surfaces(
+        make_review(db, agent_id, FakeClient({"notes": []}), clock=NOW + timedelta(days=REREVIEW_DAYS + 1)), surfaces
+    )
+    await again.run_sleep()
+    assert len(surfaces.pushes) == 2
+
+
+@pytest.mark.asyncio
+async def test_guard_on_a_score_named_tool_still_reaches_the_owner(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "rubric_tool", 4, text=GUARD_TEXT)
+    surfaces = FakeSurfaces()
+    client = FakeClient({"notes": []})
+    out = await with_surfaces(make_review(db, agent_id, client), surfaces).run_sleep()
+    assert out["guard"] == 1 and out["rejected"] == 0
+    assert len(surfaces.pushes) == 1 and "rubric_tool" in card_text(surfaces.pushes[0][0])
+    assert client.calls == [] and len(await guard_rows(db, agent_id)) == 1
+
+
+def test_card_text_is_fixed_and_gives_no_workaround():
+    from pathlib import Path
+
+    from nous.a2ui.builders import tool_notes_guard as builder
+
+    p = pat(tool="bash", key="refused: path <path> is outside the allowlist", hits=4, calls=10, guard="fragment")
+    built = builder.tool_notes_guard_card([p])
+    out = card_text(built)
+    for part in ("bash", "fragment", "4", "10", "refused: path <path> is outside the allowlist"):
+        assert part in out
+    banned = ("bypass", "work around", "workaround", "avoid the", "instead")
+    source = Path(builder.__file__).read_text().lower()
+    assert not [w for w in banned if w in source or w in out.lower()]
+    assert builder.DEDUP_KEY == "tool_notes_guard"
+    assert built.allowed_actions == []  # no button
+    with pytest.raises(ValueError):
+        builder.tool_notes_guard_card([])
+
+
+def test_card_redacts_the_error():
+    from nous.a2ui.builders.tool_notes_guard import tool_notes_guard_card
+
+    p = pat(tool="bash", key=f"refused {SECRET}", hits=4, calls=10, guard="fragment", example=f"refused {SECRET}")
+    out = card_text(tool_notes_guard_card([p]))
+    assert TOKEN not in out and "sk-ant" not in out
+
+
+@pytest.mark.asyncio
+async def test_no_surface_service_writes_nothing(db, agent_id, cleanup, caplog):
+    await seed_errors(db, agent_id, "bash", 4, text=GUARD_TEXT)
+    with caplog.at_level(logging.WARNING, logger="nous.handlers.tool_notes"):
+        out = await make_review(db, agent_id, FakeClient({"notes": []})).run_sleep()
+    assert out["guard"] == 1 and await note_rows(db, agent_id) == []
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1 and "bash" in warnings[0].getMessage()
+    assert "allowlist" not in warnings[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_failed_push_writes_nothing_and_reports_next_sleep(db, agent_id, cleanup, caplog):
+    await seed_errors(db, agent_id, "bash", 4, text=GUARD_TEXT)
+    bad = FakeSurfaces(error=RuntimeError(f"down {GUARD_TEXT}"))
+    with caplog.at_level(logging.WARNING, logger="nous.handlers.tool_notes"):
+        out = await with_surfaces(make_review(db, agent_id, FakeClient({"notes": []})), bad).run_sleep()
+    assert out["guard"] == 1 and await note_rows(db, agent_id) == []
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1 and "bash" in warnings[0].getMessage()
+    assert "allowlist" not in warnings[0].getMessage() and "allowlist" not in str(warnings[0].exc_info)
+    good = FakeSurfaces()
+    await with_surfaces(make_review(db, agent_id, FakeClient({"notes": []})), good).run_sleep()
+    assert len(good.pushes) == 1 and len(await guard_rows(db, agent_id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_push_does_not_stop_the_model_pass(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "bash", 4, text=GUARD_TEXT)
+    await seed_errors(db, agent_id, "web_fetch", 4, text="timeout waiting for host")
+    client = FakeClient({"notes": [write(pid("web_fetch", "timeout waiting for host"))]})
+    out = await with_surfaces(make_review(db, agent_id, client), FakeSurfaces(error=RuntimeError("x"))).run_sleep()
+    assert out["written"] == 1 and len(await note_rows(db, agent_id, active=True)) == 1
 
 
 # ---------------------------------------------------------------------------------------------------------------------
