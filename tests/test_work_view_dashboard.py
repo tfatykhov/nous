@@ -2461,6 +2461,23 @@ def test_parse_call_id():
             wv.parse_call_id(raw)
 
 
+def test_parse_block_ord():
+    assert [wv.parse_block_ord(raw) for raw in ("0", "007", "-1", "2147483647", "2147483648")] == [
+        0,
+        7,
+        -1,
+        2**31 - 1,
+        2**31,
+    ]
+    # More digits than the INT column holds: past it, and int() never sees the string (it refuses over 4,300 digits).
+    for raw in ("99999999999", "9" * 4301, "-" + "9" * 4301):
+        assert wv.parse_block_ord(raw) == wv.BLOCK_ORD_MAX + 1
+    assert wv.parse_block_ord("0" * 5000 + "12") == 12  # leading zeros do not count
+    for raw in ("", "-", "x", "1.5", "1e3", "+1", "--1", " 1", "٣"):  # the last: an Arabic-Indic digit
+        with pytest.raises(ValueError, match="ord must be an integer"):
+            wv.parse_block_ord(raw)
+
+
 def test_disabled_model_call_has_the_detail_keys_and_nothing_in_them():
     assert wv.disabled_model_call(False) == {
         "enabled": False,
@@ -2742,15 +2759,20 @@ async def test_block_body_endpoint(mct_client, db, agent_id, cleanup, text_store
             block_path(call_id, "system", 1),  # past the call's blocks
             block_path(call_id, "messages", 7),
             block_path(call_id, "system", 2**31),  # past the INT column: cannot exist
-            block_path(call_id, "system", "x"),  # not a number: no route
+            block_path(call_id, "system", -1),  # negative: cannot exist
+            block_path(call_id, "system", "9" * 4301),  # past what int() parses: never parsed
             block_path(uuid.uuid4(), "system", 0),
             block_path(foreign, "system", 0),
         ):
-            assert (await mct_client.get(path)).status_code == 404, path
+            resp = await mct_client.get(path)
+            assert resp.status_code == 404 and resp.json() == {"error": "not found"}, path[:120]
     finally:
         await delete_agent_rows(db, other)
     resp = await mct_client.get(block_path("not-a-uuid", "system", 0))
     assert resp.status_code == 400 and set(resp.json()) == {"error"}
+    for ord_ in ("x", "1.5", "1e3", "+1"):
+        resp = await mct_client.get(block_path(call_id, "system", ord_))
+        assert resp.status_code == 400 and resp.json() == {"error": "ord must be an integer"}, ord_
 
     # Text off (the setting, the store, or the model-call log): 404.
     for store, flags in ((text_store, {"text_on": False}), (text_store, {"log": False}), (None, {})):
@@ -2852,6 +2874,20 @@ async def test_model_call_detail_and_block_failures_are_a_plain_500(mct_client, 
         resp = await mct_client.get(path)
         assert resp.status_code == 500 and resp.json() == {"error": "work view query failed"}, path
         assert any(r.levelname == "WARNING" and r.exc_info for r in caplog.records), path
+
+
+@pytest.mark.postgres_only
+async def test_model_call_detail_blocks_failure_is_a_plain_500(db, agent_id, cleanup, caplog):
+    """The blocks are added after the handler's session is closed, still inside its error handling."""
+    call_id = await insert_model_call(db, agent_id, purpose="chat", started_at=_hour_ago())
+    store = MagicMock()
+    store.describe = AsyncMock(side_effect=RuntimeError("secret detail from the text store"))
+    async with AsyncClient(transport=ASGITransport(app=text_app(db, agent_id, store)), base_url="http://test") as c:
+        resp = await c.get(call_path(call_id))
+    assert resp.status_code == 500 and resp.json() == {"error": "work view query failed"}
+    assert "secret detail" not in resp.text
+    store.describe.assert_awaited_once_with(call_id)
+    assert any(r.levelname == "WARNING" and r.exc_info for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------------------------------------------------

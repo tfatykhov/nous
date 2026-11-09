@@ -209,6 +209,17 @@ def input_total_sql(alias: str) -> str:
     )
 
 
+def session_title_sql(session_expr: str) -> str:
+    """The episode title of session ``session_expr`` (a SQL expression) as a scalar subquery: the latest active
+    ``heart.episodes`` row of agent ``:agent`` with that ``session_id`` and a non-empty title, else NULL. The sessions
+    list, the trace header and the model-call detail all read a session's title through it."""
+    return (
+        "(SELECT e.title FROM heart.episodes e "
+        f"WHERE e.agent_id = :agent AND e.session_id = {session_expr} AND e.active AND coalesce(e.title, '') <> '' "
+        "ORDER BY e.started_at DESC LIMIT 1)"
+    )
+
+
 async def _set_timeout(session: AsyncSession) -> None:
     # SET LOCAL binds the transaction the session autobegan; it holds only while the caller runs every statement in
     # that one transaction, so never commit (or open a second session) between the statements of a handler.
@@ -306,9 +317,7 @@ listed AS (
 ),
 titled AS (
     SELECT l.*, coalesce(
-        (SELECT e.title FROM heart.episodes e
-         WHERE e.agent_id = :agent AND e.session_id = l.session_id AND e.active AND coalesce(e.title, '') <> ''
-         ORDER BY e.started_at DESC LIMIT 1),
+        {session_title_sql("l.session_id")},
         left(st.task, :task_chars),
         left(nullif(l.first_message, ''), :trigger_chars),
         :no_title) AS title
@@ -482,7 +491,7 @@ WITH trace_turns AS (
 # turn row. The title follows the list's rule.
 _TRACE_HEADER_SQL = (
     _TRACE_TURNS_CTE
-    + """,
+    + f""",
 trace_calls AS (
     SELECT c.turn_id, c.call_index, c.is_error, c.subtask_id, c.work_kind, c.parent_session_id,
            tt.started_at AS turn_started_at
@@ -514,9 +523,7 @@ SELECT
     coalesce(ft.work_kind, fc.work_kind) AS work_kind,
     CASE WHEN ft.work_kind IS NOT NULL THEN ft.parent_session_id ELSE fc.parent_session_id END AS parent_session_id,
     coalesce(
-        (SELECT e.title FROM heart.episodes e
-         WHERE e.agent_id = :agent AND e.session_id = :sid AND e.active AND coalesce(e.title, '') <> ''
-         ORDER BY e.started_at DESC LIMIT 1),
+        {session_title_sql(":sid")},
         left(st.task, :task_chars),
         left(nullif(ft.trigger_text, ''), :trigger_chars),
         :no_title) AS title
@@ -1118,6 +1125,21 @@ def parse_call_id(raw: str) -> UUID:
         raise ValueError("call id must be a UUID") from exc
 
 
+def parse_block_ord(raw: str) -> int:
+    """A block's ``ord`` from the path: an integer (ASCII digits, an optional leading ``-``). Raises ValueError
+    otherwise. ``int()`` only ever parses the significant digits (leading zeros dropped), at most as many as
+    ``BLOCK_ORD_MAX`` has: an integer with more comes back as ``BLOCK_ORD_MAX + 1`` (past the INT column, whatever
+    its sign), so a huge digit string never reaches ``int()`` and :func:`get_block` refuses it like any other
+    ``ord`` outside the column."""
+    digits = raw.removeprefix("-")
+    if not (digits.isascii() and digits.isdigit()):
+        raise ValueError("ord must be an integer")
+    significant = digits.lstrip("0") or "0"
+    if len(significant) > len(str(BLOCK_ORD_MAX)):
+        return BLOCK_ORD_MAX + 1
+    return -int(significant) if raw.startswith("-") else int(significant)
+
+
 def disabled_model_call(text_enabled: bool) -> dict[str, Any]:
     """The model-call detail with the model-call log off: the same keys as with it on, nothing in them."""
     return {
@@ -1133,7 +1155,7 @@ def disabled_model_call(text_enabled: bool) -> dict[str, Any]:
 
 
 # One call by its primary key, agent-scoped, with the detail's columns, whether it is older than the text retention,
-# and its session's title (the latest active titled episode, as the sessions list's title reads it). The call's
+# and its session's title (session_title_sql, as the sessions list and the trace read it). The call's
 # session is its turn's: the runner stamps both from the same turn (Runner._call_context).
 _MODEL_CALL_DETAIL_SQL = f"""
 SELECT {_MODEL_CALL_COLUMNS},
@@ -1142,9 +1164,7 @@ SELECT {_MODEL_CALL_COLUMNS},
        m.loaded_facts, m.loaded_decisions, m.loaded_procedures, m.loaded_episodes, m.cache_break,
        m.cache_break_components, m.cache_break_tokens_lost, m.section_tokens_est,
        m.started_at < now() - make_interval(days => :retention_days) AS past_text_retention,
-       (SELECT e.title FROM heart.episodes e
-        WHERE e.agent_id = :agent AND e.session_id = m.session_id AND e.active AND coalesce(e.title, '') <> ''
-        ORDER BY e.started_at DESC LIMIT 1) AS session_title
+       {session_title_sql("m.session_id")} AS session_title
 FROM nous_system.model_call_log m
 WHERE m.id = CAST(:call_id AS uuid) AND m.agent_id = :agent
 """

@@ -2398,20 +2398,20 @@ def create_app(
 
     async def dashboard_model_call_block(request: Request) -> JSONResponse:
         """GET /dashboard/model-calls/{call_id}/blocks/{part}/{ord} — F108: the body of one stored text block of a
-        model call, as stored (redacted when written). Read-only. 404 when the call has no such block, is another
-        agent's, or the text (or the model-call log) is off; then no session is opened."""
+        model call, as stored (redacted when written). Read-only. 400 for an id that is not a UUID or an ``ord`` that
+        is not an integer. 404 when the call has no such block, is another agent's, or the text (or the model-call
+        log) is off; then no session is opened."""
         from nous.api import work_view_dashboard as wv
 
         try:
             call_id = wv.parse_call_id(request.path_params["call_id"])
+            ord_ = wv.parse_block_ord(request.path_params["ord"])
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         if not (settings.model_call_log_enabled and settings.model_call_text_enabled and model_call_text_store):
             return JSONResponse({"error": "not found"}, status_code=404)
         try:
-            data = await wv.get_block(
-                model_call_text_store, call_id, request.path_params["part"], request.path_params["ord"]
-            )
+            data = await wv.get_block(model_call_text_store, call_id, request.path_params["part"], ord_)
             if data is None:
                 return JSONResponse({"error": "not found"}, status_code=404)
             return JSONResponse(data)
@@ -3953,7 +3953,7 @@ def create_app(
         Route("/dashboard/work/patterns", dashboard_work_patterns),
         Route("/dashboard/model-calls", dashboard_model_calls),
         Route("/dashboard/model-calls/{call_id}", dashboard_model_call),
-        Route("/dashboard/model-calls/{call_id}/blocks/{part}/{ord:int}", dashboard_model_call_block),
+        Route("/dashboard/model-calls/{call_id}/blocks/{part}/{ord}", dashboard_model_call_block),
         # F038: DAG orchestration dashboard
         Route("/dashboard/dag", dashboard_dag),
         Route("/dashboard/execution", dashboard_execution),
