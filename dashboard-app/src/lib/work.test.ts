@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { LANE_COLORS, laneColor, fmtDuration, fmtTokens, fmtTime, parseWorkSub, toolChips, callsOf } from './work';
+import { LANE_COLORS, laneColor, fmtDuration, fmtTokens, fmtTime, fmtDays, parseWorkSub, toolChips, callsOf } from './work';
 
 describe('fmtDuration', () => {
   it('shows a dash for no duration', () => { expect(fmtDuration(null)).toBe('—'); });
@@ -27,6 +27,14 @@ describe('fmtTokens', () => {
   it('shows M with one decimal from 1,000,000', () => {
     expect(fmtTokens(1_000_000)).toBe('1.0M');
     expect(fmtTokens(2_500_000)).toBe('2.5M');
+  });
+});
+
+describe('fmtDays', () => {
+  it('says day for one, days for any other count', () => {
+    expect(fmtDays(1)).toBe('1 day');
+    expect(fmtDays(7)).toBe('7 days');
+    expect(fmtDays(30)).toBe('30 days');
   });
 });
 

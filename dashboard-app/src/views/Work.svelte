@@ -32,7 +32,7 @@
     <Patterns />
   {:else if view?.view === 'changes'}
     <div>
-      <h1>Work</h1>
+      <h1 class="page-h1">Work</h1>
       <Ledger embedded />
     </div>
   {:else if view?.view === 'trace'}
@@ -46,7 +46,6 @@
 
 <style>
   .work { display: flex; flex-direction: column; gap: 1rem; }
-  h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em; margin: 0.25rem 0; }
   .gone { color: var(--muted); font-size: 0.9375rem; }
   .gone a { color: var(--accent-text); }
 </style>

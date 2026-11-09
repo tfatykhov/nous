@@ -405,6 +405,20 @@ describe('Work sessions list', () => {
       expect(await screen.findByText('No sessions match in the last 30 days.')).toBeTruthy();
     });
 
+    it('a one-day window reads "1 day", in the subtitle and in the empty state', async () => {
+      go('#/work?days=1');
+      render(Work);
+      await screen.findByText('Gap Scout status check');
+      expect(screen.getByText(/in the last 1 day,/)).toBeTruthy();
+      expect(document.body.textContent).not.toMatch(/1 days/);
+      cleanup();
+      respond = (url) => ({ body: { ...echo(url), sessions: [], next_before: null } });
+      install();
+      go('#/work?days=1');
+      render(Work);
+      expect(await screen.findByText('No sessions match in the last 1 day.')).toBeTruthy();
+    });
+
     it('ignores a days value outside 1-30 or not a whole number, and does not carry it into a filter change', async () => {
       for (const bad of ['0', '31', '99', 'abc', '1.5', '-3', '']) {
         cleanup();

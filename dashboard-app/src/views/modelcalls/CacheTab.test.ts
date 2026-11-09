@@ -95,7 +95,7 @@ describe('Model calls Cache tab', () => {
 });
 
 describe('Cache standalone (embedded false)', () => {
-  beforeEach(() => { install(); location.hash = ''; initRouter(); go('#/cache'); });
+  beforeEach(() => { install(); location.hash = ''; initRouter(); go('#/model-calls/cache'); });
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
   it('keeps its own Cache header', async () => {

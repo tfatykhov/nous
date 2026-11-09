@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { get } from 'svelte/store';
-import { currentRoute, currentSub, currentQuery, initRouter, routeHref, REDIRECTS, ROUTES } from './router';
+import { currentRoute, currentSub, currentQuery, initRouter, routeHref, REDIRECTS, ROUTES, type RouteName } from './router';
 
 function go(hash: string) {
   location.hash = hash;
@@ -10,10 +10,18 @@ function go(hash: string) {
 describe('router', () => {
   beforeEach(() => { location.hash = ''; });
   it('defaults to overview when hash empty', () => { initRouter(); expect(get(currentRoute)).toBe('overview'); });
-  it('reads the hash route', () => { location.hash = '#/cache'; initRouter(); expect(get(currentRoute)).toBe('cache'); });
+  it('reads the hash route', () => { location.hash = '#/model-calls'; initRouter(); expect(get(currentRoute)).toBe('model-calls'); });
   it('falls back to overview on unknown route', () => { location.hash = '#/nope'; initRouter(); expect(get(currentRoute)).toBe('overview'); });
-  it('lists all 24 routes', () => { expect(ROUTES.length).toBe(24); });
-  it('includes the memory write health route', () => { expect(ROUTES).toContain('memory-write-health'); });
+  it('lists the 18 routes in navigation order', () => {
+    expect(ROUTES.length).toBe(18);
+    expect([...ROUTES]).toEqual([
+      'overview', 'graph', 'browser', 'health', 'retrieval', 'consolidation',
+      'work', 'model-calls', 'dag', 'subtasks', 'heartbeat',
+      'decisions', 'rubric',
+      'autonomy', 'intentions', 'harness',
+      'observability', 'identity',
+    ]);
+  });
   it('includes the work route', () => { expect(ROUTES).toContain('work'); });
   it('includes the model-calls route', () => { expect(ROUTES).toContain('model-calls'); });
   it('includes the autonomy route', () => { expect(ROUTES).toContain('autonomy'); });
@@ -22,13 +30,13 @@ describe('router', () => {
   it('includes the identity route', () => { expect(ROUTES).toContain('identity'); });
   it('unknown fragment (e.g. skip-link #main-content) leaves current route unchanged', () => {
     // Navigate to a known route first
-    location.hash = '#/cache';
+    location.hash = '#/model-calls';
     initRouter();
-    expect(get(currentRoute)).toBe('cache');
+    expect(get(currentRoute)).toBe('model-calls');
     // Simulate the skip-link setting a non-route fragment
     location.hash = '#main-content';
     window.dispatchEvent(new HashChangeEvent('hashchange'));
-    expect(get(currentRoute)).toBe('cache');  // must not reset to 'overview'
+    expect(get(currentRoute)).toBe('model-calls');  // must not reset to 'overview'
   });
 });
 
@@ -82,14 +90,14 @@ describe('router sub paths and query', () => {
   });
 
   it('a subscriber woken by the new route already reads the new sub and query', () => {
-    go('#/cache');
+    go('#/model-calls');
     const seen: string[] = [];
     const unsub = currentRoute.subscribe((r) => {
       seen.push(`${r}|${get(currentSub)}|${get(currentQuery).toString()}`);
     });
     go('#/work/growth?d=7');
     unsub();
-    expect(seen).toEqual(['cache||', 'work|growth|d=7']);
+    expect(seen).toEqual(['model-calls||', 'work|growth|d=7']);
   });
 
   it('does not notify query subscribers when the query string is unchanged', () => {
@@ -102,8 +110,84 @@ describe('router sub paths and query', () => {
     expect(calls).toBe(1); // the subscribe call itself only
   });
 
-  it('starts with no redirects (they are added with the final routes)', () => {
-    expect(REDIRECTS).toEqual({});
+});
+
+// F108 Phase 2 T14: the six retired routes redirect to where their screens live now. The hash is replaced once
+// (no new history entry), then the stores are set, so an old bookmark lands on the new screen.
+describe('router redirects', () => {
+  beforeEach(() => { location.hash = ''; initRouter(); });
+
+  const CASES: [string, RouteName, string][] = [
+    ['#/activity', 'observability', ''],
+    ['#/admission', 'health', 'writes'],
+    ['#/memory-write-health', 'health', 'writes'],
+    ['#/density', 'health', 'graph'],
+    ['#/cache', 'model-calls', 'cache'],
+    ['#/execution', 'work', 'changes'],
+  ];
+
+  for (const [from, route, sub] of CASES) {
+    it(`${from} lands on ${route}${sub ? ` sub ${sub}` : ''} and rewrites the address bar`, () => {
+      go(from);
+      expect(get(currentRoute)).toBe(route);
+      expect(get(currentSub)).toBe(sub);
+      expect(get(currentQuery).toString()).toBe('');
+      expect(location.hash).toBe(routeHref(route, sub));
+    });
+  }
+
+  it('the table holds exactly the six retired routes, keyed by bare name, each to a live route', () => {
+    expect(Object.keys(REDIRECTS).sort()).toEqual(['activity', 'admission', 'cache', 'density', 'execution', 'memory-write-health']);
+    for (const [key, target] of Object.entries(REDIRECTS)) {
+      expect(key).not.toContain('#');
+      expect(ROUTES as readonly string[]).not.toContain(key);
+      expect(ROUTES).toContain(target.route);
+    }
+  });
+
+  it('an old bookmark with a sub and a query lands on the new screen without them', () => {
+    go('#/cache/foo?x=1');
+    expect(get(currentRoute)).toBe('model-calls');
+    expect(get(currentSub)).toBe('cache');
+    expect(get(currentQuery).toString()).toBe('');
+    expect(location.hash).toBe('#/model-calls/cache');
+  });
+
+  it('a name that is only an Object property is no redirect: it falls back to overview and keeps the hash', () => {
+    for (const name of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+      go(`#/${name}`);
+      expect(get(currentRoute)).toBe('overview');
+      expect(location.hash).toBe(`#/${name}`);
+    }
+  });
+
+  it('redirects on the first load too', () => {
+    location.hash = '#/execution';
+    initRouter();
+    expect(get(currentRoute)).toBe('work');
+    expect(get(currentSub)).toBe('changes');
+    expect(location.hash).toBe('#/work/changes');
+  });
+
+  it('replaces the history entry instead of adding one', () => {
+    go('#/overview');
+    const before = history.length;
+    go('#/density');
+    expect(location.hash).toBe('#/health/graph');
+    expect(history.length).toBe(before + 1); // the go() itself; the redirect adds none
+  });
+
+  it('the hashchange that follows the replace changes nothing', () => {
+    go('#/admission');
+    const seen: string[] = [];
+    const unsubs = [
+      currentRoute.subscribe((r) => seen.push(`route:${r}`)),
+      currentSub.subscribe((s) => seen.push(`sub:${s}`)),
+      currentQuery.subscribe((q) => seen.push(`query:${q.toString()}`)),
+    ];
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    unsubs.forEach((u) => u());
+    expect(seen).toEqual(['route:health', 'sub:writes', 'query:']); // the subscribe calls only
   });
 });
 

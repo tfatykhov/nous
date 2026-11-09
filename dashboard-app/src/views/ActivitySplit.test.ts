@@ -283,6 +283,25 @@ describe('Activity split', () => {
     expect(within(card('Schedule Fires (7d)')).getByText('9')).toBeTruthy();
   });
 
+  // The moved numbers keep Activity's fixed windows, under screens that have a window selector of their own.
+  it('Guards says its censor numbers do not follow the window selector', async () => {
+    render(Harness);
+    const s = await sectionOf('Most Active Censors');
+    await waitFor(() => expect(within(s).getByText('never email the board')).toBeTruthy());
+    expect(within(s).getByText(
+      'Numbers marked (7d) are the last 7 days, whatever the window above. The count beside each censor is its all-time activations.',
+    )).toBeTruthy();
+    expect(screen.getByRole('group', { name: 'Window' })).toBeTruthy(); // the selector the caption speaks of
+  });
+
+  it('Subtasks says its schedule numbers do not follow the window selector', async () => {
+    render(Subtasks);
+    const s = await sectionOf('Upcoming Schedules');
+    await waitFor(() => expect(within(s).getByText('weekly report digest')).toBeTruthy());
+    expect(within(s).getByText('Numbers marked (7d) are the last 7 days, whatever the window above.')).toBeTruthy();
+    expect(screen.getByRole('combobox', { name: 'Window' })).toBeTruthy();
+  });
+
   it('Consolidation shows Sleep Activity', async () => {
     render(Consolidation);
     const s = await sectionOf('Sleep Activity');

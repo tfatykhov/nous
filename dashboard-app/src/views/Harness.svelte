@@ -283,6 +283,7 @@
   <h2>Most Active Censors</h2>
   {#if $activity.data}
     {@const cs = $activity.data.censor_stats}
+    <p class="small muted">Numbers marked (7d) are the last 7 days, whatever the window above. The count beside each censor is its all-time activations.</p>
     <StatGrid stats={[
       { label: 'Censor Activations (7d)',  value: cs.total_activations_7d },
       { label: 'Auto-created Censors',     value: cs.auto_created },

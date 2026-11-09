@@ -1,14 +1,29 @@
 import { get, writable, type Readable } from 'svelte/store';
 
+// In navigation order: Overview; Memory; Execution; Decisions; Autonomy; System (F108 Phase 2).
 export const ROUTES = [
-  'overview','graph','browser','decisions','activity','heartbeat','observability',
-  'health','admission','rubric','execution','cache','density','consolidation','dag','subtasks',
-  'identity','retrieval','harness','intentions','autonomy','memory-write-health','work','model-calls',
+  'overview',
+  'graph','browser','health','retrieval','consolidation',
+  'work','model-calls','dag','subtasks','heartbeat',
+  'decisions','rubric',
+  'autonomy','intentions','harness',
+  'observability','identity',
 ] as const;
 export type RouteName = typeof ROUTES[number];
 
-/** Old route id → where it lives now. Empty until the navigation merge (F108 Phase 2 T14) fills and applies it. */
-export const REDIRECTS: Record<string, { route: RouteName; sub?: string }> = {};
+/**
+ * Retired route id (a bare name, never `#/…`) → where its screen lives now (F108 Phase 2). `parse()` replaces such
+ * a hash once with the new one. The old screens had no sub paths or queries, so an old hash's sub and query are
+ * dropped: the bookmark lands on the new screen itself.
+ */
+export const REDIRECTS: Record<string, { route: RouteName; sub?: string }> = {
+  activity: { route: 'observability' },
+  admission: { route: 'health', sub: 'writes' },
+  'memory-write-health': { route: 'health', sub: 'writes' },
+  density: { route: 'health', sub: 'graph' },
+  cache: { route: 'model-calls', sub: 'cache' },
+  execution: { route: 'work', sub: 'changes' },
+};
 
 export const currentRoute = writable<RouteName>('overview');
 const subStore = writable('');
@@ -26,6 +41,8 @@ interface Parsed { route: RouteName; sub: string; query: string }
  * caller can leave the current route unchanged (e.g. `#main-content` from
  * the skip-link should not reset navigation).
  * Returns 'overview' for an empty/missing hash or an unknown `#/...` hash.
+ * A retired route (`REDIRECTS`) replaces the hash with its new home, so the address bar shows it and no history
+ * entry is added, and returns that home at once; the hashchange the replace fires parses to the same place.
  */
 function parse(): Parsed | null {
   const raw = location.hash;
@@ -45,6 +62,11 @@ function parse(): Parsed | null {
       sub: slash === -1 ? '' : path.slice(slash + 1),
       query: q === -1 ? '' : h.slice(q + 1),
     };
+  }
+  if (Object.hasOwn(REDIRECTS, name)) {
+    const to = REDIRECTS[name];
+    location.replace(routeHref(to.route, to.sub));
+    return { route: to.route, sub: to.sub ?? '', query: '' };
   }
   // Unknown route path → fall back to overview (original behaviour)
   return { route: 'overview', sub: '', query: '' };

@@ -1,6 +1,6 @@
 # F108: Agent Work View
 
-**Status:** Phase 1 complete, flags off. Phase 1 is the recording. PR 1 (#870, merged) records tool calls and turns. PR 2 (#871, merged) records the model-call numbers. PR 3 (#872, merged) records the model-call text. PR 4, the last PR of Phase 1, makes the model-call table the one recorder: the context endpoints read it, and `context_log` gets no more rows. Every setting defaults off: `NOUS_TOOL_CALL_LOG_ENABLED` and `NOUS_TOOL_REASON_ENABLED` (PR 1), `NOUS_MODEL_CALL_LOG_ENABLED` (PR 2; the cutover in PR 4), `NOUS_MODEL_CALL_TEXT_ENABLED` (PR 3). Phase 2 (the Work and Model calls views, the navigation) and Phase 3 (tool notes) follow.
+**Status:** Phase 1 deployed, with all four settings on. Phase 2 complete. Phase 1 is the recording. PR 1 (#870) records tool calls and turns. PR 2 (#871) records the model-call numbers. PR 3 (#872) records the model-call text. PR 4 (#873), the last PR of Phase 1, makes the model-call table the one recorder: the context endpoints read it, and `context_log` gets no more rows. Every setting defaults off: `NOUS_TOOL_CALL_LOG_ENABLED` and `NOUS_TOOL_REASON_ENABLED` (PR 1), `NOUS_MODEL_CALL_LOG_ENABLED` (PR 2; the cutover in PR 4), `NOUS_MODEL_CALL_TEXT_ENABLED` (PR 3). Phase 2 is the views: the dashboard's Work and Model calls screens, their read-only endpoints, and the navigation in six groups (see [Phase 2: the views](#phase-2-the-views)). Phase 3 (tool notes) follows.
 
 ## Problem
 
@@ -165,7 +165,7 @@ Drop the setting's `.env` line and restart. For `NOUS_MODEL_CALL_LOG_ENABLED`, t
 - **The ring fallback is the ring's.** It holds at most 10 payloads per session and 50 in all, in memory: with the text off, a call from before a restart has no payload or section text, as before.
 - **Ties.** Calls are listed newest first by start time, then by id, so two calls that start within one tick of the clock are listed in either order.
 - **Stored section text is redacted** and a block over the cap is cut with a marker, so a section's text can be shorter than its estimate. `/context/log/{id}/sections` loads the call's whole stored text to read its system blocks.
-- **The Observability view still shows the uncached input** (`input_tokens_actual`) beside the estimate. `input_total_tokens` is there for the Phase 2 Model calls view; the dashboard is not changed in Phase 1.
+- **The dashboard is not changed in Phase 1.** Its Observability view showed the uncached input (`input_tokens_actual`) beside the estimate. Phase 2 moved the per-call numbers to the Model calls view, which shows the uncached input, the cache reads and writes, and their total.
 
 ## How the rows are written
 
@@ -190,6 +190,49 @@ Each sweep runs in a try of its own, so one failing sweep never skips another.
 The dashboards, and Nous itself: the `db_query` reader (`nous_reader`, `scripts/ops/db_roles.sql` section 5d) may read `tool_call_log`, `model_call_log` and `model_call_attempt`, so Nous can look up its own tool calls, their reasons and its own model calls. It never reads `agent_turn_log`, which holds message text, nor the model-call text (`model_text_block` and `model_call_block_ref`, the full prompts and responses): `db_roles.sql` lists none of them. This is the one exception to "dashboards read the observability tables, the agent never does".
 
 The dashboard reads both text tables (`model_text_block` and `model_call_block_ref`) through the app role, never the reader: the model-call detail lists a call's blocks without their bodies (`GET /dashboard/model-calls/{call_id}`), and one block's body is read alone, on request (`GET /dashboard/model-calls/{call_id}/blocks/{part}/{ord}`).
+
+## Phase 2: the views
+
+Phase 2 reads the Phase 1 rows on the dashboard (`/dashboard/v2/`). It adds no table, no setting and no write route.
+
+### The screens
+
+- **Work** (`#/work`) has three tabs. **Sessions** lists conversations and tasks, newest first; background work is hidden unless asked for. It filters by kind, tool, text and five lenses: a tool failed, the same call repeated, 10 or more calls in a turn, Nous asked you a question, and changed something. A link's `days` sets the window (1 to 30, default 7). **A session's trace** (`#/work/s/<session_id>`, or `.../<turn_id>` for one turn) shows each turn: what started it, the memory in its context, the critic's verdict, the claim check, its main-loop model calls, and each tool call with its reason first. A call that the ledger left `unknown` gets the undo help (copy the guarded SQL); any other recorded call shows its ledger status. **Patterns** (`#/work/patterns`) shows the tools by kind of work with their common reasons, the tools that fail most (each links to its failing sessions), and the wasted steps (repeated calls, and retries that failed again). **Changes** (`#/work/changes`) is the execution ledger, unchanged.
+- **Model calls** (`#/model-calls`) has two tabs. **Calls** lists every model call with its purpose, tokens, cache reads, duration and any problem, filtered by purpose, model, session, turn and status (`problem` = failed, sent more than once, sent on a fallback path, or no purpose recorded). **A call** (`#/model-calls/c/<call_id>`) shows its attempts, its context sections by size, a link to the turn that made it, and its stored text by block, each with how many calls sent the same block; a block's body is loaded only when it is opened. **Cache** (`#/model-calls/cache`) is the old Cache screen; a timeline row links to its call when the model-call log is on.
+- **Memory health** (`#/health`) has three tabs: **Graph** (the graph health charts, with the old Density screen's orphan rate by type, edge distribution and backfill progress), **Writes** (memory write health, then admission) and **Growth** (memory growth, fact categories and the fact growth rate, which Overview sums up in one line).
+- The old Activity screen's sections moved to the screens they belong to: the Event Timeline to Observability, the Upcoming Schedules to Subtasks, the Sleep Activity to Consolidation, and the Most Active Censors to Guards. Their numbers keep Activity's fixed windows (7 days; the top censors' counts are all-time), which a caption says, since Guards and Subtasks have a window selector of their own. Observability's per-call sections are gone; their numbers are on Model calls.
+
+Every text is shown as stored (redacted when written), as plain text: never as HTML, never as rendered markdown.
+
+### Endpoints
+
+All read-only `GET`s, agent-scoped, documented in the [REST API](../reference/rest-api.md): `/dashboard/work/sessions`, `/dashboard/work/sessions/{session_id}`, `/dashboard/work/patterns`, `/dashboard/model-calls`, `/dashboard/model-calls/{call_id}` and `/dashboard/model-calls/{call_id}/blocks/{part}/{ord}`. Lists page with an opaque keyset cursor. A trace orders turns by their start, then id, never by turn number, since turn numbers repeat after compaction.
+
+### With a setting off
+
+Each endpoint group reads its tables only while its Phase 1 setting is on. Off, it answers 200 with `enabled` false, every list empty and every count zero, and opens no database session. The screens then say so and name the setting: Work, "Tool-call recording is off. Set NOUS_TOOL_CALL_LOG_ENABLED to record what Nous does."; Model calls, "Model-call recording is off. Set NOUS_MODEL_CALL_LOG_ENABLED."; a call's text, "Prompt text is not recorded. Set NOUS_MODEL_CALL_TEXT_ENABLED." A call older than the text's retention says its text is no longer kept.
+
+### Navigation and redirects
+
+The navigation has 18 items in six groups: Overview; **Memory**: Graph, Browse, Health, Retrieval, Consolidation; **Execution**: Work, Model calls, Workflows, Subtasks, Heartbeat; **Decisions**: Decisions, Scoring; **Autonomy**: Autonomy, Intentions, Guards; **System**: Observability, Identity. Workflows, Scoring and Guards keep their route ids (`dag`, `rubric`, `harness`). The badge for sends in doubt is on Work (the sends are on its Changes tab); the badge for questions waiting stays on Workflows.
+
+Six routes are retired. An old link or bookmark lands on the screen's new home: the router replaces the hash (no new history entry), so the address bar shows the new one. The old screens had no sub paths or queries, so an old hash's sub path and query are dropped.
+
+| Old | New |
+|---|---|
+| `#/activity` | `#/observability` |
+| `#/admission` | `#/health/writes` |
+| `#/memory-write-health` | `#/health/writes` |
+| `#/density` | `#/health/graph` |
+| `#/cache` | `#/model-calls/cache` |
+| `#/execution` | `#/work/changes` |
+
+### What Phase 2 leaves out
+
+- **Patterns** shows tools by kind of work, their common reasons, the tools that fail most and the wasted steps. It does not group reasons by goal, show what Nous did after a failure, or show which memory a call was given: each needs reasons clustered or labelled first, so they move to Phase 3 (tool notes).
+- **"Nous asked you a question"** finds only `resolve_intention` calls that decided `ask`; a workflow waiting on an answer is not counted.
+- **A trace's model calls** are the main loop's calls of that turn. A background helper inside a turn (the critic, the epistemic gate, query expansion, the date window, admission) records a session but no turn, so the trace also links the session's whole set of model calls.
+- **A session with calls but no turn row** (for example one that starts with an owner-approved call) is not listed; its trace still opens by id. Every unlabelled Claude Code conversation shares the session id `mcp-session`, so it is one long row, paged in its trace.
 
 ## Non-goals
 
@@ -220,6 +263,7 @@ The model-call text (PR 3) is not in these figures: its size, with the dedup, is
 ## Reference
 
 - Settings: [environment variables](../reference/environment-variables.md) (`NOUS_TOOL_CALL_LOG_ENABLED`, `NOUS_TOOL_REASON_ENABLED`, `NOUS_TOOL_CALL_RETENTION_DAYS`, `NOUS_TOOL_INPUT_MAX_CHARS`, `NOUS_TOOL_RESULT_PREVIEW_CHARS`, `NOUS_TOOL_REASON_MAX_CHARS`, `NOUS_MODEL_CALL_LOG_ENABLED`, `NOUS_MODEL_CALL_RETENTION_DAYS`, `NOUS_MODEL_CALL_TEXT_ENABLED`, `NOUS_MODEL_CALL_TEXT_BLOCK_MAX_CHARS`, `NOUS_MODEL_CALL_TEXT_RETENTION_DAYS`; the cutover's effect on `NOUS_CONTEXT_LOG_ENABLED`).
-- Endpoints: [REST API](../reference/rest-api.md) (`GET /dashboard/observability`, `recording` and `context_log`; `/dashboard/cache`; `/context/log*`; `/context/diff`).
+- Endpoints: [REST API](../reference/rest-api.md) (`GET /dashboard/observability`, `recording` and `context_log`; `/dashboard/cache`; `/context/log*`; `/context/diff`; Phase 2: `/dashboard/work/*` and `/dashboard/model-calls*`).
+- Dashboard (Phase 2): `nous/api/work_view_dashboard.py` (the endpoints); `dashboard-app/src/views/Work.svelte`, `views/work/`, `views/ModelCalls.svelte`, `views/modelcalls/`, `views/Health.svelte` and `views/health/` (the screens); `dashboard-app/src/lib/router.ts` (the routes and `REDIRECTS`) and `lib/ui/Nav.svelte` (the groups).
 - Reader: [database roles](../reference/database-roles.md) and [agent tools](../reference/agent-tools.md) (`db_query`).
 - Code: `nous/observability/recording.py`, `nous/observability/tool_calls.py`, `nous/observability/model_calls.py`, `nous/observability/model_call_text.py`, `nous/observability/context_view.py` (the views the context endpoints read), `nous/observability/work_view_retention.py`, `nous/api/runner.py` (`_note_tool_call`, `_note_turn`, the call contexts), `nous/api/anthropic_client.py` (`set_recorder`, the scopes and attempts), `nous/browser/loop.py`, `nous/brain/embeddings.py` and `nous/heart/reranker.py` (`set_recorder`), `nous/main.py` (wiring, `_build_context_logger`, retention loop, shutdown).

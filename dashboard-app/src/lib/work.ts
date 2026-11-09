@@ -33,6 +33,11 @@ export function fmtTokens(n: number | null): string {
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
+/** A window's length: `"1 day"`, `"7 days"`. */
+export function fmtDays(n: number): string {
+  return `${n} day${n === 1 ? '' : 's'}`;
+}
+
 /** `"Nov 7 00:07 UTC"` from a UTC ISO timestamp, the same text as the harness screens (`fmtUtc`); `"—"` for null, empty or unparsable input. */
 export function fmtTime(iso: string | null): string {
   return fmtUtc(iso);

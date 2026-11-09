@@ -24,7 +24,7 @@
 </script>
 
 <div class="health">
-  <h1>Memory health</h1>
+  <h1 class="page-h1">Memory health</h1>
   <SubNav {items} current={tab ?? ''} label="Memory health views" />
 
   {#if tab === 'graph'}
@@ -40,7 +40,6 @@
 
 <style>
   .health { display: flex; flex-direction: column; gap: 1rem; }
-  h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em; margin: 0.25rem 0; }
   .gone { color: var(--muted); font-size: 0.9375rem; }
   .gone a { color: var(--accent-text); }
 </style>

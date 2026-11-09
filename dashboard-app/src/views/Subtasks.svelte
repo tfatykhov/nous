@@ -293,6 +293,7 @@
   <h2>Upcoming Schedules</h2>
   {#if $activity.data}
     {@const ss = $activity.data.schedule_stats}
+    <p class="caption">Numbers marked (7d) are the last 7 days, whatever the window above.</p>
     <StatGrid stats={[
       { label: 'Active Schedules',         value: ss.active },
       { label: 'Schedule Fires (7d)',      value: ss.fires_7d },
@@ -391,6 +392,12 @@
     border-radius: 10px;
     padding: 1rem;
     margin-top: 1rem;
+  }
+
+  .caption {
+    color: var(--muted);
+    font-size: 0.75rem;
+    margin: 0 0 0.75rem;
   }
 
   .empty {
