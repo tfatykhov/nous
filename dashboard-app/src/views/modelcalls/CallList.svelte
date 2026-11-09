@@ -32,7 +32,7 @@
     makePollStore<ModelCallsData>((signal) => {
       const k = key;
       return apiGet<ModelCallsData>(`/dashboard/model-calls?${k}`, { signal }).then((d) => {
-        if (lastPage?.key === k && moreCursor !== undefined) {
+        if (lastPage?.key === k && (moreCursor !== undefined || moreBusy)) {
           const seen = new Set(d.calls.map((c) => c.id));
           const have = new Set(extra.map((c) => c.id));
           const fell = lastPage.calls.filter((c) => !seen.has(c.id) && !have.has(c.id));
