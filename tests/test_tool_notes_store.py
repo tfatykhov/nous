@@ -223,3 +223,47 @@ async def test_mark_judged(store):
     await store.mark_judged(nid, judged)
     (n,) = await store.active()
     assert n.judged == judged
+
+
+@pytest.mark.asyncio
+async def test_caps_ignore_active_rows_with_empty_text(store, db, agent_id):
+    async with db.session() as s:
+        for i in range(NOTES_PER_TOOL):
+            await s.execute(
+                sa_text(
+                    "INSERT INTO nous_system.tool_note (agent_id, tool_name, pattern_kind, pattern_key, note_text, "
+                    "baseline_rate, baseline_calls, baseline_hits, active) "
+                    "VALUES (:a, 'bash', 'error_repeat', :k, '', 0, 0, 0, TRUE)"
+                ),
+                {"a": agent_id, "k": f"empty{i}"},
+            )
+        await s.commit()
+    assert await store.active() == []
+    for i in range(NOTES_PER_TOOL):
+        await store.add(pat(key=f"real{i}"), "n", now=NOW)
+    assert len(await store.active()) == NOTES_PER_TOOL
+
+
+@pytest.mark.asyncio
+async def test_cap_breach_rolls_back_the_replaces_retire(store):
+    a = [await store.add(pat(tool="a", key=f"k{i}"), "n", now=NOW) for i in range(3)]
+    [await store.add(pat(tool="b", key=f"k{i}"), "n", now=NOW) for i in range(3)]
+    with pytest.raises(NoteCapError):
+        await store.add(pat(tool="b", key="new"), "n", now=NOW, replaces=a[0])
+    assert a[0] in {n.id for n in await store.active()}
+    assert len(await store.active()) == 6
+
+
+@pytest.mark.asyncio
+async def test_concurrent_adds_cannot_exceed_the_per_tool_cap(db, agent_id, store):
+    import asyncio
+
+    stores = [ToolNoteStore(db, agent_id) for _ in range(10)]
+    results = await asyncio.wait_for(
+        asyncio.gather(
+            *(s.add(pat(key=f"k{i}"), "n", now=NOW) for i, s in enumerate(stores)), return_exceptions=True
+        ),
+        timeout=30,
+    )
+    assert sum(isinstance(r, NoteCapError) for r in results) == 10 - NOTES_PER_TOOL
+    assert len(await store.active()) == NOTES_PER_TOOL

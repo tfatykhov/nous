@@ -2351,7 +2351,7 @@ class ToolNote(Base):
 
     __tablename__ = "tool_note"
     __table_args__ = (
-        CheckConstraint("char_length(note_text) <= 300", name="tool_note_note_text_check"),
+        CheckConstraint("length(note_text) <= 300", name="tool_note_note_text_check"),
         Index(
             "uq_tool_note_active_pattern",
             "agent_id",
