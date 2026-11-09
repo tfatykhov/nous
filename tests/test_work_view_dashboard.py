@@ -1050,7 +1050,7 @@ async def test_trace_turn_without_turn_row_is_synthetic(client, db, agent_id, cl
         "work_kind": "subtask",
         "title": "(no title)",
         "started_at": (base + timedelta(seconds=2)).isoformat(),
-        "ended_at": (base + timedelta(seconds=2)).isoformat(),
+        "ended_at": (base + timedelta(seconds=5)).isoformat(),  # the synthetic turn ends at its last call
         "turns": 1,
         "tool_calls": 2,
         "errors": 0,
@@ -1364,6 +1364,26 @@ async def test_trace_session_header(client, db, agent_id, cleanup):
         "tool_calls": 1,
         "errors": 0,
     }
+
+
+@pytest.mark.postgres_only
+async def test_trace_synthetic_turn_of_two_calls_ends_at_its_last_call(client, db, agent_id, cleanup):
+    base = _hour_ago()
+    await insert_turn(db, agent_id, "sess-G2", started_at=base, ended_at=base + timedelta(seconds=30))
+    ghost = uuid.uuid4()  # calls under a turn id with no turn row
+    first, last = base + timedelta(minutes=5), base + timedelta(minutes=10)
+    await insert_call(db, agent_id, ghost, 0, session_id="sess-G2", input_text="a", started_at=first)
+    await insert_call(db, agent_id, ghost, 1, session_id="sess-G2", input_text="b", started_at=last)
+
+    body = await get_json(client, trace_path("sess-G2"))
+    synthetic = body["turns"][1]
+    assert (synthetic["turn_id"], synthetic["has_turn_row"], synthetic["started_at"]) == (
+        str(ghost),
+        False,
+        first.isoformat(),
+    )
+    assert [c["input"] for c in synthetic["calls"]] == ["a", "b"]
+    assert (body["session"]["started_at"], body["session"]["ended_at"]) == (base.isoformat(), last.isoformat())
 
 
 @pytest.mark.postgres_only

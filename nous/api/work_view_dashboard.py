@@ -453,14 +453,14 @@ def disabled_trace() -> dict[str, Any]:
 # A trace's turns: the session's turn rows, and, as synthetic turns, the turn ids of the session's calls that have no
 # turn row (execute_single_call writes its calls under a turn id of their own and never a turn row). The two parts
 # are disjoint (NOT EXISTS), hence UNION ALL. The header and the page both read this union, so the header's counts
-# agree with the body. A synthetic turn starts and ends at its first call.
+# agree with the body. A synthetic turn starts at its first call and ends at its last.
 _TRACE_TURNS_CTE = """
 WITH trace_turns AS (
     SELECT t.id, t.started_at, coalesce(t.ended_at, t.started_at) AS last_at, true AS has_turn_row
     FROM nous_system.agent_turn_log t
     WHERE t.agent_id = :agent AND t.session_id = :sid
     UNION ALL
-    SELECT c.turn_id, min(c.started_at), min(c.started_at), false
+    SELECT c.turn_id, min(c.started_at), max(c.started_at), false
     FROM nous_system.tool_call_log c
     WHERE c.agent_id = :agent AND c.session_id = :sid AND c.turn_id IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM nous_system.agent_turn_log t WHERE t.id = c.turn_id AND t.agent_id = :agent)
