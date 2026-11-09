@@ -29,6 +29,10 @@
     gap: 4px;
   }
 
+  @media (max-width: 768px) {
+    .subnav-link { display: inline-flex; align-items: center; min-height: 44px; }
+  }
+
   .subnav-link {
     padding: 8px 14px;
     border-radius: var(--radius-sm);

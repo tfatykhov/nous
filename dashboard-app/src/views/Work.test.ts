@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import Work from './Work.svelte';
 import { initRouter } from '../lib/router';
+import { getLastListQuery } from '../lib/work';
 
 const HOSTILE = '<img src=x onerror=alert(1)>';
 const CURSOR = '2026-11-07T00:07:00.123456+00:00|sess/two+x';
@@ -338,7 +339,7 @@ describe('Work host dispatch', () => {
   it('shows a stub for patterns and does not fetch the list', async () => {
     go('#/work/patterns');
     render(Work);
-    expect(await screen.findByText('patterns')).toBeTruthy();
+    expect(await screen.findByText('Patterns are not built yet.')).toBeTruthy();
     expect(urls).toHaveLength(0);
   });
 
@@ -347,6 +348,18 @@ describe('Work host dispatch', () => {
     render(Work);
     await waitFor(() => expect(urls).toHaveLength(1));
     expect(urls[0]).toBe('/dashboard/work/sessions/abc%2Fdef');
+  });
+
+  it('lets the kind buttons wrap so the list never scrolls sideways at phone width', () => {
+    const src = readFileSync(resolve(__dirname, 'work/SessionList.svelte'), 'utf-8');
+    expect(src).toMatch(/\.seg \{[^}]*flex-wrap: wrap/);
+  });
+
+  it('remembers the list query for the trace Back link', async () => {
+    go('#/work?kind=task&lens=error');
+    render(Work);
+    await screen.findByText('Gap Scout status check');
+    expect(getLastListQuery()).toEqual({ kind: 'task', lens: 'error' });
   });
 
   it('treats a malformed escape in the path as not found, without throwing', async () => {
@@ -361,7 +374,7 @@ describe('Work host dispatch', () => {
     render(Work);
     await screen.findByText('Gap Scout status check');
     go('#/work/patterns');
-    expect(await screen.findByText('patterns')).toBeTruthy();
+    expect(await screen.findByText('Patterns are not built yet.')).toBeTruthy();
     expect(screen.queryByText('Gap Scout status check')).toBeNull();
   });
 });

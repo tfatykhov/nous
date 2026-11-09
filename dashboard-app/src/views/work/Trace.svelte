@@ -2,19 +2,57 @@
   import { apiGet, type ApiError } from '../../lib/api';
   import { makePollStore } from '../../lib/stores/registry';
   import { usePoll } from '../../lib/poll';
-  import { routeHref, type RouteName } from '../../lib/router';
-  import { fmtDuration, fmtTime, fmtTokens, laneColor } from '../../lib/work';
+  import { routeHref, ROUTES, type RouteName } from '../../lib/router';
+  import { fmtDuration, fmtTime, fmtTokens, getLastListQuery, laneColor } from '../../lib/work';
   import type { WorkCall, WorkTrace, WorkTurn } from '../../lib/types/api';
   import StaleBadge from '../../lib/ui/StaleBadge.svelte';
   import HoldUndo from '../../lib/ui/HoldUndo.svelte';
 
   // F108 Work trace: one session, turn by turn. Every string here (messages, reasons, inputs, results, replies,
   // critic rationale) came from a model or a user and is shown as a text node only: no {@html}, no markdown.
-  // Polled every 15 s (page one only); pages after the first are fetched on demand and survive a poll.
+  // Turns come oldest first, a page at a time. While more pages remain nothing is polled (loaded history does not
+  // change); once every turn is loaded, each 15 s poll asks for the turns after the second-to-last one, so the
+  // newest turn is refreshed and new turns appear. Results merge by turn id.
   let { sessionId, turnId }: { sessionId: string; turnId?: string } = $props();
 
   const base = () => `/dashboard/work/sessions/${encodeURIComponent(sessionId)}`;
-  const store = usePoll(makePollStore<WorkTrace>((signal) => apiGet<WorkTrace>(base(), { signal }), 15000));
+  let turns = $state<WorkTurn[]>([]);
+  let nextCursor = $state<string | null>(null);
+  let head = $state<WorkTrace | null>(null);
+
+  /** The endpoint's own cursor format, `<started_at>|<turn id>` (format_cursor), for the turns after `t`. */
+  const cursorOf = (t: WorkTurn) => `${t.started_at}|${t.turn_id}`;
+
+  function absorb(r: WorkTrace) {
+    head = r;
+    nextCursor = r.next_after;
+    const next = [...turns];
+    for (const t of r.turns) {
+      const i = next.findIndex((x) => x.turn_id === t.turn_id);
+      if (i >= 0) next[i] = t;
+      else next.push(t);
+    }
+    turns = next;
+  }
+
+  // A 4xx (the session is gone) ends the polling: later ticks rethrow it without a request.
+  let gone: Error | null = null;
+  const poll = makePollStore<WorkTrace>(async (signal) => {
+    if (gone) throw gone;
+    if (head && nextCursor !== null) return head; // more pages remain: loaded history does not change
+    const anchor = turns.length >= 2 ? turns[turns.length - 2] : null;
+    const url = anchor ? `${base()}?${new URLSearchParams({ after: cursorOf(anchor) })}` : base();
+    try {
+      const r = await apiGet<WorkTrace>(url, { signal });
+      absorb(r);
+      return r;
+    } catch (e) {
+      const status = (e as ApiError).status;
+      if (status !== undefined && status >= 400 && status < 500) gone = e as Error;
+      throw e;
+    }
+  }, 15000);
+  const store = usePoll(poll);
 
   const KIND_LABEL: Record<string, string> = { conversation: 'Conversation', task: 'Task', background: 'Background' };
   const LANES: { id: string; name: string }[] = [
@@ -26,36 +64,36 @@
   const laneName = (lane: string) => LANES.find((l) => l.id === lane)?.name ?? 'Other';
   const railLanes = (lane: string) => (LANES.some((l) => l.id === lane) ? LANES.map((l) => l.id) : [...LANES.map((l) => l.id), 'other']);
 
-  // Pages after the first, and the cursor to the next.
-  let extra = $state<WorkTurn[]>([]);
-  let moreCursor = $state<string | null | undefined>(undefined);
   let moreBusy = $state(false);
   let moreError = $state(false);
 
-  let data = $derived($store.data);
-  let notFound = $derived(($store.error as ApiError | null)?.status === 404 && !data);
-  let turns = $derived.by(() => {
-    const first = data?.turns ?? [];
-    const seen = new Set(first.map((t) => t.turn_id));
-    return [...first, ...extra.filter((t) => !seen.has(t.turn_id))];
-  });
-  let cursor = $derived(moreCursor === undefined ? (data?.next_after ?? null) : moreCursor);
+  let data = $derived(head);
+  let notFound = $derived(($store.error as ApiError | null)?.status === 404 && !head);
 
   async function loadMore() {
-    if (cursor === null || moreBusy) return;
+    if (nextCursor === null || moreBusy) return;
     moreBusy = true;
     moreError = false;
     try {
-      const page = await apiGet<WorkTrace>(`${base()}?${new URLSearchParams({ after: cursor })}`);
-      const seen = new Set(turns.map((t) => t.turn_id));
-      extra = [...extra, ...page.turns.filter((t) => !seen.has(t.turn_id))];
-      moreCursor = page.next_after;
+      absorb(await apiGet<WorkTrace>(`${base()}?${new URLSearchParams({ after: nextCursor })}`));
     } catch {
       moreError = true;
     } finally {
       moreBusy = false;
     }
   }
+
+  // A linked turn on a page not loaded yet: load the next pages until it shows, at most 10 of them.
+  let autoPages = 0;
+  let gaveUp = $state(false);
+  $effect(() => {
+    if (!turnId || !head || moreBusy || moreError || nextCursor === null) return;
+    if (turns.some((t) => t.turn_id === turnId)) return;
+    if (autoPages >= 10) { gaveUp = true; return; }
+    autoPages += 1;
+    void loadMore();
+  });
+  let turnMissing = $derived(!!turnId && !!head && !turns.some((t) => t.turn_id === turnId) && (nextCursor === null || gaveUp));
 
   // Scroll to the linked turn once, when it is first on screen.
   let scrolledTo = '';
@@ -114,12 +152,14 @@
     return [...by].map(([tool, u]) => ({ tool, ...u }));
   });
 
+  const modelCallsReady = () => (ROUTES as readonly string[]).includes('model-calls');
   const modelCallsHref = (sub: string[] | undefined, query?: Record<string, string>) => routeHref('model-calls' as RouteName, sub, query);
+  const num = (n: number) => n.toLocaleString('en-US');
   const errorsText = (n: number) => (n === 0 ? 'No errors' : plural(n, 'error', 'errors'));
 </script>
 
 <div class="trace">
-  <a class="back" href={routeHref('work')}>← Back to Work</a>
+  <a class="back" href={routeHref('work', '', getLastListQuery())}>← Back to Work</a>
 
   {#if notFound}
     <p class="gone" role="status">This session is not in the work log (it may be older than 30 days).</p>
@@ -138,7 +178,7 @@
         <span>{plural(s.turns, 'turn', 'turns')}</span>
         <span>{plural(s.tool_calls, 'tool call', 'tool calls')}</span>
         <span class:bad={s.errors > 0}>{errorsText(s.errors)}</span>
-        <a href={modelCallsHref(undefined, { session_id: s.session_id })}>all model calls of this conversation</a>
+        {#if modelCallsReady()}<a href={modelCallsHref(undefined, { session_id: s.session_id })}>all model calls of this conversation</a>{/if}
       </div>
     </header>
 
@@ -148,7 +188,12 @@
         {#each used as u (u.tool)}
           <div class="used-row">
             <span class="used-tool"><span class="dot" aria-hidden="true" style:background={laneColor(u.lane)}></span>{u.tool}<span class="count">{plural(u.calls, 'call', 'calls')}</span></span>
-            <ul>{#each u.why as w}<li class="wrap">{w}</li>{/each}</ul>
+            <ul>
+              {#each u.why.slice(0, 3) as w}<li class="wrap reason">{w}</li>{/each}
+              {#if u.why.length > 3}
+                <li class="more-reasons"><details><summary>and {u.why.length - 3} more</summary><ul>{#each u.why.slice(3) as w}<li class="wrap">{w}</li>{/each}</ul></details></li>
+              {/if}
+            </ul>
           </div>
         {/each}
       </section>
@@ -161,6 +206,10 @@
         </span>
         <span>The rail shows which lane each step used: memory, live state, workspace, acts. Read it top to bottom to see the path Nous took.</span>
       </div>
+
+      {#if turnMissing}
+        <p class="gone" role="status">{nextCursor === null ? 'That turn is not in this session.' : 'That turn is further on. Use Load more to reach it.'}</p>
+      {/if}
 
       {#each turns as t, i (t.turn_id)}
         {@const chips = contextChips(t)}
@@ -233,14 +282,18 @@
             <div class="row">
               <div class="side"></div>
               <div class="mcalls">
-                <a href={modelCallsHref(undefined, { turn_id: t.turn_id })}>{plural(t.model_calls.length, 'main-loop model call', 'main-loop model calls')}</a>
-                <span class="muted">·</span>
-                <a href={modelCallsHref(undefined, { session_id: s.session_id })}>all model calls of this conversation</a>
+                {#if modelCallsReady()}
+                  <a href={modelCallsHref(undefined, { turn_id: t.turn_id })}>{plural(t.model_calls.length, 'main-loop model call', 'main-loop model calls')}</a>
+                  <span class="muted">·</span>
+                  <a href={modelCallsHref(undefined, { session_id: s.session_id })}>all model calls of this conversation</a>
+                {:else}
+                  <span>{plural(t.model_calls.length, 'main-loop model call', 'main-loop model calls')}</span>
+                {/if}
                 <details>
                   <summary>List them</summary>
                   <ul>
                     {#each t.model_calls as m (m.id)}
-                      <li><a href={modelCallsHref(['c', m.id])}>{m.model ?? 'unknown model'}</a> <span class="muted">{m.purpose} · {m.status} · {fmtTokens(m.input_total)} in · {fmtTokens(m.output_tokens)} out</span></li>
+                      <li>{#if modelCallsReady()}<a href={modelCallsHref(['c', m.id])}>{m.model ?? 'unknown model'}</a>{:else}<span>{m.model ?? 'unknown model'}</span>{/if} <span class="muted">{m.purpose} · {m.status} · {fmtTokens(m.input_total)} in · {fmtTokens(m.output_tokens)} out</span></li>
                     {/each}
                   </ul>
                 </details>
@@ -250,9 +303,10 @@
         </article>
       {/each}
 
-      {#if cursor !== null}
+      {#if nextCursor !== null}
         <div class="more">
           <button type="button" disabled={moreBusy} onclick={loadMore}>Load more turns</button>
+          <span class="muted">{`Showing ${num(turns.length)} of ${num(Math.max(s.turns, turns.length))} turns`}</span>
           {#if moreError}<span class="err" role="alert">Could not load more.</span>{/if}
         </div>
       {/if}
@@ -333,7 +387,9 @@
   .more button { font: inherit; cursor: pointer; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.875rem; min-height: 36px; }
   .more button:disabled { opacity: 0.6; cursor: default; }
   .more { display: flex; align-items: center; gap: 0.75rem; }
+  .more-reasons { list-style: none; margin-left: -1.125rem; }
   @media (max-width: 768px) {
+    .more button, summary, .mcalls a, .back { min-height: 44px; display: inline-flex; align-items: center; }
     .side, .rail { width: 56px; }
     .col { width: 14px; }
     .lane-keys span { width: 14px; }

@@ -2,7 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/svelte';
 import Trace from './Trace.svelte';
 import Work from '../Work.svelte';
-import { initRouter } from '../../lib/router';
+import { setLastListQuery } from '../../lib/work';
+import { initRouter, ROUTES } from '../../lib/router';
 
 const HOSTILE = '<img src=x onerror=alert(1)>';
 const T1 = '11111111-1111-4111-8111-111111111111';
@@ -44,8 +45,9 @@ function install() {
 }
 
 describe('Work trace', () => {
-  beforeEach(() => { install(); location.hash = ''; initRouter(); });
-  afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); });
+  const routes = ROUTES as unknown as string[];
+  beforeEach(() => { install(); location.hash = ''; initRouter(); routes.push('model-calls'); });
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers(); const i = routes.indexOf('model-calls'); if (i >= 0) routes.splice(i, 1); });
 
   it('fetches the URL-encoded session and shows the header counts', async () => {
     respond = () => ({ body: trace([turn(T1, 1)]) });
@@ -154,6 +156,37 @@ describe('Work trace', () => {
     await screen.findByText('Reply 1');
     const link = within(container.querySelector('header') as HTMLElement).getByRole('link', { name: 'all model calls of this conversation' });
     expect(link.getAttribute('href')).toBe('#/model-calls?session_id=sess%2Fone');
+  });
+
+  it('with no model-calls route the trace links nothing to it', async () => {
+    routes.splice(routes.indexOf('model-calls'), 1);
+    respond = () => ({ body: trace([turn(T1, 1, { model_calls: [{ id: 'mc-1', purpose: 'main_loop', model: 'claude-x', status: 'ok', input_total: 1, output_tokens: 1 }] })]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 1');
+    expect(container.querySelector('a[href^="#/model-calls"]')).toBeNull();
+    expect(container.textContent).toContain('1 main-loop model call');
+  });
+
+  it('caps the reasons per tool at 3 and folds the rest into "and N more"', async () => {
+    respond = () => ({ body: trace([turn(T1, 1, { calls: [1, 2, 3, 4].map((i) => call(i, { tool: 'db_query', lane: 'live', reason: `Why ${i}` })) })]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Why 1', { selector: '.step *' });
+    const used = container.querySelector('section.used') as HTMLElement;
+    const det = used.querySelector('details')!;
+    expect(det.open).toBe(false);
+    expect(within(det).getByText('and 1 more')).toBeTruthy();
+    expect(det.textContent).toContain('Turn 1: Why 4');
+    const direct = Array.from(used.querySelectorAll('li.reason')).map((l) => l.textContent);
+    expect(direct).toEqual(['Turn 1: Why 1', 'Turn 1: Why 2', 'Turn 1: Why 3']);
+  });
+
+  it('the Back link keeps the list filters', async () => {
+    setLastListQuery({ kind: 'task', lens: 'error' });
+    respond = () => ({ body: trace([turn(T1, 1)]) });
+    render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 1');
+    expect(screen.getByRole('link', { name: /Back to Work/ }).getAttribute('href')).toBe('#/work?kind=task&lens=error');
+    setLastListQuery({});
   });
 
   it('a turn with no calls says no tools were used and still shows its reply', async () => {
@@ -321,44 +354,18 @@ describe('Work trace', () => {
     expect(used.textContent).toContain('1 call');
   });
 
-  describe('pages and polling', () => {
-    const CURSOR = '2026-11-07T00:07:00.123456+00:00|' + T1;
-    it('appends the next page through next_after and a poll keeps the loaded pages', async () => {
-      let page1Reply = 'Reply 1';
-      respond = (url) => url.includes('after=')
-        ? { body: trace([turn(T2, 2)], { next_after: null }) }
-        : { body: trace([turn(T1, 1, { reply: page1Reply })], { next_after: CURSOR }) };
-      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
-      const { container } = render(Trace, { sessionId: 'sess/one' });
-      await vi.advanceTimersByTimeAsync(0);
-      await screen.findByText('Reply 1');
-      await fireEvent.click(screen.getByRole('button', { name: 'Load more turns' }));
-      await screen.findByText('Reply 2');
-      const afterUrl = new URL(urls[urls.length - 1], 'http://x');
-      expect(afterUrl.searchParams.get('after')).toBe(CURSOR);
-      expect(screen.queryByRole('button', { name: 'Load more turns' })).toBeNull();
-      // 15 s later the first page is refetched: it changed, and page two must still be there.
-      page1Reply = 'Reply 1 updated';
-      const before = urls.length;
-      await vi.advanceTimersByTimeAsync(15000);
-      await screen.findByText('Reply 1 updated');
-      expect(urls.length).toBeGreaterThan(before);
-      expect(urls[before]).not.toContain('after=');
-      expect(screen.getByText('Reply 2')).toBeTruthy();
-      expect(container.querySelectorAll('article.turn')).toHaveLength(2);
-    });
-  });
-
-  describe('pages, overlap and scrolling', () => {
-    const C1 = '2026-11-07T00:07:00+00:00|' + T1;
-    const C2 = '2026-11-07T00:08:00+00:00|' + T2;
+  describe('pages, polling and scrolling', () => {
+    const at = (n: number) => `2026-11-07T00:0${n}:00.123456+00:00`;
+    const cur = (t: { started_at: string; turn_id: string }) => `${t.started_at}|${t.turn_id}`;
+    const tn = (id: string, n: number, over: Record<string, unknown> = {}) => turn(id, n, { started_at: at(n), ...over });
     const order = (c: HTMLElement) => Array.from(c.querySelectorAll('article.turn')).map((a) => a.id);
 
     it('three pages append, every turn stays, in order', async () => {
-      respond = (url) => url.includes(encodeURIComponent(C2))
-        ? { body: trace([turn(T3, 3)], { next_after: null }) }
-        : url.includes('after=') ? { body: trace([turn(T2, 2)], { next_after: C2 }) }
-        : { body: trace([turn(T1, 1)], { next_after: C1 }) };
+      const t1 = tn(T1, 1); const t2 = tn(T2, 2);
+      respond = (url) => url.includes(encodeURIComponent(cur(t2)))
+        ? { body: trace([tn(T3, 3)], { next_after: null }) }
+        : url.includes('after=') ? { body: trace([t2], { next_after: cur(t2) }) }
+        : { body: trace([t1], { next_after: cur(t1) }) };
       const { container } = render(Trace, { sessionId: 'sess/one' });
       await screen.findByText('Reply 1');
       await fireEvent.click(screen.getByRole('button', { name: 'Load more turns' }));
@@ -368,28 +375,78 @@ describe('Work trace', () => {
       expect(order(container)).toEqual([`turn-${T1}`, `turn-${T2}`, `turn-${T3}`]);
     });
 
-    it('a re-poll whose first page overlaps loaded pages does not duplicate turns', async () => {
-      let first = [turn(T1, 1)];
-      respond = (url) => url.includes('after=')
-        ? { body: trace([turn(T2, 2)], { next_after: null }) }
-        : { body: trace(first, { next_after: C1 }) };
+    it('says how many of the session turns are shown beside Load more', async () => {
+      respond = () => ({ body: trace([tn(T1, 1)], { next_after: cur(tn(T1, 1)), session: session({ turns: 3000 }) }) });
+      render(Trace, { sessionId: 'sess/one' });
+      await screen.findByText('Reply 1');
+      expect(screen.getByText('Showing 1 of 3,000 turns')).toBeTruthy();
+    });
+
+    it('does not poll while more pages remain', async () => {
+      respond = () => ({ body: trace([tn(T1, 1)], { next_after: cur(tn(T1, 1)) }) });
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      render(Trace, { sessionId: 'sess/one' });
+      await vi.advanceTimersByTimeAsync(0);
+      await screen.findByText('Reply 1');
+      await vi.advanceTimersByTimeAsync(45000);
+      expect(urls).toHaveLength(1);
+    });
+
+    it('once every turn is loaded, a poll asks after the second-to-last turn, replaces it and appends new ones', async () => {
+      const t1 = tn(T1, 1); const t2 = tn(T2, 2);
+      let phase = 0;
+      respond = (url) => {
+        if (!url.includes('after=')) return { body: trace([t1, t2]) };
+        phase += 1;
+        return { body: trace([tn(T2, 2, { reply: 'Reply 2 grew' }), tn(T3, 3)]) };
+      };
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const { container } = render(Trace, { sessionId: 'sess/one' });
+      await vi.advanceTimersByTimeAsync(0);
+      await screen.findByText('Reply 2');
+      await vi.advanceTimersByTimeAsync(15000);
+      await screen.findByText('Reply 2 grew');
+      expect(phase).toBe(1);
+      const u = new URL(urls[urls.length - 1], 'http://x');
+      expect(u.searchParams.get('after')).toBe(cur(t1));
+      expect(order(container)).toEqual([`turn-${T1}`, `turn-${T2}`, `turn-${T3}`]);
+      // the next poll moves its cursor to the new second-to-last turn
+      await vi.advanceTimersByTimeAsync(15000);
+      expect(new URL(urls[urls.length - 1], 'http://x').searchParams.get('after')).toBe(cur(tn(T2, 2)));
+    });
+
+    it('with a single turn a poll refetches page one and merges by id', async () => {
+      let reply = 'Reply 1';
+      respond = () => ({ body: trace([tn(T1, 1, { reply })]) });
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
       const { container } = render(Trace, { sessionId: 'sess/one' });
       await vi.advanceTimersByTimeAsync(0);
       await screen.findByText('Reply 1');
-      await fireEvent.click(screen.getByRole('button', { name: 'Load more turns' }));
-      await screen.findByText('Reply 2');
-      first = [turn(T1, 1), turn(T2, 2, { reply: 'Reply 2 fresh' })];   // page one grew over page two
+      reply = 'Reply 1 later';
       await vi.advanceTimersByTimeAsync(15000);
-      await screen.findByText('Reply 2 fresh');
-      expect(order(container)).toEqual([`turn-${T1}`, `turn-${T2}`]);
+      await screen.findByText('Reply 1 later');
+      expect(urls[1]).not.toContain('after=');
+      expect(container.querySelectorAll('article.turn')).toHaveLength(1);
+    });
+
+    it('a 404 on a poll stops polling', async () => {
+      let n = 0;
+      respond = () => (++n === 1 ? { body: trace([tn(T1, 1)]) } : { status: 404, body: { error: 'not found' } });
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      render(Trace, { sessionId: 'sess/one' });
+      await vi.advanceTimersByTimeAsync(0);
+      await screen.findByText('Reply 1');
+      await vi.advanceTimersByTimeAsync(15000);
+      const after404 = urls.length;
+      await vi.advanceTimersByTimeAsync(60000);
+      expect(urls).toHaveLength(after404);
     });
 
     it('turnId scrolls once; a later poll does not scroll again', async () => {
       const scroll = vi.fn();
       Element.prototype.scrollIntoView = scroll;
       let reply = 'Reply 2';
-      respond = () => ({ body: trace([turn(T1, 1), turn(T2, 2, { reply })]) });
+      respond = () => ({ body: trace([tn(T1, 1), tn(T2, 2, { reply })]) });
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
       render(Trace, { sessionId: 'sess/one', turnId: T2 });
       await vi.advanceTimersByTimeAsync(0);
@@ -399,6 +456,32 @@ describe('Work trace', () => {
       await vi.advanceTimersByTimeAsync(15000);
       await screen.findByText('Reply 2 later');
       expect(scroll).toHaveBeenCalledTimes(1);
+    });
+
+    it('a turnId on page 3 loads pages until it is found, then scrolls to it', async () => {
+      const scroll = vi.fn();
+      Element.prototype.scrollIntoView = scroll;
+      const t1 = tn(T1, 1); const t2 = tn(T2, 2);
+      respond = (url) => url.includes(encodeURIComponent(cur(t2)))
+        ? { body: trace([tn(T3, 3)]) }
+        : url.includes('after=') ? { body: trace([t2], { next_after: cur(t2) }) }
+        : { body: trace([t1], { next_after: cur(t1) }) };
+      render(Trace, { sessionId: 'sess/one', turnId: T3 });
+      await waitFor(() => expect(scroll).toHaveBeenCalledTimes(1));
+      expect(urls).toHaveLength(3);
+      expect(screen.queryByText(/That turn is further on/)).toBeNull();
+    });
+
+    it('stops after 10 pages and tells the owner how to reach the turn', async () => {
+      let n = 0;
+      respond = () => {
+        n += 1;
+        const t = tn(`aaaaaaaa-0000-4000-8000-${String(n).padStart(12, '0')}`, 1, { started_at: `2026-11-07T00:00:${String(n).padStart(2, '0')}+00:00` });
+        return { body: trace([t], { next_after: cur(t) }) };
+      };
+      render(Trace, { sessionId: 'sess/one', turnId: T3 });
+      expect(await screen.findByText('That turn is further on. Use Load more to reach it.')).toBeTruthy();
+      expect(urls).toHaveLength(11);   // page one plus at most 10 automatic pages
     });
   });
 

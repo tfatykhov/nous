@@ -89,3 +89,13 @@ export function parseWorkSub(sub: string): WorkView {
   }
   return { view: 'notfound' };
 }
+
+let lastListQuery: Record<string, string> = {};
+/** Remember the Work list's filters (its hash query) so the trace's Back link can restore them. */
+export function setLastListQuery(q: Record<string, string>): void {
+  lastListQuery = { ...q };
+}
+/** The list filters last shown by the Work list; `{}` before it was opened. */
+export function getLastListQuery(): Record<string, string> {
+  return { ...lastListQuery };
+}

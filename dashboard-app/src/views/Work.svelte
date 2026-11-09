@@ -27,7 +27,7 @@
   {#if view?.view === 'sessions'}
     <SessionList />
   {:else if view?.view === 'patterns'}
-    <Placeholder route="patterns" />
+    <p class="gone" role="status">Patterns are not built yet.</p>
   {:else if view?.view === 'changes'}
     <Placeholder route="changes" />
   {:else if view?.view === 'trace'}

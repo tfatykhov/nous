@@ -4,7 +4,7 @@
   import { makePollStore } from '../../lib/stores/registry';
   import { usePoll } from '../../lib/poll';
   import { currentRoute, currentSub, currentQuery, routeHref } from '../../lib/router';
-  import { fmtTime, laneColor, toolChips } from '../../lib/work';
+  import { fmtTime, laneColor, setLastListQuery, toolChips } from '../../lib/work';
   import type { WorkSession, WorkSessionsData } from '../../lib/types/api';
   import StatGrid from '../../lib/ui/StatGrid.svelte';
   import StaleBadge from '../../lib/ui/StaleBadge.svelte';
@@ -55,6 +55,17 @@
 
   // The query string of page one. While the hash is off this screen (a route change is mid-flight) it holds
   // the last one, so a stray refresh never fetches another screen's query.
+  // The trace's Back link restores these.
+  $effect(() => {
+    if (!filters) return;
+    const q: Record<string, string> = {};
+    if (filters.kind !== 'all') q.kind = filters.kind;
+    if (filters.lens) q.lens = filters.lens;
+    if (filters.tool) q.tool = filters.tool;
+    if (filters.q) q.q = filters.q;
+    setLastListQuery(q);
+  });
+
   let key = $derived(filters ? apiQuery(filters) : null);
   let lastKey = '';
   const currentKey = () => {
@@ -273,7 +284,7 @@
   .refresh:disabled { opacity: 0.6; cursor: default; }
   .filters, .lenses { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-top: 0.25rem; }
   .lenses { gap: 0.5rem; }
-  .seg { display: flex; gap: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 4px; }
+  .seg { display: flex; flex-wrap: wrap; min-width: 0; gap: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 4px; }
   .seg button { background: transparent; color: var(--muted); border: 0; border-radius: 7px; padding: 0.5rem 0.875rem; min-height: 36px; font-size: 0.875rem; }
   .seg button.on { background: var(--surface-hover); color: var(--text); font-weight: 600; box-shadow: inset 0 0 0 1px var(--accent); }
   .field { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); font-size: 0.875rem; }
@@ -307,6 +318,7 @@
   .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .err { color: var(--red); font-size: 0.875rem; }
   @media (max-width: 768px) {
+    .seg button, .chip, .refresh { min-height: 44px; }
     a.row { grid-template-columns: minmax(0, 1fr); }
     .meta { flex-direction: row; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
   }
