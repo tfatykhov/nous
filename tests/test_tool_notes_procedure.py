@@ -56,8 +56,8 @@ async def env(lesson_heart, db):  # noqa: F811
             await conn.execute(delete, {"a": lesson_heart.agent_id})
 
 
-def tools_for(env, *, enabled=True):
-    settings = Settings(_env_file=None).model_copy(update={"tool_notes_enabled": enabled})
+def tools_for(env, *, enabled=True, log=True):
+    settings = Settings(_env_file=None).model_copy(update={"tool_notes_enabled": enabled, "tool_call_log_enabled": log})
     return create_nous_tools(MagicMock(), env.heart, settings)
 
 
@@ -292,7 +292,9 @@ async def test_run_sleep_syncs_the_procedure(env):
             error_text="boom" if i < 6 else None,
             started_at=datetime(2026, 11, 7, 12, tzinfo=UTC),
         )
-    settings = SimpleNamespace(tool_notes_enabled=True, background_model="m", agent_id=env.agent_id)
+    settings = SimpleNamespace(
+        tool_notes_enabled=True, tool_call_log_enabled=True, background_model="m", agent_id=env.agent_id
+    )
     pid = Pattern(kind="error_repeat", tool_name="bash", key="boom", hits=6, calls=10, guard=None, example="boom").id
     client = _Client({"notes": [{"pattern": pid, "action": "write", "text": "check the path first", "replaces": None}]})
     review = ToolNotesReview(env.db, env.heart, settings, client, clock=lambda: NOW)
@@ -304,3 +306,35 @@ async def test_run_sleep_syncs_the_procedure(env):
     await env.store.retire(note.id, {"reason": "no_improvement"}, now=NOW)
     await review.run_sleep()  # nothing new to offer (the pattern is blocked), the last note is gone
     assert not (await procedure_rows(env))[0].active
+
+
+@pytest.mark.asyncio
+async def test_run_sleep_with_the_tool_call_log_off_retires_the_procedure(env):
+    await add_note(env, "bash", "check the path first")
+    await sync_procedure(env.heart, env.store, True)
+    assert (await procedure_rows(env))[0].active
+    settings = SimpleNamespace(
+        tool_notes_enabled=True, tool_call_log_enabled=False, background_model="m", agent_id=env.agent_id
+    )
+    review = ToolNotesReview(env.db, env.heart, settings, _Client({"notes": []}), clock=lambda: NOW)
+    await review.run_sleep()
+    assert not (await procedure_rows(env))[0].active
+    settings.tool_call_log_enabled = True  # both on: active again
+    await review.run_sleep()
+    assert (await procedure_rows(env))[0].active
+
+
+@pytest.mark.asyncio
+async def test_get_procedure_serves_nothing_with_the_tool_call_log_off(env):
+    await add_note(env, "bash", "check the path first")
+    await sync_procedure(env.heart, env.store, True)  # the row is active, the log flag is off
+    (row,) = await procedure_rows(env)
+    off = tools_for(env, enabled=True, log=False)
+    assert (await text_of(off, TOOL_NOTES_PROCEDURE)).startswith("No procedure found")
+    assert (await text_of(off, str(row.id))).startswith("No procedure found")
+    assert "check the path first" in await text_of(tools_for(env, enabled=True, log=True), TOOL_NOTES_PROCEDURE)
+
+
+def test_the_startup_sync_needs_both_flags():
+    source = (Path(__file__).parent.parent / "nous" / "main.py").read_text(encoding="utf-8")
+    assert "settings.tool_notes_enabled and settings.tool_call_log_enabled" in source

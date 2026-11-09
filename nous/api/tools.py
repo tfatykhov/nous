@@ -2384,7 +2384,9 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
     def _tool_notes_hidden(detail: Any) -> bool:
         """The tool notes procedure is served only while active and with NOUS_TOOL_NOTES_ENABLED on."""
         return is_tool_notes_procedure(detail) and (
-            not getattr(detail, "active", False) or not getattr(settings, "tool_notes_enabled", False)
+            not getattr(detail, "active", False)
+            or not getattr(settings, "tool_notes_enabled", False)
+            or not getattr(settings, "tool_call_log_enabled", False)
         )
 
     async def get_procedure(

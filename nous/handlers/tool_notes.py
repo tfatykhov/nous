@@ -474,7 +474,12 @@ class ToolNotesReview:
         counts = await self._review()
         if self._settings.tool_notes_enabled:
             try:
-                await sync_procedure(self._heart, ToolNoteStore(self._db, self._heart.agent_id), True)
+                # Without the tool-call log the notes could never be judged or aged out, so none are served.
+                await sync_procedure(
+                    self._heart,
+                    ToolNoteStore(self._db, self._heart.agent_id),
+                    bool(self._settings.tool_call_log_enabled),
+                )
             except Exception as exc:
                 logger.warning("tool notes: procedure sync failed (%s)", type(exc).__name__)
         return counts

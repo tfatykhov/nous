@@ -1084,7 +1084,11 @@ async def create_components(settings: Settings) -> dict:
         try:
             from nous.handlers.tool_notes import ToolNoteStore, sync_procedure
 
-            await sync_procedure(heart, ToolNoteStore(heart.db, heart.agent_id), settings.tool_notes_enabled)
+            await sync_procedure(
+                heart,
+                ToolNoteStore(heart.db, heart.agent_id),
+                settings.tool_notes_enabled and settings.tool_call_log_enabled,
+            )
         except Exception as exc:
             logger.warning("Tool notes: procedure sync at startup failed (%s)", type(exc).__name__)
 
