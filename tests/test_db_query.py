@@ -6,6 +6,9 @@ tests/test_db_query_live.py; the shape check here is a courtesy that gives the a
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import random
 import re
 import uuid
 from pathlib import Path
@@ -264,6 +267,104 @@ def test_a_cell_cut_by_the_server_hides_a_secret_the_cut_split():
     cut = format_result(["c"], [[Cell(window, len(window) + 5000)]], truncated=False)
     assert "PARTIAL" not in cut and "token=[REDACTED]" in cut
     assert re.search(r"…\[\+\d+ chars\]$", cut.splitlines()[1]), cut
+
+
+# A cut cell under dense masking. Prod's scan pad is 3148 (the longest own secret); dropping it from the REDACTED
+# window, which masks had shrunk below it, left no preview at all.
+_HASH_LINES = "".join(hashlib.sha1(str(i).encode()).hexdigest() + "\n" for i in range(3000))  # 123,000 characters
+_BLOB = base64.b64encode(random.Random(5).randbytes(150_000)).decode()  # one 200,000-character run
+
+
+@pytest.fixture(params=[None, 3148], ids=["default_pad", "prod_pad"])
+def scan_pad(request, monkeypatch) -> int:
+    if request.param is not None:
+        for module in (ledger_store, db_query):
+            monkeypatch.setattr(module, "redaction_scan_pad", lambda: request.param)
+    return ledger_store.redaction_scan_pad()
+
+
+@pytest.mark.parametrize("value", [_HASH_LINES, _BLOB], ids=["hash_lines", "one_blob"])
+@pytest.mark.parametrize("fetched", ["cell_window", "three_scans", "four_clips"])
+def test_a_cut_cell_keeps_a_preview_under_dense_masking(scan_pad, value, fetched):
+    # the server's window: what execute_readonly fetches, the least that fits three scans, or the old four clips and
+    # a pad
+    window = {
+        "cell_window": db_query.cell_window(),
+        "three_scans": MAX_CELL_CHARS + 2 * scan_pad,
+        "four_clips": 4 * MAX_CELL_CHARS + scan_pad,
+    }[fetched]
+    line = format_result(["c"], [[Cell(value[:window], len(value))]], truncated=False).splitlines()[1]
+    preview, marker, _ = line.partition("…[+")
+    assert marker and preview, line
+    assert "[REDACTED_HEX]" in preview or "[REDACTED_BLOB]" in preview
+    assert re.search(r"[0-9a-f]{4}|[A-Za-z0-9+/]{20}", preview) is None, preview  # no raw part of a hash or blob
+    assert len(preview) <= MAX_CELL_CHARS
+
+
+def test_the_server_window_is_never_narrower_than_before(scan_pad):
+    """A cell the old window (four clips and a pad) held whole is still sent whole and redacted whole, and a cut
+    cell has room for three scans."""
+    assert db_query.cell_window() >= 4 * MAX_CELL_CHARS + scan_pad
+    assert db_query.cell_window() >= MAX_CELL_CHARS + 2 * scan_pad
+
+
+def test_a_labelled_password_the_old_window_held_whole_is_masked(scan_pad):
+    """A cut cell cannot vouch for a labelled value longer than the pad (detail_text says why). At the default pad a
+    1,416-character jsonb value arrived whole in the old window and was masked; a window of one clip and two pads
+    (1,012) cut it and showed the password."""
+    rng = random.Random(9)
+    password = "".join(rng.choice("ghijklmnopqrstuvwxyz") for _ in range(1400))  # no hex or base64 rule matches it
+    value = '{"password": "' + password + '"}'
+    line = format_result(["c"], [[Cell(value[: db_query.cell_window()], len(value))]], truncated=False)
+    assert not any(password[i : i + 8] in line for i in range(len(password) - 7)), line[:120]
+    if len(value) <= 4 * MAX_CELL_CHARS + scan_pad:
+        assert '{"password": [REDACTED]}' in line
+
+
+def _cut_line(value: str) -> str:
+    """``value`` as one cell the server cut at its window, rendered."""
+    assert len(value) > db_query.cell_window()
+    return format_result(["c"], [[Cell(value[: db_query.cell_window()], len(value))]], truncated=False).splitlines()[1]
+
+
+def test_codex_cut_cell_with_a_quoted_password_is_masked(scan_pad):
+    """Codex on #874: the closing quote sits inside the fetched window but past the first scans. The old code
+    redacted the whole window and masked the password; scans of 500 and 756 characters both missed the quote and
+    agreed on the raw password."""
+    line = _cut_line('password: "' + "sensitive words " * 80 + '"; ' + "ordinary prose " * 500)
+    preview = line.partition("…[+")[0]
+    assert "sensitive" not in line and "[REDACTED]" in preview, line[:120]
+
+
+@pytest.mark.parametrize("where", ["in_the_head", "before_the_last_pad", "in_the_last_pad"])
+def test_a_quoted_value_closed_anywhere_in_the_window_is_masked(scan_pad, where):
+    window = db_query.cell_window()
+    quote_at = {
+        "in_the_head": 300,
+        "before_the_last_pad": (MAX_CELL_CHARS + window - scan_pad) // 2,
+        "in_the_last_pad": window - scan_pad // 2,
+    }[where]
+    head = 'password: "'
+    value = head + ("sensitive words " * 1000)[: quote_at - len(head)] + '"; ' + "ordinary prose " * 1000
+    assert value.index('"', len(head)) == quote_at
+    line = _cut_line(value)
+    preview = line.partition("…[+")[0]
+    assert "sensitive" not in line and preview.startswith("password"), line[:120]
+
+
+def test_a_periodic_own_secret_in_a_cell_leaves_no_fragment(monkeypatch, scan_pad):
+    """A self-overlapping secret run on past a whole copy: str.replace left the overhang raw, whole or cut."""
+    password = "s3cr3t! " * 8
+    monkeypatch.setenv("NOUS_TEST_TOKEN", password)
+    ledger_store._own_secrets.cache_clear()
+    try:
+        group = password * 3 + password[:24] + " "
+        for value in (group, "x " + group * 400):  # whole, and cut by the server
+            line = format_result(["c"], [[Cell(value[: db_query.cell_window()], len(value))]], truncated=False)
+            assert not any(password[i : i + 6] in line for i in range(len(password) - 5)), line[:200]
+    finally:
+        monkeypatch.delenv("NOUS_TEST_TOKEN")
+        ledger_store._own_secrets.cache_clear()
 
 
 def test_newlines_in_a_cell_do_not_forge_a_row():

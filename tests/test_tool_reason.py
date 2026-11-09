@@ -208,8 +208,8 @@ def test_split_reason_cases(tool_input, want_input, want_reason):
         assert out is tool_input
 
 
-# detail_text's own output is longer than its cap, and a second pass at a cap below about 2 x the redaction scan pad
-# cuts it again (one marker, less text): 100 is such a cap, 500 (the default) is not.
+# detail_text's own output is longer than its cap by the cut marker, so split_reason clips it to the cap; the
+# recorder's second pass must keep that clip as it is. A cap below 2 x the redaction scan pad (100) once emptied it.
 REASON_CAPS = pytest.mark.parametrize("cap", [100, 500])
 
 

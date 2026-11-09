@@ -243,11 +243,73 @@ def _own_secrets() -> tuple[str, ...]:
     return tuple(sorted(values, key=len, reverse=True))
 
 
-def _redact_detail(text: str) -> str:
-    """Own secret values first, then the reviewed pattern redaction."""
+@lru_cache(maxsize=1024)
+def _period(value: str) -> int:
+    """The smallest p with ``value[i] == value[i + p]`` for every i (from the KMP failure function); computed once
+    per own secret that is found."""
+    fail = [0] * len(value)
+    k = 0
+    for i in range(1, len(value)):
+        while k and value[i] != value[k]:
+            k = fail[k - 1]
+        if value[i] == value[k]:
+            k += 1
+        fail[i] = k
+    return len(value) - fail[-1] if value else 1
+
+
+def _own_secret_spans(text: str) -> list[tuple[int, int]]:
+    """The stretches ``[start, end)`` of ``text`` that occurrences of this process's own secrets cover, any spelling:
+    sorted, merged where they overlap or touch.
+
+    Every occurrence counts, overlapping ones too, so whether a character is covered depends only on the text
+    within one secret's length of it, never on where a scan starts. ``str.replace`` masks non-overlapping matches
+    from the left instead: a window that starts inside a run of a self-overlapping secret (``'s3cr3t! ' * 8``,
+    repeated) masks the run at another alignment and leaves a raw stretch of it, at the window's end or wherever the
+    run ends, and even a whole text keeps the part of a run that only an overlapping occurrence covers.
+
+    Linear per spelling: from an occurrence, the next one a whole number of periods on needs only its new last
+    characters checked (any multiple of the period up to the secret's length is a period too), so a run of
+    overlapping occurrences is walked once, in strides as long as the secret allows, and the next search starts one
+    past the last occurrence."""
+    spans: list[tuple[int, int]] = []
     for secret in _own_secrets():
-        text = text.replace(secret, SECRET_MASK)
-    return redact_error_text(text)
+        size = len(secret)
+        at = text.find(secret)
+        while at != -1:
+            period = _period(secret)
+            end = at + size
+            for step in (size - size % period, period):
+                last = secret[size - step :]
+                while text.startswith(last, end):
+                    end += step
+            spans.append((at, end))
+            at = text.find(secret, end - size + 1)
+    spans.sort()
+    merged: list[tuple[int, int]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _masked(text: str, spans: list[tuple[int, int]]) -> str:
+    """``text`` with each of the sorted, disjoint stretches in ``spans`` replaced by one mask."""
+    parts: list[str] = []
+    at = 0
+    for start, end in spans:
+        parts += (text[at:start], SECRET_MASK)
+        at = end
+    parts.append(text[at:])
+    return "".join(parts)
+
+
+def _redact_detail(text: str) -> str:
+    """Own secret values first (every stretch their occurrences cover, ``_own_secret_spans``), then the reviewed
+    pattern redaction."""
+    return redact_error_text(_masked(text, _own_secret_spans(text)))
 
 
 def redact_output(text: str) -> str:
@@ -280,33 +342,132 @@ def redact_structure(value: Any, cap: int | None = None) -> Any:
 
 def redaction_scan_pad() -> int:
     """How many characters at a cut edge redaction cannot vouch for: a secret
-    split by the cut matches nothing, so the last this-many characters of a
-    redacted window are dropped (the longest own secret, at least the scan pad)."""
+    split by the cut matches nothing (the longest own secret, at least the scan
+    pad). A cut text's scans reach this far past what they keep (``_settled_side``)."""
     return max([_DETAIL_SCAN_PAD, *map(len, _own_secrets())])
+
+
+def _settled_side(text: str, half: int, pad: int, tail: bool) -> str:
+    """Up to ``half`` characters of one side of the redacted ``text`` (the head, or with ``tail`` the tail) that text
+    past the scanned window cannot change. Each scan is a window from this side's end of ``text`` inward: ``near``
+    ``half`` characters long, ``far`` a pad longer, and a third a pad longer still. ``text`` must be at least
+    ``half`` + 2 * pad long.
+
+    Own secrets, by position. Their stretches (``_own_secret_spans``) are found once, over the third window, and
+    each scan masks the stretches that fall in it, cut at its edge. An own secret is at most pad long (pad is at
+    least the longest spelling). The third window runs to the text's own end on one side and a pad past ``far``'s
+    edge on the other, so it holds every occurrence that covers a character of ``near`` or ``far``, and in those two
+    every such character is masked, wherever a run of a periodic secret begins or ends. Only the third window's
+    inner edge can hold part of one, and that scan is only compared against.
+
+    The patterns, by agreement. Two scans a pad apart keep only the start they agree on: a token the shorter one's
+    edge cuts, the longer one sees whole and masks, so they differ from its start. When that leaves less than
+    ``half`` (masks shrank it, or a token runs across the edge), ``far`` is settled against the third scan the same
+    way and the longer result is kept. Both are prefixes of ``far``, so the kept side is always a prefix of ``far``:
+    it holds no character of an own secret, and nothing ``far``'s redaction masks. ``far`` is the window the code
+    before #874 redacted for each side (``half`` + pad), so nothing it masked is shown now."""
+    reach = half + 2 * pad
+    region = text[max(0, len(text) - reach) :] if tail else text[:reach]
+    spans = _own_secret_spans(region)
+
+    def scan(size: int) -> str:
+        # the redacted ``size`` characters at this side's end, read from that end inward
+        if tail:
+            start = max(0, len(region) - size)
+            cut = [(max(s, start) - start, e - start) for s, e in spans if e > start]
+            return redact_error_text(_masked(region[start:], cut))[::-1]
+        return redact_error_text(_masked(region[:size], [(s, min(e, size)) for s, e in spans if s < size]))
+
+    near, far = scan(half), scan(half + pad)
+    kept = os.path.commonprefix([near, far])
+    if len(kept) < half:
+        kept = max(kept, os.path.commonprefix([far, scan(half + 2 * pad)]), key=len)
+    kept = kept[:half]
+    return kept[::-1] if tail else kept
+
+
+def redacted_head(text: str, chars: int, *, complete: bool = True) -> str:
+    """At most ``chars`` characters from the start of ``text``, redacted, every secret the redaction finds masked
+    BEFORE the cut. A ``complete`` text of at most ``chars`` + 2 * pad characters is redacted whole, then cut; a
+    longer one is settled as ``detail_text``'s head is (``_settled_side``), so the regexes see at most
+    3 * ``chars`` + 3 * pad characters and masks that shrink it cannot empty it (``detail_text`` names the one case
+    that can).
+
+    ``complete`` False: ``text`` is a window someone else cut from a longer value (``db_query``'s server-side cut),
+    and its end may split a secret. Two scans: the WHOLE window, and the window less its last pad characters; the
+    kept head is the start they agree on, cut to ``chars``. Own secrets are masked by position in both, from
+    stretches found over the whole window.
+
+    - It is a prefix of both scans. The shorter one's raw window is what the code before #874 fetched and redacted
+      (for ``db_query``, four clips and a pad), so nothing that redaction masked is shown; the whole-window scan
+      sees a pad further, so a pattern whose closing context lies anywhere in the fetched window is masked too.
+    - It holds nothing from the window's last pad characters: the shorter scan has none of them, and a token that
+      runs into them is seen whole only by the longer scan, so the two differ from its start. A secret split by the
+      cut lies within those characters (no own secret is longer than the pad).
+    - It holds no character of an own secret: it is a prefix of the shorter scan, which ends a pad before the
+      window's end, so its every own-secret character is masked.
+    - Masks shrink both scans alike, so dense masking does not empty it. The regexes see 2 * ``len(text)``
+      characters; the caller bounds the window."""
+    pad = redaction_scan_pad()
+    if complete and len(text) <= chars + 2 * pad:
+        return _redact_detail(text)[:chars]
+    if not complete:
+        if len(text) <= pad:
+            return ""
+        spans = _own_secret_spans(text)
+        inner = len(text) - pad
+        whole = redact_error_text(_masked(text, spans))
+        shorter = redact_error_text(_masked(text[:inner], [(s, min(e, inner)) for s, e in spans if s < inner]))
+        return os.path.commonprefix([whole, shorter])[:chars]
+    return _settled_side(text, chars, pad, tail=False)
 
 
 def detail_text(text: str, cap: int) -> str:
     """``text`` redacted and bounded to about ``cap`` characters.
 
-    Over the cap, the head and the tail are kept with a marker between. Each
-    side is redacted over its own scan window BEFORE it is cut, so a secret
-    straddling the cut is still masked, and the regexes never see more than
-    ``cap`` + 2 * pad characters of an unbounded output. The pad covers the
-    longest own secret. The last ``pad`` characters of a redacted window (its
-    first, for the tail) are dropped: a secret cut by the window edge is only
-    partly masked there, and masking shrinks the text so raw edge text would
-    otherwise slide into the kept part.
+    Over the cap, the head and the tail are kept with a marker between. Every
+    secret the redaction finds is masked BEFORE the cut, so the cut never
+    keeps part of one. The regexes never see more than 3 * (``cap`` + 2 * pad)
+    characters of any text, where pad (``redaction_scan_pad``) covers the
+    longest own secret. Two paths:
+
+    - Up to ``cap`` + 2 * pad characters, the whole text is redacted once and
+      the redacted text is cut: half of the cap from each end, or none of it
+      cut when masking brought it within the cap.
+    - Longer, each side is redacted over its ``cap // 2`` characters and over
+      those plus pad characters further in, and only what the two agree on is
+      kept (``_settled_side``); a third scan, another pad in, runs only when
+      that is short. So the pad is dropped in raw characters, not redacted
+      ones: a side can be shorter than ``cap // 2`` where masks shrank it,
+      and an own secret (at most pad long) can never empty it. A pattern run
+      longer than ``cap // 2`` + pad at the text's very edge keeps its mask
+      alone (a hex run gives ``[REDACTED_HEX]``). A side is empty only when
+      that run is base64-like and the blob rule's path exception (3+ slashes
+      and no ``+``: left raw) flips across the three scans: masked, raw,
+      masked.
+
+    The windowed path cannot vouch for a labelled secret value longer than
+    the pad that no self-identifying rule (hex, base64 blob, key prefix)
+    matches, such as ``password=`` and 3,500 lowercase letters and digits.
+    When the label lies outside a side's scans (the tail's windows start
+    inside the value, or the value runs past both window edges), both scans
+    see the same unmasked text, agree, and keep it raw; whole-text redaction
+    would mask it. This is not a regression: the pad-drop rule this replaced
+    had the same blind spot.
+
+    ``redact_structure`` cuts every string through this.
     """
     if len(text) <= cap:
         return _redact_detail(text)
     half = cap // 2
     pad = redaction_scan_pad()
-    head = _redact_detail(text[: half + pad])
-    tail = _redact_detail(text[-(half + pad):])
-    head = head[: min(half, len(head) - pad)] if len(head) > pad else ""
-    keep = min(half, len(tail) - pad)
-    tail = tail[-keep:] if keep > 0 else ""
-    return f"{head}\n…[middle cut]…\n{tail}"
+    if len(text) <= cap + 2 * pad:
+        redacted = _redact_detail(text)
+        if len(redacted) <= cap:
+            return redacted
+        return f"{redacted[:half]}\n…[middle cut]…\n{redacted[len(redacted) - half :]}"
+    head = _settled_side(text, half, pad, tail=False)
+    return f"{head}\n…[middle cut]…\n{_settled_side(text, half, pad, tail=True)}"
 
 
 def detail_input(tool_name: str, tool_input: dict[str, Any]) -> str:

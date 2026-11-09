@@ -16,6 +16,7 @@ import pytest
 from sqlalchemy import text
 
 from nous.api.execution_context import CONTEXT_KINDS
+from nous.cognitive import ledger_store
 from nous.cognitive.ledger_store import detail_text
 from nous.observability.recording import BoundedWriter, RecorderStats
 from nous.observability.tool_calls import WORK_KINDS, ToolCallRecord, ToolCallRecorder, work_kind_for
@@ -101,6 +102,28 @@ async def test_record_clips_input_to_2000_and_result_to_500(db):
         assert row["turn_number"] == 3 and row["context_kind"] == "interactive" and row["duration_ms"] == 12
         assert row["started_at"] is not None
         assert writer.stats.written == 1
+    finally:
+        await _delete(db, agent)
+
+
+@pytest.mark.postgres_only
+async def test_a_mid_length_result_keeps_its_preview_at_the_prod_scan_pad(db, monkeypatch):
+    """Prod's scan pad is 3148 (the longest own secret). A 1500-character result was stored as the cut marker alone:
+    its scan windows covered the whole text and the pad was still dropped from each side."""
+    monkeypatch.setattr(ledger_store, "redaction_scan_pad", lambda: 3148)
+    agent = _agent()
+    writer = BoundedWriter("test")
+    recorder = ToolCallRecorder(writer, db, agent, _SETTINGS)
+    result = ("RESULT-START " + "the command printed this line\n" * 60)[:1490] + " RESULT-END"
+    try:
+        recorder.record(_record(result_preview=result))
+        await writer.drain(5.0)
+        rows = await _rows(db, agent)
+        assert len(rows) == 1
+        preview = rows[0]["result_preview"]
+        assert preview != _CUT_MARKER
+        assert preview.startswith("RESULT-START") and preview.endswith(" RESULT-END")
+        assert len(preview) == 500 + len(_CUT_MARKER)
     finally:
         await _delete(db, agent)
 

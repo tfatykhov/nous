@@ -22,11 +22,11 @@ from nous.api.db_query import (
     MAX_OUTPUT_CHARS,
     MAX_ROWS,
     ReaderError,
+    cell_window,
     execute_readonly,
     reader_connect_args,
     run_db_query,
 )
-from nous.cognitive.ledger_store import redaction_scan_pad
 from nous.config import Settings
 
 pytestmark = pytest.mark.postgres_only
@@ -558,7 +558,7 @@ async def test_the_server_cuts_each_cell_before_sending_it(reader_settings):
     columns, rows, truncated = await execute_readonly(reader_settings, "select repeat('x', 5000) as c, null as d")
     assert columns == ["c", "d"] and not truncated
     [[cell, null]] = rows
-    assert len(cell.text) == 4 * MAX_CELL_CHARS + redaction_scan_pad() and cell.length == 5000
+    assert len(cell.text) == cell_window() and cell.length == 5000
     assert null.text is None
     out = await run_db_query(reader_settings, "select repeat('x', 2000) as c")
     assert out.splitlines()[1] == "x" * MAX_CELL_CHARS + "…[+1500 chars]"
@@ -599,7 +599,7 @@ async def test_a_huge_single_cell_comes_back_cut_with_its_full_length(reader_set
     columns, rows, truncated = await execute_readonly(reader_settings, "select repeat('x', 50000000) as c")
     assert columns == ["c"] and not truncated
     [[cell]] = rows
-    assert cell.length == 50_000_000 and len(cell.text) == 4 * MAX_CELL_CHARS + redaction_scan_pad()
+    assert cell.length == 50_000_000 and len(cell.text) == cell_window()
     out = await run_db_query(reader_settings, "select repeat('x', 50000000) as c")
     assert out.splitlines()[1] == "x" * MAX_CELL_CHARS + "…[+49999500 chars]", out[:200]
 
