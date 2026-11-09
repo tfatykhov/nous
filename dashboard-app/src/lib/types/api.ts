@@ -24,6 +24,8 @@ export interface CacheSession {
 }
 
 export interface CacheTimelineEntry {
+  /** The model-call id, when the endpoint sends it (F108: Cache rows link to the call). */
+  id?: string;
   timestamp: string;
   session_id: string | null;
   turn: number | null;

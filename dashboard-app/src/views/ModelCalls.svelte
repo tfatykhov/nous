@@ -2,12 +2,13 @@
   import { currentRoute, currentSub, currentQuery, routeHref } from '../lib/router';
   import { parseModelCallsSub, modelCallFilters, modelCallQuery } from '../lib/work';
   import SubNav from '../lib/ui/SubNav.svelte';
-  import Placeholder from '../lib/ui/Placeholder.svelte';
   import CallList from './modelcalls/CallList.svelte';
   import CallDetail from './modelcalls/CallDetail.svelte';
+  import Cache from './Cache.svelte';
 
   // F108 Model calls host: the list, and with `c/<id>` the call's detail beside it (below 1000 px wide the detail
-  // replaces the list). Filters live in the hash query. Route, sub and query are read together and never written.
+  // replaces the list); `cache` is the Cache tab, under this screen's title. Filters live in the hash query. Route,
+  // sub and query are read together and never written.
   let state = $derived.by(() => {
     const route = $currentRoute;
     const sub = $currentSub;
@@ -39,7 +40,10 @@
       {/if}
     </div>
   {:else if view?.view === 'cache'}
-    <Placeholder route="cache" />
+    <div>
+      <h1>Model calls</h1>
+      <Cache embedded />
+    </div>
   {:else if view?.view === 'notfound'}
     <p class="gone" role="status">Nothing here. <a href={routeHref('model-calls')}>Back to calls</a></p>
   {/if}
@@ -48,6 +52,7 @@
 <style>
   .mc { display: flex; flex-direction: column; gap: 1rem; }
   .gone { color: var(--muted); font-size: 0.9375rem; }
+  h1 { font-size: 1.75rem; font-weight: 700; letter-spacing: -0.02em; margin: 0.25rem 0; }
   .gone a, .back { color: var(--accent-text); }
   .split { display: block; }
   .detailcol { display: flex; flex-direction: column; gap: 1rem; min-width: 0; }

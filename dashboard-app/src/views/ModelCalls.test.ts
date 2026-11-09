@@ -198,12 +198,6 @@ describe('Model calls list', () => {
     expect(await screen.findByText('Model-call recording is off. Set NOUS_MODEL_CALL_LOG_ENABLED.')).toBeTruthy();
   });
 
-  it('cache sub path is a placeholder for now', () => {
-    go('#/model-calls/cache');
-    render(ModelCalls);
-    expect(screen.getByText(/this view is being migrated/)).toBeTruthy();
-  });
-
   it('a malformed % in the sub path shows Nothing here', () => {
     go('#/model-calls/c/%E0%A4%A');
     render(ModelCalls);
