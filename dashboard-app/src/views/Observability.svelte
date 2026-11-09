@@ -4,7 +4,7 @@
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
   import { routeHref } from '../lib/router';
-  import type { ObservabilityData } from '../lib/types/api';
+  import type { ActivityData, ActivityEvent, ObservabilityData } from '../lib/types/api';
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import Chart from '../lib/viz/Chart.svelte';
@@ -15,6 +15,48 @@
       30_000,
     ),
   );
+
+  // The Event Timeline, moved here from the Activity screen (F108). Fetched once per open, as Activity did; its
+  // retry reloads it.
+  const activity = usePoll(
+    makePollStore<ActivityData>(
+      (signal) => apiGet<ActivityData>('/dashboard/activity?hours=168', { signal }),
+      0, // fetch-once
+    ),
+  );
+
+  function formatDateTime(dateStr: string | null): string {
+    if (!dateStr) return '—';
+    return new Date(dateStr).toLocaleString();
+  }
+
+  function eventSummary(event: ActivityEvent): string {
+    const d = (event.data ?? {}) as Record<string, unknown>;
+    const str = (k: string): string => String(d[k] ?? '');
+    const num = (k: string): number => Number(d[k] ?? 0);
+    switch (event.type) {
+      case 'censor_triggered':
+        return `Censor ${str('censor_id')} fired — matched: ${str('matched_text')}`;
+      case 'sleep_completed':
+        return `Sleep cycle completed. ${num('facts_created')} facts, ${num('procedures_created')} procedures.`;
+      case 'schedule_fired':
+        return `Schedule ${str('task') || str('schedule_id')} fired.`;
+      case 'subtask_completed':
+        return `Subtask completed: ${str('title') || str('subtask_id')}`;
+      case 'subtask_failed':
+        return `Subtask failed: ${str('title') || str('subtask_id')}${d['error'] ? ' — ' + str('error') : ''}`;
+      case 'censor_created':
+        return `New censor created: ${str('trigger_pattern')} (${d['auto'] ? 'auto' : 'manual'})`;
+      case 'censor_escalated':
+        return `Censor escalated: ${str('trigger_pattern')} — ${str('reason')}`;
+      default:
+        return JSON.stringify(event.data).slice(0, 120);
+    }
+  }
+
+  function typeLabel(type: string): string {
+    return type.replace(/_/g, ' ');
+  }
 
   // ── Trace expand/collapse ────────────────────────────────────────────────
   // SvelteSet keyed by trace_id. Adding/removing an id toggles expansion.
@@ -283,6 +325,36 @@
   <p class="status-msg">Loading…</p>
 {/if}
 
+<!-- ── Event Timeline (moved from the Activity screen, F108) ── -->
+<section class="chart-card">
+  <h2>Event Timeline</h2>
+  {#if $activity.data}
+    {@const d = $activity.data}
+    {#if d.events.length > 0}
+      <div class="timeline">
+        {#each d.events as event}
+          <div class="timeline-item">
+            <div class="event-header">
+              <span class="event-badge">{typeLabel(event.type)}</span>
+              <span class="event-time">{formatDateTime(event.created_at)}</span>
+            </div>
+            <div class="event-summary">{eventSummary(event)}</div>
+          </div>
+        {/each}
+      </div>
+    {:else}
+      <p class="empty">No events in the last 7 days.</p>
+    {/if}
+  {:else if $activity.error}
+    <p class="empty error">
+      Failed to load activity data —
+      <button class="retry-link" onclick={() => void activity.refresh()}>retry</button>
+    </p>
+  {:else}
+    <p class="empty">Loading…</p>
+  {/if}
+</section>
+
 <!-- The last call's token breakdown and the recent API calls are on the Model calls screen (F108). -->
 <p class="moved">Model calls moved to <a href={routeHref('model-calls')}>Model calls</a></p>
 
@@ -523,6 +595,68 @@
     font-size: 0.75rem;
     color: var(--muted);
     margin: 0.375rem 0 0;
+  }
+
+  /* ── Event Timeline (from Activity) ── */
+  .timeline {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .timeline-item {
+    padding: 0.75rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .timeline-item:last-child {
+    border-bottom: none;
+  }
+
+  .event-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: 0.25rem;
+  }
+
+  .event-badge {
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+    background: rgba(124, 106, 247, 0.12);
+    border-radius: 4px;
+    padding: 0.125rem 0.375rem;
+    white-space: nowrap;
+  }
+
+  .event-time {
+    font-size: 0.6875rem;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  .event-summary {
+    font-size: 0.8125rem;
+    color: var(--text);
+    line-height: 1.45;
+    word-break: break-word;
+  }
+
+  .empty.error {
+    color: var(--red, #ef4444);
+  }
+
+  .retry-link {
+    background: none;
+    border: none;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: inherit;
+    padding: 0;
+    text-decoration: underline;
   }
 
   .moved {

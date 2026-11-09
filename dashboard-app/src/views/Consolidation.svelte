@@ -3,6 +3,7 @@
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
   import type {
+    ActivityData,
     ConsolidationData,
     ConsolidationCycle,
     ConsolidationCycleDetail,
@@ -18,6 +19,24 @@
       0, // fetch-once (manual refresh only)
     ),
   );
+
+  // ── Sleep Activity, moved here from the Activity screen (F108): fetch-once like the list; Refresh reloads both.
+  const activity = usePoll(
+    makePollStore<ActivityData>(
+      (signal) => apiGet<ActivityData>('/dashboard/activity?hours=168', { signal }),
+      0, // fetch-once
+    ),
+  );
+
+  function refreshAll() {
+    void store.refresh();
+    void activity.refresh();
+  }
+
+  function formatDateTime(dateStr: string | null): string {
+    if (!dateStr) return '—';
+    return new Date(dateStr).toLocaleString();
+  }
 
   // ── Detail drill-through (per-cycle, on-demand fetch with its own state) ───
   let selectedCycleId = $state<string | null>(null);
@@ -120,7 +139,7 @@
     <p class="subtitle">Per-sleep-cycle memory consolidation audit — merges, supersessions, and deactivations</p>
   </div>
   <div class="head-right">
-    <button class="refresh-btn" onclick={() => void store.refresh()} disabled={$store.loading}>
+    <button class="refresh-btn" onclick={refreshAll} disabled={$store.loading}>
       {$store.loading ? 'Loading…' : 'Refresh'}
     </button>
     <StaleBadge state={$store} />
@@ -244,6 +263,33 @@
 {:else}
   <p class="status-msg">Loading…</p>
 {/if}
+
+<!-- ── Sleep Activity (moved from the Activity screen, F108) ─────────────── -->
+<section class="chart-card mt">
+  <h2>Sleep Activity</h2>
+  {#if $activity.data}
+    {@const sl = $activity.data.sleep_stats}
+    <dl class="detail-grid">
+      <dt>Last Sleep</dt>
+      <dd>{sl.last_sleep ? formatDateTime(sl.last_sleep) : 'Never'}</dd>
+      <dt>Total Sleeps</dt>
+      <dd>{sl.total_sleeps}</dd>
+      <dt>Facts Created</dt>
+      <dd>{sl.facts_created}</dd>
+      <dt>Procedures</dt>
+      <dd>{sl.procedures_created}</dd>
+      <dt>Censors Retired</dt>
+      <dd>{sl.censors_retired}</dd>
+    </dl>
+  {:else if $activity.error}
+    <p class="empty error">
+      Failed to load activity data —
+      <button class="retry-link" onclick={() => void activity.refresh()}>retry</button>
+    </p>
+  {:else}
+    <p class="empty">Loading…</p>
+  {/if}
+</section>
 
 <style>
   /* ── Header ──────────────────────────────────────────────── */
@@ -526,6 +572,35 @@
   }
 
   .status-msg.error { color: var(--red, #ef4444); }
+
+  /* ── Sleep Activity (from Activity) ──────────────────────── */
+  .detail-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.375rem 1rem;
+    font-size: 0.8125rem;
+    margin: 0;
+  }
+
+  .detail-grid dt {
+    color: var(--muted);
+    font-weight: 500;
+  }
+
+  .detail-grid dd {
+    color: var(--text);
+    margin: 0;
+  }
+
+  .empty {
+    color: var(--muted);
+    font-size: 0.875rem;
+    padding: 1rem 0;
+    text-align: center;
+    margin: 0;
+  }
+
+  .empty.error { color: var(--red, #ef4444); }
 
   .retry-link {
     background: none;

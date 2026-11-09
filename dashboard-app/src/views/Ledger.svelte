@@ -15,6 +15,10 @@
 
   // Harness dashboard §3.2 / §4: the durable execution ledger. Filters are
   // component-local $state and survive polls by construction.
+  // Embedded as Work's Changes tab (F108): that screen's title stands above, so this view drops its h1 (its
+  // subtitle and staleness badge stay).
+  let { embedded = false }: { embedded?: boolean } = $props();
+
   let windowSel = $state('24h');
   let context = $state('');
   let status = $state('');
@@ -161,7 +165,7 @@
 
 <header class="view-head">
   <div>
-    <h1>Execution Ledger</h1>
+    {#if !embedded}<h1>Execution Ledger</h1>{/if}
     <p class="subtitle">Every side-effecting tool call, kept durably — it survives restarts and ended sessions</p>
   </div>
   <StaleBadge state={$store} />

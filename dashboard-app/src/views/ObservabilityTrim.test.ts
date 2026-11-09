@@ -23,6 +23,14 @@ const OBS = {
   context_log: [ENTRY],
 };
 
+// The Event Timeline moved here from Activity (T13) and reads /dashboard/activity.
+const ACTIVITY = {
+  events: [],
+  censor_stats: { total: 0, active: 0, auto_created: 0, manual_created: 0, total_activations_7d: 0, false_positives_7d: 0, top_censors: [] },
+  schedule_stats: { total: 0, active: 0, fires_7d: 0, next_fires: [] },
+  sleep_stats: { total_sleeps: 0, last_sleep: null, facts_created: 0, procedures_created: 0, censors_retired: 0 },
+};
+
 let urls: string[] = [];
 
 describe('Observability after the Model calls move', () => {
@@ -30,7 +38,8 @@ describe('Observability after the Model calls move', () => {
     urls = [];
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       urls.push(url);
-      return { ok: true, status: 200, json: async () => (url.startsWith('/dashboard/observability') ? OBS : {}) } as Response;
+      const body = url.startsWith('/dashboard/observability') ? OBS : url.startsWith('/dashboard/activity') ? ACTIVITY : {};
+      return { ok: true, status: 200, json: async () => body } as Response;
     }));
     vi.stubGlobal('Chart', class { destroy() {} update() {} data = {}; options = {}; });
   });
@@ -58,7 +67,7 @@ describe('Observability after the Model calls move', () => {
     for (const name of ['View Context Text', 'View Raw Payload']) expect(screen.queryByRole('button', { name })).toBeNull();
     await new Promise((r) => setTimeout(r, 0));
     expect(urls.filter((u) => u.includes('/context/log/'))).toEqual([]);
-    expect(urls.every((u) => u.startsWith('/dashboard/observability'))).toBe(true);
+    expect(urls.every((u) => u.startsWith('/dashboard/observability') || u === '/dashboard/activity?hours=168')).toBe(true);
   });
 
   it('points to the Model calls screen in one line', async () => {

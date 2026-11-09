@@ -2,10 +2,11 @@
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
-  import type { HarnessData } from '../lib/types/api';
+  import type { ActivityData, HarnessData } from '../lib/types/api';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import FilterBar from '../lib/ui/FilterBar.svelte';
   import DataTable from '../lib/ui/DataTable.svelte';
+  import StatGrid from '../lib/ui/StatGrid.svelte';
   import Chart from '../lib/viz/Chart.svelte';
   import { ruleVerdict, claimVerdict, fmtUtc, FLAG_GLOSS, type Verdict } from '../lib/harness';
 
@@ -25,6 +26,15 @@
     if (first) { first = false; return; }
     void store.refresh();
   });
+
+  // Most Active Censors and the censor numbers, moved here from the Activity screen (F108). Fetched once per open,
+  // as Activity did; its retry reloads it. Its 7-day numbers do not follow the window above.
+  const activity = usePoll(
+    makePollStore<ActivityData>(
+      (signal) => apiGet<ActivityData>('/dashboard/activity?hours=168', { signal }),
+      0, // fetch-once
+    ),
+  );
 
   const WIN_LABEL: Record<string, string> = { '24h': '24 h', '7d': '7 d', '30d': '30 d' };
   // Series colours outside the status set (spec §4.1).
@@ -268,6 +278,41 @@
   <p class="state-msg">Loading…</p>
 {/if}
 
+<!-- Most Active Censors, with the censor numbers (moved from the Activity screen, F108) -->
+<section class="panel censors">
+  <h2>Most Active Censors</h2>
+  {#if $activity.data}
+    {@const cs = $activity.data.censor_stats}
+    <StatGrid stats={[
+      { label: 'Censor Activations (7d)',  value: cs.total_activations_7d },
+      { label: 'Auto-created Censors',     value: cs.auto_created },
+      { label: 'Manual Censors',           value: cs.manual_created },
+      { label: 'False Positives (7d)',     value: cs.false_positives_7d },
+    ]} />
+    {#if cs.top_censors.length > 0}
+      <ul class="item-list">
+        {#each cs.top_censors as c}
+          <li class="item-row">
+            <span class="item-label" title={c.trigger_pattern ?? ''}>
+              {c.trigger_pattern ?? c.id}
+            </span>
+            <span class="badge">{c.activations}</span>
+          </li>
+        {/each}
+      </ul>
+    {:else}
+      <p class="empty">No censor activations.</p>
+    {/if}
+  {:else if $activity.error}
+    <p class="empty error">
+      Failed to load activity data —
+      <button class="retry-link" onclick={() => void activity.refresh()}>retry</button>
+    </p>
+  {:else}
+    <p class="empty">Loading…</p>
+  {/if}
+</section>
+
 <style>
   .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
@@ -315,6 +360,18 @@
   .order ol { margin: 0; padding-left: 1.25rem; display: flex; flex-direction: column; gap: 0.75rem; font-size: 0.875rem; }
   .order code { display: block; color: var(--muted); margin-top: 0.25rem; overflow-wrap: anywhere; }
   .empty { color: var(--muted); font-size: 0.875rem; text-align: center; padding: 1.5rem 0; margin: 0; }
+  .empty.error { color: var(--red); }
+  /* Most Active Censors (from Activity) */
+  .censors { display: flex; flex-direction: column; gap: 0.75rem; }
+  ul.item-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0; }
+  .item-row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.5rem 0;
+    border-bottom: 1px solid var(--border); font-size: 0.8125rem; }
+  .item-row:last-child { border-bottom: none; }
+  .item-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; color: var(--text); }
+  .badge { font-size: 0.75rem; font-weight: 600; color: var(--accent); background: rgba(124, 106, 247, 0.12);
+    border-radius: 4px; padding: 0.125rem 0.375rem; white-space: nowrap; flex-shrink: 0; }
+  .retry-link { background: none; border: none; color: var(--accent); cursor: pointer; font-size: inherit; padding: 0;
+    text-decoration: underline; }
   .small { font-size: 0.75rem; }
   .muted { color: var(--muted); }
   .state-msg { margin-top: 2rem; text-align: center; color: var(--muted); font-size: 0.875rem; }

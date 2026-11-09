@@ -2,7 +2,7 @@
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
-  import type { SubtasksData } from '../lib/types/api';
+  import type { ActivityData, SubtasksData } from '../lib/types/api';
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import DataTable from '../lib/ui/DataTable.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
@@ -29,6 +29,20 @@
     void hours;
     void store.refresh();
   });
+
+  // Upcoming Schedules and the schedule numbers, moved here from the Activity screen (F108). Fetched once per open,
+  // as Activity did; its retry reloads it. They do not follow the hours window above.
+  const activity = usePoll(
+    makePollStore<ActivityData>(
+      (signal) => apiGet<ActivityData>('/dashboard/activity?hours=168', { signal }),
+      0, // fetch-once
+    ),
+  );
+
+  function formatDateTime(dateStr: string | null): string {
+    if (!dateStr) return '—';
+    return new Date(dateStr).toLocaleString();
+  }
 
   // ── Outcome colours (mirrors subtasks.js OUTCOME_COLORS) ─────────────────
   const OUTCOME_COLORS: Record<string, string> = {
@@ -274,6 +288,37 @@
   <p class="status-msg">Loading…</p>
 {/if}
 
+<!-- Upcoming Schedules, with the schedule numbers (moved from the Activity screen, F108) -->
+<section class="chart-card">
+  <h2>Upcoming Schedules</h2>
+  {#if $activity.data}
+    {@const ss = $activity.data.schedule_stats}
+    <StatGrid stats={[
+      { label: 'Active Schedules',         value: ss.active },
+      { label: 'Schedule Fires (7d)',      value: ss.fires_7d },
+    ]} />
+    {#if ss.next_fires.length > 0}
+      <ul class="item-list">
+        {#each ss.next_fires as s}
+          <li class="schedule-item">
+            <div class="schedule-task">{s.task ?? s.id}</div>
+            <div class="schedule-time">Next: {formatDateTime(s.next_fire_at)}</div>
+          </li>
+        {/each}
+      </ul>
+    {:else}
+      <p class="empty">No upcoming schedules.</p>
+    {/if}
+  {:else if $activity.error}
+    <p class="empty error">
+      Failed to load activity data —
+      <button class="retry-link" onclick={() => void activity.refresh()}>retry</button>
+    </p>
+  {:else}
+    <p class="empty">Loading…</p>
+  {/if}
+</section>
+
 <style>
   .view-head {
     display: flex;
@@ -365,5 +410,51 @@
 
   .status-msg.error {
     color: var(--red, #ef4444);
+  }
+
+  /* ── Upcoming Schedules (from Activity) ──────────────────────── */
+  ul.item-list {
+    list-style: none;
+    margin: 0.75rem 0 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+
+  .schedule-item {
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 0.8125rem;
+  }
+  .schedule-item:last-child {
+    border-bottom: none;
+  }
+
+  .schedule-task {
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .schedule-time {
+    font-size: 0.75rem;
+    color: var(--muted);
+    margin-top: 0.125rem;
+  }
+
+  .empty.error {
+    color: var(--red, #ef4444);
+  }
+
+  .retry-link {
+    background: none;
+    border: none;
+    color: var(--accent);
+    cursor: pointer;
+    font-size: inherit;
+    padding: 0;
+    text-decoration: underline;
   }
 </style>

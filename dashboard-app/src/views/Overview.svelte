@@ -130,7 +130,7 @@
             </a>
           {/if}
           {#if a.sends_in_doubt > 0}
-            <a class="attn-card attn-unknown" href="#/execution" aria-labelledby="attn-s">
+            <a class="attn-card attn-unknown" href={routeHref('work', 'changes')} aria-labelledby="attn-s">
               <span class="attn-kicker">Sends in doubt</span>
               <span id="attn-s" class="attn-title">{a.sends_in_doubt} send{a.sends_in_doubt === 1 ? '' : 's'} ended without confirming delivery</span>
               {#if a.latest_in_doubt}
@@ -195,7 +195,7 @@
   <section class="chart-card integrity-section">
     <div class="section-title-row">
       <h2>Execution integrity</h2>
-      <a class="detail-link" href="#/execution">Open ledger &rsaquo;</a>
+      <a class="detail-link" href={routeHref('work', 'changes')}>Open ledger &rsaquo;</a>
     </div>
     {#if x && !x.modes.persist}
       <p class="muted">Ledger persistence is off (NOUS_EXECUTION_LEDGER_PERSIST_ENABLED) — no calls are recorded and sends are not de-duplicated, so there are no numbers to show.</p>

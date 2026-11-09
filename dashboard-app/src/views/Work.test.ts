@@ -451,13 +451,13 @@ describe('Work host dispatch', () => {
   });
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-  it('has Sessions and Patterns in the sub navigation, Sessions current', async () => {
+  it('has Sessions, Patterns and Changes in the sub navigation, Sessions current', async () => {
     go('#/work');
     render(Work);
     const nav = screen.getByRole('navigation', { name: 'Work views' });
     const links = within(nav).getAllByRole('link');
-    expect(links.map((a) => a.textContent)).toEqual(['Sessions', 'Patterns']);
-    expect(links.map((a) => a.getAttribute('href'))).toEqual(['#/work', '#/work/patterns']);
+    expect(links.map((a) => a.textContent)).toEqual(['Sessions', 'Patterns', 'Changes']);
+    expect(links.map((a) => a.getAttribute('href'))).toEqual(['#/work', '#/work/patterns', '#/work/changes']);
     expect(links[0].getAttribute('aria-current')).toBe('page');
     await screen.findByText('Gap Scout status check');
   });

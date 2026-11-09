@@ -123,6 +123,13 @@ const DAG_APPROVALS = {
 
 let dag: Record<string, unknown> = DAG;
 
+const ACTIVITY = {
+  events: [],
+  censor_stats: { total: 0, active: 0, auto_created: 0, manual_created: 0, total_activations_7d: 0, false_positives_7d: 0, top_censors: [] },
+  schedule_stats: { total: 0, active: 0, fires_7d: 0, next_fires: [] },
+  sleep_stats: { total_sleeps: 0, last_sleep: null, facts_created: 0, procedures_created: 0, censors_retired: 0 },
+};
+
 let harnessPersisted = true;
 
 function install() {
@@ -139,6 +146,8 @@ function install() {
       : url.startsWith('/dashboard/dag') ? dag
       : url.startsWith('/dashboard/attention') ? { ...ATTENTION, ...attention }
       : url.startsWith('/status') ? STATUS
+      // Guards' Most Active Censors (moved from Activity, F108 T13).
+      : url.startsWith('/dashboard/activity') ? ACTIVITY
       : null;
     if (!body) throw new Error(`unexpected ${url}`);
     return { ok: true, status: 200, json: async () => body } as Response;
