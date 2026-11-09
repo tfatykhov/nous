@@ -121,6 +121,21 @@ describe('Work sessions list', () => {
     await waitFor(() => expect((screen.getByRole('button', { name: 'Load more' }) as HTMLButtonElement).disabled).toBe(false));
   });
 
+  it('an Everything button after Background asks for kind=any and keeps it across filter changes', async () => {
+    render(Work);
+    await screen.findByText('Gap Scout status check');
+    const labels = Array.from(document.querySelectorAll('.seg button')).map((b) => b.textContent);
+    expect(labels).toEqual(['All but background', 'Conversations', 'Tasks', 'Background', 'Everything']);
+    await fireEvent.click(screen.getByRole('button', { name: 'Everything' }));
+    await waitFor(() => expect(lastParams().get('kind')).toBe('any'));
+    expect(location.hash).toContain('kind=any');
+    expect(screen.getByRole('button', { name: 'Everything' }).getAttribute('aria-pressed')).toBe('true');
+    await fireEvent.click(screen.getByRole('button', { name: 'A tool failed' }));
+    await waitFor(() => expect(lastParams().get('lens')).toBe('error'));
+    expect(lastParams().get('kind')).toBe('any');
+    expect(location.hash).toContain('kind=any');
+  });
+
   it('kind buttons set aria-pressed and refetch with kind=', async () => {
     render(Work);
     await screen.findByText('Gap Scout status check');

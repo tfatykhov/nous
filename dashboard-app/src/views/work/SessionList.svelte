@@ -17,6 +17,7 @@
     { id: 'conversation', label: 'Conversations' },
     { id: 'task', label: 'Tasks' },
     { id: 'background', label: 'Background' },
+    { id: 'any', label: 'Everything' },
   ];
   const LENSES = [
     { id: 'error', label: 'A tool failed' },

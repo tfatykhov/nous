@@ -88,7 +88,7 @@ describe('Work patterns', () => {
   it('draws the failing tools as bars with a percentage and a link to the failing sessions', async () => {
     render(Work);
     const link = await screen.findByRole('link', { name: /learn_skill/ });
-    expect(link.getAttribute('href')).toBe('#/work?tool=learn_skill&lens=error&days=7');
+    expect(link.getAttribute('href')).toBe('#/work?tool=learn_skill&lens=error&kind=any&days=7');
     expect(link.textContent).toContain('45%');
     expect(link.textContent).toContain('18 of 40 calls');
     const fill = link.querySelector('.fill') as HTMLElement;
@@ -101,8 +101,8 @@ describe('Work patterns', () => {
     go('#/work/patterns?days=30');
     render(Work);
     const link = await screen.findByRole('link', { name: /learn_skill/ });
-    expect(link.getAttribute('href')).toBe('#/work?tool=learn_skill&lens=error&days=30');
-    expect(screen.getByRole('link', { name: /dag_create/ }).getAttribute('href')).toBe('#/work?tool=dag_create&lens=error&days=30');
+    expect(link.getAttribute('href')).toBe('#/work?tool=learn_skill&lens=error&kind=any&days=30');
+    expect(screen.getByRole('link', { name: /dag_create/ }).getAttribute('href')).toBe('#/work?tool=dag_create&lens=error&kind=any&days=30');
   });
 
   it('says so when no tool has enough calls with errors', async () => {

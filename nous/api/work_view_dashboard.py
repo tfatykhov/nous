@@ -38,12 +38,13 @@ MANY_CALLS = 10
 NO_TITLE = "(no title)"
 
 KINDS: tuple[str, ...] = ("conversation", "task", "background")
-# ``all`` is what the list shows by default: conversations and tasks, background work hidden.
+# ``all`` is what the list shows by default: conversations and tasks, background work hidden. ``any`` is everything.
 KIND_FILTERS: dict[str, tuple[str, ...]] = {
     "all": ("conversation", "task"),
     "conversation": ("conversation",),
     "task": ("task",),
     "background": ("background",),
+    "any": ("conversation", "task", "background"),
 }
 # A session's flags, in the order they are listed.
 FLAGS: tuple[str, ...] = ("error", "repeat", "many", "asked", "changed")

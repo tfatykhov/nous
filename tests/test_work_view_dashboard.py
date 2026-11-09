@@ -3007,3 +3007,15 @@ async def test_sessions_tool_with_error_lens_needs_that_tool_to_have_failed(clie
     # Every other combination is unchanged: the lens alone is any failure, the tool alone is any use of it.
     assert set(_ids(await get_json(client, lens="error"))) == {"sess-y-fails", "sess-x-fails"}
     assert set(_ids(await get_json(client, tool="bash"))) == {"sess-y-fails", "sess-x-fails"}
+
+
+@pytest.mark.postgres_only
+async def test_sessions_kind_any_lists_background_and_all_still_hides_it(client, db, agent_id, cleanup):
+    base = _hour_ago()
+    await insert_turn(db, agent_id, "sess-conv", started_at=base, work_kind="conversation")
+    await insert_turn(db, agent_id, "sess-bg", started_at=base + timedelta(minutes=1), work_kind="heartbeat")
+
+    assert _ids(await get_json(client, kind="all")) == ["sess-conv"]
+    assert set(_ids(await get_json(client, kind="any"))) == {"sess-conv", "sess-bg"}
+    resp = await client.get(SESSIONS, params={"kind": "nope"})
+    assert resp.status_code == 400 and "any" in resp.json()["error"]

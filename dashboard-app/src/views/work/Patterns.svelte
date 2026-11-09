@@ -153,7 +153,7 @@
         <ul class="fails">
           {#each data.failing as f (f.tool)}
             <li>
-              <a class="fail" href={routeHref('work', '', { tool: f.tool, lens: 'error', days: String(data.window_days) })}>
+              <a class="fail" href={routeHref('work', '', { tool: f.tool, lens: 'error', kind: 'any', days: String(data.window_days) })}>
                 <span class="fname">{f.tool}</span>
                 <span class="track"><span class="fill" style:width={pct(f.error_rate)} style:background="#f87171"></span></span>
                 <span class="rate">{pct(f.error_rate)}</span>
