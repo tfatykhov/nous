@@ -96,3 +96,51 @@ def test_fragments_are_lowercase():
 @pytest.mark.parametrize("text", ["ok: file written", "timeout after 30s", "KeyError: 'a'"])
 def test_ordinary_errors_are_not_guards(text):
     assert guard_cause("error", None, text) is None
+
+
+def test_normalise_error_pairs_every_quote():
+    # A short quoted value must not shift the pairing of the quotes after it.
+    a = normalise_error("unknown option 'x' in section 'foo'")
+    assert a == "unknown option 'x' in section <str>"
+    assert normalise_error("unknown option 'y' in section 'bar'") == a.replace("'x'", "'y'")
+    # Short values stay as they are; 3+ character values are replaced.
+    assert normalise_error("bad key 'ab'") == "bad key 'ab'"
+    assert normalise_error('KeyError: "ab"') == 'keyerror: "ab"'
+    assert normalise_error("Refused to write 'a': nope") == "refused to write 'a': nope"
+    # Two errors differing only in a 3+ character quoted value share one key.
+    assert normalise_error("no such table 'users'") == normalise_error("no such table 'orders'")
+    assert normalise_error('KeyError: "abc"') == "keyerror: <str>"
+
+
+def test_long_digit_runs_are_numbers_not_hex():
+    assert normalise_error("exit code 12345678") == normalise_error("exit code 1") == "exit code <n>"
+    assert normalise_error("commit deadbeef1234 not found") == "commit <hex> not found"
+    assert normalise_error("object 12345678ab") == "object <hex>"
+
+
+def test_transient_network_errors_are_not_guards():
+    text = "ConnectionRefusedError: [Errno 111] Connection refused"
+    assert guard_cause("error", None, text) is None
+    assert guard_cause("error", None, "curl: (7) Failed to connect: Connection refused") is None
+    # A real guard sentence next to one is still a guard.
+    assert guard_cause("error", None, f"{text}; Refused to write 'a': it is inside the undo journal") == "fragment"
+
+
+def test_runner_model_mistakes_and_ledger_failures_are_not_guards():
+    offered = "Tool error: 'x' is not available in this turn. Use only the tools offered to you."
+    assert guard_cause("refused", "offered_set", offered) is None
+    for text in (
+        "A send to the same recipients from this task is error since 2026-11-09T10:00:00; "
+        "not sending again, to avoid a duplicate.",
+        "Already sent at 2026-11-09T10:00:00; not sending it again.",
+        "This turn already sent to the same recipients at 2026-11-09T10:00:00. If this is "
+        "intentionally a second message, call again with a distinct send_label.",
+    ):
+        assert guard_cause("suppressed", None, text) is None, text
+        assert guard_cause("refused", "duplicate", text) is None, text
+    ledger = (
+        "Send refused: the execution ledger could not record this send, so a duplicate "
+        "cannot be ruled out. Retry later."
+    )
+    assert guard_cause("suppressed", None, ledger) is None
+    assert guard_cause("error", None, ledger) is None

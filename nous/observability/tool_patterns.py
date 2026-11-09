@@ -8,6 +8,7 @@ Pure: no database. The SQL pieces are fragments over a window of ``nous_system.t
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 
 from nous.cognitive.ledger_store import REFUSAL_CODES
 
@@ -25,17 +26,23 @@ NORMALISED_MAX_CHARS = 160
 _UUID = re.compile(r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
 _ISO_TIME = re.compile(r"\b\d{4}-\d{2}-\d{2}[t ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:z|[+-]\d{2}:?\d{2})?")
 _PATH = re.compile(r"(?:\b[a-z]:[\\/][^\s'\"]*|(?<![\w<>])/[^\s'\"]+)")
-_HEX = re.compile(r"\b[0-9a-f]{8,}\b")
+_HEX = re.compile(r"\b(?=[0-9]*[a-f])[0-9a-f]{8,}\b")  # needs a letter: a long digit run is a number
 _DIGITS = re.compile(r"\d+")
-_QUOTED = re.compile(r"""(['"])[^'"\n]{3,}?\1""")
+_QUOTED = re.compile(r"""(['"])([^'"\n]*?)\1""")  # every pair, so a short value cannot shift the pairing
+_QUOTED_MIN_CHARS = 3
 
-_SUBSTITUTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
+
+def _quoted_to_str(m: re.Match[str]) -> str:
+    """``<str>`` for a quoted value of 3 or more characters; a shorter pair is kept as it is."""
+    return "<str>" if len(m.group(2)) >= _QUOTED_MIN_CHARS else m.group(0)
+
+_SUBSTITUTIONS: tuple[tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]], ...] = (
     (_UUID, "<id>"),
     (_ISO_TIME, "<time>"),
     (_PATH, "<path>"),
     (_HEX, "<hex>"),
     (_DIGITS, "<n>"),
-    (_QUOTED, "<str>"),
+    (_QUOTED, _quoted_to_str),
 )
 
 
@@ -67,6 +74,15 @@ GUARD_FRAGMENTS: tuple[str, ...] = (
 )
 
 
+# Phrases that carry a guard word but are transient failures, not guards: a network error (see
+# nous/cognitive/monitor.py) and the runner's "execution ledger could not record this send" (runner.py), which is
+# retryable. They are blanked before the fragment match.
+TRANSIENT_PHRASES: tuple[str, ...] = (
+    "connectionrefusederror",
+    "connection refused",
+    "send refused: the execution ledger could not record this send",
+)
+
 # ``duplicate`` and ``offered_set`` are model mistakes (a repeated call, a tool not offered), not guards.
 GUARD_CODES: frozenset[str] = frozenset(REFUSAL_CODES) - {"duplicate", "offered_set"}
 
@@ -84,6 +100,8 @@ def guard_cause(outcome: str, refused_by: str | None, error_text: str | None) ->
     elif outcome in ("refused", "gated"):
         return outcome
     lowered = (error_text or "").lower()
+    for phrase in TRANSIENT_PHRASES:
+        lowered = lowered.replace(phrase, " ")
     if lowered and any(f in lowered for f in GUARD_FRAGMENTS):
         return "fragment"
     return None
