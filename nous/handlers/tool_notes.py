@@ -267,6 +267,18 @@ REVIEW_MAX_TOKENS = 1500
 # Words a note must never carry: notes and the review mention the tool-call records only.
 SCORE_WORDS = re.compile(r"\bscor(e|es|ed|ing)\b|\brubric\b|\bpenalt\w*|\bgrad(e|ed|es|ing)\b|outcome label", re.I)
 
+# Guard wording a note must never carry: the record fragments, word-bound, without "may not" and "may only" (they are
+# everyday words in a benign note; the guard classification of records still uses them). A stem ending in "authori"
+# is not closed on the right, a whole word may take a plural s.
+_NOTE_GUARD_WORDS = re.compile(
+    "|".join(
+        r"\b" + re.escape(f) + ("" if f.endswith("authori") else r"s?\b")
+        for f in GUARD_FRAGMENTS
+        if f not in ("may not", "may only")
+    ),
+    re.I,
+)
+
 # Words a note must never carry: advice on getting past a refusal (checked beside the guard fragments).
 WORKAROUND_WORDS = re.compile(
     r"\bbypass\w*|\bwork(?:ing)?[ -]?arounds?\b|\bcircumvent\w*|\bget(?:ting)? (?:around|past)\b|\bsudo\b"
@@ -358,7 +370,7 @@ def _entry(
     if not text_ or len(text_) > NOTE_MAX_CHARS or SCORE_WORDS.search(text_):
         return None
     # A note never speaks of a guard or of getting past one, whatever a record told the model.
-    if WORKAROUND_WORDS.search(text_) or any(f in text_.lower() for f in GUARD_FRAGMENTS):
+    if WORKAROUND_WORDS.search(text_) or _NOTE_GUARD_WORDS.search(text_):
         return None
     replaces: UUID | None = None
     if raw.get("replaces") is not None:
