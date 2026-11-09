@@ -130,8 +130,8 @@ ERROR_ROWS_CAP = 5000
 PATTERN_KINDS: tuple[str, ...] = ("error_repeat", "call_repeat", "retry_failed")
 EXAMPLE_MAX_CHARS = 200
 
-# Long inputs are cut in SQL, far past what is shown; the text is redacted before it is cut to the shown length, so a
-# secret near the shown edge is never half-visible.
+# A length bound on the input text read per hit row (the recorder clips inputs at ``tool_input_max_chars``, 2000 by
+# default). Only a bound: the example is redacted with ``redact_output`` and then cut to the shown length.
 _INPUT_FETCH_CHARS = 2000
 
 _WINDOW_CTE = """
@@ -198,6 +198,12 @@ class Pattern:
         return self.hits / self.calls if self.calls else 0.0
 
 
+def _require_aware(**times: datetime) -> None:
+    for name, value in times.items():
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError(f"{name} must be timezone-aware")
+
+
 async def _set_timeout(session: AsyncSession) -> None:
     # SET LOCAL binds the transaction the session autobegan; every statement here runs in that one transaction.
     await session.execute(text("SET LOCAL statement_timeout = '10s'"))
@@ -250,8 +256,10 @@ async def detect_patterns(
     """The repeated tool mistakes of the ``days`` days before ``now`` with at least ``min_hits`` hits, most hits
     first (ties by id), and the number of tools skipped for ``error_repeat`` because their error rows reached
     ``ERROR_ROWS_CAP``."""
+    _require_aware(now=now)
     await _set_timeout(session)
     params = _params(agent_id, now - timedelta(days=days), now, None)
+    # A tool can appear between the statements (READ COMMITTED): .get() below tolerates it, counting 0 calls.
     tools = await _tool_calls(session, params)
     patterns: list[Pattern] = []
 
@@ -267,7 +275,9 @@ async def detect_patterns(
             if len(rows) >= min_hits:
                 labels = [guard_cause(r["outcome"], r["refused_by"], r["error_text"]) for r in rows]
                 example = _example(rows[0]["input_text"])
-                patterns.append(Pattern(kind, tool, "", len(rows), tools[tool][0], _guard_of(labels), example))
+                patterns.append(
+                    Pattern(kind, tool, "", len(rows), tools.get(tool, (0, 0))[0], _guard_of(labels), example)
+                )
 
     # error_repeat: group the error rows in Python per tool, unless the tool's error rows reach the cap.
     wanted = [t for t, (_, errors) in tools.items() if errors > 0]
@@ -285,7 +295,9 @@ async def detect_patterns(
             if len(labels) >= min_hits:
                 example = _example(key)
                 patterns.append(
-                    Pattern("error_repeat", tool, key, len(labels), tools[tool][0], _guard_of(labels), example)
+                    Pattern(
+                        "error_repeat", tool, key, len(labels), tools.get(tool, (0, 0))[0], _guard_of(labels), example
+                    )
                 )
 
     patterns.sort(key=lambda p: (-p.hits, p.id))
@@ -306,6 +318,7 @@ async def pattern_counts(
     would reach ``ERROR_ROWS_CAP`` (a bound never becomes a rate)."""
     if kind not in PATTERN_KINDS:
         raise ValueError(f"unknown pattern kind: {kind!r}")
+    _require_aware(since=since, until=until)
     await _set_timeout(session)
     params = _params(agent_id, since, until, tool_name)
     calls, errors = (await _tool_calls(session, params)).get(tool_name, (0, 0))

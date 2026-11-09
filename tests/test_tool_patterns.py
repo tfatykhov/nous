@@ -457,3 +457,68 @@ async def test_detect_runs_under_a_10s_statement_timeout(db, agent_id, cleanup):
         await detect_patterns(session, agent_id, now=datetime.now(UTC))
         shown = (await session.execute(sa_text("SHOW statement_timeout"))).scalar_one()
     assert shown == "10s"
+
+
+@pytest.mark.postgres_only
+async def test_a_tool_missing_from_the_call_counts_does_not_raise(db, agent_id, cleanup, monkeypatch):
+    # Rows can commit between the statements (READ COMMITTED): the hit rows may name a tool the call count missed.
+    turn = await insert_turn(db, agent_id, "s1")
+    await _calls(db, agent_id, turn, [("ls", True, "boom")] * 4)
+
+    async def no_tools(session, params):
+        return {}
+
+    monkeypatch.setattr(tool_patterns, "_tool_calls", no_tools)
+    patterns, _ = await _detect(db, agent_id)
+    assert {p.kind for p in patterns} == {"call_repeat", "retry_failed"}
+    assert all(p.calls == 0 and p.rate == 0.0 for p in patterns)
+
+
+@pytest.mark.postgres_only
+async def test_naive_datetimes_are_refused(db, agent_id):
+    naive = datetime.now()
+    aware = datetime.now(UTC)
+    async with db.session() as session:
+        with pytest.raises(ValueError):
+            await detect_patterns(session, agent_id, now=naive)
+        with pytest.raises(ValueError):
+            await pattern_counts(session, agent_id, "bash", "call_repeat", "", since=naive, until=aware)
+        with pytest.raises(ValueError):
+            await pattern_counts(session, agent_id, "bash", "call_repeat", "", since=aware, until=naive)
+
+
+@pytest.mark.postgres_only
+async def test_unknown_pattern_kind_raises(db, agent_id):
+    async with db.session() as session:
+        with pytest.raises(ValueError):
+            await pattern_counts(session, agent_id, "bash", "nope", "", since=_ago(days=1), until=datetime.now(UTC))
+
+
+@pytest.mark.postgres_only
+async def test_exactly_half_guard_labelled_is_guard_caused(db, agent_id, cleanup):
+    turn = await insert_turn(db, agent_id, "s1")
+    for i in range(2):
+        await insert_call(db, agent_id, turn, i, session_id="s1", input_text=f"g{i}", is_error=True,
+                          outcome="refused", refused_by="context_policy", error_text="blocked here",
+                          started_at=_ago(hours=1))  # fmt: skip
+    for i in range(2, 4):
+        await insert_call(db, agent_id, turn, i, session_id="s1", input_text=f"o{i}", is_error=True,
+                          outcome="error", error_text="blocked here", started_at=_ago(hours=1))  # fmt: skip
+    rep = _of((await _detect(db, agent_id))[0], "error_repeat")
+    assert len(rep) == 1 and rep[0].hits == 4 and rep[0].guard == "context_policy"
+    # One guarded in three is below half.
+    assert tool_patterns._guard_of(["context_policy", None, None]) is None
+
+
+@pytest.mark.postgres_only
+async def test_exactly_at_the_cap_counts_as_capped(db, agent_id, cleanup, monkeypatch):
+    monkeypatch.setattr(tool_patterns, "ERROR_ROWS_CAP", 5)
+    turn = await insert_turn(db, agent_id, "s1")
+    await _calls(db, agent_id, turn, [(f"i{i}", True, "same failure") for i in range(5)])
+    patterns, skipped = await _detect(db, agent_id)
+    assert skipped == 1 and _of(patterns, "error_repeat") == []
+    async with db.session() as session:
+        got = await pattern_counts(
+            session, agent_id, "bash", "error_repeat", "x", since=_ago(days=1), until=datetime.now(UTC)
+        )
+    assert got is None
