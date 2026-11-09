@@ -16,15 +16,17 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 
 from nous.a2ui.builders.tool_notes_guard import DEDUP_KEY as GUARD_DEDUP_KEY
 from nous.a2ui.builders.tool_notes_guard import MAX_PER_CARD, tool_notes_guard_card
 from nous.cognitive.ledger_store import redact_output, redact_structure
 from nous.handlers import call_background_llm, parse_llm_json
+from nous.heart.schemas import ProcedureInput
 from nous.observability.tool_patterns import GUARD_FRAGMENTS, NO_ERROR_TEXT, Pattern, detect_patterns
 from nous.storage.database import Database
+from nous.storage.models import Procedure
 
 logger = logging.getLogger(__name__)
 
@@ -464,6 +466,20 @@ class ToolNotesReview:
         return len(new)
 
     async def run_sleep(self) -> dict[str, int]:
+        """Review the repeated mistakes, then bring the "Tool notes" procedure in line with the notes.
+
+        The sync is best effort and runs on every path of an enabled sleep: it never raises, and a failed sync is
+        retried by the next sleep (and by the startup sync).
+        """
+        counts = await self._review()
+        if self._settings.tool_notes_enabled:
+            try:
+                await sync_procedure(self._heart, ToolNoteStore(self._db, self._heart.agent_id), True)
+            except Exception as exc:
+                logger.warning("tool notes: procedure sync failed (%s)", type(exc).__name__)
+        return counts
+
+    async def _review(self) -> dict[str, int]:
         """Detect, offer at most ``MAX_CANDIDATES`` to one model call, store the notes, close the rest as declined."""
         counts = dict.fromkeys(_COUNT_KEYS, 0)
         # Both flags: without the tool-call log the old records must not be read (main.py also warns at start).
@@ -525,3 +541,65 @@ class ToolNotesReview:
                 await store.close(p, "declined", now=now)
                 counts["declined"] += 1
         return counts
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The "Tool notes" procedure: its body is rendered from the table by get_procedure, never stored
+# ---------------------------------------------------------------------------------------------------------------------
+
+TOOL_NOTES_PROCEDURE = "Tool notes"
+# not "auto:%", so the procedure learner never dedupes or retires the procedure
+TOOL_NOTES_TAG = "tool_notes"
+# Fixed (118 characters, under proc_catalog_desc_chars), so the cached catalog changes only when it appears or goes.
+TOOL_NOTES_DESCRIPTION = (
+    "Notes on past tool mistakes. Read before a tool you have not used lately, "
+    "after a tool fails, or when choosing a tool."
+)
+
+
+def is_tool_notes_procedure(detail: object) -> bool:
+    """True for the "Tool notes" procedure: its name (any case) and the ``tool_notes`` tag."""
+    name = getattr(detail, "name", None)
+    tags = getattr(detail, "tags", None)
+    if not isinstance(name, str) or not isinstance(tags, (list, tuple)):
+        return False
+    return name.lower() == TOOL_NOTES_PROCEDURE.lower() and TOOL_NOTES_TAG in tags
+
+
+def render_notes(notes: Sequence[Any]) -> list[str]:
+    """One ``tool: note`` line per note: tools sorted, the newest note first within a tool."""
+    ordered = sorted(notes, key=lambda n: n.created_at, reverse=True)  # stable: newest first
+    ordered.sort(key=lambda n: n.tool_name)
+    return [f"{n.tool_name}: {n.note_text}" for n in ordered]
+
+
+async def sync_procedure(heart: Any, store: ToolNoteStore, enabled: bool) -> None:
+    """Make the procedure active when ``enabled`` and a note exists, and inactive otherwise.
+
+    The row is found active or not by the ORM (``get_procedure_by_name`` and the name index are active-only, so a
+    second store would duplicate it) and is reactivated, never stored twice. Zero notes cost zero context.
+    """
+    want = enabled and bool(await store.active())
+    async with heart.db.session() as session:
+        row = (
+            await session.execute(
+                select(Procedure.id, Procedure.active)
+                .where(Procedure.agent_id == heart.agent_id)
+                .where(func.lower(Procedure.name) == TOOL_NOTES_PROCEDURE.lower())
+                .where(Procedure.tags.any(TOOL_NOTES_TAG))
+                .order_by(Procedure.created_at.desc())
+                .limit(1)
+            )
+        ).first()
+    if row is None:
+        if want:
+            await heart.store_procedure(
+                ProcedureInput(
+                    name=TOOL_NOTES_PROCEDURE, domain="tools", description=TOOL_NOTES_DESCRIPTION, tags=[TOOL_NOTES_TAG]
+                )
+            )
+    elif want and not row.active:
+        await heart.reactivate_procedure(row.id)
+    elif not want and row.active:
+        why = "tool_notes_empty" if enabled else "tool_notes_disabled"
+        await heart.retire_procedure(row.id, reason={"reason": why})
