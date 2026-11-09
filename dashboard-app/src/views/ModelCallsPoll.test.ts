@@ -109,4 +109,42 @@ describe('Model calls list polls with Load more pages', () => {
     await vi.advanceTimersByTimeAsync(50);
     expect(shown(container)).toEqual([16, 15, 14, 12].map(id));
   });
+
+  it('60 new calls between polls leave no gap: the pagination restarts from the new page one', async () => {
+    let polls = 0;
+    respond = (u) => {
+      if (u.includes('before=')) return { body: list([row(id(1))], null) };
+      polls += 1;
+      // page size 3; the second poll shares no row with the first
+      return { body: polls === 1 ? list([row(id(4)), row(id(3)), row(id(2))], 'x|' + id(2)) : list([row(id(9)), row(id(8)), row(id(7))], 'y|' + id(7)) };
+    };
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const { container } = render(ModelCalls);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Load more' }));
+    await waitFor(() => expect(shown(container)).toEqual([4, 3, 2, 1].map(id)));
+    await vi.advanceTimersByTimeAsync(60_000);
+    await waitFor(() => expect(polls).toBe(2));
+    await vi.advanceTimersByTimeAsync(50);
+    expect(shown(container)).toEqual([9, 8, 7].map(id));
+    await fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    await waitFor(() => expect(urls.some((u) => u.includes('before=y'))).toBe(true));
+  });
+
+  it('a failed page-one refresh after a filter change leaves Load more shut: the old cursor is never sent', async () => {
+    respond = (u) => {
+      if (u.includes('status=error')) return { status: 500, body: {} };
+      return { body: list([row(id(4)), row(id(3))], 'x|' + id(3)) };
+    };
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(ModelCalls);
+    await screen.findByRole('button', { name: 'Load more' });
+    await fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'error' } });
+    await vi.advanceTimersByTimeAsync(8_000); // apiGet gives up after 1 + 2 + 4 s
+    await waitFor(() => expect(urls.filter((u) => u.includes('status=error')).length).toBe(4));
+    await vi.advanceTimersByTimeAsync(50);
+    const more = screen.getByRole('button', { name: 'Load more' }) as HTMLButtonElement;
+    expect(more.disabled).toBe(true);
+    await fireEvent.click(more);
+    expect(urls.some((u) => u.includes('before='))).toBe(false);
+  });
 });

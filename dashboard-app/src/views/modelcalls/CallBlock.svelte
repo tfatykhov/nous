@@ -38,7 +38,7 @@
   <summary><span class="title">{title}</span><span class="meta">{meta}</span></summary>
   <div class="inner">
     {#if body}
-      <p class="size">{body.size_chars.toLocaleString('en-US')} characters</p>
+      <p class="size">{body.size_chars != null ? body.size_chars.toLocaleString('en-US') : '—'} characters</p>
       <div class="scroll"><pre class="wrap">{body.body}</pre></div>
     {:else if failure === 'gone'}
       <p class="size">This text is no longer stored.</p>

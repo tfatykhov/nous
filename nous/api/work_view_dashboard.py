@@ -346,7 +346,13 @@ def _page_sql(*, tool: bool, q: bool, lens: str | None, before: bool) -> str:
         )
     if q:
         where.append("(title ILIKE :q ESCAPE '\\' OR first_message ILIKE :q ESCAPE '\\')")
-    if lens is not None:
+    if lens == "error" and tool:
+        # A tool and the error lens together mean that tool failed, not that some other call of the session did.
+        where.append(
+            "EXISTS (SELECT 1 FROM calls c WHERE c.session_id = titled.session_id "
+            "AND c.tool_name = :tool AND c.is_error)"
+        )
+    elif lens is not None:
         where.append(_LENS_COLUMN[lens])
     if before:
         where.append("(started_at, session_id) < (CAST(:before_ts AS timestamptz), CAST(:before_key AS text))")

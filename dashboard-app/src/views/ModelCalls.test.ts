@@ -206,6 +206,19 @@ describe('Model calls list', () => {
 });
 
 describe('Model call detail', () => {
+  it('a block body without size_chars shows a dash instead of crashing the view', async () => {
+    respond = (u) => {
+      if (u === `/dashboard/model-calls/${ID1}`) return { body: detail() };
+      if (u.includes('/blocks/')) return { body: { part: 'response', ord: 0, body: 'the text' } };
+      return { body: list([row(ID1)]) };
+    };
+    install(); location.hash = ''; initRouter(); go(`#/model-calls/c/${ID1}`);
+    render(ModelCalls);
+    expect(await screen.findByText('the text')).toBeTruthy();
+    expect(screen.getByText('— characters')).toBeTruthy();
+    cleanup();
+  });
+
   let bodies: Record<string, { size_chars: number; body: string }> = {};
   beforeEach(() => {
     bodies = {};
@@ -662,7 +675,11 @@ describe('Model calls PR4 fix round', () => {
   });
 
   it('keeps the page heading while a call is open', async () => {
-    respond = (u) => ({ body: u.startsWith(`/dashboard/model-calls/${ID1}`) ? detail() : list([row(ID1)]) });
+    respond = (u) => {
+      if (u === `/dashboard/model-calls/${ID1}`) return { body: detail() };
+      if (u.includes('/blocks/')) return { body: { part: 'response', ord: 0, size_chars: 5, body: 'x' } };
+      return { body: list([row(ID1)]) };
+    };
     go(`#/model-calls/c/${ID1}`);
     const { container } = render(ModelCalls);
     await screen.findByRole('link', { name: /Back to calls/ });

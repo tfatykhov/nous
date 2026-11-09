@@ -27,6 +27,9 @@
   // rows that fell off it (newer calls pushed them past the seam) are folded into the front of the loaded pages, so
   // the list has no gap. Only while a later page is loaded, and only for the same filters.
   let lastPage: { key: string; calls: ModelCallRow[] } | null = null;
+  // The filters of the page one now on screen. After a filter change whose page one failed it is still the old one,
+  // and so is the cursor: Load more waits for a page one of the current filters.
+  let dataKey = $state<string | null>(null);
 
   const store = usePoll(
     makePollStore<ModelCallsData>((signal) => {
@@ -34,11 +37,18 @@
       return apiGet<ModelCallsData>(`/dashboard/model-calls?${k}`, { signal }).then((d) => {
         if (lastPage?.key === k && (moreCursor !== undefined || moreBusy)) {
           const seen = new Set(d.calls.map((c) => c.id));
-          const have = new Set(extra.map((c) => c.id));
-          const fell = lastPage.calls.filter((c) => !seen.has(c.id) && !have.has(c.id));
-          if (fell.length > 0) extra = [...fell, ...extra];
+          if (lastPage.calls.length > 0 && d.calls.length > 0 && !lastPage.calls.some((c) => seen.has(c.id))) {
+            // So many new calls that the new page one no longer meets the old one: the rows between them cannot be
+            // folded in, so start paging again from the new page one.
+            resetPages();
+          } else {
+            const have = new Set(extra.map((c) => c.id));
+            const fell = lastPage.calls.filter((c) => !seen.has(c.id) && !have.has(c.id));
+            if (fell.length > 0) extra = [...fell, ...extra];
+          }
         }
         lastPage = { key: k, calls: d.calls };
+        dataKey = k;
         return d;
       });
     }, 60000),
@@ -83,7 +93,7 @@
 
   async function loadMore() {
     // While page one of the new filters loads, the cursor on screen belongs to the old filters.
-    if (cursor === null || moreBusy || refetching) return;
+    if (cursor === null || moreBusy || refetching || dataKey !== key) return;
     const mine = generation;
     const params = new URLSearchParams(key);
     params.set('before', cursor);
@@ -194,7 +204,7 @@
       </ul>
       {#if cursor !== null}
         <div class="more">
-          <button type="button" class="btn" disabled={moreBusy || refetching} onclick={loadMore}>Load more</button>
+          <button type="button" class="btn" disabled={moreBusy || refetching || dataKey !== key} onclick={loadMore}>Load more</button>
           {#if moreError}<span class="err" role="alert">Could not load more.</span>{/if}
         </div>
       {/if}
