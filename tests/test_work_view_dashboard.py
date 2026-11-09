@@ -1395,3 +1395,331 @@ async def test_trace_unrenderable_payload_is_the_plain_500(client, monkeypatch, 
     resp = await client.get(trace_path("sess-x"))
     assert resp.status_code == 500 and resp.json() == {"error": "work view query failed"}
     assert any(r.levelname == "WARNING" and r.exc_info for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# GET /dashboard/work/patterns
+# ---------------------------------------------------------------------------------------------------------------------
+
+PATTERNS = "/dashboard/work/patterns"
+NO_WASTE = {"repeated_calls": 0, "retried_and_failed_again": 0}
+NO_KIND = {"turns": 0, "calls": 0}
+
+
+async def insert_calls(
+    db,
+    agent_id: str,
+    tool: str,
+    n: int,
+    *,
+    errors: int = 0,
+    turn_id: uuid.UUID | None = None,
+    session_id: str | None = "sess-bulk",
+    work_kind: str = "conversation",
+    started_at: datetime | None = None,
+) -> None:
+    """``n`` calls of ``tool`` in one statement, the first ``errors`` of them failing, each with an input of its own
+    (so no two of them repeat). Each call gets a turn id of its own unless ``turn_id`` is given."""
+    async with db.engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO nous_system.tool_call_log (agent_id, session_id, turn_id, call_index, work_kind, "
+                "tool_name, tool_name_called, input_text, outcome, is_error, started_at) "
+                "SELECT :a, :s, coalesce(CAST(:t AS uuid), gen_random_uuid()), g, :wk, :tool, :tool, 'in-' || g, "
+                "CASE WHEN g < :errors THEN 'error' ELSE 'ran' END, g < :errors, :start "
+                "FROM generate_series(0, :n - 1) g"
+            ),
+            {
+                "a": agent_id,
+                "s": session_id,
+                "t": turn_id,
+                "wk": work_kind,
+                "tool": tool,
+                "errors": errors,
+                "n": n,
+                "start": started_at or datetime.now(UTC),
+            },
+        )
+
+
+def _tools(body: dict) -> dict[str, dict]:
+    return {t["tool"]: t for t in body["tools"]}
+
+
+def test_disabled_patterns_has_the_page_keys_and_nothing_in_them():
+    assert wv.disabled_patterns(9) == {
+        "enabled": False,
+        "window_days": 9,
+        "reason_coverage": {"calls": 0, "with_reason": 0},
+        "tools": [],
+        "failing": [],
+        "wasted": NO_WASTE,
+    }
+
+
+@pytest.mark.postgres_only
+async def test_patterns_flag_off(db, agent_id, cleanup, monkeypatch):
+    await insert_call(db, agent_id, uuid.uuid4(), 0, session_id="sess-P", reason="why")
+    opened = 0
+    real_session = db.session
+
+    def counting_session(*args, **kwargs):
+        nonlocal opened
+        opened += 1
+        return real_session(*args, **kwargs)
+
+    monkeypatch.setattr(db, "session", counting_session)
+    off = make_app(db, _settings(agent_id, tool_call_log_enabled=False))
+    async with AsyncClient(transport=ASGITransport(app=off), base_url="http://test") as c:
+        assert await get_json(c, PATTERNS) == wv.disabled_patterns(7)
+        assert await get_json(c, PATTERNS, days="3") == wv.disabled_patterns(3)
+    assert opened == 0
+
+    # The counter does see the handler's session when the log is on (so the zero above means something).
+    on = make_app(db, _settings(agent_id, tool_call_log_enabled=True))
+    async with AsyncClient(transport=ASGITransport(app=on), base_url="http://test") as c:
+        body = await get_json(c, PATTERNS)
+    assert body["enabled"] is True and opened == 1
+    assert body["reason_coverage"] == {"calls": 1, "with_reason": 1}
+
+
+@pytest.mark.postgres_only
+async def test_patterns_empty_window_is_zeros_not_nulls(client, agent_id):
+    assert await get_json(client, PATTERNS) == {
+        "enabled": True,
+        "window_days": 7,
+        "reason_coverage": {"calls": 0, "with_reason": 0},
+        "tools": [],
+        "failing": [],
+        "wasted": NO_WASTE,
+    }
+
+
+@pytest.mark.postgres_only
+async def test_patterns_counts_by_kind_of_work(client, db, agent_id, cleanup):
+    conv, sub, beat = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    await insert_call(db, agent_id, conv, 0, session_id="sess-A", tool="bash", input_text="ls")
+    await insert_call(db, agent_id, conv, 1, session_id="sess-A", tool="bash", input_text="pwd", is_error=True)
+    await insert_call(db, agent_id, conv, 2, session_id="sess-A", tool="read_file", input_text="x")
+    await insert_call(db, agent_id, sub, 0, session_id="sess-B", tool="bash", input_text="ls", work_kind="subtask")
+    await insert_call(db, agent_id, beat, 0, session_id="sess-C", tool="bash", input_text="ls", work_kind="heartbeat")
+    # A turnless call of an unknown kind of work: background, a call but no turn.
+    await insert_call(db, agent_id, None, 0, session_id="sess-C", tool="bash", input_text="df", work_kind="new_kind")
+
+    body = await get_json(client, PATTERNS)
+    assert [t["tool"] for t in body["tools"]] == ["bash", "read_file"]  # most calls first
+    bash, read = _tools(body)["bash"], _tools(body)["read_file"]
+    assert (bash["lane"], bash["calls"], bash["errors"], bash["sessions"]) == ("workspace", 5, 1, 3)
+    assert bash["by_kind"] == {
+        "conversation": {"turns": 1, "calls": 2},
+        "task": {"turns": 1, "calls": 1},
+        "background": {"turns": 1, "calls": 2},
+    }
+    # Every kind is listed, zero when the tool was not used in it.
+    assert read["by_kind"] == {"conversation": {"turns": 1, "calls": 1}, "task": NO_KIND, "background": NO_KIND}
+    assert (read["calls"], read["errors"], read["sessions"], read["reasons"]) == (1, 0, 1, [])
+
+
+@pytest.mark.postgres_only
+async def test_patterns_tools_are_capped_at_30_by_calls(client, db, agent_id, cleanup):
+    # 30 tools with one call, then two with two calls whose names sort last: a cap by name would drop them.
+    for i in range(30):
+        await insert_calls(db, agent_id, f"t-{i:02d}", 1)
+    await insert_calls(db, agent_id, "zz-a", 2)
+    await insert_calls(db, agent_id, "zz-b", 2)
+
+    body = await get_json(client, PATTERNS)
+    assert [t["tool"] for t in body["tools"]] == ["zz-a", "zz-b"] + [f"t-{i:02d}" for i in range(28)]
+    assert {t["lane"] for t in body["tools"]} == {"other"}
+    assert body["reason_coverage"] == {"calls": 34, "with_reason": 0}  # every call, not only the listed tools
+
+
+@pytest.mark.postgres_only
+async def test_patterns_common_reasons(client, db, agent_id, cleanup):
+    base = _hour_ago()
+    turn = uuid.uuid4()
+    # Inserted out of time order: the text shown is the first seen (by started_at), not the first inserted and not
+    # min() (the database's collation sorts "check x " before "Check X").
+    bash = [
+        ("check x ", 1),
+        ("Check X", 0),
+        ("Read log", 2),
+        (None, 3),
+        ("   ", 4),  # blank: no reason
+    ]
+    for i, (reason, second) in enumerate(bash):
+        await insert_call(
+            db,
+            agent_id,
+            turn,
+            i,
+            session_id="sess-R",
+            tool="bash",
+            input_text=f"cmd-{i}",
+            reason=reason,
+            started_at=base + timedelta(seconds=second),
+        )
+    # Top 3 only; ties go to the reason seen first.
+    read = ["a", "a", "a", "b", "b", "c", "d"]
+    for i, reason in enumerate(read):
+        await insert_call(
+            db,
+            agent_id,
+            turn,
+            10 + i,
+            session_id="sess-R",
+            tool="read_file",
+            input_text=f"f-{i}",
+            reason=reason,
+            started_at=base + timedelta(seconds=10 + i),
+        )
+
+    body = await get_json(client, PATTERNS)
+    tools = _tools(body)
+    assert tools["bash"]["reasons"] == [{"text": "Check X", "count": 2}, {"text": "Read log", "count": 1}]
+    assert tools["read_file"]["reasons"] == [
+        {"text": "a", "count": 3},
+        {"text": "b", "count": 2},
+        {"text": "c", "count": 1},
+    ]
+    assert body["reason_coverage"] == {"calls": 12, "with_reason": 10}
+
+
+@pytest.mark.postgres_only
+async def test_patterns_failing_needs_20_calls(client, db, agent_id, cleanup):
+    await insert_calls(db, agent_id, "few", 5, errors=5)  # every call failed, but too few calls
+    await insert_calls(db, agent_id, "never", 20, errors=0)  # enough calls, none failed
+    await insert_calls(db, agent_id, "half", 20, errors=10)
+    for tool, calls, errors in (
+        ("f-a", 20, 9),
+        ("f-b", 20, 8),
+        ("f-c", 40, 16),  # the same rate as f-b with more calls: listed first
+        ("f-d", 20, 7),
+        ("f-e", 20, 6),
+        ("f-f", 20, 5),
+        ("f-g", 20, 4),
+        ("f-h", 20, 3),  # ninth: cut
+    ):
+        await insert_calls(db, agent_id, tool, calls, errors=errors)
+
+    failing = (await get_json(client, PATTERNS))["failing"]
+    assert failing == [
+        {"tool": "half", "calls": 20, "errors": 10, "error_rate": 0.5},
+        {"tool": "f-a", "calls": 20, "errors": 9, "error_rate": 0.45},
+        {"tool": "f-c", "calls": 40, "errors": 16, "error_rate": 0.4},
+        {"tool": "f-b", "calls": 20, "errors": 8, "error_rate": 0.4},
+        {"tool": "f-d", "calls": 20, "errors": 7, "error_rate": 0.35},
+        {"tool": "f-e", "calls": 20, "errors": 6, "error_rate": 0.3},
+        {"tool": "f-f", "calls": 20, "errors": 5, "error_rate": 0.25},
+        {"tool": "f-g", "calls": 20, "errors": 4, "error_rate": 0.2},
+    ]
+
+
+@pytest.mark.postgres_only
+async def test_patterns_failing_reads_every_tool_not_only_the_listed_30(client, db, agent_id, cleanup):
+    for i in range(30):
+        await insert_calls(db, agent_id, f"busy-{i:02d}", 25)
+    await insert_calls(db, agent_id, "flaky", 20, errors=10)
+
+    body = await get_json(client, PATTERNS)
+    assert "flaky" not in _tools(body) and len(body["tools"]) == 30
+    assert body["failing"] == [{"tool": "flaky", "calls": 20, "errors": 10, "error_rate": 0.5}]
+
+
+@pytest.mark.postgres_only
+async def test_patterns_wasted(client, db, agent_id, cleanup):
+    base = _hour_ago()
+
+    async def turn_calls(calls: list[tuple[str, str, bool]], *, seconds: list[int] | None = None) -> None:
+        turn = uuid.uuid4()
+        for i, (tool, input_text, is_error) in enumerate(calls):
+            await insert_call(
+                db,
+                agent_id,
+                turn,
+                i,
+                session_id="sess-W",
+                tool=tool,
+                input_text=input_text,
+                is_error=is_error,
+                started_at=base + timedelta(seconds=seconds[i] if seconds else i),
+            )
+
+    await turn_calls([("bash", "ls", False), ("bash", "ls", False)])  # repeated 1
+    await turn_calls([("read_file", "x", True), ("read_file", "x", True)])  # repeated 1, retried and failed 1
+    await turn_calls([("bash", "pwd", False)] * 3)  # repeated 2: each call after the first
+    await turn_calls([("web_fetch", "u", True), ("web_fetch", "u", False)])  # repeated 1; the retry worked
+    await turn_calls([("db_query", "q", True), ("bash", "q", True), ("db_query", "q2", True)])  # no repeat
+    # In call order: error, ok, error (repeated 2, no failed retry); in time order it would read error, error, ok.
+    await turn_calls(
+        [("write_file", "w", True), ("write_file", "w", False), ("write_file", "w", True)], seconds=[0, 2, 1]
+    )
+    # The same call in two turns, and two turnless calls: no repeat.
+    await turn_calls([("bash", "same", True)])
+    await turn_calls([("bash", "same", True)])
+    for _ in range(2):
+        await insert_call(db, agent_id, None, 0, session_id="sess-W", tool="bash", input_text="solo", is_error=True)
+
+    assert (await get_json(client, PATTERNS))["wasted"] == {"repeated_calls": 7, "retried_and_failed_again": 1}
+
+
+@pytest.mark.postgres_only
+async def test_patterns_window_and_agent_scope(client, db, agent_id, cleanup):
+    now = datetime.now(UTC)
+    old, new = now - timedelta(days=8), now - timedelta(hours=1)
+    await insert_call(db, agent_id, uuid.uuid4(), 0, session_id="sess-old", reason="old", started_at=old)
+    await insert_call(db, agent_id, uuid.uuid4(), 0, session_id="sess-new", reason="new", started_at=new)
+    other = _agent()
+    try:
+        # Another agent: failing calls, reasons and a repeat under my session id, none of them mine.
+        await insert_calls(db, other, "theirs", 25, errors=25, session_id="sess-new")
+        shared_turn = uuid.uuid4()
+        for i in range(2):
+            await insert_call(
+                db, other, shared_turn, i, session_id="sess-new", input_text="ls", reason="theirs", is_error=True
+            )
+
+        body = await get_json(client, PATTERNS)  # default: 7 days
+        assert body["window_days"] == 7
+        assert [(t["tool"], t["calls"], t["sessions"]) for t in body["tools"]] == [("bash", 1, 1)]
+        assert _tools(body)["bash"]["reasons"] == [{"text": "new", "count": 1}]
+        assert body["reason_coverage"] == {"calls": 1, "with_reason": 1}
+        assert (body["failing"], body["wasted"]) == ([], NO_WASTE)
+
+        wide = await get_json(client, PATTERNS, days="9")
+        assert wide["window_days"] == 9
+        assert [(t["tool"], t["calls"], t["sessions"]) for t in wide["tools"]] == [("bash", 2, 2)]
+        assert wide["reason_coverage"] == {"calls": 2, "with_reason": 2}
+    finally:
+        await delete_agent_rows(db, other)
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("days", ["0", "31", "abc", "-1", "7.5"])
+async def test_patterns_days_bounds_400(client, days):
+    resp = await client.get(PATTERNS, params={"days": days})
+    assert resp.status_code == 400 and set(resp.json()) == {"error"}
+
+
+@pytest.mark.postgres_only
+async def test_patterns_days_bounds_accepted(client):
+    assert (await get_json(client, PATTERNS, days="1"))["window_days"] == 1
+    assert (await get_json(client, PATTERNS, days="30"))["window_days"] == 30
+
+
+@pytest.mark.postgres_only
+async def test_patterns_run_under_a_10s_statement_timeout(db, agent_id):
+    async with db.session() as session:
+        await wv.get_patterns(session, agent_id, days=7)
+        assert (await session.execute(text("SHOW statement_timeout"))).scalar_one() == "10s"
+
+
+@pytest.mark.postgres_only
+async def test_patterns_query_failure_is_a_plain_500(client, monkeypatch, caplog):
+    async def boom(*args, **kwargs):
+        raise RuntimeError("secret detail from the database")
+
+    monkeypatch.setattr(wv, "get_patterns", boom)
+    resp = await client.get(PATTERNS)
+    assert resp.status_code == 500 and resp.json() == {"error": "work view query failed"}
+    assert any(r.levelname == "WARNING" and r.exc_info for r in caplog.records)

@@ -2323,6 +2323,26 @@ def create_app(
             logger.warning("dashboard_work_trace: the work view query failed", exc_info=True)
             return JSONResponse({"error": "work view query failed"}, status_code=500)
 
+    async def dashboard_work_patterns(request: Request) -> JSONResponse:
+        """GET /dashboard/work/patterns — F108: tool use over the last ``days`` days (default 7): the most used tools
+        by kind of work with their common reasons, the tools that fail most, and the wasted steps. Read-only. With
+        the tool-call log off: 200 {"enabled": false} and no session."""
+        from nous.api import work_view_dashboard as wv
+
+        try:
+            days = wv.parse_days(request.query_params.get("days"), wv.DAYS_DEFAULT, wv.DAYS_MAX)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        if not settings.tool_call_log_enabled:
+            return JSONResponse(wv.disabled_patterns(days))
+        try:
+            async with database.session() as session:
+                data = await wv.get_patterns(session, settings.agent_id, days=days)
+            return JSONResponse(data)
+        except Exception:
+            logger.warning("dashboard_work_patterns: the work view query failed", exc_info=True)
+            return JSONResponse({"error": "work view query failed"}, status_code=500)
+
     async def dashboard_memory_write_health_acknowledge(request: Request) -> JSONResponse:
         """POST /dashboard/memory-write-health/acknowledge {rule, day?, note?} — P4: the owner accepts a rule's
         evidence (a deliberate restore or delete) and resets its baseline. Records who acknowledged what as an events
@@ -3854,6 +3874,7 @@ def create_app(
         # F108: Work view
         Route("/dashboard/work/sessions", dashboard_work_sessions),
         Route("/dashboard/work/sessions/{session_id}", dashboard_work_trace),
+        Route("/dashboard/work/patterns", dashboard_work_patterns),
         # F038: DAG orchestration dashboard
         Route("/dashboard/dag", dashboard_dag),
         Route("/dashboard/execution", dashboard_execution),

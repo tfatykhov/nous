@@ -682,3 +682,167 @@ async def get_trace(
         "turns": [_turn_out(row, calls[str(row["id"])], model_calls[str(row["id"])]) for row in rows],
         "next_after": next_after,
     }
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# GET /dashboard/work/patterns
+# ---------------------------------------------------------------------------------------------------------------------
+
+PATTERN_TOOLS = 30
+PATTERN_REASONS = 3
+FAILING_MIN_CALLS = 20
+FAILING_TOOLS = 8
+
+
+def disabled_patterns(days: int) -> dict[str, Any]:
+    """The patterns with the tool-call log off: the same keys as with it on, every list empty, every count zero."""
+    return {
+        "enabled": False,
+        "window_days": days,
+        "reason_coverage": {"calls": 0, "with_reason": 0},
+        "tools": [],
+        "failing": [],
+        "wasted": {"repeated_calls": 0, "retried_and_failed_again": 0},
+    }
+
+
+# The window's calls of this agent. Every patterns statement reads only this, so each is a range scan of
+# idx_tool_call_log_agent_started (agent_id, started_at DESC), never the whole table. A call's kind of work is its
+# own work_kind through WORK_KIND_GROUP; a blank reason is no reason.
+_PATTERNS_WINDOW_CTE = """
+WITH win AS (
+    SELECT c.id, c.turn_id, c.call_index, c.session_id, c.tool_name, c.input_text, c.is_error, c.started_at,
+           nullif(btrim(c.reason), '') AS reason,
+           CASE WHEN c.work_kind = ANY(CAST(:conversation_kinds AS text[])) THEN 'conversation'
+                WHEN c.work_kind = ANY(CAST(:task_kinds AS text[])) THEN 'task'
+                ELSE 'background' END AS kind
+    FROM nous_system.tool_call_log c
+    WHERE c.agent_id = :agent AND c.started_at >= now() - make_interval(days => :days)
+)
+"""
+
+# The most used tools, with their calls and turns per kind of work (a turnless call counts as a call, not a turn).
+_PATTERNS_TOOLS_SQL = (
+    _PATTERNS_WINDOW_CTE
+    + "SELECT tool_name, count(*)::int AS calls, (count(*) FILTER (WHERE is_error))::int AS errors, "
+    + "count(DISTINCT session_id)::int AS sessions, "
+    + ", ".join(
+        f"(count(*) FILTER (WHERE kind = '{k}'))::int AS {k}_calls, "
+        f"(count(DISTINCT turn_id) FILTER (WHERE kind = '{k}'))::int AS {k}_turns"
+        for k in KINDS
+    )
+    + " FROM win GROUP BY tool_name ORDER BY calls DESC, tool_name LIMIT :tools_cap"
+)
+
+# The listed tools' most common reasons: grouped by the trimmed, lowercased text, shown as the first seen (by
+# started_at, not min(), which follows the database's collation), most frequent first, ties to the first seen.
+_PATTERNS_REASONS_SQL = (
+    _PATTERNS_WINDOW_CTE
+    + """
+SELECT tool_name, reason_text, n
+FROM (
+    SELECT tool_name, reason_text, n,
+           row_number() OVER (PARTITION BY tool_name ORDER BY n DESC, first_at, reason_key) AS rank
+    FROM (
+        SELECT tool_name, lower(reason) AS reason_key, count(*)::int AS n, min(started_at) AS first_at,
+               (array_agg(reason ORDER BY started_at, id))[1] AS reason_text
+        FROM win
+        WHERE reason IS NOT NULL AND tool_name = ANY(CAST(:tools AS text[]))
+        GROUP BY tool_name, lower(reason)
+    ) g
+) r
+WHERE rank <= :reasons_cap
+ORDER BY tool_name, rank
+"""
+)
+
+# Every tool of the window (not only the listed ones) with enough calls that failed at all, worst rate first.
+_PATTERNS_FAILING_SQL = (
+    _PATTERNS_WINDOW_CTE
+    + """
+SELECT tool_name, count(*)::int AS calls, (count(*) FILTER (WHERE is_error))::int AS errors
+FROM win
+GROUP BY tool_name
+HAVING count(*) >= :failing_min AND count(*) FILTER (WHERE is_error) > 0
+ORDER BY (count(*) FILTER (WHERE is_error))::float8 / count(*) DESC, count(*) DESC, tool_name
+LIMIT :failing_cap
+"""
+)
+
+# Reason coverage over every call of the window, and the wasted steps within a turn: prev_error is the is_error of
+# the turn's previous identical call (same tool, same input, by call_index), NULL for the first. A call that has one
+# is a repeat; an error after an identical error is a retry that failed again. Turnless calls have no turn to repeat
+# in.
+_PATTERNS_TOTALS_SQL = (
+    _PATTERNS_WINDOW_CTE
+    + """
+SELECT cov.calls, cov.with_reason, w.repeated_calls, w.retried_and_failed_again
+FROM (SELECT count(*)::int AS calls, count(reason)::int AS with_reason FROM win) cov
+CROSS JOIN (
+    SELECT (count(*) FILTER (WHERE prev_error IS NOT NULL))::int AS repeated_calls,
+           (count(*) FILTER (WHERE is_error AND prev_error))::int AS retried_and_failed_again
+    FROM (
+        SELECT is_error,
+               lag(is_error) OVER (PARTITION BY turn_id, tool_name, input_text ORDER BY call_index, id) AS prev_error
+        FROM win
+        WHERE turn_id IS NOT NULL
+    ) x
+) w
+"""
+)
+
+
+async def get_patterns(session: AsyncSession, agent_id: str, *, days: int) -> dict[str, Any]:
+    """Tool use over the last ``days`` days: the most used tools by kind of work with their common reasons, the
+    tools that fail most, and the wasted steps."""
+    base = {
+        "agent": agent_id,
+        "days": days,
+        "conversation_kinds": [k for k, g in WORK_KIND_GROUP.items() if g == "conversation"],
+        "task_kinds": [k for k, g in WORK_KIND_GROUP.items() if g == "task"],
+    }
+    await _set_timeout(session)
+
+    tool_rows = list(
+        (await session.execute(text(_PATTERNS_TOOLS_SQL), {**base, "tools_cap": PATTERN_TOOLS})).mappings()
+    )
+    reasons: dict[str, list[dict[str, Any]]] = {row["tool_name"]: [] for row in tool_rows}
+    if tool_rows:
+        params = {**base, "tools": list(reasons), "reasons_cap": PATTERN_REASONS}
+        for row in (await session.execute(text(_PATTERNS_REASONS_SQL), params)).mappings():
+            reasons[row["tool_name"]].append({"text": row["reason_text"], "count": row["n"]})
+
+    params = {**base, "failing_min": FAILING_MIN_CALLS, "failing_cap": FAILING_TOOLS}
+    failing = [
+        {
+            "tool": row["tool_name"],
+            "calls": row["calls"],
+            "errors": row["errors"],
+            "error_rate": row["errors"] / row["calls"],
+        }
+        for row in (await session.execute(text(_PATTERNS_FAILING_SQL), params)).mappings()
+    ]
+    totals = (await session.execute(text(_PATTERNS_TOTALS_SQL), base)).mappings().one()
+
+    return {
+        "enabled": True,
+        "window_days": days,
+        "reason_coverage": {"calls": totals["calls"], "with_reason": totals["with_reason"]},
+        "tools": [
+            {
+                "tool": row["tool_name"],
+                "lane": lane_of(row["tool_name"]),
+                "calls": row["calls"],
+                "errors": row["errors"],
+                "sessions": row["sessions"],
+                "by_kind": {k: {"turns": row[f"{k}_turns"], "calls": row[f"{k}_calls"]} for k in KINDS},
+                "reasons": reasons[row["tool_name"]],
+            }
+            for row in tool_rows
+        ],
+        "failing": failing,
+        "wasted": {
+            "repeated_calls": totals["repeated_calls"],
+            "retried_and_failed_again": totals["retried_and_failed_again"],
+        },
+    }
