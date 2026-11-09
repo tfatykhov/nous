@@ -1902,8 +1902,10 @@ export interface WorkSession {
   context_kind: string | null;
   title: string;
   first_message: string | null;
+  /** The last turn's message; null for a one-turn session. */
+  last_message: string | null;
   started_at: string;
-  /** Latest end (or start) of the session's turns; the code never returns null here. */
+  /** Latest end (or start) of the session's turns; the code never returns null here. The list sorts by it. */
   ended_at: string;
   turns: number;
   tool_calls: number;
@@ -1921,7 +1923,7 @@ export interface WorkSessionsData {
   counts: Record<WorkKind, { sessions: number; turns: number }>;
   tool_names: string[];
   sessions: WorkSession[];
-  /** Keyset cursor `"<started_at ISO>|<session_id>"` for `before`; null on the last page. */
+  /** Keyset cursor `"<ended_at ISO>|<session_id>"` for `before`; null on the last page. */
   next_before: string | null;
 }
 

@@ -247,8 +247,9 @@ def disabled_sessions(days: int) -> dict[str, Any]:
 
 # A session is the window's turns of one non-NULL session_id. Its calls are the tool_call_log rows of those turns
 # (joined on turn_id), so a call with no turn row and a turn with no session are never counted. Its kind, first
-# message and parent come from its first turn (started_at, then id). Unreferenced CTEs are not run. tool_counts is
-# MATERIALIZED so the page's per-row tools lookup reads the aggregate once instead of re-aggregating every call.
+# message and parent come from its first turn (started_at, then id), its last message from its last turn.
+# Unreferenced CTEs are not run. tool_counts is MATERIALIZED so the page's per-row tools lookup reads the aggregate
+# once instead of re-aggregating every call.
 _SESSIONS_CTE = f"""
 WITH turns AS (
     SELECT t.id, t.session_id, t.parent_session_id, t.work_kind, t.context_kind, t.trigger_text,
@@ -262,6 +263,11 @@ first_turn AS (
            {_kind_case_sql("work_kind")} AS kind
     FROM turns
     ORDER BY session_id, started_at, id
+),
+last_turn AS (
+    SELECT DISTINCT ON (session_id) session_id, trigger_text
+    FROM turns
+    ORDER BY session_id, started_at DESC, id DESC
 ),
 calls AS (
     SELECT c.turn_id, c.call_index, c.tool_name, c.input_text, c.is_error, c.ledger_entry_id, c.subtask_id,
@@ -309,11 +315,13 @@ grouped AS (
 listed AS (
     SELECT g.session_id, g.started_at, g.ended_at, g.turns, g.f_many,
            f.parent_session_id, f.work_kind, f.context_kind, f.trigger_text AS first_message, f.kind,
+           CASE WHEN g.turns > 1 THEN lt.trigger_text END AS last_message,
            coalesce(cs.tool_calls, 0) AS tool_calls, coalesce(cs.errors, 0) AS errors,
            coalesce(cs.f_error, false) AS f_error, (r.session_id IS NOT NULL) AS f_repeat,
            coalesce(cs.f_asked, false) AS f_asked, coalesce(cs.f_changed, false) AS f_changed
     FROM grouped g
     JOIN first_turn f ON f.session_id = g.session_id
+    JOIN last_turn lt ON lt.session_id = g.session_id
     LEFT JOIN call_stats cs ON cs.session_id = g.session_id
     LEFT JOIN repeats r ON r.session_id = g.session_id
 ),
@@ -347,7 +355,10 @@ def _page_sql(*, tool: bool, q: bool, lens: str | None, before: bool) -> str:
             "EXISTS (SELECT 1 FROM tool_counts tc WHERE tc.session_id = titled.session_id AND tc.tool_name = :tool)"
         )
     if q:
-        where.append("(title ILIKE :q ESCAPE '\\' OR first_message ILIKE :q ESCAPE '\\')")
+        where.append(
+            "(title ILIKE :q ESCAPE '\\' OR EXISTS (SELECT 1 FROM turns t "
+            "WHERE t.session_id = titled.session_id AND t.trigger_text ILIKE :q ESCAPE '\\'))"
+        )
     if lens == "error" and tool:
         # A tool and the error lens together mean that tool failed, not that some other call of the session did.
         where.append(
@@ -357,7 +368,7 @@ def _page_sql(*, tool: bool, q: bool, lens: str | None, before: bool) -> str:
     elif lens is not None:
         where.append(_LENS_COLUMN[lens])
     if before:
-        where.append("(started_at, session_id) < (CAST(:before_ts AS timestamptz), CAST(:before_key AS text))")
+        where.append("(ended_at, session_id) < (CAST(:before_ts AS timestamptz), CAST(:before_key AS text))")
     return (
         _SESSIONS_CTE
         + """
@@ -367,7 +378,7 @@ FROM (
     WHERE """
         + "\n      AND ".join(where)
         + """
-    ORDER BY started_at DESC, session_id DESC
+    ORDER BY ended_at DESC, session_id DESC
     LIMIT :fetch
 ) p
 LEFT JOIN LATERAL (
@@ -376,7 +387,7 @@ LEFT JOIN LATERAL (
     FROM (SELECT tc.tool_name, tc.calls FROM tool_counts tc WHERE tc.session_id = p.session_id
           ORDER BY tc.calls DESC, tc.tool_name LIMIT :tools_cap) x
 ) tl ON true
-ORDER BY p.started_at DESC, p.session_id DESC
+ORDER BY p.ended_at DESC, p.session_id DESC
 """
     )
 
@@ -390,6 +401,7 @@ def _session_out(row: Mapping[str, Any]) -> dict[str, Any]:
         "context_kind": row["context_kind"],
         "title": row["title"],
         "first_message": row["first_message"],
+        "last_message": row["last_message"],
         "started_at": _iso(row["started_at"]),
         "ended_at": _iso(row["ended_at"]),
         "turns": row["turns"],
@@ -415,7 +427,8 @@ async def get_sessions(
     limit: int,
     before: tuple[datetime, str] | None,
 ) -> dict[str, Any]:
-    """The Work list: the sessions of the last ``days`` days, newest first, ``limit`` per page after ``before``.
+    """The Work list: the sessions of the last ``days`` days, latest activity (``ended_at``) first, ``limit`` per
+    page after ``before``.
 
     ``counts`` and ``tool_names`` cover the whole window and ignore ``kind``, ``tool``, ``q`` and ``lens``.
     """
@@ -455,7 +468,7 @@ async def get_sessions(
     next_before = None
     if len(rows) > limit:
         rows = rows[:limit]
-        next_before = format_cursor(rows[-1]["started_at"], rows[-1]["session_id"])
+        next_before = format_cursor(rows[-1]["ended_at"], rows[-1]["session_id"])
     return {
         "enabled": True,
         "window_days": days,

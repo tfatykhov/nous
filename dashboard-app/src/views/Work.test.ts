@@ -11,7 +11,7 @@ const CURSOR = '2026-11-07T00:07:00.123456+00:00|sess/two+x';
 
 const session = (id: string, title: string, over: Record<string, unknown> = {}) => ({
   session_id: id, parent_session_id: null, kind: 'conversation', work_kind: 'interactive', context_kind: null,
-  title, first_message: `first of ${id}`, started_at: '2026-11-07T00:07:00+00:00', ended_at: '2026-11-07T00:30:00+00:00',
+  title, first_message: `first of ${id}`, last_message: null, started_at: '2026-11-07T00:07:00+00:00', ended_at: '2026-11-07T00:30:00+00:00',
   turns: 4, tool_calls: 9, errors: 0,
   tools: [
     { tool: 'db_query', calls: 3, lane: 'live' },
@@ -75,7 +75,7 @@ describe('Work sessions list', () => {
     expect(within(row).getByText('Conversation')).toBeTruthy();   // kind pill
     expect(within(row).getByText('db_query ×3')).toBeTruthy();    // tool chip with a text label
     expect(within(row).getByText('recall_deep')).toBeTruthy();
-    expect(row.textContent).toContain('Nov 7 00:07 UTC');         // start time
+    expect(row.textContent).toContain('Nov 7 00:30 UTC');         // last activity (ended_at)
     expect(row.textContent).toContain('4 turns');
     const dot = within(row).getByText('db_query ×3').querySelector('.dot') as HTMLElement;
     expect(dot.getAttribute('aria-hidden')).toBe('true');
@@ -282,8 +282,25 @@ describe('Work sessions list', () => {
     await screen.findByText('Gap Scout status check');
     for (const d of Array.from(container.querySelectorAll('.dot'))) expect(d.getAttribute('aria-hidden')).toBe('true');
     const row = screen.getByText('Gap Scout status check').closest('li')!;
-    expect(row.textContent).toContain('Started');
-    expect(within(row).getByText('Started').className).toContain('vh');
+    expect(row.textContent).toContain('Last active');
+    expect(within(row).getByText('Last active').className).toContain('vh');
+  });
+
+  it('shows the last activity time and, for a continued session, its latest message as text', async () => {
+    const long = session('s-long', 'Tracking ID: is it running?', { last_message: HOSTILE });
+    respond = () => ({ body: { ...PAGE1, sessions: [long], next_before: null } });
+    const { container } = render(Work);
+    await screen.findByText('Tracking ID: is it running?');
+    const row = screen.getByText('Tracking ID: is it running?').closest('li')!;
+    expect(row.querySelector('.when')!.textContent).toContain('00:30'); // ended_at, not started_at (00:07)
+    expect(row.querySelector('.latest')!.textContent).toBe(`Latest: ${HOSTILE}`);
+    expect(container.querySelector('img')).toBeNull();
+  });
+
+  it('leaves the latest line out of a one-turn session', async () => {
+    const { container } = render(Work);
+    await screen.findByText('Gap Scout status check');
+    expect(container.querySelector('.latest')).toBeNull();
   });
 
   it('shows Loading… while a refetch is in flight', async () => {
