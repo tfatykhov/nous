@@ -92,8 +92,8 @@ describe('fmtTokens rounding at the unit boundary', () => {
 
 describe('fmtTime', () => {
   it('formats a UTC timestamp', () => {
-    expect(fmtTime('2026-11-07T00:07:12.5+00:00')).toBe('Nov 7, 00:07 UTC');
-    expect(fmtTime('2026-10-27T13:45:00Z')).toBe('Oct 27, 13:45 UTC');
+    expect(fmtTime('2026-11-07T00:07:12.5+00:00')).toBe('Nov 7 00:07 UTC');
+    expect(fmtTime('2026-10-27T13:45:00Z')).toBe('Oct 27 13:45 UTC');
   });
   it('shows a dash for null, empty or unparsable input, never Invalid Date', () => {
     for (const v of [null, '', 'not a date', '2026-13-45']) {
@@ -117,5 +117,12 @@ describe('parseWorkSub', () => {
     for (const sub of ['s/%E0%A4%A', 's/ok/%', 's/', 's//x', 'nope', 'patterns/x', 's/a/b/c']) {
       expect(parseWorkSub(sub)).toEqual({ view: 'notfound' });
     }
+  });
+});
+
+describe('fmtTime agrees with the harness timestamp format', () => {
+  it('prints what fmtUtc prints for a valid timestamp', async () => {
+    const { fmtUtc } = await import('./harness');
+    for (const iso of ['2026-11-07T00:07:12.5+00:00', '2026-09-25T14:31:00Z']) expect(fmtTime(iso)).toBe(fmtUtc(iso));
   });
 });

@@ -70,7 +70,7 @@ describe('Work sessions list', () => {
     expect(within(row).getByText('Conversation')).toBeTruthy();   // kind pill
     expect(within(row).getByText('db_query ×3')).toBeTruthy();    // tool chip with a text label
     expect(within(row).getByText('recall_deep')).toBeTruthy();
-    expect(row.textContent).toContain('Nov 7, 00:07 UTC');         // start time
+    expect(row.textContent).toContain('Nov 7 00:07 UTC');         // start time
     expect(row.textContent).toContain('4 turns');
     const dot = within(row).getByText('db_query ×3').querySelector('.dot') as HTMLElement;
     expect(dot.getAttribute('aria-hidden')).toBe('true');
@@ -164,6 +164,89 @@ describe('Work sessions list', () => {
     expect(lastParams().get('before')).toBe(CURSOR);
     expect(screen.getByText('Gap Scout status check')).toBeTruthy();   // first page stays
     expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull();
+  });
+
+  it('keeps a trailing space typed in the search box when the committed query comes back', async () => {
+    render(Work);
+    await screen.findByText('Gap Scout status check');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const box = screen.getByLabelText('Search') as HTMLInputElement;
+    await fireEvent.input(box, { target: { value: 'gap ' } });
+    await vi.advanceTimersByTimeAsync(350);
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    vi.useRealTimers();
+    await waitFor(() => expect(lastParams().get('q')).toBe('gap'));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(box.value).toBe('gap ');
+  });
+
+  it('a filter click during the search debounce keeps the typed text, and the later commit sends it', async () => {
+    render(Work);
+    await screen.findByText('Gap Scout status check');
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const box = screen.getByLabelText('Search') as HTMLInputElement;
+    await fireEvent.input(box, { target: { value: 'abc' } });
+    await vi.advanceTimersByTimeAsync(100);
+    await fireEvent.click(screen.getByRole('button', { name: 'Tasks' }));
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    await vi.advanceTimersByTimeAsync(10);
+    expect(box.value).toBe('abc');
+    await vi.advanceTimersByTimeAsync(400);
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    vi.useRealTimers();
+    await waitFor(() => expect(lastParams().get('q')).toBe('abc'));
+    expect(lastParams().get('kind')).toBe('task');
+    expect(box.value).toBe('abc');
+  });
+
+  it('Load more twice keeps every row of every page', async () => {
+    const cursor2 = '2026-11-06T00:00:00+00:00|s-three';
+    respond = (url) => {
+      const before = new URL(url, 'http://x').searchParams.get('before');
+      if (before === CURSOR) return { body: { ...PAGE1, sessions: [session('s-three', 'Third page row')], next_before: cursor2 } };
+      if (before === cursor2) return { body: { ...PAGE1, sessions: [session('s-four', 'Fourth page row')], next_before: null } };
+      return { body: PAGE1 };
+    };
+    render(Work);
+    await screen.findByText('Gap Scout status check');
+    await fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    await screen.findByText('Third page row');
+    await fireEvent.click(screen.getByRole('button', { name: 'Load more' }));
+    await screen.findByText('Fourth page row');
+    for (const t of ['Gap Scout status check', HOSTILE, 'Third page row', 'Fourth page row']) {
+      expect(screen.getByText(t)).toBeTruthy();
+    }
+  });
+
+  it('filter clicks replace the history entry instead of pushing one', async () => {
+    render(Work);
+    await screen.findByText('Gap Scout status check');
+    const n = history.length;
+    await fireEvent.click(screen.getByRole('button', { name: 'Tasks' }));
+    await fireEvent.click(screen.getByRole('button', { name: 'A tool failed' }));
+    await waitFor(() => expect(lastParams().get('lens')).toBe('error'));
+    expect(history.length).toBe(n);
+  });
+
+  it('gives the legend dots and the time and turns screen-reader context', async () => {
+    const { container } = render(Work);
+    await screen.findByText('Gap Scout status check');
+    for (const d of Array.from(container.querySelectorAll('.dot'))) expect(d.getAttribute('aria-hidden')).toBe('true');
+    const row = screen.getByText('Gap Scout status check').closest('li')!;
+    expect(row.textContent).toContain('Started');
+    expect(within(row).getByText('Started').className).toContain('vh');
+  });
+
+  it('shows Loading… while a refetch is in flight', async () => {
+    render(Work);
+    await screen.findByText('Gap Scout status check');
+    expect(screen.queryByText('Loading…')).toBeNull();
+    let release: (v: Response) => void = () => {};
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((res) => { release = res; })));
+    await fireEvent.click(screen.getByRole('button', { name: 'Tasks' }));
+    expect(await screen.findByText('Loading…')).toBeTruthy();
+    release({ ok: true, status: 200, json: async () => PAGE1 } as Response);
+    await waitFor(() => expect(screen.queryByText('Loading…')).toBeNull());
   });
 
   it('no Load more on the last page', async () => {

@@ -129,15 +129,25 @@
     if (f.lens) query.lens = f.lens;
     if (f.tool) query.tool = f.tool;
     if (f.q) query.q = f.q;
-    location.hash = routeHref('work', '', query);
+    location.replace(routeHref('work', '', query)); // a filter is not a page: Back leaves the screen
   }
 
   let qText = $state('');
-  $effect(() => { qText = filters?.q ?? ''; });
+  // Re-sync the box only when the URL's q itself changed (Back, a shared link), never on another filter's change,
+  // and without reading qText here: that would wipe what is being typed.
+  let syncedQ = '';
+  $effect(() => {
+    const q = filters?.q ?? '';
+    if (q !== syncedQ) { syncedQ = q; qText = q; }
+  });
   let timer: ReturnType<typeof setTimeout> | null = null;
   function onSearch() {
     if (timer) clearTimeout(timer);
-    timer = setTimeout(() => { timer = null; go({ q: qText.trim() }); }, 300);
+    timer = setTimeout(() => {
+      timer = null;
+      syncedQ = qText.trim(); // the URL will echo this back: not a change to re-sync from
+      go({ q: syncedQ });
+    }, 300);
   }
   onDestroy(() => { if (timer) clearTimeout(timer); });
 
@@ -168,6 +178,7 @@
   </div>
   <div class="head-right">
     <button type="button" class="refresh" onclick={refresh}>Refresh</button>
+    {#if $store.loading}<span class="loading" role="status">Loading…</span>{/if}
     <StaleBadge state={$store} />
   </div>
 </header>
@@ -208,7 +219,7 @@
   {#if sessions.length === 0}
     <p class="empty">No sessions match.</p>
   {:else}
-    <ul class="sessions">
+    <ul class="sessions" class:dim={$store.loading}>
       {#each sessions as s (s.session_id)}
         <li>
           <a class="row" href={routeHref('work', ['s', s.session_id])}>
@@ -218,7 +229,7 @@
             </span>
             <span class="meta">
               <span class="kind kind-{s.kind}">{KIND_LABEL[s.kind] ?? s.kind}</span>
-              <span class="when">{fmtTime(s.started_at)}</span>
+              <span class="when"><span class="vh">Started </span>{fmtTime(s.started_at)}</span>
               <span class="turns">{s.turns} {s.turns === 1 ? 'turn' : 'turns'}</span>
             </span>
             <span class="tools">
@@ -232,10 +243,10 @@
     </ul>
     <div class="legend">
       <span>Dot colour is the kind of tool:</span>
-      <span><i class="dot" style:background={laneColor('memory')}></i>memory</span>
-      <span><i class="dot" style:background={laneColor('live')}></i>live state</span>
-      <span><i class="dot" style:background={laneColor('workspace')}></i>workspace</span>
-      <span><i class="dot" style:background={laneColor('acts')}></i>acts on the world</span>
+      <span><i class="dot" aria-hidden="true" style:background={laneColor('memory')}></i>memory</span>
+      <span><i class="dot" aria-hidden="true" style:background={laneColor('live')}></i>live state</span>
+      <span><i class="dot" aria-hidden="true" style:background={laneColor('workspace')}></i>workspace</span>
+      <span><i class="dot" aria-hidden="true" style:background={laneColor('acts')}></i>acts on the world</span>
       <span class="count">Showing {sessions.length} {sessions.length === 1 ? 'session' : 'sessions'}</span>
     </div>
     {#if cursor !== null}
@@ -291,6 +302,9 @@
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
   .legend .count { margin-left: auto; }
   .more { display: flex; align-items: center; gap: 0.75rem; }
+  .loading { color: var(--muted); font-size: 0.8125rem; }
+  .sessions.dim { opacity: 0.6; }
+  .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
   .err { color: var(--red); font-size: 0.875rem; }
   @media (max-width: 768px) {
     a.row { grid-template-columns: minmax(0, 1fr); }

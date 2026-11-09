@@ -1,4 +1,5 @@
 // F108 Work and Model calls screens: tool lanes and the formatters they share.
+import { fmtUtc } from './harness';
 
 /**
  * A tool lane (what the tool touches) to its colour, from the mockups. The lane names are the endpoints'
@@ -32,16 +33,9 @@ export function fmtTokens(n: number | null): string {
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
-/** `"Nov 7, 00:07 UTC"` from a UTC ISO timestamp; `"—"` for null, empty or unparsable input (never "Invalid Date"). */
+/** `"Nov 7 00:07 UTC"` from a UTC ISO timestamp, the same text as the harness screens (`fmtUtc`); `"—"` for null, empty or unparsable input. */
 export function fmtTime(iso: string | null): string {
-  if (!iso) return '—';
-  const t = Date.parse(iso);
-  if (Number.isNaN(t)) return '—';
-  const d = new Date(t);
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
+  return fmtUtc(iso);
 }
 
 /** One chip per tool, in first-seen order, its calls summed: `"bash ×3"` when called more than once. */
