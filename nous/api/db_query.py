@@ -238,18 +238,18 @@ def _escape(text: str) -> str:
 
 def cell_window() -> int:
     """How many characters of each cell the server sends: four clips and two scan pads. A value that fits arrives
-    whole and is redacted whole. A longer one is cut there, and the two pads leave room for the three scans
-    ``_render`` settles a cut cell with. It is never narrower than the four clips and one pad it replaced, so a cell
-    that once arrived whole still does: the cut path cannot vouch for a labelled value longer than the pad
-    (``detail_text`` says why)."""
+    whole and is redacted whole. A longer one is cut there and redacted over the whole window (``_render``); the
+    window less one pad, which ``_render`` compares against, is the four clips and one pad the code before #874
+    fetched and redacted. So no window is narrower than before, and a cell that once arrived whole still does."""
     return 4 * MAX_CELL_CHARS + 2 * redaction_scan_pad()
 
 
 def _render(cell: Cell) -> str:
     """A cell as shown: redacted first, then clipped to ``MAX_CELL_CHARS``, so a secret the clip would split is
     masked whole. A cell the server cut ends inside its value, perhaps inside a secret that then matches no
-    pattern: only the head that scans a pad apart agree on inside the window is shown (``redacted_head``), so the
-    pad is dropped in raw characters and masks that shrink the window cannot empty the preview."""
+    pattern: the whole window is redacted, and only the start that agrees with the window less its last pad is
+    shown (``redacted_head``). Nothing the whole window's redaction masks is shown, nothing from the window's last
+    pad is, and masks that shrink the window cannot empty the preview."""
     if cell.text is None:
         return "NULL"
     total = cell.length if cell.length is not None else len(cell.text)

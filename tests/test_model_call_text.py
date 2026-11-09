@@ -242,6 +242,23 @@ def test_a_block_that_is_one_base64_run_keeps_its_prefix_and_mask(scan_pad, size
     assert _head(body) == "Here is the file:\n[REDACTED_BLOB]"
 
 
+@pytest.mark.parametrize("size", ["within_two_pads", "past_two_pads"])
+def test_a_block_never_shows_a_quoted_value_the_base_window_masked(scan_pad, size):
+    """Before #874 a block over the cap was redacted over its first max_chars + pad characters. A quoted value whose
+    closing quote lies anywhere in that window was masked then, so it must be masked now."""
+    cap = 1000
+    head = 'password: "'
+    for quote_at in range(300, cap + 2 * scan_pad + 400, 97):
+        value = head + ("sensitive words " * 1000)[: quote_at - len(head)] + '"; '
+        raw = value + "ordinary prose " * ((cap + 2 * scan_pad + (10 if size == "within_two_pads" else 3000)) // 15)
+        if size == "within_two_pads":
+            raw = raw[: cap + 2 * scan_pad]
+        if "sensitive" in ledger_store.redact_output(raw[: cap + scan_pad]):
+            continue  # the base left it raw too (its quote was past the base window)
+        _, body = prepare_block(raw, cap)
+        assert "sensitive" not in body, (quote_at, len(raw), body[:80])
+
+
 def test_a_periodic_own_secret_in_a_block_leaves_no_fragment(monkeypatch, scan_pad):
     """A self-overlapping secret run on past a whole copy: str.replace left the overhang raw, within the cap or over
     it."""

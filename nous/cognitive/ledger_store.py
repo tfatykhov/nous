@@ -347,25 +347,26 @@ def redaction_scan_pad() -> int:
     return max([_DETAIL_SCAN_PAD, *map(len, _own_secrets())])
 
 
-def _settled_side(text: str, half: int, pad: int, tail: bool, third: bool = True) -> str:
+def _settled_side(text: str, half: int, pad: int, tail: bool) -> str:
     """Up to ``half`` characters of one side of the redacted ``text`` (the head, or with ``tail`` the tail) that text
     past the scanned window cannot change. Each scan is a window from this side's end of ``text`` inward: ``near``
-    ``half`` characters long, ``far`` a pad longer, and (unless ``third`` is False) a third a pad longer still.
+    ``half`` characters long, ``far`` a pad longer, and a third a pad longer still. ``text`` must be at least
+    ``half`` + 2 * pad long.
 
-    Own secrets, by position. Their stretches (``_own_secret_spans``) are found once, over the longest window, and
+    Own secrets, by position. Their stretches (``_own_secret_spans``) are found once, over the third window, and
     each scan masks the stretches that fall in it, cut at its edge. An own secret is at most pad long (pad is at
-    least the longest spelling). The longest window runs to the text's own end on one side and, on the other, at
-    least a pad past the edge of every scan whose start can be kept (``far`` when there is a third scan, else
-    ``near``). So it holds every occurrence that covers a character of those scans, and in them every such character
-    is masked, wherever a run of a periodic secret begins or ends. Only the longest window's inner edge can hold part
-    of one, and that scan is only compared against.
+    least the longest spelling). The third window runs to the text's own end on one side and a pad past ``far``'s
+    edge on the other, so it holds every occurrence that covers a character of ``near`` or ``far``, and in those two
+    every such character is masked, wherever a run of a periodic secret begins or ends. Only the third window's
+    inner edge can hold part of one, and that scan is only compared against.
 
     The patterns, by agreement. Two scans a pad apart keep only the start they agree on: a token the shorter one's
     edge cuts, the longer one sees whole and masks, so they differ from its start. When that leaves less than
     ``half`` (masks shrank it, or a token runs across the edge), ``far`` is settled against the third scan the same
-    way and the longer result is kept: both are prefixes of ``far``. So the kept side is always a prefix of a scan
-    whose own secrets are all masked, and it holds no character of one."""
-    reach = half + (2 if third else 1) * pad
+    way and the longer result is kept. Both are prefixes of ``far``, so the kept side is always a prefix of ``far``:
+    it holds no character of an own secret, and nothing ``far``'s redaction masks. ``far`` is the window the code
+    before #874 redacted for each side (``half`` + pad), so nothing it masked is shown now."""
+    reach = half + 2 * pad
     region = text[max(0, len(text) - reach) :] if tail else text[:reach]
     spans = _own_secret_spans(region)
 
@@ -379,7 +380,7 @@ def _settled_side(text: str, half: int, pad: int, tail: bool, third: bool = True
 
     near, far = scan(half), scan(half + pad)
     kept = os.path.commonprefix([near, far])
-    if third and len(kept) < half:
+    if len(kept) < half:
         kept = max(kept, os.path.commonprefix([far, scan(half + 2 * pad)]), key=len)
     kept = kept[:half]
     return kept[::-1] if tail else kept
@@ -392,19 +393,31 @@ def redacted_head(text: str, chars: int, *, complete: bool = True) -> str:
     3 * ``chars`` + 3 * pad characters and masks that shrink it cannot empty it (``detail_text`` names the one case
     that can).
 
-    ``complete`` False: ``text`` is a prefix someone else cut (``db_query``'s server-side window), and its end may
-    split a secret, so nothing within a pad of that end is ever kept. Every scan stays inside ``text``: ``chars``
-    shrinks to ``len(text)`` - pad when the window is narrower than ``chars`` + pad (nothing is kept when that
-    leaves nothing), and the third scan runs only when ``chars`` + 2 * pad fits. A caller fetches ``chars`` + 2 * pad
-    characters to keep all of ``chars`` under dense masking."""
+    ``complete`` False: ``text`` is a window someone else cut from a longer value (``db_query``'s server-side cut),
+    and its end may split a secret. Two scans: the WHOLE window, and the window less its last pad characters; the
+    kept head is the start they agree on, cut to ``chars``. Own secrets are masked by position in both, from
+    stretches found over the whole window.
+
+    - It is a prefix of the whole window's redaction, which is what the code before #874 redacted and showed the
+      start of. So nothing that redaction masks is shown, wherever in the window a pattern's closing context lies.
+    - It holds nothing from the window's last pad characters: the shorter scan has none of them, and a token that
+      runs into them is seen whole only by the longer scan, so the two differ from its start. A secret split by the
+      cut lies within those characters (no own secret is longer than the pad).
+    - It holds no character of an own secret: it is a prefix of the shorter scan, which ends a pad before the
+      window's end, so its every own-secret character is masked.
+    - Masks shrink both scans alike, so dense masking does not empty it. The regexes see 2 * ``len(text)``
+      characters; the caller bounds the window."""
     pad = redaction_scan_pad()
     if complete and len(text) <= chars + 2 * pad:
         return _redact_detail(text)[:chars]
     if not complete:
-        chars = min(chars, len(text) - pad)
-        if chars <= 0:
+        if len(text) <= pad:
             return ""
-        return _settled_side(text, chars, pad, tail=False, third=chars + 2 * pad <= len(text))
+        spans = _own_secret_spans(text)
+        inner = len(text) - pad
+        whole = redact_error_text(_masked(text, spans))
+        shorter = redact_error_text(_masked(text[:inner], [(s, min(e, inner)) for s, e in spans if s < inner]))
+        return os.path.commonprefix([whole, shorter])[:chars]
     return _settled_side(text, chars, pad, tail=False)
 
 

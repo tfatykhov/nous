@@ -321,6 +321,37 @@ def test_a_labelled_password_the_old_window_held_whole_is_masked(scan_pad):
         assert '{"password": [REDACTED]}' in line
 
 
+def _cut_line(value: str) -> str:
+    """``value`` as one cell the server cut at its window, rendered."""
+    assert len(value) > db_query.cell_window()
+    return format_result(["c"], [[Cell(value[: db_query.cell_window()], len(value))]], truncated=False).splitlines()[1]
+
+
+def test_codex_cut_cell_with_a_quoted_password_is_masked(scan_pad):
+    """Codex on #874: the closing quote sits inside the fetched window but past the first scans. The old code
+    redacted the whole window and masked the password; scans of 500 and 756 characters both missed the quote and
+    agreed on the raw password."""
+    line = _cut_line('password: "' + "sensitive words " * 80 + '"; ' + "ordinary prose " * 500)
+    preview = line.partition("…[+")[0]
+    assert "sensitive" not in line and "[REDACTED]" in preview, line[:120]
+
+
+@pytest.mark.parametrize("where", ["in_the_head", "before_the_last_pad", "in_the_last_pad"])
+def test_a_quoted_value_closed_anywhere_in_the_window_is_masked(scan_pad, where):
+    window = db_query.cell_window()
+    quote_at = {
+        "in_the_head": 300,
+        "before_the_last_pad": (MAX_CELL_CHARS + window - scan_pad) // 2,
+        "in_the_last_pad": window - scan_pad // 2,
+    }[where]
+    head = 'password: "'
+    value = head + ("sensitive words " * 1000)[: quote_at - len(head)] + '"; ' + "ordinary prose " * 1000
+    assert value.index('"', len(head)) == quote_at
+    line = _cut_line(value)
+    preview = line.partition("…[+")[0]
+    assert "sensitive" not in line and preview.startswith("password"), line[:120]
+
+
 def test_a_periodic_own_secret_in_a_cell_leaves_no_fragment(monkeypatch, scan_pad):
     """A self-overlapping secret run on past a whole copy: str.replace left the overhang raw, whole or cut."""
     password = "s3cr3t! " * 8
