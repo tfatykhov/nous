@@ -88,6 +88,14 @@ describe('Work sessions list', () => {
     expect(container.querySelector('tr')).toBeNull();
   });
 
+  it('two filter writes in one tick keep both', async () => {
+    render(Work);
+    await screen.findByText('Gap Scout status check');
+    fireEvent.click(screen.getByRole('button', { name: 'Tasks' }));
+    fireEvent.click(screen.getByRole('button', { name: 'A tool failed' }));
+    expect(location.hash).toBe('#/work?kind=task&lens=error');
+  });
+
   it('kind buttons set aria-pressed and refetch with kind=', async () => {
     render(Work);
     await screen.findByText('Gap Scout status check');

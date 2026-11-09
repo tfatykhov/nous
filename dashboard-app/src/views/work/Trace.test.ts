@@ -155,7 +155,7 @@ describe('Work trace', () => {
     const { container } = render(Trace, { sessionId: 'sess/one' });
     await screen.findByText('Reply 1');
     const link = within(container.querySelector('header') as HTMLElement).getByRole('link', { name: 'all model calls of this conversation' });
-    expect(link.getAttribute('href')).toBe('#/model-calls?session_id=sess%2Fone');
+    expect(link.getAttribute('href')).toBe('#/model-calls?session_id=sess%2Fone&days=30');
   });
 
   it('with no model-calls route the trace links nothing to it', async () => {
@@ -285,12 +285,12 @@ describe('Work trace', () => {
     await screen.findByText('Reply 1');
     const arts = Array.from(container.querySelectorAll('article.turn')) as HTMLElement[];
     const n = within(arts[0]).getByRole('link', { name: '2 main-loop model calls' });
-    expect(n.getAttribute('href')).toBe(`#/model-calls?turn_id=${T1}`);
+    expect(n.getAttribute('href')).toBe(`#/model-calls?turn_id=${T1}&days=30`);
     expect(arts[0].textContent).not.toMatch(/\d model calls/);
     const all = within(arts[0]).getByRole('link', { name: 'all model calls of this conversation' });
-    expect(all.getAttribute('href')).toBe('#/model-calls?session_id=sess%2Fone');
+    expect(all.getAttribute('href')).toBe('#/model-calls?session_id=sess%2Fone&days=30');
     expect(Array.from(arts[0].querySelectorAll('a')).map((a) => a.getAttribute('href'))).toEqual(
-      expect.arrayContaining(['#/model-calls/c/mc-1', '#/model-calls/c/mc-2']));
+      expect.arrayContaining(['#/model-calls/c/mc-1?days=30', '#/model-calls/c/mc-2?days=30']));
     expect(arts[0].textContent).toContain('54.5K');
     expect(within(arts[1]).queryByRole('link', { name: /main-loop/ })).toBeNull();
   });

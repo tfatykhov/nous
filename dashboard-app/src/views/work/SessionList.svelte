@@ -29,12 +29,7 @@
 
   type Filters = { kind: string; lens: string; tool: string; q: string };
 
-  // Route, sub and query are read together, and never written. A filter change goes through the hash.
-  let filters = $derived.by((): Filters | null => {
-    const route = $currentRoute;
-    const sub = $currentSub;
-    const query = $currentQuery;
-    if (route !== 'work' || sub.replace(/\/+$/, '') !== '') return null;
+  function readFilters(query: URLSearchParams): Filters {
     const kind = query.get('kind') ?? 'all';
     const lens = query.get('lens') ?? '';
     return {
@@ -43,6 +38,15 @@
       tool: query.get('tool') ?? '',
       q: query.get('q') ?? '',
     };
+  }
+
+  // Route, sub and query are read together, and never written. A filter change goes through the hash.
+  let filters = $derived.by((): Filters | null => {
+    const route = $currentRoute;
+    const sub = $currentSub;
+    const query = $currentQuery;
+    if (route !== 'work' || sub.replace(/\/+$/, '') !== '') return null;
+    return readFilters(query);
   });
 
   function apiQuery(f: Filters): string {
@@ -134,7 +138,9 @@
 
   // Each control writes the hash; the router turns that into a new query and the effect above refetches.
   function go(patch: Partial<Filters>) {
-    const f = { ...(filters ?? { kind: 'all', lens: '', tool: '', q: '' }), ...patch };
+    // Built from the hash itself, not the derived filters: two writes in one tick must both land.
+    const live = new URLSearchParams(location.hash.split('?')[1] ?? '');
+    const f = { ...readFilters(live), ...patch };
     const query: Record<string, string> = {};
     if (f.kind !== 'all') query.kind = f.kind;
     if (f.lens) query.lens = f.lens;

@@ -153,7 +153,7 @@
   });
 
   const modelCallsReady = () => (ROUTES as readonly string[]).includes('model-calls');
-  const modelCallsHref = (sub: string[] | undefined, query?: Record<string, string>) => routeHref('model-calls' as RouteName, sub, query);
+  const modelCallsHref = (sub: string[] | undefined, query?: Record<string, string>) => routeHref('model-calls' as RouteName, sub, { ...query, days: '30' }); // the Work log keeps 30 days; the list defaults to 7
   const num = (n: number) => n.toLocaleString('en-US');
   const errorsText = (n: number) => (n === 0 ? 'No errors' : plural(n, 'error', 'errors'));
 </script>
