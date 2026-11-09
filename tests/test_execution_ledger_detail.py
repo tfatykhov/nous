@@ -559,15 +559,17 @@ def test_own_secret_spans_cover_every_occurrence(monkeypatch):
         for key in [k for k in os.environ if k.startswith("NOUS_TEST_SPAN_")]:
             monkeypatch.delenv(key)
         alphabet = rng.choice(["ab", "abc", "aab"])
+        values = []
         for j in range(rng.randint(1, 3)):
             base = "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 5)))
-            value = rng.choice([(base * 20)[: rng.randint(8, 30)], "abaababaabaab"])
-            monkeypatch.setenv(f"NOUS_TEST_SPAN_{j}_TOKEN", value)
+            values.append(rng.choice([(base * 20)[: rng.randint(8, 30)], "abaababaabaab"]))
+            monkeypatch.setenv(f"NOUS_TEST_SPAN_{j}_TOKEN", values[-1])
         ledger_store._own_secrets.cache_clear()
-        secrets = ledger_store._own_secrets()
         text = "".join(rng.choice(alphabet + "x") for _ in range(rng.randint(0, 300)))
-        planted = rng.choice(secrets)
+        planted = rng.choice(values)  # only this test's values: never a real secret of the machine
         text = text[:40] + planted * rng.randint(1, 5) + planted[: rng.randint(0, len(planted))] + text[40:]
+        # the walk masks every own secret, so the brute force counts every one; the message names only this test's
+        secrets = ledger_store._own_secrets()
         every = sorted((i, i + len(s)) for s in secrets for i in range(len(text)) if text.startswith(s, i))
         want: list[tuple[int, int]] = []
         for start, end in every:
@@ -575,7 +577,7 @@ def test_own_secret_spans_cover_every_occurrence(monkeypatch):
                 want[-1] = (want[-1][0], max(want[-1][1], end))
             else:
                 want.append((start, end))
-        assert ledger_store._own_secret_spans(text) == want, (secrets, text)
+        assert ledger_store._own_secret_spans(text) == want, (values, text)
 
 
 def test_a_run_continued_past_a_whole_occurrence_is_masked_in_the_whole_text(monkeypatch):

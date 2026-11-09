@@ -342,8 +342,8 @@ def redact_structure(value: Any, cap: int | None = None) -> Any:
 
 def redaction_scan_pad() -> int:
     """How many characters at a cut edge redaction cannot vouch for: a secret
-    split by the cut matches nothing, so the last this-many characters of a
-    redacted window are dropped (the longest own secret, at least the scan pad)."""
+    split by the cut matches nothing (the longest own secret, at least the scan
+    pad). A cut text's scans reach this far past what they keep (``_settled_side``)."""
     return max([_DETAIL_SCAN_PAD, *map(len, _own_secrets())])
 
 
