@@ -1769,3 +1769,25 @@ async def test_sessions_repeat_flag_and_patterns_repeated_calls_agree(client, db
     sessions, patterns = await get_json(client), await get_json(client, PATTERNS)
     assert "repeat" in sessions["sessions"][0]["flags"]
     assert patterns["wasted"]["repeated_calls"] == 1
+
+
+def _assert_same_keys(disabled: dict, enabled: dict, where: str = "payload") -> None:
+    """Every dict of the flag-off payload has the keys of the enabled one at the same place (a dict that is null
+    when disabled, the trace's ``session``, is compared no further)."""
+    assert set(disabled) == set(enabled), where
+    for key, value in disabled.items():
+        if isinstance(value, dict) and isinstance(enabled[key], dict):
+            _assert_same_keys(value, enabled[key], f"{where}.{key}")
+
+
+@pytest.mark.postgres_only
+async def test_disabled_payloads_have_the_enabled_keys(client, db, agent_id, cleanup):
+    await insert_turn(db, agent_id, "sess-K", started_at=_hour_ago())
+    pairs = {
+        "sessions": (wv.disabled_sessions(7), await get_json(client)),
+        "trace": (wv.disabled_trace(), await get_json(client, trace_path("sess-K"))),
+        "patterns": (wv.disabled_patterns(7), await get_json(client, PATTERNS)),
+    }
+    for name, (disabled, enabled) in pairs.items():
+        assert enabled["enabled"] is True and disabled["enabled"] is False, name
+        _assert_same_keys(disabled, enabled, name)
