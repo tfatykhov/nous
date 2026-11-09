@@ -258,6 +258,7 @@ async def insert_model_call(
     cache_read: int | None = 50,
     output_tokens: int | None = 20,
     started_at: datetime | None = None,
+    cache_write: int | None = None,
 ) -> uuid.UUID:
     """One ``model_call_log`` row; returns its id. ``input_total`` is the table's generated column."""
     async with db.engine.begin() as conn:
@@ -265,8 +266,9 @@ async def insert_model_call(
             await conn.execute(
                 text(
                     "INSERT INTO nous_system.model_call_log (agent_id, purpose, label_source, call_kind, model, "
-                    "session_id, turn_id, status, input_uncached, cache_read, output_tokens, started_at) "
-                    "VALUES (:a, :purpose, 'explicit', 'call', :model, :s, :t, :status, :uncached, :read, "
+                    "session_id, turn_id, status, input_uncached, cache_read, cache_write, output_tokens, "
+                    "started_at) "
+                    "VALUES (:a, :purpose, 'explicit', 'call', :model, :s, :t, :status, :uncached, :read, :write, "
                     ":out, :start) RETURNING id"
                 ),
                 {
@@ -278,6 +280,7 @@ async def insert_model_call(
                     "status": status,
                     "uncached": input_uncached,
                     "read": cache_read,
+                    "write": cache_write,
                     "out": output_tokens,
                     "start": started_at or datetime.now(UTC),
                 },
@@ -1148,13 +1151,38 @@ async def test_trace_model_calls_attached_only_when_model_log_on(db, agent_id, c
             "purpose": "main_loop",
             "model": None,
             "status": "error",
-            "input_total": 0,
+            "input_total": None,  # no usage recorded: null, not the generated column's 0
             "output_tokens": None,
         },
     ]
     # At most 20 per turn, the earliest first.
     assert [m["id"] for m in body_on["turns"][1]["model_calls"]] == [str(i) for i in reversed(busy_ids)][:20]
     assert [t["model_calls"] for t in body_off["turns"]] == [[], []]
+
+
+@pytest.mark.postgres_only
+async def test_trace_model_call_input_total_is_null_only_without_usage(db, agent_id, cleanup):
+    # input_total is a generated coalesce sum (0 for a call with no usage). The trace returns null when all three
+    # parts are null, whatever the status, and the sum as soon as any part is recorded, a zero included.
+    base = _hour_ago()
+    turn = await insert_turn(db, agent_id, "sess-IT", started_at=base)
+    no_usage = {"input_uncached": None, "cache_read": None}  # cache_write defaults to None
+    cases = [
+        ("no usage, failed", {**no_usage, "status": "error"}, None),
+        ("no usage, ok", {**no_usage, "status": "ok"}, None),
+        ("cache write only, failed", {**no_usage, "status": "error", "cache_write": 7}, 7),
+        ("cache read only", {"input_uncached": None, "cache_read": 30}, 30),
+        ("a recorded zero", {"input_uncached": 0, "cache_read": None}, 0),
+        ("all three", {"input_uncached": 100, "cache_read": 50, "cache_write": 5}, 155),
+    ]
+    for i, (_, parts, _) in enumerate(cases):
+        at = base + timedelta(seconds=i)
+        await insert_model_call(db, agent_id, turn, session_id="sess-IT", started_at=at, **parts)
+    on = make_app(db, _settings(agent_id, tool_call_log_enabled=True, model_call_log_enabled=True))
+    async with AsyncClient(transport=ASGITransport(app=on), base_url="http://test") as c:
+        body = await get_json(c, trace_path("sess-IT"))
+    got = [m["input_total"] for m in body["turns"][0]["model_calls"]]
+    assert got == [expected for _, _, expected in cases], list(zip([name for name, _, _ in cases], got, strict=True))
 
 
 @pytest.mark.postgres_only

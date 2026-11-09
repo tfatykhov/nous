@@ -168,6 +168,17 @@ def _iso(ts: datetime | None) -> str | None:
     return ts.isoformat() if ts is not None else None
 
 
+def input_total_sql(alias: str) -> str:
+    """A model call's input tokens as a SQL expression over ``model_call_log`` row ``alias``: NULL when the call
+    recorded no usage (``input_uncached``, ``cache_read`` and ``cache_write`` all NULL), else ``input_total``. The
+    table's ``input_total`` is a generated coalesce sum, so it reads 0, never NULL, for a call that failed before any
+    usage came back."""
+    return (
+        f"CASE WHEN num_nonnulls({alias}.input_uncached, {alias}.cache_read, {alias}.cache_write) > 0 "
+        f"THEN {alias}.input_total END"
+    )
+
+
 async def _set_timeout(session: AsyncSession) -> None:
     # SET LOCAL binds the transaction the session autobegan; it holds only while the caller runs every statement in
     # that one transaction, so never commit (or open a second session) between the statements of a handler.
@@ -518,12 +529,12 @@ ORDER BY c.turn_id, c.call_index, c.id
 """
 
 # The model calls that carry one of the page's turn ids (main-loop calls: background calls carry no turn id), the
-# first few of each turn.
-_TRACE_MODEL_CALLS_SQL = """
+# first few of each turn. input_total is null for a call with no usage (input_total_sql).
+_TRACE_MODEL_CALLS_SQL = f"""
 SELECT id, turn_id, purpose, model, status, input_total, output_tokens
 FROM (
-    SELECT m.id, m.turn_id, m.purpose, m.model, m.status, m.input_total, m.output_tokens, m.started_at,
-           row_number() OVER (PARTITION BY m.turn_id ORDER BY m.started_at, m.id) AS n
+    SELECT m.id, m.turn_id, m.purpose, m.model, m.status, {input_total_sql("m")} AS input_total, m.output_tokens,
+           m.started_at, row_number() OVER (PARTITION BY m.turn_id ORDER BY m.started_at, m.id) AS n
     FROM nous_system.model_call_log m
     WHERE m.agent_id = :agent AND m.turn_id = ANY(CAST(:turn_ids AS uuid[]))
 ) x
