@@ -12,7 +12,7 @@ const LEDGER = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 
 const call = (i: number, over: Record<string, unknown> = {}) => ({
   id: `call-${i}`, call_index: i, tool: 'recall_deep', tool_called: null, lane: 'memory',
-  reason: `Reason ${i}`, input: `input ${i}`, result: `result ${i}`, outcome: 'success', is_error: false,
+  reason: `Reason ${i}`, input: `input ${i}`, result: `result ${i}`, outcome: 'ran', is_error: false,
   error: null, refused_by: null, duration_ms: 1400, started_at: '2026-11-07T00:07:30+00:00', ledger: null, ...over,
 });
 const turn = (id: string, n: number | null, over: Record<string, unknown> = {}) => ({
@@ -121,6 +121,39 @@ describe('Work trace', () => {
     expect(within(steps[1]).getByText(/connection reset/)).toBeTruthy();
     expect(steps[1].querySelector('.badge')).toBeNull();
     expect(steps[2].querySelector('.badge')!.textContent).toContain('action_gate');
+  });
+
+  it('a ran call has no badge; every other outcome does', async () => {
+    const outs = ['ran', 'refused', 'gated', 'suppressed', 'retired', 'bad_input'];
+    respond = () => ({ body: trace([turn(T1, 1, { calls: outs.map((o, i) => call(i, { outcome: o })) })]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reason 0', { selector: '.step *' });
+    const steps = Array.from(container.querySelectorAll('.step')) as HTMLElement[];
+    expect(steps[0].querySelector('.badge')).toBeNull();
+    outs.slice(1).forEach((o, i) => expect(steps[i + 1].querySelector('.badge')!.textContent).toBe(o));
+  });
+
+  it('an error or refused call with no result text shows no empty Got line', async () => {
+    respond = () => ({ body: trace([turn(T1, 1, { calls: [
+      call(0, { outcome: 'error', is_error: true, error: 'boom', result: '' }),
+      call(1, { outcome: 'refused', refused_by: 'policy', result: '' }),
+      call(2),
+    ] })]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reason 0', { selector: '.step *' });
+    const steps = Array.from(container.querySelectorAll('.step')) as HTMLElement[];
+    expect(steps[0].textContent).toContain('boom');
+    expect(steps[0].textContent).not.toContain('Got:');
+    expect(steps[1].textContent).not.toContain('Got:');
+    expect(steps[2].textContent).toContain('Got: result 2');
+  });
+
+  it('the header links all model calls of the conversation even when no turn has main-loop calls', async () => {
+    respond = () => ({ body: trace([turn(T1, 1)]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 1');
+    const link = within(container.querySelector('header') as HTMLElement).getByRole('link', { name: 'all model calls of this conversation' });
+    expect(link.getAttribute('href')).toBe('#/model-calls?session_id=sess%2Fone');
   });
 
   it('a turn with no calls says no tools were used and still shows its reply', async () => {
@@ -313,6 +346,59 @@ describe('Work trace', () => {
       expect(urls[before]).not.toContain('after=');
       expect(screen.getByText('Reply 2')).toBeTruthy();
       expect(container.querySelectorAll('article.turn')).toHaveLength(2);
+    });
+  });
+
+  describe('pages, overlap and scrolling', () => {
+    const C1 = '2026-11-07T00:07:00+00:00|' + T1;
+    const C2 = '2026-11-07T00:08:00+00:00|' + T2;
+    const order = (c: HTMLElement) => Array.from(c.querySelectorAll('article.turn')).map((a) => a.id);
+
+    it('three pages append, every turn stays, in order', async () => {
+      respond = (url) => url.includes(encodeURIComponent(C2))
+        ? { body: trace([turn(T3, 3)], { next_after: null }) }
+        : url.includes('after=') ? { body: trace([turn(T2, 2)], { next_after: C2 }) }
+        : { body: trace([turn(T1, 1)], { next_after: C1 }) };
+      const { container } = render(Trace, { sessionId: 'sess/one' });
+      await screen.findByText('Reply 1');
+      await fireEvent.click(screen.getByRole('button', { name: 'Load more turns' }));
+      await screen.findByText('Reply 2');
+      await fireEvent.click(screen.getByRole('button', { name: 'Load more turns' }));
+      await screen.findByText('Reply 3');
+      expect(order(container)).toEqual([`turn-${T1}`, `turn-${T2}`, `turn-${T3}`]);
+    });
+
+    it('a re-poll whose first page overlaps loaded pages does not duplicate turns', async () => {
+      let first = [turn(T1, 1)];
+      respond = (url) => url.includes('after=')
+        ? { body: trace([turn(T2, 2)], { next_after: null }) }
+        : { body: trace(first, { next_after: C1 }) };
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const { container } = render(Trace, { sessionId: 'sess/one' });
+      await vi.advanceTimersByTimeAsync(0);
+      await screen.findByText('Reply 1');
+      await fireEvent.click(screen.getByRole('button', { name: 'Load more turns' }));
+      await screen.findByText('Reply 2');
+      first = [turn(T1, 1), turn(T2, 2, { reply: 'Reply 2 fresh' })];   // page one grew over page two
+      await vi.advanceTimersByTimeAsync(15000);
+      await screen.findByText('Reply 2 fresh');
+      expect(order(container)).toEqual([`turn-${T1}`, `turn-${T2}`]);
+    });
+
+    it('turnId scrolls once; a later poll does not scroll again', async () => {
+      const scroll = vi.fn();
+      Element.prototype.scrollIntoView = scroll;
+      let reply = 'Reply 2';
+      respond = () => ({ body: trace([turn(T1, 1), turn(T2, 2, { reply })]) });
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      render(Trace, { sessionId: 'sess/one', turnId: T2 });
+      await vi.advanceTimersByTimeAsync(0);
+      await screen.findByText('Reply 2');
+      expect(scroll).toHaveBeenCalledTimes(1);
+      reply = 'Reply 2 later';
+      await vi.advanceTimersByTimeAsync(15000);
+      await screen.findByText('Reply 2 later');
+      expect(scroll).toHaveBeenCalledTimes(1);
     });
   });
 

@@ -7,7 +7,7 @@
   import Trace from './work/Trace.svelte';
 
   // F108 Work host: one screen, its views chosen by the sub path of #/work. The list keeps its filters in the
-  // hash query; Patterns, the trace and the ledger are stubs until their tasks land.
+  // hash query; Patterns and the change ledger are stubs until their tasks land.
   const items = [
     { id: 'sessions', label: 'Sessions', href: routeHref('work') },
     { id: 'patterns', label: 'Patterns', href: routeHref('work', 'patterns') },

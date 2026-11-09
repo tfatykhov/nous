@@ -92,10 +92,12 @@
     return '';
   }
 
-  // A refusal or gate shows as a badge; a plain success or error does not (an error shows its text).
+  // The runner writes ran, error, refused, gated, suppressed, retired and bad_input (migration 100). Only ran and
+  // error are ordinary (an error shows its text); every other outcome gets a badge, with who refused when known.
   function badge(c: WorkCall): string {
-    if (c.refused_by) return `${c.outcome === 'success' || c.outcome === 'error' ? 'refused' : c.outcome} by ${c.refused_by}`;
-    return c.outcome === 'success' || c.outcome === 'error' || c.outcome === 'ok' ? '' : c.outcome;
+    const ordinary = c.outcome === 'ran' || c.outcome === 'error';
+    if (c.refused_by) return `${ordinary ? 'refused' : c.outcome} by ${c.refused_by}`;
+    return ordinary ? '' : c.outcome;
   }
 
   // One entry per tool, first-seen order: how many calls and the reason given in each turn.
@@ -136,6 +138,7 @@
         <span>{plural(s.turns, 'turn', 'turns')}</span>
         <span>{plural(s.tool_calls, 'tool call', 'tool calls')}</span>
         <span class:bad={s.errors > 0}>{errorsText(s.errors)}</span>
+        <a href={modelCallsHref(undefined, { session_id: s.session_id })}>all model calls of this conversation</a>
       </div>
     </header>
 
@@ -197,7 +200,7 @@
                 </div>
                 <div class="input wrap">{c.input}</div>
                 {#if c.error}<p class="err wrap">{c.error}</p>{/if}
-                <p class="got wrap"><span class="muted">Got:</span> {c.result}</p>
+                {#if c.result}<p class="got wrap"><span class="muted">Got:</span> {c.result}</p>{/if}
                 {#if c.ledger && c.ledger.status === 'unknown'}
                   <HoldUndo id={c.ledger.id} />
                 {/if}
@@ -275,6 +278,7 @@
   h1 { margin: 0; font-size: 1.625rem; font-weight: 700; letter-spacing: -0.02em; max-width: 60ch; overflow-wrap: anywhere; }
   .meta { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; font-size: 0.875rem; color: var(--muted); }
   .meta .bad { color: var(--red); }
+  .meta a { color: var(--accent-text); }
   .used { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1.125rem 1.25rem; display: flex; flex-direction: column; gap: 0.875rem; }
   .used h2 { margin: 0; font-size: 1.0625rem; font-weight: 600; }
   .used-row { display: grid; grid-template-columns: minmax(160px, 220px) minmax(0, 1fr); gap: 0.25rem 1rem; align-items: baseline; border-top: 1px solid var(--border); padding-top: 0.75rem; }
