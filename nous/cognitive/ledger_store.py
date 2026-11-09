@@ -398,8 +398,9 @@ def redacted_head(text: str, chars: int, *, complete: bool = True) -> str:
     kept head is the start they agree on, cut to ``chars``. Own secrets are masked by position in both, from
     stretches found over the whole window.
 
-    - It is a prefix of the whole window's redaction, which is what the code before #874 redacted and showed the
-      start of. So nothing that redaction masks is shown, wherever in the window a pattern's closing context lies.
+    - It is a prefix of both scans. The shorter one's raw window is what the code before #874 fetched and redacted
+      (for ``db_query``, four clips and a pad), so nothing that redaction masked is shown; the whole-window scan
+      sees a pad further, so a pattern whose closing context lies anywhere in the fetched window is masked too.
     - It holds nothing from the window's last pad characters: the shorter scan has none of them, and a token that
       runs into them is seen whole only by the longer scan, so the two differ from its start. A secret split by the
       cut lies within those characters (no own secret is longer than the pad).
