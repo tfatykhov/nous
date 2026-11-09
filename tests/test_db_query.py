@@ -10,6 +10,7 @@ import base64
 import hashlib
 import random
 import re
+import threading
 import uuid
 from pathlib import Path
 
@@ -510,6 +511,41 @@ async def test_a_result_that_reads_like_an_error_is_not_one(monkeypatch):
     assert await dispatcher.dispatch("db_query", {"sql": 'select 1 as "Error: x"'}) == ("Error: x\n1\n(1 row)", False)
     answer = await answer_db_query(_settings(reader_db_password="readerpassword1"), 'select 1 as "Error: x"')
     assert answer == ("Error: x\n1\n(1 row)", False)
+
+
+async def _rows_with_a_cut_cell(settings, sql):
+    return ["c", "d"], [[Cell("a\nb", 3), Cell(None, None)], [Cell("x" * 3000, 9000), Cell("2", 1)]], True
+
+
+async def test_the_result_is_formatted_in_a_worker_thread(monkeypatch):
+    """A page of cut cells is seconds of regex work (each cell redacted over its whole window and that window less a
+    pad), so it is formatted off the event loop, as prepare_block prepares a big block. The text is unchanged. This
+    proves the thread, not a free loop: the regex work holds the GIL, so the thread shares the CPU with the loop."""
+    monkeypatch.setattr(db_query, "execute_readonly", _rows_with_a_cut_cell)
+    on_main: list[bool] = []
+    real = db_query.format_result
+
+    def spy(columns, rows, *, truncated):
+        on_main.append(threading.current_thread() is threading.main_thread())
+        return real(columns, rows, truncated=truncated)
+
+    monkeypatch.setattr(db_query, "format_result", spy)
+    answer = await answer_db_query(_settings(reader_db_password="readerpassword1"), "select 1")
+    assert on_main == [False]  # formatted once, in a worker thread
+    columns, rows, truncated = await _rows_with_a_cut_cell(None, None)
+    assert answer == (real(columns, rows, truncated=truncated), False)
+    assert answer.text.splitlines()[0] == "c | d" and "first 200 rows" in answer.text
+
+
+async def test_a_formatting_failure_in_the_worker_thread_is_still_an_error_answer(monkeypatch):
+    monkeypatch.setattr(db_query, "execute_readonly", _rows_with_a_cut_cell)
+
+    def broken(columns, rows, *, truncated):
+        raise RuntimeError("format failed")
+
+    monkeypatch.setattr(db_query, "format_result", broken)
+    answer = await answer_db_query(_settings(reader_db_password="readerpassword1"), "select 1")
+    assert answer == ("Error: db_query failed: RuntimeError", True)
 
 
 async def test_the_log_line_names_the_tables_and_never_the_statement(monkeypatch, caplog):
