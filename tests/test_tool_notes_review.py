@@ -192,6 +192,7 @@ def test_prompt_is_records_only_and_redacted():
     for p in (p1, p2):
         assert p.id in prompt and p.tool_name in prompt and p.kind in prompt
         assert f"hits={p.hits}" in prompt and f"calls={p.calls}" in prompt
+        assert "auth failed" in prompt or "path" in prompt  # the example is listed
     assert str(old.id) in prompt and "use the full path" in prompt
     assert str(other.id) not in prompt  # a note of a tool that is not offered
     low = prompt.lower()
@@ -261,12 +262,93 @@ async def test_hostile_answers_are_dropped_and_counted(db, agent_id, cleanup, na
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("answer", [{"notes": []}, {}], ids=["empty_list", "empty_object"])
-async def test_empty_answers_store_nothing(db, agent_id, cleanup, answer):
+async def test_empty_notes_list_declines_every_offered_pattern(db, agent_id, cleanup):
     await seed_errors(db, agent_id, "bash", 4)
-    out = await make_review(db, agent_id, FakeClient(answer)).run_sleep()
+    out = await make_review(db, agent_id, FakeClient({"notes": []})).run_sleep()
     assert await note_rows(db, agent_id, active=True) == []
     assert out["written"] == 0 and out["llm_failed"] == 0 and out["declined"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [{}, [], {"path": "x"}, {"notes": "no"}], ids=["empty", "list", "other", "str"])
+async def test_malformed_answer_is_a_failure_and_closes_nothing(db, agent_id, cleanup, answer):
+    await seed_errors(db, agent_id, "bash", 4)
+    out = await make_review(db, agent_id, FakeClient(answer)).run_sleep()
+    assert out["llm_failed"] == 1 and out["declined"] == 0 and out["rejected"] == 0
+    assert await note_rows(db, agent_id) == []  # offered again next sleep
+
+
+@pytest.mark.asyncio
+async def test_deep_json_counts_llm_failed(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "bash", 4)
+    out = await make_review(db, agent_id, FakeClient(raw="[" * 5000 + "]" * 5000)).run_sleep()
+    assert out["llm_failed"] == 1 and await note_rows(db, agent_id) == []
+
+
+def test_setting_reads_by_name_and_by_env(monkeypatch):
+    from nous.config import Settings
+
+    assert Settings(tool_notes_enabled=True).tool_notes_enabled is True
+    assert Settings().tool_notes_enabled is False
+    monkeypatch.setenv("NOUS_TOOL_NOTES_ENABLED", "true")
+    assert Settings().tool_notes_enabled is True
+
+
+def test_prompt_withholds_an_example_with_a_score_word():
+    p = pat(tool="db_query", key="permission denied for schema scoring", example="permission denied for schema scoring")
+    prompt = build_review_prompt([p], [])
+    assert SCORE_WORDS.search(prompt) is None
+    assert "(example withheld)" in prompt and p.id in prompt
+
+
+@pytest.mark.asyncio
+async def test_candidate_whose_tool_name_has_a_score_word_is_left_out(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "rubric", 4)
+    await seed_errors(db, agent_id, "bash", 4)
+    client = FakeClient({"notes": []})
+    out = await make_review(db, agent_id, client).run_sleep()
+    assert out["detected"] == 2 and out["offered"] == 1 and out["rejected"] == 1
+    prompt = client.calls[0][0]["messages"][0]["content"][0]["text"]
+    assert SCORE_WORDS.search(prompt) is None and "rubric" not in prompt
+    assert {r["tool_name"] for r in await note_rows(db, agent_id)} == {"bash"}  # no declined row for it
+
+
+def test_note_text_boundary_and_missing_text():
+    cand = pat()
+    ok, rej = parse_review({"notes": [write(cand.id, "x" * 300)]}, [cand], [])
+    assert len(ok) == 1 and rej == 0
+    ok, rej = parse_review({"notes": [write(cand.id, "x" * 301)]}, [cand], [])
+    assert ok == [] and rej == 1
+    ok, rej = parse_review({"notes": [{"pattern": cand.id, "action": "write"}]}, [cand], [])
+    assert ok == [] and rej == 1
+    ok, rej = parse_review({"notes": [{"pattern": cand.id, "action": "write", "text": 5}]}, [cand], [])
+    assert ok == [] and rej == 1
+
+
+def test_skip_then_write_keeps_the_first_decision():
+    cand = pat()
+    answer = {"notes": [{"pattern": cand.id, "action": "skip"}, write(cand.id, "later")]}
+    ok, rej = parse_review(answer, [cand], [])
+    assert [d.action for d in ok] == ["skip"] and rej == 1
+
+
+@pytest.mark.asyncio
+async def test_total_cap_lets_replaces_name_another_tools_note(db, agent_id, cleanup):
+    store = ToolNoteStore(db, agent_id)
+    for t in range(14):
+        for k in range(3 if t < 13 else 1):
+            await store.add(pat(tool=f"t{t}", key=f"k{k}"), f"note {t}-{k}", now=NOW - timedelta(days=30))
+    notes = await store.active()
+    assert len(notes) == 40
+    foreign = next(n for n in notes if n.tool_name == "t0")
+    cand = pat(tool="bash")  # no notes of its own: room
+    ok, rej = parse_review({"notes": [write(cand.id, "new", replaces=str(foreign.id))]}, [cand], notes)
+    assert len(ok) == 1 and ok[0].replaces == foreign.id and rej == 0
+    full = pat(tool="t1")  # at its own cap of 3: a foreign replace cannot make room
+    ok, rej = parse_review({"notes": [write(full.id, "new", replaces=str(foreign.id))]}, [full], notes)
+    assert ok == [] and rej == 1
+    prompt = build_review_prompt([cand], notes)  # the cap binds: the model sees every note id it may name
+    assert str(foreign.id) in prompt
 
 
 @pytest.mark.asyncio

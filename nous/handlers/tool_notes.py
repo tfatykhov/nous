@@ -289,16 +289,22 @@ def build_review_prompt(candidates: Sequence[Pattern], notes: Sequence[StoredNot
     Every string that came from a record or a note goes through ``redact_structure`` before it is formatted in.
     """
     tools = {p.tool_name for p in candidates}
+    # Record text that holds a word the notes must never carry is withheld: the pattern stays eligible.
+    examples = [
+        "(example withheld)" if SCORE_WORDS.search(p.example) else " ".join(p.example.split()) for p in candidates
+    ]
+    # When the total cap binds a new note may replace any note, so the model is shown every note id.
+    all_notes = len(notes) >= NOTES_TOTAL
     safe = redact_structure(
         {
             "candidates": [
-                {"id": p.id, "tool": p.tool_name, "kind": p.kind, "example": " ".join(p.example.split())}
-                for p in candidates
+                {"id": p.id, "tool": p.tool_name, "kind": p.kind, "example": e}
+                for p, e in zip(candidates, examples, strict=True)
             ],
             "notes": [
                 {"id": str(n.id), "tool": n.tool_name, "text": " ".join(n.note_text.split())}
                 for n in notes
-                if n.tool_name in tools
+                if all_notes or n.tool_name in tools
             ],
         }
     )
@@ -421,6 +427,10 @@ class ToolNotesReview:
         notes = await store.active()
         blocked = {n.pattern_id for n in notes} | await store.recently_reviewed(now)
         fresh = [p for p in patterns if p.id not in blocked]
+        # A tool name holding a word the notes must never carry cannot go into the prompt: left out, not closed.
+        named = [p for p in fresh if SCORE_WORDS.search(p.tool_name)]
+        counts["rejected"] += len(named)
+        fresh = [p for p in fresh if p not in named]
         counts["guard"] = sum(1 for p in fresh if p.guard)  # Task 5 reports these to the owner
         offered = [p for p in fresh if not p.guard][:MAX_CANDIDATES]
         counts["offered"] = len(offered)
@@ -436,12 +446,14 @@ class ToolNotesReview:
         )
         try:
             data = parse_llm_json(answer) if answer else None
-        except ValueError:  # json.JSONDecodeError is a ValueError
+        except (ValueError, RecursionError):  # json.JSONDecodeError is a ValueError
             data = None
-        if data is None:
+        if not isinstance(data, dict) or not isinstance(data.get("notes"), list):
+            # No judgement about any pattern: nothing stored, nothing closed, offered again next sleep.
             counts["llm_failed"] = 1
             return counts
-        decisions, counts["rejected"] = parse_review(data, offered, notes)
+        decisions, rejected = parse_review(data, offered, notes)
+        counts["rejected"] += rejected
         stored: set[str] = set()
         for d in decisions:
             if d.action != "write":
