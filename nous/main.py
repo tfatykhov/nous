@@ -1181,6 +1181,10 @@ async def create_components(settings: Settings) -> dict:
         stable_tool_set_enabled=settings.stable_tool_set_enabled,
         arg_salvage_enabled=settings.tool_arg_salvage_enabled,
     )
+    # F108 Phase 3: the tool-notes review shows the model how each offered tool is called. The review was built
+    # before the dispatcher, so it gets the definitions here; they are read at review time, after every register.
+    if getattr(sleep_handler, "_tool_notes", None) is not None:
+        sleep_handler._tool_notes.set_tool_definitions(dispatcher.tool_definitions)
     register_nous_tools(dispatcher, brain, heart, settings=settings)
     register_builtin_tools(dispatcher, settings)
 

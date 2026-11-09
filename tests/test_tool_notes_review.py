@@ -23,13 +23,16 @@ from nous.handlers.tool_notes import (
     MAX_CANDIDATES,
     NOTE_MAX_CHARS,
     NOTES_TOTAL,
+    PARAM_DESC_MAX_CHARS,
     REREVIEW_DAYS,
     SCORE_WORDS,
+    TOOL_SPEC_MAX_CHARS,
     Decision,
     ToolNotesReview,
     ToolNoteStore,
     build_review_prompt,
     parse_review,
+    tool_spec,
 )
 from nous.observability.model_calls import PURPOSES
 from nous.observability.tool_patterns import Pattern
@@ -216,6 +219,88 @@ async def test_review_call_is_labelled(db, agent_id, cleanup):
     assert "tool_notes" in PURPOSES
     assert payload["model"] == "bg-model-test"
     assert payload["max_tokens"] == 1500
+
+
+GET_PROCEDURE_DEF = {
+    "name": "get_procedure",
+    "description": "Load a procedure's full body. Call it with the procedure's NAME; no UUID lookup needed.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"procedure_id": {"type": "string", "description": "The procedure's NAME, or its UUID."}},
+        "required": ["procedure_id"],
+    },
+}
+
+
+def test_prompt_shows_how_an_offered_tool_is_called():
+    """An error like "missing procedure_id, provided: name" is read against the tool's own parameters."""
+    p = pat(tool="get_procedure", key="missing procedure_id. provided: name", example="missing procedure_id")
+    other = {"name": "web_fetch", "description": "Fetch a page.", "input_schema": {"properties": {}}}
+    prompt = build_review_prompt([p], [], {"get_procedure": GET_PROCEDURE_DEF, "web_fetch": other})
+    assert (
+        "tool=get_procedure: procedure_id (string, required): The procedure's NAME, or its UUID. "
+        "| about: Load a procedure's full body." in prompt
+    )
+    assert "tool=web_fetch" not in prompt  # not offered
+    assert "How these tools are called" not in build_review_prompt([p], [])
+    assert "description and parameters" in _REVIEW_SYSTEM and "must agree with them" in _REVIEW_SYSTEM
+
+
+def test_tool_spec_masks_a_score_word_and_keeps_the_parameters():
+    scored = {
+        "name": "run_python",
+        "description": "Runs code; results are graded later.",
+        "input_schema": {"properties": {"code": {"type": "string", "description": "Python to run"}}},
+    }
+    assert tool_spec(scored) == "code (string): Python to run | about: Runs code; results are […] later."
+    p = pat(tool="run_python", example="SyntaxError")
+    assert SCORE_WORDS.search(build_review_prompt([p], [], {"run_python": scored})) is None
+
+
+def test_tool_spec_cuts_the_description_not_the_parameters():
+    """A long description (db_query's is about 1,400 characters) must not push its parameters past the cap."""
+    long = {
+        "name": "db_query",
+        "description": "Run one read-only query. " * 100,
+        "input_schema": {
+            "properties": {"sql": {"type": "string", "description": "One SELECT. " + "x" * 400}},
+            "required": ["sql"],
+        },
+    }
+    spec = tool_spec(long)
+    assert spec.startswith("sql (string, required): One SELECT. ")
+    assert len(spec.split(" | about: ")[0]) == len("sql (string, required): ") + PARAM_DESC_MAX_CHARS
+    assert len(spec) == TOOL_SPEC_MAX_CHARS and spec.endswith("…")
+    bare = {"name": "x", "input_schema": {"properties": {"path": {}}, "required": ["path"]}}
+    assert tool_spec(bare) == "path (any, required)"
+
+
+@pytest.mark.asyncio
+async def test_review_sends_the_offered_tools_definitions(db, agent_id, cleanup):
+    await seed_errors(db, agent_id, "get_procedure", 4)
+    client = FakeClient({"notes": []})
+    review = make_review(db, agent_id, client)
+    review.set_tool_definitions(lambda: [GET_PROCEDURE_DEF, {"name": "web_fetch", "description": "Fetch a page."}])
+    await review.run_sleep()
+    sent = json.dumps(client.calls[0][0])
+    assert "procedure_id (string, required)" in sent and "tool=web_fetch" not in sent
+
+
+@pytest.mark.asyncio
+async def test_review_runs_without_definitions_when_reading_them_fails(db, agent_id, cleanup, caplog):
+    await seed_errors(db, agent_id, "get_procedure", 4)
+    client = FakeClient({"notes": []})
+    review = make_review(db, agent_id, client)
+
+    def broken():
+        raise RuntimeError("registry gone")
+
+    review.set_tool_definitions(broken)
+    with caplog.at_level(logging.WARNING):
+        counts = await review.run_sleep()
+    assert client.calls and counts["llm_failed"] == 0
+    assert "How these tools are called" not in json.dumps(client.calls[0][0])
+    assert "tool definitions could not be read" in caplog.text
 
 
 # ---------------------------------------------------------------------------------------------------------------------
