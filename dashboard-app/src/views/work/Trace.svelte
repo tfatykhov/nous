@@ -83,6 +83,32 @@
     }
   }
 
+  // Reload every loaded turn from the start (a send settled elsewhere changes an older turn's ledger status, which
+  // the poll never refetches). Asks for as many turns as are loaded, a page at a time, and merges them by id.
+  let refreshing = $state(false);
+  async function refresh() {
+    if (refreshing || moreBusy) return;
+    refreshing = true;
+    moreError = false;
+    try {
+      const want = Math.max(turns.length, 1);
+      let got = 0;
+      let after: string | null = null;
+      do {
+        const q = new URLSearchParams({ limit: String(Math.min(200, want - got)) });
+        if (after !== null) q.set('after', after);
+        const r = await apiGet<WorkTrace>(`${base()}?${q}`);
+        absorb(r);
+        got += r.turns.length;
+        after = r.next_after;
+      } while (after !== null && got < want);
+    } catch {
+      moreError = true;
+    } finally {
+      refreshing = false;
+    }
+  }
+
   // A linked turn on a page not loaded yet: load the next pages until it shows, at most 10 of them.
   let autoPages = 0;
   let gaveUp = $state(false);
@@ -170,7 +196,10 @@
     <header class="head">
       <div class="head-top">
         <h1>{s.title}</h1>
-        <StaleBadge state={$store} />
+        <span class="head-right">
+          <button type="button" class="refresh" disabled={refreshing} onclick={refresh}>Refresh</button>
+          <StaleBadge state={$store} />
+        </span>
       </div>
       <div class="meta">
         <span>{KIND_LABEL[s.kind] ?? s.kind}</span>
@@ -250,7 +279,7 @@
                 <div class="input wrap">{c.input}</div>
                 {#if c.error}<p class="err wrap">{c.error}</p>{/if}
                 {#if c.result}<p class="got wrap"><span class="muted">Got:</span> {c.result}</p>{/if}
-                {#if c.ledger && c.ledger.status === 'unknown'}
+                {#if c.ledger && c.ledger.status === 'unknown' && c.ledger.held}
                   <HoldUndo id={c.ledger.id} />
                 {/if}
               </div>
@@ -331,6 +360,9 @@
   .head-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
   h1 { margin: 0; font-size: 1.625rem; font-weight: 700; letter-spacing: -0.02em; max-width: 60ch; overflow-wrap: anywhere; }
   .meta { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; font-size: 0.875rem; color: var(--muted); }
+  .head-right { display: flex; align-items: center; gap: 0.75rem; }
+  .refresh { font: inherit; cursor: pointer; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.875rem; min-height: 36px; }
+  .refresh:disabled { opacity: 0.6; cursor: default; }
   .meta .bad { color: var(--red); }
   .meta a { color: var(--accent-text); }
   .used { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1.125rem 1.25rem; display: flex; flex-direction: column; gap: 0.875rem; }
@@ -389,7 +421,7 @@
   .more { display: flex; align-items: center; gap: 0.75rem; }
   .more-reasons { list-style: none; margin-left: -1.125rem; }
   @media (max-width: 768px) {
-    .more button, summary, .mcalls a, .back { min-height: 44px; display: inline-flex; align-items: center; }
+    .refresh, .more button, summary, .mcalls a, .back { min-height: 44px; display: inline-flex; align-items: center; }
     .side, .rail { width: 56px; }
     .col { width: 14px; }
     .lane-keys span { width: 14px; }

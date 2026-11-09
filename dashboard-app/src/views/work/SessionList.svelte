@@ -117,7 +117,8 @@
   let cursor = $derived(moreCursor === undefined ? (data?.next_before ?? null) : moreCursor);
 
   async function loadMore() {
-    if (cursor === null || moreBusy) return;
+    // While page one of the current filters loads, the cursor on screen belongs to the old filters.
+    if (cursor === null || moreBusy || $store.loading) return;
     const mine = generation;
     const params = new URLSearchParams(currentKey());
     params.set('before', cursor);
@@ -268,7 +269,7 @@
     </div>
     {#if cursor !== null}
       <div class="more">
-        <button type="button" class="refresh" disabled={moreBusy} onclick={loadMore}>Load more</button>
+        <button type="button" class="refresh" disabled={moreBusy || $store.loading} onclick={loadMore}>Load more</button>
         {#if moreError}<span class="err" role="alert">Could not load more.</span>{/if}
       </div>
     {/if}

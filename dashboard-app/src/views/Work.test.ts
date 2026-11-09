@@ -96,6 +96,27 @@ describe('Work sessions list', () => {
     expect(location.hash).toBe('#/work?kind=task&lens=error');
   });
 
+  it('Load more is refused while page one of the new filters is loading, so the old cursor is never used', async () => {
+    render(Work);
+    await screen.findByText('Gap Scout status check');
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      urls.push(url);
+      if (!url.includes('before=')) await gate;
+      return { ok: true, status: 200, json: async () => (url.includes('before=') ? PAGE2 : PAGE1) } as Response;
+    }));
+    const before = urls.length;
+    await fireEvent.click(screen.getByRole('button', { name: 'Tasks' }));
+    await waitFor(() => expect(urls.length).toBe(before + 1));
+    const more = screen.getByRole('button', { name: 'Load more' }) as HTMLButtonElement;
+    expect(more.disabled).toBe(true);
+    await fireEvent.click(more);
+    expect(urls.slice(before).some((u) => u.includes('before='))).toBe(false);
+    release();
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Load more' }) as HTMLButtonElement).disabled).toBe(false));
+  });
+
   it('kind buttons set aria-pressed and refetch with kind=', async () => {
     render(Work);
     await screen.findByText('Gap Scout status check');

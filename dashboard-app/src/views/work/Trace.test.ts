@@ -238,8 +238,8 @@ describe('Work trace', () => {
 
   it('unknown ledger status shows the undo statements; success does not; a ref shows the status pill', async () => {
     respond = () => ({ body: trace([turn(T1, 1, { calls: [
-      call(0, { tool: 'send_email', lane: 'acts', ledger: { id: LEDGER, status: 'unknown', side_effect_type: 'external', external_ref: null, tombstone: false } }),
-      call(1, { tool: 'send_email', lane: 'acts', ledger: { id: 'other-id', status: 'success', side_effect_type: 'external', external_ref: null, tombstone: false } }),
+      call(0, { tool: 'send_email', lane: 'acts', ledger: { id: LEDGER, status: 'unknown', side_effect_type: 'external', external_ref: null, tombstone: false, held: true } }),
+      call(1, { tool: 'send_email', lane: 'acts', ledger: { id: 'other-id', status: 'success', side_effect_type: 'external', external_ref: null, tombstone: false, held: false } }),
       call(2),
     ] })]) });
     const { container } = render(Trace, { sessionId: 'sess/one' });
@@ -251,6 +251,33 @@ describe('Work trace', () => {
     expect(steps[1].querySelector('code.sql')).toBeNull();
     expect(steps[1].querySelector('.pill')!.textContent).toContain('success');
     expect(steps[2].querySelector('.pill')).toBeNull();
+  });
+
+  it('an unknown ledger row that holds nothing (held false) shows no undo statements', async () => {
+    respond = () => ({ body: trace([turn(T1, 1, { calls: [
+      call(0, { ledger: { id: LEDGER, status: 'unknown', side_effect_type: 'external', external_ref: null, tombstone: false, held: false } }),
+    ] })]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reason 0', { selector: '.step *' });
+    expect(container.querySelector('code.sql')).toBeNull();
+    expect(container.querySelector('.pill')!.textContent).toContain('unknown');
+  });
+
+  it('Refresh reloads the loaded turns, so an older turn settled elsewhere updates', async () => {
+    let status = 'unknown';
+    const led = () => ({ id: LEDGER, status, side_effect_type: 'external', external_ref: null, tombstone: false, held: status === 'unknown' });
+    const t = (id: string, n: number, over: Record<string, unknown> = {}) => turn(id, n, { started_at: `2026-11-07T00:0${n}:00+00:00`, ...over });
+    respond = () => ({ body: trace([t(T1, 1, { calls: [call(0, { ledger: led() })] }), t(T2, 2), t(T3, 3)]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reason 0', { selector: '.step *' });
+    expect(container.querySelector('code.sql')).not.toBeNull();
+    status = 'success';
+    const before = urls.length;
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(container.querySelector('code.sql')).toBeNull());
+    expect(container.querySelector('.pill')!.textContent).toContain('success');
+    expect(urls[before]).not.toContain('after=');
+    expect(container.querySelectorAll('article.turn')).toHaveLength(3);
   });
 
   it('the rail has one coloured segment per step, in order', async () => {

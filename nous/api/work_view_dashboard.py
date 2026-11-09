@@ -21,7 +21,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nous.api.harness_dashboard import _is_tombstone
+from nous.api.harness_dashboard import _is_tombstone, holds
 from nous.observability.model_call_text import BLOCK_PARTS
 
 DAYS_DEFAULT = 7
@@ -585,7 +585,7 @@ ORDER BY turn_id, started_at, id
 """
 
 
-def _ledger_out(row: Mapping[str, Any]) -> dict[str, Any] | None:
+def _ledger_out(row: Mapping[str, Any], ledger_persisted: bool) -> dict[str, Any] | None:
     if row["ledger_id"] is None:
         return None
     return {
@@ -598,10 +598,12 @@ def _ledger_out(row: Mapping[str, Any]) -> dict[str, Any] | None:
                 idempotency_key=row["idempotency_key"], status=row["ledger_status"], key_args=row["key_args"]
             )
         ),
+        # A keyed unknown send with persistence on: the only kind the Ledger screen offers to settle.
+        "held": holds(row["ledger_status"], row["idempotency_key"], ledger_persisted),
     }
 
 
-def _call_out(row: Mapping[str, Any]) -> dict[str, Any]:
+def _call_out(row: Mapping[str, Any], ledger_persisted: bool) -> dict[str, Any]:
     tool = row["tool_name"]
     return {
         "id": str(row["id"]),
@@ -618,7 +620,7 @@ def _call_out(row: Mapping[str, Any]) -> dict[str, Any]:
         "refused_by": row["refused_by"],
         "duration_ms": row["duration_ms"],
         "started_at": _iso(row["started_at"]),
-        "ledger": _ledger_out(row),
+        "ledger": _ledger_out(row, ledger_persisted),
     }
 
 
@@ -652,6 +654,7 @@ async def get_trace(
     limit: int,
     after: tuple[datetime, str] | None,
     model_calls_enabled: bool,
+    ledger_persisted: bool = False,
 ) -> dict[str, Any] | None:
     """One session's trace: its header and ``limit`` turns after ``after``, oldest first, each with its calls and
     (when the model-call log is on) its main-loop model calls. None when this agent has no turn row and no call of
@@ -691,7 +694,7 @@ async def get_trace(
     if turn_ids:
         ids = {"agent": agent_id, "turn_ids": turn_ids}
         for row in (await session.execute(text(_TRACE_CALLS_SQL), ids)).mappings():
-            calls[str(row["turn_id"])].append(_call_out(row))
+            calls[str(row["turn_id"])].append(_call_out(row, ledger_persisted))
         if model_calls_enabled:
             per_turn = {**ids, "per_turn": MODEL_CALLS_PER_TURN}
             for row in (await session.execute(text(_TRACE_MODEL_CALLS_SQL), per_turn)).mappings():

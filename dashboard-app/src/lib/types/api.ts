@@ -1961,6 +1961,8 @@ export interface WorkLedgerRef {
   side_effect_type: string;
   external_ref: string | null;
   tombstone: boolean;
+  /** A keyed unknown send with ledger persistence on: the only kind the Ledger offers to settle. */
+  held: boolean;
 }
 
 export interface WorkCall {
