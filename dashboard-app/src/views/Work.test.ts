@@ -342,11 +342,11 @@ describe('Work host dispatch', () => {
     expect(urls).toHaveLength(0);
   });
 
-  it('shows a stub for a trace', async () => {
+  it('mounts the trace for s/<id>/<turn>, fetching the decoded session', async () => {
     go('#/work/s/abc%2Fdef/turn1');
     render(Work);
-    expect(await screen.findByText('trace')).toBeTruthy();
-    expect(urls).toHaveLength(0);
+    await waitFor(() => expect(urls).toHaveLength(1));
+    expect(urls[0]).toBe('/dashboard/work/sessions/abc%2Fdef');
   });
 
   it('treats a malformed escape in the path as not found, without throwing', async () => {

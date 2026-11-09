@@ -9,6 +9,7 @@
   import DataTable from '../lib/ui/DataTable.svelte';
   import FilterBar from '../lib/ui/FilterBar.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
+  import HoldUndo from '../lib/ui/HoldUndo.svelte';
   import { ledgerStatusColor, badgeStyle } from '../lib/status';
   import { fmtWhen, fmtUtc, ledgerTarget, recipients } from '../lib/harness';
 
@@ -104,28 +105,6 @@
   let rows = $derived([...($store.data?.rows ?? []), ...older]);
   let canLoadOlder = $derived(paused ? olderCursor !== null : ($store.data?.next_before ?? null) !== null);
 
-  // ── Copy an operator statement (Clipboard API needs a secure context; the
-  //    LAN host serves plain http, so fall back to selecting the text).
-  let copied = $state('');
-  async function copySql(id: string, el: HTMLElement | null) {
-    const text = el?.textContent ?? '';
-    try {
-      await navigator.clipboard.writeText(text);
-      copied = 'Copied to the clipboard.';
-    } catch {
-      if (el) {
-        const range = document.createRange();
-        range.selectNodeContents(el);
-        const sel = window.getSelection();
-        sel?.removeAllRanges();
-        sel?.addRange(range);
-      }
-      copied = 'Selected — press Ctrl+C (or ⌘C) to copy.';
-    }
-    lastCopied = id;
-  }
-  let lastCopied = $state('');
-
   const cols = [
     { key: 'when', label: 'When' },
     { key: 'tool', label: 'Tool' },
@@ -154,8 +133,6 @@
     if (mode === 'warn' || mode === 'shadow') return 'mode-warn';
     return 'mode-off';
   }
-
-  const sqlEls: Record<string, HTMLElement | null> = {};
 
   // The stored command and output are fetched when a row is first expanded,
   // once per id: the list carries only a preview.
@@ -232,29 +209,12 @@
             {#if r.external_ref}<dt>Provider ref</dt><dd class="mono">{r.external_ref}</dd>{/if}
             {#if r.result_summary}<dt>Stored note</dt><dd class="mono">{r.result_summary}</dd>{/if}
           </dl>
-          <div class="attn-actions">
-            <div>
-              <div class="sql-title">They got it — retries are answered “already sent”</div>
-              <code class="sql" bind:this={sqlEls[`ok-${r.id}`]}>UPDATE nous_system.execution_ledger SET status = 'success',
-  result_summary = concat_ws(' · ', result_summary, 'confirmed delivered by operator')
-WHERE id = '{r.id}' AND status = 'unknown';</code>
-              <button type="button" class="btn" onclick={() => copySql(`ok-${r.id}`, sqlEls[`ok-${r.id}`])}>Copy SQL: they got it</button>
-            </div>
-            <div>
-              <div class="sql-title">Nobody got it — the next retry sends</div>
-              <code class="sql" bind:this={sqlEls[`rel-${r.id}`]}>UPDATE nous_system.execution_ledger SET status = 'error',
-  result_summary = concat_ws(' · ', result_summary, 'released by operator')
-WHERE id = '{r.id}' AND status = 'unknown';</code>
-              <button type="button" class="btn" onclick={() => copySql(`rel-${r.id}`, sqlEls[`rel-${r.id}`])}>Copy SQL: nobody got it</button>
-            </div>
-            <p class="note">Releasing re-sends nothing by itself — retry the step to send again. If only some recipients got it, keep the hold.</p>
-          </div>
+          <div class="attn-actions"><HoldUndo id={r.id} /></div>
         </div>
       {/each}
       {#if d.attention_total > d.attention.length}
         <p class="note">Showing the newest {d.attention.length} of {d.attention_total} — the rest appear here as these are settled.</p>
       {/if}
-      <p class="sr-only" aria-live="polite">{lastCopied ? copied : ''}</p>
     </section>
   {/if}
 
@@ -416,11 +376,6 @@ WHERE id = '{r.id}' AND status = 'unknown';</code>
   .attn-facts dt { color: var(--muted); }
   .attn-facts dd { margin: 0; overflow-wrap: anywhere; }
   .attn-actions { display: flex; flex-direction: column; gap: 0.625rem; }
-  .sql-title { font-size: 0.8125rem; font-weight: 600; }
-  .attn-actions .btn { margin-top: 0.375rem; }
-  .sql { display: block; margin-top: 0.25rem; padding: 0.5rem 0.625rem; border-radius: 8px; background: var(--bg);
-    border: 1px solid var(--border); font-family: var(--font-mono); font-size: 0.6875rem; line-height: 1.6;
-    white-space: pre-wrap; overflow-wrap: anywhere; }
   .note { font-size: 0.75rem; color: var(--muted); margin: 0; }
   .btn-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
   .btn { min-height: 32px; padding: 0 0.75rem; border-radius: 8px; border: 1px solid var(--border); background: var(--surface);

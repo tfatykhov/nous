@@ -4,6 +4,7 @@
   import SubNav from '../lib/ui/SubNav.svelte';
   import Placeholder from '../lib/ui/Placeholder.svelte';
   import SessionList from './work/SessionList.svelte';
+  import Trace from './work/Trace.svelte';
 
   // F108 Work host: one screen, its views chosen by the sub path of #/work. The list keeps its filters in the
   // hash query; Patterns, the trace and the ledger are stubs until their tasks land.
@@ -30,7 +31,9 @@
   {:else if view?.view === 'changes'}
     <Placeholder route="changes" />
   {:else if view?.view === 'trace'}
-    <Placeholder route="trace" />
+    {#key view.sessionId}
+      <Trace sessionId={view.sessionId} turnId={view.turn ?? undefined} />
+    {/key}
   {:else if view?.view === 'notfound'}
     <p class="gone" role="status">Nothing here. <a href={routeHref('work')}>Back to sessions</a></p>
   {/if}
