@@ -1,6 +1,6 @@
 # F108: Agent Work View
 
-**Status:** Phase 1 and Phase 2 deployed (all four recording flags on in prod); the full tool result is deployed; Phase 3 tool notes are built and ship off (`NOUS_TOOL_NOTES_ENABLED`, which needs `NOUS_TOOL_CALL_LOG_ENABLED`), to be enabled no earlier than about 2026-11-22. Phase 1 is the recording. PR 1 (#870) records tool calls and turns. PR 2 (#871) records the model-call numbers. PR 3 (#872) records the model-call text. PR 4 (#873), the last PR of Phase 1, makes the model-call table the one recorder: the context endpoints read it, and `context_log` gets no more rows. Every setting defaults off: `NOUS_TOOL_CALL_LOG_ENABLED` and `NOUS_TOOL_REASON_ENABLED` (PR 1), `NOUS_MODEL_CALL_LOG_ENABLED` (PR 2; the cutover in PR 4), `NOUS_MODEL_CALL_TEXT_ENABLED` (PR 3). Phase 2 is the views: the dashboard's Work and Model calls screens, their read-only endpoints, and the navigation in six groups (see [Phase 2: the views](#phase-2-the-views)). Phase 3 (tool notes) is described in [Phase 3: tool notes](#phase-3-tool-notes-nous_tool_notes_enabled-migration-103).
+**Status:** Phase 1 and Phase 2 deployed (all four recording flags on in prod); the full tool result is deployed; Phase 3 tool notes are on in prod since 2026-11-09 (`NOUS_TOOL_NOTES_ENABLED`, which needs `NOUS_TOOL_CALL_LOG_ENABLED`; default off). Phase 1 is the recording. PR 1 (#870) records tool calls and turns. PR 2 (#871) records the model-call numbers. PR 3 (#872) records the model-call text. PR 4 (#873), the last PR of Phase 1, makes the model-call table the one recorder: the context endpoints read it, and `context_log` gets no more rows. Every setting defaults off: `NOUS_TOOL_CALL_LOG_ENABLED` and `NOUS_TOOL_REASON_ENABLED` (PR 1), `NOUS_MODEL_CALL_LOG_ENABLED` (PR 2; the cutover in PR 4), `NOUS_MODEL_CALL_TEXT_ENABLED` (PR 3). Phase 2 is the views: the dashboard's Work and Model calls screens, their read-only endpoints, and the navigation in six groups (see [Phase 2: the views](#phase-2-the-views)). Phase 3 (tool notes) is described in [Phase 3: tool notes](#phase-3-tool-notes-nous_tool_notes_enabled-migration-103).
 
 ## Problem
 
@@ -73,7 +73,13 @@ The vocabulary is `PURPOSES` in `nous/observability/model_calls.py`; a name outs
 
 ### Measured
 
-Measured in prod after deploy, with the flags turned on: rows per hour, the `unlabelled` count and `dropped_backpressure`. The numbers follow in a later PR.
+Measured in prod over the day from 2026-11-08 23:30 to 2026-11-09 23:30 UTC, with every flag on:
+
+- **Rows:** 4,136 rows for 7,642 calls (the embedding and rerank minute buckets hold 2,588 and 1,337 calls in 342 and 77 rows): 2,627 `aggregated`, 973 `call` and 117 `stream`. That is 165 rows an hour on average, 42 to 343.
+- **Main loop:** 2,747 calls, about 19,200 a week against the 14,400 counted before.
+- **Labels:** every row names its purpose: `label_source` is `explicit` on all 4,285 rows since recording began, and `unlabelled` is 0.
+- **Size:** a row takes about 1 KB; with `model_call_attempt` and the indexes the tables held 7.2 MB after the first 25 hours (about 200 MB at the 30-day retention).
+- **Drops:** the recorder counters (`dropped_backpressure` and the rest) reset at each restart, and that day had several deploys. Read once after the last one they showed no drop of any kind, over minutes of uptime, so they are not a daily figure.
 
 ### Known gaps
 
@@ -116,7 +122,7 @@ Measured in prod after deploy, with the text on, from the block and ref tables. 
 - **Bytes per call, with dedup:** the growth of `pg_total_relation_size` of `model_text_block` and `model_call_block_ref` (heap, TOAST and indexes) over the window, divided by the calls whose refs were written in it (`count(DISTINCT call_id)` of the refs created in the window). Only a block not stored before adds to the size, so the figure includes the dedup.
 - **GB per week:** the bytes per call times the calls per week (about 14,400 main-loop calls, plus the background calls the numbers table counts). The sweep keeps 7 days of it.
 
-The numbers follow from prod in a later PR.
+Measured over the day from 2026-11-08 23:30 to 2026-11-09 23:30 UTC: 3,716 calls stored their text through 48,129 block references, and only 9,037 blocks were new (28.9 million characters, 19.1 MB stored after compression), so about 81% of the references reused a block already stored. The rows alone come to about 7 KB a call (19.1 MB of blocks and 6.9 MB of references). With the indexes, the two tables held 36.4 MB for the 3,801 calls stored in the first 25 hours, about 9.6 KB a call. At about 26,000 calls a week that is about 250 MB for the 7 days the sweep keeps: an upper bound, since a block reused from an earlier day is not stored again.
 
 ### Known limits
 
@@ -289,7 +295,7 @@ The step's counts are one nested dict, `sleep_stats["tool_notes"]`: `detected`, 
 
 ### Rollout
 
-The step needs sleep and the tool-call log; with the log off, `main.py` logs one WARNING and the step finds nothing. The flag is off by default. The owner enables it no earlier than about 2026-11-22 (two weeks of records), with `NOUS_TOOL_CALL_LOG_ENABLED` on: add `- NOUS_TOOL_NOTES_ENABLED=${NOUS_TOOL_NOTES_ENABLED:-false}` to the `nous` service in `docker-compose.yml` (a code-owner path, so the PR does not change it) and the `.env` line. Migration 103 is applied by the application at start and needs no `db_roles.sql` run: the reader reads neither the notes nor the guard rows. Rollback is removing the `.env` line; the next startup retires the procedure, and the stored notes stay as rows.
+The step needs sleep and the tool-call log; with the log off, `main.py` logs one WARNING and the step finds nothing. The flag is off by default. The owner turned it on in prod on 2026-11-09, a day after recording began, with `NOUS_TOOL_CALL_LOG_ENABLED` on. The first review found 2 patterns and wrote 2 notes; one misread an argument error, was corrected by hand, and led to the review seeing each tool's parameters (above). To turn it on: add `- NOUS_TOOL_NOTES_ENABLED=${NOUS_TOOL_NOTES_ENABLED:-false}` to the `nous` service in `docker-compose.yml` (a code-owner path, so the PR does not change it) and the `.env` line. Migration 103 is applied by the application at start and needs no `db_roles.sql` run: the reader reads neither the notes nor the guard rows. Rollback is removing the `.env` line; the next startup retires the procedure, and the stored notes stay as rows.
 
 ## Non-goals
 
@@ -310,6 +316,13 @@ Bytes per row are bounded by the caps. A tool-call row is about 250 bytes of fix
 Over 30 days that is 22,500 to 120,000 tool-call rows (about 30 MB typical, 520 MB if every row hit every cap) and 15,000 to 63,000 turn rows (about 100 MB typical), plus their indexes: typically about 100 to 300 MB in all at steady state. The capped worst case, every row at every cap at the top of both ranges, is about 1.3 GB: 120,000 tool-call rows at 4.3 KB (520 MB) and 63,000 turn rows at about 12 KB (750 MB; the claim-check JSON has no cap on its number of entries, so a turn with many claims can exceed even this), before compression. For comparison, `context_log` holds about 1.6 KB a row (44,226 rows, 72 MB, since 2026-10-04).
 
 The daily sweep deletes one day's rows, about 1,250 to 6,100. Deletes of that size need only autovacuum: the dead rows are reclaimed and their space reused by the next days' inserts, so the tables stay near their 30-day size. No partitioning is needed.
+
+Measured in prod over the day from 2026-11-08 23:30 to 2026-11-09 23:30 UTC:
+
+- **Turn rows: 487**, at the low end of the range. 484 used a tool: 372 background checks, 66 subtasks, 25 workflow steps, 17 conversation turns, 7 heartbeats and 2 intentions.
+- **Tool-call rows: 2,632**, above the typical 1,000. A background check made 4.0 calls, not the one assumed; a workflow step made 22.7, a subtask 6.5 and a conversation turn 7.4. 34 calls were errors and 337 kept a full result.
+- **Row size:** a tool-call row takes about 1.2 KB and a turn row about 2.5 KB (at most 3.8 KB).
+- **Tables:** after the first 25 hours `tool_call_log` held 4.8 MB and `agent_turn_log` 2.2 MB with their indexes. At this rate that is about 210 MB at 30 days, inside the typical range above.
 
 The model-call text (PR 3) is not in these figures: its size, with the dedup, is measured in prod after deploy (see What PR 3 records, Measured).
 
