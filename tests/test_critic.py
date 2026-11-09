@@ -731,4 +731,4 @@ class TestCriticPromptCache:
 
         assert result.recommended_frame == "task"
         payload = mock_api.call.call_args.args[0]
-        assert _user_text(payload) == "USER MESSAGE:\n" + message
+        assert _user_text(payload) == "USER MESSAGE:\n" + message + "\n\n" + CriticAgent._ANSWER_REMINDER

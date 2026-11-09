@@ -46,6 +46,9 @@ class CriticAgent:
         "no i meant", "that's not", "try again",
     })
 
+    # After the message in the user turn: the JSON-only rule sat right after the message before the system/user split.
+    _ANSWER_REMINDER = "Answer with the JSON object only, no other text."
+
     # The stable part of the prompt, sent as the cached system block; the user message goes in the user turn and is
     # never passed through .format().
     _SYSTEM_PROMPT = """\
@@ -195,7 +198,7 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
             available_frames="\n".join(f"- {f}" for f in frames),
             skill_catalog=skill_catalog,
         )
-        prompt = "USER MESSAGE:\n" + user_message
+        prompt = "USER MESSAGE:\n" + user_message + "\n\n" + self._ANSWER_REMINDER
 
         try:
             from nous.handlers import call_background_llm
