@@ -130,7 +130,7 @@
                     <span class="muted">No reason recorded</span>
                   {:else}
                     <ul class="reasons">
-                      {#each t.reasons.slice(0, 3) as r (r.text)}<li>{r.text} <span class="muted">×{fmt(r.count)}</span></li>{/each}
+                      {#each t.reasons as r (r.text)}<li>{r.text} <span class="muted">×{fmt(r.count)}</span></li>{/each}
                     </ul>
                   {/if}
                 </td>
@@ -174,7 +174,7 @@
       </div>
       <div class="waste">
         <p class="big">{fmt(data.wasted.retried_and_failed_again)}</p>
-        <p>{fmt(data.wasted.retried_and_failed_again)} calls failed again after an identical call in the same turn had already failed.</p>
+        <p>{fmt(data.wasted.retried_and_failed_again)} calls failed again after the previous identical call in the same turn had failed.</p>
       </div>
     </section>
   </div>

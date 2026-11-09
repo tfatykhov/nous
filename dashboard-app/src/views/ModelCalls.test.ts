@@ -485,6 +485,55 @@ describe('Model calls fix round 1', () => {
     await waitFor(() => expect((screen.getByRole('button', { name: 'Load more' }) as HTMLButtonElement).disabled).toBe(false));
   });
 
+  it('Load more stays refused until the LATEST page one lands after two quick filter changes', async () => {
+    const cursor = '2026-11-07T00:00:00+00:00|' + ID2;
+    start('#/model-calls', () => ({ body: list([row(ID1), row(ID2)], { next_before: cursor }) }));
+    render(ModelCalls);
+    await screen.findByRole('button', { name: 'Load more' });
+    // A fetch that honours the abort signal, as the real one does: a superseded page one rejects with AbortError.
+    let release!: (b: unknown) => void;
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: { signal?: AbortSignal }) => {
+      urls.push(url);
+      const ok = (body: unknown) => ({ ok: true, status: 200, json: async () => body }) as Response;
+      if (url.includes('before=')) return Promise.resolve(ok(list([row(ID3)])));
+      return new Promise<Response>((resolve, reject) => {
+        release = (b) => resolve(ok(b));
+        init?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+      });
+    }));
+    const before = urls.length;
+    await fireEvent.click(screen.getByRole('button', { name: /embedding/ })); // change 1: its page one hangs
+    await waitFor(() => expect(urls.length).toBe(before + 1));
+    await fireEvent.change(screen.getByLabelText('Status'), { target: { value: 'error' } }); // change 2 aborts change 1
+    await waitFor(() => expect(urls.length).toBe(before + 2));
+    await new Promise((r) => setTimeout(r, 30)); // let the aborted refresh settle
+    const more = screen.getByRole('button', { name: 'Load more' }) as HTMLButtonElement;
+    expect(more.disabled).toBe(true);
+    await fireEvent.click(more);
+    expect(urls.slice(before).some((u) => u.includes('before='))).toBe(false);
+    release(list([row(ID1)], { next_before: null }));
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull());
+  });
+
+  it('Load more stays enabled while a background poll is in flight', async () => {
+    const cursor = '2026-11-07T00:00:00+00:00|' + ID2;
+    let polls = 0;
+    start('#/model-calls', (u) => {
+      if (u.includes('before=')) return { body: list([row(ID3)]) };
+      polls += 1;
+      return polls === 1 ? { body: list([row(ID1), row(ID2)], { next_before: cursor }) } : { hang: true };
+    });
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(ModelCalls);
+    await screen.findByRole('button', { name: 'Load more' });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await waitFor(() => expect(polls).toBe(2));
+    const more = screen.getByRole('button', { name: 'Load more' }) as HTMLButtonElement;
+    expect(more.disabled).toBe(false);
+    await fireEvent.click(more);
+    await waitFor(() => expect(urls.some((u) => u.includes('before='))).toBe(true));
+  });
+
   it('a block used by this call only still shows its token count', async () => {
     start(`#/model-calls/c/${ID1}`, (u) => (u === `/dashboard/model-calls/${ID1}` ? { body: detail() } : u.includes('/blocks/') ? { body: { part: 'response', ord: 0, size_chars: 5, body: 'x' } } : { body: list([row(ID1)]) }));
     const { container } = render(ModelCalls);

@@ -116,7 +116,7 @@ describe('Work patterns', () => {
   it('explains the two wasted-step counts', async () => {
     render(Work);
     expect(await screen.findByText(/12 extra calls repeated an identical call in the same turn/)).toBeTruthy();
-    expect(screen.getByText(/3 calls failed again after an identical call in the same turn had already failed/)).toBeTruthy();
+    expect(screen.getByText(/3 calls failed again after the previous identical call in the same turn had failed/)).toBeTruthy();
   });
 
   it('says the recording is off and shows nothing else', async () => {

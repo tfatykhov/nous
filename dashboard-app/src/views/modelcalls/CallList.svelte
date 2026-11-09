@@ -55,7 +55,8 @@
     seenKey = k;
     resetPages();
     refetching = true;
-    void store.refresh().finally(() => { refetching = false; });
+    const mine = generation; // a later change aborts this refresh: only the latest one re-enables Load more
+    void store.refresh().finally(() => { if (mine === generation) refetching = false; });
   });
 
   let data = $derived($store.data);
