@@ -63,6 +63,8 @@ include = ["nous*", "nous_eval*"]
 [tool.setuptools.package-data]
 # browser_task's Chromium launcher (F100), run as Playwright's executable_path.
 "nous.browser" = ["*.sh"]
+# F110: the builtin skills (nous/skills/builtin/<name>/SKILL.md), read by sync_builtin_skills at startup.
+"nous.skills" = ["builtin/*/SKILL.md"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
