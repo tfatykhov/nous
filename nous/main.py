@@ -1174,8 +1174,9 @@ async def create_components(settings: Settings) -> dict:
         await reactivate_skills(heart)
         # F110: the builtin skills follow NOUS_SPEC_SKILL_ENABLED; after reactivate_skills, so off stays off.
         await sync_builtin_skills(heart, settings.spec_skill_enabled)
-    except Exception:
-        logger.debug("Skill bootstrap skipped or failed (non-fatal)")
+    except Exception as exc:
+        # WARNING: a raise here also skips the builtin-skill sync, so NOUS_SPEC_SKILL_ENABLED=false retires nothing.
+        logger.warning("Skill bootstrap skipped or failed (non-fatal): %s", type(exc).__name__)
 
     # Create tool dispatcher and register all tools
     dispatcher = ToolDispatcher(

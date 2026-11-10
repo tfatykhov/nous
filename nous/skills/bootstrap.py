@@ -4,7 +4,8 @@ F011 v2: Scans workspace skills directory, deduplicates by exact name match,
 and stores new skill procedures. Skills live in the DB after registration.
 
 F110: the builtin skills ship in the package (``builtin/<name>/SKILL.md``) and
-follow a setting at every start (``sync_builtin_skills``).
+follow a setting at every start (``sync_builtin_skills``). A builtin skill owns
+its name: a workspace skill with that name is not registered.
 """
 
 from __future__ import annotations
@@ -13,10 +14,12 @@ import hashlib
 import logging
 import os
 from pathlib import Path
+from uuid import UUID
 
 from sqlalchemy import func, select
 
 from nous.heart.heart import Heart
+from nous.heart.schemas import JOB_LESSON_KIND, STRATEGY_CARD_KIND
 from nous.skills.parser import SkillParser
 from nous.storage.models import Procedure
 
@@ -24,10 +27,22 @@ logger = logging.getLogger(__name__)
 
 # F110: skills that ship with the code. Package data (pyproject.toml), so an installed copy has them too.
 BUILTIN_DIR = Path(__file__).parent / "builtin"
-# Marks a procedure stored from BUILTIN_DIR: only a row with it is updated or retired by sync_builtin_skills.
+# Stamped on a procedure stored or re-imported from BUILTIN_DIR (a marker: the sync finds its row by name).
 BUILTIN_TAG = "builtin-skill"
-# The core concept that holds the sha256 of the file a builtin skill was stored from.
-BODY_SHA_PREFIX = "body-sha:"
+# runtime_metadata key of a builtin row: {"body_sha": sha256 of the file it was stored from}. Not in core_concepts,
+# which feed the embedding.
+BUILTIN_META_KEY = "builtin"
+
+
+def _builtin_skill_names(parser: SkillParser) -> set[str]:
+    """Lower-cased names of the builtin skills; a file that does not parse owns no name."""
+    names: set[str] = set()
+    for skill_md in BUILTIN_DIR.glob("*/SKILL.md"):
+        try:
+            names.add(parser.parse(skill_md.read_text(encoding="utf-8")).name.lower())
+        except Exception:
+            continue
+    return names
 
 
 async def bootstrap_local_skills(workspace_dir: str, heart: Heart) -> int:
@@ -45,6 +60,7 @@ async def bootstrap_local_skills(workspace_dir: str, heart: Heart) -> int:
 
     parser = SkillParser()
     registered = 0
+    builtin_names = _builtin_skill_names(parser)
 
     for skill_dir in sorted(skills_dir.iterdir()):
         if not skill_dir.is_dir():
@@ -56,6 +72,11 @@ async def bootstrap_local_skills(workspace_dir: str, heart: Heart) -> int:
         try:
             markdown = skill_md.read_text(encoding="utf-8")
             manifest = parser.parse(markdown, source_hint=str(skill_md))
+
+            # F110: a builtin skill owns its name; sync_builtin_skills would take the row over (or retire it, off).
+            if manifest.name.lower() in builtin_names:
+                logger.info("Skill %s has a builtin skill's name, skipping the workspace copy", manifest.name)
+                continue
 
             # Dedup: check if procedure with this name already exists
             existing = await heart.get_procedure_by_name(manifest.name)
@@ -123,11 +144,14 @@ async def sync_builtin_skills(heart: Heart, enabled: bool) -> int:
 
     Called at startup after ``reactivate_skills``. Modelled on the tool-notes procedure
     (``nous/handlers/tool_notes.py`` ``sync_procedure``), not on ``bootstrap_local_skills``: the row is found
-    active or not, by name and the ``builtin-skill`` tag (``get_procedure_by_name`` is active-only, so a second
-    store would duplicate a retired row). Enabled: a missing skill is stored; a stored one is re-imported in place
-    (a new version, learned counts kept) when the file's sha256 differs from its ``body-sha:`` concept, and
-    reactivated when inactive; a name consolidated into another procedure is left alone. Disabled: an active row is
-    retired. The one builtin skill is the spec skill, so ``enabled`` is ``NOUS_SPEC_SKILL_ENABLED``.
+    active or not (``get_procedure_by_name`` is active-only, so a second store would duplicate a retired row), by
+    name, with or without the ``builtin-skill`` tag: a builtin skill owns its name and its file is the source of
+    truth, so a same-name row ``learn_skill`` rewrote is taken back. Never a strategy card, a job lesson or a
+    consolidated row; an active row is preferred. Enabled: a missing skill is stored, unless the name was
+    consolidated into another procedure; a found row is re-imported in place (a new version, learned counts kept,
+    the tag stamped again) when the file's sha256 differs from ``runtime_metadata["builtin"]["body_sha"]`` or is
+    missing, and reactivated when inactive. Disabled: an active row is retired. The one builtin skill is the spec
+    skill, so ``enabled`` is ``NOUS_SPEC_SKILL_ENABLED``.
 
     Never raises: a failure is logged with its exception type only and that skill is skipped.
 
@@ -149,22 +173,31 @@ async def sync_builtin_skills(heart: Heart, enabled: bool) -> int:
     return changed
 
 
+async def _is_active(heart: Heart, procedure_id: UUID) -> bool:
+    """The row's ``active`` as stored now."""
+    async with heart.db.session() as session:
+        active = await session.scalar(
+            select(Procedure.active).where(Procedure.id == procedure_id).where(Procedure.agent_id == heart.agent_id)
+        )
+    return bool(active)
+
+
 async def _sync_builtin_skill(heart: Heart, parser: SkillParser, skill_md: Path, enabled: bool) -> int:
     """Sync one builtin skill file; returns 1 when its row was written, else 0."""
     markdown = skill_md.read_text(encoding="utf-8")  # text mode: a CRLF checkout hashes as LF
     manifest = parser.parse(markdown, source_hint=f"builtin:{skill_md.parent.name}")
-    if enabled and await heart.is_procedure_name_superseded(manifest.name):
-        # Dedup Phase 0, as for workspace skills: a name consolidated into a canonical procedure is not brought back.
-        logger.info("Builtin skill %s was consolidated into a canonical procedure, skipping", manifest.name)
-        return 0
     async with heart.db.session() as session:
         row = (
             await session.execute(
-                select(Procedure.id, Procedure.active, Procedure.core_concepts)
+                select(Procedure.id, Procedure.active, Procedure.runtime_metadata)
                 .where(Procedure.agent_id == heart.agent_id)
+                # Compared the way the name index compares: lower() in the database, both sides.
                 .where(func.lower(Procedure.name) == func.lower(manifest.name))
-                .where(Procedure.tags.any(BUILTIN_TAG))
-                .order_by(Procedure.created_at.desc())
+                .where(Procedure.kind.is_distinct_from(STRATEGY_CARD_KIND))
+                .where(Procedure.kind.is_distinct_from(JOB_LESSON_KIND))
+                .where(Procedure.superseded_by.is_(None))
+                # The active row first, so off retires the live one when an older copy of the name is inactive.
+                .order_by(Procedure.active.desc().nulls_last(), Procedure.created_at.desc())
                 .limit(1)
             )
         ).first()
@@ -179,19 +212,30 @@ async def _sync_builtin_skill(heart: Heart, parser: SkillParser, skill_md: Path,
         logger.info("Builtin skill %s retired (disabled)", manifest.name)
         return 1
 
-    body_sha = BODY_SHA_PREFIX + hashlib.sha256(markdown.encode("utf-8")).hexdigest()
+    if row is None and await heart.is_procedure_name_superseded(manifest.name):
+        # Dedup Phase 0, as for workspace skills: a name consolidated into a canonical procedure is not brought back.
+        logger.info("Builtin skill %s was consolidated into a canonical procedure, skipping", manifest.name)
+        return 0
+
+    body_sha = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
     proc_input = parser.to_procedure_input(manifest)
     proc_input.tags = [*proc_input.tags, BUILTIN_TAG]
-    proc_input.core_concepts = [*proc_input.core_concepts, body_sha]
+    # Merged into the manifest's runtime metadata (F064.4 keys): update_body replaces the column wholesale.
+    proc_input.runtime_metadata = {**(proc_input.runtime_metadata or {}), BUILTIN_META_KEY: {"body_sha": body_sha}}
     if row is None:
         await heart.store_procedure(proc_input)
         logger.info("Builtin skill %s loaded", manifest.name)
         return 1
-    changed = body_sha not in (row.core_concepts or [])
+    stored_sha = ((row.runtime_metadata or {}).get(BUILTIN_META_KEY) or {}).get("body_sha")
+    changed = stored_sha != body_sha
     if changed:
         await heart.update_procedure_body(row.id, proc_input, reason="builtin_skill_changed")
         logger.info("Builtin skill %s re-imported (file changed)", manifest.name)
+    reactivated = False
     if not row.active:
         await heart.reactivate_procedure(row.id)
-        logger.info("Builtin skill %s reactivated", manifest.name)
-    return int(changed or not row.active)
+        # reactivate skips (with a warning) when another active row holds the name: count only what happened.
+        reactivated = await _is_active(heart, row.id)
+        if reactivated:
+            logger.info("Builtin skill %s reactivated", manifest.name)
+    return int(changed or reactivated)
