@@ -208,6 +208,9 @@ class TurnContext(BaseModel):
     sections_by_tier: dict[str, str] = Field(default_factory=dict)  # F036: tier -> joined text
     # F108: the data of this turn's critic_classified event (the turn record keeps a copy); None when no critic ran.
     critic_verdict: dict | None = None
+    # F110: the critic's recommended frame as a label for the turn log: a frame id the critic was offered, "unknown"
+    # for anything else (the verdict's critic_frame is the critic model's own text); None when no critic ran.
+    critic_frame: str | None = None
     # F108: the turn's F035 trace id, minted by pre_turn with the bus's id generator. post_turn makes it the root
     # turn_completed event's event_id and trace_id, and the runner puts it on each of the turn's model-call rows.
     trace_id: str | None = None

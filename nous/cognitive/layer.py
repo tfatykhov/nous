@@ -583,6 +583,8 @@ class CognitiveLayer:
         _critic_skills: list[str] = []
         # F108: the critic_classified event's data, kept on the TurnContext; None when the critic does not run.
         _critic_verdict: dict | None = None
+        # F110: the critic's frame as a label (a frame id or "unknown"); None when the critic does not run.
+        _critic_frame: str | None = None
 
         # Track user messages for frustration detection (F024) and correction detection (F039)
         if (self._critic and self._settings.critic_enabled) or self._settings.correction_extraction_enabled:
@@ -673,6 +675,11 @@ class CognitiveLayer:
                             )
                     except Exception:
                         logger.warning("F024 Critic skill activation failed: %s", skill_name)
+
+            # F110: recommended_frame is the critic model's own text (frames[0] of its JSON), so the turn log keeps
+            # it only when it names a frame the critic was offered.
+            recommended = critic_result.recommended_frame
+            _critic_frame = recommended if recommended in available_frame_ids else "unknown"
 
             # Emit critic_classified event
             _critic_verdict = {
@@ -1178,6 +1185,7 @@ class CognitiveLayer:
             censor_injected_context=censor_injected,
             sections_by_tier=sections_by_tier,
             critic_verdict=_critic_verdict,
+            critic_frame=_critic_frame,
             trace_id=new_event_id(),  # F108: the turn's trace (post_turn's turn_completed is its root)
         )
 

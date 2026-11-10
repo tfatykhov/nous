@@ -2188,9 +2188,9 @@ class AgentTurnLog(Base):
     repeat after compaction: order turns by ``started_at``. The indexes are in the migration.
 
     Migration 106 (F110): ``frame_reason`` (``FrameSelection.match_method``: why the frame was chosen),
-    ``critic_frame`` (the frame the critic recommended, NULL when it did not run) and ``had_error`` (the turn ended with
-    an error). Scalars, unlike the text and JSON columns: the reader's grant can name them once
-    ``scripts/ops/db_roles.sql`` lists them.
+    ``critic_frame`` (the frame the critic recommended: a frame id, or ``unknown`` when the critic named none, never its
+    text; NULL when it did not run) and ``had_error`` (the turn ended with an error). Labels, unlike the text and JSON
+    columns: the reader's grant can name them once ``scripts/ops/db_roles.sql`` lists them.
     """
 
     __tablename__ = "agent_turn_log"

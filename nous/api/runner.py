@@ -670,7 +670,7 @@ class AgentRunner:
                     context_kind=ctx.kind,
                     frame_id=turn_context.frame.frame_id,
                     frame_reason=turn_context.frame.match_method,
-                    critic_frame=(turn_context.critic_verdict or {}).get("critic_frame"),
+                    critic_frame=turn_context.critic_frame,
                     had_error=error is not None,
                     trigger_text=trigger,
                     memory_context={
