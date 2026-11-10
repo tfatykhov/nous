@@ -28,7 +28,15 @@ from nous.cognitive.deliberation import DESCRIPTION_CAPTURE_CHARS, DeliberationE
 from nous.cognitive.frames import FrameEngine
 from nous.cognitive.intent import IntentClassifier, IntentSignals
 from nous.cognitive.monitor import MonitorEngine
-from nous.cognitive.schemas import Assessment, BuildResult, SessionMetadata, TurnContext, TurnResult
+from nous.cognitive.schemas import (
+    Assessment,
+    BuildResult,
+    CarriedFrame,
+    FrameSelection,
+    SessionMetadata,
+    TurnContext,
+    TurnResult,
+)
 from nous.cognitive.usage_tracker import UsageTracker
 from nous.config import Settings
 from nous.events import Event, EventBus, new_event_id
@@ -276,6 +284,8 @@ class CognitiveLayer:
         # §2: Haiku epistemic classifier (wired from main.py when flag on).
         self._epistemic_classifier: "EpistemicClassifier | None" = None
         self._session_tool_history: dict[str, list[dict]] = {}
+        # F110 v2: the frame each session carries into its next turn (NOUS_FRAME_CARRY_ENABLED).
+        self._session_frames: dict[str, CarriedFrame] = {}
         self._censor_executor = CensorActionExecutor(heart)
         self._pending_nudges: dict[str, str] = {}
         self._session_response_lengths: dict[str, list[int]] = {}
@@ -309,6 +319,7 @@ class CognitiveLayer:
         self._active_episodes.pop(session_id, None)
         self._session_metadata.pop(session_id, None)
         self._session_tool_history.pop(session_id, None)
+        self._session_frames.pop(session_id, None)
         self._session_response_lengths.pop(session_id, None)
         self._session_user_messages.pop(session_id, None)
         self._pending_nudges.pop(session_id, None)
@@ -336,6 +347,47 @@ class CognitiveLayer:
             self._purge_session_state(sid)
         if stale:
             logger.info("CR-4: swept %d stale in-process session(s)", len(stale))
+
+    async def _carried_frame_for(
+        self, session_id: str, first_in_process: bool, session: AsyncSession | None
+    ) -> CarriedFrame | None:
+        """F110 v2: the frame this session carries into the turn, or None (flag off or nothing carried).
+
+        The in-process entry first. Only on the session's first turn in this process (after a restart,
+        or after the stale sweep), working memory's ``current_frame`` stands in at strength 1: a row
+        with it set is proof of a prior substantive turn. Later turns never read it, or a spent frame
+        would come back from it every turn. Fail-open: a failed read carries nothing.
+        """
+        if not self._settings.frame_carry_enabled:
+            return None
+        carried = self._session_frames.get(session_id)
+        if carried is not None or not first_in_process:
+            return carried
+        try:
+            wm = await self._heart.get_working_memory(session_id, session=session)
+        except Exception:
+            logger.warning("F110: working memory unreadable for session %s; no carried frame", session_id)
+            return None
+        if wm is None or not wm.current_frame:
+            return None
+        return CarriedFrame(wm.current_frame, 1, 0)
+
+    def _update_session_frame(self, session_id: str, frame: FrameSelection, carried: CarriedFrame | None) -> None:
+        """F110 v2: store the turn's final frame as the session's carried frame.
+
+        A fresh selection (``pattern``, ``critic``, or ``referent``, an accepted offer) sets strength 3;
+        a turn that used the carried frame lowers it by 1 and drops it at 0, so a selection is carried
+        for at most three turns. A ``default`` turn changes nothing.
+        """
+        if frame.match_method in ("pattern", "critic", "referent"):
+            self._session_frames[session_id] = CarriedFrame(frame.frame_id, 3, 0)
+        elif frame.match_method == "carried" and carried is not None:
+            if carried.strength > 1:
+                self._session_frames[session_id] = CarriedFrame(
+                    carried.frame_id, carried.strength - 1, carried.turns + 1
+                )
+            else:
+                self._session_frames.pop(session_id, None)
 
     async def list_frames(self, agent_id: str, session: AsyncSession | None = None) -> list:
         """Public delegation to FrameEngine.list_frames()."""
@@ -532,6 +584,8 @@ class CognitiveLayer:
         self._sweep_stale_sessions()
 
         # 1b. Track user input for significance (005.5 Phase A)
+        # F110: no metadata yet means this is the session's first turn in this process.
+        _first_in_process = session_id not in self._session_metadata
         meta = self._session_metadata.setdefault(session_id, SessionMetadata())
         meta.total_user_chars += len(user_input)
         # Check for explicit remember request
@@ -569,17 +623,20 @@ class CognitiveLayer:
                 logger.warning("Failed to check initiation state, proceeding normally")
 
         # 2. FRAME — select cognitive frame (F5: agent_id first)
+        # F110: the session's carried frame; None with NOUS_FRAME_CARRY_ENABLED off.
+        _carried: CarriedFrame | None = None
         if _is_initiation:
             # 008: Force initiation frame — restricts tools to store_identity + complete_initiation
-            from nous.cognitive.schemas import FrameSelection
             frame = FrameSelection(
                 frame_id="initiation",
                 frame_name="Initiation",
                 confidence=1.0,
+                match_method="direct",
                 description="Identity initiation protocol",
                 questions_to_ask=[],
             )
         else:
+            _carried = await self._carried_frame_for(session_id, _first_in_process, session)
             try:
                 frame = await self._frames.select(
                     agent_id,
@@ -592,6 +649,8 @@ class CognitiveLayer:
                         if last_assistant_text and self._settings.frame_context_enabled
                         else {}
                     ),
+                    # F110: only when the session carries a frame, so the call is otherwise unchanged.
+                    **({"carried": _carried} if _carried is not None else {}),
                 )
             except Exception:
                 logger.warning("Frame selection failed, falling back to conversation")
@@ -734,6 +793,10 @@ class CognitiveLayer:
             if (self._settings.critic_mode == "advised"
                     and critic_result.skills):
                 _critic_skills = critic_result.skills
+
+        # F110: the final frame (after any critic override) is what the session carries next turn.
+        if self._settings.frame_carry_enabled and not _is_initiation:
+            self._update_session_frame(session_id, frame, _carried)
 
         # F083 A2/C1: warm the active-episode map from DB first, so a session that is
         # ongoing after a process restart is not mis-seen as a first turn.

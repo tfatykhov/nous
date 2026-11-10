@@ -67,7 +67,7 @@ nous/
 │   │   ├── dedup.py            # Conversation deduplication
 │   │   ├── monitor.py          # Post-turn self-assessment
 │   │   ├── usage_tracker.py    # Context usage feedback loop
-│   │   └── schemas.py          # TurnContext, TurnResult, etc.
+│   │   └── schemas.py          # TurnContext, TurnResult, CarriedFrame (F110 carried frame), etc.
 │   ├── handlers/               # Event bus handlers
 │   │   ├── episode_summarizer.py  # Episode summary generation
 │   │   ├── job_lessons.py         # JobLessonLearner: lessons from bad runs of recurring jobs

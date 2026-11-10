@@ -8,12 +8,11 @@ from __future__ import annotations
 import logging
 import re
 from datetime import UTC, datetime
-from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nous.cognitive.schemas import FrameSelection
+from nous.cognitive.schemas import CarriedFrame, FrameSelection
 from nous.config import Settings
 from nous.storage.database import Database
 from nous.storage.models import Frame
@@ -46,6 +45,9 @@ _REFERENT_FRAME_ID = "task"
 _REFERENT_CONFIDENCE = 0.6
 # A one-hit keyword frame the referent rule may override (a zero-hit reply always may).
 _REFERENT_OVERRIDABLE = frozenset({"task", "conversation"})
+# F110 v2 carry rule: a reply that is only one of these keeps a carried frame like an affirmative.
+_COURTESY_TOKENS = frozenset({"thanks", "thank", "thx", "great", "perfect", "cool", "nice"})
+_CARRY_CONFIDENCE_PER_STRENGTH = 0.3
 
 
 def _is_affirmative_led(text: str) -> bool:
@@ -62,6 +64,16 @@ def _is_affirmative_led(text: str) -> bool:
         return False
     tokens = re.sub(r"[^\w\s]", " ", lowered).split()
     return bool(tokens) and (tokens[0] in _AFFIRMATIVE_TOKENS or tokens[:2] in _AFFIRMATIVE_PHRASES)
+
+
+def _is_courtesy_reply(text: str) -> bool:
+    """True when the whole reply, lowercased and punctuation stripped, is one courtesy token.
+
+    The tokens are ``thanks thank thx great perfect cool nice``. Only the carry rule reads this:
+    a courtesy reply keeps a carried frame but never accepts an offer (the referent rule).
+    """
+    tokens = re.sub(r"[^\w\s]", " ", text.lower()).split()
+    return len(tokens) == 1 and tokens[0] in _COURTESY_TOKENS
 
 
 def _offers_action(assistant_tail: str) -> bool:
@@ -88,7 +100,7 @@ class FrameEngine:
         input_text: str,
         session: AsyncSession | None = None,
         *,
-        carried: Any = None,
+        carried: CarriedFrame | None = None,
         last_assistant_text: str | None = None,
     ) -> FrameSelection:
         """Select the best cognitive frame for this input.
@@ -103,10 +115,14 @@ class FrameEngine:
            assistant offer selects ``task`` (match_method ``referent``),
            unless the reply has ``frame_switch_min_hits`` hits or its one
            best frame is neither task nor conversation
-        4. Frame with most matches wins (ties broken by priority)
-        5. If no matches, return default frame (conversation)
+        4. Carry rule (F110, only with ``frame_carry_enabled`` and a
+           ``carried`` frame of strength > 0): below ``frame_switch_min_hits``
+           hits, a short reply that is affirmative-led or one courtesy token
+           (3a), or any reply with no hit (3b), keeps the carried frame
+           (match_method ``carried``, confidence ``min(1, 0.3 * strength)``)
+        5. Frame with most matches wins (ties broken by priority)
+        6. If no matches, return default frame (conversation)
 
-        ``carried`` is accepted and ignored (the frame carry rule comes later).
         No LLM call -- pure pattern matching for speed.
         """
         if session is None:
@@ -124,7 +140,7 @@ class FrameEngine:
         input_text: str,
         session: AsyncSession,
         *,
-        carried: Any = None,
+        carried: CarriedFrame | None = None,
         last_assistant_text: str | None = None,
     ) -> FrameSelection:
         frames = await self._load_frames(agent_id, session)
@@ -177,6 +193,12 @@ class FrameEngine:
         if referent is not None:
             await self._increment_usage(referent, session)
             return self._frame_to_selection(referent, "referent", _REFERENT_CONFIDENCE)
+
+        kept = self._carried_frame(frames, input_text, best_count, carried)
+        if kept is not None:
+            carried_frame, carried_confidence = kept
+            await self._increment_usage(carried_frame, session)
+            return self._frame_to_selection(carried_frame, "carried", carried_confidence)
 
         if best_frame is None:
             # No matches -- use default frame
@@ -267,6 +289,40 @@ class FrameEngine:
             return next((f for f in frames if f.id == _REFERENT_FRAME_ID), None)
         except Exception:
             logger.warning("Frame referent rule failed; using keyword selection", exc_info=True)
+            return None
+
+    def _carried_frame(
+        self,
+        frames: list[Frame],
+        input_text: str,
+        best_count: int,
+        carried: CarriedFrame | None,
+    ) -> tuple[Frame, float] | None:
+        """The carried frame and its confidence when the reply keeps it, else None (today's path).
+
+        Rule 1 comes first, here as in the referent rule, so it holds with either flag alone:
+        ``frame_switch_min_hits`` keyword hits keep the keyword frame. Then 3a: a short reply
+        (``frame_short_reply_max_words`` words or fewer) that is affirmative-led or one courtesy
+        token; or 3b: a reply with no keyword hit. The frame is looked up among the agent's active
+        frames; a missing one falls through. Fail-open: an error here returns None.
+        """
+        if carried is None:
+            return None
+        try:
+            if not self._settings.frame_carry_enabled or carried.strength <= 0:
+                return None
+            if best_count >= self._settings.frame_switch_min_hits:
+                return None
+            short = len(input_text.split()) <= self._settings.frame_short_reply_max_words
+            keeps = (short and (_is_affirmative_led(input_text) or _is_courtesy_reply(input_text))) or best_count == 0
+            if not keeps:
+                return None
+            frame = next((f for f in frames if f.id == carried.frame_id), None)
+            if frame is None:
+                return None
+            return frame, min(1.0, _CARRY_CONFIDENCE_PER_STRENGTH * carried.strength)
+        except Exception:
+            logger.warning("Frame carry rule failed; using keyword selection", exc_info=True)
             return None
 
     async def _load_frames(self, agent_id: str, session: AsyncSession) -> list[Frame]:
