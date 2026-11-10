@@ -2184,8 +2184,9 @@ class AgentTurnLog(Base):
     """Migration 100 (F108): one agent turn; ``id`` is the turn's ``turn_id``, supplied by the runner.
 
     Written when the turn ends, while ``NOUS_TOOL_CALL_LOG_ENABLED`` is on. ``trigger_text`` and ``reply_text`` are
-    redacted and capped by the writer; it holds message text, so the ``db_query`` reader does not read it. Turn numbers
-    repeat after compaction: order turns by ``started_at``. The indexes are in the migration.
+    redacted and capped by the writer. The ``db_query`` reader reads every column except the text ones
+    (``trigger_text``, ``reply_text``, ``error``, ``critic``, ``claim_check``: ``scripts/ops/db_roles.sql`` section 5d).
+    Turn numbers repeat after compaction: order turns by ``started_at``. The indexes are in the migration.
 
     Migration 106 (F110): ``frame_reason`` (``FrameSelection.match_method``: why the frame was chosen),
     ``critic_frame`` (the frame the critic's model recommended: a frame id, or ``unknown`` for anything else, never its

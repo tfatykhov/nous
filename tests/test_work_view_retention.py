@@ -29,8 +29,10 @@ from nous.observability.work_view_retention import sweep_tool_calls
 ROOT = Path(__file__).resolve().parents[1]
 _SETTINGS = SimpleNamespace(tool_input_max_chars=2000, tool_result_preview_chars=500, tool_reason_max_chars=500)
 DB_QUERY_EXCEPTION = (
-    "dashboards read these tables, the agent never does, except `tool_call_log`, `model_call_log` and "
-    "`model_call_attempt`, which `db_query` may read"
+    "Dashboards read these tables in full; the agent (`db_query`) reads only what `scripts/ops/db_roles.sql` section "
+    "5d lists: `tool_call_log` (redacted, capped previews and reasons, never the full result), `model_call_log` and "
+    "`model_call_attempt` (never a prompt or response), and the numbers, ids and labels of `agent_turn_log` (never a "
+    "message)"
 )
 
 

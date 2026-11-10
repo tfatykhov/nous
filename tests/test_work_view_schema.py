@@ -221,19 +221,8 @@ def test_settings_defaults():
 
 
 @pytest.mark.postgres_only
-async def test_reader_can_read_tool_call_log_but_not_turn_log(db, reader_role, reader_settings):
-    # from the catalog: some column of the tool-call log, no column of the turn log (it holds message text)
-    async with db.engine.connect() as conn:
-        [(calls, turns)] = (
-            await conn.execute(
-                text(
-                    "SELECT has_any_column_privilege(:r, 'nous_system.tool_call_log', 'SELECT'), "
-                    "has_any_column_privilege(:r, 'nous_system.agent_turn_log', 'SELECT')"
-                ),
-                {"r": reader_role},
-            )
-        ).all()
-    assert (calls, turns) == (True, False)
+async def test_reader_can_read_tool_call_log_but_not_its_full_result(db, reader_role, reader_settings):
+    # the turn log's columns are pinned by tests/test_db_query_live.py (F110: its numbers, never its text)
     # the full result of a call is not for the reader: column by column, the result_text column only
     async with db.engine.connect() as conn:
         granted = dict(
@@ -258,7 +247,7 @@ async def test_reader_can_read_tool_call_log_but_not_turn_log(db, reader_role, r
             assert await conn.fetchval("SELECT count(*) FROM nous_system.tool_call_log") >= 0
         with pytest.raises(asyncpg.PostgresError) as denied:
             async with conn.transaction(readonly=True):
-                await conn.fetch("SELECT count(*) FROM nous_system.agent_turn_log")
+                await conn.fetch("SELECT result_text FROM nous_system.tool_call_log LIMIT 1")
         assert denied.value.sqlstate == "42501"
     finally:
         await conn.close()

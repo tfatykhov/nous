@@ -131,19 +131,19 @@ def test_every_required_check_runs_on_every_pull_request_and_comes_from_actions(
     assert all(c.get("integration_id") == GITHUB_ACTIONS_APP_ID for c in checks), checks
 
 
-def test_migrations_099_to_104_are_applied_again_as_the_application_role() -> None:
-    # db_roles.sql names tables of 099, 100 and 101, so they go in as the superuser before the roles exist (102 to 104
-    # ride along: the migrator applies every version up to the cap); the job undoes them all as the administrator and
-    # lets the application role apply them, as a deployment does.
+def test_migrations_099_to_106_are_applied_again_as_the_application_role() -> None:
+    # db_roles.sql names tables of 099, 100 and 101, and verify reads the turn-log columns of 106, so they go in as
+    # the superuser before the roles exist (102 to 106 ride along: the migrator applies every version up to the cap);
+    # the job undoes them all as the administrator and lets the application role apply them, as a deployment does.
     text = (WORKFLOWS / "ci.yml").read_text()
-    assert "run: python scripts/ci/apply_migrations.py --max-version 104\n" in _step(
-        "Apply the migrations up to 104 (as the superuser, with the application's migrator)"
+    assert "run: python scripts/ci/apply_migrations.py --max-version 106\n" in _step(
+        "Apply the migrations up to 106 (as the superuser, with the application's migrator)"
     )
     roles = text.index("- name: Create the database roles and check them\n")
-    undo = text.index("- name: Undo migrations 099 to 104 so the application role applies them\n")
+    undo = text.index("- name: Undo migrations 099 to 106 so the application role applies them\n")
     later = text.index("- name: Apply every later migration as the application role\n")
     assert roles < undo < later
-    step = _step("Undo migrations 099 to 104 so the application role applies them")
+    step = _step("Undo migrations 099 to 106 so the application role applies them")
     assert "psql -U nous_admin -d nous -X -v ON_ERROR_STOP=1" in step, step
     assert "DROP TABLE nous_system.memory_write_health_daily" in step, step
     assert "DELETE FROM nous_system.schema_migrations WHERE version = '099'" in step, step
@@ -163,4 +163,7 @@ def test_migrations_099_to_104_are_applied_again_as_the_application_role() -> No
     assert refs < attempts, step
     assert refs < step.index("DROP TABLE nous_system.model_text_block"), step
     assert "DROP TABLE nous_system.tool_note" in step, step
-    assert "DELETE FROM nous_system.schema_migrations WHERE version IN ('102', '103', '104')" in step, step
+    # 105 updates a row of nous_system.frames (guarded, so applying it again changes nothing); 106 adds columns to
+    # agent_turn_log, which the drop of 100 above removed: without its record deleted they would never come back
+    redo = "DELETE FROM nous_system.schema_migrations WHERE version IN ('102', '103', '104', '105', '106')"
+    assert redo in step, step

@@ -548,6 +548,7 @@ BEGIN
             ('nous_system.execution_ledger', ARRAY[]::text[]),
             ('nous_system.memory_write_health_daily', ARRAY[]::text[]),
             ('nous_system.tool_call_log', ARRAY['result_text']),
+            ('nous_system.agent_turn_log', ARRAY['trigger_text', 'reply_text', 'error', 'critic', 'claim_check']),
             ('nous_system.model_call_log', ARRAY[]::text[]),
             ('nous_system.model_call_attempt', ARRAY[]::text[])
 -- reader tables end
