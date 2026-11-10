@@ -87,7 +87,8 @@ nous/
 │   │   └── time_parser.py         # Natural language time parsing
 │   ├── skills/                 # Skill discovery system (F011)
 │   │   ├── parser.py           # SkillParser + SkillManifest
-│   │   └── bootstrap.py        # One-time local skill registration
+│   │   ├── builtin/            # F110: skills that ship with the code (spec-writing/SKILL.md, the spec-writing-verify skill), package data
+│   │   └── bootstrap.py        # One-time local skill registration; F110 sync_builtin_skills (builtin/ follows NOUS_SPEC_SKILL_ENABLED)
 │   ├── heartbeat/              # Proactive monitoring (F034)
 │   │   ├── runner.py           # HeartbeatRunner tick loop + triage
 │   │   ├── registry.py         # CheckRegistry + BaseCheck ABC

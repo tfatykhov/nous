@@ -2597,6 +2597,9 @@ class Settings(BaseSettings):
     # consumer enforcement at the orchestrator level. Off by default until
     # F064.4-v2 ships the consumer.
     skill_runtime_metadata_enabled: bool = False
+    # F110: the builtin spec-writing-verify skill (nous/skills/builtin/spec-writing/SKILL.md). On: stored as an
+    # active procedure at startup and re-imported when the file changes. Off: an active one is retired at startup.
+    spec_skill_enabled: bool = False
 
     # F064.5: scheduled task continuation (v1 Episode reuse only). Off by
     # default — every fire creates a fresh session_id, today's behavior. When

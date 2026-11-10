@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 from uuid import uuid4
 
 import pytest
+from job_support import lesson_heart  # noqa: F401
 
 from nous.cognitive.critic import CriticAgent
 from nous.cognitive.critic_schemas import (
@@ -590,6 +591,25 @@ class TestSkillCatalog:
         assert "- template-skill — Use {variable} syntax" in formatted
         assert "{{" not in catalog
         assert "template-skill" in valid_names
+
+    @pytest.mark.asyncio
+    @pytest.mark.postgres_only
+    async def test_critic_catalog_lists_spec_skill(self, lesson_heart):  # noqa: F811
+        """F110 PR 6: the builtin spec skill is in the critic's catalog while NOUS_SPEC_SKILL_ENABLED is on."""
+        from nous.skills.bootstrap import sync_builtin_skills
+
+        agent = CriticAgent(_settings(), procedure_manager=lesson_heart.procedures)
+        await sync_builtin_skills(lesson_heart, True)
+        catalog, valid_names = await agent._build_skill_catalog()
+        assert "spec-writing-verify" in valid_names
+        assert (
+            "- spec-writing-verify — Writing a spec, design note, plan, proposal or review about code or data."
+            in catalog
+        )
+        await sync_builtin_skills(lesson_heart, False)
+        catalog, valid_names = await agent._build_skill_catalog()
+        assert "spec-writing-verify" not in valid_names
+        assert "spec-writing-verify" not in catalog
 
 
 class TestSkillFiltering:

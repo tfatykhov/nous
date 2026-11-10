@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from nous.skills.parser import SkillManifest, SkillParser, _parse_frontmatter
@@ -807,3 +809,27 @@ class TestGetProcedureTool:
 
         text = result["content"][0]["text"]
         assert "No procedure found" in text
+
+
+# ---------------------------------------------------------------------------
+# F110 PR 6: the builtin spec skill (nous/skills/builtin/spec-writing/SKILL.md)
+# ---------------------------------------------------------------------------
+
+BUILTIN_SPEC_SKILL = Path(__file__).resolve().parents[1] / "nous" / "skills" / "builtin" / "spec-writing" / "SKILL.md"
+
+
+def test_builtin_spec_skill_parses():
+    parser = SkillParser()
+    manifest = parser.parse(BUILTIN_SPEC_SKILL.read_text(encoding="utf-8"))
+    assert manifest.name == "spec-writing-verify"
+    # The critic's catalog and the procedure recall find the skill by these words.
+    for word in ("spec", "design note", "plan", "proposal", "review"):
+        assert word in manifest.description
+    assert manifest.domain == "general"
+    assert manifest.requires == []  # reactivate_skills only re-enables a skill with requires
+    assert manifest.warnings == []
+    assert [line.split(".")[0] for line in manifest.raw_content.splitlines()] == ["1", "2", "3", "4", "5"]
+    proc = parser.to_procedure_input(manifest)
+    assert proc.tags == ["skill", "local"]
+    assert proc.core_concepts == ["general"]
+    assert not any(c.startswith("requires:") for c in proc.core_concepts)

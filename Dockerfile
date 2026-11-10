@@ -67,6 +67,9 @@ COPY nous/ nous/
 RUN pip install --no-cache-dir --no-deps .
 
 COPY sql/ sql/
+# F110: the feature and reference docs, so the agent can read the docs of the code it runs (/app/docs).
+COPY docs/features/ docs/features/
+COPY docs/reference/ docs/reference/
 COPY static/ static/
 # Built Svelte dashboard (from the dashboard build stage above)
 COPY --from=dashboard /build/static/dashboard-v2/dist ./static/dashboard-v2/dist
