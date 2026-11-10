@@ -38,7 +38,7 @@ nous/
 │   ├── skills/             # Skill discovery (F011)
 │   ├── heartbeat/          # Proactive monitoring (F034)
 │   ├── identity/           # Agent identity (F018)
-│   ├── observability/      # Telemetry writers — dashboards read these tables, the agent never does, except `tool_call_log`, `model_call_log` and `model_call_attempt`, which `db_query` may read. The tool-notes review (`nous/handlers/tool_notes.py`) also reads `tool_call_log`, and `tool_note` (migration 103) is read and written by the app only
+│   ├── observability/      # Telemetry writers. Dashboards read these tables in full; the agent (`db_query`) reads only what `scripts/ops/db_roles.sql` section 5d lists: `tool_call_log` (redacted, capped previews and reasons, never the full result), `model_call_log` and `model_call_attempt` (never a prompt or response), and the numbers, ids and labels of `agent_turn_log` (never a message). The tool-notes review (`nous/handlers/tool_notes.py`) also reads `tool_call_log`, and `tool_note` (migration 103) is read and written by the app only
 │   ├── dag/                # F038/F087 DAG orchestration
 │   ├── a2ui/               # F092 companion surfaces
 │   └── api/                # External interfaces: REST, MCP, agent runner, tool dispatch
