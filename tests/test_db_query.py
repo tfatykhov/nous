@@ -663,6 +663,24 @@ def test_the_tool_description_teaches_the_limits():
     assert DB_QUERY_SCHEMA["required"] == ["sql"] and DB_QUERY_SCHEMA["properties"]["sql"]["type"] == "string"
 
 
+def test_description_names_the_three_own_records():
+    # F110: the agent answers questions about its own work from its records, and knows the turn log has no text
+    description = DB_QUERY_SCHEMA["description"]
+    for needed in (
+        "nous_system.tool_call_log",
+        "nous_system.model_call_log",
+        "nous_system.agent_turn_log",
+        "Your own records: tool_call_log answers",
+        "model_call_log answers",
+        "agent_turn_log answers",
+        "frame_reason: pattern, default, carried, referent or critic",
+        "critic_frame",
+        "had_error",
+        "Turn numbers only: no message text.",
+    ):
+        assert needed in description, needed
+
+
 def test_compose_passes_the_reader_login_to_the_application():
     # a deployment's compose lists the environment explicitly: without these lines the tool silently stays off
     compose = (Path(__file__).resolve().parents[1] / "docker-compose.yml").read_text(encoding="utf-8")

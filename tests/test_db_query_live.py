@@ -491,6 +491,42 @@ async def test_reader_reads_an_allowed_table(reader_settings):
     assert lines[0] == "n" and lines[1].isdigit() and lines[-1] == "(1 row)", text_
 
 
+# F110: the turn log's numbers, ids and labels are the reader's; its text is not (scripts/ops/db_roles.sql section 5d)
+TURN_TEXT_COLUMNS = {"trigger_text", "reply_text", "error", "critic", "claim_check"}
+
+
+async def test_reader_selects_frame_scalars(reader_settings):
+    out = await run_db_query(reader_settings, "SELECT frame_id, frame_reason FROM nous_system.agent_turn_log LIMIT 1")
+    assert out.splitlines()[0] == "frame_id | frame_reason", out
+    # logged in as the reader: every scalar the db_query description names, migration 106's three included
+    async with _login(reader_settings) as conn:
+        async with conn.transaction(readonly=True):
+            await conn.fetch(
+                "SELECT frame_id, frame_reason, critic_frame, had_error, turn_number, work_kind, tool_call_count "
+                "FROM nous_system.agent_turn_log LIMIT 1"
+            )
+
+
+async def test_reader_denied_reply_text(db, reader_role, reader_settings):
+    # from the catalog, column by column: the text columns only (the pattern of the tool-call log's result_text)
+    granted = dict(
+        await _rows(
+            db,
+            "SELECT a.attname, has_column_privilege(:r, 'nous_system.agent_turn_log', a.attname, 'SELECT') "
+            "FROM pg_attribute a WHERE a.attrelid = 'nous_system.agent_turn_log'::regclass "
+            "AND a.attnum > 0 AND NOT a.attisdropped",
+            r=reader_role,
+        )
+    )
+    assert {name for name, ok in granted.items() if not ok} == TURN_TEXT_COLUMNS, granted
+    assert granted["frame_reason"] and granted["had_error"]  # the positive control: migration 106's scalars
+    # logged in as the reader: a privilege refusal, not a missing column
+    for column in sorted(TURN_TEXT_COLUMNS):
+        assert await _refusal(reader_settings, f"SELECT {column} FROM nous_system.agent_turn_log") == "42501", column
+    out = await run_db_query(reader_settings, "SELECT reply_text FROM nous_system.agent_turn_log")
+    assert out.startswith("Error: 42501") and "permission denied" in out, out
+
+
 @pytest.mark.parametrize(
     "sql",
     [
