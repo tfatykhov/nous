@@ -111,7 +111,8 @@ async def _seed_frames(db: Database) -> None:
         rows = [
             ("task", "Task Execution", "Focused on completing a specific task",
              ["build", "fix", "create", "implement", "deploy", "run", "execute",
-              "check", "show", "list", "install", "update", "delete", "move", "copy"],
+              "check", "show", "list", "install", "update", "delete", "move", "copy",
+              "write", "draft", "spec", "send", "deliver", "add", "edit"],
              "tooling", "medium"),
             ("question", "Question Answering", "Answering questions",
              ["what", "how", "why", "explain", "tell me"], "process", "low"),
