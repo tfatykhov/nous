@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+import unicodedata
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
@@ -226,6 +227,26 @@ def _check_censor_compliance(
         matches = sum(1 for w in words if w in response_lower)
         results[censor_id] = matches >= 2
     return results
+
+
+def _session_referent_section(text: str, age_s: float, max_chars: int) -> str:
+    """F110 PR 4: the "Previous Conversation" section for a new session's first turn, or "" when nothing is left.
+
+    The reply is stripped of control and format characters (newline and tab stay) FIRST, then redacted, then cut to
+    its last ``max_chars`` characters, where an offer usually sits: a secret split by an invisible character is
+    never rebuilt after redaction.
+    """
+    from nous.cognitive.ledger_store import redact_output
+
+    stripped = "".join(c for c in text if c in "\n\t" or not unicodedata.category(c).startswith("C"))
+    tail = redact_output(stripped)[-max_chars:]
+    if not tail.strip():
+        return ""
+    minutes = max(1, round(age_s / 60))
+    return (
+        f"Previous Conversation\n\nYour last message to this user, {minutes} minutes ago, in a conversation that has "
+        "since ended (the model's history does not show it). A short reply is probably an answer to it:\n" + tail
+    )
 
 
 class CognitiveLayer:
@@ -576,7 +597,8 @@ class CognitiveLayer:
             user_display_name: Optional user display name for episode tracking.
             last_assistant_text: The assistant message the user is replying to. Passed to
                 ``FrameEngine.select`` only with ``frame_context_enabled`` on.
-            last_assistant_age_s: Seconds since ``last_assistant_text``; not read yet.
+            last_assistant_age_s: Seconds since ``last_assistant_text``; set only for a cross-session text,
+                which gets the Previous Conversation section with ``session_referent_enabled``.
         """
         # CR-4: refresh this session's activity stamp BEFORE sweeping, so an
         # active session is never evicted, then sweep orphaned sessions.
@@ -990,6 +1012,25 @@ class CognitiveLayer:
                     "Failed to inject subtask results for session %s",
                     session_id, exc_info=True,
                 )
+
+        # F110 PR 4: the channel's last reply, on a new session's first turn. Age None = an in-session
+        # text (the model has it in its history), so no section.
+        if (
+            last_assistant_text
+            and last_assistant_age_s is not None
+            and getattr(self._settings, "session_referent_enabled", False) is True
+        ):
+            try:
+                _referent = _session_referent_section(
+                    last_assistant_text, last_assistant_age_s, self._settings.session_referent_max_chars
+                )
+                if _referent:
+                    system_prompt = system_prompt + "\n\n" + _referent
+                    if sections_by_tier:
+                        _existing_dyn = sections_by_tier.get("dynamic", "")
+                        sections_by_tier["dynamic"] = _existing_dyn + "\n\n" + _referent if _existing_dyn else _referent
+            except Exception:
+                logger.warning("F110: the session referent section failed", exc_info=True)
 
         # 4. DELIBERATE — start if frame warrants it
         decision_id: str | None = None
