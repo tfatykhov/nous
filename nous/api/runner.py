@@ -4780,13 +4780,20 @@ Rules:
         return "\n".join(text_parts) if text_parts else ""
 
     def _last_assistant_text(self, conversation: Conversation) -> str | None:
-        """F110: the text of the conversation's last assistant message, or None when there is none."""
-        message = next((m for m in reversed(conversation.messages) if m.role == "assistant"), None)
-        if message is None:
+        """F110: the text of the conversation's last assistant message, or None when there is none.
+
+        Fail-open: content it cannot read (a malformed restored block list) returns None.
+        """
+        try:
+            message = next((m for m in reversed(conversation.messages) if m.role == "assistant"), None)
+            if message is None:
+                return None
+            if isinstance(message.content, list):
+                return self._extract_text(message.content)
+            return message.text_content or message.content
+        except Exception:
+            logger.warning("F110: could not read the last assistant message; frame context skipped", exc_info=True)
             return None
-        if isinstance(message.content, list):
-            return self._extract_text(message.content)
-        return message.text_content or message.content
 
     async def _activity_heartbeat_loop(self, dag_node_id: UUID, interval_seconds: float) -> None:
         """F064.1: background heartbeat ping while a tool dispatch is in flight.

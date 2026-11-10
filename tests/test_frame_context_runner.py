@@ -200,8 +200,12 @@ async def test_runner_omits_kwargs_flag_off(entry):
             Message(role="user", content="earlier", text_content="earlier"),
             Message(role="assistant", content=[{"type": "tool_use", "id": "t1", "name": "bash", "input": {}}]),
         ],
+        [
+            Message(role="user", content="earlier", text_content="earlier"),
+            Message(role="assistant", content=["not a block"]),
+        ],
     ],
-    ids=["empty", "user-only", "assistant-without-text"],
+    ids=["empty", "user-only", "assistant-without-text", "unreadable-content"],
 )
 async def test_runner_no_assistant_message_omits(entry, history):
     cognitive = _SpyCognitive()
