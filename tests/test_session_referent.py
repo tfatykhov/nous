@@ -519,7 +519,7 @@ async def test_secret_straddling_the_store_cut_never_reaches_prompt_or_critic(db
         monkeypatch.setattr(settings, "critic_enabled", True)
         monkeypatch.setattr(settings, "critic_mode", "shadow")
         max_chars = settings.session_referent_max_chars
-        # The cut falls 12 characters into the secret: its last 20 characters sit at the head of the stored tail.
+        # The cut falls 12 characters into the secret: its last 19 characters sit at the head of the stored tail.
         trailing = max_chars - len(secret) + 12
         reply = "intro words " * 40 + secret + (" ab cd" * trailing)[:trailing]
         assert len(reply) - max_chars > 0

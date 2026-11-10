@@ -71,7 +71,14 @@ from nous.cognitive.execution_ledger import (
     redact_error_text,
 )
 from nous.cognitive.layer import CognitiveLayer
-from nous.cognitive.ledger_store import DuplicateSend, HeldKey, LedgerStore, LedgerWriteError, redact_structure
+from nous.cognitive.ledger_store import (
+    DuplicateSend,
+    HeldKey,
+    LedgerStore,
+    LedgerWriteError,
+    redact_output,
+    redact_structure,
+)
 from nous.cognitive.schemas import ToolResult, TurnContext, TurnResult
 from nous.config import Settings
 from nous.heart.heart import Heart
@@ -4848,8 +4855,6 @@ Rules:
         try:
             # Strip, then redact, the WHOLE reply before the store cuts it: a secret straddling the cut would
             # otherwise be left as a fragment no pattern matches (the layer and the critic repeat both passes).
-            from nous.cognitive.ledger_store import redact_output
-
             prepared = redact_output(
                 "".join(c for c in reply if c in "\n\t" or not unicodedata.category(c).startswith("C"))
             )
