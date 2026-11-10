@@ -27,7 +27,7 @@ from nous.cognitive.critic_schemas import CriticResult, RoutingMode
 from nous.cognitive.ledger_store import detail_text
 from nous.cognitive.schemas import FrameSelection, TurnContext
 from nous.observability.recording import BoundedWriter
-from nous.observability.tool_calls import ToolCallRecorder, TurnRecord
+from nous.observability.tool_calls import _TURN_COLUMNS, ToolCallRecorder, TurnRecord
 
 _SETTINGS = SimpleNamespace(tool_input_max_chars=2000, tool_result_preview_chars=500, tool_reason_max_chars=500)
 _CUT_MARKER = "\n…[middle cut]…\n"
@@ -295,6 +295,37 @@ async def test_stream_closed_by_its_consumer_ends_in_a_cancelled_row():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", PATHS)
+async def test_turn_record_carries_frame_reason(path):
+    """F110: the frame's match_method is the row's frame_reason; no critic means no critic_frame; a turn that ended
+    well has had_error False."""
+    spy = _TurnSpy()
+    r, _calls = _runner(recorder=spy)
+    frame = FrameSelection(frame_id="conversation", frame_name="Conversation", confidence=0.9, match_method="pattern")
+    r._cognitive.preset = TurnContext(system_prompt="You are Nous.", frame=frame)
+    assert await _drive(r, path, []) == "done"
+    (turn,) = spy.turns
+    assert turn.frame_reason == "pattern"
+    assert turn.critic_frame is None
+    assert turn.had_error is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", PATHS)
+async def test_turn_record_critic_frame_and_error(path):
+    """F110: the critic's recommended frame (the verdict's critic_frame) and the turn's error flag."""
+    spy = _TurnSpy()
+    r, _calls = _turn_runner(spy)  # VERDICT: the critic recommended task
+    with pytest.raises(RuntimeError):
+        await _drive_failing(r, path, RuntimeError("boom"))
+    (turn,) = spy.turns
+    assert turn.error == "boom"
+    assert turn.critic_frame == "task"
+    assert turn.had_error is True
+    assert turn.frame_reason == "default"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", PATHS)
 async def test_recorder_failure_does_not_change_the_turn(path):
     class _Broken(_TurnSpy):
         def record_turn(self, rec):
@@ -486,6 +517,49 @@ async def test_record_turn_upserts_on_id(db):
         assert (row["session_id"], row["turn_number"]) == ("s-1", 2)
         assert row["started_at"] == first.started_at and row["ended_at"] is not None
         assert recorder.stats.written == 2
+    finally:
+        await _delete(db, agent)
+
+
+@pytest.mark.postgres_only
+async def test_turn_columns_match_table(db):
+    """The recorder's column list (derived from TurnRecord) is exactly the table's: a column added to one and not the
+    other fails here, not in the writer's background task."""
+    async with db.engine.connect() as conn:
+        columns = (
+            (
+                await conn.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = 'nous_system' AND table_name = 'agent_turn_log'"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert set(_TURN_COLUMNS) == set(columns)
+    assert len(_TURN_COLUMNS) == len(set(_TURN_COLUMNS))
+
+
+@pytest.mark.postgres_only
+async def test_frame_reason_critic_frame_and_had_error_reach_the_row(db):
+    agent = _agent()
+    writer = BoundedWriter("test")
+    recorder = ToolCallRecorder(writer, db, agent, _SETTINGS)
+    failed, quiet = _turn(frame_reason="critic", critic_frame="task", had_error=True), _turn()
+    try:
+        recorder.record_turn(failed)
+        recorder.record_turn(quiet)
+        await writer.drain(5.0)
+        rows = {row["id"]: row for row in await _rows(db, agent)}
+        assert (rows[failed.id]["frame_reason"], rows[failed.id]["critic_frame"]) == ("critic", "task")
+        assert rows[failed.id]["had_error"] is True
+        assert (rows[quiet.id]["frame_reason"], rows[quiet.id]["critic_frame"], rows[quiet.id]["had_error"]) == (
+            None,
+            None,
+            None,
+        )
     finally:
         await _delete(db, agent)
 

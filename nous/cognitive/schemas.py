@@ -94,7 +94,7 @@ class FrameSelection(BaseModel):
     frame_id: str
     frame_name: str
     confidence: float = Field(ge=0.0, le=1.0)
-    match_method: str  # "pattern" or "default"
+    match_method: str  # pattern | default | carried | referent | critic | direct
     description: str | None = None
     default_category: str | None = None
     default_stakes: str | None = None
