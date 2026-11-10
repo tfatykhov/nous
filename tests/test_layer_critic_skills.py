@@ -341,3 +341,52 @@ class TestCriticSkillsContextWiring:
         layer._context.build.assert_called_once()
         call_kwargs = layer._context.build.call_args.kwargs
         assert call_kwargs.get("critic_skills") == []
+
+
+class TestCriticFrameReason:
+    """F110: a frame the critic replaced records match_method "critic" (the turn log's frame_reason); a critic that
+    agrees, runs in shadow mode, or names an unknown frame leaves the heuristic's method."""
+
+    @staticmethod
+    def _layer(mode: str, recommended: str):
+        layer = _mock_layer(_settings(critic_enabled=True, critic_mode=mode))
+        layer.warm_active_episode = AsyncMock(return_value=None)
+        layer._critic = MagicMock()
+        result = CriticResult(routing=RoutingMode.SINGLE_ADVISED, recommended_frame=recommended, rationale="test")
+        layer._critic.classify = AsyncMock(return_value=result)
+        layer._critic.run_diagnostics = MagicMock(return_value=[])
+        # what FrameEngine.get returns: the frame by id, match_method "direct"
+        layer._frames.get = AsyncMock(return_value=_frame(recommended, 1.0, "direct"))
+        return layer
+
+    @staticmethod
+    async def _frame_of(layer):
+        ctx = await layer.pre_turn(agent_id="test", session_id="s1", user_input="should we pick redis or kafka")
+        return ctx.frame
+
+    @pytest.mark.asyncio
+    async def test_critic_override_records_critic_match_method(self):
+        layer = self._layer("advised", "decision")
+        frame = await self._frame_of(layer)
+        assert (frame.frame_id, frame.match_method) == ("decision", "critic")
+        assert frame.confidence == 1.0  # the rest of the fetched frame is kept
+
+    @pytest.mark.asyncio
+    async def test_critic_agree_keeps_heuristic_method(self):
+        layer = self._layer("advised", "task")
+        frame = await self._frame_of(layer)
+        assert (frame.frame_id, frame.match_method) == ("task", "pattern")
+        layer._frames.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_critic_shadow_never_changes_match_method(self):
+        layer = self._layer("shadow", "decision")
+        frame = await self._frame_of(layer)
+        assert (frame.frame_id, frame.match_method) == ("task", "pattern")
+
+    @pytest.mark.asyncio
+    async def test_critic_unknown_frame_keeps_heuristic_method(self):
+        layer = self._layer("advised", "nonexistent")
+        layer._frames.get = AsyncMock(side_effect=ValueError("Frame 'nonexistent' not found"))
+        frame = await self._frame_of(layer)
+        assert (frame.frame_id, frame.match_method) == ("task", "pattern")

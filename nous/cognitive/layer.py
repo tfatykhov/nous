@@ -620,6 +620,8 @@ class CognitiveLayer:
                     frame = await self._frames.get(
                         critic_result.recommended_frame, agent_id, session=session,
                     )
+                    # F110: the turn log's frame_reason says the critic chose this frame
+                    frame = frame.model_copy(update={"match_method": "critic"})
                     logger.info(
                         "F024 Critic override: %s -> %s (reason: %s, latency=%dms)",
                         heuristic_frame.frame_id, critic_result.recommended_frame,
