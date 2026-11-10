@@ -4790,7 +4790,9 @@ Rules:
                 return None
             if isinstance(message.content, list):
                 return self._extract_text(message.content)
-            return message.text_content or message.content
+            if isinstance(message.content, str):
+                return message.text_content or message.content
+            return None  # neither a list nor a str: nothing readable, nothing to log
         except Exception:
             logger.warning("F110: could not read the last assistant message; frame context skipped", exc_info=True)
             return None

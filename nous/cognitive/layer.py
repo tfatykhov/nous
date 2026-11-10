@@ -630,6 +630,12 @@ class CognitiveLayer:
                 heuristic_frame=frame,
                 available_frames=available_frame_ids,
                 tool_call_history=tool_history,
+                # F110: only with text and the flag on, so test doubles of classify see the call unchanged.
+                **(
+                    {"last_assistant_text": last_assistant_text}
+                    if last_assistant_text and self._settings.frame_context_enabled
+                    else {}
+                ),
             )
 
             # In advised mode, override frame selection
