@@ -2186,6 +2186,11 @@ class AgentTurnLog(Base):
     Written when the turn ends, while ``NOUS_TOOL_CALL_LOG_ENABLED`` is on. ``trigger_text`` and ``reply_text`` are
     redacted and capped by the writer; it holds message text, so the ``db_query`` reader does not read it. Turn numbers
     repeat after compaction: order turns by ``started_at``. The indexes are in the migration.
+
+    Migration 106 (F110): ``frame_reason`` (``FrameSelection.match_method``: why the frame was chosen),
+    ``critic_frame`` (the frame the critic recommended, NULL when it did not run) and ``had_error`` (the turn ended with
+    an error). Scalars, unlike the text and JSON columns: the reader's grant can name them once
+    ``scripts/ops/db_roles.sql`` lists them.
     """
 
     __tablename__ = "agent_turn_log"
@@ -2199,6 +2204,9 @@ class AgentTurnLog(Base):
     work_kind: Mapped[str] = mapped_column(Text, nullable=False)
     context_kind: Mapped[str | None] = mapped_column(Text, nullable=True)
     frame_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    frame_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    critic_frame: Mapped[str | None] = mapped_column(Text, nullable=True)
+    had_error: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     trigger_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     memory_context: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     critic: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

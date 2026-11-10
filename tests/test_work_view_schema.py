@@ -189,6 +189,27 @@ async def test_agent_turn_log_pk_is_turn_id(db):
         await _delete(db, agent)
 
 
+@pytest.mark.postgres_only
+async def test_agent_turn_log_has_frame_columns(db):
+    """Migration 106 (F110): why the frame was chosen, what the critic said, whether the turn failed. Nullable, no
+    default."""
+    async with db.engine.connect() as conn:
+        rows = (
+            await conn.execute(
+                text(
+                    "SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns "
+                    "WHERE table_schema = 'nous_system' AND table_name = 'agent_turn_log' "
+                    "AND column_name IN ('frame_reason', 'critic_frame', 'had_error')"
+                )
+            )
+        ).all()
+    assert {name: (kind, nullable, default) for name, kind, nullable, default in rows} == {
+        "frame_reason": ("text", "YES", None),
+        "critic_frame": ("text", "YES", None),
+        "had_error": ("boolean", "YES", None),
+    }
+
+
 def test_settings_defaults():
     fields = Settings.model_fields
     assert fields["tool_call_log_enabled"].default is False
