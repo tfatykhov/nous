@@ -14,6 +14,7 @@ import itertools
 import json
 import logging
 import time
+import unicodedata
 import weakref
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, Callable, Iterator
@@ -4845,7 +4846,14 @@ Rules:
         if channel is None or error is not None:
             return
         try:
-            self._channel_last_reply.record(channel, session_id, reply, time.monotonic())
+            # Strip, then redact, the WHOLE reply before the store cuts it: a secret straddling the cut would
+            # otherwise be left as a fragment no pattern matches (the layer and the critic repeat both passes).
+            from nous.cognitive.ledger_store import redact_output
+
+            prepared = redact_output(
+                "".join(c for c in reply if c in "\n\t" or not unicodedata.category(c).startswith("C"))
+            )
+            self._channel_last_reply.record(channel, session_id, prepared, time.monotonic())
         except Exception as exc:  # noqa: BLE001 -- the referent must not change a turn
             # The type only: an exception message can echo the reply.
             logger.warning("F110: session referent not recorded (%s)", type(exc).__name__)

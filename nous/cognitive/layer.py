@@ -245,7 +245,9 @@ def _session_referent_section(text: str, age_s: float, max_chars: int) -> str:
     minutes = max(1, round(age_s / 60))
     return (
         f"Previous Conversation\n\nYour last message to this user, {minutes} minutes ago, in a conversation that has "
-        "since ended (the model's history does not show it). A short reply is probably an answer to it:\n" + tail
+        "since ended (the model's history does not show it). A short reply is probably an answer to it:\n"
+        + tail
+        + "\n(end of the previous message)"
     )
 
 

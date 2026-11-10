@@ -1577,11 +1577,30 @@ async def test_section_absent_without_text(cognitive, settings, session, monkeyp
     assert "Previous Conversation" not in ctx.system_prompt
 
 
-async def test_section_absent_when_age_missing_in_session(cognitive, settings, session, monkeypatch):
+async def test_section_absent_when_age_missing_in_session(cognitive, settings, session, monkeypatch, caplog):
     monkeypatch.setattr(settings, "session_referent_enabled", True)
-    ctx = await _referent_turn(cognitive, session, _OFFER, None)
+    with caplog.at_level("WARNING", logger="nous.cognitive.layer"):
+        ctx = await _referent_turn(cognitive, session, _OFFER, None)
     assert "Previous Conversation" not in ctx.system_prompt
     assert "Previous Conversation" not in (ctx.sections_by_tier or {}).get("dynamic", "")
+    # Without the age guard the section raises on round(None / 60) and the fail-open except hides it: the
+    # guard is what keeps an in-session turn off that path.
+    assert "session referent section failed" not in caplog.text
+
+
+async def test_section_failure_is_fail_open(cognitive, settings, session, monkeypatch, caplog):
+    monkeypatch.setattr(settings, "session_referent_enabled", True)
+    baseline = await _referent_turn(cognitive, session, None, None)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("nous.cognitive.layer._session_referent_section", boom)
+    with caplog.at_level("WARNING", logger="nous.cognitive.layer"):
+        ctx = await _referent_turn(cognitive, session, _OFFER, 300.0)
+    assert "session referent section failed" in caplog.text
+    assert "Previous Conversation" not in ctx.system_prompt
+    assert ctx.system_prompt == baseline.system_prompt
 
 
 async def test_section_absent_when_flag_off(cognitive, settings, session, monkeypatch):
@@ -1611,13 +1630,17 @@ async def test_section_redacts_secret(cognitive, settings, session, monkeypatch)
 
 @pytest.mark.parametrize("splitter", ["\x00", "​", "⁠", "﻿", "‮"])
 async def test_section_secret_split_by_invisible_char_is_redacted(cognitive, settings, session, monkeypatch, splitter):
-    """Stripping comes before redaction: a secret split by an invisible character is not rebuilt afterwards."""
+    """Stripping comes before redaction: a secret split by an invisible character is not rebuilt afterwards.
+
+    The body after ``sk-`` is under 40 characters, so only the prefix-keyed pattern can match it, and only when the
+    two halves are joined first (strip, then redact). Redacting first leaves the key whole in the prompt."""
     monkeypatch.setattr(settings, "session_referent_enabled", True)
-    secret = "sk-ant-api03-" + "A1b2C3d4E5f6G7h8I9j0" * 3
-    split = secret[:20] + splitter + secret[20:]
-    ctx = await _referent_turn(cognitive, session, f"key {split} done", 60.0)
-    assert secret not in ctx.system_prompt
-    assert splitter not in ctx.system_prompt.split("A short reply is probably an answer to it:")[1][:200]
+    body = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"
+    ctx = await _referent_turn(cognitive, session, f"key sk-{splitter}{body} done", 60.0)
+    assert "Previous Conversation" in ctx.system_prompt
+    assert body not in ctx.system_prompt
+    assert "A1b2C3" not in ctx.system_prompt
+    assert "done" in ctx.system_prompt
 
 
 async def test_section_injection_text_is_data(cognitive, settings, session, monkeypatch):
@@ -1629,6 +1652,10 @@ async def test_section_injection_text_is_data(cognitive, settings, session, monk
     framing = "A short reply is probably an answer to it:\n"
     assert prompt.index(framing) < prompt.index(hostile)
     assert prompt.index("Previous Conversation") < prompt.index(framing)
+    terminator = "\n(end of the previous message)"
+    assert prompt.count(terminator) == 1
+    assert prompt.index(hostile) + len(hostile) == prompt.index(terminator)
+    assert prompt.index(terminator) > prompt.index(hostile)
 
 
 async def test_section_huge_reply_capped(cognitive, settings, session, monkeypatch):

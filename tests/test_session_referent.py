@@ -495,3 +495,104 @@ async def test_store_errors_fail_open(entry):
     assert _no_referent(kwargs)
     runner._channel_last_reply.lookup.assert_called_once()
     runner._channel_last_reply.record.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# I1: the reply is stripped and redacted BEFORE the store cuts it
+# ---------------------------------------------------------------------------
+
+
+async def test_secret_straddling_the_store_cut_never_reaches_prompt_or_critic(db, heart, settings, monkeypatch):
+    """A reply over max_chars with an own secret straddling the cut: no 8+ char fragment of it reaches the next
+    session's system prompt or the critic's previous-message input (redaction precedes the store's cut)."""
+    from nous.brain.brain import Brain
+    from nous.cognitive.critic_schemas import CriticResult, RoutingMode
+    from nous.cognitive.layer import CognitiveLayer
+    from nous.cognitive.ledger_store import _own_secrets
+
+    secret = "Zq7Kp2Xw9Lm4Tn8Vb3Yc6Rd1Sf5Gh0J"
+    monkeypatch.setenv("NOUS_TEST_F110_TOKEN", secret)
+    _own_secrets.cache_clear()
+    try:
+        monkeypatch.setattr(settings, "session_referent_enabled", True)
+        monkeypatch.setattr(settings, "frame_context_enabled", True)
+        monkeypatch.setattr(settings, "critic_enabled", True)
+        monkeypatch.setattr(settings, "critic_mode", "shadow")
+        max_chars = settings.session_referent_max_chars
+        # The cut falls 12 characters into the secret: its last 20 characters sit at the head of the stored tail.
+        trailing = max_chars - len(secret) + 12
+        reply = "intro words " * 40 + secret + (" ab cd" * trailing)[:trailing]
+        assert len(reply) - max_chars > 0
+
+        brain = Brain(database=db, settings=settings)
+        cognitive = CognitiveLayer(brain, heart, settings, identity_prompt="You are Nous.")
+        seen: list[dict] = []
+
+        async def classify(**kwargs):
+            seen.append(kwargs)
+            return CriticResult(
+                routing=RoutingMode.PASSTHROUGH, recommended_frame=kwargs["heuristic_frame"].frame_id, rationale="x"
+            )
+
+        critic = MagicMock()
+        critic.classify = classify
+        monkeypatch.setattr(cognitive, "_critic", critic)
+        monkeypatch.setattr(cognitive, "post_turn", AsyncMock(return_value=Assessment(actual="x")))
+
+        runner = AgentRunner(cognitive, _Stub(), _Stub(), settings)
+        runner._tool_loop = AsyncMock(return_value=(reply, [], {"input_tokens": 1, "output_tokens": 1}, []))
+        runner.set_dispatcher(ToolDispatcher())
+        prompts: list[str] = []
+        real_pre_turn = cognitive.pre_turn
+
+        async def spy_pre_turn(*args, **kwargs):
+            ctx = await real_pre_turn(*args, **kwargs)
+            prompts.append(ctx.system_prompt)
+            return ctx
+
+        monkeypatch.setattr(cognitive, "pre_turn", spy_pre_turn)
+        try:
+            await _turn(runner, "run_turn", _sid(), "plan it", channel=CH)
+            await _turn(runner, "run_turn", _sid(), "yes do it", channel=CH)
+        finally:
+            await runner.close()
+            await brain.close()
+
+        assert "Previous Conversation" in prompts[1]
+        fragments = {secret[i : i + 8] for i in range(len(secret) - 7)}
+        for frag in fragments:
+            assert frag not in prompts[1], frag
+        critic_texts = [k["last_assistant_text"] for k in seen if "last_assistant_text" in k]
+        assert critic_texts, "the critic should have received the previous message"
+        for text in critic_texts:
+            for frag in fragments:
+                assert frag not in text, frag
+    finally:
+        monkeypatch.delenv("NOUS_TEST_F110_TOKEN", raising=False)
+        _own_secrets.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "kind", ["background", "scheduled", "subtask", "dag_node", "heartbeat_triage", "agent_action", "mcp"]
+)
+async def test_non_interactive_kinds_neither_write_nor_read_the_store(kind):
+    """Only an interactive turn touches the channel's last reply: a channelled turn of another kind reads none
+    and replaces none."""
+    cognitive = _SpyCognitive()
+    runner = _runner(cognitive, referent=True)
+    first, other = _sid(), _sid()
+    try:
+        await _turn(runner, "run_turn", first, "plan it", channel=CH)  # stores REPLY
+        runner._tool_loop = AsyncMock(
+            return_value=("A different reply.", [], {"input_tokens": 1, "output_tokens": 1}, [])
+        )
+        await runner.run_turn(
+            other, "background work", context=ExecutionContext(kind=kind, session_id=other, channel=CH)
+        )
+    finally:
+        await runner.close()
+
+    interactive_kwargs, other_kwargs = cognitive.pre_turn_kwargs
+    assert _no_referent(interactive_kwargs)
+    assert _no_referent(other_kwargs)  # no read
+    assert runner._channel_last_reply.lookup(CH, _sid(), time.monotonic())[0] == REPLY  # no write
