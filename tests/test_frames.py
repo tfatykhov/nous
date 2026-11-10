@@ -1,10 +1,12 @@
 """Tests for FrameEngine — cognitive frame selection via pattern matching.
 
-Uses unittest.mock throughout — no real database required.
+Uses unittest.mock throughout — no real database required, except the
+migration 105 test (Postgres only).
 
 Seed frame patterns (matching seed.sql defaults):
   task:         build, fix, create, implement, deploy, run, execute, check, show, list,
-                install, update, delete, move, copy
+                install, update, delete, move, copy, write, draft, spec, send, deliver,
+                add, edit
   question:     what, how, why, explain, tell me (multi-word)
   decision:     should, choose, decide, compare, trade-off
   creative:     imagine, brainstorm, what if (multi-word), design, explore
@@ -14,12 +16,16 @@ Seed frame patterns (matching seed.sql defaults):
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import text
 
 from nous.cognitive.frames import FRAME_PRIORITY, FrameEngine
 from nous.cognitive.schemas import FrameSelection
+from nous.storage.migrator import _split_sql_statements
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +61,7 @@ class FakeFrame:
 
 # Seed frames that mirror the production seed.sql defaults
 SEED_FRAMES = [
-    FakeFrame("task", "Task Execution", ["build", "fix", "create", "implement", "deploy", "run", "execute", "check", "show", "list", "install", "update", "delete", "move", "copy"], "tooling", "medium"),
+    FakeFrame("task", "Task Execution", ["build", "fix", "create", "implement", "deploy", "run", "execute", "check", "show", "list", "install", "update", "delete", "move", "copy", "write", "draft", "spec", "send", "deliver", "add", "edit"], "tooling", "medium"),
     FakeFrame("question", "Question Answering", ["what", "how", "why", "explain", "tell me"], "process", "low"),
     FakeFrame("decision", "Decision Making", ["should", "choose", "decide", "compare", "trade-off"], "architecture", "high"),
     FakeFrame("creative", "Creative", ["imagine", "brainstorm", "what if", "design", "explore"], "architecture", "low"),
@@ -539,3 +545,64 @@ async def test_frame_select_session_context_manager():
 
     assert result.frame_id == "task"
     engine._db.session.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 30. F110 task keywords (migration 105)
+# ---------------------------------------------------------------------------
+
+ROOT = Path(__file__).resolve().parents[1]
+MIGRATION_105 = ROOT / "sql" / "migrations" / "105_task_frame_keywords.sql"
+NEW_TASK_WORDS = ["write", "draft", "spec", "send", "deliver", "add", "edit"]
+PRE_105_TASK_WORDS = [
+    "build", "fix", "create", "implement", "deploy", "run", "execute", "check", "show", "list",
+    "install", "update", "delete", "move", "copy",
+]  # fmt: skip
+
+
+async def test_task_keywords_spec_request():
+    """The live request that went to conversation now selects task: write, spec and deliver are 3 hits."""
+    engine = make_engine()
+    result = await select_with_frames(engine, "Yes write short spec., deliver here", SEED_FRAMES)
+    assert result.frame_id == "task"
+    assert result.match_method == "pattern"
+    assert result.confidence == pytest.approx(0.9)
+
+
+async def test_task_keywords_haiku_accepted():
+    """'write' alone selects task: the accepted cost of a common verb."""
+    engine = make_engine()
+    result = await select_with_frames(engine, "write me a haiku", SEED_FRAMES)
+    assert result.frame_id == "task"
+    assert result.match_method == "pattern"
+
+
+def test_seed_task_patterns_contain_new_keywords():
+    seed = (ROOT / "sql" / "seed.sql").read_text(encoding="utf-8")
+    (row,) = [ln for ln in seed.splitlines() if ln.lstrip().startswith("('task',")]
+    patterns = re.findall(r"'([^']*)'", re.search(r"ARRAY\[(.*?)\]", row).group(1))
+    assert patterns == PRE_105_TASK_WORDS + NEW_TASK_WORDS
+    assert next(f for f in SEED_FRAMES if f.id == "task").activation_patterns == patterns
+
+
+@pytest.mark.postgres_only
+async def test_migration_105_idempotent_and_adds_keywords(session):
+    sql = MIGRATION_105.read_text(encoding="utf-8")
+    assert all(";" not in ln for ln in sql.splitlines() if ln.lstrip().startswith("--"))
+    (statement,) = _split_sql_statements(sql)
+    seed_row = text(
+        "INSERT INTO nous_system.frames (id, name, activation_patterns) VALUES ('task', 'Task Execution', "
+        "CAST(:p AS text[])) ON CONFLICT (id) DO UPDATE SET activation_patterns = EXCLUDED.activation_patterns"
+    )
+    patterns = text("SELECT activation_patterns FROM nous_system.frames WHERE id = 'task'")
+
+    await session.execute(seed_row, {"p": PRE_105_TASK_WORDS})
+    assert [(await session.execute(text(statement))).rowcount for _ in range(2)] == [1, 0]
+    after = (await session.execute(patterns)).scalar_one()
+    assert after == PRE_105_TASK_WORDS + NEW_TASK_WORDS
+    assert all(after.count(word) == 1 for word in NEW_TASK_WORDS)
+
+    held = ["edit", "add", "deliver", "send", "spec", "draft", "write", "build"]
+    await session.execute(seed_row, {"p": held})
+    assert (await session.execute(text(statement))).rowcount == 0
+    assert (await session.execute(patterns)).scalar_one() == held

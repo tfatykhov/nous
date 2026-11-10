@@ -25,7 +25,7 @@ INSERT INTO nous_system.agents (id, name, description, config) VALUES (
 -- Default cognitive frames
 -- ---------------------------------------------------------------------------
 INSERT INTO nous_system.frames (id, agent_id, name, description, activation_patterns, default_category, default_stakes) VALUES
-    ('task', 'nous-default', 'Task Execution', 'Focused on completing a specific task', ARRAY['build', 'fix', 'create', 'implement', 'deploy', 'run', 'execute', 'check', 'show', 'list', 'install', 'update', 'delete', 'move', 'copy'], 'tooling', 'medium'),
+    ('task', 'nous-default', 'Task Execution', 'Focused on completing a specific task', ARRAY['build', 'fix', 'create', 'implement', 'deploy', 'run', 'execute', 'check', 'show', 'list', 'install', 'update', 'delete', 'move', 'copy', 'write', 'draft', 'spec', 'send', 'deliver', 'add', 'edit'], 'tooling', 'medium'),
     ('question', 'nous-default', 'Question Answering', 'Answering questions, looking things up', ARRAY['what', 'how', 'why', 'explain', 'tell me'], 'process', 'low'),
     ('decision', 'nous-default', 'Decision Making', 'Evaluating options, choosing a path', ARRAY['should', 'choose', 'decide', 'compare', 'trade-off'], 'architecture', 'high'),
     ('creative', 'nous-default', 'Creative', 'Brainstorming, ideation, exploration', ARRAY['imagine', 'brainstorm', 'what if', 'design', 'explore'], 'architecture', 'low'),
