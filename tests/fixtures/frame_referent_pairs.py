@@ -1,8 +1,10 @@
-"""F110 v2 referent rule: 30 (previous assistant text, user reply, expected frame, expected match_method) pairs.
+"""F110 v2 referent rule: (previous assistant text, user reply, expected frame, expected match_method) pairs.
 
 Scored against the seed frames in ``tests/test_frames.py`` with the frame-context flag on, a short reply of at
 most 6 words and a switch threshold of 2 hits. A pair whose method is not ``referent`` expects exactly the
-frame today's keyword selection picks.
+frame today's keyword selection picks. The first 30 pairs are the task's original set; the rest come from the
+fix-round ruling (a reply with a ``?`` or a negation or deferral word is not affirmative-led, and a lone
+``do`` is not an affirmative first word).
 
 Five assistant texts are block lists flattened the way the runner's ``_extract_text`` flattens a tool-using
 turn: text blocks joined with a newline, every other block dropped.
@@ -107,4 +109,18 @@ FRAME_REFERENT_PAIRS: list[tuple[str, str, str, str]] = [
     # "should include" is not "should i": the offer phrases match whole words
     ("The release notes should include the migration number.", "ok", "conversation", "default"),
     (_FLAT_OFFER_TOO_EARLY, "yes", "conversation", "default"),
+    # --- fix round 1: more accepted offers ---
+    ("I can draft the migration now if you want.", "ok go ahead", "task", "referent"),
+    ("Want me to send it to the team?", "do that", "task", "referent"),
+    # --- fix round 1: negations, deferrals and questions are not acceptances ---
+    ("Shall I delete the branch?", "please don't", "conversation", "default"),
+    ("Want me to rerun it?", "do not", "conversation", "default"),
+    ("Want me to file the issue?", "yeah no", "conversation", "default"),
+    ("I can run the backfill tonight.", "yes, later", "conversation", "default"),
+    ("Should I merge?", "sure, but not today", "conversation", "default"),
+    ("Want me to clean that up?", "ok, hold on", "conversation", "default"),
+    ("Want me to clean that up?", "please stop", "conversation", "default"),
+    (WRITE_IT_UP, "do you think so?", "conversation", "default"),
+    # the review's "I can't" case: not an offer
+    ("I can't run that tonight.", "ok", "conversation", "default"),
 ]

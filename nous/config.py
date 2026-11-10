@@ -2174,10 +2174,10 @@ class Settings(BaseSettings):
     # chars selects `task` (match_method "referent"). Off: selection unchanged.
     frame_context_enabled: bool = False
     # A reply of at most this many whitespace-separated words is short.
-    frame_short_reply_max_words: int = 6
+    frame_short_reply_max_words: int = Field(default=6, ge=1)
     # Keyword hits (single-word pattern 1, multi-word 2) at which a reply keeps
     # its keyword frame over the referent rule: a clear new topic always wins.
-    frame_switch_min_hits: int = 2
+    frame_switch_min_hits: int = Field(default=2, ge=1)
 
     # Email / integration credentials (used by heartbeat EmailCheck, other integrations)
     email: str = ""  # Nous agent email address

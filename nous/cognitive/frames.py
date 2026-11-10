@@ -32,9 +32,13 @@ FRAME_PRIORITY: dict[str, int] = {
 
 # F110 v2 referent rule: a short affirmative reply to an assistant offer is work.
 _AFFIRMATIVE_TOKENS = frozenset(
-    {"yes", "yep", "yeah", "ok", "okay", "sure", "go", "do", "proceed", "please", "agreed", "confirm"}
+    {"yes", "yep", "yeah", "ok", "okay", "sure", "go", "proceed", "please", "agreed", "confirm"}
 )
-_OFFER_PHRASES = re.compile(r"\b(?:want me to|shall i|should i|i can|would you like)\b")
+_AFFIRMATIVE_PHRASES = (["do", "it"], ["do", "that"])
+# Any of these anywhere in the reply means it is not an acceptance.
+_NEGATION_WORDS = re.compile(r"\b(?:no|not|don['\u2019]t|dont|do not|stop|cancel|wait|never|later|hold|nope|nah)\b")
+# "i can" but not "i can't" ("i cannot" already fails the closing \b).
+_OFFER_PHRASES = re.compile(r"\b(?:want me to|shall i|should i|i can(?!['\u2019]t)|would you like)\b")
 _OFFER_TAIL_CHARS = 200
 _REFERENT_FRAME_ID = "task"
 _REFERENT_CONFIDENCE = 0.6
@@ -43,20 +47,25 @@ _REFERENT_OVERRIDABLE = frozenset({"task", "conversation"})
 
 
 def _is_affirmative_led(text: str) -> bool:
-    """True when the reply's first word, case-insensitive with punctuation stripped, is an affirmative.
+    """True when the reply opens with an affirmative and neither asks nor refuses.
 
-    The words are ``yes yep yeah ok okay sure go do proceed please agreed confirm``; a leading
-    ``do it`` or ``go ahead`` is covered by ``do`` and ``go``.
+    Case-insensitive, punctuation stripped: the first word is one of
+    ``yes yep yeah ok okay sure go proceed please agreed confirm`` (``go ahead`` is covered by
+    ``go``), or the reply starts with ``do it`` / ``do that``. A ``?`` anywhere, or any whole word
+    of ``no not don't dont do not stop cancel wait never later hold nope nah``, makes it False.
     """
-    tokens = re.sub(r"[^\w\s]", " ", text.lower()).split()
-    return bool(tokens) and tokens[0] in _AFFIRMATIVE_TOKENS
+    lowered = text.lower()
+    if "?" in lowered or _NEGATION_WORDS.search(lowered):
+        return False
+    tokens = re.sub(r"[^\w\s]", " ", lowered).split()
+    return bool(tokens) and (tokens[0] in _AFFIRMATIVE_TOKENS or tokens[:2] in _AFFIRMATIVE_PHRASES)
 
 
 def _offers_action(assistant_tail: str) -> bool:
     """True when the assistant text's last 200 characters (trailing whitespace dropped) offer something.
 
     An offer is a ``?`` or one of the whole-word phrases ``want me to``, ``shall i``, ``should i``,
-    ``i can``, ``would you like``, case-insensitive.
+    ``i can`` (not ``i can't`` / ``i cannot``), ``would you like``, case-insensitive.
     """
     tail = assistant_tail.rstrip()[-_OFFER_TAIL_CHARS:].lower()
     return "?" in tail or _OFFER_PHRASES.search(tail) is not None
@@ -237,11 +246,13 @@ class FrameEngine:
 
         Rule 1 comes first: ``frame_switch_min_hits`` keyword hits keep the keyword frame. A
         reply is short at ``frame_short_reply_max_words`` whitespace-separated words or fewer.
-        Fail-open: an error here returns None.
+        Fail-open: an error here, a settings error included, returns None.
         """
-        if not (last_assistant_text and self._settings.frame_context_enabled):
+        if not last_assistant_text:
             return None
         try:
+            if not self._settings.frame_context_enabled:
+                return None
             if best_count >= self._settings.frame_switch_min_hits:
                 return None
             if best_frame is not None and best_frame.id not in _REFERENT_OVERRIDABLE:

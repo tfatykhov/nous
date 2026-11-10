@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import text
 
 from nous.cognitive.frames import FRAME_PRIORITY, FrameEngine, _is_affirmative_led, _offers_action
@@ -642,6 +644,12 @@ def test_frame_context_settings_environment_names(monkeypatch):
     assert (s.frame_context_enabled, s.frame_short_reply_max_words, s.frame_switch_min_hits) == (True, 4, 3)
 
 
+@pytest.mark.parametrize("field", ["frame_short_reply_max_words", "frame_switch_min_hits"])
+def test_frame_context_threshold_below_one_is_rejected(field):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: 0})
+
+
 def test_frame_context_settings_have_doc_rows():
     doc = (ROOT / "docs" / "reference" / "environment-variables.md").read_text(encoding="utf-8")
     for field, default in FRAME_CONTEXT_DEFAULTS.items():
@@ -707,11 +715,12 @@ async def test_referent_yes_explain_why_stays_question():
 
 
 def test_referent_fixture_composition():
-    assert len(FRAME_REFERENT_PAIRS) == 30
-    assert sum(method != "referent" for _, _, _, method in FRAME_REFERENT_PAIRS) >= 10
+    assert len(FRAME_REFERENT_PAIRS) == 41
+    assert sum(method != "referent" for _, _, _, method in FRAME_REFERENT_PAIRS) >= 22
     assert sum("\n" in prev for prev, _, _, _ in FRAME_REFERENT_PAIRS) >= 5
+    assert sum(reply != reply.lower() for _, reply, _, method in FRAME_REFERENT_PAIRS if method == "referent") >= 3
     # the too-early offer really sits outside the 200-character tail
-    too_early = FRAME_REFERENT_PAIRS[-1][0]
+    (too_early,) = [prev for prev, _, _, _ in FRAME_REFERENT_PAIRS if "\n" in prev and len(prev) > 200]
     assert "?" in too_early and len(too_early) - too_early.index("?") > 200
 
 
@@ -756,6 +765,15 @@ async def test_referent_fails_open():
     assert result.model_dump() == today.model_dump()
 
 
+@pytest.mark.parametrize("reply", ["yes do it", "build it"])
+async def test_referent_settings_error_fails_open(reply: str):
+    """Settings without the frame-context fields: today's selection, not an error out of select()."""
+    engine = FrameEngine(MagicMock(), SimpleNamespace())
+    today = await select_with_frames(make_engine(), reply, SEED_FRAMES)
+    result = await select_with_frames(engine, reply, SEED_FRAMES, last_assistant_text=WRITE_IT_UP)
+    assert result.model_dump() == today.model_dump()
+
+
 # Every input the tests above select on, plus every fixture reply.
 _TODAY_INPUTS = [
     "should we use Redis?", "build a REST API", "error in deployment", "hello how are you", "xyzzy foobar",
@@ -786,8 +804,15 @@ async def test_select_without_frames_ignores_context():
 
 @pytest.mark.parametrize(
     ("reply", "expected"),
-    [("yes", True), ("Go-ahead!", True), ("  OK, sure", True), ("do it", True), ("please", True),
-     ("no", False), ("don't", False), ("", False), ("...", False), ("yesterday", False)],
+    [("yes", True), ("Go-ahead!", True), ("  OK, sure", True), ("do it", True), ("Do that.", True),
+     ("please", True), ("please do", True), ("yes thanks", True),
+     ("no", False), ("don't", False), ("", False), ("...", False), ("yesterday", False),
+     # fix round 1: a lone "do" is not an affirmative; a "?" or a negation/deferral word vetoes
+     ("do", False), ("do you think so", False), ("yes?", False), ("ok, why?", False),
+     ("please don't", False), ("please don\u2019t", False), ("yes dont", False), ("do not", False),
+     ("yeah no", False), ("yes, later", False), ("sure, but not today", False), ("ok, hold on", False),
+     ("please stop", False), ("ok cancel", False), ("yes wait", False), ("sure, never mind", False),
+     ("ok nope", False), ("YES NAH", False)],
 )  # fmt: skip
 def test_is_affirmative_led(reply: str, expected: bool):
     assert _is_affirmative_led(reply) is expected
@@ -797,7 +822,10 @@ def test_is_affirmative_led(reply: str, expected: bool):
     ("assistant", "expected"),
     [("Want me to?", True), ("I CAN draft it.", True), ("Would you like a copy.", True), ("Shall I.", True),
      ("Done.", False), ("Notes should include it.", False), ("Want me to rerun it? " + "x" * 200, False),
-     ("Ready. Should I merge?\n\n", True)],
+     ("Ready. Should I merge?\n\n", True),
+     # fix round 1: "I can't" / "I cannot" are not offers
+     ("I can't run that tonight.", False), ("I can\u2019t do that.", False), ("I cannot do that.", False),
+     ("I can. ", True)],
 )  # fmt: skip
 def test_offers_action(assistant: str, expected: bool):
     assert _offers_action(assistant) is expected
