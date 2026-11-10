@@ -934,6 +934,15 @@ class TestCriticFrameContext:
         assert OFFER_SENTENCE in prompt
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("splitter", ["\x00", "​", "⁠", "\x07"], ids=["nul", "zwsp", "wordjoiner", "bel"])
+    async def test_previous_message_secret_split_by_invisible_character_redacted(self, splitter):
+        body = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"
+        _agent, _system, prompt = await _classify_captured(True, f"key sk-{splitter}{body} {OFFER_SENTENCE}")
+        assert body not in prompt
+        assert "A1b2C3" not in prompt
+        assert OFFER_SENTENCE in prompt
+
+    @pytest.mark.asyncio
     async def test_previous_message_control_characters_stripped(self):
         _agent, _system, prompt = await _classify_captured(True, "before\x00mid\x07dle\nafter " + OFFER_SENTENCE)
         assert "\x00" not in prompt and "\x07" not in prompt

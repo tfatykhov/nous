@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import time
+import unicodedata
 from collections import Counter
 from typing import Any
 
@@ -154,7 +155,7 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
     def _previous_message_section(text: str | None) -> str:
         """F110: the PREVIOUS ASSISTANT MESSAGE block of the user turn, or "" without text.
 
-        The text is redacted, stripped of NUL and other control characters (newline and tab stay), then cut to its
+        The text is stripped of control and format characters (newline and tab stay), then redacted, then cut to its
         last ``_PREVIOUS_MESSAGE_CHARS`` characters, where an offer usually sits. Fail-open: text that cannot be
         prepared is left out.
         """
@@ -163,8 +164,9 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
         try:
             from nous.cognitive.ledger_store import redact_output
 
-            clean = "".join(c for c in redact_output(text) if c in "\n\t" or c.isprintable())
-            tail = clean[-_PREVIOUS_MESSAGE_CHARS:]
+            # Strip first: a NUL or zero-width character inside a secret would otherwise split it past the patterns.
+            stripped = "".join(c for c in text if c in "\n\t" or not unicodedata.category(c).startswith("C"))
+            tail = redact_output(stripped)[-_PREVIOUS_MESSAGE_CHARS:]
         except Exception:
             logger.warning("F110: the critic could not prepare the previous assistant message", exc_info=True)
             return ""
