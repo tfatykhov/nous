@@ -239,7 +239,7 @@ class FrameEngine:
         reply is short at ``frame_short_reply_max_words`` whitespace-separated words or fewer.
         Fail-open: an error here returns None.
         """
-        if not (self._settings.frame_context_enabled and last_assistant_text):
+        if not (last_assistant_text and self._settings.frame_context_enabled):
             return None
         try:
             if best_count >= self._settings.frame_switch_min_hits:
