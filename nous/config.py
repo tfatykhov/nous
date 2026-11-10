@@ -2176,8 +2176,13 @@ class Settings(BaseSettings):
     # A reply of at most this many whitespace-separated words is short.
     frame_short_reply_max_words: int = Field(default=6, ge=1)
     # Keyword hits (single-word pattern 1, multi-word 2) at which a reply keeps
-    # its keyword frame over the referent rule: a clear new topic always wins.
+    # its keyword frame over the referent rule and a carried frame: a clear new
+    # topic always wins.
     frame_switch_min_hits: int = Field(default=2, ge=1)
+    # F110 v2 frame carry. On: FrameEngine.select keeps a carried frame (strength > 0)
+    # for a short affirmative-led or courtesy reply below frame_switch_min_hits hits,
+    # or for any reply with no keyword hit (match_method "carried"). Off: unchanged.
+    frame_carry_enabled: bool = False
 
     # Email / integration credentials (used by heartbeat EmailCheck, other integrations)
     email: str = ""  # Nous agent email address

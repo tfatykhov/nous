@@ -101,6 +101,20 @@ class FrameSelection(BaseModel):
     questions_to_ask: list[str] = Field(default_factory=list)
 
 
+@dataclass(frozen=True, slots=True)
+class CarriedFrame:
+    """F110 v2: the frame a session carries into its next turn (the carry rule in FrameEngine.select).
+
+    ``strength`` (3 after a keyword or critic selection, one less per inherited turn) sets the carry
+    confidence, ``0.3 * strength``; at 0 the frame is spent and not carried. ``turns`` is the
+    cognitive layer's bookkeeping; select() does not read it.
+    """
+
+    frame_id: str
+    strength: int
+    turns: int
+
+
 class ContextBudget(BaseModel):
     """Token and turn budgets for context assembly.
 

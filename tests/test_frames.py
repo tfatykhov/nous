@@ -27,7 +27,7 @@ from pydantic import ValidationError
 from sqlalchemy import text
 
 from nous.cognitive.frames import FRAME_PRIORITY, FrameEngine, _is_affirmative_led, _offers_action
-from nous.cognitive.schemas import FrameSelection
+from nous.cognitive.schemas import CarriedFrame, FrameSelection
 from nous.config import Settings
 from nous.storage.migrator import _split_sql_statements
 from tests.fixtures.frame_referent_pairs import FRAME_REFERENT_PAIRS, WRITE_IT_UP
@@ -75,15 +75,16 @@ SEED_FRAMES = [
 ]
 
 
-def make_engine(*, context: bool = False) -> FrameEngine:
+def make_engine(*, context: bool = False, carry: bool = False) -> FrameEngine:
     """FrameEngine wired to a stub Database (session never used directly).
 
-    The settings carry real F110 frame-context values (the flag off unless ``context``), so the
-    referent rule never reads a truthy MagicMock attribute.
+    The settings carry real F110 frame values (each flag off unless ``context`` / ``carry``), so
+    the referent and carry rules never read a truthy MagicMock attribute.
     """
     db = MagicMock()
     settings = MagicMock()
     settings.frame_context_enabled = context
+    settings.frame_carry_enabled = carry
     settings.frame_short_reply_max_words = 6
     settings.frame_switch_min_hits = 2
     return FrameEngine(db, settings)
@@ -628,6 +629,7 @@ FRAME_CONTEXT_DEFAULTS = {
     "frame_context_enabled": False,
     "frame_short_reply_max_words": 6,
     "frame_switch_min_hits": 2,
+    "frame_carry_enabled": False,
 }
 
 
@@ -831,3 +833,162 @@ def test_is_affirmative_led(reply: str, expected: bool):
 )  # fmt: skip
 def test_offers_action(assistant: str, expected: bool):
     assert _offers_action(assistant) is expected
+
+
+# ---------------------------------------------------------------------------
+# 32. F110 v2 PR 3: the carried frame and the carry rule (rule 3)
+# ---------------------------------------------------------------------------
+
+CARRIED_TASK = CarriedFrame("task", 3, 0)
+
+
+def test_frame_carry_setting_environment_name(monkeypatch):
+    monkeypatch.setenv("NOUS_FRAME_CARRY_ENABLED", "true")
+    assert Settings(_env_file=None).frame_carry_enabled is True
+
+
+def test_carried_frame_is_frozen_with_slots():
+    carried = CarriedFrame(frame_id="task", strength=3, turns=1)
+    with pytest.raises(AttributeError):
+        carried.strength = 2  # type: ignore[misc]
+    assert not hasattr(carried, "__dict__")
+
+
+async def test_carried_task_plus_ok_stays_task():
+    """Rule 3a: a short affirmative-led reply with no keyword hit keeps the carried frame."""
+    result = await select_with_frames(make_engine(carry=True), "ok", SEED_FRAMES, carried=CARRIED_TASK)
+    assert (result.frame_id, result.match_method) == ("task", "carried")
+    assert result.confidence == pytest.approx(0.9)
+
+
+async def test_carried_ok_explain_why_stays_task():
+    """Rule 3a: one question hit in a short affirmative-led reply stays in the carried task frame.
+
+    The design's example "ok, explain why" is 2 question hits against the seed (``explain`` and
+    ``why`` are both single-word patterns), so rule 1 keeps it ``question``; the 1-hit, 3-word
+    reply the design describes is "ok, explain it".
+    """
+    engine = make_engine(carry=True)
+    result = await select_with_frames(engine, "ok, explain it", SEED_FRAMES, carried=CARRIED_TASK)
+    assert (result.frame_id, result.match_method) == ("task", "carried")
+    two_hits = await select_with_frames(engine, "ok, explain why", SEED_FRAMES, carried=CARRIED_TASK)
+    assert (two_hits.frame_id, two_hits.match_method) == ("question", "pattern")
+
+
+async def test_carried_thanks_stays():
+    """A carried frame plus "thanks" (1 conversation hit) stays carried.
+
+    "thanks" is not affirmative-led (it is not added to the affirmative list, so the referent
+    rule never reads it as an acceptance). Rule 3a's affirmative test also accepts a courtesy
+    token as the whole reply: thanks, thank, thx, great, perfect, cool, nice. A longer reply
+    with the same hit ("thanks a lot") is not a courtesy token and keeps its keyword frame.
+    """
+    engine = make_engine(carry=True)
+    assert _is_affirmative_led("thanks") is False
+    for reply in ("thanks", "Thanks!"):
+        result = await select_with_frames(engine, reply, SEED_FRAMES, carried=CARRIED_TASK)
+        assert (result.frame_id, result.match_method) == ("task", "carried"), reply
+    longer = await select_with_frames(engine, "thanks a lot", SEED_FRAMES, carried=CARRIED_TASK)
+    assert (longer.frame_id, longer.match_method) == ("conversation", "pattern")
+
+
+async def test_two_hit_new_topic_overrides_carry():
+    """Rule 1 holds for the carry rule with the frame-context flag off: two hits switch frame."""
+    engine = make_engine(carry=True)
+    for reply in ("what if we redesign it", "ok, what if we redesign it"):
+        result = await select_with_frames(engine, reply, SEED_FRAMES, carried=CARRIED_TASK)
+        assert (result.frame_id, result.match_method) == ("creative", "pattern"), reply
+
+
+async def test_seven_word_one_hit_falls_to_pattern():
+    """A one-hit reply that is not short falls to today's path; six words is still short."""
+    engine = make_engine(carry=True)
+    seven = await select_with_frames(
+        engine, "ok, now design the new dashboard please", SEED_FRAMES, carried=CARRIED_TASK
+    )
+    six = await select_with_frames(engine, "ok, now design the new dashboard", SEED_FRAMES, carried=CARRIED_TASK)
+    assert (seven.frame_id, seven.match_method) == ("creative", "pattern")
+    assert seven.confidence == pytest.approx(0.3)
+    assert (six.frame_id, six.match_method) == ("task", "carried")
+
+
+async def test_carry_zero_hits_any_length_stays_carried():
+    """Rule 3b: no keyword hit keeps the carried frame at any length; 3a needs an affirmative."""
+    engine = make_engine(carry=True)
+    long_reply = "the numbers from yesterday look about right to me"
+    result = await select_with_frames(engine, long_reply, SEED_FRAMES, carried=CARRIED_TASK)
+    assert (result.frame_id, result.match_method) == ("task", "carried")
+    one_hit = await select_with_frames(engine, "explain it", SEED_FRAMES, carried=CARRIED_TASK)
+    assert (one_hit.frame_id, one_hit.match_method) == ("question", "pattern")
+
+
+async def test_flag_off_ignores_carried():
+    today = await select_with_frames(make_engine(), "ok", SEED_FRAMES)
+    result = await select_with_frames(make_engine(carry=False), "ok", SEED_FRAMES, carried=CARRIED_TASK)
+    assert (today.frame_id, today.match_method) == ("conversation", "default")
+    assert result.model_dump() == today.model_dump()
+
+
+@pytest.mark.parametrize("reply", _TODAY_INPUTS)
+async def test_no_carried_equals_today(reply: str):
+    """Carry on without a carried frame, or both flags off with one: today's selection."""
+    today = await select_with_frames(make_engine(), reply, SEED_FRAMES)
+    no_carried = await select_with_frames(make_engine(carry=True), reply, SEED_FRAMES, carried=None)
+    flags_off = await select_with_frames(
+        make_engine(), reply, SEED_FRAMES, carried=CARRIED_TASK, last_assistant_text=WRITE_IT_UP
+    )
+    assert no_carried.model_dump() == today.model_dump()
+    assert flags_off.model_dump() == today.model_dump()
+
+
+async def test_referent_beats_carry():
+    """Rule 2 before rule 3: an accepted offer is work, whatever frame was carried."""
+    result = await select_with_frames(
+        make_engine(context=True, carry=True),
+        "yes",
+        SEED_FRAMES,
+        carried=CarriedFrame("question", 3, 0),
+        last_assistant_text=WRITE_IT_UP,
+    )
+    assert (result.frame_id, result.match_method) == ("task", "referent")
+    assert result.confidence == pytest.approx(0.6)
+
+
+@pytest.mark.parametrize(("strength", "confidence"), [(1, 0.3), (2, 0.6), (4, 1.0)])
+async def test_carry_confidence_is_capped_strength(strength: int, confidence: float):
+    carried = CarriedFrame("task", strength, 0)
+    result = await select_with_frames(make_engine(carry=True), "ok", SEED_FRAMES, carried=carried)
+    assert (result.frame_id, result.match_method) == ("task", "carried")
+    assert result.confidence == pytest.approx(confidence)
+
+
+@pytest.mark.parametrize("carried", [CarriedFrame("task", 0, 3), CarriedFrame("retired", 3, 0)])
+async def test_carry_spent_or_missing_frame_falls_through(carried: CarriedFrame):
+    """Strength 0, or a carried frame the agent no longer has (or has deactivated): today's path."""
+    today = await select_with_frames(make_engine(), "ok", SEED_FRAMES)
+    result = await select_with_frames(make_engine(carry=True), "ok", SEED_FRAMES, carried=carried)
+    assert result.model_dump() == today.model_dump()
+
+
+async def test_carry_increments_carried_usage():
+    engine = make_engine(carry=True)
+    increment = AsyncMock()
+    with patch.object(engine, "_load_frames", AsyncMock(return_value=SEED_FRAMES)):
+        with patch.object(engine, "_increment_usage", increment):
+            await engine.select("nous-default", "ok", make_session(), carried=CarriedFrame("debug", 2, 1))
+    increment.assert_called_once()
+    assert increment.call_args.args[0].id == "debug"
+
+
+@pytest.mark.parametrize(
+    ("settings", "carried"),
+    [(SimpleNamespace(), CARRIED_TASK),
+     (SimpleNamespace(frame_carry_enabled=True), CARRIED_TASK),
+     (None, SimpleNamespace(frame_id="task"))],
+)  # fmt: skip
+async def test_carry_fails_open(settings: Any, carried: Any):
+    """A settings error or a malformed carried value falls back to today's selection."""
+    engine = make_engine(carry=True) if settings is None else FrameEngine(MagicMock(), settings)
+    today = await select_with_frames(make_engine(), "ok", SEED_FRAMES)
+    result = await select_with_frames(engine, "ok", SEED_FRAMES, carried=carried)
+    assert result.model_dump() == today.model_dump()
