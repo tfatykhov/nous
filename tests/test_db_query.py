@@ -673,7 +673,7 @@ def test_description_names_the_three_own_records():
         "Your own records: tool_call_log answers",
         "model_call_log answers",
         "agent_turn_log answers",
-        "frame_reason: pattern, default, carried, referent or critic",
+        "frame_reason: pattern, default, carried, referent, critic or direct",
         "critic_frame",
         "had_error",
         "Turn numbers only: no message text.",

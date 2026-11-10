@@ -459,6 +459,39 @@ def test_reader_list_has_agent_turn_log_with_text_exclusions():
     assert _reader_rows()["nous_system.agent_turn_log"] == excluded
 
 
+def test_reader_granted_turn_log_columns_are_pinned():
+    # F110: the role script grants every agent_turn_log column it does not exclude, so a new text column added by a
+    # later migration would be readable at the next re-run. Pin the granted set: a new column fails here until someone
+    # decides whether the reader may read it.
+    from nous.storage.models import AgentTurnLog
+
+    granted = set(AgentTurnLog.__table__.columns.keys()) - _reader_rows()["nous_system.agent_turn_log"]
+    assert granted == {
+        "agent_id",
+        "context_kind",
+        "critic_frame",
+        "ended_at",
+        "frame_id",
+        "frame_reason",
+        "had_error",
+        "id",
+        "memory_context",
+        "parent_session_id",
+        "session_id",
+        "started_at",
+        "tool_call_count",
+        "turn_number",
+        "work_kind",
+    }
+
+
+def test_verify_check_count_matches_the_docs():
+    body = VERIFY.split("FOR c IN", 1)[1].split("AS t(label, run_as", 1)[0]
+    count = len(re.findall(r"^\s*\('", body, re.M))
+    docs = (OPS.parents[1] / "docs" / "reference" / "database-roles.md").read_text(encoding="utf-8")
+    assert f"{count} at present" in docs, count
+
+
 def test_verify_checks_turn_numbers_and_text_denial():
     for row in (
         "('reader reads the turn numbers', 'nous_reader', 'SELECT count(*) FROM nous_system.agent_turn_log', 'ok', "
