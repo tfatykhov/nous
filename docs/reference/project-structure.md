@@ -169,6 +169,7 @@ nous/
 │       ├── guard_dashboard.py   # The scoreboard's guards section (F107 phase 2/3): guarded schedules and heartbeat checks, guard outcomes and shadow misses in the window, read-only, Postgres-only
 │       ├── mcp.py              # MCP server (nous_chat, nous_decide, etc.)
 │       ├── runner.py           # Agent runner (tool loop, streaming)
+│       ├── session_referent.py # F110 PR 4: ChannelLastReply, the in-process store of each channel's last interactive reply that the runner hands to a new session's first turn (NOUS_SESSION_REFERENT_ENABLED)
 │       ├── preamble.py         # CLAUDE_CODE_PREAMBLE: system block 0 of every Messages request (one definition)
 │       ├── model_caps.py       # What a model accepts, by version: legacy Haiku, Haiku 5+ thinking disabled by default
 │       ├── tools.py            # Tool dispatcher + registration; `get_procedure` renders the "Tool notes" procedure from `tool_note` and hides it while inactive or a flag is off
