@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import text
+from test_critic import FALLBACK_PATHS, critic_answering, critic_on_fallback
 from test_layer_critic_skills import _mock_layer
 from test_layer_critic_skills import _settings as _layer_settings
 from test_tool_call_recording import PATHS, SCENARIO, _block, _drive, _runner, _Spy
@@ -405,9 +406,10 @@ _HOSTILE_FRAMES = {
 }
 
 
-def _critic_layer(mode: str, recommended: str):
+def _critic_layer(mode: str, critic):
     """The mocked layer (heuristic frame task, method pattern) with the six seeded frames, ``get`` returning one by id
-    (method "direct", as FrameEngine.get does) or raising ValueError, and a critic that recommends ``recommended``."""
+    (method "direct", as FrameEngine.get does) or raising ValueError, and ``critic`` (a real CriticAgent) as its
+    critic."""
     layer = _layer(_layer_settings(critic_enabled=True, critic_mode=mode))
     frames = {
         f: FrameSelection(frame_id=f, frame_name=f.title(), confidence=0.0, match_method="list") for f in _FRAME_IDS
@@ -420,22 +422,19 @@ def _critic_layer(mode: str, recommended: str):
         return frames[frame_id].model_copy(update={"match_method": "direct", "confidence": 1.0})
 
     layer._frames.get = AsyncMock(side_effect=get)
-    result = CriticResult(routing=RoutingMode.SINGLE_ADVISED, recommended_frame=recommended, rationale="r")
-    layer._critic = MagicMock()
-    layer._critic.classify = AsyncMock(return_value=result)
-    layer._critic.run_diagnostics = MagicMock(return_value=[])
+    layer._critic = critic
     return layer
 
 
-async def _critic_pre_turn(layer) -> TurnContext:
-    return await layer.pre_turn(agent_id="test", session_id="s1", user_input="should we pick redis or kafka")
+async def _critic_pre_turn(layer, message: str = "should we pick redis or kafka") -> TurnContext:
+    return await layer.pre_turn(agent_id="test", session_id="s1", user_input=message)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["shadow", "advised"])
 @pytest.mark.parametrize("hostile", list(_HOSTILE_FRAMES.values()), ids=list(_HOSTILE_FRAMES))
 async def test_critic_frame_outside_the_frame_ids_is_unknown(mode, hostile):
-    ctx = await _critic_pre_turn(_critic_layer(mode, hostile))
+    ctx = await _critic_pre_turn(_critic_layer(mode, critic_answering(hostile)))
     assert ctx.critic_frame == "unknown"
     assert (ctx.frame.frame_id, ctx.frame.match_method) == ("task", "pattern")  # no override to a frame that is not
     assert ctx.critic_verdict["critic_frame"] == hostile  # the event's data keeps what the critic said
@@ -444,10 +443,25 @@ async def test_critic_frame_outside_the_frame_ids_is_unknown(mode, hostile):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["shadow", "advised"])
 async def test_critic_frame_that_is_a_frame_id_is_kept(mode):
-    ctx = await _critic_pre_turn(_critic_layer(mode, "decision"))
+    ctx = await _critic_pre_turn(_critic_layer(mode, critic_answering("decision")))
     assert ctx.critic_frame == "decision"
     expected = ("decision", "critic") if mode == "advised" else ("task", "pattern")
     assert (ctx.frame.frame_id, ctx.frame.match_method) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["shadow", "advised"])
+@pytest.mark.parametrize("path", FALLBACK_PATHS)
+async def test_critic_frame_is_none_when_the_model_gave_no_frame(mode, path):
+    """The critic ran, but its model gave no frame (passthrough, no API client, timeout, error, an answer that does not
+    parse or names no frame): classify() returns the heuristic's frame, which is no recommendation, so critic_frame is
+    None. The critic_classified data is unchanged: it still names the heuristic's frame."""
+    critic, message, context = critic_on_fallback(path)
+    with context:
+        ctx = await _critic_pre_turn(_critic_layer(mode, critic), message)
+    assert ctx.critic_frame is None
+    assert ctx.critic_verdict is not None and ctx.critic_verdict["critic_frame"] == "task"
+    assert (ctx.frame.frame_id, ctx.frame.match_method) == ("task", "pattern")
 
 
 # ---- rows in Postgres -----------------------------------------------------------------------------------------

@@ -676,10 +676,12 @@ class CognitiveLayer:
                     except Exception:
                         logger.warning("F024 Critic skill activation failed: %s", skill_name)
 
-            # F110: recommended_frame is the critic model's own text (frames[0] of its JSON), so the turn log keeps
-            # it only when it names a frame the critic was offered.
-            recommended = critic_result.recommended_frame
-            _critic_frame = recommended if recommended in available_frame_ids else "unknown"
+            # F110: the turn log's critic_frame. With from_model, recommended_frame is the critic model's own text
+            # (frames[0] of its JSON), kept only when it names a frame the critic was offered. Without it,
+            # recommended_frame is the heuristic's frame, which is no recommendation: critic_frame stays None.
+            if critic_result.from_model:
+                recommended = critic_result.recommended_frame
+                _critic_frame = recommended if recommended in available_frame_ids else "unknown"
 
             # Emit critic_classified event
             _critic_verdict = {

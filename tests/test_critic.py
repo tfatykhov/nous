@@ -1,4 +1,6 @@
 """Tests for F024 Critic Agent Phase 0."""
+import asyncio
+import contextlib
 import json
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
 from uuid import uuid4
@@ -260,6 +262,87 @@ class TestCriticClassification:
             available_frames=["task"],
         )
         assert result.recommended_frame == "task"
+
+
+# ---- Where the recommended frame came from (F110) ----
+
+_NEEDS_CRITIC = "please help me understand the complex architecture of this system"
+# Every way classify() returns the heuristic's frame because the model gave none.
+FALLBACK_PATHS = ["passthrough", "no-api", "timeout", "error", "parse-fallback", "no-frame-named"]
+
+
+def _answering(text: str) -> AsyncMock:
+    """An API client whose answer is ``text``."""
+    api = AsyncMock()
+    response = MagicMock()
+    response.content = [{"type": "text", "text": text}]
+    api.call = AsyncMock(return_value=response)
+    return api
+
+
+def critic_answering(frame: str) -> CriticAgent:
+    """A critic whose model answers with ``frame`` as its first frame."""
+    agent = CriticAgent(_settings())
+    agent.set_api_client(_answering(json.dumps({"frames": [frame], "skills": [], "rationale": "r"})))
+    return agent
+
+
+def critic_on_fallback(path: str) -> tuple[CriticAgent, str, contextlib.AbstractContextManager]:
+    """A critic, a user message, and a context to call classify() in, that send it down one of ``FALLBACK_PATHS``."""
+    agent = CriticAgent(_settings())
+    message, llm = _NEEDS_CRITIC, None
+    if path == "passthrough":
+        agent.set_api_client(_answering(json.dumps({"frames": ["decision"]})))
+        message = "hi"
+    elif path == "timeout":
+        agent.set_api_client(AsyncMock())
+        llm = AsyncMock(side_effect=asyncio.TimeoutError())
+    elif path == "error":
+        agent.set_api_client(AsyncMock())
+        llm = AsyncMock(side_effect=RuntimeError("llm down"))
+    elif path == "parse-fallback":
+        agent.set_api_client(_answering("not json at all"))
+    elif path == "no-frame-named":
+        agent.set_api_client(_answering(json.dumps({"frames": [], "skills": [], "rationale": ""})))
+    else:
+        assert path == "no-api", path
+    context = patch("nous.handlers.call_background_llm", llm) if llm else contextlib.nullcontext()
+    return agent, message, context
+
+
+class TestCriticFromModel:
+    """from_model is True only when the recommended frame is the model's answer; every fallback leaves it False."""
+
+    @pytest.mark.asyncio
+    async def test_a_parsed_answer_is_from_model(self):
+        result = await critic_answering("decision").classify(
+            user_message=_NEEDS_CRITIC,
+            heuristic_frame=_frame("task", 0.8, "pattern"),
+            available_frames=["task", "decision"],
+        )
+        assert (result.recommended_frame, result.from_model) == ("decision", True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("path", FALLBACK_PATHS)
+    async def test_a_fallback_is_not_from_model(self, path):
+        agent, message, context = critic_on_fallback(path)
+        with context:
+            result = await agent.classify(
+                user_message=message,
+                heuristic_frame=_frame("task", 0.8, "pattern"),
+                available_frames=["task", "decision"],
+            )
+        assert (result.recommended_frame, result.from_model) == ("task", False)
+        # each path took the branch it names
+        rationale = {
+            "passthrough": "Passthrough: simple message",
+            "no-api": "No API client available",
+            "timeout": "Fallback: classification timed out",
+            "error": "Fallback: classification error",
+            "parse-fallback": "Parse fallback: ",
+            "no-frame-named": "",
+        }[path]
+        assert result.rationale.startswith(rationale) if path == "parse-fallback" else result.rationale == rationale
 
 
 # ---- Diagnostic Critics ----
