@@ -27,6 +27,7 @@ from nous.brain.schemas import ReasonInput, RecordInput
 from nous.cognitive.layer import CognitiveLayer
 from nous.cognitive.schemas import (
     Assessment,
+    CarriedFrame,
     ToolResult,
     TurnContext,
     TurnResult,
@@ -1297,3 +1298,247 @@ async def test_pre_turn_forces_initiation_frame(brain, heart, settings, session)
     ctx = await layer.pre_turn("nous-default", sid, "build and deploy the service", session=session)
 
     assert (ctx.frame.frame_id, ctx.frame.match_method) == ("initiation", "direct")
+
+
+# ---------------------------------------------------------------------------
+# F110 v2 PR 3: the layer carries a frame per session (NOUS_FRAME_CARRY_ENABLED)
+# ---------------------------------------------------------------------------
+
+_TASK_INPUT = "build and deploy the service"  # two task hits, a substantive turn
+_QUIET = "ok"  # no keyword hit in any frame, too short to change working memory's focus
+
+
+def _frame_of(ctx: TurnContext) -> tuple[str, str]:
+    return ctx.frame.frame_id, ctx.frame.match_method
+
+
+async def _task_turn(layer, sid, session) -> TurnContext:
+    ctx = await layer.pre_turn("nous-default", sid, _TASK_INPUT, session=session)
+    assert _frame_of(ctx) == ("task", "pattern")
+    return ctx
+
+
+async def _seed_wm_frame(heart, sid, frame_id, session) -> None:
+    """A working-memory row as a previous process left it: current_frame set by a substantive turn."""
+    await heart.get_or_create_working_memory(sid, session=session)
+    await heart.focus(sid, "build the deploy script", frame_id, session=session)
+
+
+def _critic_returning(*frames: str) -> MagicMock:
+    """A critic whose classify recommends these frames in turn (advised routing, from the model)."""
+    from nous.cognitive.critic_schemas import CriticResult, RoutingMode
+
+    critic = MagicMock()
+    critic.classify = AsyncMock(
+        side_effect=[
+            CriticResult(routing=RoutingMode.SINGLE_ADVISED, recommended_frame=f, rationale="test", from_model=True)
+            for f in frames
+        ]
+    )
+    return critic
+
+
+async def test_session_frames_set_after_pattern_turn(cognitive, settings, session, monkeypatch):
+    """A keyword selection stores the frame at strength 3, no inherited turns yet."""
+    monkeypatch.setattr(settings, "frame_carry_enabled", True)
+    sid = f"test-f110-carry-set-{uuid.uuid4().hex[:8]}"
+
+    await _task_turn(cognitive, sid, session)
+
+    assert cognitive._session_frames[sid] == CarriedFrame("task", 3, 0)
+
+
+async def test_decay_three_quiet_turns_then_default(cognitive, settings, session, monkeypatch):
+    """After a task turn, three quiet turns carry it (stored strength 2, 1, then gone), then default.
+
+    The fifth and sixth turns pin that a fourth consecutive carried turn is impossible: once the entry is
+    spent, working memory's current_frame (still "task") does not bring it back in this process.
+    """
+    monkeypatch.setattr(settings, "frame_carry_enabled", True)
+    calls = _capture_select(cognitive, monkeypatch)
+    sid = f"test-f110-carry-decay-{uuid.uuid4().hex[:8]}"
+
+    await _task_turn(cognitive, sid, session)
+    seen: list[tuple[str, str, float, CarriedFrame | None]] = []
+    for _ in range(5):
+        ctx = await cognitive.pre_turn("nous-default", sid, _QUIET, session=session)
+        seen.append((*_frame_of(ctx), round(ctx.frame.confidence, 2), cognitive._session_frames.get(sid)))
+
+    assert seen == [
+        ("task", "carried", 0.9, CarriedFrame("task", 2, 1)),
+        ("task", "carried", 0.6, CarriedFrame("task", 1, 2)),
+        ("task", "carried", 0.3, None),
+        ("conversation", "default", 0.0, None),
+        ("conversation", "default", 0.0, None),
+    ]
+    assert [c.get("carried") for c in calls] == [
+        None,
+        CarriedFrame("task", 3, 0),
+        CarriedFrame("task", 2, 1),
+        CarriedFrame("task", 1, 2),
+        None,
+        None,
+    ]
+    wm = await cognitive._heart.get_working_memory(sid, session=session)
+    assert wm.current_frame == "task"  # the frame the fallback would have resurrected
+
+
+async def test_end_session_pops_session_frames(cognitive, settings, session, monkeypatch):
+    """end_session drops the session's carried frame with the other per-session state."""
+    monkeypatch.setattr(settings, "frame_carry_enabled", True)
+    sid = f"test-f110-carry-end-{uuid.uuid4().hex[:8]}"
+    await _task_turn(cognitive, sid, session)
+    assert sid in cognitive._session_frames
+
+    await cognitive.end_session("nous-default", sid, session=session)
+
+    assert sid not in cognitive._session_frames
+
+
+async def test_stale_sweep_pops_session_frames(cognitive):
+    """The stale-session sweep (_purge_session_state) drops an orphaned session's carried frame."""
+    import time as _time
+
+    timeout = float(getattr(cognitive._settings, "session_timeout", 1800) or 1800)
+    now = _time.monotonic()
+    cognitive._session_frames["old"] = CarriedFrame("task", 3, 0)
+    cognitive._session_frames["live"] = CarriedFrame("debug", 2, 1)
+    cognitive._session_last_activity["old"] = now - (timeout * 2 + 10)
+    cognitive._session_last_activity["live"] = now
+    cognitive._last_session_sweep = now - max(timeout, 60.0) - 1.0
+
+    cognitive._sweep_stale_sessions()
+
+    assert "old" not in cognitive._session_frames
+    assert cognitive._session_frames["live"] == CarriedFrame("debug", 2, 1)
+
+
+async def test_restart_fallback_reads_working_memory_current_frame(brain, heart, settings, session, monkeypatch):
+    """A new layer (a restarted process) carries working memory's current_frame at strength 1, for one turn."""
+    monkeypatch.setattr(settings, "frame_carry_enabled", True)
+    sid = f"test-f110-carry-restart-{uuid.uuid4().hex[:8]}"
+    await _seed_wm_frame(heart, sid, "task", session)
+    layer = CognitiveLayer(brain, heart, settings, identity_prompt="You are Nous.")
+    calls = _capture_select(layer, monkeypatch)
+
+    ctx = await layer.pre_turn("nous-default", sid, _QUIET, session=session)
+
+    assert calls[0] == {"carried": CarriedFrame("task", 1, 0)}
+    assert _frame_of(ctx) == ("task", "carried")
+    assert ctx.frame.confidence == pytest.approx(0.3)
+    assert sid not in layer._session_frames  # strength 1 is spent by the turn that used it
+
+
+async def test_restart_fallback_runs_once_per_process(brain, heart, settings, session, monkeypatch):
+    """Working memory is read only on the session's first turn in this process, so it carries one turn, not more."""
+    monkeypatch.setattr(settings, "frame_carry_enabled", True)
+    sid = f"test-f110-carry-restart-once-{uuid.uuid4().hex[:8]}"
+    await _seed_wm_frame(heart, sid, "task", session)
+    layer = CognitiveLayer(brain, heart, settings, identity_prompt="You are Nous.")
+    calls = _capture_select(layer, monkeypatch)
+
+    first = await layer.pre_turn("nous-default", sid, _QUIET, session=session)
+    second = await layer.pre_turn("nous-default", sid, _QUIET, session=session)
+
+    assert calls == [{"carried": CarriedFrame("task", 1, 0)}, {}]
+    assert _frame_of(first) == ("task", "carried")
+    assert _frame_of(second) == ("conversation", "default")
+    wm = await heart.get_working_memory(sid, session=session)
+    assert wm.current_frame == "task"  # still there: only the first turn in this process reads it
+
+
+async def test_restart_no_wm_row_is_default(cognitive, settings, session, monkeypatch):
+    """A session with no working-memory row carries nothing: select gets no carried frame."""
+    monkeypatch.setattr(settings, "frame_carry_enabled", True)
+    calls = _capture_select(cognitive, monkeypatch)
+    sid = f"test-f110-carry-nowm-{uuid.uuid4().hex[:8]}"
+
+    ctx = await cognitive.pre_turn("nous-default", sid, _QUIET, session=session)
+
+    assert calls == [{}]
+    assert _frame_of(ctx) == ("conversation", "default")
+    assert sid not in cognitive._session_frames
+
+
+async def test_wm_read_failure_fails_open(cognitive, heart, settings, session, monkeypatch):
+    """A working-memory read that raises gives no carried frame and today's selection."""
+    monkeypatch.setattr(settings, "frame_carry_enabled", True)
+    sid = f"test-f110-carry-wmfail-{uuid.uuid4().hex[:8]}"
+    await _seed_wm_frame(heart, sid, "task", session)
+    calls = _capture_select(cognitive, monkeypatch)
+    real_get = heart.get_working_memory
+    failed: list[str] = []
+
+    async def broken_get(session_id, session=None):
+        if not failed:  # the turn's first read is the carried-frame fallback, before select
+            failed.append(session_id)
+            raise RuntimeError("working memory unreadable")
+        return await real_get(session_id, session=session)
+
+    monkeypatch.setattr(heart, "get_working_memory", broken_get)
+
+    ctx = await cognitive.pre_turn("nous-default", sid, _QUIET, session=session)
+
+    assert failed == [sid]
+    assert calls == [{}]
+    assert _frame_of(ctx) == ("conversation", "default")
+
+
+async def test_initiation_frame_not_carried(brain, heart, settings, session, monkeypatch):
+    """The forced initiation frame is never stored as a carried frame."""
+    monkeypatch.setattr(settings, "frame_carry_enabled", True)
+    layer = CognitiveLayer(
+        brain, heart, settings, identity_prompt="You are Nous.", identity_manager=_uninitiated_identity()
+    )
+    sid = f"test-f110-carry-init-{uuid.uuid4().hex[:8]}"
+
+    ctx = await layer.pre_turn("nous-default", sid, _TASK_INPUT, session=session)
+
+    assert ctx.frame.frame_id == "initiation"
+    assert sid not in layer._session_frames
+
+
+async def test_critic_override_sets_critic_frame_strength(brain, heart, settings, session, monkeypatch):
+    """The stored frame is the final one: a critic override of a carried turn stores the critic's frame at 3."""
+    monkeypatch.setattr(settings, "frame_carry_enabled", True)
+    monkeypatch.setattr(settings, "critic_enabled", True)
+    monkeypatch.setattr(settings, "critic_mode", "advised")
+    layer = CognitiveLayer(
+        brain, heart, settings, identity_prompt="You are Nous.", critic=_critic_returning("task", "debug")
+    )
+    sid = f"test-f110-carry-critic-{uuid.uuid4().hex[:8]}"
+    await _task_turn(layer, sid, session)  # the critic agrees: task
+    assert layer._session_frames[sid] == CarriedFrame("task", 3, 0)
+
+    ctx = await layer.pre_turn("nous-default", sid, _QUIET, session=session)
+
+    assert _frame_of(ctx) == ("debug", "critic")
+    assert layer._session_frames[sid] == CarriedFrame("debug", 3, 0)
+
+
+async def test_referent_turn_counts_as_fresh_selection(cognitive, settings, session, monkeypatch):
+    """A referent selection (an accepted offer) stores task at strength 3, like a keyword selection."""
+    monkeypatch.setattr(settings, "frame_carry_enabled", True)
+    monkeypatch.setattr(settings, "frame_context_enabled", True)
+    sid = f"test-f110-carry-referent-{uuid.uuid4().hex[:8]}"
+
+    ctx = await cognitive.pre_turn("nous-default", sid, "yes do it", session=session, last_assistant_text=_OFFER)
+
+    assert _frame_of(ctx) == ("task", "referent")
+    assert cognitive._session_frames[sid] == CarriedFrame("task", 3, 0)
+
+
+async def test_flag_off_stores_and_reads_nothing(cognitive, heart, settings, session, monkeypatch):
+    """Flag off: no carried frame is stored, working memory is not read for one, select gets none."""
+    monkeypatch.setattr(settings, "frame_carry_enabled", False)
+    sid = f"test-f110-carry-off-{uuid.uuid4().hex[:8]}"
+    await _seed_wm_frame(heart, sid, "task", session)
+    calls = _capture_select(cognitive, monkeypatch)
+
+    first = await cognitive.pre_turn("nous-default", sid, _TASK_INPUT, session=session)
+    second = await cognitive.pre_turn("nous-default", sid, _QUIET, session=session)
+
+    assert calls == [{}, {}]
+    assert _frame_of(first) == ("task", "pattern")
+    assert _frame_of(second) == ("conversation", "default")
+    assert cognitive._session_frames == {}
