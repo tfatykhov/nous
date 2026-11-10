@@ -398,6 +398,9 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_CRITIC_SKILL_INJECTION` | `disabled` | Critic skill injection mode: enabled, disabled, log_only |
 | `NOUS_CRITIC_SKILL_SLOTS` | `2` | Reserved procedure slots for Critic-recommended skills |
 | `NOUS_EMBEDDING_SKILL_SLOTS` | `3` | Procedure slots for embedding similarity search |
+| `NOUS_FRAME_CONTEXT_ENABLED` | `false` | F110 v2: `FrameEngine.select` takes the previous assistant message. A short (`NOUS_FRAME_SHORT_REPLY_MAX_WORDS`) reply whose first word is an affirmative (`yes`, `yep`, `yeah`, `ok`, `okay`, `sure`, `go`, `do`, `proceed`, `please`, `agreed`, `confirm`), answering a message whose last 200 chars hold a `?` or an offer (`want me to`, `shall i`, `should i`, `i can`, `would you like`), selects `task` with `match_method="referent"` (confidence 0.6). It does not override a reply with `NOUS_FRAME_SWITCH_MIN_HITS` keyword hits, nor a one-hit frame other than task or conversation; with no task frame, or on any error, selection is today's. Off: selection unchanged. |
+| `NOUS_FRAME_SHORT_REPLY_MAX_WORDS` | `6` | F110 v2: a reply of at most this many whitespace-separated words is short for the referent rule (`NOUS_FRAME_CONTEXT_ENABLED`). |
+| `NOUS_FRAME_SWITCH_MIN_HITS` | `2` | F110 v2: keyword hits (a single-word pattern 1, a multi-word pattern 2) at which a reply keeps its keyword frame over the referent rule: a clear new topic always wins. |
 | `NOUS_RUBRIC_ENABLED` | `true` | Enable self-modifying rubric system (F024-3b) |
 | `NOUS_RUBRIC_OUTCOME_DETECTION_ENABLED` | `true` | Enable outcome signal detection on episodes |
 | `NOUS_RUBRIC_EVOLUTION_ENABLED` | `false` | Enable weight/split/merge evolution (Phase 1+) |
