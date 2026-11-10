@@ -2169,6 +2169,16 @@ class Settings(BaseSettings):
     critic_skill_slots: int = Field(default=2, ge=0)  # Reserved slots for Critic-recommended skills
     embedding_skill_slots: int = Field(default=3, ge=0)  # Slots for embedding similarity search
 
+    # F110 v2 frame context. On: FrameEngine.select takes the previous assistant
+    # message, and a short affirmative-led reply to an offer in its last 200
+    # chars selects `task` (match_method "referent"). Off: selection unchanged.
+    frame_context_enabled: bool = False
+    # A reply of at most this many whitespace-separated words is short.
+    frame_short_reply_max_words: int = Field(default=6, ge=1)
+    # Keyword hits (single-word pattern 1, multi-word 2) at which a reply keeps
+    # its keyword frame over the referent rule: a clear new topic always wins.
+    frame_switch_min_hits: int = Field(default=2, ge=1)
+
     # Email / integration credentials (used by heartbeat EmailCheck, other integrations)
     email: str = ""  # Nous agent email address
     email_user: str = ""  # IMAP login user

@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import time
+import unicodedata
 from collections import Counter
 from typing import Any
 
@@ -19,6 +20,8 @@ from nous.cognitive.critic_schemas import CriticResult, DiagnosticResult, Routin
 from nous.cognitive.schemas import FrameSelection
 from nous.config import Settings
 from nous.heart.procedures import ProcedureManager
+
+_PREVIOUS_MESSAGE_CHARS = 1200  # F110: how much of the previous assistant message the critic sees
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +151,29 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
 
         return True
 
+    @staticmethod
+    def _previous_message_section(text: str | None) -> str:
+        """F110: the PREVIOUS ASSISTANT MESSAGE block of the user turn, or "" without text.
+
+        The text is stripped of control and format characters (newline and tab stay), then redacted, then cut to its
+        last ``_PREVIOUS_MESSAGE_CHARS`` characters, where an offer usually sits. Fail-open: text that cannot be
+        prepared is left out.
+        """
+        if not text or not isinstance(text, str):
+            return ""
+        try:
+            from nous.cognitive.ledger_store import redact_output
+
+            # Strip first: a NUL or zero-width character inside a secret would otherwise split it past the patterns.
+            stripped = "".join(c for c in text if c in "\n\t" or not unicodedata.category(c).startswith("C"))
+            tail = redact_output(stripped)[-_PREVIOUS_MESSAGE_CHARS:]
+        except Exception:
+            logger.warning("F110: the critic could not prepare the previous assistant message", exc_info=True)
+            return ""
+        if not tail.strip():
+            return ""
+        return "PREVIOUS ASSISTANT MESSAGE (the user may be replying to it):\n" + tail + "\n\n"
+
     # ------------------------------------------------------------------
     # LLM Classification
     # ------------------------------------------------------------------
@@ -158,8 +184,14 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
         heuristic_frame: FrameSelection,
         available_frames: list[str],
         tool_call_history: list[dict[str, Any]] | None = None,
+        *,
+        last_assistant_text: str | None = None,
     ) -> CriticResult:
         """Classify user message and recommend frame.
+
+        F110: with ``frame_context_enabled`` the user turn also carries the heuristic frame and, when
+        ``last_assistant_text`` is given, the tail of the previous assistant message (redacted), so a reply such as
+        "yes, do it" can be read as the answer to an offer. The system block is not touched.
 
         Uses call_background_llm() with timeout protection.
         Falls back to heuristic frame on any error.
@@ -201,6 +233,12 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
             skill_catalog=skill_catalog,
         )
         prompt = "USER MESSAGE:\n" + user_message + "\n\n" + self._ANSWER_REMINDER
+        if self._settings.frame_context_enabled:
+            prompt = (
+                self._previous_message_section(last_assistant_text)
+                + "HEURISTIC FRAME: " + heuristic_frame.frame_id + "\n\n"
+                + prompt
+            )
 
         try:
             from nous.handlers import call_background_llm

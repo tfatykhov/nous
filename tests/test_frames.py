@@ -18,14 +18,19 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import text
 
-from nous.cognitive.frames import FRAME_PRIORITY, FrameEngine
+from nous.cognitive.frames import FRAME_PRIORITY, FrameEngine, _is_affirmative_led, _offers_action
 from nous.cognitive.schemas import FrameSelection
+from nous.config import Settings
 from nous.storage.migrator import _split_sql_statements
+from tests.fixtures.frame_referent_pairs import FRAME_REFERENT_PAIRS, WRITE_IT_UP
 
 
 # ---------------------------------------------------------------------------
@@ -70,10 +75,17 @@ SEED_FRAMES = [
 ]
 
 
-def make_engine() -> FrameEngine:
-    """FrameEngine wired to a stub Database (session never used directly)."""
+def make_engine(*, context: bool = False) -> FrameEngine:
+    """FrameEngine wired to a stub Database (session never used directly).
+
+    The settings carry real F110 frame-context values (the flag off unless ``context``), so the
+    referent rule never reads a truthy MagicMock attribute.
+    """
     db = MagicMock()
     settings = MagicMock()
+    settings.frame_context_enabled = context
+    settings.frame_short_reply_max_words = 6
+    settings.frame_switch_min_hits = 2
     return FrameEngine(db, settings)
 
 
@@ -84,12 +96,12 @@ def make_session() -> AsyncMock:
     return session
 
 
-async def select_with_frames(engine: FrameEngine, text: str, frames: list[FakeFrame]) -> FrameSelection:
-    """Run engine.select() with a controlled frame list via _load_frames patch."""
+async def select_with_frames(engine: FrameEngine, text: str, frames: list[FakeFrame], **kwargs: Any) -> FrameSelection:
+    """Run engine.select() with a controlled frame list via _load_frames patch; kwargs go to select()."""
     session = make_session()
     with patch.object(engine, "_load_frames", AsyncMock(return_value=frames)):
         with patch.object(engine, "_increment_usage", AsyncMock()):
-            return await engine.select("nous-default", text, session=session)
+            return await engine.select("nous-default", text, session=session, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -606,3 +618,216 @@ async def test_migration_105_idempotent_and_adds_keywords(session):
     await session.execute(seed_row, {"p": held})
     assert (await session.execute(text(statement))).rowcount == 0
     assert (await session.execute(patterns)).scalar_one() == held
+
+
+# ---------------------------------------------------------------------------
+# 31. F110 v2 PR 2b: frame-context settings and the referent rule
+# ---------------------------------------------------------------------------
+
+FRAME_CONTEXT_DEFAULTS = {
+    "frame_context_enabled": False,
+    "frame_short_reply_max_words": 6,
+    "frame_switch_min_hits": 2,
+}
+
+
+def test_frame_context_settings_defaults():
+    s = Settings(_env_file=None)
+    assert {k: getattr(s, k) for k in FRAME_CONTEXT_DEFAULTS} == FRAME_CONTEXT_DEFAULTS
+
+
+def test_frame_context_settings_environment_names(monkeypatch):
+    monkeypatch.setenv("NOUS_FRAME_CONTEXT_ENABLED", "true")
+    monkeypatch.setenv("NOUS_FRAME_SHORT_REPLY_MAX_WORDS", "4")
+    monkeypatch.setenv("NOUS_FRAME_SWITCH_MIN_HITS", "3")
+    s = Settings(_env_file=None)
+    assert (s.frame_context_enabled, s.frame_short_reply_max_words, s.frame_switch_min_hits) == (True, 4, 3)
+
+
+@pytest.mark.parametrize("field", ["frame_short_reply_max_words", "frame_switch_min_hits"])
+def test_frame_context_threshold_below_one_is_rejected(field):
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, **{field: 0})
+
+
+def test_frame_context_settings_have_doc_rows():
+    doc = (ROOT / "docs" / "reference" / "environment-variables.md").read_text(encoding="utf-8")
+    for field, default in FRAME_CONTEXT_DEFAULTS.items():
+        value = str(default).lower() if isinstance(default, bool) else str(default)
+        assert f"| `NOUS_{field.upper()}` | `{value}` |" in doc, field
+
+
+async def test_referent_yes_do_it_after_offer():
+    """An affirmative reply to an offer is work: task, by the referent rule."""
+    result = await select_with_frames(
+        make_engine(context=True), "yes do it", SEED_FRAMES, last_assistant_text=WRITE_IT_UP
+    )
+    assert (result.frame_id, result.match_method) == ("task", "referent")
+    assert result.confidence == pytest.approx(0.6)
+
+
+async def test_referent_requires_flag():
+    """Flag off: the previous assistant text changes nothing."""
+    engine = make_engine(context=False)
+    today = await select_with_frames(engine, "yes do it", SEED_FRAMES)
+    result = await select_with_frames(engine, "yes do it", SEED_FRAMES, last_assistant_text=WRITE_IT_UP)
+    assert (today.frame_id, today.match_method) == ("conversation", "default")
+    assert result.model_dump() == today.model_dump()
+
+
+async def test_referent_no_offer_no_override():
+    result = await select_with_frames(
+        make_engine(context=True), "yes", SEED_FRAMES, last_assistant_text="Here is the summary."
+    )
+    assert (result.frame_id, result.match_method) == ("conversation", "default")
+
+
+async def test_referent_long_reply_not_referent():
+    """Seven words is not short; six still is."""
+    engine = make_engine(context=True)
+    offer = WRITE_IT_UP
+    seven = await select_with_frames(engine, "yes do it but keep it short", SEED_FRAMES, last_assistant_text=offer)
+    six = await select_with_frames(engine, "yes do it but keep short", SEED_FRAMES, last_assistant_text=offer)
+    assert (seven.frame_id, seven.match_method) == ("conversation", "default")
+    assert (six.frame_id, six.match_method) == ("task", "referent")
+
+
+async def test_two_hit_topic_beats_referent():
+    """Rule 1: two keyword hits keep the keyword frame, even for a short affirmative-led reply."""
+    engine = make_engine(context=True)
+    for reply in ("What if we redesign it?", "yes, what if we redesign it"):
+        result = await select_with_frames(engine, reply, SEED_FRAMES, last_assistant_text=WRITE_IT_UP)
+        assert (result.frame_id, result.match_method) == ("creative", "pattern"), reply
+    # two task hits: task either way, but by its keywords, not the referent rule
+    result = await select_with_frames(engine, "yes, build and deploy it", SEED_FRAMES, last_assistant_text=WRITE_IT_UP)
+    assert (result.frame_id, result.match_method) == ("task", "pattern")
+
+
+async def test_referent_yes_explain_why_stays_question():
+    """The ruling: the referent rule overrides only no hits or a task/conversation frame.
+
+    "yes, explain why" is 2 question hits (rule 1); "yes, explain it" is 1 question hit, kept by the ruling.
+    """
+    engine = make_engine(context=True)
+    for reply in ("yes, explain why", "yes, explain it"):
+        result = await select_with_frames(engine, reply, SEED_FRAMES, last_assistant_text=WRITE_IT_UP)
+        assert (result.frame_id, result.match_method) == ("question", "pattern"), reply
+
+
+def test_referent_fixture_composition():
+    assert len(FRAME_REFERENT_PAIRS) == 44
+    assert sum(method != "referent" for _, _, _, method in FRAME_REFERENT_PAIRS) >= 25
+    assert sum("\n" in prev for prev, _, _, _ in FRAME_REFERENT_PAIRS) >= 5
+    assert sum(reply != reply.lower() for _, reply, _, method in FRAME_REFERENT_PAIRS if method == "referent") >= 3
+    # the too-early offer really sits outside the 200-character tail
+    (too_early,) = [prev for prev, _, _, _ in FRAME_REFERENT_PAIRS if "\n" in prev and len(prev) > 200]
+    assert "?" in too_early and len(too_early) - too_early.index("?") > 200
+
+
+@pytest.mark.parametrize(
+    ("prev", "reply", "frame", "method"),
+    FRAME_REFERENT_PAIRS,
+    ids=[f"{i:02d}-{reply}" for i, (_, reply, _, _) in enumerate(FRAME_REFERENT_PAIRS)],
+)
+async def test_referent_fixture_30_pairs(prev: str, reply: str, frame: str, method: str):
+    result = await select_with_frames(make_engine(context=True), reply, SEED_FRAMES, last_assistant_text=prev)
+    assert (result.frame_id, result.match_method) == (frame, method)
+    if method == "referent":
+        assert result.confidence == pytest.approx(0.6)
+    else:
+        today = await select_with_frames(make_engine(), reply, SEED_FRAMES)
+        assert result.model_dump() == today.model_dump()
+
+
+async def test_referent_without_task_frame_falls_through():
+    """No task frame for the agent: today's path."""
+    frames = [f for f in SEED_FRAMES if f.id != "task"]
+    result = await select_with_frames(make_engine(context=True), "yes do it", frames, last_assistant_text=WRITE_IT_UP)
+    assert (result.frame_id, result.match_method) == ("conversation", "default")
+
+
+async def test_referent_increments_task_usage():
+    engine = make_engine(context=True)
+    increment = AsyncMock()
+    with patch.object(engine, "_load_frames", AsyncMock(return_value=SEED_FRAMES)):
+        with patch.object(engine, "_increment_usage", increment):
+            await engine.select("nous-default", "yes do it", make_session(), last_assistant_text=WRITE_IT_UP)
+    increment.assert_called_once()
+    assert increment.call_args.args[0].id == "task"
+
+
+async def test_referent_fails_open():
+    """An error inside the referent rule falls back to today's selection."""
+    engine = make_engine(context=True)
+    today = await select_with_frames(make_engine(), "yes do it", SEED_FRAMES)
+    with patch("nous.cognitive.frames._offers_action", side_effect=RuntimeError("boom")):
+        result = await select_with_frames(engine, "yes do it", SEED_FRAMES, last_assistant_text=WRITE_IT_UP)
+    assert result.model_dump() == today.model_dump()
+
+
+@pytest.mark.parametrize("reply", ["yes do it", "build it"])
+async def test_referent_settings_error_fails_open(reply: str):
+    """Settings without the frame-context fields: today's selection, not an error out of select()."""
+    engine = FrameEngine(MagicMock(), SimpleNamespace())
+    today = await select_with_frames(make_engine(), reply, SEED_FRAMES)
+    result = await select_with_frames(engine, reply, SEED_FRAMES, last_assistant_text=WRITE_IT_UP)
+    assert result.model_dump() == today.model_dump()
+
+
+# Every input the tests above select on, plus every fixture reply.
+_TODAY_INPUTS = [
+    "should we use Redis?", "build a REST API", "error in deployment", "hello how are you", "xyzzy foobar",
+    "should we fix this bug", "build something", "what is the capital of France",
+    "brainstorm ideas for a product", "BUILD a REST API", "build this", "build and fix the server",
+    "build create implement deploy", "", "tell me everything about it", "me tell everything",
+    "buildings everywhere", "xyzzy plugh quux", "Yes write short spec., deliver here", "write me a haiku",
+    "yes do it but keep it short", "yes do it but keep short", "yes, explain it",
+] + [reply for _, reply, _, _ in FRAME_REFERENT_PAIRS]  # fmt: skip
+
+
+@pytest.mark.parametrize("reply", _TODAY_INPUTS)
+async def test_context_flag_off_selects_as_today(reply: str):
+    """Flag off, or no previous assistant text: select() returns what it returns without the new arguments."""
+    today = await select_with_frames(make_engine(), reply, SEED_FRAMES)
+    flag_off = await select_with_frames(
+        make_engine(context=False), reply, SEED_FRAMES, carried=object(), last_assistant_text=WRITE_IT_UP
+    )
+    no_text = await select_with_frames(make_engine(context=True), reply, SEED_FRAMES, last_assistant_text=None)
+    assert flag_off.model_dump() == today.model_dump()
+    assert no_text.model_dump() == today.model_dump()
+
+
+async def test_select_without_frames_ignores_context():
+    result = await select_with_frames(make_engine(context=True), "yes do it", [], last_assistant_text=WRITE_IT_UP)
+    assert (result.frame_id, result.match_method) == ("conversation", "default")
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [("yes", True), ("Go-ahead!", True), ("  OK, sure", True), ("do it", True), ("Do that.", True),
+     ("please", True), ("please do", True), ("yes thanks", True),
+     ("no", False), ("don't", False), ("", False), ("...", False), ("yesterday", False),
+     # fix round 1: a lone "do" is not an affirmative; a "?" or a negation/deferral word vetoes
+     ("do", False), ("do you think so", False), ("yes?", False), ("ok, why?", False),
+     ("please don't", False), ("please don\u2019t", False), ("yes dont", False), ("do not", False),
+     ("yeah no", False), ("yes, later", False), ("sure, but not today", False), ("ok, hold on", False),
+     ("please stop", False), ("ok cancel", False), ("yes wait", False), ("sure, never mind", False),
+     ("ok nope", False), ("YES NAH", False),
+     # follow-up ruling: skip, leave, away; "yes, no problem" stays a cautious non-acceptance
+     ("go away", False), ("ok, skip it", False), ("yes, leave it", False), ("yes, no problem", False)],
+)  # fmt: skip
+def test_is_affirmative_led(reply: str, expected: bool):
+    assert _is_affirmative_led(reply) is expected
+
+
+@pytest.mark.parametrize(
+    ("assistant", "expected"),
+    [("Want me to?", True), ("I CAN draft it.", True), ("Would you like a copy.", True), ("Shall I.", True),
+     ("Done.", False), ("Notes should include it.", False), ("Want me to rerun it? " + "x" * 200, False),
+     ("Ready. Should I merge?\n\n", True),
+     # fix round 1: "I can't" / "I cannot" are not offers
+     ("I can't run that tonight.", False), ("I can\u2019t do that.", False), ("I cannot do that.", False),
+     ("I can. ", True)],
+)  # fmt: skip
+def test_offers_action(assistant: str, expected: bool):
+    assert _offers_action(assistant) is expected

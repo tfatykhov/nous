@@ -1832,6 +1832,8 @@ class AgentRunner:
                 for m in conversation.messages
                 if m.role == "user"
             ][-8:]
+            # F110: the message the user is replying to, read only with the flag on.
+            _last_text = self._last_assistant_text(conversation) if self._settings.frame_context_enabled else None
             turn_context = await self._cognitive.pre_turn(
                 _agent_id,
                 session_id,
@@ -1841,6 +1843,8 @@ class AgentRunner:
                 user_display_name=user_display_name,
                 skip_episode=skip_episode,
                 is_subtask=is_subtask,
+                # F110: only passed when set, so test doubles of pre_turn see the call unchanged.
+                **({"last_assistant_text": _last_text} if _last_text else {}),
                 # F098: only passed when known, so callers without a channel
                 # (and test doubles of pre_turn) see the call unchanged.
                 **({"channel": _ctx.channel} if _ctx.channel else {}),
@@ -2674,6 +2678,8 @@ class AgentRunner:
                 for m in conversation.messages
                 if m.role == "user"
             ][-8:]
+            # F110: see run_turn
+            _last_text = self._last_assistant_text(conversation) if self._settings.frame_context_enabled else None
             turn_context = await self._cognitive.pre_turn(
                 _agent_id,
                 session_id,
@@ -2683,6 +2689,7 @@ class AgentRunner:
                 user_display_name=user_display_name,
                 turn_number=(len(conversation.messages) + 2) // 2,  # F091, see run_turn
                 **({"channel": _ctx.channel} if _ctx.channel else {}),  # F098
+                **({"last_assistant_text": _last_text} if _last_text else {}),  # F110, see run_turn
             )
             if turn_context.decision_id:
                 # F099 Phase 0a: the Plan decision reaches dispatch(), so a spawn
@@ -4771,6 +4778,24 @@ Rules:
             if block.get("type") == "text":
                 text_parts.append(block["text"])
         return "\n".join(text_parts) if text_parts else ""
+
+    def _last_assistant_text(self, conversation: Conversation) -> str | None:
+        """F110: the text of the conversation's last assistant message, or None when there is none.
+
+        Fail-open: content it cannot read (a malformed restored block list) returns None.
+        """
+        try:
+            message = next((m for m in reversed(conversation.messages) if m.role == "assistant"), None)
+            if message is None:
+                return None
+            if isinstance(message.content, list):
+                return self._extract_text(message.content)
+            if isinstance(message.content, str):
+                return message.text_content or message.content
+            return None  # neither a list nor a str: nothing readable, nothing to log
+        except Exception:
+            logger.warning("F110: could not read the last assistant message; frame context skipped", exc_info=True)
+            return None
 
     async def _activity_heartbeat_loop(self, dag_node_id: UUID, interval_seconds: float) -> None:
         """F064.1: background heartbeat ping while a tool dispatch is in flight.

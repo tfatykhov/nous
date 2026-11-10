@@ -6,7 +6,9 @@ No LLM calls. Pure pattern matching for speed (<10ms).
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +30,49 @@ FRAME_PRIORITY: dict[str, int] = {
     "decision": 6,
 }
 
+# F110 v2 referent rule: a short affirmative reply to an assistant offer is work.
+_AFFIRMATIVE_TOKENS = frozenset(
+    {"yes", "yep", "yeah", "ok", "okay", "sure", "go", "proceed", "please", "agreed", "confirm"}
+)
+_AFFIRMATIVE_PHRASES = (["do", "it"], ["do", "that"])
+# Any of these anywhere in the reply means it is not an acceptance.
+_NEGATION_WORDS = re.compile(
+    r"\b(?:no|not|don['\u2019]t|dont|do not|stop|cancel|wait|never|later|hold|nope|nah|skip|leave|away)\b"
+)
+# "i can" but not "i can't" ("i cannot" already fails the closing \b).
+_OFFER_PHRASES = re.compile(r"\b(?:want me to|shall i|should i|i can(?!['\u2019]t)|would you like)\b")
+_OFFER_TAIL_CHARS = 200
+_REFERENT_FRAME_ID = "task"
+_REFERENT_CONFIDENCE = 0.6
+# A one-hit keyword frame the referent rule may override (a zero-hit reply always may).
+_REFERENT_OVERRIDABLE = frozenset({"task", "conversation"})
+
+
+def _is_affirmative_led(text: str) -> bool:
+    """True when the reply opens with an affirmative and neither asks nor refuses.
+
+    Case-insensitive, punctuation stripped: the first word is one of
+    ``yes yep yeah ok okay sure go proceed please agreed confirm`` (``go ahead`` is covered by
+    ``go``), or the reply starts with ``do it`` / ``do that``. A ``?`` anywhere, or any whole word
+    of ``no not don't dont do not stop cancel wait never later hold nope nah skip
+    leave away``, makes it False.
+    """
+    lowered = text.lower()
+    if "?" in lowered or _NEGATION_WORDS.search(lowered):
+        return False
+    tokens = re.sub(r"[^\w\s]", " ", lowered).split()
+    return bool(tokens) and (tokens[0] in _AFFIRMATIVE_TOKENS or tokens[:2] in _AFFIRMATIVE_PHRASES)
+
+
+def _offers_action(assistant_tail: str) -> bool:
+    """True when the assistant text's last 200 characters (trailing whitespace dropped) offer something.
+
+    An offer is a ``?`` or one of the whole-word phrases ``want me to``, ``shall i``, ``should i``,
+    ``i can`` (not ``i can't`` / ``i cannot``), ``would you like``, case-insensitive.
+    """
+    tail = assistant_tail.rstrip()[-_OFFER_TAIL_CHARS:].lower()
+    return "?" in tail or _OFFER_PHRASES.search(tail) is not None
+
 
 class FrameEngine:
     """Selects cognitive frame for each interaction."""
@@ -42,6 +87,9 @@ class FrameEngine:
         agent_id: str,
         input_text: str,
         session: AsyncSession | None = None,
+        *,
+        carried: Any = None,
+        last_assistant_text: str | None = None,
     ) -> FrameSelection:
         """Select the best cognitive frame for this input.
 
@@ -50,21 +98,34 @@ class FrameEngine:
         2. For each frame, count activation_pattern matches
            - Multi-word patterns: substring match on full input
            - Single-word patterns: set membership on tokenized words
-        3. Frame with most matches wins (ties broken by priority)
-        4. If no matches, return default frame (conversation)
+        3. Referent rule (F110, only with ``frame_context_enabled`` and
+           ``last_assistant_text``): a short, affirmative-led reply to an
+           assistant offer selects ``task`` (match_method ``referent``),
+           unless the reply has ``frame_switch_min_hits`` hits or its one
+           best frame is neither task nor conversation
+        4. Frame with most matches wins (ties broken by priority)
+        5. If no matches, return default frame (conversation)
 
+        ``carried`` is accepted and ignored (the frame carry rule comes later).
         No LLM call -- pure pattern matching for speed.
         """
         if session is None:
             async with self._db.session() as session:
-                return await self._select(agent_id, input_text, session)
-        return await self._select(agent_id, input_text, session)
+                return await self._select(
+                    agent_id, input_text, session, carried=carried, last_assistant_text=last_assistant_text
+                )
+        return await self._select(
+            agent_id, input_text, session, carried=carried, last_assistant_text=last_assistant_text
+        )
 
     async def _select(
         self,
         agent_id: str,
         input_text: str,
         session: AsyncSession,
+        *,
+        carried: Any = None,
+        last_assistant_text: str | None = None,
     ) -> FrameSelection:
         frames = await self._load_frames(agent_id, session)
         if not frames:
@@ -111,6 +172,11 @@ class FrameEngine:
                     best_frame = frame
                     best_count = match_count
                     best_priority = priority
+
+        referent = self._referent_frame(frames, input_text, best_frame, best_count, last_assistant_text)
+        if referent is not None:
+            await self._increment_usage(referent, session)
+            return self._frame_to_selection(referent, "referent", _REFERENT_CONFIDENCE)
 
         if best_frame is None:
             # No matches -- use default frame
@@ -170,6 +236,38 @@ class FrameEngine:
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    def _referent_frame(
+        self,
+        frames: list[Frame],
+        input_text: str,
+        best_frame: Frame | None,
+        best_count: int,
+        last_assistant_text: str | None,
+    ) -> Frame | None:
+        """The task frame when the reply accepts the assistant's offer, else None (today's path).
+
+        Rule 1 comes first: ``frame_switch_min_hits`` keyword hits keep the keyword frame. A
+        reply is short at ``frame_short_reply_max_words`` whitespace-separated words or fewer.
+        Fail-open: an error here, a settings error included, returns None.
+        """
+        if not last_assistant_text:
+            return None
+        try:
+            if not self._settings.frame_context_enabled:
+                return None
+            if best_count >= self._settings.frame_switch_min_hits:
+                return None
+            if best_frame is not None and best_frame.id not in _REFERENT_OVERRIDABLE:
+                return None
+            if len(input_text.split()) > self._settings.frame_short_reply_max_words:
+                return None
+            if not (_is_affirmative_led(input_text) and _offers_action(last_assistant_text)):
+                return None
+            return next((f for f in frames if f.id == _REFERENT_FRAME_ID), None)
+        except Exception:
+            logger.warning("Frame referent rule failed; using keyword selection", exc_info=True)
+            return None
 
     async def _load_frames(self, agent_id: str, session: AsyncSession) -> list[Frame]:
         result = await session.execute(

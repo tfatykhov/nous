@@ -498,6 +498,10 @@ class CognitiveLayer:
         # 'continuation' turn does, from PR-2c). A continuation reads its results
         # by intention, so it neither claims the chat inbox nor opens a Plan decision.
         context_kind: str | None = None,
+        # F110: the session's last assistant message, for the referent rule in FrameEngine.select.
+        last_assistant_text: str | None = None,
+        # F110: seconds since that message; accepted now, read by the first-turn section (PR 4).
+        last_assistant_age_s: float | None = None,
     ) -> TurnContext:
         """SENSE -> FRAME -> RECALL -> DELIBERATE — prepare for LLM turn.
 
@@ -518,6 +522,9 @@ class CognitiveLayer:
                 Optional — without it, dedup is skipped (backward compat).
             user_id: Optional user identifier for episode tracking.
             user_display_name: Optional user display name for episode tracking.
+            last_assistant_text: The assistant message the user is replying to. Passed to
+                ``FrameEngine.select`` only with ``frame_context_enabled`` on.
+            last_assistant_age_s: Seconds since ``last_assistant_text``; not read yet.
         """
         # CR-4: refresh this session's activity stamp BEFORE sweeping, so an
         # active session is never evicted, then sweep orphaned sessions.
@@ -574,7 +581,18 @@ class CognitiveLayer:
             )
         else:
             try:
-                frame = await self._frames.select(agent_id, user_input, session=session)
+                frame = await self._frames.select(
+                    agent_id,
+                    user_input,
+                    session=session,
+                    # F110: only with text and the flag on (text first, so no setting is read without it);
+                    # test doubles of select without the parameter see the call unchanged.
+                    **(
+                        {"last_assistant_text": last_assistant_text}
+                        if last_assistant_text and self._settings.frame_context_enabled
+                        else {}
+                    ),
+                )
             except Exception:
                 logger.warning("Frame selection failed, falling back to conversation")
                 frame = self._frames._default_selection()
@@ -612,6 +630,12 @@ class CognitiveLayer:
                 heuristic_frame=frame,
                 available_frames=available_frame_ids,
                 tool_call_history=tool_history,
+                # F110: only with text and the flag on, so test doubles of classify see the call unchanged.
+                **(
+                    {"last_assistant_text": last_assistant_text}
+                    if last_assistant_text and self._settings.frame_context_enabled
+                    else {}
+                ),
             )
 
             # In advised mode, override frame selection

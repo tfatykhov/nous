@@ -1212,3 +1212,63 @@ class TestMemoryFidelityCaps:
         assert len(episode_input.summary) == 300, (
             f"Expected seed truncated to 300 chars, got {len(episode_input.summary)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# F110 v2 PR 2b: pre_turn hands the previous assistant message to frame selection
+# ---------------------------------------------------------------------------
+
+_OFFER = "Want me to write it up?"
+
+
+def _capture_select(cognitive, monkeypatch, *, side_effect=None) -> list[dict]:
+    """Wrap FrameEngine.select so the test sees its keyword arguments."""
+    calls: list[dict] = []
+    real_select = cognitive._frames.select
+
+    async def spy(agent_id, input_text, session=None, **kwargs):
+        calls.append(kwargs)
+        if side_effect is not None:
+            raise side_effect
+        return await real_select(agent_id, input_text, session=session, **kwargs)
+
+    monkeypatch.setattr(cognitive._frames, "select", spy)
+    return calls
+
+
+async def test_pre_turn_select_receives_text(cognitive, settings, session, monkeypatch):
+    """Flag on: select gets the previous assistant text, so a short yes to an offer selects task."""
+    monkeypatch.setattr(settings, "frame_context_enabled", True)
+    calls = _capture_select(cognitive, monkeypatch)
+    sid = f"test-f110-referent-{uuid.uuid4().hex[:8]}"
+
+    ctx = await cognitive.pre_turn(
+        "nous-default", sid, "yes do it", session=session, last_assistant_text=_OFFER, last_assistant_age_s=5.0
+    )
+
+    assert calls == [{"last_assistant_text": _OFFER}]
+    assert (ctx.frame.frame_id, ctx.frame.match_method) == ("task", "referent")
+
+
+async def test_pre_turn_flag_off_select_gets_no_text(cognitive, settings, session, monkeypatch):
+    """Flag off: select is called as today, without last_assistant_text."""
+    monkeypatch.setattr(settings, "frame_context_enabled", False)
+    calls = _capture_select(cognitive, monkeypatch)
+    sid = f"test-f110-off-{uuid.uuid4().hex[:8]}"
+
+    ctx = await cognitive.pre_turn("nous-default", sid, "yes do it", session=session, last_assistant_text=_OFFER)
+
+    assert calls == [{}]
+    assert ctx.frame.match_method != "referent"
+
+
+async def test_pre_turn_select_failure_falls_back_to_default(cognitive, settings, session, monkeypatch):
+    """A select that raises with the text leaves the turn on the default frame."""
+    monkeypatch.setattr(settings, "frame_context_enabled", True)
+    calls = _capture_select(cognitive, monkeypatch, side_effect=RuntimeError("select broke"))
+    sid = f"test-f110-fail-{uuid.uuid4().hex[:8]}"
+
+    ctx = await cognitive.pre_turn("nous-default", sid, "yes do it", session=session, last_assistant_text=_OFFER)
+
+    assert calls == [{"last_assistant_text": _OFFER}]
+    assert (ctx.frame.frame_id, ctx.frame.match_method) == ("conversation", "default")
