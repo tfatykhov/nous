@@ -1168,10 +1168,12 @@ async def create_components(settings: Settings) -> dict:
 
     # F011: Bootstrap local skills (one-time, only if DB has no skills)
     try:
-        from nous.skills.bootstrap import bootstrap_local_skills, reactivate_skills
+        from nous.skills.bootstrap import bootstrap_local_skills, reactivate_skills, sync_builtin_skills
 
         await bootstrap_local_skills(settings.workspace_dir, heart)
         await reactivate_skills(heart)
+        # F110: the builtin skills follow NOUS_SPEC_SKILL_ENABLED; after reactivate_skills, so off stays off.
+        await sync_builtin_skills(heart, settings.spec_skill_enabled)
     except Exception:
         logger.debug("Skill bootstrap skipped or failed (non-fatal)")
 
