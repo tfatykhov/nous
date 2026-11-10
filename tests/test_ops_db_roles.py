@@ -291,6 +291,7 @@ READER_TABLES = {
     "nous_system.events",
     "nous_system.memory_write_health_daily",
     "nous_system.tool_call_log",
+    "nous_system.agent_turn_log",
     "nous_system.model_call_log",
     "nous_system.model_call_attempt",
 }
@@ -405,7 +406,11 @@ READER_VERIFY_LABELS = (
     "reader reads an allowed table",
     "reader reads the memory write-health rollup",
     "reader reads the tool-call records",
-    "reader cannot read the turn records",
+    "reader reads the turn numbers",
+    "reader reads the frame scalars",
+    "reader cannot read a turn's reply",
+    "reader cannot read a turn's trigger",
+    "reader cannot read the critic record",
     "reader reads the model-call records",
     "reader reads the model-call attempts",
     "reader cannot read an embedding",
@@ -413,7 +418,7 @@ READER_VERIFY_LABELS = (
     "reader cannot INSERT",
     "reader cannot read a server file",
     "reader cannot run a program",
-    "reader holds SELECT on columns of exactly 18 tables and nothing else",
+    "reader holds SELECT on columns of exactly 19 tables and nothing else",
     "reader reads no vector, tsvector or credential-named column",
     "reader reads nothing in public",
     "the reader's relations are plain tables without row policies",
@@ -435,8 +440,40 @@ def test_verify_has_reader_checks():
     assert reader_rows.count("'nous_reader', ") >= 7, reader_rows
     assert "SET ROLE" not in reader_rows and "SESSION AUTHORIZATION" not in reader_rows
     assert "tests/test_db_query_live.py" in VERIFY
-    # the reader's 18 tables are counted with column privileges (a column grant gives no table-level SELECT)
-    assert "has_any_column_privilege(''nous_reader'', c.oid, ''SELECT'')) = 18" in VERIFY
+
+
+def test_verify_counts_19_tables():
+    # verify's count is the reader block's: a table added to one and not the other fails here, not in the CI job
+    assert len(_reader_rows()) == len(READER_TABLES) == 19
+    assert "('reader holds SELECT on columns of exactly 19 tables and nothing else', " in VERIFY
+    # counted with column privileges (a column grant gives no table-level SELECT)
+    assert "has_any_column_privilege(''nous_reader'', c.oid, ''SELECT'')) = 19" in VERIFY
+    assert "exactly 18 tables" not in VERIFY and "''SELECT'')) = 18" not in VERIFY
+
+
+def test_reader_list_has_agent_turn_log_with_text_exclusions():
+    # F110: the reader reads a turn's numbers, ids and labels (frame, frame reason, critic frame, error flag, turn
+    # number, work kind), never its text: the trigger, the reply, the error and the critic and claim-check records.
+    # Only migration-100 columns are named, so the script also runs on a database without migration 106.
+    excluded = {"trigger_text", "reply_text", "error", "critic", "claim_check"}
+    assert _reader_rows()["nous_system.agent_turn_log"] == excluded
+
+
+def test_verify_checks_turn_numbers_and_text_denial():
+    for row in (
+        "('reader reads the turn numbers', 'nous_reader', 'SELECT count(*) FROM nous_system.agent_turn_log', 'ok', "
+        "NULL),",
+        "('reader reads the frame scalars', 'nous_reader', 'SELECT frame_id, frame_reason, critic_frame, had_error, "
+        "turn_number, work_kind FROM nous_system.agent_turn_log LIMIT 1', 'ok', NULL),",
+        "('reader cannot read a turn''s reply', 'nous_reader', 'SELECT reply_text FROM nous_system.agent_turn_log', "
+        "'error', NULL),",
+        "('reader cannot read a turn''s trigger', 'nous_reader', "
+        "'SELECT trigger_text FROM nous_system.agent_turn_log', 'error', NULL),",
+        "('reader cannot read the critic record', 'nous_reader', 'SELECT critic FROM nous_system.agent_turn_log', "
+        "'error', NULL),",
+    ):
+        assert row in VERIFY, row
+    assert "reader cannot read the turn records" not in VERIFY
 
 
 def test_the_reader_credential_rule_is_the_same_in_the_script_and_the_live_test():
