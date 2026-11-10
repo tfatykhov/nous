@@ -54,6 +54,7 @@ from nous.api.models import (  # noqa: F401 — re-exported for backward compat
     Message,
 )
 from nous.api.preamble import CLAUDE_CODE_PREAMBLE
+from nous.api.session_referent import ChannelLastReply
 from nous.api.smart_compress import add_cache_key, smart_compress
 from nous.api.tool_classes import refuse_denylist
 from nous.brain.brain import Brain
@@ -447,6 +448,11 @@ class AgentRunner:
         self._heart = heart
         self._settings = settings
         self._conversations: OrderedDict[str, Conversation] = OrderedDict()
+        # F110: each channel's last interactive reply, read on a new session's first turn (in process only).
+        self._channel_last_reply = ChannelLastReply(
+            max_age_s=settings.session_referent_max_age_hours * 3600,
+            max_chars=settings.session_referent_max_chars,
+        )
         self._api: AnthropicClient | None = None
         self._api_shared: bool = False  # True if client was externally provided
         self._dispatcher: Any | None = None  # ToolDispatcher, set via set_dispatcher()
@@ -1832,8 +1838,8 @@ class AgentRunner:
                 for m in conversation.messages
                 if m.role == "user"
             ][-8:]
-            # F110: the message the user is replying to, read only with the flag on.
-            _last_text = self._last_assistant_text(conversation) if self._settings.frame_context_enabled else None
+            # F110: the message the user is replying to (in-session, or the channel's last reply on a new session).
+            _referent = self._referent_kwargs(conversation, session_id, _ctx)
             turn_context = await self._cognitive.pre_turn(
                 _agent_id,
                 session_id,
@@ -1844,7 +1850,7 @@ class AgentRunner:
                 skip_episode=skip_episode,
                 is_subtask=is_subtask,
                 # F110: only passed when set, so test doubles of pre_turn see the call unchanged.
-                **({"last_assistant_text": _last_text} if _last_text else {}),
+                **_referent,
                 # F098: only passed when known, so callers without a channel
                 # (and test doubles of pre_turn) see the call unchanged.
                 **({"channel": _ctx.channel} if _ctx.channel else {}),
@@ -1889,6 +1895,7 @@ class AgentRunner:
                         call_indexes=_call_indexes,
                         started_at=_turn_started,
                     )
+                self._remember_reply(_ctx, session_id, response_text)  # F110: beside the row, not under its gate
                 conversation.messages.append(Message(role="assistant", content=response_text))
                 turn_result = TurnResult(response_text=response_text)
                 await self._cognitive.post_turn(
@@ -2120,6 +2127,7 @@ class AgentRunner:
                         call_indexes=_call_indexes,
                         started_at=_turn_started,
                     )
+                self._remember_reply(_ctx, session_id, response_text)  # F110: see the censor path
                 raise
             else:
                 _caught_exc = None
@@ -2155,6 +2163,7 @@ class AgentRunner:
                     call_indexes=_call_indexes,
                     started_at=_turn_started,
                 )
+            self._remember_reply(_ctx, session_id, response_text)  # F110: see the censor path
 
             # 7. Post-turn (always called, even on error)
             turn_result = TurnResult(
@@ -2678,8 +2687,7 @@ class AgentRunner:
                 for m in conversation.messages
                 if m.role == "user"
             ][-8:]
-            # F110: see run_turn
-            _last_text = self._last_assistant_text(conversation) if self._settings.frame_context_enabled else None
+            _referent = self._referent_kwargs(conversation, session_id, _ctx)  # F110: see run_turn
             turn_context = await self._cognitive.pre_turn(
                 _agent_id,
                 session_id,
@@ -2689,7 +2697,7 @@ class AgentRunner:
                 user_display_name=user_display_name,
                 turn_number=(len(conversation.messages) + 2) // 2,  # F091, see run_turn
                 **({"channel": _ctx.channel} if _ctx.channel else {}),  # F098
-                **({"last_assistant_text": _last_text} if _last_text else {}),  # F110, see run_turn
+                **_referent,  # F110, see run_turn
             )
             if turn_context.decision_id:
                 # F099 Phase 0a: the Plan decision reaches dispatch(), so a spawn
@@ -2718,6 +2726,7 @@ class AgentRunner:
                         call_indexes=call_indexes,
                         started_at=_turn_started,
                     )
+                self._remember_reply(_ctx, session_id, block_msg)  # F110: see run_turn
                 conversation.messages.append(Message(role="assistant", content=block_msg))
                 turn_result = TurnResult(response_text=block_msg)
                 await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
@@ -3620,6 +3629,7 @@ class AgentRunner:
                         call_indexes=call_indexes,
                         started_at=_turn_started,
                     )
+                self._remember_reply(_ctx, session_id, response_text)  # F110: see run_turn
                 # ALWAYS call post_turn (review P1: guaranteed cleanup).
                 # Shield from cancellation to prevent DB connection pool leaks —
                 # CancelledError during post_turn's DB ops leaves sessions checked
@@ -4796,6 +4806,46 @@ Rules:
         except Exception:
             logger.warning("F110: could not read the last assistant message; frame context skipped", exc_info=True)
             return None
+
+    def _referent_kwargs(self, conversation: Conversation, session_id: str, ctx: ExecutionContext) -> dict[str, Any]:
+        """F110: the ``pre_turn`` keyword arguments naming the message the user is replying to; empty when none.
+
+        A conversation with messages gives its last assistant text (with ``frame_context_enabled``). An empty one,
+        a new session's first turn, gives the channel's last reply from another session within the window and its
+        age (with ``session_referent_enabled``). Never both: in-session wins. A store error gives none.
+        """
+        if conversation.messages:
+            text = self._last_assistant_text(conversation) if self._settings.frame_context_enabled else None
+            return {"last_assistant_text": text} if text else {}
+        channel = self._referent_channel(ctx)
+        if channel is None:
+            return {}
+        try:
+            found = self._channel_last_reply.lookup(channel, session_id, time.monotonic())
+        except Exception as exc:  # noqa: BLE001 -- the referent must not change a turn
+            logger.warning("F110: session referent not read (%s)", type(exc).__name__)
+            return {}
+        if found is None:
+            return {}
+        text, age = found
+        return {"last_assistant_text": text, "last_assistant_age_s": age}
+
+    def _referent_channel(self, ctx: ExecutionContext) -> str | None:
+        """F110: the channel whose last reply an interactive turn reads and writes; None with the flag off."""
+        if self._settings.session_referent_enabled and ctx.kind == "interactive" and ctx.channel:
+            return ctx.channel
+        return None
+
+    def _remember_reply(self, ctx: ExecutionContext, session_id: str, reply: str) -> None:
+        """F110: keep ``reply`` as its channel's last reply. Never raises: the referent must not change a turn."""
+        channel = self._referent_channel(ctx)
+        if channel is None:
+            return
+        try:
+            self._channel_last_reply.record(channel, session_id, reply, time.monotonic())
+        except Exception as exc:  # noqa: BLE001 -- the referent must not change a turn
+            # The type only: an exception message can echo the reply.
+            logger.warning("F110: session referent not recorded (%s)", type(exc).__name__)
 
     async def _activity_heartbeat_loop(self, dag_node_id: UUID, interval_seconds: float) -> None:
         """F064.1: background heartbeat ping while a tool dispatch is in flight.

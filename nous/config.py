@@ -2183,6 +2183,14 @@ class Settings(BaseSettings):
     # for a short affirmative-led or courtesy reply below frame_switch_min_hits hits,
     # or for any reply with no keyword hit (match_method "carried"). Off: unchanged.
     frame_carry_enabled: bool = False
+    # F110 v2 session referent. On: the runner keeps each channel's last interactive
+    # reply in process and, on a new session's first turn (empty conversation) on the
+    # same channel, passes it to pre_turn with its age. Off: nothing kept or passed.
+    session_referent_enabled: bool = False
+    # Only a reply from at most this many hours ago is passed.
+    session_referent_max_age_hours: int = Field(default=24, ge=1)
+    # The last this many characters of the reply are kept (the offer is the end).
+    session_referent_max_chars: int = Field(default=1200, ge=1)
 
     # Email / integration credentials (used by heartbeat EmailCheck, other integrations)
     email: str = ""  # Nous agent email address
