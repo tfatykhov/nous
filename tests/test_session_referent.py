@@ -457,6 +457,28 @@ async def test_censor_blocked_turn_records_its_reply(entry):
 
 
 @ENTRIES
+async def test_errored_turn_keeps_the_stored_offer(entry):
+    """An errored turn's reply ("I encountered an error...") never replaces the channel's stored offer."""
+    cognitive = _SpyCognitive()
+    runner = _runner(cognitive, referent=True, reply=OFFER)
+    first = _sid()
+    try:
+        await _turn(runner, entry, first, "plan it", channel=CH)
+        working = runner._tool_loop, runner._call_api_stream
+        runner._tool_loop = AsyncMock(side_effect=RuntimeError("boom"))
+        runner._call_api_stream = MagicMock(side_effect=RuntimeError("boom"))
+        with pytest.raises(RuntimeError):
+            await _turn(runner, entry, first, "and the rest?", channel=CH)
+        assert runner._conversations[first].messages[-1].content.startswith("I encountered an error")
+        runner._tool_loop, runner._call_api_stream = working
+        await _turn(runner, entry, _sid(), "yes", channel=CH)
+    finally:
+        await runner.close()
+
+    assert cognitive.pre_turn_kwargs[-1]["last_assistant_text"] == OFFER
+
+
+@ENTRIES
 async def test_store_errors_fail_open(entry):
     """A store that raises on read or write never changes the turn: no referent, the reply still returned."""
     cognitive = _SpyCognitive()

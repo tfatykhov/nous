@@ -1895,7 +1895,7 @@ class AgentRunner:
                         call_indexes=_call_indexes,
                         started_at=_turn_started,
                     )
-                self._remember_reply(_ctx, session_id, response_text)  # F110: beside the row, not under its gate
+                self._remember_reply(_ctx, session_id, response_text, error=None)  # F110: beside the row's gate
                 conversation.messages.append(Message(role="assistant", content=response_text))
                 turn_result = TurnResult(response_text=response_text)
                 await self._cognitive.post_turn(
@@ -2127,7 +2127,6 @@ class AgentRunner:
                         call_indexes=_call_indexes,
                         started_at=_turn_started,
                     )
-                self._remember_reply(_ctx, session_id, response_text)  # F110: see the censor path
                 raise
             else:
                 _caught_exc = None
@@ -2163,7 +2162,7 @@ class AgentRunner:
                     call_indexes=_call_indexes,
                     started_at=_turn_started,
                 )
-            self._remember_reply(_ctx, session_id, response_text)  # F110: see the censor path
+            self._remember_reply(_ctx, session_id, response_text, error=error)  # F110: see the censor path
 
             # 7. Post-turn (always called, even on error)
             turn_result = TurnResult(
@@ -2726,7 +2725,7 @@ class AgentRunner:
                         call_indexes=call_indexes,
                         started_at=_turn_started,
                     )
-                self._remember_reply(_ctx, session_id, block_msg)  # F110: see run_turn
+                self._remember_reply(_ctx, session_id, block_msg, error=None)  # F110: see run_turn
                 conversation.messages.append(Message(role="assistant", content=block_msg))
                 turn_result = TurnResult(response_text=block_msg)
                 await self._cognitive.post_turn(_agent_id, session_id, turn_result, turn_context)
@@ -3629,7 +3628,9 @@ class AgentRunner:
                         call_indexes=call_indexes,
                         started_at=_turn_started,
                     )
-                self._remember_reply(_ctx, session_id, response_text)  # F110: see run_turn
+                self._remember_reply(  # F110: see run_turn
+                    _ctx, session_id, response_text, error="cancelled" if _consumer_closed else error
+                )
                 # ALWAYS call post_turn (review P1: guaranteed cleanup).
                 # Shield from cancellation to prevent DB connection pool leaks —
                 # CancelledError during post_turn's DB ops leaves sessions checked
@@ -4836,10 +4837,12 @@ Rules:
             return ctx.channel
         return None
 
-    def _remember_reply(self, ctx: ExecutionContext, session_id: str, reply: str) -> None:
-        """F110: keep ``reply`` as its channel's last reply. Never raises: the referent must not change a turn."""
+    def _remember_reply(self, ctx: ExecutionContext, session_id: str, reply: str, *, error: str | None) -> None:
+        """F110: keep ``reply`` as its channel's last reply when the turn ended without an error (``error`` is the
+        turn row's), so an error reply never replaces an earlier offer. Never raises: the referent must not change
+        a turn."""
         channel = self._referent_channel(ctx)
-        if channel is None:
+        if channel is None or error is not None:
             return
         try:
             self._channel_last_reply.record(channel, session_id, reply, time.monotonic())
