@@ -188,8 +188,8 @@ def test_2d_added_no_migration_and_no_setting():  # PIN: changes when a later PR
     # reason 094, refines edge relation 095, profile card 096, fact temporal columns 097, merged reason
     # backfill 098, memory write health 099, tool-call and turn records 100 (F108), model-call records 101
     # (F108), model-call text 102 (F108), tool notes 103 (F108), tool-call full result 104 (F108), task frame
-    # keywords 105 (F110); 2d none
-    assert sorted(migrations.glob("*.sql"))[-1].name.startswith("105_")
+    # keywords 105 (F110), turn frame reason 106 (F110); 2d none
+    assert sorted(migrations.glob("*.sql"))[-1].name.startswith("106_")
     named = {name for name in Settings.model_fields if "proposal" in name or "owner_action" in name}
     assert named == {"intention_proposal_ttl_hours"}
 

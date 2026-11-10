@@ -669,6 +669,9 @@ class AgentRunner:
                     turn_number=turn_number,
                     context_kind=ctx.kind,
                     frame_id=turn_context.frame.frame_id,
+                    frame_reason=turn_context.frame.match_method,
+                    critic_frame=turn_context.critic_frame,
+                    had_error=error is not None,
                     trigger_text=trigger,
                     memory_context={
                         "decision": turn_context.recalled_decision_ids,

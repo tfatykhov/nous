@@ -287,6 +287,7 @@ Respond ONLY with valid JSON. No markdown, no explanation outside the JSON."""
                 rationale=data.get("rationale", ""),
                 complexity=data.get("complexity", "moderate"),
                 skills=skills,
+                from_model=bool(frames),
             )
         except (json.JSONDecodeError, KeyError, IndexError) as e:
             logger.warning("CriticAgent: failed to parse JSON: %s", e)

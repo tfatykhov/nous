@@ -167,7 +167,10 @@ class TurnRecord:
     """One turn, as the runner saw it at the turn's end: the ``agent_turn_log`` columns except ``agent_id`` (the
     recorder's). ``id`` is the turn's ``turn_id``, the one its tool-call rows carry. Text and JSON fields are given
     raw; the recorder redacts and clips them. ``memory_context`` maps a kind of memory (decision, fact, procedure,
-    episode) to the ids recalled into the turn's context. ``started_at`` None means the time the row is written."""
+    episode) to the ids recalled into the turn's context. ``started_at`` None means the time the row is written.
+    F110: ``frame_reason`` is the frame's ``match_method``, ``critic_frame`` the frame the critic recommended as a label
+    (a frame id, or ``unknown`` for anything else; None when the critic did not run or its model gave no frame) and
+    ``had_error`` whether the turn ended with an error."""
 
     id: UUID
     work_kind: str
@@ -176,6 +179,9 @@ class TurnRecord:
     turn_number: int | None = None
     context_kind: str | None = None
     frame_id: str | None = None
+    frame_reason: str | None = None
+    critic_frame: str | None = None
+    had_error: bool | None = None
     trigger_text: str | None = None
     memory_context: dict[str, list[str]] | None = None
     critic: dict[str, Any] | None = None
