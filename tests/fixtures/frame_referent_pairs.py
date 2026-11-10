@@ -123,4 +123,8 @@ FRAME_REFERENT_PAIRS: list[tuple[str, str, str, str]] = [
     (WRITE_IT_UP, "do you think so?", "conversation", "default"),
     # the review's "I can't" case: not an offer
     ("I can't run that tonight.", "ok", "conversation", "default"),
+    # fix round 1 follow-up: skip, leave and away also veto
+    ("Want me to clean that up?", "go away", "conversation", "default"),
+    ("Shall I send the summary to your inbox?", "skip it", "conversation", "default"),
+    ("Should I merge?", "leave it", "conversation", "default"),
 ]

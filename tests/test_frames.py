@@ -715,8 +715,8 @@ async def test_referent_yes_explain_why_stays_question():
 
 
 def test_referent_fixture_composition():
-    assert len(FRAME_REFERENT_PAIRS) == 41
-    assert sum(method != "referent" for _, _, _, method in FRAME_REFERENT_PAIRS) >= 22
+    assert len(FRAME_REFERENT_PAIRS) == 44
+    assert sum(method != "referent" for _, _, _, method in FRAME_REFERENT_PAIRS) >= 25
     assert sum("\n" in prev for prev, _, _, _ in FRAME_REFERENT_PAIRS) >= 5
     assert sum(reply != reply.lower() for _, reply, _, method in FRAME_REFERENT_PAIRS if method == "referent") >= 3
     # the too-early offer really sits outside the 200-character tail
@@ -812,7 +812,9 @@ async def test_select_without_frames_ignores_context():
      ("please don't", False), ("please don\u2019t", False), ("yes dont", False), ("do not", False),
      ("yeah no", False), ("yes, later", False), ("sure, but not today", False), ("ok, hold on", False),
      ("please stop", False), ("ok cancel", False), ("yes wait", False), ("sure, never mind", False),
-     ("ok nope", False), ("YES NAH", False)],
+     ("ok nope", False), ("YES NAH", False),
+     # follow-up ruling: skip, leave, away; "yes, no problem" stays a cautious non-acceptance
+     ("go away", False), ("ok, skip it", False), ("yes, leave it", False), ("yes, no problem", False)],
 )  # fmt: skip
 def test_is_affirmative_led(reply: str, expected: bool):
     assert _is_affirmative_led(reply) is expected

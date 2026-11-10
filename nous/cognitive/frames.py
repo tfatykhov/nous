@@ -36,7 +36,9 @@ _AFFIRMATIVE_TOKENS = frozenset(
 )
 _AFFIRMATIVE_PHRASES = (["do", "it"], ["do", "that"])
 # Any of these anywhere in the reply means it is not an acceptance.
-_NEGATION_WORDS = re.compile(r"\b(?:no|not|don['\u2019]t|dont|do not|stop|cancel|wait|never|later|hold|nope|nah)\b")
+_NEGATION_WORDS = re.compile(
+    r"\b(?:no|not|don['\u2019]t|dont|do not|stop|cancel|wait|never|later|hold|nope|nah|skip|leave|away)\b"
+)
 # "i can" but not "i can't" ("i cannot" already fails the closing \b).
 _OFFER_PHRASES = re.compile(r"\b(?:want me to|shall i|should i|i can(?!['\u2019]t)|would you like)\b")
 _OFFER_TAIL_CHARS = 200
@@ -52,7 +54,8 @@ def _is_affirmative_led(text: str) -> bool:
     Case-insensitive, punctuation stripped: the first word is one of
     ``yes yep yeah ok okay sure go proceed please agreed confirm`` (``go ahead`` is covered by
     ``go``), or the reply starts with ``do it`` / ``do that``. A ``?`` anywhere, or any whole word
-    of ``no not don't dont do not stop cancel wait never later hold nope nah``, makes it False.
+    of ``no not don't dont do not stop cancel wait never later hold nope nah skip
+    leave away``, makes it False.
     """
     lowered = text.lower()
     if "?" in lowered or _NEGATION_WORDS.search(lowered):
