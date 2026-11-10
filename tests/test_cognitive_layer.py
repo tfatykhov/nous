@@ -1272,3 +1272,28 @@ async def test_pre_turn_select_failure_falls_back_to_default(cognitive, settings
 
     assert calls == [{"last_assistant_text": _OFFER}]
     assert (ctx.frame.frame_id, ctx.frame.match_method) == ("conversation", "default")
+
+
+# ---------------------------------------------------------------------------
+# 008: an agent that is not initiated takes the forced initiation frame
+# ---------------------------------------------------------------------------
+
+
+def _uninitiated_identity() -> MagicMock:
+    """An identity manager for an agent that is not initiated, whose initiation claim succeeds."""
+    identity = MagicMock()
+    identity.is_initiated = AsyncMock(return_value=False)
+    identity.claim_initiation = AsyncMock(return_value=True)
+    return identity
+
+
+async def test_pre_turn_forces_initiation_frame(brain, heart, settings, session):
+    """The forced initiation frame builds (match_method "direct") instead of raising a ValidationError."""
+    layer = CognitiveLayer(
+        brain, heart, settings, identity_prompt="You are Nous.", identity_manager=_uninitiated_identity()
+    )
+    sid = f"test-initiation-frame-{uuid.uuid4().hex[:8]}"
+
+    ctx = await layer.pre_turn("nous-default", sid, "build and deploy the service", session=session)
+
+    assert (ctx.frame.frame_id, ctx.frame.match_method) == ("initiation", "direct")

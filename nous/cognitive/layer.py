@@ -576,6 +576,7 @@ class CognitiveLayer:
                 frame_id="initiation",
                 frame_name="Initiation",
                 confidence=1.0,
+                match_method="direct",
                 description="Identity initiation protocol",
                 questions_to_ask=[],
             )
