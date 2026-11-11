@@ -696,10 +696,12 @@
   }
 
   /* ── Waiting on you (harness dashboard §4) ── */
+  /* A standard card (final step: it wore a purple outline and a 4px tinted halo); the purple dot, the heading and its
+     count say that it waits on you. */
   .waiting {
     background: var(--surface);
-    border: 1px solid color-mix(in srgb, var(--waiting) 35%, transparent);
-    box-shadow: 0 0 0 4px color-mix(in srgb, var(--waiting) 6%, transparent);
+    border: var(--card-border);
+    box-shadow: var(--card-shadow);
     border-radius: var(--card-radius);
     padding: 1.25rem;
     margin-bottom: 1.25rem;

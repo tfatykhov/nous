@@ -70,6 +70,13 @@ describe('no coloured side stripe', () => {
     expect(parseBlocks(style('views/modelcalls/CallList.svelte')).get("a.row[aria-current='true']")).toEqual({ background: 'var(--accent-glow)' });
   });
 
+  // Final step A7: Workflows' waiting card wore a purple 35% outline and a 4px tinted halo, a treatment no other card has.
+  // It is a standard card: the purple dot, the heading and its count say that it waits on you.
+  it('the Workflows waiting card is a standard card, with no tinted outline or halo', () => {
+    expect(parseBlocks(style('views/DagView.svelte')).get('.waiting')).toMatchObject({ border: 'var(--card-border)', 'box-shadow': 'var(--card-shadow)' });
+    expect(style('views/DagView.svelte')).not.toMatch(/0 0 0 4px/);
+  });
+
   it('the companion ScoreCard keeps its top rule only in a legacy theme', () => {
     expect(parseBlocks(style('companion/catalog/ScoreCardView.svelte')).get('.score')?.['border-top']).toBe('var(--side-rule) solid var(--ink)');
   });
