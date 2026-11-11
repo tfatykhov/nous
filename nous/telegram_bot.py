@@ -28,6 +28,7 @@ import httpx
 
 from nous.api.attachments import classify_attachment, sanitize_filename
 from nous.api.models import Attachment
+from nous.brain.commitments import format_short_id, parse_short_id
 from nous.log_redaction import configure_logging
 from nous.owner_actions import ANSWER_REFUSALS, CANCEL_REFUSALS, DECISION_REFUSALS, parse_callback
 
@@ -221,6 +222,19 @@ def describe_intentions(body: dict) -> str:
         lines.append(more.format(len(listed) - shown))
     lines.append(footer)
     return "\n".join(lines)
+
+
+def describe_commitment_close(status: int, body: dict, drop: bool, short_id: int) -> str:
+    """F111: the answer to /drop or /done, fixed vocabulary and the id only (the row's text is never echoed). Not
+    called for a 404: an id the server does not know goes on to chat, as /cancel_intention's does."""
+    label = format_short_id(short_id)
+    if status == 200:
+        if body.get("changed") is True:
+            return f"Dropped {label}; it will not be followed up." if drop else f"Marked {label} as done."
+        return f"{label} was already closed; nothing changed."
+    if status == 400:
+        return "That is not a commitment id (use the form C-42)."
+    return f"Could not close {label} right now; try again."
 
 
 def describe_cancel(status: int, body: dict, short_id: str) -> str:
@@ -960,8 +974,8 @@ class NousTelegramBot:
             logger.warning("could not send the follow-up of an owner action (%s)", type(exc).__name__)
 
     async def _handle_owner_text(self, message: dict[str, Any], chat_id: Any, user_id: Any, text: str) -> bool:
-        """``/approve``, ``/reject``, ``/answer``, ``/intentions``, ``/cancel_intention`` and a reply to one of our
-        messages, in the owner chat. True when
+        """``/approve``, ``/reject``, ``/answer``, ``/intentions``, ``/cancel_intention``, ``/drop`` and ``/done``
+        (F111) and a reply to one of our messages, in the owner chat. True when
         the message was consumed; anything else (another chat, another command, a malformed or missing id, an id
         the server answers 404 for, a reply the answer route does not confirm with a 200 or a 409) is left for the
         ordinary path, unchanged: under
@@ -1011,6 +1025,18 @@ class NousTelegramBot:
             if status == 404:
                 return False  # no such root: ordinary chat, as before 2e
             await self._send_owner(chat_id, describe_cancel(status, body, hex_id[:8]))
+            return True
+        if command in ("/drop", "/done"):
+            args = rest.split()
+            short_id = parse_short_id(args[0]) if len(args) == 1 else None
+            if short_id is None:
+                return False  # not a commitment id: it was never ours (and no argument reaches a URL)
+            status, body = await self._owner_post(
+                f"/commitments/{short_id}/{command[1:]}", {"actor": f"telegram:{user_id}"}
+            )
+            if status == 404:
+                return False  # no such commitment: ordinary chat
+            await self._send_owner(chat_id, describe_commitment_close(status, body, command == "/drop", short_id))
             return True
         reply_to = message.get("reply_to_message")
         if (

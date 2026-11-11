@@ -3077,7 +3077,7 @@ def register_nous_tools(
 _COMMIT_SCHEMA = {
     "description": (
         "Record an obligation you are taking on: work you say you will do after this reply ends (\"I'll check back "
-        "tomorrow\", \"I'll relaunch it at 18:15 UTC unless you object\"). Call it in the same turn as the promise "
+        'tomorrow", "I\'ll relaunch it at 18:15 UTC unless you object"). Call it in the same turn as the promise '
         "whenever no schedule_task, dag_create or spawn_task call in this turn already does the work. It writes a "
         "ledger row with a deadline that the owner sees and can /drop; it does not do the work, schedule it or "
         "remind anyone by itself. Available in every context, background turns included."
@@ -3105,7 +3105,7 @@ _COMMIT_SCHEMA = {
         },
         "awaiting_owner": {
             "type": "boolean",
-            "description": "True when the next move is the owner's (\"once you confirm\"): never reported as overdue.",
+            "description": 'True when the next move is the owner\'s ("once you confirm"): never reported as overdue.',
         },
     },
     "required": ["what", "due"],
@@ -3164,6 +3164,7 @@ def create_commit_tool(store: Any) -> Callable[..., Any]:
             return _tool_error("commit: the ledger could not be written; nothing was recorded.")
         # Wording: no "committed" (the claim verifier reads that word as a git claim).
         return {
+            "is_error": False,
             "content": [
                 {
                     "type": "text",
@@ -3173,7 +3174,7 @@ def create_commit_tool(store: Any) -> Callable[..., Any]:
                         "schedule, DAG or spawn that does it."
                     ),
                 }
-            ]
+            ],
         }
 
     return commit

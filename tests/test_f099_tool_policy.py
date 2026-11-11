@@ -46,6 +46,7 @@ LINEAGE_ALLOWED = frozenset(
         "record_decision",
         "cancel_task",
         "ingest_document",
+        "commit",  # F111: an obligation ledger row; a write that starts no work, so every lineage may record one
     }
 )
 

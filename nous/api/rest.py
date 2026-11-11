@@ -53,6 +53,7 @@ from starlette.routing import Mount, Route
 from starlette.types import Scope
 
 from nous import undo_journal
+from nous.api.commitment_routes import build_commitment_routes
 from nous.api.companion_assets import OverlayStaticFiles
 from nous.api.execution_context import ExecutionContext
 from nous.api.intention_routes import build_intention_routes
@@ -4059,6 +4060,8 @@ def create_app(
     routes.extend(
         build_intention_routes(database=database, settings=settings, continuation_runner=continuation_runner)
     )
+    # F111: the owner's /drop and /done of a commitment.
+    routes.extend(build_commitment_routes(database=database, settings=settings))
 
     # Dashboard v2 (Svelte) — appended after the exact-match Route entries above.
     dashboard_v2_dir = os.path.join(

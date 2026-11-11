@@ -1,0 +1,86 @@
+{
+  "note": "Sentences (or whole replies) the stage-1 detector must NOT flag. Constructed for coverage, not transcripts.",
+  "cases": [
+    {
+      "text": "Let me check the file."
+    },
+    {
+      "text": "I'll explain below."
+    },
+    {
+      "text": "If you want, I can launch it tomorrow."
+    },
+    {
+      "text": "If you'd like, I'll relaunch it at 18:15 UTC."
+    },
+    {
+      "text": "Want me to schedule it for tomorrow?"
+    },
+    {
+      "text": "Should I relaunch the chain at 18:15?"
+    },
+    {
+      "text": "> I'll relaunch the chain at 18:15 UTC unless you object."
+    },
+    {
+      "text": "```\n# I'll run this tomorrow\nmake test\n```"
+    },
+    {
+      "text": "You wrote \"I'll send it tomorrow\" in the brief."
+    },
+    {
+      "text": "I launched it at 18:15."
+    },
+    {
+      "text": "I'll note that."
+    },
+    {
+      "text": "I'll keep that in mind."
+    },
+    {
+      "text": "I'll be brief."
+    },
+    {
+      "text": "I'll walk you through it."
+    },
+    {
+      "text": "I'll summarize the results."
+    },
+    {
+      "text": "I'll explain after the table."
+    },
+    {
+      "text": "The schedule fires at 18:15 UTC."
+    },
+    {
+      "text": "Yesterday I scheduled the run for 18:15."
+    },
+    {
+      "text": "I've queued it for tomorrow."
+    },
+    {
+      "text": "Tomorrow is Friday."
+    },
+    {
+      "text": "I started items 1–3 this morning; the DAG is running."
+    },
+    {
+      "text": "The job will run when the queue drains."
+    },
+    {
+      "text": "I would schedule it tomorrow if the quota allowed."
+    },
+    {
+      "text": "I can merge it later."
+    },
+    {
+      "text": "Do you want me to deploy it in an hour?"
+    },
+    {
+      "text": "Use `I'll run it at 18:15` as the example string."
+    },
+    {
+      "text": "I'll answer your question first."
+    }
+  ]
+}
