@@ -241,7 +241,8 @@
   .calls.dim { opacity: 0.6; }
   a.row { display: flex; flex-direction: column; gap: 4px; padding: 0.75rem 1rem; color: inherit; text-decoration: none; }
   a.row:hover { background: var(--surface-hover); }
-  a.row[aria-current='true'] { background: var(--surface-hover); box-shadow: inset 3px 0 0 var(--accent); }
+  /* The selected call: the selected tint Consolidation's and Retrieval's lists use (no stripe; the hover is a wash). */
+  a.row[aria-current='true'] { background: var(--accent-glow); }
   .top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
   .purpose { font-weight: 600; font-size: 0.875rem; overflow-wrap: anywhere; }
   .when { font-size: 0.75rem; color: var(--muted); white-space: nowrap; }

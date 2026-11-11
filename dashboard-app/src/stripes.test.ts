@@ -10,8 +10,14 @@ import { filesUnder, sourceFiles } from './lib/testing/sources';
 
 const SRC = __dirname;
 const style = (f: string) => styleBlocks(readFileSync(join(SRC, f), 'utf-8'));
-/** A side or top border wider than 1px, written as a length (a token such as var(--side-rule) is the legacy switch). */
-const STRIPE = /border-(?:left|right|top)(?:-width)?:\s*(?:[2-9]|\d{2,})px/;
+/** A side or top border wider than 1px, written as a length (a token such as var(--side-rule) is the legacy switch), or
+ * the same stripe drawn as an inset shadow offset 2px or more on one axis with no blur (final step: Model calls'
+ * selected row was `inset 3px 0 0 var(--accent)`). An all-round inset ring (`inset 0 0 0 1px`) is not a stripe. */
+const STRIPE = new RegExp([
+  String.raw`border-(?:left|right|top)(?:-width)?:\s*(?:[2-9]|\d{2,})px`,
+  String.raw`inset\s+-?(?:[2-9]|\d{2,})px\s+0(?:px)?\s+0(?:px)?\b`,
+  String.raw`inset\s+0(?:px)?\s+-?(?:[2-9]|\d{2,})px\s+0(?:px)?\b`,
+].join('|'));
 
 /** Neutral rails drawn as an axis (a timeline's or a tree's, with the dots or the branches on it), not a stripe on a
  * block: a 2px rule in the border grey, on these selectors only. */
@@ -25,8 +31,10 @@ const RAIL_RULE = '2px solid var(--border)';
 describe('no coloured side stripe', () => {
   it('the pattern catches a 2px or wider side or top border and spares a 1px rule and the legacy token', () => {
     for (const bad of ['border-left: 3px solid var(--yellow);', 'border-right: 2px solid red;', 'border-top: 3px solid var(--ink);',
-      'border-left-width: 4px;']) expect(bad, bad).toMatch(STRIPE);
-    for (const ok of ['border-left: 1px solid var(--border);', 'border-top: var(--side-rule) solid var(--ink);', 'border: 2px solid x;']) {
+      'border-left-width: 4px;', 'box-shadow: inset 3px 0 0 var(--accent);', 'box-shadow: inset -4px 0 0 red;',
+      'box-shadow: inset 0 2px 0 var(--x);']) expect(bad, bad).toMatch(STRIPE);
+    for (const ok of ['border-left: 1px solid var(--border);', 'border-top: var(--side-rule) solid var(--ink);', 'border: 2px solid x;',
+      'box-shadow: inset 0 0 0 1px var(--x);', 'box-shadow: inset 1px 0 0 var(--x);', 'box-shadow: 0 2px 0 var(--x);']) {
       expect(ok, ok).not.toMatch(STRIPE);
     }
   });
@@ -56,6 +64,10 @@ describe('no coloured side stripe', () => {
   it('a drift anomaly says its severity in a tinted pill', () => {
     const src = readFileSync(join(SRC, 'views/Observability.svelte'), 'utf-8');
     expect(src).toContain('<span class="anomaly-level status-pill" class:status-pill--bad={a.severity === \'alert\'} class:status-pill--warn={a.severity !== \'alert\'}>');
+  });
+
+  it('Model calls\' selected row is the selected tint the other lists use, with no stripe', () => {
+    expect(parseBlocks(style('views/modelcalls/CallList.svelte')).get("a.row[aria-current='true']")).toEqual({ background: 'var(--accent-glow)' });
   });
 
   it('the companion ScoreCard keeps its top rule only in a legacy theme', () => {
