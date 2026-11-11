@@ -207,6 +207,9 @@ const CHANGES: Change[] = [
   ['views/Observability.svelte', '.mono', 'font-family', 'var(--font-mono)', 'monospace', "'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace", "the trace id in the look's mono font (Red Hat Mono on paper); scoped, so no other screen moves"],
   ['views/Identity.svelte', 'textarea:focus-visible', 'outline', '2px solid var(--focus-ring)', 'none', '2px solid #7c6af7', 'the plan\'s form rule: the focus ring replaces outline: none and the accent border'],
   ['views/Identity.svelte', '.detail-grid .mono', 'font-family', 'var(--font-mono)', 'monospace', "'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace", "the fact id in the look's mono font; a scoped rule, so the global .mono other screens use is unchanged"],
+  // Review M6: the facts table sits in a card, under dark too (it was on the page ground).
+  ['views/Identity.svelte', '.facts-card', 'background', 'var(--surface)', 'transparent', '#12121a', 'review M6: the facts table sits in a card'],
+  ['views/Identity.svelte', '.facts-card', 'border', 'var(--card-border)', 'none', '1px solid #1e1e2e', 'review M6: the facts table sits in a card'],
 ];
 
 /** PR 4 and PR 5's routes and their views. */

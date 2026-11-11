@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, within, cleanup } from '@testing-library/svelte';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { parseBlocks, styleBlocks } from '../lib/testing/css';
+import { markupOf, parseBlocks, styleBlocks } from '../lib/testing/css';
 import Identity from './Identity.svelte';
 
 // Render smoke for the Identity view: mocks fetch so both panels load and a
@@ -141,6 +141,15 @@ describe('Identity in the paper look', () => {
     expect(document.body.textContent).not.toContain('★');
   });
 
+  it('the Content cell holds the fact\'s text in its own element; every other cell is the plain value', async () => {
+    render(Identity);
+    await screen.findByText('Tim lives in Lisbon');
+    const row = screen.getByText('Tim lives in Lisbon').closest('tr')!;
+    expect(row.querySelector('td[data-label="Content"] .fact-content')?.textContent).toBe('Tim lives in Lisbon');
+    expect(row.querySelector('td[data-label="Subject"]')?.textContent?.trim()).toBe('Tim');
+    expect(row.querySelector('td[data-label="Subject"] *')).toBeNull();
+  });
+
   it('a section\'s Save is the shared button, disabled until the text changes and while it is blank', async () => {
     render(Identity);
     const character = (await screen.findByLabelText('character')) as HTMLTextAreaElement;
@@ -200,6 +209,17 @@ describe('Identity: the paper look\'s structure (source contracts)', () => {
     expect(rules.get('textarea:focus-visible')).toMatchObject({ outline: '2px solid var(--focus-ring)', 'outline-offset': '2px' });
     expect(rules.get('textarea:focus')).toBeUndefined();
     expect(styleBlocks(src)).not.toMatch(/outline:\s*none/);
+  });
+
+  it('the facts table sits in a card that reads the card tokens (review M6)', () => {
+    expect(rules.get('.facts-card')).toMatchObject({ background: 'var(--surface)', border: 'var(--card-border)',
+      'border-radius': 'var(--card-radius)', 'box-shadow': 'var(--card-shadow)' });
+    expect(markupOf(src)).toMatch(/<div class="facts-card">\s*<DataTable/);
+  });
+
+  it('a fact\'s content may break anywhere, so a long unbroken fact cannot widen the table past its box (review M10)', () => {
+    // Two classes deep, so it outranks DataTable's phone-width reset of a cell's elements (a class and an element).
+    expect(rules.get('.facts-card .fact-content')).toMatchObject({ 'overflow-wrap': 'anywhere' });
   });
 
   it('a section card never asks for more than the screen\'s width (320 px or the full width, whichever is less)', () => {

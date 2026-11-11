@@ -267,85 +267,92 @@
     {#if factRows.length === 0}
       <p class="empty">No Tier-1 profile facts found.</p>
     {:else}
-      <DataTable
-        columns={[
-          { key: 'subject',            label: 'Subject' },
-          { key: 'category',           label: 'Category' },
-          { key: 'content_display',    label: 'Content' },
-          { key: 'confidence_display', label: 'Confidence' },
-          { key: 'active_display',     label: 'Active' },
-          { key: 'core_display',       label: 'Core' },
-        ]}
-        rows={factRows}
-        mode="cards"
-        rowKey={(r: BrowserFact) => r.id}
-        onrowclick={(row: BrowserFact) => initFactDraft(row)}
-      >
-        {#snippet detail(row: BrowserFact)}
-          <div class="detail-grid">
-            <span class="dl">Subject</span><span>{row.subject ?? '—'}</span>
-            <span class="dl">Category</span><span>{row.category ?? '—'}</span>
-            <span class="dl">Confidence</span><span>{row.confidence.toFixed(2)}</span>
-            <span class="dl">Active</span><span>{row.active ? 'yes' : 'no'}</span>
-            <span class="dl">ID</span><span class="mono">{row.id}</span>
-          </div>
-
-          <!-- Edit = supersede (new versioned fact); Deactivate = soft delete -->
-          <div
-            class="fact-edit"
-            onclick={(e) => e.stopPropagation()}
-            onkeydown={(e) => e.stopPropagation()}
-            role="presentation"
-          >
-            <textarea
-              class="fact-textarea"
-              aria-label="Fact content"
-              rows={4}
-              bind:value={factDrafts[row.id]}
-            ></textarea>
-            <div class="fact-actions">
-              <Button
-                variant="outline"
-                size="sm"
-                class="max-md:min-h-11 max-md:px-4"
-                onclick={() => saveFact(row)}
-                disabled={factStatus[row.id] === 'saving' || !(factDrafts[row.id] ?? '').trim()}
-              >
-                {factStatus[row.id] === 'saving' ? 'Saving…' : 'Save'}
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                class="max-md:min-h-11 max-md:px-4"
-                onclick={() => setCore(row, !isCore(row))}
-                disabled={factStatus[row.id] === 'saving'}
-              >
-                {isCore(row) ? 'Unset core' : 'Set core'}
-              </Button>
-              <!-- The hover says "destructive" in the error colour; utilities, since a scoped class cannot reach the
-                   Button's element. -->
-              <Button
-                variant="outline"
-                size="sm"
-                class="max-md:min-h-11 max-md:px-4 hover:border-[var(--err-text)] hover:text-[var(--err-text)]"
-                onclick={() => deactivateFact(row)}
-                disabled={factStatus[row.id] === 'saving'}
-              >
-                Deactivate
-              </Button>
-              {#if factMsg[row.id]}
-                <span
-                  class="save-status"
-                  class:save-ok={factStatus[row.id] === 'saved'}
-                  class:save-err={factStatus[row.id] === 'error'}
-                >
-                  {factMsg[row.id]}
-                </span>
-              {/if}
+      <div class="facts-card">
+        <DataTable
+          columns={[
+            { key: 'subject',            label: 'Subject' },
+            { key: 'category',           label: 'Category' },
+            { key: 'content_display',    label: 'Content' },
+            { key: 'confidence_display', label: 'Confidence' },
+            { key: 'active_display',     label: 'Active' },
+            { key: 'core_display',       label: 'Core' },
+          ]}
+          rows={factRows}
+          mode="cards"
+          rowKey={(r: BrowserFact) => r.id}
+          onrowclick={(row: BrowserFact) => initFactDraft(row)}
+        >
+          <!-- The content in its own element, which may break anywhere: a long unbroken fact cannot widen the table, and
+               with it the open fact's form, past its box (between phone width and wide desktop). -->
+          {#snippet cell(row: BrowserFact & Record<string, string>, c: { key: string })}
+            {#if c.key === 'content_display'}<span class="fact-content">{row.content_display}</span>{:else}{row[c.key]}{/if}
+          {/snippet}
+          {#snippet detail(row: BrowserFact)}
+            <div class="detail-grid">
+              <span class="dl">Subject</span><span>{row.subject ?? '—'}</span>
+              <span class="dl">Category</span><span>{row.category ?? '—'}</span>
+              <span class="dl">Confidence</span><span>{row.confidence.toFixed(2)}</span>
+              <span class="dl">Active</span><span>{row.active ? 'yes' : 'no'}</span>
+              <span class="dl">ID</span><span class="mono">{row.id}</span>
             </div>
-          </div>
-        {/snippet}
-      </DataTable>
+
+            <!-- Edit = supersede (new versioned fact); Deactivate = soft delete -->
+            <div
+              class="fact-edit"
+              onclick={(e) => e.stopPropagation()}
+              onkeydown={(e) => e.stopPropagation()}
+              role="presentation"
+            >
+              <textarea
+                class="fact-textarea"
+                aria-label="Fact content"
+                rows={4}
+                bind:value={factDrafts[row.id]}
+              ></textarea>
+              <div class="fact-actions">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="max-md:min-h-11 max-md:px-4"
+                  onclick={() => saveFact(row)}
+                  disabled={factStatus[row.id] === 'saving' || !(factDrafts[row.id] ?? '').trim()}
+                >
+                  {factStatus[row.id] === 'saving' ? 'Saving…' : 'Save'}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="max-md:min-h-11 max-md:px-4"
+                  onclick={() => setCore(row, !isCore(row))}
+                  disabled={factStatus[row.id] === 'saving'}
+                >
+                  {isCore(row) ? 'Unset core' : 'Set core'}
+                </Button>
+                <!-- The hover says "destructive" in the error colour; utilities, since a scoped class cannot reach the
+                     Button's element. -->
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="max-md:min-h-11 max-md:px-4 hover:border-[var(--err-text)] hover:text-[var(--err-text)]"
+                  onclick={() => deactivateFact(row)}
+                  disabled={factStatus[row.id] === 'saving'}
+                >
+                  Deactivate
+                </Button>
+                {#if factMsg[row.id]}
+                  <span
+                    class="save-status"
+                    class:save-ok={factStatus[row.id] === 'saved'}
+                    class:save-err={factStatus[row.id] === 'error'}
+                  >
+                    {factMsg[row.id]}
+                  </span>
+                {/if}
+              </div>
+            </div>
+          {/snippet}
+        </DataTable>
+      </div>
     {/if}
   {/if}
 
@@ -532,6 +539,20 @@
      is for the other screens that use it. */
   .detail-grid .mono {
     font-family: var(--font-mono);
+  }
+
+  /* ── The facts table, in a card like every other block (on the page ground its rules were 1.09:1) ── */
+  .facts-card {
+    background: var(--surface);
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
+    padding: 0.25rem 0.75rem;
+  }
+
+  /* Two classes deep: it outranks DataTable's phone-width reset of a cell's elements (a class and an element). */
+  .facts-card .fact-content {
+    overflow-wrap: anywhere;
   }
 
   /* ── Fact edit controls ── */
