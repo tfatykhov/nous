@@ -174,3 +174,35 @@ describe('no colour literal in a migrated view script or markup', () => {
     expect(hits).toEqual([]);
   });
 });
+
+// Review I1, second gap: a Tailwind colour class is a literal too. A palette colour (bg-black/10, text-red-500) keeps
+// one value under both looks; foreground, muted, muted-foreground and popover are deliberately unmapped (app.css's
+// @theme inline), so those classes emit nothing.
+const TAILWIND_COLOUR = new RegExp(
+  String.raw`(?<![\w-])(?:bg|text|border|ring|outline|fill|stroke|from|via|to|decoration|shadow|accent|caret|divide|placeholder)-` +
+    String.raw`(?:black|white|(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3})(?![\w-])` +
+    String.raw`|(?<![\w-])(?:text-foreground|text-muted-foreground|bg-muted|bg-popover|text-popover-foreground)(?![\w-])`,
+);
+
+describe('no Tailwind colour class in a migrated markup', () => {
+  it('the pattern catches palette and unmapped colour classes, and spares tokens and sizes', () => {
+    for (const bad of ['class="bg-black/10 fixed"', 'class="text-red-500"', 'class="text-foreground flex"', 'class="bg-muted mx-auto"',
+      'class="hover:bg-white"', 'class="bg-popover text-popover-foreground"']) {
+      expect(bad, bad).toMatch(TAILWIND_COLOUR);
+    }
+    for (const ok of ['class="bg-primary text-[var(--on-accent)]"', 'class="bg-clip-padding text-sm"', 'class="text-destructive"',
+      'class="border-[var(--border)] shadow-[var(--card-shadow)]"', 'class="bg-muted-x"']) {
+      expect(ok, ok).not.toMatch(TAILWIND_COLOUR);
+    }
+  });
+
+  it.each(SCRIPT_GUARDED)('%s', (file) => {
+    const lines = markupOf(readFileSync(join(SRC, file), 'utf-8')).split('\n');
+    expect(lines.filter((line) => TAILWIND_COLOUR.test(line)).map((l) => l.trim())).toEqual([]);
+  });
+
+  it('the drawer primitives (allowed in paperRouteCoverage) are where these classes live today', () => {
+    const overlay = markupOf(readFileSync(join(SRC, 'lib/ui/drawer/drawer-overlay.svelte'), 'utf-8'));
+    expect(overlay).toMatch(TAILWIND_COLOUR);
+  });
+});
