@@ -52,6 +52,19 @@ function resolveImport(file: string, spec: string): string | null {
   return hit ? relative(SRC, hit).split('\\').join('/') : null;
 }
 
+/**
+ * The module specifiers a source pulls in: static imports (side-effect ones included, `import type` skipped),
+ * re-exports (`export { default as X } from …`, `export * from …`; `export type` skipped) and dynamic `import('…')`.
+ * Re-exports and dynamic imports are review R1: an index.ts that only re-exports hid badge.svelte from the walk.
+ */
+function specifiers(src: string): string[] {
+  return [
+    ...[...src.matchAll(/^\s*import\s+(?!type\b)[^'"]*?['"]([^'"]+)['"]/gm)].map((m) => m[1]),
+    ...[...src.matchAll(/^\s*export\s+(?!type\b)(?:\*(?:\s+as\s+\w+)?|\{[^}]*\})\s*from\s*['"]([^'"]+)['"]/gm)].map((m) => m[1]),
+    ...[...src.matchAll(/\bimport\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1]),
+  ];
+}
+
 /** Every .svelte file `entry` renders: its imports, followed through .ts modules, stopping at allowed files. */
 function rendered(entry: string): { svelte: string[]; allowedReached: string[] } {
   const seen = new Set<string>();
@@ -68,8 +81,8 @@ function rendered(entry: string): { svelte: string[]; allowedReached: string[] }
       svelte.push(file);
     }
     const src = readFileSync(join(SRC, file), 'utf-8');
-    for (const m of src.matchAll(/^\s*import\s+(?!type\b)[^'"]*?['"]([^'"]+)['"]/gm)) {
-      const next = resolveImport(file, m[1]);
+    for (const spec of specifiers(src)) {
+      const next = resolveImport(file, spec);
       if (next) walk(next);
     }
   };
@@ -115,6 +128,24 @@ describe('every paper route renders only guarded files', () => {
     expect(rendered('views/Health.svelte').svelte).toEqual(expect.arrayContaining(['views/Admission.svelte', 'views/MemoryWriteHealth.svelte']));
     // An island stops the walk: the Ledger's own imports are not Work's.
     expect(rendered('views/Work.svelte').allowedReached).toContain('views/Ledger.svelte');
+    // Review R1: Overview's Badge comes through an index.ts that only re-exports it.
+    expect(rendered('views/Overview.svelte').svelte).toContain('lib/ui/badge/badge.svelte');
+  });
+
+  it('reads static imports, re-exports and dynamic imports, and nothing else (review R1)', () => {
+    const src = [
+      "import A from './a.svelte';",
+      "import './side-effect.ts';",
+      "import type { T } from './types';",
+      "import {\n  b,\n  c,\n} from '$lib/b';",
+      'export { default as Badge } from "./badge.svelte";',
+      "export * from './star';",
+      "export * as ns from './ns';",
+      "export type { U } from './u';",
+      "export const label = 'not-a-module';",
+      "const L = await import('./lazy.svelte');",
+    ].join('\n');
+    expect(specifiers(src).sort()).toEqual(['$lib/b', './a.svelte', './badge.svelte', './lazy.svelte', './ns', './side-effect.ts', './star'].sort());
   });
 
   it('fails for a route that renders a file missing from a guard, or a route with no view', () => {

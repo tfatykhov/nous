@@ -118,6 +118,7 @@ export const SCRIPT_GUARDED: readonly string[] = [
   'lib/ui/FilterBar.svelte',
   'views/Retrieval.svelte',
   'views/Consolidation.svelte',
+  'lib/ui/badge/badge.svelte', // review R1: Overview renders it through a re-exporting index.ts
 ];
 
 /** A literal colour (hex, rgb/hsl/oklch, a named colour in a fill/stroke attribute), or a two-hex-digit alpha glued onto
@@ -184,7 +185,7 @@ const TAILWIND_COLOUR = new RegExp(
     String.raw`|(?<![\w-])(?:text-foreground|text-muted-foreground|bg-muted|bg-popover|text-popover-foreground)(?![\w-])`,
 );
 
-describe('no Tailwind colour class in a migrated markup', () => {
+describe('no Tailwind colour class in a migrated markup or script', () => {
   it('the pattern catches palette and unmapped colour classes, and spares tokens and sizes', () => {
     for (const bad of ['class="bg-black/10 fixed"', 'class="text-red-500"', 'class="text-foreground flex"', 'class="bg-muted mx-auto"',
       'class="hover:bg-white"', 'class="bg-popover text-popover-foreground"']) {
@@ -196,9 +197,16 @@ describe('no Tailwind colour class in a migrated markup', () => {
     }
   });
 
+  // Review R1: shadcn components keep their classes in a module script (tailwind-variants), so the script is read too.
   it.each(SCRIPT_GUARDED)('%s', (file) => {
-    const lines = markupOf(readFileSync(join(SRC, file), 'utf-8')).split('\n');
+    const source = readFileSync(join(SRC, file), 'utf-8');
+    const lines = [...scriptBlocks(source).split('\n'), ...markupOf(source).split('\n')];
     expect(lines.filter((line) => TAILWIND_COLOUR.test(line)).map((l) => l.trim())).toEqual([]);
+  });
+
+  it('a class string in a module script is caught', () => {
+    const src = '<script lang="ts" module>\n  const v = tv({ variants: { ghost: "hover:bg-muted hover:text-muted-foreground" } });\n</script>';
+    expect(scriptBlocks(src)).toMatch(TAILWIND_COLOUR);
   });
 
   it('the drawer primitives (allowed in paperRouteCoverage) are where these classes live today', () => {
