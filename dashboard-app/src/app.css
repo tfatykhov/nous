@@ -283,13 +283,13 @@
 
     /* PR 2: at least 3:1 on the white card; no categorical value is a frame or status colour (tokens.test.ts) */
     --pending: #1b6a9c;
-    --fact-color: #1f5fa8;
-    --episode-color: #159a7a;
+    --fact-color: #159a7a;                     /* one colour per memory type on paper: the Graph's (--gv-*) */
+    --episode-color: #1f5fa8;
     --decision-color: #a8408f;
     --procedure-color: #d0620d;
     --censor-color: #8a5a2b;
     --heartbeat-color: #4f5f6f;
-    --chunk-color: #7a8a1a;
+    --chunk-color: #8b5cf6;
     --series-1: #1f5fa8;
     --series-2: #159a7a;
     --series-3: #a8408f;

@@ -199,13 +199,13 @@ for (const [k, [dark]] of Object.entries(PR2)) NEW_DARK[k] = dark;
 
 // The legacy memory-type colours keep their golden dark values (ORIGIN_ROOT) and get paper ones (Retrieval's chips).
 const LEGACY_PAPER: Record<string, string> = {
-  '--fact-color': '#1f5fa8',
-  '--episode-color': '#159a7a',
+  '--fact-color': '#159a7a', // review M6: one colour per memory type on paper, the Graph's
+  '--episode-color': '#1f5fa8',
   '--decision-color': '#a8408f',
   '--procedure-color': '#d0620d',
   '--censor-color': '#8a5a2b',
   '--heartbeat-color': '#4f5f6f',
-  '--chunk-color': '#7a8a1a',
+  '--chunk-color': '#8b5cf6',
   '--pending': '#1b6a9c',
 };
 
@@ -609,6 +609,11 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
         }
       }
     }
+  });
+
+  it('a memory type has one colour on every Memory screen on paper: the legacy type colours are the Graph\'s', () => {
+    // Review M6. Under dark the legacy fact and episode colours are the Graph's the other way round (golden-pinned).
+    for (const t of ['fact', 'episode', 'decision', 'procedure', 'chunk']) expect(PAPER[`--${t}-color`], t).toBe(PAPER[`--gv-${t}`]);
   });
 
   it('every relation colour and legacy type colour is at least 3:1 on white', () => {
