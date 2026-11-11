@@ -124,9 +124,8 @@ describe('the anchor of the paper rules in the views', () => {
     // T6a, kept on purpose (each with its reason in the file): Browser's .btn out-ranks .btn-sm, Retrieval's .chart-card
     // out-ranks .list-card, Memory write health's h2 out-ranks .verdict-title.
     'views/Browser.svelte': 1, 'views/Retrieval.svelte': 1, 'views/MemoryWriteHealth.svelte': 1,
-    'views/Autonomy.svelte': 3, 'views/DagView.svelte': 1, 'views/Decisions.svelte': 1, 'views/Harness.svelte': 1,
-    'views/Heartbeat.svelte': 3, 'views/Identity.svelte': 1, 'views/Intentions.svelte': 3, 'views/Observability.svelte': 1,
-    'views/Overview.svelte': 1, 'views/Rubric.svelte': 1, 'views/Subtasks.svelte': 1, 'views/work/Trace.svelte': 1,
+    'views/Autonomy.svelte': 3, 'views/Decisions.svelte': 1, 'views/Harness.svelte': 1, 'views/Identity.svelte': 1,
+    'views/Intentions.svelte': 3, 'views/Observability.svelte': 1, 'views/Rubric.svelte': 1,
   };
 
   it('the anchors left are the counted ones, and the old scoped form is gone', () => {

@@ -508,8 +508,7 @@
 <style>
   /* Colours and structure are tokens only (hexGuard): rounded white cards on the paper ground. */
   .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
-  .title { font-size: 1.4rem; font-weight: 700; color: var(--text); margin: 0; line-height: 1.2; }
-  :global(html:root) .title { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
+  .title { font-size: 30px; font-weight: 650; color: var(--text); margin: 0; line-height: 1.15; letter-spacing: -0.022em; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; flex-shrink: 0; margin-left: auto; }
   .meta { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; font-size: 0.8125rem; }
   .meta > * { padding: 3px 11px; border-radius: 999px; background: var(--surface); border: var(--card-border); box-shadow: var(--card-shadow); color: var(--text); }

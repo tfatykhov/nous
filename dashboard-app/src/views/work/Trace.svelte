@@ -409,8 +409,7 @@
   /* Header: the title, Refresh top right, the facts as pills */
   .head { display: flex; flex-direction: column; gap: 0.75rem; }
   .head-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
-  .title { margin: 0; font-size: 1.625rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1.2; max-width: 60ch; overflow-wrap: anywhere; min-width: 0; }
-  :global(html:root) .title { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
+  .title { margin: 0; font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; max-width: 60ch; overflow-wrap: anywhere; min-width: 0; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; margin-left: auto; }
   .meta { display: flex; flex-wrap: wrap; gap: 0.5rem; font-size: 0.8125rem; }
   .meta > * { padding: 3px 11px; border-radius: 999px; background: var(--surface); border: var(--card-border); box-shadow: var(--card-shadow); color: var(--text); text-decoration: none; }
