@@ -10,7 +10,7 @@ import type { RouteName } from './router';
 export type Look = 'dark' | 'paper';
 export const LOOK_KEY = 'nous.look';
 /** The routes the redesign has migrated: their `<main>` is a paper ground under the paper look. */
-export const PAPER_ROUTES: readonly RouteName[] = ['overview', 'work', 'graph', 'browser', 'health', 'retrieval', 'consolidation', 'model-calls', 'dag', 'subtasks', 'heartbeat', 'decisions', 'rubric', 'autonomy', 'intentions', 'harness', 'observability'];
+export const PAPER_ROUTES: readonly RouteName[] = ['overview', 'work', 'graph', 'browser', 'health', 'retrieval', 'consolidation', 'model-calls', 'dag', 'subtasks', 'heartbeat', 'decisions', 'rubric', 'autonomy', 'intentions', 'harness', 'observability', 'identity'];
 
 function isLook(value: unknown): value is Look {
   return value === 'paper' || value === 'dark';

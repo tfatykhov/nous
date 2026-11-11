@@ -896,6 +896,13 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     expect(contrast(PAPER['--field-border'], page)).toBeGreaterThanOrEqual(3); // 3.22
   });
 
+  it('Identity\'s text fields: the focus ring is at least 3:1 on the card and on the field\'s own fill (the page colour)', () => {
+    expect(contrast(PAPER['--focus-ring'], white)).toBeGreaterThanOrEqual(3); // 7.55
+    expect(contrast(PAPER['--focus-ring'], page)).toBeGreaterThanOrEqual(3); // 6.70
+    expect(contrast(PAPER['--text'], page)).toBeGreaterThanOrEqual(4.5); // what is typed, on the field
+    expect(contrast(PAPER['--err-text'], white)).toBeGreaterThanOrEqual(4.5); // Deactivate, hovered
+  });
+
   it('Scoring\'s heatmap: ink on the strongest cell (65% of the fill over the card) is at least 4.5:1 on paper', () => {
     expect(contrast(PAPER['--text'], tint(PAPER['--green'], 0.65, white))).toBeGreaterThanOrEqual(4.5); // 6.78
     expect(contrast(PAPER['--text'], tint(PAPER['--red'], 0.65, white))).toBeGreaterThanOrEqual(4.5); // 5.78
