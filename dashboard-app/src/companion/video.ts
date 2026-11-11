@@ -11,6 +11,8 @@
 //   - YouTube watch?v= / shorts / youtu.be and Vimeo /<digits> links, whose
 //     embed src is built from constants plus the matched id — no other part
 //     of the input reaches the iframe.
+// The overlay path rules are tidiness, not a security boundary: the any-host
+// https rule already allows an absolute same-origin URL (as ImageView does).
 
 export type VideoSource =
   | { kind: 'video'; src: string }
