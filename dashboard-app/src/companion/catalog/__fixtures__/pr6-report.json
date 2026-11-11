@@ -1,0 +1,117 @@
+{
+  "components": [
+    {
+      "id": "root",
+      "component": "Column",
+      "children": ["header", "tiles", "s-line", "s-video", "s-bars", "s-table", "s-meter", "s-timeline"]
+    },
+    {
+      "id": "header",
+      "component": "AppHeader",
+      "title": "Recall since frame context",
+      "subtitle": "Composed by Nous at 09:40 UTC",
+      "composedAt": "2026-11-10T09:40:00Z",
+      "note": "invented sample data"
+    },
+    { "id": "tiles", "component": "StatRow", "children": ["m-calls", "m-p95"] },
+    {
+      "id": "m-calls",
+      "component": "MetricCard",
+      "label": "Recall calls per hour",
+      "value": "9",
+      "delta": "down from 40",
+      "tone": "crit"
+    },
+    {
+      "id": "m-p95",
+      "component": "MetricCard",
+      "label": "Retrieval p95",
+      "value": "2.4",
+      "unit": "s",
+      "delta": "up from 1.9 s",
+      "tone": "warn"
+    },
+    { "id": "s-line", "component": "Section", "title": "Recall calls per hour, today", "child": "line" },
+    {
+      "id": "line",
+      "component": "LineChart",
+      "label": "Recall calls per hour",
+      "path": "/recall",
+      "yLabel": "calls",
+      "series": [
+        { "key": "calls", "label": "recall calls" },
+        { "key": "deep", "label": "recall_deep" },
+        { "key": "db", "label": "db_query" },
+        { "key": "files", "label": "read_file" }
+      ]
+    },
+    { "id": "s-video", "component": "Section", "title": "The recall drop, replayed", "child": "video-col" },
+    { "id": "video-col", "component": "Column", "children": ["video", "video-cap"] },
+    { "id": "video", "component": "Video", "url": "/dashboard/v2/media/recall-drop.mp4" },
+    {
+      "id": "video-cap",
+      "component": "Text",
+      "variant": "caption",
+      "text": "Replayed from the dashboard. Nous attached this from its workspace."
+    },
+    { "id": "s-bars", "component": "Section", "title": "Recall calls by frame, after 04:51", "child": "bars" },
+    { "id": "bars", "component": "BarChart", "label": "Recall calls by frame", "path": "/byFrame", "orientation": "horizontal" },
+    { "id": "s-table", "component": "Section", "title": "Tools behind the recall turns", "child": "table" },
+    {
+      "id": "table",
+      "component": "DataTable",
+      "columns": [
+        { "key": "tool", "label": "Tool" },
+        { "key": "calls", "label": "Calls", "align": "end" },
+        { "key": "errors", "label": "Errors", "align": "end" },
+        { "key": "p95", "label": "p95", "align": "end" }
+      ],
+      "rows": { "path": "/tools" }
+    },
+    { "id": "s-meter", "component": "Section", "title": "How sure Nous is that frame context caused the drop", "child": "meter" },
+    { "id": "meter", "component": "ConfidenceMeter", "value": 0.72 },
+    { "id": "s-timeline", "component": "Section", "title": "What happened", "child": "timeline" },
+    { "id": "timeline", "component": "Timeline", "items": { "path": "/events" } }
+  ],
+  "dataModel": {
+    "recall": {
+      "kind": "series",
+      "unit": "calls",
+      "points": [
+        { "t": "00", "calls": 39, "deep": 22, "db": 11, "files": 5 },
+        { "t": "01", "calls": 41, "deep": 23, "db": 12, "files": 4 },
+        { "t": "02", "calls": 44, "deep": 25, "db": 12, "files": 6 },
+        { "t": "03", "calls": 38, "deep": 21, "db": 10, "files": 5 },
+        { "t": "04", "calls": 42, "deep": 24, "db": 11, "files": 6 },
+        { "t": "05", "calls": 36, "deep": 20, "db": 10, "files": 5 },
+        { "t": "06", "calls": 41, "deep": 23, "db": 12, "files": 4 },
+        { "t": "07", "calls": 37, "deep": 21, "db": 9, "files": 5 },
+        { "t": "08", "calls": 12, "deep": 6, "db": 4, "files": 2 },
+        { "t": "09", "calls": 9, "deep": 4, "db": 3, "files": 2 }
+      ],
+      "meta": { "dropped": 0, "downsampled_from": null }
+    },
+    "byFrame": {
+      "kind": "series",
+      "unit": "calls",
+      "points": [
+        { "t": "question", "v": 4 },
+        { "t": "task", "v": 6 },
+        { "t": "decision", "v": 5 },
+        { "t": "conversation", "v": -2 }
+      ],
+      "meta": { "dropped": 0, "downsampled_from": null }
+    },
+    "tools": [
+      { "tool": "recall_deep", "calls": "212", "errors": "0", "p95": "2.4 s" },
+      { "tool": "db_query", "calls": "96", "errors": "3", "p95": "0.4 s" },
+      { "tool": "read_file", "calls": "41", "errors": "0", "p95": "0.1 s" }
+    ],
+    "events": [
+      { "at": "04:51", "label": "Frame context went on" },
+      { "at": "08:13", "label": "Deploy 7c2e9b1" },
+      { "at": "09:12", "label": "You asked about the drop" },
+      { "at": "09:21", "label": "Nous raised frame carry for your decision", "flag": true }
+    ]
+  }
+}
