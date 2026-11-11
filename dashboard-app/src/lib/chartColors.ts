@@ -71,6 +71,8 @@ export const DARK_FALLBACK: Record<string, string> = {
   '--oc-timeout': '#dc2626',
   '--oc-errored': '#7c2d12',
   '--oc-unknown': '#9ca3af',
+  '--oc-blocked': '#f59e0b',
+  '--err-text': '#f87171',
 };
 
 /** `#rgba` / `#rrggbbaa` as `rgba(r, g, b, a)`; anything else unchanged. The production build minifies an rgba() token

@@ -238,6 +238,7 @@
     --oc-timeout: #dc2626;
     --oc-errored: #7c2d12;
     --oc-unknown: #9ca3af;
+    --oc-blocked: #f59e0b;                     /* Subtasks' incomplete_blocked, as a chart mark */
     --stack-bar: rgba(251, 191, 36, 0.7);      /* Workflows: a token budget's consumed part */
     --hit-good: #22c55e;                       /* Cache: the hit-rate line, the doughnut's cache-read part */
     --hit-mid: #eab308;
@@ -411,6 +412,7 @@
     --oc-timeout: #8a1c2c;
     --oc-errored: #6b2a12;
     --oc-unknown: #7a8794;                     /* lighter than --st-neutral (cancelled), as under dark */
+    --oc-blocked: #b7791f;                     /* a mark (3:1), not the badge amber, which merges with failed under deuteranopia */
     --stack-bar: #b7791f;
     --hit-good: #23703d;
     --hit-mid: #8a5a0e;

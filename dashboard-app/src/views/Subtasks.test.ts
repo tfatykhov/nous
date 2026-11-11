@@ -15,7 +15,7 @@ const OLD: Record<string, string> = {
   timed_out: '#dc2626', errored: '#7c2d12', cancelled: '#6b7280', unknown: '#9ca3af',
 };
 const TOKEN: Record<string, string> = {
-  completed: '--st-success', incomplete_blocked: '--st-ledger-blocked', incomplete_no_terminal: '--oc-failed',
+  completed: '--st-success', incomplete_blocked: '--oc-blocked', incomplete_no_terminal: '--oc-failed',
   validation_failed: '--oc-failed', timed_out: '--oc-timeout', errored: '--oc-errored', cancelled: '--st-neutral', unknown: '--oc-unknown',
 };
 const OUTCOMES = Object.keys(OLD);

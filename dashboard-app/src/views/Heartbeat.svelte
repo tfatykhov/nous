@@ -57,8 +57,9 @@
     return 'var(--pending)';
   }
 
+  // High is a mark in the error text value: the red fill and the amber merge under deuteranopia (review I3).
   const URGENCY_COLOR: Record<string, string> = {
-    high: 'var(--red)',
+    high: 'var(--err-text)',
     normal: 'var(--yellow)',
     low: 'var(--st-neutral)',
   };

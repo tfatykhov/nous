@@ -224,6 +224,7 @@ const OC: Record<string, [string, string]> = {
   '--oc-timeout': ['#dc2626', '#8a1c2c'],
   '--oc-errored': ['#7c2d12', '#6b2a12'],
   '--oc-unknown': ['#9ca3af', '#7a8794'], // fix round 0: a lighter slate, not cancelled's grey
+  '--oc-blocked': ['#f59e0b', '#b7791f'], // Subtasks' incomplete_blocked as a mark (review I3: the text amber merged with failed)
 };
 const PR3: Record<string, [string, string]> = {
   ...ST,
@@ -763,6 +764,36 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
     expect(DARK['--st-unknown']).toBe(DARK['--unknown']);
     expect(PAPER['--st-unknown']).toBe(PAPER['--unknown']);
     expect(PAPER['--st-blocked']).not.toBe(PAPER['--st-failed']);
+  });
+
+  it('marks one chart draws together keep 8 apart for normal vision and under protanopia and deuteranopia (review I3)', () => {
+    // Marks need 3:1, not the badge's 4.5:1, so a mark can take a lighter tone than its text token. The sets are the
+    // tokens the views draw together: Subtasks' outcomes (doughnut, bars and trend; no_terminal and validation_failed
+    // share --oc-failed by design) and Heartbeat's urgencies (stacked bars and timeline dots).
+    const sets: Record<string, string[]> = {
+      subtasks: ['--st-success', '--oc-blocked', '--oc-failed', '--oc-timeout', '--oc-errored', '--st-neutral', '--oc-unknown'],
+      heartbeat: ['--err-text', '--yellow', '--st-neutral'],
+    };
+    // Open pairs with no verified hex (the review's and the ones measured with it), each held at its present floor.
+    const open: Record<string, number> = {
+      '--st-success|--oc-failed': 5, // deutan 5.5
+      '--st-success|--oc-timeout': 5.5, // deutan 5.8
+      '--st-success|--st-neutral': 6.5, // deutan 6.9
+      '--oc-failed|--oc-timeout': 7.5, // protan 7.8
+      '--oc-timeout|--oc-errored': 3.5, // protan 3.7, deutan 4.8
+    };
+    for (const [chart, tokens] of Object.entries(sets)) {
+      for (let i = 0; i < tokens.length; i++) {
+        for (let j = i + 1; j < tokens.length; j++) {
+          const [a, b] = [tokens[i], tokens[j]];
+          const floor = open[`${a}|${b}`] ?? 8;
+          for (const cvd of [undefined, 'protan', 'deutan'] as const) {
+            expect(okDistance(PAPER[a], PAPER[b], cvd), `${chart}: ${a} and ${b} (${cvd ?? 'normal'})`).toBeGreaterThanOrEqual(floor);
+          }
+        }
+      }
+    }
+    expect(contrast(PAPER['--oc-blocked'], '#ffffff')).toBeGreaterThanOrEqual(3);
   });
 
   it('Subtasks\' cancelled and unknown outcomes are told apart on paper (ruling 5): at least 10 apart, as under dark', () => {

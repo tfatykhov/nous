@@ -89,7 +89,8 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
     render(Heartbeat, { target: paperMain() });
     await waitFor(() => expect(configs).toHaveLength(2));
     expect(chart('doughnut').data.datasets[0].backgroundColor).toEqual([PAPER['--yellow'], PAPER['--track']]);
-    expect(chart('bar').data.datasets.map((d) => d.backgroundColor)).toEqual([PAPER['--red'], PAPER['--yellow'], PAPER['--st-neutral']]);
+    // High is drawn in the error text value: the status red fill and the amber merge under deuteranopia (review I3).
+    expect(chart('bar').data.datasets.map((d) => d.backgroundColor)).toEqual([PAPER['--err-text'], PAPER['--yellow'], PAPER['--st-neutral']]);
   });
 
   it('dark: the findings bars by urgency are today\'s red, amber and grey', async () => {
@@ -131,7 +132,7 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
     expect(items.map((i) => i.querySelector('.tl-source')?.textContent)).toEqual(['disk', 'mail', 'feeds']);
     expect(items.map((i) => i.querySelector('.tl-summary')?.textContent)).toEqual(['Disk at 91%', 'Inbox backlog', 'A feed is slow']);
     for (const i of items) expect(i.querySelector('.tl-time')?.textContent).toMatch(/ago$/);
-    expect(items.map((i) => i.querySelector<HTMLElement>('.tl-dot')!.style.background)).toEqual(['var(--red)', 'var(--yellow)', 'var(--st-neutral)']);
+    expect(items.map((i) => i.querySelector<HTMLElement>('.tl-dot')!.style.background)).toEqual(['var(--err-text)', 'var(--yellow)', 'var(--st-neutral)']);
   });
 
   it('an urgency written as text takes a text token: the error and warn text, the neutral grey', async () => {

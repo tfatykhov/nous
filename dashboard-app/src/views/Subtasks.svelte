@@ -48,7 +48,7 @@
   // ── Outcome colours (mirrors subtasks.js OUTCOME_COLORS): status and outcome tokens, which Chart resolves ──
   const OUTCOME_TOKENS: Record<string, string> = {
     completed: '--st-success',
-    incomplete_blocked: '--st-ledger-blocked',
+    incomplete_blocked: '--oc-blocked',
     incomplete_no_terminal: '--oc-failed',
     validation_failed: '--oc-failed',
     timed_out: '--oc-timeout',
