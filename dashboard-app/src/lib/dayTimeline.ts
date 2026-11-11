@@ -24,6 +24,8 @@ export const MIN_BAR = 5;
 /** The narrowest a padded bar gets when the next one is close; the error or gated underline is padded to UNDERLINE. */
 const MIN_SQUEEZED = 1.5;
 const UNDERLINE = 8;
+/** A squeezed bar's underline floor: at phone density the mark stays visible, though it may overlap a neighbour's. */
+const SQUEEZED_UNDERLINE = 4;
 
 /** Minutes after 00:00 UTC of a timestamp, seconds as a fraction; null when unreadable. */
 export function utcMinute(iso: string | null | undefined): number | null {
@@ -110,7 +112,8 @@ export function layout(turns: readonly WorkTodayTurn[], nowMs: number, width: nu
       const room = i + 1 < bars.length ? bars[i + 1].x - b.x - 1 : Infinity;
       const real = b.w;
       b.w = Math.max(real, Math.min(MIN_BAR, Math.max(MIN_SQUEEZED, room)));
-      b.uw = Math.max(b.w, Math.min(UNDERLINE, room));
+      const uw = Math.max(b.w, Math.min(UNDERLINE, room));
+      b.uw = room < MIN_SQUEEZED ? Math.max(uw, SQUEEZED_UNDERLINE) : uw;
     });
   }
   return rows;

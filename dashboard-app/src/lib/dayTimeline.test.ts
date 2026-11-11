@@ -74,6 +74,21 @@ describe('layout', () => {
     expect(bars[11].uw).toBe(8);
   });
 
+  // Review N3: at phone density (0.176 px a minute, 0.88 px between 5-minute heartbeats) a squeezed bar is 1.5 px, so
+  // its error or gated underline gets a 4 px floor to stay visible (it may overlap a neighbour's); with room to spare,
+  // as at 1440, the underline still stops before the next bar.
+  it('a squeezed bar (room under 1.5 px) keeps a 4 px underline; a bar with room is unchanged', () => {
+    const twelve = Array.from({ length: 12 }, (_, i) => t(`p${i}`, `01:${String(i * 5).padStart(2, '0')}`, { work_kind: 'heartbeat', error: true }));
+    const bars = layout(twelve, NOW, 720 * 0.176).heartbeat;
+    for (const b of bars.slice(0, -1)) {
+      expect(b.w).toBe(1.5);
+      expect(b.uw).toBe(4);
+    }
+    expect(bars.at(-1)!.uw).toBe(8);
+    const roomy = layout(twelve, NOW, 720 * 0.88).heartbeat;
+    expect(roomy[0].uw).toBeCloseTo(3.4, 5);
+  });
+
   it('padding never squeezes a bar below 1.5 px, and a long turn keeps its true width', () => {
     const bars = layout([
       t('a', '02:00'), t('b', '02:00', { started_at: '2026-11-10T02:00:30+00:00' }),   // 0.44 px apart
