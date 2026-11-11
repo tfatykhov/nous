@@ -67,6 +67,8 @@
     align-items: flex-start;
     gap: 0.5rem;
     cursor: pointer;
+    /* The whole label is the target: 44px on paper, auto (as before) in a legacy theme. */
+    min-height: var(--tap-min);
   }
   input {
     margin: 0;

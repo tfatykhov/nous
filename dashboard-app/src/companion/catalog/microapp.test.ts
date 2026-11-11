@@ -496,6 +496,26 @@ describe('TimelineView', () => {
     expect(rows[1].classList.contains('flag')).toBe(true);
   });
 
+  it('a flagged row says so in words to a screen reader (its dot and colour are visual only; PR 6 list for PR 7)', () => {
+    seedSurface({
+      stays: [
+        { at: 'Sep 5', label: 'Venice', detail: '2 nights' },
+        { at: 'Sep 7', label: 'GAP: nothing booked', flag: true },
+      ],
+    });
+    const { container } = render(TimelineView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'tl', component: 'Timeline', items: { path: '/stays' } },
+      },
+    });
+    const rows = container.querySelectorAll('li');
+    expect(rows[0].querySelector('.sr-only')).toBeNull();
+    const word = rows[1].querySelector('.sr-only');
+    expect(word?.textContent).toBe('Flagged: ');
+    expect(rows[1].querySelector('.body')?.textContent?.startsWith('Flagged: GAP')).toBe(true);
+  });
+
   it('resolves non-array data to no rows, never throws', () => {
     seedSurface({});
     const { container } = render(TimelineView, {

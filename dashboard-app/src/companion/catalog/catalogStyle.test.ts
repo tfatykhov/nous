@@ -249,6 +249,7 @@ describe('every control is a 44px tap target on paper through --tap-min (source 
     ['ChoicePickerView', '.options.chips .option'],
     ['ModalView', '.close'],
     ['SectionView', '.toggle'],
+    ['CheckBoxView', '.box'], // PR 6 fix round 2's list for PR 7: the whole label row was about 24px
   ])('%s %s', (name, sel) => {
     expect(style(name).split(`${sel} {`)[1].split('}')[0]).toContain('min-height: var(--tap-min)');
   });
