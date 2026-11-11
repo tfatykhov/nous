@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Button } from '../lib/ui/button';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -19,6 +20,8 @@
       15_000,
     ),
   );
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
+  const refreshPage = () => store.refresh();
 
   // ── Selected active DAG for graph view ───────────────────────────────────
   let selectedDagId = $state<string | null>(null);
@@ -163,8 +166,8 @@
       { label: 'Active DAGs', value: String(s.active_count) },
       { label: 'Waiting on you', value: String(s.waiting_count ?? 0), tone: (s.waiting_count ? 'waiting' : undefined) as 'waiting' | undefined },
       { label: 'Nodes (24 h)', value: String(s.nodes_completed_24h) },
-      { label: 'Success Rate', value: successPct },
-      { label: 'Avg Duration', value: fmtDuration(s.avg_completion_seconds) },
+      { label: 'Success rate', value: successPct },
+      { label: 'Avg duration', value: fmtDuration(s.avg_completion_seconds) },
     ];
   });
 
@@ -207,7 +210,7 @@
         {
           label: 'Budget',
           data: dags.map((d) => d.token_budget - d.tokens_consumed),
-          backgroundColor: 'var(--track-strong)',
+          backgroundColor: 'var(--track)',
         },
       ],
     };
@@ -268,9 +271,12 @@
 <div class="view-head">
   <div>
     <h1 class="view-title">Workflows</h1>
-    <p class="view-subtitle">Unified execution DAGs, node progress, and graph visualization</p>
+    <p class="view-subtitle">The workflows Nous runs: where each one is, what it has spent, and what is waiting on you.</p>
   </div>
-  <StaleBadge state={$store} />
+  <div class="head-right">
+    <StaleBadge state={$store} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading}>{$store.loading ? 'Loading…' : 'Refresh'}</Button>
+  </div>
 </div>
 
 {#if $store.loading && $store.data === null}
@@ -333,7 +339,7 @@
     {#if data.active_dags.length === 0}
       <p class="empty-state">No active DAGs</p>
     {:else}
-      <div class="table-wrap">
+      <div class="table-wrap table-scroll">
         <table class="dag-table">
           <thead>
             <tr>
@@ -414,7 +420,7 @@
   <!-- Token budget chart (only when active DAGs have budgets) -->
   {#if budgetDags.length > 0 && budgetChartData() !== null}
     <section class="chart-card">
-      <h2 class="section-title">Token Budgets</h2>
+      <h2 class="section-title">Token budgets</h2>
       <Chart type="bar" data={budgetChartData()!} height="240px" options={{
         plugins: { legend: { labels: { color: 'var(--chart-text)' } } },
         scales: {
@@ -439,7 +445,7 @@
         }))}
         rowKey={(r) => r._dag.id}
         rowLabel={(r) => r.name}
-        mode="scroll"
+        mode="cards"
       >
         {#snippet cell(row, c)}
           {#if c.key === 'statusBadge'}
@@ -462,12 +468,12 @@
           <div class="detail-grid">
             <div><span class="detail-label">Source</span><span>{dag.source || '--'}</span></div>
             <div><span class="detail-label">Duration</span><span>{dagDuration(dag)}</span></div>
-            <div><span class="detail-label">Token Budget</span><span>{fmtTokens(dag.token_budget)}</span></div>
+            <div><span class="detail-label">Token budget</span><span>{fmtTokens(dag.token_budget)}</span></div>
             <div><span class="detail-label">Created</span><span>{fmtAgo(dag.created_at)}</span></div>
           </div>
           {#if dag.result_summary}
             <div class="detail-section">
-              <div class="detail-label">Result Summary</div>
+              <div class="detail-label">Result summary</div>
               <div class="detail-text">{dag.result_summary}</div>
             </div>
           {/if}
@@ -589,6 +595,7 @@
 </BottomSheet>
 
 <style>
+  .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   .view-head {
     display: flex;
     align-items: flex-start;
@@ -598,13 +605,12 @@
   }
 
   .view-title {
-    font-size: 1.375rem;
-    font-weight: 700;
+    font-size: 30px;
+    font-weight: 650;
     color: var(--text);
     margin: 0 0 0.25rem;
+    letter-spacing: -0.022em;
   }
-
-  :global(html[data-look="paper"] [data-ground="paper"]) .view-title { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; }
 
   .view-subtitle {
     font-size: 0.8125rem;
@@ -669,8 +675,8 @@
     color: var(--muted);
     font-size: 0.75rem;
     font-weight: 600;
-    text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking);
+    text-transform: none;
+    letter-spacing: 0;
   }
 
   .dag-table tr:hover td {
@@ -690,10 +696,12 @@
   }
 
   /* ── Waiting on you (harness dashboard §4) ── */
+  /* A standard card (final step: it wore a purple outline and a 4px tinted halo); the purple dot, the heading and its
+     count say that it waits on you. */
   .waiting {
     background: var(--surface);
-    border: 1px solid color-mix(in srgb, var(--waiting) 35%, transparent);
-    box-shadow: 0 0 0 4px color-mix(in srgb, var(--waiting) 6%, transparent);
+    border: var(--card-border);
+    box-shadow: var(--card-shadow);
     border-radius: var(--card-radius);
     padding: 1.25rem;
     margin-bottom: 1.25rem;
@@ -711,21 +719,21 @@
   .q-question { font-size: 0.9375rem; font-weight: 600; }
   .q-error { font-size: 0.8125rem; color: var(--st-awaiting-check); margin: 0.25rem 0 0; }
   .q-when, .q-default { font-size: 0.875rem; min-width: 9rem; }
-  .label { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform); letter-spacing: var(--label-tracking); }
+  .label { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: none; letter-spacing: 0; }
   .soon { color: var(--st-running); font-weight: 600; }
   .text { color: var(--text); }
   .mono { font-family: var(--font-mono); font-size: 0.75rem; }
   .q-actions { display: flex; gap: 0.5rem; justify-content: flex-end; flex-wrap: wrap; }
   .btn-primary { display: inline-flex; align-items: center; min-height: 36px; padding: 0 0.875rem; border-radius: var(--ctl-radius);
-    background: var(--accent); color: var(--on-accent); font-size: 0.8125rem; font-weight: 700; text-decoration: none; white-space: nowrap; }
+    background: var(--action); color: var(--on-accent); font-size: 0.8125rem; font-weight: 700; text-decoration: none; white-space: nowrap; }
   .btn-primary:focus-visible, .node-btn:focus-visible, .card-link:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
   .btn-tall { min-height: 36px; }
   .now { font-size: 0.75rem; }
   /* Room for the pill, so a narrow table scrolls in its box rather than squeezing it; a 0.75rem radius is a pill on
      one line and a rounded block when the text wraps. */
   .now-cell { min-width: 10rem; }
-  .now-waiting { display: inline-block; padding: 3px 10px; border-radius: 0.75rem; font-weight: 600; color: var(--wait-ink); background: var(--wait-bg); }
-  .now-held { display: inline-block; padding: 3px 10px; border-radius: 0.75rem; font-weight: 600; color: var(--st-running); background: color-mix(in srgb, var(--st-running) 10%, transparent); }
+  .now-waiting { display: inline-block; padding: 3px 10px; border-radius: var(--card-radius-sm); font-weight: 600; color: var(--waiting); background: var(--wait-bg); }
+  .now-held { display: inline-block; padding: 3px 10px; border-radius: var(--card-radius-sm); font-weight: 600; color: var(--st-running); background: color-mix(in srgb, var(--st-running) 10%, transparent); }
   .now-plain { color: var(--muted); }
   .node-list { list-style: none; margin: 0; padding: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem; border-top: 1px solid var(--border); }
   .node-btn { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; padding: 0.375rem 0.625rem; border-radius: var(--card-radius-sm);
@@ -740,7 +748,7 @@
   .opt-default { color: var(--muted); border-color: var(--border); font-weight: 500; }
   .approval-dl { display: grid; gap: 0.5rem; margin: 0.75rem 0 0; }
   .approval-dl div { display: grid; grid-template-columns: 7rem minmax(0, 1fr); gap: 0.75rem; }
-  .approval-dl dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform); letter-spacing: var(--label-tracking); }
+  .approval-dl dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: none; letter-spacing: 0; }
   .approval-dl dd { margin: 0; font-size: 0.875rem; }
   .card-link { display: inline-block; margin-top: 0.75rem; font-size: 0.8125rem; font-weight: 600; color: var(--accent-text); }
   .attempts { margin: 0.25rem 0 0; padding-left: 1.25rem; font-size: 0.8125rem; display: grid; gap: 0.25rem; }
@@ -777,9 +785,9 @@
 
   .progress-fill {
     height: 100%;
-    background: var(--accent);
+    background: var(--series-0);
     border-radius: 2px;
-    transition: width 0.3s ease;
+    transition: width var(--transition);
   }
 
   /* ── Graph panel ── */
@@ -859,8 +867,8 @@
     font-size: 0.6875rem;
     font-weight: 600;
     color: var(--muted);
-    text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking);
+    text-transform: none;
+    letter-spacing: 0;
   }
 
   .detail-section {
@@ -875,9 +883,11 @@
     overflow-wrap: anywhere;
   }
 
+  /* A tinted block at the world's radius (no side stripe: the craft floor). */
   .detail-postmortem {
-    border-left: 3px solid var(--st-running);
-    padding-left: 0.625rem;
+    background: var(--wash);
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--card-radius-sm);
   }
 
   /* ── Node detail (bottom sheet) ── */

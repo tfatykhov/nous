@@ -134,6 +134,19 @@ describe('DecisionCardView', () => {
     expect(container.querySelector('.card')?.classList.contains('settled')).toBe(true);
   });
 
+  // Finish review fix 6 (verdict pass 1): the reference to a decision sits under its title, never above it as an
+  // eyebrow. The product's DecisionCard (what decision_sweep composes) places the id itself, after the description.
+  it('places the decision reference under the title, after the description', () => {
+    seedSurface({ decisions: {} });
+    const { container } = render(DecisionCardView, {
+      props: { surfaceId: SURFACE, comp: { id: 'c', component: 'DecisionCard', decisionId: '8f027e1a-0000', description: 'Keep frame carry off' } },
+    });
+    const desc = container.querySelector('.desc')!;
+    const ref = container.querySelector('.id')!;
+    expect(ref.textContent).toBe('8f027e1a');
+    expect(desc.compareDocumentPosition(ref) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it('stays unsettled while the bound outcome is pending', () => {
     seedSurface({ decisions: { 'd-1': 'pending' } });
     const { container } = render(DecisionCardView, {

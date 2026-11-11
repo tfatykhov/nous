@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { combinePolls } from '../lib/pollBadge';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -10,7 +11,7 @@
   import Chart from '../lib/viz/Chart.svelte';
   import { Button } from '../lib/ui/button';
   import { lineLegendLabels } from '../lib/chartColors';
-  import { ruleVerdict, claimVerdict, fmtUtc, FLAG_GLOSS, type Verdict } from '../lib/harness';
+  import { ruleVerdict, claimVerdict, fmtUtc, FLAG_GLOSS, type Verdict, fmtDay } from '../lib/harness';
 
   // Harness dashboard §3.3 / §4.3: what each rule flagged — the evidence for
   // moving it from warn to enforce. Never summed across rules: one call in
@@ -37,10 +38,14 @@
       0, // fetch-once
     ),
   );
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
+  const refreshPage = () => Promise.all([store.refresh(), activity.refresh()]);
 
+  /** A rule's mode as a status pill: enforcing is ok, warn and shadow are warnings, off is neutral. */
+  const MODE_PILL: Record<string, string> = { enforce: 'ok', warn: 'warn', shadow: 'warn' };
   const WIN_LABEL: Record<string, string> = { '24h': '24 h', '7d': '7 d', '30d': '30 d' };
   // Series colours outside the status set (spec §4.1), as tokens: Chart.svelte resolves them against the canvas's
-  // ground, and the DOM paints them through --fill (dark: the old literals; claims is the ramp's cyan, not a teal).
+  // ground, and the DOM paints them through --fill (claims is the ramp's cyan, not a teal).
   const SERIES_TOKEN = { offered_set: '--series-1', context_policy: '--series-4', claims: '--series-9' };
   const seriesVar = (rule: string) => `var(${SERIES_TOKEN[rule as keyof typeof SERIES_TOKEN] ?? '--muted'})`;
   const RULE_LABEL: Record<string, string> = {
@@ -110,7 +115,7 @@
       borderWidth: 2, borderDash: dash, pointRadius: 2, tension: 0.2, fill: false, spanGaps: false,
     });
     return {
-      labels: d.daily.map((x) => x.date.slice(5)),
+      labels: d.daily.map((x) => fmtDay(x.date)),
       datasets: [
         line('Offered-tool rule', 'offered_set', seriesVar('offered_set'), []),
         line('Context policy', 'context_policy', seriesVar('context_policy'), [6, 4]),
@@ -119,7 +124,7 @@
     };
   }
 
-  // Explicit axis colours (today's under dark) beat Chart.svelte's paper defaults, so they are the paper tokens' too.
+  // Explicit axis colours beat Chart.svelte's defaults, so they name the same tokens.
   const chartOptions = {
     // The legend samples each line with its dash (a box outline turns four corners); see Rubric.svelte.
     plugins: { legend: { labels: lineLegendLabels({ color: 'var(--muted)' }) } },
@@ -137,17 +142,20 @@
     { key: 'count', label: 'Count' },
     { key: 'last_seen', label: 'Last seen' },
   ];
+  /** The header badge speaks for every store this page reads (Codex round 1). */
+  const pagePoll = $derived(combinePolls({ guards: $store, 'censor activity': $activity }));
 </script>
 
 <header class="view-head">
   <div>
     <h1>Guards</h1>
-    <p class="subtitle">What each safety rule flagged — the evidence for moving it from warn to enforce</p>
+    <p class="subtitle">What each safety rule flagged, and the evidence for moving it from warn to enforce.</p>
   </div>
   <div class="head-right">
     <FilterBar label="Window" required bind:value={windowSel}
       options={[{ value: '24h', label: '24 h' }, { value: '7d', label: '7 d' }, { value: '30d', label: '30 d' }]} />
-    <StaleBadge state={$store} />
+    <StaleBadge state={pagePoll} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={pagePoll.loading}>{pagePoll.loading ? 'Loading…' : 'Refresh'}</Button>
   </div>
 </header>
 
@@ -169,7 +177,7 @@
             <h2 id="rule-{c.id}">{c.title}</h2>
             <div class="env">{c.env}</div>
           </div>
-          <span class="mode-pill mode-{c.mode}">{c.mode}</span>
+          <span class="mode status-pill status-pill--{MODE_PILL[c.mode] ?? 'neutral'}">{c.mode}</span>
         </div>
         <div>
           <div class="big">{d.events_persisted ? c.total : '—'}</div>
@@ -288,19 +296,16 @@
 <!-- Most Active Censors, with the censor numbers (moved from the Activity screen, F108) -->
 <section class="panel censors">
   <div class="section-head">
-    <h2>Most Active Censors</h2>
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void activity.refresh()} disabled={$activity.loading}>
-      {$activity.loading ? 'Loading…' : 'Refresh'}
-    </Button>
+    <h2>Most active censors</h2>
   </div>
   {#if $activity.data}
     {@const cs = $activity.data.censor_stats}
     <p class="small muted">Numbers marked (7d) are the last 7 days, whatever the window above. The count beside each censor is its all-time activations.</p>
-    <StatGrid stats={[
-      { label: 'Censor Activations (7d)',  value: cs.total_activations_7d },
-      { label: 'Auto-created Censors',     value: cs.auto_created },
-      { label: 'Manual Censors',           value: cs.manual_created },
-      { label: 'False Positives (7d)',     value: cs.false_positives_7d },
+    <StatGrid flat stats={[
+      { label: 'Censor activations (7d)',  value: cs.total_activations_7d },
+      { label: 'Auto-created censors',     value: cs.auto_created },
+      { label: 'Manual censors',           value: cs.manual_created },
+      { label: 'False positives (7d)',     value: cs.false_positives_7d },
     ]} />
     {#if cs.top_censors.length > 0}
       <ul class="item-list">
@@ -329,12 +334,11 @@
 <style>
   .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
-  h1 { font-size: 1.375rem; font-weight: 700; margin: 0 0 0.25rem; }
-  :global(html[data-look="paper"] [data-ground="paper"]) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
+  h1 { font-size: 30px; font-weight: 650; margin: 0 0 0.25rem; letter-spacing: -0.022em; line-height: 1.15; }
   h2 { font-size: 0.9375rem; font-weight: 600; margin: 0; }
   .subtitle { font-size: 0.8125rem; color: var(--muted); margin: 0; }
-  .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--notice-bg);
-    border: 1px solid var(--notice-border); font-size: 0.8125rem; margin-bottom: 1rem; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--warn-bg);
+    border: 1px solid var(--warn-border); font-size: 0.8125rem; margin-bottom: 1rem; }
   .notice code, .order code, .env, .mono { font-family: var(--font-mono); font-size: 0.75rem; }
   .rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }
   .card, .panel { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow);
@@ -345,14 +349,11 @@
   .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; }
   .min0 { min-width: 0; }
   .env { color: var(--muted); margin-top: 0.125rem; overflow-wrap: anywhere; }
-  .mode-pill { flex-shrink: 0; font-size: 0.6875rem; font-weight: 600; padding: 0.125rem 0.5rem; border-radius: 999px; border: 1px solid currentColor; }
-  .mode-enforce { color: var(--stat-ok); }
-  .mode-warn, .mode-shadow { color: var(--stat-warn); }
-  .mode-off { color: var(--muted); border-color: var(--border); }
+  .mode { flex-shrink: 0; } /* app.css .status-pill */
   .big { font-size: 2rem; font-weight: 700; line-height: 1.1; }
   .breakdown { display: flex; flex-direction: column; gap: 0.5rem; }
-  .label { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking); }
+  .label { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: none;
+    letter-spacing: 0; }
   .bar-row { display: grid; grid-template-columns: minmax(0, 9.5rem) minmax(0, 1fr) 2.25rem; gap: 0.625rem; align-items: center; }
   .bar-key { font-family: var(--font-mono); font-size: 0.75rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .bar { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
@@ -360,10 +361,10 @@
   .bar-count { font-size: 0.8125rem; font-weight: 600; text-align: right; }
   .verdict { padding: 0.75rem 0.875rem; border-radius: var(--card-radius-sm); border: 1px solid; }
   /* Status by token: the alphas of the old literals are the mix percentages (dark identical). */
-  .verdict-warn { color: var(--stat-warn); border-color: color-mix(in srgb, var(--stat-warn) 35%, transparent);
-    background: color-mix(in srgb, var(--stat-warn) 8%, transparent); }
-  .verdict-ok { color: var(--stat-ok); border-color: color-mix(in srgb, var(--stat-ok) 35%, transparent);
-    background: color-mix(in srgb, var(--stat-ok) 8%, transparent); }
+  .verdict-warn { color: var(--warn-text); border-color: color-mix(in srgb, var(--warn-text) 35%, transparent);
+    background: color-mix(in srgb, var(--warn-text) 8%, transparent); }
+  .verdict-ok { color: var(--ok-text); border-color: color-mix(in srgb, var(--ok-text) 35%, transparent);
+    background: color-mix(in srgb, var(--ok-text) 8%, transparent); }
   .verdict-muted { color: var(--muted); border-color: var(--border); background: transparent; }
   .verdict-title { font-size: 0.8125rem; font-weight: 700; }
   .verdict-detail { font-size: 0.8125rem; color: var(--text); margin-top: 0.125rem; }
@@ -372,8 +373,8 @@
     font-weight: 600; color: var(--text); border: 1px solid color-mix(in srgb, var(--fill) 40%, transparent); white-space: nowrap; }
   .rule-pill::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--fill); flex-shrink: 0; }
   .detail { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.5rem 1.5rem; margin: 0; padding: 0.5rem 0; }
-  .detail dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking); }
+  .detail dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: none;
+    letter-spacing: 0; }
   .detail dd { margin: 0.125rem 0 0; font-size: 0.8125rem; }
   .glossary { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0.375rem 1.5rem; margin: 1rem 0 0; font-size: 0.75rem; }
   .glossary div { display: flex; gap: 0.5rem; }

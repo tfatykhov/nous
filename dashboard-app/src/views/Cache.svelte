@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { Button } from '../lib/ui/button';
+  import { fmtUtc } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -20,6 +22,8 @@
       30_000,
     ),
   );
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
+  const refreshPage = () => store.refresh();
 
   // ── Helpers ──────────────────────────────────────────────────────────
   function formatTokens(n: number): string {
@@ -29,13 +33,7 @@
   }
 
   function formatTime(ts: string): string {
-    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  }
-
-  function hitRateColor(rate: number): string {
-    if (rate >= 50) return 'var(--hit-good)';
-    if (rate >= 20) return 'var(--hit-mid)';
-    return 'var(--hit-bad)';
+    return fmtUtc(ts);
   }
 
   // ── Session table columns ─────────────────────────────────────────────
@@ -64,9 +62,12 @@
 <header class="view-head">
   <div>
     {#if !embedded}<h1>Cache</h1>{/if}
-    <p class="subtitle">API cache performance, token savings, and break analysis</p>
+    <p class="subtitle">How the API cache performs: hit rate, tokens saved, and what broke it.</p>
   </div>
-  <StaleBadge state={$store} />
+  <div class="head-right">
+    <StaleBadge state={$store} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading}>{$store.loading ? 'Loading…' : 'Refresh'}</Button>
+  </div>
 </header>
 
 {#if $store.data}
@@ -84,11 +85,11 @@
   <!-- Row 2: two charts side by side -->
   <div class="chart-row">
     <section class="chart-card">
-      <h2>Token Breakdown</h2>
+      <h2>Token breakdown</h2>
       <Chart
         type="doughnut"
         data={{
-          labels: ['Cache Read', 'Cache Created', 'Uncached'],
+          labels: ['Cache read', 'Cache Created', 'Uncached'],
           datasets: [{
             data: [s.total_cache_read, s.total_cache_created, uncached],
             backgroundColor: ['var(--hit-good)', 'var(--cache-blue)', 'var(--cache-grey)'],
@@ -101,7 +102,7 @@
     </section>
 
     <section class="chart-card">
-      <h2>Break Components</h2>
+      <h2>Break components</h2>
       {#if Object.keys(d.break_components).length > 0}
         <Chart
           type="bar"
@@ -129,7 +130,7 @@
 
   <!-- Row 3: efficiency timeline -->
   <section class="chart-card">
-    <h2>Efficiency Timeline</h2>
+    <h2>Efficiency timeline</h2>
     {#if d.timeline.length > 0}
       {@const sorted = [...d.timeline].reverse()}
       <Chart
@@ -137,7 +138,7 @@
         data={{
           labels: sorted.map((t) => formatTime(t.timestamp)),
           datasets: [{
-            label: 'Hit Rate %',
+            label: 'Hit rate %',
             data: sorted.map((t) => t.hit_rate),
             borderColor: 'var(--hit-good)',
             backgroundColor: tint('--hit-good', 0.1),
@@ -184,7 +185,7 @@
 
   <!-- Row 5: recent calls table -->
   <section class="table-card">
-    <h2>Recent Calls</h2>
+    <h2>Recent calls</h2>
     {#if d.timeline.length > 0}
       <DataTable
         columns={callCols}
@@ -220,6 +221,7 @@
 {/if}
 
 <style>
+  .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   .view-head {
     display: flex;
     align-items: flex-start;

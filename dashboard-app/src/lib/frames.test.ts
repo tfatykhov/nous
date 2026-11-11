@@ -15,7 +15,7 @@ import {
   verdictText,
 } from './frames';
 import { laneVar } from './work';
-import { DARK_SEL, PAPER_SEL, parseBlocks } from './testing/css';
+import { ROOT_SEL, block, parseBlocks } from './testing/css';
 import type { WorkTurn } from './types/api';
 
 const turn = (over: Partial<WorkTurn> = {}): WorkTurn => ({
@@ -122,12 +122,9 @@ describe('frame colour, name and reason', () => {
     expect(chosenBy(undefined)).toBe('reason not recorded');
   });
 
-  it('the seven frame tokens and the neutral exist on the dark block and on the paper ground', () => {
-    const blocks = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8'));
-    for (const sel of [DARK_SEL, PAPER_SEL]) {
-      const b = blocks.get(sel) ?? {};
-      for (const f of [...FRAME_IDS, 'other']) expect(b[`--f-${f}`], `${sel} --f-${f}`).toMatch(/^#[0-9a-f]{6}$/);
-    }
+  it('the seven frame tokens and the neutral exist at :root', () => {
+    const b = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
+    for (const f of [...FRAME_IDS, 'other']) expect(b[`--f-${f}`], `--f-${f}`).toMatch(/^#[0-9a-f]{6}$/);
   });
 });
 

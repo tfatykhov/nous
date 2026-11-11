@@ -231,6 +231,36 @@ export function formatTick(v: number): string {
   return v.toFixed(abs >= 10 ? 1 : 2);
 }
 
+/** A step of 1, 2, 2.5 or 5 times a power of ten, the smallest at least `raw`. */
+function niceStep(raw: number): number {
+  if (!(raw > 0)) return 1;
+  const p = 10 ** Math.floor(Math.log10(raw));
+  const f = raw / p;
+  const m = f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10;
+  return m * p;
+}
+
+/** Round axis numbers (finish review fix 8): the domain widened to the nearest nice step and `count` ticks on it, so an
+ * axis reads "0 / 25 / 50", never "0 / 23.7 / 47.4". The zero break is recomputed from the rounded bounds: a domain
+ * rounded down (or up) to zero no longer breaks (Codex round 3). */
+export function niceTicks(domain: Domain, count = 3): { domain: Domain; ticks: number[] } {
+  const span = domain.max - domain.min || 1;
+  let step = niceStep(span / (count - 1));
+  let min = Math.floor(domain.min / step) * step;
+  let max = min + step * (count - 1);
+  // A step that leaves the top uncovered (a domain off the step grid) moves up one notch.
+  while (max < domain.max - 1e-9) {
+    step = niceStep(step * 1.01);
+    min = Math.floor(domain.min / step) * step;
+    max = min + step * (count - 1);
+  }
+  const round = (v: number) => Number(v.toPrecision(12));
+  const ticksOut = Array.from({ length: count }, (_, k) => round(min + step * k));
+  const lo = round(min);
+  const hi = round(max);
+  return { domain: { min: lo, max: hi, zeroBreak: lo > 0 || hi < 0 }, ticks: ticksOut };
+}
+
 /** A few evenly-spaced tick values across a domain. */
 export function ticks(domain: Domain, count = 3): number[] {
   const out: number[] = [];

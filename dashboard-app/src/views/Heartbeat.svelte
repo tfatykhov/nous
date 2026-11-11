@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { Button } from '../lib/ui/button';
+  import { fmtUtc, fmtDay } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -14,6 +16,8 @@
       30_000,
     ),
   );
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
+  const refreshPage = () => store.refresh();
 
   // ── Formatters ────────────────────────────────────────────────────────────
 
@@ -46,7 +50,7 @@
 
   function fmtTs(iso: string | null | undefined): string {
     if (!iso) return '--';
-    return new Date(iso).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+    return fmtUtc(iso);
   }
 
   // Colours are tokens: Chart resolves them against its ground, the DOM reads var() directly. Budget and urgency are
@@ -66,16 +70,23 @@
 
   const URGENCY_INK: Record<string, string> = {
     high: 'var(--err-text)',
-    normal: 'var(--hb-warn-ink)',
+    normal: 'var(--warn-text)',
     low: 'var(--st-neutral)',
   };
 
-  const STATE_COLOR: Record<string, string> = {
-    new: 'var(--pending)',
-    acknowledged: 'var(--yellow)',
-    resolved: 'var(--st-completed)',
-    suppressed: 'var(--st-neutral)',
+  /** A lifecycle state's status pill (app.css .status-pill): new is info, acknowledged a warning, resolved ok. */
+  const STATE_PILL: Record<string, string> = {
+    new: 'info',
+    acknowledged: 'warn',
+    resolved: 'ok',
   };
+
+  /** A check's status, in a word and a pill: an open circuit breaker, failures on the way to it, or ok. */
+  function checkStatus(c: { circuit_breaker_open: boolean; consecutive_failures: number }): { word: string; pill: string } {
+    if (c.circuit_breaker_open) return { word: 'open', pill: 'bad' };
+    if (c.consecutive_failures > 0) return { word: 'failing', pill: 'warn' };
+    return { word: 'ok', pill: 'ok' };
+  }
 
   // ── Chart data builders ───────────────────────────────────────────────────
 
@@ -94,7 +105,7 @@
 
   function findingsBarData(byDay: HeartbeatData['findings_by_day']) {
     return {
-      labels: byDay.map((d) => d.date.slice(5)), // MM-DD
+      labels: byDay.map((d) => fmtDay(d.date)),
       datasets: [
         {
           label: 'High',
@@ -147,9 +158,12 @@
 <header class="view-head">
   <div>
     <h1>Heartbeat</h1>
-    <p class="subtitle">Autonomous monitoring, checks, and cognitive triage</p>
+    <p class="subtitle">What Nous checks on its own, what it found, and what it looked into.</p>
   </div>
-  <StaleBadge state={$store} />
+  <div class="head-right">
+    <StaleBadge state={$store} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading}>{$store.loading ? 'Loading…' : 'Refresh'}</Button>
+  </div>
 </header>
 
 {#if $store.data}
@@ -164,23 +178,26 @@
   {@const tripped = d.checks.filter((c) => c.circuit_breaker_open).length}
   {@const budgetPct = bgt.limit > 0 ? Math.round((bgt.used / bgt.limit) * 100) : 0}
 
-  <div class="hb-banner" class:hb-banner--disabled={!enabled} class:hb-banner--warn={enabled && tripped > 0}>
+  <div class="hb-banner">
     <span class="hb-dot" class:hb-dot--ok={enabled && tripped === 0} class:hb-dot--warn={enabled && tripped > 0} class:hb-dot--off={!enabled}></span>
     <span class="hb-banner-label">{enabled ? 'Heartbeat Active' : 'Heartbeat Disabled'}</span>
     <div class="hb-pills">
-      <span class="hb-pill" class:hb-pill--warn={qh.active}>
+      {#if enabled && tripped > 0}
+        <span class="status-pill status-pill--warn">{tripped} {tripped === 1 ? 'breaker' : 'breakers'} tripped</span>
+      {/if}
+      <span class="status-pill" class:status-pill--warn={qh.active}>
         Quiet hours: {qh.active ? `active (${qh.start}:00–${qh.end}:00)` : 'inactive'}
       </span>
       <span
-        class="hb-pill"
-        class:hb-pill--ok={budgetPct < 80}
-        class:hb-pill--warn={budgetPct >= 80 && budgetPct < 100}
-        class:hb-pill--bad={budgetPct >= 100}
+        class="status-pill"
+        class:status-pill--ok={budgetPct < 80}
+        class:status-pill--warn={budgetPct >= 80 && budgetPct < 100}
+        class:status-pill--bad={budgetPct >= 100}
       >
         Budget: {budgetPct >= 100 ? 'exhausted' : budgetPct + '% used'}
       </span>
       {#if st.last_tick}
-        <span class="hb-pill">Last tick: {fmtAgo(st.last_tick)}</span>
+        <span class="status-pill">Last tick: {fmtAgo(st.last_tick)}</span>
       {/if}
     </div>
   </div>
@@ -201,7 +218,7 @@
     <!-- ── Charts row ── -->
     <div class="chart-row">
       <section class="chart-card">
-        <h2>Token Budget</h2>
+        <h2>Token budget</h2>
         <div class="budget-wrap">
           <Chart
             type="doughnut"
@@ -217,7 +234,7 @@
       </section>
 
       <section class="chart-card">
-        <h2>Findings by Urgency (7d)</h2>
+        <h2>Findings by urgency (7d)</h2>
         {#if d.findings_by_day.length > 0}
           <Chart
             type="bar"
@@ -239,7 +256,7 @@
 
     <!-- ── Check status table ── -->
     <section class="table-card">
-      <h2>Check Status</h2>
+      <h2>Check status</h2>
       {#if d.checks.length > 0}
         <DataTable
           columns={checkCols}
@@ -248,11 +265,15 @@
             interval_fmt: fmtInterval(c.interval),
             last_run_fmt: fmtAgo(c.last_run),
             failures_fmt: c.consecutive_failures + ' / ' + c.max_failures,
-            status_fmt: c.circuit_breaker_open ? 'OPEN' : c.consecutive_failures > 0 ? 'warn' : 'ok',
+            status_fmt: checkStatus(c).word,
           }))}
           mode="cards"
           rowKey={(r) => r.name}
-        />
+        >
+          {#snippet cell(r, c)}
+            {#if c.key === 'status_fmt'}<span class="status-pill status-pill--{checkStatus(r).pill}">{r.status_fmt}</span>{:else}{r[c.key]}{/if}
+          {/snippet}
+        </DataTable>
       {:else}
         <p class="empty">No checks configured</p>
       {/if}
@@ -264,16 +285,16 @@
       {@const byState = lc.stats.by_state}
       {@const activeFindings = lc.findings.filter((f) => f.state !== 'resolved')}
       <section class="table-card">
-        <h2>Finding Lifecycle</h2>
+        <h2>Finding lifecycle</h2>
 
         <!-- State pills -->
         <div class="state-pills">
           {#each ['new', 'acknowledged', 'resolved', 'suppressed', 'auto_closed_known_fp'] as st}
-            <span class="hb-pill" style:border-color={STATE_COLOR[st] ?? 'var(--st-neutral)'}>
+            <span class="status-pill status-pill--{STATE_PILL[st] ?? 'neutral'}">
               {st}: {byState[st] ?? 0}
             </span>
           {/each}
-          <span class="hb-pill hb-pill--total">total: {lc.stats.total}</span>
+          <span class="status-pill">total: {lc.stats.total}</span>
         </div>
 
         {#if activeFindings.length > 0}
@@ -316,7 +337,7 @@
     <!-- ── Tuning status ── -->
     {#if d.tuning}
       <section class="chart-card">
-        <h2>Self-Tuning</h2>
+        <h2>Self-tuning</h2>
         {#if !d.tuning.enabled}
           <p class="empty">Tuning disabled (set NOUS_HEARTBEAT_TUNING_ENABLED=true)</p>
         {:else if d.tuning.last_report}
@@ -338,7 +359,7 @@
     <!-- ── Findings timeline + cognitive sessions ── -->
     <div class="chart-row">
       <section class="chart-card">
-        <h2>Findings (Last 24h)</h2>
+        <h2>Findings (last 24h)</h2>
         {#if d.findings_timeline.length > 0}
           <div class="timeline">
             {#each d.findings_timeline as f}
@@ -361,7 +382,7 @@
       </section>
 
       <section class="chart-card">
-        <h2>Cognitive Sessions</h2>
+        <h2>Cognitive sessions</h2>
         {#if d.cognitive_sessions.length > 0}
           <DataTable
             columns={sessionCols}
@@ -389,6 +410,7 @@
 {/if}
 
 <style>
+  .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   .view-head {
     display: flex;
     align-items: flex-start;
@@ -398,15 +420,10 @@
   }
 
   h1 {
-    font-size: 1.4rem;
-    font-weight: 700;
-    color: var(--text);
-    margin: 0 0 0.125rem;
-  }
-
-  :global(html[data-look="paper"] [data-ground="paper"]) h1 {
     font-size: 30px;
     font-weight: 650;
+    color: var(--text);
+    margin: 0 0 0.125rem;
     letter-spacing: -0.022em;
   }
 
@@ -437,10 +454,10 @@
     margin-bottom: 1rem;
   }
 
-  .hb-banner--warn { border-color: var(--yellow); }
-  .hb-banner--disabled { opacity: 0.65; }
-  /* Muted pills at 65% are 2.8:1 on the white card: on paper the grey dot and the words "Heartbeat Disabled" say it. */
-  :global(html[data-look="paper"] [data-ground="paper"]) .hb-banner--disabled { opacity: 1; }
+  /* The banner stays white in every state, so each fact reads as a pill (on a warn tint the warn pills vanished into
+     it); a tripped breaker is a pill of its own, in words, beside the yellow dot (design batch 2). */
+  /* A disabled banner is not dimmed (its muted pills at 65% were 2.8:1 on the white card): the grey dot and the words
+     "Heartbeat Disabled" say it. */
 
   .hb-dot {
     width: 10px;
@@ -448,8 +465,8 @@
     border-radius: 50%;
     flex-shrink: 0;
   }
-  .hb-dot--ok { background: var(--st-completed); box-shadow: 0 0 var(--glow-blur) color-mix(in srgb, var(--st-completed) 60%, transparent); }
-  .hb-dot--warn { background: var(--yellow); box-shadow: 0 0 var(--glow-blur) color-mix(in srgb, var(--yellow) 60%, transparent); }
+  .hb-dot--ok { background: var(--st-completed); }
+  .hb-dot--warn { background: var(--yellow); }
   .hb-dot--off { background: var(--st-neutral); }
 
   .hb-banner-label {
@@ -466,20 +483,7 @@
     margin-left: auto;
   }
 
-  .hb-pill {
-    font-size: 0.75rem;
-    padding: 0.125rem 0.5rem;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    color: var(--muted);
-    white-space: nowrap;
-  }
-  .hb-pill--ok { border-color: var(--st-completed); color: var(--st-completed); }
-  .hb-pill--warn { border-color: var(--yellow); color: var(--hb-warn-ink); }
-  .hb-pill--bad { border-color: var(--red); color: var(--err-text); }
-  .hb-pill--total { opacity: 0.6; }
-  /* Muted text at 60% is 2.5:1 on the white card: the paper ground shows the total at full strength. */
-  :global(html[data-look="paper"] [data-ground="paper"]) .hb-pill--total { opacity: 1; }
+  /* The pills are app.css's .status-pill (one tinted pill on every screen). The total is not dimmed. */
 
   /* ── Layout ── */
   .chart-row {

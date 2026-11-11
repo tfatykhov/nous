@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Button } from '../lib/ui/button';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -21,6 +22,8 @@
       60_000,
     ),
   );
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
+  const refreshPage = () => store.refresh();
   let first = true;
   $effect(() => {
     void days;
@@ -28,10 +31,12 @@
     void store.refresh();
   });
 
-  // Bar, swatch and share colours are tokens, set on the element as --fill and painted by the stylesheet (dark: the old
-  // literals). An outcome bar sits beside its label; the shares have a legend and an accessible name.
+  // Bar, swatch and share colours are tokens, set on the element as --fill and painted by the stylesheet. An outcome bar
+  // sits beside its label; the shares have a legend and an accessible name.
+  /** A job fix's state as a status pill: in progress is info, the rest by its tone. */
+  const FIX_PILL: Record<string, string> = { live: 'info', ok: 'ok', warn: 'warn', muted: 'neutral' };
   const OUTCOME_TOKEN: Record<string, string> = {
-    done_verified: '--green', done_checked: '--series-2', done_self: '--series-1', partial: '--stat-warn', failed: '--red', not_scored: '--muted',
+    done_verified: '--green', done_checked: '--series-2', done_self: '--series-1', partial: '--warn-text', failed: '--red', not_scored: '--muted',
   };
   const CONTEXT_TOKEN: Record<string, string> = { owner_present: '--series-1', approved: '--series-2', autonomous: '--series-4' };
   const fill = (token: string | undefined) => `var(${token ?? '--muted'})`;
@@ -108,6 +113,7 @@
     <FilterBar label="Window" required bind:value={days}
       options={[{ value: '7', label: '7 d' }, { value: '30', label: '30 d' }, { value: '90', label: '90 d' }]} />
     <StaleBadge state={$store} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading}>{$store.loading ? 'Loading…' : 'Refresh'}</Button>
   </div>
 </header>
 
@@ -189,7 +195,7 @@
           </div>
         {/each}
       </div>
-      <div class="table-wrap">
+      <div class="table-wrap table-scroll">
       <table class="stats nums">
         <caption class="label">Scores (−1 to 1) · settled: {settledSpan(ts.settled_window)}</caption>
         <thead><tr><th scope="col"></th><th scope="col">Count</th><th scope="col">Mean</th><th scope="col">p10</th><th scope="col">p50</th><th scope="col">p90</th><th scope="col">Overrides</th></tr></thead>
@@ -211,7 +217,7 @@
       <h2 id="rollups-title">DAG runs and intentions</h2>
       <span class="small muted">Counted apart: never added into a subtask's score</span>
     </div>
-    <div class="table-wrap">
+    <div class="table-wrap table-scroll">
       <table class="stats nums">
         <thead>
           <tr>
@@ -265,7 +271,7 @@
         {#if d.decision_grades.length === 0}
           <p class="empty">No decisions graded in this window.</p>
         {:else}
-          <div class="table-wrap">
+          <div class="table-wrap table-scroll">
           <table class="stats">
             <thead><tr><th scope="col">Reviewer</th><th scope="col">Outcome</th><th scope="col">Count</th></tr></thead>
             <tbody>
@@ -310,7 +316,7 @@
             {#if successes(t) === 0}
               <span class="small muted">no successful run</span>
             {:else}
-              <span class="pill" class:pill-warn={t.de_facto_level !== 'L0'}>{LEVEL_LABEL[t.de_facto_level] ?? t.de_facto_level}</span>
+              <span class="status-pill" class:status-pill--warn={t.de_facto_level !== 'L0'}>{LEVEL_LABEL[t.de_facto_level] ?? t.de_facto_level}</span>
             {/if}
           {:else if c.key === 'undo'}
             <span class="small" class:muted={!t.compensable}>{t.compensable ? 'yes' : 'no'}</span>
@@ -326,6 +332,7 @@
         {/snippet}
       </DataTable>
     {/if}
+    <div class="table-scroll">
     <table class="stats censors nums">
       <caption class="label">Censors, last {d.inventory.censors.days} d</caption>
       <thead><tr><th scope="col">Written by</th><th scope="col">Created</th><th scope="col">Deactivated</th></tr></thead>
@@ -335,6 +342,7 @@
         {/each}
       </tbody>
     </table>
+    </div>
   </section>
 
   <section class="panel" aria-labelledby="fix-title">
@@ -357,7 +365,7 @@
             <span class="job" title={r.job}>{r.job}</span>
           {:else if c.key === 'state'}
             {@const s = fixState(r)}
-            <span class="pill fix-{s.tone}">{s.label}</span>
+            <span class="status-pill status-pill--{FIX_PILL[s.tone]}">{s.label}</span>
           {:else if c.key === 'why'}
             {@const before = fixBaseline(r)}
             <span class="small">{r.trigger ? FIX_TRIGGER_LABEL[r.trigger] ?? r.trigger : '—'}</span>
@@ -431,15 +439,15 @@
     {:else if g.schedules.length === 0 && !g.other}
       <p class="small muted">No schedule has a guard.</p>
     {:else}
-      <div class="table-wrap">
+      <div class="table-wrap table-scroll">
         <table class="stats guards">
           <thead><tr><th scope="col">Job</th><th scope="col">Guard</th><th scope="col">Mode</th><th scope="col">Runs</th><th scope="col">Skipped</th><th scope="col">Would skip</th><th scope="col">Shadow misses</th></tr></thead>
           <tbody>
             {#each g.schedules as s (s.schedule_id)}
               <tr>
                 <th scope="row"><span class="job" title={s.job}>{s.job}</span></th>
-                <td><span class="mono">{s.name ?? '—'}</span>{#if !s.allowlisted}{' '}<span class="pill pill-warn">not allowlisted</span>{/if}</td>
-                <td><span class="pill" class:pill-warn={s.mode !== 'shadow' && s.mode !== 'skip'}>{guardMode(s.mode)}</span></td>
+                <td><span class="mono">{s.name ?? '—'}</span>{#if !s.allowlisted}{' '}<span class="status-pill status-pill--warn">not allowlisted</span>{/if}</td>
+                <td><span class="status-pill" class:status-pill--warn={s.mode !== 'shadow' && s.mode !== 'skip'}>{guardMode(s.mode)}</span></td>
                 <td>{s.runs}</td>
                 <td>{s.skipped}</td>
                 <td>{s.would_skip}</td>
@@ -464,18 +472,18 @@
       </div>
     {/if}
     {#if g.checks.length > 0}
-      <div class="table-wrap">
+      <div class="table-wrap table-scroll">
         <table class="stats guards" data-testid="guard-checks">
           <thead><tr><th scope="col">Heartbeat check</th><th scope="col">Guard</th><th scope="col">Mode</th><th scope="col">Runs</th><th scope="col">Skipped</th><th scope="col">Would skip</th><th scope="col">Shadow misses</th></tr></thead>
           <tbody>
             {#each g.checks as c (c.check_id)}
               <tr>
-                <th scope="row"><span class="mono">{c.check ?? c.check_id}</span>{#if c.enabled === false}{' '}<span class="pill">disabled</span>{/if}</th>
+                <th scope="row"><span class="mono">{c.check ?? c.check_id}</span>{#if c.enabled === false}{' '}<span class="status-pill">disabled</span>{/if}</th>
                 <td>
                   {#if c.mode === null}<span class="small muted">guard removed</span>
-                  {:else}<span class="mono">{c.name ?? '—'}</span>{#if !c.allowlisted}{' '}<span class="pill pill-warn">not allowlisted</span>{/if}{/if}
+                  {:else}<span class="mono">{c.name ?? '—'}</span>{#if !c.allowlisted}{' '}<span class="status-pill status-pill--warn">not allowlisted</span>{/if}{/if}
                 </td>
-                <td>{#if c.mode !== null}<span class="pill" class:pill-warn={c.mode !== 'shadow' && c.mode !== 'skip'}>{guardMode(c.mode)}</span>{:else}—{/if}</td>
+                <td>{#if c.mode !== null}<span class="status-pill" class:status-pill--warn={c.mode !== 'shadow' && c.mode !== 'skip'}>{guardMode(c.mode)}</span>{:else}—{/if}</td>
                 <td>{c.runs}</td>
                 <td>{c.skipped}</td>
                 <td>{c.would_skip}</td>
@@ -513,7 +521,7 @@
       {/if}
     {/snippet}
     {#snippet guardRecords(rows: GuardRecord[], caption?: string)}
-      <div class="table-wrap">
+      <div class="table-wrap table-scroll">
         <!-- Command output and job text: plain text interpolation only, never {@html}. -->
         <table class="stats guards">
           {#if caption}<caption class="label">{caption}</caption>{/if}
@@ -549,7 +557,7 @@
     {:else if d.warn_classes.length === 0}
       <p class="empty">Nothing flagged in this window.</p>
     {:else}
-      <div class="table-wrap">
+      <div class="table-wrap table-scroll">
       <DataTable columns={warnCols} rows={d.warn_classes}
         rowKey={(r: AutonomyData['warn_classes'][number]) => JSON.stringify([r.mode, r.context_kind, r.violation, r.tool_name])}>
         {#snippet cell(r: AutonomyData['warn_classes'][number], c: { key: string })}
@@ -578,17 +586,16 @@
 <style>
   .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
-  h1 { font-size: 1.375rem; font-weight: 700; margin: 0 0 0.25rem; }
-  :global(html[data-look="paper"] [data-ground="paper"]) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
+  h1 { font-size: 30px; font-weight: 650; margin: 0 0 0.25rem; letter-spacing: -0.022em; line-height: 1.15; }
   h2 { font-size: 0.9375rem; font-weight: 600; margin: 0; }
   .subtitle { font-size: 0.8125rem; color: var(--muted); margin: 0; }
   .strip { display: flex; justify-content: space-between; align-items: center; gap: 1rem 2rem; flex-wrap: wrap;
     padding: 0.875rem 1.125rem; border-radius: var(--card-radius); border: 1px solid; margin-bottom: 1rem; }
   /* Status by token: the alphas of the old literals are the mix percentages (dark identical). */
-  .verdict-warn { color: var(--stat-warn); border-color: color-mix(in srgb, var(--stat-warn) 35%, transparent);
-    background: color-mix(in srgb, var(--stat-warn) 8%, transparent); }
-  .verdict-ok { color: var(--stat-ok); border-color: color-mix(in srgb, var(--stat-ok) 35%, transparent);
-    background: color-mix(in srgb, var(--stat-ok) 8%, transparent); }
+  .verdict-warn { color: var(--warn-text); border-color: color-mix(in srgb, var(--warn-text) 35%, transparent);
+    background: color-mix(in srgb, var(--warn-text) 8%, transparent); }
+  .verdict-ok { color: var(--ok-text); border-color: color-mix(in srgb, var(--ok-text) 35%, transparent);
+    background: color-mix(in srgb, var(--ok-text) 8%, transparent); }
   .verdict-bad { color: var(--err-text); border-color: color-mix(in srgb, var(--tone-bad) 50%, transparent);
     background: color-mix(in srgb, var(--tone-bad) 10%, transparent); margin: 0 0 1rem; }
   .verdict-bad .verdict-title { font-size: 1rem; }
@@ -597,7 +604,7 @@
   .verdict-detail { font-size: 0.8125rem; color: var(--text); margin-top: 0.125rem; }
   .strip-meta { display: flex; gap: 1.5rem; flex-wrap: wrap; margin: 0; }
   .strip-meta dt, .tiles dt, .triple dt, .detail dt, .label { font-size: 0.6875rem; font-weight: 600; color: var(--muted);
-    text-transform: var(--label-transform); letter-spacing: var(--label-tracking); }
+    text-transform: none; letter-spacing: 0; }
   .strip-meta dd { margin: 0.125rem 0 0; font-size: 0.8125rem; color: var(--text); }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 1rem; }
   .card, .panel { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow);
@@ -625,11 +632,10 @@
   .stats caption { text-align: left; padding-bottom: 0.375rem; }
   .stats th, .stats td { padding: 0.375rem 0.5rem; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
   .stats th:first-child, .stats td:first-child { text-align: left; }
-  .stats thead th { font-size: 0.6875rem; font-weight: 600; color: var(--muted); }
-  /* The paper look's dense table (the prototype's): a 12px header, numbers in the narrow width. */
-  :global(html[data-look="paper"] [data-ground="paper"]) .stats thead th { font-size: 12px; }
+  /* The dense table (the prototype's): a 12px header, numbers in the narrow width. */
+  .stats thead th { font-size: 12px; font-weight: 600; color: var(--muted); }
   /* Only the all-number tables (.nums): the run-guard and grade tables hold words and pills. */
-  :global(html[data-look="paper"] [data-ground="paper"]) .nums td:not(:first-child) { font-stretch: 85%; }
+  .nums td:not(:first-child) { font-stretch: 85%; }
   .censors { margin-top: 1.25rem; max-width: 28rem; }
   .guards { margin-bottom: 1rem; }
   .guards td.wrap { white-space: normal; text-align: left; min-width: 12rem; }
@@ -644,12 +650,7 @@
     background: var(--fill); }
   .stack { display: flex; width: 8rem; max-width: 100%; height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
   .stack > div { background: var(--fill); }
-  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.6875rem; font-weight: 600;
-    border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
-  .pill-warn { color: var(--st-partial); border-color: color-mix(in srgb, var(--st-partial) 50%, transparent); }
-  .fix-live { color: var(--accent); border-color: var(--accent); }
-  .fix-ok { color: var(--stat-ok); border-color: color-mix(in srgb, var(--stat-ok) 50%, transparent); }
-  .fix-warn { color: var(--st-partial); border-color: color-mix(in srgb, var(--st-partial) 50%, transparent); }
+  /* The states and levels are app.css's .status-pill (one tinted pill on every screen). */
   /* Two lines at most. It wraps anywhere, because an unbreakable line would widen the page on a phone (min-content). */
   .job { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
     overflow-wrap: anywhere; max-width: 28rem; font-size: 0.8125rem; }

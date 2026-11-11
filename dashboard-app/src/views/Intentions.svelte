@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { fmtUtc } from '../lib/harness';
+  import { Button } from '../lib/ui/button';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -17,6 +19,8 @@
       30_000,
     ),
   );
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
+  const refreshPage = () => store.refresh();
   let first = true;
   $effect(() => {
     void windowSel; void stateSel;
@@ -24,7 +28,7 @@
     void store.refresh();
   });
   const fmt = (n: number) => n.toLocaleString('en-US');
-  const when = (iso: string | null) => (iso ? iso.replace('T', ' ').slice(0, 16) + ' UTC' : '—');
+  const when = (iso: string | null) => fmtUtc(iso);
   const pretty = (v: unknown) => JSON.stringify(v);
 </script>
 
@@ -54,6 +58,7 @@
     <FilterBar label="Roots" required bind:value={stateSel}
       options={[{ value: 'all', label: 'All' }, { value: 'open', label: 'Open' }]} />
     <StaleBadge state={$store} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading}>{$store.loading ? 'Loading…' : 'Refresh'}</Button>
   </div>
 </header>
 
@@ -83,7 +88,7 @@
         {m.stalls.stall_escalations} ended by the stall budget.
       </p>
       <p class="small muted">{m.arrivals_ungradable} arrivals have no decision record, so calibration cannot grade them.</p>
-      <div class="scroll">
+      <div class="scroll table-scroll">
         <table>
           <caption>Arrivals by decision and outcome</caption>
           <thead><tr><th>Decision</th><th>Outcome</th><th>Gate</th><th>Count</th></tr></thead>
@@ -94,7 +99,7 @@
           </tbody>
         </table>
       </div>
-      <div class="scroll">
+      <div class="scroll table-scroll">
         <table>
           <caption>Why chains were escalated</caption>
           <thead><tr><th>Cause</th><th>Count</th></tr></thead>
@@ -114,7 +119,7 @@
         continuation turns only (subtask and DAG sessions have their own ids), so it is not the whole of the budget
         column. The budget does not count cached tokens (issue 744), which is what this page is evidence for.
       </p>
-      <div class="scroll">
+      <div class="scroll table-scroll">
         <table>
           <caption>Budget count against context log</caption>
           <thead><tr><th>Root</th><th>Budget total</th><th>Arrivals out</th><th>Failed (in + out)</th><th>Log output</th><th>Log cache read</th><th>Output not in an arrival</th></tr></thead>
@@ -164,7 +169,7 @@
           {/if}
           {#if root.children.length > 0}<ul class="tree">{#each root.children as c (c.id)}{@render node(c)}{/each}</ul>{/if}
           {#if root.arrivals.length > 0}
-            <div class="scroll">
+            <div class="scroll table-scroll">
               <table>
                 <caption>Arrivals</caption>
                 <thead><tr><th>n</th><th>Decision</th><th>Outcome</th><th>Gate</th><th>Progress</th><th>Graded</th><th>Latency</th><th>Note</th></tr></thead>
@@ -182,7 +187,7 @@
             </div>
           {/if}
           {#if root.proposals.length > 0}
-            <div class="scroll">
+            <div class="scroll table-scroll">
               <table>
                 <caption>Proposals</caption>
                 <thead><tr><th>Id</th><th>Tool</th><th>State</th><th>Why</th><th>Arguments</th><th>Result</th></tr></thead>
@@ -195,7 +200,7 @@
             </div>
           {/if}
           {#if root.owner_rows.length > 0}
-            <div class="scroll">
+            <div class="scroll table-scroll">
               <table>
                 <caption>Messages to the owner</caption>
                 <thead><tr><th>Kind</th><th>Title</th><th>Created</th><th>Pushed</th><th>Delivered</th></tr></thead>
@@ -220,12 +225,11 @@
 <style>
   .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
-  h1 { font-size: 1.375rem; font-weight: 700; margin: 0 0 0.25rem; }
-  :global(html[data-look="paper"] [data-ground="paper"]) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
+  h1 { font-size: 30px; font-weight: 650; margin: 0 0 0.25rem; letter-spacing: -0.022em; line-height: 1.15; }
   h2 { font-size: 0.9375rem; font-weight: 600; margin: 0 0 0.75rem; }
   .subtitle { font-size: 0.8125rem; color: var(--muted); margin: 0; }
-  .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--notice-bg);
-    border: 1px solid var(--notice-border); font-size: 0.8125rem; margin-bottom: 1rem; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--warn-bg);
+    border: 1px solid var(--warn-border); font-size: 0.8125rem; margin-bottom: 1rem; }
   .notice code { font-family: var(--font-mono); font-size: 0.75rem; }
   .panel { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow);
     padding: 1.25rem; margin-top: 1.25rem; }
@@ -233,18 +237,22 @@
   .small { font-size: 0.75rem; }
   .muted { color: var(--muted); }
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0.75rem; margin: 0 0 1rem; }
-  .tiles div { border: var(--card-border); border-radius: var(--card-radius-sm); padding: 0.625rem 0.75rem; }
-  /* On paper the tile border is clear, so a tile is a soft fill inside the white panel. */
-  :global(html[data-look="paper"] [data-ground="paper"]) .tiles div { background: var(--wash); }
-  .tiles dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking); }
+  /* The tile border is clear, so a tile is a soft fill inside the white panel. */
+  .tiles div { border: var(--card-border); border-radius: var(--card-radius-sm); padding: 0.625rem 0.75rem; background: var(--wash); }
+  .tiles dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: none;
+    letter-spacing: 0; }
   .tiles dd { margin: 0.25rem 0 0; font-size: 1.25rem; font-weight: 700; }
+  @media (max-width: 640px) {
+    /* Two up on a phone, an odd last tile across: one per row made eight tiles a long column. */
+    .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .tiles > div:last-child:nth-child(odd) { grid-column: 1 / -1; }
+  }
   .scroll { overflow-x: auto; margin-top: 0.75rem; }
   table { border-collapse: collapse; width: 100%; font-size: 0.8125rem; }
   caption { text-align: left; font-weight: 600; padding-bottom: 0.375rem; }
   th, td { text-align: left; padding: 0.25rem 0.625rem 0.25rem 0; border-bottom: 1px solid var(--border); vertical-align: top; }
-  /* The paper look's dense table header (the prototype's): 12px, semibold, secondary ink. */
-  :global(html[data-look="paper"] [data-ground="paper"]) thead th { font-size: 12px; font-weight: 600; color: var(--muted); }
+  /* The dense table header (the prototype's): 12px, semibold, secondary ink. */
+  thead th { font-size: 12px; font-weight: 600; color: var(--muted); }
   .tree, .tree ul { list-style: none; padding-left: 1.25rem; }
   .row { display: flex; gap: 0.5rem; align-items: baseline; flex-wrap: wrap; }
   .intent { overflow-wrap: anywhere; }

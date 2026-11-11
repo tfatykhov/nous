@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtDay } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -20,7 +21,7 @@
   // ── Helpers ──────────────────────────────────────────────────────────────
 
   const OUTCOME_ORDER = ['success', 'partial', 'failure', 'pending'] as const;
-  // Chart colours are tokens that Chart.svelte resolves against the canvas's ground (dark: the old literals). The
+  // Chart colours are tokens that Chart.svelte resolves against the canvas's ground. The
   // outcomes take the Overview's decision-outcome palette (success and failure apart from partial and from each other
   // under red-green colour blindness); the violet marks --series-0, not the accent, whose paper value is the question
   // frame's blue.
@@ -38,8 +39,8 @@
   }
 
   function fmtDate(iso: string): string {
-    // Show MM-DD from YYYY-MM-DD
-    return iso.length >= 10 ? iso.slice(5, 10) : iso;
+    // The one day format, "Oct 20" (finish review fix 4)
+    return fmtDay(iso);
   }
 
   function brierClass(b: number | null): 'good' | 'warn' | 'bad' | 'neutral' {
@@ -103,14 +104,14 @@
 
 <header class="view-head">
   <div>
-    <h1>Decision Intelligence</h1>
-    <p class="subtitle">Calibration, confidence, and reasoning analytics</p>
+    <h1>Decisions</h1>
+    <p class="subtitle">How well calibrated the decisions are, how confident, and how they were reasoned.</p>
   </div>
   <div class="head-right">
+    <StaleBadge state={$store} />
     <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void store.refresh()} disabled={$store.loading}>
       {$store.loading ? 'Loading…' : 'Refresh'}
     </Button>
-    <StaleBadge state={$store} />
   </div>
 </header>
 
@@ -126,24 +127,24 @@
     { label: 'Reviewed (30d)',   value: totals.reviewed.toLocaleString() },
     { label: 'Accuracy (30d)',   value: accuracy != null ? (accuracy * 100).toFixed(1) + '%' : '—' },
     { label: 'Brier score',      value: brier != null ? brier.toFixed(3) : '—' },
-  ]} />
-
-  <!-- Brier colour-coded indicator card -->
-  <div class="indicator-row">
-    <div class="stat-card">
-      <div class="stat-value">
-        <span class="indicator {brierClass(brier)}"></span>
-        {brier != null ? brier.toFixed(4) : '—'}
-        {#if BRIER_WORD[brierClass(brier)]}<span class="indicator-word">{BRIER_WORD[brierClass(brier)]}</span>{/if}
+  ]}>
+    <!-- The Brier tile, colour-coded and said in a word: in the same grid, so no row is left with one tile -->
+    {#snippet extra()}
+      <div class="stat-card">
+        <div class="stat-value">
+          <span class="indicator {brierClass(brier)}"></span>
+          {brier != null ? brier.toFixed(4) : '—'}
+          {#if BRIER_WORD[brierClass(brier)]}<span class="indicator-word">{BRIER_WORD[brierClass(brier)]}</span>{/if}
+        </div>
+        <div class="stat-label">Latest Brier score (lower is better)</div>
       </div>
-      <div class="stat-label">Latest Brier score (lower is better)</div>
-    </div>
-  </div>
+    {/snippet}
+  </StatGrid>
 
   <!-- ── Row 1: Calibration curve + Confidence histogram ───────────────── -->
   <div class="chart-row">
     <section class="chart-card">
-      <h2>Calibration Curve</h2>
+      <h2>Calibration curve</h2>
       {#if d.calibration_curve.length > 0}
         <Chart
           type="line"
@@ -151,7 +152,7 @@
             labels: d.calibration_curve.map((p) => p.bucket),
             datasets: [
               {
-                label: 'Actual Success Rate',
+                label: 'Actual success rate',
                 data: d.calibration_curve.map((p) => p.actual_success_rate),
                 borderColor: MARK,
                 backgroundColor: tint('--series-0', 0.1),
@@ -174,8 +175,8 @@
           }}
           options={{
             scales: {
-              x: { title: { display: true, text: 'Predicted Confidence' } },
-              y: { title: { display: true, text: 'Actual Success Rate' }, min: 0, max: 1 },
+              x: { title: { display: true, text: 'Predicted confidence' } },
+              y: { title: { display: true, text: 'Actual success rate' }, min: 0, max: 1 },
             },
             plugins: { legend: { display: false } },
           }}
@@ -187,7 +188,7 @@
     </section>
 
     <section class="chart-card">
-      <h2>Confidence Distribution</h2>
+      <h2>Confidence distribution</h2>
       {#if d.confidence_histogram.length > 0}
         <Chart
           type="bar"
@@ -203,7 +204,7 @@
           }}
           options={{
             scales: {
-              x: { title: { display: true, text: 'Confidence Range' }, grid: { display: false } },
+              x: { title: { display: true, text: 'Confidence range' }, grid: { display: false } },
               y: { beginAtZero: true, ticks: { precision: 0 }, title: { display: true, text: 'Count' } },
             },
             plugins: { legend: { display: false } },
@@ -219,7 +220,7 @@
   <!-- ── Row 2: Outcome by category + Outcome by stakes ────────────────── -->
   <div class="chart-row">
     <section class="chart-card">
-      <h2>Outcome by Category</h2>
+      <h2>Outcome by category</h2>
       {#if Object.keys(d.outcome_by_category).length > 0}
         {@const chart = buildStackedOutcomeChart(d.outcome_by_category)}
         <Chart
@@ -240,7 +241,7 @@
     </section>
 
     <section class="chart-card">
-      <h2>Outcome by Stakes</h2>
+      <h2>Outcome by stakes</h2>
       {#if Object.keys(d.outcome_by_stakes).length > 0}
         {@const chart = buildStackedOutcomeChart(d.outcome_by_stakes)}
         <Chart
@@ -263,7 +264,7 @@
 
   <!-- ── Row 3: Reason type usage (full width) ─────────────────────────── -->
   <section class="chart-card">
-    <h2>Reason Type Usage</h2>
+    <h2>Reason type usage</h2>
     {#if Object.keys(d.reason_type_stats).length > 0}
       {@const r = buildReasonChart(d.reason_type_stats)}
       <Chart
@@ -271,7 +272,7 @@
         data={{
           labels: r.labels,
           datasets: [{
-            label: 'Usage Count',
+            label: 'Usage count',
             data: r.data,
             backgroundColor: tint('--series-0', 0.5),
             borderColor: MARK,
@@ -296,14 +297,14 @@
   <!-- ── Row 4: Brier score over time + Decisions per day ──────────────── -->
   <div class="chart-row">
     <section class="chart-card">
-      <h2>Brier Score Over Time</h2>
+      <h2>Brier score over time</h2>
       {#if d.brier_history.length > 0}
         <Chart
           type="line"
           data={{
             labels: d.brier_history.map((p) => fmtDate(p.date)),
             datasets: [{
-              label: 'Brier Score',
+              label: 'Brier score',
               data: d.brier_history.map((p) => p.brier_score),
               borderColor: MARK,
               backgroundColor: tint('--series-0', 0.1),
@@ -316,7 +317,7 @@
           options={{
             scales: {
               x: { ticks: { maxTicksLimit: 10 }, grid: { display: false } },
-              y: { title: { display: true, text: 'Brier Score (lower is better)' }, min: 0, max: 0.5 },
+              y: { title: { display: true, text: 'Brier score (lower is better)' }, min: 0, max: 0.5 },
             },
             plugins: { legend: { display: false } },
           }}
@@ -328,7 +329,7 @@
     </section>
 
     <section class="chart-card">
-      <h2>Decisions Per Day</h2>
+      <h2>Decisions per day</h2>
       {#if d.daily_decisions.length > 0}
         <Chart
           type="bar"
@@ -337,9 +338,7 @@
             datasets: [{
               label: 'Decisions',
               data: d.daily_decisions.map((p) => p.count),
-              backgroundColor: tint('--series-3', 0.5),
-              borderColor: 'var(--series-3)',
-              borderWidth: 1,
+              backgroundColor: tint('--series-0', 0.5),
             }],
           }}
           options={{
@@ -377,16 +376,10 @@
   }
 
   h1 {
-    font-size: 1.4rem;
-    font-weight: 700;
-    color: var(--text);
-    margin: 0 0 0.125rem;
-  }
-
-  /* The paper look's title size; the dark title keeps the rule above. */
-  :global(html[data-look="paper"] [data-ground="paper"]) h1 {
     font-size: 30px;
     font-weight: 650;
+    color: var(--text);
+    margin: 0 0 0.125rem;
     letter-spacing: -0.022em;
     line-height: 1.15;
   }
@@ -411,13 +404,6 @@
     flex-shrink: 0;
   }
 
-  /* Brier indicator card */
-  .indicator-row {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap: 1rem;
-    margin-top: 1rem;
-  }
 
   /* A copy of StatGrid's card, by the same tokens. */
   .stat-card {
@@ -445,8 +431,8 @@
     font-size: 0.75rem;
     font-weight: 500;
     color: var(--muted);
-    text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking);
+    text-transform: none;
+    letter-spacing: 0;
   }
 
   .indicator {
@@ -482,9 +468,6 @@
 
   @media (max-width: 640px) {
     .chart-row {
-      grid-template-columns: 1fr;
-    }
-    .indicator-row {
       grid-template-columns: 1fr;
     }
   }

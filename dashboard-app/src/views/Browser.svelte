@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtUtc } from '../lib/harness';
   import { onMount } from 'svelte';
   import { apiGet, apiSend } from '../lib/api';
   import DataTable from '../lib/ui/DataTable.svelte';
@@ -145,7 +146,7 @@
 
   function fmtDate(iso: string | null | undefined): string {
     if (!iso) return '—';
-    return new Date(iso).toLocaleDateString([], { dateStyle: 'short' });
+    return fmtUtc(iso);
   }
 
   function fmtPct(v: number | null | undefined): string {
@@ -213,13 +214,6 @@
   }
 </script>
 
-<header class="view-head">
-  <div>
-    <h1>Memory Browser</h1>
-    <p class="subtitle">Search and explore all memory types</p>
-  </div>
-</header>
-
 <!-- ── Tab bar ─────────────────────────────────────────────────────────── -->
 <div class="tab-bar" role="tablist">
   {#each TABS as tab}
@@ -234,6 +228,14 @@
     </button>
   {/each}
 </div>
+
+<header class="view-head">
+  <div>
+    <h1>Browse</h1>
+    <p class="subtitle">Search and read every kind of memory.</p>
+  </div>
+</header>
+
 
 <!-- ── Tab content ──────────────────────────────────────────────────────── -->
 <div class="tab-body">
@@ -261,6 +263,7 @@
       {:else}
         <div class="table-card">
         <DataTable
+          mode="cards"
           columns={[
             { key: 'content_short',  label: 'Content' },
             { key: 'category',       label: 'Category' },
@@ -324,6 +327,7 @@
       {:else}
         <div class="table-card">
         <DataTable
+          mode="cards"
           columns={[
             { key: 'title_fmt',     label: 'Title' },
             { key: 'summary_short', label: 'Summary' },
@@ -345,7 +349,7 @@
               <span class="dl">Outcome</span><span>{row.outcome ?? '—'}</span>
               <span class="dl">Started</span><span>{fmtDate(row.started_at)}</span>
               {#if row.structured_summary?.key_points?.length}
-                <span class="dl">Key Points</span>
+                <span class="dl">Key points</span>
                 <span>{(row.structured_summary.key_points as string[]).join('; ')}</span>
               {/if}
               {#if row.structured_summary?.outcome_rationale}
@@ -395,6 +399,7 @@
       {:else}
         <div class="table-card">
         <DataTable
+          mode="cards"
           columns={[
             { key: 'desc_short',  label: 'Description' },
             { key: 'category',    label: 'Category' },
@@ -470,6 +475,7 @@
       {:else}
         <div class="table-card">
         <DataTable
+          mode="cards"
           columns={[
             { key: 'name_short', label: 'Name' },
             { key: 'domain',     label: 'Domain' },
@@ -530,6 +536,7 @@
       {:else}
         <div class="table-card">
         <DataTable
+          mode="cards"
           columns={[
             { key: 'trigger_short', label: 'Trigger' },
             { key: 'action',        label: 'Action' },
@@ -555,7 +562,7 @@
               <span class="dl">Reason</span><span>{row.reason}</span>
               <span class="dl">Domain</span><span>{row.domain ?? '—'}</span>
               <span class="dl">Activations</span><span>{row.activation_count}</span>
-              <span class="dl">False Positives</span><span>{row.false_positive_count}</span>
+              <span class="dl">False positives</span><span>{row.false_positive_count}</span>
               <span class="dl">ID</span><span class="mono">{row.id}</span>
             </div>
 
@@ -647,6 +654,7 @@
       {:else}
         <div class="table-card">
         <DataTable
+          mode="cards"
           columns={[
             { key: 'content_short', label: 'Content' },
             { key: 'chunk_index',   label: 'Idx' },
@@ -664,7 +672,7 @@
           {#snippet detail(row: BrowserChunk)}
             <div class="detail-grid">
               <span class="dl">Content</span><span>{row.content}</span>
-              <span class="dl">Chunk Index</span><span>{row.chunk_index}</span>
+              <span class="dl">Chunk index</span><span>{row.chunk_index}</span>
               <span class="dl">Episode</span><span class="mono">{row.episode_id}</span>
               <span class="dl">Created</span><span>{fmtDate(row.created_at)}</span>
               <span class="dl">ID</span><span class="mono">{row.id}</span>
@@ -688,23 +696,17 @@
 </div>
 
 <style>
-  /* Colours and structure are tokens only (hexGuard). The tabs are the SubNav's pills (an inset accent ring under the
-     dark look, a raised white pill on paper). Paper-only chrome (the 30px title, each table in a white rounded card,
-     the mono font) sits under a paper-ground selector, so the dark look keeps its tables on the page. */
+  /* Colours and structure are tokens only (hexGuard). The tabs are the SubNav's pills (the selected one a raised white
+     pill); each table sits in a white rounded card. */
   .view-head {
     margin-bottom: 1.25rem;
   }
 
   h1 {
-    font-size: 1.4rem;
-    font-weight: 700;
-    color: var(--text);
-    margin: 0 0 0.125rem;
-  }
-
-  :global(html[data-look="paper"] [data-ground="paper"]) h1 {
     font-size: 30px;
     font-weight: 650;
+    color: var(--text);
+    margin: 0 0 0.125rem;
     letter-spacing: -0.022em;
     line-height: 1.15;
   }
@@ -762,9 +764,9 @@
   .search-input {
     flex: 1;
     min-width: 180px;
-    padding: 0.4375rem 0.75rem;
+    padding: 0.4375rem 1rem;
     background: var(--surface);
-    border: 1px solid var(--border);
+    border: 1px solid var(--field-border);
     border-radius: var(--ctl-radius);
     color: var(--text);
     font-size: 0.875rem;
@@ -775,11 +777,7 @@
     border-color: var(--accent);
   }
 
-  :global(html[data-look="paper"] [data-ground="paper"]) .search-input {
-    padding: 0.4375rem 1rem;
-  }
-
-  :global(html[data-look="paper"] [data-ground="paper"]) .search-input:focus-visible {
+  .search-input:focus-visible {
     outline: 2px solid var(--focus-ring);
     outline-offset: 1px;
   }
@@ -797,8 +795,9 @@
   }
 
   .btn:hover:not(:disabled) {
-    border-color: var(--accent);
-    color: var(--accent);
+    border-color: var(--muted);
+    color: var(--text);
+    box-shadow: var(--card-shadow);
   }
 
   .btn:disabled {
@@ -806,15 +805,10 @@
     cursor: not-allowed;
   }
 
-  :global(html[data-look="paper"] [data-ground="paper"]) .btn {
+  /* Anchored on purpose: it out-ranks .btn-sm's later padding, so every button keeps the pill's padding. */
+  :global(html:root .page-ground) .btn {
     padding: 0.4375rem 1rem;
     font-weight: 550;
-  }
-
-  :global(html[data-look="paper"] [data-ground="paper"]) .btn:hover:not(:disabled) {
-    border-color: var(--muted);
-    color: var(--text);
-    box-shadow: var(--card-shadow);
   }
 
   .btn-sm {
@@ -823,7 +817,7 @@
   }
 
   /* ── Tables: a white rounded card on paper ── */
-  :global(html[data-look="paper"] [data-ground="paper"]) .table-card {
+  .table-card {
     background: var(--surface);
     border: var(--card-border);
     border-radius: var(--card-radius);
@@ -892,7 +886,7 @@
     font-size: 0.75rem;
   }
 
-  :global(html[data-look="paper"] [data-ground="paper"]) .tab-body :global(.mono) {
+  .tab-body :global(.mono) {
     font-family: var(--font-mono);
   }
 
@@ -921,21 +915,17 @@
   }
 
   .censor-select {
-    padding: 0.25rem 0.5rem;
+    padding: 0.25rem 0.75rem;
     background: var(--surface);
-    border: 1px solid var(--border);
+    border: 1px solid var(--field-border);
     border-radius: var(--ctl-radius);
     color: var(--text);
     font-size: 0.8125rem;
     cursor: pointer;
   }
 
-  :global(html[data-look="paper"] [data-ground="paper"]) .censor-select {
-    padding: 0.25rem 0.75rem;
-  }
-
-  :global(html[data-look="paper"] [data-ground="paper"]) .censor-label input {
-    accent-color: var(--accent);
+  .censor-label input {
+    accent-color: var(--action);
   }
 
   .save-status {

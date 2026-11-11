@@ -1,16 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, within, waitFor } from '@testing-library/svelte';
+import { render, screen, cleanup, within, waitFor, fireEvent } from '@testing-library/svelte';
 import Health from './Health.svelte';
 import Overview from './Overview.svelte';
 import Observability from './Observability.svelte';
 import { initRouter } from '../lib/router';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { setLook } from '../lib/look';
-import { PAPER_SEL, parseBlocks, styleBlocks } from '../lib/testing/css';
+import { ROOT_SEL, block, parseBlocks, styleBlocks } from '../lib/testing/css';
+import { withAlpha } from '../lib/overviewCharts';
 
 // F108 Phase 2 T12: Graph Health, Density, Admission, Memory write health and the growth charts become one
-// "Memory health" screen with three tabs (Graph, Writes, Growth). Every value below is made up.
+// "Health" screen with three tabs (Graph, Writes, Growth). Every value below is made up.
 
 const HEALTH = {
   daily_edges: [{ date: '2026-11-07', count: 5, auto: 3, manual: 2 }, { date: '2026-11-08', count: 4, auto: 4, manual: 0 }],
@@ -84,11 +84,14 @@ let admission: Record<string, unknown> = ADMISSION;
 let status: Record<string, unknown> = STATUS;
 /** While set, /dashboard/density answers only once it resolves (a slow density endpoint). */
 let densityGate: Promise<void> | null = null;
+/** While set, /dashboard/density fails (a 4xx, so apiGet does not wait out its retries). */
+let densityFails = false;
 function install() {
   urls = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     urls.push(url);
     if (url === '/dashboard/density' && densityGate) await densityGate;
+    if (url === '/dashboard/density' && densityFails) return { ok: false, status: 404, json: async () => ({}) } as Response;
     const body =
       url === '/dashboard/health?days=30' ? HEALTH
       : url === '/dashboard/density' ? DENSITY
@@ -118,23 +121,23 @@ const h2Texts = () => screen.queryAllByRole('heading', { level: 2 }).map((h) => 
 const tabsNav = () => screen.getByRole('navigation', { name: 'Memory health views' });
 
 const GRAPH_HEADINGS = [
-  'Graph Density Over Time', 'Edge Creation Rate', 'Node Degree Distribution', 'Orphan Nodes Over Time',
-  'Auto vs Manual Edges', 'Orphan Breakdown by Type', 'Orphan Rate by Type', 'Edge Distribution',
-  'Backfill Progress (Last 7 Days)',
+  'Graph density over time', 'Edge creation rate', 'Node degree distribution', 'Orphan nodes over time',
+  'Auto vs manual edges', 'Orphan breakdown by type', 'Orphan rate by type', 'Edge distribution',
+  'Backfill progress (last 7 days)',
 ];
 const statLabel = (label: string) => screen.queryAllByText(label, { selector: '.stat-label' });
 const statValue = (label: string) => screen.getByText(label, { selector: '.stat-label' }).previousElementSibling?.textContent?.trim();
-const GROWTH_HEADINGS = ['Memory growth (30 days)', 'Fact categories', 'Fact Growth Rate (7d)'];
+const GROWTH_HEADINGS = ['Memory growth (30 days)', 'Fact categories', 'Fact growth rate (7d)'];
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); obs = OBS; admission = ADMISSION; status = STATUS; densityGate = null; });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); obs = OBS; admission = ADMISSION; status = STATUS; densityGate = null; densityFails = false; });
 
 describe('Memory health: Graph tab', () => {
   for (const hash of ['#/health', '#/health/graph']) {
-    it(`${hash} renders every graph chart exactly once under one "Memory health" title`, async () => {
+    it(`${hash} renders every graph chart exactly once under one "Health" title`, async () => {
       start(hash);
       render(Health);
       for (const name of GRAPH_HEADINGS) await waitFor(() => expect(h2(name)).toHaveLength(1));
-      expect(screen.getAllByRole('heading', { level: 1 }).map((h) => h.textContent?.trim())).toEqual(['Memory health']);
+      expect(screen.getAllByRole('heading', { level: 1 }).map((h) => h.textContent?.trim())).toEqual(['Health']);
       expect(urls).toContain('/dashboard/health?days=30');
       expect(urls).toContain('/dashboard/density');
     });
@@ -148,22 +151,48 @@ describe('Memory health: Graph tab', () => {
     expect(new Set(texts).size).toBe(texts.length);
   });
 
-  it('moves Density\'s tables with their rows, and keeps both sources\' staleness badges', async () => {
+  // Codex round 1 (#904): density fails on a refresh after a good load while health succeeds. The poll store keeps the
+  // old density figures, so the one header badge must say the density refresh failed and how old the data is; Refresh
+  // retries both sources, and a good refresh clears it.
+  it('density failing after a good load, health succeeding: the header badge says so, and Refresh retries both', async () => {
     start('#/health/graph');
     const { container } = render(Health);
-    const edges = (await screen.findByRole('heading', { level: 2, name: 'Edge Distribution' })).closest('section') as HTMLElement;
+    await screen.findByRole('heading', { level: 2, name: 'Edge distribution' });
+    const badge = () => container.querySelector('.view-head .stale-badge') as HTMLElement;
+    await waitFor(() => expect(badge().textContent).toMatch(/^\s*updated /));
+    const calls = (u: string) => urls.filter((x) => x === u).length;
+    const [health0, density0] = [calls('/dashboard/health?days=30'), calls('/dashboard/density')];
+    densityFails = true;
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(badge().textContent).toMatch(/graph density failed/));
+    expect(badge().classList.contains('error')).toBe(true);
+    expect(badge().textContent).toMatch(/data from \d+s ago/);
+    expect(calls('/dashboard/health?days=30')).toBe(health0 + 1);
+    expect(calls('/dashboard/density')).toBe(density0 + 1);
+    expect(screen.getByRole('heading', { level: 2, name: 'Edge distribution' })).toBeTruthy(); // the old figures stay, marked
+    densityFails = false;
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(badge().textContent).toMatch(/^\s*updated /));
+    expect(badge().classList.contains('error')).toBe(false);
+  });
+
+  it('moves Density\'s tables with their rows; "updated" is said once, in the header (finish review fix 8)', async () => {
+    start('#/health/graph');
+    const { container } = render(Health);
+    const edges = (await screen.findByRole('heading', { level: 2, name: 'Edge distribution' })).closest('section') as HTMLElement;
     expect(within(edges).getByText('related_to')).toBeTruthy();
-    const backfill = screen.getByRole('heading', { level: 2, name: 'Backfill Progress (Last 7 Days)' }).closest('section') as HTMLElement;
-    expect(within(backfill).getByText('2026-11-08')).toBeTruthy();
-    const orphans = screen.getByRole('heading', { level: 2, name: 'Orphan Breakdown by Type' }).closest('section') as HTMLElement;
+    const backfill = screen.getByRole('heading', { level: 2, name: 'Backfill progress (last 7 days)' }).closest('section') as HTMLElement;
+    expect(within(backfill).getByText('Nov 8')).toBeTruthy(); // the one day format (design batch 1)
+    const orphans = screen.getByRole('heading', { level: 2, name: 'Orphan breakdown by type' }).closest('section') as HTMLElement;
     expect(within(orphans).getByText('facts')).toBeTruthy();
-    expect(container.querySelectorAll('.stale-badge')).toHaveLength(2);
+    // The orphan banner had its own badge for the density source; the header's Refresh covers both sources.
+    expect(container.querySelectorAll('.stale-badge')).toHaveLength(1);
   });
 
   it('keeps Density\'s orphan rate by type, with the per-type totals and rates the breakdown does not show', async () => {
     start('#/health/graph');
     render(Health);
-    const rates = (await screen.findByRole('heading', { level: 2, name: 'Orphan Rate by Type' })).closest('section') as HTMLElement;
+    const rates = (await screen.findByRole('heading', { level: 2, name: 'Orphan rate by type' })).closest('section') as HTMLElement;
     expect(within(rates).getAllByRole('columnheader').map((c) => c.textContent?.trim())).toEqual(['Type', 'Total', 'Orphans', 'Rate']);
     const fact = within(rates).getByText('facts').closest('tr') as HTMLElement;
     expect(within(fact).getAllByRole('cell').map((c) => c.textContent?.trim())).toEqual(['facts', '10', '3', '30.0%']);
@@ -172,8 +201,8 @@ describe('Memory health: Graph tab', () => {
   it('names the node types the same way in the orphan breakdown and the orphan rate table', async () => {
     start('#/health/graph');
     render(Health);
-    const rates = (await screen.findByRole('heading', { level: 2, name: 'Orphan Rate by Type' })).closest('section') as HTMLElement;
-    const breakdown = screen.getByRole('heading', { level: 2, name: 'Orphan Breakdown by Type' }).closest('section') as HTMLElement;
+    const rates = (await screen.findByRole('heading', { level: 2, name: 'Orphan rate by type' })).closest('section') as HTMLElement;
+    const breakdown = screen.getByRole('heading', { level: 2, name: 'Orphan breakdown by type' }).closest('section') as HTMLElement;
     const inBreakdown = Array.from(breakdown.querySelectorAll('.orphan-type')).map((e) => e.textContent?.trim()).filter((t) => t !== 'Total');
     const inRates = within(rates).getAllByRole('row').slice(1).map((r) => r.querySelector('td')?.textContent?.trim());
     expect(inRates.sort()).toEqual(inBreakdown.sort());
@@ -183,7 +212,7 @@ describe('Memory health: Graph tab', () => {
   it('labels the orphan trend as a running total that may differ from the count above', async () => {
     start('#/health/graph');
     render(Health);
-    const trend = (await screen.findByRole('heading', { level: 2, name: 'Orphan Nodes Over Time' })).closest('section') as HTMLElement;
+    const trend = (await screen.findByRole('heading', { level: 2, name: 'Orphan nodes over time' })).closest('section') as HTMLElement;
     expect(within(trend).getByText('Running total; may differ from the count above')).toBeTruthy();
   });
 
@@ -192,34 +221,34 @@ describe('Memory health: Graph tab', () => {
     densityGate = new Promise<void>((r) => { release = r; });
     start('#/health/graph');
     render(Health);
-    await screen.findByRole('heading', { level: 2, name: 'Graph Density Over Time' });
+    await screen.findByRole('heading', { level: 2, name: 'Graph density over time' });
     // Health has loaded, so the one Loading… line left is Density's.
     expect(screen.getAllByText('Loading…', { selector: 'p' })).toHaveLength(1);
-    expect(statLabel('Total Nodes')).toHaveLength(0);
+    expect(statLabel('Total nodes')).toHaveLength(0);
     release();
-    await waitFor(() => expect(statLabel('Total Nodes')).toHaveLength(1));
+    await waitFor(() => expect(statLabel('Total nodes')).toHaveLength(1));
     expect(screen.queryAllByText('Loading…', { selector: 'p' })).toHaveLength(0);
   });
 
   it('puts Density\'s totals and the overall orphan rate at the top, each number once, without the summary footer', async () => {
     start('#/health/graph');
     render(Health);
-    const first = await screen.findByRole('heading', { level: 2, name: 'Graph Density Over Time' });
-    await waitFor(() => expect(statLabel('Total Nodes')).toHaveLength(1));
-    expect(statValue('Total Nodes')).toBe('18');
-    expect(statValue('Total Edges')).toBe('9');
-    expect(statValue('Avg Degree')).toBe('0.64');
-    expect(statValue('Connected Nodes')).toBe('14');
-    const banner = screen.getByText('Overall Orphan Rate').parentElement as HTMLElement;
-    expect(banner.textContent?.replace(/\s+/g, ' ')).toContain('Overall Orphan Rate 22.2% (moderate) (4 of 18 nodes unconnected)');
+    const first = await screen.findByRole('heading', { level: 2, name: 'Graph density over time' });
+    await waitFor(() => expect(statLabel('Total nodes')).toHaveLength(1));
+    expect(statValue('Total nodes')).toBe('18');
+    expect(statValue('Total edges')).toBe('9');
+    expect(statValue('Avg degree')).toBe('0.64');
+    expect(statValue('Connected nodes')).toBe('14');
+    const banner = screen.getByText('Overall orphan rate').parentElement as HTMLElement;
+    expect(banner.textContent?.replace(/\s+/g, ' ')).toContain('Overall orphan rate 22.2% (moderate) (4 of 18 nodes unconnected)');
     // Density's block comes first: before Health's stats and the first chart.
-    const top = screen.getByText('Total Nodes', { selector: '.stat-label' });
+    const top = screen.getByText('Total nodes', { selector: '.stat-label' });
     expect(top.compareDocumentPosition(banner) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(banner.compareDocumentPosition(screen.getByText('Current Density', { selector: '.stat-label' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(banner.compareDocumentPosition(screen.getByText('Current density', { selector: '.stat-label' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(banner.compareDocumentPosition(first) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // Health's other numbers stay; its orphan count is the banner's, so it is not shown again.
-    for (const label of ['Current Density', 'Edges (30d)', 'Auto-linked']) expect(statLabel(label)).toHaveLength(1);
-    expect(statLabel('Orphan Nodes')).toHaveLength(0);
+    for (const label of ['Current density', 'Edges (30d)', 'Auto-linked']) expect(statLabel(label)).toHaveLength(1);
+    expect(statLabel('Orphan nodes')).toHaveLength(0);
     // The footer only repeated the grid (connected nodes) and the banner (orphans).
     expect(screen.queryByText(/Connected nodes:/)).toBeNull();
     expect(screen.queryByText(/Total orphans:/)).toBeNull();
@@ -231,8 +260,8 @@ describe('Memory health: Writes tab', () => {
     start('#/health/writes');
     const { container } = render(Health);
     const verdict = await screen.findByRole('heading', { level: 2, name: '1 rule tripped: you decide' });
-    const sim = await screen.findByRole('heading', { level: 2, name: 'Threshold Simulator' });
-    const rejected = screen.getByRole('heading', { level: 2, name: 'Rejected Facts' });
+    const sim = await screen.findByRole('heading', { level: 2, name: 'Threshold simulator' });
+    const rejected = screen.getByRole('heading', { level: 2, name: 'Rejected facts' });
     // A visible heading separates the two pages: after the write-health sections, before the admission ones.
     const admission = screen.getByRole('heading', { level: 2, name: 'Admission' });
     const acks = screen.getByRole('heading', { level: 2, name: 'Acknowledgements' });
@@ -241,7 +270,7 @@ describe('Memory health: Writes tab', () => {
     expect(verdict.compareDocumentPosition(sim) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(sim.compareDocumentPosition(rejected) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(await screen.findByText('a rejected fact')).toBeTruthy();
-    expect(screen.getAllByRole('heading', { level: 1 }).map((h) => h.textContent?.trim())).toEqual(['Memory health']);
+    expect(screen.getAllByRole('heading', { level: 1 }).map((h) => h.textContent?.trim())).toEqual(['Health']);
     expect(container.querySelectorAll('.stale-badge')).toHaveLength(2);
     expect(urls.some((u) => u.startsWith('/dashboard/health'))).toBe(false);
   });
@@ -254,7 +283,8 @@ describe('Memory health: Growth tab', () => {
     for (const name of GROWTH_HEADINGS) await waitFor(() => expect(h2(name)).toHaveLength(1));
     expect(urls).toContain('/status?dashboard=true');
     expect(urls).toContain('/dashboard/observability');
-    expect(container.querySelectorAll('.stale-badge')).toHaveLength(2);
+    // One badge, in the header, for both sources (Codex round 1: the fact growth rate's own badge said "updated" twice).
+    expect(container.querySelectorAll('.stale-badge')).toHaveLength(1);
   });
 });
 
@@ -286,10 +316,10 @@ describe('Memory health: tabs', () => {
   it('switches tab when the route changes', async () => {
     start('#/health');
     render(Health);
-    await screen.findByRole('heading', { level: 2, name: 'Edge Distribution' });
+    await screen.findByRole('heading', { level: 2, name: 'Edge distribution' });
     go('#/health/growth');
     expect(await screen.findByRole('heading', { level: 2, name: 'Memory growth (30 days)' })).toBeTruthy();
-    expect(h2('Edge Distribution')).toHaveLength(0);
+    expect(h2('Edge distribution')).toHaveLength(0);
     expect(within(tabsNav()).getByRole('link', { name: 'Growth' }).getAttribute('aria-current')).toBe('page');
   });
 
@@ -299,7 +329,7 @@ describe('Memory health: tabs', () => {
     const msg = await screen.findByRole('status');
     expect(msg.textContent).toContain('Nothing here');
     expect(within(msg).getByRole('link').getAttribute('href')).toBe('#/health/graph');
-    expect(h2('Edge Distribution')).toHaveLength(0);
+    expect(h2('Edge distribution')).toHaveLength(0);
   });
 });
 
@@ -329,8 +359,8 @@ describe('Observability after the growth move', () => {
   it('no longer renders the fact growth rate, and keeps the handler error rate', async () => {
     start('#/observability');
     render(Observability);
-    expect(await screen.findByRole('heading', { level: 2, name: 'Handler Error Rate (7d)' })).toBeTruthy();
-    expect(h2('Fact Growth Rate (7d)')).toHaveLength(0);
+    expect(await screen.findByRole('heading', { level: 2, name: 'Handler error rate (7d)' })).toBeTruthy();
+    expect(h2('Fact growth rate (7d)')).toHaveLength(0);
   });
 
   it('with only fact growth points, says there is no drift trend data', async () => {
@@ -338,13 +368,13 @@ describe('Observability after the growth move', () => {
     start('#/observability');
     render(Observability);
     expect(await screen.findByText('No drift trend data available yet')).toBeTruthy();
-    expect(h2('Fact Growth Rate (7d)')).toHaveLength(0);
+    expect(h2('Fact growth rate (7d)')).toHaveLength(0);
   });
 });
 
 // ── PR 2: the charts read tokens (Chart.js resolves them against the ground the chart sits in) ────────────────────
 
-const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
+const PAPER = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
 type Ds = Record<string, any>;
 let configs: { type: string; data: { datasets: Ds[] }; options: Record<string, any> }[] = [];
 /** Replaces the no-op Chart stub with one that records every chart's resolved config. */
@@ -368,52 +398,54 @@ const norm = (c: unknown): any => (Array.isArray(c) ? c.map(norm) : String(c).re
 /** A paper <main> with the paper ground's tokens set on it (jsdom has no stylesheet), as App renders it. */
 function paperMain(): HTMLElement {
   const main = document.createElement('main');
-  main.setAttribute('data-ground', 'paper');
+  main.classList.add('page-ground');
   for (const [k, v] of Object.entries(PAPER)) if (k.startsWith('--')) main.style.setProperty(k, v);
   document.body.appendChild(main);
   return main;
 }
 
 describe('Memory health charts read tokens', () => {
-  afterEach(() => { setLook('dark'); document.body.innerHTML = ''; });
+  afterEach(() => { document.body.innerHTML = ''; });
 
-  it('dark: the Graph tab\'s datasets are today\'s colours exactly', async () => {
+  // With no stylesheet (jsdom) every token takes its :root value, through TOKEN_FALLBACK.
+  it('the Graph tab\'s datasets: each mark its token and alpha (no stylesheet: the :root values)', async () => {
     start('#/health/graph');
     recordCharts();
     render(Health);
     await waitFor(() => expect(configs.length).toBe(5));
-    const want: [string, string, unknown, unknown][] = [
-      ['Density', 'borderColor', '#7c6af7', 'rgba(124, 106, 247, 0.1)'],
-      ['Edges Created', 'borderColor', '#7c6af7', 'rgba(124, 106, 247, 0.5)'],
-      ['Node Count', 'borderColor', '#60a5fa', 'rgba(96, 165, 250, 0.5)'],
-      ['Orphan Nodes', 'borderColor', '#f87171', 'rgba(248, 113, 113, 0.1)'],
-      ['Auto-linked', 'borderColor', '#34d399', 'rgba(52, 211, 153, 0.5)'],
-      ['Manual', 'borderColor', '#7c6af7', 'rgba(124, 106, 247, 0.5)'],
+    // Finish review fix 8: Node count, a single series, is the neutral --series-0 (it was --series-1); a bar has no
+    // outline (the Chart component sets its width to 0), so its fill is the mark.
+    const want: [string, string, number][] = [
+      ['Density', '--series-0', 0.1],
+      ['Edges created', '--series-0', 0.5],
+      ['Node count', '--series-0', 0.5],
+      ['Orphan nodes', '--red', 0.1],
+      ['Auto-linked', '--series-2', 0.5],
+      ['Manual', '--series-0', 0.5],
     ];
-    for (const [label, , border, fill] of want) {
-      expect(norm(dataset(label).borderColor), label).toBe(norm(border));
-      expect(norm(dataset(label).backgroundColor), label).toBe(norm(fill));
+    for (const [label, token, a] of want) {
+      if (label !== 'Node count') expect(norm(dataset(label).borderColor), label).toBe(norm(PAPER[token]));
+      expect(norm(dataset(label).backgroundColor), label).toBe(norm(withAlpha(PAPER[token], a)));
     }
     // Density 1.4 and 1.5: "watch" (amber); orphans' points in red.
-    expect(dataset('Density').pointBackgroundColor).toEqual(['#fbbf24', '#fbbf24']);
-    expect(dataset('Orphan Nodes').pointBackgroundColor).toBe('#f87171');
-    // Chart.js's own defaults stay on a dark ground: nothing is added to the options.
-    expect(chartOf('Node Count').options.color).toBeUndefined();
+    expect(dataset('Density').pointBackgroundColor).toEqual([PAPER['--yellow'], PAPER['--yellow']]);
+    expect(dataset('Orphan nodes').pointBackgroundColor).toBe(PAPER['--red']);
+    // The legend and the axes take the chart text colour.
+    expect(chartOf('Node count').options.color).toBe(PAPER['--chart-text']);
   });
 
-  it('dark: the Growth tab\'s datasets and the doughnut are today\'s colours exactly', async () => {
+  it('the Growth tab\'s datasets and the doughnut: series 1 to 3, a 10% fill (no stylesheet: the :root values)', async () => {
     start('#/health/growth');
     recordCharts();
     render(Health);
     await waitFor(() => expect(configs.length).toBe(3));
-    expect(norm(['Facts', 'Episodes', 'Decisions'].map((l) => dataset(l).borderColor))).toEqual(['#60a5fa', '#34d399', '#a78bfa']);
-    expect(norm(['Facts', 'Episodes', 'Decisions'].map((l) => dataset(l).backgroundColor))).toEqual(
-      norm(['rgba(96,165,250,0.10)', 'rgba(52,211,153,0.10)', 'rgba(167,139,250,0.10)']).map((c: string) => c.replace('0.10)', '0.1)')),
-    );
-    expect(norm(dataset('Fact delta').borderColor)).toBe('#60a5fa');
-    expect(norm(dataset('Fact delta').backgroundColor)).toBe('rgba(96,165,250,0.1)');
+    const series = ['--series-1', '--series-2', '--series-3'];
+    expect(norm(['Facts', 'Episodes', 'Decisions'].map((l) => dataset(l).borderColor))).toEqual(series.map((t) => PAPER[t]));
+    expect(norm(['Facts', 'Episodes', 'Decisions'].map((l) => dataset(l).backgroundColor))).toEqual(norm(series.map((t) => withAlpha(PAPER[t], 0.1))));
+    expect(norm(dataset('Fact delta').borderColor)).toBe(PAPER['--series-1']);
+    expect(norm(dataset('Fact delta').backgroundColor)).toBe(norm(withAlpha(PAPER['--series-1'], 0.1)));
     const doughnut = configs.find((c) => c.type === 'doughnut')!;
-    expect(doughnut.data.datasets[0].backgroundColor).toEqual(['#60a5fa', '#34d399']); // two categories in the fixture
+    expect(doughnut.data.datasets[0].backgroundColor).toEqual([PAPER['--series-1'], PAPER['--series-2']]); // two categories in the fixture
   });
 
   it('a ninth fact category gets series 9, not series 1 again beside its twin (review M7)', async () => {
@@ -425,24 +457,23 @@ describe('Memory health charts read tokens', () => {
     await waitFor(() => expect(configs.length).toBe(3));
     const colours = configs.find((c) => c.type === 'doughnut')!.data.datasets[0].backgroundColor;
     expect(colours).toHaveLength(9);
-    expect(colours[8]).toBe('#22d3ee'); // dark series 9
+    expect(colours[8]).toBe(PAPER['--series-9']);
     expect(new Set(colours).size).toBe(9);
   });
 
   it('paper: the same datasets take the paper series and status colours, and the axes the chart text and grid', async () => {
-    setLook('paper');
     const target = paperMain();
     start('#/health/graph');
     recordCharts();
     render(Health, { target });
     await waitFor(() => expect(configs.length).toBe(5));
-    expect(dataset('Node Count').borderColor).toBe(PAPER['--series-1']);
+    expect(norm(dataset('Node count').backgroundColor)).toBe(norm(withAlpha(PAPER['--series-0'], 0.5))); // the neutral single series
     expect(dataset('Auto-linked').borderColor).toBe(PAPER['--series-2']);
     // Review M1: the marks that were violet take --series-0, not the accent (on paper the question frame's blue).
-    for (const l of ['Density', 'Edges Created', 'Manual']) expect(dataset(l).borderColor, l).toBe(PAPER['--series-0']);
-    expect(dataset('Orphan Nodes').borderColor).toBe(PAPER['--red']);
+    for (const l of ['Density', 'Edges created', 'Manual']) expect(dataset(l).borderColor, l).toBe(PAPER['--series-0']);
+    expect(dataset('Orphan nodes').borderColor).toBe(PAPER['--red']);
     expect(dataset('Density').pointBackgroundColor).toEqual([PAPER['--yellow'], PAPER['--yellow']]);
-    const o = chartOf('Node Count').options;
+    const o = chartOf('Node count').options;
     expect(o.scales.x.ticks.color).toBe(PAPER['--chart-text']);
     expect(o.scales.y.grid.color).toBe(PAPER['--chart-grid']);
     for (const c of configs) {
@@ -472,28 +503,27 @@ describe('Memory health: the Writes tab\'s admission charts read tokens', () => 
     daily_trend: [{ date: '2026-11-07', scored: 4, admitted: 3, avg_score: 0.6 }, { date: '2026-11-08', scored: 6, admitted: 4, avg_score: 0.62 }],
     bypass_breakdown: { user_direct: 1, pinned: 1 },
   };
-  afterEach(() => { setLook('dark'); document.body.innerHTML = ''; });
+  afterEach(() => { document.body.innerHTML = ''; });
 
-  it('dark: admitted and rejected are the status green and red, bypassed the series slate, the trends today\'s colours', async () => {
+  it('admitted and rejected are the status green and red, bypassed the series slate, the trends series 0 (no stylesheet: the :root values)', async () => {
     admission = FULL_ADMISSION;
     start('#/health/writes');
     recordCharts();
     render(Health);
     await waitFor(() => expect(configs.length).toBe(6));
     const scores = configs.find((c) => c.data.datasets[0].label === 'Facts')!.data.datasets[0];
-    expect(scores.backgroundColor).toEqual(['#f87171', '#34d399']); // 0.40-0.45 below the 0.55 threshold, 0.60-0.65 above
+    expect(scores.backgroundColor).toEqual([PAPER['--red'], PAPER['--green']]); // 0.40-0.45 below the 0.55 threshold, 0.60-0.65 above
     const bySource = configs.find((c) => c.data.datasets.length === 3)!.data.datasets;
-    expect(bySource.map((d) => d.backgroundColor)).toEqual(['#34d399', '#f87171', '#6b6b8a']);
-    expect(norm(dataset('Admission Rate (%)').backgroundColor)).toBe('rgba(52,211,153,0.1)');
-    expect(dataset('Avg Score').borderColor).toBe('#7c6af7');
+    expect(bySource.map((d) => d.backgroundColor)).toEqual([PAPER['--green'], PAPER['--red'], PAPER['--series-7']]);
+    expect(norm(dataset('Admission rate (%)').backgroundColor)).toBe(norm(withAlpha(PAPER['--green'], 0.1)));
+    expect(dataset('Avg score').borderColor).toBe(PAPER['--series-0']);
     const bypass = configs.find((c) => c.type === 'doughnut')!.data.datasets[0];
-    expect(bypass.backgroundColor).toEqual(['#7c6af7', '#60a5fa']);
-    expect(bypass.borderColor).toBe('#12121a'); // the card behind it (it was an unreadable 'var(--surface)' string)
+    expect(bypass.backgroundColor).toEqual([PAPER['--series-0'], PAPER['--series-1']]);
+    expect(bypass.borderColor).toBe(PAPER['--surface']); // the card behind it (it was an unreadable 'var(--surface)' string)
   });
 
   it('paper: the same datasets take the paper status and series values', async () => {
     admission = FULL_ADMISSION;
-    setLook('paper');
     const target = paperMain();
     start('#/health/writes');
     recordCharts();
@@ -505,7 +535,7 @@ describe('Memory health: the Writes tab\'s admission charts read tokens', () => 
     expect(bypass.borderColor).toBe(PAPER['--surface']);
     // Review M1: the first slice is --series-0, not a second blue beside --series-1.
     expect(bypass.backgroundColor).toEqual([PAPER['--series-0'], PAPER['--series-1']]); // two bypass reasons in the fixture
-    expect(dataset('Avg Score').borderColor).toBe(PAPER['--series-0']);
+    expect(dataset('Avg score').borderColor).toBe(PAPER['--series-0']);
   });
 
   it('the box plots tint with color-mix (no hex alpha suffix), and the score note is in words', async () => {

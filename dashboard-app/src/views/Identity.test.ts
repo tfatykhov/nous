@@ -75,8 +75,8 @@ describe('Identity view', () => {
   it('renders both panels, seeds identity sections, and lists profile facts', async () => {
     render(Identity);
 
-    expect(await screen.findByText('Agent Identity')).toBeTruthy();
-    expect(screen.getByText('User Profile Facts (Tier-1)')).toBeTruthy();
+    expect(await screen.findByText('Agent identity')).toBeTruthy();
+    expect(screen.getByText('User profile facts (Tier-1)')).toBeTruthy();
 
     // Section textarea seeded from GET /identity (findByDisplayValue retries
     // until the async load flushes to the bound textarea).
@@ -232,10 +232,10 @@ describe('Identity: the paper look\'s structure (source contracts)', () => {
 
   it('cards, labels, save messages and the title read tokens', () => {
     expect(rules.get('.section-card')).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius-sm)', 'box-shadow': 'var(--card-shadow)' });
-    expect(rules.get('.section-label')).toMatchObject({ 'text-transform': 'var(--label-transform)', 'letter-spacing': 'var(--label-tracking)' });
+    expect(rules.get('.section-label')).toMatchObject({ 'text-transform': 'none', 'letter-spacing': '0' });
     expect(rules.get('.save-status.save-ok')).toMatchObject({ color: 'var(--save-ok)' });
     expect(rules.get('.save-status.save-err')).toMatchObject({ color: 'var(--save-err)' });
-    expect(rules.get(':global(html[data-look="paper"] [data-ground="paper"]) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
+    expect(rules.get('h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
   });
 
   it('the fact id takes the look\'s mono font through a scoped rule, leaving the shared global .mono alone', () => {

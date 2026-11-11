@@ -5,8 +5,8 @@ import Cache from '../Cache.svelte';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { initRouter } from '../../lib/router';
-import { setLook } from '../../lib/look';
-import { PAPER_SEL, parseBlocks } from '../../lib/testing/css';
+import { ROOT_SEL, block, parseBlocks } from '../../lib/testing/css';
+import { withAlpha } from '../../lib/overviewCharts';
 
 // F108 Phase 2 T10: the Cache screen is the Model calls screen's second tab. Its rows link to the call's detail when
 // the row carries the model-call id (the endpoint sends it when the model-call log is on).
@@ -48,7 +48,7 @@ function go(hash: string) {
   location.hash = hash;
   window.dispatchEvent(new HashChangeEvent('hashchange'));
 }
-const recentCalls = () => screen.getByRole('heading', { level: 2, name: 'Recent Calls' }).closest('section') as HTMLElement;
+const recentCalls = () => screen.getByRole('heading', { level: 2, name: 'Recent calls' }).closest('section') as HTMLElement;
 const sessions = () => screen.getByRole('heading', { level: 2, name: 'Sessions' }).closest('section') as HTMLElement;
 
 describe('Model calls Cache tab', () => {
@@ -57,7 +57,7 @@ describe('Model calls Cache tab', () => {
 
   it('renders the Cache content under the Model calls header, the Cache sub view current', async () => {
     render(ModelCalls);
-    for (const name of ['Token Breakdown', 'Break Components', 'Efficiency Timeline', 'Sessions', 'Recent Calls']) {
+    for (const name of ['Token breakdown', 'Break components', 'Efficiency timeline', 'Sessions', 'Recent calls']) {
       expect(await screen.findByRole('heading', { level: 2, name })).toBeTruthy();
     }
     expect(screen.getByRole('heading', { level: 1, name: 'Model calls' })).toBeTruthy();
@@ -71,14 +71,14 @@ describe('Model calls Cache tab', () => {
 
   it('reads the cache endpoint only: the call list is not mounted', async () => {
     render(ModelCalls);
-    await screen.findByRole('heading', { level: 2, name: 'Recent Calls' });
+    await screen.findByRole('heading', { level: 2, name: 'Recent calls' });
     expect(urls.some((u) => u.startsWith('/dashboard/cache'))).toBe(true);
     expect(urls.some((u) => u.startsWith('/dashboard/model-calls'))).toBe(false);
   });
 
   it('a Recent Calls row links to its call when it carries an id, and not otherwise', async () => {
     render(ModelCalls);
-    await screen.findByRole('heading', { level: 2, name: 'Recent Calls' });
+    await screen.findByRole('heading', { level: 2, name: 'Recent calls' });
     const links = within(recentCalls()).getAllByRole('link');
     expect(links).toHaveLength(1);
     expect(links[0].getAttribute('href')).toBe(`#/model-calls/c/${CALL}`);
@@ -88,7 +88,7 @@ describe('Model calls Cache tab', () => {
 
   it('a null session shows — in Recent Calls and in Sessions', async () => {
     render(ModelCalls);
-    await screen.findByRole('heading', { level: 2, name: 'Recent Calls' });
+    await screen.findByRole('heading', { level: 2, name: 'Recent calls' });
     const recentRows = within(recentCalls()).getAllByRole('row').slice(1);
     expect(recentRows).toHaveLength(2);
     expect(within(recentRows[1]).getByText('—')).toBeTruthy();
@@ -105,14 +105,14 @@ describe('Cache standalone (embedded false)', () => {
   it('keeps its own Cache header', async () => {
     render(Cache);
     expect(screen.getByRole('heading', { level: 1, name: 'Cache' })).toBeTruthy();
-    expect(await screen.findByRole('heading', { level: 2, name: 'Recent Calls' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { level: 2, name: 'Recent calls' })).toBeTruthy();
   });
 
   it('embedded drops the h1 and keeps the subtitle and the staleness badge row', async () => {
     const { container } = render(Cache, { props: { embedded: true } });
-    await screen.findByRole('heading', { level: 2, name: 'Recent Calls' });
+    await screen.findByRole('heading', { level: 2, name: 'Recent calls' });
     expect(screen.queryByRole('heading', { level: 1 })).toBeNull();
-    expect(container.querySelector('.view-head .subtitle')?.textContent).toContain('API cache performance');
+    expect(container.querySelector('.view-head .subtitle')?.textContent).toContain('How the API cache performs'); // the plain-sentence subtitle (finish review fix 8)
     expect(container.querySelector('.view-head')?.textContent).toMatch(/updated .* ago/);
   });
 });
@@ -120,7 +120,7 @@ describe('Cache standalone (embedded false)', () => {
 // ── Redesign PR 3: the Cache tab's charts read tokens ────────────────────────────────────────────────────────────────
 
 describe('Cache charts read tokens', () => {
-  const PAPER = parseBlocks(readFileSync(join(__dirname, '..', '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
+  const PAPER = block(parseBlocks(readFileSync(join(__dirname, '..', '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
   const RICH = {
     ...CACHE,
     break_components: { system_prompt: 8, tools: 7, messages: 6, model: 5, betas: 4, effort: 3, thinking: 2, other: 1 },
@@ -143,25 +143,24 @@ describe('Cache charts read tokens', () => {
   const byType = (t: string) => configs.find((c) => c.type === t)!.data.datasets[0];
   function paperMain(): HTMLElement {
     const main = document.createElement('main');
-    main.setAttribute('data-ground', 'paper');
+    main.classList.add('page-ground');
     for (const [k, v] of Object.entries(PAPER)) if (k.startsWith('--')) main.style.setProperty(k, v);
     document.body.appendChild(main);
     return main;
   }
   beforeEach(() => { installRich(); location.hash = ''; initRouter(); go('#/model-calls/cache'); });
-  afterEach(() => { cleanup(); vi.unstubAllGlobals(); setLook('dark'); document.body.innerHTML = ''; });
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); document.body.innerHTML = ''; });
 
-  it('dark: the doughnut, the eight break bars and the hit-rate line are today\'s colours exactly', async () => {
+  it('the doughnut, the eight break bars and the hit-rate line take their tokens (no stylesheet: the :root values)', async () => {
     render(Cache, { props: { embedded: true } });
     await waitFor(() => expect(configs).toHaveLength(3));
-    expect(byType('doughnut').backgroundColor).toEqual(['#22c55e', '#3b82f6', '#4b5563']);
-    expect(byType('bar').backgroundColor).toEqual(['#f87171', '#fbbf24', '#60a5fa', '#34d399', '#a78bfa', '#fb923c', '#22d3ee', '#e879f9']);
-    expect(byType('line').borderColor).toBe('#22c55e');
-    expect(norm(byType('line').backgroundColor)).toBe(norm('rgba(34,197,94,0.1)'));
+    expect(byType('doughnut').backgroundColor).toEqual([PAPER['--hit-good'], PAPER['--cache-blue'], PAPER['--cache-grey']]);
+    expect(byType('bar').backgroundColor).toEqual([5, 6, 1, 2, 3, 4, 9, 10].map((n) => PAPER[`--series-${n}`]));
+    expect(byType('line').borderColor).toBe(PAPER['--hit-good']);
+    expect(norm(byType('line').backgroundColor)).toBe(norm(withAlpha(PAPER['--hit-good'], 0.1)));
   });
 
   it('paper: the same datasets take the paper values', async () => {
-    setLook('paper');
     render(Cache, { props: { embedded: true }, target: paperMain() });
     await waitFor(() => expect(configs).toHaveLength(3));
     expect(byType('doughnut').backgroundColor).toEqual([PAPER['--hit-good'], PAPER['--cache-blue'], PAPER['--cache-grey']]);
@@ -170,9 +169,16 @@ describe('Cache charts read tokens', () => {
     expect(configs.find((c) => c.type === 'line')!.options.scales.y.ticks.color).toBe(PAPER['--chart-text']);
   });
 
+  it('source contract: no dead hit-rate colour function, and its two tokens are gone (PR 7 T4)', () => {
+    expect(readFileSync(join(__dirname, '..', 'Cache.svelte'), 'utf-8')).not.toMatch(/hitRateColor|--hit-mid|--hit-bad/);
+    expect(PAPER['--hit-mid']).toBeUndefined();
+    expect(PAPER['--hit-bad']).toBeUndefined();
+    expect(PAPER['--hit-good']).toBeDefined();
+  });
+
   it('a cache break is marked with the word yes, not a glyph', async () => {
     render(Cache, { props: { embedded: true } });
-    await screen.findByRole('heading', { level: 2, name: 'Recent Calls' });
+    await screen.findByRole('heading', { level: 2, name: 'Recent calls' });
     const rows = within(recentCalls()).getAllByRole('row').slice(1);
     expect(within(rows[0]).getByText('yes')).toBeTruthy();
     expect(recentCalls().textContent).not.toContain('●');

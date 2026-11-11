@@ -3,14 +3,13 @@ import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-li
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Heartbeat from './Heartbeat.svelte';
-import { setLook } from '../lib/look';
-import { PAPER_SEL, parseBlocks, styleBlocks } from '../lib/testing/css';
+import { ROOT_SEL, block, parseBlocks, styleBlocks } from '../lib/testing/css';
 
 // Redesign PR 3: Heartbeat on paper, a dense restyle (no frame treatment: HeartbeatData carries no frame). Urgency,
 // state and budget colours are tokens; a colour used as text takes a text token, since paper's amber and red fills
 // are marks, not text.
 
-const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
+const PAPER = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
 const NOW = Date.now();
 const ago = (min: number) => new Date(NOW - min * 60_000).toISOString();
 
@@ -20,6 +19,7 @@ const finding = (fingerprint: string, urgency: string, state: string) => ({
 });
 
 let budget = { used: 5000, limit: 10000, percentage: 50 };
+let breakerOpen = false;
 const data = () => ({
   recent_ticks: [{ created_at: ago(1), data: {} }],
   cognitive_sessions: [{ timestamp: ago(30), session_id: 'hb-session-123456', findings_count: 2, tokens_used: 4200, response_summary: 'ok' }],
@@ -32,7 +32,7 @@ const data = () => ({
   ],
   status: { enabled: true, is_running: true, last_tick: ago(1), tick_interval: 300 },
   checks: [{ name: 'disk', active: true, interval: 300, last_run: ago(1), consecutive_failures: 0, max_failures: 3,
-    circuit_breaker_open: false, permanent: false, urgent_override: false }],
+    circuit_breaker_open: breakerOpen, permanent: false, urgent_override: false }],
   budget,
   quiet_hours: { start: 22, end: 7, active: false },
   finding_lifecycle: {
@@ -60,7 +60,7 @@ function install() {
 }
 function paperMain(): HTMLElement {
   const main = document.createElement('main');
-  main.setAttribute('data-ground', 'paper');
+  main.classList.add('page-ground');
   for (const [k, v] of Object.entries(PAPER)) if (k.startsWith('--')) main.style.setProperty(k, v);
   document.body.appendChild(main);
   return main;
@@ -68,24 +68,23 @@ function paperMain(): HTMLElement {
 const chart = (t: string) => configs.find((c) => c.type === t)!;
 const section = (name: string) => screen.getByRole('heading', { level: 2, name }).closest('section') as HTMLElement;
 
-beforeEach(() => { budget = { used: 5000, limit: 10000, percentage: 50 }; install(); });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); setLook('dark'); document.body.innerHTML = ''; });
+beforeEach(() => { budget = { used: 5000, limit: 10000, percentage: 50 }; breakerOpen = false; install(); });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); document.body.innerHTML = ''; });
 
 describe('Heartbeat: urgency, state and budget colours by token', () => {
   it.each([
-    [5000, '#22d3ee', '--pending'],
-    [8500, '#fbbf24', '--yellow'],
-    [10000, '#f87171', '--red'],
-  ])('a budget of %i of 10,000 used is %s under dark (%s), the remainder the track', async (used, hex) => {
+    [5000, '--pending'],
+    [8500, '--yellow'],
+    [10000, '--red'],
+  ])('a budget of %i of 10,000 used is %s, the remainder the track (no stylesheet: the :root values)', async (used, token) => {
     budget = { used, limit: 10000, percentage: used / 100 };
     render(Heartbeat);
     await waitFor(() => expect(configs.find((c) => c.type === 'doughnut')).toBeTruthy());
-    expect(chart('doughnut').data.datasets[0].backgroundColor).toEqual([hex, 'rgba(255, 255, 255, 0.06)']);
+    expect(chart('doughnut').data.datasets[0].backgroundColor).toEqual([PAPER[token], PAPER['--track']]);
   });
 
   it('paper: the budget, and the findings bars by urgency, take the paper values', async () => {
     budget = { used: 8500, limit: 10000, percentage: 85 };
-    setLook('paper');
     render(Heartbeat, { target: paperMain() });
     await waitFor(() => expect(configs).toHaveLength(2));
     expect(chart('doughnut').data.datasets[0].backgroundColor).toEqual([PAPER['--yellow'], PAPER['--track']]);
@@ -93,28 +92,34 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
     expect(chart('bar').data.datasets.map((d) => d.backgroundColor)).toEqual([PAPER['--err-text'], PAPER['--yellow'], PAPER['--st-neutral']]);
   });
 
-  it('dark: the findings bars by urgency are today\'s red, amber and grey', async () => {
+  it('the findings bars by urgency, each named: error text, amber and the neutral (no stylesheet: the :root values)', async () => {
     render(Heartbeat);
     await waitFor(() => expect(configs).toHaveLength(2));
-    expect(chart('bar').data.datasets.map((d) => [d.label, d.backgroundColor])).toEqual([['High', '#f87171'], ['Normal', '#fbbf24'], ['Low', '#6b7280']]);
+    expect(chart('bar').data.datasets.map((d) => [d.label, d.backgroundColor])).toEqual(
+      [['High', PAPER['--err-text']], ['Normal', PAPER['--yellow']], ['Low', PAPER['--st-neutral']]]);
   });
 
-  it('the state pills show all five states with a word and a count, each edged in its state token', async () => {
+  it('the state pills show all five states with a word and a count, each a tinted status pill by state (finish review fix 2)', async () => {
     render(Heartbeat);
-    await screen.findByRole('heading', { level: 2, name: 'Finding Lifecycle' });
-    const pills = Array.from(section('Finding Lifecycle').querySelectorAll<HTMLElement>('.state-pills .hb-pill'));
+    await screen.findByRole('heading', { level: 2, name: 'Finding lifecycle' });
+    const pills = Array.from(section('Finding lifecycle').querySelectorAll<HTMLElement>('.state-pills .status-pill'));
     expect(pills.map((p) => p.textContent?.trim())).toEqual(
       ['new: 2', 'acknowledged: 1', 'resolved: 3', 'suppressed: 1', 'auto_closed_known_fp: 2', 'total: 9']);
-    expect(pills.slice(0, 5).map((p) => p.style.borderColor)).toEqual(
-      ['var(--pending)', 'var(--yellow)', 'var(--st-completed)', 'var(--st-neutral)', 'var(--st-neutral)']);
-    // The total is dimmed by a class, not an inline opacity, so the paper ground can undo it: muted text at 60% is
-    // 2.5:1 on the white card. The dark look keeps its 0.6.
-    const total = pills[5];
-    expect(total.classList.contains('hb-pill--total')).toBe(true);
-    expect(total.style.opacity).toBe('');
+    const variant = (p: HTMLElement) => [...p.classList].find((c) => c.startsWith('status-pill--')) ?? 'plain';
+    expect(pills.map(variant)).toEqual(['status-pill--info', 'status-pill--warn', 'status-pill--ok', 'status-pill--neutral',
+      'status-pill--neutral', 'plain']);
+    // No outline and no inline colour: the pill is the shared tint (app.css .status-pill). The total is not dimmed.
+    for (const p of pills) expect([p.style.borderColor, p.style.opacity]).toEqual(['', '']);
     const css = styleBlocks(readFileSync(join(__dirname, 'Heartbeat.svelte'), 'utf-8'));
-    expect(css).toMatch(/\.hb-pill--total \{ opacity: 0\.6; \}/);
-    expect(css).toMatch(/:global\(html\[data-look="paper"\] \[data-ground="paper"\]\) \.hb-pill--total \{ opacity: 1; \}/);
+    expect(css).not.toMatch(/\.hb-pill(?!s)|opacity: 0\.6/);
+  });
+
+  it('check status is a tinted pill in a word: open, failing or ok (it was plain text "OPEN / warn / ok")', async () => {
+    render(Heartbeat);
+    await screen.findByRole('heading', { level: 2, name: 'Check status' });
+    const pills = Array.from(section('Check status').querySelectorAll<HTMLElement>('.status-pill'));
+    expect(pills.map((p) => [p.textContent, [...p.classList].find((c) => c.startsWith('status-pill--'))])).toEqual(
+      [['ok', 'status-pill--ok']]);
   });
 
   it('the escalation note is in words', async () => {
@@ -127,8 +132,8 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
 
   it('the findings timeline lists each finding with its source, time and summary, its dot by urgency', async () => {
     render(Heartbeat);
-    await screen.findByRole('heading', { level: 2, name: 'Findings (Last 24h)' });
-    const items = Array.from(section('Findings (Last 24h)').querySelectorAll<HTMLElement>('.tl-item'));
+    await screen.findByRole('heading', { level: 2, name: 'Findings (last 24h)' });
+    const items = Array.from(section('Findings (last 24h)').querySelectorAll<HTMLElement>('.tl-item'));
     expect(items.map((i) => i.querySelector('.tl-source')?.textContent)).toEqual(['disk', 'mail', 'feeds']);
     expect(items.map((i) => i.querySelector('.tl-summary')?.textContent)).toEqual(['Disk at 91%', 'Inbox backlog', 'A feed is slow']);
     for (const i of items) expect(i.querySelector('.tl-time')?.textContent).toMatch(/ago$/);
@@ -137,21 +142,21 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
 
   it('an urgency written as text takes a text token: the error and warn text, the neutral grey', async () => {
     render(Heartbeat);
-    await screen.findByRole('heading', { level: 2, name: 'Finding Lifecycle' });
-    const life = section('Finding Lifecycle');
+    await screen.findByRole('heading', { level: 2, name: 'Finding lifecycle' });
+    const life = section('Finding lifecycle');
     for (const b of within(life).getAllByRole('button', { name: /Show details for/ })) await fireEvent.click(b);
     const inks = Array.from(life.querySelectorAll<HTMLElement>('.finding-detail .urgency')).map((u) => [u.textContent, u.style.color]);
-    expect(inks).toEqual([['high', 'var(--err-text)'], ['normal', 'var(--hb-warn-ink)'], ['low', 'var(--st-neutral)']]);
+    expect(inks).toEqual([['high', 'var(--err-text)'], ['normal', 'var(--warn-text)'], ['low', 'var(--st-neutral)']]);
   });
 
   it('every table keeps its columns', async () => {
     render(Heartbeat);
-    await screen.findByRole('heading', { level: 2, name: 'Check Status' });
+    await screen.findByRole('heading', { level: 2, name: 'Check status' });
     // (A table with row details has a first, visually hidden "Details" column.)
     const heads = (name: string) => within(section(name)).getAllByRole('columnheader').map((th) => th.textContent).filter((t) => t && t !== 'Details');
-    expect(heads('Check Status')).toEqual(['Check', 'Interval', 'Last run', 'Failures', 'Status']);
-    expect(heads('Finding Lifecycle')).toEqual(['State', 'Check', 'Summary', 'Seen', 'Age']);
-    expect(heads('Cognitive Sessions')).toEqual(['Time', 'Session', 'Findings', 'Tokens']);
+    expect(heads('Check status')).toEqual(['Check', 'Interval', 'Last run', 'Failures', 'Status']);
+    expect(heads('Finding lifecycle')).toEqual(['State', 'Check', 'Summary', 'Seen', 'Age']);
+    expect(heads('Cognitive sessions')).toEqual(['Time', 'Session', 'Findings', 'Tokens']);
   });
 
   it('source contract: a long unbroken finding may wrap, and a two-column row\'s cells may shrink (2,744 px at 390 before)', () => {
@@ -161,18 +166,44 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
     expect(css).toMatch(/\.tl-summary \{[^}]*overflow-wrap: anywhere;/);
   });
 
-  it('source contract: a disabled banner is dimmed under dark only; on paper its muted pills would be 2.8:1 (review M3)', () => {
+  it('source contract: a disabled banner is not dimmed; at 65% its muted pills were 2.8:1 (review M3)', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'Heartbeat.svelte'), 'utf-8'));
-    expect(css).toMatch(/\.hb-banner--disabled \{ opacity: 0\.65; \}/);
-    expect(css).toMatch(/:global\(html\[data-look="paper"\] \[data-ground="paper"\]\) \.hb-banner--disabled \{ opacity: 1; \}/);
+    expect(css).not.toMatch(/hb-banner--disabled|opacity: 0\.65/);
   });
 
-  it('source contract: the banner and pills read status tokens: text tokens for words, the glow by --glow-blur', () => {
+  it('the banner pills are tinted status pills: quiet hours, budget by how much is used, last tick', async () => {
+    budget = { used: 8500, limit: 10000, percentage: 85 };
+    const { container } = render(Heartbeat);
+    await screen.findByText(/^Budget:/);
+    const pills = Array.from(container.querySelectorAll<HTMLElement>('.hb-pills .status-pill'));
+    expect(pills.map((p) => [p.textContent?.trim().split(':')[0], [...p.classList].find((c) => c.startsWith('status-pill--')) ?? 'plain']))
+      .toEqual([['Quiet hours', 'plain'], ['Budget', 'status-pill--warn'], ['Last tick', 'plain']]);
+  });
+
+  // Design batch 2 (verdict pass 1): on the tinted banner the two warn pills were the banner's own tint, so they read
+  // as bare amber text beside one grey pill. The banner stays white, every fact is a pill, and a tripped breaker is
+  // said in words, as a pill of its own (it was the tint and the dot's colour only).
+  it('a tripped breaker is a pill of its own on the white banner, beside the other facts', async () => {
+    breakerOpen = true;
+    budget = { used: 8500, limit: 10000, percentage: 85 };
+    const { container } = render(Heartbeat);
+    await screen.findByText(/^Budget:/);
+    const banner = container.querySelector('.hb-banner')!;
+    expect([...banner.classList].filter((c) => c.startsWith('hb-banner--'))).toEqual([]);
+    const pills = Array.from(banner.querySelectorAll<HTMLElement>('.hb-pills > *'));
+    expect(pills.every((p) => p.classList.contains('status-pill'))).toBe(true);
+    expect(pills.map((p) => p.textContent?.trim().split(':')[0])).toEqual(['1 breaker tripped', 'Quiet hours', 'Budget', 'Last tick']);
+    expect(pills[0].classList.contains('status-pill--warn')).toBe(true);
+  });
+
+  it('source contract: no outlined pill is left; the banner is never tinted; the dots have no glow', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'Heartbeat.svelte'), 'utf-8'));
-    expect(css).toMatch(/\.hb-pill--warn \{ border-color: var\(--yellow\); color: var\(--hb-warn-ink\); \}/);
-    expect(css).toMatch(/\.hb-pill--bad \{ border-color: var\(--red\); color: var\(--err-text\); \}/);
-    expect(css).toMatch(/\.hb-pill--ok \{ border-color: var\(--st-completed\); color: var\(--st-completed\); \}/);
-    expect(css).toMatch(/\.hb-dot--ok \{ background: var\(--st-completed\); box-shadow: 0 0 var\(--glow-blur\) color-mix\(in srgb, var\(--st-completed\) 60%, transparent\); \}/);
+    expect(css).not.toMatch(/\.hb-pill(?!s)/);
+    expect(css).not.toMatch(/\.hb-banner--warn/);
+    // The dark look's glow (a blur that was 0 px on paper) is gone with its token (PR 7 T5).
+    expect(css).toMatch(/\.hb-dot--ok \{ background: var\(--st-completed\); \}/);
+    expect(css).toMatch(/\.hb-dot--warn \{ background: var\(--yellow\); \}/);
+    expect(css).not.toMatch(/glow|box-shadow: 0 0 /);
     expect(css).toMatch(/\.tuning-pre \{[^}]*background: var\(--wash\);/);
   });
 });

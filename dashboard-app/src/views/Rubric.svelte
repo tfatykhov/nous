@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtUtc, fmtDay } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -21,7 +22,7 @@
 
   function fmtDate(iso: string | null | undefined): string {
     if (!iso) return '—';
-    return new Date(iso).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+    return fmtUtc(iso);
   }
 
   function fmtPct(n: number): string {
@@ -52,7 +53,7 @@
 
   // ── Chart data builders ───────────────────────────────────────────────────
 
-  // Chart colours are tokens that Chart.svelte resolves against the canvas's ground (dark: the old literals). The
+  // Chart colours are tokens that Chart.svelte resolves against the canvas's ground. The
   // first dimension and the radar take --series-0, not the accent, whose paper value is the question frame's blue.
   const DIM_TOKENS = ['--series-0', '--series-2', '--series-1', '--series-4', '--series-5', '--series-3', '--series-6', '--series-8', '--series-9'];
   const dimColor = (i: number) => (i < DIM_TOKENS.length ? `var(${DIM_TOKENS[i]})` : seriesToken(i));
@@ -61,8 +62,8 @@
   const DIM_DASHES = [[], [10, 4], [2, 3], [8, 3, 2, 3], [2, 2], [14, 5], [6, 2, 2, 2], [2, 4], [8, 3, 1, 3, 1, 3]];
   const dimDash = (i: number) => DIM_DASHES[i] ?? [i + 2, 3];
 
-  // Reworked is --err-text (dark: the old red), apart from corrected's orange under deuteranopia; self-corrected a mark
-  // of its own (--series-3 was 4.2 from praised's blue under protanopia); an unknown type --series-7 (dark: #6b6b8a).
+  // Reworked is --err-text, apart from corrected's orange under deuteranopia; self-corrected a mark of its own
+  // (--series-3 was 4.2 from praised's blue under protanopia); an unknown type --series-7.
   const SIGNAL_TOKENS: Record<string, string> = {
     completed: '--oc-success',
     praised: '--series-1',
@@ -85,7 +86,7 @@
       labels: dims.map((x) => x.name),
       datasets: [
         {
-          label: 'Current Weight',
+          label: 'Current weight',
           data: dims.map((x) => x.weight),
           borderColor: 'var(--series-0)',
           backgroundColor: tint('--series-0', 0.2),
@@ -94,7 +95,7 @@
         },
         {
           // Full-strength lines (3:1 or more on paper), dashes of different kinds: Min dotted, Max dashed.
-          label: 'Min Bound',
+          label: 'Min bound',
           data: dims.map((x) => x.min_weight ?? 0.10),
           borderColor: 'var(--red)',
           backgroundColor: 'transparent',
@@ -103,7 +104,7 @@
           pointRadius: 0,
         },
         {
-          label: 'Max Bound',
+          label: 'Max bound',
           data: dims.map((x) => x.max_weight ?? 0.40),
           borderColor: 'var(--green)',
           backgroundColor: 'transparent',
@@ -135,7 +136,7 @@
       return { label, data, borderColor: `var(${token})`, backgroundColor: tint(token, 0.15), fill };
     };
     return {
-      labels: trend.map((x) => x.date.slice(5)), // month-day: a phone keeps the labels level
+      labels: trend.map((x) => fmtDay(x.date)), // "Oct 20": a phone keeps the labels level
       datasets: [
         line('Completed', trend.map((x) => x.completed), 'completed', 'origin'),
         line('Praised', trend.map((x) => x.praised), 'praised', '-1'),
@@ -196,13 +197,13 @@
 <header class="view-head">
   <div>
     <h1>Scoring</h1>
-    <p class="subtitle">F024 Phase 3b — Evaluation dimensions, outcome signals, and evolution tracking</p>
+    <p class="subtitle">F024: the dimensions each turn is scored on, the outcome signals, and how the weights evolve.</p>
   </div>
   <div class="head-actions">
+    <StaleBadge state={$store} />
     <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void store.refresh()} disabled={$store.loading}>
       {$store.loading ? 'Loading…' : 'Refresh'}
     </Button>
-    <StaleBadge state={$store} />
   </div>
 </header>
 
@@ -227,28 +228,28 @@
     <div class="config-banner" class:config-banner--active={cfg.evolution_enabled} class:config-banner--off={!cfg.evolution_enabled}>
       <span class="banner-dot" class:dot-active={cfg.evolution_enabled} class:dot-off={!cfg.evolution_enabled}></span>
       <div class="banner-text">
-        <strong>Rubric v{rubric.version}</strong> — {rubric.dimension_count} dimensions
-        {cfg.evolution_enabled ? ' | Evolution ACTIVE' : ' | Evolution OFF (observation mode)'}
+        <strong>Rubric v{rubric.version}</strong>, {rubric.dimension_count} dimensions.
+        {cfg.evolution_enabled ? 'The weights evolve.' : 'The weights are fixed (observation only).'}
         <div class="banner-stats">
-          Outcome detection: {cfg.outcome_detection_enabled ? 'ON' : 'OFF'} |
-          Signals collected: {d.outcome_signals.total.toLocaleString()} |
-          Min episodes for correlation: {cfg.min_episodes_for_correlation} |
-          Weight cap: ±{(cfg.weight_change_cap * 100).toFixed(0)}%
+          Outcome detection is {cfg.outcome_detection_enabled ? 'on' : 'off'};
+          {d.outcome_signals.total.toLocaleString()} signals collected;
+          a correlation needs {cfg.min_episodes_for_correlation} episodes;
+          a weight moves at most ±{(cfg.weight_change_cap * 100).toFixed(0)}% at a time.
         </div>
       </div>
     </div>
 
     <!-- ── Stat grid ──────────────────────────────────────────────── -->
     <StatGrid stats={[
-      { label: 'Rubric Version', value: rubric.version },
+      { label: 'Rubric version', value: rubric.version },
       { label: 'Dimensions', value: rubric.dimension_count },
-      { label: 'Total Signals', value: d.outcome_signals.total.toLocaleString() },
+      { label: 'Total signals', value: d.outcome_signals.total.toLocaleString() },
       { label: 'Versions', value: d.version_history.length },
     ]} />
 
     <!-- ── Current Dimensions & Weights ──────────────────────────── -->
     <section class="chart-card mt">
-      <h2>Current Dimensions &amp; Weights</h2>
+      <h2>Current dimensions &amp; weights</h2>
       <div class="dim-grid">
         <div class="radar-wrap">
           <Chart
@@ -286,7 +287,7 @@
     <!-- ── Outcome Signal Distribution ───────────────────────────── -->
     {#if Object.keys(d.outcome_signals.by_type).length > 0}
       <section class="chart-card mt">
-        <h2>Outcome Signal Distribution</h2>
+        <h2>Outcome signal distribution</h2>
         <p class="section-note">Total: {d.outcome_signals.total.toLocaleString()} signals detected from episodes</p>
         <div class="doughnut-wrap">
           <Chart
@@ -302,7 +303,7 @@
     <!-- ── Signal Trend (30 days) ─────────────────────────────────── -->
     {#if hasTrendData(d)}
       <section class="chart-card mt">
-        <h2>Signal Trend (30 Days)</h2>
+        <h2>Signal trend (30 days)</h2>
         <Chart
           type="line"
           data={signalTrendData(d)}
@@ -369,7 +370,7 @@
     <!-- ── Weight Evolution ───────────────────────────────────────── -->
     {#if d.weight_history.length >= 2}
       <section class="chart-card mt">
-        <h2>Weight Evolution</h2>
+        <h2>Weight evolution</h2>
         <p class="section-note">How dimension weights have changed across rubric versions</p>
         <Chart
           type="line"
@@ -390,7 +391,7 @@
     <!-- ── Version History ───────────────────────────────────────── -->
     {#if d.version_history.length > 0}
       <section class="chart-card mt">
-        <h2>Version History</h2>
+        <h2>Version history</h2>
         <div class="table-scroll">
           <table class="data-table">
             <thead>
@@ -398,7 +399,7 @@
                 <th>Version</th>
                 <th>Status</th>
                 <th>Dimensions</th>
-                <th>Change Reason</th>
+                <th>Change reason</th>
                 <th>Created</th>
               </tr>
             </thead>
@@ -421,7 +422,7 @@
     <!-- ── Recent Outcome Signals ─────────────────────────────────── -->
     {#if d.outcome_signals.recent.length > 0}
       <section class="chart-card mt">
-        <h2>Recent Outcome Signals</h2>
+        <h2>Recent outcome signals</h2>
         <div class="table-scroll">
           <table class="data-table">
             <thead>
@@ -462,17 +463,11 @@
 
   .view-head h1 {
     margin: 0 0 0.25rem;
-    font-size: 1.5rem;
-    font-weight: 700;
-    color: var(--text);
-  }
-
-  /* The paper look's title size; the dark title keeps the rule above. */
-  :global(html[data-look="paper"] [data-ground="paper"]) h1 {
     font-size: 30px;
     font-weight: 650;
     letter-spacing: -0.022em;
     line-height: 1.15;
+    color: var(--text);
   }
 
   .subtitle {
@@ -520,7 +515,7 @@
 
   .empty-state code {
     font-family: var(--font-mono);
-    background: var(--track-strong);
+    background: var(--track);
     padding: 0.125rem 0.375rem;
     border-radius: 4px;
   }
@@ -622,10 +617,15 @@
     }
   }
 
+  /* Two up at every width; the odd seventh card takes the row (three up left it alone; finish review fix 5). */
   .dim-cards {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0.75rem;
+  }
+
+  .dim-card:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
   }
 
   .dim-card {
@@ -661,9 +661,7 @@
   }
 
   /* ── Correlation heatmap table ───────────────────────────────── */
-  .table-scroll {
-    overflow-x: auto;
-  }
+  /* .table-scroll is app.css's (a fixed first column and an edge fade). */
 
   .corr-table {
     border-collapse: collapse;
@@ -724,8 +722,8 @@
     color: var(--muted);
     font-weight: 600;
     font-size: 0.75rem;
-    text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking);
+    text-transform: none;
+    letter-spacing: 0;
   }
 
   .data-table tbody tr:hover {

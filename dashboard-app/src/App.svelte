@@ -1,8 +1,6 @@
 <script lang="ts">
   import { currentRoute, initRouter } from '$lib/router';
   import Nav from '$lib/ui/Nav.svelte';
-  import LookToggle from '$lib/ui/LookToggle.svelte';
-  import { groundFor } from '$lib/look';
   import DagView from './views/DagView.svelte';
   import Heartbeat from './views/Heartbeat.svelte';
   import Observability from './views/Observability.svelte';
@@ -99,18 +97,16 @@
 <a href="#main-content" class="skip-link">Skip to content</a>
 
 <!-- ── Desktop sidebar ───────────────────────────────────────── -->
-<!-- The navigation is a rail ground: the Atlantic-blue rail under the paper look, today's sidebar otherwise. -->
-<aside class="sidebar" aria-label="Site navigation" data-ground="rail">
+<!-- The navigation is the rail (class rail): the Atlantic-blue sidebar. -->
+<aside class="sidebar rail" aria-label="Site navigation">
   <div class="sidebar-header">
-    <span class="sidebar-logo" aria-hidden="true">&#x1D6B9;</span>
     <span class="sidebar-title">Nous</span>
   </div>
   <Nav currentRoute={$currentRoute} navLabel="Site navigation" />
-  <div class="sidebar-footer"><LookToggle /></div>
 </aside>
 
 <!-- ── Mobile header ─────────────────────────────────────────── -->
-<header class="mobile-header" data-ground="rail">
+<header class="mobile-header rail">
   <button
     bind:this={hamburgerBtn}
     class="hamburger"
@@ -141,9 +137,8 @@
 <div
   id="mobile-drawer"
   bind:this={drawerEl}
-  class="drawer"
+  class="drawer rail"
   class:drawer-open={drawerOpen}
-  data-ground="rail"
   role="dialog"
   aria-modal="true"
   aria-label="Navigation menu"
@@ -152,7 +147,6 @@
   onkeydown={handleDrawerKeydown}
 >
   <div class="drawer-header">
-    <span class="sidebar-logo" aria-hidden="true">&#x1D6B9;</span>
     <span class="sidebar-title">Nous</span>
     <button
       class="drawer-close"
@@ -165,12 +159,11 @@
     </button>
   </div>
   <Nav currentRoute={$currentRoute} navLabel="Mobile navigation" onnavigate={closeDrawer} />
-  <div class="sidebar-footer"><LookToggle /></div>
 </div>
 
 <!-- ── Main content ───────────────────────────────────────────── -->
-<!-- A paper ground on the routes the redesign has migrated (PAPER_ROUTES), a dark one on every other. -->
-<main id="main-content" class="main-content" data-ground={groundFor($currentRoute)}>
+<!-- The page ground (class page-ground): chart paper, on every route. -->
+<main id="main-content" class="main-content page-ground">
   <!--
     Route switch: {#if} (not {#key}) so each view's component state
     (scroll, loaded data) survives tab switching.
@@ -223,7 +216,7 @@
     z-index: 9999;
     padding: 0.5rem 1rem;
     background: var(--accent);
-    color: var(--skip-link-text);
+    color: var(--on-accent);
     border-radius: var(--radius-sm);
     font-size: 0.875rem;
     font-weight: 600;
@@ -261,25 +254,11 @@
     flex-shrink: 0;
   }
 
-  /* The glyph is hidden in the rail (no glyphs under the paper look). */
-  .sidebar-logo {
-    display: var(--logo-display);
-    font-size: 1.375rem;
-    line-height: 1;
-    color: var(--accent);
-  }
-
   .sidebar-title {
     font-size: var(--brand-size);
     font-weight: 700;
     color: var(--text);
     letter-spacing: -0.01em;
-  }
-
-  .sidebar-footer {
-    margin-top: auto;
-    padding: 0.75rem 1.25rem 1rem;
-    flex-shrink: 0;
   }
 
   /* ── Mobile header (hidden on desktop) ──────────────────────── */
@@ -337,8 +316,8 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      width: 2.25rem;
-      height: 2.25rem;
+      width: 2.75rem; /* a 44px tap target (final step) */
+      height: 2.75rem;
       background: none;
       border: none;
       border-radius: var(--radius-sm);
@@ -349,8 +328,8 @@
     }
     .hamburger-dot {
       position: absolute;
-      top: 0.25rem;
-      right: 0.25rem;
+      top: 0.5rem; /* the button grew 4px a side: the dot stays on the icon */
+      right: 0.5rem;
       width: 0.5rem;
       height: 0.5rem;
       border-radius: 50%;
@@ -381,7 +360,7 @@
       border-right: 1px solid var(--border);
       z-index: 300;
       transform: translateX(-100%);
-      transition: transform 0.25s ease;
+      transition: transform var(--transition);
       overflow-y: auto;
       /* Safe area for notched phones */
       padding-bottom: env(safe-area-inset-bottom);
@@ -395,7 +374,7 @@
       display: flex;
       align-items: center;
       gap: 0.625rem;
-      padding: 1.125rem 1rem;
+      padding: 0.75rem 1rem; /* with the 44px close, the header stays 68px tall */
       border-bottom: 1px solid var(--border);
       flex-shrink: 0;
     }
@@ -405,8 +384,8 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      width: 2rem;
-      height: 2rem;
+      width: 2.75rem; /* a 44px tap target (final step) */
+      height: 2.75rem;
       background: none;
       border: none;
       border-radius: var(--radius-sm);

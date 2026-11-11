@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Button } from '../lib/ui/button';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -44,6 +45,8 @@
   const store = usePoll(
     makePollStore<ExecutionData>((signal) => apiGet<ExecutionData>(query(), { signal }), 15_000),
   );
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
+  const refreshPage = () => store.refresh();
 
   // Refetch on a filter change (the poll itself keeps the head fresh).
   let first = true;
@@ -165,10 +168,13 @@
 
 <header class="view-head">
   <div>
-    {#if !embedded}<h1>Execution Ledger</h1>{/if}
-    <p class="subtitle">Every side-effecting tool call, kept durably — it survives restarts and ended sessions</p>
+    {#if !embedded}<h1>Execution ledger</h1>{/if}
+    <p class="subtitle">Every side-effecting tool call, kept durably: it survives restarts and ended sessions.</p>
   </div>
-  <StaleBadge state={$store} />
+  <div class="head-right">
+    <StaleBadge state={$store} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading}>{$store.loading ? 'Loading…' : 'Refresh'}</Button>
+  </div>
 </header>
 
 {#if $store.data}
@@ -352,6 +358,7 @@
 {/if}
 
 <style>
+  .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 1.25rem; }
   h1 { font-size: 1.375rem; font-weight: 700; color: var(--text); margin: 0 0 0.125rem; }
   .subtitle { font-size: 0.8125rem; color: var(--muted); margin: 0; }
@@ -370,12 +377,12 @@
   .mode-enforce { color: var(--st-success); }
   .mode-warn { color: var(--st-ledger-blocked); }
 
-  .attention { border-radius: var(--card-radius); background: color-mix(in srgb, var(--st-unknown) 6%, transparent); border: 1px solid color-mix(in srgb, var(--st-unknown) 35%, transparent);
+  .attention { border-radius: var(--card-radius); background: color-mix(in srgb, var(--unknown) 6%, transparent); border: 1px solid color-mix(in srgb, var(--unknown) 35%, transparent);
     padding: 1rem 1.125rem; margin-bottom: 1rem; display: flex; flex-direction: column; gap: 0.75rem; }
   .attn-lede { font-size: 0.8125rem; margin: 0; }
   .unknown-text { color: var(--unknown); }
   .attn-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 1.5rem; align-items: start;
-    padding-top: 0.75rem; border-top: 1px solid color-mix(in srgb, var(--st-unknown) 20%, transparent); }
+    padding-top: 0.75rem; border-top: 1px solid color-mix(in srgb, var(--unknown) 20%, transparent); }
   .attn-facts { display: grid; grid-template-columns: 6rem minmax(0, 1fr); gap: 0.25rem 0.75rem; font-size: 0.8125rem; margin: 0; }
   .attn-facts dt { color: var(--muted); }
   .attn-facts dd { margin: 0; overflow-wrap: anywhere; }
@@ -390,8 +397,8 @@
 
   .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem 1.25rem; margin: 1rem 0 0.75rem; }
   .filter-group { display: flex; align-items: center; gap: 0.5rem; }
-  .filter-label { font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform); letter-spacing: var(--label-tracking); }
-  select, input[type='search'] { min-height: 32px; padding: 0 0.625rem; border-radius: var(--ctl-radius); border: 1px solid var(--border);
+  .filter-label { font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: none; letter-spacing: 0; }
+  select, input[type='search'] { min-height: 32px; padding: 0 0.625rem; border-radius: var(--ctl-radius); border: 1px solid var(--field-border);
     background: var(--surface); color: var(--text); font-family: inherit; font-size: 0.8125rem; }
   .search { margin-left: auto; flex: 1 1 14rem; max-width: 18rem; }
   .search input { width: 100%; border-radius: 999px; }
@@ -412,7 +419,7 @@
     border: 1px solid var(--border); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }
   .target-preview { display: block; max-width: 28rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .error-text { color: var(--err-text); }
-  .detail-grid dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform); letter-spacing: var(--label-tracking); }
+  .detail-grid dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: none; letter-spacing: 0; }
   .detail-grid dd { margin: 0.125rem 0 0; font-size: 0.8125rem; }
   .mono { font-family: var(--font-mono); font-size: 0.75rem; }
   .wrap { overflow-wrap: anywhere; }

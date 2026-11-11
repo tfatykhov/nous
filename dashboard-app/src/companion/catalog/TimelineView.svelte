@@ -56,7 +56,7 @@
       <li class:flag={item.flag}>
         <span class="at">{item.at}</span>
         <span class="body">
-          <span class="label">{item.label}</span>
+          {#if item.flag}<span class="sr-only">{'Flagged: '}</span>{/if}<span class="label">{item.label}</span>
           {#if item.detail}
             <span class="detail">{item.detail}</span>
           {/if}
@@ -126,6 +126,18 @@
   }
   .label {
     overflow-wrap: anywhere;
+  }
+  /* The flag's dot and colour are visual only: the word is for a screen reader, in every theme. */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
   li.flag .label {
     color: var(--warn);

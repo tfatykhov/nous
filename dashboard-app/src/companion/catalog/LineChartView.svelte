@@ -16,7 +16,7 @@
     toneVar,
     seriesVar,
     formatTick,
-    ticks,
+    niceTicks,
   } from '../chart';
   import type { Scope } from '../pointer';
   import type { A2uiComponent } from '../store.svelte';
@@ -62,7 +62,9 @@
     specs.flatMap((s) => series.points.map((p) => p[s.key]).filter(isFiniteNumber) as number[]),
   );
   const kind = $derived(classify(allValues));
-  const domain = $derived(yDomain(allValues, false));
+  // Round axis numbers: the domain widened to a nice step, the ticks on it (finish review fix 8).
+  const nice = $derived(niceTicks(yDomain(allValues, false), 3));
+  const domain = $derived(nice.domain);
 
   // Positions map straight into the plot area (left axis gutter PAD_L);
   // xScale/yScale from chart.ts assume symmetric padding, so the axis-gutter
@@ -92,7 +94,7 @@
       };
     }),
   );
-  const yTicks = $derived(ticks(domain, 3));
+  const yTicks = $derived(nice.ticks);
 </script>
 
 <div class="line">

@@ -429,7 +429,7 @@
     font: inherit;
     font-size: 0.8rem;
     color: var(--muted);
-    background: var(--surface);
+    background: transparent;
     border: 1px solid var(--border);
     border-radius: var(--ctl-radius);
     padding: 0.25rem 0.8rem;
@@ -444,11 +444,13 @@
     border-color: var(--accent);
     color: var(--text);
   }
+  /* The selected surface is the white raised pill, as every switch in the dashboard (finish review fix 2). */
   .chip.active {
-    color: var(--on-accent);
-    background: var(--accent);
-    border-color: var(--accent);
+    background: var(--tab-active-bg);
+    color: var(--text);
     font-weight: 600;
+    box-shadow: var(--tab-active-shadow);
+    border-color: transparent;
   }
   .chip:focus-visible {
     outline: 2px solid var(--accent);

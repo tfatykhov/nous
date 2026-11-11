@@ -106,11 +106,11 @@ describe('Browse', () => {
     render(Browser);
     const cases: [string, string[]][] = [
       ['Facts', ['Content', 'Category', 'Subject', 'Confidence', 'ID', 'Tags', 'Event date']],
-      ['Episodes', ['Title', 'Summary', 'Outcome', 'Started', 'Key Points', 'Rationale', 'Lessons', 'Tags']],
+      ['Episodes', ['Title', 'Summary', 'Outcome', 'Started', 'Key points', 'Rationale', 'Lessons', 'Tags']],
       ['Decisions', ['Description', 'Category', 'Stakes', 'Confidence', 'Outcome', 'Pattern', 'Context', 'Reasons', 'ID']],
       ['Procedures', ['Name', 'Domain', 'Description', 'Patterns', 'Notes', 'Activations']],
-      ['Censors', ['Trigger', 'Action', 'Provenance', 'Reason', 'Domain', 'Activations', 'False Positives', 'ID']],
-      ['Chunks', ['Content', 'Chunk Index', 'Episode', 'Created', 'ID']],
+      ['Censors', ['Trigger', 'Action', 'Provenance', 'Reason', 'Domain', 'Activations', 'False positives', 'ID']],
+      ['Chunks', ['Content', 'Chunk index', 'Episode', 'Created', 'ID']],
     ];
     for (const [name, want] of cases) {
       const table = await openTab(name);

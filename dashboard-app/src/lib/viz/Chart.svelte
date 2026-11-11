@@ -1,7 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { look } from '../look';
-  import { cssColor, isPaperGround, resolveColors, withPaperDefaults } from '../chartColors';
+  import { applyChartFont, cssColor, finishBars, levelDayLabels, resolveColors, withChartDefaults } from '../chartColors';
 
   // phoneHeight: the height under 768 px (200 px unless a chart with a dense legend or many lines asks for more).
   let { type, data, options = {}, height = '220px', phoneHeight = '200px' }:
@@ -11,17 +10,15 @@
   let chart: any = null; // plain let — NOT $state to avoid infinite update loop
 
   // The canvas cannot read var(): tokens in the data and options (`var(--x)`, `tint(--x, a)`) resolve against the
-  // ground the canvas sits in. On a paper ground the axes and legend take the chart text and grid colours; anywhere
-  // else nothing is added, so a dark chart's options are exactly the caller's.
+  // element the canvas sits in. The axes and legend take the chart text and grid colours beneath the caller's own.
   function config(d: any, o: any) {
-    let opts = resolveColors(o, canvas);
-    if (isPaperGround(canvas)) {
-      opts = withPaperDefaults(type, opts, cssColor(canvas, '--chart-text'), cssColor(canvas, '--chart-grid'));
-    }
-    return { data: resolveColors(d, canvas), options: { responsive: true, maintainAspectRatio: false, ...opts } };
+    const opts = withChartDefaults(type, levelDayLabels(type, d, resolveColors(o, canvas)), cssColor(canvas, '--chart-text'),
+      cssColor(canvas, '--chart-grid'));
+    return { data: finishBars(type, resolveColors(d, canvas)), options: { responsive: true, maintainAspectRatio: false, ...opts } };
   }
 
   onMount(() => {
+    applyChartFont(); // the UI face for chart text, redrawn once the web fonts are in (finish review fix 7)
     chart = new Chart(canvas, { type, ...config(data, options) });
     return () => {
       chart?.destroy();
@@ -29,12 +26,10 @@
     };
   });
 
-  // New data or options, or a look switch (look.ts sets <html data-look> before the store changes, so the tokens
-  // already read the new ground): re-resolve and redraw in place.
+  // New data or options: re-resolve and redraw in place.
   $effect(() => {
     const d = data;
     const o = options;
-    void $look;
     if (chart) {
       const c = config(d, o);
       chart.data = c.data;

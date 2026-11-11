@@ -47,21 +47,21 @@ describe('Observability after the Model calls move', () => {
 
   it('no longer shows the last-call token breakdown or the recent API calls', async () => {
     render(Observability);
-    await screen.findByRole('heading', { level: 2, name: 'Handler Health' });
+    await screen.findByRole('heading', { level: 2, name: 'Handler health' });
     expect(screen.queryByText('Context Token Breakdown (Last Call)')).toBeNull();
     expect(screen.queryByText('Recent API Calls')).toBeNull();
   });
 
   it('keeps the other sections', async () => {
     render(Observability);
-    for (const name of ['Handler Health', 'Recent Causal Traces', 'Autonomous Modifications (24h)']) {
+    for (const name of ['Handler health', 'Recent causal traces', 'Autonomous modifications (24h)']) {
       expect(await screen.findByRole('heading', { level: 2, name })).toBeTruthy();
     }
   });
 
   it('never fetches a call\'s context text or raw payload', async () => {
     render(Observability);
-    await screen.findByRole('heading', { level: 2, name: 'Handler Health' });
+    await screen.findByRole('heading', { level: 2, name: 'Handler health' });
     // The buttons that would fetch a call's text or payload are gone from the screen, so there is nothing to press.
     expect(screen.queryAllByRole('button', { name: /Show details for/ })).toEqual([]);
     for (const name of ['View Context Text', 'View Raw Payload']) expect(screen.queryByRole('button', { name })).toBeNull();
@@ -72,7 +72,7 @@ describe('Observability after the Model calls move', () => {
 
   it('points to the Model calls screen in one line', async () => {
     render(Observability);
-    await screen.findByRole('heading', { level: 2, name: 'Handler Health' });
+    await screen.findByRole('heading', { level: 2, name: 'Handler health' });
     const link = screen.getByRole('link', { name: 'Model calls' });
     expect(link.getAttribute('href')).toBe('#/model-calls');
     expect(link.closest('p')?.textContent?.trim()).toBe('Model calls moved to Model calls');

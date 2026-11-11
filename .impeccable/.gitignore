@@ -1,0 +1,5 @@
+# The design tooling's runtime folders and local settings: never committed.
+mocks/
+questions/
+review/
+config.local.json

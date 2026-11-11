@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtUtc } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -162,18 +163,18 @@
     const orphanTotal = Object.values(s.orphan_counts).reduce((a, b) => a + b, 0);
     return [
       { label: 'Nodes', value: String(s.node_count) },
-      { label: 'Total Edges', value: String(s.total_edges) },
-      { label: 'Shown Edges', value: String(s.displayed_edges) },
+      { label: 'Total edges', value: String(s.total_edges) },
+      { label: 'Shown edges', value: String(s.displayed_edges) },
       { label: 'Orphans', value: String(orphanTotal) },
     ];
   });
 
   // ── Cytoscape style (mirrors graph.js) ──────────────────────────────────
-  // Cytoscape draws on a canvas and cannot read var(): the stylesheet's colours are read off the graph's own element
-  // (Graph.svelte rebuilds it when the look changes). Node and edge fills come from each element's `color` data.
+  // Cytoscape draws on a canvas and cannot read var(): the stylesheet's colours are read off the graph's own element.
+  // Node and edge fills come from each element's `color` data.
   function cytoscapeStyle(el: Element) {
     const c = (token: string) => cssColor(el, token);
-    /** A number token on the graph's ground (the edge opacities); `fallback`, the dark value, when unset. */
+    /** A number token on the graph's element (the edge opacities); `fallback`, the :root value, when unset (jsdom). */
     const n = (token: string, fallback: number) => {
       const v = parseFloat(el.isConnected ? readToken(el, token) : '');
       return Number.isFinite(v) ? v : fallback;
@@ -219,7 +220,7 @@
       style: {
         'curve-style': 'bezier',
         'line-color': 'data(color)',
-        opacity: n('--gv-edge-opacity', 0.5),
+        opacity: n('--gv-edge-opacity', 0.75),
         width: 'mapData(weight, 0, 1, 1, 4)',
         'target-arrow-color': 'data(color)',
         'target-arrow-shape': 'triangle',
@@ -228,7 +229,7 @@
     },
     {
       selector: 'edge[extraction_method = "inferred"]',
-      style: { opacity: n('--gv-edge-opacity-inferred', 0.3), 'line-style': 'dashed' },
+      style: { opacity: n('--gv-edge-opacity-inferred', 0.5), 'line-style': 'dashed' },
     },
     {
       selector: 'edge.faded',
@@ -280,7 +281,7 @@
   function fmtDate(iso: string | null | undefined): string {
     if (!iso) return '--';
     try {
-      return new Date(iso).toLocaleDateString();
+      return fmtUtc(iso);
     } catch {
       return iso;
     }
@@ -301,7 +302,7 @@
 
 <div class="view-head">
   <div>
-    <h1 class="view-title">Knowledge Graph</h1>
+    <h1 class="view-title">Graph</h1>
     <p class="view-subtitle">
       {$store.data ? graphSliceText($store.data.stats) : 'Memory nodes and the links between them.'}
     </p>
@@ -383,7 +384,7 @@
 {/if}
 
 <!-- Node detail bottom sheet -->
-<BottomSheet bind:open={sheetOpen} title={selectedHead ? capitalize(selectedHead.type) + ' Detail' : 'Node Detail'}>
+<BottomSheet bind:open={sheetOpen} title={selectedHead ? capitalize(selectedHead.type) + ' detail' : 'Node detail'}>
   {#if selectedHead}
     {@const head = selectedHead}
     <div class="node-detail">
@@ -475,9 +476,7 @@
 </BottomSheet>
 
 <style>
-  /* Colours and structure are tokens only (hexGuard): today's values under the dark look, rounded white cards and
-     pills on the paper ground. Paper-only chrome (the title size, chips as pills, the mono font) sits under a
-     paper-ground selector, so the dark look keeps its shapes and fonts. */
+  /* Colours and structure are tokens only (hexGuard): rounded white cards and pills on the paper ground. */
   .view-head {
     display: flex;
     flex-wrap: wrap; /* at phone width the actions drop below the title rather than widen the page */
@@ -488,15 +487,10 @@
   }
 
   .view-title {
-    font-size: 1.375rem;
-    font-weight: 700;
-    color: var(--text);
-    margin: 0 0 0.25rem;
-  }
-
-  :global(html[data-look="paper"] [data-ground="paper"]) .view-title {
     font-size: 30px;
     font-weight: 650;
+    color: var(--text);
+    margin: 0 0 0.25rem;
     letter-spacing: -0.022em;
     line-height: 1.15;
   }
@@ -558,15 +552,15 @@
     gap: 0.75rem;
     padding: 0.75rem 1rem;
     border-bottom: 1px solid var(--border);
-    background: var(--bar-bg);
+    background: var(--surface-hover);
   }
 
   .search-input {
-    padding: 0.25rem 0.625rem;
+    padding: 0.3125rem 0.875rem;
     font-size: 0.8125rem;
-    border: 1px solid var(--border);
+    border: 1px solid var(--field-border);
     border-radius: var(--ctl-radius);
-    background: var(--bg);
+    background: var(--surface);
     color: var(--text);
     width: 180px;
     outline: none;
@@ -576,12 +570,7 @@
     border-color: var(--accent);
   }
 
-  :global(html[data-look="paper"] [data-ground="paper"]) .search-input {
-    background: var(--surface);
-    padding: 0.3125rem 0.875rem;
-  }
-
-  :global(html[data-look="paper"] [data-ground="paper"]) .search-input:focus-visible {
+  .search-input:focus-visible {
     outline: 2px solid var(--focus-ring);
     outline-offset: 1px;
   }
@@ -592,27 +581,23 @@
     gap: 0.5rem;
   }
 
+  /* Each type filter is a pill: the box, the dot and the word inside one rounded chip. */
   .type-check {
     display: flex;
     align-items: center;
     gap: 0.3rem;
     font-size: 0.75rem;
-    color: var(--muted);
+    color: var(--text);
     cursor: pointer;
     user-select: none;
-  }
-
-  /* Each type filter is a pill on paper: the box, the dot and the word inside one rounded chip. */
-  :global(html[data-look="paper"] [data-ground="paper"]) .type-check {
     padding: 0.1875rem 0.625rem 0.1875rem 0.4375rem;
     border-radius: 999px;
     background: var(--surface);
     border: 1px solid var(--border);
-    color: var(--text);
   }
 
-  :global(html[data-look="paper"] [data-ground="paper"]) .type-check input {
-    accent-color: var(--accent);
+  .type-check input {
+    accent-color: var(--action);
   }
 
   .type-dot {
@@ -636,7 +621,7 @@
 
   .range-slider {
     width: 100px;
-    accent-color: var(--accent);
+    accent-color: var(--action);
   }
 
   .empty-state {
@@ -678,11 +663,12 @@
     font-size: 0.6875rem;
     font-weight: 600;
     color: var(--muted);
-    text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking);
+    text-transform: none;
+    letter-spacing: 0;
   }
 
   /* The type's colour (--type, set inline) on its own 12.5% tint (the old hex `20` alpha). */
+  /* The node colours are 3:1 marks, not text: the badge's word is mixed toward the ink (4.5:1 or more). */
   .type-badge {
     display: inline-block;
     padding: 2px 8px;
@@ -691,11 +677,6 @@
     font-weight: 600;
     border: 1px solid transparent;
     background: color-mix(in srgb, var(--type) 12.5%, transparent);
-    color: var(--type);
-  }
-
-  /* On paper the node colours are 3:1 marks, not text: the badge's word is mixed toward the ink (4.5:1 or more). */
-  :global(html[data-look="paper"] [data-ground="paper"]) .type-badge {
     color: color-mix(in srgb, var(--type) 70%, var(--text));
   }
 
@@ -709,8 +690,7 @@
     font-family: ui-monospace, monospace;
   }
 
-  :global(html[data-look="paper"] [data-ground="paper"]) .mono,
-  :global(html[data-look="paper"] [data-ground="paper"]) .conn-weight {
+  .mono, .conn-weight {
     font-family: var(--font-mono);
   }
 
@@ -779,7 +759,7 @@
     text-align: left;
     background: none;
     border: none;
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
     padding: 0.3rem 0.4rem;
     cursor: pointer;
     color: var(--text);
@@ -800,9 +780,6 @@
     flex-shrink: 0;
     min-width: 2.25rem;
     font-size: 0.6875rem;
-  }
-
-  :global(html[data-look="paper"] [data-ground="paper"]) .conn-dir {
     font-family: var(--font-ui);
   }
 
@@ -823,8 +800,8 @@
 
   .conn-flag {
     font-size: 0.625rem;
-    text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking);
+    text-transform: none;
+    letter-spacing: 0;
     color: var(--err-text);
     border: 1px solid var(--red);
     border-radius: 999px;

@@ -12,7 +12,7 @@
     {
       "id": "due",
       "component": "Column",
-      "children": ["from", "title", "chips", "meter-label", "meter", "s-why", "s-changed", "kv", "actions"]
+      "children": ["title", "from", "chips", "meter-label", "meter", "s-why", "s-changed", "kv", "actions"]
     },
     { "id": "from", "component": "Text", "variant": "caption", "text": "Decision 8f027e1a, in the decision frame" },
     { "id": "title", "component": "Text", "text": "## Keep frame carry off until 13 November" },

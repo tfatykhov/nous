@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { combinePolls } from '../lib/pollBadge';
+  import { fmtUtc, fmtHour } from '../lib/harness';
   import { SvelteSet } from 'svelte/reactivity';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
@@ -26,10 +28,11 @@
       0, // fetch-once
     ),
   );
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
+  const refreshPage = () => Promise.all([store.refresh(), activity.refresh()]);
 
   function formatDateTime(dateStr: string | null): string {
-    if (!dateStr) return '—';
-    return new Date(dateStr).toLocaleString();
+    return fmtUtc(dateStr);
   }
 
   function eventSummary(event: ActivityEvent): string {
@@ -107,7 +110,7 @@
   }
 
   /** The dot's token by error rate: the success mark, the amber, and --err-text (not --red: under deuteranopia it stays
-   *  apart from the amber, 12.5 where red is 5.1; both are #f87171 under dark). Every pair is 9.8 or more apart under
+   *  apart from the amber, 12.5 where red is 5.1). Every pair is 9.8 or more apart under
    *  all three visions, and the rate itself is printed beside the dot. */
   function handlerDotToken(errorRate: number): string {
     if (errorRate > 0.1) return '--err-text';
@@ -118,10 +121,7 @@
   // ── Drift trend chart builders ────────────────────────────────────────────
 
   function trendLabels(points: { t: string }[]): string[] {
-    return points.map((p) => {
-      const d = new Date(p.t);
-      return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:00`;
-    });
+    return points.map((p) => fmtHour(p.t)); // "Nov 10 15:00", UTC like every other time
   }
 
   function errorTrendData(points: { t: string; v: number }[]) {
@@ -148,14 +148,19 @@
     },
     plugins: { legend: { display: false } },
   };
+  /** The header badge speaks for every store this page reads (Codex round 1). */
+  const pagePoll = $derived(combinePolls({ 'event bus': $store, 'event timeline': $activity }));
 </script>
 
 <header class="view-head">
   <div>
     <h1>Observability</h1>
-    <p class="subtitle">Event bus health, causal traces, and behavioral drift</p>
+    <p class="subtitle">How the event bus is doing, the causal traces, and drift in behaviour.</p>
   </div>
-  <StaleBadge state={$store} />
+  <div class="head-right">
+    <StaleBadge state={pagePoll} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={pagePoll.loading}>{pagePoll.loading ? 'Loading…' : 'Refresh'}</Button>
+  </div>
 </header>
 
 {#if $store.data}
@@ -175,7 +180,7 @@
 
   <!-- Handler health list -->
   <section class="chart-card">
-    <h2>Handler Health</h2>
+    <h2>Handler health</h2>
     {#if handlerNames.length > 0}
       <div class="handler-list">
         {#each handlerNames as name}
@@ -205,7 +210,7 @@
   <div class="chart-row">
     <!-- Recent traces with expand/collapse tree -->
     <section class="chart-card">
-      <h2>Recent Causal Traces</h2>
+      <h2>Recent causal traces</h2>
       {#if d.recent_traces.length > 0}
         <div class="trace-list">
           {#each d.recent_traces as t (t.trace_id)}
@@ -251,7 +256,7 @@
                 </div>
                 <div class="trace-detail-row">
                   <span class="dl">Timestamp</span>
-                  <span>{t.timestamp ? new Date(t.timestamp).toLocaleString() : '--'}</span>
+                  <span>{t.timestamp ? fmtUtc(t.timestamp) : '--'}</span>
                 </div>
               </div>
             {/if}
@@ -264,7 +269,7 @@
 
     <!-- Autonomous modifications -->
     <section class="chart-card">
-      <h2>Autonomous Modifications (24h)</h2>
+      <h2>Autonomous modifications (24h)</h2>
       {#if d.recent_modifications.length > 0}
         <div class="mod-list">
           {#each d.recent_modifications as m}
@@ -286,11 +291,11 @@
   <!-- Anomalies banner -->
   {#if d.drift?.anomalies && d.drift.anomalies.length > 0}
     <section class="chart-card">
-      <h2>Active Drift Anomalies</h2>
+      <h2>Active drift anomalies</h2>
       {#each d.drift.anomalies as a}
         <div class="anomaly" class:anomaly--alert={a.severity === 'alert'}>
           <!-- The severity in a word as well as the tint (status is never colour alone). -->
-          <span class="anomaly-level">{a.severity === 'alert' ? 'Alert' : 'Warning'}</span>
+          <span class="anomaly-level status-pill" class:status-pill--bad={a.severity === 'alert'} class:status-pill--warn={a.severity !== 'alert'}>{a.severity === 'alert' ? 'Alert' : 'Warning'}</span>
           <strong>{a.metric}</strong>:
           {#if a.residualized_by}
             {a.raw_current} raw, {a.current} unexplained after {a.residualized_by}
@@ -308,7 +313,7 @@
   {#if errPts.length > 0}
     <div class="chart-row">
       <section class="chart-card">
-        <h2>Handler Error Rate (7d)</h2>
+        <h2>Handler error rate (7d)</h2>
         <Chart type="line" data={errorTrendData(errPts)} options={trendLineOpts} height="180px" />
       </section>
     </div>
@@ -343,10 +348,7 @@
 <!-- ── Event Timeline (moved from the Activity screen, F108) ── -->
 <section class="chart-card">
   <div class="section-head">
-    <h2>Event Timeline</h2>
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void activity.refresh()} disabled={$activity.loading}>
-      {$activity.loading ? 'Loading…' : 'Refresh'}
-    </Button>
+    <h2>Event timeline</h2>
   </div>
   {#if $activity.data}
     {@const d = $activity.data}
@@ -379,6 +381,7 @@
 <p class="moved">Model calls moved to <a href={routeHref('model-calls')}>Model calls</a></p>
 
 <style>
+  .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   .view-head {
     display: flex;
     align-items: flex-start;
@@ -389,13 +392,13 @@
   }
 
   h1 {
-    font-size: 1.4rem;
-    font-weight: 700;
+    font-size: 30px;
+    font-weight: 650;
     color: var(--text);
     margin: 0 0 0.125rem;
+    letter-spacing: -0.022em;
+    line-height: 1.15;
   }
-
-  :global(html[data-look="paper"] [data-ground="paper"]) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
 
   .subtitle {
     font-size: 0.8125rem;
@@ -422,6 +425,7 @@
   }
 
   .chart-row > * { min-width: 0; }
+  .chart-row > :only-child { grid-column: 1 / -1; } /* one chart: the full width */
 
   .chart-card {
     background: var(--surface);
@@ -501,10 +505,10 @@
     align-items: center;
     gap: 0.5rem;
     padding: 0.5rem 0.375rem;
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
     font-size: 0.8125rem;
-    transition: background 0.1s;
+    transition: background var(--transition);
   }
 
   .trace-row:hover,
@@ -556,12 +560,12 @@
     margin-left: auto;
   }
 
+  /* A tinted block at the world's radius, indented under its row (no side stripe: the craft floor). */
   .trace-detail {
-    padding: 0.5rem 0.75rem 0.5rem 1.5rem;
+    padding: 0.5rem 0.75rem;
     background: var(--wash);
-    border-left: 2px solid var(--border);
     margin: 0 0 0.25rem 1rem;
-    border-radius: 0 6px 6px 0;
+    border-radius: var(--card-radius-sm);
   }
 
   .trace-detail-row {
@@ -627,29 +631,20 @@
   }
 
   /* ── Drift anomalies ── */
+  /* A tinted block at the world's radius; the severity is the tinted pill in front (Alert red, Warning amber). No side
+     stripe (the craft floor). */
   .anomaly {
     padding: 0.5rem 0.75rem;
-    border-radius: 6px;
-    background: color-mix(in srgb, var(--yellow) 10%, transparent);
-    border-left: 3px solid var(--yellow);
+    border-radius: var(--card-radius-sm);
+    background: var(--wash);
     font-size: 0.8125rem;
     margin-bottom: 0.5rem;
     color: var(--text);
     overflow-wrap: anywhere;
   }
 
-  .anomaly--alert {
-    background: var(--err-bg);
-    border-left-color: var(--red);
-  }
-
   .anomaly-level {
-    font-weight: 700;
-    color: var(--warn-text);
-  }
-
-  .anomaly--alert .anomaly-level {
-    color: var(--err-text);
+    margin-right: 0.375rem;
   }
 
   .snapshot-grid {
@@ -701,8 +696,8 @@
   .event-badge {
     font-size: 0.6875rem;
     font-weight: 600;
-    text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking);
+    text-transform: none;
+    letter-spacing: 0;
     color: var(--accent);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     border-radius: 999px;

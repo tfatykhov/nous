@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { combinePolls } from '../lib/pollBadge';
+  import { fmtUtc } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -35,8 +37,7 @@
   }
 
   function formatDateTime(dateStr: string | null): string {
-    if (!dateStr) return '—';
-    return new Date(dateStr).toLocaleString();
+    return fmtUtc(dateStr);
   }
 
   // ── Detail drill-through (per-cycle, on-demand fetch with its own state) ───
@@ -91,9 +92,7 @@
   }
 
   function fmtTs(iso: string | null): string {
-    if (!iso) return '—';
-    const d = new Date(iso);
-    return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+    return fmtUtc(iso);
   }
 
   function shortId(id: string): string {
@@ -130,19 +129,21 @@
     }
     return [...groups.entries()].map(([phase, items]) => ({ phase, items }));
   });
+  /** The header badge speaks for every store this page reads (Codex round 1). */
+  const pagePoll = $derived(combinePolls({ cycles: $store, 'sleep activity': $activity }));
 </script>
 
 <!-- ── Header ──────────────────────────────────────────────────────────── -->
 <header class="view-head">
   <div>
     <h1>Consolidation</h1>
-    <p class="subtitle">Per-sleep-cycle memory consolidation audit — merges, supersessions, and deactivations</p>
+    <p class="subtitle">What each sleep cycle merged, superseded and deactivated in memory.</p>
   </div>
   <div class="head-right">
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={$store.loading}>
-      {$store.loading ? 'Loading…' : 'Refresh'}
+    <StaleBadge state={pagePoll} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={pagePoll.loading}>
+      {pagePoll.loading ? 'Loading…' : 'Refresh'}
     </Button>
-    <StaleBadge state={$store} />
   </div>
 </header>
 
@@ -151,8 +152,8 @@
 
   <!-- ── Cycle list ──────────────────────────────────────────────────────── -->
   <section class="chart-card">
-    <h2>Recent Cycles</h2>
-    <div class="table-wrap">
+    <h2>Recent cycles</h2>
+    <div class="table-wrap table-scroll">
     <table class="data-table">
       <thead>
         <tr>
@@ -269,19 +270,19 @@
 
 <!-- ── Sleep Activity (moved from the Activity screen, F108) ─────────────── -->
 <section class="chart-card mt">
-  <h2>Sleep Activity</h2>
+  <h2>Sleep activity</h2>
   {#if $activity.data}
     {@const sl = $activity.data.sleep_stats}
     <dl class="detail-grid">
-      <dt>Last Sleep</dt>
+      <dt>Last sleep</dt>
       <dd>{sl.last_sleep ? formatDateTime(sl.last_sleep) : 'Never'}</dd>
-      <dt>Total Sleeps</dt>
+      <dt>Total sleeps</dt>
       <dd>{sl.total_sleeps}</dd>
-      <dt>Facts Created</dt>
+      <dt>Facts created</dt>
       <dd>{sl.facts_created}</dd>
       <dt>Procedures</dt>
       <dd>{sl.procedures_created}</dd>
-      <dt>Censors Retired</dt>
+      <dt>Censors retired</dt>
       <dd>{sl.censors_retired}</dd>
     </dl>
   {:else if $activity.error}
@@ -306,12 +307,13 @@
   }
 
   h1 {
-    font-size: 1.4rem;
-    font-weight: 700;
+    font-size: 30px;
+    font-weight: 650;
     color: var(--text);
     margin: 0 0 0.125rem;
+    letter-spacing: -0.022em;
+    line-height: 1.15;
   }
-  :global(html[data-look="paper"] [data-ground="paper"]) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
 
   .subtitle {
     font-size: 0.8125rem;
@@ -320,12 +322,11 @@
   }
 
   h2 {
-    font-size: 0.875rem;
-    font-weight: 600;
+    font-size: 15px;
+    font-weight: 650;
     color: var(--text);
     margin: 0 0 0.75rem;
   }
-  :global(html[data-look="paper"] [data-ground="paper"]) h2 { font-size: 15px; font-weight: 650; }
 
   .head-right {
     display: flex;
@@ -340,9 +341,8 @@
     border: var(--card-border);
     border-radius: var(--card-radius);
     box-shadow: var(--card-shadow);
-    padding: 1rem;
+    padding: 1.125rem 1.25rem;
   }
-  :global(html[data-look="paper"] [data-ground="paper"]) .chart-card { padding: 1.125rem 1.25rem; }
 
   .mt { margin-top: 1rem; }
 
@@ -378,14 +378,14 @@
   .cycle-row:hover td { background: var(--surface-hover); }
   .cycle-row.selected td { background: var(--accent-glow); }
 
-  .ts { display: block; }
+  .ts { display: block; white-space: nowrap; } /* one line: the table scrolls on a phone instead */
   .trace {
     font-size: 0.7rem;
     color: var(--muted);
     font-family: var(--font-mono, monospace);
   }
 
-  .totals-cell { color: var(--muted); }
+  .totals-cell { color: var(--muted); white-space: nowrap; }
 
   .empty-cell {
     text-align: center;
@@ -500,7 +500,7 @@
     font-size: 0.75rem;
     font-weight: 700;
     color: var(--accent);
-    text-transform: var(--label-transform);
+    text-transform: none;
     letter-spacing: 0.02em;
   }
 
@@ -534,7 +534,7 @@
     font-size: 0.7rem;
     font-weight: 600;
     color: var(--muted);
-    text-transform: var(--label-transform);
+    text-transform: none;
   }
 
   .diff-none {
@@ -558,8 +558,9 @@
     overflow-x: auto;
   }
 
-  .diff-before pre { border-left: 2px solid var(--red); }
-  .diff-after pre  { border-left: 2px solid var(--green); }
+  /* Before and after are tinted blocks (the err and ok tints), not side stripes; the labels name them. */
+  .diff-before pre { background: var(--err-bg); }
+  .diff-after pre  { background: var(--ok-bg); }
 
   /* ── Status messages ─────────────────────────────────────── */
   .status-msg {

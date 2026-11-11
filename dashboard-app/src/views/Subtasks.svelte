@@ -1,4 +1,7 @@
 <script lang="ts">
+  import { combinePolls } from '../lib/pollBadge';
+  import { Button } from '../lib/ui/button';
+  import { fmtUtc, fmtDay } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -39,10 +42,11 @@
       0, // fetch-once
     ),
   );
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
+  const refreshPage = () => Promise.all([store.refresh(), activity.refresh()]);
 
   function formatDateTime(dateStr: string | null): string {
-    if (!dateStr) return '—';
-    return new Date(dateStr).toLocaleString();
+    return fmtUtc(dateStr);
   }
 
   // ── Outcome colours (mirrors subtasks.js OUTCOME_COLORS): status and outcome tokens, which Chart resolves ──
@@ -71,8 +75,7 @@
   }
 
   function formatTs(ts: string | null): string {
-    if (!ts) return '—';
-    return new Date(ts).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+    return fmtUtc(ts);
   }
 
   // ── Chart data builders ───────────────────────────────────────────────────
@@ -110,7 +113,7 @@
     daily.forEach((d) => Object.keys(d.by_outcome).forEach((k) => allOutcomes.add(k)));
     const outcomes = Array.from(allOutcomes).sort();
     return {
-      labels: daily.map((d) => d.date),
+      labels: daily.map((d) => fmtDay(d.date)),
       datasets: outcomes.map((outcome) => ({
         label: outcome,
         data: daily.map((d) => d.by_outcome[outcome] ?? 0),
@@ -140,12 +143,14 @@
     { key: 'tool_calls_made', label: 'Tool calls' },
     { key: 'task', label: 'Task' },
   ];
+  /** The header badge speaks for every store this page reads (Codex round 1). */
+  const pagePoll = $derived(combinePolls({ subtasks: $store, schedules: $activity }));
 </script>
 
 <header class="view-head">
   <div>
     <h1>Subtasks</h1>
-    <p class="subtitle">F061 outcome metrics — last {$store.data?.window_hours ?? hours}h</p>
+    <p class="subtitle">F061: how background subtasks ended in the last {$store.data?.window_hours ?? hours} hours.</p>
   </div>
   <div class="head-right">
     <label class="hours-label" for="hours-select">Window</label>
@@ -158,7 +163,8 @@
         <option value={h}>{h}h</option>
       {/each}
     </select>
-    <StaleBadge state={$store} />
+    <StaleBadge state={pagePoll} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={pagePoll.loading}>{pagePoll.loading ? 'Loading…' : 'Refresh'}</Button>
   </div>
 </header>
 
@@ -296,17 +302,14 @@
 <!-- Upcoming Schedules, with the schedule numbers (moved from the Activity screen, F108) -->
 <section class="chart-card">
   <div class="section-head">
-    <h2>Upcoming Schedules</h2>
-    <button class="refresh-btn" onclick={() => void activity.refresh()} disabled={$activity.loading}>
-      {$activity.loading ? 'Loading…' : 'Refresh'}
-    </button>
+    <h2>Upcoming schedules</h2>
   </div>
   {#if $activity.data}
     {@const ss = $activity.data.schedule_stats}
     <p class="caption">Numbers marked (7d) are the last 7 days, whatever the window above.</p>
-    <StatGrid stats={[
-      { label: 'Active Schedules',         value: ss.active },
-      { label: 'Schedule Fires (7d)',      value: ss.fires_7d },
+    <StatGrid flat stats={[
+      { label: 'Active schedules',         value: ss.active },
+      { label: 'Schedule fires (7d)',      value: ss.fires_7d },
     ]} />
     {#if ss.next_fires.length > 0}
       <ul class="item-list">
@@ -341,15 +344,10 @@
   }
 
   h1 {
-    font-size: 1.4rem;
-    font-weight: 700;
-    color: var(--text);
-    margin: 0 0 0.125rem;
-  }
-
-  :global(html[data-look="paper"] [data-ground="paper"]) h1 {
     font-size: 30px;
     font-weight: 650;
+    color: var(--text);
+    margin: 0 0 0.125rem;
     letter-spacing: -0.022em;
   }
 
@@ -450,17 +448,6 @@
     margin: 0;
   }
 
-  .refresh-btn {
-    font-size: 0.8125rem;
-    padding: 0.25rem 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: var(--ctl-radius);
-    background: var(--surface);
-    color: var(--text);
-    cursor: pointer;
-  }
-  .refresh-btn:hover:not(:disabled) { background: var(--surface-hover); }
-  .refresh-btn:disabled { opacity: 0.5; cursor: default; }
 
   ul.item-list {
     list-style: none;

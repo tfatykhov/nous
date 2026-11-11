@@ -1,12 +1,16 @@
 <script lang="ts">
+  import { Button } from '../lib/ui/button';
   import { apiGet, apiSend } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
   import type { MemoryWriteHealthData, MwhRuleId } from '../lib/types/api';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import FilterBar from '../lib/ui/FilterBar.svelte';
-  import { fmtWhen } from '../lib/harness';
+  import { fmtWhen, fmtDay } from '../lib/harness';
   import { dayRows, fmtValue, ruleTiles, stateTone, RULE_LABEL, SOURCE_COLUMNS, STATE_LABEL } from '../lib/memoryWriteHealth';
+
+  /** A rule's tone as a status pill (app.css .status-pill). */
+  const PILL: Record<string, string> = { bad: 'bad', warn: 'warn', ok: 'ok', muted: 'neutral' };
 
   // GET /dashboard/memory-write-health: the daily write-health rollup and its rules. These findings never go to
   // Telegram: this page (and the companion card) is where they show. Acknowledge records who accepted a rule's
@@ -21,6 +25,8 @@
       60_000,
     ),
   );
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
+  const refreshPage = () => store.refresh();
   let first = true;
   $effect(() => {
     void days;
@@ -57,12 +63,13 @@
 <header class="view-head">
   <div>
     {#if !embedded}<h1>Memory write health</h1>{/if}
-    <p class="subtitle">What the memory write paths stored each day, and the rules that watch them. Shown here and on the companion only, never on Telegram</p>
+    <p class="subtitle">What the memory write paths stored each day, and the rules that watch them. Shown here and on the companion only, never on Telegram.</p>
   </div>
   <div class="head-right">
     <FilterBar label="Window" required bind:value={days}
       options={[{ value: '7', label: '7 d' }, { value: '30', label: '30 d' }, { value: '90', label: '90 d' }]} />
     <StaleBadge state={$store} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading}>{$store.loading ? 'Loading…' : 'Refresh'}</Button>
   </div>
 </header>
 
@@ -89,7 +96,7 @@
         <section class="tile tone-{stateTone(t.state)}" aria-labelledby="rule-{t.id}">
           <div class="tile-head">
             <h2 id="rule-{t.id}"><span class="rule-id">{t.id}</span> {t.label}</h2>
-            <span class="pill pill-{stateTone(t.state)}">{STATE_LABEL[t.state]}</span>
+            <span class="status-pill status-pill--{PILL[stateTone(t.state)]}">{STATE_LABEL[t.state]}</span>
           </div>
           <div class="value">{fmtValue(t.id, t.value)} <span class="small muted">/ threshold {fmtValue(t.id, t.threshold)}</span></div>
           <p class="small muted">{t.hint}</p>
@@ -115,7 +122,7 @@
       <section class="panel" aria-labelledby="hd-title">
         <div class="panel-head">
           <h2 id="hd-title">Hard-delete signals</h2>
-          <span class="small muted">Observed {fmtWhen(l.observed_at)} · ledger since {l.ledger_oldest ? l.ledger_oldest.slice(0, 10) : '—'}</span>
+          <span class="small muted">Observed {fmtWhen(l.observed_at)} · ledger since {fmtDay(l.ledger_oldest)}</span>
         </div>
         <dl class="tiles">
           <div><dt>Facts (all rows)</dt><dd>{n(l.facts_total)}</dd></div>
@@ -198,16 +205,16 @@
 <style>
   .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
-  h1 { font-size: 1.375rem; font-weight: 700; margin: 0 0 0.25rem; }
+  h1 { font-size: 30px; font-weight: 650; margin: 0 0 0.25rem; letter-spacing: -0.022em; line-height: 1.15; }
   h2 { font-size: 0.9375rem; font-weight: 600; margin: 0; }
-  :global(html[data-look="paper"] [data-ground="paper"]) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
-  :global(html[data-look="paper"] [data-ground="paper"]) h2 { font-weight: 650; }
+  /* Anchored on purpose: it out-ranks .verdict-title's 700, so the verdict reads 650 like every heading. */
+  :global(html:root .page-ground) h2 { font-weight: 650; }
   .subtitle { font-size: 0.8125rem; color: var(--muted); margin: 0; }
   .strip { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem 2rem; flex-wrap: wrap;
     padding: 0.875rem 1.125rem; border-radius: var(--card-radius); border: 1px solid; margin-bottom: 1rem; }
   /* Status by token: the alphas of the old literals are the mix percentages (dark identical). */
-  .verdict-ok { color: var(--stat-ok); border-color: color-mix(in srgb, var(--stat-ok) 35%, transparent);
-    background: color-mix(in srgb, var(--stat-ok) 8%, transparent); }
+  .verdict-ok { color: var(--ok-text); border-color: color-mix(in srgb, var(--ok-text) 35%, transparent);
+    background: color-mix(in srgb, var(--ok-text) 8%, transparent); }
   .verdict-bad { color: var(--err-text); border-color: color-mix(in srgb, var(--tone-bad) 50%, transparent);
     background: color-mix(in srgb, var(--tone-bad) 10%, transparent); }
   .verdict-title { font-size: 0.9375rem; font-weight: 700; }
@@ -217,29 +224,25 @@
   .tile { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow); padding: 1rem 1.125rem;
     display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; }
   .tile.tone-bad { border-color: color-mix(in srgb, var(--tone-bad) 60%, transparent); }
-  .tile.tone-warn { border-color: color-mix(in srgb, var(--stat-warn) 50%, transparent); }
+  .tile.tone-warn { border-color: color-mix(in srgb, var(--warn-text) 50%, transparent); }
   .tile p { margin: 0; }
   .tile-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; }
   .rule-id { font-family: var(--font-mono); font-size: 0.75rem; color: var(--muted); }
   .value { font-size: 1.5rem; font-weight: 700; }
   .summary { font-size: 0.8125rem; overflow-wrap: anywhere; }
   .ack { display: flex; flex-direction: column; gap: 0.375rem; margin-top: 0.25rem; }
-  .ack input { padding: 0.375rem 0.5rem; border: 1px solid var(--border); border-radius: var(--ctl-radius); background: var(--bg);
+  .ack input { padding: 0.375rem 0.5rem; border: 1px solid var(--field-border); border-radius: var(--ctl-radius); background: var(--bg);
     color: var(--text); font-size: 0.8125rem; min-width: 0; }
-  .ack button { align-self: flex-start; padding: 0.375rem 0.875rem; border-radius: var(--ctl-radius); border: 1px solid var(--accent);
-    background: var(--accent); color: var(--btn-ink); font-size: 0.8125rem; font-weight: 600; cursor: pointer; }
+  .ack button { align-self: flex-start; padding: 0.375rem 0.875rem; border-radius: var(--ctl-radius); border: 1px solid var(--action);
+    background: var(--action); color: var(--on-accent); font-size: 0.8125rem; font-weight: 600; cursor: pointer; }
   .ack button:disabled { opacity: 0.6; cursor: default; }
-  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.6875rem; font-weight: 600;
-    border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
-  .pill-bad { color: var(--err-text); border-color: color-mix(in srgb, var(--tone-bad) 60%, transparent); }
-  .pill-warn { color: var(--stat-warn); border-color: color-mix(in srgb, var(--stat-warn) 50%, transparent); }
-  .pill-ok { color: var(--stat-ok); border-color: color-mix(in srgb, var(--stat-ok) 50%, transparent); }
+  /* A rule's state is app.css's .status-pill (one tinted pill on every screen). */
   .panel { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow);
     padding: 1.25rem; min-width: 0; margin-top: 1.25rem; }
   .panel p { margin: 0.5rem 0 0; }
   .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem 1rem; flex-wrap: wrap; margin-bottom: 0.875rem; }
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin: 0; }
-  .tiles dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform); letter-spacing: var(--label-tracking); }
+  .tiles dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: none; letter-spacing: 0; }
   .tiles dd { margin: 0.125rem 0 0; font-size: 1.375rem; font-weight: 700; }
   /* contain: a wide table scrolls in its own box instead of widening the page (main is a flex item). */
   .table-wrap { overflow-x: auto; contain: inline-size; }

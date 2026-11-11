@@ -102,6 +102,11 @@ describe('the three prototype phones render from catalog components', () => {
     expect(tabs.map((t) => t.textContent?.trim())).toEqual(['Due for review 2', 'Decided 14']);
     expect(tabs[0].getAttribute('aria-selected')).toBe('true');
     expect(container.querySelector('h2')?.textContent).toBe('Keep frame carry off until 13 November');
+    // Finish review fix 6: the reference line follows the title (no eyebrow above it), as the product's DecisionCard
+    // places its id under the description.
+    const ref = [...container.querySelectorAll('p, span, div')].find((e) => e.textContent?.trim() === 'Decision 8f027e1a, in the decision frame')!;
+    expect(ref).toBeTruthy();
+    expect(container.querySelector('h2')!.compareDocumentPosition(ref) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect([...container.querySelectorAll('.chips .chip .v')].map((c) => c.textContent)).toEqual([
       'process',
       'medium',

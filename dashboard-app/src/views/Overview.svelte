@@ -1,16 +1,16 @@
 <script lang="ts">
+  import { combinePolls } from '../lib/pollBadge';
   import { onMount } from 'svelte';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
   import type { StatusData, StatusTimeseriesPoint, ExecutionData, WorkToday, HeartbeatTrackedFinding } from '../lib/types/api';
   import { attentionPoll } from '../lib/stores/attention';
-  import { fmtUtc, relUntil } from '../lib/harness';
+  import { fmtDayMonth, fmtUtc, relUntil } from '../lib/harness';
   import { routeHref } from '../lib/router';
   import { fmtTokens } from '../lib/work';
   import { fmtSeconds } from '../lib/frames';
   import { hhmm, utcMinute } from '../lib/dayTimeline';
-  import { look } from '../lib/look';
   import { chartPalette, readToken } from '../lib/overviewCharts';
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
@@ -95,11 +95,10 @@
 
   const plural = (n: number, one: string, many: string) => `${fmt(n)} ${n === 1 ? one : many}`;
 
-  function fmtWithDelta(value: number, delta: number | null | undefined): string {
-    if (delta == null) return fmt(value);
-    if (delta === 0) return fmt(value);
-    const sign = delta > 0 ? '+' : '';
-    return `${fmt(value)} (${sign}${delta} 7d)`;
+  /** The 7-day change as a small note under the number (finish review fix 8); none when there is none. */
+  function deltaNote(delta: number | null | undefined): string | undefined {
+    if (delta == null || delta === 0) return undefined;
+    return `${delta > 0 ? '+' : ''}${fmt(delta)} in 7 days`;
   }
 
   /**
@@ -119,6 +118,9 @@
     };
   }
 
+  /** A dot's state in a word, as Decisions' Brier dot says it (final step: the colour was alone). */
+  const DOT_WORD: Record<string, string> = { good: 'good', warn: 'fair', bad: 'poor' };
+
   function densityClass(d: number | null): 'good' | 'warn' | 'bad' {
     if (d == null) return 'warn';
     if (d >= 3.0) return 'good';
@@ -133,11 +135,9 @@
     return 'bad';
   }
 
-  // The charts' colours come from the ground's tokens, read off the chart row itself (a canvas cannot read var()),
-  // and again whenever the look changes: today's colours exactly under dark, the paper palette under paper.
+  // The charts' colours come from the tokens, read off the chart row itself (a canvas cannot read var()).
   let chartRow = $state<HTMLElement>();
   let palette = $derived.by(() => {
-    void $look;
     const el = chartRow;
     return el ? chartPalette((name) => readToken(el, name)) : null;
   });
@@ -149,8 +149,8 @@
   /** `Today, 10 November` from the endpoint's UTC day, else the browser's UTC date. */
   let dayTitle = $derived.by(() => {
     const day = td?.day ?? new Date().toISOString().slice(0, 10);
-    const d = new Date(`${day}T00:00:00Z`);
-    return Number.isNaN(d.getTime()) ? 'Today' : `Today, ${d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', timeZone: 'UTC' })}`;
+    const label = fmtDayMonth(`${day}T00:00:00Z`);
+    return label === '—' ? 'Today' : `Today, ${label}`;
   });
   let nowText = $derived.by(() => {
     const m = utcMinute(td?.now);
@@ -191,14 +191,16 @@
 
   type Rule = { mode: string | null; warn_7d: number; refused_7d: number };
   const ruleCount = (r: Rule) => (r.mode === 'enforce' ? r.refused_7d : r.mode === 'off' ? 0 : r.warn_7d);
+  /** The header badge speaks for every store this page reads (Codex round 1). */
+  const pagePoll = $derived(combinePolls({ memory: $store, ledger: $exec, 'today': $today, findings: $findings, 'questions and sends': $attentionPoll }));
 </script>
 
 <header class="view-head">
   <h1 class="title">{dayTitle}</h1>
   <div class="head-right">
-    <StaleBadge state={$store} />
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={$store.loading}>
-      {$store.loading ? 'Loading…' : 'Refresh'}
+    <StaleBadge state={pagePoll} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={pagePoll.loading}>
+      {pagePoll.loading ? 'Loading…' : 'Refresh'}
     </Button>
   </div>
 </header>
@@ -380,32 +382,34 @@
 
   <!-- ── Stat cards ───────────────────────────────────────────────────── -->
   <StatGrid stats={[
-    { label: 'Facts',            value: fmtWithDelta(mem.total_facts,      deltas.facts.last_7_days) },
-    { label: 'Episodes',         value: fmtWithDelta(mem.total_episodes,   deltas.episodes.last_7_days) },
+    { label: 'Facts', value: fmt(mem.total_facts), note: deltaNote(deltas.facts.last_7_days) },
+    { label: 'Episodes', value: fmt(mem.total_episodes), note: deltaNote(deltas.episodes.last_7_days) },
     { label: 'Chunks',           value: fmt(mem.total_chunks) },
-    { label: 'Decisions',        value: fmtWithDelta(mem.total_decisions,  deltas.decisions.last_7_days) },
-    { label: 'Procedures',       value: fmtWithDelta(mem.total_procedures, deltas.procedures.last_7_days) },
+    { label: 'Decisions', value: fmt(mem.total_decisions), note: deltaNote(deltas.decisions.last_7_days) },
+    { label: 'Procedures', value: fmt(mem.total_procedures), note: deltaNote(deltas.procedures.last_7_days) },
     { label: 'Active censors',   value: fmt(mem.active_censors) },
     { label: 'Active sessions',  value: fmt(mem.active_conversations) },
-  ]} />
-
-  <!-- Special cards: graph density + Brier score (color-coded) -->
-  <div class="special-cards">
-    <div class="stat-card">
-      <div class="stat-value">
-        <span class="indicator {densityClass(db.graph_density)}"></span>
-        {db.graph_density != null ? db.graph_density.toFixed(1) : '—'}
+  ]}>
+    <!-- Graph density and Brier score, colour-coded: in the same grid, so no row is left with one tile -->
+    {#snippet extra()}
+      <div class="stat-card">
+        <div class="stat-value">
+          <span class="indicator {densityClass(db.graph_density)}"></span>
+          {db.graph_density != null ? db.graph_density.toFixed(1) : '—'}
+          {#if db.graph_density != null}<span class="indicator-word">{DOT_WORD[densityClass(db.graph_density)]}</span>{/if}
+        </div>
+        <div class="stat-label">Graph density</div>
       </div>
-      <div class="stat-label">Graph density</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-value">
-        <span class="indicator {brierClass(d.calibration.brier_score)}"></span>
-        {d.calibration.brier_score != null ? d.calibration.brier_score.toFixed(3) : '—'}
+      <div class="stat-card">
+        <div class="stat-value">
+          <span class="indicator {brierClass(d.calibration.brier_score)}"></span>
+          {d.calibration.brier_score != null ? d.calibration.brier_score.toFixed(3) : '—'}
+          {#if DOT_WORD[brierClass(d.calibration.brier_score)]}<span class="indicator-word">{DOT_WORD[brierClass(d.calibration.brier_score)]}</span>{/if}
+        </div>
+        <div class="stat-label">Brier score</div>
       </div>
-      <div class="stat-label">Brier score</div>
-    </div>
-  </div>
+    {/snippet}
+  </StatGrid>
 
   <!-- ── Execution integrity: the durable ledger (harness dashboard §2) ── -->
   {@const x = $exec.data}
@@ -416,13 +420,13 @@
     </div>
     {#if x && !x.modes.persist}
       <p class="muted">Ledger persistence is off (NOUS_EXECUTION_LEDGER_PERSIST_ENABLED) — no calls are recorded and sends are not de-duplicated, so there are no numbers to show.</p>
-      <StatGrid stats={[
+      <StatGrid flat cols={3} stats={[
         { label: 'Claim checks',          value: x.modes.claim_verification },
         { label: 'Context policy',        value: x.modes.context_policy },
         { label: 'Offered-tool rule',     value: x.modes.offered_set },
       ]} />
     {:else if x}
-      <StatGrid stats={[
+      <StatGrid flat cols={3} stats={[
         { label: 'Calls (24 h)',          value: x.stats.calls },
         { label: 'Sends',                 value: x.stats.sends },
         { label: 'Repeat sends refused',  value: x.stats.repeat_sends_refused },
@@ -464,7 +468,7 @@
             }],
           }}
           options={{ cutout: '60%', plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } } }}
-          height="240px"
+          height="160px"
         />
         {/if}
       {:else}
@@ -493,7 +497,7 @@
             },
             plugins: { legend: { display: false } },
           }}
-          height="240px"
+          height="160px"
         />
         {/if}
       {:else}
@@ -509,11 +513,9 @@
 {/if}
 
 <style>
-  /* Colours and structure are tokens only (hexGuard): today's values under the dark look, the paper ground's
-     rounded white cards under the paper look. */
+  /* Colours and structure are tokens only (hexGuard): rounded white cards on the paper ground. */
   .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
-  .title { font-size: 1.4rem; font-weight: 700; color: var(--text); margin: 0; line-height: 1.2; }
-  :global(html[data-look="paper"]) .title { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
+  .title { font-size: 30px; font-weight: 650; color: var(--text); margin: 0; line-height: 1.15; letter-spacing: -0.022em; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; flex-shrink: 0; margin-left: auto; }
   .meta { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; font-size: 0.8125rem; }
   .meta > * { padding: 3px 11px; border-radius: 999px; background: var(--surface); border: var(--card-border); box-shadow: var(--card-shadow); color: var(--text); }
@@ -536,7 +538,7 @@
   .item a { font-weight: 550; text-decoration: none; }
   .item a:hover { text-decoration: underline; }
   .item .k { grid-column: 2; font-size: 0.78125rem; color: var(--muted); overflow-wrap: anywhere; }
-  .item .k a { font-weight: 600; margin-left: 0.25rem; white-space: nowrap; }
+  .item .k a { font-weight: 600; margin-left: 0.25rem; } /* wraps at its spaces: a narrow card never widens the page */
   .item .k strong { color: var(--text); }
   .what { font-weight: 550; }
   .more-link { display: inline-block; margin: 0.25rem 0 0.25rem; font-size: 0.8125rem; font-weight: 600; text-decoration: none; }
@@ -552,12 +554,6 @@
   /* Memory and decisions: today's content, in cards */
   .group-h { margin: 1.75rem 0 0.75rem; font-size: 1.0625rem; }
 
-  .special-cards {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: 1rem;
-    margin-top: 1rem;
-  }
 
   .stat-card {
     background: var(--surface);
@@ -584,8 +580,8 @@
     font-size: 0.75rem;
     font-weight: 500;
     color: var(--muted);
-    text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking);
+    text-transform: none;
+    letter-spacing: 0;
   }
 
   .indicator {
@@ -599,6 +595,7 @@
   .indicator.warn    { background: var(--yellow); }
   .indicator.bad     { background: var(--red); }
   .indicator.neutral { background: var(--muted); }
+  .indicator-word { font-size: 0.75rem; font-weight: 500; color: var(--muted); }
 
   .integrity-section { margin-top: 1rem; }
   .section-title-row { display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 0.75rem; }
@@ -623,7 +620,6 @@
   }
   @media (max-width: 640px) {
     .chart-row { grid-template-columns: minmax(0, 1fr); }
-    .special-cards { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 0.75rem; }
     .sec, .field { padding-left: 1rem; padding-right: 1rem; }
   }
 </style>

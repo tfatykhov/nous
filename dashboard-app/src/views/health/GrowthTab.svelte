@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { combinePolls } from '../../lib/pollBadge';
+  import { fmtDay, fmtHour } from '../../lib/harness';
   import { apiGet } from '../../lib/api';
   import { makePollStore } from '../../lib/stores/registry';
   import { usePoll } from '../../lib/poll';
@@ -33,7 +35,7 @@
 
   /** Convert [{date, count},...] arrays into Chart.js-ready {labels, datasets data}. */
   function normalizeTimeseries(raw: { facts: StatusTimeseriesPoint[]; episodes: StatusTimeseriesPoint[]; decisions: StatusTimeseriesPoint[] }) {
-    const labels = raw.facts.map((p) => p.date.slice(5)); // MM-DD
+    const labels = raw.facts.map((p) => fmtDay(p.date));
     return {
       labels,
       facts: raw.facts.map((p) => p.count),
@@ -57,10 +59,7 @@
   // ── From Observability ────────────────────────────────────────────────
 
   function trendLabels(points: { t: string }[]): string[] {
-    return points.map((p) => {
-      const d = new Date(p.t);
-      return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:00`;
-    });
+    return points.map((p) => fmtHour(p.t)); // "Nov 10 15:00", UTC like every other time
   }
 
   function factTrendData(points: { t: string; v: number }[]) {
@@ -85,15 +84,17 @@
     },
     plugins: { legend: { display: false } },
   };
+  /** The header badge speaks for every store this page reads (Codex round 1). */
+  const pagePoll = $derived(combinePolls({ growth: $store, 'fact growth rate': $obs }));
 </script>
 
 <header class="view-head">
   <p class="subtitle">Facts, episodes and decisions created over 30 days, fact categories, and the fact growth rate</p>
   <div class="head-right">
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={$store.loading || $obs.loading}>
-      {$store.loading || $obs.loading ? 'Loading…' : 'Refresh'}
+    <StaleBadge state={pagePoll} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={pagePoll.loading}>
+      {pagePoll.loading ? 'Loading…' : 'Refresh'}
     </Button>
-    <StaleBadge state={$store} />
   </div>
 </header>
 
@@ -160,8 +161,7 @@
 <!-- Fact growth rate (line), from Observability's drift trends -->
 <section class="chart-card mt">
   <div class="card-head">
-    <h2>Fact Growth Rate (7d)</h2>
-    <StaleBadge state={$obs} />
+    <h2>Fact growth rate (7d)</h2>
   </div>
   {#if $obs.data}
     {@const factPts = $obs.data.drift_trends?.fact_count_delta ?? []}
@@ -180,6 +180,7 @@
 <style>
   .view-head {
     display: flex;
+    flex-wrap: wrap;
     align-items: flex-start;
     justify-content: space-between;
     gap: 1rem;
@@ -187,21 +188,17 @@
   }
 
   .subtitle {
+    flex: 1 1 20rem; /* a phone puts "updated" and Refresh under it, not beside it */
     font-size: 0.8125rem;
     color: var(--muted);
     margin: 0;
   }
 
   h2 {
-    font-size: 0.875rem;
-    font-weight: 600;
-    color: var(--text);
-    margin: 0 0 0.75rem;
-  }
-
-  :global(html[data-look="paper"] [data-ground="paper"]) h2 {
     font-size: 15px;
     font-weight: 650;
+    color: var(--text);
+    margin: 0 0 0.75rem;
   }
 
   .head-right {
@@ -228,10 +225,6 @@
     border: var(--card-border);
     border-radius: var(--card-radius);
     box-shadow: var(--card-shadow);
-    padding: 1rem;
-  }
-
-  :global(html[data-look="paper"] [data-ground="paper"]) .chart-card {
     padding: 1.125rem 1.25rem;
   }
 

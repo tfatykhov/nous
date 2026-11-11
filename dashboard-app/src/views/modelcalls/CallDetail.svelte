@@ -139,7 +139,7 @@
   .made a { color: var(--accent-text); }
   .gone { color: var(--muted); }
   .err { color: var(--err-text); font-size: 0.875rem; margin: 0; }
-  .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--notice-bg); border: 1px solid var(--notice-border); font-size: 0.875rem; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--warn-bg); border: 1px solid var(--warn-border); font-size: 0.875rem; }
   .wrap { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
   pre.err { color: var(--err-text); font-family: var(--font-mono); font-size: 0.75rem; max-height: 320px; overflow: auto; }
   .attempts { margin: 0; padding-left: 1.25rem; display: flex; flex-direction: column; gap: 4px; font-size: 0.8125rem; }

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Button } from '../../lib/ui/button';
   import { apiGet } from '../../lib/api';
   import { makePollStore } from '../../lib/stores/registry';
   import { usePoll } from '../../lib/poll';
@@ -53,6 +54,8 @@
       });
     }, 60000),
   );
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
+  const refreshPage = () => store.refresh();
 
   let extra = $state<ModelCallRow[]>([]);
   let moreCursor = $state<string | null | undefined>(undefined);
@@ -141,6 +144,7 @@
     <div class="head-right">
       {#if $store.loading && (!data || refetching)}<span class="loading" role="status">Loading…</span>{/if}
       <StaleBadge state={$store} />
+      <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading}>{$store.loading ? 'Loading…' : 'Refresh'}</Button>
     </div>
   </header>
 
@@ -220,7 +224,7 @@
   .muted { color: var(--muted); font-size: 0.8125rem; margin: 0; }
   .loading { color: var(--muted); font-size: 0.8125rem; }
   .mono { font-family: var(--font-mono); }
-  .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--notice-bg); border: 1px solid var(--notice-border); font-size: 0.875rem; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--warn-bg); border: 1px solid var(--warn-border); font-size: 0.875rem; }
   .empty { color: var(--muted); text-align: center; padding: 2rem 0; margin: 0; }
   button { font: inherit; cursor: pointer; }
   button:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
@@ -228,16 +232,17 @@
   .chip { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 999px; padding: 0.4rem 0.75rem; font-size: 0.8125rem; font-weight: 500; min-height: 36px; }
   .chip.on { border-color: var(--accent); background: var(--accent-glow); }
   .chip .n { color: var(--muted); }
-  .chip .note { color: var(--muted); font-size: 0.75rem; border: 1px dashed var(--border); border-radius: 6px; padding: 0 5px; margin-left: 2px; }
+  .chip .note { color: var(--muted); font-size: 0.75rem; border: 1px dashed var(--border); border-radius: var(--radius-sm); padding: 0 5px; margin-left: 2px; }
   .chip .remove { color: var(--muted); font-size: 0.75rem; margin-left: 2px; }
   .field { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); font-size: 0.875rem; }
-  select { background: var(--surface); border: 1px solid var(--border); border-radius: var(--ctl-radius); color: var(--text); padding: 0.5rem 0.75rem; font: inherit; min-height: 40px; }
+  select { background: var(--surface); border: 1px solid var(--field-border); border-radius: var(--ctl-radius); color: var(--text); padding: 0.5rem 0.75rem; font: inherit; min-height: 40px; }
   .calls { list-style: none; margin: 0; padding: 0; border: var(--card-border); border-radius: var(--card-radius); background: var(--surface); box-shadow: var(--card-shadow); overflow: hidden; }
   .calls li + li { border-top: 1px solid var(--border); }
   .calls.dim { opacity: 0.6; }
   a.row { display: flex; flex-direction: column; gap: 4px; padding: 0.75rem 1rem; color: inherit; text-decoration: none; }
   a.row:hover { background: var(--surface-hover); }
-  a.row[aria-current='true'] { background: var(--surface-hover); box-shadow: inset 3px 0 0 var(--accent); }
+  /* The selected call: the selected tint Consolidation's and Retrieval's lists use (no stripe; the hover is a wash). */
+  a.row[aria-current='true'] { background: var(--accent-glow); }
   .top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
   .purpose { font-weight: 600; font-size: 0.875rem; overflow-wrap: anywhere; }
   .when { font-size: 0.75rem; color: var(--muted); white-space: nowrap; }

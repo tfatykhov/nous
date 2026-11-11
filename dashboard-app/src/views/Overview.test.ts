@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import Overview from './Overview.svelte';
 import { attentionOverride, attentionPoll } from '../lib/stores/attention';
-import { setLook } from '../lib/look';
+import { sourceFiles } from '../lib/testing/sources';
 
 // The redesigned Overview: Needs you, Today so far and Health on top, the compact day timeline below them, then the
 // memory numbers as before. Each card reads data the dashboard already serves; nothing is invented.
@@ -94,6 +94,23 @@ describe('Overview', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // Final step A2: the two coloured dots said their state by colour alone; each now says it in a word, as Decisions'
+  // Brier dot does. No figure, no word.
+  it('Graph density and Brier score say their state in a word beside the dot', async () => {
+    replies['/status'] = () => ({ body: { ...STATUS, dashboard: { ...STATUS.dashboard, graph_density: 2.4 }, calibration: { brier_score: 0.028 } } });
+    await show();
+    await screen.findByText('Graph density');
+    const tile = (label: string) => [...document.querySelectorAll('.stat-card')].find((t) => t.querySelector('.stat-label')?.textContent === label)!;
+    expect(tile('Graph density').querySelector('.indicator-word')?.textContent).toBe('fair');
+    expect(tile('Brier score').querySelector('.indicator-word')?.textContent).toBe('good');
+  });
+
+  it('with no figures the dots say no word', async () => {
+    await show();
+    await screen.findByText('Graph density');
+    expect(document.querySelectorAll('.indicator-word')).toHaveLength(0);
   });
 
   it('the title is the UTC day and the header pills come from the day totals', async () => {
@@ -239,7 +256,7 @@ describe('Overview', () => {
     expect(h2s.slice(0, 5)).toEqual(['Needs you', 'Today so far', 'Health', "Today's turns", 'Memory and decisions']);
   });
 
-  it('the charts read their colours from the ground, and again when the look changes (review I4)', async () => {
+  it('the charts read their colours from the tokens, off the chart row (review I4)', async () => {
     const configs: { data: { datasets: { backgroundColor: unknown; borderColor?: unknown }[] } }[] = [];
     vi.stubGlobal('Chart', class {
       data: unknown; options = {};
@@ -249,7 +266,7 @@ describe('Overview', () => {
     });
     const root = document.documentElement.style;
     const set = (vars: Record<string, string>) => Object.entries(vars).forEach(([k, v]) => root.setProperty(k, v));
-    set({ '--oc-success': '#34d399', '--yellow': '#fbbf24', '--err-text': '#f87171', '--series-7': '#6b6b8a', '--series-0': '#7c6af7' });
+    set({ '--oc-success': '#3f8772', '--yellow': '#b7791f', '--err-text': '#b02a22', '--series-7': '#4f5f6f', '--series-0': '#274455' });
     replies['/status'] = () => ({ body: { ...STATUS, dashboard: { ...STATUS.dashboard,
       distributions: { fact_categories: {}, decision_outcomes: { success: 3, pending: 1 }, edge_relations: { supports: 2 } } } } });
     try {
@@ -257,15 +274,10 @@ describe('Overview', () => {
       await waitFor(() => expect(configs.length).toBeGreaterThanOrEqual(2));
       const outcomes = () => configs.filter((c) => Array.isArray(c.data.datasets[0].backgroundColor)).at(-1)!.data.datasets[0];
       const bars = () => configs.filter((c) => !Array.isArray(c.data.datasets[0].backgroundColor)).at(-1)!.data.datasets[0];
-      expect(outcomes().backgroundColor).toEqual(['#34d399', '#6b6b8a']);
-      expect(bars().backgroundColor).toBe('rgba(124, 106, 247, 0.5)');
-      expect(bars().borderColor).toBe('#7c6af7');
-      set({ '--oc-success': '#3f8772', '--series-7': '#8a5a2b', '--series-0': '#274455' });
-      setLook('paper');
-      await waitFor(() => expect(outcomes().backgroundColor).toEqual(['#3f8772', '#8a5a2b']));
+      expect(outcomes().backgroundColor).toEqual(['#3f8772', '#4f5f6f']);
+      expect(bars().backgroundColor).toBe('rgba(39, 68, 85, 0.5)');
       expect(bars().borderColor).toBe('#274455');
     } finally {
-      setLook('dark');
       for (const k of ['--oc-success', '--yellow', '--err-text', '--series-7', '--series-0']) root.removeProperty(k);
     }
   });
@@ -274,7 +286,7 @@ describe('Overview', () => {
     const src = readFileSync(resolve(__dirname, 'Overview.svelte'), 'utf-8');
     expect(src).not.toContain('{@html');
     expect(src).not.toMatch(/#[0-9a-fA-F]{6}\b|rgba?\(/); // markup and script too, not only the style
-    const guard = readFileSync(resolve(__dirname, '..', 'hexGuard.test.ts'), 'utf-8');
-    for (const f of ['views/Overview.svelte', 'lib/viz/DayTimeline.svelte']) expect(guard).toContain(`'${f}'`);
+    // The hex guard walks every source file (PR 7: lib/testing/sources.ts), these two among them.
+    expect(sourceFiles()).toEqual(expect.arrayContaining(['views/Overview.svelte', 'lib/viz/DayTimeline.svelte']));
   });
 });

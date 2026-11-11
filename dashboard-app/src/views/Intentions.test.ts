@@ -151,15 +151,15 @@ describe('Intentions: the paper look (source contracts)', () => {
 
   it('the notice reads the notice tokens; panels and tiles the card tokens; labels the label tokens', () => {
     expect(rules.get('.notice')).toMatchObject({
-      background: 'var(--notice-bg)', border: '1px solid var(--notice-border)', 'border-radius': 'var(--card-radius-sm)',
+      background: 'var(--warn-bg)', border: '1px solid var(--warn-border)', 'border-radius': 'var(--card-radius-sm)',
     });
     expect(rules.get('.panel')).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius)', 'box-shadow': 'var(--card-shadow)' });
     expect(rules.get('.tiles div')).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius-sm)' });
-    expect(rules.get('.tiles dt')).toMatchObject({ 'text-transform': 'var(--label-transform)', 'letter-spacing': 'var(--label-tracking)' });
+    expect(rules.get('.tiles dt')).toMatchObject({ 'text-transform': 'none', 'letter-spacing': '0' });
   });
 
-  it('under the paper look only: the title size, soft tiles and the prototype\'s table header', () => {
-    const paper = (sel: string) => rules.get(`:global(html[data-look="paper"] [data-ground="paper"]) ${sel}`);
+  it('the title size, soft tiles and the prototype\'s table header', () => {
+    const paper = (sel: string) => rules.get(sel); // the folded rules (PR 7 T6c): the paper look is the only one
     expect(paper('h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
     expect(paper('.tiles div')).toMatchObject({ background: 'var(--wash)' });
     expect(paper('thead th')).toMatchObject({ 'font-size': '12px', 'font-weight': '600', color: 'var(--muted)' });

@@ -4,16 +4,14 @@ import { tick } from 'svelte';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import GraphView from './GraphView.svelte';
-import { setLook } from '../lib/look';
 import { currentRoute } from '../lib/router';
-import { DARK_SEL, PAPER_SEL, parseBlocks, styleBlocks } from '../lib/testing/css';
+import { ROOT_SEL, block, parseBlocks, styleBlocks } from '../lib/testing/css';
 
-// The Graph on the paper look: node, edge, ring and legend colours are tokens. Cytoscape draws on a canvas, so its
-// colours are resolved against the graph's own element; a look switch restyles in place and never re-runs the layout
-// (which is random: re-running it would move every node). Every value below is made up.
+// The Graph: node, edge, ring and legend colours are tokens. Cytoscape draws on a canvas, so its colours are resolved
+// against the graph's own element; the layout runs once (it is random: re-running it would move every node). Every
+// value below is made up.
 const BLOCKS = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8'));
-const DARK = BLOCKS.get(DARK_SEL) ?? {};
-const PAPER = BLOCKS.get(PAPER_SEL) ?? {};
+const PAPER = block(BLOCKS, ROOT_SEL, 50);
 
 const HOSTILE = '<img src=x onerror="alert(1)">';
 const LONG = 'L'.repeat(300);
@@ -102,7 +100,7 @@ function install(detail: unknown = DETAIL) {
 /** A paper <main> with the paper ground's tokens set on it (jsdom has no stylesheet), as App renders it. */
 function paperMain(): HTMLElement {
   const main = document.createElement('main');
-  main.setAttribute('data-ground', 'paper');
+  main.classList.add('page-ground');
   for (const [k, v] of Object.entries(PAPER)) if (k.startsWith('--')) main.style.setProperty(k, v);
   document.body.appendChild(main);
   return main;
@@ -119,7 +117,6 @@ beforeEach(() => { currentRoute.set('graph'); });
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
-  setLook('dark');
   document.body.innerHTML = '';
 });
 
@@ -135,7 +132,7 @@ describe('Graph on the paper look', () => {
     );
   });
 
-  it('builds cytoscape with the dark colours under the dark look, and runs the layout once', async () => {
+  it('with no stylesheet (jsdom) the colours fall back to the :root values, and the layout runs once', async () => {
     install();
     render(GraphView);
     await waitFor(() => expect(cyto.factory).toHaveBeenCalledTimes(1));
@@ -143,32 +140,26 @@ describe('Graph on the paper look', () => {
     const created = cyto.factory.mock.calls[0][0];
     const color = (id: string) => created.elements.find((e: any) => e.data.id === id).data.color;
     expect(['n-fact', 'n-episode', 'n-decision', 'n-procedure', 'n-chunk'].map(color)).toEqual(
-      ['#34d399', '#60a5fa', '#a78bfa', '#fbbf24', '#06b6d4'],
+      ['--gv-fact', '--gv-episode', '--gv-decision', '--gv-procedure', '--gv-chunk'].map((t) => PAPER[t]),
     );
-    expect(['e1', 'e2', 'e3', 'e4'].map(color)).toEqual(['#34d399', '#a78bfa', '#22d3ee', '#f87171']);
-    // Today's cytoscape style, value for value.
-    expect(styleValue(created.style, 'node', 'border-color')).toBe(DARK['--gv-node-border']);
-    expect(styleValue(created.style, 'node', 'color')).toBe('#8e8eab');
-    expect(styleValue(created.style, 'node', 'text-outline-color')).toBe('#0a0a0f');
-    expect(styleValue(created.style, 'node:selected', 'border-color')).toBe('#fbbf24');
-    expect(styleValue(created.style, 'node.searchHit', 'border-color')).toBe('#fbbf24');
-    expect(styleValue(created.style, 'edge', 'opacity')).toBe(0.5);
-    expect(styleValue(created.style, 'edge[extraction_method = "inferred"]', 'opacity')).toBe(0.3);
+    expect(styleValue(created.style, 'node', 'border-color')).toBe('rgba(20, 32, 43, 0.35)');
+    expect(styleValue(created.style, 'node', 'color')).toBe(PAPER['--muted']);
+    expect(styleValue(created.style, 'edge', 'opacity')).toBe(0.75);
+    expect(styleValue(created.style, 'edge[extraction_method = "inferred"]', 'opacity')).toBe(0.5);
     expect(cyto.cy.layout).toHaveBeenCalledTimes(1);
     expect(cyto.cy.style).not.toHaveBeenCalled();
   });
 
-  it('a look switch restyles nodes, edges and rings once, without re-running the layout', async () => {
+  it('on the page ground: nodes, edges and rings take its tokens, and nothing restyles or re-runs the layout', async () => {
     install();
     render(GraphView, { target: paperMain() });
     await waitFor(() => expect(cyto.factory).toHaveBeenCalledTimes(1));
     await tick();
-    expect(nodeColor('n-fact')).toBe(PAPER['--gv-fact']); // the paper ground's tokens are on <main> in this test
-    setLook('paper');
+    expect(nodeColor('n-fact')).toBe(PAPER['--gv-fact']); // the page ground's tokens are on <main> in this test
     await tick();
-    expect(cyto.cy.style).toHaveBeenCalledTimes(1);
+    expect(cyto.cy.style).not.toHaveBeenCalled(); // no look switch is left to restyle the graph
     expect(cyto.cy.layout).toHaveBeenCalledTimes(1);
-    const style = cyto.cy.style.mock.calls[0][0];
+    const style = cyto.factory.mock.calls[0][0].style;
     // Rings and labels stay visible on the white card.
     expect(styleValue(style, 'node:selected', 'border-color')).toBe('#14202b');
     expect(styleValue(style, 'node.searchHit', 'border-color')).toBe('#14202b');
@@ -186,9 +177,9 @@ describe('Graph on the paper look', () => {
     render(GraphView);
     await waitFor(() => expect(cyto.factory).toHaveBeenCalledTimes(1));
     cyto.tap('n-episode');
-    const sheet = await screen.findByLabelText('Episode Detail');
+    const sheet = await screen.findByLabelText('Episode detail');
     await waitFor(() => expect(sheet.querySelectorAll('button.conn-item')).toHaveLength(2));
-    expect(sheet.getAttribute('data-ground')).toBe('paper'); // the route's ground, though portalled
+    expect(sheet.classList.contains('page-ground')).toBe(true); // the page ground, though portalled
     expect(sheet.textContent).toContain(HOSTILE);
     expect(sheet.querySelector('img')).toBeNull();
     expect(sheet.textContent).toContain(LONG);
@@ -202,10 +193,9 @@ describe('Graph on the paper look', () => {
     expect(sheet.querySelector('.rel-dot')?.getAttribute('style')).toContain('var(--rel-supports)');
   });
 
-  it('the type badge: the colour on its 12.5% tint under dark; on paper the text mixed 70% with the ink, 4.5:1 or more (review I3)', () => {
+  it('the type badge: the colour\'s 12.5% tint; the text the colour mixed 70% with the ink, 4.5:1 or more (review I3)', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'GraphView.svelte'), 'utf-8'));
-    expect(css).toMatch(/\.type-badge \{[^}]*background: color-mix\(in srgb, var\(--type\) 12\.5%, transparent\);[^}]*color: var\(--type\);/);
-    expect(css).toMatch(/\[data-ground="paper"\]\) \.type-badge \{\s*color: color-mix\(in srgb, var\(--type\) 70%, var\(--text\)\);/);
+    expect(css).toMatch(/\.type-badge \{[^}]*background: color-mix\(in srgb, var\(--type\) 12\.5%, transparent\);[^}]*color: color-mix\(in srgb, var\(--type\) 70%, var\(--text\)\);/);
     // On paper the plain node colours are 3:1 marks (fact 3.06:1 as 11px text on its tint); mixed, every type passes.
     const rgb = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
     const lum = (c: number[]) => {

@@ -59,6 +59,7 @@ A lightweight, read-only web dashboard served from the Nous server that provides
 2. **Lightweight** — No build step, no npm, no React. Vanilla HTML/CSS/JS + vendored Chart.js + D3. Served as static files from the Nous server.
 3. **API-first** — All data comes from REST endpoints. Dashboard is a pure frontend consumer. New endpoints are added to the existing `rest.py`.
 4. **Dark theme** — Consistent with the existing landing page design system. Same CSS variables (`--bg`, `--surface`, `--accent`, etc.).
+   *Superseded 2026-11 by the dashboard redesign: the dashboard has a single paper look.*
 5. **Responsive** — Works on desktop (primary) and tablet. Mobile is not a priority.
 6. **Agent-scoped** — All queries filter by `agent_id`. Multi-agent support is future work.
 7. **Extend, don't duplicate** — Reuse existing endpoints where possible. Extend `/status` rather than creating parallel aggregation endpoints.
@@ -647,6 +648,8 @@ async function apiGet(path, retries = 3) {
 ---
 
 ## Design System
+
+*Superseded 2026-11 by the dashboard redesign: the dashboard has a single paper look.*
 
 Extends the existing design system:
 

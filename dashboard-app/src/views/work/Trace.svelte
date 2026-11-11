@@ -395,22 +395,21 @@
 </div>
 
 <style>
-  /* Colours are tokens only (hexGuard): the dark look reads today's values, the paper ground its own. */
+  /* Colours are tokens only (hexGuard). */
   .trace { display: flex; flex-direction: column; gap: 1.25rem; --gw: 168px; --lw: 86px; }
   .back { color: var(--accent-text); font-size: 0.8125rem; text-decoration: none; align-self: flex-start; text-underline-offset: 3px; }
   .back:hover { text-decoration: underline; }
   a:focus-visible, summary:focus-visible, input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
   .gone, .muted { color: var(--muted); }
   .small { font-size: 0.75rem; }
-  .notice { padding: 0.75rem 1rem; border-radius: var(--radius-sm); background: var(--notice-bg); border: 1px solid var(--notice-border); font-size: 0.875rem; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--radius-sm); background: var(--warn-bg); border: 1px solid var(--warn-border); font-size: 0.875rem; }
   .wrap { overflow-wrap: anywhere; white-space: pre-wrap; }
   .card { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow); }
 
   /* Header: the title, Refresh top right, the facts as pills */
   .head { display: flex; flex-direction: column; gap: 0.75rem; }
   .head-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
-  .title { margin: 0; font-size: 1.625rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1.2; max-width: 60ch; overflow-wrap: anywhere; min-width: 0; }
-  :global(html[data-look="paper"]) .title { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
+  .title { margin: 0; font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; max-width: 60ch; overflow-wrap: anywhere; min-width: 0; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; margin-left: auto; }
   .meta { display: flex; flex-wrap: wrap; gap: 0.5rem; font-size: 0.8125rem; }
   .meta > * { padding: 3px 11px; border-radius: 999px; background: var(--surface); border: var(--card-border); box-shadow: var(--card-shadow); color: var(--text); text-decoration: none; }

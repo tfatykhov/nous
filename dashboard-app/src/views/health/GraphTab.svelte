@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { combinePolls } from '../../lib/pollBadge';
+  import { fmtDay } from '../../lib/harness';
   // F108 Memory health, Graph tab: Density's totals and overall orphan rate first, then Graph Health's charts
   // (/dashboard/health), then Density's tables (/dashboard/density). "Orphan Rate by Type" stays beside "Orphan
   // Breakdown by Type": the orphan counts agree, but only the former has each type's total and rate.
@@ -55,8 +57,8 @@
   // ── Chart data builders ────────────────────────────────────────────────
 
   function shortDate(iso: string): string {
-    // Slice MM-DD from YYYY-MM-DD
-    return iso.length >= 10 ? iso.slice(5) : iso;
+    // The one day format, "Oct 20" (finish review fix 4)
+    return fmtDay(iso);
   }
 
   function densityChartData(d: HealthData) {
@@ -87,7 +89,7 @@
       },
       y: {
         beginAtZero: true,
-        title: { display: true, text: 'Avg Edges per Node' },
+        title: { display: true, text: 'Avg edges per node' },
       },
     },
     plugins: {
@@ -119,7 +121,7 @@
       labels: d.daily_edges.map((p) => shortDate(p.date)),
       datasets: [
         {
-          label: 'Edges Created',
+          label: 'Edges created',
           data: d.daily_edges.map((p) => p.count),
           backgroundColor: tint('--series-0', 0.5),
           borderColor: 'var(--series-0)',
@@ -145,11 +147,9 @@
       labels: d.degree_distribution.map((p) => p.degree),
       datasets: [
         {
-          label: 'Node Count',
+          label: 'Node count',
           data: d.degree_distribution.map((p) => p.count),
-          backgroundColor: tint('--series-1', 0.5),
-          borderColor: 'var(--series-1)',
-          borderWidth: 1,
+          backgroundColor: tint('--series-0', 0.5),
         },
       ],
     };
@@ -158,13 +158,13 @@
   const degreeOptions = {
     scales: {
       x: {
-        title: { display: true, text: 'Edge Count (degree)' },
+        title: { display: true, text: 'Edge count (degree)' },
         grid: { display: false },
       },
       y: {
         beginAtZero: true,
         ticks: { precision: 0 },
-        title: { display: true, text: 'Number of Nodes' },
+        title: { display: true, text: 'Number of nodes' },
       },
     },
     plugins: { legend: { display: false } },
@@ -175,7 +175,7 @@
       labels: d.orphan_trend.map((p) => shortDate(p.date)),
       datasets: [
         {
-          label: 'Orphan Nodes',
+          label: 'Orphan nodes',
           data: d.orphan_trend.map((p) => p.count),
           // Orphans are a defect: the status red.
           borderColor: 'var(--red)',
@@ -196,7 +196,7 @@
       y: {
         beginAtZero: true,
         ticks: { precision: 0 },
-        title: { display: true, text: 'Orphan Count' },
+        title: { display: true, text: 'Orphan count' },
       },
     },
     plugins: { legend: { display: false } },
@@ -239,15 +239,17 @@
     },
     plugins: { legend: { position: 'bottom' } },
   };
+  /** The header badge speaks for every store this page reads (Codex round 1). */
+  const pagePoll = $derived(combinePolls({ 'graph health': $store, 'graph density': $density }));
 </script>
 
 <header class="view-head">
-  <p class="subtitle">Density trends, edge creation, and node connectivity</p>
+  <p class="subtitle">How dense the graph is getting, how many edges are made, and how connected the nodes are.</p>
   <div class="head-right">
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={$store.loading || $density.loading}>
-      {$store.loading || $density.loading ? 'Loading…' : 'Refresh'}
+    <StaleBadge state={pagePoll} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={pagePoll.loading}>
+      {pagePoll.loading ? 'Loading…' : 'Refresh'}
     </Button>
-    <StaleBadge state={$store} />
   </div>
 </header>
 
@@ -256,18 +258,17 @@
   {@const d = $density.data}
 
   <StatGrid stats={[
-    { label: 'Total Nodes',    value: d.total_nodes.toLocaleString() },
-    { label: 'Total Edges',    value: d.total_edges.toLocaleString() },
-    { label: 'Avg Degree',     value: d.avg_degree.toFixed(2) },
-    { label: 'Connected Nodes', value: d.connected_nodes.toLocaleString() },
+    { label: 'Total nodes',    value: d.total_nodes.toLocaleString() },
+    { label: 'Total edges',    value: d.total_edges.toLocaleString() },
+    { label: 'Avg degree',     value: d.avg_degree.toFixed(2) },
+    { label: 'Connected nodes', value: d.connected_nodes.toLocaleString() },
   ]} />
 
   <!-- Orphan rate — single-card banner with colour badge; Density's staleness badge at its end -->
   <div class="orphan-banner">
-    <span class="orphan-label">Overall Orphan Rate</span>
+    <span class="orphan-label">Overall orphan rate</span>
     <span class="badge {orphanRateClass(d.orphan_rate)}">{orphanRateLabel(d.orphan_rate)}</span>
     <span class="orphan-meta">({d.total_orphans.toLocaleString()} of {d.total_nodes.toLocaleString()} nodes unconnected)</span>
-    <span class="banner-stale"><StaleBadge state={$density} /></span>
   </div>
 {:else if $density.error}
   <p class="status-msg error">
@@ -300,7 +301,7 @@
          orphan trend, a running sum whose backend query counts its boundary day twice (pre-existing, parked as a
          follow-up), so it can differ from the banner. -->
     <StatGrid stats={[
-      { label: 'Current Density', value: latestDensity.toFixed(1) },
+      { label: 'Current density', value: latestDensity.toFixed(1) },
       { label: 'Edges (30d)',     value: totalEdges30d },
       { label: 'Auto-linked',     value: `${autoPercent}%` },
     ]} />
@@ -311,7 +312,7 @@
       <!-- Density over time -->
       {#if d.density_history.length > 0}
         <section class="chart-card">
-          <h2>Graph Density Over Time</h2>
+          <h2>Graph density over time</h2>
           <Chart type="line" data={densityChartData(d)} options={densityOptions} height="220px" />
         </section>
       {/if}
@@ -319,7 +320,7 @@
       <!-- Edge creation rate -->
       {#if d.daily_edges.length > 0}
         <section class="chart-card">
-          <h2>Edge Creation Rate</h2>
+          <h2>Edge creation rate</h2>
           <Chart type="bar" data={edgeRateChartData(d)} options={edgeRateOptions} height="220px" />
         </section>
       {/if}
@@ -327,7 +328,7 @@
       <!-- Degree distribution -->
       {#if d.degree_distribution.length > 0}
         <section class="chart-card">
-          <h2>Node Degree Distribution</h2>
+          <h2>Node degree distribution</h2>
           <Chart type="bar" data={degreeChartData(d)} options={degreeOptions} height="220px" />
         </section>
       {/if}
@@ -335,7 +336,7 @@
       <!-- Orphan nodes over time -->
       {#if d.orphan_trend.length > 0}
         <section class="chart-card">
-          <h2>Orphan Nodes Over Time</h2>
+          <h2>Orphan nodes over time</h2>
           <p class="chart-note">Running total; may differ from the count above</p>
           <Chart type="line" data={orphanChartData(d)} options={orphanOptions} height="220px" />
         </section>
@@ -344,7 +345,7 @@
       <!-- Auto vs Manual edges — full width -->
       {#if d.daily_edges.length > 0}
         <section class="chart-card full-width">
-          <h2>Auto vs Manual Edges</h2>
+          <h2>Auto vs manual edges</h2>
           <Chart type="bar" data={autoManualChartData(d)} options={autoManualOptions} height="220px" />
         </section>
       {/if}
@@ -354,7 +355,7 @@
     <!-- ── Orphan breakdown ──────────────────────────────────────────────── -->
     {#if d.total_orphans > 0}
       <section class="chart-card orphan-section">
-        <h2>Orphan Breakdown by Type</h2>
+        <h2>Orphan breakdown by type</h2>
         <ul class="orphan-list">
           {#each Object.entries(d.orphan_counts) as [type, count]}
             <li class="orphan-row">
@@ -389,17 +390,17 @@
 
     <!-- Orphan rate by type -->
     <section class="chart-card">
-      <h2>Orphan Rate by Type</h2>
+      <h2>Orphan rate by type</h2>
       <table class="data-table">
         <thead>
-          <tr><th>Type</th><th>Total</th><th>Orphans</th><th>Rate</th></tr>
+          <tr><th>Type</th><th class="num">Total</th><th class="num">Orphans</th><th>Rate</th></tr>
         </thead>
         <tbody>
           {#each Object.entries(d.density_by_type) as [type, stats]}
             <tr>
               <td class="type-cell">{TYPE_LABEL[type] ?? type}</td>
-              <td>{stats.total.toLocaleString()}</td>
-              <td>{stats.orphan.toLocaleString()}</td>
+              <td class="num">{stats.total.toLocaleString()}</td>
+              <td class="num">{stats.orphan.toLocaleString()}</td>
               <td><span class="badge {orphanRateClass(stats.orphan_rate)}">{(stats.orphan_rate * 100).toFixed(1)}%</span></td>
             </tr>
           {:else}
@@ -411,16 +412,16 @@
 
     <!-- Edge distribution -->
     <section class="chart-card">
-      <h2>Edge Distribution</h2>
+      <h2>Edge distribution</h2>
       <table class="data-table">
         <thead>
-          <tr><th>Relation</th><th>Count</th></tr>
+          <tr><th>Relation</th><th class="num">Count</th></tr>
         </thead>
         <tbody>
           {#each Object.entries(d.edge_distribution) as [relation, count]}
             <tr>
               <td>{relation}</td>
-              <td>{count.toLocaleString()}</td>
+              <td class="num">{count.toLocaleString()}</td>
             </tr>
           {:else}
             <tr><td colspan="2" class="empty-cell">No edges</td></tr>
@@ -433,16 +434,16 @@
 
   <!-- ── Backfill progress ───────────────────────────────────────────────── -->
   <section class="chart-card mt">
-    <h2>Backfill Progress (Last 7 Days)</h2>
+    <h2>Backfill progress (last 7 days)</h2>
     <table class="data-table">
       <thead>
-        <tr><th>Date</th><th>Auto-linked Edges</th></tr>
+        <tr><th>Date</th><th class="num">Auto-linked edges</th></tr>
       </thead>
       <tbody>
         {#each d.backfill_progress as row}
           <tr>
-            <td>{row.date}</td>
-            <td>{row.edges.toLocaleString()}</td>
+            <td>{fmtDay(row.date)}</td>
+            <td class="num">{row.edges.toLocaleString()}</td>
           </tr>
         {:else}
           <tr><td colspan="2" class="empty-cell">No backfill activity</td></tr>
@@ -455,6 +456,7 @@
 <style>
   .view-head {
     display: flex;
+    flex-wrap: wrap;
     align-items: flex-start;
     justify-content: space-between;
     gap: 1rem;
@@ -462,21 +464,17 @@
   }
 
   .subtitle {
+    flex: 1 1 20rem; /* a phone puts "updated" and Refresh under it, not beside it */
     font-size: 0.8125rem;
     color: var(--muted);
     margin: 0;
   }
 
   h2 {
-    font-size: 0.875rem;
-    font-weight: 600;
-    color: var(--text);
-    margin: 0 0 0.75rem;
-  }
-
-  :global(html[data-look="paper"] [data-ground="paper"]) h2 {
     font-size: 15px;
     font-weight: 650;
+    color: var(--text);
+    margin: 0 0 0.75rem;
   }
 
   .head-right {
@@ -499,10 +497,6 @@
     border: var(--card-border);
     border-radius: var(--card-radius);
     box-shadow: var(--card-shadow);
-    padding: 1rem;
-  }
-
-  :global(html[data-look="paper"] [data-ground="paper"]) .chart-card {
     padding: 1.125rem 1.25rem;
   }
 
@@ -619,9 +613,6 @@
     color: var(--muted);
   }
 
-  .banner-stale {
-    margin-left: auto;
-  }
 
   /* ── Badge (from Density) ────────────────────────────────── */
   .badge {
@@ -662,6 +653,9 @@
   .data-table tbody tr:last-child td { border-bottom: none; }
 
   .data-table tbody tr:hover td { background: var(--surface-hover); }
+
+  /* A number column: right-aligned in tabular figures, as in the shared table (finish review fix 3). */
+  .data-table .num { text-align: right; font-variant-numeric: tabular-nums; }
 
   .type-cell {
     font-weight: 500;

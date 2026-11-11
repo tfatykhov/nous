@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import { getLook, look } from '../look';
   import { resolveColors } from '../chartColors';
 
   export type GraphNode = {
@@ -36,7 +35,6 @@
 
   let el: HTMLDivElement;
   let cy: any = null; // plain let — NOT $state to avoid infinite update loop
-  let painted = getLook(); // the look the stylesheet and colours were last resolved under
 
   const isEdge = (data: any) => data?.source != null;
   function colorOf(data: any): string | undefined {
@@ -50,7 +48,6 @@
   }
 
   onMount(() => {
-    painted = getLook();
     cy = cytoscape({ container: el, elements: paint(elements), layout, style: style(el) });
 
     cy.on('tap', 'node', (evt: any) => {
@@ -79,22 +76,6 @@
         cy.json({ elements: paint(e) });
         cy.layout(layout).run();
       }
-    });
-  });
-
-  // A look switch: a new stylesheet and new colour data, in place. The layout is random (cose), so it never re-runs
-  // here: every node keeps its position, and the filters and search marks (bypasses and classes) stay.
-  $effect(() => {
-    const now = $look;
-    untrack(() => {
-      if (!cy || now === painted) return;
-      painted = now;
-      cy.style(style(el));
-      if (!colorFor) return;
-      cy.batch(() => {
-        cy.nodes().forEach((n: any) => n.data('color', colorOf({ type: n.data('type') })));
-        cy.edges().forEach((e: any) => e.data('color', colorOf({ source: e.data('source'), relation: e.data('relation') })));
-      });
     });
   });
 

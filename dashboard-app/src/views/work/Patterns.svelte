@@ -84,9 +84,9 @@
         {#each WINDOWS as w (w)}<option value={String(w)}>Last {w} days</option>{/each}
       </select>
     </label>
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void store.refresh()}>Refresh</Button>
     {#if $store.loading}<span class="loading" role="status">Loading…</span>{/if}
     <StaleBadge state={$store} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void store.refresh()}>Refresh</Button>
   </div>
 </header>
 
@@ -188,12 +188,12 @@
   .subtitle { color: var(--muted); font-size: 0.9375rem; margin: 0; max-width: 75ch; }
   .muted { color: var(--muted); font-size: 0.8125rem; margin: 0; }
   .loading { color: var(--muted); font-size: 0.8125rem; }
-  .notice { padding: 0.75rem 1rem; border-radius: var(--radius-sm); background: var(--notice-bg);
-    border: 1px solid var(--notice-border); font-size: 0.875rem; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--radius-sm); background: var(--warn-bg);
+    border: 1px solid var(--warn-border); font-size: 0.875rem; }
   .empty { color: var(--muted); margin: 0.5rem 0; font-size: 0.9375rem; }
   select:focus-visible, a:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
   .field { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); font-size: 0.875rem; }
-  select { background: var(--surface); border: 1px solid var(--border); border-radius: var(--ctl-radius); color: var(--text); padding: 0.5rem 0.875rem; font: inherit; min-height: 36px; }
+  select { background: var(--surface); border: 1px solid var(--field-border); border-radius: var(--ctl-radius); color: var(--text); padding: 0.5rem 0.875rem; font: inherit; min-height: 36px; }
   .card { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow); padding: 1.25rem; display: flex; flex-direction: column; gap: 0.75rem; min-width: 0; }
   .card-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.5rem; align-items: baseline; }
   .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.25rem; }
@@ -213,7 +213,7 @@
   td.why { padding-left: 1.25rem; font-size: 0.8125rem; line-height: 1.45; }
   .reasons { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; overflow-wrap: anywhere; }
   .fails { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.75rem; }
-  a.fail { display: grid; grid-template-columns: minmax(0, 140px) minmax(0, 1fr) 3rem; gap: 0.25rem 0.75rem; align-items: center; color: inherit; text-decoration: none; border-radius: 6px; }
+  a.fail { display: grid; grid-template-columns: minmax(0, 140px) minmax(0, 1fr) 3rem; gap: 0.25rem 0.75rem; align-items: center; color: inherit; text-decoration: none; border-radius: var(--radius-sm); }
   a.fail:hover { background: var(--surface-hover); }
   .fname { font-family: var(--font-mono); font-size: 0.8125rem; overflow-wrap: anywhere; }
   .rate { text-align: right; font-size: 0.8125rem; }

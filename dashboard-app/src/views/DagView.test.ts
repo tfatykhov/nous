@@ -5,16 +5,17 @@ import { join } from 'node:path';
 import DagView from './DagView.svelte';
 import Dag from '../lib/viz/Dag.svelte';
 import { DAG_NODE_STATUSES } from '../lib/status';
-import { setLook } from '../lib/look';
-import { PAPER_SEL, parseBlocks, styleBlocks } from '../lib/testing/css';
+import { ROOT_SEL, block, parseBlocks, styleBlocks } from '../lib/testing/css';
 
 // Redesign PR 3: Workflows on paper. Status badges and DAG nodes are painted by token (`--st-*`, color-mix tints), so
 // the paper look restyles them and the dark look keeps today's colours; the budget chart's colours are tokens the
 // Chart component resolves against its ground.
 
-const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
+const PAPER = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
 const HOSTILE = '<img src=x onerror=alert(1)>' + 'n'.repeat(300);
 const dash = (s: string) => s.replaceAll('_', '-');
+/** A status's token: its own --st-*, except awaiting input, which is the waiting colour itself (PR 7 T4). */
+const stVar = (s: string) => (s === 'awaiting_input' ? 'var(--waiting)' : `var(--st-${dash(s)})`);
 
 const node = (id: string, name: string, status: string, over: Record<string, unknown> = {}) => ({
   id, name, description: '', node_type: 'subtask', wave: 0, status, result: '', error: '', tokens_used: 0,
@@ -82,14 +83,14 @@ function installD3() {
 
 function paperMain(): HTMLElement {
   const main = document.createElement('main');
-  main.setAttribute('data-ground', 'paper');
+  main.classList.add('page-ground');
   for (const [k, v] of Object.entries(PAPER)) if (k.startsWith('--')) main.style.setProperty(k, v);
   document.body.appendChild(main);
   return main;
 }
 
 beforeEach(() => { install(); installD3(); });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); setLook('dark'); document.body.innerHTML = ''; });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); document.body.innerHTML = ''; });
 
 describe('Workflows: status by token', () => {
   it('every DAG status renders a badge from its --st-* token with a color-mix tint, never a hex', async () => {
@@ -100,7 +101,7 @@ describe('Workflows: status by token', () => {
       const b = badges.find((x) => x.textContent === s);
       expect(b, s).toBeTruthy();
       const style = b!.getAttribute('style') ?? '';
-      expect(style, s).toContain(`var(--st-${dash(s)})`);
+      expect(style, s).toContain(stVar(s));
       expect(style, s).toContain('color-mix(in srgb');
       expect(style, s).not.toContain('#');
     }
@@ -119,11 +120,11 @@ describe('Workflows: status by token', () => {
 
   it('source contract: the Now pills read the wait and running tokens, have room, and round as blocks when wrapped', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'DagView.svelte'), 'utf-8'));
-    expect(css).toMatch(/\.now-waiting \{[^}]*color: var\(--wait-ink\); background: var\(--wait-bg\);/);
+    expect(css).toMatch(/\.now-waiting \{[^}]*color: var\(--waiting\); background: var\(--wait-bg\);/);
     // At phone width the Now column squeezed each pill over four lines; a pill radius on a block of text cut it.
     expect(css).toMatch(/\.now-cell \{ min-width: 10rem; \}/);
-    expect(css).toMatch(/\.now-waiting \{[^}]*border-radius: 0\.75rem;/);
-    expect(css).toMatch(/\.now-held \{[^}]*border-radius: 0\.75rem;/);
+    expect(css).toMatch(/\.now-waiting \{[^}]*border-radius: var\(--card-radius-sm\);/); // 12px, now as its token (final step A8)
+    expect(css).toMatch(/\.now-held \{[^}]*border-radius: var\(--card-radius-sm\);/); // 12px, now as its token (final step A8)
   });
 
   it('a hostile node name is text', async () => {
@@ -147,7 +148,7 @@ describe('Workflows: the DAG graph', () => {
     render(Dag, { props: { nodes, edges: [{ from_node_id: 'n0', to_node_id: 'n1' }] } });
     for (const n of EVERY) {
       const shape = calls.filter((c) => c.id === n.id && c.tag !== 'text' && c.kind === 'style');
-      const v = `var(--st-${dash(n.status)})`;
+      const v = stVar(n.status);
       expect(shape.find((c) => c.k === 'fill')?.v, n.status).toBe(`color-mix(in srgb, ${v} 18.8%, transparent)`);
       expect(shape.find((c) => c.k === 'stroke')?.v, n.status).toBe(v);
     }
@@ -194,34 +195,22 @@ describe('Workflows: no invented glyph in the graph', () => {
     const mine = calls.filter((c) => c.id === 'a1');
     // (The graph draws on mount and again from its effect: compare the set of texts.)
     expect([...new Set(mine.filter((c) => c.kind === 'text' && c.tag === 'text').map((c) => c.v))]).toEqual(['approve-send', 'awaiting input']);
-    expect(mine.some((c) => c.tag === 'rect' && c.k === 'stroke' && c.v === 'var(--st-awaiting-input)')).toBe(true);
+    expect(mine.some((c) => c.tag === 'rect' && c.k === 'stroke' && c.v === 'var(--waiting)')).toBe(true);
     expect(readFileSync(join(__dirname, '..', 'lib', 'viz', 'Dag.svelte'), 'utf-8')).not.toMatch(/\.text\('\?'\)/);
   });
 });
 
 describe('Workflows: the token budget chart', () => {
   const ds = (label: string) => configs.find((c) => c.type === 'bar')!.data.datasets.find((d) => d.label === label)!;
-  const norm = (c: unknown) => String(c).replace(/\s+/g, '');
 
-  it('dark: consumed, remaining and the axes are today\'s colours exactly', async () => {
-    render(DagView);
-    await waitFor(() => expect(configs.filter((c) => c.type === 'bar')).toHaveLength(1));
-    expect(norm(ds('Consumed').backgroundColor)).toBe('rgba(251,191,36,0.7)');
-    expect(norm(ds('Budget').backgroundColor)).toBe('rgba(255,255,255,0.08)');
-    const o = configs.find((c) => c.type === 'bar')!.options;
-    expect(o.plugins.legend.labels.color).toBe('#94a3b8');
-    expect([o.scales.x.ticks.color, o.scales.y.ticks.color]).toEqual(['#94a3b8', '#94a3b8']);
-    expect([o.scales.x.grid.color, o.scales.y.grid.color]).toEqual(['#1e293b', '#1e293b']);
-  });
-
-  it('paper: the same chart takes the paper values', async () => {
-    setLook('paper');
+  it('consumed, remaining and the axes take their tokens', async () => {
     render(DagView, { target: paperMain() });
     await waitFor(() => expect(configs.filter((c) => c.type === 'bar')).toHaveLength(1));
     expect(ds('Consumed').backgroundColor).toBe(PAPER['--stack-bar']);
-    expect(ds('Budget').backgroundColor).toBe(PAPER['--track-strong']);
+    expect(ds('Budget').backgroundColor).toBe(PAPER['--track']);
     const o = configs.find((c) => c.type === 'bar')!.options;
     expect(o.plugins.legend.labels.color).toBe(PAPER['--chart-text']);
-    expect(o.scales.y.grid.color).toBe(PAPER['--chart-grid']);
+    expect([o.scales.x.ticks.color, o.scales.y.ticks.color]).toEqual([PAPER['--chart-text'], PAPER['--chart-text']]);
+    expect([o.scales.x.grid.color, o.scales.y.grid.color]).toEqual([PAPER['--chart-grid'], PAPER['--chart-grid']]);
   });
 });

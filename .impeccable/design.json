@@ -1,0 +1,1273 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-11T21:53:37.521Z",
+  "title": "Design System: Nous dashboard and companion",
+  "extensions": {
+    "colorMeta": {
+      "chart-paper": {
+        "role": "neutral",
+        "displayName": "Chart Paper",
+        "canonical": "#eef2f3",
+        "tonalRamp": [
+          "#0a0b0c",
+          "#242728",
+          "#424646",
+          "#606465",
+          "#838788",
+          "#a8abac",
+          "#cfd1d2",
+          "#edefef"
+        ]
+      },
+      "card-white": {
+        "role": "neutral",
+        "displayName": "Card White",
+        "canonical": "#ffffff",
+        "tonalRamp": [
+          "#0b0b0b",
+          "#262626",
+          "#454545",
+          "#636363",
+          "#868686",
+          "#ababab",
+          "#d1d1d1",
+          "#eeeeee"
+        ]
+      },
+      "wash": {
+        "role": "neutral",
+        "displayName": "Wash",
+        "canonical": "#f4f7f8",
+        "tonalRamp": [
+          "#0a0b0c",
+          "#252728",
+          "#434546",
+          "#616464",
+          "#848787",
+          "#a9abac",
+          "#d0d1d2",
+          "#edefef"
+        ]
+      },
+      "rule": {
+        "role": "neutral",
+        "displayName": "Rule",
+        "canonical": "#e3e9ec",
+        "tonalRamp": [
+          "#0a0b0c",
+          "#232729",
+          "#414648",
+          "#5f6467",
+          "#82878a",
+          "#a7abae",
+          "#cfd1d3",
+          "#eceff0"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "#14202b",
+        "tonalRamp": [
+          "#070c10",
+          "#1c2833",
+          "#394753",
+          "#576572",
+          "#798896",
+          "#a1acb7",
+          "#cbd2d9",
+          "#e8eff6"
+        ]
+      },
+      "ink-muted": {
+        "role": "neutral",
+        "displayName": "Muted Ink",
+        "canonical": "#56687a",
+        "tonalRamp": [
+          "#060c12",
+          "#182837",
+          "#364758",
+          "#536577",
+          "#76889b",
+          "#9eadbc",
+          "#c9d2db",
+          "#e6f0f9"
+        ]
+      },
+      "atlantic": {
+        "role": "primary",
+        "displayName": "Atlantic Blue",
+        "canonical": "#12304f",
+        "tonalRamp": [
+          "#030c17",
+          "#092746",
+          "#294768",
+          "#466688",
+          "#6889ae",
+          "#94aeca",
+          "#c3d3e5",
+          "#e3f0ff"
+        ]
+      },
+      "atlantic-hover": {
+        "role": "primary",
+        "displayName": "Atlantic Lift",
+        "canonical": "#1a3d62",
+        "tonalRamp": [
+          "#020c19",
+          "#03274a",
+          "#24476d",
+          "#42668e",
+          "#6489b3",
+          "#91aecf",
+          "#c1d3e7",
+          "#e4f0fe"
+        ]
+      },
+      "link-blue": {
+        "role": "secondary",
+        "displayName": "Link Blue",
+        "canonical": "#2346c8",
+        "tonalRamp": [
+          "#010231",
+          "#07007e",
+          "#142db0",
+          "#2c53d6",
+          "#527df4",
+          "#86a8fa",
+          "#bdd1fe",
+          "#e7efff"
+        ]
+      },
+      "link-wash": {
+        "role": "secondary",
+        "displayName": "Link Wash",
+        "canonical": "#e6ecfb",
+        "tonalRamp": [
+          "#090b0f",
+          "#222631",
+          "#404551",
+          "#5e6370",
+          "#818693",
+          "#a6abb5",
+          "#ced1d7",
+          "#eceef5"
+        ]
+      },
+      "field-rule": {
+        "role": "neutral",
+        "displayName": "Field Rule",
+        "canonical": "#7a8896",
+        "tonalRamp": [
+          "#070c10",
+          "#1c2833",
+          "#3a4753",
+          "#586572",
+          "#7a8896",
+          "#a1acb7",
+          "#cbd2d9",
+          "#e8eff6"
+        ]
+      },
+      "control-rule": {
+        "role": "neutral",
+        "displayName": "Control Rule",
+        "canonical": "#c9d4da",
+        "tonalRamp": [
+          "#080c0d",
+          "#1f282c",
+          "#3d474c",
+          "#5b656a",
+          "#7e888d",
+          "#a4acb1",
+          "#cdd2d4",
+          "#eaeff2"
+        ]
+      },
+      "rail-ink": {
+        "role": "primary",
+        "displayName": "Rail Ink",
+        "canonical": "#dbe6ef",
+        "tonalRamp": [
+          "#080c0e",
+          "#1f282e",
+          "#3d464e",
+          "#5b656c",
+          "#7e8890",
+          "#a4acb2",
+          "#cdd2d6",
+          "#eaeff3"
+        ]
+      },
+      "rail-muted": {
+        "role": "primary",
+        "displayName": "Rail Mute",
+        "canonical": "#9fb6c9",
+        "tonalRamp": [
+          "#060c12",
+          "#152937",
+          "#344858",
+          "#516677",
+          "#73899b",
+          "#9cadbb",
+          "#c8d3db",
+          "#e5f0f9"
+        ]
+      },
+      "rail-waiting": {
+        "role": "primary",
+        "displayName": "Rail Waiting Badge",
+        "canonical": "#c4b5fd",
+        "tonalRamp": [
+          "#0d071c",
+          "#2b1752",
+          "#493875",
+          "#665797",
+          "#897abd",
+          "#ada2d7",
+          "#d2cced",
+          "#efecfe"
+        ]
+      },
+      "rail-unknown": {
+        "role": "primary",
+        "displayName": "Rail Unknown Badge",
+        "canonical": "#f9a8d4",
+        "tonalRamp": [
+          "#19030f",
+          "#480331",
+          "#6c2851",
+          "#8e4770",
+          "#b56a94",
+          "#d196b6",
+          "#eac5d8",
+          "#fee7f3"
+        ]
+      },
+      "frame-conversation": {
+        "role": "tertiary",
+        "displayName": "Frame: Conversation Slate",
+        "canonical": "#55697a",
+        "tonalRamp": [
+          "#060c12",
+          "#162837",
+          "#344757",
+          "#526677",
+          "#74899b",
+          "#9dadbb",
+          "#c8d2db",
+          "#e6f0f9"
+        ]
+      },
+      "frame-question": {
+        "role": "tertiary",
+        "displayName": "Frame: Question Blue",
+        "canonical": "#2346c8",
+        "tonalRamp": [
+          "#010231",
+          "#07007e",
+          "#142db0",
+          "#2c53d6",
+          "#527df4",
+          "#86a8fa",
+          "#bdd1fe",
+          "#e7efff"
+        ]
+      },
+      "frame-task": {
+        "role": "tertiary",
+        "displayName": "Frame: Task Teal",
+        "canonical": "#0b6e7a",
+        "tonalRamp": [
+          "#000e11",
+          "#032c32",
+          "#014f58",
+          "#0f707c",
+          "#4094a0",
+          "#7cb6bf",
+          "#b6d8de",
+          "#d3f6fc"
+        ]
+      },
+      "frame-decision": {
+        "role": "tertiary",
+        "displayName": "Frame: Decision Violet",
+        "canonical": "#7b3fa0",
+        "tonalRamp": [
+          "#140120",
+          "#390653",
+          "#5f2181",
+          "#7f43a4",
+          "#a367cb",
+          "#c295e2",
+          "#e0c5f4",
+          "#f5e9fe"
+        ]
+      },
+      "frame-debug": {
+        "role": "tertiary",
+        "displayName": "Frame: Debug Rust",
+        "canonical": "#b4531c",
+        "tonalRamp": [
+          "#1b0300",
+          "#431700",
+          "#702f08",
+          "#9c4717",
+          "#ca6633",
+          "#e29571",
+          "#f6c5ae",
+          "#feeae1"
+        ]
+      },
+      "frame-creative": {
+        "role": "tertiary",
+        "displayName": "Frame: Creative Magenta",
+        "canonical": "#a3266f",
+        "tonalRamp": [
+          "#1e000f",
+          "#4a002e",
+          "#7c0851",
+          "#a62971",
+          "#cf5195",
+          "#e887b7",
+          "#fabcd8",
+          "#fee7f1"
+        ]
+      },
+      "frame-initiation": {
+        "role": "tertiary",
+        "displayName": "Frame: Initiation Ochre",
+        "canonical": "#8f5c0f",
+        "tonalRamp": [
+          "#150800",
+          "#382101",
+          "#5f3d0b",
+          "#895704",
+          "#af7a36",
+          "#cca273",
+          "#e6ccb0",
+          "#feebd6"
+        ]
+      },
+      "frame-other": {
+        "role": "tertiary",
+        "displayName": "Frame: Other (neutral ink)",
+        "canonical": "#14202b",
+        "tonalRamp": [
+          "#070c10",
+          "#1c2833",
+          "#394753",
+          "#576572",
+          "#798896",
+          "#a1acb7",
+          "#cbd2d9",
+          "#e8eff6"
+        ]
+      },
+      "status-ok-fill": {
+        "role": "tertiary",
+        "displayName": "Ok Mark Green",
+        "canonical": "#2f8a4e",
+        "tonalRamp": [
+          "#001003",
+          "#052f15",
+          "#045427",
+          "#14773c",
+          "#429b5e",
+          "#7dbc8d",
+          "#b7dcbf",
+          "#d4fadc"
+        ]
+      },
+      "status-warn-fill": {
+        "role": "tertiary",
+        "displayName": "Warn Mark Amber",
+        "canonical": "#b7791f",
+        "tonalRamp": [
+          "#150800",
+          "#382000",
+          "#603c04",
+          "#875811",
+          "#b5771c",
+          "#d1a167",
+          "#e9cbaa",
+          "#ffebd4"
+        ]
+      },
+      "status-error-fill": {
+        "role": "tertiary",
+        "displayName": "Error Mark Red",
+        "canonical": "#d2352b",
+        "tonalRamp": [
+          "#200000",
+          "#4d0504",
+          "#860204",
+          "#b91411",
+          "#e4473b",
+          "#f98475",
+          "#fcc0b7",
+          "#ffe9e5"
+        ]
+      },
+      "ok-text": {
+        "role": "tertiary",
+        "displayName": "Ok Text",
+        "canonical": "#23703d",
+        "tonalRamp": [
+          "#001003",
+          "#003012",
+          "#0a5327",
+          "#287441",
+          "#4f9963",
+          "#84ba90",
+          "#badbc1",
+          "#d7f9de"
+        ]
+      },
+      "ok-tint": {
+        "role": "tertiary",
+        "displayName": "Ok Tint",
+        "canonical": "#e3f2e8",
+        "tonalRamp": [
+          "#080c0a",
+          "#1e2a22",
+          "#3c4941",
+          "#5a675e",
+          "#7d8a81",
+          "#a3aea7",
+          "#ccd3ce",
+          "#eaf0ec"
+        ]
+      },
+      "warn-text": {
+        "role": "tertiary",
+        "displayName": "Warn Text",
+        "canonical": "#8a5a0e",
+        "tonalRamp": [
+          "#150800",
+          "#372102",
+          "#603c00",
+          "#875809",
+          "#ad7b38",
+          "#caa374",
+          "#e5cdb0",
+          "#fdebd6"
+        ]
+      },
+      "warn-tint": {
+        "role": "tertiary",
+        "displayName": "Warn Tint",
+        "canonical": "#f8efdc",
+        "tonalRamp": [
+          "#0d0b06",
+          "#2c2617",
+          "#4c4435",
+          "#6a6252",
+          "#8d8574",
+          "#b0aa9d",
+          "#d4d1c8",
+          "#f2eee6"
+        ]
+      },
+      "error-text": {
+        "role": "tertiary",
+        "displayName": "Error Text",
+        "canonical": "#b02a22",
+        "tonalRamp": [
+          "#1f0000",
+          "#500000",
+          "#850707",
+          "#b02a22",
+          "#da5346",
+          "#f1897c",
+          "#fcc0b7",
+          "#ffe9e5"
+        ]
+      },
+      "error-tint": {
+        "role": "tertiary",
+        "displayName": "Error Tint",
+        "canonical": "#fbe9e8",
+        "tonalRamp": [
+          "#0f0a09",
+          "#302322",
+          "#4f4140",
+          "#6e5f5e",
+          "#928281",
+          "#b4a7a7",
+          "#d7cfce",
+          "#f4ecec"
+        ]
+      },
+      "info-text": {
+        "role": "tertiary",
+        "displayName": "Info Text",
+        "canonical": "#1b6a9c",
+        "tonalRamp": [
+          "#000c1a",
+          "#012943",
+          "#0a496f",
+          "#1a699b",
+          "#448dc1",
+          "#7db1da",
+          "#b6d6ef",
+          "#e0f1ff"
+        ]
+      },
+      "info-tint": {
+        "role": "tertiary",
+        "displayName": "Info Tint",
+        "canonical": "#e3ecf3",
+        "tonalRamp": [
+          "#090c0e",
+          "#21272d",
+          "#3f464c",
+          "#5d646a",
+          "#7f878e",
+          "#a5acb1",
+          "#ced1d5",
+          "#ebeff2"
+        ]
+      },
+      "waiting": {
+        "role": "tertiary",
+        "displayName": "Waiting Violet",
+        "canonical": "#7b3fa0",
+        "tonalRamp": [
+          "#140120",
+          "#390653",
+          "#5f2181",
+          "#7f43a4",
+          "#a367cb",
+          "#c295e2",
+          "#e0c5f4",
+          "#f5e9fe"
+        ]
+      },
+      "waiting-tint": {
+        "role": "tertiary",
+        "displayName": "Waiting Tint",
+        "canonical": "#efe3f6",
+        "tonalRamp": [
+          "#0d0a0f",
+          "#2b2230",
+          "#4a4150",
+          "#695f6f",
+          "#8c8193",
+          "#b0a7b5",
+          "#d4cfd7",
+          "#f1ecf5"
+        ]
+      },
+      "unknown": {
+        "role": "tertiary",
+        "displayName": "Unknown Magenta",
+        "canonical": "#a3266f",
+        "tonalRamp": [
+          "#1e000f",
+          "#4a002e",
+          "#7c0851",
+          "#a62971",
+          "#cf5195",
+          "#e887b7",
+          "#fabcd8",
+          "#fee7f1"
+        ]
+      },
+      "outcome-success": {
+        "role": "tertiary",
+        "displayName": "Outcome Success Mark",
+        "canonical": "#3f8772",
+        "tonalRamp": [
+          "#000f09",
+          "#002e23",
+          "#095140",
+          "#28725e",
+          "#4e9680",
+          "#84b8a6",
+          "#bad9ce",
+          "#d7f7ec"
+        ]
+      },
+      "ok-mark": {
+        "role": "tertiary",
+        "displayName": "Companion Ok Mark",
+        "canonical": "#21694b",
+        "tonalRamp": [
+          "#001007",
+          "#022f1e",
+          "#105238",
+          "#2c7254",
+          "#529776",
+          "#86b89e",
+          "#bbd9c9",
+          "#d8f7e7"
+        ]
+      },
+      "warn-mark": {
+        "role": "tertiary",
+        "displayName": "Companion Warn Mark",
+        "canonical": "#b4771e",
+        "tonalRamp": [
+          "#150800",
+          "#382000",
+          "#603c05",
+          "#875813",
+          "#b4771f",
+          "#d0a168",
+          "#e9cbaa",
+          "#ffebd5"
+        ]
+      },
+      "lane-memory": {
+        "role": "tertiary",
+        "displayName": "Lane: Memory",
+        "canonical": "#3a6ea5",
+        "tonalRamp": [
+          "#000b1e",
+          "#03274a",
+          "#0f467a",
+          "#32669c",
+          "#558ac3",
+          "#87afdb",
+          "#bbd4ef",
+          "#e4f0fd"
+        ]
+      },
+      "lane-live": {
+        "role": "tertiary",
+        "displayName": "Lane: Live State",
+        "canonical": "#946213",
+        "tonalRamp": [
+          "#150800",
+          "#372100",
+          "#5f3d08",
+          "#855916",
+          "#ae7a33",
+          "#cba371",
+          "#e5cdaf",
+          "#feebd5"
+        ]
+      },
+      "lane-workspace": {
+        "role": "tertiary",
+        "displayName": "Lane: Workspace",
+        "canonical": "#5f6b76",
+        "tonalRamp": [
+          "#080c0f",
+          "#1d2831",
+          "#3b4651",
+          "#596570",
+          "#7b8893",
+          "#a2acb5",
+          "#ccd2d7",
+          "#e9eff5"
+        ]
+      },
+      "lane-acts": {
+        "role": "tertiary",
+        "displayName": "Lane: Acts On The World",
+        "canonical": "#96406b",
+        "tonalRamp": [
+          "#1b010e",
+          "#4b002d",
+          "#73204d",
+          "#96406b",
+          "#be648f",
+          "#d992b2",
+          "#efc2d5",
+          "#fee7f0"
+        ]
+      },
+      "series-0": {
+        "role": "tertiary",
+        "displayName": "Chart Series 0",
+        "canonical": "#274455",
+        "tonalRamp": [
+          "#040c13",
+          "#0c2a3a",
+          "#2c495a",
+          "#4a687a",
+          "#6c8b9e",
+          "#97afbe",
+          "#c5d3dd",
+          "#e2f1fb"
+        ]
+      },
+      "series-1": {
+        "role": "tertiary",
+        "displayName": "Chart Series 1",
+        "canonical": "#1f5fa8",
+        "tonalRamp": [
+          "#000a21",
+          "#002650",
+          "#084483",
+          "#2463ad",
+          "#4988d4",
+          "#7faee9",
+          "#b7d4f8",
+          "#e4f0fe"
+        ]
+      },
+      "series-2": {
+        "role": "tertiary",
+        "displayName": "Chart Series 2",
+        "canonical": "#159a7a",
+        "tonalRamp": [
+          "#000f09",
+          "#032e23",
+          "#01523f",
+          "#0f745c",
+          "#1a9c7c",
+          "#6ebda3",
+          "#b0ddcc",
+          "#cdfbe9"
+        ]
+      },
+      "series-3": {
+        "role": "tertiary",
+        "displayName": "Chart Series 3",
+        "canonical": "#a8408f",
+        "tonalRamp": [
+          "#1c0015",
+          "#47003a",
+          "#770862",
+          "#9b3383",
+          "#c359a8",
+          "#dd8bc6",
+          "#f2bfe2",
+          "#fee7f6"
+        ]
+      },
+      "series-4": {
+        "role": "tertiary",
+        "displayName": "Chart Series 4",
+        "canonical": "#d0620d",
+        "tonalRamp": [
+          "#1a0400",
+          "#401a02",
+          "#6c330c",
+          "#9c4706",
+          "#d0620d",
+          "#e89363",
+          "#f9c4a7",
+          "#feeae0"
+        ]
+      },
+      "series-5": {
+        "role": "tertiary",
+        "displayName": "Chart Series 5",
+        "canonical": "#7a8a1a",
+        "tonalRamp": [
+          "#0a0d00",
+          "#242a00",
+          "#414b08",
+          "#5e6b17",
+          "#809023",
+          "#a5b36b",
+          "#cdd7ab",
+          "#eaf5c8"
+        ]
+      },
+      "series-6": {
+        "role": "tertiary",
+        "displayName": "Chart Series 6",
+        "canonical": "#985c50",
+        "tonalRamp": [
+          "#180503",
+          "#461209",
+          "#6a3228",
+          "#8c5145",
+          "#b27467",
+          "#cf9d93",
+          "#e8c9c2",
+          "#fee9e4"
+        ]
+      },
+      "series-7": {
+        "role": "tertiary",
+        "displayName": "Chart Series 7",
+        "canonical": "#4f5f6f",
+        "tonalRamp": [
+          "#070c11",
+          "#1a2836",
+          "#374756",
+          "#556575",
+          "#778899",
+          "#9fadba",
+          "#cad2da",
+          "#e7f0f8"
+        ]
+      },
+      "series-8": {
+        "role": "tertiary",
+        "displayName": "Chart Series 8",
+        "canonical": "#1c2f55",
+        "tonalRamp": [
+          "#050b19",
+          "#12254a",
+          "#30446c",
+          "#4d638d",
+          "#6f86b3",
+          "#99abce",
+          "#c6d1e7",
+          "#e7effe"
+        ]
+      },
+      "series-9": {
+        "role": "tertiary",
+        "displayName": "Chart Series 9",
+        "canonical": "#0e7490",
+        "tonalRamp": [
+          "#000e15",
+          "#012b38",
+          "#0b4d60",
+          "#006e8a",
+          "#3a92af",
+          "#78b5cb",
+          "#b4d8e5",
+          "#d9f4fe"
+        ]
+      },
+      "series-10": {
+        "role": "tertiary",
+        "displayName": "Chart Series 10",
+        "canonical": "#8b5cf6",
+        "tonalRamp": [
+          "#0f002c",
+          "#2d0564",
+          "#4f17a2",
+          "#6e38d1",
+          "#8f61fb",
+          "#ae9af7",
+          "#d2c9fd",
+          "#efecfe"
+        ]
+      },
+      "series-11": {
+        "role": "tertiary",
+        "displayName": "Chart Series 11",
+        "canonical": "#6b7280",
+        "tonalRamp": [
+          "#090b10",
+          "#212632",
+          "#3f4552",
+          "#5d6371",
+          "#7f8695",
+          "#a5abb6",
+          "#cdd1d8",
+          "#ebeff6"
+        ]
+      },
+      "series-12": {
+        "role": "tertiary",
+        "displayName": "Chart Series 12",
+        "canonical": "#908870",
+        "tonalRamp": [
+          "#0e0b04",
+          "#2d2611",
+          "#4c452f",
+          "#6b634c",
+          "#8e866e",
+          "#b1ab98",
+          "#d5d1c5",
+          "#f2eee3"
+        ]
+      },
+      "series-13": {
+        "role": "tertiary",
+        "displayName": "Chart Series 13",
+        "canonical": "#7a3f3f",
+        "tonalRamp": [
+          "#180505",
+          "#471014",
+          "#6a3132",
+          "#8c4f4f",
+          "#b27271",
+          "#cf9c9a",
+          "#e9c8c7",
+          "#ffe9e7"
+        ]
+      },
+      "node-fact": {
+        "role": "tertiary",
+        "displayName": "Node: Fact",
+        "canonical": "#159a7a",
+        "tonalRamp": [
+          "#000f09",
+          "#032e23",
+          "#01523f",
+          "#0f745c",
+          "#1a9c7c",
+          "#6ebda3",
+          "#b0ddcc",
+          "#cdfbe9"
+        ]
+      },
+      "node-episode": {
+        "role": "tertiary",
+        "displayName": "Node: Episode",
+        "canonical": "#1f5fa8",
+        "tonalRamp": [
+          "#000a21",
+          "#002650",
+          "#084483",
+          "#2463ad",
+          "#4988d4",
+          "#7faee9",
+          "#b7d4f8",
+          "#e4f0fe"
+        ]
+      },
+      "node-decision": {
+        "role": "tertiary",
+        "displayName": "Node: Decision",
+        "canonical": "#802c66",
+        "tonalRamp": [
+          "#1a0112",
+          "#460535",
+          "#711e59",
+          "#943f78",
+          "#bc629d",
+          "#d791bd",
+          "#eec2dc",
+          "#ffe6f5"
+        ]
+      },
+      "node-procedure": {
+        "role": "tertiary",
+        "displayName": "Node: Procedure",
+        "canonical": "#d0620d",
+        "tonalRamp": [
+          "#1a0400",
+          "#401a02",
+          "#6c330c",
+          "#9c4706",
+          "#d0620d",
+          "#e89363",
+          "#f9c4a7",
+          "#feeae0"
+        ]
+      },
+      "node-chunk": {
+        "role": "tertiary",
+        "displayName": "Node: Chunk",
+        "canonical": "#8b5cf6",
+        "tonalRamp": [
+          "#0f002c",
+          "#2d0564",
+          "#4f17a2",
+          "#6e38d1",
+          "#8f61fb",
+          "#ae9af7",
+          "#d2c9fd",
+          "#efecfe"
+        ]
+      },
+      "node-other": {
+        "role": "tertiary",
+        "displayName": "Node: Other",
+        "canonical": "#4f5f6f",
+        "tonalRamp": [
+          "#070c11",
+          "#1a2836",
+          "#374756",
+          "#556575",
+          "#778899",
+          "#9fadba",
+          "#cad2da",
+          "#e7f0f8"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "The page title, one per screen."
+      },
+      "title-lg": {
+        "displayName": "Title large",
+        "purpose": "A group heading between card rows, and the frame name in a trace column."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "A card heading."
+      },
+      "figure": {
+        "displayName": "Figure",
+        "purpose": "The value of a stat tile, in tabular figures."
+      },
+      "figure-condensed": {
+        "displayName": "Figure condensed",
+        "purpose": "Readouts, durations, table totals and hour labels: Archivo at 82% width."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Prose in cards."
+      },
+      "body-reading": {
+        "displayName": "Body reading",
+        "purpose": "A message, a tool-call reason and a reply in the trace, at most 72ch."
+      },
+      "data": {
+        "displayName": "Data",
+        "purpose": "Table cells, chips and meta pills."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Table headers, tile labels, pills and chart text; sentence case, no tracking."
+      },
+      "label-small": {
+        "displayName": "Label small",
+        "purpose": "Rail group headings and count badges."
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "A tool name."
+      },
+      "mono-block": {
+        "displayName": "Mono block",
+        "purpose": "Tool input and output."
+      }
+    },
+    "shadows": [
+      {
+        "name": "card",
+        "value": "0 1px 2px rgba(18, 48, 79, 0.06), 0 6px 20px rgba(18, 48, 79, 0.07)",
+        "purpose": "Every card and stat tile on the paper, the meta pills under a title, an outline button on hover."
+      },
+      {
+        "name": "raised-pill",
+        "value": "0 1px 3px rgba(18, 48, 79, 0.12)",
+        "purpose": "The selected option of a pill group."
+      }
+    ],
+    "motion": [
+      {
+        "name": "transition",
+        "value": "0.2s cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "Every state change: a hover fill, a chevron turn, a replayed bar fading."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "transition: none; animation: none",
+        "purpose": "Under prefers-reduced-motion every transition is off and every loop stops."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "stack",
+        "value": "640px",
+        "purpose": "List tables stack, tiles go two up, the frame column lies flat."
+      },
+      {
+        "name": "shell",
+        "value": "768px",
+        "purpose": "The rail becomes a top bar with a drawer; sub-navigation and filter pills grow to 44px."
+      },
+      {
+        "name": "overview-cards",
+        "value": "900px",
+        "purpose": "The three Overview cards become one column."
+      },
+      {
+        "name": "trace-side-card",
+        "value": "1180px",
+        "purpose": "The card beside the Work trace drops below it."
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The Atlantic pill for the action that changes something.",
+      "html": "<button class=\"ds-btn-primary\">Confirm choice</button>",
+      "css": ".ds-btn-primary { font-family: var(--font-ui, 'Archivo', system-ui, sans-serif); font-size: 14px; font-weight: 500; height: 36px; padding: 0 16px; border: 1px solid transparent; border-radius: 999px; background: var(--action, #12304f); color: var(--on-accent, #ffffff); cursor: pointer; transition: background 0.2s cubic-bezier(0.16, 1, 0.3, 1); } .ds-btn-primary:hover { background: #1a3d62; } .ds-btn-primary:active { transform: translateY(1px); } .ds-btn-primary:focus-visible { outline: 2px solid #2346c8; outline-offset: 2px; } .ds-btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }"
+    },
+    {
+      "name": "Outline button",
+      "kind": "button",
+      "refersTo": "button-outline",
+      "description": "The white pill of the page header (Refresh) and of secondary actions.",
+      "html": "<button class=\"ds-btn-outline\">Refresh</button>",
+      "css": ".ds-btn-outline { font-family: var(--font-ui, 'Archivo', system-ui, sans-serif); font-size: 14px; font-weight: 500; height: 36px; padding: 0 16px; border: 1px solid var(--border, #e3e9ec); border-radius: 999px; background: var(--surface, #ffffff); color: var(--text, #14202b); cursor: pointer; transition: border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1); } .ds-btn-outline:hover { border-color: var(--muted, #56687a); box-shadow: var(--card-shadow, 0 1px 2px rgba(18, 48, 79, 0.06), 0 6px 20px rgba(18, 48, 79, 0.07)); } .ds-btn-outline:active { transform: translateY(1px); } .ds-btn-outline:focus-visible { outline: 2px solid #2346c8; outline-offset: 2px; }"
+    },
+    {
+      "name": "Status pills",
+      "kind": "chip",
+      "refersTo": "status-pill-ok",
+      "description": "A state said in a word on its tint; never colour alone.",
+      "html": "<span class=\"ds-pill ds-pill-ok\">Clear</span> <span class=\"ds-pill ds-pill-warn\">Watch</span> <span class=\"ds-pill ds-pill-bad\">4 errors</span> <span class=\"ds-pill ds-pill-info\">Ready</span> <span class=\"ds-pill\">Skipped</span>",
+      "css": ".ds-pill { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 999px; font-family: var(--font-ui, 'Archivo', system-ui, sans-serif); font-size: 12px; font-weight: 500; line-height: 1; white-space: nowrap; background: #f4f7f8; color: #56687a; } .ds-pill-ok { background: #e3f2e8; color: #23703d; } .ds-pill-warn { background: #f8efdc; color: #8a5a0e; } .ds-pill-bad { background: #fbe9e8; color: #b02a22; } .ds-pill-info { background: #e3ecf3; color: #1b6a9c; }"
+    },
+    {
+      "name": "Selected pill group",
+      "kind": "nav",
+      "refersTo": "tab-selected",
+      "description": "Sub-navigation, segmented controls and filters: the selected option is the white raised pill.",
+      "html": "<nav class=\"ds-tabs\" aria-label=\"Views\"><a class=\"ds-tab ds-tab-on\" href=\"#\" aria-current=\"page\">Sessions</a><a class=\"ds-tab\" href=\"#\">Patterns</a><a class=\"ds-tab\" href=\"#\">Changes</a></nav>",
+      "css": ".ds-tabs { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 4px; background: #eef2f3; border-radius: 999px; } .ds-tab { padding: 8px 14px; border-radius: 999px; font-family: var(--font-ui, 'Archivo', system-ui, sans-serif); font-size: 14px; color: #56687a; text-decoration: none; transition: background 0.2s cubic-bezier(0.16, 1, 0.3, 1), color 0.2s cubic-bezier(0.16, 1, 0.3, 1); } .ds-tab:hover { background: #f4f7f8; color: #14202b; } .ds-tab-on, .ds-tab-on:hover { background: #ffffff; color: #14202b; font-weight: 600; box-shadow: 0 1px 3px rgba(18, 48, 79, 0.12); } .ds-tab:focus-visible { outline: 2px solid #2346c8; outline-offset: 2px; }"
+    },
+    {
+      "name": "Rail navigation",
+      "kind": "nav",
+      "refersTo": "nav-link",
+      "description": "The Atlantic rail: group headings as text, the current item as a chart-paper pill.",
+      "html": "<nav class=\"ds-rail\" aria-label=\"Site navigation\"><a class=\"ds-rail-link ds-rail-on\" href=\"#\" aria-current=\"page\">Overview</a><div class=\"ds-rail-group\">Execution</div><a class=\"ds-rail-link\" href=\"#\">Work</a><a class=\"ds-rail-link\" href=\"#\">Model calls</a></nav>",
+      "css": ".ds-rail { display: flex; flex-direction: column; gap: 2px; width: 196px; padding: 8px 12px; background: #12304f; font-family: var(--font-ui, 'Archivo', system-ui, sans-serif); } .ds-rail-group { padding: 10px 12px 2px; color: #9fb6c9; font-size: 11px; font-weight: 600; } .ds-rail-link { padding: 8px 12px; border-radius: 10px; color: #dbe6ef; font-size: 14px; font-weight: 500; text-decoration: none; transition: background 0.2s cubic-bezier(0.16, 1, 0.3, 1); } .ds-rail-link:hover { background: #1a3d62; } .ds-rail-on, .ds-rail-on:hover { background: #eef2f3; color: #14202b; font-weight: 600; } .ds-rail-link:focus-visible { outline: 2px solid #ffffff; outline-offset: 2px; }"
+    },
+    {
+      "name": "Card with stat tiles",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "A white card on the paper; tiles inside it are a flat wash, never a second shadow.",
+      "html": "<section class=\"ds-card\"><h2 class=\"ds-card-h\">Execution integrity</h2><div class=\"ds-tiles\"><div class=\"ds-tile\"><div class=\"ds-tile-v\">214</div><div class=\"ds-tile-l\">Calls (24 h)</div></div><div class=\"ds-tile\"><div class=\"ds-tile-v\">6</div><div class=\"ds-tile-l\">Sends</div></div><div class=\"ds-tile\"><div class=\"ds-tile-v\">1</div><div class=\"ds-tile-l\">Repeat sends refused</div></div></div></section>",
+      "css": ".ds-card { background: var(--surface, #ffffff); border-radius: 18px; box-shadow: var(--card-shadow, 0 1px 2px rgba(18, 48, 79, 0.06), 0 6px 20px rgba(18, 48, 79, 0.07)); padding: 18px 20px; font-family: var(--font-ui, 'Archivo', system-ui, sans-serif); color: var(--text, #14202b); font-variant-numeric: tabular-nums; } .ds-card-h { margin: 0 0 12px; font-size: 15px; font-weight: 650; } .ds-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; } .ds-tile { background: #f4f7f8; border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 4px; } .ds-tile-v { font-size: 24px; font-weight: 700; line-height: 1.2; } .ds-tile-l { font-size: 12px; font-weight: 500; color: var(--muted, #56687a); }"
+    },
+    {
+      "name": "Data table",
+      "kind": "custom",
+      "refersTo": "table-cell",
+      "description": "The dense shared table: 13px in rows of about 32px, numbers right-aligned in tabular figures.",
+      "html": "<table class=\"ds-table\"><thead><tr><th>Tool</th><th>Last call</th><th class=\"ds-num\">Calls</th><th class=\"ds-num\">Median</th></tr></thead><tbody><tr><td>db_query</td><td>Nov 10 09:31 UTC</td><td class=\"ds-num\">1,284</td><td class=\"ds-num\">0.4 s</td></tr><tr><td>recall_deep</td><td>Nov 10 09:12 UTC</td><td class=\"ds-num\">375</td><td class=\"ds-num\">1.9 s</td></tr></tbody></table>",
+      "css": ".ds-table { width: 100%; border-collapse: collapse; background: var(--surface, #ffffff); font-family: var(--font-ui, 'Archivo', system-ui, sans-serif); color: var(--text, #14202b); } .ds-table th, .ds-table td { text-align: left; padding: 7px 12px; font-size: 13px; line-height: 1.35; border-bottom: 1px solid var(--border, #e3e9ec); white-space: nowrap; } .ds-table th { color: var(--muted, #56687a); font-size: 12px; font-weight: 600; } .ds-table .ds-num { text-align: right; font-variant-numeric: tabular-nums; } .ds-table tbody tr:hover td { background: #f4f7f8; }"
+    },
+    {
+      "name": "Frame column and frame-change sentence",
+      "kind": "custom",
+      "refersTo": "code-block",
+      "description": "The Work trace: a turn tinted 7% in its frame colour with the frame named in a word, and one sentence where the frame changes.",
+      "html": "<div class=\"ds-change\"><span class=\"ds-grad\"></span><p>The frame changed from <b class=\"ds-from\">question</b> to <b class=\"ds-to\">task</b>. A new topic.</p></div><div class=\"ds-turn\"><div class=\"ds-gutter\"><div class=\"ds-when\">09:31:07</div><div class=\"ds-frame\">task</div><div>chosen by pattern</div><span class=\"ds-crit\">Critic agreed</span></div><div class=\"ds-rows\"><p class=\"ds-why\">Check the recall rate since the deploy.</p><div class=\"ds-tool\">db_query</div><pre class=\"ds-got\">rows: 24</pre></div></div>",
+      "css": ".ds-turn { --fc: #0b6e7a; display: grid; grid-template-columns: 168px minmax(0, 1fr); border-radius: 12px; background: #ffffff; font-family: var(--font-ui, 'Archivo', system-ui, sans-serif); color: #14202b; } .ds-gutter { border-radius: 12px; background: color-mix(in srgb, var(--fc) 7%, transparent); padding: 12px 14px; font-size: 12.5px; color: #56687a; cursor: pointer; } .ds-gutter:hover { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fc) 35%, transparent); } .ds-when { font-stretch: 82%; font-variant-numeric: tabular-nums; } .ds-frame { font-size: 17px; font-weight: 650; line-height: 1.2; color: var(--fc); margin-top: 2px; } .ds-crit { display: inline-block; margin-top: 10px; font-size: 12px; font-weight: 600; padding: 1px 9px; border-radius: 10px; background: #ffffff; color: #56687a; } .ds-rows { padding: 8px 8px 8px 22px; } .ds-why { margin: 0 0 4px; font-size: 15px; line-height: 1.5; } .ds-tool { font-family: var(--font-mono, 'Red Hat Mono', ui-monospace, monospace); font-size: 13px; font-weight: 500; } .ds-got { display: inline-block; margin: 4px 0 0; font-family: var(--font-mono, 'Red Hat Mono', ui-monospace, monospace); font-size: 12.5px; line-height: 1.5; background: #f4f7f8; border-radius: 8px; padding: 5px 10px; } .ds-change { --from: #2346c8; --to: #0b6e7a; display: flex; align-items: center; gap: 10px; padding: 6px 12px; font-family: var(--font-ui, 'Archivo', system-ui, sans-serif); font-size: 13px; color: #56687a; background: #ffffff; } .ds-change p { margin: 0; } .ds-grad { width: 144px; height: 6px; border-radius: 3px; background: linear-gradient(90deg, var(--from), var(--to)); flex: none; } .ds-change b { font-weight: 650; } .ds-from { color: var(--from); } .ds-to { color: var(--to); }"
+    },
+    {
+      "name": "Replay control",
+      "kind": "input",
+      "refersTo": "card",
+      "description": "One range control per screen: a hairline track, a round Atlantic handle, a condensed readout.",
+      "html": "<div class=\"ds-replay\"><label for=\"ds-replay-range\">Replay</label><input id=\"ds-replay-range\" type=\"range\" min=\"0\" max=\"24\" value=\"16\" /><span class=\"ds-readout\">15:40 UTC</span></div>",
+      "css": ".ds-replay { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 18px; padding: 12px 20px; background: #ffffff; border-radius: 18px; box-shadow: var(--card-shadow, 0 1px 2px rgba(18, 48, 79, 0.06), 0 6px 20px rgba(18, 48, 79, 0.07)); font-family: var(--font-ui, 'Archivo', system-ui, sans-serif); } .ds-replay label { font-size: 13px; color: #56687a; } .ds-readout { font-size: 15px; font-weight: 650; font-stretch: 82%; font-variant-numeric: tabular-nums; color: #14202b; } .ds-replay input { width: 100%; height: 24px; margin: 0; background: transparent; appearance: none; -webkit-appearance: none; cursor: pointer; } .ds-replay input:focus-visible { outline: 2px solid #2346c8; outline-offset: 2px; } .ds-replay input::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: #e3e9ec; } .ds-replay input::-moz-range-track { height: 4px; border-radius: 2px; background: #e3e9ec; } .ds-replay input::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 18px; height: 18px; margin-top: -7px; border-radius: 50%; background: #12304f; border: 3px solid #ffffff; box-shadow: 0 0 0 1px #e3e9ec; } .ds-replay input::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; background: #12304f; border: 3px solid #ffffff; box-shadow: 0 0 0 1px #e3e9ec; }"
+    },
+    {
+      "name": "Companion choice picker",
+      "kind": "input",
+      "refersTo": "field",
+      "description": "A recommendation with options: each option a bordered rounded card, the chosen one outlined in Atlantic on a pale wash; controls at least 44px tall.",
+      "html": "<fieldset class=\"ds-picker\"><legend>What should Nous do?</legend><label class=\"ds-option ds-option-on\"><input type=\"radio\" name=\"ds-choice\" checked /> Wait three days, then decide (recommended)</label><label class=\"ds-option\"><input type=\"radio\" name=\"ds-choice\" /> Turn it on now</label></fieldset>",
+      "css": ".ds-picker { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; font-family: var(--font-ui, 'Archivo', system-ui, sans-serif); font-size: 15px; color: #14202b; } .ds-picker legend { color: #56687a; font-size: 13px; padding: 0 5px; } .ds-option { display: flex; align-items: center; gap: 8px; min-height: 44px; padding: 11px 13px; border: 1.5px solid #e3e9ec; border-radius: 12px; cursor: pointer; transition: border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1), background 0.2s cubic-bezier(0.16, 1, 0.3, 1); } .ds-option:hover { border-color: #c9d4da; } .ds-option-on, .ds-option-on:hover { border-color: #12304f; background: #f3f6fa; } .ds-option input { margin: 0; accent-color: #12304f; } .ds-option:focus-within { outline: 2px solid #12304f; outline-offset: 2px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Agent's Mind, Visible",
+    "overview": "Two surfaces share one world. The dashboard is an eighteen-screen reading room for one expert reader; the companion is a phone-first column of cards the agent composes. Both sit on a cool chart-paper ground with white rounded cards, deep Atlantic-blue navigation, and dark ink. There is one look and no look switch.\n\nMeaning is carried by plain words and colour. A turn is tinted with the colour of the frame the agent was in, the frame is named in a word, and a frame change is said in one sentence with its reason. A status is a word in a tinted pill. Nothing is encoded in an invented symbol.\n\nThe finish is smooth and rounded: pill controls, soft single shadows, round handles and dots. Dense data stays dense inside that finish: tables keep 13px text in rows of about 32px, numbers align in tabular figures, and the Overview keeps its timeline compact, below the cards that say what needs the reader.",
+    "keyCharacteristics": [
+      "Chart-paper ground, white cards at an 18px radius with one soft shadow, Atlantic-blue rail.",
+      "One colour per cognitive frame, shown as a 7% tint and as the frame's word.",
+      "Status as a word in a tinted pill; a status colour never stands alone.",
+      "Two typefaces: Archivo for everything read, Red Hat Mono for code and tool input and output.",
+      "Dense tables and compact charts inside rounded cards.",
+      "Every colour is a token, and guard tests in the source tree pin the rules."
+    ],
+    "rules": [
+      {
+        "name": "The Frame Colour Rule",
+        "body": "The frame tokens are read by the Work trace and the Overview timeline only: as the 7% tint of a turn's frame column, as the colour of the frame's word, as the key dots, as the timeline bars, and as the short bar between two turns that runs from the old frame's colour to the new one. Screens whose data records no frame stay untinted.",
+        "section": "colors"
+      },
+      {
+        "name": "The Word With Colour Rule",
+        "body": "A status is never colour alone. A word says the state, and the colour agrees with it.",
+        "section": "colors"
+      },
+      {
+        "name": "The Marks And Text Rule",
+        "body": "A status fill is a mark; status text uses the text tone on its tint. `hexGuard.test.ts` fails a component that sets a status fill as a text colour.",
+        "section": "colors"
+      },
+      {
+        "name": "The Atlantic Action Rule",
+        "body": "Every filled action is Atlantic Blue. The saturated blue is left to links, focus and the question frame.",
+        "section": "colors"
+      },
+      {
+        "name": "The Separate Families Rule",
+        "body": "No chart series, graph node, relation or retrieval disposition colour is a frame colour or an ok, warn or error fill or text tone, and each stays a measured distance from those status tones. `tokens.test.ts` pins this, with the contrast of each colour on the surfaces it is drawn on and the distance between colours one chart draws together under normal vision, protanopia and deuteranopia.",
+        "section": "colors"
+      },
+      {
+        "name": "The Tokens Only Rule",
+        "body": "No colour literal, named colour or palette utility class appears in a component. `hexGuard.test.ts` enforces it, `tokenUse.test.ts` checks that every token read is declared and every token declared is read, and `oldPalette.test.ts` and `flipResidue.test.ts` keep the retired dark palette and its switch out.",
+        "section": "colors"
+      },
+      {
+        "name": "The Two Faces Rule",
+        "body": "Archivo and Red Hat Mono are the only faces of this world. Mono is for code, ids, and tool input and output, never for figures or labels.",
+        "section": "typography"
+      },
+      {
+        "name": "The Tabular Figures Rule",
+        "body": "The body sets tabular figures, so numbers align wherever they stack. A number column is right-aligned.",
+        "section": "typography"
+      },
+      {
+        "name": "The Sentence Case Rule",
+        "body": "Labels, headers and headings are sentence case. Labels carry no letter-spacing, and there are no tracked capitals.",
+        "section": "typography"
+      },
+      {
+        "name": "The One Timestamp Rule",
+        "body": "A timestamp reads \"Nov 10 09:31 UTC\": absolute, UTC, no seconds. Its day form is \"Nov 10\", a chart's hour is \"Nov 10 15:00\", and a heading's day is \"10 November\". Browser-locale dates and hand-cut date strings are refused by `timeFormat.test.ts`, which holds the `handMadeDates` check. A relative age (\"2h ago\") may follow the absolute time, and a turn in the trace shows its clock time alone (\"09:31:07\", UTC).",
+        "section": "typography"
+      },
+      {
+        "name": "The Dense Stays Dense Rule",
+        "body": "The shared table is 13px text in rows of about 32px. Rounding the cards does not loosen the data inside them.",
+        "section": "layout"
+      },
+      {
+        "name": "The Compact Timeline Rule",
+        "body": "The Overview timeline is compact and sits below the Needs you, Today so far and Health cards. It never leads the page.",
+        "section": "layout"
+      },
+      {
+        "name": "The No Shadow On Shadow Rule",
+        "body": "A tile or card inside a card is a flat wash at the 12px radius, never a second shadow.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Plain Scrim Rule",
+        "body": "A sheet's backdrop is a flat scrim with no blur (`browserSurfaces.test.ts`).",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** say a state in a word and let the colour agree: \"Waiting\", \"Clear\", \"4 errors\".",
+      "**Do** read every colour from a token, and add a new one to the stylesheet with its contrast and distance pinned in `tokens.test.ts`.",
+      "**Do** use the white raised pill for the selected option of any switch, segmented control or filter group.",
+      "**Do** keep the page header in its one order: sub-navigation, title, then \"updated\" and Refresh at the right.",
+      "**Do** print a timestamp as \"Nov 10 09:31 UTC\", through the shared formatters.",
+      "**Do** keep tables at 13px in rows of about 32px, with numbers right-aligned in tabular figures.",
+      "**Do** set figures in condensed Archivo and tool input and output in Red Hat Mono.",
+      "**Do** put a tile or card that sits inside a card on a flat wash at the 12px radius.",
+      "**Do** make every companion control at least 44px tall, and stack list tables at phone width while wide numeric tables scroll with a fixed first column and an edge fade.",
+      "**Do** mark what is missing in words (\"No frame recorded\", \"not yet\") rather than leaving it out."
+    ],
+    "donts": [
+      "**Don't** invent a symbol or use a glyph to carry meaning: no arrows, geometric shapes, dingbats or emoji in what a screen shows. `glyphs.test.ts` fails them; punctuation such as the middle dot, dashes and the ellipsis stays.",
+      "**Don't** show a status by colour alone.",
+      "**Don't** read a frame token outside the Work trace and the Overview timeline, or tint a screen whose data records no frame.",
+      "**Don't** reuse a frame colour or an ok, warn or error tone for a chart series, a graph node type, a relation or a retrieval disposition.",
+      "**Don't** fill a control with the saturated blue; filled actions are Atlantic.",
+      "**Don't** set a status fill as a text colour; use the text tone on its tint.",
+      "**Don't** write a colour literal, a named colour or a palette utility class in a component.",
+      "**Don't** bring back the look switch or a value from the retired dark palette.",
+      "**Don't** put a coloured side stripe on a callout, alert or list row.",
+      "**Don't** set labels in tracked capitals or Title Case.",
+      "**Don't** let the Overview timeline lead or dominate its page.",
+      "**Don't** format a date with the browser's locale or local-time getters, or print a cut ISO date.",
+      "**Don't** describe or restyle the companion's legacy themes as part of this world."
+    ]
+  }
+}
