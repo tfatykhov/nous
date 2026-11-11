@@ -1,5 +1,5 @@
 /* Google Fonts must precede @import tailwindcss */
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Archivo:wdth,wght@62..125,100..900&family=Red+Hat+Mono:wght@400;500&display=swap');
 @import "tailwindcss";
 
 /* ============================================================
@@ -8,7 +8,11 @@
    ============================================================ */
 
 @layer base {
-  :root {
+  /* The dark tokens: the default look, and a dark island inside a paper page (a dark ground re-declares them, as
+     inheritance would otherwise hand it the paper values). Every value above "Redesign" is unchanged
+     (tokens.test.ts pins them). */
+  :root,
+  [data-ground="dark"] {
     /* --- Nous dark palette --- */
     --bg: #0a0a0f;
     --surface: #12121a;
@@ -84,7 +88,186 @@
     --ring: 249 89% 63%;               /* accent */
 
     --radius-tw: 0.75rem;              /* 12px = var(--radius) */
+
+    /* ---- Redesign (staged behind html[data-look="paper"]) ----
+       Each dark value is the literal the component used before it read the token, so the dark look does not
+       move. The paper and rail grounds below redefine them. */
+    /* Status text, tint and border */
+    --ok-text: #34d399;
+    --ok-bg: rgba(52, 211, 153, 0.12);
+    --warn-text: #fbbf24;
+    --warn-bg: rgba(251, 191, 36, 0.08);
+    --warn-border: rgba(251, 191, 36, 0.5);
+    --err-text: #f87171;
+    --err-bg: rgba(248, 113, 113, 0.1);
+    --stat-warn: #f59e0b;               /* StatGrid's warn tone */
+    --stat-ok: #10b981;                 /* StatGrid's ok tone */
+    --stale-err-bg: rgba(248, 113, 113, 0.08); /* StaleBadge's error tint */
+    /* Frame colours, one each (7.1 to 9.3:1 on --surface) */
+    --f-conversation: #8fa3b5;
+    --f-question: #8aa4ff;
+    --f-task: #3fc3d1;
+    --f-decision: #c08be0;
+    --f-debug: #f09a5a;
+    --f-creative: #ee82bd;
+    --f-initiation: #e0b050;
+    /* Lane dots: work.ts LANE_COLORS */
+    --lane-memory: #60a5fa;
+    --lane-live: #fbbf24;
+    --lane-workspace: #9ca3af;
+    --lane-acts: #f472b6;
+    --lane-other: #8e8eab;
+    /* Structure */
+    --card-radius: 12px;
+    --card-radius-sm: 8px;
+    --card-shadow: none;
+    --card-border: 1px solid var(--border);
+    --ctl-radius: 8px;
+    --label-transform: uppercase;
+    --label-tracking: 0.05em;
+    --nav-label-tracking: 0.06em;
+    --nav-icon-display: inline;
+    --logo-display: inline;
+    --nav-radius: 8px;
+    --nav-ink: var(--muted);
+    --nav-active-weight: 500;
+    --brand-size: 1rem;
+    --on-accent: var(--bg);
+    --skip-link-text: #fff;
+    --overlay-bg: rgba(0, 0, 0, 0.6);
+    --tab-active-bg: var(--surface-hover);
+    --tab-active-shadow: inset 0 0 0 1px var(--accent);
+    --focus-ring: var(--accent);
   }
+
+  /* ---- The paper ground: page content under the paper look ---- */
+  html[data-look="paper"] [data-ground="paper"] {
+    --bg: #eef2f3;
+    --surface: #ffffff;
+    --surface-hover: #f4f7f8;
+    --border: #e3e9ec;
+    --accent: #2346c8;
+    --accent-dim: #12304f;
+    --accent-glow: #e6ecfb;
+    --accent-text: #2346c8;
+    --text: #14202b;
+    --muted: #56687a;
+    --green: #2f8a4e;
+    --red: #d2352b;
+    --yellow: #b7791f;
+    --waiting: #7b3fa0;
+    --unknown: #a3266f;
+    --radius: 18px;
+    --radius-sm: 8px;
+    --transition: 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    --font-ui: 'Archivo', system-ui, sans-serif;
+    --font-mono: 'Red Hat Mono', ui-monospace, monospace;
+
+    --ok-text: #23703d;
+    --ok-bg: #e3f2e8;
+    --warn-text: #8a5a0e;
+    --warn-bg: #f8efdc;
+    --warn-border: transparent;
+    --err-text: #b02a22;
+    --err-bg: #fbe9e8;
+    --stat-warn: #8a5a0e;
+    --stat-ok: #23703d;
+    --stale-err-bg: #fbe9e8;
+
+    --f-conversation: #55697a;
+    --f-question: #2346c8;
+    --f-task: #0b6e7a;
+    --f-decision: #7b3fa0;
+    --f-debug: #b4531c;
+    --f-creative: #a3266f;
+    --f-initiation: #8f5c0f;
+
+    --lane-memory: #3a6ea5;
+    --lane-live: #946213;
+    --lane-workspace: #5f6b76;
+    --lane-acts: #96406b;
+    --lane-other: #56687a;
+
+    --card-radius: 18px;
+    --card-radius-sm: 12px;
+    --card-shadow: 0 1px 2px rgba(18, 48, 79, 0.06), 0 6px 20px rgba(18, 48, 79, 0.07);
+    --card-border: 1px solid transparent;
+    --ctl-radius: 999px;
+    --label-transform: none;
+    --label-tracking: 0;
+    --on-accent: #ffffff;
+    --tab-active-bg: #ffffff;
+    --tab-active-shadow: 0 1px 3px rgba(18, 48, 79, 0.12);
+    --focus-ring: #2346c8;
+
+    /* shadcn, HSL of the paper hex */
+    --background: 192 17% 94%;
+    --foreground: 209 37% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 209 37% 12%;
+    --popover: 0 0% 100%;
+    --primary: 210 63% 19%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 195 22% 96%;
+    --secondary-foreground: 209 37% 12%;
+    --muted-foreground: 210 17% 41%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 4 66% 50%;
+    --border-token: 200 19% 91%;
+    --input: 200 19% 91%;
+    --ring: 227 70% 46%;
+
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---- The rail ground: the Atlantic-blue navigation under the paper look ---- */
+  html[data-look="paper"] [data-ground="rail"] {
+    --bg: #12304f;                     /* also the nav badge's text */
+    --surface: #12304f;
+    --surface-hover: #1a3d62;
+    --border: rgba(255, 255, 255, 0.12);
+    --text: #dbe6ef;
+    --muted: #9fb6c9;
+    --accent: #9fb6c9;
+    --accent-glow: #eef2f3;            /* the current item's paper pill */
+    --accent-text: #14202b;
+    --focus-ring: #ffffff;
+    --waiting: #c4b5fd;
+    --unknown: #f9a8d4;
+    --transition: 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    --font-ui: 'Archivo', system-ui, sans-serif;
+    --font-mono: 'Red Hat Mono', ui-monospace, monospace;
+    --label-transform: none;
+    --label-tracking: 0;
+    --nav-label-tracking: 0;
+    --nav-icon-display: none;          /* no icons or glyphs in the rail (owner rule) */
+    --logo-display: none;
+    --nav-radius: 10px;
+    --nav-ink: #dbe6ef;
+    --nav-active-weight: 600;
+    --brand-size: 21px;
+  }
+}
+
+/* ============================================================
+   shadcn utilities (bg-card, bg-primary, border-border...): `inline`
+   keeps the var() live, so each resolves to its ground's set.
+   Not mapped: foreground, muted, muted-foreground and popover. The
+   drawer (the bottom sheet of Graph and Workflows) already carries
+   those classes, and mapping them would change those dark screens.
+   ============================================================ */
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-border: hsl(var(--border-token));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
 }
 
 /* ============================================================
@@ -171,5 +354,43 @@
     font-weight: 700;
     letter-spacing: -0.02em;
     margin: 0.25rem 0;
+  }
+
+  /* ---- Grounds, under the paper look only (with the look off none of this matches) ---- */
+  html[data-look="paper"] {
+    color-scheme: light;
+  }
+
+  html[data-look="paper"] body {
+    background: #eef2f3;
+    background-image: none;
+  }
+
+  /* A ground sets its own background, text colour and font: the body resolved them once, at :root. */
+  html[data-look="paper"] [data-ground] {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-ui);
+  }
+
+  html[data-look="paper"] [data-ground="paper"] {
+    color-scheme: light;
+  }
+
+  html[data-look="paper"] [data-ground="dark"],
+  html[data-look="paper"] [data-ground="rail"] {
+    color-scheme: dark;
+  }
+
+  html[data-look="paper"] [data-ground="paper"] .page-h1 {
+    font-size: 30px;
+    font-weight: 650;
+    letter-spacing: -0.022em;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html[data-look="paper"] * {
+      transition: none !important;
+    }
   }
 }
