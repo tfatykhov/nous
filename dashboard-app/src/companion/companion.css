@@ -64,11 +64,13 @@
   --node-chunk: #8b5cf6;
 
   /* F094 §2 — ordered series ramp assigned by the renderer for multi-series
-     charts: the dashboard ramp from its slot 0 (see companionParity.test.ts). */
+     charts: the dashboard ramp from its slot 0, and its olive slot 5 for the
+     fourth (its magenta slot 3 is 4.2 from the blue under protanopia; see
+     companionParity.test.ts and themes.test.ts). */
   --series-1: #274455;
   --series-2: #1f5fa8;
   --series-3: #159a7a;
-  --series-4: #a8408f;
+  --series-4: #7a8a1a;
   --chart-axis: #56687a;
   --chart-grid: #e3e9ec;
 
@@ -108,6 +110,12 @@
   --tl-dot: 10px; /* a timeline entry's ringed dot on the rail */
   --tl-dot-ring: 2px solid var(--accent);
   --meter-track: var(--border); /* the confidence meter's track: a hairline grey on white */
+  --graph-edge: var(--chart-axis); /* graph edges: a --border hairline vanishes on white */
+  --graph-edge-opacity: 0.6;
+  --line-width: 2; /* chart lines: thicker, with round ends and corners */
+  --line-cap: round;
+  --line-join: round;
+  --spark-ring: var(--surface); /* the sparkline's end dot, ringed in the card colour */
 
   /* Chrome: the Atlantic-blue bar. It sits outside every surface, never under
      a [data-theme], so no theme declares these (themes.test.ts lists them). */
@@ -189,6 +197,12 @@
   --tl-dot: 0px;
   --tl-dot-ring: 0 solid transparent;
   --meter-track: var(--surface-hover);
+  --graph-edge: var(--border);
+  --graph-edge-opacity: 1;
+  --line-width: 1.5;
+  --line-cap: butt;
+  --line-join: miter;
+  --spark-ring: transparent;
   font-variant-numeric: normal;
 }
 

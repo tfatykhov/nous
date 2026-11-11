@@ -40,11 +40,12 @@ const PARITY: Record<string, string> = {
   '--node-chunk': '--gv-chunk',
   '--node-decision': '--gv-decision',
   // The series ramp, shifted one slot: the companion's first-drawn series is the dashboard's slot 0 (the slate navy
-  // of single marks). Dashboard slot 4 (orange) is not used: it sits next to warn.
+  // of single marks). The fourth is the dashboard's olive slot 5: slot 3 (magenta) is 4.2 from slot 1 (blue) under
+  // protanopia and 3.8 from the axis grey under deuteranopia; slot 4 (orange) sits next to warn.
   '--series-1': '--series-0',
   '--series-2': '--series-1',
   '--series-3': '--series-2',
-  '--series-4': '--series-3',
+  '--series-4': '--series-5',
   '--chart-axis': '--chart-text',
   '--chart-grid': '--chart-grid',
   // shape
@@ -107,6 +108,12 @@ const COMPANION_OWN: Record<string, string> = {
   '--tl-dot': "a timeline entry's ringed dot (the prototype .tl)",
   '--tl-dot-ring': "the dot's ring: the navy accent",
   '--meter-track': "the confidence meter's track",
+  '--graph-edge': 'graph edges: the axis grey, as the dashboard Graph draws them',
+  '--graph-edge-opacity': "graph edges' opacity",
+  '--line-width': 'chart line width',
+  '--line-cap': 'chart line ends',
+  '--line-join': 'chart line corners',
+  '--spark-ring': "the sparkline end dot's ring",
 };
 
 describe('the companion paper default and the dashboard paper ground share their values', () => {

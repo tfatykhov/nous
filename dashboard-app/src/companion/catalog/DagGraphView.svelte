@@ -91,7 +91,8 @@
     const colW = 150;
     const rowH = 64;
     const width = nCols * colW + 40;
-    const height = maxRows * rowH + 30;
+    // +44, not +30: room under the lowest (wave-shifted) node for its name AND its status word.
+    const height = maxRows * rowH + 44;
     const pos = new Map<string, { x: number; y: number }>();
     for (const [d, col] of columns) {
       col.forEach((n, i) => {
@@ -138,11 +139,11 @@
       {@const b = layout.pos.get(edge.to)}
       {#if a && b}
         <line
+          class="edge"
           x1={a.x + 12}
           y1={a.y}
           x2={b.x - 14}
           y2={b.y}
-          stroke="var(--border)"
           stroke-width="1.5"
           marker-end="url(#arrow-{surfaceId}-{comp.id})"
         />
@@ -156,6 +157,9 @@
             <title>{node.name} — {node.status ?? 'pending'}{node.node_type ? ` (${node.node_type})` : ''}</title>
           </circle>
           <text x={p.x} y={p.y + 24} text-anchor="middle">{short(node.name)}</text>
+          <!-- The status in words: four statuses share the grey, and running and
+               failed merge under red-green colour blindness. -->
+          <text class="st" x={p.x} y={p.y + 36} text-anchor="middle">{node.status ?? 'pending'}</text>
         </g>
       {/if}
     {/each}
@@ -170,9 +174,9 @@
 
 <style>
   .dag {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
+    background: var(--nested-bg);
+    border: var(--card-border);
+    border-radius: var(--radius-md);
     padding: 0.4rem;
     overflow-x: auto;
   }
@@ -184,6 +188,13 @@
   text {
     fill: var(--muted);
     font-size: 11px;
+  }
+  text.st {
+    font-size: 9.5px;
+  }
+  .edge {
+    stroke: var(--graph-edge);
+    stroke-opacity: var(--graph-edge-opacity);
   }
   .node.running circle {
     animation: pulse 1.6s ease-in-out infinite;

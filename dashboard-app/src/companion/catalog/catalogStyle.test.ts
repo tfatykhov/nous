@@ -140,6 +140,42 @@ describe('tiles, cards, tables and the timeline take the paper shape through tok
   });
 
   it('the confidence meter track is --meter-track (a hairline on white, the old soft fill in a legacy theme)', () => {
+    // (T7 charts follow in the next describe)
     expect(style('ConfidenceMeterView')).toMatch(/\.track \{[^}]*background: var\(--meter-track\)/);
+  });
+});
+
+describe('charts and graphs read the paper ramp and node colours (source contract, PR 6 T7)', () => {
+  it('MemoryGraph colours a node by its type token', () => {
+    const script = scriptBlocks(src('MemoryGraphView'));
+    for (const [type, token] of [
+      ['fact', '--node-fact'],
+      ['decision', '--node-decision'],
+      ['episode', '--node-episode'],
+      ['procedure', '--node-procedure'],
+      ['chunk', '--node-chunk'],
+    ]) {
+      expect(script, type).toContain(`${type}: 'var(${token})'`);
+    }
+  });
+
+  it('graph edges are --graph-edge at --graph-edge-opacity (a hairline is invisible on white)', () => {
+    for (const name of ['MemoryGraphView', 'DagGraphView']) {
+      expect(style(name), name).toMatch(/\.edge \{[^}]*stroke: var\(--graph-edge\);[^}]*stroke-opacity: var\(--graph-edge-opacity\)/);
+      expect(markupOf(src(name)), name).not.toMatch(/stroke="var\(--border\)"/);
+    }
+  });
+
+  it('chart lines are --line-width wide with --line-cap ends and --line-join corners', () => {
+    expect(style('LineChartView')).toMatch(/\.ln \{[^}]*stroke-width: var\(--line-width\);[^}]*stroke-linecap: var\(--line-cap\);[^}]*stroke-linejoin: var\(--line-join\)/);
+  });
+
+  it('the sparkline end dot is ringed in the card colour (no area wash: F096 keeps a non-zero-based line unfilled)', () => {
+    expect(style('SparkSvg')).toMatch(/\.end \{[^}]*stroke: var\(--spark-ring\)/);
+  });
+
+  it('graph boxes are nested tiles', () => {
+    expect(style('DagGraphView')).toMatch(/\.dag \{[^}]*background: var\(--nested-bg\);[^}]*border: var\(--card-border\);[^}]*border-radius: var\(--radius-md\)/);
+    expect(style('MemoryGraphView')).toMatch(/\.graph \{[^}]*background: var\(--nested-bg\);[^}]*border: var\(--card-border\);[^}]*border-radius: var\(--radius-md\)/);
   });
 });

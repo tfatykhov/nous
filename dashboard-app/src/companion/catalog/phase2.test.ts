@@ -177,6 +177,39 @@ describe('DagGraphView', () => {
     expect(container.textContent).toContain('analyze');
   });
 
+  it('names each node status in words under its name: colour is not the only carrier (PR 6)', () => {
+    // pending, ready, cancelled and skipped share one grey, and running/failed merge under red-green colour
+    // blindness: the word tells them apart.
+    seedSurface({
+      nodes: [
+        { name: 'fetch', status: 'completed' },
+        { name: 'score', status: 'running' },
+        { name: 'write', status: 'failed' },
+        { name: 'notify', status: 'ready' },
+        { name: 'archive', status: 'skipped' },
+        { name: 'later' },
+      ],
+      edges: [{ from: 'fetch', to: 'score' }],
+    });
+    const { container } = render(DagGraphView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'g', component: 'DagGraph', nodes: { path: '/nodes' }, edges: { path: '/edges' } },
+      },
+    });
+    const words = [...container.querySelectorAll('g.node')].map((g) =>
+      [...g.querySelectorAll('text')].map((t) => t.textContent?.trim()),
+    );
+    expect(words).toEqual([
+      ['fetch', 'completed'],
+      ['score', 'running'],
+      ['write', 'failed'],
+      ['notify', 'ready'],
+      ['archive', 'skipped'],
+      ['later', 'pending'],
+    ]);
+  });
+
   it('dedupes parallel edges between the same pair (duplicate keyed-each crash)', () => {
     seedSurface({
       nodes: [

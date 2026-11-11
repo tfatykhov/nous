@@ -120,7 +120,7 @@
     {/if}
   {/each}
   {#if last && !lastIsolated}
-    <circle class="end" cx={x(last.i).toFixed(1)} cy={y(last.v).toFixed(1)} r="3" fill="var(--tone)" />
+    <circle class="end" cx={x(last.i).toFixed(1)} cy={y(last.v).toFixed(1)} r="3" fill="var(--tone)" stroke-width="1.5" />
   {/if}
 </svg>
 
@@ -132,5 +132,8 @@
   .brk {
     fill: var(--muted);
     font-size: 9px;
+  }
+  .end {
+    stroke: var(--spark-ring);
   }
 </style>

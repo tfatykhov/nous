@@ -3,7 +3,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parseThemes } from './testing/themes';
-import { contrast, hexLuminance, mix, over } from './testing/color';
+import { contrast, cvdDistance, hexLuminance, mix, over } from './testing/color';
 
 // The companion's theme tokens, read from companion.css as the browser resolves them (testing/themes.ts), against
 // the tables of origin/main (9e4953f3). The five named themes and the old default look must not move.
@@ -363,6 +363,12 @@ function newLegacy(id: string): Record<string, string> {
     '--tl-dot': '0px',
     '--tl-dot-ring': '0 solid transparent',
     '--meter-track': o['--surface-hover'],
+    '--graph-edge': o['--border'],
+    '--graph-edge-opacity': '1',
+    '--line-width': '1.5',
+    '--line-cap': 'butt',
+    '--line-join': 'miter',
+    '--spark-ring': 'transparent',
   };
 }
 const JETBRAINS = "'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace";
@@ -476,7 +482,7 @@ const PAPER_ROOT: Record<string, string> = {
   '--series-1': '#274455',
   '--series-2': '#1f5fa8',
   '--series-3': '#159a7a',
-  '--series-4': '#a8408f',
+  '--series-4': '#7a8a1a',
   '--chart-axis': '#56687a',
   '--chart-grid': '#e3e9ec',
   ...PAPER_FRAMES,
@@ -505,6 +511,12 @@ const PAPER_ROOT: Record<string, string> = {
   '--tl-dot': '10px',
   '--tl-dot-ring': '2px solid #12304f',
   '--meter-track': '#e3e9ec',
+  '--graph-edge': '#56687a',
+  '--graph-edge-opacity': '0.6',
+  '--line-width': '2',
+  '--line-cap': 'round',
+  '--line-join': 'round',
+  '--spark-ring': '#ffffff',
 };
 
 describe('the default is the paper world', () => {
@@ -656,6 +668,64 @@ describe('contrast per theme (WCAG: text 4.5, marks 3)', () => {
     expect(pct).toBeGreaterThan(0);
     for (const ink of ['--warn', '--crit', '--ok', '--accent']) {
       expect(contrast(t[ink], mix(t[ink], pct, 'transparent', t['--nested-bg'])), ink).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it('the testing helper agrees with known OKLab distances', () => {
+    expect(cvdDistance('#000000', '#ffffff')).toBeCloseTo(100, 1);
+    expect(cvdDistance('#159a7a', '#159a7a', 'protan')).toBe(0);
+  });
+
+  it('paper: the five memory-node colours and the four series stay 6 apart (OKLab x100), also under protanopia and deuteranopia', () => {
+    const t = SHEET.resolved('nous-default');
+    const sets = {
+      nodes: ['--node-fact', '--node-episode', '--node-procedure', '--node-chunk', '--node-decision'],
+      series: ['--series-1', '--series-2', '--series-3', '--series-4'],
+    };
+    const close: string[] = [];
+    for (const [name, set] of Object.entries(sets)) {
+      for (let i = 0; i < set.length; i++) {
+        for (let j = i + 1; j < set.length; j++) {
+          for (const cvd of [undefined, 'protan', 'deutan'] as const) {
+            const d = cvdDistance(t[set[i]], t[set[j]], cvd);
+            if (d < 6) close.push(`${name}: ${set[i]} ${set[j]} ${cvd ?? 'normal'} ${d.toFixed(1)}`);
+          }
+        }
+      }
+    }
+    expect(close).toEqual([]);
+  });
+
+  it('paper: a series colour is 6 apart from every status ink a chart can draw beside it (all three visions)', () => {
+    const t = SHEET.resolved('nous-default');
+    const close: string[] = [];
+    for (const s of ['--series-1', '--series-2', '--series-3', '--series-4']) {
+      for (const st of ['--ok', '--warn', '--crit', '--locked', '--chart-axis']) {
+        for (const cvd of [undefined, 'protan', 'deutan'] as const) {
+          const d = cvdDistance(t[s], t[st], cvd);
+          if (d < 6) close.push(`${s} ${st} ${cvd ?? 'normal'} ${d.toFixed(1)}`);
+        }
+      }
+    }
+    expect(close).toEqual([]);
+  });
+
+  it('paper: series and node marks are 3:1 on the card and on a nested tile', () => {
+    const t = SHEET.resolved('nous-default');
+    for (const k of Object.keys(t).filter((k) => /^--(series-\d|node-)/.test(k))) {
+      expect(contrast(t[k], t['--surface']), k).toBeGreaterThanOrEqual(3);
+      expect(contrast(t[k], t['--nested-bg']), k).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  it('a negative bar keeps a visible hatch: the --scrim stripe against each bar fill, 1.5 or more (and on paper, against the card)', () => {
+    const paper = SHEET.resolved('nous-default');
+    expect(contrast(over(paper['--scrim'], paper['--surface']), paper['--surface'])).toBeGreaterThanOrEqual(1.5);
+    for (const id of THEMES) {
+      const t = SHEET.resolved(id);
+      for (const fill of ['--chart-axis', '--ok', '--warn', '--crit']) {
+        expect(contrast(over(t['--scrim'], t[fill]), t[fill]), `${id} ${fill}`).toBeGreaterThanOrEqual(1.5);
+      }
     }
   });
 
