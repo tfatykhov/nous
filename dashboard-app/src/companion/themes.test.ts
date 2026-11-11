@@ -382,6 +382,7 @@ function newLegacy(id: string): Record<string, string> {
     '--settled-opacity': '0.65',
     '--dim-opacity': '0.72',
     '--settled-ink': o['--text'],
+    '--field-focus': '0 solid transparent',
     '--graph-edge': o['--border'],
     '--graph-edge-opacity': '1',
     '--line-width': '1.5',
@@ -521,6 +522,7 @@ const PAPER_ROOT: Record<string, string> = {
   '--settled-opacity': '1',
   '--dim-opacity': '1',
   '--settled-ink': '#56687a',
+  '--field-focus': '2px solid #12304f',
   '--chart-axis': '#56687a',
   '--chart-grid': '#e3e9ec',
   ...PAPER_FRAMES,
@@ -825,6 +827,15 @@ describe('contrast per theme (WCAG: text 4.5, marks 3)', () => {
     }
     // a dimmed section's muted text on the card
     expect(at(t['--muted'], t['--dim-opacity'], t['--surface'])).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('paper: a placeholder is --muted at full opacity (5.7:1 on the white field), keyed on the paper default only (review M3)', () => {
+    // A legacy look keeps the browser's own placeholder colour, which differs by browser, so no token can mean "as
+    // before": this is the one paper rule that names a theme id.
+    const rule = SHEET.rules.get(".surface:not([data-theme]) ::placeholder, .surface[data-theme='nous-default'] ::placeholder");
+    expect(rule).toEqual({ color: 'var(--muted)', opacity: '1' });
+    const t = SHEET.resolved('nous-default');
+    expect(contrast(t['--muted'], t['--field-bg'])).toBeGreaterThanOrEqual(4.5);
   });
 
   it('every recorded shortfall names a pair the matrix measures', () => {

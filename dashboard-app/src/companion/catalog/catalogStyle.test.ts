@@ -160,6 +160,19 @@ describe('tiles, cards, tables and the timeline take the paper shape through tok
   });
 });
 
+describe('a focused field shows a ring (source contract, review M2)', () => {
+  it.each([
+    ['TextFieldView', 'textarea:focus'],
+    ['DateTimeInputView', 'input:focus'],
+    ['ChoicePickerView', '.filter:focus'],
+  ])('%s %s: outline --field-focus, offset 1px, never none', (name, sel) => {
+    const rule = style(name).split(`${sel} {`)[1].split('}')[0];
+    expect(rule).toContain('outline: var(--field-focus)');
+    expect(rule).toContain('outline-offset: 1px');
+    expect(rule).not.toContain('outline: none');
+  });
+});
+
 describe('dimmed content keeps its contrast on paper (source contract, review M1)', () => {
   it('a settled decision dims by --settled-opacity and its title takes --settled-ink; a refreshing section dims by --dim-opacity', () => {
     const card = style('DecisionCardView');

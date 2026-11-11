@@ -102,6 +102,7 @@
   --settled-opacity: 1;
   --dim-opacity: 1;
   --settled-ink: var(--muted);
+  --field-focus: 2px solid var(--accent); /* a focused text field's ring */
   --chart-axis: #56687a;
   --chart-grid: #e3e9ec;
 
@@ -239,6 +240,7 @@
   --settled-opacity: 0.65;
   --dim-opacity: 0.72;
   --settled-ink: var(--text);
+  --field-focus: 0 solid transparent;
   --tile-rule-width: 3px;
   --badge-tint: 0%;
   --badge-edge: 100%;
@@ -514,6 +516,16 @@
 
 html {
   color-scheme: light;
+}
+
+/* A field's placeholder on the paper default. The one paper rule that names a
+   theme id: a legacy look keeps the browser's own placeholder grey, which
+   differs by browser (Chromium #757575, WebKit darkgray), so no token value
+   could mean "as before". --muted is 5.7:1 on the white field. */
+.surface:not([data-theme]) ::placeholder,
+.surface[data-theme='nous-default'] ::placeholder {
+  color: var(--muted);
+  opacity: 1;
 }
 
 * {

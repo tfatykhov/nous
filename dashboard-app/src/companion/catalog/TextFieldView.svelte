@@ -87,7 +87,8 @@
   }
   input:focus,
   textarea:focus {
-    outline: none;
+    outline: var(--field-focus);
+    outline-offset: 1px;
     border-color: var(--accent);
   }
   .err {

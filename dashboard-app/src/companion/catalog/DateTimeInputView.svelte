@@ -135,7 +135,8 @@
     padding: 0.45rem 0.6rem;
   }
   input:focus {
-    outline: none;
+    outline: var(--field-focus);
+    outline-offset: 1px;
     border-color: var(--accent);
   }
   .err {

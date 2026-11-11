@@ -147,7 +147,8 @@
     padding: 0.35rem 0.5rem;
   }
   .filter:focus {
-    outline: none;
+    outline: var(--field-focus);
+    outline-offset: 1px;
     border-color: var(--accent);
   }
   .options {
