@@ -67,12 +67,41 @@ const ROWS: Row[] = [
   ['views/Decisions.svelte', '.indicator.bad', 'background', 'var(--red)', '#f87171'],
   ['views/Decisions.svelte', '.chart-card', 'border', 'var(--card-border)', '1px solid #1e1e2e'],
   ['views/Decisions.svelte', '.status-msg.error', 'color', 'var(--err-text)', '#f87171'],
+  // Scoring
+  ['views/Rubric.svelte', '.status-msg.error', 'color', 'var(--err-text)', '#f87171'],
+  ['views/Rubric.svelte', '.retry-link', 'color', 'var(--accent)', '#7c6af7'],
+  ['views/Rubric.svelte', '.empty-state', 'border', 'var(--card-border)', '1px solid #1e1e2e'],
+  ['views/Rubric.svelte', '.empty-state code', 'background', 'var(--track-strong)', 'rgba(255, 255, 255, 0.08)'],
+  ['views/Rubric.svelte', '.config-banner--active', 'background', 'color-mix(in srgb, var(--green) 6%, transparent)', 'rgba(52, 211, 153, 0.06)'],
+  ['views/Rubric.svelte', '.config-banner--active', 'border-color', 'color-mix(in srgb, var(--green) 30%, transparent)', 'rgba(52, 211, 153, 0.3)'],
+  ['views/Rubric.svelte', '.config-banner--off', 'background', 'var(--wash)', 'rgba(255, 255, 255, 0.03)'],
+  ['views/Rubric.svelte', '.dot-active', 'background', 'var(--green)', '#34d399'],
+  ['views/Rubric.svelte', '.dot-off', 'background', 'var(--st-neutral)', '#6b7280'],
+  ['views/Rubric.svelte', '.chart-card', 'border', 'var(--card-border)', '1px solid #1e1e2e'],
+  ['views/Rubric.svelte', '.dim-card', 'background', 'var(--bg)', '#0a0a0f'],
+  ['views/Rubric.svelte', '.dim-card', 'border', 'var(--card-border)', '1px solid #1e1e2e'],
+  ['views/Rubric.svelte', '.dim-card', 'border-radius', 'var(--card-radius-sm)', '8px'],
+  ['views/Rubric.svelte', '.corr-table th', 'background', 'var(--bg)', '#0a0a0f'],
+  ['views/Rubric.svelte', '.data-table th', 'text-transform', 'var(--label-transform)', 'uppercase'],
+  ['views/Rubric.svelte', '.badge-success', 'background', 'var(--badge-good-bg)', 'rgba(52, 211, 153, 0.15)'],
+  ['views/Rubric.svelte', '.badge-success', 'color', 'var(--ok-text)', '#34d399'],
+  ['views/Rubric.svelte', '.badge-failure', 'background', 'var(--badge-bad-bg)', 'rgba(248, 113, 113, 0.15)'],
+  ['views/Rubric.svelte', '.badge-failure', 'color', 'var(--err-text)', '#f87171'],
+  ['views/Rubric.svelte', '.badge-partial', 'color', 'var(--st-partial)', '#fb923c'],
 ];
 
 /** The plan's listed dark changes: [file, selector, property, value now, old literal, the dark value it resolves to]. */
 type Change = [file: string, selector: string, property: string, value: string, old: string, now: string, why: string];
 const CHANGES: Change[] = [
   ['views/Decisions.svelte', '.chart-card', 'border-radius', 'var(--card-radius)', '10px', '12px', 'D2: a chart card takes the card radius'],
+  ['views/Rubric.svelte', '.chart-card', 'border-radius', 'var(--card-radius)', '8px', '12px', 'D2: a chart card takes the card radius'],
+  ['views/Rubric.svelte', '.empty-state', 'border-radius', 'var(--card-radius)', '8px', '12px', 'D2: the empty state is a card'],
+  ['views/Rubric.svelte', '.config-banner', 'border-radius', 'var(--card-radius)', '8px', '12px', 'D2: the banner is a card'],
+  ['views/Rubric.svelte', '.data-table th', 'letter-spacing', 'var(--label-tracking)', '0.04em', '0.05em', 'D6: labels take the label tracking'],
+  ['views/Rubric.svelte', '.data-table tbody tr:hover', 'background', 'var(--wash)', 'rgba(255, 255, 255, 0.02)', 'rgba(255, 255, 255, 0.03)', 'D4: the hover is the wash'],
+  ['views/Rubric.svelte', '.badge-partial', 'background', 'color-mix(in srgb, var(--st-partial) 12.5%, transparent)', 'rgba(251, 146, 60, 0.15)', 'rgba(251, 146, 60, 0.125)', "PR 3's badge tint: at 15% the paper text is 4.49:1 on a hovered row"],
+  ['views/Rubric.svelte', '.badge-pending', 'color', 'var(--muted)', '#a78bfa', '#8e8eab', 'D4: a pending or unknown status is neutral, not violet'],
+  ['views/Rubric.svelte', '.badge-pending', 'background', 'var(--wash)', 'rgba(167, 139, 250, 0.15)', 'rgba(255, 255, 255, 0.03)', 'D4: the neutral badge sits on the wash'],
 ];
 
 /** PR 4 and PR 5's routes and their views. */

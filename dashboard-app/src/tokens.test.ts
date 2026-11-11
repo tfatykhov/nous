@@ -929,26 +929,52 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     // Decisions' outcome by category and by stakes (stacked bars): the Overview's decision-outcome palette, so a hue
     // means the same outcome on both screens.
     'decisions outcomes': ['--green', '--yellow', '--red', '--series-7'],
+    // Scoring's signal doughnut and stacked trend. Reworked is drawn in --err-text (dark: the old #f87171), which keeps it
+    // apart from corrected's orange under deuteranopia (5.2 with --red); --series-7 is an unknown signal type's slice.
+    'scoring signals': ['--green', '--series-1', '--series-4', '--err-text', '--series-3', '--series-7'],
+    // Scoring's weight evolution: one line per dimension. Each line also has a dash of its own (Rubric.test.ts).
+    'scoring dimensions': ['--series-0', '--series-2', '--series-1', '--series-4', '--series-5', '--series-3', '--series-6', '--series-8', '--series-9'],
   };
   const OPEN_PAIRS: Record<string, number> = {
     // The status hues under red-green colour blindness; the stack order (success at the base) and the legend name them.
     '--green|--yellow': 4.5, // protan 4.6
     '--green|--red': 5.5, // deutan 5.9
     '--yellow|--red': 5, // deutan 5.1
+    // Scoring's signals: the doughnut's and the trend's legend name each, and the trend stacks in a fixed order.
+    '--green|--series-4': 5.5, // protan 5.9
+    '--green|--err-text': 6.5, // deutan 6.6
+    '--series-1|--series-3': 4, // protan 4.2 (also two dimensions)
+    '--series-3|--series-7': 6, // protan 6.1, deutan 6.9
+    // Scoring's dimensions: told apart by the dash as well as the hue.
+    '--series-0|--series-8': 7, // 7.2 normal
+    '--series-2|--series-6': 7.5, // deutan 7.6
+    '--series-4|--series-5': 3, // deutan 3.4: orange and olive (the accepted paper series 5)
+    '--series-3|--series-9': 3.5, // deutan 3.7
+    '--series-1|--series-9': 7.5, // protan 7.95 (8.0 normal)
   };
+  const openFloor = (a: string, b: string) => OPEN_PAIRS[`${a}|${b}`] ?? OPEN_PAIRS[`${b}|${a}`] ?? 8;
 
   it('marks one chart draws together keep 8 apart under normal vision, protanopia and deuteranopia, or a named floor', () => {
     for (const [chart, set] of Object.entries(MARK_SETS)) {
       for (let i = 0; i < set.length; i++) {
         expect(contrast(PAPER[set[i]], white), `${chart}: ${set[i]} on white`).toBeGreaterThanOrEqual(3);
         for (let j = i + 1; j < set.length; j++) {
-          const floor = OPEN_PAIRS[`${set[i]}|${set[j]}`] ?? 8;
+          const floor = openFloor(set[i], set[j]);
           for (const cvd of [undefined, 'protan', 'deutan'] as const) {
             expect(okDistance(PAPER[set[i]], PAPER[set[j]], cvd), `${chart}: ${set[i]} and ${set[j]} (${cvd ?? 'normal'})`)
               .toBeGreaterThanOrEqual(floor);
           }
         }
       }
+    }
+  });
+
+  it('every named open pair is drawn together by some chart and is really below 8 (no stale exemption)', () => {
+    for (const key of Object.keys(OPEN_PAIRS)) {
+      const [a, b] = key.split('|');
+      expect(Object.values(MARK_SETS).some((s) => s.includes(a) && s.includes(b)), key).toBe(true);
+      const worst = Math.min(...([undefined, 'protan', 'deutan'] as const).map((cvd) => okDistance(PAPER[a], PAPER[b], cvd)));
+      expect(worst, key).toBeLessThan(8);
     }
   });
 
