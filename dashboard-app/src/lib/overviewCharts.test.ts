@@ -36,8 +36,8 @@ describe('the chart palette', () => {
     // Review N2: pending is "not known yet", a neutral as under dark, and far from partial's amber.
     expect(p.outcome('pending')).not.toBe(p.outcome('partial'));
     // Review M1 (PR 2): the bars were the accent, on paper the question frame's blue, beside the day timeline's frames.
-    expect(p.barBorder).toBe('#8b5cf6');
-    expect(p.bar).toBe('rgba(139, 92, 246, 0.5)');
+    expect(p.barBorder).toBe('#274455');
+    expect(p.bar).toBe('rgba(39, 68, 85, 0.5)');
     expect(p.barBorder).not.toBe(PAPER['--f-question']);
     for (const c of [p.outcome('success'), p.outcome('pending'), p.bar, p.barBorder]) expect(c).not.toMatch(/7c6af7|124, 106, 247/);
   });

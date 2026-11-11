@@ -295,7 +295,7 @@
     --chunk-color: #8b5cf6;
     --gv-edge-opacity: 0.75;                   /* less faint on white: a light colour at 0.5 was 1.8:1 */
     --gv-edge-opacity-inferred: 0.5;
-    --series-0: #8b5cf6;
+    --series-0: #274455;                       /* a slate navy: the rail navy #12304f is 1.6 from --series-8 */
     --series-1: #1f5fa8;
     --series-2: #159a7a;
     --series-3: #a8408f;

@@ -192,7 +192,7 @@ const PR2: Record<string, [string, string]> = {
   '--chart-grid': ['#1e293b', '#e3e9ec'],
   '--gv-edge-opacity': ['0.5', '0.75'], // review M8: Graph edges, less faint on white
   '--gv-edge-opacity-inferred': ['0.3', '0.5'],
-  '--series-0': ['#7c6af7', '#8b5cf6'], // review M1: violet marks; was --accent, on paper the question frame's blue
+  '--series-0': ['#7c6af7', '#274455'], // review M1/R2: was --accent (the question blue), then violet; a slate navy of its own
   '--save-ok': ['#4ade80', '#23703d'], // Browse: a censor's save message (not --ok-text, whose dark is #34d399)
   '--save-err': ['#f87171', '#b02a22'],
   '--tone-bad': ['#ef4444', '#b02a22'], // Memory write health: a tripped rule's border and tint (not --err-text's #f87171)
@@ -575,6 +575,13 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
         if (j !== i) expect(okDistance(paper[i], paper[j]), `series-${i + 1} and series-${j + 1}`).toBeGreaterThanOrEqual(7);
       }
     }
+  });
+
+  it('series 0, the one-series chart mark: its own colour, at least 7 from every slot and 6 from every frame (review R2)', () => {
+    const zero = PAPER['--series-0'];
+    expect(contrast(zero, '#ffffff')).toBeGreaterThanOrEqual(3);
+    for (const [k, [, p]] of Object.entries(SERIES)) expect(okDistance(zero, p), `--series-0 and ${k}`).toBeGreaterThanOrEqual(7);
+    for (const f of [...FRAMES, 'other']) expect(okDistance(zero, PAPER[`--f-${f}`]), `--series-0 and --f-${f}`).toBeGreaterThanOrEqual(6);
   });
 
   it('the CVD helper reproduces the review\'s figures (the old olive chunk against procedure)', () => {

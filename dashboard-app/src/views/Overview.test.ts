@@ -260,10 +260,10 @@ describe('Overview', () => {
       expect(outcomes().backgroundColor).toEqual(['#34d399', '#6b6b8a']);
       expect(bars().backgroundColor).toBe('rgba(124, 106, 247, 0.5)');
       expect(bars().borderColor).toBe('#7c6af7');
-      set({ '--green': '#2f8a4e', '--series-7': '#8a5a2b', '--series-0': '#8b5cf6' });
+      set({ '--green': '#2f8a4e', '--series-7': '#8a5a2b', '--series-0': '#274455' });
       setLook('paper');
       await waitFor(() => expect(outcomes().backgroundColor).toEqual(['#2f8a4e', '#8a5a2b']));
-      expect(bars().borderColor).toBe('#8b5cf6');
+      expect(bars().borderColor).toBe('#274455');
     } finally {
       setLook('dark');
       for (const k of ['--green', '--yellow', '--red', '--series-7', '--series-0']) root.removeProperty(k);
