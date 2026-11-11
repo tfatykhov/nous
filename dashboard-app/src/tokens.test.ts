@@ -937,6 +937,8 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     // Autonomy's "who was there" shares and their legend. (Its outcome bars each sit beside their label, so they are
     // never matched by colour.)
     'autonomy contexts': ['--series-1', '--series-2', '--series-4'],
+    // Guards' flags per day: one line per rule, each with its own dash as well.
+    'guards rules': ['--series-1', '--series-4', '--series-9'],
   };
   const OPEN_PAIRS: Record<string, number> = {
     // The status hues under red-green colour blindness; the stack order (success at the base) and the legend name them.

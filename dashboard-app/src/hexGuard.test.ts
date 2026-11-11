@@ -55,6 +55,7 @@ export const HEX_GUARDED: readonly string[] = [
   'views/Rubric.svelte',
   'views/Autonomy.svelte',
   'views/Intentions.svelte',
+  'views/Harness.svelte',
 ];
 
 const SRC = __dirname;
@@ -147,6 +148,7 @@ export const SCRIPT_GUARDED: readonly string[] = [
   'views/Rubric.svelte',
   'views/Autonomy.svelte',
   'views/Intentions.svelte',
+  'views/Harness.svelte',
 ];
 
 /** A literal colour (hex, rgb/hsl/oklch, a named colour in a fill/stroke attribute), or a two-hex-digit alpha glued onto

@@ -116,6 +116,26 @@ const ROWS: Row[] = [
   ['views/Intentions.svelte', '.tiles div', 'border', 'var(--card-border)', '1px solid #1e1e2e'],
   ['views/Intentions.svelte', '.tiles div', 'border-radius', 'var(--card-radius-sm)', '8px'],
   ['views/Intentions.svelte', '.tiles dt', 'text-transform', 'var(--label-transform)', 'uppercase'],
+  // Guards
+  ['views/Harness.svelte', '.notice', 'background', 'var(--notice-bg)', 'rgba(245, 158, 11, 0.08)'],
+  ['views/Harness.svelte', '.notice', 'border', '1px solid var(--notice-border)', '1px solid rgba(245, 158, 11, 0.4)'],
+  ['views/Harness.svelte', '.notice', 'border-radius', 'var(--card-radius-sm)', '8px'],
+  ['views/Harness.svelte', '.card, .panel', 'border', 'var(--card-border)', '1px solid #1e1e2e'],
+  ['views/Harness.svelte', '.mode-enforce', 'color', 'var(--stat-ok)', '#10b981'],
+  ['views/Harness.svelte', '.mode-warn, .mode-shadow', 'color', 'var(--stat-warn)', '#f59e0b'],
+  ['views/Harness.svelte', '.label', 'text-transform', 'var(--label-transform)', 'uppercase'],
+  ['views/Harness.svelte', '.detail dt', 'text-transform', 'var(--label-transform)', 'uppercase'],
+  ['views/Harness.svelte', '.verdict', 'border-radius', 'var(--card-radius-sm)', '8px'],
+  ['views/Harness.svelte', '.verdict-warn', 'color', 'var(--stat-warn)', '#f59e0b'],
+  ['views/Harness.svelte', '.verdict-warn', 'border-color', 'color-mix(in srgb, var(--stat-warn) 35%, transparent)', 'rgba(245, 158, 11, 0.35)'],
+  ['views/Harness.svelte', '.verdict-warn', 'background', 'color-mix(in srgb, var(--stat-warn) 8%, transparent)', 'rgba(245, 158, 11, 0.08)'],
+  ['views/Harness.svelte', '.verdict-ok', 'color', 'var(--stat-ok)', '#10b981'],
+  ['views/Harness.svelte', '.verdict-ok', 'border-color', 'color-mix(in srgb, var(--stat-ok) 35%, transparent)', 'rgba(16, 185, 129, 0.35)'],
+  ['views/Harness.svelte', '.verdict-ok', 'background', 'color-mix(in srgb, var(--stat-ok) 8%, transparent)', 'rgba(16, 185, 129, 0.08)'],
+  ['views/Harness.svelte', '.empty.error', 'color', 'var(--err-text)', '#f87171'],
+  ['views/Harness.svelte', '.state-msg.error', 'color', 'var(--err-text)', '#f87171'],
+  ['views/Harness.svelte', '.badge', 'color', 'var(--accent)', '#7c6af7'],
+  ['views/Harness.svelte', '.badge', 'background', 'color-mix(in srgb, var(--accent) 12%, transparent)', 'rgba(124, 106, 247, 0.12)'],
 ];
 
 /** The plan's listed dark changes: [file, selector, property, value now, old literal, the dark value it resolves to]. */
@@ -135,6 +155,13 @@ const CHANGES: Change[] = [
   ['views/Autonomy.svelte', '.strip-meta dt, .tiles dt, .triple dt, .detail dt, .label', 'letter-spacing', 'var(--label-tracking)', '0.04em', '0.05em', 'D6: labels take the label tracking'],
   ['views/Intentions.svelte', '.panel', 'border-radius', 'var(--card-radius)', '8px', '12px', 'D2: panels take the card radius'],
   ['views/Intentions.svelte', '.tiles dt', 'letter-spacing', 'var(--label-tracking)', '0.04em', '0.05em', 'D6: labels take the label tracking'],
+  ['views/Harness.svelte', '.card, .panel', 'border-radius', 'var(--card-radius)', '8px', '12px', 'D2: cards and panels take the card radius'],
+  ['views/Harness.svelte', '.label', 'letter-spacing', 'var(--label-tracking)', '0.04em', '0.05em', 'D6: labels take the label tracking'],
+  ['views/Harness.svelte', '.detail dt', 'letter-spacing', 'var(--label-tracking)', '0.04em', '0.05em', 'D6: labels take the label tracking'],
+  // The old pill text was the rule's own colour (offered_set's shown); series colours are marks, never text.
+  ['views/Harness.svelte', '.rule-pill', 'color', 'var(--text)', '#60a5fa', '#e2e2f0', 'the pill text is the ink; the rule colour is its dot and border'],
+  ['views/Harness.svelte', '.rule-pill', 'border-radius', '999px', '4px', '999px', 'a rule pill is a pill, as the badges of PR 2 and PR 3'],
+  ['views/Harness.svelte', '.badge', 'border-radius', '999px', '4px', '999px', 'the censor count is a pill, as the badges of PR 2 and PR 3'],
 ];
 
 /** PR 4 and PR 5's routes and their views. */
