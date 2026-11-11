@@ -262,12 +262,30 @@ describe('Work trace', () => {
     await screen.findByText('Reply 3');
     const g = Array.from(container.querySelectorAll('.gutter')) as HTMLElement[];
     expect(g[0].querySelector('.crit-old')!.textContent).toBe('Critic recommended task; the heuristic said question.');
-    expect(g[1].querySelector('.crit-old')!.textContent).toBe('Critic recommended task.');
+    // Review N1: with no critic model answer the stored critic_frame is the heuristic's own, so equal frames are no
+    // recommendation: nothing is said.
+    expect(g[1].querySelector('.crit-old')).toBeNull();
     expect(g[0].querySelector('.crit')).toBeNull();
     expect(g[2].querySelector('.crit-old')).toBeNull(); // a recorded reason: the verdict pill says it
     expect(g[2].querySelector('.crit')!.textContent).toBe('Critic agreed');
     // The change sentence for an unrecorded reason stays.
     expect(container.querySelector('.change')!.textContent).toContain('The reason was not recorded.');
+  });
+
+  it('a pre-106 critic record only names a recommendation when it differs from the heuristic frame (review N1)', async () => {
+    const same = turn(T1, 1, { frame_id: 'question', frame_reason: null,
+      critic: { critic_frame: 'question', heuristic_frame: 'question', rationale: 'Model timed out.' } });
+    const noHeuristic = turn(T2, 2, { frame_id: 'task', frame_reason: null, critic: { critic_frame: 'task' } });
+    const differs = turn(T3, 3, { frame_id: 'question', frame_reason: null, critic: { critic_frame: 'decision', heuristic_frame: 'question' } });
+    respond = () => ({ body: trace([same, noHeuristic, differs]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 3');
+    const g = Array.from(container.querySelectorAll('.gutter')) as HTMLElement[];
+    expect(g[0].querySelector('.crit-old')).toBeNull();
+    expect(g[0].querySelector('details')!.textContent).toContain('Model timed out.'); // the folded reasoning stays
+    expect(g[1].querySelector('.crit-old')).toBeNull(); // no heuristic frame stored: not certain
+    expect(g[2].querySelector('.crit-old')!.textContent).toBe('Critic recommended decision; the heuristic said question.');
+    expect(container.textContent).not.toContain('Critic recommended question');
   });
 
   it('a critic rationale with no pill still shows, folded', async () => {

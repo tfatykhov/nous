@@ -285,9 +285,11 @@
                 <div><dt>{num(calls)}</dt> <dd>{calls === 1 ? 'tool call' : 'tool calls'}</dd></div>
               </dl>
               {#if verdict}<span class="crit" class:no={verdict === 'overrode'}>{verdictText(verdict, t.frame_id)}</span>{/if}
-              <!-- A turn older than migration 106 has no frame reason, so no verdict: say what its critic record names. -->
-              {#if t.frame_reason == null && t.critic?.critic_frame}
-                <p class="crit-old">Critic recommended {t.critic.critic_frame}{t.critic.heuristic_frame && t.critic.heuristic_frame !== t.critic.critic_frame ? `; the heuristic said ${t.critic.heuristic_frame}` : ''}.</p>
+              <!-- A turn older than migration 106 has no frame reason, so no verdict. Its critic record's critic_frame is the
+                   heuristic's own frame when no critic model answered, so only a frame that differs from the heuristic's is a
+                   recommendation the critic certainly made: say that one, and nothing otherwise. -->
+              {#if t.frame_reason == null && t.critic?.critic_frame && t.critic.heuristic_frame && t.critic.critic_frame !== t.critic.heuristic_frame}
+                <p class="crit-old">Critic recommended {t.critic.critic_frame}; the heuristic said {t.critic.heuristic_frame}.</p>
               {/if}
               {#if t.critic?.rationale}
                 <details class="crit-why"><summary>{verdict ? 'Why' : "Critic's reasoning"}</summary><p class="wrap">{t.critic.rationale}</p></details>
