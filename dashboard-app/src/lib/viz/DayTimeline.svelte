@@ -43,7 +43,8 @@
 
   let bars = $derived(layout(turns, Number.isNaN(nowMs) ? 0 : nowMs, X1 - X0));
   let hours = $derived(Array.from({ length: span / 60 + 1 }, (_, h) => h));
-  let labelEvery = $derived(((X1 - X0) / (span / 60)) * 3 < 44 ? 6 : 3);
+  // An hour label is about 32 px wide in the dark look's font (no condensed width): every 3 hours needs 60 px apart.
+  let labelEvery = $derived(((X1 - X0) / (span / 60)) * 3 < 60 ? 6 : 3);
 
   // Replay: the chosen minute, until `now` moves (a refresh brings the slider back to now).
   let scrub = $state<{ at: string; m: number } | null>(null);
