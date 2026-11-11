@@ -41,9 +41,10 @@ const DARK_VALUES: Record<string, string> = {
   '--stat-ok': '#10b981', '--stat-warn': '#f59e0b', '--card-radius': '12px', '--card-radius-sm': '8px',
 };
 
-/** Every token a component's script names: `var(--x)`, and a quoted `'--x'` (built into var() or tinted later). */
+/** Every token a component's script or markup names: `var(--x)`, and a quoted `'--x'` (built into var() or tinted later).
+ * The markup counts because a chart's props may be written inline there (PR 4 re-review N2). */
 function scriptTokens(src: string): string[] {
-  const js = css.scriptBlocks(src);
+  const js = css.scriptBlocks(src) + '\n' + css.markupOf(src);
   return [...new Set([...js.matchAll(/var\(\s*(--[\w-]+)/g), ...js.matchAll(/['"`](--[\w-]+)['"`]/g)].map((m) => m[1]))];
 }
 const SEVEN = ['Decisions', 'Rubric', 'Autonomy', 'Intentions', 'Harness', 'Observability', 'Identity'].map((v) => `views/${v}.svelte`);
@@ -89,6 +90,9 @@ describe('interfaces PR 4 and PR 5 build on', () => {
     for (const file of chartViews) for (const t of scriptTokens(readFileSync(join(SRC, file), 'utf-8'))) used.add(t);
     expect(chartViews.length).toBeGreaterThanOrEqual(1);
     expect(used.has('--signal-self-corrected')).toBe(chartViews.includes('views/Rubric.svelte'));
+    // PR 4 re-review N2: the markup is read too, where Decisions and Scoring write some chart props inline.
+    expect(scriptTokens("<Chart options={{ grid: { color: 'var(--kind-task)' } }} data={{ c: tint('--made-up', 0.2) }} />"))
+      .toEqual(['--kind-task', '--made-up']);
     for (const t of used) expect(chartColors.DARK_FALLBACK[t], t).toBe(DARK[t]);
   });
 
