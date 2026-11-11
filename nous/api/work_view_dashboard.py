@@ -13,7 +13,7 @@ The text they return was redacted when it was stored; it is returned as stored a
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
@@ -514,7 +514,7 @@ _TRACE_HEADER_SQL = (
     _TRACE_TURNS_CTE
     + f""",
 trace_calls AS (
-    SELECT c.turn_id, c.call_index, c.is_error, c.subtask_id, c.work_kind, c.parent_session_id,
+    SELECT c.turn_id, c.call_index, c.is_error, c.outcome, c.subtask_id, c.work_kind, c.parent_session_id,
            tt.started_at AS turn_started_at
     FROM nous_system.tool_call_log c
     JOIN trace_turns tt ON tt.id = c.turn_id
@@ -540,7 +540,7 @@ first_subtask AS (
 SELECT
     (EXISTS (SELECT 1 FROM nous_system.agent_turn_log WHERE agent_id = :agent AND session_id = :sid)
      OR EXISTS (SELECT 1 FROM nous_system.tool_call_log WHERE agent_id = :agent AND session_id = :sid)) AS known,
-    tt.turns, tt.started_at, tt.ended_at, tc.tool_calls, tc.errors,
+    tt.turns, tt.started_at, tt.ended_at, tc.tool_calls, tc.errors, tc.gated,
     coalesce(ft.work_kind, fc.work_kind) AS work_kind,
     CASE WHEN ft.work_kind IS NOT NULL THEN ft.parent_session_id ELSE fc.parent_session_id END AS parent_session_id,
     coalesce(
@@ -549,7 +549,8 @@ SELECT
         left(nullif(ft.trigger_text, ''), :trigger_chars),
         :no_title) AS title
 FROM (SELECT count(*)::int AS turns, min(started_at) AS started_at, max(last_at) AS ended_at FROM trace_turns) tt
-CROSS JOIN (SELECT count(*)::int AS tool_calls, (count(*) FILTER (WHERE is_error))::int AS errors
+CROSS JOIN (SELECT count(*)::int AS tool_calls, (count(*) FILTER (WHERE is_error))::int AS errors,
+                   (count(*) FILTER (WHERE outcome = 'gated'))::int AS gated
             FROM trace_calls) tc
 LEFT JOIN first_turn ft ON true
 LEFT JOIN first_call fc ON true
@@ -567,7 +568,7 @@ def _trace_page_sql(*, after: bool) -> str:
         _TRACE_TURNS_CTE
         + """
 SELECT p.id, p.started_at, p.has_turn_row, t.turn_number, t.ended_at, t.frame_id, t.trigger_text, t.memory_context,
-       t.critic, t.claim_check, t.reply_text, t.error, t.tool_call_count
+       t.critic, t.claim_check, t.reply_text, t.error, t.tool_call_count, t.frame_reason, t.critic_frame, t.had_error
 FROM (SELECT id, started_at, has_turn_row FROM trace_turns
       """
         + where
@@ -604,6 +605,15 @@ FROM (
 ) x
 WHERE n <= :per_turn
 ORDER BY turn_id, started_at, id
+"""
+
+# Every model call that carries one of the page's turn ids, not only the listed few: a turn's call count and its
+# input tokens. SUM skips the calls with no usage (input_total_sql is NULL for them) and is NULL when none had any.
+_TRACE_MODEL_TOTALS_SQL = f"""
+SELECT m.turn_id, count(*)::int AS n, sum({input_total_sql("m")})::bigint AS input_tokens
+FROM nous_system.model_call_log m
+WHERE m.agent_id = :agent AND m.turn_id = ANY(CAST(:turn_ids AS uuid[]))
+GROUP BY m.turn_id
 """
 
 
@@ -647,7 +657,14 @@ def _call_out(row: Mapping[str, Any], ledger_persisted: bool) -> dict[str, Any]:
     }
 
 
-def _turn_out(row: Mapping[str, Any], calls: list[dict[str, Any]], model_calls: list[dict[str, Any]]) -> dict[str, Any]:
+def _turn_out(
+    row: Mapping[str, Any],
+    calls: list[dict[str, Any]],
+    model_calls: list[dict[str, Any]],
+    totals: tuple[int, int | None] = (0, None),
+) -> dict[str, Any]:
+    """One trace turn. ``totals`` is (model calls, input tokens) over all of the turn's main-loop calls: (0, None)
+    with the model-call log off or no call recorded."""
     count = row["tool_call_count"]
     return {
         "turn_id": str(row["id"]),
@@ -662,8 +679,14 @@ def _turn_out(row: Mapping[str, Any], calls: list[dict[str, Any]], model_calls: 
         "claim_check": row["claim_check"],
         "reply": row["reply_text"],
         "error": row["error"],
+        # Migration 106: NULL on older rows and on a synthetic turn (no turn row).
+        "frame_reason": row["frame_reason"],
+        "critic_frame": row["critic_frame"],
+        "had_error": row["had_error"],
         # The runner's count when the turn row has one, else the calls listed (a synthetic turn has no count).
         "tool_call_count": count if count is not None else len(calls),
+        "input_tokens": totals[1],
+        "model_call_count": totals[0],
         "model_calls": model_calls,
         "calls": calls,
     }
@@ -714,6 +737,7 @@ async def get_trace(
     turn_ids = [row["id"] for row in rows]
     calls: dict[str, list[dict[str, Any]]] = {str(t): [] for t in turn_ids}
     model_calls: dict[str, list[dict[str, Any]]] = {str(t): [] for t in turn_ids}
+    totals: dict[str, tuple[int, int | None]] = {}
     if turn_ids:
         ids = {"agent": agent_id, "turn_ids": turn_ids}
         for row in (await session.execute(text(_TRACE_CALLS_SQL), ids)).mappings():
@@ -731,6 +755,8 @@ async def get_trace(
                         "output_tokens": row["output_tokens"],
                     }
                 )
+            for row in (await session.execute(text(_TRACE_MODEL_TOTALS_SQL), ids)).mappings():
+                totals[str(row["turn_id"])] = (row["n"], row["input_tokens"])
 
     work_kind = header["work_kind"]
     return {
@@ -746,9 +772,168 @@ async def get_trace(
             "turns": header["turns"],
             "tool_calls": header["tool_calls"],
             "errors": header["errors"],
+            "gated": header["gated"],
         },
-        "turns": [_turn_out(row, calls[str(row["id"])], model_calls[str(row["id"])]) for row in rows],
+        "turns": [
+            _turn_out(row, calls[str(row["id"])], model_calls[str(row["id"])], totals.get(str(row["id"]), (0, None)))
+            for row in rows
+        ],
         "next_after": next_after,
+    }
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# GET /dashboard/work/today
+# ---------------------------------------------------------------------------------------------------------------------
+
+# The most turns the day's list returns: the latest ones (a cut drops the morning, and ``truncated`` says so). The
+# totals always cover the whole day.
+TODAY_TURNS_MAX = 3000
+
+
+def _day_start(now: datetime) -> datetime:
+    """00:00 UTC of ``now``'s UTC day."""
+    return now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def disabled_today(now: datetime) -> dict[str, Any]:
+    """The day's turns with the tool-call log off: the same keys as with it on, no turn, every count zero and the
+    model figures null."""
+    return {
+        "enabled": False,
+        "day": _day_start(now).date().isoformat(),
+        "now": now.isoformat(),
+        "turns": [],
+        "truncated": False,
+        "totals": {
+            "owner_turns": 0,
+            "background_turns": 0,
+            "tool_calls": 0,
+            "errors": 0,
+            "gated": 0,
+            "tool_error_turns": 0,
+            "median_seconds": None,
+            "model_calls": None,
+            "input_tokens": None,
+            "cache_read_tokens": None,
+        },
+    }
+
+
+# The day's turns: this agent's turn rows that started in [00:00 UTC, now], each with its calls' flags (joined on
+# turn_id, agent-scoped). A turn is ``error`` when its row says so (had_error, or an error text) or one of its calls
+# failed, and ``gated`` when one of its calls was gated; it can be both. ``tool_calls`` is the turn row's count, else
+# the turn's calls.
+_TODAY_CTE = """
+WITH day_turns AS (
+    SELECT t.id, t.session_id, t.started_at, t.ended_at, t.work_kind, t.frame_id, t.tool_call_count, t.had_error,
+           t.error
+    FROM nous_system.agent_turn_log t
+    WHERE t.agent_id = :agent AND t.started_at >= :day_start AND t.started_at <= :now
+),
+call_flags AS (
+    SELECT c.turn_id, count(*)::int AS calls, bool_or(c.is_error) AS any_error,
+           bool_or(c.outcome = 'gated') AS any_gated
+    FROM nous_system.tool_call_log c
+    JOIN day_turns d ON d.id = c.turn_id
+    WHERE c.agent_id = :agent
+      AND c.started_at >= :day_start  -- redundant (a call starts after its turn), so the planner can range-scan by time
+    GROUP BY c.turn_id
+),
+flagged AS (
+    SELECT d.id, d.session_id, d.started_at, d.ended_at, d.work_kind, d.frame_id,
+           (d.had_error IS TRUE OR d.error IS NOT NULL OR coalesce(f.any_error, false)) AS error,
+           coalesce(f.any_gated, false) AS gated,
+           coalesce(f.any_error, false) AS tool_error,
+           coalesce(d.tool_call_count, f.calls, 0) AS tool_calls
+    FROM day_turns d
+    LEFT JOIN call_flags f ON f.turn_id = d.id
+)
+"""
+
+# The latest :fetch turns of the day, returned oldest first.
+_TODAY_TURNS_SQL = (
+    _TODAY_CTE
+    + """
+SELECT * FROM (SELECT * FROM flagged ORDER BY started_at DESC, id DESC LIMIT :fetch) p
+ORDER BY started_at, id
+"""
+)
+
+# The whole day's totals, never the capped list's. ``errors`` and ``gated`` count turns, as the list's flags do.
+_TODAY_TOTALS_SQL = (
+    _TODAY_CTE
+    + """
+SELECT (count(*) FILTER (WHERE work_kind = ANY(CAST(:conversation_kinds AS text[]))))::int AS owner_turns,
+       (count(*) FILTER (WHERE NOT work_kind = ANY(CAST(:conversation_kinds AS text[]))))::int AS background_turns,
+       coalesce(sum(tool_calls), 0)::int AS tool_calls,
+       (count(*) FILTER (WHERE error))::int AS errors,
+       (count(*) FILTER (WHERE gated))::int AS gated,
+       (count(*) FILTER (WHERE tool_error))::int AS tool_error_turns,
+       percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM ended_at - started_at))
+           FILTER (WHERE ended_at IS NOT NULL) AS median_seconds
+FROM flagged
+"""
+)
+
+# The day's model calls, every purpose (background ones included); a per-minute row counts its call_count calls.
+# Each sum is NULL when there is no row, and input_tokens also when no row recorded usage.
+_TODAY_MODEL_SQL = f"""
+SELECT sum(m.call_count)::bigint AS model_calls, sum({input_total_sql("m")})::bigint AS input_tokens,
+       sum(m.cache_read)::bigint AS cache_read_tokens
+FROM nous_system.model_call_log m
+WHERE m.agent_id = :agent AND m.started_at >= :day_start AND m.started_at <= :now
+"""
+
+
+async def get_today(
+    session: AsyncSession, agent_id: str, *, now: datetime, model_calls_enabled: bool
+) -> dict[str, Any]:
+    """The turns of ``now``'s UTC day up to ``now``, one compact row each, oldest first (the latest
+    TODAY_TURNS_MAX), and the whole day's totals. The model figures are null with the model-call log off."""
+    day_start = _day_start(now)
+    base = {"agent": agent_id, "day_start": day_start, "now": now}
+    await _set_timeout(session)
+    rows = list((await session.execute(text(_TODAY_TURNS_SQL), {**base, "fetch": TODAY_TURNS_MAX + 1})).mappings())
+    truncated = len(rows) > TODAY_TURNS_MAX
+    if truncated:
+        rows = rows[1:]  # oldest first: the extra row is the earliest
+    totals = (await session.execute(text(_TODAY_TOTALS_SQL), {**base, **_KIND_PARAMS})).mappings().one()
+    model: Mapping[str, Any] = {"model_calls": None, "input_tokens": None, "cache_read_tokens": None}
+    if model_calls_enabled:
+        model = (await session.execute(text(_TODAY_MODEL_SQL), base)).mappings().one()
+    median = totals["median_seconds"]
+    return {
+        "enabled": True,
+        "day": day_start.date().isoformat(),
+        "now": now.isoformat(),
+        "turns": [
+            {
+                "id": str(row["id"]),
+                "session_id": row["session_id"],
+                "started_at": _iso(row["started_at"]),
+                "ended_at": _iso(row["ended_at"]),
+                "work_kind": row["work_kind"],
+                "frame_id": row["frame_id"],
+                "error": row["error"],
+                "gated": row["gated"],
+                "tool_calls": row["tool_calls"],
+            }
+            for row in rows
+        ],
+        "truncated": truncated,
+        "totals": {
+            "owner_turns": totals["owner_turns"],
+            "background_turns": totals["background_turns"],
+            "tool_calls": totals["tool_calls"],
+            "errors": totals["errors"],
+            "gated": totals["gated"],
+            "tool_error_turns": totals["tool_error_turns"],
+            "median_seconds": float(median) if median is not None else None,
+            "model_calls": model["model_calls"],
+            "input_tokens": model["input_tokens"],
+            "cache_read_tokens": model["cache_read_tokens"],
+        },
     }
 
 

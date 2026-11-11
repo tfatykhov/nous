@@ -1950,6 +1950,8 @@ export interface WorkTraceSession {
   turns: number;
   tool_calls: number;
   errors: number;
+  /** Calls with outcome `gated`. Absent from an API older than the redesign. */
+  gated?: number;
 }
 
 /** The critic's verdict as stored (keys of the critic_classified event). */
@@ -2033,6 +2035,17 @@ export interface WorkTurn {
   reply: string | null;
   error: string | null;
   tool_call_count: number;
+  // The redesign's fields (F110 columns of agent_turn_log, migration 106). Each is absent from an API older than
+  // the redesign and null on a synthetic turn: read them with `== null`, never `=== null`.
+  /** Why the frame was chosen: pattern | default | carried | referent | critic | direct; null before migration 106. */
+  frame_reason?: string | null;
+  /** The critic model's recommended frame (a frame id or `unknown`); null when the critic gave no model recommendation. */
+  critic_frame?: string | null;
+  had_error?: boolean | null;
+  /** Summed over every main-loop model call of the turn (not only the 20 listed); null when none recorded usage. */
+  input_tokens?: number | null;
+  /** Every main-loop model call of the turn; 0 with the model-call log off. */
+  model_call_count?: number;
   /** At most 20; [] when the model-call log is off. */
   model_calls: WorkTurnModelCall[];
   /** In call_index order. */
@@ -2047,6 +2060,54 @@ export interface WorkTrace {
   turns: WorkTurn[];
   /** Keyset cursor `"<turn started_at ISO>|<turn_id>"` for `after`; null on the last page. */
   next_after: string | null;
+}
+
+// ── GET /dashboard/work/today: one compact row per turn of the UTC day (the Overview timeline) ──
+
+export interface WorkTodayTurn {
+  id: string;
+  session_id: string;
+  started_at: string;
+  ended_at: string | null;
+  /** conversation | subtask | workflow_step | intention | heartbeat | background_check */
+  work_kind: string;
+  frame_id: string | null;
+  /** The turn row says so (had_error or an error text), or one of its calls failed. */
+  error: boolean;
+  /** One of its calls was gated. A turn can be both. */
+  gated: boolean;
+  tool_calls: number;
+}
+
+export interface WorkTodayTotals {
+  /** `conversation` turns. */
+  owner_turns: number;
+  /** Every other kind. */
+  background_turns: number;
+  tool_calls: number;
+  /** Turns, by the per-turn flags. */
+  errors: number;
+  gated: number;
+  /** Of `errors`, the turns with a failed tool call (what the Work list's "a tool failed" lens finds). */
+  tool_error_turns?: number;
+  /** Over the ended turns; null when none ended. */
+  median_seconds: number | null;
+  /** The model figures: null with the model-call log off or no row (shown as absent, never 0). */
+  model_calls: number | null;
+  input_tokens: number | null;
+  cache_read_tokens: number | null;
+}
+
+export interface WorkToday {
+  enabled: boolean;
+  /** `YYYY-MM-DD`, UTC. */
+  day: string;
+  now: string;
+  /** Oldest first: the latest 3,000 turns of the day. */
+  turns: WorkTodayTurn[];
+  /** True when the cap dropped the day's earliest turns. The totals always cover the whole day. */
+  truncated: boolean;
+  totals: WorkTodayTotals;
 }
 
 export interface WorkPatternTool {

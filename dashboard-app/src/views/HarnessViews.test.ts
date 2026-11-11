@@ -130,6 +130,14 @@ const ACTIVITY = {
   sleep_stats: { total_sleeps: 0, last_sleep: null, facts_created: 0, procedures_created: 0, censors_retired: 0 },
 };
 
+// The Overview's day timeline and Needs-you findings (redesign PR 1): recording off, no open finding.
+const TODAY_OFF = {
+  enabled: false, day: '2026-11-08', now: '2026-11-08T12:00:00+00:00', turns: [], truncated: false,
+  totals: { owner_turns: 0, background_turns: 0, tool_calls: 0, errors: 0, gated: 0, median_seconds: null,
+    model_calls: null, input_tokens: null, cache_read_tokens: null },
+};
+const FINDINGS = { findings: [], stats: {} };
+
 let harnessPersisted = true;
 
 function install() {
@@ -148,6 +156,8 @@ function install() {
       : url.startsWith('/status') ? STATUS
       // Guards' Most Active Censors (moved from Activity, F108 T13).
       : url.startsWith('/dashboard/activity') ? ACTIVITY
+      : url.startsWith('/dashboard/work/today') ? TODAY_OFF
+      : url.startsWith('/heartbeat/findings') ? FINDINGS
       : null;
     if (!body) throw new Error(`unexpected ${url}`);
     return { ok: true, status: 200, json: async () => body } as Response;

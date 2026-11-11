@@ -90,8 +90,8 @@
   .filter-btn.active {
     background: var(--accent);
     border-color: var(--accent);
-    /* #0a0a0f on the accent: 4.95:1 (white was 3.99:1) */
-    color: var(--bg);
+    /* Dark: #0a0a0f on the accent, 4.95:1 (white was 3.99:1). Paper: white on the link blue. */
+    color: var(--on-accent);
     font-weight: 600;
   }
 

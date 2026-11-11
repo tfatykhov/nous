@@ -1,6 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { render } from '@testing-library/svelte';
 import SubNav from './SubNav.svelte';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { styleBlocks } from '../testing/css';
 
 const items = [
   { id: 'sessions', label: 'Sessions', href: '#/work' },
@@ -37,5 +40,24 @@ describe('SubNav', () => {
     });
     expect(container.querySelector('nav b')).toBeNull();
     expect(container.querySelector('nav a')?.textContent?.trim()).toBe('<b>bold</b>');
+  });
+});
+
+// Dashboard redesign: pill tabs. The current tab alone carries the active background and shadow tokens (the inset
+// accent ring under the dark look, a white raised pill under the paper look).
+describe('SubNav pills', () => {
+  const css = styleBlocks(readFileSync(join(__dirname, 'SubNav.svelte'), 'utf-8'));
+
+  it('current tab has aria-current and the active class is the only thing carrying --tab-active-bg', () => {
+    const { container } = render(SubNav, { props: { items, current: 'changes', label: 'Work views' } });
+    const active = container.querySelectorAll('a.active');
+    expect(active).toHaveLength(1);
+    expect(active[0].getAttribute('aria-current')).toBe('page');
+    const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)];
+    const carriers = rules.filter((r) => /--tab-active-(bg|shadow)/.test(r[2])).map((r) => r[1].trim());
+    expect(carriers).toEqual(['.subnav-link.active']);
+    expect(css).toMatch(/\.subnav-link\.active\s*\{[^}]*background:\s*var\(--tab-active-bg\)/);
+    expect(css).toMatch(/\.subnav-link\.active\s*\{[^}]*box-shadow:\s*var\(--tab-active-shadow\)/);
+    expect(css).toMatch(/\.subnav-link\s*\{[^}]*border-radius:\s*var\(--ctl-radius\)/);
   });
 });

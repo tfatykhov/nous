@@ -4,10 +4,11 @@
   import { makePollStore } from '../../lib/stores/registry';
   import { usePoll } from '../../lib/poll';
   import { currentRoute, currentSub, currentQuery, routeHref } from '../../lib/router';
-  import { fmtDays, fmtTime, laneColor, setLastListQuery, toolChips } from '../../lib/work';
+  import { fmtDays, fmtTime, laneVar, setLastListQuery, toolChips } from '../../lib/work';
   import type { WorkSession, WorkSessionsData } from '../../lib/types/api';
   import StatGrid from '../../lib/ui/StatGrid.svelte';
   import StaleBadge from '../../lib/ui/StaleBadge.svelte';
+  import { Button } from '../../lib/ui/button';
 
   // F108 Work sessions list. Fetched once per open and on every filter change, plus a Refresh button: the keyset
   // is on an aggregate, so every page aggregates the whole window. Filters live in the hash query. Every string
@@ -203,7 +204,7 @@
     </p>
   </div>
   <div class="head-right">
-    <button type="button" class="refresh" onclick={refresh}>Refresh</button>
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refresh}>Refresh</Button>
     {#if $store.loading}<span class="loading" role="status">Loading…</span>{/if}
     <StaleBadge state={$store} />
   </div>
@@ -261,7 +262,7 @@
             </span>
             <span class="tools">
               {#each toolChips(s.tools) as c}
-                <span class="chip-tool"><span class="dot" aria-hidden="true" style:background={laneColor(c.lane)}></span>{c.label}</span>
+                <span class="chip-tool"><span class="dot" aria-hidden="true" style:--dot={laneVar(c.lane)}></span>{c.label}</span>
               {/each}
             </span>
           </a>
@@ -270,15 +271,15 @@
     </ul>
     <div class="legend">
       <span>Dot colour is the kind of tool:</span>
-      <span><i class="dot" aria-hidden="true" style:background={laneColor('memory')}></i>memory</span>
-      <span><i class="dot" aria-hidden="true" style:background={laneColor('live')}></i>live state</span>
-      <span><i class="dot" aria-hidden="true" style:background={laneColor('workspace')}></i>workspace</span>
-      <span><i class="dot" aria-hidden="true" style:background={laneColor('acts')}></i>acts on the world</span>
+      <span><i class="dot" aria-hidden="true" style:--dot={laneVar('memory')}></i>memory</span>
+      <span><i class="dot" aria-hidden="true" style:--dot={laneVar('live')}></i>live state</span>
+      <span><i class="dot" aria-hidden="true" style:--dot={laneVar('workspace')}></i>workspace</span>
+      <span><i class="dot" aria-hidden="true" style:--dot={laneVar('acts')}></i>acts on the world</span>
       <span class="count">Showing {sessions.length} {sessions.length === 1 ? 'session' : 'sessions'}</span>
     </div>
     {#if cursor !== null}
       <div class="more">
-        <button type="button" class="refresh" disabled={moreBusy || $store.loading} onclick={loadMore}>Load more</button>
+        <Button variant="outline" class="max-md:min-h-11" disabled={moreBusy || $store.loading} onclick={loadMore}>Load more</Button>
         {#if moreError}<span class="err" role="alert">Could not load more.</span>{/if}
       </div>
     {/if}
@@ -286,32 +287,31 @@
 {/if}
 
 <style>
+  /* Colours and structure are tokens (hexGuard): today's values under the dark look, rounded white cards on paper. */
   .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; }
   .subtitle { color: var(--muted); font-size: 0.9375rem; margin: 0; max-width: 70ch; }
   .muted { color: var(--muted); font-size: 0.875rem; }
-  .notice { padding: 0.75rem 1rem; border-radius: 8px; background: rgba(245, 158, 11, 0.08);
-    border: 1px solid rgba(245, 158, 11, 0.4); font-size: 0.875rem; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--radius-sm); background: var(--notice-bg);
+    border: 1px solid var(--notice-border); font-size: 0.875rem; }
   .empty { color: var(--muted); text-align: center; padding: 2rem 0; margin: 0; }
   button { font: inherit; cursor: pointer; }
   button:focus-visible, select:focus-visible, input:focus-visible, a.row:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
-  .refresh { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.875rem; min-height: 36px; }
-  .refresh:disabled { opacity: 0.6; cursor: default; }
   .filters, .lenses { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-top: 0.25rem; }
   .lenses { gap: 0.5rem; }
-  .seg { display: flex; flex-wrap: wrap; min-width: 0; gap: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 4px; }
-  .seg button { background: transparent; color: var(--muted); border: 0; border-radius: 7px; padding: 0.5rem 0.875rem; min-height: 36px; font-size: 0.875rem; }
-  .seg button.on { background: var(--surface-hover); color: var(--text); font-weight: 600; box-shadow: inset 0 0 0 1px var(--accent); }
+  .seg { display: flex; flex-wrap: wrap; min-width: 0; gap: 4px; background: var(--seg-bg); border: var(--card-border); border-radius: var(--ctl-radius); padding: 4px; }
+  .seg button { background: transparent; color: var(--muted); border: 0; border-radius: var(--ctl-radius); padding: 0.5rem 0.875rem; min-height: 36px; font-size: 0.875rem; }
+  .seg button.on { background: var(--tab-active-bg); color: var(--text); font-weight: 600; box-shadow: var(--tab-active-shadow); }
   .field { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); font-size: 0.875rem; }
   .field.grow { flex: 1 1 260px; }
-  select, input[type='search'] { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; color: var(--text);
-    padding: 0.5rem 0.75rem; font: inherit; min-height: 40px; min-width: 0; }
+  select, input[type='search'] { background: var(--surface); border: 1px solid var(--border); border-radius: var(--ctl-radius); color: var(--text);
+    padding: 0.5rem 0.875rem; font: inherit; min-height: 40px; min-width: 0; }
   input[type='search'] { flex: 1 1 auto; }
   .chip { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 999px; padding: 0.5rem 0.75rem; font-size: 0.8125rem; font-weight: 500; min-height: 36px; }
   .chip.on { border-color: var(--accent); background: var(--accent-glow); }
-  .sessions { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: hidden; }
+  .sessions { list-style: none; margin: 0; padding: 0; border: var(--card-border); border-radius: var(--card-radius); background: var(--surface); box-shadow: var(--card-shadow); overflow: hidden; }
   .sessions li + li { border-top: 1px solid var(--border); }
-  a.row { display: grid; grid-template-columns: minmax(0, 2fr) auto minmax(0, 2fr); gap: 1rem; padding: 0.875rem 1rem; color: inherit; text-decoration: none; align-items: start; }
+  a.row { display: grid; grid-template-columns: minmax(0, 2fr) auto minmax(0, 2fr); gap: 1rem; padding: 0.875rem 1.125rem; color: inherit; text-decoration: none; align-items: start; }
   a.row:hover { background: var(--surface-hover); }
   .main { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
   .title { font-weight: 600; overflow-wrap: anywhere; }
@@ -319,13 +319,13 @@
   .latest { font-size: 0.8125rem; overflow-wrap: anywhere; }
   .latest-label { color: var(--muted); }
   .meta { display: flex; flex-direction: column; gap: 0.25rem; align-items: flex-start; font-size: 0.8125rem; color: var(--muted); white-space: nowrap; }
-  .kind { display: inline-block; padding: 0.125rem 0.5rem; border-radius: 6px; font-size: 0.75rem; font-weight: 500; border: 1px solid var(--border); background: var(--bg); color: var(--muted); }
-  .kind-conversation { color: #a99df9; }
-  .kind-task { color: #22d3ee; }
+  .kind { display: inline-block; padding: 0.125rem 0.5rem; border-radius: var(--ctl-radius); font-size: 0.75rem; font-weight: 500; border: 1px solid var(--border); background: var(--bg); color: var(--muted); }
+  .kind-conversation { color: var(--accent-text); }
+  .kind-task { color: var(--kind-task); }
   .tools { display: flex; flex-wrap: wrap; gap: 6px; }
-  .chip-tool { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg);
+  .chip-tool { display: inline-flex; align-items: center; gap: 6px; padding: 3px 8px; border-radius: var(--ctl-radius); border: 1px solid var(--border); background: var(--bg);
     font-family: var(--font-mono); font-size: 0.75rem; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--dot); }
   .legend { display: flex; flex-wrap: wrap; gap: 1rem; font-size: 0.8125rem; color: var(--muted); align-items: center; }
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
   .legend .count { margin-left: auto; }
@@ -333,9 +333,9 @@
   .loading { color: var(--muted); font-size: 0.8125rem; }
   .sessions.dim { opacity: 0.6; }
   .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
-  .err { color: var(--red); font-size: 0.875rem; }
+  .err { color: var(--err-text); font-size: 0.875rem; }
   @media (max-width: 768px) {
-    .seg button, .chip, .refresh { min-height: 44px; }
+    .seg button, .chip { min-height: 44px; }
     a.row { grid-template-columns: minmax(0, 1fr); }
     .meta { flex-direction: row; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
   }

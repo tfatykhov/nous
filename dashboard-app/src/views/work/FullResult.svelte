@@ -58,13 +58,13 @@
 <style>
   .full { display: flex; flex-direction: column; gap: 6px; align-items: flex-start; min-width: 0; }
   .full > * { max-width: 100%; }
-  .toggle { font: inherit; font-size: 0.8125rem; cursor: pointer; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0.25rem 0.625rem; min-height: 32px; }
+  .toggle { font: inherit; font-size: 0.8125rem; cursor: pointer; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--ctl-radius); padding: 0.25rem 0.75rem; min-height: 32px; }
   .toggle:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
   .panel { display: flex; flex-direction: column; gap: 6px; width: 100%; outline: none; }
   .muted { color: var(--muted); margin: 0; font-size: 0.875rem; }
   .small { font-size: 0.75rem; }
-  .err { color: var(--red); font-size: 0.875rem; margin: 0; }
-  .scroll { max-height: 24rem; overflow: auto; width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; }
+  .err { color: var(--err-text); font-size: 0.875rem; margin: 0; }
+  .scroll { max-height: 24rem; overflow: auto; width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm); }
   .wrap { overflow-wrap: anywhere; white-space: pre-wrap; margin: 0; font-family: var(--font-mono); font-size: 0.8125rem; line-height: 1.5; padding: 0.5rem 0.625rem; }
   @media (max-width: 768px) { .toggle { min-height: 44px; } }
 </style>

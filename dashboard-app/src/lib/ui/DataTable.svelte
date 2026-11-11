@@ -112,8 +112,8 @@
     color: var(--muted);
     font-size: 0.75rem;
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
   }
 
   tr:hover td {
@@ -187,7 +187,7 @@
     .dt--cards tr {
       margin-bottom: 0.75rem;
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: var(--card-radius-sm);
       overflow: hidden;
     }
 

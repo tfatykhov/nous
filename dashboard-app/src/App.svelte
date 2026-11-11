@@ -1,6 +1,8 @@
 <script lang="ts">
   import { currentRoute, initRouter } from '$lib/router';
   import Nav from '$lib/ui/Nav.svelte';
+  import LookToggle from '$lib/ui/LookToggle.svelte';
+  import { groundFor } from '$lib/look';
   import DagView from './views/DagView.svelte';
   import Heartbeat from './views/Heartbeat.svelte';
   import Observability from './views/Observability.svelte';
@@ -97,16 +99,18 @@
 <a href="#main-content" class="skip-link">Skip to content</a>
 
 <!-- ── Desktop sidebar ───────────────────────────────────────── -->
-<aside class="sidebar" aria-label="Site navigation">
+<!-- The navigation is a rail ground: the Atlantic-blue rail under the paper look, today's sidebar otherwise. -->
+<aside class="sidebar" aria-label="Site navigation" data-ground="rail">
   <div class="sidebar-header">
     <span class="sidebar-logo" aria-hidden="true">&#x1D6B9;</span>
     <span class="sidebar-title">Nous</span>
   </div>
   <Nav currentRoute={$currentRoute} navLabel="Site navigation" />
+  <div class="sidebar-footer"><LookToggle /></div>
 </aside>
 
 <!-- ── Mobile header ─────────────────────────────────────────── -->
-<header class="mobile-header">
+<header class="mobile-header" data-ground="rail">
   <button
     bind:this={hamburgerBtn}
     class="hamburger"
@@ -139,6 +143,7 @@
   bind:this={drawerEl}
   class="drawer"
   class:drawer-open={drawerOpen}
+  data-ground="rail"
   role="dialog"
   aria-modal="true"
   aria-label="Navigation menu"
@@ -160,10 +165,12 @@
     </button>
   </div>
   <Nav currentRoute={$currentRoute} navLabel="Mobile navigation" onnavigate={closeDrawer} />
+  <div class="sidebar-footer"><LookToggle /></div>
 </div>
 
 <!-- ── Main content ───────────────────────────────────────────── -->
-<main id="main-content" class="main-content">
+<!-- A paper ground on the routes the redesign has migrated (PAPER_ROUTES), a dark one on every other. -->
+<main id="main-content" class="main-content" data-ground={groundFor($currentRoute)}>
   <!--
     Route switch: {#if} (not {#key}) so each view's component state
     (scroll, loaded data) survives tab switching.
@@ -216,7 +223,7 @@
     z-index: 9999;
     padding: 0.5rem 1rem;
     background: var(--accent);
-    color: #fff;
+    color: var(--skip-link-text);
     border-radius: var(--radius-sm);
     font-size: 0.875rem;
     font-weight: 600;
@@ -254,17 +261,25 @@
     flex-shrink: 0;
   }
 
+  /* The glyph is hidden in the rail (no glyphs under the paper look). */
   .sidebar-logo {
+    display: var(--logo-display);
     font-size: 1.375rem;
     line-height: 1;
     color: var(--accent);
   }
 
   .sidebar-title {
-    font-size: 1rem;
+    font-size: var(--brand-size);
     font-weight: 700;
     color: var(--text);
     letter-spacing: -0.01em;
+  }
+
+  .sidebar-footer {
+    margin-top: auto;
+    padding: 0.75rem 1.25rem 1rem;
+    flex-shrink: 0;
   }
 
   /* ── Mobile header (hidden on desktop) ──────────────────────── */
@@ -311,7 +326,7 @@
     }
 
     .mobile-title {
-      font-size: 1rem;
+      font-size: var(--brand-size);
       font-weight: 700;
       color: var(--text);
     }
@@ -349,7 +364,7 @@
       display: block;
       position: fixed;
       inset: 0;
-      background: rgba(0, 0, 0, 0.6);
+      background: var(--overlay-bg);
       z-index: 299;
     }
 

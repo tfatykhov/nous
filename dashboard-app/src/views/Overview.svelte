@@ -1,17 +1,32 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
-  import type { StatusData, StatusTimeseriesPoint, ExecutionData } from '../lib/types/api';
+  import type { StatusData, StatusTimeseriesPoint, ExecutionData, WorkToday, HeartbeatTrackedFinding } from '../lib/types/api';
   import { attentionPoll } from '../lib/stores/attention';
   import { fmtUtc, relUntil } from '../lib/harness';
   import { routeHref } from '../lib/router';
+  import { fmtTokens } from '../lib/work';
+  import { fmtSeconds } from '../lib/frames';
+  import { hhmm, utcMinute } from '../lib/dayTimeline';
+  import { look } from '../lib/look';
+  import { chartPalette, readToken } from '../lib/overviewCharts';
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
+  import { Button } from '../lib/ui/button';
+  import { Badge } from '../lib/ui/badge';
   import Chart from '../lib/viz/Chart.svelte';
+  import DayTimeline from '../lib/viz/DayTimeline.svelte';
 
-  // Load once: interval so large it never auto-fires (~285k years).
-  // StaleBadge still gets lastUpdated from the initial tick.
+  // The Overview: what needs the owner, today's numbers and health, a compact timeline of today's turns, then the
+  // memory numbers. Every card reads data the dashboard already serves (nothing authored, nothing invented): the
+  // attention counts (the app-wide poll), the open heartbeat findings, GET /dashboard/work/today, /status and the
+  // ledger's 24 h numbers. Each loads once (Refresh reloads); a part that fails says so and the rest still renders.
+  // Not shown, for want of cheap data: live companion surfaces (the index has no "awaiting the owner" flag, and the
+  // DAG questions it would duplicate are already counted), retrieval latency, write-health findings.
+
+  // Load once: interval 0 never auto-fires. StaleBadge still gets lastUpdated from the initial tick.
   const store = usePoll(
     makePollStore<StatusData>(
       (signal) => apiGet<StatusData>('/status?dashboard=true', { signal }),
@@ -19,8 +34,8 @@
     ),
   );
 
-  // Harness dashboard §4: the durable ledger's 24 h numbers (fetch-once, like
-  // the rest of the Overview). The attention strip reads the app-wide poll.
+  // Harness dashboard §4: the durable ledger's 24 h numbers (fetch-once, like the rest of the Overview). The
+  // attention cards read the app-wide poll.
   const exec = usePoll(
     makePollStore<ExecutionData>(
       (signal) => apiGet<ExecutionData>('/dashboard/execution?window=24h&limit=1', { signal }),
@@ -28,17 +43,57 @@
     ),
   );
 
+  const today = usePoll(makePollStore<WorkToday>((signal) => apiGet<WorkToday>('/dashboard/work/today', { signal }), 0));
+
+  // The heartbeat's in-memory finding store; 503 when the heartbeat is not running (one retry, then it says so).
+  type FindingsData = { findings: HeartbeatTrackedFinding[] };
+  const findings = usePoll(
+    makePollStore<FindingsData>((signal) => apiGet<FindingsData>('/heartbeat/findings', { signal, retries: 1 }), 0),
+  );
+
   function refreshAll() {
     void store.refresh();
     void exec.refresh();
     void attentionPoll.refresh();
+    void today.refresh();
+    void findings.refresh();
   }
+
+  // The day rolls over at 00:00 UTC: refetch then, and when the tab comes back after it, so a page left open never
+  // calls yesterday "Today".
+  const utcDate = () => new Date().toISOString().slice(0, 10);
+  function checkDay() {
+    const day = $today.data?.day;
+    if (day && day !== utcDate()) refreshAll();
+  }
+  onMount(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const arm = () => {
+      const now = new Date();
+      const next = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+      timer = setTimeout(() => {
+        checkDay();
+        arm();
+      }, next - now.getTime() + 1000);
+    };
+    arm();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') checkDay();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  });
 
   // ── Helpers ───────────────────────────────────────────────────────────
 
   function fmt(n: number): string {
-    return n.toLocaleString();
+    return n.toLocaleString('en-US');
   }
+
+  const plural = (n: number, one: string, many: string) => `${fmt(n)} ${n === 1 ? one : many}`;
 
   function fmtWithDelta(value: number, delta: number | null | undefined): string {
     if (delta == null) return fmt(value);
@@ -78,88 +133,250 @@
     return 'bad';
   }
 
-  const OUTCOME_COLORS: Record<string, string> = {
-    success: '#34d399', partial: '#fbbf24', failure: '#f87171', pending: '#6b6b8a',
-  };
+  // The charts' colours come from the ground's tokens, read off the chart row itself (a canvas cannot read var()),
+  // and again whenever the look changes: today's colours exactly under dark, the paper palette under paper.
+  let chartRow = $state<HTMLElement>();
+  let palette = $derived.by(() => {
+    void $look;
+    const el = chartRow;
+    return el ? chartPalette((name) => readToken(el, name)) : null;
+  });
+
+  // ── Today ─────────────────────────────────────────────────────────────
+
+  let td = $derived($today.data);
+  let tt = $derived(td && td.enabled ? td.totals : null);
+  /** `Today, 10 November` from the endpoint's UTC day, else the browser's UTC date. */
+  let dayTitle = $derived.by(() => {
+    const day = td?.day ?? new Date().toISOString().slice(0, 10);
+    const d = new Date(`${day}T00:00:00Z`);
+    return Number.isNaN(d.getTime()) ? 'Today' : `Today, ${d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', timeZone: 'UTC' })}`;
+  });
+  let nowText = $derived.by(() => {
+    const m = utcMinute(td?.now);
+    return m === null ? null : `Now ${hhmm(m)} UTC`;
+  });
+  let soFar = $derived.by(() => {
+    if (!tt) return [];
+    const rows: [string, string | null][] = [
+      ['Owner turns', fmt(tt.owner_turns)],
+      ['Background turns', fmt(tt.background_turns)],
+      ['Tool calls', fmt(tt.tool_calls)],
+      ['Errors', fmt(tt.errors)],
+      ['Median turn', tt.median_seconds == null ? null : fmtSeconds(tt.median_seconds)],
+      ['Model calls', tt.model_calls == null ? null : fmt(tt.model_calls)],
+      ['Input tokens', tt.input_tokens == null ? null : fmtTokens(tt.input_tokens)],
+      ['Cache reads', tt.cache_read_tokens == null ? null : fmtTokens(tt.cache_read_tokens)],
+    ];
+    return rows.filter((r): r is [string, string] => r[1] !== null);
+  });
+
+  // ── Needs you ─────────────────────────────────────────────────────────
+
+  // Open = new or acknowledged, not resolved: both are "in front of the owner" in the finding store's own words.
+  // The heartbeat acknowledges a finding itself when it routes it to triage, so the two states are not the owner's
+  // and both get the one badge, Open. Suppressed, auto-closed and resolved ones are left out. High urgency first,
+  // then the most recently seen.
+  const URGENCY: Record<string, number> = { high: 0, normal: 1, low: 2 };
+  const FINDINGS_SHOWN = 3;
+  let openFindings = $derived(
+    ($findings.data?.findings ?? [])
+      .filter((f) => f.state === 'new' || f.state === 'acknowledged')
+      .sort((a, b) => (URGENCY[a.urgency] ?? 3) - (URGENCY[b.urgency] ?? 3) || (Date.parse(b.last_seen ?? '') || 0) - (Date.parse(a.last_seen ?? '') || 0)),
+  );
+
+  let a = $derived($attentionPoll.data);
+
+  // ── Health ────────────────────────────────────────────────────────────
+
+  type Rule = { mode: string | null; warn_7d: number; refused_7d: number };
+  const ruleCount = (r: Rule) => (r.mode === 'enforce' ? r.refused_7d : r.mode === 'off' ? 0 : r.warn_7d);
 </script>
 
 <header class="view-head">
-  <div>
-    <h1>Overview</h1>
-    <p class="subtitle">At-a-glance memory health and trends</p>
-  </div>
+  <h1 class="title">{dayTitle}</h1>
   <div class="head-right">
-    <button class="refresh-btn" onclick={refreshAll} disabled={$store.loading}>
-      {$store.loading ? 'Loading…' : 'Refresh'}
-    </button>
     <StaleBadge state={$store} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={$store.loading}>
+      {$store.loading ? 'Loading…' : 'Refresh'}
+    </Button>
   </div>
 </header>
+{#if tt}
+  <div class="meta">
+    <span>{plural(tt.owner_turns + tt.background_turns, 'turn', 'turns')}</span>
+    <span>{plural(tt.tool_calls, 'tool call', 'tool calls')}</span>
+    {#if tt.model_calls != null}<span>{plural(tt.model_calls, 'model call', 'model calls')}</span>{/if}
+    <span class:bad={tt.errors > 0}>{plural(tt.errors, 'error', 'errors')}</span>
+    {#if nowText}<span>{nowText}</span>{/if}
+  </div>
+{/if}
 
+<div class="cards">
+  <!-- ── Needs you (harness dashboard §4.6, plus the open heartbeat findings) ── -->
+  <section class="card sec" aria-labelledby="needs-h">
+    <h2 id="needs-h">Needs you</h2>
+    {#snippet findingItems()}
+      {#each openFindings.slice(0, FINDINGS_SHOWN) as f (f.fingerprint)}
+        <li class="item">
+          <Badge variant={f.urgency === 'high' ? 'error' : 'warn'}>Open</Badge>
+          <a class="wrap" href={routeHref('heartbeat')}>{f.summary}</a>
+          <span class="k">Heartbeat finding from {f.check_name}, {f.urgency} urgency. Last seen {fmtUtc(f.last_seen)}.</span>
+        </li>
+      {/each}
+    {/snippet}
+    {#snippet moreFindings()}
+      {#if openFindings.length > FINDINGS_SHOWN}
+        {@const rest = openFindings.length - FINDINGS_SHOWN}
+        <a class="more-link" href={routeHref('heartbeat')}>{rest} more open finding{rest === 1 ? '' : 's'} on Heartbeat</a>
+      {/if}
+    {/snippet}
+    {#if !a}
+      <p class="muted">{$attentionPoll.error ? "Questions and sends in doubt could not be loaded." : "Loading…"}</p>
+      <!-- The findings come from the heartbeat's own store, so they show even when the attention counts fail. -->
+      {#if openFindings.length > 0}
+        <ul class="items">
+          {@render findingItems()}
+        </ul>
+        {@render moreFindings()}
+      {/if}
+      {#if $findings.error}<p class="muted small">Heartbeat findings could not be loaded.</p>{/if}
+    {:else}
+      {#if a.questions_waiting > 0 || a.sends_in_doubt > 0 || openFindings.length > 0}
+        <ul class="items">
+          {#if a.questions_waiting > 0}
+            <li class="item">
+              <Badge variant="warn">Waiting</Badge>
+              <a href={routeHref('dag')}>{a.questions_waiting} question{a.questions_waiting === 1 ? '' : 's'} waiting on you</a>
+              {#if a.next}
+                <span class="k">Next deadline {fmtUtc(a.next.deadline)} ({relUntil(a.next.deadline)}), {a.next.dag_name}, {a.next.node_name}. No answer by then applies ‘{a.next.default_label}’.</span>
+              {/if}
+            </li>
+          {/if}
+          {#if a.sends_in_doubt > 0}
+            <li class="item">
+              <Badge variant="warn">Check</Badge>
+              <a href={routeHref('work', 'changes')}>{a.sends_in_doubt} send{a.sends_in_doubt === 1 ? '' : 's'} ended without confirming delivery</a>
+              {#if a.latest_in_doubt}
+                <span class="k">
+                  {a.latest_in_doubt.tool_name}{a.latest_in_doubt.tombstone ? '' : a.latest_in_doubt.recipients.length ? ` to ${a.latest_in_doubt.recipients.join(', ')}` : ''}{a.latest_in_doubt.dag_name ? `, ${a.latest_in_doubt.dag_name}` : ''}, {fmtUtc(a.latest_in_doubt.created_at)}. Retries of it are held until you check.
+                </span>
+              {/if}
+            </li>
+          {/if}
+          {@render findingItems()}
+        </ul>
+        {@render moreFindings()}
+      {:else if !a.ledger_persisted}
+        <p class="all-clear">
+          No questions waiting. Ledger persistence is off (NOUS_EXECUTION_LEDGER_PERSIST_ENABLED), so a send whose delivery went unconfirmed is not recorded — none can be shown here.
+        </p>
+      {:else if $findings.data}
+        <p class="all-clear">Nothing needs you — no questions waiting, no sends in doubt and no open heartbeat findings.</p>
+      {:else}
+        <p class="all-clear">No questions waiting and no sends in doubt.</p>
+      {/if}
+      {#if $findings.error}<p class="muted small">Heartbeat findings could not be loaded.</p>{/if}
+    {/if}
+  </section>
+
+  <!-- ── Today so far ── -->
+  <section class="card sec" aria-labelledby="sofar-h">
+    <h2 id="sofar-h">Today so far</h2>
+    {#if tt}
+      <table class="nums">
+        <tbody>
+          {#each soFar as [label, value] (label)}<tr><th scope="row">{label}</th><td>{value}</td></tr>{/each}
+        </tbody>
+      </table>
+    {:else if td && !td.enabled}
+      <p class="muted">Tool-call recording is off, so there are no turn numbers.</p>
+    {:else if $today.error}
+      <p class="muted">Today's turns are unavailable.</p>
+    {:else}
+      <p class="muted">Loading…</p>
+    {/if}
+  </section>
+
+  <!-- ── Health ── -->
+  <section class="card sec" aria-labelledby="health-h">
+    <h2 id="health-h">Health</h2>
+    {#if !a && $attentionPoll.error}
+      <p class="muted">Guards and the ledger could not be loaded.</p>
+    {/if}
+    {#if a}
+      {@const h = a.harness}
+      {@const guardsWatch = !h.events_persisted || ruleCount(h.offered_set) + ruleCount(h.context_policy) > 0}
+      <div class="item">
+        <Badge variant={guardsWatch ? 'warn' : 'ok'}>{guardsWatch ? 'Watch' : 'Clear'}</Badge>
+        <span class="what">Guards</span>
+        <span class="k">
+          {#if !h.events_persisted}
+            Not measured: event persistence is off.
+          {:else}
+            Last 7 days:
+            {#each [['Offered-tool rule', h.offered_set], ['Context policy', h.context_policy]] as [name, r], i (name)}
+              {@const rule = r as Rule}
+              {i ? '; ' : ''}{name}
+              {#if rule.mode === 'enforce'} refused <strong>{rule.refused_7d}</strong>
+              {:else if rule.mode === 'off'} is off
+              {:else} flagged <strong>{rule.warn_7d}</strong> (warn, the calls still ran){/if}
+            {/each}.
+          {/if}
+          <a href={routeHref('harness')}>Open Guards</a>
+        </span>
+      </div>
+      <div class="item">
+        <Badge variant={a.ledger_persisted ? 'ok' : 'warn'}>{a.ledger_persisted ? 'Clear' : 'Watch'}</Badge>
+        <span class="what">Ledger</span>
+        <span class="k">
+          {a.ledger_persisted
+            ? 'Every side-effecting call is recorded, and repeat sends are refused.'
+            : 'Ledger persistence is off (NOUS_EXECUTION_LEDGER_PERSIST_ENABLED): calls are not recorded and sends are not de-duplicated.'}
+        </span>
+      </div>
+    {/if}
+    {#if tt}
+      <div class="item">
+        <Badge variant={tt.errors > 0 ? 'warn' : 'ok'}>{tt.errors > 0 ? 'Watch' : 'Clear'}</Badge>
+        <span class="what">Errors today</span>
+        <span class="k">
+          {#if tt.errors > 0}
+            {plural(tt.errors, 'turn', 'turns')} had an error{tt.gated > 0 ? `, ${plural(tt.gated, 'turn', 'turns')} a gated call` : ''}.
+            <!-- The Work list's lens finds failed tool calls over the last 24 h: linked only when one failed today. -->
+            {#if (tt.tool_error_turns ?? 0) > 0}
+              <a href={routeHref('work', '', { lens: 'error', kind: 'any', days: '1' })}>Sessions where a tool failed, last 24 h</a>
+            {/if}
+          {:else}
+            No turn has had an error today{tt.gated > 0 ? `; ${plural(tt.gated, 'turn', 'turns')} had a gated call` : ''}.
+          {/if}
+        </span>
+      </div>
+    {/if}
+  </section>
+</div>
+
+<!-- ── Today's turns: compact, below the cards ── -->
+<section class="card field" aria-labelledby="turns-h">
+  <h2 id="turns-h">Today's turns</h2>
+  {#if td && td.enabled}
+    <DayTimeline turns={td.turns} now={td.now} truncated={td.truncated} />
+  {:else if td && !td.enabled}
+    <p class="muted">Tool-call recording is off. Set NOUS_TOOL_CALL_LOG_ENABLED to record what Nous does.</p>
+  {:else if $today.error}
+    <p class="muted">Today's turns are unavailable.</p>
+  {:else}
+    <p class="muted">Loading…</p>
+  {/if}
+</section>
+
+<h2 class="group-h">Memory and decisions</h2>
 {#if $store.data}
   {@const d = $store.data}
   {@const mem = d.memory}
   {@const db = d.dashboard}
   {@const deltas = db.deltas}
   {@const dist = db.distributions}
-
-  <!-- ── Needs your attention (harness dashboard §4.6) ─────────────────── -->
-  {@const a = $attentionPoll.data}
-  {#if a}
-    <section class="attention" aria-labelledby="attn-title">
-      <h2 id="attn-title">Needs your attention</h2>
-      {#if a.questions_waiting === 0 && a.sends_in_doubt === 0 && !a.ledger_persisted}
-        <p class="all-clear">
-          No questions waiting. Ledger persistence is off (NOUS_EXECUTION_LEDGER_PERSIST_ENABLED), so a send whose delivery went unconfirmed is not recorded — none can be shown here.
-        </p>
-      {:else if a.questions_waiting === 0 && a.sends_in_doubt === 0}
-        <p class="all-clear">
-          <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="#10b981" stroke-width="2" aria-hidden="true"><path d="M4 10.5l4 4 8-9"/></svg>
-          Nothing needs you — no questions waiting and no sends in doubt.
-        </p>
-      {:else}
-        <div class="attn-cards">
-          {#if a.questions_waiting > 0}
-            <a class="attn-card attn-waiting" href={routeHref('dag')} aria-labelledby="attn-q">
-              <span class="attn-kicker">Questions</span>
-              <span id="attn-q" class="attn-title">{a.questions_waiting} question{a.questions_waiting === 1 ? '' : 's'} waiting on you</span>
-              {#if a.next}
-                <span class="attn-detail">Next deadline {fmtUtc(a.next.deadline)} ({relUntil(a.next.deadline)}) — {a.next.dag_name} · {a.next.node_name}. No answer by then applies ‘{a.next.default_label}’.</span>
-              {/if}
-              <span class="attn-cta">See questions ›</span>
-            </a>
-          {/if}
-          {#if a.sends_in_doubt > 0}
-            <a class="attn-card attn-unknown" href={routeHref('work', 'changes')} aria-labelledby="attn-s">
-              <span class="attn-kicker">Sends in doubt</span>
-              <span id="attn-s" class="attn-title">{a.sends_in_doubt} send{a.sends_in_doubt === 1 ? '' : 's'} ended without confirming delivery</span>
-              {#if a.latest_in_doubt}
-                <span class="attn-detail">
-                  {a.latest_in_doubt.tool_name}{a.latest_in_doubt.tombstone ? '' : a.latest_in_doubt.recipients.length ? ` to ${a.latest_in_doubt.recipients.join(', ')}` : ''}{a.latest_in_doubt.dag_name ? ` · ${a.latest_in_doubt.dag_name}` : ''} · {fmtUtc(a.latest_in_doubt.created_at)}. Retries of it are held until you check.
-                </span>
-              {/if}
-              <span class="attn-cta">Review in ledger ›</span>
-            </a>
-          {/if}
-        </div>
-      {/if}
-      <p class="harness-line">
-        {#if !a.harness.events_persisted}
-          Guards: not measured — event persistence is off.
-        {:else}
-          Guards, last 7 days:
-          {#each [['Offered-tool rule', a.harness.offered_set], ['Context policy', a.harness.context_policy]] as [name, r], i (name)}
-            {@const rule = r as { mode: string | null; warn_7d: number; refused_7d: number }}
-            {i ? ' · ' : ''}{name}
-            {#if rule.mode === 'enforce'} refused <strong>{rule.refused_7d}</strong>
-            {:else if rule.mode === 'off'} is off
-            {:else} flagged <strong>{rule.warn_7d}</strong> (warn — the calls still ran){/if}
-          {/each}.
-        {/if}
-        <a href={routeHref('harness')}>Open Guards</a>
-      </p>
-    </section>
-  {/if}
 
   <!-- ── Stat cards ───────────────────────────────────────────────────── -->
   <StatGrid stats={[
@@ -195,7 +412,7 @@
   <section class="chart-card integrity-section">
     <div class="section-title-row">
       <h2>Execution integrity</h2>
-      <a class="detail-link" href={routeHref('work', 'changes')}>Open ledger &rsaquo;</a>
+      <a class="detail-link" href={routeHref('work', 'changes')}>Open ledger</a>
     </div>
     {#if x && !x.modes.persist}
       <p class="muted">Ledger persistence is off (NOUS_EXECUTION_LEDGER_PERSIST_ENABLED) — no calls are recorded and sends are not de-duplicated, so there are no numbers to show.</p>
@@ -223,23 +440,25 @@
     Created in the last {db.timeseries.facts.length} days: <strong>{fmt(seriesTotal(db.timeseries.facts))}</strong> facts,
     <strong>{fmt(seriesTotal(db.timeseries.episodes))}</strong> episodes,
     <strong>{fmt(seriesTotal(db.timeseries.decisions))}</strong> decisions.
-    <a href={routeHref('health', 'growth')}>Memory growth ›</a>
+    <a href={routeHref('health', 'growth')}>Memory growth</a>
   </p>
 
   <!-- ── Charts ───────────────────────────────────────────────────────── -->
-  <div class="chart-row">
+  <div class="chart-row" bind:this={chartRow}>
     <!-- Decision outcomes (doughnut) -->
     <section class="chart-card">
       <h2>Decision outcomes</h2>
       {#if Object.keys(dist.decision_outcomes).length > 0}
         {@const do_ = sortedDistribution(dist.decision_outcomes)}
+        {#if palette}
+        {@const pal = palette}
         <Chart
           type="doughnut"
           data={{
             labels: do_.labels,
             datasets: [{
               data: do_.values,
-              backgroundColor: do_.labels.map((l) => OUTCOME_COLORS[l.toLowerCase()] ?? '#6b6b8a'),
+              backgroundColor: do_.labels.map((l) => pal.outcome(l)),
               borderWidth: 0,
               hoverOffset: 4,
             }],
@@ -247,6 +466,7 @@
           options={{ cutout: '60%', plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } } }}
           height="240px"
         />
+        {/if}
       {:else}
         <p class="empty">No decisions recorded yet</p>
       {/if}
@@ -257,11 +477,13 @@
       <h2>Edge types</h2>
       {#if Object.keys(dist.edge_relations).length > 0}
         {@const er = sortedDistribution(dist.edge_relations)}
+        {#if palette}
+        {@const pal = palette}
         <Chart
           type="bar"
           data={{
             labels: er.labels.map((l) => l.replace(/_/g, ' ')),
-            datasets: [{ data: er.values, backgroundColor: 'rgba(124,106,247,0.5)', borderColor: '#7c6af7', borderWidth: 1 }],
+            datasets: [{ data: er.values, backgroundColor: pal.bar, borderColor: pal.barBorder, borderWidth: 1 }],
           }}
           options={{
             indexAxis: 'y',
@@ -273,6 +495,7 @@
           }}
           height="240px"
         />
+        {/if}
       {:else}
         <p class="empty">No graph edges yet</p>
       {/if}
@@ -286,80 +509,49 @@
 {/if}
 
 <style>
-  /* ── Needs your attention (harness dashboard §4.6) ── */
-  .attention { display: flex; flex-direction: column; gap: 0.75rem; margin-bottom: 1.25rem; }
-  .attention h2 { margin: 0; font-size: 0.9375rem; font-weight: 600; }
-  .all-clear { display: flex; align-items: center; gap: 0.625rem; margin: 0; padding: 1rem 1.125rem; border-radius: 8px;
-    background: var(--surface); border: 1px solid var(--border); font-size: 0.875rem; }
-  .attn-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem; }
-  .attn-card { display: flex; flex-direction: column; gap: 0.5rem; padding: 1.125rem; border-radius: 8px; background: var(--surface);
-    border: 1px solid; text-decoration: none; color: var(--text); }
-  .attn-card:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
-  .attn-waiting { border-color: rgba(167, 139, 250, 0.35); }
-  .attn-unknown { border-color: rgba(244, 114, 182, 0.35); }
-  .attn-kicker { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
-  .attn-waiting .attn-kicker, .attn-waiting .attn-cta { color: var(--waiting); }
-  .attn-unknown .attn-kicker, .attn-unknown .attn-cta { color: var(--unknown); }
-  .attn-title { font-size: 1.125rem; font-weight: 700; line-height: 1.3; }
-  .attn-detail { font-size: 0.8125rem; color: var(--muted); }
-  .attn-cta { font-size: 0.8125rem; font-weight: 600; margin-top: auto; }
-  .harness-line { margin: 0; font-size: 0.8125rem; color: var(--muted); }
-  .harness-line strong { color: var(--text); }
-  .harness-line a { color: var(--accent-text); font-weight: 600; text-decoration: none; margin-left: 0.25rem; }
+  /* Colours and structure are tokens only (hexGuard): today's values under the dark look, the paper ground's
+     rounded white cards under the paper look. */
+  .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+  .title { font-size: 1.4rem; font-weight: 700; color: var(--text); margin: 0; line-height: 1.2; }
+  :global(html[data-look="paper"]) .title { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
+  .head-right { display: flex; align-items: center; gap: 0.75rem; flex-shrink: 0; margin-left: auto; }
+  .meta { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.75rem; font-size: 0.8125rem; }
+  .meta > * { padding: 3px 11px; border-radius: 999px; background: var(--surface); border: var(--card-border); box-shadow: var(--card-shadow); color: var(--text); }
+  .meta .bad { color: var(--err-text); background: var(--err-bg); border-color: transparent; box-shadow: none; font-weight: 600; }
 
-  .view-head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 1rem;
-    margin-bottom: 1.25rem;
-  }
+  h2 { font-size: 0.9375rem; font-weight: 650; color: var(--text); margin: 0 0 0.5rem; }
+  .muted { color: var(--muted); font-size: 0.875rem; margin: 0; }
+  .small { font-size: 0.8125rem; margin-top: 0.5rem; }
+  .wrap { overflow-wrap: anywhere; }
+  a { color: var(--accent-text); }
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+  .card { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow); min-width: 0; }
 
-  h1 {
-    font-size: 1.4rem;
-    font-weight: 700;
-    color: var(--text);
-    margin: 0 0 0.125rem;
-  }
+  /* Needs you, Today so far, Health */
+  .cards { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr); gap: 1.25rem; margin-top: 1.25rem; align-items: start; }
+  .sec { padding: 1.125rem 1.25rem 0.75rem; }
+  .items { list-style: none; margin: 0; padding: 0; }
+  .item { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; padding: 0.625rem 0; border-top: 1px solid var(--border); align-items: start; font-size: 0.875rem; }
+  .item > :global([data-slot="badge"]) { margin-top: 1px; }
+  .item a { font-weight: 550; text-decoration: none; }
+  .item a:hover { text-decoration: underline; }
+  .item .k { grid-column: 2; font-size: 0.78125rem; color: var(--muted); overflow-wrap: anywhere; }
+  .item .k a { font-weight: 600; margin-left: 0.25rem; white-space: nowrap; }
+  .item .k strong { color: var(--text); }
+  .what { font-weight: 550; }
+  .more-link { display: inline-block; margin: 0.25rem 0 0.25rem; font-size: 0.8125rem; font-weight: 600; text-decoration: none; }
+  .all-clear { margin: 0; padding: 0.625rem 0; border-top: 1px solid var(--border); font-size: 0.875rem; }
+  table.nums { width: 100%; border-collapse: collapse; font-size: 0.875rem; }
+  table.nums th, table.nums td { padding: 0.5rem 0; border-top: 1px solid var(--border); }
+  table.nums th { text-align: left; font-weight: 400; color: var(--text); }
+  table.nums td { text-align: right; font-weight: 650; font-stretch: 82%; font-size: 0.9375rem; }
 
-  .subtitle {
-    font-size: 0.8125rem;
-    color: var(--muted);
-    margin: 0;
-  }
+  /* Today's turns: compact */
+  .field { margin-top: 1.25rem; padding: 1rem 1.25rem 0.75rem; }
 
-  h2 {
-    font-size: 0.875rem;
-    font-weight: 600;
-    color: var(--text);
-    margin: 0 0 0.75rem;
-  }
+  /* Memory and decisions: today's content, in cards */
+  .group-h { margin: 1.75rem 0 0.75rem; font-size: 1.0625rem; }
 
-  .head-right {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    flex-shrink: 0;
-  }
-
-  .refresh-btn {
-    font-size: 0.8125rem;
-    padding: 0.25rem 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
-    background: var(--surface);
-    color: var(--text);
-    cursor: pointer;
-  }
-  .refresh-btn:hover:not(:disabled) {
-    background: var(--surface-hover);
-  }
-  .refresh-btn:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-
-  /* Special indicator cards (density + Brier) */
   .special-cards {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
@@ -369,8 +561,9 @@
 
   .stat-card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 8px);
+    border: var(--card-border);
+    border-radius: var(--card-radius-sm);
+    box-shadow: var(--card-shadow);
     padding: 1rem;
     display: flex;
     flex-direction: column;
@@ -391,8 +584,8 @@
     font-size: 0.75rem;
     font-weight: 500;
     color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
   }
 
   .indicator {
@@ -402,89 +595,35 @@
     border-radius: 50%;
     flex-shrink: 0;
   }
-  .indicator.good    { background: var(--green, #22c55e); }
-  .indicator.warn    { background: var(--yellow, #eab308); }
-  .indicator.bad     { background: var(--red, #ef4444); }
+  .indicator.good    { background: var(--green); }
+  .indicator.warn    { background: var(--yellow); }
+  .indicator.bad     { background: var(--red); }
   .indicator.neutral { background: var(--muted); }
 
-  /* Integrity section */
-  .integrity-section {
-    margin-top: 1rem;
-  }
-
-  .section-title-row {
-    display: flex;
-    align-items: baseline;
-    gap: 0.75rem;
-    margin-bottom: 0.75rem;
-  }
-
-  .section-title-row h2 {
-    margin: 0;
-  }
-
-  .detail-link {
-    font-size: 0.8125rem;
-    color: var(--accent);
-    text-decoration: none;
-    margin-left: auto;
-  }
+  .integrity-section { margin-top: 1rem; }
+  .section-title-row { display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 0.75rem; }
+  .section-title-row h2 { margin: 0; }
+  .detail-link { font-size: 0.8125rem; color: var(--accent-text); text-decoration: none; margin-left: auto; font-weight: 600; }
   .detail-link:hover { text-decoration: underline; }
 
   .growth-line { margin: 1rem 0 0; font-size: 0.875rem; color: var(--muted); }
   .growth-line strong { color: var(--text); }
-  .growth-line a { color: var(--accent-text); font-weight: 600; text-decoration: none; margin-left: 0.25rem; }
+  .growth-line a { font-weight: 600; text-decoration: none; margin-left: 0.25rem; }
 
-  .chart-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 1rem;
-    margin-top: 1rem;
+  .chart-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1rem; margin-top: 1rem; }
+  .chart-card { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow); padding: 1rem 1.25rem; min-width: 0; }
+
+  .empty { color: var(--muted); font-size: 0.875rem; padding: 1.5rem 0; text-align: center; margin: 0; }
+  .status-msg { color: var(--muted); font-size: 0.9375rem; padding: 3rem 2rem; text-align: center; }
+  .status-msg.error { color: var(--err-text); }
+  .retry-link { background: none; border: none; color: var(--accent-text); cursor: pointer; font-size: inherit; padding: 0; text-decoration: underline; }
+
+  @media (max-width: 900px) {
+    .cards { grid-template-columns: minmax(0, 1fr); }
   }
-
   @media (max-width: 640px) {
-    .chart-row {
-      grid-template-columns: 1fr;
-    }
-    .special-cards {
-      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
-      gap: 0.75rem;
-    }
-  }
-
-  .chart-card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 1rem;
-  }
-
-  .empty {
-    color: var(--muted);
-    font-size: 0.875rem;
-    padding: 1.5rem 0;
-    text-align: center;
-    margin: 0;
-  }
-
-  .status-msg {
-    color: var(--muted);
-    font-size: 0.9375rem;
-    padding: 3rem 2rem;
-    text-align: center;
-  }
-
-  .status-msg.error {
-    color: var(--red, #ef4444);
-  }
-
-  .retry-link {
-    background: none;
-    border: none;
-    color: var(--accent);
-    cursor: pointer;
-    font-size: inherit;
-    padding: 0;
-    text-decoration: underline;
+    .chart-row { grid-template-columns: minmax(0, 1fr); }
+    .special-cards { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 0.75rem; }
+    .sec, .field { padding-left: 1rem; padding-right: 1rem; }
   }
 </style>

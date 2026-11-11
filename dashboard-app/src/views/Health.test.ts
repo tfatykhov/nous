@@ -301,11 +301,11 @@ describe('Overview after the growth move', () => {
   it('shows one growth summary line with the three counts over the series\' window, linking to the Growth tab', async () => {
     start('#/overview');
     render(Overview);
-    const link = await screen.findByRole('link', { name: 'Memory growth ›' });
+    const link = await screen.findByRole('link', { name: 'Memory growth' });
     expect(link.getAttribute('href')).toBe('#/health/growth');
     expect(link.closest('p')?.textContent?.replace(/\s+/g, ' ').trim())
       // The window is the series' own length (31 calendar days, today included, in the endpoint; 2 in this fixture).
-      .toBe('Created in the last 2 days: 1,234 facts, 2 episodes, 4 decisions. Memory growth ›');
+      .toBe('Created in the last 2 days: 1,234 facts, 2 episodes, 4 decisions. Memory growth');
     expect(screen.getAllByRole('link').filter((a) => a.getAttribute('href') === '#/health/growth')).toHaveLength(1);
   });
 

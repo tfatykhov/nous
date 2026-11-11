@@ -3,17 +3,22 @@
   import { makePollStore } from '../../lib/stores/registry';
   import { usePoll } from '../../lib/poll';
   import { routeHref } from '../../lib/router';
-  import { fmtDuration, fmtTime, fmtTokens, getLastListQuery, laneColor } from '../../lib/work';
+  import { fmtDuration, fmtTime, fmtTokens, getLastListQuery, laneVar } from '../../lib/work';
+  import { chosenBy, clockTime, criticVerdict, fmtSeconds, frameChange, frameLabel, frameVar, lastFramed, replySeconds, verdictText } from '../../lib/frames';
   import type { WorkCall, WorkTrace, WorkTurn } from '../../lib/types/api';
   import StaleBadge from '../../lib/ui/StaleBadge.svelte';
   import HoldUndo from '../../lib/ui/HoldUndo.svelte';
+  import { Button } from '../../lib/ui/button';
   import FullResult from './FullResult.svelte';
 
   // F108 Work trace: one session, turn by turn. Every string here (messages, reasons, inputs, results, replies,
-  // critic rationale) came from a model or a user and is shown as a text node only: no {@html}, no markdown.
-  // Turns come oldest first, a page at a time. While more pages remain nothing is polled (loaded history does not
-  // change); once every turn is loaded, each 15 s poll asks for the turns after the second-to-last one, so the
-  // newest turn is refreshed and new turns appear. Results merge by turn id.
+  // critic rationale, frame ids and reasons) came from a model or a user and is shown as a text node only: no
+  // raw-HTML directive, no markdown. Turns come oldest first, a page at a time. While more pages remain nothing is polled
+  // (loaded history does not change); once every turn is loaded, each 15 s poll asks for the turns after the
+  // second-to-last one, so the newest turn is refreshed and new turns appear. Results merge by turn id.
+  // Redesign: each turn has a frame column tinted in its frame's colour (time, frame, why it was chosen, its numbers
+  // and the critic's verdict), a sentence says where the frame changed and why, and a replay control steps through
+  // the loaded turns.
   let { sessionId, turnId }: { sessionId: string; turnId?: string } = $props();
 
   const base = () => `/dashboard/work/sessions/${encodeURIComponent(sessionId)}`;
@@ -56,14 +61,8 @@
   const store = usePoll(poll);
 
   const KIND_LABEL: Record<string, string> = { conversation: 'Conversation', task: 'Task', background: 'Background' };
-  const LANES: { id: string; name: string }[] = [
-    { id: 'memory', name: 'Memory' },
-    { id: 'live', name: 'Live state' },
-    { id: 'workspace', name: 'Workspace' },
-    { id: 'acts', name: 'Acts' },
-  ];
-  const laneName = (lane: string) => LANES.find((l) => l.id === lane)?.name ?? 'Other';
-  const railLanes = (lane: string) => (LANES.some((l) => l.id === lane) ? LANES.map((l) => l.id) : [...LANES.map((l) => l.id), 'other']);
+  const LANE_NAME: Record<string, string> = { memory: 'Memory', live: 'Live state', workspace: 'Workspace', acts: 'Acts' };
+  const laneName = (lane: string) => (Object.hasOwn(LANE_NAME, lane) ? LANE_NAME[lane] : 'Other');
 
   let moreBusy = $state(false);
   let moreError = $state(false);
@@ -132,6 +131,27 @@
     el.scrollIntoView({ block: 'start' });
   });
 
+  // Replay: one step per loaded turn (index-based, not time-based: a session can span days). Nothing is marked
+  // until the owner moves it. It scrolls only from the slider itself, never from a poll or an effect.
+  let replay = $state<number | null>(null);
+  let replayAt = $derived(turns.length === 0 ? 0 : Math.min(replay ?? 0, turns.length - 1));
+  const reducedMotion = () => typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function mark(i: number) {
+    if (!Number.isInteger(i) || i < 0 || i >= turns.length) return;
+    replay = i;
+    const el = document.getElementById(`turn-${turns[i].turn_id}`);
+    el?.scrollIntoView?.({ block: 'nearest', behavior: reducedMotion() ? 'auto' : 'smooth' });
+  }
+  const onReplay = (e: Event) => mark(Number((e.currentTarget as HTMLInputElement).value));
+  // Before the first move the thumb already rests on the first turn, so Home or a step back changes nothing and fires
+  // no input: mark the first turn then (the keyboard's way to reach it); a click on the resting thumb marks it too.
+  function onReplayKey(e: KeyboardEvent) {
+    if (replay === null && ['Home', 'ArrowLeft', 'ArrowDown', 'PageDown'].includes(e.key)) mark(0);
+  }
+  function onReplayPointer(e: PointerEvent) {
+    if (replay === null) mark(Number((e.currentTarget as HTMLInputElement).value));
+  }
+
   const turnLabel = (t: WorkTurn, i: number) => (t.has_turn_row ? `Turn ${t.turn_number ?? i + 1}` : 'Turn record missing (single call)');
 
   function plural(n: number, one: string, many: string) {
@@ -179,13 +199,16 @@
     return [...by].map(([tool, u]) => ({ tool, ...u }));
   });
 
+  // The frames among the loaded turns, first-seen order: the key above the turns.
+  let frames = $derived([...new Set(turns.map((t) => t.frame_id).filter((f): f is string => f != null && f !== ''))]);
+
   const modelCallsHref = (sub: string[] | undefined, query?: Record<string, string>) => routeHref('model-calls', sub, { ...query, days: '30' }); // the Work log keeps 30 days; the list defaults to 7
   const num = (n: number) => n.toLocaleString('en-US');
   const errorsText = (n: number) => (n === 0 ? 'No errors' : plural(n, 'error', 'errors'));
 </script>
 
 <div class="trace">
-  <a class="back" href={routeHref('work', '', getLastListQuery())}>← Back to Work</a>
+  <a class="back" href={routeHref('work', '', getLastListQuery())}>Back to Work</a>
 
   {#if notFound}
     <p class="gone" role="status">This session is not in the work log (it may be older than 30 days).</p>
@@ -193,12 +216,13 @@
     <div class="notice" role="status">Tool-call recording is off. Set NOUS_TOOL_CALL_LOG_ENABLED to record what Nous does.</div>
   {:else if data && data.session}
     {@const s = data.session}
+    {@const gated = s.gated ?? 0}
     <header class="head">
       <div class="head-top">
-        <h1>{s.title}</h1>
+        <h1 class="title">{s.title}</h1>
         <span class="head-right">
-          <button type="button" class="refresh" disabled={refreshing} onclick={refresh}>Refresh</button>
           <StaleBadge state={$store} />
+          <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" disabled={refreshing} onclick={refresh}>Refresh</Button>
         </span>
       </div>
       <div class="meta">
@@ -207,221 +231,333 @@
         <span>{plural(s.turns, 'turn', 'turns')}</span>
         <span>{plural(s.tool_calls, 'tool call', 'tool calls')}</span>
         <span class:bad={s.errors > 0}>{errorsText(s.errors)}</span>
+        {#if gated > 0}<span class="warn">{num(gated)} gated</span>{/if}
         <a href={modelCallsHref(undefined, { session_id: s.session_id })}>all model calls of this conversation</a>
       </div>
     </header>
 
-    {#if used.length > 0}
-      <section class="used" aria-labelledby="used-h">
-        <h2 id="used-h">What it used, and why</h2>
-        {#each used as u (u.tool)}
-          <div class="used-row">
-            <span class="used-tool"><span class="dot" aria-hidden="true" style:background={laneColor(u.lane)}></span>{u.tool}<span class="count">{plural(u.calls, 'call', 'calls')}</span></span>
-            <ul>
-              {#each u.why.slice(0, 3) as w}<li class="wrap reason">{w}</li>{/each}
-              {#if u.why.length > 3}
-                <li class="more-reasons"><details><summary>and {u.why.length - 3} more</summary><ul>{#each u.why.slice(3) as w}<li class="wrap">{w}</li>{/each}</ul></details></li>
-              {/if}
-            </ul>
-          </div>
-        {/each}
-      </section>
+    {#if turns.length > 1}
+      <div class="replay card">
+        <label for="replay-turn">Replay</label>
+        <input id="replay-turn" type="range" min="0" max={turns.length - 1} step="1" value={replayAt}
+          aria-label="Replay turn" aria-valuetext={`${turnLabel(turns[replayAt], replayAt)}, ${clockTime(turns[replayAt].started_at)} UTC`}
+          oninput={onReplay} onkeydown={onReplayKey} onpointerup={onReplayPointer} />
+        <output for="replay-turn" class="readout">{clockTime(turns[replayAt].started_at)} UTC</output>
+      </div>
     {/if}
 
-    <section class="turns" aria-label="Turns">
-      <div class="legend">
-        <span class="lane-keys" aria-hidden="true">
-          {#each LANES as l (l.id)}<span style:color={laneColor(l.id)}>{l.name[0]}</span>{/each}
-        </span>
-        <span>The rail shows which lane each step used: memory, live state, workspace, acts. Read it top to bottom to see the path Nous took.</span>
-      </div>
-
-      {#if turnMissing}
-        <p class="gone" role="status">{nextCursor === null ? 'That turn is not in this session.' : 'That turn is further on. Use Load more to reach it.'}</p>
-      {/if}
-
-      {#each turns as t, i (t.turn_id)}
-        {@const chips = contextChips(t)}
-        {@const claim = claimLine(t)}
-        <article class="turn" class:target={t.turn_id === turnId} id="turn-{t.turn_id}">
-          <div class="row">
-            <div class="side"><span>{turnLabel(t, i)}</span><br />{fmtTime(t.started_at)}</div>
-            {#if t.trigger}
-              <div class="bubble"><div class="who">You</div><div class="wrap body">{t.trigger}</div></div>
-            {/if}
-          </div>
-
-          {#if chips.length > 0}
-            <div class="row ctx">
-              <div class="side"></div>
-              <div class="chips"><span>Already in context before acting:</span>{#each chips as c}<span class="chip">{c}</span>{/each}</div>
-            </div>
+    <div class="layout">
+      <section class="turns card" aria-label="Turns">
+        <div class="list-top">
+          <span class="muted">Each turn is tinted with the colour of the frame Nous was in.</span>
+          {#if frames.length > 0}
+            <ul class="key" aria-label="Frames in these turns">
+              {#each frames as f (f)}<li title={f}><span class="kdot" aria-hidden="true" style:--fc={frameVar(f)}></span><span class="kname">{f}</span></li>{/each}
+            </ul>
           {/if}
-
-          {#each t.calls as c (c.id)}
-            {@const b = badge(c)}
-            <div class="row">
-              <div class="rail" aria-hidden="true">
-                {#each railLanes(c.lane) as l (l)}
-                  <span class="col" style:--lane={laneColor(l)}>{#if l === (LANES.some((x) => x.id === c.lane) ? c.lane : 'other')}<span class="seg" style:background={laneColor(c.lane)}></span>{/if}</span>
-                {/each}
-              </div>
-              <div class="step" style:box-shadow={`inset 3px 0 0 ${laneColor(c.lane)}`}>
-                {#if c.reason}<p class="why wrap">{c.reason}</p>{:else}<p class="why muted">No reason recorded</p>{/if}
-                <div class="toolline">
-                  <span class="tool">{c.tool}</span>
-                  {#if c.tool_called && c.tool_called !== c.tool}<span class="muted small">called as {c.tool_called}</span>{/if}
-                  <span class="lane" style:color={laneColor(c.lane)}>{laneName(c.lane)}</span>
-                  {#if b}<span class="badge">{b}</span>{/if}
-                  {#if c.ledger}<span class="pill pill-{c.ledger.status}">{c.ledger.status}</span>{/if}
-                  <span class="ms">{fmtDuration(c.duration_ms)}</span>
-                </div>
-                <div class="input wrap">{c.input}</div>
-                {#if c.error}<p class="err wrap">{c.error}</p>{/if}
-                {#if c.result}<p class="got wrap"><span class="muted">Got:</span> {c.result}</p>{/if}
-                {#if c.result_full}<FullResult callId={c.id} />{/if}
-                {#if c.ledger && c.ledger.status === 'unknown' && c.ledger.held}
-                  <HoldUndo id={c.ledger.id} />
-                {/if}
-              </div>
-            </div>
-          {:else}
-            <div class="row"><div class="side"></div><p class="muted none">No tools used this turn</p></div>
-          {/each}
-
-          {#if t.reply || claim || t.critic || t.error}
-            <div class="row">
-              <div class="side"></div>
-              <div class="reply">
-                {#if t.reply}<div class="who">Nous replied</div><div class="wrap body">{t.reply}</div>{/if}
-                {#if t.error}<p class="err wrap">{t.error}</p>{/if}
-                {#if claim}<div class="claim" class:bad={(t.claim_check?.violation_count ?? 0) > 0}>{claim}</div>{/if}
-                {#if t.critic}
-                  <div class="critic">
-                    Critic: {t.critic.critic_frame ?? 'unknown'}{#if t.critic.agreed === false && t.critic.heuristic_frame} (heuristic said {t.critic.heuristic_frame}){/if}
-                    {#if t.critic.rationale}
-                      <details><summary>Why</summary><p class="wrap">{t.critic.rationale}</p></details>
-                    {/if}
-                  </div>
-                {/if}
-              </div>
-            </div>
-          {/if}
-
-          {#if t.model_calls.length > 0}
-            <div class="row">
-              <div class="side"></div>
-              <div class="mcalls">
-                <a href={modelCallsHref(undefined, { turn_id: t.turn_id })}>{plural(t.model_calls.length, 'main-loop model call', 'main-loop model calls')}</a>
-                <span class="muted">·</span>
-                <a href={modelCallsHref(undefined, { session_id: s.session_id })}>all model calls of this conversation</a>
-                <details>
-                  <summary>List them</summary>
-                  <ul>
-                    {#each t.model_calls as m (m.id)}
-                      <li><a href={modelCallsHref(['c', m.id])}>{m.model ?? 'unknown model'}</a> <span class="muted">{m.purpose} · {m.status} · {fmtTokens(m.input_total)} in · {fmtTokens(m.output_tokens)} out</span></li>
-                    {/each}
-                  </ul>
-                </details>
-              </div>
-            </div>
-          {/if}
-        </article>
-      {/each}
-
-      {#if nextCursor !== null}
-        <div class="more">
-          <button type="button" disabled={moreBusy} onclick={loadMore}>Load more turns</button>
-          <span class="muted">{`Showing ${num(turns.length)} of ${num(Math.max(s.turns, turns.length))} turns`}</span>
-          {#if moreError}<span class="err" role="alert">Could not load more.</span>{/if}
         </div>
+
+        {#if turnMissing}
+          <p class="gone" role="status">{nextCursor === null ? 'That turn is not in this session.' : 'That turn is further on. Use Load more to reach it.'}</p>
+        {/if}
+
+        {#each turns as t, i (t.turn_id)}
+          {@const change = frameChange(lastFramed(turns, i), t)}
+          {@const chips = contextChips(t)}
+          {@const claim = claimLine(t)}
+          {@const verdict = criticVerdict(t)}
+          {@const calls = t.tool_call_count}
+          {#if change}
+            <div class="change" style:--from={frameVar(change.from)} style:--to={frameVar(change.to)}>
+              <span class="grad" aria-hidden="true"></span>
+              <p>Frame changed from <b class="from">{change.from}</b> to <b class="to">{change.to}</b>. {change.why}</p>
+            </div>
+          {/if}
+          <article class="turn" class:target={t.turn_id === turnId} class:hl={replay === i} id="turn-{t.turn_id}" style:--fc={frameVar(t.frame_id)}>
+            <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+            <div class="gutter" onclick={() => (replay = i)}>
+              <div class="when"><span class="tlabel">{turnLabel(t, i)}</span> <span class="clock">{clockTime(t.started_at)}</span></div>
+              <div class="frame">{frameLabel(t.frame_id)}</div>
+              <div class="chosen">{chosenBy(t.frame_reason)}</div>
+              <dl>
+                <div><dt>{fmtTokens(t.input_tokens ?? null)}</dt> <dd>tokens in</dd></div>
+                <div><dt>{fmtSeconds(replySeconds(t))}</dt> <dd>to reply</dd></div>
+                <div><dt>{num(calls)}</dt> <dd>{calls === 1 ? 'tool call' : 'tool calls'}</dd></div>
+              </dl>
+              {#if verdict}<span class="crit" class:no={verdict === 'overrode'}>{verdictText(verdict, t.frame_id)}</span>{/if}
+              <!-- A turn older than migration 106 has no frame reason, so no verdict. Its critic record's critic_frame is the
+                   heuristic's own frame when no critic model answered, so only a frame that differs from the heuristic's is a
+                   recommendation the critic certainly made: say that one, and nothing otherwise. -->
+              {#if t.frame_reason == null && t.critic?.critic_frame && t.critic.heuristic_frame && t.critic.critic_frame !== t.critic.heuristic_frame}
+                <p class="crit-old">Critic recommended {t.critic.critic_frame}; the heuristic said {t.critic.heuristic_frame}.</p>
+              {/if}
+              {#if t.critic?.rationale}
+                <details class="crit-why"><summary>{verdict ? 'Why' : "Critic's reasoning"}</summary><p class="wrap">{t.critic.rationale}</p></details>
+              {/if}
+            </div>
+
+            <div class="rows">
+              {#if t.trigger}
+                <div class="bubble line"><span class="who">You</span><div class="wrap said">{t.trigger}</div></div>
+              {/if}
+
+              {#if chips.length > 0}
+                <div class="chips ctx"><span>Already in context before acting:</span>{#each chips as c}<span class="chip">{c}</span>{/each}</div>
+              {/if}
+
+              {#each t.calls as c (c.id)}
+                {@const b = badge(c)}
+                <div class="step" class:err={c.is_error}>
+                  {#if c.reason}<p class="why reason wrap">{c.reason}</p>{:else}<p class="why muted">No reason recorded</p>{/if}
+                  <div class="toolline">
+                    <span class="tool">{c.tool}</span>
+                    {#if c.tool_called && c.tool_called !== c.tool}<span class="muted small">called as {c.tool_called}</span>{/if}
+                    {#if b}<span class="badge">{b}</span>{/if}
+                    {#if c.ledger}<span class="pill pill-{c.ledger.status}">{c.ledger.status}</span>{/if}
+                  </div>
+                  <span class="lane">{laneName(c.lane)}</span>
+                  <span class="ms">{fmtDuration(c.duration_ms)}</span>
+                  <div class="input wrap">{c.input}</div>
+                  {#if c.error}<p class="errtext wrap">{c.error}</p>{/if}
+                  {#if c.result}<p class="got wrap"><span class="muted">Got:</span> {c.result}</p>{/if}
+                  {#if c.result_full}<FullResult callId={c.id} />{/if}
+                  {#if c.ledger && c.ledger.status === 'unknown' && c.ledger.held}
+                    <HoldUndo id={c.ledger.id} />
+                  {/if}
+                </div>
+              {:else}
+                <p class="muted none">No tools used this turn</p>
+              {/each}
+
+              {#if t.reply || claim || t.error}
+                <div class="reply line">
+                  <span class="who">{t.reply ? 'Nous replied' : 'Nous'}</span>
+                  <div class="reply-body">
+                    {#if t.reply}<div class="wrap said">{t.reply}</div>{/if}
+                    {#if t.error}<p class="errtext wrap">{t.error}</p>{/if}
+                    {#if claim}<div class="claim" class:bad={(t.claim_check?.violation_count ?? 0) > 0}>{claim}</div>{/if}
+                  </div>
+                </div>
+              {/if}
+
+              {#if t.model_calls.length > 0}
+                <!-- Every main-loop call of the turn (the API lists at most 20; an older API has no count). -->
+                {@const mcount = t.model_call_count ?? t.model_calls.length}
+                <div class="mcalls">
+                  <a href={modelCallsHref(undefined, { turn_id: t.turn_id })}>{plural(mcount, 'main-loop model call', 'main-loop model calls')}</a>
+                  <span class="muted">·</span>
+                  <a href={modelCallsHref(undefined, { session_id: s.session_id })}>all model calls of this conversation</a>
+                  <details>
+                    <summary>{mcount > t.model_calls.length ? `List the first ${t.model_calls.length}` : 'List them'}</summary>
+                    <ul>
+                      {#each t.model_calls as m (m.id)}
+                        <li><a href={modelCallsHref(['c', m.id])}>{m.model ?? 'unknown model'}</a> <span class="muted">{m.purpose} · {m.status} · {fmtTokens(m.input_total)} in · {fmtTokens(m.output_tokens)} out</span></li>
+                      {/each}
+                    </ul>
+                  </details>
+                </div>
+              {/if}
+            </div>
+          </article>
+        {/each}
+
+        {#if nextCursor !== null}
+          <div class="more">
+            <Button variant="outline" class="max-md:min-h-11" disabled={moreBusy} onclick={loadMore}>Load more turns</Button>
+            <span class="muted">{`Showing ${num(turns.length)} of ${num(Math.max(s.turns, turns.length))} turns`}</span>
+            {#if moreError}<span class="errtext" role="alert">Could not load more.</span>{/if}
+          </div>
+        {/if}
+      </section>
+
+      {#if used.length > 0}
+        <section class="used card" aria-labelledby="used-h">
+          <h2 id="used-h">What it used, and why</h2>
+          {#each used as u (u.tool)}
+            <div class="used-row">
+              <span class="used-tool"><span class="dot" aria-hidden="true" style:--dot={laneVar(u.lane)}></span>{u.tool}<span class="count">{plural(u.calls, 'call', 'calls')}</span></span>
+              <ul>
+                {#each u.why.slice(0, 3) as w}<li class="wrap reason">{w}</li>{/each}
+                {#if u.why.length > 3}
+                  <li class="more-reasons"><details><summary>and {u.why.length - 3} more</summary><ul>{#each u.why.slice(3) as w}<li class="wrap">{w}</li>{/each}</ul></details></li>
+                {/if}
+              </ul>
+            </div>
+          {/each}
+        </section>
       {/if}
-    </section>
+    </div>
   {:else if $store.error}
-    <p class="err" role="alert">Could not load this session.</p>
+    <p class="errtext" role="alert">Could not load this session.</p>
   {:else}
     <p class="muted" role="status">Loading…</p>
   {/if}
 </div>
 
 <style>
-  .trace { display: flex; flex-direction: column; gap: 1.5rem; }
-  .back { color: var(--accent-text); font-size: 0.875rem; text-decoration: none; align-self: flex-start; }
+  /* Colours are tokens only (hexGuard): the dark look reads today's values, the paper ground its own. */
+  .trace { display: flex; flex-direction: column; gap: 1.25rem; --gw: 168px; --lw: 86px; }
+  .back { color: var(--accent-text); font-size: 0.8125rem; text-decoration: none; align-self: flex-start; text-underline-offset: 3px; }
   .back:hover { text-decoration: underline; }
-  a:focus-visible, button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
+  a:focus-visible, summary:focus-visible, input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
   .gone, .muted { color: var(--muted); }
   .small { font-size: 0.75rem; }
-  .notice { padding: 0.75rem 1rem; border-radius: 8px; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.4); font-size: 0.875rem; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--radius-sm); background: var(--notice-bg); border: 1px solid var(--notice-border); font-size: 0.875rem; }
   .wrap { overflow-wrap: anywhere; white-space: pre-wrap; }
-  .head { display: flex; flex-direction: column; gap: 0.625rem; }
+  .card { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow); }
+
+  /* Header: the title, Refresh top right, the facts as pills */
+  .head { display: flex; flex-direction: column; gap: 0.75rem; }
   .head-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
-  h1 { margin: 0; font-size: 1.625rem; font-weight: 700; letter-spacing: -0.02em; max-width: 60ch; overflow-wrap: anywhere; }
-  .meta { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; font-size: 0.875rem; color: var(--muted); }
-  .head-right { display: flex; align-items: center; gap: 0.75rem; }
-  .refresh { font: inherit; cursor: pointer; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.875rem; min-height: 36px; }
-  .refresh:disabled { opacity: 0.6; cursor: default; }
-  .meta .bad { color: var(--red); }
+  .title { margin: 0; font-size: 1.625rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1.2; max-width: 60ch; overflow-wrap: anywhere; min-width: 0; }
+  :global(html[data-look="paper"]) .title { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
+  .head-right { display: flex; align-items: center; gap: 0.75rem; margin-left: auto; }
+  .meta { display: flex; flex-wrap: wrap; gap: 0.5rem; font-size: 0.8125rem; }
+  .meta > * { padding: 3px 11px; border-radius: 999px; background: var(--surface); border: var(--card-border); box-shadow: var(--card-shadow); color: var(--text); text-decoration: none; }
+  .meta .bad { color: var(--err-text); background: var(--err-bg); border-color: transparent; box-shadow: none; font-weight: 600; }
+  .meta .warn { color: var(--warn-text); background: var(--warn-bg); border-color: transparent; box-shadow: none; font-weight: 600; }
   .meta a { color: var(--accent-text); }
-  .used { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1.125rem 1.25rem; display: flex; flex-direction: column; gap: 0.875rem; }
-  .used h2 { margin: 0; font-size: 1.0625rem; font-weight: 600; }
-  .used-row { display: grid; grid-template-columns: minmax(160px, 220px) minmax(0, 1fr); gap: 0.25rem 1rem; align-items: baseline; border-top: 1px solid var(--border); padding-top: 0.75rem; }
-  .used-tool { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 0.875rem; overflow-wrap: anywhere; }
-  .count { font-family: inherit; font-size: 0.8125rem; color: var(--muted); }
-  .used ul { margin: 0; padding-left: 1.125rem; display: flex; flex-direction: column; gap: 4px; font-size: 0.875rem; line-height: 1.5; }
-  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex: none; }
-  .turns { display: flex; flex-direction: column; gap: 1.75rem; }
-  .legend { display: flex; align-items: center; gap: 1rem; font-size: 0.8125rem; color: var(--muted); flex-wrap: wrap; }
-  .lane-keys { display: flex; }
-  .lane-keys span { width: 28px; text-align: center; font-weight: 600; }
-  .turn { display: flex; flex-direction: column; gap: 0.625rem; scroll-margin-top: 1rem; border-radius: 12px; }
-  .turn.target { outline: 2px solid var(--accent); outline-offset: 6px; }
-  .row { display: flex; gap: 1rem; align-items: flex-start; }
-  .side { width: 112px; flex: none; font-size: 0.8125rem; color: var(--muted); padding-top: 0.75rem; }
-  .ctx .side { padding: 0; }
-  .bubble { flex: 1 1 auto; min-width: 0; background: var(--surface-hover); border: 1px solid var(--border); border-radius: 12px; padding: 0.75rem 1rem; }
-  .who { font-size: 0.75rem; color: var(--muted); margin-bottom: 4px; }
-  .body { font-size: 0.9375rem; line-height: 1.5; }
-  .chips { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 0.8125rem; color: var(--muted); }
-  .chip { padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text); }
-  .rail { width: 112px; flex: none; display: flex; align-self: stretch; }
-  .col { width: 28px; display: flex; justify-content: center; padding-top: 1rem;
-    background: linear-gradient(color-mix(in srgb, var(--lane) 13%, transparent), color-mix(in srgb, var(--lane) 13%, transparent)) center / 2px 100% no-repeat; }
-  .seg { width: 12px; height: 12px; border-radius: 50%; box-shadow: 0 0 0 3px var(--bg); }
-  .step { flex: 1 1 auto; min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 0.75rem 1rem; display: flex; flex-direction: column; gap: 8px; }
-  .why { margin: 0; font-size: 0.9375rem; line-height: 1.5; font-weight: 500; }
-  .why.muted { font-weight: 400; }
-  .toolline { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: baseline; }
-  .tool { font-family: var(--font-mono); font-size: 0.875rem; font-weight: 500; }
-  .lane { font-size: 0.75rem; font-weight: 600; }
-  .ms { font-size: 0.8125rem; color: var(--muted); margin-left: auto; }
-  .badge { font-size: 0.75rem; font-weight: 600; padding: 2px 8px; border-radius: 6px; color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.5); background: rgba(251, 191, 36, 0.08); }
-  .pill { font-size: 0.75rem; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
-  .pill-unknown { color: #fbbf24; border-color: rgba(251, 191, 36, 0.5); }
-  .pill-error, .pill-blocked { color: var(--red); }
-  .pill-success { color: #34d399; }
-  .input { font-family: var(--font-mono); font-size: 0.8125rem; line-height: 1.5; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.625rem; overflow-x: auto; }
-  .got { margin: 0; font-size: 0.875rem; line-height: 1.5; }
-  .err { color: var(--red); font-size: 0.875rem; margin: 0; }
-  .none { margin: 0; font-size: 0.875rem; padding-top: 0.25rem; }
-  .reply { flex: 1 1 auto; min-width: 0; border-left: 2px solid var(--accent); padding: 6px 0 6px 1rem; display: flex; flex-direction: column; gap: 6px; }
-  .reply .body { line-height: 1.55; max-width: 90ch; }
-  .claim { font-size: 0.8125rem; color: #34d399; }
-  .claim.bad { color: var(--red); }
-  .critic { font-size: 0.8125rem; color: var(--muted); }
-  .critic details p { margin: 4px 0 0; }
-  .mcalls { flex: 1 1 auto; min-width: 0; font-size: 0.8125rem; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
-  .mcalls a, .back { color: var(--accent-text); }
+  .meta a:hover { text-decoration: underline; }
+
+  /* Replay: one round handle steps through the loaded turns */
+  /* Sticky, so dragging it never scrolls it out of view (the turns land below it: see .turn scroll-margin-top). */
+  .replay { position: sticky; top: 0.5rem; z-index: 1; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 1.125rem; padding: 0.75rem 1.25rem; }
+  .replay label { font-size: 0.8125rem; color: var(--muted); }
+  .readout { font-size: 0.9375rem; font-weight: 650; font-stretch: 82%; min-width: 9ch; text-align: right; }
+  .replay input { width: 100%; height: 24px; margin: 0; background: transparent; appearance: none; -webkit-appearance: none; cursor: pointer; }
+  .replay input::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: var(--border); }
+  .replay input::-moz-range-track { height: 4px; border-radius: 2px; background: var(--border); }
+  .replay input::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 18px; height: 18px; margin-top: -7px; border-radius: 50%;
+    background: hsl(var(--primary)); border: 3px solid var(--surface); box-shadow: 0 0 0 1px var(--border); }
+  .replay input::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; background: hsl(var(--primary)); border: 3px solid var(--surface); box-shadow: 0 0 0 1px var(--border); }
+
+  /* The turns card and the "What it used" card beside it */
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 1.5rem; align-items: start; }
+  .turns { padding: 0.375rem 0 0.75rem; display: flex; flex-direction: column; min-width: 0; }
+  .list-top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0.5rem 1.25rem; padding: 0.75rem 1.375rem 0.625rem; font-size: 0.8125rem; }
+  .key { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.375rem 1rem; color: var(--muted); overflow-wrap: anywhere; min-width: 0; }
+  .key li { display: inline-flex; align-items: center; gap: 6px; }
+  .kdot { width: 10px; height: 10px; border-radius: 50%; background: var(--fc); flex: none; }
+  /* A long or custom frame id is cut, never the key's width; the title holds it whole. */
+  .kname { max-width: 16ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .turn { display: grid; grid-template-columns: var(--gw) minmax(0, 1fr); margin: 0.375rem 0.625rem; border-radius: var(--card-radius-sm); scroll-margin-top: 6rem; }
+  /* The replay mark tints the rows only: the 7% frame tint is measured over the white card (on --surface-hover the
+     debug name would fall to 4.2:1). */
+  .turn.hl .rows { background: var(--surface-hover); }
+  /* The soft blocks inside the marked rows share its colour: lift them to the card colour so they keep their shape. */
+  .turn.hl .rows .chip, .turn.hl .rows .step:not(.err) .got { background: var(--surface); }
+  .turn.target { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* The frame column: the frame's colour at 7% (debug's name on its tint is 4.56:1), a ring on hover */
+  .gutter { border-radius: var(--card-radius-sm); background: color-mix(in srgb, var(--fc) 7%, transparent); padding: 0.75rem 0.875rem; cursor: pointer;
+    overflow-wrap: anywhere; min-width: 0; font-size: 0.78125rem; color: var(--muted); }
+  .gutter:hover { box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--fc) 35%, transparent); }
+  .when { font-stretch: 82%; }
+  .tlabel { margin-right: 0.375rem; }
+  .frame { font-size: 1.0625rem; font-weight: 650; color: var(--fc); margin-top: 2px; line-height: 1.2; }
+  .chosen { margin-bottom: 0.625rem; }
+  .gutter dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 1px 8px; margin: 0; }
+  .gutter dl > div { display: contents; }
+  .gutter dt { font-weight: 650; font-stretch: 82%; text-align: right; color: var(--text); }
+  .gutter dd { margin: 0; }
+  /* A pill on one line; a radius of half its height keeps a wrapped "Critic disagreed, kept initiation" rounded. */
+  .crit { display: inline-block; margin-top: 0.625rem; font-size: 0.75rem; font-weight: 600; font-stretch: 88%; padding: 1px 9px; border-radius: 10px; background: var(--surface); color: var(--muted); }
+  .crit.no { color: var(--err-text); background: var(--err-bg); }
+  .crit-old { margin: 0.625rem 0 0; }
+  .crit-why { margin-top: 0.375rem; }
+  .crit-why summary { cursor: pointer; color: var(--accent-text); }
+  .crit-why p { margin: 4px 0 0; color: var(--text); }
+
+  /* The rows beside it: your message, each call (reason first), the reply */
+  .rows { min-width: 0; padding: 0.5rem 0.5rem 0.5rem 1.375rem; display: flex; flex-direction: column; border-radius: var(--card-radius-sm); transition: background var(--transition); }
+  .line { display: grid; grid-template-columns: var(--lw) minmax(0, 1fr); gap: 0.75rem; padding: 0.375rem 0 0.625rem; }
+  .who { font-size: 0.78125rem; color: var(--muted); padding-top: 2px; }
+  .said { font-size: 0.9375rem; line-height: 1.5; max-width: 72ch; overflow-wrap: anywhere; }
+  .reply { border-top: 1px solid var(--border); padding-top: 0.625rem; }
+  .reply-body { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 0.8125rem; color: var(--muted); padding: 0 0 0.625rem calc(var(--lw) + 0.75rem); }
+  .chip { padding: 3px 10px; border-radius: 999px; background: var(--surface-hover); color: var(--text); }
+  .none { margin: 0; font-size: 0.875rem; padding: 0.5rem 0 0.5rem calc(var(--lw) + 0.75rem); border-top: 1px solid var(--border); }
+
+  .step { display: grid; grid-template-columns: var(--lw) minmax(0, 1fr) auto; gap: 4px 0.75rem; padding: 0.625rem 0; border-top: 1px solid var(--border); align-items: start; }
+  .step > :global(*) { grid-column: 2 / -1; min-width: 0; max-width: 100%; }
+  .step > .why { grid-column: 2; grid-row: 1; }
+  .step > .toolline { grid-column: 2; grid-row: 2; }
+  .step > .lane { grid-column: 1; grid-row: 1; }
+  .step > .ms { grid-column: 3; grid-row: 1; }
+  .why { margin: 0; font-size: 0.9375rem; line-height: 1.5; max-width: 72ch; }
+  .reason { overflow-wrap: anywhere; }
+  .toolline { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+  .tool { font-family: var(--font-mono); font-size: 0.8125rem; font-weight: 500; overflow-wrap: anywhere; }
+  .lane { font-size: 0.78125rem; color: var(--muted); padding-top: 2px; }
+  .ms { font-size: 0.78125rem; color: var(--muted); font-stretch: 82%; text-align: right; padding-top: 2px; white-space: nowrap; }
+  .badge { font-size: 0.71875rem; font-weight: 650; padding: 1px 9px; border-radius: 999px; color: var(--warn-text); background: var(--warn-bg); border: 1px solid var(--warn-border); }
+  .pill { font-size: 0.71875rem; padding: 1px 9px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+  .pill-unknown { color: var(--warn-text); border-color: var(--warn-border); }
+  .pill-error, .pill-blocked { color: var(--err-text); }
+  .pill-success { color: var(--ok-text); }
+  .input { font-family: var(--font-mono); font-size: 0.78125rem; line-height: 1.5; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 0.375rem 0.625rem; overflow-x: auto; overflow-wrap: anywhere; max-width: 100%; justify-self: stretch; }
+  .got { margin: 0; justify-self: start; max-width: 100%; font-family: var(--font-mono); font-size: 0.78125rem; line-height: 1.5; color: var(--text);
+    background: var(--surface-hover); border-radius: var(--radius-sm); padding: 0.3125rem 0.625rem; overflow-wrap: anywhere; }
+  .step.err .got { color: var(--err-text); background: var(--err-bg); }
+  .errtext { color: var(--err-text); font-size: 0.875rem; margin: 0; }
+  .claim { font-size: 0.8125rem; color: var(--ok-text); }
+  .claim.bad { color: var(--err-text); }
+  .mcalls { font-size: 0.8125rem; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; padding: 0.25rem 0 0.25rem calc(var(--lw) + 0.75rem); }
+  .mcalls a { color: var(--accent-text); }
   .mcalls details { flex-basis: 100%; }
   .mcalls ul { margin: 4px 0 0; padding-left: 1.125rem; display: flex; flex-direction: column; gap: 2px; }
-  .more button { font: inherit; cursor: pointer; background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.875rem; min-height: 36px; }
-  .more button:disabled { opacity: 0.6; cursor: default; }
-  .more { display: flex; align-items: center; gap: 0.75rem; }
+
+  /* Between turns: a bar from the old frame's colour to the new one's, and the sentence */
+  .change { display: flex; align-items: center; gap: 0.625rem; margin: 2px 0.625rem; padding: 0.375rem 0.75rem; font-size: 0.8125rem; color: var(--muted); overflow-wrap: anywhere; }
+  .change p { margin: 0; min-width: 0; }
+  .grad { width: calc(var(--gw) - 24px); height: 6px; border-radius: 3px; background: linear-gradient(90deg, var(--from), var(--to)); flex: none; }
+  .change b { font-weight: 650; }
+  .change .from { color: var(--from); }
+  .change .to { color: var(--to); }
+
+  .more { display: flex; align-items: center; flex-wrap: wrap; gap: 0.75rem; padding: 0.75rem 1.375rem 0; }
+
+  /* What it used, and why */
+  .used { padding: 1.125rem 1.25rem 0.5rem; display: flex; flex-direction: column; min-width: 0; }
+  .used h2 { margin: 0 0 0.5rem; font-size: 0.9375rem; font-weight: 650; }
+  .used-row { border-top: 1px solid var(--border); padding: 0.625rem 0; display: flex; flex-direction: column; gap: 4px; }
+  .used-tool { display: flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 0.8125rem; font-weight: 500; overflow-wrap: anywhere; }
+  .count { font-family: var(--font-ui); font-weight: 400; font-size: 0.78125rem; color: var(--muted); margin-left: auto; white-space: nowrap; }
+  .used ul { margin: 0; padding-left: 1.125rem; display: flex; flex-direction: column; gap: 2px; font-size: 0.8125rem; line-height: 1.45; color: var(--muted); }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--dot); }
   .more-reasons { list-style: none; margin-left: -1.125rem; }
+
+  @media (max-width: 1180px) {
+    .layout { grid-template-columns: minmax(0, 1fr); }
+  }
   @media (max-width: 768px) {
-    .refresh, .more button, summary, .mcalls a, .back { min-height: 44px; display: inline-flex; align-items: center; }
-    .side, .rail { width: 56px; }
-    .col { width: 14px; }
-    .lane-keys span { width: 14px; }
-    .used-row { grid-template-columns: minmax(0, 1fr); }
+    summary, .mcalls a, .back { min-height: 44px; display: inline-flex; align-items: center; }
+    .replay { top: calc(3.25rem + 0.5rem); gap: 0.75rem; padding: 0.625rem 1rem; }
+    .turn { scroll-margin-top: calc(3.25rem + 7rem); }
+    .replay input { height: 44px; }
+  }
+  @media (max-width: 640px) {
+    .turn { grid-template-columns: minmax(0, 1fr); }
+    .gutter { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.75rem; }
+    .gutter .frame, .gutter .chosen { margin: 0; }
+    .gutter dl { display: flex; flex-wrap: wrap; gap: 0 0.75rem; }
+    .gutter dl > div { display: inline-flex; gap: 4px; }
+    .crit, .crit-why, .crit-old { margin-top: 0; }
+    .rows { padding: 0.5rem 0.25rem; }
+    .line { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+    .step { grid-template-columns: minmax(0, 1fr) auto; }
+    .step > :global(*) { grid-column: 1 / -1; }
+    .step > .lane { grid-column: 1; grid-row: 1; }
+    .step > .ms { grid-column: 2; grid-row: 1; }
+    .step > .why { grid-column: 1 / -1; grid-row: 2; }
+    .step > .toolline { grid-column: 1 / -1; grid-row: 3; }
+    .chips, .none, .mcalls { padding-left: 0; }
+    .change { flex-wrap: wrap; }
+    .grad { width: 48px; }
+    .list-top, .more { padding-left: 0.875rem; padding-right: 0.875rem; }
+    .turn, .change { margin-left: 0.375rem; margin-right: 0.375rem; }
   }
 </style>

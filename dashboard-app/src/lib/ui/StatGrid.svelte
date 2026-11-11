@@ -29,10 +29,12 @@
     gap: 1rem;
   }
 
+  /* Structure and tones read tokens whose dark values are the old literals (shared.look.test.ts). */
   .stat-card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 8px);
+    border: var(--card-border);
+    border-radius: var(--card-radius-sm);
+    box-shadow: var(--card-shadow);
     padding: 1rem;
     display: flex;
     flex-direction: column;
@@ -50,8 +52,8 @@
     font-size: 0.75rem;
     font-weight: 500;
     color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
   }
 
   .stat-note {
@@ -61,9 +63,9 @@
 
   .tone-waiting { color: var(--waiting); }
   .tone-unknown { color: var(--unknown); }
-  .tone-error { color: var(--red); }
-  .tone-warn { color: #f59e0b; }
-  .tone-ok { color: #10b981; }
+  .tone-error { color: var(--err-text); }
+  .tone-warn { color: var(--stat-warn); }
+  .tone-ok { color: var(--stat-ok); }
 
   @media (max-width: 640px) {
     .stat-grid {

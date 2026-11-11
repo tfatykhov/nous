@@ -79,7 +79,7 @@ describe('Work sessions list', () => {
     expect(row.textContent).toContain('4 turns');
     const dot = within(row).getByText('db_query ×3').querySelector('.dot') as HTMLElement;
     expect(dot.getAttribute('aria-hidden')).toBe('true');
-    expect(dot.style.backgroundColor).toBe('rgb(251, 191, 36)');   // the live lane
+    expect(dot.style.getPropertyValue('--dot')).toBe('var(--lane-live)');   // the live lane's token
     expect(urls).toHaveLength(1);
   });
 
@@ -275,6 +275,21 @@ describe('Work sessions list', () => {
     await fireEvent.click(screen.getByRole('button', { name: 'A tool failed' }));
     await waitFor(() => expect(lastParams().get('lens')).toBe('error'));
     expect(history.length).toBe(n);
+  });
+
+  it('the legend dots read the lane tokens, in lane order', async () => {
+    const { container } = render(Work);
+    await screen.findByText('Gap Scout status check');
+    const dots = Array.from(container.querySelectorAll('.legend .dot')) as HTMLElement[];
+    expect(dots.map((d) => d.style.getPropertyValue('--dot'))).toEqual(
+      ['var(--lane-memory)', 'var(--lane-live)', 'var(--lane-workspace)', 'var(--lane-acts)']);
+  });
+
+  it('the list reads tokens: no colour literal in its style or its markup', () => {
+    for (const f of ['Work.svelte', 'work/SessionList.svelte', 'work/Patterns.svelte', 'work/FullResult.svelte']) {
+      const src = readFileSync(resolve(__dirname, f), 'utf-8');
+      expect(src, f).not.toMatch(/#[0-9a-fA-F]{6}\b|rgba?\(/);
+    }
   });
 
   it('gives the legend dots and the time and turns screen-reader context', async () => {

@@ -18,6 +18,12 @@ export function laneColor(lane: string): string {
   return Object.hasOwn(LANE_COLORS, lane) ? LANE_COLORS[lane] : LANE_COLORS.other;
 }
 
+/** The lane's colour token, `var(--lane-memory)` (dark: the hex above; paper: its darker paper value); `other` for any
+ * lane not listed. */
+export function laneVar(lane: string): string {
+  return `var(--lane-${Object.hasOwn(LANE_COLORS, lane) ? lane : 'other'})`;
+}
+
 /** `"40 ms"` under a second, `"1.4 s"` from a second; `"—"` when there is no duration. */
 export function fmtDuration(ms: number | null): string {
   if (ms == null) return '—';
