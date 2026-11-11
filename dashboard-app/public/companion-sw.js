@@ -12,6 +12,8 @@
 //     paint inline, which is the honest offline story.
 //   - /a2ui/stream (SSE), /a2ui/action, /a2ui/call, everything non-GET:
 //     NEVER touched — pass through to the network.
+//   - media (Range / video / audio requests) is never touched — a 206
+//     cannot be cached and iOS needs the origin's own Range answers.
 //
 // Web Push is deliberately absent (spec §12.0/§13): Telegram is the push
 // channel with deep links; a second delivery channel splits notification
@@ -172,6 +174,7 @@ self.addEventListener('fetch', (event) => {
   if (request.method !== 'GET') return;
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return;
+  if (request.headers.has('range') || request.destination === 'video' || request.destination === 'audio') return;
   if (isImmutableAsset(url)) {
     event.respondWith(cacheFirst(request));
   } else if (isShell(url) || isSnapshotApi(url)) {
