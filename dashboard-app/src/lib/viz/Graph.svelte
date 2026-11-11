@@ -1,5 +1,7 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
+  import { getLook, look } from '../look';
+  import { resolveColors } from '../chartColors';
 
   export type GraphNode = {
     id: string;
@@ -13,7 +15,8 @@
   let {
     elements,
     layout = { name: 'cose' },
-    style = [],
+    style = () => [],
+    colorFor,
     onNodeClick,
     searchQuery = '',
     hiddenTypes = new Set<string>(),
@@ -21,7 +24,10 @@
   }: {
     elements: any[];
     layout?: any;
-    style?: any[];
+    /** The cytoscape stylesheet, built against the graph's own element (cytoscape cannot read var()). */
+    style?: (el: Element) => any[];
+    /** A node's (by type) or an edge's (by relation) colour as a token, `var(--x)`; the graph resolves it. */
+    colorFor?: (kind: 'node' | 'edge', key: string) => string;
     onNodeClick?: (node: GraphNode) => void;
     searchQuery?: string;
     hiddenTypes?: Set<string>;
@@ -30,9 +36,22 @@
 
   let el: HTMLDivElement;
   let cy: any = null; // plain let — NOT $state to avoid infinite update loop
+  let painted = getLook(); // the look the stylesheet and colours were last resolved under
+
+  const isEdge = (data: any) => data?.source != null;
+  function colorOf(data: any): string | undefined {
+    if (!colorFor) return undefined;
+    return resolveColors(colorFor(isEdge(data) ? 'edge' : 'node', (isEdge(data) ? data.relation : data.type) ?? ''), el);
+  }
+  /** The elements with each one's colour (a `color` data field the stylesheet reads) resolved on this ground. */
+  function paint(els: any[]): any[] {
+    if (!colorFor) return els;
+    return els.map((e) => ({ ...e, data: { ...e.data, color: colorOf(e.data) } }));
+  }
 
   onMount(() => {
-    cy = cytoscape({ container: el, elements, layout, style });
+    painted = getLook();
+    cy = cytoscape({ container: el, elements: paint(elements), layout, style: style(el) });
 
     cy.on('tap', 'node', (evt: any) => {
       const node = evt.target;
@@ -52,13 +71,31 @@
     };
   });
 
-  // Re-load elements when they change (e.g. initial data arrives)
+  // Re-load elements when they change (e.g. initial data arrives). The only place the layout runs.
   $effect(() => {
     const e = elements;
-    if (cy) {
-      cy.json({ elements: e });
-      cy.layout(layout).run();
-    }
+    untrack(() => {
+      if (cy) {
+        cy.json({ elements: paint(e) });
+        cy.layout(layout).run();
+      }
+    });
+  });
+
+  // A look switch: a new stylesheet and new colour data, in place. The layout is random (cose), so it never re-runs
+  // here: every node keeps its position, and the filters and search marks (bypasses and classes) stay.
+  $effect(() => {
+    const now = $look;
+    untrack(() => {
+      if (!cy || now === painted) return;
+      painted = now;
+      cy.style(style(el));
+      if (!colorFor) return;
+      cy.batch(() => {
+        cy.nodes().forEach((n: any) => n.data('color', colorOf({ type: n.data('type') })));
+        cy.edges().forEach((e: any) => e.data('color', colorOf({ source: e.data('source'), relation: e.data('relation') })));
+      });
+    });
   });
 
   // Apply type/minEdges visibility filter

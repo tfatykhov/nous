@@ -31,6 +31,14 @@ const ROUTE_FILES: Partial<Record<RouteName, readonly string[]>> = {
     'lib/ui/StaleBadge.svelte',
     'lib/ui/button/button.svelte',
   ],
+  graph: [
+    'views/GraphView.svelte',
+    'lib/viz/Graph.svelte',
+    'lib/ui/BottomSheet.svelte',
+    'lib/ui/StatGrid.svelte',
+    'lib/ui/StaleBadge.svelte',
+    'lib/ui/button/button.svelte',
+  ],
 };
 
 /** The guard list `name` of hexGuard.test.ts, read as text (importing a test file would run its tests twice). */
