@@ -375,6 +375,14 @@
     background-image: none;
   }
 
+  /* The skip link sits outside every ground, so under the paper look it would still read the dark :root accent
+     (white on #7c6af7 is 3.99:1). It takes the paper ground's link blue and white instead (7.4:1). The dark look is
+     untouched. */
+  html[data-look="paper"] .skip-link {
+    --accent: #2346c8;
+    --skip-link-text: #ffffff;
+  }
+
   /* A ground sets its own background, text colour and font: the body resolved them once, at :root. Likewise
      Tailwind's mono default (a bare <code> or <pre>), which :root resolved to the dark mono font. */
   html[data-look="paper"] [data-ground] {

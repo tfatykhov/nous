@@ -337,6 +337,17 @@ describe('contrast of the new values', () => {
     }
   });
 
+  it('the skip link under the paper look: the paper link blue and white, at least 4.5; dark untouched', () => {
+    const skip = BLOCKS.get('html[data-look="paper"] .skip-link') ?? {};
+    expect(skip).toEqual({ '--accent': PAPER['--accent'], '--skip-link-text': '#ffffff' });
+    expect(contrast(skip['--skip-link-text'], skip['--accent'])).toBeGreaterThanOrEqual(4.5);
+    // The App's rule reads exactly these two tokens, so the paper values reach it and the dark ones stay.
+    const app = readFileSync(join(__dirname, 'App.svelte'), 'utf-8');
+    expect(app).toMatch(/\.skip-link \{[^}]*background: var\(--accent\);[^}]*color: var\(--skip-link-text\);/);
+    expect(DARK['--skip-link-text']).toBe('#fff');
+    expect(contrast('#ffffff', DARK['--accent'])).toBeCloseTo(3.99, 1); // origin/main's dark skip link, kept as is
+  });
+
   it('paper text on the accent (a primary button, an active filter): at least 4.5', () => {
     expect(contrast(PAPER['--on-accent'], PAPER['--accent'])).toBeGreaterThanOrEqual(4.5);
   });
