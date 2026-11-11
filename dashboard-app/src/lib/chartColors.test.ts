@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DARK_FALLBACK, cssColor, isPaperGround, resolveColors, seriesToken, tint, withPaperDefaults } from './chartColors';
-import { DARK_SEL, parseBlocks } from './testing/css';
+import { DARK_SEL, PAPER_SEL, parseBlocks, scriptBlocks } from './testing/css';
 
 // A canvas (Chart.js) or cytoscape cannot read var(): their colours are tokens (`var(--x)`, or the `tint(--x, a)`
 // sentinel) that chartColors resolves against the element the chart draws into, so a dark island on a paper page
@@ -28,9 +28,55 @@ describe('DARK_FALLBACK', () => {
     for (const [k, v] of Object.entries(DARK_FALLBACK)) expect(v, k).toBe(DARK[k]);
   });
 
-  it('holds every series slot and every graph and relation token', () => {
-    for (let i = 1; i <= 13; i++) expect(DARK_FALLBACK[`--series-${i}`], `--series-${i}`).toBeDefined();
-    for (const k of Object.keys(DARK).filter((t) => t.startsWith('--gv-') || t.startsWith('--rel-'))) expect(DARK_FALLBACK[k], k).toBeDefined();
+  it('holds every series slot and every graph and relation colour token', () => {
+    for (let i = 0; i <= 13; i++) expect(DARK_FALLBACK[`--series-${i}`], `--series-${i}`).toBeDefined();
+    // The Graph's edge opacities are numbers, read by GraphView itself; the table holds colours only.
+    const colourTokens = Object.keys(DARK).filter((t) => (t.startsWith('--gv-') || t.startsWith('--rel-')) && !t.endsWith('-opacity') && !t.includes('-opacity-'));
+    for (const k of colourTokens) expect(DARK_FALLBACK[k], k).toBeDefined();
+  });
+
+  // Review M4: tint() and withAlpha only parse hex and comma rgb(); any other form (space syntax, hsl, color-mix) would
+  // silently lose its alpha and draw opaque. Every token a chart reads must be in one of those forms on both grounds.
+  const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
+  const TINTABLE = /^(#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})|rgba?\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*(,\s*[\d.]+\s*)?\))$/i;
+
+  it('the tintable form: hex or comma rgb(a); not space syntax, hsl or color-mix', () => {
+    for (const ok of ['#fff', '#14202b59', 'rgb(1, 2, 3)', 'rgba(0, 0, 0, 0.3)']) expect(ok, ok).toMatch(TINTABLE);
+    for (const bad of ['rgb(183 121 31 / 70%)', 'hsl(210 50% 40%)', 'color-mix(in srgb, red 50%, blue)', 'var(--x)', 'red']) {
+      expect(bad, bad).not.toMatch(TINTABLE);
+    }
+  });
+
+  it('every token it lists is tintable on both grounds (the paper value, or the dark one where paper inherits it)', () => {
+    for (const k of Object.keys(DARK_FALLBACK)) {
+      expect(DARK[k], `${k} dark`).toMatch(TINTABLE);
+      expect(PAPER[k] ?? DARK[k], `${k} paper`).toMatch(TINTABLE);
+    }
+  });
+});
+
+// Review M5: a mistyped token (`var(--sereis-1)`) resolves to '' and draws in the library's default colour, silently.
+// Every token a migrated script names by a literal string must exist in app.css.
+describe('every token a migrated script names exists', () => {
+  const guard = readFileSync(join(__dirname, '..', 'hexGuard.test.ts'), 'utf-8');
+  const files = [...(guard.match(/export const SCRIPT_GUARDED[^=]*=\s*\[([\s\S]*?)\];/)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  const scripts = [...files.map((f) => [f, scriptBlocks(readFileSync(join(__dirname, '..', f), 'utf-8'))] as const),
+    ['lib/overviewCharts.ts', readFileSync(join(__dirname, 'overviewCharts.ts'), 'utf-8')] as const];
+  /** Token names in a script's string literals: `var(--x)`, `tint(--x, …)`/`tint('--x', …)`, and a bare `'--x'`. */
+  const named = (js: string) => [...new Set([
+    ...[...js.matchAll(/var\(\s*(--[a-z0-9-]+)\s*\)/gi)].map((m) => m[1]),
+    ...[...js.matchAll(/tint\(\s*['"]?(--[a-z0-9-]+)/gi)].map((m) => m[1]),
+    ...[...js.matchAll(/['"`](--[a-z0-9-]+)['"`]/gi)].map((m) => m[1]),
+  ])];
+
+  it('finds the names (and would catch a typo)', () => {
+    expect(named("const a = 'var(--sereis-1)'; tint('--green', 0.1); c('--gv-select'); `var(--gv-${t})`")).toEqual(['--sereis-1', '--green', '--gv-select']);
+    expect(files.length).toBeGreaterThan(20);
+  });
+
+  it.each(scripts.map(([f]) => f))('%s', (file) => {
+    const js = scripts.find(([f]) => f === file)![1];
+    expect(named(js).filter((t) => !(t in DARK))).toEqual([]);
   });
 });
 
