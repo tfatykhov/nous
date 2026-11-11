@@ -32,7 +32,7 @@ class CoverageManifestTest {
         }
     }
 
-    @Test fun webUnimplementedStayUnsupported() {
+    @Test fun notPortedStayUnsupported() {
         assertTrue("Video" !in Registry.ported && "AudioPlayer" !in Registry.ported)
     }
 }

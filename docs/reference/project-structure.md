@@ -179,7 +179,7 @@ nous/
 │       ├── tool_classes.py     # Harness 2a: every tool's class, declared once
 │       ├── tool_policy.py      # Harness 2a: per-context policy at the choke point; F099: the internal_only allowed set, denylist and per-call rules
 │       ├── idempotency.py      # Harness 2b: logical-send keys for external sends
-│       ├── companion_assets.py # Agent-hosted asset overlay behind /dashboard/v2
+│       ├── companion_assets.py # Agent-hosted asset overlay behind /dashboard/v2: images and mp4/webm video
 │       ├── compensation.py     # Harness 2.8: snapshots of side-effecting writes so a background mutation can be reverted (NOUS_COMPENSATION_ENABLED)
 │       ├── builtin_tools.py    # bash, read_file, write_file
 │       ├── db_query.py         # db_query: one read-only SELECT as the nous_reader login (scripts/ops/db_roles.sql); row, cell and output caps, ledger redaction

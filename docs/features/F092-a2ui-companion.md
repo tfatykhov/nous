@@ -324,7 +324,7 @@ Two catalogs, mixed per surface. Both vendored into `nous/a2ui/catalogs/` and se
 
 ### 8.1 `a2ui-basic` (upstream, unmodified)
 
-Vendored verbatim at a pinned commit. We implement a **subset**: `Text, Row, Column, List, Card, Tabs, Divider, Modal, Button, CheckBox, TextField, ChoicePicker, Slider, DateTimeInput, Icon, Image`. `Video` and `AudioPlayer` are out of scope for v1.
+Vendored verbatim at a pinned commit. We implement a **subset**: `Text, Row, Column, List, Card, Tabs, Divider, Modal, Button, CheckBox, TextField, ChoicePicker, Slider, DateTimeInput, Icon, Image, Video`. `Video` was added after v1 (2026-11): overlay mp4/webm, direct https mp4/webm, or a YouTube/Vimeo link embedded from a src built out of the parsed id (`dashboard-app/src/companion/video.ts` is the gate). `AudioPlayer` is out of scope.
 
 ### 8.2 `nous-core` (ours)
 

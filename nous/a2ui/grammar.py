@@ -41,13 +41,14 @@ BANNED_COMPONENTS = frozenset(
     {"TextField", "Slider", "DateTimeInput", "CheckBox", "ChoicePicker"}
 )
 
-# nous-core + the basic DISPLAY subset the companion renders (Video and
-# AudioPlayer are deliberately unimplemented in the renderer).
+# nous-core + the basic DISPLAY subset the companion renders (AudioPlayer is
+# deliberately unimplemented in the renderer).
 ALLOWED_COMPONENTS = frozenset(
     {
         # basic display
         "Text",
         "Image",
+        "Video",
         "Icon",
         "Row",
         "Column",

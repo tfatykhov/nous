@@ -63,6 +63,7 @@ _COMPONENT_ORDER = (
     "Modal",
     "Icon",
     "Image",
+    "Video",
     "Button",
     "MemoryGraph",
     "DagGraph",

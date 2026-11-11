@@ -4034,7 +4034,8 @@ class Settings(BaseSettings):
             "anything written there is deleted when the container is "
             "recreated — the Italy app lost its photos that way on "
             "2026-09-28. The app's own files always win a name clash, and "
-            "this directory serves an ALLOWLIST of image types only: it is "
+            "this directory serves an ALLOWLIST of media types only (images, "
+            "mp4/webm video): it is "
             "agent-writable, persistent and same-origin with /a2ui/action, "
             "so HTML or script from it is refused outright."
         ),

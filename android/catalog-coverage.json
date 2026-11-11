@@ -101,11 +101,11 @@
     "Video": {
       "status": "unsupported",
       "props": {
-        "url": "ignored:web-unimplemented",
-        "posterUrl": "ignored:web-unimplemented",
-        "description": "ignored:web-unimplemented",
-        "weight": "ignored:web-unimplemented",
-        "accessibility": "ignored:web-unimplemented"
+        "url": "ignored:android-not-ported",
+        "posterUrl": "ignored:android-not-ported",
+        "description": "ignored:android-not-ported",
+        "weight": "ignored:android-not-ported",
+        "accessibility": "ignored:android-not-ported"
       }
     },
     "AudioPlayer": {
