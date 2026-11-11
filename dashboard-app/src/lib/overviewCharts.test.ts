@@ -30,9 +30,11 @@ describe('the chart palette', () => {
     expect(p.barBorder).toBe('#7c6af7');
   });
 
-  it('under the paper look it is the paper palette: status fills, the series-7 grey-brown, the link blue (no violet)', () => {
+  it('under the paper look it is the paper palette: status fills, the series-7 slate, the link blue (no violet)', () => {
     const p = chartPalette((n) => PAPER[n] ?? '');
-    expect(['success', 'partial', 'failure', 'pending'].map((l) => p.outcome(l))).toEqual(['#2f8a4e', '#b7791f', '#d2352b', '#8a5a2b']);
+    expect(['success', 'partial', 'failure', 'pending'].map((l) => p.outcome(l))).toEqual(['#2f8a4e', '#b7791f', '#d2352b', '#4f5f6f']);
+    // Review N2: pending is "not known yet", a neutral as under dark, and far from partial's amber.
+    expect(p.outcome('pending')).not.toBe(p.outcome('partial'));
     expect(p.barBorder).toBe('#2346c8');
     expect(p.bar).toBe('rgba(35, 70, 200, 0.5)');
     for (const c of [p.outcome('success'), p.outcome('pending'), p.bar, p.barBorder]) expect(c).not.toMatch(/7c6af7|124, 106, 247/);
