@@ -1,10 +1,21 @@
 <script lang="ts" module>
-  /** The column count for n tiles: all in one row up to five, then as few rows of at most five as hold them, as even
-   *  as they go (6: 3 + 3, 7: 4 + 3, 9: 5 + 4). It does not depend on the width, so no desktop width leaves one tile
-   *  alone on its row (auto-fill at 200px fitted five at 1440 and four at 1280: five became four and one). */
-  export function balancedCols(n: number): number {
-    if (n <= 5) return Math.max(1, n);
-    return Math.ceil(n / Math.ceil(n / 5));
+  /** The narrowest a tile may be: the widest real content ("0.028 good" with its dot, or a six-digit total with its
+   *  "+312 in 7 days" note) at the 24px figure size, plus the tile's 16px padding each side (Codex round 3). */
+  export const STAT_MIN_TILE = 160;
+  /** The grid's gap above phone width (1rem). */
+  export const STAT_GAP = 16;
+
+  /**
+   * The columns for n tiles in a grid `width` px wide (Codex round 3): as many as fit at STAT_MIN_TILE, at most `max`
+   * (five), then as few rows as hold the tiles, as even as they go (5 in three columns: 3 + 2; 9: 5 + 4, or
+   * 3 + 3 + 3). Where a last row would hold one tile it spans the row. With no width measured (0, as in jsdom) the
+   * tile count alone decides.
+   */
+  export function statLayout(n: number, width: number, max = 5): { cols: number; spanLast: boolean } {
+    const fit = width > 0 ? Math.max(1, Math.floor((width + STAT_GAP) / (STAT_MIN_TILE + STAT_GAP))) : max;
+    const cap = Math.max(1, Math.min(max, fit, n));
+    const cols = Math.ceil(n / Math.ceil(n / cap));
+    return { cols, spanLast: n > 1 && cols > 1 && n % cols === 1 };
   }
 </script>
 
@@ -20,13 +31,30 @@
   };
 
   /** flat: the tiles sit inside a card, so they are a flat tint, not a shadow on a shadow (finish review fix 8).
-   *  cols: the column count above phone width; by default it comes from the number of stats (balancedCols). A grid
-   *  with extra tiles names it, since the grid cannot count a view's own tiles.
+   *  cols: the most columns this grid wants (Execution integrity: three); the width may allow fewer (statLayout).
    *  extra: a view's own tiles (a coloured dot, a word), in the same grid so a row never ends in one lone tile. */
   let { stats, flat = false, cols, extra }: { stats: Stat[]; flat?: boolean; cols?: number; extra?: Snippet } = $props();
+
+  // The grid's own width (the rail takes 220px of the window) and its tiles, a view's extra tiles counted.
+  let width = $state(0);
+  let grid = $state<HTMLElement>();
+  let count = $state(0);
+  $effect(() => {
+    void stats.length;
+    count = grid?.children.length ?? stats.length;
+  });
+  // Measured with a ResizeObserver where there is one (not in jsdom: there the width stays 0 and the count decides).
+  $effect(() => {
+    if (!grid || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(([entry]) => { width = entry.contentRect.width; });
+    ro.observe(grid);
+    return () => ro.disconnect();
+  });
+  const layout = $derived(statLayout(Math.max(count, stats.length), width, cols ?? 5));
 </script>
 
-<div class="stat-grid" class:stat-grid--flat={flat} style:--cols={cols ?? balancedCols(stats.length)}>
+<div class="stat-grid" class:stat-grid--flat={flat} class:stat-grid--span-last={layout.spanLast} style:--cols={layout.cols}
+  bind:this={grid}>
   {#each stats as stat}
     <div class="stat-card">
       <div class="stat-value" class:tone-waiting={stat.tone === 'waiting'} class:tone-unknown={stat.tone === 'unknown'}
@@ -79,6 +107,11 @@
   }
 
   .stat-grid--flat .stat-card { background: var(--wash); box-shadow: none; }
+
+  /* A last row of one tile: it spans the row (statLayout), so no tile stands alone. */
+  .stat-grid--span-last > :global(:last-child) {
+    grid-column: 1 / -1;
+  }
 
 
   .tone-waiting { color: var(--waiting); }

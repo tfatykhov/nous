@@ -4,13 +4,13 @@ import { createRawSnippet } from 'svelte';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { markupOf, parseBlocks, styleBlocks } from './lib/testing/css';
-import StatGrid, { balancedCols } from './lib/ui/StatGrid.svelte';
+import StatGrid, { STAT_GAP, STAT_MIN_TILE, statLayout } from './lib/ui/StatGrid.svelte';
 
 // Finish review fix 8, the dense-screen finish: a tile inside a card is a flat tint (no shadow on a shadow, the floor's
 // nested card), Overview's 7-day change is a small note under the number, the donut is no taller than the timeline's
 // card needs, and a flow-bar count that does not fit its segment is hidden (the legend names it).
 
-const read = (f: string) => readFileSync(join(__dirname, f), 'utf-8');
+const read = (f: string) => readFileSync(join(__dirname, f), 'utf-8').replace(/\r\n/g, '\n'); // any checkout
 
 describe('flat tiles inside a card', () => {
   it('StatGrid flat: a wash fill and no shadow', () => {
@@ -38,42 +38,72 @@ describe('one tile grid per group', () => {
     // Above phone width (the 640px block sets two up, so the first .stat-grid rule is the one read here).
     expect(styleBlocks(read('lib/ui/StatGrid.svelte'))).toMatch(/\.stat-grid \{[^}]*grid-template-columns: repeat\(var\(--cols\), minmax\(0, 1fr\)\);/);
     const extra = createRawSnippet(() => ({ render: () => '<div class="stat-card x">extra</div>' }));
-    const { container } = render(StatGrid, { props: { stats: [{ label: 'A', value: 1 }], cols: 3, extra } });
+    // cols is the most columns (Codex round 3): five stats and one extra tile at most three a row are 3 + 3.
+    const { container } = render(StatGrid, { props: { stats: [1, 2, 3, 4, 5].map((i) => ({ label: `S${i}`, value: i })), cols: 3, extra } });
     const grid = container.querySelector('.stat-grid') as HTMLElement;
     expect(grid.querySelector('.x')?.parentElement).toBe(grid);
     expect(grid.style.getPropertyValue('--cols')).toBe('3');
   });
 
-  // Design batch 2 (verdict pass 1): auto-fill at 200px fit five tiles at 1440 but four at 1280, so a row of five
-  // became four and one. The column count now comes from the tile count, not the width: at most five a row, the rows
-  // as even as they go, so no desktop width leaves one tile alone (the phone stays two up).
-  it('the columns come from the tile count: up to five in one row, then the rows as even as they go', () => {
-    expect([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(balancedCols)).toEqual([1, 2, 3, 4, 5, 3, 4, 4, 5, 5, 4, 4]);
-    for (let n = 2; n <= 20; n++) expect(n % balancedCols(n), `${n} tiles`).not.toBe(1);
-    const { container } = render(StatGrid, { props: { stats: [1, 2, 3, 4, 5, 6].map((i) => ({ label: `S${i}`, value: i })) } });
-    expect((container.querySelector('.stat-grid') as HTMLElement).style.getPropertyValue('--cols')).toBe('3');
+  // Codex round 3 (#904, P2): columns from the tile count alone forced five tiles into 532px at an 800px window (the
+  // rail takes 220px). The layout now respects both the tile count and the grid's own width: as many columns as fit
+  // at the minimum tile width (the widest real content, "0.028 good" or a six-digit total with its note), at most five,
+  // in as few rows as hold the tiles and as even as they go. A last row of one tile spans the row.
+  it('statLayout: no tile narrower than the minimum, as few rows as fit, as even as they go, and no lone tile', () => {
+    for (let n = 1; n <= 12; n++) {
+      for (const width of [150, 320, 532, 756, 1012, 1172, 2000]) {
+        const { cols, spanLast } = statLayout(n, width);
+        const fit = Math.max(1, Math.floor((width + STAT_GAP) / (STAT_MIN_TILE + STAT_GAP)));
+        const cap = Math.min(5, fit, n);
+        expect(cols, `${n} tiles in ${width}px`).toBeLessThanOrEqual(Math.max(1, fit));
+        if (cols > 1) expect(cols * STAT_MIN_TILE + (cols - 1) * STAT_GAP, `${n} tiles in ${width}px`).toBeLessThanOrEqual(width);
+        expect(Math.ceil(n / cols), `${n} tiles in ${width}px: rows`).toBe(Math.ceil(n / cap));
+        expect(spanLast, `${n} tiles in ${width}px: a last row of one spans`).toBe(n > 1 && cols > 1 && n % cols === 1);
+      }
+    }
+    // The cases named in the finding: 5 at 532px is 3 + 2; 9 is 3 + 3 + 3 there and 5 + 4 at 1012px.
+    expect(statLayout(5, 532).cols).toBe(3);
+    expect(statLayout(9, 532).cols).toBe(3);
+    expect(statLayout(9, 1012).cols).toBe(5);
+    expect(statLayout(6, 0).cols).toBe(3); // no width measured (jsdom): the tile count alone, as before
+    expect(STAT_MIN_TILE).toBeGreaterThanOrEqual(150);
   });
 
-  it.each([['views/Overview.svelte', 'memory grid: seven tiles and two extra'], ['views/Decisions.svelte', 'four tiles and one extra']])(
-    '%s: a grid with extra tiles names its columns (%s: one row of five, or five and four)', (f) => {
-      expect(markupOf(read(f))).toMatch(/<StatGrid cols=\{5\} stats=\{\[[\s\S]*?\]\}>\s*\{#snippet extra\(\)\}/);
-    });
+  it('StatGrid counts its own and its extra tiles, measures its own width, and spans a lone last tile', () => {
+    const src = read('lib/ui/StatGrid.svelte');
+    expect(src).toMatch(/new ResizeObserver\(\(\[entry\]\) => \{ width = entry\.contentRect\.width; \}\);\s*ro\.observe\(grid\);/);
+    expect(src).toMatch(/class:stat-grid--span-last=\{layout\.spanLast\}/);
+    expect(styleBlocks(src)).toMatch(/\.stat-grid--span-last > :global\(:last-child\) \{\s*grid-column: 1 \/ -1;\s*\}/);
+    const extra = createRawSnippet(() => ({ render: () => '<div class="stat-card x">extra</div>' }));
+    const { container } = render(StatGrid, { props: { stats: [1, 2, 3, 4].map((i) => ({ label: `S${i}`, value: i })), extra } });
+    expect((container.querySelector('.stat-grid') as HTMLElement).style.getPropertyValue('--cols')).toBe('5'); // 4 + 1 extra
+  });
+
+  it.each(['views/Overview.svelte', 'views/Decisions.svelte'])('%s: the grid with extra tiles no longer fixes its columns', (f) => {
+    expect(markupOf(read(f))).toMatch(/<StatGrid stats=\{\[[\s\S]*?\]\}>\s*\{#snippet extra\(\)\}/);
+  });
 
   it('Overview: the dot tiles are in the memory grid (no second grid), Execution integrity is three columns', () => {
     const src = read('views/Overview.svelte');
     expect(src).not.toMatch(/special-cards/);
-    expect(markupOf(src)).toMatch(/<StatGrid cols=\{5\} stats=\{\[[\s\S]*?\]\}>\s*\{#snippet extra\(\)\}[\s\S]*?Graph density[\s\S]*?Brier score[\s\S]*?\{\/snippet\}\s*<\/StatGrid>/);
+    expect(markupOf(src)).toMatch(/<StatGrid stats=\{\[[\s\S]*?\]\}>\s*\{#snippet extra\(\)\}[\s\S]*?Graph density[\s\S]*?Brier score[\s\S]*?\{\/snippet\}\s*<\/StatGrid>/);
     expect((markupOf(src).match(/<StatGrid flat cols=\{3\}/g) ?? []).length).toBe(2);
   });
 
   it('Decisions: the Brier tile is in the StatGrid (no second grid)', () => {
     const src = read('views/Decisions.svelte');
     expect(src).not.toMatch(/indicator-row/);
-    expect(markupOf(src)).toMatch(/<StatGrid cols=\{5\} stats=\{\[[\s\S]*?\]\}>\s*\{#snippet extra\(\)\}[\s\S]*?Latest Brier score[\s\S]*?\{\/snippet\}\s*<\/StatGrid>/);
+    expect(markupOf(src)).toMatch(/<StatGrid stats=\{\[[\s\S]*?\]\}>\s*\{#snippet extra\(\)\}[\s\S]*?Latest Brier score[\s\S]*?\{\/snippet\}\s*<\/StatGrid>/);
   });
 });
 
 describe('Overview', () => {
+  // Codex round 3, seen at a 1024px window: the Health card's link "Sessions where a tool failed, last 24 h" could not
+  // wrap (white-space: nowrap) and pushed the page 67px sideways. A card link wraps at its spaces.
+  it('a link in a card row may wrap, so a narrow card never widens the page', () => {
+    expect(parseBlocks(styleBlocks(read('views/Overview.svelte'))).get('.item .k a')?.['white-space']).toBeUndefined();
+  });
+
   it('the 7-day change is a small note, not part of the big number', () => {
     const src = read('views/Overview.svelte');
     expect(src).not.toMatch(/fmtWithDelta/);

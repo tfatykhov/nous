@@ -381,7 +381,7 @@
   {@const dist = db.distributions}
 
   <!-- ── Stat cards ───────────────────────────────────────────────────── -->
-  <StatGrid cols={5} stats={[
+  <StatGrid stats={[
     { label: 'Facts', value: fmt(mem.total_facts), note: deltaNote(deltas.facts.last_7_days) },
     { label: 'Episodes', value: fmt(mem.total_episodes), note: deltaNote(deltas.episodes.last_7_days) },
     { label: 'Chunks',           value: fmt(mem.total_chunks) },
@@ -538,7 +538,7 @@
   .item a { font-weight: 550; text-decoration: none; }
   .item a:hover { text-decoration: underline; }
   .item .k { grid-column: 2; font-size: 0.78125rem; color: var(--muted); overflow-wrap: anywhere; }
-  .item .k a { font-weight: 600; margin-left: 0.25rem; white-space: nowrap; }
+  .item .k a { font-weight: 600; margin-left: 0.25rem; } /* wraps at its spaces: a narrow card never widens the page */
   .item .k strong { color: var(--text); }
   .what { font-weight: 550; }
   .more-link { display: inline-block; margin: 0.25rem 0 0.25rem; font-size: 0.8125rem; font-weight: 600; text-decoration: none; }

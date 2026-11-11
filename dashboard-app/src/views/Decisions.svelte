@@ -122,7 +122,7 @@
   {@const accuracy = totals.reviewed > 0 ? totals.successes / totals.reviewed : null}
 
   <!-- ── Stat cards ──────────────────────────────────────────────────────── -->
-  <StatGrid cols={5} stats={[
+  <StatGrid stats={[
     { label: 'Decisions (30d)',  value: totals.total.toLocaleString() },
     { label: 'Reviewed (30d)',   value: totals.reviewed.toLocaleString() },
     { label: 'Accuracy (30d)',   value: accuracy != null ? (accuracy * 100).toFixed(1) + '%' : '—' },
