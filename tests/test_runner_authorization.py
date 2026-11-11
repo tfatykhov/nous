@@ -34,7 +34,15 @@ class _RecordingDispatcher:
         return [{"name": n, "description": n, "input_schema": {"type": "object"}} for n in self.offered]
 
     async def dispatch(
-        self, name, inp, session_id=None, is_background=False, turn_number=None, context=None, outcome=None
+        self,
+        name,
+        inp,
+        session_id=None,
+        is_background=False,
+        turn_number=None,
+        context=None,
+        outcome=None,
+        turn_id=None,
     ):
         if self.store is not None:
             self.store.events.append(("dispatch", name))

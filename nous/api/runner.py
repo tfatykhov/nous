@@ -2175,9 +2175,27 @@ class AgentRunner:
             _gate_footer: str | None = None  # F111: shown to a foreground caller, never stored
             if _caught_exc is None:
                 _claim_check = self._verify_claims(session_id, response_text, tool_results, ledger)
-                _gate_footer = await self._promise_gate_step(
-                    _ctx, response_text, tool_results, path="run_turn", session_id=session_id, turn_id=str(_turn_id)
-                )
+                try:
+                    _gate_footer = await self._promise_gate_step(
+                        _ctx, response_text, tool_results, path="run_turn", session_id=session_id, turn_id=str(_turn_id)
+                    )
+                except asyncio.CancelledError:
+                    # F108: a cancel in the gate skips the turn row below, as one in the model call would.
+                    if self._tool_call_recorder:
+                        self._note_turn(
+                            _ctx,
+                            turn_id=_turn_id,
+                            session_id=session_id,
+                            turn_number=_turn_number_local,
+                            turn_context=turn_context,
+                            trigger=user_message,
+                            reply=response_text,
+                            error="cancelled",
+                            claim_check=_claim_check,
+                            call_indexes=_call_indexes,
+                            started_at=_turn_started,
+                        )
+                    raise
 
             # F108: the turn row, before post_turn so a post_turn that raises cannot skip it.
             if self._tool_call_recorder:
@@ -3451,6 +3469,7 @@ class AgentRunner:
                                             turn_number=_stream_turn_number,  # F091
                                             context=_ctx,  # harness Phase 1a
                                             outcome=outcome,  # harness Phase 2b
+                                            turn_id=_stream_turn_id,  # F111
                                         ):
                                             if isinstance(item, StreamEvent):
                                                 yield item
@@ -3629,14 +3648,20 @@ class AgentRunner:
                 # F111: the promise gate, after the reply is stored and claim-checked, so a consumer that goes away
                 # here or at the footer below loses nothing. The footer never joins response_text.
                 if _gate_due:
-                    _gate_footer = await self._promise_gate_step(
-                        _ctx,
-                        response_text,
-                        all_tool_results,
-                        path="stream",
-                        session_id=session_id,
-                        turn_id=str(_stream_turn_id),
-                    )
+                    try:
+                        _gate_footer = await self._promise_gate_step(
+                            _ctx,
+                            response_text,
+                            all_tool_results,
+                            path="stream",
+                            session_id=session_id,
+                            turn_id=str(_stream_turn_id),
+                        )
+                    except asyncio.CancelledError:
+                        # The except clauses above do not see a cancel raised in this else: the finally's turn row
+                        # would say the turn succeeded. The cancel still propagates.
+                        error = "cancelled"
+                        raise
 
                 # F024 F4/F5: record memory on the SUCCESS path only (needs
                 # response_text). Fix A: link the fact to the active episode so
@@ -3728,6 +3753,7 @@ class AgentRunner:
         dag_node_id: UUID | None,
         turn_number: int | None,
         is_background: bool,
+        turn_id: UUID | None = None,
     ) -> Dispatched:
         """Everything between "this call may run" and "its text": the F064.1 ping and activity heartbeat, the
         durable ledger row (a keyed send claimed first, or suppressed), the write-path lock and compensation
@@ -3810,6 +3836,7 @@ class AgentRunner:
                         turn_number=turn_number,  # F091 (caller-captured)
                         context=ctx,  # harness Phase 1a
                         outcome=outcome,  # harness Phase 2b
+                        turn_id=turn_id,  # F111: commit's idempotency key
                     )
                 except asyncio.CancelledError:
                     # Subtask timeout / shutdown: the side effect may
@@ -4464,6 +4491,7 @@ class AgentRunner:
                                 dag_node_id=dag_node_id,
                                 turn_number=turn_number,
                                 is_background=is_background,
+                                turn_id=turn_id,
                             )
                             result_text, is_error = dispatched.text, dispatched.is_error
                             suppressed = dispatched.suppressed
@@ -5403,6 +5431,7 @@ Rules:
         turn_number: int | None = None,  # F091: caller-captured, see _tool_loop
         context: ExecutionContext | None = None,  # harness Phase 1a
         outcome: CallOutcome | None = None,  # harness Phase 2b
+        turn_id: UUID | None = None,  # F111: commit's idempotency key
     ) -> AsyncGenerator[StreamEvent | DispatchOutcome, None]:
         """Execute a tool, yielding keepalive events during long execution.
 
@@ -5424,6 +5453,7 @@ Rules:
                     turn_number=turn_number,  # F091 (caller-captured)
                     context=context,  # harness Phase 1a
                     outcome=outcome,  # harness Phase 2b
+                    turn_id=turn_id,
                 ),
                 timeout=timeout,
             )

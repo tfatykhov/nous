@@ -391,6 +391,59 @@ async def test_a_cancelled_turn_is_still_cancelled_while_the_gate_runs():
     await runner.close()
 
 
+class _TurnRows:
+    """The F108 recorder, keeping only what the gate's cancellation tests read."""
+
+    def __init__(self) -> None:
+        self.turns: list = []
+
+    def record(self, rec) -> None:
+        pass
+
+    def record_turn(self, rec) -> None:
+        self.turns.append(rec)
+
+
+async def test_a_run_turn_cancelled_in_the_gate_still_writes_one_cancelled_turn_row():
+    """Codex P2 on bdb41254: the gate's await sat between the cancelled-turn handler and the turn row."""
+    store, rows = _SlowStore(), _TurnRows()
+    runner, _ = _runner("shadow", store)
+    runner.set_tool_call_recorder(rows)
+    runner._tool_loop = AsyncMock(return_value=(NOV10["reply"], [], {"input_tokens": 1, "output_tokens": 1}, []))
+    task = asyncio.ensure_future(runner.run_turn("s-cancel-row", "go"))
+    await asyncio.sleep(0.1)  # inside the gate's 0.3 s write
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(store.finished.wait(), timeout=3)
+    await runner.close()
+    assert [t.error for t in rows.turns] == ["cancelled"]
+
+
+async def test_a_stream_cancelled_in_the_gate_writes_one_cancelled_turn_row():
+    store, rows = _SlowStore(), _TurnRows()
+    runner, _ = _runner("shadow", store, [_reply_segment(NOV10["reply"])])
+    runner.set_tool_call_recorder(rows)
+    task = asyncio.ensure_future(_stream(runner, "s-cancel-stream"))
+    await asyncio.sleep(0.1)  # inside the gate's 0.3 s write
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(store.finished.wait(), timeout=3)
+    assert [t.error for t in rows.turns] == ["cancelled"]
+
+
+async def test_commit_in_a_stream_turn_is_keyed_on_the_turn_id():
+    """Codex P2 on bdb41254: commit's idempotency key is the runner's per-turn id, the one the turn row carries."""
+    store, rows = FakeStore(), _TurnRows()
+    commit = ("commit", {"what": "relaunch the chain", "due": "in 2 hours"})
+    runner, _ = _runner("shadow", store, [_tool_segment(commit, commit), _reply_segment("Recorded.")])
+    runner.set_tool_call_recorder(rows)
+    await _stream(runner, "s-commit-key")
+    [turn] = rows.turns
+    assert len(store.rows) == 1 and {c["turn_id"] for c in store.calls} == {str(turn.id)}
+
+
 async def test_a_consumer_that_closes_at_the_footer_loses_nothing():
     """The footer is the last text delta; a consumer that stops there (aclose) finds the reply stored and claimed."""
     store = FakeStore()

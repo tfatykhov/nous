@@ -524,6 +524,7 @@ class ToolDispatcher:
         turn_number: int | None = None,
         context: ExecutionContext | None = None,
         outcome: CallOutcome | None = None,
+        turn_id: UUID | None = None,
     ) -> tuple[str, bool]:
         """Dispatch a tool call and return (result_text, is_error).
 
@@ -540,6 +541,9 @@ class ToolDispatcher:
         outcome: the call's CallOutcome (harness Phase 2b). The handler reads
         it through ``current_outcome()``; it is set and reset around the
         handler call here, inside this one task.
+
+        turn_id: the runner's F108 id of the turn making the call (F111:
+        ``commit`` keys its idempotency on it). None outside a turn.
         """
         ctx = resolve_context(context, is_background=is_background, session_id=session_id)
         is_background = ctx.is_background
@@ -703,7 +707,13 @@ class ToolDispatcher:
             if name == "commit":
                 # F111: the turn key (idempotency within a turn) and the ledger's source_kind come from the
                 # harness, never from the model.
-                args = {**args, "_session_id": session_id, "_turn_number": turn_number, "_context_kind": ctx.kind}
+                args = {
+                    **args,
+                    "_session_id": session_id,
+                    "_turn_number": turn_number,
+                    "_turn_id": str(turn_id) if turn_id is not None else None,
+                    "_context_kind": ctx.kind,
+                }
             if session_id is not None and name in ("push_surface", "compose_surface"):
                 # F092: surfaces record the chat session that pushed them so
                 # a companion card can be traced back to its conversation.
@@ -3124,6 +3134,7 @@ def create_commit_tool(store: Any) -> Callable[..., Any]:
         awaiting_owner: bool = False,
         _session_id: str | None = None,
         _turn_number: int | None = None,
+        _turn_id: str | None = None,
         _context_kind: str | None = None,
     ) -> dict[str, Any]:
         try:
@@ -3142,14 +3153,22 @@ def create_commit_tool(store: Any) -> Callable[..., Any]:
             "kind": "awaiting_user" if awaiting_owner else "action",
             "consent": consent,
         }
-        # A retry of the same call in the same turn is the same row; without a turn number, no dedupe at all.
-        turn_key = f"{_session_id}:{_turn_number}" if _turn_number is not None else f"{_session_id}:{uuid4().hex}"
+        # A retry of the same call in the same turn is the same row. The key is the runner's id for the turn; a call
+        # outside a turn falls back to the turn number, and without either there is no dedupe at all.
+        if _turn_id is not None:
+            turn_key = _turn_id
+        elif _turn_number is not None:
+            turn_key = f"{_session_id}:{_turn_number}"
+        else:
+            turn_key = f"{_session_id}:{uuid4().hex}"
         try:
             row = await store.create_idempotent(turn_id=turn_key, **row_args)
-            if not row.inserted and row.status not in LIVE_STATUSES:
-                # A session's turn numbers restart (a continuation thread is discarded before each step), so the
-                # key can name a row an earlier turn wrote and the owner has since closed: this is a new obligation.
-                row = await store.create_idempotent(turn_id=f"{turn_key}:{uuid4().hex}", **row_args)
+            while not row.inserted and row.status not in LIVE_STATUSES:
+                # The key names a row the owner has since closed (a session's turn numbers restart: a continuation
+                # thread is discarded before each step), so this is a new obligation. Its key follows from the closed
+                # row's, so every retry in this turn lands on the same new row.
+                turn_key = f"{turn_key}:after:{row.id}"
+                row = await store.create_idempotent(turn_id=turn_key, **row_args)
         except CommitmentRefused as exc:
             return _tool_error(f"commit: {exc}")
         except Exception:

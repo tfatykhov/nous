@@ -103,6 +103,7 @@ _REL_RE = re.compile(r"\bin\s+(\d+|an?|one|two|half\s+an)\s+(minute|min|hour|hr|
 _WITHIN_HOUR_RE = re.compile(r"\bwithin\s+(?:the|an?)\s+hour\b", re.I)
 _CLOCK_RE = re.compile(r"\b(?:at|by|around|before)?\s*(\d{1,2}):(\d{2})\s*(z|utc|gmt)?\b", re.I)
 _TOMORROW_RE = re.compile(r"\btomorrow\b", re.I)
+_TODAY_RE = re.compile(r"\btoday\b", re.I)
 _UNIT_NAMES = {"minute": "minute", "min": "minute", "hour": "hour", "hr": "hour", "day": "day", "week": "week"}
 _WORD_NUM = {"a": 1, "an": 1, "one": 1, "two": 2}
 
@@ -146,8 +147,16 @@ def _due_at(sentence: str, now: datetime, default_minutes: int) -> tuple[datetim
     if m and m.group(3):
         hour, minute = int(m.group(1)), int(m.group(2))
         if hour < 24 and minute < 60:
+            # "tomorrow" names the day; "today" at a time already past is unreadable (the default, not tomorrow:
+            # a deadline a day late would hide the miss); a bare clock time is its next occurrence.
             at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            return (at if at > now else at + timedelta(days=1)), True
+            if _TOMORROW_RE.search(sentence):
+                return at + timedelta(days=1), True
+            if at > now:
+                return at, True
+            if not _TODAY_RE.search(sentence):
+                return at + timedelta(days=1), True
+            return now + timedelta(minutes=default_minutes), False
     if _TOMORROW_RE.search(sentence):
         return now + timedelta(days=1), True
     return now + timedelta(minutes=default_minutes), False

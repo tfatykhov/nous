@@ -82,6 +82,24 @@ def test_a_named_time_is_parsed_and_no_time_gets_the_default():
     assert not naive.due_parsed  # no zone named: no guess, the default
 
 
+def test_a_clock_time_with_tomorrow_or_today_is_read_on_that_day():
+    """Codex P2 on bdb41254: the clock time returned before ``tomorrow`` was read, so tomorrow 18:15 became today."""
+    nine = datetime(2026, 11, 10, 9, 0, tzinfo=UTC)
+    tomorrow = datetime(2026, 11, 11, tzinfo=UTC)
+    detector = PromiseDetector(default_due_minutes=60)
+    [later] = detector.scan("I'll relaunch the service tomorrow at 18:15 UTC.", now=nine)
+    assert later.due_parsed and later.due_at == tomorrow.replace(hour=18, minute=15)
+    [earlier] = detector.scan("I'll relaunch the service tomorrow at 08:00 UTC.", now=nine)
+    assert earlier.due_parsed and earlier.due_at == tomorrow.replace(hour=8)  # not two days on
+    [plain] = detector.scan("I'll relaunch the service at 18:15 UTC.", now=nine)
+    assert plain.due_parsed and plain.due_at == nine.replace(hour=18, minute=15)
+    [today] = detector.scan("I'll relaunch the service today at 18:15 UTC.", now=nine)
+    assert today.due_parsed and today.due_at == nine.replace(hour=18, minute=15)
+    # "today" at a time already past: the default, not tomorrow (a day late to notice the miss).
+    [past_today] = detector.scan("I'll relaunch the service today at 08:00 UTC.", now=nine)
+    assert not past_today.due_parsed and past_today.due_at == nine + timedelta(minutes=60)
+
+
 def test_a_relative_time_goes_through_schedule_tasks_resolver():
     before = datetime.now(UTC)
     [promise] = PromiseDetector().scan("I plan to deploy the fix in 2 hours.")
@@ -405,6 +423,38 @@ async def test_commit_tool_writes_a_new_row_when_the_turn_key_names_a_closed_one
     store.rows[key] = replace(store.rows[key], status="done")
     out = await tool(what="check the deploy of PR 812", due="in 1 hour", _session_id="intent-x", _turn_number=1)
     assert "C-0002" in out["content"][0]["text"] and len(store.rows) == 2
+
+
+async def test_commit_retries_after_a_closed_row_land_on_one_new_row():
+    """Codex P2 on bdb41254: each retry past a closed row minted a fresh key, so two identical calls in the new turn
+    made two live rows."""
+    from dataclasses import replace
+
+    from nous.api.tools import create_commit_tool
+
+    store = FakeStore()
+    tool = create_commit_tool(store)
+    args = {"what": "check the deploy of PR 812", "due": "in 1 hour", "_session_id": "intent-x", "_turn_number": 1}
+    await tool(**args)
+    [key] = store.rows
+    store.rows[key] = replace(store.rows[key], status="done")
+    first, second = await tool(**args), await tool(**args)
+    assert "C-0002" in first["content"][0]["text"] and "C-0002" in second["content"][0]["text"]
+    assert [r.status for r in store.rows.values()].count("open") == 1 and len(store.rows) == 2
+
+
+async def test_commit_keys_on_the_turn_id_when_the_runner_gives_one():
+    """The runner's per-turn id: a restarted turn number is a new turn, and calls without a number still dedupe."""
+    from nous.api.tools import create_commit_tool
+
+    store = FakeStore()
+    tool = create_commit_tool(store)
+    args = {"what": "check the deploy of PR 812", "due": "in 1 hour", "_session_id": "intent-x"}
+    await tool(**args, _turn_id="turn-a")
+    await tool(**args, _turn_id="turn-a")
+    assert len(store.rows) == 1 and store.calls[0]["turn_id"] == "turn-a"
+    await tool(**args, _turn_number=1, _turn_id="turn-b")
+    assert len(store.rows) == 2
 
 
 async def test_commit_tool_takes_its_source_kind_from_the_turn_kind():
