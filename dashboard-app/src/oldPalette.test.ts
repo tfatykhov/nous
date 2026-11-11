@@ -5,6 +5,9 @@ import { join, relative, resolve } from 'node:path';
 // Dashboard redesign PR 7: the dark look is gone, and with it its palette (the near-black grounds, the violet accent and
 // its glow, the grey inks) and its two fonts. None of them may come back in a source, a test, a public file or a page;
 // a test that still names an old value to forbid it in a render is replaced by this one guard over the files.
+// The one legitimate home is the companion's old look, kept on purpose (PR 6): the nous-dark theme, the legacy group's
+// two fonts, and the tests that pin those values. ALLOWED names each place exactly; everything else in the same file is
+// read like any other file.
 
 const APP = resolve(__dirname, '..');
 
@@ -14,18 +17,40 @@ const OLD = [
   '#0a0a0f', '#12121a', '#181824', '#1e1e2e', '#7c6af7', '#4f46a8', '#a99df9', '#e2e2f0', '#8e8eab', '#6b6b8a', '#0b0b10',
   '#863bff', '#7e14ff',
 ];
-const OLD_PALETTE = new RegExp([...OLD, String.raw`rgba\(\s*124\s*,\s*106\s*,\s*247\b`, String.raw`DM[ +]Sans`, String.raw`JetBrains[ +]Mono`].join('|'), 'i');
+const OLD_SOURCE = [...OLD, String.raw`rgba\(\s*124\s*,\s*106\s*,\s*247\b`, String.raw`DM[ +]Sans`, String.raw`JetBrains[ +]Mono`].join('|');
+const OLD_PALETTE = new RegExp(OLD_SOURCE, 'i');
+const OLD_ALL = new RegExp(OLD_SOURCE, 'gi');
 
-/** Not read until the work that replaces them lands; each with its reason. A group that no longer holds the old palette
- * fails (no stale exclusion). */
-const EXCLUDED: { match: RegExp; reason: string }[] = [
+/** A place where the old palette may stand: in `file`, inside each text `scope` matches, the text `values` matches is
+ * allowed (and removed before the guard reads the file). */
+type Allowance = { file: string; scope: RegExp; values: RegExp; reason: string };
+const LEGACY_FONTS = /'(?:DM Sans|JetBrains Mono)'/g;
+const ALLOWED: Allowance[] = [
   {
-    match: /^(?:src\/companion\/|companion\.html$|public\/companion[.-])/,
-    reason: 'the companion: PR 6 re-themes it (its nous-dark and legacy themes keep the old values on purpose); after the ' +
-      'rebase onto PR 6 this becomes the narrow allowance of companion.css and the companion tests that assert those themes',
+    file: 'src/companion/companion.css', scope: /\[data-theme='nous-dark'\]\s*\{[^}]*\}/g, values: OLD_ALL,
+    reason: "the nous-dark theme block: the companion's previous default, kept as a named theme (PR 6)",
   },
-  { match: /^public\/favicon\.svg$/, reason: 'the old violet mark (#863bff); PR 7 Task 8 re-draws it after PR 6 lands' },
-  { match: /^src\/oldPalette\.test\.ts$/, reason: 'this guard spells the patterns it forbids' },
+  {
+    file: 'src/companion/companion.css',
+    scope: /\[data-theme='nous-dark'\],\s*\[data-theme='alpine-dusk'\],\s*\[data-theme='harbor'\],\s*\[data-theme='paper'\],\s*\[data-theme='signal'\],\s*\[data-theme='report'\]\s*\{[^}]*\}/g,
+    values: LEGACY_FONTS,
+    reason: "the legacy group's two fonts: nous-dark and the five named themes keep DM Sans and JetBrains Mono (only the fonts)",
+  },
+  {
+    file: 'src/companion/companion.css', scope: /\[data-theme='signal'\]\s*\{[^}]*\}/g, values: LEGACY_FONTS,
+    reason: "the signal theme's mono display face (only the fonts)",
+  },
+  {
+    file: 'src/companion/companion.css', scope: /@import url\('[^']*'\)/g, values: /family=(?:DM\+Sans|JetBrains\+Mono):[^&']*/g,
+    reason: 'the font import loads the two legacy faces those blocks name (only those two families)',
+  },
+  {
+    file: 'src/companion/themes.test.ts',
+    scope: /^\s*'--[\w-]+': (?:'[^']*'|"[^"]*"),?\s*$|^const JETBRAINS = "[^"]*";$|for \(const family of \[[^\]]*\]\)|^\s*it\('[^']*'/gm,
+    values: OLD_ALL,
+    reason: "the pins of those themes: the resolved token tables (a token per line), the JETBRAINS constant, the import's " +
+      'family list and the titles that name the face',
+  },
 ];
 
 function walk(dir: string): string[] {
@@ -41,7 +66,12 @@ function scanned(): string[] {
     .sort();
 }
 
-const hit = (f: string) => OLD_PALETTE.test(readFileSync(join(APP, f), 'utf-8'));
+/** `text` with every allowance for `file` applied: inside each scope, the allowed values removed. */
+function allowed(file: string, text: string): string {
+  return ALLOWED.filter((a) => a.file === file).reduce((t, a) => t.replace(a.scope, (m) => m.replace(a.values, '')), text);
+}
+const read = (f: string) => readFileSync(join(APP, f), 'utf-8').replace(/\r\n/g, '\n');
+const hit = (f: string) => OLD_PALETTE.test(allowed(f, read(f)));
 
 describe('no old palette anywhere in the dashboard', () => {
   it('the pattern matches each old value in its own sample, any case, and spares the new palette', () => {
@@ -61,21 +91,45 @@ describe('no old palette anywhere in the dashboard', () => {
     const files = scanned();
     expect(files.length).toBeGreaterThan(200);
     for (const f of ['src/app.css', 'src/App.svelte', 'src/tokens.test.ts', 'src/lib/chartColors.ts', 'index.html', 'companion.html',
-      'public/favicon.svg', 'public/icons.svg']) {
+      'src/companion/companion.css', 'src/companion/themes.test.ts', 'public/favicon.svg', 'public/companion.webmanifest']) {
       expect(files, f).toContain(f);
     }
     expect(files.some((f) => f.startsWith('public/lib/'))).toBe(false); // vendored Chart.js, d3, cytoscape
   });
 
-  it('no file holds the old palette', () => {
-    expect(scanned().filter((f) => !EXCLUDED.some((x) => x.match.test(f))).filter(hit)).toEqual([]);
+  it('an allowance spares only its own values in its own scope', () => {
+    const css = [
+      "@import url('https://x/css2?family=Archivo:wght@400&family=DM+Sans:wght@400&display=swap');",
+      "[data-theme='nous-dark'] { --bg: #0a0a0f; --font-ui: 'DM Sans'; }",
+      "[data-theme='signal'] { --font-mono: 'JetBrains Mono'; }",
+    ].join('\n');
+    expect(OLD_PALETTE.test(allowed('src/companion/companion.css', css))).toBe(false);
+    // The same values one block over, a hex in the fonts-only blocks, or a palette value in any other file, still fail.
+    for (const bad of ["[data-theme='harbor'] { --bg: #0a0a0f; }", "[data-theme='signal'] { --bg: #0a0a0f; }",
+      ":root { --font-ui: 'DM Sans'; }", "@import url('https://x/css2?family=Archivo&display=swap'); .x { color: #7c6af7 }"]) {
+      expect(OLD_PALETTE.test(allowed('src/companion/companion.css', bad)), bad).toBe(true);
+    }
+    expect(OLD_PALETTE.test(allowed('src/companion/Companion.svelte', "[data-theme='nous-dark'] { --bg: #0a0a0f; }"))).toBe(true);
+    // In the pins file only a pin line is spared: a palette value in a test body is not.
+    expect(OLD_PALETTE.test(allowed('src/companion/themes.test.ts', "    '--bg': '#0a0a0f',"))).toBe(false);
+    expect(OLD_PALETTE.test(allowed('src/companion/themes.test.ts', "    expect(x).toBe('#0a0a0f');"))).toBe(true);
   });
 
-  it.each(EXCLUDED.map((x) => [x.match.source, x.reason] as const))('the exclusion %s still holds the old palette (%s)', (src) => {
-    const x = EXCLUDED.find((e) => e.match.source === src)!;
-    const files = scanned().filter((f) => x.match.test(f));
-    expect(files.length, 'the exclusion names no file').toBeGreaterThan(0);
-    expect(files.some(hit), 'no excluded file holds the old palette any more: drop the exclusion').toBe(true);
+  it('no file holds the old palette outside its allowances', () => {
+    const excluded = ['public/favicon.svg', 'src/oldPalette.test.ts'];
+    expect(scanned().filter((f) => !excluded.includes(f)).filter(hit)).toEqual([]);
+  });
+
+  it.each(ALLOWED.map((a, i) => [i, a.file, a.reason] as const))('allowance %i (%s) still spares something: %s', (i) => {
+    const a = ALLOWED[i];
+    const scopes = read(a.file).match(a.scope) ?? [];
+    expect(scopes.length, 'the scope matches nothing').toBeGreaterThan(0);
+    expect(scopes.some((m) => (m.match(a.values) ?? []).some((v) => OLD_PALETTE.test(v))), 'it spares no old value: drop it').toBe(true);
+  });
+
+  it('the guard itself and the old mark are the only files left out (the mark until Task 8 re-draws it)', () => {
+    expect(OLD_PALETTE.test(read('src/oldPalette.test.ts'))).toBe(true);
+    expect(read('public/favicon.svg')).toMatch(/#863bff/i);
   });
 
   it('the stylesheet and the page the dark look lived in are clean (its other files are gone: flipResidue.test.ts)', () => {

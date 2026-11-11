@@ -166,7 +166,7 @@
    element which merely inherits (a plain Text, the app title) keeps the
    :root colour while its siblings that re-declare `color: var(--text)`
    pick the theme up. Measured on `paper`: the surface's --text token resolved
-   correctly to #2a2622 while the title still painted #e2e2f0. Re-declaring
+   correctly to #2a2622 while the title still painted the old :root's light ink. Re-declaring
    here recomputes the inherited value inside the theme scope. Same reason
    F093 rejected `--green: var(--ok)` aliases in :root. */
 [data-theme] {
