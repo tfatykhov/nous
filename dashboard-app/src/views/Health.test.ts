@@ -80,6 +80,7 @@ const OBS = {
 
 let urls: string[] = [];
 let obs: Record<string, unknown> = OBS;
+let admission: Record<string, unknown> = ADMISSION;
 /** While set, /dashboard/density answers only once it resolves (a slow density endpoint). */
 let densityGate: Promise<void> | null = null;
 function install() {
@@ -92,7 +93,7 @@ function install() {
       : url === '/dashboard/density' ? DENSITY
       : url.startsWith('/dashboard/memory-write-health') ? MWH
       : url.startsWith('/dashboard/admission/rejected') ? REJECTED
-      : url === '/dashboard/admission' ? ADMISSION
+      : url === '/dashboard/admission' ? admission
       : url === '/status?dashboard=true' ? STATUS
       : url === '/dashboard/observability' ? obs
       : null;
@@ -124,7 +125,7 @@ const statLabel = (label: string) => screen.queryAllByText(label, { selector: '.
 const statValue = (label: string) => screen.getByText(label, { selector: '.stat-label' }).previousElementSibling?.textContent?.trim();
 const GROWTH_HEADINGS = ['Memory growth (30 days)', 'Fact categories', 'Fact Growth Rate (7d)'];
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); obs = OBS; densityGate = null; });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); obs = OBS; admission = ADMISSION; densityGate = null; });
 
 describe('Memory health: Graph tab', () => {
   for (const hash of ['#/health', '#/health/graph']) {
@@ -441,5 +442,54 @@ describe('Memory health charts read tokens', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'health', 'GraphTab.svelte'), 'utf-8'));
     expect(css).toMatch(/\.badge-good\s*\{\s*background:\s*var\(--badge-good-bg\);\s*color:\s*var\(--ok-text\);/);
     expect(css).toMatch(/\.badge-bad\s*\{\s*background:\s*var\(--badge-bad-bg\);\s*color:\s*var\(--err-text\);/);
+  });
+});
+
+describe('Memory health: the Writes tab\'s admission charts read tokens', () => {
+  const FULL_ADMISSION = {
+    ...ADMISSION,
+    config: { ...ADMISSION.config, shadow_mode: false },
+    by_source: { user_direct: { admitted: 5, rejected: 1, bypassed: 2 } },
+    by_category: { general: { admitted: 4, rejected: 2 } },
+    daily_trend: [{ date: '2026-11-07', scored: 4, admitted: 3, avg_score: 0.6 }, { date: '2026-11-08', scored: 6, admitted: 4, avg_score: 0.62 }],
+    bypass_breakdown: { user_direct: 1, pinned: 1 },
+  };
+  afterEach(() => { setLook('dark'); document.body.innerHTML = ''; });
+
+  it('dark: admitted and rejected are the status green and red, bypassed the series slate, the trends today\'s colours', async () => {
+    admission = FULL_ADMISSION;
+    start('#/health/writes');
+    recordCharts();
+    render(Health);
+    await waitFor(() => expect(configs.length).toBe(6));
+    const scores = configs.find((c) => c.data.datasets[0].label === 'Facts')!.data.datasets[0];
+    expect(scores.backgroundColor).toEqual(['#f87171', '#34d399']); // 0.40-0.45 below the 0.55 threshold, 0.60-0.65 above
+    const bySource = configs.find((c) => c.data.datasets.length === 3)!.data.datasets;
+    expect(bySource.map((d) => d.backgroundColor)).toEqual(['#34d399', '#f87171', '#6b6b8a']);
+    expect(norm(dataset('Admission Rate (%)').backgroundColor)).toBe('rgba(52,211,153,0.1)');
+    expect(dataset('Avg Score').borderColor).toBe('#7c6af7');
+    const bypass = configs.find((c) => c.type === 'doughnut')!.data.datasets[0];
+    expect(bypass.backgroundColor).toEqual(['#7c6af7', '#60a5fa']);
+    expect(bypass.borderColor).toBe('#12121a'); // the card behind it (it was an unreadable 'var(--surface)' string)
+  });
+
+  it('paper: the same datasets take the paper status and series values', async () => {
+    admission = FULL_ADMISSION;
+    setLook('paper');
+    const target = paperMain();
+    start('#/health/writes');
+    recordCharts();
+    render(Health, { target });
+    await waitFor(() => expect(configs.length).toBe(6));
+    const bySource = configs.find((c) => c.data.datasets.length === 3)!.data.datasets;
+    expect(bySource.map((d) => d.backgroundColor)).toEqual([PAPER['--green'], PAPER['--red'], PAPER['--series-7']]);
+    expect(configs.find((c) => c.type === 'doughnut')!.data.datasets[0].borderColor).toBe(PAPER['--surface']);
+  });
+
+  it('the box plots tint with color-mix (no hex alpha suffix), and the score note is in words', async () => {
+    const src = readFileSync(join(__dirname, 'Admission.svelte'), 'utf-8');
+    expect(src).toContain('style:background="color-mix(in srgb, {color} 18.8%, transparent)"');
+    expect(src).toContain('style:background="color-mix(in srgb, {color} 50.2%, transparent)"');
+    expect(src).not.toMatch(/≥|#[0-9a-fA-F]{3,8}\b|rgba?\(/);
   });
 });

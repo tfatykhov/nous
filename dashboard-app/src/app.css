@@ -210,6 +210,8 @@
     --chart-grid: #1e293b;
     --save-ok: #4ade80;                        /* Browse: a censor's save message */
     --save-err: #f87171;
+    --tone-bad: #ef4444;                       /* Memory write health: a tripped rule's border and tint */
+    --btn-ink: #fff;                           /* text on an accent-filled button (not --on-accent: dark keeps white) */
   }
 
   /* ---- The paper ground: page content under the paper look ---- */
@@ -344,6 +346,8 @@
     --chart-grid: #e3e9ec;
     --save-ok: #23703d;
     --save-err: #b02a22;
+    --tone-bad: #b02a22;
+    --btn-ink: #ffffff;
 
     /* shadcn, HSL of the paper hex */
     --background: 192 17% 94%;

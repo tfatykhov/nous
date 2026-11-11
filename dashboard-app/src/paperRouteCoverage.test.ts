@@ -40,6 +40,22 @@ const ROUTE_FILES: Partial<Record<RouteName, readonly string[]>> = {
     'lib/ui/button/button.svelte',
   ],
   browser: ['views/Browser.svelte', 'lib/ui/DataTable.svelte'],
+  // The Writes tab embeds the write-health page and Admission: both must be converted before health turns paper.
+  health: [
+    'views/Health.svelte',
+    'views/health/GraphTab.svelte',
+    'views/health/GrowthTab.svelte',
+    'views/health/WritesTab.svelte',
+    'views/MemoryWriteHealth.svelte',
+    'views/Admission.svelte',
+    'lib/ui/SubNav.svelte',
+    'lib/ui/StatGrid.svelte',
+    'lib/ui/StaleBadge.svelte',
+    'lib/ui/FilterBar.svelte',
+    'lib/ui/DataTable.svelte',
+    'lib/ui/button/button.svelte',
+    'lib/viz/Chart.svelte',
+  ],
 };
 
 /** The guard list `name` of hexGuard.test.ts, read as text (importing a test file would run its tests twice). */

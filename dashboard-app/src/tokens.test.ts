@@ -192,6 +192,8 @@ const PR2: Record<string, [string, string]> = {
   '--chart-grid': ['#1e293b', '#e3e9ec'],
   '--save-ok': ['#4ade80', '#23703d'], // Browse: a censor's save message (not --ok-text, whose dark is #34d399)
   '--save-err': ['#f87171', '#b02a22'],
+  '--tone-bad': ['#ef4444', '#b02a22'], // Memory write health: a tripped rule's border and tint (not --err-text's #f87171)
+  '--btn-ink': ['#fff', '#ffffff'], // text on an accent-filled button (--on-accent is near-black under dark)
 };
 for (const [k, [dark]] of Object.entries(PR2)) NEW_DARK[k] = dark;
 
@@ -586,6 +588,15 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
     expect(contrast(PAPER['--ok-text'], PAPER['--badge-good-bg'])).toBeGreaterThanOrEqual(4.5);
     expect(contrast(PAPER['--warn-text'], PAPER['--badge-warn-bg'])).toBeGreaterThanOrEqual(4.5);
     expect(contrast(PAPER['--err-text'], PAPER['--badge-bad-bg'])).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('memory write health: the verdict text on its tint over the page, the pills on the card, the button ink', () => {
+    const page = PAPER['--bg'];
+    expect(contrast(PAPER['--stat-ok'], tint(PAPER['--stat-ok'], 0.08, page))).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--err-text'], tint(PAPER['--tone-bad'], 0.1, page))).toBeGreaterThanOrEqual(4.5);
+    for (const t of ['--stat-ok', '--stat-warn', '--err-text']) expect(contrast(PAPER[t], '#ffffff'), t).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--btn-ink'], PAPER['--accent'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--tone-bad'], '#ffffff')).toBeGreaterThanOrEqual(3); // the tripped tile's border
   });
 
   it('the censor save messages are readable text on the white card and on the hover wash', () => {

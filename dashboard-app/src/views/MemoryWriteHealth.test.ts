@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
 import MemoryWriteHealth from './MemoryWriteHealth.svelte';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { styleBlocks } from '../lib/testing/css';
 
 // Render smoke for the Memory write health view. The fixture has the shape
 // nous/api/memory_write_health_dashboard.py returns; every value is made up.
@@ -122,5 +125,37 @@ describe('Memory write health view', () => {
     render(MemoryWriteHealth);
     expect(await screen.findByText('No rule tripped')).toBeTruthy();
     expect(screen.queryByRole('button', { name: /Acknowledge/ })).toBeNull();
+  });
+});
+
+describe('Memory write health on the paper look (PR 2)', () => {
+  beforeEach(() => { body = FULL(); urls = []; posts = []; postStatus = 200; install(); });
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+  it('keeps the verdict and tone classes the tokens hang on', async () => {
+    const { container } = render(MemoryWriteHealth);
+    await screen.findByText('2 rules tripped: you decide');
+    expect(container.querySelector('section.strip')?.classList.contains('verdict-bad')).toBe(true);
+    const tones = Array.from(container.querySelectorAll('.tile')).map((t) => [...t.classList].find((c) => c.startsWith('tone-')));
+    const pills = Array.from(container.querySelectorAll('.tile .pill')).map((p) => [...p.classList].find((c) => c.startsWith('pill-')));
+    expect(tones).toContain('tone-bad');
+    expect(pills.map((p) => p?.replace('pill-', 'tone-'))).toEqual(tones);
+  });
+
+  it('a quiet day gets the ok verdict', async () => {
+    body = { ...FULL(), checks: FULL().checks.map((c) => ({ ...c, state: 'ok', summary: '' })) };
+    const { container } = render(MemoryWriteHealth);
+    await screen.findByText('No rule tripped');
+    expect(container.querySelector('section.strip')?.classList.contains('verdict-ok')).toBe(true);
+  });
+
+  it('the style reads status tokens, with the old alphas as color-mix percentages', () => {
+    const css = styleBlocks(readFileSync(join(__dirname, 'MemoryWriteHealth.svelte'), 'utf-8'));
+    expect(css).toMatch(/\.verdict-ok \{ color: var\(--stat-ok\); border-color: color-mix\(in srgb, var\(--stat-ok\) 35%, transparent\);/);
+    expect(css).toMatch(/\.verdict-bad \{ color: var\(--err-text\); border-color: color-mix\(in srgb, var\(--tone-bad\) 50%, transparent\);/);
+    expect(css).toContain('.tile.tone-bad { border-color: color-mix(in srgb, var(--tone-bad) 60%, transparent); }');
+    expect(css).toContain('.pill-warn { color: var(--stat-warn); border-color: color-mix(in srgb, var(--stat-warn) 50%, transparent); }');
+    expect(css).toMatch(/background: var\(--accent\); color: var\(--btn-ink\);/);
+    expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/);
   });
 });

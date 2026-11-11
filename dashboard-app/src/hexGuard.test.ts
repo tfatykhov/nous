@@ -36,6 +36,9 @@ export const HEX_GUARDED: readonly string[] = [
   'views/Health.svelte',
   'views/health/GraphTab.svelte',
   'views/health/GrowthTab.svelte',
+  'views/health/WritesTab.svelte',
+  'views/MemoryWriteHealth.svelte',
+  'views/Admission.svelte',
 ];
 
 const SRC = __dirname;
@@ -88,6 +91,10 @@ export const SCRIPT_GUARDED: readonly string[] = [
   'views/Health.svelte',
   'views/health/GraphTab.svelte',
   'views/health/GrowthTab.svelte',
+  'views/health/WritesTab.svelte',
+  'views/MemoryWriteHealth.svelte',
+  'views/Admission.svelte',
+  'lib/ui/FilterBar.svelte',
 ];
 
 /** A literal colour, or a two-hex-digit alpha glued onto one (`c + '33'`, `"{color}20"`, `` `${color}30` ``), which

@@ -13,6 +13,7 @@ import { getLook } from './look';
  */
 export const DARK_FALLBACK: Record<string, string> = {
   '--accent': '#7c6af7',
+  '--surface': '#12121a',
   '--text': '#e2e2f0',
   '--muted': '#8e8eab',
   '--green': '#34d399',
