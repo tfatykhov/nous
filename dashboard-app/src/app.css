@@ -297,6 +297,16 @@
     margin: 0.25rem 0;
   }
 
+  /* Every page header (design batch 2): the title block starts at 20rem and grows, and the header wraps, so "updated"
+     and Refresh sit at the right when there is room and drop under the title on a phone, on every screen. */
+  .view-head {
+    flex-wrap: wrap;
+  }
+  .view-head > :first-child {
+    flex: 1 1 20rem;
+    min-width: 0;
+  }
+
   /* A wide table on a narrow screen (finish review fix 5): it scrolls in its own box, its first column stays put, and
      the right edge fades while there is more to see (a cover attached to the content hides the fade at the end). */
   .table-scroll {

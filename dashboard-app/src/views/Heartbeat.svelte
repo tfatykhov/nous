@@ -178,10 +178,13 @@
   {@const tripped = d.checks.filter((c) => c.circuit_breaker_open).length}
   {@const budgetPct = bgt.limit > 0 ? Math.round((bgt.used / bgt.limit) * 100) : 0}
 
-  <div class="hb-banner" class:hb-banner--disabled={!enabled} class:hb-banner--warn={enabled && tripped > 0}>
+  <div class="hb-banner">
     <span class="hb-dot" class:hb-dot--ok={enabled && tripped === 0} class:hb-dot--warn={enabled && tripped > 0} class:hb-dot--off={!enabled}></span>
     <span class="hb-banner-label">{enabled ? 'Heartbeat Active' : 'Heartbeat Disabled'}</span>
     <div class="hb-pills">
+      {#if enabled && tripped > 0}
+        <span class="status-pill status-pill--warn">{tripped} {tripped === 1 ? 'breaker' : 'breakers'} tripped</span>
+      {/if}
       <span class="status-pill" class:status-pill--warn={qh.active}>
         Quiet hours: {qh.active ? `active (${qh.start}:00–${qh.end}:00)` : 'inactive'}
       </span>
@@ -451,8 +454,8 @@
     margin-bottom: 1rem;
   }
 
-  /* A tripped breaker tints the banner (no coloured outline); the pills and the dot say what is wrong. */
-  .hb-banner--warn { background: var(--warn-bg); }
+  /* The banner stays white in every state, so each fact reads as a pill (on a warn tint the warn pills vanished into
+     it); a tripped breaker is a pill of its own, in words, beside the yellow dot (design batch 2). */
   /* A disabled banner is not dimmed (its muted pills at 65% were 2.8:1 on the white card): the grey dot and the words
      "Heartbeat Disabled" say it. */
 

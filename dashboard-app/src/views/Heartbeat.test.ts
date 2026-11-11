@@ -19,6 +19,7 @@ const finding = (fingerprint: string, urgency: string, state: string) => ({
 });
 
 let budget = { used: 5000, limit: 10000, percentage: 50 };
+let breakerOpen = false;
 const data = () => ({
   recent_ticks: [{ created_at: ago(1), data: {} }],
   cognitive_sessions: [{ timestamp: ago(30), session_id: 'hb-session-123456', findings_count: 2, tokens_used: 4200, response_summary: 'ok' }],
@@ -31,7 +32,7 @@ const data = () => ({
   ],
   status: { enabled: true, is_running: true, last_tick: ago(1), tick_interval: 300 },
   checks: [{ name: 'disk', active: true, interval: 300, last_run: ago(1), consecutive_failures: 0, max_failures: 3,
-    circuit_breaker_open: false, permanent: false, urgent_override: false }],
+    circuit_breaker_open: breakerOpen, permanent: false, urgent_override: false }],
   budget,
   quiet_hours: { start: 22, end: 7, active: false },
   finding_lifecycle: {
@@ -67,7 +68,7 @@ function paperMain(): HTMLElement {
 const chart = (t: string) => configs.find((c) => c.type === t)!;
 const section = (name: string) => screen.getByRole('heading', { level: 2, name }).closest('section') as HTMLElement;
 
-beforeEach(() => { budget = { used: 5000, limit: 10000, percentage: 50 }; install(); });
+beforeEach(() => { budget = { used: 5000, limit: 10000, percentage: 50 }; breakerOpen = false; install(); });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); document.body.innerHTML = ''; });
 
 describe('Heartbeat: urgency, state and budget colours by token', () => {
@@ -179,10 +180,26 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
       .toEqual([['Quiet hours', 'plain'], ['Budget', 'status-pill--warn'], ['Last tick', 'plain']]);
   });
 
-  it('source contract: no outlined pill is left; a tripped breaker tints the banner; the dots have no glow', () => {
+  // Design batch 2 (verdict pass 1): on the tinted banner the two warn pills were the banner's own tint, so they read
+  // as bare amber text beside one grey pill. The banner stays white, every fact is a pill, and a tripped breaker is
+  // said in words, as a pill of its own (it was the tint and the dot's colour only).
+  it('a tripped breaker is a pill of its own on the white banner, beside the other facts', async () => {
+    breakerOpen = true;
+    budget = { used: 8500, limit: 10000, percentage: 85 };
+    const { container } = render(Heartbeat);
+    await screen.findByText(/^Budget:/);
+    const banner = container.querySelector('.hb-banner')!;
+    expect([...banner.classList].filter((c) => c.startsWith('hb-banner--'))).toEqual([]);
+    const pills = Array.from(banner.querySelectorAll<HTMLElement>('.hb-pills > *'));
+    expect(pills.every((p) => p.classList.contains('status-pill'))).toBe(true);
+    expect(pills.map((p) => p.textContent?.trim().split(':')[0])).toEqual(['1 breaker tripped', 'Quiet hours', 'Budget', 'Last tick']);
+    expect(pills[0].classList.contains('status-pill--warn')).toBe(true);
+  });
+
+  it('source contract: no outlined pill is left; the banner is never tinted; the dots have no glow', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'Heartbeat.svelte'), 'utf-8'));
     expect(css).not.toMatch(/\.hb-pill(?!s)/);
-    expect(css).toMatch(/\.hb-banner--warn \{ background: var\(--warn-bg\); \}/);
+    expect(css).not.toMatch(/\.hb-banner--warn/);
     // The dark look's glow (a blur that was 0 px on paper) is gone with its token (PR 7 T5).
     expect(css).toMatch(/\.hb-dot--ok \{ background: var\(--st-completed\); \}/);
     expect(css).toMatch(/\.hb-dot--warn \{ background: var\(--yellow\); \}/);
