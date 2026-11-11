@@ -738,7 +738,7 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
     expect(okDistance('#159a7a', '#159a7a')).toBe(0);
   });
 
-  it('every token has its value', () => {
+  it('the Memory screens\' tuned tokens keep their pinned values', () => {
     for (const [k, paper] of Object.entries(PR2)) expect(PAPER[k], k).toBe(paper);
     for (const [k, paper] of Object.entries(LEGACY_PAPER)) expect(PAPER[k], k).toBe(paper);
   });
@@ -886,7 +886,7 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
 // ── PR 3: status, outcome and the Execution screens' one-off colours ─────────────────────────────────────────────────
 
 describe('PR 3 tokens: status, outcomes, execution screens', () => {
-  it('every token has its value', () => {
+  it('the Execution screens\' tuned tokens keep their pinned values', () => {
     for (const [k, paper] of Object.entries(PR3)) expect(PAPER[k], k).toBe(paper);
   });
 
@@ -1002,7 +1002,7 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
   const white = '#ffffff';
   const hover = PAPER['--surface-hover'];
 
-  it('every token has its value', () => {
+  it('the Decisions and System screens\' tuned tokens keep their pinned values', () => {
     for (const [k, paper] of Object.entries(PR4)) expect(PAPER[k], k).toBe(paper);
   });
 
@@ -1127,7 +1127,7 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     }
   });
 
-  it('Observability\'s event count and the perfect-calibration line', () => {
+  it('the event count is 4.5:1 on its 10% tint over the card and a hovered row; the perfect-calibration line at 40% is a recorded 1.79:1', () => {
     // The event count (review M2): --muted on its own 10% tint, over the card and over a hovered or open row (5.02 /
     // 4.68). The wash it had equals the hovered row's fill.
     expect(contrast(PAPER['--muted'], tint(PAPER['--muted'], 0.1, white)), 'count badge on the card').toBeGreaterThanOrEqual(4.5);
