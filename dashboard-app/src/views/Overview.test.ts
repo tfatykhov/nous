@@ -75,6 +75,27 @@ describe('Overview', () => {
   beforeEach(() => { replies = base(); attentionOverride.set({}); install(); });
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+  it('a page left open past 00:00 UTC refetches the new day by itself (review M13)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    vi.setSystemTime(new Date('2026-11-10T23:59:30Z'));
+    try {
+      await show();
+      await vi.advanceTimersByTimeAsync(0);
+      const todays = () => urls.filter((u) => u.startsWith('/dashboard/work/today')).length;
+      const before = todays();
+      expect(before).toBe(1);
+      replies['/dashboard/work/today'] = () => ({ body: { ...TODAY, day: '2026-11-11', now: '2026-11-11T00:00:31+00:00', turns: [] } });
+      await vi.advanceTimersByTimeAsync(20_000); // still the 10th: nothing
+      expect(todays()).toBe(before);
+      await vi.advanceTimersByTimeAsync(45_000); // past midnight
+      expect(todays()).toBe(before + 1);
+      await vi.advanceTimersByTimeAsync(0);
+      await waitFor(() => expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Today, 11 November'));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('the title is the UTC day and the header pills come from the day totals', async () => {
     const { container } = await show();
     // The endpoint's UTC day wins over the browser's clock once it arrives.

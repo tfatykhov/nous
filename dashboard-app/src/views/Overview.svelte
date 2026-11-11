@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -57,6 +58,34 @@
     void today.refresh();
     void findings.refresh();
   }
+
+  // The day rolls over at 00:00 UTC: refetch then, and when the tab comes back after it, so a page left open never
+  // calls yesterday "Today".
+  const utcDate = () => new Date().toISOString().slice(0, 10);
+  function checkDay() {
+    const day = $today.data?.day;
+    if (day && day !== utcDate()) refreshAll();
+  }
+  onMount(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const arm = () => {
+      const now = new Date();
+      const next = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+      timer = setTimeout(() => {
+        checkDay();
+        arm();
+      }, next - now.getTime() + 1000);
+    };
+    arm();
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') checkDay();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  });
 
   // ── Helpers ───────────────────────────────────────────────────────────
 
