@@ -327,12 +327,14 @@
               {/if}
 
               {#if t.model_calls.length > 0}
+                <!-- Every main-loop call of the turn (the API lists at most 20; an older API has no count). -->
+                {@const mcount = t.model_call_count ?? t.model_calls.length}
                 <div class="mcalls">
-                  <a href={modelCallsHref(undefined, { turn_id: t.turn_id })}>{plural(t.model_calls.length, 'main-loop model call', 'main-loop model calls')}</a>
+                  <a href={modelCallsHref(undefined, { turn_id: t.turn_id })}>{plural(mcount, 'main-loop model call', 'main-loop model calls')}</a>
                   <span class="muted">·</span>
                   <a href={modelCallsHref(undefined, { session_id: s.session_id })}>all model calls of this conversation</a>
                   <details>
-                    <summary>List them</summary>
+                    <summary>{mcount > t.model_calls.length ? `List the first ${t.model_calls.length}` : 'List them'}</summary>
                     <ul>
                       {#each t.model_calls as m (m.id)}
                         <li><a href={modelCallsHref(['c', m.id])}>{m.model ?? 'unknown model'}</a> <span class="muted">{m.purpose} · {m.status} · {fmtTokens(m.input_total)} in · {fmtTokens(m.output_tokens)} out</span></li>

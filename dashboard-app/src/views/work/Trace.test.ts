@@ -498,7 +498,7 @@ describe('Work trace', () => {
     respond = () => ({ body: trace([turn(T1, 1, { model_calls: [
       { id: 'mc-1', purpose: 'main_loop', model: 'claude-x', status: 'ok', input_total: 54500, output_tokens: 300 },
       { id: 'mc-2', purpose: 'main_loop', model: null, status: 'ok', input_total: null, output_tokens: null },
-    ] }), turn(T2, 2)]) });
+    ], model_call_count: 2 }), turn(T2, 2)]) });
     const { container } = render(Trace, { sessionId: 'sess/one' });
     await screen.findByText('Reply 1');
     const arts = Array.from(container.querySelectorAll('article.turn')) as HTMLElement[];
@@ -511,6 +511,27 @@ describe('Work trace', () => {
       expect.arrayContaining(['#/model-calls/c/mc-1?days=30', '#/model-calls/c/mc-2?days=30']));
     expect(arts[0].textContent).toContain('54.5K');
     expect(within(arts[1]).queryByRole('link', { name: /main-loop/ })).toBeNull();
+  });
+
+  it('the count is every main-loop call of the turn, not the 20 listed; the list says it shows the first 20', async () => {
+    const listed = Array.from({ length: 20 }, (_, i) => ({ id: `mc-${i}`, purpose: 'chat', model: 'm', status: 'ok', input_total: 100, output_tokens: 1 }));
+    respond = () => ({ body: trace([turn(T1, 1, { model_calls: listed, model_call_count: 22 }), turn(T2, 2, { model_calls: listed.slice(0, 3), model_call_count: 3 })]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 2');
+    const arts = Array.from(container.querySelectorAll('article.turn')) as HTMLElement[];
+    expect(within(arts[0]).getByRole('link', { name: '22 main-loop model calls' })).toBeTruthy();
+    expect(arts[0].querySelector('.mcalls summary')!.textContent).toBe('List the first 20');
+    expect(arts[0].querySelectorAll('.mcalls li')).toHaveLength(20);
+    expect(within(arts[1]).getByRole('link', { name: '3 main-loop model calls' })).toBeTruthy();
+    expect(arts[1].querySelector('.mcalls summary')!.textContent).toBe('List them');
+  });
+
+  it('an older API with no model_call_count counts the listed calls', async () => {
+    const old = turn(T1, 1, { model_calls: [{ id: 'mc-1', purpose: 'chat', model: 'm', status: 'ok', input_total: 1, output_tokens: 1 }, { id: 'mc-2', purpose: 'chat', model: 'm', status: 'ok', input_total: 1, output_tokens: 1 }] });
+    delete (old as Record<string, unknown>).model_call_count;
+    respond = () => ({ body: trace([old]) });
+    render(Trace, { sessionId: 'sess/one' });
+    expect(await screen.findByRole('link', { name: '2 main-loop model calls' })).toBeTruthy();
   });
 
   it('1 main-loop call is singular', async () => {
