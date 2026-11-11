@@ -558,7 +558,7 @@
   .search-input {
     padding: 0.3125rem 0.875rem;
     font-size: 0.8125rem;
-    border: 1px solid var(--border);
+    border: 1px solid var(--field-border);
     border-radius: var(--ctl-radius);
     background: var(--surface);
     color: var(--text);
@@ -597,7 +597,7 @@
   }
 
   .type-check input {
-    accent-color: var(--accent);
+    accent-color: var(--action);
   }
 
   .type-dot {
@@ -621,7 +621,7 @@
 
   .range-slider {
     width: 100px;
-    accent-color: var(--accent);
+    accent-color: var(--action);
   }
 
   .empty-state {

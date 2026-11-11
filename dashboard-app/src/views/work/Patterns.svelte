@@ -193,7 +193,7 @@
   .empty { color: var(--muted); margin: 0.5rem 0; font-size: 0.9375rem; }
   select:focus-visible, a:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
   .field { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); font-size: 0.875rem; }
-  select { background: var(--surface); border: 1px solid var(--border); border-radius: var(--ctl-radius); color: var(--text); padding: 0.5rem 0.875rem; font: inherit; min-height: 36px; }
+  select { background: var(--surface); border: 1px solid var(--field-border); border-radius: var(--ctl-radius); color: var(--text); padding: 0.5rem 0.875rem; font: inherit; min-height: 36px; }
   .card { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow); padding: 1.25rem; display: flex; flex-direction: column; gap: 0.75rem; min-width: 0; }
   .card-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.5rem; align-items: baseline; }
   .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.25rem; }

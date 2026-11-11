@@ -304,7 +304,7 @@
   .seg button.on { background: var(--tab-active-bg); color: var(--text); font-weight: 600; box-shadow: var(--tab-active-shadow); }
   .field { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); font-size: 0.875rem; }
   .field.grow { flex: 1 1 260px; }
-  select, input[type='search'] { background: var(--surface); border: 1px solid var(--border); border-radius: var(--ctl-radius); color: var(--text);
+  select, input[type='search'] { background: var(--surface); border: 1px solid var(--field-border); border-radius: var(--ctl-radius); color: var(--text);
     padding: 0.5rem 0.875rem; font: inherit; min-height: 40px; min-width: 0; }
   input[type='search'] { flex: 1 1 auto; }
   .chip { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 999px; padding: 0.5rem 0.75rem; font-size: 0.8125rem; font-weight: 500; min-height: 36px; }

@@ -587,7 +587,7 @@
 
   .sim-slider {
     flex: 1;
-    accent-color: var(--accent);
+    accent-color: var(--action);
     cursor: pointer;
   }
 

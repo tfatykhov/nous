@@ -351,7 +351,7 @@
 /* The browser's own surfaces carry the design (finish review ceiling; the craft floor). Unlayered and anchored at :root
    so a view's scoped rule (a `background` shorthand on its select, say) cannot reset them: a checkbox or radio takes
    the action colour; a select draws its arrow from tokens, with room for it; every disclosure marker is the muted ink. */
-:root input[type="checkbox"], :root input[type="radio"] {
+:root input[type="checkbox"], :root input[type="radio"], :root input[type="range"] {
   accent-color: var(--action);
 }
 

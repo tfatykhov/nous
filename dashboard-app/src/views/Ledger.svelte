@@ -398,7 +398,7 @@
   .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem 1.25rem; margin: 1rem 0 0.75rem; }
   .filter-group { display: flex; align-items: center; gap: 0.5rem; }
   .filter-label { font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: none; letter-spacing: 0; }
-  select, input[type='search'] { min-height: 32px; padding: 0 0.625rem; border-radius: var(--ctl-radius); border: 1px solid var(--border);
+  select, input[type='search'] { min-height: 32px; padding: 0 0.625rem; border-radius: var(--ctl-radius); border: 1px solid var(--field-border);
     background: var(--surface); color: var(--text); font-family: inherit; font-size: 0.8125rem; }
   .search { margin-left: auto; flex: 1 1 14rem; max-width: 18rem; }
   .search input { width: 100%; border-radius: 999px; }

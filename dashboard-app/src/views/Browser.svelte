@@ -766,7 +766,7 @@
     min-width: 180px;
     padding: 0.4375rem 1rem;
     background: var(--surface);
-    border: 1px solid var(--border);
+    border: 1px solid var(--field-border);
     border-radius: var(--ctl-radius);
     color: var(--text);
     font-size: 0.875rem;
@@ -917,7 +917,7 @@
   .censor-select {
     padding: 0.25rem 0.75rem;
     background: var(--surface);
-    border: 1px solid var(--border);
+    border: 1px solid var(--field-border);
     border-radius: var(--ctl-radius);
     color: var(--text);
     font-size: 0.8125rem;
@@ -925,7 +925,7 @@
   }
 
   .censor-label input {
-    accent-color: var(--accent);
+    accent-color: var(--action);
   }
 
   .save-status {

@@ -235,7 +235,7 @@
   .chip .note { color: var(--muted); font-size: 0.75rem; border: 1px dashed var(--border); border-radius: 6px; padding: 0 5px; margin-left: 2px; }
   .chip .remove { color: var(--muted); font-size: 0.75rem; margin-left: 2px; }
   .field { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); font-size: 0.875rem; }
-  select { background: var(--surface); border: 1px solid var(--border); border-radius: var(--ctl-radius); color: var(--text); padding: 0.5rem 0.75rem; font: inherit; min-height: 40px; }
+  select { background: var(--surface); border: 1px solid var(--field-border); border-radius: var(--ctl-radius); color: var(--text); padding: 0.5rem 0.75rem; font: inherit; min-height: 40px; }
   .calls { list-style: none; margin: 0; padding: 0; border: var(--card-border); border-radius: var(--card-radius); background: var(--surface); box-shadow: var(--card-shadow); overflow: hidden; }
   .calls li + li { border-top: 1px solid var(--border); }
   .calls.dim { opacity: 0.6; }
