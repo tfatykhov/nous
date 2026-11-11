@@ -234,6 +234,8 @@ const PR3: Record<string, [string, string]> = {
   '--hit-bad': ['#ef4444', '#b02a22'],
   '--cache-blue': ['#3b82f6', '#1f5fa8'], // Cache: the doughnut's cache-created part
   '--cache-grey': ['#4b5563', '#4f5f6f'], // Cache: the doughnut's uncached part
+  '--wait-ink': ['#c4b5fd', '#7b3fa0'], // Workflows: the Now column's waiting pill
+  '--wait-bg': ['rgba(167, 139, 250, 0.14)', '#efe3f6'],
 };
 for (const [k, [dark]] of Object.entries(PR3)) NEW_DARK[k] = dark;
 
@@ -760,5 +762,10 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
     for (const [k, [, p]] of Object.entries(OC)) expect(contrast(p, '#ffffff'), k).toBeGreaterThanOrEqual(3);
     expect(contrast(PAPER['--stack-bar'], '#ffffff')).toBeGreaterThanOrEqual(3);
     for (const k of ['--hit-good', '--hit-mid', '--hit-bad', '--cache-blue', '--cache-grey']) expect(contrast(PAPER[k], '#ffffff'), k).toBeGreaterThanOrEqual(3);
+  });
+
+  it('the waiting pill\'s text on its tint: at least 4.5:1 in both grounds', () => {
+    expect(contrast(PAPER['--wait-ink'], PAPER['--wait-bg'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(DARK['--wait-ink'], over(parseColor(DARK['--wait-bg']), parseColor(DARK['--surface'])))).toBeGreaterThanOrEqual(4.5);
   });
 });

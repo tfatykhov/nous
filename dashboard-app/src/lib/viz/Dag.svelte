@@ -13,7 +13,7 @@
    *   onNodeClick — optional callback when user clicks a node
    */
   import { onMount } from 'svelte';
-  import { statusColor } from '$lib/status';
+  import { statusVar } from '$lib/status';
 
   export type DagNode = {
     id: string;
@@ -57,7 +57,9 @@
   const NODE_SPACING = 100;
   const NODE_RADIUS = 22;
 
-  // One status → colour map for the graph and the DAG view (lib/status.ts).
+  // One status → colour map for the graph and the DAG view (lib/status.ts): a token, so the ground restyles it.
+  // Colours go through .style(), never .attr(): an SVG presentation attribute does not reliably take var() or
+  // color-mix().
 
   function renderGraph(nodeList: DagNode[], edgeList: DagEdge[]): void {
     if (!container) return;
@@ -123,7 +125,7 @@
       .attr('orient', 'auto')
       .append('path')
       .attr('d', 'M0,0 L10,5 L0,10 Z')
-      .attr('fill', 'var(--muted, #8e8eab)');
+      .style('fill', 'var(--muted)');
 
     // Wave lane labels
     for (let wl = 0; wl <= maxWave; wl++) {
@@ -133,7 +135,7 @@
         .attr('x', MARGIN_LEFT + wl * WAVE_SPACING)
         .attr('y', 20)
         .attr('text-anchor', 'middle')
-        .attr('fill', 'var(--muted, #8e8eab)')
+        .style('fill', 'var(--muted)')
         .attr('font-size', '11px')
         .text(`Wave ${wl}`);
     }
@@ -150,7 +152,7 @@
         .attr('y1', from.y)
         .attr('x2', to.x - NODE_RADIUS)
         .attr('y2', to.y)
-        .attr('stroke', 'var(--muted, #8e8eab)')
+        .style('stroke', 'var(--muted)')
         .attr('stroke-width', 1.5)
         .attr('marker-end', 'url(#dag-arrow)');
     }
@@ -173,7 +175,9 @@
 
     nodeGroups.each(function (this: SVGGElement, d: DagNode) {
       const g = d3.select(this);
-      const color = statusColor(d.status);
+      const color = statusVar(d.status);
+      // The old `${hex}30` fill: 0x30/255 is 18.8%.
+      const fill = `color-mix(in srgb, ${color} 18.8%, transparent)`;
       const isRunning = d.status === 'running';
       const isAwaiting = d.status === 'awaiting_check' || d.status === 'awaiting_input';
       const anim = isRunning
@@ -187,8 +191,8 @@
         // Diamond
         g.append('polygon')
           .attr('points', `0,-${r} ${r},0 0,${r} -${r},0`)
-          .attr('fill', `${color}30`)
-          .attr('stroke', color)
+          .style('fill', fill)
+          .style('stroke', color)
           .attr('stroke-width', 2)
           .style('animation', anim);
       } else if (d.node_type === 'gate') {
@@ -199,8 +203,8 @@
         }).join(' ');
         g.append('polygon')
           .attr('points', hex)
-          .attr('fill', `${color}30`)
-          .attr('stroke', color)
+          .style('fill', fill)
+          .style('stroke', color)
           .attr('stroke-width', 2)
           .style('animation', anim);
       } else if (d.node_type === 'approval') {
@@ -209,14 +213,14 @@
         g.append('rect')
           .attr('x', -r).attr('y', -r).attr('width', r * 2).attr('height', r * 2)
           .attr('rx', 6)
-          .attr('fill', `${color}30`)
-          .attr('stroke', color)
+          .style('fill', fill)
+          .style('stroke', color)
           .attr('stroke-width', 2)
           .style('animation', anim);
         g.append('text')
           .attr('text-anchor', 'middle')
           .attr('dy', 5)
-          .attr('fill', color)
+          .style('fill', color)
           .attr('font-size', '15px')
           .attr('font-weight', '700')
           .attr('aria-hidden', 'true')
@@ -225,16 +229,16 @@
         // Triangle
         g.append('polygon')
           .attr('points', `0,-${r} ${r},${r * 0.8} -${r},${r * 0.8}`)
-          .attr('fill', `${color}30`)
-          .attr('stroke', color)
+          .style('fill', fill)
+          .style('stroke', color)
           .attr('stroke-width', 2)
           .style('animation', anim);
       } else {
         // Circle (subtask — default)
         g.append('circle')
           .attr('r', r)
-          .attr('fill', `${color}30`)
-          .attr('stroke', color)
+          .style('fill', fill)
+          .style('stroke', color)
           .attr('stroke-width', 2)
           .style('animation', anim);
       }
@@ -244,7 +248,7 @@
         .attr('class', 'dag-node-label')
         .attr('dy', r + 16)
         .attr('text-anchor', 'middle')
-        .attr('fill', 'var(--text, #e2e8f0)')
+        .style('fill', 'var(--text)')
         .attr('font-size', '11px')
         .text(d.name.length > 12 ? d.name.slice(0, 11) + '…' : d.name);
     });

@@ -244,6 +244,8 @@
     --hit-bad: #ef4444;
     --cache-blue: #3b82f6;                     /* Cache: the doughnut's cache-created part */
     --cache-grey: #4b5563;                     /* Cache: the doughnut's uncached part */
+    --wait-ink: #c4b5fd;                       /* Workflows: the Now column's waiting pill */
+    --wait-bg: rgba(167, 139, 250, 0.14);
   }
 
   /* ---- The paper ground: page content under the paper look ---- */
@@ -410,6 +412,8 @@
     --hit-bad: #b02a22;
     --cache-blue: #1f5fa8;
     --cache-grey: #4f5f6f;
+    --wait-ink: #7b3fa0;
+    --wait-bg: #efe3f6;
 
     /* shadcn, HSL of the paper hex */
     --background: 192 17% 94%;
