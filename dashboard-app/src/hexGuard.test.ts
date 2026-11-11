@@ -32,6 +32,7 @@ export const HEX_GUARDED: readonly string[] = [
   'views/GraphView.svelte',
   'lib/viz/Graph.svelte',
   'lib/ui/BottomSheet.svelte',
+  'views/Browser.svelte',
 ];
 
 const SRC = __dirname;
@@ -79,6 +80,8 @@ export const SCRIPT_GUARDED: readonly string[] = [
   'views/GraphView.svelte',
   'lib/viz/Graph.svelte',
   'lib/ui/BottomSheet.svelte',
+  'views/Browser.svelte',
+  'lib/ui/DataTable.svelte',
 ];
 
 /** A literal colour, or a two-hex-digit alpha glued onto one (`c + '33'`, `"{color}20"`, `` `${color}30` ``), which

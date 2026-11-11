@@ -208,6 +208,8 @@
     --glow-blur: 6px;
     --chart-text: #94a3b8;                     /* a chart's ticks and legend on a paper ground (dark charts keep Chart.js's) */
     --chart-grid: #1e293b;
+    --save-ok: #4ade80;                        /* Browse: a censor's save message */
+    --save-err: #f87171;
   }
 
   /* ---- The paper ground: page content under the paper look ---- */
@@ -340,6 +342,8 @@
     --glow-blur: 0px;
     --chart-text: #56687a;
     --chart-grid: #e3e9ec;
+    --save-ok: #23703d;
+    --save-err: #b02a22;
 
     /* shadcn, HSL of the paper hex */
     --background: 192 17% 94%;

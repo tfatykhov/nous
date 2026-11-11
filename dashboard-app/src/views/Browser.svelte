@@ -259,6 +259,7 @@
       {#if dataFacts.facts.length === 0}
         <p class="empty">No facts found.</p>
       {:else}
+        <div class="table-card">
         <DataTable
           columns={[
             { key: 'content_short',  label: 'Content' },
@@ -287,6 +288,7 @@
             </div>
           {/snippet}
         </DataTable>
+        </div>
 
         {@const pi = pageInfo(offsetFacts, dataFacts.total)}
         <div class="pagination">
@@ -320,6 +322,7 @@
       {#if dataEpisodes.episodes.length === 0}
         <p class="empty">No episodes found.</p>
       {:else}
+        <div class="table-card">
         <DataTable
           columns={[
             { key: 'title_fmt',     label: 'Title' },
@@ -356,6 +359,7 @@
             </div>
           {/snippet}
         </DataTable>
+        </div>
 
         {@const pi = pageInfo(offsetEpisodes, dataEpisodes.total)}
         <div class="pagination">
@@ -389,6 +393,7 @@
       {#if dataDecisions.decisions.length === 0}
         <p class="empty">No decisions found.</p>
       {:else}
+        <div class="table-card">
         <DataTable
           columns={[
             { key: 'desc_short',  label: 'Description' },
@@ -429,6 +434,7 @@
             </div>
           {/snippet}
         </DataTable>
+        </div>
 
         {@const pi = pageInfo(offsetDecisions, dataDecisions.total)}
         <div class="pagination">
@@ -462,6 +468,7 @@
       {#if dataProcedures.procedures.length === 0}
         <p class="empty">No procedures found.</p>
       {:else}
+        <div class="table-card">
         <DataTable
           columns={[
             { key: 'name_short', label: 'Name' },
@@ -487,6 +494,7 @@
             </div>
           {/snippet}
         </DataTable>
+        </div>
 
         {@const pi = pageInfo(offsetProcedures, dataProcedures.total)}
         <div class="pagination">
@@ -520,6 +528,7 @@
       {#if dataCensors.censors.length === 0}
         <p class="empty">No censors found.</p>
       {:else}
+        <div class="table-card">
         <DataTable
           columns={[
             { key: 'trigger_short', label: 'Trigger' },
@@ -602,6 +611,7 @@
             </div>
           {/snippet}
         </DataTable>
+        </div>
 
         {@const pi = pageInfo(offsetCensors, dataCensors.total)}
         <div class="pagination">
@@ -635,6 +645,7 @@
       {#if dataChunks.chunks.length === 0}
         <p class="empty">No chunks found.</p>
       {:else}
+        <div class="table-card">
         <DataTable
           columns={[
             { key: 'content_short', label: 'Content' },
@@ -660,6 +671,7 @@
             </div>
           {/snippet}
         </DataTable>
+        </div>
 
         {@const pi = pageInfo(offsetChunks, dataChunks.total)}
         <div class="pagination">
@@ -676,6 +688,9 @@
 </div>
 
 <style>
+  /* Colours and structure are tokens only (hexGuard). The tabs are the SubNav's pills (an inset accent ring under the
+     dark look, a raised white pill on paper). Paper-only chrome (the 30px title, each table in a white rounded card,
+     the mono font) sits under a paper-ground selector, so the dark look keeps its tables on the page. */
   .view-head {
     margin-bottom: 1.25rem;
   }
@@ -687,43 +702,53 @@
     margin: 0 0 0.125rem;
   }
 
+  :global(html[data-look="paper"] [data-ground="paper"]) h1 {
+    font-size: 30px;
+    font-weight: 650;
+    letter-spacing: -0.022em;
+    line-height: 1.15;
+  }
+
   .subtitle {
     font-size: 0.8125rem;
     color: var(--muted);
     margin: 0;
   }
 
-  /* ── Tab bar ── */
+  /* ── Tab bar: pills, as SubNav ── */
   .tab-bar {
     display: flex;
-    gap: 0.25rem;
-    border-bottom: 2px solid var(--border);
+    gap: 4px;
     margin-bottom: 1rem;
     flex-wrap: wrap;
   }
 
   .tab-btn {
-    padding: 0.5rem 1rem;
+    padding: 8px 14px;
     background: none;
     border: none;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -2px;
+    border-radius: var(--ctl-radius);
     font-size: 0.875rem;
     font-weight: 500;
     color: var(--muted);
     cursor: pointer;
-    border-radius: 4px 4px 0 0;
-    transition: color 0.15s, border-color 0.15s;
+    transition: background var(--transition), color var(--transition);
   }
 
   .tab-btn:hover {
+    background: var(--surface-hover);
     color: var(--text);
   }
 
   .tab-btn.active {
-    color: var(--accent, #22d3ee);
-    border-bottom-color: var(--accent, #22d3ee);
+    background: var(--tab-active-bg);
+    color: var(--text);
     font-weight: 600;
+    box-shadow: var(--tab-active-shadow);
+  }
+
+  @media (max-width: 768px) {
+    .tab-btn { min-height: 44px; }
   }
 
   /* ── Controls bar ── */
@@ -740,14 +765,23 @@
     padding: 0.4375rem 0.75rem;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--ctl-radius);
     color: var(--text);
     font-size: 0.875rem;
   }
 
   .search-input:focus {
     outline: none;
-    border-color: var(--accent, #22d3ee);
+    border-color: var(--accent);
+  }
+
+  :global(html[data-look="paper"] [data-ground="paper"]) .search-input {
+    padding: 0.4375rem 1rem;
+  }
+
+  :global(html[data-look="paper"] [data-ground="paper"]) .search-input:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 1px;
   }
 
   /* ── Buttons ── */
@@ -755,7 +789,7 @@
     padding: 0.4375rem 0.875rem;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--ctl-radius);
     color: var(--text);
     font-size: 0.875rem;
     cursor: pointer;
@@ -763,8 +797,8 @@
   }
 
   .btn:hover:not(:disabled) {
-    border-color: var(--accent, #22d3ee);
-    color: var(--accent, #22d3ee);
+    border-color: var(--accent);
+    color: var(--accent);
   }
 
   .btn:disabled {
@@ -772,9 +806,30 @@
     cursor: not-allowed;
   }
 
+  :global(html[data-look="paper"] [data-ground="paper"]) .btn {
+    padding: 0.4375rem 1rem;
+    font-weight: 550;
+  }
+
+  :global(html[data-look="paper"] [data-ground="paper"]) .btn:hover:not(:disabled) {
+    border-color: var(--muted);
+    color: var(--text);
+    box-shadow: var(--card-shadow);
+  }
+
   .btn-sm {
     padding: 0.3125rem 0.625rem;
     font-size: 0.8125rem;
+  }
+
+  /* ── Tables: a white rounded card on paper ── */
+  :global(html[data-look="paper"] [data-ground="paper"]) .table-card {
+    background: var(--surface);
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
+    padding: 0.25rem 0.75rem;
+    overflow: hidden;
   }
 
   /* ── Pagination ── */
@@ -800,7 +855,7 @@
   }
 
   .status-msg.error {
-    color: var(--red, #ef4444);
+    color: var(--red);
   }
 
   .empty {
@@ -819,6 +874,12 @@
     padding: 0.5rem 0;
   }
 
+  /* A value of any length wraps inside its column (a 1,000-character token included), never widening the page. */
+  .tab-body :global(.detail-grid > span) {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
   :global(.dl) {
     color: var(--muted);
     font-weight: 600;
@@ -829,6 +890,10 @@
   :global(.mono) {
     font-family: monospace;
     font-size: 0.75rem;
+  }
+
+  :global(html[data-look="paper"] [data-ground="paper"]) .tab-body :global(.mono) {
+    font-family: var(--font-mono);
   }
 
   :global(.muted-text) {
@@ -859,10 +924,18 @@
     padding: 0.25rem 0.5rem;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--ctl-radius);
     color: var(--text);
     font-size: 0.8125rem;
     cursor: pointer;
+  }
+
+  :global(html[data-look="paper"] [data-ground="paper"]) .censor-select {
+    padding: 0.25rem 0.75rem;
+  }
+
+  :global(html[data-look="paper"] [data-ground="paper"]) .censor-label input {
+    accent-color: var(--accent);
   }
 
   .save-status {
@@ -871,10 +944,10 @@
   }
 
   .save-status.save-ok {
-    color: #4ade80;
+    color: var(--save-ok);
   }
 
   .save-status.save-err {
-    color: #f87171;
+    color: var(--save-err);
   }
 </style>
