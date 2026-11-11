@@ -63,6 +63,13 @@ describe('classifyVideoUrl', () => {
     });
   });
 
+  it('a literal space is not a control character: the overlay file still plays', () => {
+    expect(classifyVideoUrl('/dashboard/v2/trip/my clip.mp4')).toEqual({
+      kind: 'video',
+      src: '/dashboard/v2/trip/my clip.mp4',
+    });
+  });
+
   it('a direct https file is a <video>, extension case-insensitive', () => {
     expect(classifyVideoUrl('https://cdn.example.com/v/clip.MP4')).toEqual({
       kind: 'video',

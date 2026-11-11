@@ -27,15 +27,16 @@ const VIMEO_HOSTS = new Set(['vimeo.com', 'www.vimeo.com']);
 const YOUTUBE_EMBED = 'https://www.youtube-nocookie.com/embed/';
 const VIMEO_EMBED = 'https://player.vimeo.com/video/';
 // A browser strips tab/CR/LF from a URL before parsing it, so `.\t.` would
-// turn into a `..` segment after the checks below; refuse all of them.
+// turn into a `..` segment after the checks below; refuse every control
+// character. A literal space is kept (and percent-encoded) by the browser.
 // eslint-disable-next-line no-control-regex
-const WHITESPACE_OR_CONTROL = /[\s\u0000-\u001f\u007f]/;
+const CONTROL = /[\u0000-\u001f\u007f]/;
 const NONE: VideoSource = { kind: 'none' };
 
 function cleaned(raw: unknown): string | null {
   if (typeof raw !== 'string') return null;
   const s = raw.trim();
-  if (s.length === 0 || s.length > MAX_LENGTH || WHITESPACE_OR_CONTROL.test(s)) return null;
+  if (s.length === 0 || s.length > MAX_LENGTH || CONTROL.test(s)) return null;
   return s;
 }
 
