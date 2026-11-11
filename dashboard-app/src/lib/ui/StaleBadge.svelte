@@ -1,7 +1,9 @@
 <script lang="ts">
   import type { PollState } from '../stores/registry';
+  import { nameList } from '../pollBadge';
 
-  let { state }: { state: PollState<unknown> } = $props();
+  /** One store's state, or several combined (combinePolls), whose `failed` names the stores whose refresh failed. */
+  let { state }: { state: PollState<unknown> & { failed?: string[] } } = $props();
 
   function formatAgo(ts: number | null): string {
     if (ts === null) return '';
@@ -13,8 +15,11 @@
     return `${hours}h ago`;
   }
 
+  // A combined badge says what failed and, when earlier figures are still shown, how old they are (Codex round 1).
   let label = $derived(
-    state.error
+    state.error && state.failed?.length
+      ? `${nameList(state.failed)} failed${state.lastUpdated !== null ? ` · data from ${formatAgo(state.lastUpdated)}` : ' — retrying'}`
+      : state.error
       ? 'error — retrying'
       : state.loading && state.data === null
         ? 'loading…'

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { combinePolls } from '../lib/pollBadge';
   import { Button } from '../lib/ui/button';
   import { fmtUtc, fmtDay } from '../lib/harness';
   import { apiGet } from '../lib/api';
@@ -142,6 +143,8 @@
     { key: 'tool_calls_made', label: 'Tool calls' },
     { key: 'task', label: 'Task' },
   ];
+  /** The header badge speaks for every store this page reads (Codex round 1). */
+  const pagePoll = $derived(combinePolls({ subtasks: $store, schedules: $activity }));
 </script>
 
 <header class="view-head">
@@ -160,8 +163,8 @@
         <option value={h}>{h}h</option>
       {/each}
     </select>
-    <StaleBadge state={$store} />
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading || $activity.loading}>{$store.loading || $activity.loading ? 'Loading…' : 'Refresh'}</Button>
+    <StaleBadge state={pagePoll} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={pagePoll.loading}>{pagePoll.loading ? 'Loading…' : 'Refresh'}</Button>
   </div>
 </header>
 

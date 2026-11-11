@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { combinePolls } from '../../lib/pollBadge';
   import { fmtDay } from '../../lib/harness';
   // F108 Memory health, Graph tab: Density's totals and overall orphan rate first, then Graph Health's charts
   // (/dashboard/health), then Density's tables (/dashboard/density). "Orphan Rate by Type" stays beside "Orphan
@@ -238,14 +239,16 @@
     },
     plugins: { legend: { position: 'bottom' } },
   };
+  /** The header badge speaks for every store this page reads (Codex round 1). */
+  const pagePoll = $derived(combinePolls({ 'graph health': $store, 'graph density': $density }));
 </script>
 
 <header class="view-head">
   <p class="subtitle">How dense the graph is getting, how many edges are made, and how connected the nodes are.</p>
   <div class="head-right">
-    <StaleBadge state={$store} />
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={$store.loading || $density.loading}>
-      {$store.loading || $density.loading ? 'Loading…' : 'Refresh'}
+    <StaleBadge state={pagePoll} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={pagePoll.loading}>
+      {pagePoll.loading ? 'Loading…' : 'Refresh'}
     </Button>
   </div>
 </header>

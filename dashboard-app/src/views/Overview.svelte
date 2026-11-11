@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { combinePolls } from '../lib/pollBadge';
   import { onMount } from 'svelte';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
@@ -190,14 +191,16 @@
 
   type Rule = { mode: string | null; warn_7d: number; refused_7d: number };
   const ruleCount = (r: Rule) => (r.mode === 'enforce' ? r.refused_7d : r.mode === 'off' ? 0 : r.warn_7d);
+  /** The header badge speaks for every store this page reads (Codex round 1). */
+  const pagePoll = $derived(combinePolls({ memory: $store, ledger: $exec, 'today': $today, findings: $findings, 'questions and sends': $attentionPoll }));
 </script>
 
 <header class="view-head">
   <h1 class="title">{dayTitle}</h1>
   <div class="head-right">
-    <StaleBadge state={$store} />
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={$store.loading}>
-      {$store.loading ? 'Loading…' : 'Refresh'}
+    <StaleBadge state={pagePoll} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={pagePoll.loading}>
+      {pagePoll.loading ? 'Loading…' : 'Refresh'}
     </Button>
   </div>
 </header>

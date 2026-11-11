@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { combinePolls } from '../lib/pollBadge';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -141,6 +142,8 @@
     { key: 'count', label: 'Count' },
     { key: 'last_seen', label: 'Last seen' },
   ];
+  /** The header badge speaks for every store this page reads (Codex round 1). */
+  const pagePoll = $derived(combinePolls({ guards: $store, 'censor activity': $activity }));
 </script>
 
 <header class="view-head">
@@ -151,8 +154,8 @@
   <div class="head-right">
     <FilterBar label="Window" required bind:value={windowSel}
       options={[{ value: '24h', label: '24 h' }, { value: '7d', label: '7 d' }, { value: '30d', label: '30 d' }]} />
-    <StaleBadge state={$store} />
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading || $activity.loading}>{$store.loading || $activity.loading ? 'Loading…' : 'Refresh'}</Button>
+    <StaleBadge state={pagePoll} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={pagePoll.loading}>{pagePoll.loading ? 'Loading…' : 'Refresh'}</Button>
   </div>
 </header>
 

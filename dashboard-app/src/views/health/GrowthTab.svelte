@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { combinePolls } from '../../lib/pollBadge';
   import { fmtDay, fmtHour } from '../../lib/harness';
   import { apiGet } from '../../lib/api';
   import { makePollStore } from '../../lib/stores/registry';
@@ -83,14 +84,16 @@
     },
     plugins: { legend: { display: false } },
   };
+  /** The header badge speaks for every store this page reads (Codex round 1). */
+  const pagePoll = $derived(combinePolls({ growth: $store, 'fact growth rate': $obs }));
 </script>
 
 <header class="view-head">
   <p class="subtitle">Facts, episodes and decisions created over 30 days, fact categories, and the fact growth rate</p>
   <div class="head-right">
-    <StaleBadge state={$store} />
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={$store.loading || $obs.loading}>
-      {$store.loading || $obs.loading ? 'Loading…' : 'Refresh'}
+    <StaleBadge state={pagePoll} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={pagePoll.loading}>
+      {pagePoll.loading ? 'Loading…' : 'Refresh'}
     </Button>
   </div>
 </header>
@@ -159,7 +162,6 @@
 <section class="chart-card mt">
   <div class="card-head">
     <h2>Fact growth rate (7d)</h2>
-    <StaleBadge state={$obs} />
   </div>
   {#if $obs.data}
     {@const factPts = $obs.data.drift_trends?.fact_count_delta ?? []}

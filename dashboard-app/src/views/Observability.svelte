@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { combinePolls } from '../lib/pollBadge';
   import { fmtUtc, fmtHour } from '../lib/harness';
   import { SvelteSet } from 'svelte/reactivity';
   import { apiGet } from '../lib/api';
@@ -147,6 +148,8 @@
     },
     plugins: { legend: { display: false } },
   };
+  /** The header badge speaks for every store this page reads (Codex round 1). */
+  const pagePoll = $derived(combinePolls({ 'event bus': $store, 'event timeline': $activity }));
 </script>
 
 <header class="view-head">
@@ -155,8 +158,8 @@
     <p class="subtitle">How the event bus is doing, the causal traces, and drift in behaviour.</p>
   </div>
   <div class="head-right">
-    <StaleBadge state={$store} />
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading || $activity.loading}>{$store.loading || $activity.loading ? 'Loading…' : 'Refresh'}</Button>
+    <StaleBadge state={pagePoll} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={pagePoll.loading}>{pagePoll.loading ? 'Loading…' : 'Refresh'}</Button>
   </div>
 </header>
 

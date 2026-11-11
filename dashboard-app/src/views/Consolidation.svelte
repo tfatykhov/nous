@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { combinePolls } from '../lib/pollBadge';
   import { fmtUtc } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
@@ -128,6 +129,8 @@
     }
     return [...groups.entries()].map(([phase, items]) => ({ phase, items }));
   });
+  /** The header badge speaks for every store this page reads (Codex round 1). */
+  const pagePoll = $derived(combinePolls({ cycles: $store, 'sleep activity': $activity }));
 </script>
 
 <!-- ── Header ──────────────────────────────────────────────────────────── -->
@@ -137,9 +140,9 @@
     <p class="subtitle">What each sleep cycle merged, superseded and deactivated in memory.</p>
   </div>
   <div class="head-right">
-    <StaleBadge state={$store} />
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={$store.loading}>
-      {$store.loading ? 'Loading…' : 'Refresh'}
+    <StaleBadge state={pagePoll} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={pagePoll.loading}>
+      {pagePoll.loading ? 'Loading…' : 'Refresh'}
     </Button>
   </div>
 </header>

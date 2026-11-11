@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, within, waitFor } from '@testing-library/svelte';
+import { render, screen, cleanup, within, waitFor, fireEvent } from '@testing-library/svelte';
 import Health from './Health.svelte';
 import Overview from './Overview.svelte';
 import Observability from './Observability.svelte';
@@ -84,11 +84,14 @@ let admission: Record<string, unknown> = ADMISSION;
 let status: Record<string, unknown> = STATUS;
 /** While set, /dashboard/density answers only once it resolves (a slow density endpoint). */
 let densityGate: Promise<void> | null = null;
+/** While set, /dashboard/density fails (a 4xx, so apiGet does not wait out its retries). */
+let densityFails = false;
 function install() {
   urls = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
     urls.push(url);
     if (url === '/dashboard/density' && densityGate) await densityGate;
+    if (url === '/dashboard/density' && densityFails) return { ok: false, status: 404, json: async () => ({}) } as Response;
     const body =
       url === '/dashboard/health?days=30' ? HEALTH
       : url === '/dashboard/density' ? DENSITY
@@ -126,7 +129,7 @@ const statLabel = (label: string) => screen.queryAllByText(label, { selector: '.
 const statValue = (label: string) => screen.getByText(label, { selector: '.stat-label' }).previousElementSibling?.textContent?.trim();
 const GROWTH_HEADINGS = ['Memory growth (30 days)', 'Fact categories', 'Fact growth rate (7d)'];
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); obs = OBS; admission = ADMISSION; status = STATUS; densityGate = null; });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); obs = OBS; admission = ADMISSION; status = STATUS; densityGate = null; densityFails = false; });
 
 describe('Memory health: Graph tab', () => {
   for (const hash of ['#/health', '#/health/graph']) {
@@ -146,6 +149,31 @@ describe('Memory health: Graph tab', () => {
     for (const name of GRAPH_HEADINGS) await waitFor(() => expect(h2(name)).toHaveLength(1));
     const texts = h2Texts();
     expect(new Set(texts).size).toBe(texts.length);
+  });
+
+  // Codex round 1 (#904): density fails on a refresh after a good load while health succeeds. The poll store keeps the
+  // old density figures, so the one header badge must say the density refresh failed and how old the data is; Refresh
+  // retries both sources, and a good refresh clears it.
+  it('density failing after a good load, health succeeding: the header badge says so, and Refresh retries both', async () => {
+    start('#/health/graph');
+    const { container } = render(Health);
+    await screen.findByRole('heading', { level: 2, name: 'Edge distribution' });
+    const badge = () => container.querySelector('.view-head .stale-badge') as HTMLElement;
+    await waitFor(() => expect(badge().textContent).toMatch(/^\s*updated /));
+    const calls = (u: string) => urls.filter((x) => x === u).length;
+    const [health0, density0] = [calls('/dashboard/health?days=30'), calls('/dashboard/density')];
+    densityFails = true;
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(badge().textContent).toMatch(/graph density failed/));
+    expect(badge().classList.contains('error')).toBe(true);
+    expect(badge().textContent).toMatch(/data from \d+s ago/);
+    expect(calls('/dashboard/health?days=30')).toBe(health0 + 1);
+    expect(calls('/dashboard/density')).toBe(density0 + 1);
+    expect(screen.getByRole('heading', { level: 2, name: 'Edge distribution' })).toBeTruthy(); // the old figures stay, marked
+    densityFails = false;
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(badge().textContent).toMatch(/^\s*updated /));
+    expect(badge().classList.contains('error')).toBe(false);
   });
 
   it('moves Density\'s tables with their rows; "updated" is said once, in the header (finish review fix 8)', async () => {
@@ -255,7 +283,8 @@ describe('Memory health: Growth tab', () => {
     for (const name of GROWTH_HEADINGS) await waitFor(() => expect(h2(name)).toHaveLength(1));
     expect(urls).toContain('/status?dashboard=true');
     expect(urls).toContain('/dashboard/observability');
-    expect(container.querySelectorAll('.stale-badge')).toHaveLength(2);
+    // One badge, in the header, for both sources (Codex round 1: the fact growth rate's own badge said "updated" twice).
+    expect(container.querySelectorAll('.stale-badge')).toHaveLength(1);
   });
 });
 
