@@ -40,6 +40,14 @@ describe('cssColor', () => {
     expect(cssColor(el, '--series-1')).toBe('#1f5fa8');
   });
 
+  it('turns a hex with alpha into rgba(): the build minifies rgba() tokens to #rrggbbaa, which cytoscape cannot parse', () => {
+    const el = ground('paper', { '--gv-node-border': '#14202b59', '--track': '#fff1', '--gv-outline': '#fff' });
+    expect(cssColor(el, '--gv-node-border')).toBe('rgba(20, 32, 43, 0.349)');
+    expect(cssColor(el, '--track')).toBe('rgba(255, 255, 255, 0.067)');
+    expect(cssColor(el, '--gv-outline')).toBe('#fff'); // an opaque hex stays as declared
+    expect(resolveColors('tint(--gv-node-border, 0.5)', el)).toBe('rgba(20, 32, 43, 0.5)');
+  });
+
   it('falls back to the dark value when nothing declares it (jsdom has no stylesheet), and to "" for an unknown token', () => {
     const el = ground('dark', {});
     expect(cssColor(el, '--series-1')).toBe('#60a5fa');

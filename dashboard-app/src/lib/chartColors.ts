@@ -59,11 +59,21 @@ export const DARK_FALLBACK: Record<string, string> = {
   '--chart-grid': '#1e293b',
 };
 
-/** A token's colour on `el` as declared (a hex stays the hex), inherited from its ground; the dark value when nothing
- * declares it; '' for an unknown token. */
+/** `#rgba` / `#rrggbbaa` as `rgba(r, g, b, a)`; anything else unchanged. The production build minifies an rgba() token
+ * to the 8-digit hex form, which cytoscape does not parse (it falls back to black) and withAlpha cannot tint. */
+function alphaHexToRgba(c: string): string {
+  const m = /^#([0-9a-f]{4}|[0-9a-f]{8})$/i.exec(c);
+  if (!m) return c;
+  const h = m[1].length === 4 ? [...m[1]].map((x) => x + x).join('') : m[1];
+  const [r, g, b, a] = [0, 2, 4, 6].map((i) => parseInt(h.slice(i, i + 2), 16));
+  return `rgba(${r}, ${g}, ${b}, ${Math.round((a / 255) * 1000) / 1000})`;
+}
+
+/** A token's colour on `el` as declared (an opaque hex stays the hex; a hex with alpha becomes rgba()), inherited from
+ * its ground; the dark value when nothing declares it; '' for an unknown token. */
 export function cssColor(el: Element | null, token: string): string {
   const declared = el && el.isConnected ? readToken(el, token) : '';
-  return declared || DARK_FALLBACK[token] || '';
+  return alphaHexToRgba(declared || DARK_FALLBACK[token] || '');
 }
 
 /** The sentinel for a token at an alpha, `tint(--series-1, 0.12)`; resolveColors turns it into `rgba(…, 0.12)`. */
