@@ -229,12 +229,6 @@ const ORIGIN_THEMES: Record<string, Record<string, string>> = {
 /** Pairs below their bar on origin/main, with the ratio measured there: recorded, not fixed (this PR does not change
  * the five themes' colours). A recorded pair may not get worse, and one that now passes must be removed. */
 const KNOWN_BELOW: Record<string, number> = {
-  'nous-default|--muted|--bg': 3.85,
-  'nous-default|--muted|--surface': 3.63,
-  'nous-default|--muted|--surface-hover': 3.42,
-  'nous-default|--on-accent|--accent': 3.99,
-  'nous-default|--accent|--accent-glow': 3.96,
-  'nous-default|--chart-axis|--surface': 3.63,
   'nous-dark|--muted|--bg': 3.85,
   'nous-dark|--muted|--surface': 3.63,
   'nous-dark|--muted|--surface-hover': 3.42,
@@ -361,8 +355,78 @@ describe('the old default (now nous-dark) and the five named themes render exact
     expect(SHEET.resolved(id)).toEqual({ ...ORIGIN_OF(id), ...newLegacy(id) });
   });
 
-  it('nous-default still resolves to the old table in this step (the paper :root comes next)', () => {
-    expect(SHEET.resolved('nous-default')).toEqual({ ...ORIGIN_THEMES['nous-default'], ...newLegacy('nous-dark') });
+});
+
+/** The default (`nous-default`: no data-theme, or data-theme="nous-default") is the paper world of the dashboard
+ * redesign. The values it shares with the dashboard are pinned again in companionParity.test.ts. */
+const PAPER_ROOT: Record<string, string> = {
+  '--bg': '#eef2f3',
+  '--surface': '#ffffff',
+  '--surface-hover': '#f4f7f8',
+  '--border': '#e3e9ec',
+  '--accent': '#12304f',
+  '--accent-dim': '#1a3d62',
+  '--accent-glow': '#f3f6fa',
+  '--text': '#14202b',
+  '--muted': '#56687a',
+  '--green': '#2f8a4e',
+  '--red': '#d2352b',
+  '--yellow': '#b7791f',
+  '--radius': '18px',
+  '--radius-md': '12px',
+  '--radius-sm': '8px',
+  '--ctl-radius': '999px',
+  '--card-shadow': '0 1px 2px rgba(18, 48, 79, 0.06), 0 6px 20px rgba(18, 48, 79, 0.07)',
+  '--card-border': '1px solid transparent',
+  '--select-border': '#12304f',
+  '--transition': '0.2s cubic-bezier(0.16, 1, 0.3, 1)',
+  '--font-ui': "'Archivo', system-ui, sans-serif",
+  '--font-mono': "'Red Hat Mono', ui-monospace, monospace",
+  '--font-display': "'Archivo', system-ui, sans-serif",
+  '--font-numeric': "'Red Hat Mono', ui-monospace, monospace",
+  '--ok': '#23703d',
+  '--warn': '#8a5a0e',
+  '--crit': '#b02a22',
+  '--locked': '#0b6e7a',
+  '--soft': '#56687a',
+  '--on-accent': '#ffffff',
+  '--scrim': 'rgba(20, 32, 43, 0.45)',
+  '--node-decision': '#802c66',
+  '--node-fact': '#159a7a',
+  '--node-episode': '#1f5fa8',
+  '--node-procedure': '#d0620d',
+  '--node-chunk': '#8b5cf6',
+  '--series-1': '#274455',
+  '--series-2': '#1f5fa8',
+  '--series-3': '#159a7a',
+  '--series-4': '#a8408f',
+  '--chart-axis': '#56687a',
+  '--chart-grid': '#e3e9ec',
+  ...PAPER_FRAMES,
+};
+
+describe('the default is the paper world', () => {
+  it('nous-default resolves to the paper table, nothing else', () => {
+    expect(SHEET.resolved('nous-default')).toEqual(PAPER_ROOT);
+  });
+
+  it('figures are Red Hat Mono in the default and JetBrains Mono in nous-dark', () => {
+    expect(SHEET.resolved('nous-default')['--font-numeric']).toBe("'Red Hat Mono', ui-monospace, monospace");
+    expect(SHEET.resolved('nous-dark')['--font-numeric']).toBe(JETBRAINS);
+  });
+
+  it('the page is light: html and :root say so, body sets tabular figures, and a legacy theme turns them off', () => {
+    expect(SHEET.rules.get('html')?.['color-scheme']).toBe('light');
+    expect(SHEET.root['color-scheme']).toBe('light');
+    expect(SHEET.rules.get('body')?.['font-variant-numeric']).toBe('tabular-nums');
+    for (const id of LEGACY) expect(SHEET.declared(id)['font-variant-numeric'], id).toBe('normal');
+  });
+
+  it('loads Archivo and Red Hat Mono beside the legacy faces', () => {
+    const url = /@import url\('([^']+)'\)/.exec(CSS)?.[1] ?? '';
+    for (const family of ['DM+Sans', 'JetBrains+Mono', 'Archivo:wdth,wght@62..125,100..900', 'Red+Hat+Mono:wght@400;500']) {
+      expect(url, family).toContain(`family=${family}`);
+    }
   });
 });
 

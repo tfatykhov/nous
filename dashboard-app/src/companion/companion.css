@@ -1,86 +1,82 @@
 /* Nous Companion — standalone entry stylesheet.
    Deliberately does NOT import app.css: the companion needs no Tailwind
-   utilities and no dashboard chrome. The core token values below are a
-   copy of the Nous palette in src/app.css (:root) — if that palette
-   changes, change both (P3 tradeoff accepted in the F092 plan review:
-   duplicating ~20 vars beats re-plumbing the dashboard's CSS load order). */
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+   utilities, no dashboard chrome and no look switch. Its default theme
+   (:root below) is the paper world of the dashboard redesign: the values it
+   shares with the dashboard's paper ground are COPIES, kept in sync by
+   companionParity.test.ts, which reads app.css and fails when one drifts.
+   The previous default lives on as the named theme nous-dark. */
+@import url('https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=Red+Hat+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 :root {
-  --bg: #0a0a0f;
-  --surface: #12121a;
-  --surface-hover: #181824;
-  --border: #1e1e2e;
-  --accent: #7c6af7;
-  --accent-dim: #4f46a8;
-  --accent-glow: rgba(124, 106, 247, 0.15);
-  --text: #e2e2f0;
-  --muted: #6b6b8a;
-  --green: #34d399;
-  --red: #f87171;
-  --yellow: #fbbf24;
-  --radius: 12px;
-  --radius-sm: 8px;
-  --transition: 0.2s ease;
-  --font-ui: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+  /* nous-default: chart-paper ground, white rounded cards, the Atlantic-blue
+     rail navy as the accent. */
+  color-scheme: light;
+  --bg: #eef2f3;
+  --surface: #ffffff;
+  --surface-hover: #f4f7f8;
+  --border: #e3e9ec;
+  --accent: #12304f;
+  --accent-dim: #1a3d62; /* hover of a filled accent */
+  --accent-glow: #f3f6fa; /* the selected option row's wash */
+  --text: #14202b;
+  --muted: #56687a;
+  /* Status FILLS, kept for any older reader; text and marks use the
+     semantic --ok/--warn/--crit below. */
+  --green: #2f8a4e;
+  --red: #d2352b;
+  --yellow: #b7791f;
+  --radius: 18px; /* the surface card */
+  --radius-md: 12px; /* a nested card, tile, meter */
+  --radius-sm: 8px; /* chips and inputs inside rows */
+  --ctl-radius: 999px; /* buttons, tabs, option pills */
+  --card-shadow: 0 1px 2px rgba(18, 48, 79, 0.06), 0 6px 20px rgba(18, 48, 79, 0.07);
+  --card-border: 1px solid transparent;
+  --select-border: var(--accent);
+  --transition: 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  --font-ui: 'Archivo', system-ui, sans-serif;
+  --font-mono: 'Red Hat Mono', ui-monospace, monospace;
 
-  /* F093 §4 — semantic tokens. --ok/--warn/--crit default to the exact
-     --green/--red/--yellow values they name, so nous-default renders
-     byte-identical (AC1). --locked/--soft take their alpine-dusk values as
-     universal defaults per §4 (a token absent from :root resolves to
-     nothing and silently drops the property). */
-  --ok: #34d399;
-  --warn: #fbbf24;
-  --crit: #f87171;
-  --locked: #5fb3a1;
-  --soft: #8a8fa3;
-  /* --font-display defaults to the UI font (no visual change under
-     nous-default); themes may swap in a serif for editorial character. */
+  /* F093 §4 — semantic tokens. On paper they are TEXT colours (a tile value,
+     a pill), so they are the dashboard's text tones, 4.5:1 on every ground. */
+  --ok: #23703d;
+  --warn: #8a5a0e;
+  --crit: #b02a22;
+  --locked: #0b6e7a;
+  --soft: #56687a; /* the neutral ink: never lighter than --muted */
+  /* --font-display defaults to the UI font; themes may swap in a serif. */
   --font-display: var(--font-ui);
-  /* F096 §4.5 — every FIGURE (MetricCard/ScoreCard values, deltas, table
-     numbers, the sparkline current value) renders in this face with
-     tabular-nums. A var() alias is safe at :root only because no theme
-     changes its mono stack (signal re-declares an identical one); a theme
-     that does MUST re-declare --font-numeric in its own block, for the
-     inheritance reason documented under [data-theme] below. */
+  /* F096 §4.5 — every FIGURE renders in this face with tabular-nums. The
+     var() alias is substituted HERE, at :root, so every theme that changes
+     --font-mono re-declares --font-numeric itself (the legacy group below
+     does it for all of them). */
   --font-numeric: var(--font-mono);
 
-  /* F093 §1(a) — the three hardcoded literals migrate here so themes
-     re-skin them too. */
+  /* F093 §1(a) — literals that themes re-skin. */
   --on-accent: #ffffff; /* text on a filled --accent button (ButtonView) */
-  --scrim: rgba(10, 10, 15, 0.72); /* modal backdrop (ModalView) */
-  --node-decision: #a78bfa; /* MemoryGraph 'decision' node type — semantic */
+  --scrim: rgba(20, 32, 43, 0.45); /* modal backdrop; BarChart negative hatching */
+  --node-decision: #802c66; /* MemoryGraph node types: the dashboard Graph's */
+  --node-fact: #159a7a;
+  --node-episode: #1f5fa8;
+  --node-procedure: #d0620d;
+  --node-chunk: #8b5cf6;
 
   /* F094 §2 — ordered series ramp assigned by the renderer for multi-series
-     charts. The model never picks a color; it picks a `tone` or a series
-     `key`, and the renderer maps it here. */
-  --series-1: #7c6af7;
-  --series-2: #34d399;
-  --series-3: #fbbf24;
-  --series-4: #60a5fa;
-  --chart-axis: #6b6b8a;
-  --chart-grid: #1e1e2e;
+     charts: the dashboard ramp from its slot 0 (see companionParity.test.ts). */
+  --series-1: #274455;
+  --series-2: #1f5fa8;
+  --series-3: #159a7a;
+  --series-4: #a8408f;
+  --chart-axis: #56687a;
+  --chart-grid: #e3e9ec;
 
-  /* Dashboard redesign PR 6 — shape tokens (their values here are the old
-     shape until :root takes the paper look), node colours for MemoryGraph,
-     and the seven frame colours. */
-  --radius-md: 8px;
-  --ctl-radius: 8px;
-  --card-shadow: 0 0 #0000;
-  --card-border: 1px solid var(--border);
-  --select-border: var(--accent);
-  --node-fact: #7c6af7;
-  --node-episode: #34d399;
-  --node-procedure: #fbbf24;
-  --node-chunk: #6b6b8a;
-  --f-conversation: #8fa3b5;
-  --f-question: #8aa4ff;
-  --f-task: #3fc3d1;
-  --f-decision: #c08be0;
-  --f-debug: #f09a5a;
-  --f-creative: #ee82bd;
-  --f-initiation: #e0b050;
+  /* The seven frame colours (a future frame label; nothing reads them yet). */
+  --f-conversation: #55697a;
+  --f-question: #2346c8;
+  --f-task: #0b6e7a;
+  --f-decision: #7b3fa0;
+  --f-debug: #b4531c;
+  --f-creative: #a3266f;
+  --f-initiation: #8f5c0f;
 }
 
 /* A themed root MUST re-assert the inherited properties it re-defines.
@@ -393,7 +389,7 @@
 }
 
 html {
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 * {
@@ -408,4 +404,5 @@ body {
   font-size: 15px;
   line-height: 1.5;
   min-height: 100dvh;
+  font-variant-numeric: tabular-nums;
 }
