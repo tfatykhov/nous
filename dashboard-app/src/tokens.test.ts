@@ -229,6 +229,11 @@ const PR3: Record<string, [string, string]> = {
   ...ST,
   ...OC,
   '--stack-bar': ['rgba(251, 191, 36, 0.7)', '#b7791f'], // Workflows: a token budget's consumed part
+  '--hit-good': ['#22c55e', '#23703d'], // Cache: the hit-rate line and the doughnut's cache-read part
+  '--hit-mid': ['#eab308', '#8a5a0e'],
+  '--hit-bad': ['#ef4444', '#b02a22'],
+  '--cache-blue': ['#3b82f6', '#1f5fa8'], // Cache: the doughnut's cache-created part
+  '--cache-grey': ['#4b5563', '#4f5f6f'], // Cache: the doughnut's uncached part
 };
 for (const [k, [dark]] of Object.entries(PR3)) NEW_DARK[k] = dark;
 
@@ -754,5 +759,6 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
   it('outcome marks and the budget bar are at least 3:1 on the white card', () => {
     for (const [k, [, p]] of Object.entries(OC)) expect(contrast(p, '#ffffff'), k).toBeGreaterThanOrEqual(3);
     expect(contrast(PAPER['--stack-bar'], '#ffffff')).toBeGreaterThanOrEqual(3);
+    for (const k of ['--hit-good', '--hit-mid', '--hit-bad', '--cache-blue', '--cache-grey']) expect(contrast(PAPER[k], '#ffffff'), k).toBeGreaterThanOrEqual(3);
   });
 });

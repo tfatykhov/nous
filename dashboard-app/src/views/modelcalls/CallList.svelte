@@ -167,7 +167,7 @@
       {#each ACTIVE as a (a.key)}
         {#if filters[a.key]}
           <button type="button" class="chip on" aria-label={`Clear ${a.name.toLowerCase()} filter`} onclick={() => go({ [a.key]: '' })}>
-            {a.name}: <span class="mono">{filters[a.key]}</span> ✕
+            {a.name}: <span class="mono">{filters[a.key]}</span> <span class="remove">Remove</span>
           </button>
         {/if}
       {/each}
@@ -190,7 +190,7 @@
                 <span>{cacheShare(c)} from cache</span>
                 <span>{fmtTokens(c.output_tokens)} out</span>
                 <span>{fmtDuration(c.duration_ms)}</span>
-                {#if isBucket(c)}<span>×{fmt(c.call_count)} {c.call_count === 1 ? 'call' : 'calls'}</span>{/if}
+                {#if isBucket(c)}<span>{fmt(c.call_count)} {c.call_count === 1 ? 'call' : 'calls'}</span>{/if}
               </span>
               {#if c.problem}<span class="problem">Problem: {c.problem}</span>{/if}
             </a>
@@ -220,7 +220,7 @@
   .muted { color: var(--muted); font-size: 0.8125rem; margin: 0; }
   .loading { color: var(--muted); font-size: 0.8125rem; }
   .mono { font-family: var(--font-mono); }
-  .notice { padding: 0.75rem 1rem; border-radius: 8px; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.4); font-size: 0.875rem; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--notice-bg); border: 1px solid var(--notice-border); font-size: 0.875rem; }
   .empty { color: var(--muted); text-align: center; padding: 2rem 0; margin: 0; }
   button { font: inherit; cursor: pointer; }
   button:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
@@ -229,9 +229,10 @@
   .chip.on { border-color: var(--accent); background: var(--accent-glow); }
   .chip .n { color: var(--muted); }
   .chip .note { color: var(--muted); font-size: 0.75rem; border: 1px dashed var(--border); border-radius: 6px; padding: 0 5px; margin-left: 2px; }
+  .chip .remove { color: var(--muted); font-size: 0.75rem; margin-left: 2px; }
   .field { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); font-size: 0.875rem; }
-  select { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 0.5rem 0.75rem; font: inherit; min-height: 40px; }
-  .calls { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); overflow: hidden; }
+  select { background: var(--surface); border: 1px solid var(--border); border-radius: var(--ctl-radius); color: var(--text); padding: 0.5rem 0.75rem; font: inherit; min-height: 40px; }
+  .calls { list-style: none; margin: 0; padding: 0; border: var(--card-border); border-radius: var(--card-radius); background: var(--surface); box-shadow: var(--card-shadow); overflow: hidden; }
   .calls li + li { border-top: 1px solid var(--border); }
   .calls.dim { opacity: 0.6; }
   a.row { display: flex; flex-direction: column; gap: 4px; padding: 0.75rem 1rem; color: inherit; text-decoration: none; }
@@ -242,13 +243,13 @@
   .when { font-size: 0.75rem; color: var(--muted); white-space: nowrap; }
   .model { font-size: 0.75rem; color: var(--text); overflow-wrap: anywhere; }
   .nums { display: flex; flex-wrap: wrap; gap: 2px 14px; font-size: 0.75rem; color: var(--muted); }
-  .problem { font-size: 0.75rem; color: var(--red); }
-  .error { margin: 0; padding: 0 1rem 0.75rem; font-size: 0.75rem; color: var(--red); overflow-wrap: anywhere; }
+  .problem { font-size: 0.75rem; color: var(--err-text); }
+  .error { margin: 0; padding: 0 1rem 0.75rem; font-size: 0.75rem; color: var(--err-text); overflow-wrap: anywhere; }
   .full { color: var(--accent-text); margin-left: 6px; }
   .more { display: flex; align-items: center; gap: 0.75rem; }
-  .btn { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.875rem; min-height: 36px; }
+  .btn { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--ctl-radius); padding: 0.5rem 0.875rem; min-height: 36px; }
   .btn:disabled { opacity: 0.6; cursor: default; }
-  .err { color: var(--red); font-size: 0.875rem; }
+  .err { color: var(--err-text); font-size: 0.875rem; }
   @media (max-width: 768px) {
     .chip, .btn, select { min-height: 44px; }
   }

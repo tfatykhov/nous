@@ -41,6 +41,11 @@ export const HEX_GUARDED: readonly string[] = [
   'views/Admission.svelte',
   'views/Retrieval.svelte',
   'views/Consolidation.svelte',
+  'views/ModelCalls.svelte',
+  'views/modelcalls/CallList.svelte',
+  'views/modelcalls/CallDetail.svelte',
+  'views/modelcalls/CallBlock.svelte',
+  'views/Cache.svelte',
 ];
 
 const SRC = __dirname;
@@ -119,6 +124,11 @@ export const SCRIPT_GUARDED: readonly string[] = [
   'views/Retrieval.svelte',
   'views/Consolidation.svelte',
   'lib/ui/badge/badge.svelte', // review R1: Overview renders it through a re-exporting index.ts
+  'views/ModelCalls.svelte',
+  'views/modelcalls/CallList.svelte',
+  'views/modelcalls/CallDetail.svelte',
+  'views/modelcalls/CallBlock.svelte',
+  'views/Cache.svelte',
 ];
 
 /** A literal colour (hex, rgb/hsl/oklch, a named colour in a fill/stroke attribute), or a two-hex-digit alpha glued onto

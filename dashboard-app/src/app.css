@@ -239,6 +239,11 @@
     --oc-errored: #7c2d12;
     --oc-unknown: #9ca3af;
     --stack-bar: rgba(251, 191, 36, 0.7);      /* Workflows: a token budget's consumed part */
+    --hit-good: #22c55e;                       /* Cache: the hit-rate line, the doughnut's cache-read part */
+    --hit-mid: #eab308;
+    --hit-bad: #ef4444;
+    --cache-blue: #3b82f6;                     /* Cache: the doughnut's cache-created part */
+    --cache-grey: #4b5563;                     /* Cache: the doughnut's uncached part */
   }
 
   /* ---- The paper ground: page content under the paper look ---- */
@@ -400,6 +405,11 @@
     --oc-errored: #6b2a12;
     --oc-unknown: #5f6b76;
     --stack-bar: #b7791f;
+    --hit-good: #23703d;
+    --hit-mid: #8a5a0e;
+    --hit-bad: #b02a22;
+    --cache-blue: #1f5fa8;
+    --cache-grey: #4f5f6f;
 
     /* shadcn, HSL of the paper hex */
     --background: 192 17% 94%;

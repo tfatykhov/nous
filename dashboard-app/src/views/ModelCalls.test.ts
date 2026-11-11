@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/svelte';
 import ModelCalls from './ModelCalls.svelte';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { initRouter } from '../lib/router';
+import { DARK_SEL, parseBlocks, styleBlocks } from '../lib/testing/css';
 
 const HOSTILE = '<img src=x onerror=alert(1)>';
 const ID1 = '11111111-1111-4111-8111-111111111111';
@@ -117,7 +120,7 @@ describe('Model calls list', () => {
     go('#/model-calls?purpose=embedding');
     respond = () => ({ body: list([row(ID1, { purpose: 'embedding', call_kind: 'embedding', call_count: 30, input_total: null, output_tokens: null })]) });
     render(ModelCalls);
-    expect(await screen.findByText(/×30 calls/)).toBeTruthy();
+    expect(await screen.findByText('30 calls')).toBeTruthy();
   });
 
   it('timestamps go through fmtTime, never Invalid Date', async () => {
@@ -383,7 +386,7 @@ describe('Model call detail', () => {
   it('Back to calls keeps the filters', async () => {
     go(`#/model-calls/c/${ID1}?purpose=main_loop&days=30`);
     render(ModelCalls);
-    const back = await screen.findByRole('link', { name: /Back to calls/ });
+    const back = await screen.findByRole('link', { name: 'Back to calls' });
     expect(back.getAttribute('href')).toBe('#/model-calls?purpose=main_loop&days=30');
   });
 
@@ -696,5 +699,66 @@ describe('Model calls PR4 fix round', () => {
     expect(container.querySelectorAll('h1')).toHaveLength(1);
     expect(container.querySelector('.listcol h1')).toBeNull();
     expect(screen.getByRole('heading', { level: 1, name: 'Model calls' })).toBeTruthy();
+  });
+});
+
+// ── Redesign PR 3: Model calls on paper ──────────────────────────────────────────────────────────────────────────────
+
+describe('Model calls on paper: tokens and words', () => {
+  const DARK = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(DARK_SEL) ?? {};
+  const source = (f: string) => readFileSync(join(__dirname, f), 'utf-8');
+  const NINE = ['System prompt', 'Identity', 'Facts', 'Decisions', 'Procedures', 'Episodes', 'Messages', 'Tools', 'Skills']
+    .map((name, i) => ({ name, tokens_est: 100 * (i + 1) }));
+  const OLD_PALETTE = ['#a99df9', '#60a5fa', '#22d3ee', '#34d399', '#fbbf24', '#fb923c', '#f472b6', '#9ca3af', '#c4c4d8'];
+  const start = (hash: string, r: (u: string) => Reply) => {
+    respond = r; install(); location.hash = ''; initRouter(); go(hash);
+  };
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+  it('nine context sections: nine bars and nine named legend entries, each a token whose dark value is the old colour', async () => {
+    start(`#/model-calls/c/${ID1}`, (u) => (u === `/dashboard/model-calls/${ID1}` ? { body: detail({ sections: NINE }) }
+      : u.includes('/blocks/') ? { body: { part: 'response', ord: 0, size_chars: 1, body: 'x' } } : { body: list([row(ID1)]) }));
+    const { container } = render(ModelCalls);
+    await screen.findByText('What filled the context');
+    const bars = Array.from(container.querySelectorAll<HTMLElement>('.sections .bar'));
+    const items = Array.from(container.querySelectorAll<HTMLElement>('.sections .legend li'));
+    expect(bars).toHaveLength(9);
+    expect(items.map((li) => li.querySelector('.grow')?.textContent)).toEqual(NINE.map((s) => s.name));
+    const tokens = bars.map((b) => b.style.background);
+    for (const t of tokens) expect(t).toMatch(/^var\(--[\w-]+\)$/);
+    expect(items.map((li) => li.querySelector<HTMLElement>('.dot')!.style.background)).toEqual(tokens);
+    expect(tokens.map((t) => DARK[t.slice(4, -1)])).toEqual(OLD_PALETTE);
+  });
+
+  it('the list and the detail carry no arrow, cross or times glyph: the words Back to calls, Remove and N calls', async () => {
+    start(`#/model-calls/c/${ID1}?model=m1`, (u) => (u === `/dashboard/model-calls/${ID1}` ? { body: detail() }
+      : u.includes('/blocks/') ? { body: { part: 'response', ord: 0, size_chars: 1, body: 'x' } }
+      : { body: list([row(ID1), row(ID2, { purpose: 'embedding', call_kind: 'embedding', call_count: 30 })]) }));
+    const { container } = render(ModelCalls);
+    expect((await screen.findByRole('link', { name: 'Back to calls' })).textContent).toBe('Back to calls');
+    const chip = await screen.findByRole('button', { name: 'Clear model filter' });
+    expect(chip.textContent).toMatch(/Model: m1\s+Remove$/);
+    expect(await screen.findByText('30 calls')).toBeTruthy();
+    expect(container.textContent).not.toMatch(/[✕×←→]/);
+  });
+
+  it('a hostile 5,000-character prompt block is text in Red Hat Mono (the ground\'s mono), wrapping anywhere, in a soft rounded block', async () => {
+    const body = HOSTILE + 'p'.repeat(5000 - HOSTILE.length);
+    start(`#/model-calls/c/${ID1}`, (u) => (u === `/dashboard/model-calls/${ID1}` ? { body: detail() }
+      : u.includes('/blocks/') ? { body: { part: 'response', ord: 0, size_chars: 5000, body } } : { body: list([row(ID1)]) }));
+    const { container } = render(ModelCalls);
+    await waitFor(() => expect(container.querySelector('details.block pre')?.textContent).toBe(body));
+    expect(container.querySelector('details.block img')).toBeNull();
+    const css = styleBlocks(source('modelcalls/CallBlock.svelte'));
+    expect(css).toMatch(/pre\.wrap \{[^}]*font-family: var\(--font-mono\);[^}]*overflow-wrap: anywhere;/);
+    expect(css).toMatch(/\.block \{[^}]*border-radius: var\(--card-radius-sm\);/);
+  });
+
+  it('the recording-off notices read the notice tokens; error text the error text token', () => {
+    for (const f of ['modelcalls/CallList.svelte', 'modelcalls/CallDetail.svelte']) {
+      const css = styleBlocks(source(f));
+      expect(css, f).toMatch(/\.notice \{[^}]*background: var\(--notice-bg\);[^}]*border: 1px solid var\(--notice-border\);/);
+      expect(css, f).not.toMatch(/color: var\(--red\)/);
+    }
   });
 });

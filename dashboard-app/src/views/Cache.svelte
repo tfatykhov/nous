@@ -8,6 +8,7 @@
   import DataTable from '../lib/ui/DataTable.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import Chart from '../lib/viz/Chart.svelte';
+  import { tint } from '../lib/chartColors';
 
   // Embedded as the Model calls screen's Cache tab: that screen's header is the title, so this view drops its h1
   // (its subtitle and staleness badge stay).
@@ -32,9 +33,9 @@
   }
 
   function hitRateColor(rate: number): string {
-    if (rate >= 50) return '#22c55e';
-    if (rate >= 20) return '#eab308';
-    return '#ef4444';
+    if (rate >= 50) return 'var(--hit-good)';
+    if (rate >= 20) return 'var(--hit-mid)';
+    return 'var(--hit-bad)';
   }
 
   // ── Session table columns ─────────────────────────────────────────────
@@ -90,7 +91,7 @@
           labels: ['Cache Read', 'Cache Created', 'Uncached'],
           datasets: [{
             data: [s.total_cache_read, s.total_cache_created, uncached],
-            backgroundColor: ['#22c55e', '#3b82f6', '#4b5563'],
+            backgroundColor: ['var(--hit-good)', 'var(--cache-blue)', 'var(--cache-grey)'],
             borderWidth: 0,
           }],
         }}
@@ -109,7 +110,7 @@
             datasets: [{
               label: 'Breaks',
               data: Object.values(d.break_components),
-              backgroundColor: ['#f87171','#fbbf24','#60a5fa','#34d399','#a78bfa','#fb923c','#22d3ee','#e879f9'],
+              backgroundColor: [5, 6, 1, 2, 3, 4, 9, 10].map((n) => `var(--series-${n})`),
               borderWidth: 0,
             }],
           }}
@@ -138,8 +139,8 @@
           datasets: [{
             label: 'Hit Rate %',
             data: sorted.map((t) => t.hit_rate),
-            borderColor: '#22c55e',
-            backgroundColor: 'rgba(34,197,94,0.1)',
+            borderColor: 'var(--hit-good)',
+            backgroundColor: tint('--hit-good', 0.1),
             fill: true,
             borderWidth: 2,
             pointRadius: 2,
@@ -194,7 +195,7 @@
           input_fmt: formatTokens(c.input_tokens),
           cache_read_fmt: formatTokens(c.cache_read),
           hit_rate_fmt: c.hit_rate + '%',
-          break_fmt: c.cache_break ? '●' : '',
+          break_fmt: c.cache_break ? 'yes' : '',
         }))}
         mode="cards"
         rowKey={(_, i) => String(i)}
@@ -263,8 +264,9 @@
   .chart-card,
   .table-card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
     padding: 1rem;
     margin-top: 1rem;
   }
@@ -289,6 +291,6 @@
   }
 
   .status-msg.error {
-    color: var(--red, #ef4444);
+    color: var(--err-text);
   }
 </style>

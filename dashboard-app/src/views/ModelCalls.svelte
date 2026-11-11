@@ -38,7 +38,7 @@
       <div class="listcol"><CallList filters={state.filters} selectedId={callId} /></div>
       {#if callId !== null}
         <div class="detailcol">
-          <a class="back" href={routeHref('model-calls', '', modelCallQuery(state.filters))}>← Back to calls</a>
+          <a class="back" href={routeHref('model-calls', '', modelCallQuery(state.filters))}>Back to calls</a>
           {#key callId}<CallDetail {callId} />{/key}
         </div>
       {/if}

@@ -46,7 +46,10 @@
       : [],
   );
   let sectionTotal = $derived((data?.sections ?? []).reduce((a, s) => a + s.tokens_est, 0));
-  const PALETTE = ['#a99df9', '#60a5fa', '#22d3ee', '#34d399', '#fbbf24', '#fb923c', '#f472b6', '#9ca3af', '#c4c4d8'];
+  // Each section's colour is a token (the bar and its legend dot use var() directly); every legend entry names its
+  // section, so colour is never the only signal.
+  const PALETTE = ['--accent-text', '--series-1', '--series-9', '--series-2', '--series-6', '--series-4', '--unknown', '--series-12', '--series-13']
+    .map((t) => `var(${t})`);
   const madeBy = (t: NonNullable<ModelCallDetail['turn']>) => t.session_title || t.session_id || '';
 </script>
 
@@ -126,7 +129,7 @@
 
 <style>
   .detail { display: flex; flex-direction: column; gap: 1rem; min-width: 0; }
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 0.625rem; min-width: 0; }
+  .card { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow); padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 0.625rem; min-width: 0; }
   h2 { margin: 0; font-size: 1.25rem; font-weight: 700; }
   h3 { margin: 0; font-size: 1rem; font-weight: 600; }
   .title-row { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: baseline; }
@@ -135,14 +138,14 @@
   .made { font-size: 0.875rem; }
   .made a { color: var(--accent-text); }
   .gone { color: var(--muted); }
-  .err { color: var(--red); font-size: 0.875rem; margin: 0; }
-  .notice { padding: 0.75rem 1rem; border-radius: 8px; background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.4); font-size: 0.875rem; }
+  .err { color: var(--err-text); font-size: 0.875rem; margin: 0; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--notice-bg); border: 1px solid var(--notice-border); font-size: 0.875rem; }
   .wrap { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
-  pre.err { color: var(--red); font-family: var(--font-mono); font-size: 0.75rem; max-height: 320px; overflow: auto; }
+  pre.err { color: var(--err-text); font-family: var(--font-mono); font-size: 0.75rem; max-height: 320px; overflow: auto; }
   .attempts { margin: 0; padding-left: 1.25rem; display: flex; flex-direction: column; gap: 4px; font-size: 0.8125rem; }
-  .attempts li.failed { color: var(--red); }
+  .attempts li.failed { color: var(--err-text); }
   .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; }
-  .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 0.75rem 0.875rem; display: flex; flex-direction: column; gap: 4px; }
+  .tile { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow); padding: 0.75rem 0.875rem; display: flex; flex-direction: column; gap: 4px; }
   .val { font-size: 1.125rem; font-weight: 600; overflow-wrap: anywhere; }
   .bars { display: flex; height: 14px; border-radius: 4px; overflow: hidden; gap: 2px; }
   .bar { display: block; min-width: 2px; }
