@@ -306,7 +306,7 @@
     --gv-episode: #1f5fa8;
     --gv-decision: #a8408f;
     --gv-procedure: #d0620d;
-    --gv-chunk: #7a8a1a;
+    --gv-chunk: #8b5cf6;                       /* not the olive: it merged with procedure under red-green colour blindness */
     --gv-other: #4f5f6f;
     --gv-outline: #ffffff;
     --gv-node-border: rgba(20, 32, 43, 0.35);

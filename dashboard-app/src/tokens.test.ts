@@ -139,7 +139,7 @@ const GV_NODES: Record<string, [string, string]> = {
   '--gv-episode': ['#60a5fa', '#1f5fa8'],
   '--gv-decision': ['#a78bfa', '#a8408f'],
   '--gv-procedure': ['#fbbf24', '#d0620d'],
-  '--gv-chunk': ['#06b6d4', '#7a8a1a'],
+  '--gv-chunk': ['#06b6d4', '#8b5cf6'], // review I4: the olive merged with procedure under red-green colour blindness
 };
 const GV: Record<string, [string, string]> = {
   ...GV_NODES,
@@ -505,8 +505,34 @@ function oklab(c: string): [number, number, number] {
     0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
   ];
 }
-function okDistance(a: string, b: string): number {
-  const [x, y] = [oklab(a), oklab(b)];
+/** Colour-vision deficiency (Machado, Oliveira and Fernandes 2009, severity 1), applied to linear sRGB. */
+const CVD: Record<'protan' | 'deutan', number[][]> = {
+  protan: [[0.152286, 1.052583, -0.204868], [0.114503, 0.786281, 0.099216], [-0.003882, -0.048116, 1.051998]],
+  deutan: [[0.367322, 0.860646, -0.227968], [0.280085, 0.672501, 0.047413], [-0.01182, 0.04294, 0.968881]],
+};
+function oklabLinear([r, g, b]: number[]): [number, number, number] {
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return [
+    0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+  ];
+}
+function linearRgb(c: string): number[] {
+  return parseColor(c).slice(0, 3).map((v) => {
+    const s = v / 255;
+    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  });
+}
+function okDistance(a: string, b: string, cvd?: 'protan' | 'deutan'): number {
+  const see = (c: string) => {
+    const lin = linearRgb(c);
+    if (!cvd) return oklabLinear(lin);
+    return oklabLinear(CVD[cvd].map((row) => Math.min(1, Math.max(0, row[0] * lin[0] + row[1] * lin[1] + row[2] * lin[2]))));
+  };
+  const [x, y] = [see(a), see(b)];
   return 100 * Math.hypot(x[0] - y[0], x[1] - y[1], x[2] - y[2]);
 }
 
@@ -548,20 +574,41 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
     }
   });
 
-  it('the five graph node colours: at least 3:1 on white, and at least 11 apart (fact and chunk are the closest, 11.1)', () => {
-    // The plan asked for 12; its own hexes measure 11.10 for fact (teal) and chunk (olive). The hexes are kept: they
-    // are shared with the series ramp, the legacy type colours and the relations.
+  it('the CVD helper reproduces the review\'s figures (the old olive chunk against procedure)', () => {
+    expect(okDistance('#7a8a1a', '#d0620d', 'deutan')).toBeCloseTo(3.4, 1);
+    expect(okDistance('#7a8a1a', '#d0620d', 'protan')).toBeCloseTo(5.5, 1);
+    expect(okDistance('#123456', '#123456', 'protan')).toBe(0);
+  });
+
+  it('the five graph node colours: at least 3:1 on white, and at least 12 apart', () => {
     const nodes = Object.entries(GV_NODES).map(([k, [, p]]) => [k, p] as const);
     for (const [k, c] of nodes) expect(contrast(c, '#ffffff'), k).toBeGreaterThanOrEqual(3);
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
-        expect(okDistance(nodes[i][1], nodes[j][1]), `${nodes[i][0]} and ${nodes[j][0]}`).toBeGreaterThanOrEqual(11);
+        expect(okDistance(nodes[i][1], nodes[j][1]), `${nodes[i][0]} and ${nodes[j][0]}`).toBeGreaterThanOrEqual(12);
       }
     }
     expect(contrast(PAPER['--gv-other'], '#ffffff')).toBeGreaterThanOrEqual(3);
     // The rings and the label halo on the white card.
     expect(contrast(PAPER['--gv-select'], '#ffffff')).toBeGreaterThanOrEqual(3);
     expect(contrast(PAPER['--muted'], PAPER['--gv-outline'])).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('graph node colours under red-green colour blindness: chunk at least 12 from every type, other pairs at least 8', () => {
+    // Review I4: the olive chunk and the orange procedure read as one colour under deuteranopia (3.4). The one pair
+    // left below 8 is episode and decision under protanopia (4.2): fixing it means moving --gv-decision, which the
+    // series ramp shares (recorded in the PR 2 report, not this PR's to change).
+    const nodes = Object.entries(GV_NODES).map(([k, [, p]]) => [k.replace('--gv-', ''), p] as const);
+    for (const cvd of ['protan', 'deutan'] as const) {
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const [a, b] = [nodes[i], nodes[j]];
+          const d = okDistance(a[1], b[1], cvd);
+          if (a[0] === 'chunk' || b[0] === 'chunk') expect(d, `${cvd}: ${a[0]} and ${b[0]}`).toBeGreaterThanOrEqual(12);
+          else if (!(cvd === 'protan' && a[0] === 'episode' && b[0] === 'decision')) expect(d, `${cvd}: ${a[0]} and ${b[0]}`).toBeGreaterThanOrEqual(8);
+        }
+      }
+    }
   });
 
   it('every relation colour and legacy type colour is at least 3:1 on white', () => {
