@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { markupOf, scriptBlocks, styleBlocks } from './lib/testing/css';
 import { sourceFiles } from './lib/testing/sources';
+import { TOKEN_FALLBACK } from './lib/chartColors';
 
 // The dashboard's colours live in app.css, as tokens. No source file holds a colour literal: no `#hex`, `rgb(`/`rgba(`,
 // hsl or oklch in a component's <style>, <script> or markup, or in a module's code; only var(--token). PR 7: the guards
@@ -272,6 +273,17 @@ describe('the walk and the allowances', () => {
       .toEqual(['class="text-muted-foreground text-red-500"']);
     expect(hits('views/Overview.svelte', 'tailwind colour', ['class="bg-popover"'], TAILWIND_COLOUR)).toEqual(['class="bg-popover"']);
     expect(unmapped.files.test('lib/ui/drawer/drawer-content.svelte')).toBe(true);
+  });
+
+  // Code review M2: the TOKEN_FALLBACK allowance goes by the shape of a line, and chartColors.test.ts proves the table
+  // row by row. A second table of the same shape (`const LEGEND = { '--accent': '#ff0000' }`) would be stripped by the
+  // allowance and proved by nothing, so the module may hold exactly as many rows of that shape as the table has keys.
+  it('chartColors.ts holds exactly as many fallback-shaped lines as TOKEN_FALLBACK has rows', () => {
+    const row = new RegExp(ALLOWED[0].allow.source);
+    const rows = (lines: string[]) => lines.filter((l) => row.test(l)).length;
+    const n = Object.keys(TOKEN_FALLBACK).length;
+    expect(rows(codeLines('lib/chartColors.ts'))).toBe(n);
+    expect(rows([...codeLines('lib/chartColors.ts'), 'const LEGEND = {', "  '--accent': '#ff0000',", '};'])).toBe(n + 1);
   });
 
   // Each allowance still matches something a guard would otherwise fail on, in a file the walk reads (none is stale).
