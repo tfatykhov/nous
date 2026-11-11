@@ -238,7 +238,8 @@ describe('Observability: words, not glyphs', () => {
   it('the trend chart\'s x labels stay level at phone width: Chart.js skips labels instead of tilting them', async () => {
     render(Observability);
     await waitFor(() => expect(configs).toHaveLength(1));
-    expect(configs[0].options.scales.x.ticks).toMatchObject({ maxTicksLimit: 8, maxRotation: 0 });
+    // And a gap between the level labels it keeps: at 390 px with the default 3 px they ran together ("15:0011/6").
+    expect(configs[0].options.scales.x.ticks).toMatchObject({ maxTicksLimit: 8, maxRotation: 0, autoSkipPadding: 16 });
   });
 
   it('Refresh on the Event Timeline is the shared outline pill button', async () => {

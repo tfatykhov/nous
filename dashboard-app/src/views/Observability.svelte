@@ -141,8 +141,9 @@
 
   const trendLineOpts = {
     scales: {
-      // Level labels: at phone width Chart.js skips some instead of tilting them over the plot.
-      x: { display: true, ticks: { maxTicksLimit: 8, maxRotation: 0, font: { size: 10 } } },
+      // Level labels: at phone width Chart.js skips some instead of tilting them over the plot, and keeps a gap between
+      // the ones it draws (with its default 3 px they ran together).
+      x: { display: true, ticks: { maxTicksLimit: 8, maxRotation: 0, autoSkipPadding: 16, font: { size: 10 } } },
       y: { beginAtZero: true },
     },
     plugins: { legend: { display: false } },
