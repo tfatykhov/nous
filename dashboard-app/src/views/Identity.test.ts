@@ -218,7 +218,7 @@ describe('Identity: the paper look\'s structure (source contracts)', () => {
   });
 
   it('a fact\'s content may break anywhere, so a long unbroken fact cannot widen the table past its box (review M10)', () => {
-    // Two classes deep, so it outranks DataTable's phone-width reset of a cell's elements (a class and an element).
+    // It holds in cards mode as well: DataTable's reset of a cell's elements has no specificity (DataTable.test.ts).
     expect(rules.get('.facts-card .fact-content')).toMatchObject({ 'overflow-wrap': 'anywhere' });
   });
 

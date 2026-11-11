@@ -210,12 +210,13 @@
     /* A long unbroken value (a URL, a path) wraps inside its card, which clips, instead of running off its edge. Only the
        labelled cells' own text: a detail panel inherits nothing, and an element a cell snippet renders keeps word
        wrapping (anywhere would let a squeezed flex item break a normal word). The child is global: a snippet's elements
-       carry the calling view's scope, not this one's. */
+       carry the calling view's scope, not this one's. The reset has no specificity (:where), so it only replaces the
+       inherited value and a view's own rule for its element still wins. */
     .dt--cards td[data-label] {
       overflow-wrap: anywhere;
     }
 
-    .dt--cards td[data-label] > :global(*) {
+    :where(.dt--cards td[data-label]) > :global(*) {
       overflow-wrap: normal;
     }
 

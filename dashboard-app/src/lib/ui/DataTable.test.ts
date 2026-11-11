@@ -69,6 +69,8 @@ describe('DataTable — cards mode at phone width (source contract)', () => {
     // Only the cell's own text: an element inside (a snippet's spans, as Autonomy's job fixes have) wraps at words as before,
     // or a squeezed flex item breaks a normal word ("Faile / d often" under dark). Global, since a snippet's elements carry
     // the calling view's scope class, which a scoped `> *` never matches.
-    expect(parseBlocks(phoneBlock()).get('.dt--cards td[data-label] > :global(*)')).toMatchObject({ 'overflow-wrap': 'normal' });
+    // With no specificity (:where), so it only replaces the inherited value: a view's own rule for its element still wins
+    // (Identity's fact content, which must break anywhere).
+    expect(parseBlocks(phoneBlock()).get(':where(.dt--cards td[data-label]) > :global(*)')).toMatchObject({ 'overflow-wrap': 'normal' });
   });
 });

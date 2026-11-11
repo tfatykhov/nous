@@ -550,7 +550,7 @@
     padding: 0.25rem 0.75rem;
   }
 
-  /* Two classes deep: it outranks DataTable's phone-width reset of a cell's elements (a class and an element). */
+  /* In cards mode too: DataTable's reset of a cell's elements has no specificity, so this rule wins there. */
   .facts-card .fact-content {
     overflow-wrap: anywhere;
   }
