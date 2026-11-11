@@ -41,6 +41,17 @@ const DARK_VALUES: Record<string, string> = {
   '--stat-ok': '#10b981', '--stat-warn': '#f59e0b', '--card-radius': '12px', '--card-radius-sm': '8px',
 };
 
+/** Every token a component's script names: `var(--x)`, and a quoted `'--x'` (built into var() or tinted later). */
+function scriptTokens(src: string): string[] {
+  const js = css.scriptBlocks(src);
+  return [...new Set([...js.matchAll(/var\(\s*(--[\w-]+)/g), ...js.matchAll(/['"`](--[\w-]+)['"`]/g)].map((m) => m[1]))];
+}
+const SEVEN = ['Decisions', 'Rubric', 'Autonomy', 'Intentions', 'Harness', 'Observability', 'Identity'].map((v) => `views/${v}.svelte`);
+const guarded = [...(readFileSync(join(SRC, 'hexGuard.test.ts'), 'utf-8').match(/export const HEX_GUARDED[^=]*=\s*\[([\s\S]*?)\];/)?.[1] ?? '')
+  .matchAll(/'([^']+)'/g)].map((m) => m[1]);
+/** The converted views of PR 4 and PR 5 that draw a Chart. */
+const chartViews = SEVEN.filter((f) => guarded.includes(f) && /import Chart from/.test(readFileSync(join(SRC, f), 'utf-8')));
+
 describe('interfaces PR 4 and PR 5 build on', () => {
   it('every token named by the plan is defined in the dark block and on the paper ground', () => {
     for (const t of [...PR1_TOKENS, ...PR23_TOKENS]) {
@@ -72,9 +83,12 @@ describe('interfaces PR 4 and PR 5 build on', () => {
   });
 
   it('DARK_FALLBACK holds every token a chart on these screens reads (a missing one resolves to "" in jsdom)', () => {
-    // Decisions, Scoring, Guards and Observability: lines, bars, radar grid, doughnut slice gaps, axis ticks.
-    const used = ['--accent', '--muted', '--border', '--surface', '--green', '--yellow', '--red', '--err-text', '--st-neutral',
-      '--chart-text', '--chart-grid', ...Array.from({ length: 14 }, (_, i) => `--series-${i}`)];
+    // Review M5: read off the converted views that draw a Chart (every token their script names, by var() or by name),
+    // plus Chart.svelte's own paper defaults, not a hand-kept list.
+    const used = new Set(['--chart-text', '--chart-grid']);
+    for (const file of chartViews) for (const t of scriptTokens(readFileSync(join(SRC, file), 'utf-8'))) used.add(t);
+    expect(chartViews.length).toBeGreaterThanOrEqual(1);
+    expect(used.has('--signal-self-corrected')).toBe(chartViews.includes('views/Rubric.svelte'));
     for (const t of used) expect(chartColors.DARK_FALLBACK[t], t).toBe(DARK[t]);
   });
 
