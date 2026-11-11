@@ -168,6 +168,9 @@ describe('Identity in the paper look', () => {
       return el!;
     });
     expect(msg.classList.contains('save-err')).toBe(true);
+    // Review M4: what it says, and the edit is not lost.
+    expect(msg.textContent?.trim()).toBe('HTTP 405 for /identity/character');
+    expect(character.value).toBe('Curious, precise, and kind');
   });
 
   it('an open fact\'s Save, Set core and Deactivate are shared buttons; Deactivate hovers in the error colour', async () => {
@@ -218,5 +221,146 @@ describe('Identity: the paper look\'s structure (source contracts)', () => {
   it('the fact id takes the look\'s mono font through a scoped rule, leaving the shared global .mono alone', () => {
     expect(rules.get('.detail-grid .mono')).toMatchObject({ 'font-family': 'var(--font-mono)' });
     expect(rules.get(':global(.mono)')).toMatchObject({ 'font-family': 'monospace' });
+  });
+});
+
+// ── PR 5 review M4 and M5: the fact write paths, by their requests and what the screen then shows ─────────────────
+// (adapted from the reviewer's probes). Every one of these controls became the shared Button in PR 5; a swapped handler
+// (Set core deactivating the fact) passed the earlier tests, which only read classes.
+
+const wfact = (id: string, content: string, tags: string[] = []) => ({
+  id, content, category: 'preference', subject: 'Tim', confidence: 0.8, active: true, tags, superseded_by: null,
+  actionable: null, event_date: null, source: null, source_episode_id: null, learned_at: '2026-01-01T00:00:00Z', created_at: '2026-01-01T00:00:00Z',
+});
+const W_FACTS = { facts: [wfact('fact-1', 'Tim prefers Celsius'), wfact('fact-core', 'Tim lives in Lisbon', ['profile_core'])], total: 2 };
+
+describe('Identity: the fact write paths (requests and the screen after them)', () => {
+  let writes: { url: string; method: string; body: unknown }[];
+  let factGets: number;
+  let confirmAnswer: boolean;
+  let confirmAsked: string[];
+  let fail: boolean;
+  let putReply: Record<string, unknown>;
+
+  beforeEach(() => {
+    cleanup();
+    writes = []; factGets = 0; confirmAsked = []; confirmAnswer = true; fail = false;
+    putReply = { status: 'superseded', new_fact_id: 'fact-2' };
+    vi.stubGlobal('confirm', (q: string) => { confirmAsked.push(q); return confirmAnswer; });
+    vi.stubGlobal('fetch', vi.fn(async (url: string, opts?: RequestInit) => {
+      const method = opts?.method ?? 'GET';
+      if (method !== 'GET') {
+        writes.push({ url, method, body: opts?.body ? JSON.parse(opts.body as string) : undefined });
+        if (fail) return { ok: false, status: 500, json: async () => ({}) } as Response;
+      }
+      if (url === '/identity') return jsonResp(IDENTITY);
+      if (url.startsWith('/profile/facts')) { factGets++; return jsonResp(W_FACTS); }
+      if (url.startsWith('/facts/') && method === 'PUT') return jsonResp(putReply);
+      if (url.startsWith('/facts/')) return jsonResp({ status: 'ok' });
+      if (url.startsWith('/identity/')) return jsonResp({ status: 'updated' });
+      throw new Error(`unexpected ${method} ${url}`);
+    }));
+  });
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+  async function open(id: string): Promise<HTMLElement> {
+    render(Identity);
+    await screen.findByText('Tim prefers Celsius');
+    await fireEvent.click(screen.getByRole('button', { name: `Show details for ${id}` }));
+    return document.querySelector('.fact-edit') as HTMLElement;
+  }
+  const button = (edit: HTMLElement, name: string) => within(edit).getByRole('button', { name }) as HTMLButtonElement;
+
+  it('the open fact\'s field is named "Fact content" and starts as the fact (M5)', async () => {
+    const edit = await open('fact-1');
+    const field = within(edit).getByRole('textbox', { name: 'Fact content' }) as HTMLTextAreaElement;
+    expect(field.value).toBe('Tim prefers Celsius');
+  });
+
+  it('edit and save: a blank draft cannot be saved; Save PUTs the draft with the subject and confidence, then the list reloads', async () => {
+    const edit = await open('fact-1');
+    const field = edit.querySelector('textarea') as HTMLTextAreaElement;
+    await fireEvent.input(field, { target: { value: '   ' } });
+    expect(button(edit, 'Save').disabled).toBe(true);
+    await fireEvent.input(field, { target: { value: 'Tim prefers Kelvin' } });
+    expect(button(edit, 'Save').disabled).toBe(false);
+    const before = factGets;
+    await fireEvent.click(button(edit, 'Save'));
+    await waitFor(() => expect(factGets).toBe(before + 1));
+    expect(writes).toEqual([{ url: '/facts/fact-1', method: 'PUT', body: { content: 'Tim prefers Kelvin', subject: 'Tim', confidence: 0.8 } }]);
+    expect(confirmAsked).toEqual([]); // an edit supersedes; it does not ask
+    expect(document.body.textContent).not.toContain('Saving…');
+  });
+
+  it('a failed save shows the server\'s message, keeps the draft and leaves the three buttons usable', async () => {
+    const edit = await open('fact-1');
+    fail = true;
+    const field = edit.querySelector('textarea') as HTMLTextAreaElement;
+    await fireEvent.input(field, { target: { value: 'Tim prefers Kelvin' } });
+    await fireEvent.click(button(edit, 'Save'));
+    await waitFor(() => expect(within(edit).getByText('HTTP 500 for /facts/fact-1')).toBeTruthy());
+    expect(field.value).toBe('Tim prefers Kelvin');
+    for (const name of ['Save', 'Set core', 'Deactivate']) expect(button(edit, name).disabled, name).toBe(false);
+  });
+
+  it('a save the server merged into an existing fact says so above the list, with the stored text, and the list reloads', async () => {
+    putReply = { status: 'merged_into_existing', stored_content: 'Tim prefers Celsius, always' };
+    const edit = await open('fact-1');
+    const before = factGets;
+    await fireEvent.click(button(edit, 'Save'));
+    await waitFor(() => expect(screen.getByText(/Your edit matched an existing fact/)).toBeTruthy());
+    expect(screen.getByText(/Your edit matched an existing fact/).textContent).toContain('Stored: "Tim prefers Celsius, always"');
+    await waitFor(() => expect(factGets).toBe(before + 1));
+  });
+
+  it('Set core POSTs core: true; a core fact\'s button reads Unset core and POSTs core: false', async () => {
+    const edit = await open('fact-1');
+    await fireEvent.click(button(edit, 'Set core'));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]).toEqual({ url: '/facts/fact-1/core', method: 'POST', body: { core: true } });
+    expect(confirmAsked).toEqual([]); // reversible, so no question
+    cleanup(); writes = [];
+    const edit2 = await open('fact-core');
+    await fireEvent.click(button(edit2, 'Unset core'));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]).toEqual({ url: '/facts/fact-core/core', method: 'POST', body: { core: false } });
+  });
+
+  it('cancel: Deactivate asks first, and a "no" sends nothing and leaves the fact open', async () => {
+    const edit = await open('fact-1');
+    confirmAnswer = false;
+    await fireEvent.click(button(edit, 'Deactivate'));
+    expect(confirmAsked).toHaveLength(1);
+    expect(confirmAsked[0]).toMatch(/^Deactivate this fact\?/);
+    expect(writes).toEqual([]);
+    expect(within(edit).getByRole('textbox', { name: 'Fact content' })).toBeTruthy();
+  });
+
+  it('deactivate: a "yes" sends DELETE for that fact, and the list reloads', async () => {
+    const edit = await open('fact-1');
+    const before = factGets;
+    await fireEvent.click(button(edit, 'Deactivate'));
+    await waitFor(() => expect(writes).toHaveLength(1));
+    expect(writes[0]).toMatchObject({ url: '/facts/fact-1', method: 'DELETE' });
+    await waitFor(() => expect(factGets).toBe(before + 1));
+  });
+
+  it('cancel: a section Save asks first, and a "no" sends nothing and keeps the edit', async () => {
+    render(Identity);
+    const character = (await screen.findByLabelText('character')) as HTMLTextAreaElement;
+    await screen.findByDisplayValue('Curious and precise');
+    await fireEvent.input(character, { target: { value: 'Kind' } });
+    confirmAnswer = false;
+    await fireEvent.click(within(character.closest('.section-card') as HTMLElement).getByRole('button', { name: 'Save' }));
+    expect(confirmAsked).toHaveLength(1);
+    expect(writes).toEqual([]);
+    expect(character.value).toBe('Kind');
+  });
+
+  it('every control is a native focusable element, none out of the tab order, and the fact\'s three are type="button"', async () => {
+    const edit = await open('fact-1');
+    const controls = [...document.querySelectorAll('textarea, button, input')] as HTMLElement[];
+    expect(controls.filter((c) => c.getAttribute('tabindex') === '-1')).toEqual([]);
+    expect([...edit.querySelectorAll('button')].map((b) => b.getAttribute('type'))).toEqual(['button', 'button', 'button']);
   });
 });

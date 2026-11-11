@@ -299,6 +299,7 @@
           >
             <textarea
               class="fact-textarea"
+              aria-label="Fact content"
               rows={4}
               bind:value={factDrafts[row.id]}
             ></textarea>
