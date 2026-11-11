@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { CHART_FONT_SIZE, TOKEN_FALLBACK, applyChartFont, cssColor, finishBars, lineLegendLabels, resolveColors, seriesToken, tint, withChartDefaults } from './chartColors';
+import { CHART_FONT_SIZE, TOKEN_FALLBACK, applyChartFont, cssColor, finishBars, levelDayLabels, lineLegendLabels, resolveColors, seriesToken, tint, withChartDefaults } from './chartColors';
 import { ROOT_SEL, block, parseBlocks, scriptBlocks } from './testing/css';
 import { sourceFiles } from './testing/sources';
 
@@ -284,3 +284,35 @@ describe('chart furniture', () => {
     expect(dec).toMatch(/label: 'Decisions',\s*data: [^\n]*\n\s*backgroundColor: tint\('--series-0', 0\.5\),/);
   });
 });
+
+// Design batch 2 (verdict pass 1): day labels tilted where they did not fit ("Decisions per day", Health's "Edge
+// creation rate" at 1440, and the phone charts). A day or hour axis now skips labels and keeps the ones it draws
+// level, as Observability's trend already did; a category axis still tilts rather than lose a name.
+describe('levelDayLabels', () => {
+  const LEVEL = { maxRotation: 0, autoSkip: true, autoSkipPadding: 12 };
+
+  it('a day or hour axis skips labels instead of tilting them', () => {
+    for (const labels of [['Nov 4', 'Nov 5', 'Nov 10'], ['Nov 3 15:00', 'Nov 4 09:00']]) {
+      expect(levelDayLabels('bar', { labels }, {}).scales.x.ticks, labels[0]).toEqual(LEVEL);
+      expect(levelDayLabels('line', { labels }, {}).scales.x.ticks, labels[0]).toEqual(LEVEL);
+    }
+  });
+
+  it('a category axis, a horizontal bar chart, a doughnut and an empty chart are left alone', () => {
+    expect(levelDayLabels('bar', { labels: ['Architecture', 'Process'] }, {})).toEqual({});
+    expect(levelDayLabels('bar', { labels: ['Nov 4'] }, { indexAxis: 'y' })).toEqual({ indexAxis: 'y' });
+    expect(levelDayLabels('doughnut', { labels: ['Nov 4'] }, {})).toEqual({});
+    expect(levelDayLabels('line', { labels: [] }, {})).toEqual({});
+  });
+
+  it('the caller\'s own tick settings win', () => {
+    const opts = { scales: { x: { ticks: { maxTicksLimit: 8, maxRotation: 45 } } } };
+    expect(levelDayLabels('line', { labels: ['Nov 4'] }, opts).scales.x.ticks).toEqual({ ...LEVEL, maxTicksLimit: 8, maxRotation: 45 });
+  });
+
+  it('Chart applies it to every chart', () => {
+    const src = readFileSync(join(__dirname, 'viz', 'Chart.svelte'), 'utf-8');
+    expect(src).toMatch(/withChartDefaults\(type, levelDayLabels\(type, d, resolveColors\(o, canvas\)\)/);
+  });
+});
+

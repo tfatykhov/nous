@@ -186,6 +186,22 @@ export function withChartDefaults(type: string, options: Record<string, any>, te
   return mergeUnder(base, options);
 }
 
+/** A day or an hour as the dashboard prints it on an axis: fmtDay "Nov 4" or fmtHour "Nov 3 15:00". */
+const DAY_LABEL = /^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{1,2}(?: \d{2}:00)?$/;
+
+/**
+ * A day or hour axis skips labels instead of tilting them (design batch 2): Chart.js turned "Nov 10" on its side
+ * wherever the labels did not fit (Decisions per day, Health's edge creation rate, every phone chart). The labels
+ * it draws stay level, with a gap between them, as Observability's trend did. A category axis still tilts rather
+ * than lose a name, and a horizontal bar chart or a radial chart is left alone. The caller's own ticks win.
+ */
+export function levelDayLabels(type: string, data: Record<string, any>, options: Record<string, any>): Record<string, any> {
+  const labels: unknown[] = Array.isArray(data?.labels) ? data.labels : [];
+  if (!CARTESIAN.has(type) || options.indexAxis === 'y' || !labels.length) return options;
+  if (!labels.every((l) => typeof l === 'string' && DAY_LABEL.test(l))) return options;
+  return mergeUnder({ scales: { x: { ticks: { maxRotation: 0, autoSkip: true, autoSkipPadding: 12 } } } }, options);
+}
+
 /** Chart.js's own legend items, each dot filled and outlined in its line's colour. */
 function solidLineDots(chart: any): any[] {
   return (globalThis as any).Chart.defaults.plugins.legend.labels.generateLabels(chart).map((item: any) => {
