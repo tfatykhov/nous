@@ -10,6 +10,7 @@
     ConsolidationAction,
   } from '../lib/types/api';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
+  import { Button } from '../lib/ui/button';
 
   // ── List store (fetch-once + manual refresh; refresh-state preserved by the
   //    shared poll registry, matching the sibling views). ────────────────────
@@ -108,7 +109,7 @@
 
   /** Pretty-print a before/after JSON blob for diff display. */
   function fmtJson(val: unknown): string {
-    if (val === null || val === undefined) return '∅';
+    if (val === null || val === undefined) return 'none'; // a word, not the empty-set sign
     if (typeof val === 'string') return val;
     try {
       return JSON.stringify(val, null, 2);
@@ -139,9 +140,9 @@
     <p class="subtitle">Per-sleep-cycle memory consolidation audit — merges, supersessions, and deactivations</p>
   </div>
   <div class="head-right">
-    <button class="refresh-btn" onclick={refreshAll} disabled={$store.loading}>
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={$store.loading}>
       {$store.loading ? 'Loading…' : 'Refresh'}
-    </button>
+    </Button>
     <StaleBadge state={$store} />
   </div>
 </header>
@@ -237,12 +238,11 @@
                 {#if action.before !== null || action.after !== null}
                   <div class="diff">
                     <div class="diff-side diff-before">
-                      <span class="diff-label">before</span>
+                      <span class="diff-label">Before</span>
                       <pre>{fmtJson(action.before)}</pre>
                     </div>
-                    <div class="diff-arrow" aria-hidden="true">→</div>
                     <div class="diff-side diff-after">
-                      <span class="diff-label">after</span>
+                      <span class="diff-label">After</span>
                       <pre>{fmtJson(action.after)}</pre>
                     </div>
                   </div>
@@ -307,6 +307,7 @@
     color: var(--text);
     margin: 0 0 0.125rem;
   }
+  :global(html[data-look="paper"] [data-ground="paper"]) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
 
   .subtitle {
     font-size: 0.8125rem;
@@ -320,6 +321,7 @@
     color: var(--text);
     margin: 0 0 0.75rem;
   }
+  :global(html[data-look="paper"] [data-ground="paper"]) h2 { font-size: 15px; font-weight: 650; }
 
   .head-right {
     display: flex;
@@ -328,25 +330,15 @@
     flex-shrink: 0;
   }
 
-  .refresh-btn {
-    font-size: 0.8125rem;
-    padding: 0.25rem 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
-    background: var(--surface);
-    color: var(--text);
-    cursor: pointer;
-  }
-  .refresh-btn:hover:not(:disabled) { background: var(--surface-hover); }
-  .refresh-btn:disabled { opacity: 0.5; cursor: default; }
-
   /* ── Card ────────────────────────────────────────────────── */
   .chart-card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
     padding: 1rem;
   }
+  :global(html[data-look="paper"] [data-ground="paper"]) .chart-card { padding: 1.125rem 1.25rem; }
 
   .mt { margin-top: 1rem; }
 
@@ -407,7 +399,7 @@
   .chip {
     display: inline-block;
     padding: 0.1em 0.45em;
-    border-radius: 4px;
+    border-radius: 999px;
     background: var(--surface-hover);
     border: 1px solid var(--border);
     color: var(--text);
@@ -422,15 +414,15 @@
   .badge {
     display: inline-block;
     padding: 0.15em 0.55em;
-    border-radius: 4px;
+    border-radius: 999px;
     font-size: 0.75rem;
     font-weight: 600;
     white-space: nowrap;
   }
 
-  .badge-good { background: rgba(52, 211, 153, 0.15); color: #34d399; }
-  .badge-warn { background: rgba(251, 191, 36,  0.15); color: #fbbf24; }
-  .badge-bad  { background: rgba(248, 113, 113, 0.15); color: #f87171; }
+  .badge-good { background: var(--badge-good-bg); color: var(--ok-text); }
+  .badge-warn { background: var(--badge-warn-bg); color: var(--warn-text); }
+  .badge-bad  { background: var(--badge-bad-bg); color: var(--err-text); }
 
   /* ── Detail card ─────────────────────────────────────────── */
   .detail-head {
@@ -446,7 +438,7 @@
     font-size: 0.75rem;
     padding: 0.2rem 0.6rem;
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--ctl-radius);
     background: var(--surface);
     color: var(--muted);
     cursor: pointer;
@@ -483,7 +475,7 @@
   .action-row {
     padding: 0.625rem;
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--card-radius-sm);
     margin-bottom: 0.5rem;
     background: var(--bg, var(--surface));
   }
@@ -501,7 +493,7 @@
     font-size: 0.75rem;
     font-weight: 700;
     color: var(--accent);
-    text-transform: uppercase;
+    text-transform: var(--label-transform);
     letter-spacing: 0.02em;
   }
 
@@ -512,16 +504,16 @@
   }
 
   /* ── Diff ────────────────────────────────────────────────── */
+  /* Before and After side by side; their labels say which is which. */
   .diff {
     display: grid;
-    grid-template-columns: 1fr auto 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     gap: 0.5rem;
     align-items: stretch;
   }
 
   @media (max-width: 700px) {
-    .diff { grid-template-columns: 1fr; }
-    .diff-arrow { display: none; }
+    .diff { grid-template-columns: minmax(0, 1fr); }
   }
 
   .diff-side {
@@ -535,20 +527,13 @@
     font-size: 0.7rem;
     font-weight: 600;
     color: var(--muted);
-    text-transform: uppercase;
-  }
-
-  .diff-arrow {
-    display: flex;
-    align-items: center;
-    color: var(--muted);
-    font-weight: 700;
+    text-transform: var(--label-transform);
   }
 
   .diff pre {
     margin: 0;
     padding: 0.5rem;
-    border-radius: 6px;
+    border-radius: var(--card-radius-sm);
     border: 1px solid var(--border);
     background: var(--surface);
     font-family: var(--font-mono, monospace);
@@ -556,11 +541,12 @@
     color: var(--text);
     white-space: pre-wrap;
     word-break: break-word;
+    overflow-wrap: anywhere;
     overflow-x: auto;
   }
 
-  .diff-before pre { border-left: 2px solid #f87171; }
-  .diff-after pre  { border-left: 2px solid #34d399; }
+  .diff-before pre { border-left: 2px solid var(--red); }
+  .diff-after pre  { border-left: 2px solid var(--green); }
 
   /* ── Status messages ─────────────────────────────────────── */
   .status-msg {
@@ -571,7 +557,7 @@
     margin: 0;
   }
 
-  .status-msg.error { color: var(--red, #ef4444); }
+  .status-msg.error { color: var(--err-text); }
 
   /* ── Sleep Activity (from Activity) ──────────────────────── */
   .detail-grid {
@@ -600,7 +586,7 @@
     margin: 0;
   }
 
-  .empty.error { color: var(--red, #ef4444); }
+  .empty.error { color: var(--err-text); }
 
   .retry-link {
     background: none;
