@@ -268,12 +268,20 @@ describe('a migrated markup never colours text with a mark map or a status fill'
 // badgeStyleVar and WAITING_VAR instead.
 const HEX_STATUS_HELPERS = ['statusColor', 'ledgerStatusColor', 'badgeStyle', 'MUTED', 'WAITING', 'UNKNOWN', 'PENDING'];
 
-/** The names a source imports from lib/status (any relative or $lib path), `as` aliases resolved to the imported name. */
+/** The names a source imports from lib/status (any relative or $lib path), `as` aliases resolved to the imported name;
+ * a namespace (`* as st`) or default import is reported as '*', since it reaches every export. Type-only imports are
+ * skipped: a type carries no colour. */
 function statusImports(src: string): string[] {
-  return [...src.matchAll(/import\s*\{([^}]*)\}\s*from\s*['"][^'"]*\/status(?:\.(?:ts|js))?['"]/g)]
-    .flatMap((m) => m[1].split(','))
-    .map((n) => n.trim().replace(/^type\s+/, '').split(/\s+as\s+/)[0].trim())
-    .filter(Boolean);
+  return [...src.matchAll(/import\s+(?!type\b)([^'";]*?)\s*from\s*['"][^'"]*\/status(?:\.(?:ts|js))?['"]/g)].flatMap((m) => {
+    const clause = m[1].trim();
+    const brace = clause.indexOf('{');
+    const head = (brace < 0 ? clause : clause.slice(0, brace)).replace(/,\s*$/, '').trim();
+    const whole = head ? ['*'] : []; // `st`, `* as st`, `st, * as ns` or `st, {`
+    const named = brace < 0 ? [] : clause.slice(brace + 1, clause.indexOf('}', brace)).split(',')
+      .map((n) => n.trim().replace(/^type\s+/, '').split(/\s+as\s+/)[0].trim())
+      .filter(Boolean);
+    return [...whole, ...named];
+  });
 }
 
 describe('no migrated file imports the hex status helpers', () => {
@@ -283,8 +291,15 @@ describe('no migrated file imports the hex status helpers', () => {
     expect(statusImports("import {\n  badgeStyleVar,\n  ledgerStatusVar,\n} from '../../lib/status.ts';")).toEqual(['badgeStyleVar', 'ledgerStatusVar']);
   });
 
+  it('reports a namespace or default import of lib/status as "*", which reaches every helper (re-review N3)', () => {
+    expect(statusImports("import * as st from '$lib/status';")).toEqual(['*']);
+    expect(statusImports("import st from '../lib/status';")).toEqual(['*']);
+    expect(statusImports("import st, { statusVar } from '../lib/status.js';")).toEqual(['*', 'statusVar']);
+    expect(statusImports("import type * as T from '$lib/status';\nimport * as bar from './statusbar';")).toEqual([]);
+  });
+
   it.each(SCRIPT_GUARDED)('%s', (file) => {
-    const hits = statusImports(scriptBlocks(readFileSync(join(SRC, file), 'utf-8'))).filter((n) => HEX_STATUS_HELPERS.includes(n));
+    const hits = statusImports(scriptBlocks(readFileSync(join(SRC, file), 'utf-8'))).filter((n) => n === '*' || HEX_STATUS_HELPERS.includes(n));
     expect(hits).toEqual([]);
   });
 });
