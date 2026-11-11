@@ -365,7 +365,7 @@ describe('Activity split', () => {
     expect(within(s).getByText('Censor c-9 fired — matched: rm -rf')).toBeTruthy();
     expect(within(s).getByText('sleep completed')).toBeTruthy();
     expect(within(s).getByText('Sleep cycle completed. 4 facts, 1 procedures.')).toBeTruthy();
-    expect(within(s).getByText(new Date('2026-11-08T10:00:00+00:00').toLocaleString())).toBeTruthy();
+    expect(within(s).getByText('Nov 8 10:00 UTC')).toBeTruthy(); // one timestamp format (finish review fix 4)
   });
 
   it('Guards shows Most Active Censors with the censor numbers', async () => {
@@ -385,7 +385,7 @@ describe('Activity split', () => {
     render(Subtasks);
     const s = await sectionOf('Upcoming Schedules');
     await waitFor(() => expect(within(s).getByText('weekly report digest')).toBeTruthy());
-    expect(within(s).getByText(`Next: ${new Date('2099-01-05T09:00:00+00:00').toLocaleString()}`)).toBeTruthy();
+    expect(within(s).getByText('Next: Jan 5 09:00 UTC')).toBeTruthy(); // one timestamp format (finish review fix 4)
     const card = (label: string) => within(s).getByText(label).closest('.stat-card') as HTMLElement;
     expect(within(card('Active Schedules')).getByText('4')).toBeTruthy();
     expect(within(card('Schedule Fires (7d)')).getByText('9')).toBeTruthy();
@@ -415,7 +415,7 @@ describe('Activity split', () => {
     const s = await sectionOf('Sleep Activity');
     await waitFor(() => expect(within(s).getByText('Total Sleeps')).toBeTruthy());
     const dd = (term: string) => within(s).getByText(term).nextElementSibling?.textContent;
-    expect(dd('Last Sleep')).toBe(new Date('2026-11-08T03:00:00+00:00').toLocaleString());
+    expect(dd('Last Sleep')).toBe('Nov 8 03:00 UTC'); // one timestamp format (finish review fix 4)
     expect(dd('Total Sleeps')).toBe('23');
     expect(dd('Facts Created')).toBe('41');
     expect(dd('Procedures')).toBe('5');

@@ -1,3 +1,4 @@
+import { MONTHS } from './harness';
 import type { GraphStats } from './types/api';
 
 const fmt = (n: number) => n.toLocaleString('en-US');
@@ -10,7 +11,7 @@ export function dateSpan(from: string | null, to: string | null): string {
   const a = new Date(from);
   const b = new Date(to);
   if (Number.isNaN(a.getTime()) || Number.isNaN(b.getTime())) return '';
-  const month = (d: Date) => d.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' });
+  const month = (d: Date) => MONTHS[d.getUTCMonth()];
   const day = (d: Date) => `${month(d)} ${d.getUTCDate()}`;
   if (a.getUTCFullYear() !== b.getUTCFullYear()) {
     return `${day(a)}, ${a.getUTCFullYear()} – ${day(b)}, ${b.getUTCFullYear()}`;

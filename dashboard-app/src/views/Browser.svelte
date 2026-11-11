@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtUtc } from '../lib/harness';
   import { onMount } from 'svelte';
   import { apiGet, apiSend } from '../lib/api';
   import DataTable from '../lib/ui/DataTable.svelte';
@@ -145,7 +146,7 @@
 
   function fmtDate(iso: string | null | undefined): string {
     if (!iso) return '—';
-    return new Date(iso).toLocaleDateString([], { dateStyle: 'short' });
+    return fmtUtc(iso);
   }
 
   function fmtPct(v: number | null | undefined): string {

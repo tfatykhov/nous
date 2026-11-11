@@ -2,7 +2,7 @@
  * Pure helpers for the Autonomy view (GET /dashboard/autonomy).
  * No DOM, no fetch — unit-tested in autonomy.test.ts.
  */
-import { fmtWhen, type Verdict } from './harness';
+import { fmtDay, fmtWhen, type Verdict } from './harness';
 import type { AutonomyData, JobFixRow } from './types/api';
 
 /** The nous-scorer service starts a pass every 15 minutes (docker-compose.yml). */
@@ -92,10 +92,7 @@ export function coverageFrom(firstScoredAt: string | null, windowDays: number, n
  * window and ending 14 days ago, because a score is final only then.
  */
 export function settledSpan(win: { from: string; to: string } | null | undefined): string {
-  const day = (iso: string | undefined) => {
-    const d = new Date(iso ?? '');
-    return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
-  };
+  const day = (iso: string | undefined) => fmtDay(iso);
   return `${day(win?.from)} – ${day(win?.to)}`;
 }
 

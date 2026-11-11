@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtUtc } from '../lib/harness';
   import { SvelteSet } from 'svelte/reactivity';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
@@ -28,8 +29,7 @@
   );
 
   function formatDateTime(dateStr: string | null): string {
-    if (!dateStr) return '—';
-    return new Date(dateStr).toLocaleString();
+    return fmtUtc(dateStr);
   }
 
   function eventSummary(event: ActivityEvent): string {
@@ -251,7 +251,7 @@
                 </div>
                 <div class="trace-detail-row">
                   <span class="dl">Timestamp</span>
-                  <span>{t.timestamp ? new Date(t.timestamp).toLocaleString() : '--'}</span>
+                  <span>{t.timestamp ? fmtUtc(t.timestamp) : '--'}</span>
                 </div>
               </div>
             {/if}

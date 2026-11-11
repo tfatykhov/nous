@@ -5,7 +5,7 @@
   import { usePoll } from '../lib/poll';
   import type { StatusData, StatusTimeseriesPoint, ExecutionData, WorkToday, HeartbeatTrackedFinding } from '../lib/types/api';
   import { attentionPoll } from '../lib/stores/attention';
-  import { fmtUtc, relUntil } from '../lib/harness';
+  import { fmtDayMonth, fmtUtc, relUntil } from '../lib/harness';
   import { routeHref } from '../lib/router';
   import { fmtTokens } from '../lib/work';
   import { fmtSeconds } from '../lib/frames';
@@ -146,8 +146,8 @@
   /** `Today, 10 November` from the endpoint's UTC day, else the browser's UTC date. */
   let dayTitle = $derived.by(() => {
     const day = td?.day ?? new Date().toISOString().slice(0, 10);
-    const d = new Date(`${day}T00:00:00Z`);
-    return Number.isNaN(d.getTime()) ? 'Today' : `Today, ${d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', timeZone: 'UTC' })}`;
+    const label = fmtDayMonth(`${day}T00:00:00Z`);
+    return label === '—' ? 'Today' : `Today, ${label}`;
   });
   let nowText = $derived.by(() => {
     const m = utcMinute(td?.now);

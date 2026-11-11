@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtUtc } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -136,10 +137,7 @@
 
   // ── Helpers ──────────────────────────────────────────────────────────────
   function fmtClock(iso: string | null): string {
-    if (!iso) return '—';
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return iso;
-    return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    return fmtUtc(iso);
   }
 
   // A ticking clock, because this store is fetch-once: without it `fmtAge` is

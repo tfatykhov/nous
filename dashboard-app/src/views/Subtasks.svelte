@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtUtc } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -41,8 +42,7 @@
   );
 
   function formatDateTime(dateStr: string | null): string {
-    if (!dateStr) return '—';
-    return new Date(dateStr).toLocaleString();
+    return fmtUtc(dateStr);
   }
 
   // ── Outcome colours (mirrors subtasks.js OUTCOME_COLORS): status and outcome tokens, which Chart resolves ──
@@ -71,8 +71,7 @@
   }
 
   function formatTs(ts: string | null): string {
-    if (!ts) return '—';
-    return new Date(ts).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+    return fmtUtc(ts);
   }
 
   // ── Chart data builders ───────────────────────────────────────────────────

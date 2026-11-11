@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtUtc } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -46,7 +47,7 @@
 
   function fmtTs(iso: string | null | undefined): string {
     if (!iso) return '--';
-    return new Date(iso).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+    return fmtUtc(iso);
   }
 
   // Colours are tokens: Chart resolves them against its ground, the DOM reads var() directly. Budget and urgency are

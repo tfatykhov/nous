@@ -3,7 +3,9 @@
  * No DOM, no fetch — unit-tested in harness.test.ts.
  */
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+export const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const MONTHS_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October',
+  'November', 'December'];
 
 /** "Sep 25 14:31 UTC" — absolute, UTC, no seconds. */
 export function fmtUtc(iso: string | null | undefined): string {
@@ -13,6 +15,20 @@ export function fmtUtc(iso: string | null | undefined): string {
   const hh = String(d.getUTCHours()).padStart(2, '0');
   const mm = String(d.getUTCMinutes()).padStart(2, '0');
   return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()} ${hh}:${mm} UTC`;
+}
+
+/** The day of a timestamp in fmtUtc's words, for a date with no time: "Oct 20" (UTC). */
+export function fmtDay(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '—' : `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
+}
+
+/** A heading's day: "10 November" (UTC). */
+export function fmtDayMonth(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '—' : `${d.getUTCDate()} ${MONTHS_LONG[d.getUTCMonth()]}`;
 }
 
 /** "2h ago" / "3d ago" / "just now". */
