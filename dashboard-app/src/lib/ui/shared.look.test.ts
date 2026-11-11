@@ -115,6 +115,20 @@ describe('Button', () => {
     expect(classes).toContain('text-sm');
   });
 
+  // Review M11: on paper a focused button gets the screen's 2px --focus-ring outline (the 50% halo alone is about
+  // 2.3:1 on white); under dark the outline is 0px wide, so the dark focus look does not move.
+  it('focus: a --focus-ring outline whose width is the ground\'s --btn-focus-width (0 dark, 2px paper)', () => {
+    for (const variant of ['default', 'outline'] as const) {
+      const { container } = render(Button, { props: { variant, children: label } });
+      const classes = container.querySelector('[data-slot="button"]')!.className.split(' ');
+      for (const c of ['focus-visible:outline-solid', 'focus-visible:outline-[length:var(--btn-focus-width)]',
+        'focus-visible:outline-[color:var(--focus-ring)]', 'focus-visible:outline-offset-2']) expect(classes, `${variant} ${c}`).toContain(c);
+      cleanup();
+    }
+    expect(DARK['--btn-focus-width']).toBe('0px');
+    expect(PAPER['--btn-focus-width']).toBe('2px');
+  });
+
   it('is an <a> with href; a disabled link has aria-disabled and no href', () => {
     const { container } = render(Button, { props: { href: '#/work', variant: 'outline', children: label } });
     const a = container.querySelector('a[data-slot="button"]')!;

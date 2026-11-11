@@ -145,6 +145,7 @@
     --tab-active-bg: var(--surface-hover);
     --tab-active-shadow: inset 0 0 0 1px var(--accent);
     --focus-ring: var(--accent);
+    --btn-focus-width: 0px;                    /* a focused Button's outline: none under dark, as before */
   }
 
   /* ---- The paper ground: page content under the paper look ---- */
@@ -212,6 +213,7 @@
     --tab-active-bg: #ffffff;
     --tab-active-shadow: 0 1px 3px rgba(18, 48, 79, 0.12);
     --focus-ring: #2346c8;
+    --btn-focus-width: 2px;
 
     /* shadcn, HSL of the paper hex */
     --background: 192 17% 94%;

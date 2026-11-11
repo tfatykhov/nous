@@ -114,6 +114,7 @@ const NEW_DARK: Record<string, string> = {
   '--f-debug': '#f09a5a',
   '--f-creative': '#ee82bd',
   '--f-initiation': '#e0b050',
+  '--btn-focus-width': '0px', // a focused shadcn Button's outline: none under dark, as before (review M11)
   '--f-other': '#c4c4d8', // a frame id outside the seven (review M1): neutral, not conversation's grey
 };
 
