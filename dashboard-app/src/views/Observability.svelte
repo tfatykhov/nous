@@ -183,13 +183,16 @@
           <div class="handler-row">
             <span class="handler-dot" style:--dot={`var(${handlerDotToken(h.error_rate ?? 0)})`}></span>
             <span class="handler-name">{shortHandler(name)}</span>
-            <span class="handler-stat">{h.successes ?? 0}/{h.invocations ?? 0}</span>
-            <span class="handler-stat">{(h.avg_duration_ms ?? 0).toFixed(1)}ms</span>
-            {#if h.last_invoked_ago_s != null}
-              <span class="handler-stat">{Math.round(h.last_invoked_ago_s)}s ago</span>
-            {/if}
-            <span class="handler-rate" class:handler-rate--warn={overallErrRate > 0.1}>
-              {(h.error_rate * 100).toFixed(1)}% err
+            <!-- The figures as one group: at phone width it wraps under the name as a whole. -->
+            <span class="handler-stats">
+              <span class="handler-stat">{h.successes ?? 0}/{h.invocations ?? 0}</span>
+              <span class="handler-stat">{(h.avg_duration_ms ?? 0).toFixed(1)}ms</span>
+              {#if h.last_invoked_ago_s != null}
+                <span class="handler-stat">{Math.round(h.last_invoked_ago_s)}s ago</span>
+              {/if}
+              <span class="handler-rate" class:handler-rate--warn={overallErrRate > 0.1}>
+                {(h.error_rate * 100).toFixed(1)}% err
+              </span>
             </span>
           </div>
         {/each}
@@ -319,13 +322,16 @@
   <!-- Latest snapshot -->
   {#if d.drift}
     {@const m = d.drift.metrics}
-    <StatGrid stats={[
-      { label: 'Facts',       value: (m.fact_count ?? 0) + (m.fact_count_delta != null ? ' (change ' + (m.fact_count_delta > 0 ? '+' : '') + m.fact_count_delta + ')' : '') },
-      { label: 'Episodes',   value: String(m.episode_count ?? 0) },
-      { label: 'Censors',    value: String(m.active_censor_count ?? 0) },
-      { label: 'Procedures', value: String(m.procedure_count ?? 0) },
-      { label: 'Error rate', value: ((m.handler_error_rate ?? 0) * 100).toFixed(1) + '%' },
-    ]} />
+    <div class="snapshot-grid">
+      <StatGrid stats={[
+        { label: 'Facts',       value: String(m.fact_count ?? 0),
+          note: m.fact_count_delta != null ? 'change ' + (m.fact_count_delta > 0 ? '+' : '') + m.fact_count_delta : undefined },
+        { label: 'Episodes',   value: String(m.episode_count ?? 0) },
+        { label: 'Censors',    value: String(m.active_censor_count ?? 0) },
+        { label: 'Procedures', value: String(m.procedure_count ?? 0) },
+        { label: 'Error rate', value: ((m.handler_error_rate ?? 0) * 100).toFixed(1) + '%' },
+      ]} />
+    </div>
     <p class="snapshot-ts">Snapshot: {fmtAgo(d.drift.timestamp)}</p>
   {/if}
 
@@ -434,8 +440,10 @@
     gap: 0.5rem;
   }
 
+  /* At phone width the figures wrap under the name as one group, instead of widening the page. */
   .handler-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.625rem;
     font-size: 0.8125rem;
@@ -449,22 +457,33 @@
     background: var(--dot);
   }
 
+  /* A basis, not auto: a long name wraps beside its dot rather than leaving the dot alone on a line. */
   .handler-name {
-    flex: 1;
+    flex: 1 1 8rem;
+    min-width: 0;
+    overflow-wrap: anywhere;
     color: var(--text);
     font-weight: 500;
+  }
+
+  .handler-stats {
+    display: flex;
+    gap: 0.625rem;
+    margin-left: auto;
   }
 
   .handler-stat {
     color: var(--muted);
     min-width: 60px;
     text-align: right;
+    white-space: nowrap;
   }
 
   .handler-rate {
     min-width: 60px;
     text-align: right;
     color: var(--muted);
+    white-space: nowrap;
   }
 
   .handler-rate--warn {
@@ -479,6 +498,7 @@
 
   .trace-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.5rem;
     padding: 0.5rem 0.375rem;
@@ -509,7 +529,7 @@
   .trace-type {
     font-weight: 600;
     color: var(--accent-text);
-    flex: 1;
+    flex: 1 1 8rem; /* a basis: a long type wraps in its place instead of taking a line of its own */
     min-width: 0;
     overflow-wrap: anywhere;
   }
@@ -632,6 +652,10 @@
     color: var(--err-text);
   }
 
+  .snapshot-grid {
+    margin-top: 1rem;
+  }
+
   .snapshot-ts {
     font-size: 0.75rem;
     color: var(--muted);
@@ -667,6 +691,7 @@
 
   .event-header {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
@@ -682,7 +707,8 @@
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     border-radius: 999px;
     padding: 0.125rem 0.375rem;
-    white-space: nowrap;
+    max-width: 100%;
+    overflow-wrap: anywhere;
   }
 
   .event-time {

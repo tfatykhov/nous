@@ -210,7 +210,7 @@
           <Button
             variant="outline"
             size="sm"
-            class="max-md:min-h-11"
+            class="max-md:min-h-11 max-md:px-4"
             onclick={() => saveSection(name)}
             disabled={
               sectionStatus[name] === 'saving' ||
@@ -277,6 +277,7 @@
           { key: 'core_display',       label: 'Core' },
         ]}
         rows={factRows}
+        mode="cards"
         rowKey={(r: BrowserFact) => r.id}
         onrowclick={(row: BrowserFact) => initFactDraft(row)}
       >
@@ -305,7 +306,7 @@
               <Button
                 variant="outline"
                 size="sm"
-                class="max-md:min-h-11"
+                class="max-md:min-h-11 max-md:px-4"
                 onclick={() => saveFact(row)}
                 disabled={factStatus[row.id] === 'saving' || !(factDrafts[row.id] ?? '').trim()}
               >
@@ -314,7 +315,7 @@
               <Button
                 variant="outline"
                 size="sm"
-                class="max-md:min-h-11"
+                class="max-md:min-h-11 max-md:px-4"
                 onclick={() => setCore(row, !isCore(row))}
                 disabled={factStatus[row.id] === 'saving'}
               >
@@ -325,7 +326,7 @@
               <Button
                 variant="outline"
                 size="sm"
-                class="max-md:min-h-11 hover:border-[var(--err-text)] hover:text-[var(--err-text)]"
+                class="max-md:min-h-11 max-md:px-4 hover:border-[var(--err-text)] hover:text-[var(--err-text)]"
                 onclick={() => deactivateFact(row)}
                 disabled={factStatus[row.id] === 'saving'}
               >
@@ -389,7 +390,7 @@
   /* ── Identity section cards ── */
   .section-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
     gap: 1rem;
   }
 

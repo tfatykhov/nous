@@ -181,7 +181,11 @@ describe('Observability: words, not glyphs', () => {
   it('the Facts stat says "change", and no arrow, delta sign, triangle or lone question mark is shown', async () => {
     render(Observability);
     await screen.findByText('Active Drift Anomalies');
-    expect(text(screen.getByText('Facts').previousElementSibling)).toBe('120 (change +3)');
+    // The change is the stat's note, so the value stays one short figure (in the value, "120 (change +3)" took three
+    // lines of the large type at phone width).
+    const facts = screen.getByText('Facts');
+    expect(text(facts.previousElementSibling)).toBe('120');
+    expect(text(facts.nextElementSibling)).toBe('change +3');
     const shown = document.body.textContent ?? '';
     for (const g of ['→', 'Δ', '▶', '▼']) expect(shown, g).not.toContain(g);
     // A trace or modification with no type says so in a word (it showed "?").
@@ -215,6 +219,28 @@ describe('Observability: the paper look\'s structure (source contracts)', () => 
     expect(rules.get('.anomaly-level')).toMatchObject({ color: 'var(--warn-text)' });
     expect(rules.get('.anomaly--alert .anomaly-level')).toMatchObject({ color: 'var(--err-text)' });
     expect(rules.get('.trace-badge--mod')).toMatchObject({ background: 'color-mix(in srgb, var(--st-partial) 12.5%, transparent)' });
+  });
+
+  it('a handler row keeps its four figures together, after the name', async () => {
+    render(Observability);
+    const row = (await screen.findByText('sleep_handler')).closest('.handler-row')!;
+    const stats = row.querySelector('.handler-stats')!;
+    // No last-invoked time in this fixture, so three figures.
+    expect([...stats.children].map((c) => text(c))).toEqual(['8/10', '3.2ms', '20.0% err']);
+    expect(row.firstElementChild?.classList.contains('handler-dot')).toBe(true);
+    expect(stats.previousElementSibling?.classList.contains('handler-name')).toBe(true);
+  });
+
+  it('source contract: at phone width the rows wrap (name, then the figures) instead of widening the page', () => {
+    expect(rules.get('.handler-row')).toMatchObject({ 'flex-wrap': 'wrap' });
+    expect(rules.get('.handler-name')).toMatchObject({ flex: '1 1 8rem', 'min-width': '0', 'overflow-wrap': 'anywhere' });
+    expect(rules.get('.handler-stats')).toMatchObject({ display: 'flex', 'margin-left': 'auto' });
+    expect(rules.get('.trace-row')).toMatchObject({ 'flex-wrap': 'wrap' });
+    expect(rules.get('.trace-type')).toMatchObject({ flex: '1 1 8rem', 'min-width': '0' });
+    expect(rules.get('.event-header')).toMatchObject({ 'flex-wrap': 'wrap' });
+    expect(rules.get('.event-badge')).toMatchObject({ 'max-width': '100%', 'overflow-wrap': 'anywhere' });
+    expect(rules.get('.event-badge')?.['white-space']).toBeUndefined();
+    expect(rules.get('.snapshot-grid')).toMatchObject({ 'margin-top': '1rem' }); // the snapshot cards do not touch the chart card
   });
 
   it('no raw-HTML directive', () => {

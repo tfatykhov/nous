@@ -178,6 +178,8 @@ describe('Identity in the paper look', () => {
     for (const name of ['Save', 'Set core', 'Deactivate']) {
       expect(within(edit).getByRole('button', { name }).getAttribute('data-slot'), name).toBe('button');
     }
+    // At phone width the facts are cards, so an open fact's form is as wide as the screen, not as the table.
+    expect(edit.closest('.dt')?.classList.contains('dt--cards')).toBe(true);
     const deactivate = within(edit).getByRole('button', { name: 'Deactivate' });
     const cls = deactivate.className.split(/\s+/);
     expect(cls).toContain('hover:text-[var(--err-text)]');
@@ -195,6 +197,10 @@ describe('Identity: the paper look\'s structure (source contracts)', () => {
     expect(rules.get('textarea:focus-visible')).toMatchObject({ outline: '2px solid var(--focus-ring)', 'outline-offset': '2px' });
     expect(rules.get('textarea:focus')).toBeUndefined();
     expect(styleBlocks(src)).not.toMatch(/outline:\s*none/);
+  });
+
+  it('a section card never asks for more than the screen\'s width (320 px or the full width, whichever is less)', () => {
+    expect(rules.get('.section-grid')).toMatchObject({ 'grid-template-columns': 'repeat(auto-fill, minmax(min(320px, 100%), 1fr))' });
   });
 
   it('no dead colour fallback is left', () => {
