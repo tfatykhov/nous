@@ -9,36 +9,37 @@ import StaleBadge from './StaleBadge.svelte';
 import { Badge } from './badge';
 import { Button } from './button';
 
-// The shared pieces are used by every screen. Each declaration the redesign converted from a literal to a token reads that
-// token, and the token is declared at :root.
+// The shared pieces are used by every screen. Each declaration the redesign converted from a literal reads its token
+// (declared at :root) or, where the token was a one-value alias, the value itself (PR 7 T5).
 const PAPER = block(parseBlocks(readFileSync(join(__dirname, '../../app.css'), 'utf-8')), ROOT_SEL, 50);
 
-// [file, selector, property, token, the literal the declaration held before the redesign]
+// [file, selector, property, the value now, what it held before the redesign]
 const CONVERTED: [string, string, string, string, string][] = [
-  ['StatGrid.svelte', '.stat-card', 'border-radius', '--card-radius-sm', '8px'],
-  ['StatGrid.svelte', '.stat-card', 'border', '--card-border', '1px solid var(--border)'],
+  ['StatGrid.svelte', '.stat-card', 'border-radius', 'var(--card-radius-sm)', '8px'],
+  ['StatGrid.svelte', '.stat-card', 'border', 'var(--card-border)', '1px solid var(--border)'],
   // No box-shadow before: a transparent zero shadow paints the same, and unlike `none` it stays valid inside the
   // shadow list Tailwind composes (shadow-[var(--card-shadow)] with a focus ring on a Button).
-  ['StatGrid.svelte', '.stat-card', 'box-shadow', '--card-shadow', '0 0 #0000'],
-  ['StatGrid.svelte', '.stat-label', 'text-transform', '--label-transform', 'uppercase'],
-  ['StatGrid.svelte', '.stat-label', 'letter-spacing', '--label-tracking', '0.05em'],
-  ['StatGrid.svelte', '.tone-warn', 'color', '--stat-warn', '#f59e0b'],
-  ['StatGrid.svelte', '.tone-ok', 'color', '--stat-ok', '#10b981'],
-  ['StatGrid.svelte', '.tone-error', 'color', '--err-text', '#f87171'], // was var(--red)
-  ['DataTable.svelte', 'th', 'text-transform', '--label-transform', 'uppercase'],
-  ['DataTable.svelte', 'th', 'letter-spacing', '--label-tracking', '0.05em'],
-  ['DataTable.svelte', '.dt--cards tr', 'border-radius', '--card-radius-sm', '8px'],
-  ['FilterBar.svelte', '.filter-btn.active', 'color', '--on-accent', 'var(--bg)'],
-  ['StaleBadge.svelte', '.stale-badge.error', 'color', '--err-text', '#f87171'], // was var(--red)
-  ['StaleBadge.svelte', '.stale-badge.error', 'border-color', '--err-text', '#f87171'], // was var(--red)
-  ['StaleBadge.svelte', '.stale-badge.error', 'background', '--stale-err-bg', 'rgba(248, 113, 113, 0.08)'],
+  ['StatGrid.svelte', '.stat-card', 'box-shadow', 'var(--card-shadow)', '0 0 #0000'],
+  ['StatGrid.svelte', '.stat-label', 'text-transform', 'none', 'uppercase'], // --label-transform, one value: inlined
+  ['StatGrid.svelte', '.stat-label', 'letter-spacing', '0', '0.05em'], // --label-tracking, one value: inlined
+  ['StatGrid.svelte', '.tone-warn', 'color', 'var(--warn-text)', 'the old StatGrid amber'], // --stat-warn was its alias
+  ['StatGrid.svelte', '.tone-ok', 'color', 'var(--ok-text)', 'the old StatGrid green'], // --stat-ok was its alias
+  ['StatGrid.svelte', '.tone-error', 'color', 'var(--err-text)', 'var(--red)'],
+  ['DataTable.svelte', 'th', 'text-transform', 'none', 'uppercase'],
+  ['DataTable.svelte', 'th', 'letter-spacing', '0', '0.05em'],
+  ['DataTable.svelte', '.dt--cards tr', 'border-radius', 'var(--card-radius-sm)', '8px'],
+  ['FilterBar.svelte', '.filter-btn.active', 'color', 'var(--on-accent)', 'var(--bg)'],
+  ['StaleBadge.svelte', '.stale-badge.error', 'color', 'var(--err-text)', 'var(--red)'],
+  ['StaleBadge.svelte', '.stale-badge.error', 'border-color', 'var(--err-text)', 'var(--red)'],
+  ['StaleBadge.svelte', '.stale-badge.error', 'background', 'var(--err-bg)', 'a red tint'], // --stale-err-bg was its alias
 ];
 
 describe('converted declarations read their tokens', () => {
-  it.each(CONVERTED)('%s %s { %s } reads %s (it held %s)', (file, selector, prop, token) => {
+  it.each(CONVERTED)('%s %s { %s } is %s (it held %s)', (file, selector, prop, value) => {
     const blocks = parseBlocks(styleBlocks(readFileSync(join(__dirname, file), 'utf-8')));
-    expect(blocks.get(selector)?.[prop], `${file} ${selector}`).toBe(`var(${token})`);
-    expect(token in PAPER, `${token} is declared at :root`).toBe(true);
+    expect(blocks.get(selector)?.[prop], `${file} ${selector}`).toBe(value);
+    const token = /^var\((--[\w-]+)\)$/.exec(value)?.[1];
+    if (token) expect(token in PAPER, `${token} is declared at :root`).toBe(true);
   });
 
   it('the filter pill keeps its 999px radius', () => {
@@ -109,15 +110,15 @@ describe('Button', () => {
   });
 
   // Review M11: a focused button gets the screen's 2px --focus-ring outline (the 50% halo alone is about 2.3:1 on white).
-  it('focus: a --focus-ring outline whose width is --btn-focus-width (2px)', () => {
+  it('focus: a 2px --focus-ring outline (its width was --btn-focus-width, one value: inlined in PR 7)', () => {
     for (const variant of ['default', 'outline'] as const) {
       const { container } = render(Button, { props: { variant, children: label } });
       const classes = container.querySelector('[data-slot="button"]')!.className.split(' ');
-      for (const c of ['focus-visible:outline-solid', 'focus-visible:outline-[length:var(--btn-focus-width)]',
+      for (const c of ['focus-visible:outline-solid', 'focus-visible:outline-2',
         'focus-visible:outline-[color:var(--focus-ring)]', 'focus-visible:outline-offset-2']) expect(classes, `${variant} ${c}`).toContain(c);
       cleanup();
     }
-    expect(PAPER['--btn-focus-width']).toBe('2px');
+    expect(PAPER['--btn-focus-width']).toBeUndefined();
   });
 
   it('is an <a> with href; a disabled link has aria-disabled and no href', () => {

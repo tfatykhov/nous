@@ -224,8 +224,8 @@
   :global(html:root .page-ground) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
   h2 { font-size: 0.9375rem; font-weight: 600; margin: 0 0 0.75rem; }
   .subtitle { font-size: 0.8125rem; color: var(--muted); margin: 0; }
-  .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--notice-bg);
-    border: 1px solid var(--notice-border); font-size: 0.8125rem; margin-bottom: 1rem; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--warn-bg);
+    border: 1px solid var(--warn-border); font-size: 0.8125rem; margin-bottom: 1rem; }
   .notice code { font-family: var(--font-mono); font-size: 0.75rem; }
   .panel { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow);
     padding: 1.25rem; margin-top: 1.25rem; }
@@ -236,8 +236,8 @@
   .tiles div { border: var(--card-border); border-radius: var(--card-radius-sm); padding: 0.625rem 0.75rem; }
   /* On paper the tile border is clear, so a tile is a soft fill inside the white panel. */
   :global(html:root .page-ground) .tiles div { background: var(--wash); }
-  .tiles dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking); }
+  .tiles dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: none;
+    letter-spacing: 0; }
   .tiles dd { margin: 0.25rem 0 0; font-size: 1.25rem; font-weight: 700; }
   .scroll { overflow-x: auto; margin-top: 0.75rem; }
   table { border-collapse: collapse; width: 100%; font-size: 0.8125rem; }

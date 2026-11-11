@@ -188,8 +188,8 @@
   .subtitle { color: var(--muted); font-size: 0.9375rem; margin: 0; max-width: 75ch; }
   .muted { color: var(--muted); font-size: 0.8125rem; margin: 0; }
   .loading { color: var(--muted); font-size: 0.8125rem; }
-  .notice { padding: 0.75rem 1rem; border-radius: var(--radius-sm); background: var(--notice-bg);
-    border: 1px solid var(--notice-border); font-size: 0.875rem; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--radius-sm); background: var(--warn-bg);
+    border: 1px solid var(--warn-border); font-size: 0.875rem; }
   .empty { color: var(--muted); margin: 0.5rem 0; font-size: 0.9375rem; }
   select:focus-visible, a:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
   .field { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); font-size: 0.875rem; }

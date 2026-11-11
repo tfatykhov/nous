@@ -1276,7 +1276,7 @@
   .funnel-head h2 {
     font-size: 0.7rem;
     letter-spacing: 0.08em;
-    text-transform: var(--label-transform);
+    text-transform: none;
     color: var(--muted);
   }
   :global(html:root .page-ground) .funnel-head h2 { font-size: 15px; letter-spacing: 0; color: var(--text); }
@@ -1412,7 +1412,7 @@
   .timing-label {
     font-size: 0.7rem;
     letter-spacing: 0.08em;
-    text-transform: var(--label-transform);
+    text-transform: none;
   }
   :global(html:root .page-ground) .timing-label { font-size: 0.75rem; letter-spacing: 0; font-weight: 600; }
   .timing .slow strong { color: var(--err-text); }
@@ -1600,8 +1600,8 @@
     font-weight: 600;
     color: var(--text);
     margin: 1rem 0 0.4rem;
-    text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking);
+    text-transform: none;
+    letter-spacing: 0;
   }
 
   /* ── Tables ──────────────────────────────────────────────── */
@@ -1663,7 +1663,7 @@
     border-radius: 6px;
     margin-bottom: 0.5rem;
   }
-  .xsummary strong { color: var(--fg); font-variant-numeric: tabular-nums; }
+  .xsummary strong { font-variant-numeric: tabular-nums; }
   .conv-note { color: var(--accent); }
   /* The node's identity is the content, so it takes the flexible space and
      truncates; the numbers next to it are fixed-width and must never wrap. */
@@ -1674,8 +1674,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .seed-label { color: var(--fg); font-weight: 500; }
-  .nbr-label { color: var(--fg); }
+  .seed-label { font-weight: 500; }
   .nowrap { white-space: nowrap; flex: 0 0 auto; }
   .chip.conv { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 

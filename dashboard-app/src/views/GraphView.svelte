@@ -558,7 +558,7 @@
     gap: 0.75rem;
     padding: 0.75rem 1rem;
     border-bottom: 1px solid var(--border);
-    background: var(--bar-bg);
+    background: var(--surface-hover);
   }
 
   .search-input {
@@ -678,8 +678,8 @@
     font-size: 0.6875rem;
     font-weight: 600;
     color: var(--muted);
-    text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking);
+    text-transform: none;
+    letter-spacing: 0;
   }
 
   /* The type's colour (--type, set inline) on its own 12.5% tint (the old hex `20` alpha). */
@@ -823,8 +823,8 @@
 
   .conn-flag {
     font-size: 0.625rem;
-    text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking);
+    text-transform: none;
+    letter-spacing: 0;
     color: var(--err-text);
     border: 1px solid var(--red);
     border-radius: 999px;

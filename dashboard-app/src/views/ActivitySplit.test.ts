@@ -310,8 +310,8 @@ describe('Ledger: status and effect by token', () => {
     expect(c).toMatch(/\.banner-off \.banner-dot \{ background: var\(--st-ledger-blocked\); \}/);
     expect(c).toMatch(/\.mode-enforce \{ color: var\(--st-success\); \}/);
     expect(c).toMatch(/\.mode-warn \{ color: var\(--st-ledger-blocked\); \}/);
-    expect(c).toMatch(/\.attention \{[^}]*background: color-mix\(in srgb, var\(--st-unknown\) 6%, transparent\); border: 1px solid color-mix\(in srgb, var\(--st-unknown\) 35%, transparent\);/);
-    expect(c).toMatch(/border-top: 1px solid color-mix\(in srgb, var\(--st-unknown\) 20%, transparent\);/);
+    expect(c).toMatch(/\.attention \{[^}]*background: color-mix\(in srgb, var\(--unknown\) 6%, transparent\); border: 1px solid color-mix\(in srgb, var\(--unknown\) 35%, transparent\);/);
+    expect(c).toMatch(/border-top: 1px solid color-mix\(in srgb, var\(--unknown\) 20%, transparent\);/);
   });
 });
 

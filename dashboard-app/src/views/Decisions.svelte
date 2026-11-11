@@ -445,8 +445,8 @@
     font-size: 0.75rem;
     font-weight: 500;
     color: var(--muted);
-    text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking);
+    text-transform: none;
+    letter-spacing: 0;
   }
 
   .indicator {

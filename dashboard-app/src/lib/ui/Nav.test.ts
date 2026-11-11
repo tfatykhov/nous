@@ -151,16 +151,12 @@ describe('Nav on the rail', () => {
     expect(container.querySelector('a[href="#/work"]')?.getAttribute('aria-label')).toBe('Work, 2 sends in doubt');
   });
 
-  it('icons are hidden from speech and, on the rail, from layout (display: none, not only invisible)', () => {
+  it('a link is its words only: no icon, no glyph (the owner’s rule; the hidden icons went in PR 7)', () => {
     const { container } = render(Nav, { props: { currentRoute: 'overview' } });
-    const icons = Array.from(container.querySelectorAll('a.nav-link svg'));
-    expect(icons).toHaveLength(18);
-    for (const svg of icons) {
-      expect(svg.getAttribute('aria-hidden')).toBe('true');
-      expect(svg.classList.contains('nav-icon')).toBe(true);
-    }
-    expect(css).toMatch(/\.nav-icon\s*\{[^}]*display:\s*var\(--nav-icon-display\)/);
-    expect(rail['--nav-icon-display']).toBe('none');
+    expect(container.querySelectorAll('a.nav-link svg, a.nav-link .nav-icon')).toHaveLength(0);
+    expect(src).not.toMatch(/\bicon\b|\{@html/);
+    expect(css).not.toContain('.nav-icon');
+    expect(rail['--nav-icon-display']).toBeUndefined();
   });
 
   it('the focus ring is the ground\'s --focus-ring, white on the rail', () => {
@@ -170,8 +166,8 @@ describe('Nav on the rail', () => {
   });
 
   it('labels, pills and the current item read tokens (dark values unchanged, paper values on the rail)', () => {
-    expect(css).toMatch(/\.nav-group-label\s*\{[^}]*text-transform:\s*var\(--label-transform\)/);
-    expect(css).toMatch(/\.nav-group-label\s*\{[^}]*letter-spacing:\s*var\(--nav-label-tracking\)/);
+    expect(css).toMatch(/\.nav-group-label\s*\{[^}]*text-transform:\s*none/);
+    expect(css).toMatch(/\.nav-group-label\s*\{[^}]*letter-spacing:\s*0/);
     expect(css).toMatch(/\.nav-link\s*\{[^}]*border-radius:\s*var\(--nav-radius\)/);
     expect(css).toMatch(/\.nav-link\s*\{[^}]*color:\s*var\(--nav-ink\)/);
     expect(css).toMatch(/\.nav-link\.active\s*\{[^}]*font-weight:\s*var\(--nav-active-weight\)/);

@@ -49,7 +49,7 @@
   .stale-badge.error {
     color: var(--err-text);
     border-color: var(--err-text);
-    background: var(--stale-err-bg);
+    background: var(--err-bg);
   }
 
   .stale-badge.loading {

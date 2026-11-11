@@ -28,10 +28,10 @@
     void store.refresh();
   });
 
-  // Bar, swatch and share colours are tokens, set on the element as --fill and painted by the stylesheet (dark: the old
-  // literals). An outcome bar sits beside its label; the shares have a legend and an accessible name.
+  // Bar, swatch and share colours are tokens, set on the element as --fill and painted by the stylesheet. An outcome bar
+  // sits beside its label; the shares have a legend and an accessible name.
   const OUTCOME_TOKEN: Record<string, string> = {
-    done_verified: '--green', done_checked: '--series-2', done_self: '--series-1', partial: '--stat-warn', failed: '--red', not_scored: '--muted',
+    done_verified: '--green', done_checked: '--series-2', done_self: '--series-1', partial: '--warn-text', failed: '--red', not_scored: '--muted',
   };
   const CONTEXT_TOKEN: Record<string, string> = { owner_present: '--series-1', approved: '--series-2', autonomous: '--series-4' };
   const fill = (token: string | undefined) => `var(${token ?? '--muted'})`;
@@ -585,10 +585,10 @@
   .strip { display: flex; justify-content: space-between; align-items: center; gap: 1rem 2rem; flex-wrap: wrap;
     padding: 0.875rem 1.125rem; border-radius: var(--card-radius); border: 1px solid; margin-bottom: 1rem; }
   /* Status by token: the alphas of the old literals are the mix percentages (dark identical). */
-  .verdict-warn { color: var(--stat-warn); border-color: color-mix(in srgb, var(--stat-warn) 35%, transparent);
-    background: color-mix(in srgb, var(--stat-warn) 8%, transparent); }
-  .verdict-ok { color: var(--stat-ok); border-color: color-mix(in srgb, var(--stat-ok) 35%, transparent);
-    background: color-mix(in srgb, var(--stat-ok) 8%, transparent); }
+  .verdict-warn { color: var(--warn-text); border-color: color-mix(in srgb, var(--warn-text) 35%, transparent);
+    background: color-mix(in srgb, var(--warn-text) 8%, transparent); }
+  .verdict-ok { color: var(--ok-text); border-color: color-mix(in srgb, var(--ok-text) 35%, transparent);
+    background: color-mix(in srgb, var(--ok-text) 8%, transparent); }
   .verdict-bad { color: var(--err-text); border-color: color-mix(in srgb, var(--tone-bad) 50%, transparent);
     background: color-mix(in srgb, var(--tone-bad) 10%, transparent); margin: 0 0 1rem; }
   .verdict-bad .verdict-title { font-size: 1rem; }
@@ -597,7 +597,7 @@
   .verdict-detail { font-size: 0.8125rem; color: var(--text); margin-top: 0.125rem; }
   .strip-meta { display: flex; gap: 1.5rem; flex-wrap: wrap; margin: 0; }
   .strip-meta dt, .tiles dt, .triple dt, .detail dt, .label { font-size: 0.6875rem; font-weight: 600; color: var(--muted);
-    text-transform: var(--label-transform); letter-spacing: var(--label-tracking); }
+    text-transform: none; letter-spacing: 0; }
   .strip-meta dd { margin: 0.125rem 0 0; font-size: 0.8125rem; color: var(--text); }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 1rem; }
   .card, .panel { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow);
@@ -648,7 +648,7 @@
     border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
   .pill-warn { color: var(--st-partial); border-color: color-mix(in srgb, var(--st-partial) 50%, transparent); }
   .fix-live { color: var(--accent); border-color: var(--accent); }
-  .fix-ok { color: var(--stat-ok); border-color: color-mix(in srgb, var(--stat-ok) 50%, transparent); }
+  .fix-ok { color: var(--ok-text); border-color: color-mix(in srgb, var(--ok-text) 50%, transparent); }
   .fix-warn { color: var(--st-partial); border-color: color-mix(in srgb, var(--st-partial) 50%, transparent); }
   /* Two lines at most. It wraps anywhere, because an unbreakable line would widen the page on a phone (min-content). */
   .job { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;

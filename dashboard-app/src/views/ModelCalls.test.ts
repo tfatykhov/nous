@@ -769,7 +769,7 @@ describe('Model calls on paper: tokens and words', () => {
   it('source contract: the recording-off notices read the notice tokens; error text the error text token', () => {
     for (const f of ['modelcalls/CallList.svelte', 'modelcalls/CallDetail.svelte']) {
       const css = styleBlocks(source(f));
-      expect(css, f).toMatch(/\.notice \{[^}]*background: var\(--notice-bg\);[^}]*border: 1px solid var\(--notice-border\);/);
+      expect(css, f).toMatch(/\.notice \{[^}]*background: var\(--warn-bg\);[^}]*border: 1px solid var\(--warn-border\);/);
       expect(css, f).not.toMatch(/color: var\(--red\)/);
     }
   });

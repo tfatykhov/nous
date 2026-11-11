@@ -21,7 +21,7 @@
     --accent-text: #2346c8;
     --text: #14202b;
     --muted: #56687a;
-    --green: #2f8a4e;
+    --green: #2f8a4e;                          /* the status fill "ok" (the contract's); not --oc-success */
     --red: #d2352b;
     --yellow: #b7791f;
     --waiting: #7b3fa0;
@@ -39,13 +39,7 @@
     --warn-border: transparent;
     --err-text: #b02a22;
     --err-bg: #fbe9e8;
-    --stat-warn: #8a5a0e;
-    --stat-ok: #23703d;
-    --stale-err-bg: #fbe9e8;
-    --notice-bg: #f8efdc;
-    --notice-border: transparent;
     --kind-task: #0b6e7a;
-    --seg-bg: transparent;
     --series-7: #4f5f6f;
 
     --f-conversation: #55697a;
@@ -68,13 +62,10 @@
     --card-shadow: 0 1px 2px rgba(18, 48, 79, 0.06), 0 6px 20px rgba(18, 48, 79, 0.07);
     --card-border: 1px solid transparent;
     --ctl-radius: 999px;
-    --label-transform: none;
-    --label-tracking: 0;
     --on-accent: #ffffff;
     --tab-active-bg: #ffffff;
     --tab-active-shadow: 0 1px 3px rgba(18, 48, 79, 0.12);
     --focus-ring: #2346c8;
-    --btn-focus-width: 2px;
 
     /* PR 2: at least 3:1 on the white card; no categorical value is a frame or status colour (tokens.test.ts) */
     --pending: #1b6a9c;
@@ -83,7 +74,6 @@
     --decision-color: #802c66;
     --procedure-color: #d0620d;
     --censor-color: #985c50;
-    --heartbeat-color: #4f5f6f;
     --chunk-color: #8b5cf6;
     --gv-edge-opacity: 0.75;                   /* less faint on white: a light colour at 0.5 was 1.8:1 */
     --gv-edge-opacity-inferred: 0.5;
@@ -137,15 +127,11 @@
     --badge-warn-bg: #f8efdc;
     --badge-bad-bg: #fbe9e8;
     --track: #e3e9ec;
-    --track-strong: #e3e9ec;
-    --bar-bg: #f4f7f8;
-    --glow-blur: 0px;
     --chart-text: #56687a;
     --chart-grid: #e3e9ec;
     --save-ok: #23703d;
     --save-err: #b02a22;
     --tone-bad: #b02a22;
-    --btn-ink: #ffffff;
 
     /* PR 3: each status colour reads at 4.5:1 or more on its own 12.5% badge tint, over the white card and over a
        hovered row (--surface-hover) */
@@ -153,7 +139,6 @@
     --st-ready: #1b6a9c;
     --st-running: #8a5a0e;
     --st-awaiting-check: #9a4d0a;
-    --st-awaiting-input: #7b3fa0;
     --st-completed: #23703d;
     --st-failed: #b02a22;
     --st-blocked: #8a1c2c;
@@ -162,7 +147,6 @@
     --st-partial: #a14a08;
     --st-success: #23703d;
     --st-ledger-blocked: #8a5a0e;
-    --st-unknown: #a3266f;
     --st-neutral: #55616c;
     --oc-failed: #b02a22;
     --oc-timeout: #881c34;
@@ -173,10 +157,8 @@
     --hit-good: #23703d;
     --cache-blue: #1f5fa8;
     --cache-grey: #4f5f6f;
-    --wait-ink: #7b3fa0;
     --wait-bg: #efe3f6;
     --wash: #f4f7f8;
-    --hb-warn-ink: #8a5a0e;
     --effect-write: #1f5fa8;
     --mc-section-1: #8b5cf6;                   /* a violet, not the link blue beside series 1 */
     --mc-section-7: #7890d0;                   /* not the unknown status's magenta; 12+ from every section, all vision types */
@@ -185,20 +167,16 @@
     /* PR 4/5: 3:1 on the card and the page (WCAG 1.4.11); the prototype's rule-2 is about 1.5:1 */
     --field-border: #7a8896;
     --signal-self-corrected: #b87ab3;          /* 13.4 (OKLab) from every other signal mark, all vision types */
-    --oc-success: #3f8772;                     /* apart from partial and failure under red-green colour blindness */
+    --oc-success: #3f8772;                     /* the outcome mark: apart from partial and failure under red-green colour blindness; not --green */
 
     /* shadcn, HSL of the paper hex */
     --background: 192 17% 94%;
-    --foreground: 209 37% 12%;
     --card: 0 0% 100%;
     --card-foreground: 209 37% 12%;
-    --popover: 0 0% 100%;
     --primary: 210 63% 19%;
     --primary-foreground: 0 0% 100%;
     --secondary: 195 22% 96%;
     --secondary-foreground: 209 37% 12%;
-    --muted-foreground: 210 17% 41%;
-    --accent-foreground: 0 0% 100%;
     --destructive: 4 66% 50%;
     --border-token: 200 19% 91%;
     --input: 200 19% 91%;
@@ -207,14 +185,7 @@
     /* With no paper value of their own (from the old :root): structure, the skip link's text, and the shadcn
        variables no utility maps */
     --sidebar-width: 220px;
-    --sidebar-collapsed: 56px;
     --overlay-bg: rgba(0, 0, 0, 0.6);
-    --skip-link-text: #fff;
-    --popover-foreground: 240 33% 92%;
-    --muted-token: 240 17% 61%;        /* #8e8eab  (--muted is taken as a raw hex above) */
-    --accent-token: 249 89% 63%;
-    --destructive-foreground: 0 0% 100%;
-    --radius-tw: 0.75rem;              /* 12px = var(--radius) */
   }
 
   /* ---- The rail: the Atlantic-blue navigation (class rail: the sidebar, the mobile header, the drawer) ---- */
@@ -231,9 +202,6 @@
     --focus-ring: #ffffff;
     --waiting: #c4b5fd;
     --unknown: #f9a8d4;
-    --nav-label-tracking: 0;
-    --nav-icon-display: none;          /* no icons or glyphs in the rail (owner rule) */
-    --logo-display: none;
     --nav-radius: 10px;
     --nav-ink: #dbe6ef;
     --nav-active-weight: 600;
@@ -268,34 +236,12 @@
 }
 
 /* ============================================================
-   Tailwind v4 theme extension – expose Nous tokens as
-   utilities so components can use e.g. bg-nous-bg, text-muted
+   Tailwind v4 theme: the two font stacks (font-ui, font-mono, and
+   the default for a bare <code> or <pre>)
    ============================================================ */
 @theme {
-  --color-nous-bg:        #0a0a0f;
-  --color-nous-surface:   #12121a;
-  --color-nous-surface-hover: #181824;
-  --color-nous-border:    #1e1e2e;
-  --color-nous-accent:    #7c6af7;
-  --color-nous-accent-dim:#4f46a8;
-  --color-nous-text:      #e2e2f0;
-  --color-nous-muted:     #8e8eab;
-  --color-nous-green:     #34d399;
-  --color-nous-red:       #f87171;
-  --color-nous-yellow:    #fbbf24;
-  --color-nous-fact:      #60a5fa;
-  --color-nous-episode:   #34d399;
-  --color-nous-decision:  #a78bfa;
-  --color-nous-procedure: #fb923c;
-  --color-nous-censor:    #f87171;
-  --color-nous-heartbeat: #22d3ee;
-  --color-nous-chunk:     #06b6d4;
-
   --font-ui:   'Archivo', system-ui, sans-serif;
   --font-mono: 'Red Hat Mono', ui-monospace, monospace;
-
-  --radius-nous: 12px;
-  --radius-nous-sm: 8px;
 }
 
 /* ============================================================

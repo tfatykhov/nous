@@ -479,7 +479,7 @@ describe('harness dashboard views', () => {
     expect(rules.get('.rule-pill::before')).toMatchObject({ background: 'var(--fill)' });
     expect(rules.get('.badge')).toMatchObject({ color: 'var(--accent)', background: 'color-mix(in srgb, var(--accent) 12%, transparent)' });
     expect(rules.get('.card, .panel')).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius)', 'box-shadow': 'var(--card-shadow)' });
-    expect(rules.get('.notice')).toMatchObject({ background: 'var(--notice-bg)', border: '1px solid var(--notice-border)' });
+    expect(rules.get('.notice')).toMatchObject({ background: 'var(--warn-bg)', border: '1px solid var(--warn-border)' });
   });
 
   it('DAG view lists the question, explains an undelivered card, and names a deadline stop neutrally', async () => {

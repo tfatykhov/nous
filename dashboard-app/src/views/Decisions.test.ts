@@ -199,7 +199,7 @@ describe('Decisions: the paper look\'s structure (source contracts)', () => {
   it('cards read the card tokens; the chart cards the large radius, the Brier card the small one', () => {
     expect(rules.get('.chart-card')).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius)', 'box-shadow': 'var(--card-shadow)' });
     expect(rules.get('.stat-card')).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius-sm)', 'box-shadow': 'var(--card-shadow)' });
-    expect(rules.get('.stat-label')).toMatchObject({ 'text-transform': 'var(--label-transform)', 'letter-spacing': 'var(--label-tracking)' });
+    expect(rules.get('.stat-label')).toMatchObject({ 'text-transform': 'none', 'letter-spacing': '0' });
   });
 
   it('the title takes the paper size under the paper look only, and chart cells may shrink at phone width', () => {

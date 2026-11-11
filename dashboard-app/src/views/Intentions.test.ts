@@ -151,11 +151,11 @@ describe('Intentions: the paper look (source contracts)', () => {
 
   it('the notice reads the notice tokens; panels and tiles the card tokens; labels the label tokens', () => {
     expect(rules.get('.notice')).toMatchObject({
-      background: 'var(--notice-bg)', border: '1px solid var(--notice-border)', 'border-radius': 'var(--card-radius-sm)',
+      background: 'var(--warn-bg)', border: '1px solid var(--warn-border)', 'border-radius': 'var(--card-radius-sm)',
     });
     expect(rules.get('.panel')).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius)', 'box-shadow': 'var(--card-shadow)' });
     expect(rules.get('.tiles div')).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius-sm)' });
-    expect(rules.get('.tiles dt')).toMatchObject({ 'text-transform': 'var(--label-transform)', 'letter-spacing': 'var(--label-tracking)' });
+    expect(rules.get('.tiles dt')).toMatchObject({ 'text-transform': 'none', 'letter-spacing': '0' });
   });
 
   it('under the paper look only: the title size, soft tiles and the prototype\'s table header', () => {

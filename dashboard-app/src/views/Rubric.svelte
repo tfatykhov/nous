@@ -520,7 +520,7 @@
 
   .empty-state code {
     font-family: var(--font-mono);
-    background: var(--track-strong);
+    background: var(--track);
     padding: 0.125rem 0.375rem;
     border-radius: 4px;
   }
@@ -724,8 +724,8 @@
     color: var(--muted);
     font-weight: 600;
     font-size: 0.75rem;
-    text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking);
+    text-transform: none;
+    letter-spacing: 0;
   }
 
   .data-table tbody tr:hover {

@@ -402,7 +402,7 @@
   a:focus-visible, summary:focus-visible, input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
   .gone, .muted { color: var(--muted); }
   .small { font-size: 0.75rem; }
-  .notice { padding: 0.75rem 1rem; border-radius: var(--radius-sm); background: var(--notice-bg); border: 1px solid var(--notice-border); font-size: 0.875rem; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--radius-sm); background: var(--warn-bg); border: 1px solid var(--warn-border); font-size: 0.875rem; }
   .wrap { overflow-wrap: anywhere; white-space: pre-wrap; }
   .card { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow); }
 

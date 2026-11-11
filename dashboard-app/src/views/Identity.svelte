@@ -416,8 +416,8 @@
   .section-label {
     font-size: 0.75rem;
     font-weight: 600;
-    text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking);
+    text-transform: none;
+    letter-spacing: 0;
     color: var(--muted);
   }
 

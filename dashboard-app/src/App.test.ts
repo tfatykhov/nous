@@ -105,9 +105,9 @@ describe('App shell regions', () => {
 describe('App styles', () => {
   const src = readFileSync(join(__dirname, 'App.svelte'), 'utf-8');
 
-  it('the wordmark size and the logo glyph read tokens (21px and hidden in the rail)', () => {
-    expect(src).toMatch(/\.sidebar-logo\s*\{[^}]*display:\s*var\(--logo-display\)/);
+  it('the wordmark reads --brand-size (21px in the rail); there is no logo glyph (the owner’s no-symbols rule)', () => {
     expect(src).toMatch(/\.sidebar-title\s*\{[^}]*font-size:\s*var\(--brand-size\)/);
+    expect(src).not.toMatch(/sidebar-logo|&#x1D6B9;/);
   });
 
   it('source contract (jsdom cannot lay out; the 390 px overflow check in the screenshot round is the proof): main has min-width: 0, so as a flex item it may shrink below its content', () => {

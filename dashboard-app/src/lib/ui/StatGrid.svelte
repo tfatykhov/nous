@@ -52,8 +52,8 @@
     font-size: 0.75rem;
     font-weight: 500;
     color: var(--muted);
-    text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking);
+    text-transform: none;
+    letter-spacing: 0;
   }
 
   .stat-note {
@@ -64,8 +64,8 @@
   .tone-waiting { color: var(--waiting); }
   .tone-unknown { color: var(--unknown); }
   .tone-error { color: var(--err-text); }
-  .tone-warn { color: var(--stat-warn); }
-  .tone-ok { color: var(--stat-ok); }
+  .tone-warn { color: var(--warn-text); }
+  .tone-ok { color: var(--ok-text); }
 
   @media (max-width: 640px) {
     .stat-grid {

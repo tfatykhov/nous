@@ -500,7 +500,7 @@
     font-size: 0.75rem;
     font-weight: 700;
     color: var(--accent);
-    text-transform: var(--label-transform);
+    text-transform: none;
     letter-spacing: 0.02em;
   }
 
@@ -534,7 +534,7 @@
     font-size: 0.7rem;
     font-weight: 600;
     color: var(--muted);
-    text-transform: var(--label-transform);
+    text-transform: none;
   }
 
   .diff-none {

@@ -120,7 +120,7 @@ describe('Workflows: status by token', () => {
 
   it('source contract: the Now pills read the wait and running tokens, have room, and round as blocks when wrapped', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'DagView.svelte'), 'utf-8'));
-    expect(css).toMatch(/\.now-waiting \{[^}]*color: var\(--wait-ink\); background: var\(--wait-bg\);/);
+    expect(css).toMatch(/\.now-waiting \{[^}]*color: var\(--waiting\); background: var\(--wait-bg\);/);
     // At phone width the Now column squeezed each pill over four lines; a pill radius on a block of text cut it.
     expect(css).toMatch(/\.now-cell \{ min-width: 10rem; \}/);
     expect(css).toMatch(/\.now-waiting \{[^}]*border-radius: 0\.75rem;/);
@@ -207,7 +207,7 @@ describe('Workflows: the token budget chart', () => {
     render(DagView, { target: paperMain() });
     await waitFor(() => expect(configs.filter((c) => c.type === 'bar')).toHaveLength(1));
     expect(ds('Consumed').backgroundColor).toBe(PAPER['--stack-bar']);
-    expect(ds('Budget').backgroundColor).toBe(PAPER['--track-strong']);
+    expect(ds('Budget').backgroundColor).toBe(PAPER['--track']);
     const o = configs.find((c) => c.type === 'bar')!.options;
     expect(o.plugins.legend.labels.color).toBe(PAPER['--chart-text']);
     expect([o.scales.x.ticks.color, o.scales.y.ticks.color]).toEqual([PAPER['--chart-text'], PAPER['--chart-text']]);

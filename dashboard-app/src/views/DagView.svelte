@@ -207,7 +207,7 @@
         {
           label: 'Budget',
           data: dags.map((d) => d.token_budget - d.tokens_consumed),
-          backgroundColor: 'var(--track-strong)',
+          backgroundColor: 'var(--track)',
         },
       ],
     };
@@ -669,8 +669,8 @@
     color: var(--muted);
     font-size: 0.75rem;
     font-weight: 600;
-    text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking);
+    text-transform: none;
+    letter-spacing: 0;
   }
 
   .dag-table tr:hover td {
@@ -711,7 +711,7 @@
   .q-question { font-size: 0.9375rem; font-weight: 600; }
   .q-error { font-size: 0.8125rem; color: var(--st-awaiting-check); margin: 0.25rem 0 0; }
   .q-when, .q-default { font-size: 0.875rem; min-width: 9rem; }
-  .label { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform); letter-spacing: var(--label-tracking); }
+  .label { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: none; letter-spacing: 0; }
   .soon { color: var(--st-running); font-weight: 600; }
   .text { color: var(--text); }
   .mono { font-family: var(--font-mono); font-size: 0.75rem; }
@@ -724,7 +724,7 @@
   /* Room for the pill, so a narrow table scrolls in its box rather than squeezing it; a 0.75rem radius is a pill on
      one line and a rounded block when the text wraps. */
   .now-cell { min-width: 10rem; }
-  .now-waiting { display: inline-block; padding: 3px 10px; border-radius: 0.75rem; font-weight: 600; color: var(--wait-ink); background: var(--wait-bg); }
+  .now-waiting { display: inline-block; padding: 3px 10px; border-radius: 0.75rem; font-weight: 600; color: var(--waiting); background: var(--wait-bg); }
   .now-held { display: inline-block; padding: 3px 10px; border-radius: 0.75rem; font-weight: 600; color: var(--st-running); background: color-mix(in srgb, var(--st-running) 10%, transparent); }
   .now-plain { color: var(--muted); }
   .node-list { list-style: none; margin: 0; padding: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem; border-top: 1px solid var(--border); }
@@ -740,7 +740,7 @@
   .opt-default { color: var(--muted); border-color: var(--border); font-weight: 500; }
   .approval-dl { display: grid; gap: 0.5rem; margin: 0.75rem 0 0; }
   .approval-dl div { display: grid; grid-template-columns: 7rem minmax(0, 1fr); gap: 0.75rem; }
-  .approval-dl dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform); letter-spacing: var(--label-tracking); }
+  .approval-dl dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: none; letter-spacing: 0; }
   .approval-dl dd { margin: 0; font-size: 0.875rem; }
   .card-link { display: inline-block; margin-top: 0.75rem; font-size: 0.8125rem; font-weight: 600; color: var(--accent-text); }
   .attempts { margin: 0.25rem 0 0; padding-left: 1.25rem; font-size: 0.8125rem; display: grid; gap: 0.25rem; }
@@ -859,8 +859,8 @@
     font-size: 0.6875rem;
     font-weight: 600;
     color: var(--muted);
-    text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking);
+    text-transform: none;
+    letter-spacing: 0;
   }
 
   .detail-section {

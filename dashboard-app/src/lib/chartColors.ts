@@ -53,7 +53,6 @@ export const TOKEN_FALLBACK: Record<string, string> = {
   '--rel-part-of': '#0e7490',
   '--rel-summarized-by': '#8b5cf6',
   '--track': '#e3e9ec',
-  '--track-strong': '#e3e9ec',
   '--chart-text': '#56687a',
   '--chart-grid': '#e3e9ec',
   '--hit-good': '#23703d',
@@ -69,6 +68,8 @@ export const TOKEN_FALLBACK: Record<string, string> = {
   '--oc-unknown': '#7a8794',
   '--oc-blocked': '#b7791f',
   '--err-text': '#b02a22',
+  '--warn-text': '#8a5a0e', // Heartbeat names these two beside its charts (tokenUse.test.ts)
+  '--st-completed': '#23703d',
   '--border': '#e3e9ec', // Scoring's radar grid, Guards' grid: explicit, so it beats the chart-grid default
   '--signal-self-corrected': '#b87ab3',
   '--oc-success': '#3f8772',

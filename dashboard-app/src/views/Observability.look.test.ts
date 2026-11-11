@@ -242,7 +242,7 @@ describe('Observability: the paper look\'s structure (source contracts)', () => 
 
   it('cards read the card tokens, labels the label tokens, and the title takes the paper size under paper only', () => {
     expect(rules.get('.chart-card')).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius)', 'box-shadow': 'var(--card-shadow)' });
-    expect(rules.get('.event-badge')).toMatchObject({ 'text-transform': 'var(--label-transform)', 'letter-spacing': 'var(--label-tracking)' });
+    expect(rules.get('.event-badge')).toMatchObject({ 'text-transform': 'none', 'letter-spacing': '0' });
     expect(rules.get(':global(html:root .page-ground) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
   });
 

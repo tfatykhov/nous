@@ -220,7 +220,7 @@
   .muted { color: var(--muted); font-size: 0.8125rem; margin: 0; }
   .loading { color: var(--muted); font-size: 0.8125rem; }
   .mono { font-family: var(--font-mono); }
-  .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--notice-bg); border: 1px solid var(--notice-border); font-size: 0.875rem; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--warn-bg); border: 1px solid var(--warn-border); font-size: 0.875rem; }
   .empty { color: var(--muted); text-align: center; padding: 2rem 0; margin: 0; }
   button { font: inherit; cursor: pointer; }
   button:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }

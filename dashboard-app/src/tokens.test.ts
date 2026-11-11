@@ -207,20 +207,35 @@ const PAPER_GOLDEN: Record<string, string> = {
 const DELETED: Record<string, string> = {
   '--hit-mid': 'T4: dead, read only by Cache.svelte’s hitRateColor, which was never called',
   '--hit-bad': 'T4: dead, read only by Cache.svelte’s hitRateColor, which was never called',
+  '--stat-warn': 'T5: an alias of --warn-text (one value, one meaning); its readers read --warn-text',
+  '--stat-ok': 'T5: an alias of --ok-text (one value, one meaning); its readers read --ok-text',
+  '--stale-err-bg': 'T5: an alias of --err-bg (one value, one meaning); its readers read --err-bg',
+  '--notice-bg': 'T5: an alias of --warn-bg (one value, one meaning); its readers read --warn-bg',
+  '--notice-border': 'T5: an alias of --warn-border (one value, one meaning); its readers read --warn-border',
+  '--track-strong': 'T5: an alias of --track (one value, one meaning); its readers read --track',
+  '--bar-bg': 'T5: an alias of --surface-hover (one value, one meaning); its readers read --surface-hover',
+  '--btn-ink': 'T5: an alias of --on-accent (one value, one meaning); its readers read --on-accent',
+  '--st-awaiting-input': 'T5: an alias of --waiting (one value, one meaning); its readers read --waiting',
+  '--st-unknown': 'T5: an alias of --unknown (one value, one meaning); its readers read --unknown',
+  '--wait-ink': 'T5: an alias of --waiting (one value, one meaning); its readers read --waiting',
+  '--hb-warn-ink': 'T5: an alias of --warn-text (one value, one meaning); its readers read --warn-text',
+  '--seg-bg': 'T5: one value, transparent: inlined at its readers',
+  '--label-transform': 'T5: one value, none: inlined at its readers',
+  '--label-tracking': 'T5: one value, 0: inlined at its readers',
+  '--btn-focus-width': 'T5: one value, 2px: inlined at its readers',
+  '--glow-blur': 'T5: one value, 0px (the glow shadow, invisible at 0, is gone): inlined at its readers',
+  '--heartbeat-color': 'T5: dead (no reader; tokenUse.test.ts)',
+  '--foreground': 'T5: dead (no reader; tokenUse.test.ts)',
+  '--popover': 'T5: dead (no reader; tokenUse.test.ts)',
+  '--muted-foreground': 'T5: dead (no reader; tokenUse.test.ts)',
+  '--accent-foreground': 'T5: dead (no reader; tokenUse.test.ts)',
 };
 
-// The old :root's tokens that have no paper value and stay: structure, the skip link's text, and the shadcn variables
-// no utility maps (Task 5 deletes the last two kinds where nothing reads them).
+// The old :root's tokens that had no paper value and stay: structure, read by the shell. (T5 deleted the rest, unread:
+// --sidebar-collapsed, --skip-link-text, and five shadcn variables no utility maps.)
 const KEPT: Record<string, string> = {
   '--sidebar-width': '220px',
-  '--sidebar-collapsed': '56px',
   '--overlay-bg': 'rgba(0, 0, 0, 0.6)',
-  '--skip-link-text': '#fff',
-  '--popover-foreground': '240 33% 92%',
-  '--muted-token': '240 17% 61%',
-  '--accent-token': '249 89% 63%',
-  '--destructive-foreground': '0 0% 100%',
-  '--radius-tw': '0.75rem',
 };
 
 // PR 2 (the Memory screens): the paper values.
@@ -290,9 +305,6 @@ const PR2: Record<string, string> = {
   '--badge-warn-bg': '#f8efdc',
   '--badge-bad-bg': '#fbe9e8',
   '--track': '#e3e9ec', // a doughnut's remainder, a panel wash
-  '--track-strong': '#e3e9ec',
-  '--bar-bg': '#f4f7f8', // the Graph controls bar
-  '--glow-blur': '0px',
   '--chart-text': '#56687a', // a chart's ticks and legend on a paper ground
   '--chart-grid': '#e3e9ec',
   '--gv-edge-opacity': '0.75', // review M8: Graph edges, less faint on white
@@ -301,7 +313,6 @@ const PR2: Record<string, string> = {
   '--save-ok': '#23703d', // Browse: a censor's save message
   '--save-err': '#b02a22',
   '--tone-bad': '#b02a22', // Memory write health: a tripped rule's border and tint
-  '--btn-ink': '#ffffff', // text on an accent-filled button
 };
 
 // PR 3 (the Execution screens): status (`--st-*`) and outcome (`--oc-*`) colours, and the screens' own tokens.
@@ -310,7 +321,6 @@ const ST: Record<string, string> = {
   '--st-ready': '#1b6a9c',
   '--st-running': '#8a5a0e',
   '--st-awaiting-check': '#9a4d0a',
-  '--st-awaiting-input': '#7b3fa0', // = --waiting
   '--st-completed': '#23703d',
   '--st-failed': '#b02a22',
   '--st-blocked': '#8a1c2c',
@@ -319,7 +329,6 @@ const ST: Record<string, string> = {
   '--st-partial': '#a14a08',
   '--st-success': '#23703d', // the ledger's success, Subtasks' completed
   '--st-ledger-blocked': '#8a5a0e', // the ledger's blocked, Subtasks' incomplete_blocked
-  '--st-unknown': '#a3266f', // = --unknown
   '--st-neutral': '#55616c',
 };
 const OC: Record<string, string> = {
@@ -336,10 +345,8 @@ const PR3: Record<string, string> = {
   '--hit-good': '#23703d', // Cache: the hit-rate line and the doughnut's cache-read part
   '--cache-blue': '#1f5fa8', // Cache: the doughnut's cache-created part
   '--cache-grey': '#4f5f6f', // Cache: the doughnut's uncached part
-  '--wait-ink': '#7b3fa0', // Workflows: the Now column's waiting pill
   '--wait-bg': '#efe3f6',
   '--wash': '#f4f7f8', // Heartbeat: the tuning report's panel
-  '--hb-warn-ink': '#8a5a0e', // Heartbeat: amber as text (paper's --yellow is a mark colour)
   '--effect-write': '#1f5fa8', // the Ledger's write effect pill
   '--mc-section-1': '#8b5cf6', // a model call's first context section: a violet
   '--mc-section-7': '#7890d0', // Messages: a light blue, not a status colour
@@ -367,7 +374,6 @@ const LEGACY_PAPER: Record<string, string> = {
   '--decision-color': '#802c66',
   '--procedure-color': '#d0620d',
   '--censor-color': '#985c50',
-  '--heartbeat-color': '#4f5f6f',
   '--chunk-color': '#8b5cf6',
   '--pending': '#1b6a9c',
 };
@@ -405,7 +411,7 @@ describe('the tokens of the one look', () => {
   });
 
   it('every rail token is a :root token too (the rail re-declares a value, it adds no name) except its own nav ones', () => {
-    const own = ['--nav-label-tracking', '--nav-icon-display', '--logo-display', '--nav-radius', '--nav-ink', '--nav-active-weight', '--brand-size'];
+    const own = ['--nav-radius', '--nav-ink', '--nav-active-weight', '--brand-size'];
     expect(tokens(RAIL).filter((t) => !(t in PAPER)).sort()).toEqual([...own].sort());
     for (const t of own) expect(PAPER[t], `${t} has no :root default`).toBeUndefined();
   });
@@ -465,9 +471,6 @@ describe('the tokens of the one look', () => {
       '--focus-ring': '#ffffff',
       '--waiting': '#c4b5fd',
       '--unknown': '#f9a8d4',
-      '--nav-label-tracking': '0',
-      '--nav-icon-display': 'none',
-      '--logo-display': 'none',
       '--nav-radius': '10px',
       '--nav-ink': '#dbe6ef',
       '--nav-active-weight': '600',
@@ -478,6 +481,16 @@ describe('the tokens of the one look', () => {
       'font-family': 'var(--font-ui)',
       'font-variant-numeric': 'normal', // the rail's badges keep the proportional figures they had (pixel oracle)
     });
+  });
+});
+
+describe('the two greens', () => {
+  it('--green is the contract\u2019s status fill, --oc-success the outcome mark; both stay, at least 5 apart (OKLab)', () => {
+    expect(PAPER['--green']).toBe('#2f8a4e');
+    expect(PAPER['--oc-success']).toBe('#3f8772');
+    expect(okDistance(PAPER['--green'], PAPER['--oc-success'])).toBeGreaterThanOrEqual(5);
+    expect(CSS).toMatch(/--green: #2f8a4e;\s*\/\*[^*]*not --oc-success \*\//);
+    expect(CSS).toMatch(/--oc-success: #3f8772;\s*\/\*[^*]*not --green \*\//);
   });
 });
 
@@ -620,14 +633,13 @@ describe('contrast of the new values', () => {
     for (const s of ['ok', 'warn', 'err']) {
       expect(contrast(PAPER[`--${s}-text`], PAPER[`--${s}-bg`]), s).toBeGreaterThanOrEqual(4.5);
     }
-    expect(contrast(PAPER['--err-text'], PAPER['--stale-err-bg'])).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(PAPER['--text'], PAPER['--notice-bg'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--text'], PAPER['--warn-bg'])).toBeGreaterThanOrEqual(4.5);
     expect(contrast(PAPER['--kind-task'], PAPER['--surface'])).toBeGreaterThanOrEqual(4.5);
     expect(contrast(PAPER['--kind-task'], PAPER['--bg'])).toBeGreaterThanOrEqual(4.5);
     // Chart marks (non-text) on the white card: pending's series colour and the accent bars.
     expect(contrast(PAPER['--series-7'], '#ffffff')).toBeGreaterThanOrEqual(3);
     expect(contrast(PAPER['--accent'], '#ffffff')).toBeGreaterThanOrEqual(3);
-    for (const s of ['--stat-warn', '--stat-ok', '--red']) {
+    for (const s of ['--warn-text', '--ok-text', '--red']) {
       expect(contrast(PAPER[s], PAPER['--surface']), s).toBeGreaterThanOrEqual(s === '--red' ? 3 : 4.5);
     }
   });
@@ -635,8 +647,8 @@ describe('contrast of the new values', () => {
   it('the skip link: white on the link blue, at least 4.5 (it reads :root; no override of its own is left)', () => {
     expect([...BLOCKS.keys()].filter((k) => k.includes('skip-link'))).toEqual([]);
     const app = readFileSync(join(__dirname, 'App.svelte'), 'utf-8');
-    expect(app).toMatch(/\.skip-link \{[^}]*background: var\(--accent\);[^}]*color: var\(--skip-link-text\);/);
-    expect(contrast(PAPER['--skip-link-text'], PAPER['--accent'])).toBeGreaterThanOrEqual(4.5);
+    expect(app).toMatch(/\.skip-link \{[^}]*background: var\(--accent\);[^}]*color: var\(--on-accent\);/);
+    expect(contrast(PAPER['--on-accent'], PAPER['--accent'])).toBeGreaterThanOrEqual(4.5);
   });
 
   it('paper text on the accent (a primary button, an active filter): at least 4.5', () => {
@@ -850,10 +862,10 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
 
   it('memory write health: the verdict text on its tint over the page, the pills on the card, the button ink', () => {
     const page = PAPER['--bg'];
-    expect(contrast(PAPER['--stat-ok'], tint(PAPER['--stat-ok'], 0.08, page))).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--ok-text'], tint(PAPER['--ok-text'], 0.08, page))).toBeGreaterThanOrEqual(4.5);
     expect(contrast(PAPER['--err-text'], tint(PAPER['--tone-bad'], 0.1, page))).toBeGreaterThanOrEqual(4.5);
-    for (const t of ['--stat-ok', '--stat-warn', '--err-text']) expect(contrast(PAPER[t], '#ffffff'), t).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(PAPER['--btn-ink'], PAPER['--accent'])).toBeGreaterThanOrEqual(4.5);
+    for (const t of ['--ok-text', '--warn-text', '--err-text']) expect(contrast(PAPER[t], '#ffffff'), t).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--on-accent'], PAPER['--accent'])).toBeGreaterThanOrEqual(4.5);
     expect(contrast(PAPER['--tone-bad'], '#ffffff')).toBeGreaterThanOrEqual(3); // the tripped tile's border
   });
 
@@ -880,8 +892,9 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
   });
 
   it('one meaning each: awaiting input is the waiting colour and unknown the unknown colour', () => {
-    expect(PAPER['--st-awaiting-input']).toBe(PAPER['--waiting']);
-    expect(PAPER['--st-unknown']).toBe(PAPER['--unknown']);
+    // T5: the two were aliases of the base tokens; statusVar and ledgerStatusVar read --waiting and --unknown themselves.
+    expect(PAPER['--st-awaiting-input']).toBeUndefined();
+    expect(PAPER['--st-unknown']).toBeUndefined();
     expect(PAPER['--st-blocked']).not.toBe(PAPER['--st-failed']);
   });
 
@@ -960,8 +973,8 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
   });
 
   it('Heartbeat\'s amber text on the card and on the wash: at least 4.5:1', () => {
-    expect(contrast(PAPER['--hb-warn-ink'], PAPER['--surface'])).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(PAPER['--hb-warn-ink'], PAPER['--wash'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--warn-text'], PAPER['--surface'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--warn-text'], PAPER['--wash'])).toBeGreaterThanOrEqual(4.5);
     expect(contrast(PAPER['--text'], PAPER['--wash'])).toBeGreaterThanOrEqual(4.5);
   });
 
@@ -972,7 +985,7 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
   });
 
   it('the waiting pill\'s text on its tint: at least 4.5:1', () => {
-    expect(contrast(PAPER['--wait-ink'], PAPER['--wait-bg'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--waiting'], PAPER['--wait-bg'])).toBeGreaterThanOrEqual(4.5);
   });
 });
 
@@ -1011,8 +1024,8 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
   it('status strips and pills: text on a tint of itself, over the card, a hovered row and the page, at least 4.5:1', () => {
     // Autonomy's scorer strip sits on the page; Guards' verdicts in a card; badges and pills in hoverable rows.
     for (const bg of [white, hover, page]) {
-      expect(contrast(PAPER['--stat-ok'], tint(PAPER['--stat-ok'], 0.08, bg)), `ok on ${bg}`).toBeGreaterThanOrEqual(4.5);
-      expect(contrast(PAPER['--stat-warn'], tint(PAPER['--stat-warn'], 0.08, bg)), `warn on ${bg}`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(PAPER['--ok-text'], tint(PAPER['--ok-text'], 0.08, bg)), `ok on ${bg}`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(PAPER['--warn-text'], tint(PAPER['--warn-text'], 0.08, bg)), `warn on ${bg}`).toBeGreaterThanOrEqual(4.5);
       expect(contrast(PAPER['--err-text'], tint(PAPER['--tone-bad'], 0.1, bg)), `bad on ${bg}`).toBeGreaterThanOrEqual(4.5);
     }
     // The partial badge takes PR 3's 12.5% badge tint: at 15% it is 4.49:1 on a hovered row.
@@ -1021,7 +1034,7 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     }
     expect(contrast(PAPER['--st-partial'], tint(PAPER['--st-partial'], 0.15, hover))).toBeLessThan(4.5);
     // Border-only pills and coloured counts, on a hovered row.
-    for (const t of ['--st-partial', '--stat-ok', '--stat-warn', '--err-text', '--muted', '--accent']) {
+    for (const t of ['--st-partial', '--ok-text', '--warn-text', '--err-text', '--muted', '--accent']) {
       expect(contrast(PAPER[t], hover), t).toBeGreaterThanOrEqual(4.5);
     }
     // The neutral badge (a pending or unknown status): muted text on the wash.

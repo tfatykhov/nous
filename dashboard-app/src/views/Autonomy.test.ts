@@ -514,7 +514,7 @@ describe('Autonomy: colours by token', () => {
     expect(fillOf(bar('Done, verified'))).toBe('var(--green)');
     expect(fillOf(bar('Done, checked'))).toBe('var(--series-2)');
     expect(fillOf(bar('Done, self-reported'))).toBe('var(--series-1)');
-    expect(fillOf(bar('Partial'))).toBe('var(--stat-warn)');
+    expect(fillOf(bar('Partial'))).toBe('var(--warn-text)');
     expect(fillOf(bar('Failed'))).toBe('var(--red)');
     expect(fillOf(bar('Not scored'))).toBe('var(--muted)');
   });
@@ -576,8 +576,8 @@ describe('Autonomy: colours by token', () => {
   it('source contract: status text reads the text tokens, cards the card tokens, labels the label tokens', () => {
     const rules = parseBlocks(styleBlocks(readFileSync(join(__dirname, 'Autonomy.svelte'), 'utf-8')));
     expect(rules.get('.verdict-warn')).toEqual({
-      color: 'var(--stat-warn)', 'border-color': 'color-mix(in srgb, var(--stat-warn) 35%, transparent)',
-      background: 'color-mix(in srgb, var(--stat-warn) 8%, transparent)',
+      color: 'var(--warn-text)', 'border-color': 'color-mix(in srgb, var(--warn-text) 35%, transparent)',
+      background: 'color-mix(in srgb, var(--warn-text) 8%, transparent)',
     });
     expect(rules.get('.verdict-bad')).toMatchObject({
       color: 'var(--err-text)', 'border-color': 'color-mix(in srgb, var(--tone-bad) 50%, transparent)',
@@ -586,7 +586,7 @@ describe('Autonomy: colours by token', () => {
     expect(rules.get('.card, .panel')).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius)', 'box-shadow': 'var(--card-shadow)' });
     expect(rules.get('.strip')).toMatchObject({ 'border-radius': 'var(--card-radius)' });
     expect(rules.get('.strip-meta dt, .tiles dt, .triple dt, .detail dt, .label')).toMatchObject({
-      'text-transform': 'var(--label-transform)', 'letter-spacing': 'var(--label-tracking)',
+      'text-transform': 'none', 'letter-spacing': '0',
     });
     expect(rules.get(':global(html:root .page-ground) .nums td:not(:first-child)')).toMatchObject({ 'font-stretch': '85%' });
     expect(rules.get(':global(html:root .page-ground) .stats td:not(:first-child)')).toBeUndefined();

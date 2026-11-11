@@ -232,7 +232,7 @@ describe('Identity: the paper look\'s structure (source contracts)', () => {
 
   it('cards, labels, save messages and the title read tokens', () => {
     expect(rules.get('.section-card')).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius-sm)', 'box-shadow': 'var(--card-shadow)' });
-    expect(rules.get('.section-label')).toMatchObject({ 'text-transform': 'var(--label-transform)', 'letter-spacing': 'var(--label-tracking)' });
+    expect(rules.get('.section-label')).toMatchObject({ 'text-transform': 'none', 'letter-spacing': '0' });
     expect(rules.get('.save-status.save-ok')).toMatchObject({ color: 'var(--save-ok)' });
     expect(rules.get('.save-status.save-err')).toMatchObject({ color: 'var(--save-err)' });
     expect(rules.get(':global(html:root .page-ground) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });

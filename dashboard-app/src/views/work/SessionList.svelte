@@ -292,14 +292,14 @@
   .head-right { display: flex; align-items: center; gap: 0.75rem; }
   .subtitle { color: var(--muted); font-size: 0.9375rem; margin: 0; max-width: 70ch; }
   .muted { color: var(--muted); font-size: 0.875rem; }
-  .notice { padding: 0.75rem 1rem; border-radius: var(--radius-sm); background: var(--notice-bg);
-    border: 1px solid var(--notice-border); font-size: 0.875rem; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--radius-sm); background: var(--warn-bg);
+    border: 1px solid var(--warn-border); font-size: 0.875rem; }
   .empty { color: var(--muted); text-align: center; padding: 2rem 0; margin: 0; }
   button { font: inherit; cursor: pointer; }
   button:focus-visible, select:focus-visible, input:focus-visible, a.row:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
   .filters, .lenses { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; margin-top: 0.25rem; }
   .lenses { gap: 0.5rem; }
-  .seg { display: flex; flex-wrap: wrap; min-width: 0; gap: 4px; background: var(--seg-bg); border: var(--card-border); border-radius: var(--ctl-radius); padding: 4px; }
+  .seg { display: flex; flex-wrap: wrap; min-width: 0; gap: 4px; background: transparent; border: var(--card-border); border-radius: var(--ctl-radius); padding: 4px; }
   .seg button { background: transparent; color: var(--muted); border: 0; border-radius: var(--ctl-radius); padding: 0.5rem 0.875rem; min-height: 36px; font-size: 0.875rem; }
   .seg button.on { background: var(--tab-active-bg); color: var(--text); font-weight: 600; box-shadow: var(--tab-active-shadow); }
   .field { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); font-size: 0.875rem; }

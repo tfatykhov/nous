@@ -701,8 +701,8 @@
   .event-badge {
     font-size: 0.6875rem;
     font-weight: 600;
-    text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking);
+    text-transform: none;
+    letter-spacing: 0;
     color: var(--accent);
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     border-radius: 999px;

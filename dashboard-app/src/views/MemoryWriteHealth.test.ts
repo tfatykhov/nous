@@ -151,11 +151,11 @@ describe('Memory write health on the paper look (PR 2)', () => {
 
   it('the style reads status tokens, with the old alphas as color-mix percentages', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'MemoryWriteHealth.svelte'), 'utf-8'));
-    expect(css).toMatch(/\.verdict-ok \{ color: var\(--stat-ok\); border-color: color-mix\(in srgb, var\(--stat-ok\) 35%, transparent\);/);
+    expect(css).toMatch(/\.verdict-ok \{ color: var\(--ok-text\); border-color: color-mix\(in srgb, var\(--ok-text\) 35%, transparent\);/);
     expect(css).toMatch(/\.verdict-bad \{ color: var\(--err-text\); border-color: color-mix\(in srgb, var\(--tone-bad\) 50%, transparent\);/);
     expect(css).toContain('.tile.tone-bad { border-color: color-mix(in srgb, var(--tone-bad) 60%, transparent); }');
-    expect(css).toContain('.pill-warn { color: var(--stat-warn); border-color: color-mix(in srgb, var(--stat-warn) 50%, transparent); }');
-    expect(css).toMatch(/background: var\(--accent\); color: var\(--btn-ink\);/);
+    expect(css).toContain('.pill-warn { color: var(--warn-text); border-color: color-mix(in srgb, var(--warn-text) 50%, transparent); }');
+    expect(css).toMatch(/background: var\(--accent\); color: var\(--on-accent\);/);
     expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/);
   });
 });

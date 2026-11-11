@@ -333,8 +333,8 @@
   :global(html:root .page-ground) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
   h2 { font-size: 0.9375rem; font-weight: 600; margin: 0; }
   .subtitle { font-size: 0.8125rem; color: var(--muted); margin: 0; }
-  .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--notice-bg);
-    border: 1px solid var(--notice-border); font-size: 0.8125rem; margin-bottom: 1rem; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--warn-bg);
+    border: 1px solid var(--warn-border); font-size: 0.8125rem; margin-bottom: 1rem; }
   .notice code, .order code, .env, .mono { font-family: var(--font-mono); font-size: 0.75rem; }
   .rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }
   .card, .panel { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow);
@@ -346,13 +346,13 @@
   .min0 { min-width: 0; }
   .env { color: var(--muted); margin-top: 0.125rem; overflow-wrap: anywhere; }
   .mode-pill { flex-shrink: 0; font-size: 0.6875rem; font-weight: 600; padding: 0.125rem 0.5rem; border-radius: 999px; border: 1px solid currentColor; }
-  .mode-enforce { color: var(--stat-ok); }
-  .mode-warn, .mode-shadow { color: var(--stat-warn); }
+  .mode-enforce { color: var(--ok-text); }
+  .mode-warn, .mode-shadow { color: var(--warn-text); }
   .mode-off { color: var(--muted); border-color: var(--border); }
   .big { font-size: 2rem; font-weight: 700; line-height: 1.1; }
   .breakdown { display: flex; flex-direction: column; gap: 0.5rem; }
-  .label { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking); }
+  .label { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: none;
+    letter-spacing: 0; }
   .bar-row { display: grid; grid-template-columns: minmax(0, 9.5rem) minmax(0, 1fr) 2.25rem; gap: 0.625rem; align-items: center; }
   .bar-key { font-family: var(--font-mono); font-size: 0.75rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .bar { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
@@ -360,10 +360,10 @@
   .bar-count { font-size: 0.8125rem; font-weight: 600; text-align: right; }
   .verdict { padding: 0.75rem 0.875rem; border-radius: var(--card-radius-sm); border: 1px solid; }
   /* Status by token: the alphas of the old literals are the mix percentages (dark identical). */
-  .verdict-warn { color: var(--stat-warn); border-color: color-mix(in srgb, var(--stat-warn) 35%, transparent);
-    background: color-mix(in srgb, var(--stat-warn) 8%, transparent); }
-  .verdict-ok { color: var(--stat-ok); border-color: color-mix(in srgb, var(--stat-ok) 35%, transparent);
-    background: color-mix(in srgb, var(--stat-ok) 8%, transparent); }
+  .verdict-warn { color: var(--warn-text); border-color: color-mix(in srgb, var(--warn-text) 35%, transparent);
+    background: color-mix(in srgb, var(--warn-text) 8%, transparent); }
+  .verdict-ok { color: var(--ok-text); border-color: color-mix(in srgb, var(--ok-text) 35%, transparent);
+    background: color-mix(in srgb, var(--ok-text) 8%, transparent); }
   .verdict-muted { color: var(--muted); border-color: var(--border); background: transparent; }
   .verdict-title { font-size: 0.8125rem; font-weight: 700; }
   .verdict-detail { font-size: 0.8125rem; color: var(--text); margin-top: 0.125rem; }
@@ -372,8 +372,8 @@
     font-weight: 600; color: var(--text); border: 1px solid color-mix(in srgb, var(--fill) 40%, transparent); white-space: nowrap; }
   .rule-pill::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--fill); flex-shrink: 0; }
   .detail { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.5rem 1.5rem; margin: 0; padding: 0.5rem 0; }
-  .detail dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform);
-    letter-spacing: var(--label-tracking); }
+  .detail dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: none;
+    letter-spacing: 0; }
   .detail dd { margin: 0.125rem 0 0; font-size: 0.8125rem; }
   .glossary { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0.375rem 1.5rem; margin: 1rem 0 0; font-size: 0.75rem; }
   .glossary div { display: flex; gap: 0.5rem; }

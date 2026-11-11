@@ -290,7 +290,7 @@ describe('Scoring: the paper look\'s structure (source contracts)', () => {
       expect(rules.get(sel), sel).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius)', 'box-shadow': 'var(--card-shadow)' });
     }
     expect(rules.get('.dim-card')).toMatchObject({ 'border-radius': 'var(--card-radius-sm)' });
-    expect(rules.get('.data-table th')).toMatchObject({ 'text-transform': 'var(--label-transform)', 'letter-spacing': 'var(--label-tracking)' });
+    expect(rules.get('.data-table th')).toMatchObject({ 'text-transform': 'none', 'letter-spacing': '0' });
     expect(rules.get('.corr-cell')).toMatchObject({ background: 'var(--heat, transparent)' });
   });
 

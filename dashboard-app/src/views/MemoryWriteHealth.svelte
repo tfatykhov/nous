@@ -206,8 +206,8 @@
   .strip { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem 2rem; flex-wrap: wrap;
     padding: 0.875rem 1.125rem; border-radius: var(--card-radius); border: 1px solid; margin-bottom: 1rem; }
   /* Status by token: the alphas of the old literals are the mix percentages (dark identical). */
-  .verdict-ok { color: var(--stat-ok); border-color: color-mix(in srgb, var(--stat-ok) 35%, transparent);
-    background: color-mix(in srgb, var(--stat-ok) 8%, transparent); }
+  .verdict-ok { color: var(--ok-text); border-color: color-mix(in srgb, var(--ok-text) 35%, transparent);
+    background: color-mix(in srgb, var(--ok-text) 8%, transparent); }
   .verdict-bad { color: var(--err-text); border-color: color-mix(in srgb, var(--tone-bad) 50%, transparent);
     background: color-mix(in srgb, var(--tone-bad) 10%, transparent); }
   .verdict-title { font-size: 0.9375rem; font-weight: 700; }
@@ -217,7 +217,7 @@
   .tile { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow); padding: 1rem 1.125rem;
     display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; }
   .tile.tone-bad { border-color: color-mix(in srgb, var(--tone-bad) 60%, transparent); }
-  .tile.tone-warn { border-color: color-mix(in srgb, var(--stat-warn) 50%, transparent); }
+  .tile.tone-warn { border-color: color-mix(in srgb, var(--warn-text) 50%, transparent); }
   .tile p { margin: 0; }
   .tile-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; }
   .rule-id { font-family: var(--font-mono); font-size: 0.75rem; color: var(--muted); }
@@ -227,19 +227,19 @@
   .ack input { padding: 0.375rem 0.5rem; border: 1px solid var(--border); border-radius: var(--ctl-radius); background: var(--bg);
     color: var(--text); font-size: 0.8125rem; min-width: 0; }
   .ack button { align-self: flex-start; padding: 0.375rem 0.875rem; border-radius: var(--ctl-radius); border: 1px solid var(--accent);
-    background: var(--accent); color: var(--btn-ink); font-size: 0.8125rem; font-weight: 600; cursor: pointer; }
+    background: var(--accent); color: var(--on-accent); font-size: 0.8125rem; font-weight: 600; cursor: pointer; }
   .ack button:disabled { opacity: 0.6; cursor: default; }
   .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.6875rem; font-weight: 600;
     border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
   .pill-bad { color: var(--err-text); border-color: color-mix(in srgb, var(--tone-bad) 60%, transparent); }
-  .pill-warn { color: var(--stat-warn); border-color: color-mix(in srgb, var(--stat-warn) 50%, transparent); }
-  .pill-ok { color: var(--stat-ok); border-color: color-mix(in srgb, var(--stat-ok) 50%, transparent); }
+  .pill-warn { color: var(--warn-text); border-color: color-mix(in srgb, var(--warn-text) 50%, transparent); }
+  .pill-ok { color: var(--ok-text); border-color: color-mix(in srgb, var(--ok-text) 50%, transparent); }
   .panel { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow);
     padding: 1.25rem; min-width: 0; margin-top: 1.25rem; }
   .panel p { margin: 0.5rem 0 0; }
   .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem 1rem; flex-wrap: wrap; margin-bottom: 0.875rem; }
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin: 0; }
-  .tiles dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform); letter-spacing: var(--label-tracking); }
+  .tiles dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: none; letter-spacing: 0; }
   .tiles dd { margin: 0.125rem 0 0; font-size: 1.375rem; font-weight: 700; }
   /* contain: a wide table scrolls in its own box instead of widening the page (main is a flex item). */
   .table-wrap { overflow-x: auto; contain: inline-size; }

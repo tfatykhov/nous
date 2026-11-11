@@ -140,7 +140,7 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
     const life = section('Finding Lifecycle');
     for (const b of within(life).getAllByRole('button', { name: /Show details for/ })) await fireEvent.click(b);
     const inks = Array.from(life.querySelectorAll<HTMLElement>('.finding-detail .urgency')).map((u) => [u.textContent, u.style.color]);
-    expect(inks).toEqual([['high', 'var(--err-text)'], ['normal', 'var(--hb-warn-ink)'], ['low', 'var(--st-neutral)']]);
+    expect(inks).toEqual([['high', 'var(--err-text)'], ['normal', 'var(--warn-text)'], ['low', 'var(--st-neutral)']]);
   });
 
   it('every table keeps its columns', async () => {
@@ -166,12 +166,15 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
     expect(css).toMatch(/:global\(html:root \.page-ground\) \.hb-banner--disabled \{ opacity: 1; \}/);
   });
 
-  it('source contract: the banner and pills read status tokens: text tokens for words, the glow by --glow-blur', () => {
+  it('source contract: the banner and pills read status tokens: text tokens for words; the dots have no glow', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'Heartbeat.svelte'), 'utf-8'));
-    expect(css).toMatch(/\.hb-pill--warn \{ border-color: var\(--yellow\); color: var\(--hb-warn-ink\); \}/);
+    expect(css).toMatch(/\.hb-pill--warn \{ border-color: var\(--yellow\); color: var\(--warn-text\); \}/);
     expect(css).toMatch(/\.hb-pill--bad \{ border-color: var\(--red\); color: var\(--err-text\); \}/);
     expect(css).toMatch(/\.hb-pill--ok \{ border-color: var\(--st-completed\); color: var\(--st-completed\); \}/);
-    expect(css).toMatch(/\.hb-dot--ok \{ background: var\(--st-completed\); box-shadow: 0 0 var\(--glow-blur\) color-mix\(in srgb, var\(--st-completed\) 60%, transparent\); \}/);
+    // The dark look's glow (a blur that was 0 px on paper) is gone with its token (PR 7 T5).
+    expect(css).toMatch(/\.hb-dot--ok \{ background: var\(--st-completed\); \}/);
+    expect(css).toMatch(/\.hb-dot--warn \{ background: var\(--yellow\); \}/);
+    expect(css).not.toMatch(/glow|box-shadow: 0 0 /);
     expect(css).toMatch(/\.tuning-pre \{[^}]*background: var\(--wash\);/);
   });
 });

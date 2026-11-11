@@ -66,7 +66,7 @@
 
   const URGENCY_INK: Record<string, string> = {
     high: 'var(--err-text)',
-    normal: 'var(--hb-warn-ink)',
+    normal: 'var(--warn-text)',
     low: 'var(--st-neutral)',
   };
 
@@ -448,8 +448,8 @@
     border-radius: 50%;
     flex-shrink: 0;
   }
-  .hb-dot--ok { background: var(--st-completed); box-shadow: 0 0 var(--glow-blur) color-mix(in srgb, var(--st-completed) 60%, transparent); }
-  .hb-dot--warn { background: var(--yellow); box-shadow: 0 0 var(--glow-blur) color-mix(in srgb, var(--yellow) 60%, transparent); }
+  .hb-dot--ok { background: var(--st-completed); }
+  .hb-dot--warn { background: var(--yellow); }
   .hb-dot--off { background: var(--st-neutral); }
 
   .hb-banner-label {
@@ -475,7 +475,7 @@
     white-space: nowrap;
   }
   .hb-pill--ok { border-color: var(--st-completed); color: var(--st-completed); }
-  .hb-pill--warn { border-color: var(--yellow); color: var(--hb-warn-ink); }
+  .hb-pill--warn { border-color: var(--yellow); color: var(--warn-text); }
   .hb-pill--bad { border-color: var(--red); color: var(--err-text); }
   .hb-pill--total { opacity: 0.6; }
   /* Muted text at 60% is 2.5:1 on the white card: the paper ground shows the total at full strength. */

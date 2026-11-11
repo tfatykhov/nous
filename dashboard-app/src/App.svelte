@@ -100,7 +100,6 @@
 <!-- The navigation is the rail (class rail): the Atlantic-blue sidebar. -->
 <aside class="sidebar rail" aria-label="Site navigation">
   <div class="sidebar-header">
-    <span class="sidebar-logo" aria-hidden="true">&#x1D6B9;</span>
     <span class="sidebar-title">Nous</span>
   </div>
   <Nav currentRoute={$currentRoute} navLabel="Site navigation" />
@@ -148,7 +147,6 @@
   onkeydown={handleDrawerKeydown}
 >
   <div class="drawer-header">
-    <span class="sidebar-logo" aria-hidden="true">&#x1D6B9;</span>
     <span class="sidebar-title">Nous</span>
     <button
       class="drawer-close"
@@ -218,7 +216,7 @@
     z-index: 9999;
     padding: 0.5rem 1rem;
     background: var(--accent);
-    color: var(--skip-link-text);
+    color: var(--on-accent);
     border-radius: var(--radius-sm);
     font-size: 0.875rem;
     font-weight: 600;
@@ -254,14 +252,6 @@
     padding: 1.25rem 1.25rem 1rem;
     border-bottom: 1px solid var(--border);
     flex-shrink: 0;
-  }
-
-  /* The glyph is hidden in the rail (no glyphs: the owner's rule). */
-  .sidebar-logo {
-    display: var(--logo-display);
-    font-size: 1.375rem;
-    line-height: 1;
-    color: var(--accent);
   }
 
   .sidebar-title {
