@@ -290,7 +290,7 @@
     --episode-color: #1f5fa8;
     --decision-color: #a8408f;
     --procedure-color: #d0620d;
-    --censor-color: #905860;
+    --censor-color: #985c50;
     --heartbeat-color: #4f5f6f;
     --chunk-color: #8b5cf6;
     --gv-edge-opacity: 0.75;                   /* less faint on white: a light colour at 0.5 was 1.8:1 */
@@ -301,7 +301,7 @@
     --series-3: #a8408f;
     --series-4: #d0620d;
     --series-5: #7a8a1a;
-    --series-6: #905860;                       /* at least 6 (OKLab) from every status colour (tokens.test.ts) */
+    --series-6: #985c50;                       /* at least 6 (OKLab) from every status colour (tokens.test.ts) */
     --series-8: #1c2f55;
     --series-9: #0e7490;
     --series-10: #8b5cf6;
@@ -322,7 +322,7 @@
     --rel-supports: #159a7a;
     --rel-informed-by: #a8408f;
     --rel-evidence-for: #d0620d;
-    --rel-contradicts: #905860;
+    --rel-contradicts: #985c50;
     --rel-supersedes: #7a8a1a;
     --rel-caused-by: #1c2f55;
     --rel-discussed-in: #6b7280;

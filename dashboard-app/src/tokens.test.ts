@@ -125,7 +125,7 @@ const SERIES: Record<string, [string, string]> = {
   '--series-3': ['#a78bfa', '#a8408f'],
   '--series-4': ['#fb923c', '#d0620d'],
   '--series-5': ['#f87171', '#7a8a1a'],
-  '--series-6': ['#fbbf24', '#905860'], // review M2: the brown #8a5a2b was 2.1 from warn text
+  '--series-6': ['#fbbf24', '#985c50'], // review M2 (the brown #8a5a2b was 2.1 from warn text) then N2 (#905860 was 3.1 from related_to under protanopia)
   '--series-7': ['#6b6b8a', '#4f5f6f'],
   '--series-8': ['#e2e2f0', '#1c2f55'],
   '--series-9': ['#22d3ee', '#0e7490'],
@@ -154,7 +154,7 @@ const REL: Record<string, [string, string]> = {
   '--rel-supports': ['#34d399', '#159a7a'],
   '--rel-informed-by': ['#a78bfa', '#a8408f'],
   '--rel-evidence-for': ['#fbbf24', '#d0620d'],
-  '--rel-contradicts': ['#f87171', '#905860'],
+  '--rel-contradicts': ['#f87171', '#985c50'],
   '--rel-supersedes': ['#fb923c', '#7a8a1a'],
   '--rel-caused-by': ['#e2e2f0', '#1c2f55'],
   '--rel-discussed-in': ['#6b6b8a', '#6b7280'],
@@ -206,7 +206,7 @@ const LEGACY_PAPER: Record<string, string> = {
   '--episode-color': '#1f5fa8',
   '--decision-color': '#a8408f',
   '--procedure-color': '#d0620d',
-  '--censor-color': '#905860',
+  '--censor-color': '#985c50',
   '--heartbeat-color': '#4f5f6f',
   '--chunk-color': '#8b5cf6',
   '--pending': '#1b6a9c',
@@ -650,6 +650,14 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
     expect(taken.size).toBeGreaterThanOrEqual(14);
     const categorical = { ...SERIES, ...GV_NODES, '--gv-other': GV['--gv-other'], ...REL, ...DISP };
     for (const [k, [, p]] of Object.entries(categorical)) expect(taken.has(p.toLowerCase()), k).toBe(false);
+  });
+
+  it('a contradicts edge is told from a plain related_to edge under protanopia (review N2)', () => {
+    expect(okDistance(PAPER['--rel-contradicts'], PAPER['--rel-related-to'], 'protan')).toBeGreaterThanOrEqual(6);
+    expect(okDistance(PAPER['--rel-contradicts'], PAPER['--rel-related-to'], 'deutan')).toBeGreaterThanOrEqual(6);
+    // --series-6 and the legacy censor colour share the hex.
+    expect(PAPER['--series-6']).toBe(PAPER['--rel-contradicts']);
+    expect(PAPER['--censor-color']).toBe(PAPER['--rel-contradicts']);
   });
 
   it('rendered, the one good outcome, stands apart in the funnel under red-green colour blindness and from the task frame (review N1)', () => {
