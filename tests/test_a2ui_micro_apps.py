@@ -1491,6 +1491,11 @@ def test_usage_block_names_the_three_video_sources() -> None:
 
     for needle in ("companion-assets", "youtube", "vimeo", "https"):
         assert needle in usage, needle
+    # The compose model is one tool-less text call: it cannot GET anything,
+    # and a YouTube page answers text/html anyway. Only the url's origin is
+    # within its reach.
+    assert "GET" not in usage
+    assert "never invent" in usage
 
 
 def test_catalog_summary_names_the_properties_that_broke_in_production() -> None:

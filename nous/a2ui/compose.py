@@ -259,8 +259,8 @@ _COMPONENT_USAGE: dict[str, str] = {
         "direct https link ending .mp4/.webm; a youtube.com/watch?v=, "
         "youtu.be/, youtube.com/shorts/ or vimeo.com/<digits> link "
         "(embedded). Anything else renders 'Video unavailable'. posterUrl? is "
-        "an image URL. GET a remote url first and confirm 200 + video/*; never "
-        "invent a url."
+        "an image URL. Use only a url given in the request or the "
+        "server-resolved data; never invent one."
     ),
 }
 
