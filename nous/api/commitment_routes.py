@@ -22,6 +22,7 @@ _CLOSES: dict[str, tuple[str, str]] = {"drop": ("cancelled", "owner_drop"), "don
 
 
 def build_commitment_routes(*, database: Any, settings: Any) -> list[Route]:
+    """The owner's close routes, over a store for ``settings.agent_id``."""
     store = CommitmentStore(database, settings.agent_id)
 
     async def close(request: Request) -> JSONResponse:

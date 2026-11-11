@@ -161,6 +161,7 @@ class PromiseDetector:
         self._default_due_minutes = default_due_minutes
 
     def scan(self, response_text: str, now: datetime | None = None) -> list[Promise]:
+        """The promises in a reply, one per sentence, in order (empty for none)."""
         if not response_text:
             return []
         now = now or datetime.now(UTC)
@@ -262,6 +263,7 @@ class BackingResolver:
     MIN_OVERLAP = 0.3
 
     def artifacts(self, tool_results: list[Any]) -> list[Artifact]:
+        """The artifacts this turn created: one per backing call with a non-error result and a parseable id."""
         found: list[Artifact] = []
         for tr in tool_results:
             name = getattr(tr, "tool_name", None)
@@ -279,6 +281,7 @@ class BackingResolver:
     def split(
         self, promises: list[Promise], tool_results: list[Any]
     ) -> tuple[list[tuple[Promise, Artifact]], list[Promise]]:
+        """``(backed, unbacked)``: each backed promise with the artifact that backs it."""
         artifacts = self.artifacts(tool_results)
         backed: list[tuple[Promise, Artifact]] = []
         unbacked: list[Promise] = []
@@ -327,6 +330,7 @@ class GateOutcome:
 
 
 def source_kind_for(path: str, context_kind: str | None) -> str:
+    """The ledger's ``source_kind`` for a turn: its background kind, else the chat path it ran on."""
     if context_kind in SOURCE_KIND_BY_CONTEXT:
         return SOURCE_KIND_BY_CONTEXT[context_kind]
     return "chat_stream" if path == "stream" else "chat_turn"
@@ -363,6 +367,7 @@ class PromiseGate:
 
     @property
     def mode(self) -> GateMode:
+        """The effective mode: ``off`` whenever the gate is disabled."""
         if not self._settings.promise_gate_enabled:
             return "off"
         return self._settings.promise_gate_mode
@@ -378,6 +383,7 @@ class PromiseGate:
         context_kind: str | None,
         now: datetime | None = None,
     ) -> GateOutcome:
+        """Detect, resolve and record one turn (rows and log row in one transaction); the footer in warn."""
         mode = self.mode
         if mode == "off":
             return GateOutcome(outcome="off")

@@ -119,6 +119,7 @@ class Commitment:
 
     @property
     def label(self) -> str:
+        """The owner-facing id, ``C-0042``."""
         return format_short_id(self.short_id)
 
 
@@ -271,6 +272,7 @@ class CommitmentStore:
         return written
 
     async def get(self, short_id: int) -> Commitment | None:
+        """The row with this short id, or None."""
         async with self._db.session() as session:
             result = await session.execute(
                 text(f"SELECT {_COLUMNS} FROM brain.commitments WHERE agent_id = :agent_id AND short_id = :short_id"),
