@@ -118,6 +118,100 @@ const NEW_DARK: Record<string, string> = {
   '--f-other': '#c4c4d8', // a frame id outside the seven (review M1): neutral, not conversation's grey
 };
 
+// PR 2 (the Memory screens): [dark, paper]. Each dark value is the literal the screen used before it read the token.
+const SERIES: Record<string, [string, string]> = {
+  '--series-1': ['#60a5fa', '#1f5fa8'],
+  '--series-2': ['#34d399', '#159a7a'],
+  '--series-3': ['#a78bfa', '#a8408f'],
+  '--series-4': ['#fb923c', '#d0620d'],
+  '--series-5': ['#f87171', '#7a8a1a'],
+  '--series-6': ['#fbbf24', '#985c50'], // review M2 (the brown #8a5a2b was 2.1 from warn text) then N2 (#905860 was 3.1 from related_to under protanopia)
+  '--series-7': ['#6b6b8a', '#4f5f6f'],
+  '--series-8': ['#e2e2f0', '#1c2f55'],
+  '--series-9': ['#22d3ee', '#0e7490'],
+  '--series-10': ['#e879f9', '#8b5cf6'],
+  '--series-11': ['#f472b6', '#6b7280'],
+  '--series-12': ['#9ca3af', '#908870'], // review M2: the amber #a8741a was 3.1 from the warn fill
+  '--series-13': ['#c4c4d8', '#7a3f3f'],
+};
+const GV_NODES: Record<string, [string, string]> = {
+  '--gv-fact': ['#34d399', '#159a7a'],
+  '--gv-episode': ['#60a5fa', '#1f5fa8'],
+  '--gv-decision': ['#a78bfa', '#802c66'], // re-review: #a8408f was 4.2 from episode under protanopia
+  '--gv-procedure': ['#fbbf24', '#d0620d'],
+  '--gv-chunk': ['#06b6d4', '#8b5cf6'], // review I4: the olive merged with procedure under red-green colour blindness
+};
+const GV: Record<string, [string, string]> = {
+  ...GV_NODES,
+  '--gv-other': ['#6b6b8a', '#4f5f6f'],
+  '--gv-outline': ['#0a0a0f', '#ffffff'], // the label halo
+  '--gv-node-border': ['rgba(0, 0, 0, 0.3)', 'rgba(20, 32, 43, 0.35)'],
+  '--gv-select': ['#fbbf24', '#14202b'], // the selected and search-hit rings
+};
+const REL: Record<string, [string, string]> = {
+  '--rel-related-to': ['#7c6af7', '#4f5f6f'],
+  '--rel-extracted-from': ['#60a5fa', '#1f5fa8'],
+  '--rel-supports': ['#34d399', '#159a7a'],
+  '--rel-informed-by': ['#a78bfa', '#a8408f'],
+  '--rel-evidence-for': ['#fbbf24', '#d0620d'],
+  '--rel-contradicts': ['#f87171', '#985c50'],
+  '--rel-supersedes': ['#fb923c', '#7a8a1a'],
+  '--rel-caused-by': ['#e2e2f0', '#1c2f55'],
+  '--rel-discussed-in': ['#6b6b8a', '#6b7280'],
+  '--rel-part-of': ['#22d3ee', '#0e7490'],
+  '--rel-summarized-by': ['#06b6d4', '#8b5cf6'],
+};
+const DISP: Record<string, [string, string]> = {
+  '--disp-rendered': ['#34d399', '#045c4c'], // review M2 then N1: apart from ok text, from f071 under protanopia, from the task frame
+  '--disp-returned-to-script': ['#22d3ee', '#1c5d99'],
+  '--disp-sliced-off': ['#f59e0b', '#883800'], // review M2: 3.8 from warn text before
+  '--disp-budget-truncated': ['#fcd34d', '#b05a09'],
+  '--disp-below-floor': ['#a78bfa', '#5b2fb3'],
+  '--disp-filter-dropped': ['#c4b5fd', '#7c4dd0'],
+  '--disp-deduped': ['#94a3b8', '#4d5a6b'],
+  '--disp-superseded': ['#cbd5e1', '#6b7787'],
+  '--disp-replaced-at-merge': ['#64748b', '#2a3646'],
+  '--disp-f071-excluded': ['#7c8da3', '#5d6a7b'],
+  '--disp-type-excluded': ['#475569', '#3b4859'],
+  '--disp-unaccounted': ['#f472b6', '#a3185c'],
+};
+const PR2: Record<string, [string, string]> = {
+  ...SERIES,
+  ...GV,
+  ...REL,
+  ...DISP,
+  '--seg-ink': ['#0a0a0f', '#ffffff'], // the count label on a Retrieval funnel segment
+  '--badge-good-bg': ['rgba(52, 211, 153, 0.15)', '#e3f2e8'],
+  '--badge-warn-bg': ['rgba(251, 191, 36, 0.15)', '#f8efdc'],
+  '--badge-bad-bg': ['rgba(248, 113, 113, 0.15)', '#fbe9e8'],
+  '--track': ['rgba(255, 255, 255, 0.06)', '#e3e9ec'], // a doughnut's remainder, a panel wash
+  '--track-strong': ['rgba(255, 255, 255, 0.08)', '#e3e9ec'],
+  '--bar-bg': ['rgba(17, 17, 24, 0.6)', '#f4f7f8'], // the Graph controls bar
+  '--glow-blur': ['6px', '0px'],
+  '--chart-text': ['#94a3b8', '#56687a'], // a chart's ticks and legend on a paper ground
+  '--chart-grid': ['#1e293b', '#e3e9ec'],
+  '--gv-edge-opacity': ['0.5', '0.75'], // review M8: Graph edges, less faint on white
+  '--gv-edge-opacity-inferred': ['0.3', '0.5'],
+  '--series-0': ['#7c6af7', '#274455'], // review M1/R2: was --accent (the question blue), then violet; a slate navy of its own
+  '--save-ok': ['#4ade80', '#23703d'], // Browse: a censor's save message (not --ok-text, whose dark is #34d399)
+  '--save-err': ['#f87171', '#b02a22'],
+  '--tone-bad': ['#ef4444', '#b02a22'], // Memory write health: a tripped rule's border and tint (not --err-text's #f87171)
+  '--btn-ink': ['#fff', '#ffffff'], // text on an accent-filled button (--on-accent is near-black under dark)
+};
+for (const [k, [dark]] of Object.entries(PR2)) NEW_DARK[k] = dark;
+
+// The legacy memory-type colours keep their golden dark values (ORIGIN_ROOT) and get paper ones (Retrieval's chips).
+const LEGACY_PAPER: Record<string, string> = {
+  '--fact-color': '#159a7a', // review M6: one colour per memory type on paper, the Graph's
+  '--episode-color': '#1f5fa8',
+  '--decision-color': '#802c66',
+  '--procedure-color': '#d0620d',
+  '--censor-color': '#985c50',
+  '--heartbeat-color': '#4f5f6f',
+  '--chunk-color': '#8b5cf6',
+  '--pending': '#1b6a9c',
+};
+
 const FRAMES = ['conversation', 'question', 'task', 'decision', 'debug', 'creative', 'initiation'];
 const PAPER_FRAMES: Record<string, string> = {
   conversation: '#55697a',
@@ -393,5 +487,212 @@ describe('contrast of the new values', () => {
     // The ring sits outside the pill, on the rail.
     expect(contrast(RAIL['--focus-ring'], RAIL['--surface'])).toBeGreaterThanOrEqual(3);
     expect(contrast(RAIL['--focus-ring'], RAIL['--surface-hover'])).toBeGreaterThanOrEqual(3);
+  });
+});
+
+// ── PR 2: series, graph, relation and disposition colours ─────────────────────────────────────────────────────────
+
+/** OKLab (Björn Ottosson) of an sRGB colour; distances below are Euclidean, times 100. */
+function oklab(c: string): [number, number, number] {
+  const lin = (v: number) => {
+    const s = v / 255;
+    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  };
+  const [r, g, b] = parseColor(c).slice(0, 3).map(lin);
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return [
+    0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+  ];
+}
+/** Colour-vision deficiency (Machado, Oliveira and Fernandes 2009, severity 1), applied to linear sRGB. */
+const CVD: Record<'protan' | 'deutan', number[][]> = {
+  protan: [[0.152286, 1.052583, -0.204868], [0.114503, 0.786281, 0.099216], [-0.003882, -0.048116, 1.051998]],
+  deutan: [[0.367322, 0.860646, -0.227968], [0.280085, 0.672501, 0.047413], [-0.01182, 0.04294, 0.968881]],
+};
+function oklabLinear([r, g, b]: number[]): [number, number, number] {
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return [
+    0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+  ];
+}
+function linearRgb(c: string): number[] {
+  return parseColor(c).slice(0, 3).map((v) => {
+    const s = v / 255;
+    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  });
+}
+function okDistance(a: string, b: string, cvd?: 'protan' | 'deutan'): number {
+  const see = (c: string) => {
+    const lin = linearRgb(c);
+    if (!cvd) return oklabLinear(lin);
+    return oklabLinear(CVD[cvd].map((row) => Math.min(1, Math.max(0, row[0] * lin[0] + row[1] * lin[1] + row[2] * lin[2]))));
+  };
+  const [x, y] = [see(a), see(b)];
+  return 100 * Math.hypot(x[0] - y[0], x[1] - y[1], x[2] - y[2]);
+}
+
+describe('PR 2 tokens: series, graph, relations, dispositions', () => {
+  it('the OKLab helper agrees with known values', () => {
+    expect(oklab('#ffffff')[0]).toBeCloseTo(1, 3);
+    expect(okDistance('#000000', '#ffffff')).toBeCloseTo(100, 1);
+    expect(okDistance('#159a7a', '#159a7a')).toBe(0);
+  });
+
+  it('every new token has the dark value the screens used, and a paper value', () => {
+    for (const [k, [dark, paper]] of Object.entries(PR2)) {
+      expect(DARK[k], k).toBe(dark);
+      expect(PAPER[k], k).toBe(paper);
+    }
+    for (const [k, paper] of Object.entries(LEGACY_PAPER)) {
+      expect(DARK[k], k).toBe(ORIGIN_ROOT[k]); // the dark golden is untouched
+      expect(PAPER[k], k).toBe(paper);
+    }
+  });
+
+  it('series 1 to 9 are at least 3:1 on the white card; any two of 1 to 8 are at least 7 apart', () => {
+    const paper = Object.values(SERIES).map(([, p]) => p);
+    for (const [i, c] of paper.slice(0, 9).entries()) expect(contrast(c, '#ffffff'), `series-${i + 1}`).toBeGreaterThanOrEqual(3);
+    for (let i = 0; i < 8; i++) {
+      for (let j = i + 1; j < 8; j++) {
+        expect(okDistance(paper[i], paper[j]), `series-${i + 1} and series-${j + 1}`).toBeGreaterThanOrEqual(7);
+      }
+    }
+  });
+
+  it('series 10 to 13 are at least 3:1 and at least 7 apart from every other slot', () => {
+    const paper = Object.values(SERIES).map(([, p]) => p);
+    for (let i = 9; i < 13; i++) {
+      expect(contrast(paper[i], '#ffffff'), `series-${i + 1}`).toBeGreaterThanOrEqual(3);
+      for (let j = 0; j < 13; j++) {
+        if (j !== i) expect(okDistance(paper[i], paper[j]), `series-${i + 1} and series-${j + 1}`).toBeGreaterThanOrEqual(7);
+      }
+    }
+  });
+
+  it('series 0, the one-series chart mark: its own colour, at least 7 from every slot and 6 from every frame (review R2)', () => {
+    const zero = PAPER['--series-0'];
+    expect(contrast(zero, '#ffffff')).toBeGreaterThanOrEqual(3);
+    for (const [k, [, p]] of Object.entries(SERIES)) expect(okDistance(zero, p), `--series-0 and ${k}`).toBeGreaterThanOrEqual(7);
+    for (const f of [...FRAMES, 'other']) expect(okDistance(zero, PAPER[`--f-${f}`]), `--series-0 and --f-${f}`).toBeGreaterThanOrEqual(6);
+  });
+
+  it('the CVD helper reproduces the review\'s figures (the old olive chunk against procedure)', () => {
+    expect(okDistance('#7a8a1a', '#d0620d', 'deutan')).toBeCloseTo(3.4, 1);
+    expect(okDistance('#7a8a1a', '#d0620d', 'protan')).toBeCloseTo(5.5, 1);
+    expect(okDistance('#123456', '#123456', 'protan')).toBe(0);
+  });
+
+  it('the five graph node colours: at least 3:1 on white, and at least 12 apart', () => {
+    const nodes = Object.entries(GV_NODES).map(([k, [, p]]) => [k, p] as const);
+    for (const [k, c] of nodes) expect(contrast(c, '#ffffff'), k).toBeGreaterThanOrEqual(3);
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        expect(okDistance(nodes[i][1], nodes[j][1]), `${nodes[i][0]} and ${nodes[j][0]}`).toBeGreaterThanOrEqual(12);
+      }
+    }
+    expect(contrast(PAPER['--gv-other'], '#ffffff')).toBeGreaterThanOrEqual(3);
+    // The rings and the label halo on the white card.
+    expect(contrast(PAPER['--gv-select'], '#ffffff')).toBeGreaterThanOrEqual(3);
+    expect(contrast(PAPER['--muted'], PAPER['--gv-outline'])).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('graph node colours under red-green colour blindness: chunk at least 12 from every type, other pairs at least 8', () => {
+    // Review I4: the olive chunk and the orange procedure read as one colour under deuteranopia (3.4). The re-review:
+    // episode and decision were 4.2 apart under protanopia; --gv-decision moved, so no pair is exempt.
+    const nodes = Object.entries(GV_NODES).map(([k, [, p]]) => [k.replace('--gv-', ''), p] as const);
+    for (const cvd of ['protan', 'deutan'] as const) {
+      for (let i = 0; i < nodes.length; i++) {
+        for (let j = i + 1; j < nodes.length; j++) {
+          const [a, b] = [nodes[i], nodes[j]];
+          const d = okDistance(a[1], b[1], cvd);
+          if (a[0] === 'chunk' || b[0] === 'chunk') expect(d, `${cvd}: ${a[0]} and ${b[0]}`).toBeGreaterThanOrEqual(12);
+          else expect(d, `${cvd}: ${a[0]} and ${b[0]}`).toBeGreaterThanOrEqual(8);
+        }
+      }
+    }
+  });
+
+  it('no categorical paper colour is within 6 (OKLab) of a status fill or text: a hue carries one meaning (review M2)', () => {
+    const status = ['--green', '--yellow', '--red', '--ok-text', '--warn-text', '--err-text'].map((t) => [t, PAPER[t]] as const);
+    const categorical: [string, string][] = [
+      ...Object.entries({ ...SERIES, '--series-0': PR2['--series-0'], ...GV_NODES, '--gv-other': GV['--gv-other'], ...REL, ...DISP }).map(([k, [, p]]) => [k, p] as [string, string]),
+      ...Object.entries(LEGACY_PAPER).filter(([k]) => k !== '--pending'),
+    ];
+    for (const [k, c] of categorical) {
+      for (const [s, sc] of status) expect(okDistance(c, sc), `${k} (${c}) and ${s} (${sc})`).toBeGreaterThanOrEqual(6);
+    }
+  });
+
+  it('a memory type has one colour on every Memory screen on paper: the legacy type colours are the Graph\'s', () => {
+    // Review M6. Under dark the legacy fact and episode colours are the Graph's the other way round (golden-pinned).
+    for (const t of ['fact', 'episode', 'decision', 'procedure', 'chunk']) expect(PAPER[`--${t}-color`], t).toBe(PAPER[`--gv-${t}`]);
+  });
+
+  it('every relation colour and legacy type colour is at least 3:1 on white', () => {
+    for (const [k, [, p]] of Object.entries(REL)) expect(contrast(p, '#ffffff'), k).toBeGreaterThanOrEqual(3);
+    for (const [k, p] of Object.entries(LEGACY_PAPER)) expect(contrast(p, '#ffffff'), k).toBeGreaterThanOrEqual(3);
+  });
+
+  it('no categorical paper colour is a frame colour or a status fill or text (a hue carries one meaning)', () => {
+    const taken = new Set([
+      ...Object.keys(PAPER).filter((k) => k.startsWith('--f-')).map((k) => PAPER[k].toLowerCase()),
+      '#2f8a4e', '#b7791f', '#d2352b', '#23703d', '#8a5a0e', '#b02a22',
+    ]);
+    expect(taken.size).toBeGreaterThanOrEqual(14);
+    const categorical = { ...SERIES, ...GV_NODES, '--gv-other': GV['--gv-other'], ...REL, ...DISP };
+    for (const [k, [, p]] of Object.entries(categorical)) expect(taken.has(p.toLowerCase()), k).toBe(false);
+  });
+
+  it('a contradicts edge is told from a plain related_to edge under protanopia (review N2)', () => {
+    expect(okDistance(PAPER['--rel-contradicts'], PAPER['--rel-related-to'], 'protan')).toBeGreaterThanOrEqual(6);
+    expect(okDistance(PAPER['--rel-contradicts'], PAPER['--rel-related-to'], 'deutan')).toBeGreaterThanOrEqual(6);
+    // --series-6 and the legacy censor colour share the hex.
+    expect(PAPER['--series-6']).toBe(PAPER['--rel-contradicts']);
+    expect(PAPER['--censor-color']).toBe(PAPER['--rel-contradicts']);
+  });
+
+  it('rendered, the one good outcome, stands apart in the funnel under red-green colour blindness and from the task frame (review N1)', () => {
+    const rendered = PAPER['--disp-rendered'];
+    for (const [k, [, p]] of Object.entries(DISP)) {
+      if (k === '--disp-rendered') continue;
+      expect(okDistance(rendered, p), k).toBeGreaterThanOrEqual(7);
+      for (const cvd of ['protan', 'deutan'] as const) expect(okDistance(rendered, p, cvd), `${cvd}: ${k}`).toBeGreaterThanOrEqual(4);
+    }
+    expect(okDistance(rendered, PAPER['--f-task'])).toBeGreaterThanOrEqual(6);
+  });
+
+  it('every disposition fill takes the white count label at 4.5:1 or more', () => {
+    for (const [k, [, p]] of Object.entries(DISP)) expect(contrast(PAPER['--seg-ink'], p), k).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('a chart\'s text on the white card is at least 4.5:1; status text on the badge tints too', () => {
+    expect(contrast(PAPER['--chart-text'], '#ffffff')).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--ok-text'], PAPER['--badge-good-bg'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--warn-text'], PAPER['--badge-warn-bg'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--err-text'], PAPER['--badge-bad-bg'])).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('memory write health: the verdict text on its tint over the page, the pills on the card, the button ink', () => {
+    const page = PAPER['--bg'];
+    expect(contrast(PAPER['--stat-ok'], tint(PAPER['--stat-ok'], 0.08, page))).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--err-text'], tint(PAPER['--tone-bad'], 0.1, page))).toBeGreaterThanOrEqual(4.5);
+    for (const t of ['--stat-ok', '--stat-warn', '--err-text']) expect(contrast(PAPER[t], '#ffffff'), t).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--btn-ink'], PAPER['--accent'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--tone-bad'], '#ffffff')).toBeGreaterThanOrEqual(3); // the tripped tile's border
+  });
+
+  it('the censor save messages are readable text on the white card and on the hover wash', () => {
+    for (const t of ['--save-ok', '--save-err']) {
+      expect(contrast(PAPER[t], '#ffffff'), t).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(PAPER[t], PAPER['--surface-hover']), t).toBeGreaterThanOrEqual(4.5);
+    }
   });
 });

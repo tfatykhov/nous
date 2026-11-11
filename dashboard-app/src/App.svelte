@@ -300,6 +300,8 @@
   .main-content {
     margin-left: var(--sidebar-width);
     flex: 1;
+    /* A flex item: without this a wide table or a chart canvas would widen it, and the page, at phone width. */
+    min-width: 0;
     min-height: 100dvh;
     padding: 1.5rem;
     /* Safe area for notched devices */

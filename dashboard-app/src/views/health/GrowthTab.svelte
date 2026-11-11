@@ -5,6 +5,8 @@
   import type { StatusData, StatusTimeseriesPoint, ObservabilityData } from '../../lib/types/api';
   import StaleBadge from '../../lib/ui/StaleBadge.svelte';
   import Chart from '../../lib/viz/Chart.svelte';
+  import { Button } from '../../lib/ui/button';
+  import { seriesToken, tint } from '../../lib/chartColors';
 
   // F108 Memory health, Growth tab: Overview's memory growth and fact categories (/status?dashboard=true) and
   // Observability's fact growth rate (/dashboard/observability). Both are fetched once; Refresh reloads both.
@@ -49,7 +51,8 @@
     };
   }
 
-  const DOUGHNUT_COLORS = ['#60a5fa', '#34d399', '#a78bfa', '#fb923c', '#f87171', '#fbbf24', '#6b6b8a', '#e2e2f0'];
+  /** The doughnut's segment colours: series 1 to 13, so a ninth category never repeats the first beside it. */
+  const doughnutColors = (n: number) => Array.from({ length: n }, (_, i) => seriesToken(i));
 
   // ── From Observability ────────────────────────────────────────────────
 
@@ -66,8 +69,8 @@
       datasets: [{
         label: 'Fact delta',
         data: points.map((p) => p.v),
-        borderColor: '#60a5fa',
-        backgroundColor: 'rgba(96,165,250,0.1)',
+        borderColor: 'var(--series-1)',
+        backgroundColor: tint('--series-1', 0.1),
         fill: true,
         borderWidth: 2,
         pointRadius: 2,
@@ -87,9 +90,9 @@
 <header class="view-head">
   <p class="subtitle">Facts, episodes and decisions created over 30 days, fact categories, and the fact growth rate</p>
   <div class="head-right">
-    <button class="refresh-btn" onclick={refreshAll} disabled={$store.loading || $obs.loading}>
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={$store.loading || $obs.loading}>
       {$store.loading || $obs.loading ? 'Loading…' : 'Refresh'}
-    </button>
+    </Button>
     <StaleBadge state={$store} />
   </div>
 </header>
@@ -109,9 +112,9 @@
           data={{
             labels: ts.labels,
             datasets: [
-              { label: 'Facts',     data: ts.facts,     borderColor: '#60a5fa', backgroundColor: 'rgba(96,165,250,0.10)', fill: true, borderWidth: 2, pointRadius: 1 },
-              { label: 'Episodes',  data: ts.episodes,  borderColor: '#34d399', backgroundColor: 'rgba(52,211,153,0.10)', fill: true, borderWidth: 2, pointRadius: 1 },
-              { label: 'Decisions', data: ts.decisions, borderColor: '#a78bfa', backgroundColor: 'rgba(167,139,250,0.10)', fill: true, borderWidth: 2, pointRadius: 1 },
+              { label: 'Facts',     data: ts.facts,     borderColor: 'var(--series-1)', backgroundColor: tint('--series-1', 0.1), fill: true, borderWidth: 2, pointRadius: 1 },
+              { label: 'Episodes',  data: ts.episodes,  borderColor: 'var(--series-2)', backgroundColor: tint('--series-2', 0.1), fill: true, borderWidth: 2, pointRadius: 1 },
+              { label: 'Decisions', data: ts.decisions, borderColor: 'var(--series-3)', backgroundColor: tint('--series-3', 0.1), fill: true, borderWidth: 2, pointRadius: 1 },
             ],
           }}
           options={{
@@ -137,7 +140,7 @@
           type="doughnut"
           data={{
             labels: fc.labels,
-            datasets: [{ data: fc.values, backgroundColor: DOUGHNUT_COLORS.slice(0, fc.labels.length), borderWidth: 0, hoverOffset: 4 }],
+            datasets: [{ data: fc.values, backgroundColor: doughnutColors(fc.labels.length), borderWidth: 0, hoverOffset: 4 }],
           }}
           options={{ cutout: '60%', plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } } }}
           height="240px"
@@ -196,28 +199,16 @@
     margin: 0 0 0.75rem;
   }
 
+  :global(html[data-look="paper"] [data-ground="paper"]) h2 {
+    font-size: 15px;
+    font-weight: 650;
+  }
+
   .head-right {
     display: flex;
     align-items: center;
     gap: 0.5rem;
     flex-shrink: 0;
-  }
-
-  .refresh-btn {
-    font-size: 0.8125rem;
-    padding: 0.25rem 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
-    background: var(--surface);
-    color: var(--text);
-    cursor: pointer;
-  }
-  .refresh-btn:hover:not(:disabled) {
-    background: var(--surface-hover);
-  }
-  .refresh-btn:disabled {
-    opacity: 0.5;
-    cursor: default;
   }
 
   .chart-row {
@@ -234,9 +225,14 @@
 
   .chart-card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
     padding: 1rem;
+  }
+
+  :global(html[data-look="paper"] [data-ground="paper"]) .chart-card {
+    padding: 1.125rem 1.25rem;
   }
 
   .mt {
@@ -267,7 +263,7 @@
 
   .status-msg.error,
   .empty.error {
-    color: var(--red, #ef4444);
+    color: var(--err-text);
   }
 
   .retry-link {

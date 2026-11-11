@@ -200,40 +200,46 @@
   .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   h1 { font-size: 1.375rem; font-weight: 700; margin: 0 0 0.25rem; }
   h2 { font-size: 0.9375rem; font-weight: 600; margin: 0; }
+  :global(html[data-look="paper"] [data-ground="paper"]) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
+  :global(html[data-look="paper"] [data-ground="paper"]) h2 { font-weight: 650; }
   .subtitle { font-size: 0.8125rem; color: var(--muted); margin: 0; }
   .strip { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem 2rem; flex-wrap: wrap;
-    padding: 0.875rem 1.125rem; border-radius: 8px; border: 1px solid; margin-bottom: 1rem; }
-  .verdict-ok { color: #10b981; border-color: rgba(16, 185, 129, 0.35); background: rgba(16, 185, 129, 0.08); }
-  .verdict-bad { color: var(--red); border-color: rgba(239, 68, 68, 0.5); background: rgba(239, 68, 68, 0.1); }
+    padding: 0.875rem 1.125rem; border-radius: var(--card-radius); border: 1px solid; margin-bottom: 1rem; }
+  /* Status by token: the alphas of the old literals are the mix percentages (dark identical). */
+  .verdict-ok { color: var(--stat-ok); border-color: color-mix(in srgb, var(--stat-ok) 35%, transparent);
+    background: color-mix(in srgb, var(--stat-ok) 8%, transparent); }
+  .verdict-bad { color: var(--err-text); border-color: color-mix(in srgb, var(--tone-bad) 50%, transparent);
+    background: color-mix(in srgb, var(--tone-bad) 10%, transparent); }
   .verdict-title { font-size: 0.9375rem; font-weight: 700; }
   .strip .small { color: var(--text); }
-  .ack-error { color: var(--red); font-size: 0.8125rem; margin: 0 0 1rem; }
+  .ack-error { color: var(--err-text); font-size: 0.8125rem; margin: 0 0 1rem; }
   .tiles-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(250px, 100%), 1fr)); gap: 1rem; }
-  .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem 1.125rem;
+  .tile { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow); padding: 1rem 1.125rem;
     display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; }
-  .tile.tone-bad { border-color: rgba(239, 68, 68, 0.6); }
-  .tile.tone-warn { border-color: rgba(245, 158, 11, 0.5); }
+  .tile.tone-bad { border-color: color-mix(in srgb, var(--tone-bad) 60%, transparent); }
+  .tile.tone-warn { border-color: color-mix(in srgb, var(--stat-warn) 50%, transparent); }
   .tile p { margin: 0; }
   .tile-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem; }
   .rule-id { font-family: var(--font-mono); font-size: 0.75rem; color: var(--muted); }
   .value { font-size: 1.5rem; font-weight: 700; }
   .summary { font-size: 0.8125rem; overflow-wrap: anywhere; }
   .ack { display: flex; flex-direction: column; gap: 0.375rem; margin-top: 0.25rem; }
-  .ack input { padding: 0.375rem 0.5rem; border: 1px solid var(--border); border-radius: 6px; background: var(--bg, transparent);
+  .ack input { padding: 0.375rem 0.5rem; border: 1px solid var(--border); border-radius: var(--ctl-radius); background: var(--bg);
     color: var(--text); font-size: 0.8125rem; min-width: 0; }
-  .ack button { align-self: flex-start; padding: 0.375rem 0.875rem; border-radius: 6px; border: 1px solid var(--accent);
-    background: var(--accent); color: #fff; font-size: 0.8125rem; font-weight: 600; cursor: pointer; }
+  .ack button { align-self: flex-start; padding: 0.375rem 0.875rem; border-radius: var(--ctl-radius); border: 1px solid var(--accent);
+    background: var(--accent); color: var(--btn-ink); font-size: 0.8125rem; font-weight: 600; cursor: pointer; }
   .ack button:disabled { opacity: 0.6; cursor: default; }
   .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.6875rem; font-weight: 600;
     border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
-  .pill-bad { color: var(--red); border-color: rgba(239, 68, 68, 0.6); }
-  .pill-warn { color: #f59e0b; border-color: rgba(245, 158, 11, 0.5); }
-  .pill-ok { color: #10b981; border-color: rgba(16, 185, 129, 0.5); }
-  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; min-width: 0; margin-top: 1.25rem; }
+  .pill-bad { color: var(--err-text); border-color: color-mix(in srgb, var(--tone-bad) 60%, transparent); }
+  .pill-warn { color: var(--stat-warn); border-color: color-mix(in srgb, var(--stat-warn) 50%, transparent); }
+  .pill-ok { color: var(--stat-ok); border-color: color-mix(in srgb, var(--stat-ok) 50%, transparent); }
+  .panel { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow);
+    padding: 1.25rem; min-width: 0; margin-top: 1.25rem; }
   .panel p { margin: 0.5rem 0 0; }
   .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem 1rem; flex-wrap: wrap; margin-bottom: 0.875rem; }
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 0.75rem; margin: 0; }
-  .tiles dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .tiles dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform); letter-spacing: var(--label-tracking); }
   .tiles dd { margin: 0.125rem 0 0; font-size: 1.375rem; font-weight: 700; }
   /* contain: a wide table scrolls in its own box instead of widening the page (main is a flex item). */
   .table-wrap { overflow-x: auto; contain: inline-size; }
@@ -241,12 +247,12 @@
   .stats th, .stats td { padding: 0.375rem 0.5rem; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
   .stats th:first-child, .stats td:first-child { text-align: left; }
   .stats thead th { font-size: 0.6875rem; font-weight: 600; color: var(--muted); }
-  .stats td.hot { color: var(--red); font-weight: 700; }
+  .stats td.hot { color: var(--err-text); font-weight: 700; }
   .acks td, .acks th { text-align: left; }
   .acks td.note { white-space: normal; overflow-wrap: anywhere; min-width: 12rem; }
   .empty { color: var(--muted); font-size: 0.875rem; text-align: center; padding: 1rem 0; margin: 0; }
   .small { font-size: 0.75rem; }
   .muted { color: var(--muted); }
   .state-msg { margin-top: 2rem; text-align: center; color: var(--muted); font-size: 0.875rem; }
-  .state-msg.error { color: var(--red); }
+  .state-msg.error { color: var(--err-text); }
 </style>

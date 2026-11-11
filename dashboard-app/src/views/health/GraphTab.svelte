@@ -9,6 +9,8 @@
   import StatGrid from '../../lib/ui/StatGrid.svelte';
   import StaleBadge from '../../lib/ui/StaleBadge.svelte';
   import Chart from '../../lib/viz/Chart.svelte';
+  import { Button } from '../../lib/ui/button';
+  import { tint } from '../../lib/chartColors';
 
   // Load-once: interval so large it never auto-fires. Refresh button handles reload.
   const store = usePoll(
@@ -64,11 +66,12 @@
         {
           label: 'Density',
           data: d.density_history.map((p) => p.density),
-          borderColor: '#7c6af7',
-          backgroundColor: 'rgba(124, 106, 247, 0.1)',
+          borderColor: 'var(--series-0)',
+          backgroundColor: tint('--series-0', 0.1),
           fill: true,
           pointBackgroundColor: d.density_history.map((p) =>
-            p.density >= 3.0 ? '#34d399' : p.density >= 1.0 ? '#fbbf24' : '#f87171',
+            // Status: good, watch, bad.
+            p.density >= 3.0 ? 'var(--green)' : p.density >= 1.0 ? 'var(--yellow)' : 'var(--red)',
           ),
           pointRadius: 4,
         },
@@ -95,14 +98,14 @@
             type: 'line',
             yMin: 3.0,
             yMax: 3.0,
-            borderColor: 'rgba(52, 211, 153, 0.5)',
+            borderColor: tint('--green', 0.5),
             borderWidth: 1,
             borderDash: [5, 5],
             label: {
               content: 'Target: 3.0',
               enabled: true,
               position: 'end',
-              color: 'rgba(52, 211, 153, 0.7)',
+              color: tint('--green', 0.7),
               font: { size: 10 },
             },
           },
@@ -118,8 +121,8 @@
         {
           label: 'Edges Created',
           data: d.daily_edges.map((p) => p.count),
-          backgroundColor: 'rgba(124, 106, 247, 0.5)',
-          borderColor: '#7c6af7',
+          backgroundColor: tint('--series-0', 0.5),
+          borderColor: 'var(--series-0)',
           borderWidth: 1,
         },
       ],
@@ -144,8 +147,8 @@
         {
           label: 'Node Count',
           data: d.degree_distribution.map((p) => p.count),
-          backgroundColor: 'rgba(96, 165, 250, 0.5)',
-          borderColor: '#60a5fa',
+          backgroundColor: tint('--series-1', 0.5),
+          borderColor: 'var(--series-1)',
           borderWidth: 1,
         },
       ],
@@ -174,10 +177,11 @@
         {
           label: 'Orphan Nodes',
           data: d.orphan_trend.map((p) => p.count),
-          borderColor: '#f87171',
-          backgroundColor: 'rgba(248, 113, 113, 0.1)',
+          // Orphans are a defect: the status red.
+          borderColor: 'var(--red)',
+          backgroundColor: tint('--red', 0.1),
           fill: true,
-          pointBackgroundColor: '#f87171',
+          pointBackgroundColor: 'var(--red)',
         },
       ],
     };
@@ -205,15 +209,15 @@
         {
           label: 'Auto-linked',
           data: d.daily_edges.map((p) => p.auto),
-          backgroundColor: 'rgba(52, 211, 153, 0.5)',
-          borderColor: '#34d399',
+          backgroundColor: tint('--series-2', 0.5),
+          borderColor: 'var(--series-2)',
           borderWidth: 1,
         },
         {
           label: 'Manual',
           data: d.daily_edges.map((p) => p.manual),
-          backgroundColor: 'rgba(124, 106, 247, 0.5)',
-          borderColor: '#7c6af7',
+          backgroundColor: tint('--series-0', 0.5),
+          borderColor: 'var(--series-0)',
           borderWidth: 1,
         },
       ],
@@ -240,9 +244,9 @@
 <header class="view-head">
   <p class="subtitle">Density trends, edge creation, and node connectivity</p>
   <div class="head-right">
-    <button class="refresh-btn" onclick={refreshAll} disabled={$store.loading || $density.loading}>
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={$store.loading || $density.loading}>
       {$store.loading || $density.loading ? 'Loading…' : 'Refresh'}
-    </button>
+    </Button>
     <StaleBadge state={$store} />
   </div>
 </header>
@@ -470,28 +474,16 @@
     margin: 0 0 0.75rem;
   }
 
+  :global(html[data-look="paper"] [data-ground="paper"]) h2 {
+    font-size: 15px;
+    font-weight: 650;
+  }
+
   .head-right {
     display: flex;
     align-items: center;
     gap: 0.5rem;
     flex-shrink: 0;
-  }
-
-  .refresh-btn {
-    font-size: 0.8125rem;
-    padding: 0.25rem 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
-    background: var(--surface);
-    color: var(--text);
-    cursor: pointer;
-  }
-  .refresh-btn:hover:not(:disabled) {
-    background: var(--surface-hover);
-  }
-  .refresh-btn:disabled {
-    opacity: 0.5;
-    cursor: default;
   }
 
   /* ── Chart grid ──────────────────────────────────────────────── */
@@ -504,9 +496,14 @@
 
   .chart-card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
     padding: 1rem;
+  }
+
+  :global(html[data-look="paper"] [data-ground="paper"]) .chart-card {
+    padding: 1.125rem 1.25rem;
   }
 
   .full-width {
@@ -583,7 +580,7 @@
   }
 
   .status-msg.error {
-    color: var(--red, #ef4444);
+    color: var(--err-text);
   }
 
   .retry-link {
@@ -605,8 +602,9 @@
     gap: 0.75rem;
     padding: 0.625rem 1rem;
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
     margin: 1rem 0;
     font-size: 0.8125rem;
     flex-wrap: wrap;
@@ -629,15 +627,15 @@
   .badge {
     display: inline-block;
     padding: 0.15em 0.55em;
-    border-radius: 4px;
+    border-radius: 999px;
     font-size: 0.75rem;
     font-weight: 600;
     white-space: nowrap;
   }
 
-  .badge-good { background: rgba(52, 211, 153, 0.15); color: #34d399; }
-  .badge-warn { background: rgba(251, 191, 36,  0.15); color: #fbbf24; }
-  .badge-bad  { background: rgba(248, 113, 113, 0.15); color: #f87171; }
+  .badge-good { background: var(--badge-good-bg); color: var(--ok-text); }
+  .badge-warn { background: var(--badge-warn-bg); color: var(--warn-text); }
+  .badge-bad  { background: var(--badge-bad-bg); color: var(--err-text); }
 
   /* ── Data table (from Density) ───────────────────────────── */
   .data-table {

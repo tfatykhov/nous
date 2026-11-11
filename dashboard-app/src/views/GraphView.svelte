@@ -13,7 +13,10 @@
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import BottomSheet from '../lib/ui/BottomSheet.svelte';
+  import { Button } from '../lib/ui/button';
   import GraphViz, { type GraphNode } from '../lib/viz/Graph.svelte';
+  import { cssColor } from '../lib/chartColors';
+  import { readToken } from '../lib/overviewCharts';
 
   const store = usePoll(
     makePollStore<GraphData>(
@@ -135,7 +138,6 @@
         category: n.category ?? '',
         edge_count: edgeCounts[n.id] ?? 0,
         created_at: null, // not in backend response; kept for BottomSheet compat
-        color: typeColor(n.type),
       },
     }));
 
@@ -147,7 +149,6 @@
         relation: e.relation,
         weight: e.weight ?? 0.5,
         extraction_method: e.extraction_method ?? 'heuristic',
-        color: relationColor(e.relation),
       },
     }));
 
@@ -168,21 +169,30 @@
   });
 
   // ── Cytoscape style (mirrors graph.js) ──────────────────────────────────
-  const cytoscapeStyle = [
+  // Cytoscape draws on a canvas and cannot read var(): the stylesheet's colours are read off the graph's own element
+  // (Graph.svelte rebuilds it when the look changes). Node and edge fills come from each element's `color` data.
+  function cytoscapeStyle(el: Element) {
+    const c = (token: string) => cssColor(el, token);
+    /** A number token on the graph's ground (the edge opacities); `fallback`, the dark value, when unset. */
+    const n = (token: string, fallback: number) => {
+      const v = parseFloat(el.isConnected ? readToken(el, token) : '');
+      return Number.isFinite(v) ? v : fallback;
+    };
+    return [
     {
       selector: 'node',
       style: {
         'background-color': 'data(color)',
         'border-width': 1,
-        'border-color': 'rgba(0,0,0,0.3)',
+        'border-color': c('--gv-node-border'),
         width: 'mapData(edge_count, 0, 30, 14, 44)',
         height: 'mapData(edge_count, 0, 30, 14, 44)',
         label: '',
         'font-size': '9px',
-        color: '#8e8eab',
+        color: c('--muted'),
         'text-valign': 'bottom',
         'text-margin-y': 4,
-        'text-outline-color': '#0a0a0f',
+        'text-outline-color': c('--gv-outline'),
         'text-outline-width': 2,
       },
     },
@@ -194,7 +204,7 @@
     },
     {
       selector: 'node:selected',
-      style: { 'border-width': 3, 'border-color': '#fbbf24' },
+      style: { 'border-width': 3, 'border-color': c('--gv-select') },
     },
     {
       selector: 'node.faded',
@@ -202,14 +212,14 @@
     },
     {
       selector: 'node.searchHit',
-      style: { 'border-width': 2, 'border-color': '#fbbf24' },
+      style: { 'border-width': 2, 'border-color': c('--gv-select') },
     },
     {
       selector: 'edge',
       style: {
         'curve-style': 'bezier',
         'line-color': 'data(color)',
-        opacity: 0.5,
+        opacity: n('--gv-edge-opacity', 0.5),
         width: 'mapData(weight, 0, 1, 1, 4)',
         'target-arrow-color': 'data(color)',
         'target-arrow-shape': 'triangle',
@@ -218,13 +228,14 @@
     },
     {
       selector: 'edge[extraction_method = "inferred"]',
-      style: { opacity: 0.3, 'line-style': 'dashed' },
+      style: { opacity: n('--gv-edge-opacity-inferred', 0.3), 'line-style': 'dashed' },
     },
     {
       selector: 'edge.faded',
       style: { opacity: 0.05 },
     },
-  ];
+    ];
+  }
 
   // Cytoscape layout (cose — bundled, no plugin needed)
   const cytoscapeLayout = {
@@ -246,32 +257,24 @@
 
   // ── Helpers ──────────────────────────────────────────────────────────────
 
+  // A node type's and a relation's colour, as a token: var() works as is in the legend, the badge and the dots, and
+  // Graph.svelte resolves it for the canvas. Graph's own tokens (--gv-*), not the legacy --*-color ones, whose fact
+  // and episode are the other way round.
+  const RELATIONS = new Set([
+    'related_to', 'extracted_from', 'supports', 'informed_by', 'evidence_for', 'contradicts',
+    'supersedes', 'caused_by', 'discussed_in', 'part_of', 'summarized_by',
+  ]);
+
   function typeColor(type: string): string {
-    const map: Record<string, string> = {
-      fact: '#34d399',
-      episode: '#60a5fa',
-      decision: '#a78bfa',
-      procedure: '#fbbf24',
-      chunk: '#06b6d4',
-    };
-    return map[type] ?? '#6b6b8a';
+    return (ALL_TYPES as readonly string[]).includes(type) ? `var(--gv-${type})` : 'var(--gv-other)';
   }
 
   function relationColor(relation: string): string {
-    const map: Record<string, string> = {
-      related_to: '#7c6af7',
-      extracted_from: '#60a5fa',
-      supports: '#34d399',
-      informed_by: '#a78bfa',
-      evidence_for: '#fbbf24',
-      contradicts: '#f87171',
-      supersedes: '#fb923c',
-      caused_by: '#e2e2f0',
-      discussed_in: '#6b6b8a',
-      part_of: '#22d3ee',
-      summarized_by: '#06b6d4',
-    };
-    return map[relation] ?? '#6b6b8a';
+    return RELATIONS.has(relation) ? `var(--rel-${relation.replace(/_/g, '-')})` : 'var(--gv-other)';
+  }
+
+  function colorFor(kind: 'node' | 'edge', key: string): string {
+    return kind === 'node' ? typeColor(key) : relationColor(key);
   }
 
   function fmtDate(iso: string | null | undefined): string {
@@ -305,7 +308,7 @@
   </div>
   <div class="head-actions">
     <StaleBadge state={$store} />
-    <button class="btn-refresh" onclick={() => store.refresh()}>Refresh</button>
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => store.refresh()}>Refresh</Button>
   </div>
 </div>
 
@@ -368,6 +371,7 @@
         elements={elements()}
         layout={cytoscapeLayout}
         style={cytoscapeStyle}
+        {colorFor}
         {onNodeClick}
         {searchQuery}
         {hiddenTypes}
@@ -386,7 +390,7 @@
       <!-- Meta rows: render from detail when loaded, else from the head -->
       <div class="node-row">
         <span class="detail-label">Type</span>
-        <span class="type-badge" style:background="{typeColor(head.type)}20" style:color={typeColor(head.type)}>
+        <span class="type-badge" style:--type={typeColor(head.type)}>
           {head.type}
         </span>
       </div>
@@ -450,8 +454,8 @@
                   onclick={() => drillTo(c)}
                   title="Open {c.neighbor_type}: {c.neighbor_label}"
                 >
-                  <span class="conn-dir" title={c.direction === 'out' ? 'this → neighbor' : 'neighbor → this'}>
-                    {c.direction === 'out' ? '→' : '←'}
+                  <span class="conn-dir" title={c.direction === 'out' ? 'from this node to the neighbour' : 'from the neighbour to this node'}>
+                    {c.direction === 'out' ? 'to' : 'from'}
                   </span>
                   <span class="conn-type-dot" style:background={typeColor(c.neighbor_type)}></span>
                   <span class="conn-label">{c.neighbor_label || '(empty)'}</span>
@@ -471,8 +475,12 @@
 </BottomSheet>
 
 <style>
+  /* Colours and structure are tokens only (hexGuard): today's values under the dark look, rounded white cards and
+     pills on the paper ground. Paper-only chrome (the title size, chips as pills, the mono font) sits under a
+     paper-ground selector, so the dark look keeps its shapes and fonts. */
   .view-head {
     display: flex;
+    flex-wrap: wrap; /* at phone width the actions drop below the title rather than widen the page */
     align-items: flex-start;
     justify-content: space-between;
     gap: 1rem;
@@ -484,6 +492,13 @@
     font-weight: 700;
     color: var(--text);
     margin: 0 0 0.25rem;
+  }
+
+  :global(html[data-look="paper"] [data-ground="paper"]) .view-title {
+    font-size: 30px;
+    font-weight: 650;
+    letter-spacing: -0.022em;
+    line-height: 1.15;
   }
 
   .view-subtitle {
@@ -499,22 +514,6 @@
     flex-shrink: 0;
   }
 
-  .btn-refresh {
-    padding: 0.25rem 0.75rem;
-    font-size: 0.75rem;
-    font-weight: 500;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
-    background: var(--surface);
-    color: var(--text);
-    cursor: pointer;
-    white-space: nowrap;
-  }
-
-  .btn-refresh:hover {
-    background: var(--surface-hover);
-  }
-
   .state-msg {
     margin-top: 2rem;
     text-align: center;
@@ -523,7 +522,7 @@
   }
 
   .state-msg.error {
-    color: var(--red, #f87171);
+    color: var(--err-text);
   }
 
   .link-btn {
@@ -539,8 +538,9 @@
   /* ── Graph card ── */
   .chart-card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 8px);
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
     padding: 1.25rem;
     margin-top: 1.25rem;
   }
@@ -558,15 +558,15 @@
     gap: 0.75rem;
     padding: 0.75rem 1rem;
     border-bottom: 1px solid var(--border);
-    background: rgba(17, 17, 24, 0.6);
+    background: var(--bar-bg);
   }
 
   .search-input {
     padding: 0.25rem 0.625rem;
     font-size: 0.8125rem;
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
-    background: var(--bg, #0f172a);
+    border-radius: var(--ctl-radius);
+    background: var(--bg);
     color: var(--text);
     width: 180px;
     outline: none;
@@ -574,6 +574,16 @@
 
   .search-input:focus {
     border-color: var(--accent);
+  }
+
+  :global(html[data-look="paper"] [data-ground="paper"]) .search-input {
+    background: var(--surface);
+    padding: 0.3125rem 0.875rem;
+  }
+
+  :global(html[data-look="paper"] [data-ground="paper"]) .search-input:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 1px;
   }
 
   .type-filters {
@@ -590,6 +600,19 @@
     color: var(--muted);
     cursor: pointer;
     user-select: none;
+  }
+
+  /* Each type filter is a pill on paper: the box, the dot and the word inside one rounded chip. */
+  :global(html[data-look="paper"] [data-ground="paper"]) .type-check {
+    padding: 0.1875rem 0.625rem 0.1875rem 0.4375rem;
+    border-radius: 999px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+
+  :global(html[data-look="paper"] [data-ground="paper"]) .type-check input {
+    accent-color: var(--accent);
   }
 
   .type-dot {
@@ -655,22 +678,40 @@
     font-size: 0.6875rem;
     font-weight: 600;
     color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
   }
 
+  /* The type's colour (--type, set inline) on its own 12.5% tint (the old hex `20` alpha). */
   .type-badge {
     display: inline-block;
     padding: 2px 8px;
-    border-radius: 4px;
+    border-radius: 999px;
     font-size: 0.6875rem;
     font-weight: 600;
     border: 1px solid transparent;
+    background: color-mix(in srgb, var(--type) 12.5%, transparent);
+    color: var(--type);
+  }
+
+  /* On paper the node colours are 3:1 marks, not text: the badge's word is mixed toward the ink (4.5:1 or more). */
+  :global(html[data-look="paper"] [data-ground="paper"]) .type-badge {
+    color: color-mix(in srgb, var(--type) 70%, var(--text));
   }
 
   .mono {
     font-family: ui-monospace, monospace;
     font-size: 0.8125rem;
+  }
+
+  .conn-dir,
+  .conn-weight {
+    font-family: ui-monospace, monospace;
+  }
+
+  :global(html[data-look="paper"] [data-ground="paper"]) .mono,
+  :global(html[data-look="paper"] [data-ground="paper"]) .conn-weight {
+    font-family: var(--font-mono);
   }
 
   .detail-section {
@@ -683,6 +724,7 @@
     color: var(--text);
     white-space: pre-wrap;
     word-break: break-word;
+    overflow-wrap: anywhere;
     line-height: 1.5;
   }
 
@@ -723,7 +765,7 @@
   .rel-count {
     color: var(--muted);
     font-size: 0.6875rem;
-    background: var(--surface-hover, rgba(255, 255, 255, 0.06));
+    background: var(--surface-hover);
     border-radius: 999px;
     padding: 0 0.4rem;
     line-height: 1.4;
@@ -745,17 +787,23 @@
   }
 
   .conn-item:hover {
-    background: var(--surface-hover, rgba(255, 255, 255, 0.06));
+    background: var(--surface-hover);
   }
 
   .conn-item.inactive {
     opacity: 0.55;
   }
 
+  /* The direction is a word ("to" or "from"), muted, in a fixed width so the rows line up. */
   .conn-dir {
     color: var(--muted);
-    font-family: ui-monospace, monospace;
     flex-shrink: 0;
+    min-width: 2.25rem;
+    font-size: 0.6875rem;
+  }
+
+  :global(html[data-look="paper"] [data-ground="paper"]) .conn-dir {
+    font-family: var(--font-ui);
   }
 
   .conn-type-dot {
@@ -767,6 +815,7 @@
 
   .conn-label {
     flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -774,12 +823,12 @@
 
   .conn-flag {
     font-size: 0.625rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--red, #f87171);
-    border: 1px solid var(--red, #f87171);
-    border-radius: 3px;
-    padding: 0 0.25rem;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
+    color: var(--err-text);
+    border: 1px solid var(--red);
+    border-radius: 999px;
+    padding: 0 0.375rem;
     flex-shrink: 0;
   }
 
@@ -794,9 +843,5 @@
 
   .conn-method {
     font-style: italic;
-  }
-
-  .conn-weight {
-    font-family: ui-monospace, monospace;
   }
 </style>

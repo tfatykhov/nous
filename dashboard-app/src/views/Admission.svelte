@@ -7,6 +7,8 @@
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import DataTable from '../lib/ui/DataTable.svelte';
   import Chart from '../lib/viz/Chart.svelte';
+  import { Button } from '../lib/ui/button';
+  import { tint } from '../lib/chartColors';
 
   // Embedded in Memory health's Writes tab: that screen's header is the title, so this view drops its h1
   // (its subtitle, refresh button and staleness badge stay).
@@ -81,7 +83,7 @@
     const counts = d.score_distribution.map((b) => b.count);
     const colors = d.score_distribution.map((b) => {
       const start = parseFloat(b.bucket.split('-')[0]);
-      return start >= threshold ? '#34d399' : '#f87171';
+      return start >= threshold ? 'var(--green)' : 'var(--red)'; // admitted or rejected: an outcome, so status
     });
     return {
       labels,
@@ -102,9 +104,9 @@
     return {
       labels: sources,
       datasets: [
-        { label: 'Admitted', data: sources.map((s) => d.by_source[s].admitted), backgroundColor: '#34d399' },
-        { label: 'Rejected', data: sources.map((s) => d.by_source[s].rejected), backgroundColor: '#f87171' },
-        { label: 'Bypassed', data: sources.map((s) => d.by_source[s].bypassed ?? 0), backgroundColor: '#6b6b8a' },
+        { label: 'Admitted', data: sources.map((s) => d.by_source[s].admitted), backgroundColor: 'var(--green)' },
+        { label: 'Rejected', data: sources.map((s) => d.by_source[s].rejected), backgroundColor: 'var(--red)' },
+        { label: 'Bypassed', data: sources.map((s) => d.by_source[s].bypassed ?? 0), backgroundColor: 'var(--series-7)' },
       ],
     };
   }
@@ -122,8 +124,8 @@
     return {
       labels: cats,
       datasets: [
-        { label: 'Admitted', data: cats.map((c) => d.by_category[c].admitted), backgroundColor: '#34d399' },
-        { label: 'Rejected', data: cats.map((c) => d.by_category[c].rejected), backgroundColor: '#f87171' },
+        { label: 'Admitted', data: cats.map((c) => d.by_category[c].admitted), backgroundColor: 'var(--green)' },
+        { label: 'Rejected', data: cats.map((c) => d.by_category[c].rejected), backgroundColor: 'var(--red)' },
       ],
     };
   }
@@ -142,8 +144,8 @@
       datasets: [{
         label: 'Admission Rate (%)',
         data: d.daily_trend.map((t) => t.scored > 0 ? +((t.admitted / t.scored) * 100).toFixed(1) : null),
-        borderColor: '#34d399',
-        backgroundColor: 'rgba(52,211,153,0.1)',
+        borderColor: 'var(--green)',
+        backgroundColor: tint('--green', 0.1),
         fill: true,
         spanGaps: true,
       }],
@@ -164,8 +166,8 @@
       datasets: [{
         label: 'Avg Score',
         data: d.daily_trend.map((t) => t.avg_score),
-        borderColor: '#7c6af7',
-        backgroundColor: 'rgba(124,106,247,0.1)',
+        borderColor: 'var(--series-0)',
+        backgroundColor: tint('--series-0', 0.1),
         fill: true,
         spanGaps: true,
       }],
@@ -182,7 +184,7 @@
 
   function bypassChartData(d: AdmissionData) {
     const reasons = Object.keys(d.bypass_breakdown);
-    const palette = ['#7c6af7', '#60a5fa', '#34d399', '#fb923c', '#f87171', '#6b6b8a'];
+    const palette = ['var(--series-0)', 'var(--series-1)', 'var(--series-2)', 'var(--series-4)', 'var(--series-5)', 'var(--series-7)'];
     return {
       labels: reasons,
       datasets: [{
@@ -245,9 +247,9 @@
     <p class="subtitle">F023 Memory Admission — score analysis and threshold tuning</p>
   </div>
   <div class="head-right">
-    <button class="refresh-btn" onclick={() => void store.refresh()} disabled={$store.loading}>
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void store.refresh()} disabled={$store.loading}>
       {$store.loading ? 'Loading…' : 'Refresh'}
-    </button>
+    </Button>
     <StaleBadge state={$store} />
   </div>
 </header>
@@ -298,7 +300,7 @@
     {#if d.score_distribution.length > 0}
       <section class="chart-card mt">
         <h2>Score Distribution</h2>
-        <p class="section-note">Green bars ≥ threshold ({d.config.threshold}); red bars below. Colors update with simulator.</p>
+        <p class="section-note">Green bars at or above the threshold ({d.config.threshold}); red bars below. Colors update with simulator.</p>
         <Chart type="bar" data={scoreDistChartData(d, simThreshold)} options={scoreDistOptions} height="260px" />
       </section>
     {/if}
@@ -387,14 +389,14 @@
             {#if entry && typeof entry !== 'string'}
               <div class="dim-card">
                 <h3>{dim.replace('_', ' ')}</h3>
-                {#each [{ label: 'Admitted', stats: entry.admitted, color: '#34d399' }, { label: 'Rejected', stats: entry.rejected, color: '#f87171' }] as { label, stats, color }}
+                {#each [{ label: 'Admitted', stats: entry.admitted, color: 'var(--green)' }, { label: 'Rejected', stats: entry.rejected, color: 'var(--red)' }] as { label, stats, color }}
                   <div class="bp-row">
                     <span class="bp-label">{label}</span>
                     {#if isBoxStats(stats)}
                       {@const maxVal = Math.max(1.0, stats.max)}
                       <div class="bp-track">
-                        <div class="bp-whisker" style:left={pct(stats.min, maxVal)} style:width={pct(stats.max - stats.min, maxVal)} style:background="{color}30"></div>
-                        <div class="bp-box"    style:left={pct(stats.q1, maxVal)}  style:width={pct(stats.q3 - stats.q1, maxVal)}   style:background="{color}80"></div>
+                        <div class="bp-whisker" style:left={pct(stats.min, maxVal)} style:width={pct(stats.max - stats.min, maxVal)} style:background="color-mix(in srgb, {color} 18.8%, transparent)"></div>
+                        <div class="bp-box"    style:left={pct(stats.q1, maxVal)}  style:width={pct(stats.q3 - stats.q1, maxVal)}   style:background="color-mix(in srgb, {color} 50.2%, transparent)"></div>
                         <div class="bp-median" style:left={pct(stats.median, maxVal)} style:background={color}></div>
                       </div>
                       <span class="bp-vals">{stats.min.toFixed(2)} / {stats.median.toFixed(2)} / {stats.max.toFixed(2)}</span>
@@ -483,6 +485,13 @@
     margin: 0 0 0.125rem;
   }
 
+  :global(html[data-look="paper"] [data-ground="paper"]) h1 {
+    font-size: 30px;
+    font-weight: 650;
+    letter-spacing: -0.022em;
+    line-height: 1.15;
+  }
+
   .subtitle {
     font-size: 0.8125rem;
     color: var(--muted);
@@ -494,6 +503,11 @@
     font-weight: 600;
     color: var(--text);
     margin: 0 0 0.5rem;
+  }
+
+  :global(html[data-look="paper"] [data-ground="paper"]) h2 {
+    font-size: 15px;
+    font-weight: 650;
   }
 
   h3 {
@@ -511,32 +525,20 @@
     flex-shrink: 0;
   }
 
-  .refresh-btn {
-    font-size: 0.8125rem;
-    padding: 0.25rem 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
-    background: var(--surface);
-    color: var(--text);
-    cursor: pointer;
-  }
-  .refresh-btn:hover:not(:disabled) { background: var(--surface-hover); }
-  .refresh-btn:disabled { opacity: 0.5; cursor: default; }
-
   /* ── Banner ──────────────────────────────────────────────── */
   .banner {
     display: flex;
     align-items: flex-start;
     gap: 0.75rem;
     padding: 0.75rem 1rem;
-    border-radius: 8px;
+    border-radius: var(--card-radius);
     border: 1px solid var(--border);
     margin-bottom: 1.25rem;
     font-size: 0.8125rem;
   }
 
-  .banner-shadow  { background: rgba(251, 191, 36, 0.08); border-color: rgba(251, 191, 36, 0.3); }
-  .banner-enforced { background: rgba(52, 211, 153, 0.06); border-color: rgba(52, 211, 153, 0.25); }
+  .banner-shadow  { background: var(--warn-bg); border-color: color-mix(in srgb, var(--yellow) 30%, transparent); }
+  .banner-enforced { background: color-mix(in srgb, var(--green) 6%, transparent); border-color: color-mix(in srgb, var(--green) 25%, transparent); }
 
   .banner-dot {
     width: 8px;
@@ -545,8 +547,8 @@
     margin-top: 0.2rem;
     flex-shrink: 0;
   }
-  .banner-shadow  .banner-dot { background: #fbbf24; }
-  .banner-enforced .banner-dot { background: #34d399; }
+  .banner-shadow  .banner-dot { background: var(--yellow); }
+  .banner-enforced .banner-dot { background: var(--green); }
 
   .banner-body { color: var(--text); }
 
@@ -566,9 +568,14 @@
   /* ── Chart card ──────────────────────────────────────────── */
   .chart-card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
     padding: 1rem;
+  }
+
+  :global(html[data-look="paper"] [data-ground="paper"]) .chart-card {
+    padding: 1.125rem 1.25rem;
   }
 
   .mt { margin-top: 1rem; }
@@ -594,7 +601,7 @@
 
   .sim-slider {
     flex: 1;
-    accent-color: var(--accent, #7c6af7);
+    accent-color: var(--accent);
     cursor: pointer;
   }
 
@@ -612,8 +619,8 @@
     margin: 0;
   }
 
-  .admitted-text { color: #34d399; font-weight: 600; }
-  .rejected-text { color: #f87171; font-weight: 600; }
+  .admitted-text { color: var(--ok-text); font-weight: 600; }
+  .rejected-text { color: var(--err-text); font-weight: 600; }
 
   /* ── Dimension box plots ─────────────────────────────────── */
   .dim-grid {
@@ -623,9 +630,9 @@
   }
 
   .dim-card {
-    background: var(--surface-hover, rgba(255,255,255,0.03));
+    background: var(--surface-hover);
     border: 1px solid var(--border);
-    border-radius: 8px;
+    border-radius: var(--card-radius-sm);
     padding: 0.75rem;
   }
 
@@ -689,7 +696,7 @@
   .page-btn {
     padding: 0.25rem 0.75rem;
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--ctl-radius);
     background: var(--surface);
     color: var(--text);
     cursor: pointer;
@@ -732,7 +739,7 @@
     margin: 0;
   }
 
-  .status-msg.error { color: var(--red, #ef4444); }
+  .status-msg.error { color: var(--err-text); }
 
   .retry-link {
     background: none;

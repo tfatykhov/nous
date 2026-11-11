@@ -78,7 +78,7 @@ describe('App shell grounds', () => {
   it('with no data-look, rendering App changes nothing on <html>', async () => {
     const before = attrs(document.documentElement);
     await renderAt('#/work');
-    await renderAt('#/graph');
+    await renderAt('#/observability');
     expect(attrs(document.documentElement)).toEqual(before);
     expect(document.documentElement.hasAttribute('data-look')).toBe(false);
   });
@@ -124,6 +124,10 @@ describe('App styles', () => {
   it('the wordmark size and the logo glyph read tokens (21px and hidden in the rail)', () => {
     expect(src).toMatch(/\.sidebar-logo\s*\{[^}]*display:\s*var\(--logo-display\)/);
     expect(src).toMatch(/\.sidebar-title\s*\{[^}]*font-size:\s*var\(--brand-size\)/);
+  });
+
+  it('source contract (jsdom cannot lay out; the 390 px overflow check in the screenshot round is the proof): main has min-width: 0, so as a flex item it may shrink below its content', () => {
+    expect(src).toMatch(/\.main-content \{[^}]*min-width: 0;/);
   });
 
   it('Svelte writes no data-look (only look.ts does)', () => {

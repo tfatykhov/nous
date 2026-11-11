@@ -9,6 +9,7 @@
     RetrievalExpansion,
   } from '../lib/types/api';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
+  import { Button } from '../lib/ui/button';
   import { legYield, unattributedSeed } from '../lib/retrievalLegs';
 
   // Server-side, not a client filter over the fetched page: the `context` path
@@ -214,30 +215,30 @@
   // colour at any palette quality, so POSITION is authoritative: segments and
   // legend are rendered in this order always, and colour only confirms.
   const DISPOSITION_META: Record<string, { color: string; family: string; order: number }> = {
-    rendered:           { color: '#34d399', family: 'delivered',  order: 0 },
+    rendered:           { color: 'var(--disp-rendered)', family: 'delivered',  order: 0 },
     // Also delivered — but to a run_python script, not to the model. Sits in
     // `delivered` because the retrieval succeeded and handed its results over;
     // separate from `rendered` because the script, not the pipeline, decides
     // what the model actually sees.
-    returned_to_script: { color: '#22d3ee', family: 'delivered',  order: 1 },
+    returned_to_script: { color: 'var(--disp-returned-to-script)', family: 'delivered',  order: 1 },
     // capacity — a cut or budget removed it; the remedy is a bigger budget
-    sliced_off:         { color: '#f59e0b', family: 'capacity',   order: 2 },
-    budget_truncated:   { color: '#fcd34d', family: 'capacity',   order: 3 },
+    sliced_off:         { color: 'var(--disp-sliced-off)', family: 'capacity',   order: 2 },
+    budget_truncated:   { color: 'var(--disp-budget-truncated)', family: 'capacity',   order: 3 },
     // quality — a score or filter judged it; a bigger budget changes nothing
-    below_floor:        { color: '#a78bfa', family: 'quality',    order: 4 },
-    filter_dropped:     { color: '#c4b5fd', family: 'quality',    order: 5 },
+    below_floor:        { color: 'var(--disp-below-floor)', family: 'quality',    order: 4 },
+    filter_dropped:     { color: 'var(--disp-filter-dropped)', family: 'quality',    order: 5 },
     // redundancy/scope — deliberately not included, nothing is wrong
-    deduped:            { color: '#94a3b8', family: 'redundancy', order: 6 },
-    superseded:         { color: '#cbd5e1', family: 'redundancy', order: 7 },
-    replaced_at_merge:  { color: '#64748b', family: 'redundancy', order: 8 },
-    f071_excluded:      { color: '#7c8da3', family: 'redundancy', order: 9 },
-    type_excluded:      { color: '#475569', family: 'redundancy', order: 10 },
+    deduped:            { color: 'var(--disp-deduped)', family: 'redundancy', order: 6 },
+    superseded:         { color: 'var(--disp-superseded)', family: 'redundancy', order: 7 },
+    replaced_at_merge:  { color: 'var(--disp-replaced-at-merge)', family: 'redundancy', order: 8 },
+    f071_excluded:      { color: 'var(--disp-f071-excluded)', family: 'redundancy', order: 9 },
+    type_excluded:      { color: 'var(--disp-type-excluded)', family: 'redundancy', order: 10 },
     // anomaly — reserved, never reused
-    unaccounted:        { color: '#f472b6', family: 'anomaly',    order: 11 },
+    unaccounted:        { color: 'var(--disp-unaccounted)', family: 'anomaly',    order: 11 },
   };
 
   function dispositionColor(d: string): string {
-    return DISPOSITION_META[d]?.color ?? '#64748b';
+    return DISPOSITION_META[d]?.color ?? 'var(--disp-replaced-at-merge)';
   }
 
   function dispositionFamily(d: string): string {
@@ -639,15 +640,15 @@
     </p>
   </div>
   <div class="head-right">
-    <button class="refresh-btn" onclick={() => void store.refresh()} disabled={$store.loading}>
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void store.refresh()} disabled={$store.loading}>
       {$store.loading ? 'Loading…' : 'Refresh'}
-    </button>
+    </Button>
     <StaleBadge state={$store} />
   </div>
 </header>
 
 {#if $store.data}
-  <!-- ── Window funnel: the whole window as one in → out ──────────────────── -->
+  <!-- ── Window funnel: the whole window, in and out ──────────────────────── -->
   <section class="chart-card funnel-card">
     <div class="funnel-head">
       <h2>Candidate flow</h2>
@@ -847,8 +848,8 @@
               </div>
               <!-- NOT aria-hidden as a whole: this row is a button, so its
                    accessible name is its content, and hiding the bar removed
-                   the retrieval's OUTCOME ("not sampled", the zero reason, the
-                   in→out counts) from what a screen reader announces — leaving
+                   the retrieval's OUTCOME ("not sampled", the zero reason, how
+                   many of the candidates reached the model) from what a screen reader announces — leaving
                    only the query and metadata. The old table exposed the
                    outcome as text. Only the coloured segments are decorative;
                    they carry aria-hidden individually. -->
@@ -875,7 +876,7 @@
                       title="{s.key}: {s.val}"
                     ></span>
                   {/each}
-                  <span class="rbar-n">{tot} → <strong>{e.n_rendered}</strong></span>
+                  <span class="rbar-n"><strong>{e.n_rendered}</strong> of {tot} reached the model</span>
                 {/if}
               </div>
               <div class="rrow-meta">
@@ -1104,7 +1105,9 @@
 
             {#each expansionsBySeed as group, gi (group.key)}
               <details class="seed-group" open={gi === 0}>
-                <summary class="seed-head">
+                <!-- The summary stays a list item, so the browser draws its own disclosure marker; the row inside it
+                     is the flex box. -->
+                <summary class="seed-head"><span class="sum-row">
                   {#if group.isSpreading}
                     <span class="chip sm prov">spreading activation</span>
                     <span class="seed-label">seed not recorded (older retrieval)</span>
@@ -1118,7 +1121,7 @@
                   <span class="muted sm nowrap">
                     · {group.items.length} neighbour{group.items.length === 1 ? '' : 's'}
                   </span>
-                </summary>
+                </span></summary>
                 <ul class="edge-list">
                   {#each group.items as edge, ei (ei)}
                     {@const seeds = group.seedCount(edge)}
@@ -1143,7 +1146,7 @@
                       {/if}
                       {#if seeds > 1}
                         <span class="chip sm conv" title="Also reached from {seeds - 1} other seed(s)">
-                          ×{seeds} seeds
+                          {seeds} seeds
                         </span>
                       {/if}
                       {#if !edge.won_best_path}<span class="chip sm">lost best-path</span>{/if}
@@ -1178,14 +1181,14 @@
             {#each detailDispositions as disp (disp)}
               {@const items = detail.candidates_by_disposition[disp] ?? []}
               <details class="phase-group" open={disp !== 'rendered'}>
-                <summary class="disp-head">
+                <summary class="disp-head"><span class="sum-row">
                   <span
                     class="badge disp-badge"
-                    style="color: {dispositionColor(disp)}; border-color: {dispositionColor(disp)}55"
+                    style="color: {dispositionColor(disp)}; border-color: color-mix(in srgb, {dispositionColor(disp)} 33.3%, transparent)"
                   >{disp}</span>
                   <span class="count">{items.length}</span>
                   <span class="help">{DISPOSITION_HELP[disp] ?? ''}</span>
-                </summary>
+                </span></summary>
                 <table class="data-table compact">
                   <thead>
                     <tr>
@@ -1201,8 +1204,8 @@
                         <td class="num">
                           {fmtScore(c.entry_score)}
                           {#each c.mutations as m, mi (mi)}
-                            <span class="mut" title="{m.stage}: {fmtScore(m.score_before)} → {fmtScore(m.score_after)}">
-                              →{fmtScore(m.score_after)}
+                            <span class="mut" title="{m.stage}: from {fmtScore(m.score_before)} to {fmtScore(m.score_after)}">
+                              to {fmtScore(m.score_after)}
                             </span>
                           {/each}
                         </td>
@@ -1237,35 +1240,28 @@
   /* ── Header ──────────────────────────────────────────────── */
   .view-head {
     display: flex;
+    flex-wrap: wrap; /* at phone width the actions drop below the title rather than widen the page */
     align-items: flex-start;
     justify-content: space-between;
     gap: 1rem;
     margin-bottom: 1.25rem;
   }
   h1 { font-size: 1.4rem; font-weight: 700; color: var(--text); margin: 0 0 0.125rem; }
+  :global(html[data-look="paper"] [data-ground="paper"]) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
   .subtitle { font-size: 0.8125rem; color: var(--muted); margin: 0; }
   h2 { font-size: 0.875rem; font-weight: 600; color: var(--text); margin: 0; }
+  :global(html[data-look="paper"] [data-ground="paper"]) h2 { font-size: 15px; font-weight: 650; }
   .head-right { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
-
-  .refresh-btn {
-    font-size: 0.8125rem;
-    padding: 0.25rem 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 8px);
-    background: var(--surface);
-    color: var(--text);
-    cursor: pointer;
-  }
-  .refresh-btn:hover:not(:disabled) { background: var(--surface-hover); }
-  .refresh-btn:disabled { opacity: 0.5; cursor: default; }
 
   /* ── Card ────────────────────────────────────────────────── */
   .chart-card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
     padding: 1rem;
   }
+  :global(html[data-look="paper"] [data-ground="paper"]) .chart-card { padding: 1.125rem 1.25rem; }
   .mt { margin-top: 1rem; }
 
   /* ── Window funnel ───────────────────────────────────────── */
@@ -1280,9 +1276,10 @@
   .funnel-head h2 {
     font-size: 0.7rem;
     letter-spacing: 0.08em;
-    text-transform: uppercase;
+    text-transform: var(--label-transform);
     color: var(--muted);
   }
+  :global(html[data-look="paper"] [data-ground="paper"]) .funnel-head h2 { font-size: 15px; letter-spacing: 0; color: var(--text); }
 
   .funnel {
     display: grid;
@@ -1292,6 +1289,14 @@
   }
   .funnel-in { text-align: right; }
   .funnel-out { text-align: left; }
+  /* At phone width the two headline numbers side by side, the bar on its own row below them: squeezed between
+     them it had no width left. */
+  @media (max-width: 640px) {
+    .funnel { grid-template-columns: 1fr 1fr; grid-template-areas: "in out" "bar bar"; gap: 0.75rem 1rem; }
+    .funnel-in { grid-area: in; text-align: left; }
+    .funnel-out { grid-area: out; }
+    .funnel-track { grid-area: bar; }
+  }
   .funnel-n {
     display: block;
     font-size: 2.4rem;
@@ -1301,7 +1306,7 @@
     color: var(--text);
     line-height: 1;
   }
-  .funnel-n.good { color: var(--green); }
+  .funnel-n.good { color: var(--ok-text); }
   .funnel-l {
     display: block;
     margin-top: 0.25rem;
@@ -1314,7 +1319,7 @@
     display: block;
     margin-top: 0.15rem;
     font-size: 0.75rem;
-    color: var(--yellow);
+    color: var(--warn-text);
     font-variant-numeric: tabular-nums;
   }
 
@@ -1322,7 +1327,7 @@
     display: block;
     margin-top: 0.15rem;
     font-size: 0.72rem;
-    color: var(--red);
+    color: var(--err-text);
     font-variant-numeric: tabular-nums;
   }
   .funnel-cap {
@@ -1339,6 +1344,7 @@
     overflow: hidden;
     gap: 2px;
   }
+  :global(html[data-look="paper"] [data-ground="paper"]) .funnel-track { border-radius: 12px; }
   .funnel-seg {
     min-width: 3px;
     display: flex;
@@ -1352,7 +1358,7 @@
   .seg-label {
     font-size: 0.72rem;
     font-weight: 700;
-    color: #0a0a0f;
+    color: var(--seg-ink);
     font-variant-numeric: tabular-nums;
     overflow: hidden;
     text-overflow: clip;
@@ -1406,10 +1412,11 @@
   .timing-label {
     font-size: 0.7rem;
     letter-spacing: 0.08em;
-    text-transform: uppercase;
+    text-transform: var(--label-transform);
   }
-  .timing .slow strong { color: var(--red); }
-  .timing-slow { color: var(--yellow); margin-left: auto; }
+  :global(html[data-look="paper"] [data-ground="paper"]) .timing-label { font-size: 0.75rem; letter-spacing: 0; font-weight: 600; }
+  .timing .slow strong { color: var(--err-text); }
+  .timing-slow { color: var(--warn-text); margin-left: auto; }
 
   /* ── Session break ───────────────────────────────────────── */
   .sess-break {
@@ -1433,6 +1440,8 @@
     gap: 1rem;
     align-items: start;
   }
+  /* A card may shrink below its content (a long query, a wide table), so the column never widens the page. */
+  .split > * { min-width: 0; }
   @media (max-width: 1180px) {
     .split { grid-template-columns: 1fr; }
     .detail-card { position: static !important; }
@@ -1469,7 +1478,7 @@
     text-align: left;
     background: transparent;
     border: 1px solid transparent;
-    border-radius: 8px;
+    border-radius: var(--card-radius-sm);
     padding: 0.5rem 0.55rem;
     cursor: pointer;
     color: inherit;
@@ -1499,7 +1508,7 @@
     font-variant-numeric: tabular-nums;
     flex-shrink: 0;
   }
-  .rms.slow { color: var(--yellow); }
+  .rms.slow { color: var(--warn-text); }
 
   /* A 3px rule under the row rather than a floating bar between two text
      lines — the row reads as one block with a progress underline instead of
@@ -1523,19 +1532,24 @@
     font-variant-numeric: tabular-nums;
     line-height: 1;
   }
-  .rbar-n strong { color: var(--green); font-weight: 600; }
+  .rbar-n strong { color: var(--ok-text); font-weight: 600; }
 
-  .rrow-meta { display: flex; align-items: center; gap: 0.5rem; font-size: 0.7rem; color: var(--muted); }
+  .rrow-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.15rem 0.5rem; font-size: 0.7rem; color: var(--muted); }
+  /* At phone width a row's metadata wraps item by item, never inside "3 legs" or a time. */
+  .rrow-meta > * { white-space: nowrap; }
   .spacer { flex: 1; }
   /* Graph edges are the datum unique to this row and captured even unsampled,
      so it keeps colour while time and leg count recede. */
   .expn { color: var(--chunk-color); }
+  /* On paper the memory-type colours are marks (3:1 on white); as small text they are mixed toward the ink (4.5:1
+     or more, Retrieval.test.ts). The dark look keeps the plain colour. */
+  :global(html[data-look="paper"] [data-ground="paper"]) .expn { color: color-mix(in srgb, var(--chunk-color) 70%, var(--text)); }
   .rrow-meta .muted { opacity: 0.75; }
 
   /* ── Detail ──────────────────────────────────────────────── */
   .detail-card { position: sticky; top: 1rem; max-height: 88vh; overflow-y: auto; }
   .data-table tr.silent td { color: var(--muted); }
-  .data-table .err { color: var(--red); font-weight: 600; }
+  .data-table .err { color: var(--err-text); font-weight: 600; }
   .detail-head {
     display: flex;
     align-items: center;
@@ -1547,7 +1561,7 @@
     font-size: 0.75rem;
     padding: 0.15rem 0.6rem;
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 8px);
+    border-radius: var(--ctl-radius);
     background: var(--surface);
     color: var(--muted);
     cursor: pointer;
@@ -1568,6 +1582,7 @@
     font-size: 0.86rem;
     color: var(--text);
     line-height: 1.45;
+    overflow-wrap: anywhere;
   }
   .detail-stats {
     display: flex;
@@ -1585,8 +1600,8 @@
     font-weight: 600;
     color: var(--text);
     margin: 1rem 0 0.4rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
   }
 
   /* ── Tables ──────────────────────────────────────────────── */
@@ -1614,19 +1629,22 @@
 
   /* ── Groups ──────────────────────────────────────────────── */
   .phase-group, .seed-group { margin-bottom: 0.5rem; }
+  /* A summary stays a list item, so the browser draws its own disclosure marker (no glyph of ours); the row inside
+     it is the flex box. */
   .disp-head, .seed-head {
-    display: flex;
-    gap: 0.55rem;
-    align-items: center;
-    flex-wrap: wrap;
     cursor: pointer;
     padding: 0.3rem 0;
     font-size: 0.8rem;
-    list-style: none;
   }
-  .disp-head::-webkit-details-marker, .seed-head::-webkit-details-marker { display: none; }
-  .disp-head::before, .seed-head::before { content: '▸'; color: var(--muted); font-size: 0.7rem; }
-  details[open] > .disp-head::before, details[open] > .seed-head::before { content: '▾'; }
+  .disp-head::marker, .seed-head::marker { color: var(--muted); }
+  .sum-row {
+    display: inline-flex;
+    gap: 0.55rem;
+    align-items: center;
+    flex-wrap: wrap;
+    width: calc(100% - 1.25em);
+    min-width: 0;
+  }
   .disp-head .count { font-variant-numeric: tabular-nums; color: var(--text); font-weight: 600; }
   .disp-head .help { color: var(--muted); font-size: 0.74rem; }
 
@@ -1673,7 +1691,7 @@
   .chip {
     display: inline-block;
     padding: 0.08em 0.45em;
-    border-radius: 4px;
+    border-radius: 999px;
     background: var(--surface-hover);
     border: 1px solid var(--border);
     color: var(--text);
@@ -1682,7 +1700,7 @@
   }
   .chip.sm { font-size: 0.68rem; }
   .chip.restored { opacity: 0.85; }
-  .chip.warnchip { color: var(--yellow); border-color: var(--yellow); }
+  .chip.warnchip { color: var(--warn-text); border-color: var(--yellow); }
   .chip.prov { color: var(--muted); border-style: dashed; }
   /* Memory-type identity, reusing the palette the rest of the dashboard uses. */
   .chip.t-fact      { color: var(--fact-color);      border-color: var(--fact-color); }
@@ -1691,23 +1709,29 @@
   .chip.t-procedure { color: var(--procedure-color); border-color: var(--procedure-color); }
   .chip.t-chunk     { color: var(--chunk-color);     border-color: var(--chunk-color); }
   .chip.t-censor    { color: var(--censor-color);    border-color: var(--censor-color); }
+  :global(html[data-look="paper"] [data-ground="paper"]) .chip.t-fact { color: color-mix(in srgb, var(--fact-color) 70%, var(--text)); }
+  :global(html[data-look="paper"] [data-ground="paper"]) .chip.t-episode { color: color-mix(in srgb, var(--episode-color) 70%, var(--text)); }
+  :global(html[data-look="paper"] [data-ground="paper"]) .chip.t-decision { color: color-mix(in srgb, var(--decision-color) 70%, var(--text)); }
+  :global(html[data-look="paper"] [data-ground="paper"]) .chip.t-procedure { color: color-mix(in srgb, var(--procedure-color) 70%, var(--text)); }
+  :global(html[data-look="paper"] [data-ground="paper"]) .chip.t-chunk { color: color-mix(in srgb, var(--chunk-color) 70%, var(--text)); }
+  :global(html[data-look="paper"] [data-ground="paper"]) .chip.t-censor { color: color-mix(in srgb, var(--censor-color) 70%, var(--text)); }
 
   .badge {
     display: inline-block;
     padding: 0.12em 0.5em;
-    border-radius: 4px;
+    border-radius: 999px;
     font-size: 0.7rem;
     font-weight: 600;
     white-space: nowrap;
   }
-  .badge-good { background: rgba(52, 211, 153, 0.15); color: var(--green); }
-  .badge-warn { background: rgba(251, 191, 36, 0.15); color: var(--yellow); }
-  .badge-bad  { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+  .badge-good { background: var(--badge-good-bg); color: var(--ok-text); }
+  .badge-warn { background: var(--badge-warn-bg); color: var(--warn-text); }
+  .badge-bad  { background: var(--badge-bad-bg); color: var(--err-text); }
 
   /* ── Misc ────────────────────────────────────────────────── */
   .status-msg { font-size: 0.8rem; color: var(--muted); margin: 0.4rem 0; }
-  .status-msg.error { color: var(--red); }
-  .status-msg.warn { color: var(--yellow); }
+  .status-msg.error { color: var(--err-text); }
+  .status-msg.warn { color: var(--warn-text); }
   .muted { color: var(--muted); }
   .sm { font-size: 0.72rem; }
   .mut { font-size: 0.68rem; opacity: 0.75; margin-left: 0.15rem; }

@@ -34,6 +34,14 @@ export function scriptBlocks(source: string): string {
     .join('\n');
 }
 
+/** A Svelte component's markup: the file without its <script> and <style> blocks, HTML comments removed. */
+export function markupOf(source: string): string {
+  return source
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, '')
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/g, '')
+    .replace(/<!--[\s\S]*?-->/g, '');
+}
+
 /** The dark block of app.css (`:root` and a dark island) and the two grounds of the paper look. */
 export const DARK_SEL = ':root, [data-ground="dark"]';
 export const PAPER_SEL = 'html[data-look="paper"] [data-ground="paper"]';

@@ -1,7 +1,8 @@
 // The Overview charts' colours, read from the ground's tokens. Chart.js draws on a canvas and cannot read var(), so
 // the colours are resolved against the chart's own element when the chart is built, and again when the look changes:
 // the dark look gets today's colours exactly, the paper look the paper palette. Token names follow the PR 2/3 plan
-// (status hues for outcomes, `--series-7` for pending, the accent for marks that were violet).
+// (status hues for outcomes, `--series-7` for pending, `--series-0` for marks that were violet: not the accent, whose
+// paper value is the question frame's blue).
 // PR 2's `lib/chartColors.ts` is meant to generalise this for every chart.
 
 /** Outcome label (lower case) to its token; any other label is pending's. */
@@ -39,13 +40,13 @@ export interface ChartPalette {
 
 /** The palette from a token reader (`(name) => readToken(el, name)` in the app). */
 export function chartPalette(read: (name: string) => string): ChartPalette {
-  const accent = read('--accent');
+  const violet = read('--series-0');
   return {
     outcome: (label) => {
       const k = label.toLowerCase();
       return read(Object.hasOwn(OUTCOME_TOKENS, k) ? OUTCOME_TOKENS[k] : OUTCOME_TOKENS.pending);
     },
-    bar: withAlpha(accent, 0.5),
-    barBorder: accent,
+    bar: withAlpha(violet, 0.5),
+    barBorder: violet,
   };
 }
