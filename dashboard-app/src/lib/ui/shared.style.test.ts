@@ -138,7 +138,8 @@ describe('Button', () => {
   // keys a class off it (the shadcn primitives came with eight).
   it('no source keys a class off the OS colour scheme (dark:)', () => {
     const DARK = /(?<![\w-])dark:(?=[\w[])/;
-    expect('dark:bg-destructive/20').toMatch(DARK);
+    // Not a real utility: Tailwind scans this file too, and a real one here would put a dark-scheme rule in the build.
+    expect('dark:zzz').toMatch(DARK);
     expect('// (dark: the old literals)').not.toMatch(DARK);
     const hits = sourceFiles().filter((f) => {
       const src = readFileSync(join(SRC, f), 'utf-8');
