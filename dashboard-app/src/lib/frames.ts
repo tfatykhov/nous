@@ -6,9 +6,11 @@ import type { WorkTurn } from './types/api';
 export const FRAME_IDS = ['conversation', 'question', 'task', 'decision', 'debug', 'creative', 'initiation'] as const;
 const KNOWN: ReadonlySet<string> = new Set(FRAME_IDS);
 
-/** The frame's colour token, `var(--f-task)`; an unknown or missing frame reads the conversation grey. */
+/** The frame's colour token, `var(--f-task)`; a frame id outside the seven reads the neutral `--f-other` (so it never
+ * passes for conversation), and a missing frame the conversation grey. */
 export function frameVar(id: string | null | undefined): string {
-  return id != null && KNOWN.has(id) ? `var(--f-${id})` : 'var(--f-conversation)';
+  if (id == null || id === '') return 'var(--f-conversation)';
+  return KNOWN.has(id) ? `var(--f-${id})` : 'var(--f-other)';
 }
 
 /** The frame's name (its id), or `No frame recorded`. */

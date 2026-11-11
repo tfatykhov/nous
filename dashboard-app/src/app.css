@@ -116,6 +116,7 @@
     --f-debug: #f09a5a;
     --f-creative: #ee82bd;
     --f-initiation: #e0b050;
+    --f-other: #c4c4d8;                        /* a frame id outside the seven: neutral, not conversation */
     /* Lane dots: work.ts LANE_COLORS */
     --lane-memory: #60a5fa;
     --lane-live: #fbbf24;
@@ -192,6 +193,7 @@
     --f-debug: #b4531c;
     --f-creative: #a3266f;
     --f-initiation: #8f5c0f;
+    --f-other: #14202b;
 
     --lane-memory: #3a6ea5;
     --lane-live: #946213;

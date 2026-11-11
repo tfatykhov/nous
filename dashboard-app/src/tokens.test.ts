@@ -114,6 +114,7 @@ const NEW_DARK: Record<string, string> = {
   '--f-debug': '#f09a5a',
   '--f-creative': '#ee82bd',
   '--f-initiation': '#e0b050',
+  '--f-other': '#c4c4d8', // a frame id outside the seven (review M1): neutral, not conversation's grey
 };
 
 const FRAMES = ['conversation', 'question', 'task', 'decision', 'debug', 'creative', 'initiation'];
@@ -325,6 +326,13 @@ describe('contrast of the new values', () => {
     for (const fg of ['--text', '--muted', '--accent-text', '--ok-text', '--warn-text', '--err-text']) {
       expect(contrast(PAPER[fg], hover), fg).toBeGreaterThanOrEqual(4.5);
     }
+  });
+
+  it('the neutral for an unknown frame: readable on its 7% tint in both looks, and not conversation\'s grey', () => {
+    expect(contrast(PAPER['--f-other'], tint(PAPER['--f-other'], 0.07, '#ffffff'))).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(DARK['--f-other'], tint(DARK['--f-other'], 0.07, DARK['--surface']))).toBeGreaterThanOrEqual(4.5);
+    expect(PAPER['--f-other']).not.toBe(PAPER['--f-conversation']);
+    expect(DARK['--f-other']).not.toBe(DARK['--f-conversation']);
   });
 
   it('each dark frame colour on the dark surface and on its 12% tint: at least 4.5', () => {

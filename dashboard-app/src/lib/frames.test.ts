@@ -90,13 +90,14 @@ describe('frame change sentence', () => {
 });
 
 describe('frame colour, name and reason', () => {
-  it('a known frame reads its token; an unknown or missing one reads the conversation grey', () => {
+  it('a known frame reads its token; an id outside the seven reads the neutral; a missing one the conversation grey', () => {
     expect(frameVar('task')).toBe('var(--f-task)');
     for (const f of FRAME_IDS) expect(frameVar(f)).toBe(`var(--f-${f})`);
     expect(frameVar(null)).toBe('var(--f-conversation)');
     expect(frameVar(undefined)).toBe('var(--f-conversation)');
-    expect(frameVar('x-custom')).toBe('var(--f-conversation)');
-    expect(frameVar('toString')).toBe('var(--f-conversation)');
+    // Review M1: a frame outside the seven is not conversation; it reads its own neutral token.
+    expect(frameVar('x-custom')).toBe('var(--f-other)');
+    expect(frameVar('toString')).toBe('var(--f-other)');
   });
 
   it('a frame name is its id; a missing one says so', () => {
@@ -112,11 +113,11 @@ describe('frame colour, name and reason', () => {
     expect(chosenBy(undefined)).toBe('reason not recorded');
   });
 
-  it('the seven frame tokens exist on the dark block and on the paper ground', () => {
+  it('the seven frame tokens and the neutral exist on the dark block and on the paper ground', () => {
     const blocks = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8'));
     for (const sel of [DARK_SEL, PAPER_SEL]) {
       const b = blocks.get(sel) ?? {};
-      for (const f of FRAME_IDS) expect(b[`--f-${f}`], `${sel} --f-${f}`).toMatch(/^#[0-9a-f]{6}$/);
+      for (const f of [...FRAME_IDS, 'other']) expect(b[`--f-${f}`], `${sel} --f-${f}`).toMatch(/^#[0-9a-f]{6}$/);
     }
   });
 });

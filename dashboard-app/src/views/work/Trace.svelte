@@ -252,7 +252,7 @@
           <span class="muted">Each turn is tinted with the colour of the frame Nous was in.</span>
           {#if frames.length > 0}
             <ul class="key" aria-label="Frames in these turns">
-              {#each frames as f (f)}<li><span class="kdot" aria-hidden="true" style:--fc={frameVar(f)}></span>{f}</li>{/each}
+              {#each frames as f (f)}<li title={f}><span class="kdot" aria-hidden="true" style:--fc={frameVar(f)}></span><span class="kname">{f}</span></li>{/each}
             </ul>
           {/if}
         </div>
@@ -432,6 +432,8 @@
   .key { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.375rem 1rem; color: var(--muted); overflow-wrap: anywhere; min-width: 0; }
   .key li { display: inline-flex; align-items: center; gap: 6px; }
   .kdot { width: 10px; height: 10px; border-radius: 50%; background: var(--fc); flex: none; }
+  /* A long or custom frame id is cut, never the key's width; the title holds it whole. */
+  .kname { max-width: 16ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .turn { display: grid; grid-template-columns: var(--gw) minmax(0, 1fr); margin: 0.375rem 0.625rem; border-radius: var(--card-radius-sm); scroll-margin-top: 6rem; }
   /* The replay mark tints the rows only: the 7% frame tint is measured over the white card (on --surface-hover the

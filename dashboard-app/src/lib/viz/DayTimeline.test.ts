@@ -59,6 +59,19 @@ describe('DayTimeline', () => {
     expect(key).toEqual(['question', 'task', 'decision', 'initiation', 'error', 'gated']);
   });
 
+  it('an unknown frame gets the neutral, not conversation; its key entry has a title and an ellipsis (review M1)', () => {
+    const long = 'x-' + 'f'.repeat(40);
+    const { container } = render(DayTimeline, { turns: [t('u', '09:00', { frame_id: long }), t('c', '09:05', { frame_id: 'conversation' })], now: NOW, truncated: false });
+    const bar = (href: string) => container.querySelector(`svg a[href="${href}"] rect.bar`)!.getAttribute('class');
+    expect(bar('#/work/s/sess-1/u')).toContain('f-other');
+    expect(bar('#/work/s/sess-1/c')).toContain('f-conversation');
+    const entry = Array.from(container.querySelectorAll('.key li')).find((l) => l.textContent?.includes('x-ff'))!;
+    expect(entry.getAttribute('title')).toBe(long);
+    expect((entry.querySelector('.kdot') as HTMLElement).style.getPropertyValue('--fc')).toBe('var(--f-other)');
+    const src = readFileSync(resolve(__dirname, 'DayTimeline.svelte'), 'utf-8');
+    expect(src).toMatch(/\.kname \{[^}]*max-width: 16ch;[^}]*text-overflow: ellipsis;/);
+  });
+
   it('replay: the slider runs from 00:00 to now; moving it fades the later bars and updates the sentence', async () => {
     const { container } = render(DayTimeline, { turns: TURNS, now: NOW, truncated: false });
     const range = screen.getByRole('slider', { name: 'Replay time, minutes after 00:00 UTC' }) as HTMLInputElement;

@@ -82,13 +82,13 @@
   let label = $derived(`Today's turns by time and kind of work, 00:00 to ${hhmm(nowMinute)} UTC: ${plural(turns.length, 'turn', 'turns')}.`);
   const rowIds: RowId[] = ROWS.map((r) => r.id);
   const KNOWN: ReadonlySet<string> = new Set(FRAME_IDS);
-  /** The bar's frame class; an unknown or missing frame takes the conversation grey (no class). */
-  const frameClass = (f: string | null) => (f != null && KNOWN.has(f) ? `f-${f}` : '');
+  /** The bar's frame class: a missing frame takes the conversation grey (no class), one outside the seven the neutral. */
+  const frameClass = (f: string | null) => (f == null || f === '' ? '' : KNOWN.has(f) ? `f-${f}` : 'f-other');
 </script>
 
 <div class="tl" use:measure>
   <ul class="key" aria-label="Key">
-    {#each frames as f (f)}<li><span class="kdot" aria-hidden="true" style:--fc={frameVar(f)}></span>{f}</li>{/each}
+    {#each frames as f (f)}<li title={f}><span class="kdot" aria-hidden="true" style:--fc={frameVar(f)}></span><span class="kname">{f}</span></li>{/each}
     <li class="sw"><span class="uline error" aria-hidden="true"></span>error</li>
     <li><span class="uline gated" aria-hidden="true"></span>gated</li>
   </ul>
@@ -142,6 +142,7 @@
   .key li { display: inline-flex; align-items: center; gap: 6px; overflow-wrap: anywhere; }
   .key .sw { margin-left: auto; }
   .kdot { width: 10px; height: 10px; border-radius: 50%; background: var(--fc); flex: none; }
+  .kname { max-width: 16ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .uline { width: 14px; height: 4px; border-radius: 2px; flex: none; }
   .uline.error { background: var(--red); }
   .uline.gated { background: var(--yellow); }
@@ -163,6 +164,7 @@
   .bar.f-debug { fill: var(--f-debug); }
   .bar.f-creative { fill: var(--f-creative); }
   .bar.f-initiation { fill: var(--f-initiation); }
+  .bar.f-other { fill: var(--f-other); }
   .under.error { fill: var(--red); }
   .under.gated { fill: var(--yellow); }
   a { transition: opacity var(--transition); }

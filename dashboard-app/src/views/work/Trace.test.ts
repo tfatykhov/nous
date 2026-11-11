@@ -457,6 +457,10 @@ describe('Work trace', () => {
     await screen.findByText('Reply 4');
     const key = container.querySelector('.key')!;
     expect(Array.from(key.querySelectorAll('li')).map((l) => l.textContent?.trim())).toEqual(['task', 'question']);
+    // Review M1: an entry names its frame in a title, and the name is cut with an ellipsis, never the key's width.
+    expect(Array.from(key.querySelectorAll('li')).map((l) => l.getAttribute('title'))).toEqual(['task', 'question']);
+    const src = readFileSync(resolve(__dirname, 'Trace.svelte'), 'utf-8');
+    expect(src).toMatch(/\.kname \{[^}]*max-width: 16ch;[^}]*text-overflow: ellipsis;/);
   });
 
   it('unknown ledger status shows the undo statements; success does not; a ref shows the status pill', async () => {
