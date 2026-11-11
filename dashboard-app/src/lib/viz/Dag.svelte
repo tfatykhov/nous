@@ -178,13 +178,6 @@
       const color = statusVar(d.status);
       // The old `${hex}30` fill: 0x30/255 is 18.8%.
       const fill = `color-mix(in srgb, ${color} 18.8%, transparent)`;
-      const isRunning = d.status === 'running';
-      const isAwaiting = d.status === 'awaiting_check' || d.status === 'awaiting_input';
-      const anim = isRunning
-        ? 'pulse-running 1.5s infinite'
-        : isAwaiting
-          ? 'pulse-awaiting 3s infinite'
-          : 'none';
 
       const r = NODE_RADIUS;
       // The status in words (review I2): on paper several status colours read alike, and under red-green colour
@@ -198,8 +191,7 @@
           .attr('points', `0,-${r} ${r},0 0,${r} -${r},0`)
           .style('fill', fill)
           .style('stroke', color)
-          .attr('stroke-width', 2)
-          .style('animation', anim);
+          .attr('stroke-width', 2);
       } else if (d.node_type === 'gate') {
         // Hexagon
         const hex = Array.from({ length: 6 }, (_, i) => {
@@ -210,8 +202,7 @@
           .attr('points', hex)
           .style('fill', fill)
           .style('stroke', color)
-          .attr('stroke-width', 2)
-          .style('animation', anim);
+          .attr('stroke-width', 2);
       } else if (d.node_type === 'approval') {
         // Rounded square, named by its label below like every node (no symbol inside: owner rule). Its type and
         // status are words in the node list and the sheet, so colour and shape are never alone.
@@ -220,24 +211,21 @@
           .attr('rx', 6)
           .style('fill', fill)
           .style('stroke', color)
-          .attr('stroke-width', 2)
-          .style('animation', anim);
+          .attr('stroke-width', 2);
       } else if (d.node_type === 'callback') {
         // Triangle
         g.append('polygon')
           .attr('points', `0,-${r} ${r},${r * 0.8} -${r},${r * 0.8}`)
           .style('fill', fill)
           .style('stroke', color)
-          .attr('stroke-width', 2)
-          .style('animation', anim);
+          .attr('stroke-width', 2);
       } else {
         // Circle (subtask — default)
         g.append('circle')
           .attr('r', r)
           .style('fill', fill)
           .style('stroke', color)
-          .attr('stroke-width', 2)
-          .style('animation', anim);
+          .attr('stroke-width', 2);
       }
 
       // Label below node

@@ -169,6 +169,18 @@ describe('Workflows: a node\'s status is a word, never colour alone (review I2)'
   });
 });
 
+describe('Workflows: no dead animation (review M9)', () => {
+  it('no node names an animation, since no stylesheet defines its keyframes; the status word is the cue', () => {
+    const nodes = EVERY.map(({ id, name, status, node_type, wave }) => ({ id, name, status, node_type, wave }));
+    render(Dag, { props: { nodes, edges: [] } });
+    expect(calls.filter((c) => c.k === 'animation')).toEqual([]);
+    // Guard the premise: if pulse keyframes are ever added, the animation can come back with them.
+    const sources = import.meta.glob(['/src/**/*.{svelte,css}', '!/src/**/*.test.ts'], { query: '?raw', import: 'default', eager: true });
+    expect(Object.keys(sources).length).toBeGreaterThan(50);
+    expect(Object.entries(sources).filter(([, s]) => /@keyframes\s+pulse-(running|awaiting)/.test(String(s))).map(([f]) => f)).toEqual([]);
+  });
+});
+
 describe('Workflows: no invented glyph in the graph', () => {
   it('an approval node is a plain rounded square named by its label below: no question mark (ruling 4)', () => {
     const nodes = [{ id: 'a1', name: 'approve-send', status: 'awaiting_input', node_type: 'approval', wave: 0 }];
