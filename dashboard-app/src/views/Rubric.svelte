@@ -56,22 +56,25 @@
   // first dimension and the radar take --series-0, not the accent, whose paper value is the question frame's blue.
   const DIM_TOKENS = ['--series-0', '--series-2', '--series-1', '--series-4', '--series-5', '--series-3', '--series-6', '--series-8', '--series-9'];
   const dimColor = (i: number) => (i < DIM_TOKENS.length ? `var(${DIM_TOKENS[i]})` : seriesToken(i));
-  // A dash per line as well as a hue: some dimension hues merge under red-green colour blindness (tokens.test.ts).
-  const DIM_DASHES = [[], [6, 4], [2, 3], [10, 4], [1, 3], [8, 3, 2, 3], [4, 2], [12, 3, 3, 3], [3, 6]];
+  // A dash per line as well as a hue: some dimension hues merge under red-green colour blindness (tokens.test.ts), and
+  // each such pair gets dashes of different kinds (solid, long dash, dotted, dash-dot).
+  const DIM_DASHES = [[], [10, 4], [2, 3], [8, 3, 2, 3], [1, 4], [14, 5], [6, 2, 2, 2], [2, 6], [8, 3, 1, 3, 1, 3]];
   const dimDash = (i: number) => DIM_DASHES[i] ?? [i + 2, 3];
 
-  // Reworked is --err-text (dark: the old red), apart from corrected's orange under deuteranopia; an unknown type is
-  // --series-7 (dark: the old #6b6b8a).
+  // Reworked is --err-text (dark: the old red), apart from corrected's orange under deuteranopia; self-corrected a mark
+  // of its own (--series-3 was 4.2 from praised's blue under protanopia); an unknown type --series-7 (dark: #6b6b8a).
   const SIGNAL_TOKENS: Record<string, string> = {
     completed: '--green',
     praised: '--series-1',
     corrected: '--series-4',
     reworked: '--err-text',
-    self_corrected: '--series-3',
+    self_corrected: '--signal-self-corrected',
   };
   // 12 px swatches: at phone width (Chart.svelte's 200 px) the default 40 px ones took the legend to three or four rows
   // and left the trend and the weight lines a plot about 20 px tall.
   const LEGEND_LABELS = { boxWidth: 12 };
+  // The weight lines are told apart by their dash as well: a 24 px swatch shows it.
+  const DASH_LEGEND_LABELS = { boxWidth: 24 };
 
   const signalToken = (t: string) => (Object.hasOwn(SIGNAL_TOKENS, t) ? SIGNAL_TOKENS[t] : '--series-7');
 
@@ -366,7 +369,7 @@
           data={weightHistoryData(d)}
           height="280px"
           options={{
-            plugins: { legend: { display: true, position: 'bottom', labels: LEGEND_LABELS } },
+            plugins: { legend: { display: true, position: 'bottom', labels: DASH_LEGEND_LABELS } },
             scales: {
               x: { title: { display: true, text: 'Version' } },
               y: { title: { display: true, text: 'Weight' }, min: 0, max: 0.5 },

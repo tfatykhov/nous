@@ -256,6 +256,7 @@
 
     /* ---- PR 4 and PR 5, the Decisions, Autonomy and System screens ---- */
     --field-border: var(--border);             /* a text field's boundary (Identity's fields, as before) */
+    --signal-self-corrected: #a78bfa;          /* Scoring: the self-corrected signal mark */
   }
 
   /* ---- The paper ground: page content under the paper look ---- */
@@ -435,6 +436,7 @@
 
     /* PR 4/5: 3:1 on the card and the page (WCAG 1.4.11); the prototype's rule-2 is about 1.5:1 */
     --field-border: #7a8896;
+    --signal-self-corrected: #b87ab3;          /* 13.4 (OKLab) from every other signal mark, all vision types */
 
     /* shadcn, HSL of the paper hex */
     --background: 192 17% 94%;

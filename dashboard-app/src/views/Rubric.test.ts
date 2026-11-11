@@ -174,6 +174,16 @@ describe('Scoring: chart colours are tokens', () => {
     expect(sets[0].borderDash).toEqual([]);
   });
 
+  it('dimensions whose hues merge under colour blindness have dashes of different kinds (solid, long dash, dotted, dash-dot)', async () => {
+    body = DATA(9);
+    render(Rubric);
+    await waitFor(() => expect(configs).toHaveLength(4));
+    const kind = (d: number[]) => (d.length === 0 ? 'solid' : d.length > 2 ? 'dash-dot' : d[0] <= 2 ? 'dotted' : 'dash');
+    const dash = evolution().data.datasets.map((d) => kind(d.borderDash));
+    // The open dimension pairs of tokens.test.ts (by index in DIM_TOKENS): series-0/8, 2/6, 1/3, 4/5, 3/9, 1/9.
+    for (const [a, b] of [[0, 7], [1, 6], [2, 5], [3, 4], [5, 8], [2, 8]]) expect(dash[a], `${DIM_TOKENS[a]} and ${DIM_TOKENS[b]}`).not.toBe(dash[b]);
+  });
+
   it('dimensions past the seventh take series 8, then series 9, each with its own dash', async () => {
     body = DATA(9);
     render(Rubric);
@@ -198,15 +208,18 @@ describe('Scoring: chart colours are tokens', () => {
     const doughnut = chart('doughnut');
     expect(doughnut.data.datasets[0].borderColor).toBe(PAPER['--surface']);
     expect(doughnut.data.datasets[0].backgroundColor).toEqual(
-      ['--green', '--series-1', '--series-4', '--err-text', '--series-3', '--series-7'].map((t) => PAPER[t]));
+      ['--green', '--series-1', '--series-4', '--err-text', '--signal-self-corrected', '--series-7'].map((t) => PAPER[t]));
   });
 });
 
 describe('Scoring at phone width (the screenshot round)', () => {
-  it('every chart\'s legend uses 12 px swatches, so its rows leave the 200 px phone chart a readable plot', async () => {
+  it('legends use narrow swatches, so their rows leave the 200 px phone chart a readable plot; the weight lines\' show their dash', async () => {
     render(Rubric);
     await waitFor(() => expect(configs).toHaveLength(4));
-    for (const c of configs) expect(c.options.plugins.legend.labels?.boxWidth, c.type).toBe(12);
+    for (const c of configs) {
+      const want = c === evolution() ? 24 : 12; // 24 px: a 12 px swatch could not tell a long dash from a solid line
+      expect(c.options.plugins.legend.labels?.boxWidth, c.type).toBe(want);
+    }
   });
 
   it('the signal trend labels its days month-day (as Decisions does), so a phone does not tilt them over the plot', async () => {

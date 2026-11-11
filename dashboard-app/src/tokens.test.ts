@@ -251,6 +251,9 @@ const PR4: Record<string, [string, string]> = {
   // A text field's boundary. Dark: the --border the fields used (Identity's fields do not move). Paper: 3:1 on the card
   // and the page (WCAG 1.4.11); the prototype's rule-2 #c9d4da is about 1.5:1.
   '--field-border': ['var(--border)', '#7a8896'],
+  // Scoring's self-corrected signal mark. Dark: the old #a78bfa. Paper: a soft mauve, 13.4 (OKLab) from every other signal
+  // colour under all three visions; --series-3 (#a8408f) was 4.2 from praised's blue under protanopia.
+  '--signal-self-corrected': ['#a78bfa', '#b87ab3'],
 };
 for (const [k, [dark]] of Object.entries(PR4)) NEW_DARK[k] = dark;
 
@@ -931,7 +934,7 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     'decisions outcomes': ['--green', '--yellow', '--red', '--series-7'],
     // Scoring's signal doughnut and stacked trend. Reworked is drawn in --err-text (dark: the old #f87171), which keeps it
     // apart from corrected's orange under deuteranopia (5.2 with --red); --series-7 is an unknown signal type's slice.
-    'scoring signals': ['--green', '--series-1', '--series-4', '--err-text', '--series-3', '--series-7'],
+    'scoring signals': ['--green', '--series-1', '--series-4', '--err-text', '--signal-self-corrected', '--series-7'],
     // Scoring's weight evolution: one line per dimension. Each line also has a dash of its own (Rubric.test.ts).
     'scoring dimensions': ['--series-0', '--series-2', '--series-1', '--series-4', '--series-5', '--series-3', '--series-6', '--series-8', '--series-9'],
     // Autonomy's "who was there" shares and their legend. (Its outcome bars each sit beside their label, so they are
@@ -948,8 +951,7 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     // Scoring's signals: the doughnut's and the trend's legend name each, and the trend stacks in a fixed order.
     '--green|--series-4': 5.5, // protan 5.9
     '--green|--err-text': 6.5, // deutan 6.6
-    '--series-1|--series-3': 4, // protan 4.2 (also two dimensions)
-    '--series-3|--series-7': 6, // protan 6.1, deutan 6.9
+    '--series-1|--series-3': 4, // protan 4.2 (Scoring's dimensions 3 and 6)
     // Scoring's dimensions: told apart by the dash as well as the hue.
     '--series-0|--series-8': 7, // 7.2 normal
     '--series-2|--series-6': 7.5, // deutan 7.6
@@ -972,6 +974,20 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
         }
       }
     }
+  });
+
+  it('the self-corrected mark is a colour of its own: 3:1 on white, 6 or more from every status and frame colour', () => {
+    const c = PAPER['--signal-self-corrected'];
+    expect(contrast(c, white)).toBeGreaterThanOrEqual(3);
+    for (const t of ['--green', '--yellow', '--red', '--ok-text', '--warn-text', '--err-text', ...FRAMES.map((f) => `--f-${f}`)]) {
+      expect(okDistance(c, PAPER[t]), t).toBeGreaterThanOrEqual(6);
+    }
+  });
+
+  it('Scoring\'s radar bounds (40% of the status fills) are recorded, not 3:1: the min polygon always sits inside the max one', () => {
+    const at40 = (c: string) => over([...parseColor(c).slice(0, 3), 0.4] as RGBA, parseColor(white));
+    expect(contrast(at40(PAPER['--red']), white)).toBeCloseTo(1.87, 1);
+    expect(contrast(at40(PAPER['--green']), white)).toBeCloseTo(1.68, 1);
   });
 
   it('every named open pair is drawn together by some chart and is really below 8 (no stale exemption)', () => {
