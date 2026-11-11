@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { render } from '@testing-library/svelte';
+import { createRawSnippet } from 'svelte';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { markupOf, parseBlocks, styleBlocks } from './lib/testing/css';
@@ -20,11 +21,41 @@ describe('flat tiles inside a card', () => {
   });
 
   it.each([
-    ['views/Overview.svelte', 2], // Execution integrity, in both of its states
+    ['views/Overview.svelte', 2], // Execution integrity, in both of its states (three columns, see above)
     ['views/Subtasks.svelte', 1], // Upcoming schedules
     ['views/Harness.svelte', 1], // Most active censors
   ])('%s uses the flat tiles inside its card (%i)', (file, n) => {
     expect((markupOf(read(file)).match(/<StatGrid flat\b/g) ?? []).length).toBe(n);
+  });
+});
+
+// Design batch 1, from the captures: a tile row never ends in one lone tile on the desktop either. Overview's two
+// coloured-dot tiles and Decisions' Brier tile were a second grid under a StatGrid (Overview 5, 2, 2; Decisions 4, 1),
+// and Execution integrity's six tiles were five and one. The extra tiles join the StatGrid through its `extra` snippet,
+// and `cols` fixes a column count (Execution integrity: three, so six tiles are two rows of three).
+describe('one tile grid per group', () => {
+  it('StatGrid renders its extra tiles inside the grid, and cols sets equal columns above phone width', () => {
+    const css = parseBlocks(styleBlocks(read('lib/ui/StatGrid.svelte')));
+    expect(css.get('.stat-grid--cols')).toEqual({ 'grid-template-columns': 'repeat(var(--cols), minmax(0, 1fr))' });
+    const extra = createRawSnippet(() => ({ render: () => '<div class="stat-card x">extra</div>' }));
+    const { container } = render(StatGrid, { props: { stats: [{ label: 'A', value: 1 }], cols: 3, extra } });
+    const grid = container.querySelector('.stat-grid') as HTMLElement;
+    expect(grid.querySelector('.x')?.parentElement).toBe(grid);
+    expect(grid.classList.contains('stat-grid--cols')).toBe(true);
+    expect(grid.style.getPropertyValue('--cols')).toBe('3');
+  });
+
+  it('Overview: the dot tiles are in the memory grid (no second grid), Execution integrity is three columns', () => {
+    const src = read('views/Overview.svelte');
+    expect(src).not.toMatch(/special-cards/);
+    expect(markupOf(src)).toMatch(/<StatGrid stats=\{\[[\s\S]*?\]\}>\s*\{#snippet extra\(\)\}[\s\S]*?Graph density[\s\S]*?Brier score[\s\S]*?\{\/snippet\}\s*<\/StatGrid>/);
+    expect((markupOf(src).match(/<StatGrid flat cols=\{3\}/g) ?? []).length).toBe(2);
+  });
+
+  it('Decisions: the Brier tile is in the StatGrid (no second grid)', () => {
+    const src = read('views/Decisions.svelte');
+    expect(src).not.toMatch(/indicator-row/);
+    expect(markupOf(src)).toMatch(/<StatGrid stats=\{\[[\s\S]*?\]\}>\s*\{#snippet extra\(\)\}[\s\S]*?Latest Brier score[\s\S]*?\{\/snippet\}\s*<\/StatGrid>/);
   });
 });
 

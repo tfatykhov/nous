@@ -383,25 +383,25 @@
     { label: 'Procedures', value: fmt(mem.total_procedures), note: deltaNote(deltas.procedures.last_7_days) },
     { label: 'Active censors',   value: fmt(mem.active_censors) },
     { label: 'Active sessions',  value: fmt(mem.active_conversations) },
-  ]} />
-
-  <!-- Special cards: graph density + Brier score (color-coded) -->
-  <div class="special-cards">
-    <div class="stat-card">
-      <div class="stat-value">
-        <span class="indicator {densityClass(db.graph_density)}"></span>
-        {db.graph_density != null ? db.graph_density.toFixed(1) : '—'}
+  ]}>
+    <!-- Graph density and Brier score, colour-coded: in the same grid, so no row is left with one tile -->
+    {#snippet extra()}
+      <div class="stat-card">
+        <div class="stat-value">
+          <span class="indicator {densityClass(db.graph_density)}"></span>
+          {db.graph_density != null ? db.graph_density.toFixed(1) : '—'}
+        </div>
+        <div class="stat-label">Graph density</div>
       </div>
-      <div class="stat-label">Graph density</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-value">
-        <span class="indicator {brierClass(d.calibration.brier_score)}"></span>
-        {d.calibration.brier_score != null ? d.calibration.brier_score.toFixed(3) : '—'}
+      <div class="stat-card">
+        <div class="stat-value">
+          <span class="indicator {brierClass(d.calibration.brier_score)}"></span>
+          {d.calibration.brier_score != null ? d.calibration.brier_score.toFixed(3) : '—'}
+        </div>
+        <div class="stat-label">Brier score</div>
       </div>
-      <div class="stat-label">Brier score</div>
-    </div>
-  </div>
+    {/snippet}
+  </StatGrid>
 
   <!-- ── Execution integrity: the durable ledger (harness dashboard §2) ── -->
   {@const x = $exec.data}
@@ -412,13 +412,13 @@
     </div>
     {#if x && !x.modes.persist}
       <p class="muted">Ledger persistence is off (NOUS_EXECUTION_LEDGER_PERSIST_ENABLED) — no calls are recorded and sends are not de-duplicated, so there are no numbers to show.</p>
-      <StatGrid flat stats={[
+      <StatGrid flat cols={3} stats={[
         { label: 'Claim checks',          value: x.modes.claim_verification },
         { label: 'Context policy',        value: x.modes.context_policy },
         { label: 'Offered-tool rule',     value: x.modes.offered_set },
       ]} />
     {:else if x}
-      <StatGrid flat stats={[
+      <StatGrid flat cols={3} stats={[
         { label: 'Calls (24 h)',          value: x.stats.calls },
         { label: 'Sends',                 value: x.stats.sends },
         { label: 'Repeat sends refused',  value: x.stats.repeat_sends_refused },
@@ -546,12 +546,6 @@
   /* Memory and decisions: today's content, in cards */
   .group-h { margin: 1.75rem 0 0.75rem; font-size: 1.0625rem; }
 
-  .special-cards {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-    gap: 1rem;
-    margin-top: 1rem;
-  }
 
   .stat-card {
     background: var(--surface);
@@ -617,8 +611,6 @@
   }
   @media (max-width: 640px) {
     .chart-row { grid-template-columns: minmax(0, 1fr); }
-    .special-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; }
-    .special-cards > *:last-child:nth-child(odd) { grid-column: 1 / -1; }
     .sec, .field { padding-left: 1rem; padding-right: 1rem; }
   }
 </style>

@@ -60,10 +60,9 @@ describe('phone tables', () => {
   });
 
   it('a tile grid on a phone is two up, and an odd last tile takes the whole row', () => {
-    for (const [file, sel] of [['lib/ui/StatGrid.svelte', '.stat-card'], ['views/Overview.svelte', '.special-cards > *']] as const) {
-      const phone = phoneRules(file);
-      expect(phone.get(`${sel}:last-child:nth-child(odd)`), `${file} ${sel}`).toMatchObject({ 'grid-column': '1 / -1' });
-    }
+    // Any last tile, the extra tiles a view passes in included (design batch 1: Overview's and Decisions' dot tiles).
+    expect(phoneRules('lib/ui/StatGrid.svelte').get('.stat-grid > :global(:last-child:nth-child(odd))'))
+      .toMatchObject({ 'grid-column': '1 / -1' });
     // Scoring's seven dimension cards are two up at every width (three up left one alone on the desktop too).
     expect(STYLE('views/Rubric.svelte').get('.dim-cards')).toMatchObject({ 'grid-template-columns': 'repeat(2, minmax(0, 1fr))' });
     expect(STYLE('views/Rubric.svelte').get('.dim-card:last-child:nth-child(odd)')).toMatchObject({ 'grid-column': '1 / -1' });

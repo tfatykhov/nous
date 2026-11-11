@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
+
   /** tone colours the value (never alone: the label says what it is). */
   type Stat = {
     label: string;
@@ -7,11 +9,13 @@
     tone?: 'waiting' | 'unknown' | 'error' | 'warn' | 'ok';
   };
 
-  /** flat: the tiles sit inside a card, so they are a flat tint, not a shadow on a shadow (finish review fix 8). */
-  let { stats, flat = false }: { stats: Stat[]; flat?: boolean } = $props();
+  /** flat: the tiles sit inside a card, so they are a flat tint, not a shadow on a shadow (finish review fix 8).
+   *  cols: a fixed column count above phone width (six tiles as two rows of three, never five and one).
+   *  extra: a view's own tiles (a coloured dot, a word), in the same grid so a row never ends in one lone tile. */
+  let { stats, flat = false, cols, extra }: { stats: Stat[]; flat?: boolean; cols?: number; extra?: Snippet } = $props();
 </script>
 
-<div class="stat-grid" class:stat-grid--flat={flat}>
+<div class="stat-grid" class:stat-grid--flat={flat} class:stat-grid--cols={cols != null} style:--cols={cols}>
   {#each stats as stat}
     <div class="stat-card">
       <div class="stat-value" class:tone-waiting={stat.tone === 'waiting'} class:tone-unknown={stat.tone === 'unknown'}
@@ -21,6 +25,7 @@
       {#if stat.note}<div class="stat-note">{stat.note}</div>{/if}
     </div>
   {/each}
+  {@render extra?.()}
 </div>
 
 <style>
@@ -64,6 +69,10 @@
 
   .stat-grid--flat .stat-card { background: var(--wash); box-shadow: none; }
 
+  .stat-grid--cols {
+    grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
+  }
+
   .tone-waiting { color: var(--waiting); }
   .tone-unknown { color: var(--unknown); }
   .tone-error { color: var(--err-text); }
@@ -77,7 +86,8 @@
       gap: 0.75rem;
     }
 
-    .stat-card:last-child:nth-child(odd) {
+    /* Any last tile, a view's extra tiles included. */
+    .stat-grid > :global(:last-child:nth-child(odd)) {
       grid-column: 1 / -1;
     }
 

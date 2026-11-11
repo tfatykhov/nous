@@ -126,19 +126,19 @@
     { label: 'Reviewed (30d)',   value: totals.reviewed.toLocaleString() },
     { label: 'Accuracy (30d)',   value: accuracy != null ? (accuracy * 100).toFixed(1) + '%' : '—' },
     { label: 'Brier score',      value: brier != null ? brier.toFixed(3) : '—' },
-  ]} />
-
-  <!-- Brier colour-coded indicator card -->
-  <div class="indicator-row">
-    <div class="stat-card">
-      <div class="stat-value">
-        <span class="indicator {brierClass(brier)}"></span>
-        {brier != null ? brier.toFixed(4) : '—'}
-        {#if BRIER_WORD[brierClass(brier)]}<span class="indicator-word">{BRIER_WORD[brierClass(brier)]}</span>{/if}
+  ]}>
+    <!-- The Brier tile, colour-coded and said in a word: in the same grid, so no row is left with one tile -->
+    {#snippet extra()}
+      <div class="stat-card">
+        <div class="stat-value">
+          <span class="indicator {brierClass(brier)}"></span>
+          {brier != null ? brier.toFixed(4) : '—'}
+          {#if BRIER_WORD[brierClass(brier)]}<span class="indicator-word">{BRIER_WORD[brierClass(brier)]}</span>{/if}
+        </div>
+        <div class="stat-label">Latest Brier score (lower is better)</div>
       </div>
-      <div class="stat-label">Latest Brier score (lower is better)</div>
-    </div>
-  </div>
+    {/snippet}
+  </StatGrid>
 
   <!-- ── Row 1: Calibration curve + Confidence histogram ───────────────── -->
   <div class="chart-row">
@@ -403,13 +403,6 @@
     flex-shrink: 0;
   }
 
-  /* Brier indicator card */
-  .indicator-row {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap: 1rem;
-    margin-top: 1rem;
-  }
 
   /* A copy of StatGrid's card, by the same tokens. */
   .stat-card {
@@ -474,9 +467,6 @@
 
   @media (max-width: 640px) {
     .chart-row {
-      grid-template-columns: 1fr;
-    }
-    .indicator-row {
       grid-template-columns: 1fr;
     }
   }
