@@ -982,10 +982,13 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     }
   });
 
-  it('Scoring\'s radar bounds (40% of the status fills) are recorded, not 3:1: the min polygon always sits inside the max one', () => {
-    const at40 = (c: string) => over([...parseColor(c).slice(0, 3), 0.4] as RGBA, parseColor(white));
-    expect(contrast(at40(PAPER['--red']), white)).toBeCloseTo(1.87, 1);
-    expect(contrast(at40(PAPER['--green']), white)).toBeCloseTo(1.68, 1);
+  it('Scoring\'s radar bounds are full-strength lines: 3:1 or more on the card and over the weight polygon\'s 20% fill (review I1)', () => {
+    // At 40% they were 1.87:1 and 1.68:1 on white. Min and Max also differ by dash kind (Rubric.test.ts).
+    const polygon = tint(PAPER['--series-0'], 0.2, white);
+    for (const t of ['--red', '--green']) {
+      expect(contrast(PAPER[t], white), `${t} on white`).toBeGreaterThanOrEqual(3);
+      expect(contrast(PAPER[t], polygon), `${t} over the polygon`).toBeGreaterThanOrEqual(3);
+    }
   });
 
   it('every named open pair is drawn together by some chart and is really below 8 (no stale exemption)', () => {

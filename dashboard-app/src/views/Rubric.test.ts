@@ -148,8 +148,11 @@ describe('Scoring: chart colours are tokens', () => {
     expect(radar.data.datasets[0].borderColor).toBe('#7c6af7');
     expect(rgb(radar.data.datasets[0].backgroundColor)).toBe('124,106,247');
     expect(alpha(radar.data.datasets[0].backgroundColor)).toBe(0.2);
-    expect([rgb(radar.data.datasets[1].borderColor), alpha(radar.data.datasets[1].borderColor)]).toEqual(['248,113,113', 0.4]);
-    expect([rgb(radar.data.datasets[2].borderColor), alpha(radar.data.datasets[2].borderColor)]).toEqual(['52,211,153', 0.4]);
+    // Review I1: the bounds are full-strength lines (a dark-only shift from 40%), Min dotted and Max dashed.
+    expect(radar.data.datasets[1].borderColor).toBe('#f87171');
+    expect(radar.data.datasets[2].borderColor).toBe('#34d399');
+    expect(radar.data.datasets[1].borderDash).toEqual([2, 3]);
+    expect(radar.data.datasets[2].borderDash).toEqual([8, 4]);
     expect(radar.options.scales.r.grid.color).toBe('#1e1e2e');
     expect(radar.options.scales.r.angleLines.color).toBe('#1e1e2e');
     const doughnut = chart('doughnut');
@@ -213,13 +216,15 @@ describe('Scoring: chart colours are tokens', () => {
 });
 
 describe('Scoring at phone width (the screenshot round)', () => {
-  it('legends use narrow swatches, so their rows leave the 200 px phone chart a readable plot; the weight lines\' show their dash', async () => {
+  it('the doughnut and the trend legends set a 12 px swatch; the radar\'s and the weight lines\' legends sample the line, 28 px wide', async () => {
     render(Rubric);
     await waitFor(() => expect(configs).toHaveLength(4));
-    for (const c of configs) {
-      const want = c === evolution() ? 24 : 12; // 24 px: a 12 px swatch could not tell a long dash from a solid line
-      expect(c.options.plugins.legend.labels?.boxWidth, c.type).toBe(want);
+    // Review M1: a dash drawn as the outline of a box turns four corners; a sample of the line shows it straight.
+    // Under usePointStyle Chart.js caps boxWidth at the font size, so the width is pointStyleWidth.
+    for (const c of [chart('radar'), evolution()]) {
+      expect(c.options.plugins.legend.labels, c.type).toMatchObject({ usePointStyle: true, pointStyle: 'line', pointStyleWidth: 28 });
     }
+    for (const c of [chart('doughnut'), chart('line', 'Completed')]) expect(c.options.plugins.legend.labels?.boxWidth, c.type).toBe(12);
   });
 
   it('the signal trend labels its days month-day (as Decisions does), so a phone does not tilt them over the plot', async () => {

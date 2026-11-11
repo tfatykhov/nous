@@ -429,6 +429,8 @@ describe('harness dashboard views', () => {
     expect(c.data.datasets.map((d: any) => d.backgroundColor)).toEqual(['#60a5fa', '#fb923c', '#22d3ee']);
     expect(c.data.datasets.map((d: any) => d.borderDash)).toEqual([[], [6, 4], [2, 3]]);
     expect(c.options.plugins.legend.labels.color).toBe('#8e8eab');
+    // Review M1: the legend samples each line with its dash, not a filled box with a dashed outline.
+    expect(c.options.plugins.legend.labels).toMatchObject({ usePointStyle: true, pointStyle: 'line', pointStyleWidth: 28 });
     expect(c.options.scales.x.ticks.color).toBe('#8e8eab');
     expect(c.options.scales.y.grid.color).toBe('#1e1e2e');
   });

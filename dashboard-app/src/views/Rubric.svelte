@@ -73,8 +73,9 @@
   // 12 px swatches: at phone width (Chart.svelte's 200 px) the default 40 px ones took the legend to three or four rows
   // and left the trend and the weight lines a plot about 20 px tall.
   const LEGEND_LABELS = { boxWidth: 12 };
-  // The weight lines are told apart by their dash as well: a 24 px swatch shows it.
-  const DASH_LEGEND_LABELS = { boxWidth: 24 };
+  // Dashed lines (the weights, the radar's bounds) are told apart by their dash as well: the legend samples the line,
+  // 28 px wide, where a dashed box outline turns four corners (Chart.js caps boxWidth at the font size under usePointStyle).
+  const DASH_LEGEND_LABELS = { usePointStyle: true, pointStyle: 'line', pointStyleWidth: 28 };
 
   const signalToken = (t: string) => (Object.hasOwn(SIGNAL_TOKENS, t) ? SIGNAL_TOKENS[t] : '--series-7');
 
@@ -92,20 +93,21 @@
           borderWidth: 2,
         },
         {
+          // Full-strength lines (3:1 or more on paper), dashes of different kinds: Min dotted, Max dashed.
           label: 'Min Bound',
           data: dims.map((x) => x.min_weight ?? 0.10),
-          borderColor: tint('--red', 0.4),
+          borderColor: 'var(--red)',
           backgroundColor: 'transparent',
-          borderDash: [4, 4],
+          borderDash: [2, 3],
           borderWidth: 1,
           pointRadius: 0,
         },
         {
           label: 'Max Bound',
           data: dims.map((x) => x.max_weight ?? 0.40),
-          borderColor: tint('--green', 0.4),
+          borderColor: 'var(--green)',
           backgroundColor: 'transparent',
-          borderDash: [4, 4],
+          borderDash: [8, 4],
           borderWidth: 1,
           pointRadius: 0,
         },
@@ -261,7 +263,7 @@
                   pointLabels: { font: { size: 12 } },
                 },
               },
-              plugins: { legend: { display: true, position: 'bottom', labels: LEGEND_LABELS } },
+              plugins: { legend: { display: true, position: 'bottom', labels: DASH_LEGEND_LABELS } },
             }}
           />
         </div>

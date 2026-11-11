@@ -120,7 +120,8 @@
 
   // Explicit axis colours (today's under dark) beat Chart.svelte's paper defaults, so they are the paper tokens' too.
   const chartOptions = {
-    plugins: { legend: { labels: { color: 'var(--muted)' } } },
+    // The legend samples each line with its dash (a box outline turns four corners); see Rubric.svelte.
+    plugins: { legend: { labels: { color: 'var(--muted)', usePointStyle: true, pointStyle: 'line', pointStyleWidth: 28 } } },
     scales: {
       x: { ticks: { color: 'var(--muted)' }, grid: { color: 'var(--border)' } },
       y: { beginAtZero: true, ticks: { color: 'var(--muted)', precision: 0 }, grid: { color: 'var(--border)' } },
