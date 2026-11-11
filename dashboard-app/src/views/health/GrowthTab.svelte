@@ -193,15 +193,10 @@
   }
 
   h2 {
-    font-size: 0.875rem;
-    font-weight: 600;
-    color: var(--text);
-    margin: 0 0 0.75rem;
-  }
-
-  :global(html:root .page-ground) h2 {
     font-size: 15px;
     font-weight: 650;
+    color: var(--text);
+    margin: 0 0 0.75rem;
   }
 
   .head-right {
@@ -228,10 +223,6 @@
     border: var(--card-border);
     border-radius: var(--card-radius);
     box-shadow: var(--card-shadow);
-    padding: 1rem;
-  }
-
-  :global(html:root .page-ground) .chart-card {
     padding: 1.125rem 1.25rem;
   }
 

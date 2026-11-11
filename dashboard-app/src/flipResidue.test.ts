@@ -118,10 +118,25 @@ describe('the anchor of the paper rules in the views', () => {
     expect(extra).toEqual({});
   });
 
-  it('the anchor form is in use, and the old scoped form is gone', () => {
-    const all = views.flatMap(globalsOf);
-    expect(all.filter((g) => g === ANCHORS[0]).length).toBeGreaterThan(50);
-    expect(all.filter((g) => /data-/.test(g) && !g.includes('data-slot'))).toEqual([]);
+  // PR 7 T6 folds the dark base rules into the anchored ones and drops the anchor where nothing in the file can out-rank
+  // the plain rule; the anchors left are counted here per file (each fold group shrinks the list).
+  const ANCHORS_LEFT: Record<string, number> = {
+    // T6a, kept on purpose (each with its reason in the file): Browser's .btn out-ranks .btn-sm, Retrieval's .chart-card
+    // out-ranks .list-card, Memory write health's h2 out-ranks .verdict-title.
+    'views/Browser.svelte': 1, 'views/Retrieval.svelte': 1, 'views/MemoryWriteHealth.svelte': 1,
+    'views/Autonomy.svelte': 3, 'views/DagView.svelte': 1, 'views/Decisions.svelte': 1, 'views/Harness.svelte': 1,
+    'views/Heartbeat.svelte': 3, 'views/Identity.svelte': 1, 'views/Intentions.svelte': 3, 'views/Observability.svelte': 1,
+    'views/Overview.svelte': 1, 'views/Rubric.svelte': 1, 'views/Subtasks.svelte': 1, 'views/work/Trace.svelte': 1,
+  };
+
+  it('the anchors left are the counted ones, and the old scoped form is gone', () => {
+    const left: Record<string, number> = {};
+    for (const f of views) {
+      const n = globalsOf(f).filter((g) => ANCHORS.includes(g)).length;
+      if (n) left[relative(SRC, f).replace(/\\/g, '/')] = n;
+    }
+    expect(left).toEqual(ANCHORS_LEFT);
+    expect(views.flatMap(globalsOf).filter((g) => /data-/.test(g) && !g.includes('data-slot'))).toEqual([]);
   });
 });
 

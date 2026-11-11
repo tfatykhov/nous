@@ -1246,11 +1246,9 @@
     gap: 1rem;
     margin-bottom: 1.25rem;
   }
-  h1 { font-size: 1.4rem; font-weight: 700; color: var(--text); margin: 0 0 0.125rem; }
-  :global(html:root .page-ground) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
+  h1 { font-size: 30px; font-weight: 650; color: var(--text); margin: 0 0 0.125rem; letter-spacing: -0.022em; line-height: 1.15; }
   .subtitle { font-size: 0.8125rem; color: var(--muted); margin: 0; }
-  h2 { font-size: 0.875rem; font-weight: 600; color: var(--text); margin: 0; }
-  :global(html:root .page-ground) h2 { font-size: 15px; font-weight: 650; }
+  h2 { font-size: 15px; font-weight: 650; color: var(--text); margin: 0; }
   .head-right { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
 
   /* ── Card ────────────────────────────────────────────────── */
@@ -1261,6 +1259,7 @@
     box-shadow: var(--card-shadow);
     padding: 1rem;
   }
+  /* Anchored on purpose: it out-ranks .list-card's later padding, which a plain .chart-card would lose to. */
   :global(html:root .page-ground) .chart-card { padding: 1.125rem 1.25rem; }
   .mt { margin-top: 1rem; }
 
@@ -1274,12 +1273,11 @@
   /* Section label: small, tracked, quiet — so the figures below carry the
      weight instead of competing with a same-size heading. */
   .funnel-head h2 {
-    font-size: 0.7rem;
-    letter-spacing: 0.08em;
+    font-size: 15px;
+    letter-spacing: 0;
     text-transform: none;
-    color: var(--muted);
+    color: var(--text);
   }
-  :global(html:root .page-ground) .funnel-head h2 { font-size: 15px; letter-spacing: 0; color: var(--text); }
 
   .funnel {
     display: grid;
@@ -1340,11 +1338,10 @@
   .funnel-track {
     display: flex;
     height: 34px;
-    border-radius: 6px;
+    border-radius: 12px;
     overflow: hidden;
     gap: 2px;
   }
-  :global(html:root .page-ground) .funnel-track { border-radius: 12px; }
   .funnel-seg {
     min-width: 3px;
     display: flex;
@@ -1410,11 +1407,11 @@
   }
   .timing strong { color: var(--text); font-variant-numeric: tabular-nums; }
   .timing-label {
-    font-size: 0.7rem;
-    letter-spacing: 0.08em;
+    font-size: 0.75rem;
+    letter-spacing: 0;
     text-transform: none;
+    font-weight: 600;
   }
-  :global(html:root .page-ground) .timing-label { font-size: 0.75rem; letter-spacing: 0; font-weight: 600; }
   .timing .slow strong { color: var(--err-text); }
   .timing-slow { color: var(--warn-text); margin-left: auto; }
 
@@ -1539,11 +1536,9 @@
   .rrow-meta > * { white-space: nowrap; }
   .spacer { flex: 1; }
   /* Graph edges are the datum unique to this row and captured even unsampled,
-     so it keeps colour while time and leg count recede. */
-  .expn { color: var(--chunk-color); }
-  /* On paper the memory-type colours are marks (3:1 on white); as small text they are mixed toward the ink (4.5:1
-     or more, Retrieval.test.ts). The dark look keeps the plain colour. */
-  :global(html:root .page-ground) .expn { color: color-mix(in srgb, var(--chunk-color) 70%, var(--text)); }
+     so it keeps colour while time and leg count recede. The memory-type colours are marks (3:1 on white); as small
+     text they are mixed toward the ink (4.5:1 or more, Retrieval.test.ts). */
+  .expn { color: color-mix(in srgb, var(--chunk-color) 70%, var(--text)); }
   .rrow-meta .muted { opacity: 0.75; }
 
   /* ── Detail ──────────────────────────────────────────────── */
@@ -1648,7 +1643,6 @@
   .disp-head .count { font-variant-numeric: tabular-nums; color: var(--text); font-weight: 600; }
   .disp-head .help { color: var(--muted); font-size: 0.74rem; }
 
-
   /* ── Expansion tree ──────────────────────────────────────── */
   .xsummary {
     display: flex;
@@ -1702,18 +1696,12 @@
   .chip.warnchip { color: var(--warn-text); border-color: var(--yellow); }
   .chip.prov { color: var(--muted); border-style: dashed; }
   /* Memory-type identity, reusing the palette the rest of the dashboard uses. */
-  .chip.t-fact      { color: var(--fact-color);      border-color: var(--fact-color); }
-  .chip.t-episode   { color: var(--episode-color);   border-color: var(--episode-color); }
-  .chip.t-decision  { color: var(--decision-color);  border-color: var(--decision-color); }
-  .chip.t-procedure { color: var(--procedure-color); border-color: var(--procedure-color); }
-  .chip.t-chunk     { color: var(--chunk-color);     border-color: var(--chunk-color); }
-  .chip.t-censor    { color: var(--censor-color);    border-color: var(--censor-color); }
-  :global(html:root .page-ground) .chip.t-fact { color: color-mix(in srgb, var(--fact-color) 70%, var(--text)); }
-  :global(html:root .page-ground) .chip.t-episode { color: color-mix(in srgb, var(--episode-color) 70%, var(--text)); }
-  :global(html:root .page-ground) .chip.t-decision { color: color-mix(in srgb, var(--decision-color) 70%, var(--text)); }
-  :global(html:root .page-ground) .chip.t-procedure { color: color-mix(in srgb, var(--procedure-color) 70%, var(--text)); }
-  :global(html:root .page-ground) .chip.t-chunk { color: color-mix(in srgb, var(--chunk-color) 70%, var(--text)); }
-  :global(html:root .page-ground) .chip.t-censor { color: color-mix(in srgb, var(--censor-color) 70%, var(--text)); }
+  .chip.t-fact      { color: color-mix(in srgb, var(--fact-color) 70%, var(--text));      border-color: var(--fact-color); }
+  .chip.t-episode   { color: color-mix(in srgb, var(--episode-color) 70%, var(--text));   border-color: var(--episode-color); }
+  .chip.t-decision  { color: color-mix(in srgb, var(--decision-color) 70%, var(--text));  border-color: var(--decision-color); }
+  .chip.t-procedure { color: color-mix(in srgb, var(--procedure-color) 70%, var(--text)); border-color: var(--procedure-color); }
+  .chip.t-chunk     { color: color-mix(in srgb, var(--chunk-color) 70%, var(--text));     border-color: var(--chunk-color); }
+  .chip.t-censor    { color: color-mix(in srgb, var(--censor-color) 70%, var(--text));    border-color: var(--censor-color); }
 
   .badge {
     display: inline-block;

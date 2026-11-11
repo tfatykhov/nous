@@ -306,12 +306,13 @@
   }
 
   h1 {
-    font-size: 1.4rem;
-    font-weight: 700;
+    font-size: 30px;
+    font-weight: 650;
     color: var(--text);
     margin: 0 0 0.125rem;
+    letter-spacing: -0.022em;
+    line-height: 1.15;
   }
-  :global(html:root .page-ground) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
 
   .subtitle {
     font-size: 0.8125rem;
@@ -320,12 +321,11 @@
   }
 
   h2 {
-    font-size: 0.875rem;
-    font-weight: 600;
+    font-size: 15px;
+    font-weight: 650;
     color: var(--text);
     margin: 0 0 0.75rem;
   }
-  :global(html:root .page-ground) h2 { font-size: 15px; font-weight: 650; }
 
   .head-right {
     display: flex;
@@ -340,9 +340,8 @@
     border: var(--card-border);
     border-radius: var(--card-radius);
     box-shadow: var(--card-shadow);
-    padding: 1rem;
+    padding: 1.125rem 1.25rem;
   }
-  :global(html:root .page-ground) .chart-card { padding: 1.125rem 1.25rem; }
 
   .mt { margin-top: 1rem; }
 

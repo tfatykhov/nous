@@ -479,15 +479,10 @@
   }
 
   h1 {
-    font-size: 1.4rem;
-    font-weight: 700;
-    color: var(--text);
-    margin: 0 0 0.125rem;
-  }
-
-  :global(html:root .page-ground) h1 {
     font-size: 30px;
     font-weight: 650;
+    color: var(--text);
+    margin: 0 0 0.125rem;
     letter-spacing: -0.022em;
     line-height: 1.15;
   }
@@ -499,15 +494,10 @@
   }
 
   h2 {
-    font-size: 0.875rem;
-    font-weight: 600;
-    color: var(--text);
-    margin: 0 0 0.5rem;
-  }
-
-  :global(html:root .page-ground) h2 {
     font-size: 15px;
     font-weight: 650;
+    color: var(--text);
+    margin: 0 0 0.5rem;
   }
 
   h3 {
@@ -571,10 +561,6 @@
     border: var(--card-border);
     border-radius: var(--card-radius);
     box-shadow: var(--card-shadow);
-    padding: 1rem;
-  }
-
-  :global(html:root .page-ground) .chart-card {
     padding: 1.125rem 1.25rem;
   }
 

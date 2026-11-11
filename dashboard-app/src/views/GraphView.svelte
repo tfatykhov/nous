@@ -488,15 +488,10 @@
   }
 
   .view-title {
-    font-size: 1.375rem;
-    font-weight: 700;
-    color: var(--text);
-    margin: 0 0 0.25rem;
-  }
-
-  :global(html:root .page-ground) .view-title {
     font-size: 30px;
     font-weight: 650;
+    color: var(--text);
+    margin: 0 0 0.25rem;
     letter-spacing: -0.022em;
     line-height: 1.15;
   }
@@ -562,11 +557,11 @@
   }
 
   .search-input {
-    padding: 0.25rem 0.625rem;
+    padding: 0.3125rem 0.875rem;
     font-size: 0.8125rem;
     border: 1px solid var(--border);
     border-radius: var(--ctl-radius);
-    background: var(--bg);
+    background: var(--surface);
     color: var(--text);
     width: 180px;
     outline: none;
@@ -576,12 +571,7 @@
     border-color: var(--accent);
   }
 
-  :global(html:root .page-ground) .search-input {
-    background: var(--surface);
-    padding: 0.3125rem 0.875rem;
-  }
-
-  :global(html:root .page-ground) .search-input:focus-visible {
+  .search-input:focus-visible {
     outline: 2px solid var(--focus-ring);
     outline-offset: 1px;
   }
@@ -592,26 +582,22 @@
     gap: 0.5rem;
   }
 
+  /* Each type filter is a pill: the box, the dot and the word inside one rounded chip. */
   .type-check {
     display: flex;
     align-items: center;
     gap: 0.3rem;
     font-size: 0.75rem;
-    color: var(--muted);
+    color: var(--text);
     cursor: pointer;
     user-select: none;
-  }
-
-  /* Each type filter is a pill on paper: the box, the dot and the word inside one rounded chip. */
-  :global(html:root .page-ground) .type-check {
     padding: 0.1875rem 0.625rem 0.1875rem 0.4375rem;
     border-radius: 999px;
     background: var(--surface);
     border: 1px solid var(--border);
-    color: var(--text);
   }
 
-  :global(html:root .page-ground) .type-check input {
+  .type-check input {
     accent-color: var(--accent);
   }
 
@@ -683,6 +669,7 @@
   }
 
   /* The type's colour (--type, set inline) on its own 12.5% tint (the old hex `20` alpha). */
+  /* The node colours are 3:1 marks, not text: the badge's word is mixed toward the ink (4.5:1 or more). */
   .type-badge {
     display: inline-block;
     padding: 2px 8px;
@@ -691,11 +678,6 @@
     font-weight: 600;
     border: 1px solid transparent;
     background: color-mix(in srgb, var(--type) 12.5%, transparent);
-    color: var(--type);
-  }
-
-  /* On paper the node colours are 3:1 marks, not text: the badge's word is mixed toward the ink (4.5:1 or more). */
-  :global(html:root .page-ground) .type-badge {
     color: color-mix(in srgb, var(--type) 70%, var(--text));
   }
 
@@ -709,8 +691,7 @@
     font-family: ui-monospace, monospace;
   }
 
-  :global(html:root .page-ground) .mono,
-  :global(html:root .page-ground) .conn-weight {
+  .mono, .conn-weight {
     font-family: var(--font-mono);
   }
 
@@ -800,9 +781,6 @@
     flex-shrink: 0;
     min-width: 2.25rem;
     font-size: 0.6875rem;
-  }
-
-  :global(html:root .page-ground) .conn-dir {
     font-family: var(--font-ui);
   }
 

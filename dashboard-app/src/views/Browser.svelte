@@ -696,15 +696,10 @@
   }
 
   h1 {
-    font-size: 1.4rem;
-    font-weight: 700;
-    color: var(--text);
-    margin: 0 0 0.125rem;
-  }
-
-  :global(html:root .page-ground) h1 {
     font-size: 30px;
     font-weight: 650;
+    color: var(--text);
+    margin: 0 0 0.125rem;
     letter-spacing: -0.022em;
     line-height: 1.15;
   }
@@ -762,7 +757,7 @@
   .search-input {
     flex: 1;
     min-width: 180px;
-    padding: 0.4375rem 0.75rem;
+    padding: 0.4375rem 1rem;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--ctl-radius);
@@ -775,11 +770,7 @@
     border-color: var(--accent);
   }
 
-  :global(html:root .page-ground) .search-input {
-    padding: 0.4375rem 1rem;
-  }
-
-  :global(html:root .page-ground) .search-input:focus-visible {
+  .search-input:focus-visible {
     outline: 2px solid var(--focus-ring);
     outline-offset: 1px;
   }
@@ -797,8 +788,9 @@
   }
 
   .btn:hover:not(:disabled) {
-    border-color: var(--accent);
-    color: var(--accent);
+    border-color: var(--muted);
+    color: var(--text);
+    box-shadow: var(--card-shadow);
   }
 
   .btn:disabled {
@@ -806,15 +798,10 @@
     cursor: not-allowed;
   }
 
+  /* Anchored on purpose: it out-ranks .btn-sm's later padding, so every button keeps the pill's padding. */
   :global(html:root .page-ground) .btn {
     padding: 0.4375rem 1rem;
     font-weight: 550;
-  }
-
-  :global(html:root .page-ground) .btn:hover:not(:disabled) {
-    border-color: var(--muted);
-    color: var(--text);
-    box-shadow: var(--card-shadow);
   }
 
   .btn-sm {
@@ -823,7 +810,7 @@
   }
 
   /* ── Tables: a white rounded card on paper ── */
-  :global(html:root .page-ground) .table-card {
+  .table-card {
     background: var(--surface);
     border: var(--card-border);
     border-radius: var(--card-radius);
@@ -892,7 +879,7 @@
     font-size: 0.75rem;
   }
 
-  :global(html:root .page-ground) .tab-body :global(.mono) {
+  .tab-body :global(.mono) {
     font-family: var(--font-mono);
   }
 
@@ -921,7 +908,7 @@
   }
 
   .censor-select {
-    padding: 0.25rem 0.5rem;
+    padding: 0.25rem 0.75rem;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--ctl-radius);
@@ -930,11 +917,7 @@
     cursor: pointer;
   }
 
-  :global(html:root .page-ground) .censor-select {
-    padding: 0.25rem 0.75rem;
-  }
-
-  :global(html:root .page-ground) .censor-label input {
+  .censor-label input {
     accent-color: var(--accent);
   }
 

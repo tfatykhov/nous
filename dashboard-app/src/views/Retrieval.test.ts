@@ -132,7 +132,7 @@ describe('Retrieval on the paper look', () => {
     for (const k of ['fact', 'episode', 'decision', 'procedure', 'chunk', 'censor']) {
       const mixed = rgb(PAPER[`--${k}-color`]).map((v, i) => 0.7 * v + 0.3 * ink[i]);
       expect(ratio(mixed, rgb(PAPER['--surface-hover'])), k).toBeGreaterThanOrEqual(4.5);
-      expect(SRC).toContain(`.chip.t-${k} { color: color-mix(in srgb, var(--${k}-color) 70%, var(--text)); }`);
+      expect(SRC).toMatch(new RegExp(`\\.chip\\.t-${k}\\s*\\{ color: color-mix\\(in srgb, var\\(--${k}-color\\) 70%, var\\(--text\\)\\);`));
     }
   });
 
