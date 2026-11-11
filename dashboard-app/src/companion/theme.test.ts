@@ -158,6 +158,8 @@ describe('Section.layout accordion', () => {
     const btn = container.querySelector('button.toggle') as HTMLButtonElement;
     // the toggle says what it will do in a word, not a caret glyph (review I6)
     expect(btn.querySelector('.caret')?.textContent).toBe('Show');
+    // the word is part of the button's name (re-review N3); aria-expanded keeps the state
+    expect(btn.querySelector('.caret')?.hasAttribute('aria-hidden')).toBe(false);
     await fireEvent.click(btn);
     expect(btn.getAttribute('aria-expanded')).toBe('true');
     expect(container.textContent).toContain('hidden detail');

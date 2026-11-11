@@ -163,10 +163,11 @@
     flex-direction: column;
     gap: 0.6rem;
   }
+  /* A row of its own at the top right of the content column, so the word never
+     sits on the content's first line. */
   .close {
-    position: absolute;
-    top: 0.5rem;
-    right: 0.6rem;
+    align-self: flex-end;
+    margin: -0.7rem -0.5rem 0 0;
     font: inherit;
     color: var(--muted);
     background: none;

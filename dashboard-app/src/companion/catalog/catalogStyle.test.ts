@@ -229,6 +229,15 @@ describe('dimmed content keeps its contrast on paper (source contract, review M1
   });
 });
 
+describe("the Modal's Close has a row of its own (source contract, re-review N2)", () => {
+  it('it sits in the content column, top right, not over the first line', () => {
+    const rule = style('ModalView').split('.close {')[1].split('}')[0];
+    expect(rule).not.toContain('position: absolute');
+    expect(rule).toContain('align-self: flex-end');
+    expect(rule).toContain('margin: -0.7rem -0.5rem 0 0');
+  });
+});
+
 describe('every control is a 44px tap target on paper through --tap-min (source contract, review I5)', () => {
   it.each([
     ['ButtonView', '.btn'],
@@ -238,6 +247,8 @@ describe('every control is a 44px tap target on paper through --tap-min (source 
     ['DateTimeInputView', 'input'],
     ['ChoicePickerView', '.filter'],
     ['ChoicePickerView', '.options.chips .option'],
+    ['ModalView', '.close'],
+    ['SectionView', '.toggle'],
   ])('%s %s', (name, sel) => {
     expect(style(name).split(`${sel} {`)[1].split('}')[0]).toContain('min-height: var(--tap-min)');
   });

@@ -74,7 +74,7 @@
         {#if caption}
           <span class="caption">{caption}</span>
         {/if}
-        <span class="caret" aria-hidden="true">{open ? 'Hide' : 'Show'}</span>
+        <span class="caret">{open ? 'Hide' : 'Show'}</span>
       </button>
     </h3>
   {:else}
@@ -115,6 +115,7 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
+    min-height: var(--tap-min);
     width: 100%;
     background: none;
     border: none;
