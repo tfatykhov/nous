@@ -93,7 +93,7 @@
   {#if truncated}<p class="cut">Showing the latest 3,000 turns of the day.</p>{/if}
 
   <figure>
-    <svg role="img" aria-label={label} viewBox="0 0 {W} {H}" width={W} height={H}>
+    <svg role="img" aria-label={label} viewBox="0 0 {W} {H}">
       {#if X1 > x(nowMinute)}
         <rect class="notyet" x={x(nowMinute)} y={TOP - 8} width={X1 - x(nowMinute)} height={plotBottom - TOP + 8} rx="10" />
         {#if X1 - x(nowMinute) > 64}<text class="notyet-label" x={x(nowMinute) + 10} y={TOP + 8}>not yet</text>{/if}
@@ -144,7 +144,9 @@
   .uline.gated { background: var(--yellow); }
   .cut { margin: 0; font-size: 0.8125rem; color: var(--muted); }
   figure { margin: 0; min-width: 0; }
-  svg { display: block; max-width: 100%; height: auto; font-family: var(--font-ui); }
+  /* As wide as its box, never wider: the viewBox follows the measured width (1 unit = 1 px), and no width attribute
+     can push the page wider than a phone. */
+  svg { display: block; width: 100%; height: auto; font-family: var(--font-ui); }
   .notyet { fill: var(--surface-hover); }
   .notyet-label { fill: var(--muted); font-size: 12px; }
   .grid { stroke: var(--border); stroke-linecap: round; }

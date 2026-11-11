@@ -439,7 +439,8 @@
   .gutter dl > div { display: contents; }
   .gutter dt { font-weight: 650; font-stretch: 82%; text-align: right; color: var(--text); }
   .gutter dd { margin: 0; }
-  .crit { display: inline-block; margin-top: 0.625rem; font-size: 0.75rem; font-weight: 600; padding: 1px 9px; border-radius: 999px; background: var(--surface); color: var(--muted); }
+  /* A pill on one line; a radius of half its height keeps a wrapped "Critic disagreed, kept initiation" rounded. */
+  .crit { display: inline-block; margin-top: 0.625rem; font-size: 0.75rem; font-weight: 600; font-stretch: 88%; padding: 1px 9px; border-radius: 10px; background: var(--surface); color: var(--muted); }
   .crit.no { color: var(--err-text); background: var(--err-bg); }
   .crit-why { margin-top: 0.375rem; }
   .crit-why summary { cursor: pointer; color: var(--accent-text); }

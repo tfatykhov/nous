@@ -40,6 +40,9 @@ describe('DayTimeline', () => {
     const { container } = render(DayTimeline, { turns: TURNS, now: NOW, truncated: false });
     const svg = container.querySelector('svg')!;
     expect(svg.getAttribute('role')).toBe('img');
+    // No width attribute: a fixed width would push the page wider than a phone (the layout follows the measured box).
+    expect(svg.getAttribute('width')).toBeNull();
+    expect(svg.getAttribute('viewBox')).toMatch(/^0 0 960 [0-9]+$/);
     expect(svg.getAttribute('aria-label')).toBe("Today's turns by time and kind of work, 00:00 to 09:40 UTC: 4 turns.");
     const items = Array.from(container.querySelectorAll('.sr-only li')).map((l) => l.textContent);
     expect(items).toEqual([
