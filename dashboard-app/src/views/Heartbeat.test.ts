@@ -106,6 +106,14 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
       ['new: 2', 'acknowledged: 1', 'resolved: 3', 'suppressed: 1', 'auto_closed_known_fp: 2', 'total: 9']);
     expect(pills.slice(0, 5).map((p) => p.style.borderColor)).toEqual(
       ['var(--pending)', 'var(--yellow)', 'var(--st-completed)', 'var(--st-neutral)', 'var(--st-neutral)']);
+    // The total is dimmed by a class, not an inline opacity, so the paper ground can undo it: muted text at 60% is
+    // 2.5:1 on the white card. The dark look keeps its 0.6.
+    const total = pills[5];
+    expect(total.classList.contains('hb-pill--total')).toBe(true);
+    expect(total.style.opacity).toBe('');
+    const css = styleBlocks(readFileSync(join(__dirname, 'Heartbeat.svelte'), 'utf-8'));
+    expect(css).toMatch(/\.hb-pill--total \{ opacity: 0\.6; \}/);
+    expect(css).toMatch(/:global\(html\[data-look="paper"\] \[data-ground="paper"\]\) \.hb-pill--total \{ opacity: 1; \}/);
   });
 
   it('the escalation note is in words', async () => {

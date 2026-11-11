@@ -272,7 +272,7 @@
               {st}: {byState[st] ?? 0}
             </span>
           {/each}
-          <span class="hb-pill" style="opacity:0.6">total: {lc.stats.total}</span>
+          <span class="hb-pill hb-pill--total">total: {lc.stats.total}</span>
         </div>
 
         {#if activeFindings.length > 0}
@@ -474,6 +474,9 @@
   .hb-pill--ok { border-color: var(--st-completed); color: var(--st-completed); }
   .hb-pill--warn { border-color: var(--yellow); color: var(--hb-warn-ink); }
   .hb-pill--bad { border-color: var(--red); color: var(--err-text); }
+  .hb-pill--total { opacity: 0.6; }
+  /* Muted text at 60% is 2.5:1 on the white card: the paper ground shows the total at full strength. */
+  :global(html[data-look="paper"] [data-ground="paper"]) .hb-pill--total { opacity: 1; }
 
   /* ── Layout ── */
   .chart-row {
