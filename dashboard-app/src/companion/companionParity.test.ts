@@ -2,16 +2,37 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { PAPER_SEL, RAIL_SEL, parseBlocks } from '../lib/testing/css';
+import { parseBlocks } from '../lib/testing/css';
 import { parseThemes } from './testing/themes';
 
 // The companion keeps its own stylesheet (it never imports app.css), so the paper values it shares with the
 // dashboard are copies. This test is the sync: it reads the dashboard's paper ground from app.css and fails when a
 // shared value drifts, and it fails on any companion :root token that is neither shared nor listed as its own.
 
+type Blocks = Map<string, Record<string, string>>;
+
+/** The first of `selectors` that app.css has with at least `min` declarations; throws when none, so a renamed block
+ * fails loudly instead of comparing against `{}`. Read by selector text, not by the css.ts constants, which PR 7
+ * removes. */
+function block(blocks: Blocks, selectors: string[], min: number): Record<string, string> {
+  for (const sel of selectors) {
+    const found = blocks.get(sel);
+    if (found && Object.keys(found).length >= min) return found;
+  }
+  throw new Error(`app.css has none of ${selectors.join(' | ')} with ${min}+ declarations`);
+}
+/** The dashboard's paper values: today's paper ground, PR 7's `.page-ground`, then the flipped `:root`. */
+function paperBlock(blocks: Blocks): Record<string, string> {
+  return block(blocks, ['html[data-look="paper"] [data-ground="paper"]', 'html[data-look="paper"] .page-ground', ':root'], 50);
+}
+/** The dashboard's rail ground in the same three shapes. */
+function railBlock(blocks: Blocks): Record<string, string> {
+  return block(blocks, ['html[data-look="paper"] [data-ground="rail"]', 'html[data-look="paper"] .rail', '.rail'], 10);
+}
+
 const BLOCKS = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8'));
-const DASH = BLOCKS.get(PAPER_SEL) ?? {};
-const RAIL = BLOCKS.get(RAIL_SEL) ?? {};
+const DASH = paperBlock(BLOCKS);
+const RAIL = railBlock(BLOCKS);
 const ROOT = parseThemes(readFileSync(join(__dirname, 'companion.css'), 'utf-8')).resolved('nous-default');
 
 /** companion :root token -> the dashboard paper token it must equal. */
@@ -58,8 +79,7 @@ const PARITY: Record<string, string> = {
   '--ctl-radius': '--ctl-radius',
   '--card-shadow': '--card-shadow',
   '--card-border': '--card-border',
-  '--label-transform': '--label-transform',
-  '--label-tracking': '--label-tracking',
+  '--field-border': '--field-border',
   '--tab-active-bg': '--tab-active-bg',
   '--tab-active-shadow': '--tab-active-shadow',
   // the seven frames
@@ -112,7 +132,8 @@ const COMPANION_OWN: Record<string, string> = {
   '--ctl-bg': "a default button's fill (the prototype .btn: white)",
   '--ctl-border': "a default button's outline (the prototype rule-2)",
   '--field-bg': "a text field's fill",
-  '--field-border': "a text field's boundary; the dashboard's --field-border (#7a8896) is in PR 4, not on main yet",
+  '--label-transform': 'sentence-case labels on paper; a legacy theme keeps capitals (PR 7 deletes the dashboard token)',
+  '--label-tracking': 'no tracking on paper; a legacy theme keeps 0.05em (PR 7 deletes the dashboard token)',
   '--option-pad': 'a ChoicePicker option card: its padding',
   '--option-border': 'a ChoicePicker option card: its outline',
   '--option-selected-bg': 'a ChoicePicker option card: the chosen wash',
@@ -135,6 +156,27 @@ const COMPANION_OWN: Record<string, string> = {
   '--line-join': 'chart line corners',
   '--spark-ring': "the sparkline end dot's ring",
 };
+
+describe('the parity reader survives the dashboard flip (review M7)', () => {
+  // PR 7 unwraps the paper selectors (first to `.page-ground` / `.rail`, then to `:root` / `.rail`) and deletes the
+  // dark tokens and the selector constants. The reader finds the paper block in any of those shapes and fails loudly
+  // when none is there, never comparing against an empty block.
+  const decls = (n: number) => Array.from({ length: n }, (_, i) => `--t${i}: ${i};`).join(' ');
+  it.each([
+    ['today', `html[data-look="paper"] [data-ground="paper"] { --bg: #eef2f3; ${decls(60)} } html[data-look="paper"] [data-ground="rail"] { --surface: #12304f; ${decls(12)} }`],
+    ['PR 7, task 2', `html[data-look="paper"] .page-ground { --bg: #eef2f3; ${decls(60)} } html[data-look="paper"] .rail { --surface: #12304f; ${decls(12)} }`],
+    ['PR 7, flipped', `:root { --bg: #eef2f3; ${decls(60)} } .rail { --surface: #12304f; ${decls(12)} }`],
+  ])('%s', (_, css) => {
+    const blocks = parseBlocks(css);
+    expect(paperBlock(blocks)['--bg']).toBe('#eef2f3');
+    expect(railBlock(blocks)['--surface']).toBe('#12304f');
+  });
+
+  it('a missing or tiny block throws', () => {
+    expect(() => paperBlock(parseBlocks(':root { --bg: #000; }'))).toThrow();
+    expect(() => railBlock(parseBlocks(''))).toThrow();
+  });
+});
 
 describe('the companion paper default and the dashboard paper ground share their values', () => {
   it('reads the dashboard paper ground', () => {
