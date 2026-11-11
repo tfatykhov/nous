@@ -229,6 +229,13 @@ describe('Scoring at phone width (the screenshot round)', () => {
     for (const c of [chart('doughnut'), chart('line', 'Completed')]) expect(c.options.plugins.legend.labels?.boxWidth, c.type).toBe(12);
   });
 
+  it('the radar, the signal trend and the weight lines ask for a 300 px phone height; the doughnut keeps 200 (review I3)', async () => {
+    const { container } = render(Rubric);
+    await waitFor(() => expect(configs).toHaveLength(4));
+    const heights = [...container.querySelectorAll('.chart-wrap')].map((el) => (el as HTMLElement).style.getPropertyValue('--phone-height'));
+    expect(heights).toEqual(['300px', '200px', '300px', '300px']); // radar, doughnut, trend, weight evolution
+  });
+
   it('the signal trend labels its days month-day (as Decisions does), so a phone does not tilt them over the plot', async () => {
     render(Rubric);
     await waitFor(() => expect(configs).toHaveLength(4));

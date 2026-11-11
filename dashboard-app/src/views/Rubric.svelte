@@ -252,6 +252,7 @@
             type="radar"
             data={radarChartData(d)}
             height="320px"
+            phoneHeight="300px"
             options={{
               scales: {
                 r: {
@@ -303,6 +304,7 @@
           type="line"
           data={signalTrendData(d)}
           height="280px"
+          phoneHeight="300px"
           options={{
             plugins: { legend: { display: true, position: 'bottom', labels: LEGEND_LABELS } },
             scales: {
@@ -370,6 +372,7 @@
           type="line"
           data={weightHistoryData(d)}
           height="280px"
+          phoneHeight="300px"
           options={{
             plugins: { legend: { display: true, position: 'bottom', labels: DASH_LEGEND_LABELS } },
             scales: {

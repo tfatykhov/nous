@@ -3,6 +3,9 @@ import { render, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import Chart from './Chart.svelte';
 import { setLook } from '../look';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { styleBlocks } from '../testing/css';
 
 type Config = { type: string; data: any; options: any };
 
@@ -43,6 +46,20 @@ afterEach(() => {
 });
 
 describe('Chart.svelte', () => {
+  it('a chart is 200 px tall at phone width unless it asks for more (redesign PR 4 review I3)', () => {
+    stubChart();
+    const props = { type: 'line', data: { labels: [], datasets: [] }, options: {} };
+    const plain = render(Chart, { props }).container.querySelector('.chart-wrap') as HTMLElement;
+    expect(plain.style.getPropertyValue('--phone-height')).toBe('200px');
+    const tall = render(Chart, { props: { ...props, phoneHeight: '300px' } }).container.querySelector('.chart-wrap') as HTMLElement;
+    expect(tall.style.getPropertyValue('--phone-height')).toBe('300px');
+  });
+
+  it('source contract: under 768 px the chart takes its phone height', () => {
+    const css = styleBlocks(readFileSync(join(__dirname, 'Chart.svelte'), 'utf-8'));
+    expect(css).toMatch(/@media \(max-width: 768px\) \{\s*\.chart-wrap \{\s*height: var\(--phone-height\) !important;/);
+  });
+
   it('constructs a Chart on mount and destroys on unmount', async () => {
     const { ctor, destroy } = stubChart();
     const { unmount } = render(Chart, { props: { type: 'line', data: { labels: [], datasets: [] }, options: {} } });

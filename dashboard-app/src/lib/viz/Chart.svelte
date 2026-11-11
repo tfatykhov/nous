@@ -3,8 +3,9 @@
   import { look } from '../look';
   import { cssColor, isPaperGround, resolveColors, withPaperDefaults } from '../chartColors';
 
-  let { type, data, options = {}, height = '220px' }:
-    { type: string; data: any; options?: any; height?: string } = $props();
+  // phoneHeight: the height under 768 px (200 px unless a chart with a dense legend or many lines asks for more).
+  let { type, data, options = {}, height = '220px', phoneHeight = '200px' }:
+    { type: string; data: any; options?: any; height?: string; phoneHeight?: string } = $props();
 
   let canvas: HTMLCanvasElement;
   let chart: any = null; // plain let — NOT $state to avoid infinite update loop
@@ -43,7 +44,7 @@
   });
 </script>
 
-<div class="chart-wrap" style:height={height}>
+<div class="chart-wrap" style:height={height} style:--phone-height={phoneHeight}>
   <canvas bind:this={canvas}></canvas>
 </div>
 
@@ -54,7 +55,7 @@
   }
   @media (max-width: 768px) {
     .chart-wrap {
-      height: 200px !important;
+      height: var(--phone-height) !important;
     }
   }
 </style>
