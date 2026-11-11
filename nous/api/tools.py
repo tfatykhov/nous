@@ -31,7 +31,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from nous import cancel_provenance
 from nous.api.call_outcome import CallOutcome
@@ -700,6 +700,10 @@ class ToolDispatcher:
                 # silently accepts the kwarg (added by F051.4) and ignores
                 # it — fail-open contract.
                 args = {**args, "_session_id": session_id}
+            if name == "commit":
+                # F111: the turn key (idempotency within a turn) and the ledger's source_kind come from the
+                # harness, never from the model.
+                args = {**args, "_session_id": session_id, "_turn_number": turn_number, "_context_kind": ctx.kind}
             if session_id is not None and name in ("push_surface", "compose_surface"):
                 # F092: surfaces record the chat session that pushed them so
                 # a companion card can be traced back to its conversation.
@@ -3064,6 +3068,120 @@ def register_nous_tools(
             dispatcher.retire(old_name, change.note)
         elif dispatcher.is_registered(change.target):
             dispatcher.register_alias(old_name, change.target, change.translate, change.note)
+
+
+# ---------------------------------------------------------------------------
+# F111: commit tool (the obligation ledger, brain.commitments)
+# ---------------------------------------------------------------------------
+
+_COMMIT_SCHEMA = {
+    "description": (
+        "Record an obligation you are taking on: work you say you will do after this reply ends (\"I'll check back "
+        "tomorrow\", \"I'll relaunch it at 18:15 UTC unless you object\"). Call it in the same turn as the promise "
+        "whenever no schedule_task, dag_create or spawn_task call in this turn already does the work. It writes a "
+        "ledger row with a deadline that the owner sees and can /drop; it does not do the work, schedule it or "
+        "remind anyone by itself. Available in every context, background turns included."
+    ),
+    "type": "object",
+    "properties": {
+        "what": {
+            "type": "string",
+            "description": "What will be done, one line a reader can check later (at least 8 characters).",
+        },
+        "due": {
+            "type": "string",
+            "description": (
+                'When it is due, as schedule_task\'s "when" reads it: "in 2 hours", "in 30 minutes" or an ISO 8601 '
+                "time with an offset. Must be in the future and at most 90 days away."
+            ),
+        },
+        "consent": {
+            "type": "string",
+            "enum": ["none", "explicit", "silence"],
+            "description": (
+                "silence: you said you will do it unless the owner objects; explicit: the owner asked for it or "
+                "agreed; none (default): neither."
+            ),
+        },
+        "awaiting_owner": {
+            "type": "boolean",
+            "description": "True when the next move is the owner's (\"once you confirm\"): never reported as overdue.",
+        },
+    },
+    "required": ["what", "due"],
+}
+
+# The ledger's source_kind for each turn kind (ExecutionContext.kind); a foreground turn is a chat turn.
+_COMMIT_SOURCE_KIND: dict[str, str] = {
+    "subtask": "subtask",
+    "dag_node": "dag_node",
+    "scheduled": "scheduled",
+    "heartbeat_triage": "heartbeat",
+    "heartbeat_check": "heartbeat",
+    "heartbeat_callback": "heartbeat",
+    "continuation": "continuation",
+}
+
+
+def create_commit_tool(store: Any) -> Callable[..., Any]:
+    """The ``commit`` handler over a ``CommitmentStore``. Idempotent within a turn (same ``what``, one row)."""
+    from nous.brain.commitments import CommitmentRefused
+    from nous.handlers.time_parser import parse_when
+
+    async def commit(
+        what: str,
+        due: str,
+        consent: str = "none",
+        awaiting_owner: bool = False,
+        _session_id: str | None = None,
+        _turn_number: int | None = None,
+        _context_kind: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            due_at = parse_when(str(due))
+        except ValueError as exc:
+            return _tool_error(f"commit: could not read due ({exc}). Use e.g. 'in 2 hours' or an ISO 8601 time.")
+        if consent not in ("none", "explicit", "silence"):
+            consent = "none"
+        # A retry of the same call in the same turn is the same row; without a turn number, no dedupe at all.
+        turn_key = f"{_session_id}:{_turn_number}" if _turn_number is not None else f"{_session_id}:{uuid4().hex}"
+        try:
+            row = await store.create_idempotent(
+                source_kind=_COMMIT_SOURCE_KIND.get(_context_kind or "", "chat_turn"),
+                detected_by="tool",
+                promise_text=str(what),
+                what=str(what),
+                due_at=due_at,
+                session_id=_session_id,
+                turn_id=turn_key,
+                kind="awaiting_user" if awaiting_owner else "action",
+                consent=consent,
+            )
+        except CommitmentRefused as exc:
+            return _tool_error(f"commit: {exc}")
+        except Exception:
+            logger.warning("commit: the ledger write failed", exc_info=True)
+            return _tool_error("commit: the ledger could not be written; nothing was recorded.")
+        # Wording: no "committed" (the claim verifier reads that word as a git claim).
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        f"Commitment {row.label} recorded: {row.what} (due {row.due_at:%Y-%m-%d %H:%M} UTC). "
+                        f"The owner can /drop {row.label}. This is a record, not the work: do it, or create the "
+                        "schedule, DAG or spawn that does it."
+                    ),
+                }
+            ]
+        }
+
+    return commit
+
+
+def register_commit_tool(dispatcher: ToolDispatcher, store: Any) -> None:
+    """F111: register ``commit`` (classified ``_WRITE`` in tool_classes, so every context may call it)."""
+    dispatcher.register("commit", create_commit_tool(store), _COMMIT_SCHEMA)
 
 
 # ---------------------------------------------------------------------------

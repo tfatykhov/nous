@@ -23,7 +23,7 @@ from starlette.routing import Mount
 
 from nous.api.builtin_tools import register_builtin_tools
 from nous.api.runner import AgentRunner
-from nous.api.tools import ToolDispatcher, register_nous_tools
+from nous.api.tools import ToolDispatcher, register_commit_tool, register_nous_tools
 from nous.api.web_tools import register_web_tools
 from nous.brain import Brain, continuation
 from nous.brain.embeddings import EmbeddingProvider
@@ -1189,6 +1189,11 @@ async def create_components(settings: Settings) -> dict:
     if getattr(sleep_handler, "_tool_notes", None) is not None:
         sleep_handler._tool_notes.set_tool_definitions(dispatcher.tool_definitions)
     register_nous_tools(dispatcher, brain, heart, settings=settings)
+    # F111: the obligation ledger. The commit tool is always registered; the promise gate is wired on the runner below.
+    from nous.brain.commitments import CommitmentStore
+
+    commitment_store = CommitmentStore(database, settings.agent_id)
+    register_commit_tool(dispatcher, commitment_store)
     register_builtin_tools(dispatcher, settings)
 
     # Web tools httpx client (separate from runner — no API auth headers)
@@ -1251,6 +1256,10 @@ async def create_components(settings: Settings) -> dict:
 
     runner = AgentRunner(cognitive, brain, heart, settings)
     runner.set_dispatcher(dispatcher)
+    if settings.promise_gate_enabled and settings.promise_gate_mode != "off":
+        from nous.cognitive.promise_gate import PromiseGate
+
+        runner.set_promise_gate(PromiseGate(commitment_store, settings))
     runner.set_api_client(api_client)
     await runner.start()
 

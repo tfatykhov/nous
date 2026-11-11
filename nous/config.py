@@ -2105,6 +2105,16 @@ class Settings(BaseSettings):
     # also withholds the arrival's progress credit. Needs claim_verification_enabled and the durable ledger.
     claim_verification_reports_enabled: bool = True
 
+    # F111 obligation ledger (PR A): the turn-close promise gate (nous/cognitive/promise_gate.py). shadow writes
+    # ledger rows and the gate log only; warn also appends one footer line to the delivered reply (never to the
+    # stored text). enforce is treated as warn until PR B adds the repair re-entry. Rollback: mode off.
+    promise_gate_enabled: bool = True
+    promise_gate_mode: Literal["off", "shadow", "warn", "enforce"] = "shadow"
+    promise_gate_max_reentries: int = Field(default=2, ge=0, le=2)  # PR B (enforce); read by nothing in PR A
+    promise_gate_default_due_minutes: int = Field(default=60, ge=1)  # due_at when a promise names no time
+    promise_gate_grace_seconds: int = Field(default=900, ge=0)  # stored on each row; the PR B watcher reads it
+    promise_gate_classifier_enabled: bool = False  # stage 2 (a model call on stage-1 hits): not built in PR A
+
     action_gating_enabled: bool = True
     action_gating_mode: Literal["shadow", "warn", "enforce"] = "enforce"
     action_gating_model: str = "claude-haiku-5-5"
