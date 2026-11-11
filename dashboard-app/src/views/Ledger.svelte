@@ -10,7 +10,7 @@
   import FilterBar from '../lib/ui/FilterBar.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import HoldUndo from '../lib/ui/HoldUndo.svelte';
-  import { ledgerStatusColor, badgeStyle } from '../lib/status';
+  import { ledgerStatusVar, badgeStyleVar } from '../lib/status';
   import { fmtWhen, fmtUtc, ledgerTarget, recipients } from '../lib/harness';
 
   // Harness dashboard §3.2 / §4: the durable execution ledger. Filters are
@@ -285,7 +285,7 @@
           {:else if c.key === 'effect'}
             <span class="pill effect-{r.side_effect_type}">{r.side_effect_type}</span>
           {:else if c.key === 'status'}
-            <span class="pill" style={badgeStyle(ledgerStatusColor(r.status))}>{r.status}</span>
+            <span class="pill" style={badgeStyleVar(ledgerStatusVar(r.status))}>{r.status}</span>
             {#if r.refusal_code}<span class="small muted"> {r.refusal_code}</span>{/if}
             <!-- Persistence off: no LedgerStore is installed, so no retry is refused. -->
             {#if r.status === 'unknown'}<span class="small muted"> {!r.idempotency_key ? 'nothing held' : d.modes.persist ? 'holds a send' : 'holds nothing while persistence is off'}</span>{/if}
@@ -358,31 +358,31 @@
   h2 { font-size: 0.9375rem; font-weight: 600; color: var(--text); margin: 0; }
 
   .banner { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;
-    padding: 0.75rem 1rem; border-radius: 8px; background: var(--surface); border: 1px solid var(--border); margin-bottom: 1rem; }
+    padding: 0.75rem 1rem; border-radius: var(--card-radius); background: var(--surface); border: var(--card-border); box-shadow: var(--card-shadow); margin-bottom: 1rem; }
   .banner-left { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
-  .banner-dot { width: 8px; height: 8px; border-radius: 50%; background: #10b981; flex-shrink: 0; }
-  .banner-off .banner-dot { background: #f59e0b; }
+  .banner-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--st-success); flex-shrink: 0; }
+  .banner-off .banner-dot { background: var(--st-ledger-blocked); }
   .banner-label { font-size: 0.875rem; font-weight: 600; }
   .banner-note { font-size: 0.75rem; color: var(--muted); }
   .banner-modes { display: flex; gap: 0.5rem; flex-wrap: wrap; }
   .mode-pill { font-size: 0.6875rem; font-weight: 600; padding: 0.125rem 0.5rem; border-radius: 999px; border: 1px solid currentColor; }
   .mode-off { color: var(--muted); border-color: var(--border); }
-  .mode-enforce { color: #10b981; }
-  .mode-warn { color: #f59e0b; }
+  .mode-enforce { color: var(--st-success); }
+  .mode-warn { color: var(--st-ledger-blocked); }
 
-  .attention { border-radius: 8px; background: rgba(244, 114, 182, 0.06); border: 1px solid rgba(244, 114, 182, 0.35);
+  .attention { border-radius: var(--card-radius); background: color-mix(in srgb, var(--st-unknown) 6%, transparent); border: 1px solid color-mix(in srgb, var(--st-unknown) 35%, transparent);
     padding: 1rem 1.125rem; margin-bottom: 1rem; display: flex; flex-direction: column; gap: 0.75rem; }
   .attn-lede { font-size: 0.8125rem; margin: 0; }
   .unknown-text { color: var(--unknown); }
   .attn-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 1.5rem; align-items: start;
-    padding-top: 0.75rem; border-top: 1px solid rgba(244, 114, 182, 0.2); }
+    padding-top: 0.75rem; border-top: 1px solid color-mix(in srgb, var(--st-unknown) 20%, transparent); }
   .attn-facts { display: grid; grid-template-columns: 6rem minmax(0, 1fr); gap: 0.25rem 0.75rem; font-size: 0.8125rem; margin: 0; }
   .attn-facts dt { color: var(--muted); }
   .attn-facts dd { margin: 0; overflow-wrap: anywhere; }
   .attn-actions { display: flex; flex-direction: column; gap: 0.625rem; }
   .note { font-size: 0.75rem; color: var(--muted); margin: 0; }
   .btn-row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
-  .btn { min-height: 32px; padding: 0 0.75rem; border-radius: 8px; border: 1px solid var(--border); background: var(--surface);
+  .btn { min-height: 32px; padding: 0 0.75rem; border-radius: var(--ctl-radius); border: 1px solid var(--border); background: var(--surface);
     color: var(--text); font-family: inherit; font-size: 0.75rem; font-weight: 500; cursor: pointer; }
   .btn:hover { background: var(--surface-hover); }
   .btn:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
@@ -390,37 +390,37 @@
 
   .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem 1.25rem; margin: 1rem 0 0.75rem; }
   .filter-group { display: flex; align-items: center; gap: 0.5rem; }
-  .filter-label { font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
-  select, input[type='search'] { min-height: 32px; padding: 0 0.625rem; border-radius: 8px; border: 1px solid var(--border);
+  .filter-label { font-size: 0.75rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform); letter-spacing: var(--label-tracking); }
+  select, input[type='search'] { min-height: 32px; padding: 0 0.625rem; border-radius: var(--ctl-radius); border: 1px solid var(--border);
     background: var(--surface); color: var(--text); font-family: inherit; font-size: 0.8125rem; }
   .search { margin-left: auto; flex: 1 1 14rem; max-width: 18rem; }
   .search input { width: 100%; border-radius: 999px; }
 
-  .table-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; }
+  .table-card { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow); padding: 1.25rem; }
   .table-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
   .table-foot { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.75rem; }
   .empty { color: var(--muted); font-size: 0.875rem; text-align: center; padding: 1.5rem 0; margin: 0; }
   .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 0.6875rem; font-weight: 600;
     white-space: nowrap; border: 1px solid transparent; }
-  .effect-write { background: rgba(96, 165, 250, 0.15); color: #60a5fa; }
-  .effect-external { background: rgba(251, 191, 36, 0.15); color: #f59e0b; }
-  .effect-irreversible { background: rgba(248, 113, 113, 0.15); color: var(--red); }
+  .effect-write { background: color-mix(in srgb, var(--effect-write) 15%, transparent); color: var(--effect-write); }
+  .effect-external { background: var(--badge-warn-bg); color: var(--st-ledger-blocked); }
+  .effect-irreversible { background: var(--badge-bad-bg); color: var(--err-text); }
   .target { overflow-wrap: anywhere; font-size: 0.8125rem; }
   .detail-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.625rem 1.5rem; margin: 0; padding: 0.5rem 0; }
   .detail-wide { grid-column: 1 / -1; }
-  .stored { margin: 0.25rem 0 0.5rem; padding: 0.5rem 0.625rem; border-radius: 8px; background: var(--bg);
+  .stored { margin: 0.25rem 0 0.5rem; padding: 0.5rem 0.625rem; border-radius: var(--card-radius-sm); background: var(--bg);
     border: 1px solid var(--border); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 24rem; overflow: auto; }
   .target-preview { display: block; max-width: 28rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .error-text { color: var(--red); }
-  .detail-grid dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .error-text { color: var(--err-text); }
+  .detail-grid dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform); letter-spacing: var(--label-tracking); }
   .detail-grid dd { margin: 0.125rem 0 0; font-size: 0.8125rem; }
   .mono { font-family: var(--font-mono); font-size: 0.75rem; }
   .wrap { overflow-wrap: anywhere; }
   .small { font-size: 0.75rem; }
   .muted { color: var(--muted); }
   .state-msg { margin: 0.5rem 0 1rem; color: var(--muted); font-size: 0.875rem; }
-  .state-msg.error { color: var(--red); }
-  .older-error { color: var(--red); }
+  .state-msg.error { color: var(--err-text); }
+  .older-error { color: var(--err-text); }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
   @media (max-width: 768px) {

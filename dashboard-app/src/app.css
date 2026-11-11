@@ -215,6 +215,44 @@
     --save-err: #f87171;
     --tone-bad: #ef4444;                       /* Memory write health: a tripped rule's border and tint */
     --btn-ink: #fff;                           /* text on an accent-filled button (not --on-accent: dark keeps white) */
+
+    /* ---- PR 3, the Execution screens ----
+       Status (one meaning each; lib/status.ts's statusVar/ledgerStatusVar name them, its hex map mirrors these dark
+       values) and Subtasks' outcomes. */
+    --st-pending: #8e8eab;
+    --st-ready: #22d3ee;
+    --st-running: #fbbf24;
+    --st-awaiting-check: #f59e0b;
+    --st-awaiting-input: #a78bfa;              /* = --waiting */
+    --st-completed: #4ade80;
+    --st-failed: #f87171;
+    --st-blocked: #f25c5c;
+    --st-cancelled: #8a8a9a;
+    --st-skipped: #94a3b8;
+    --st-partial: #fb923c;
+    --st-success: #10b981;                     /* the ledger's success, Subtasks' completed */
+    --st-ledger-blocked: #f59e0b;              /* the ledger's blocked, Subtasks' incomplete_blocked */
+    --st-unknown: #f472b6;                     /* = --unknown */
+    --st-neutral: #6b7280;
+    --oc-failed: #ef4444;
+    --oc-timeout: #dc2626;
+    --oc-errored: #7c2d12;
+    --oc-unknown: #9ca3af;
+    --oc-blocked: #f59e0b;                     /* Subtasks' incomplete_blocked, as a chart mark */
+    --stack-bar: rgba(251, 191, 36, 0.7);      /* Workflows: a token budget's consumed part */
+    --hit-good: #22c55e;                       /* Cache: the hit-rate line, the doughnut's cache-read part */
+    --hit-mid: #eab308;
+    --hit-bad: #ef4444;
+    --cache-blue: #3b82f6;                     /* Cache: the doughnut's cache-created part */
+    --cache-grey: #4b5563;                     /* Cache: the doughnut's uncached part */
+    --wait-ink: #c4b5fd;                       /* Workflows: the Now column's waiting pill */
+    --wait-bg: rgba(167, 139, 250, 0.14);
+    --wash: rgba(255, 255, 255, 0.03);         /* Heartbeat: the tuning report's panel */
+    --hb-warn-ink: #fbbf24;                    /* Heartbeat: amber as text (paper's --yellow is a mark colour) */
+    --effect-write: #60a5fa;                   /* the Ledger's write effect pill */
+    --mc-section-1: #a99df9;                   /* a model call's first context section (was --accent-text) */
+    --mc-section-7: #f472b6;                   /* its Messages section (was --unknown) */
+    --mc-section-8: #9ca3af;                   /* its Tools section (was --series-12) */
   }
 
   /* ---- The paper ground: page content under the paper look ---- */
@@ -354,6 +392,43 @@
     --save-err: #b02a22;
     --tone-bad: #b02a22;
     --btn-ink: #ffffff;
+
+    /* PR 3: each status colour reads at 4.5:1 or more on its own 12.5% badge tint, over the white card and over a
+       hovered row (--surface-hover) */
+    --st-pending: #56687a;
+    --st-ready: #1b6a9c;
+    --st-running: #8a5a0e;
+    --st-awaiting-check: #9a4d0a;
+    --st-awaiting-input: #7b3fa0;
+    --st-completed: #23703d;
+    --st-failed: #b02a22;
+    --st-blocked: #8a1c2c;
+    --st-cancelled: #55616c;
+    --st-skipped: #536170;
+    --st-partial: #a14a08;
+    --st-success: #23703d;
+    --st-ledger-blocked: #8a5a0e;
+    --st-unknown: #a3266f;
+    --st-neutral: #55616c;
+    --oc-failed: #b02a22;
+    --oc-timeout: #881c34;
+    --oc-errored: #641400;
+    --oc-unknown: #7a8794;                     /* lighter than --st-neutral (cancelled), as under dark */
+    --oc-blocked: #b7791f;                     /* a mark (3:1), not the badge amber, which merges with failed under deuteranopia */
+    --stack-bar: #b7791f;
+    --hit-good: #23703d;
+    --hit-mid: #8a5a0e;
+    --hit-bad: #b02a22;
+    --cache-blue: #1f5fa8;
+    --cache-grey: #4f5f6f;
+    --wait-ink: #7b3fa0;
+    --wait-bg: #efe3f6;
+    --wash: #f4f7f8;
+    --hb-warn-ink: #8a5a0e;
+    --effect-write: #1f5fa8;
+    --mc-section-1: #8b5cf6;                   /* a violet, not the link blue beside series 1 */
+    --mc-section-7: #7890d0;                   /* not the unknown status's magenta; 12+ from every section, all vision types */
+    --mc-section-8: #382880;                   /* an indigo: apart from Decisions' teal and from the link blue under red-green CVD */
 
     /* shadcn, HSL of the paper hex */
     --background: 192 17% 94%;

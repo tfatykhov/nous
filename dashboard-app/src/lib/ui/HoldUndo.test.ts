@@ -38,3 +38,14 @@ describe('HoldUndo', () => {
     await waitFor(() => expect(container.textContent).toContain('Selected — press Ctrl+C'));
   });
 });
+
+describe('HoldUndo on paper (redesign PR 3, review M4)', () => {
+  it('source contract: the copy buttons take the control radius (pills on paper) and the SQL blocks the small card radius', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { styleBlocks } = await import('../testing/css');
+    const css = styleBlocks(readFileSync(join(__dirname, 'HoldUndo.svelte'), 'utf-8'));
+    expect(css).toMatch(/\.btn \{[^}]*border-radius: var\(--ctl-radius\);/);
+    expect(css).toMatch(/\.sql \{[^}]*border-radius: var\(--card-radius-sm\);/);
+  });
+});

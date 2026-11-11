@@ -8,7 +8,10 @@ import Harness from './Harness.svelte';
 import Subtasks from './Subtasks.svelte';
 import Consolidation from './Consolidation.svelte';
 import Observability from './Observability.svelte';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { initRouter } from '../lib/router';
+import { styleBlocks } from '../lib/testing/css';
 import { attentionOverride, attentionPoll } from '../lib/stores/attention';
 
 // F108 Phase 2 T13: the execution ledger is Work's Changes tab, and the old Activity screen's sections live on the
@@ -117,6 +120,7 @@ const FINDINGS = { findings: [], stats: {} };
 // Routed by URL: /dashboard/activity serves the four moved sections; each host answers from its own endpoint.
 let urls: string[] = [];
 let failing: string[] = [];
+let execution: unknown = EXECUTION;
 let activityBody: unknown = ACTIVITY;
 let activityGate: Promise<void> | null = null;
 function install() {
@@ -127,7 +131,7 @@ function install() {
     if (failing.some((p) => url.startsWith(p))) return { ok: false, status: 400, json: async () => ({}) } as Response;
     if (url.startsWith('/dashboard/activity') && activityGate) await activityGate;
     const body = url.startsWith('/dashboard/activity') ? activityBody
-      : url.startsWith('/dashboard/execution') ? EXECUTION
+      : url.startsWith('/dashboard/execution') ? execution
       : url.startsWith('/dashboard/harness') ? HARNESS
       : url.startsWith('/dashboard/subtasks') ? SUBTASKS
       : url.startsWith('/dashboard/consolidation') ? CONSOLIDATION
@@ -159,6 +163,7 @@ const SLEEP_STATS = ['Last Sleep', 'Sleep Facts Created'];
 
 beforeEach(() => {
   failing = [];
+  execution = EXECUTION;
   activityBody = ACTIVITY;
   activityGate = null;
   attentionOverride.set({});
@@ -198,19 +203,28 @@ describe('Work Changes tab', () => {
     expect(urls.some((u) => u.startsWith('/dashboard/work/sessions'))).toBe(false);
   });
 
-  it('Changes renders the Ledger inside a data-ground="dark" island; the Work title stays outside it', async () => {
+  it('Changes renders the Ledger straight into the paper page: no dark island, one level-1 heading', async () => {
     go('#/work/changes');
-    const { container } = render(Work);
+    const main = document.createElement('main');
+    main.setAttribute('data-ground', 'paper');
+    document.body.appendChild(main);
+    const { container } = render(Work, { target: main });
     await screen.findByText('1 send ended without confirming delivery');
-    const island = container.querySelector('[data-ground="dark"]') as HTMLElement;
-    expect(island).not.toBeNull();
-    expect(island.textContent).toContain('Every side-effecting tool call, kept durably');
-    expect(island.querySelector('code.sql')).not.toBeNull();
-    const h1 = screen.getByRole('heading', { level: 1 });
-    expect(island.contains(h1)).toBe(false);
-    // The frame's title names the tab (no second level-1 heading, no "Execution Ledger").
-    expect(container.querySelector('.island #changes-h')?.textContent).toBe('Changes');
-    expect(island.closest('.island')).not.toBeNull();
+    // Review Focus 5: nothing inside the paper route keeps a dark ground.
+    expect(main.querySelector('[data-ground="dark"]')).toBeNull();
+    expect(container.querySelector('.island')).toBeNull();
+    const subtitle = screen.getByText(/Every side-effecting tool call, kept durably/);
+    expect(subtitle.closest('[data-ground]')).toBe(main);
+    expect(main.querySelector('code.sql')).not.toBeNull();
+    // The Work title only: the embedded ledger drops its own, and the Changes frame's h2 is gone.
+    expect(screen.getAllByRole('heading', { level: 1 }).map((h) => h.textContent)).toEqual(['Work']);
+    expect(h2('Changes')).toBeNull();
+    main.remove();
+  });
+
+  it('Work no longer imports the dark island', () => {
+    const src = readFileSync(join(__dirname, 'Work.svelte'), 'utf-8');
+    expect(src).not.toMatch(/import Ground|<Ground|data-ground/);
   });
 
   it('the sessions list has no ledger in it', async () => {
@@ -249,6 +263,55 @@ describe('Ledger embedded prop', () => {
     expect(screen.queryByRole('heading', { level: 1 })).toBeNull();
     expect(container.querySelector('.view-head .subtitle')?.textContent).toContain('Every side-effecting tool call');
     expect(container.querySelector('.view-head .stale-badge')).not.toBeNull();
+  });
+});
+
+// ── Redesign PR 3: the Ledger on paper ───────────────────────────────────────────────────────────────────────────────
+
+describe('Ledger: status and effect by token', () => {
+  const css = () => styleBlocks(readFileSync(join(__dirname, 'Ledger.svelte'), 'utf-8'));
+  const WANT: Record<string, string> = {
+    pending: 'var(--pending)', success: 'var(--st-success)', error: 'var(--st-failed)',
+    blocked: 'var(--st-ledger-blocked)', unknown: 'var(--st-unknown)',
+  };
+
+  it('every ledger status renders a badge from its token with a color-mix tint, never a hex', async () => {
+    execution = { ...EXECUTION, attention: [], attention_total: 0,
+      rows: Object.keys(WANT).map((status) => row({ status, tool_name: `tool_${status}` })) };
+    const { container } = render(Ledger);
+    await screen.findByText('tool_pending');
+    for (const [status, v] of Object.entries(WANT)) {
+      const pill = Array.from(container.querySelectorAll<HTMLElement>('.pill')).find((p) => p.textContent === status);
+      expect(pill, status).toBeTruthy();
+      expect(pill!.style.color, status).toBe(v);
+      expect(pill!.style.background, status).toBe(`color-mix(in srgb, ${v} 12.5%, transparent)`);
+      expect(pill!.getAttribute('style'), status).not.toContain('#');
+    }
+  });
+
+  it('every effect renders its pill', async () => {
+    execution = { ...EXECUTION, attention: [], attention_total: 0,
+      rows: ['write', 'external', 'irreversible'].map((e) => row({ side_effect_type: e, tool_name: `tool_${e}` })) };
+    const { container } = render(Ledger);
+    await screen.findByText('tool_write');
+    expect(Array.from(container.querySelectorAll('.pill[class*="effect-"]')).map((p) => p.className.match(/effect-\w+/)?.[0]))
+      .toEqual(['effect-write', 'effect-external', 'effect-irreversible']);
+  });
+
+  it('source contract: the effect pills\' colours are tokens', () => {
+    expect(css()).toMatch(/\.effect-write \{ background: color-mix\(in srgb, var\(--effect-write\) 15%, transparent\); color: var\(--effect-write\); \}/);
+    expect(css()).toMatch(/\.effect-external \{ background: var\(--badge-warn-bg\); color: var\(--st-ledger-blocked\); \}/);
+    expect(css()).toMatch(/\.effect-irreversible \{ background: var\(--badge-bad-bg\); color: var\(--err-text\); \}/);
+  });
+
+  it('source contract: the banner, the modes and the sends-in-doubt card read status tokens', () => {
+    const c = css();
+    expect(c).toMatch(/\.banner-dot \{[^}]*background: var\(--st-success\);/);
+    expect(c).toMatch(/\.banner-off \.banner-dot \{ background: var\(--st-ledger-blocked\); \}/);
+    expect(c).toMatch(/\.mode-enforce \{ color: var\(--st-success\); \}/);
+    expect(c).toMatch(/\.mode-warn \{ color: var\(--st-ledger-blocked\); \}/);
+    expect(c).toMatch(/\.attention \{[^}]*background: color-mix\(in srgb, var\(--st-unknown\) 6%, transparent\); border: 1px solid color-mix\(in srgb, var\(--st-unknown\) 35%, transparent\);/);
+    expect(c).toMatch(/border-top: 1px solid color-mix\(in srgb, var\(--st-unknown\) 20%, transparent\);/);
   });
 });
 

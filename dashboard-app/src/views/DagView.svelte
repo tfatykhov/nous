@@ -3,7 +3,7 @@
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
   import type { DagDashboardData, DagActiveDag, DagRecentDag, DagActiveNode, DagWaiting } from '../lib/types/api';
-  import { statusColor, badgeStyle, WAITING } from '../lib/status';
+  import { statusVar, badgeStyleVar, WAITING_VAR } from '../lib/status';
   import { fmtUtc, relUntil, isSoon } from '../lib/harness';
   import { pushCounts } from '../lib/stores/attention';
   import StatGrid from '../lib/ui/StatGrid.svelte';
@@ -178,7 +178,7 @@
         _dag: dag,
         name: dag.name,
         status: dag.waiting > 0 ? 'waiting on you' : dag.status,
-        statusCol: dag.waiting > 0 ? WAITING : statusColor(dag.status),
+        statusCol: dag.waiting > 0 ? WAITING_VAR : statusVar(dag.status),
         now: nowOf(dag),
         source: dag.source,
         progress: `${completed}/${total}`,
@@ -202,12 +202,12 @@
         {
           label: 'Consumed',
           data: dags.map((d) => d.tokens_consumed),
-          backgroundColor: 'rgba(251,191,36,0.7)',
+          backgroundColor: 'var(--stack-bar)',
         },
         {
           label: 'Budget',
           data: dags.map((d) => d.token_budget - d.tokens_consumed),
-          backgroundColor: 'rgba(255,255,255,0.08)',
+          backgroundColor: 'var(--track-strong)',
         },
       ],
     };
@@ -352,7 +352,7 @@
               <tr class:selected={isSelected}>
                 <td><strong>{row.name}</strong></td>
                 <td>
-                  <span class="status-badge" style={badgeStyle(row.statusCol)}>{row.status}</span>
+                  <span class="status-badge" style={badgeStyleVar(row.statusCol)}>{row.status}</span>
                 </td>
                 <td class="now-cell">
                   <span class="now now-{row.now.kind}">{row.now.text}</span>
@@ -401,7 +401,7 @@
                 <button type="button" class="node-btn" onclick={() => onNodeClick(n)}>
                   <span class="mono">{n.name}</span>
                   <span class="small muted">{n.node_type}</span>
-                  <span class="status-badge" style={badgeStyle(statusColor(n.status))}>{n.status}</span>
+                  <span class="status-badge" style={badgeStyleVar(statusVar(n.status))}>{n.status}</span>
                 </button>
               </li>
             {/each}
@@ -416,10 +416,10 @@
     <section class="chart-card">
       <h2 class="section-title">Token Budgets</h2>
       <Chart type="bar" data={budgetChartData()!} height="240px" options={{
-        plugins: { legend: { labels: { color: '#94a3b8' } } },
+        plugins: { legend: { labels: { color: 'var(--chart-text)' } } },
         scales: {
-          x: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' } },
-          y: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' } },
+          x: { stacked: true, ticks: { color: 'var(--chart-text)' }, grid: { color: 'var(--chart-grid)' } },
+          y: { stacked: true, ticks: { color: 'var(--chart-text)' }, grid: { color: 'var(--chart-grid)' } },
         },
       }} />
     </section>
@@ -443,8 +443,8 @@
       >
         {#snippet cell(row, c)}
           {#if c.key === 'statusBadge'}
-            {@const col = row._dag.stopped_by ? WAITING : statusColor(row._dag.status)}
-            <span class="status-badge" style={badgeStyle(col)}>{row.statusBadge}</span>
+            {@const col = row._dag.stopped_by ? WAITING_VAR : statusVar(row._dag.status)}
+            <span class="status-badge" style={badgeStyleVar(col)}>{row.statusBadge}</span>
           {:else if c.key === 'summary'}
             {#if row._dag.stops.length}
               <span class="small muted">{row._dag.stops.map((s: { node_name: string; answer_source: string; answer_label: string }) =>
@@ -490,7 +490,7 @@
     <div class="node-detail">
       <div class="node-detail-row">
         <span class="detail-label">Status</span>
-        <span class="status-badge" style={badgeStyle(statusColor(n.status))}>{n.status}</span>
+        <span class="status-badge" style={badgeStyleVar(statusVar(n.status))}>{n.status}</span>
       </div>
       {#if fullNode(n.id)?.approval}
         {@const live = fullNode(n.id)!}
@@ -516,7 +516,7 @@
         </div>
         <dl class="approval-dl">
           <div><dt>Asked</dt><dd>{fmtUtc(a.asked_at)}</dd></div>
-          <div><dt>Answer by</dt><dd>{fmtUtc(a.deadline)}{#if waiting && !a.answer && a.deadline} ({relUntil(a.deadline)}){/if}</dd></div>
+          <div><dt>Answer by</dt><dd>{fmtUtc(a.deadline)}{#if waiting && !a.answer && a.deadline}{' '}({relUntil(a.deadline)}){/if}</dd></div>
           <div><dt>If no answer</dt><dd>'{a.default_label}' — the DAG stops here</dd></div>
           <div><dt>Answer</dt><dd>{answerLine(a, live.status)}</dd></div>
         </dl>
@@ -604,6 +604,8 @@
     margin: 0 0 0.25rem;
   }
 
+  :global(html[data-look="paper"] [data-ground="paper"]) .view-title { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; }
+
   .view-subtitle {
     font-size: 0.8125rem;
     color: var(--muted);
@@ -612,8 +614,9 @@
 
   .chart-card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 8px);
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
     padding: 1.25rem;
     margin-top: 1.25rem;
   }
@@ -633,7 +636,7 @@
   }
 
   .state-msg.error {
-    color: var(--red, #f87171);
+    color: var(--err-text);
   }
 
   .empty-state {
@@ -666,8 +669,8 @@
     color: var(--muted);
     font-size: 0.75rem;
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
   }
 
   .dag-table tr:hover td {
@@ -675,7 +678,7 @@
   }
 
   .dag-table tr.selected td {
-    background: rgba(34, 211, 238, 0.04);
+    background: color-mix(in srgb, var(--pending) 4%, transparent);
   }
 
   .muted {
@@ -689,9 +692,9 @@
   /* ── Waiting on you (harness dashboard §4) ── */
   .waiting {
     background: var(--surface);
-    border: 1px solid rgba(167, 139, 250, 0.35);
-    box-shadow: 0 0 0 4px rgba(167, 139, 250, 0.06);
-    border-radius: var(--radius-sm, 8px);
+    border: 1px solid color-mix(in srgb, var(--waiting) 35%, transparent);
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--waiting) 6%, transparent);
+    border-radius: var(--card-radius);
     padding: 1.25rem;
     margin-bottom: 1.25rem;
     display: flex;
@@ -704,36 +707,40 @@
   .count { min-width: 1.25rem; height: 1.25rem; padding: 0 0.375rem; border-radius: 999px; background: var(--waiting);
     color: var(--bg); font-size: 0.6875rem; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; }
   .q-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; gap: 1.25rem; align-items: center;
-    padding: 0.875rem 1rem; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); }
+    padding: 0.875rem 1rem; border-radius: var(--card-radius-sm); background: var(--bg); border: 1px solid var(--border); }
   .q-question { font-size: 0.9375rem; font-weight: 600; }
-  .q-error { font-size: 0.8125rem; color: #f59e0b; margin: 0.25rem 0 0; }
+  .q-error { font-size: 0.8125rem; color: var(--st-awaiting-check); margin: 0.25rem 0 0; }
   .q-when, .q-default { font-size: 0.875rem; min-width: 9rem; }
-  .label { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
-  .soon { color: #fbbf24; font-weight: 600; }
+  .label { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform); letter-spacing: var(--label-tracking); }
+  .soon { color: var(--st-running); font-weight: 600; }
   .text { color: var(--text); }
   .mono { font-family: var(--font-mono); font-size: 0.75rem; }
   .q-actions { display: flex; gap: 0.5rem; justify-content: flex-end; flex-wrap: wrap; }
-  .btn-primary { display: inline-flex; align-items: center; min-height: 36px; padding: 0 0.875rem; border-radius: 8px;
-    background: var(--accent); color: var(--bg); font-size: 0.8125rem; font-weight: 700; text-decoration: none; white-space: nowrap; }
+  .btn-primary { display: inline-flex; align-items: center; min-height: 36px; padding: 0 0.875rem; border-radius: var(--ctl-radius);
+    background: var(--accent); color: var(--on-accent); font-size: 0.8125rem; font-weight: 700; text-decoration: none; white-space: nowrap; }
   .btn-primary:focus-visible, .node-btn:focus-visible, .card-link:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
   .btn-tall { min-height: 36px; }
   .now { font-size: 0.75rem; }
-  .now-waiting { display: inline-block; padding: 3px 10px; border-radius: 999px; font-weight: 600; color: #c4b5fd; background: rgba(167, 139, 250, 0.14); }
-  .now-held { display: inline-block; padding: 3px 10px; border-radius: 999px; font-weight: 600; color: #fbbf24; background: rgba(251, 191, 36, 0.10); }
+  /* Room for the pill, so a narrow table scrolls in its box rather than squeezing it; a 0.75rem radius is a pill on
+     one line and a rounded block when the text wraps. */
+  .now-cell { min-width: 10rem; }
+  .now-waiting { display: inline-block; padding: 3px 10px; border-radius: 0.75rem; font-weight: 600; color: var(--wait-ink); background: var(--wait-bg); }
+  .now-held { display: inline-block; padding: 3px 10px; border-radius: 0.75rem; font-weight: 600; color: var(--st-running); background: color-mix(in srgb, var(--st-running) 10%, transparent); }
   .now-plain { color: var(--muted); }
   .node-list { list-style: none; margin: 0; padding: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem; border-top: 1px solid var(--border); }
-  .node-btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.375rem 0.625rem; border-radius: 8px;
-    border: 1px solid var(--border); background: var(--surface); color: var(--text); font-family: inherit; cursor: pointer; }
-  .card-summary { font-size: 0.8125rem; white-space: pre-wrap; padding: 0.625rem 0.75rem; border-radius: 8px;
+  .node-btn { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; padding: 0.375rem 0.625rem; border-radius: var(--card-radius-sm);
+    border: 1px solid var(--border); background: var(--surface); color: var(--text); font-family: inherit; cursor: pointer; max-width: 100%; text-align: left; }
+  .node-btn .mono { overflow-wrap: anywhere; min-width: 0; }
+  .card-summary { font-size: 0.8125rem; white-space: pre-wrap; overflow-wrap: anywhere; padding: 0.625rem 0.75rem; border-radius: var(--card-radius-sm);
     background: var(--bg); border: 1px solid var(--border); }
   .opts { display: flex; flex-wrap: wrap; gap: 0.375rem; margin-top: 0.25rem; }
   .opt { padding: 3px 10px; border-radius: 999px; font-size: 0.75rem; font-weight: 600; border: 1px solid; }
-  .opt-proceed { color: #4ade80; border-color: rgba(74, 222, 128, 0.4); }
-  .opt-stop { color: var(--red); border-color: rgba(248, 113, 113, 0.4); }
+  .opt-proceed { color: var(--st-completed); border-color: color-mix(in srgb, var(--st-completed) 40%, transparent); }
+  .opt-stop { color: var(--err-text); border-color: color-mix(in srgb, var(--red) 40%, transparent); }
   .opt-default { color: var(--muted); border-color: var(--border); font-weight: 500; }
   .approval-dl { display: grid; gap: 0.5rem; margin: 0.75rem 0 0; }
   .approval-dl div { display: grid; grid-template-columns: 7rem minmax(0, 1fr); gap: 0.75rem; }
-  .approval-dl dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .approval-dl dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform); letter-spacing: var(--label-tracking); }
   .approval-dl dd { margin: 0; font-size: 0.875rem; }
   .card-link { display: inline-block; margin-top: 0.75rem; font-size: 0.8125rem; font-weight: 600; color: var(--accent-text); }
   .attempts { margin: 0.25rem 0 0; padding-left: 1.25rem; font-size: 0.8125rem; display: grid; gap: 0.25rem; }
@@ -748,7 +755,7 @@
   .status-badge {
     display: inline-block;
     padding: 2px 8px;
-    border-radius: 4px;
+    border-radius: 999px;
     font-size: 0.6875rem;
     font-weight: 600;
     border: 1px solid transparent;
@@ -770,7 +777,7 @@
 
   .progress-fill {
     height: 100%;
-    background: var(--accent, #22d3ee);
+    background: var(--accent);
     border-radius: 2px;
     transition: width 0.3s ease;
   }
@@ -779,9 +786,9 @@
   .graph-panel {
     margin-top: 1rem;
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 8px);
+    border-radius: var(--card-radius-sm);
     overflow: hidden;
-    background: var(--bg, #0f172a);
+    background: var(--bg);
   }
 
   .graph-header {
@@ -815,7 +822,7 @@
     padding: 0.25rem 0.625rem;
     font-size: 0.75rem;
     font-weight: 500;
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--ctl-radius);
     border: 1px solid var(--border);
     background: var(--surface);
     color: var(--text);
@@ -829,9 +836,9 @@
   }
 
   .btn-sm.btn-active {
-    background: rgba(34, 211, 238, 0.1);
-    border-color: rgba(34, 211, 238, 0.4);
-    color: #22d3ee;
+    background: color-mix(in srgb, var(--pending) 10%, transparent);
+    border-color: color-mix(in srgb, var(--pending) 40%, transparent);
+    color: var(--pending);
   }
 
   /* ── Detail expand (recent DAGs) ── */
@@ -852,8 +859,8 @@
     font-size: 0.6875rem;
     font-weight: 600;
     color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
   }
 
   .detail-section {
@@ -865,11 +872,11 @@
     font-size: 0.8125rem;
     color: var(--text);
     white-space: pre-wrap;
-    word-break: break-word;
+    overflow-wrap: anywhere;
   }
 
   .detail-postmortem {
-    border-left: 3px solid #fbbf24;
+    border-left: 3px solid var(--st-running);
     padding-left: 0.625rem;
   }
 
@@ -892,6 +899,6 @@
   }
 
   .error-text {
-    color: var(--red, #f87171);
+    color: var(--err-text);
   }
 </style>

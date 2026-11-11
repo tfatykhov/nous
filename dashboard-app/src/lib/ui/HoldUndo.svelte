@@ -49,11 +49,11 @@ WHERE id = '{id}' AND status = 'unknown';</code>
   .hold-undo { display: flex; flex-direction: column; gap: 0.625rem; }
   .sql-title { font-size: 0.8125rem; font-weight: 600; }
   .hold-undo .btn { margin-top: 0.375rem; }
-  .sql { display: block; margin-top: 0.25rem; padding: 0.5rem 0.625rem; border-radius: 8px; background: var(--bg);
+  .sql { display: block; margin-top: 0.25rem; padding: 0.5rem 0.625rem; border-radius: var(--card-radius-sm); background: var(--bg);
     border: 1px solid var(--border); font-family: var(--font-mono); font-size: 0.6875rem; line-height: 1.6;
     white-space: pre-wrap; overflow-wrap: anywhere; }
   .note { font-size: 0.75rem; color: var(--muted); margin: 0; }
-  .btn { min-height: 32px; padding: 0 0.75rem; border-radius: 8px; border: 1px solid var(--border); background: var(--surface);
+  .btn { min-height: 32px; padding: 0 0.75rem; border-radius: var(--ctl-radius); border: 1px solid var(--border); background: var(--surface);
     color: var(--text); font-family: inherit; font-size: 0.75rem; font-weight: 500; cursor: pointer; }
   .btn:hover { background: var(--surface-hover); }
   .btn:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }

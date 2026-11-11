@@ -51,7 +51,7 @@
 </details>
 
 <style>
-  .block { border: 1px solid var(--border); border-radius: 8px; background: var(--bg); }
+  .block { border: 1px solid var(--border); border-radius: var(--card-radius-sm); background: var(--bg); }
   summary { padding: 0.625rem 0.75rem; cursor: pointer; display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; font-size: 0.875rem; }
   summary:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
   .title { font-weight: 600; }

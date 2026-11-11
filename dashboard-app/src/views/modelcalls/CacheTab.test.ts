@@ -1,8 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, within } from '@testing-library/svelte';
+import { render, screen, cleanup, within, waitFor } from '@testing-library/svelte';
 import ModelCalls from '../ModelCalls.svelte';
 import Cache from '../Cache.svelte';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { initRouter } from '../../lib/router';
+import { setLook } from '../../lib/look';
+import { PAPER_SEL, parseBlocks } from '../../lib/testing/css';
 
 // F108 Phase 2 T10: the Cache screen is the Model calls screen's second tab. Its rows link to the call's detail when
 // the row carries the model-call id (the endpoint sends it when the model-call log is on).
@@ -110,5 +114,67 @@ describe('Cache standalone (embedded false)', () => {
     expect(screen.queryByRole('heading', { level: 1 })).toBeNull();
     expect(container.querySelector('.view-head .subtitle')?.textContent).toContain('API cache performance');
     expect(container.querySelector('.view-head')?.textContent).toMatch(/updated .* ago/);
+  });
+});
+
+// ── Redesign PR 3: the Cache tab's charts read tokens ────────────────────────────────────────────────────────────────
+
+describe('Cache charts read tokens', () => {
+  const PAPER = parseBlocks(readFileSync(join(__dirname, '..', '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
+  const RICH = {
+    ...CACHE,
+    break_components: { system_prompt: 8, tools: 7, messages: 6, model: 5, betas: 4, effort: 3, thinking: 2, other: 1 },
+    timeline: [timelineRow({ id: CALL, cache_break: true }), timelineRow({ hit_rate: 40 })],
+  };
+  type Cfg = { type: string; data: { labels: string[]; datasets: Record<string, any>[] }; options: Record<string, any> };
+  let configs: Cfg[] = [];
+  function installRich() {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => (url.startsWith('/dashboard/cache')
+      ? { ok: true, status: 200, json: async () => RICH } : { ok: false, status: 404, json: async () => ({}) }) as Response));
+    configs = [];
+    vi.stubGlobal('Chart', class {
+      data = {}; options = {};
+      constructor(_el: unknown, cfg: Cfg) { configs.push(cfg); }
+      destroy() {}
+      update() {}
+    });
+  }
+  const norm = (c: unknown): any => (Array.isArray(c) ? c.map(norm) : String(c).replace(/\s+/g, ''));
+  const byType = (t: string) => configs.find((c) => c.type === t)!.data.datasets[0];
+  function paperMain(): HTMLElement {
+    const main = document.createElement('main');
+    main.setAttribute('data-ground', 'paper');
+    for (const [k, v] of Object.entries(PAPER)) if (k.startsWith('--')) main.style.setProperty(k, v);
+    document.body.appendChild(main);
+    return main;
+  }
+  beforeEach(() => { installRich(); location.hash = ''; initRouter(); go('#/model-calls/cache'); });
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); setLook('dark'); document.body.innerHTML = ''; });
+
+  it('dark: the doughnut, the eight break bars and the hit-rate line are today\'s colours exactly', async () => {
+    render(Cache, { props: { embedded: true } });
+    await waitFor(() => expect(configs).toHaveLength(3));
+    expect(byType('doughnut').backgroundColor).toEqual(['#22c55e', '#3b82f6', '#4b5563']);
+    expect(byType('bar').backgroundColor).toEqual(['#f87171', '#fbbf24', '#60a5fa', '#34d399', '#a78bfa', '#fb923c', '#22d3ee', '#e879f9']);
+    expect(byType('line').borderColor).toBe('#22c55e');
+    expect(norm(byType('line').backgroundColor)).toBe(norm('rgba(34,197,94,0.1)'));
+  });
+
+  it('paper: the same datasets take the paper values', async () => {
+    setLook('paper');
+    render(Cache, { props: { embedded: true }, target: paperMain() });
+    await waitFor(() => expect(configs).toHaveLength(3));
+    expect(byType('doughnut').backgroundColor).toEqual([PAPER['--hit-good'], PAPER['--cache-blue'], PAPER['--cache-grey']]);
+    expect(byType('bar').backgroundColor).toEqual([5, 6, 1, 2, 3, 4, 9, 10].map((n) => PAPER[`--series-${n}`]));
+    expect(byType('line').borderColor).toBe(PAPER['--hit-good']);
+    expect(configs.find((c) => c.type === 'line')!.options.scales.y.ticks.color).toBe(PAPER['--chart-text']);
+  });
+
+  it('a cache break is marked with the word yes, not a glyph', async () => {
+    render(Cache, { props: { embedded: true } });
+    await screen.findByRole('heading', { level: 2, name: 'Recent Calls' });
+    const rows = within(recentCalls()).getAllByRole('row').slice(1);
+    expect(within(rows[0]).getByText('yes')).toBeTruthy();
+    expect(recentCalls().textContent).not.toContain('●');
   });
 });

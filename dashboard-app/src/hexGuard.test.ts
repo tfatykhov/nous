@@ -41,6 +41,16 @@ export const HEX_GUARDED: readonly string[] = [
   'views/Admission.svelte',
   'views/Retrieval.svelte',
   'views/Consolidation.svelte',
+  'views/ModelCalls.svelte',
+  'views/modelcalls/CallList.svelte',
+  'views/modelcalls/CallDetail.svelte',
+  'views/modelcalls/CallBlock.svelte',
+  'views/Cache.svelte',
+  'views/DagView.svelte',
+  'lib/viz/Dag.svelte',
+  'views/Subtasks.svelte',
+  'views/Heartbeat.svelte',
+  'views/Ledger.svelte',
 ];
 
 const SRC = __dirname;
@@ -119,6 +129,16 @@ export const SCRIPT_GUARDED: readonly string[] = [
   'views/Retrieval.svelte',
   'views/Consolidation.svelte',
   'lib/ui/badge/badge.svelte', // review R1: Overview renders it through a re-exporting index.ts
+  'views/ModelCalls.svelte',
+  'views/modelcalls/CallList.svelte',
+  'views/modelcalls/CallDetail.svelte',
+  'views/modelcalls/CallBlock.svelte',
+  'views/Cache.svelte',
+  'views/DagView.svelte',
+  'lib/viz/Dag.svelte',
+  'views/Subtasks.svelte',
+  'views/Heartbeat.svelte',
+  'views/Ledger.svelte',
 ];
 
 /** A literal colour (hex, rgb/hsl/oklch, a named colour in a fill/stroke attribute), or a two-hex-digit alpha glued onto
@@ -212,5 +232,74 @@ describe('no Tailwind colour class in a migrated markup or script', () => {
   it('the drawer primitives (allowed in paperRouteCoverage) are where these classes live today', () => {
     const overlay = markupOf(readFileSync(join(SRC, 'lib/ui/drawer/drawer-overlay.svelte'), 'utf-8'));
     expect(overlay).toMatch(TAILWIND_COLOUR);
+  });
+});
+
+// Review M1 (PR 3): a status fill used as text can also come from the markup, through a map of mark colours
+// (`style:color={URGENCY_COLOR[u]}`, the form Heartbeat had) or a literal fill token. A text colour reads a text map,
+// named `*_INK` by convention (Heartbeat's URGENCY_INK), or a text token.
+// Only a text colour counts: a `style:color` directive's value, or the `color:` declaration of an inline style attribute
+// (not `border-color`, and not a `color:` key in an object literal, as Admission's box-plot marks have).
+const FILL_MAP_AS_TEXT =
+  /(style:color=[{"][^}"]*|style="[^"]*?(?<![-\w])color:[^";]*)(\b[A-Z][A-Z_]*_COLOR\b|var\(--(red|green|yellow)\))/;
+
+describe('a migrated markup never colours text with a mark map or a status fill', () => {
+  it('the pattern catches a colour map or a fill as text, and spares ink maps, borders and backgrounds', () => {
+    for (const bad of ['<span style:color={URGENCY_COLOR[row.urgency]}>', '<span style="color:{URGENCY_COLOR[row.urgency] ?? \'x\'}">',
+      '<b style:color="var(--red)">', '<i style="color: var(--yellow)">']) {
+      expect(bad, bad).toMatch(FILL_MAP_AS_TEXT);
+    }
+    for (const ok of ['<span style:color={URGENCY_INK[row.urgency]}>', '<span style:border-color={STATE_COLOR[st]}>',
+      '<span style:background={URGENCY_COLOR[f.urgency]}>', '<span style="border-color: var(--red)">', '<b style:color={dispositionColor(d)}>',
+      "{#each [{ label: 'Admitted', stats: entry.admitted, color: 'var(--green)' }] as { label, stats, color }}"]) {
+      expect(ok, ok).not.toMatch(FILL_MAP_AS_TEXT);
+    }
+  });
+
+  it.each(SCRIPT_GUARDED)('%s', (file) => {
+    const lines = markupOf(readFileSync(join(SRC, file), 'utf-8')).split('\n');
+    expect(lines.filter((line) => FILL_MAP_AS_TEXT.test(line)).map((l) => l.trim())).toEqual([]);
+  });
+});
+
+// Review M2 (PR 3): lib/status.ts still exports its hex helpers for the dark screens that have not moved. A migrated file
+// using them would carry the dark hex onto paper with no literal for the guards above to see
+// (`style={badgeStyle(statusColor(s))}`), so no guarded file may import them: it takes statusVar, ledgerStatusVar,
+// badgeStyleVar and WAITING_VAR instead.
+const HEX_STATUS_HELPERS = ['statusColor', 'ledgerStatusColor', 'badgeStyle', 'MUTED', 'WAITING', 'UNKNOWN', 'PENDING'];
+
+/** The names a source imports from lib/status (any relative or $lib path), `as` aliases resolved to the imported name;
+ * a namespace (`* as st`) or default import is reported as '*', since it reaches every export. Type-only imports are
+ * skipped: a type carries no colour. */
+function statusImports(src: string): string[] {
+  return [...src.matchAll(/import\s+(?!type\b)([^'";]*?)\s*from\s*['"][^'"]*\/status(?:\.(?:ts|js))?['"]/g)].flatMap((m) => {
+    const clause = m[1].trim();
+    const brace = clause.indexOf('{');
+    const head = (brace < 0 ? clause : clause.slice(0, brace)).replace(/,\s*$/, '').trim();
+    const whole = head ? ['*'] : []; // `st`, `* as st`, `st, * as ns` or `st, {`
+    const named = brace < 0 ? [] : clause.slice(brace + 1, clause.indexOf('}', brace)).split(',')
+      .map((n) => n.trim().replace(/^type\s+/, '').split(/\s+as\s+/)[0].trim())
+      .filter(Boolean);
+    return [...whole, ...named];
+  });
+}
+
+describe('no migrated file imports the hex status helpers', () => {
+  it('reads the names imported from lib/status, whatever the path or alias', () => {
+    expect(statusImports("import { statusColor, badgeStyle as b, WAITING } from '../lib/status';")).toEqual(['statusColor', 'badgeStyle', 'WAITING']);
+    expect(statusImports("import { statusVar } from '$lib/status';\nimport { status } from './lib/statusbar';")).toEqual(['statusVar']);
+    expect(statusImports("import {\n  badgeStyleVar,\n  ledgerStatusVar,\n} from '../../lib/status.ts';")).toEqual(['badgeStyleVar', 'ledgerStatusVar']);
+  });
+
+  it('reports a namespace or default import of lib/status as "*", which reaches every helper (re-review N3)', () => {
+    expect(statusImports("import * as st from '$lib/status';")).toEqual(['*']);
+    expect(statusImports("import st from '../lib/status';")).toEqual(['*']);
+    expect(statusImports("import st, { statusVar } from '../lib/status.js';")).toEqual(['*', 'statusVar']);
+    expect(statusImports("import type * as T from '$lib/status';\nimport * as bar from './statusbar';")).toEqual([]);
+  });
+
+  it.each(SCRIPT_GUARDED)('%s', (file) => {
+    const hits = statusImports(scriptBlocks(readFileSync(join(SRC, file), 'utf-8'))).filter((n) => n === '*' || HEX_STATUS_HELPERS.includes(n));
+    expect(hits).toEqual([]);
   });
 });

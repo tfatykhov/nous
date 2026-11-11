@@ -374,6 +374,19 @@ describe('harness dashboard views', () => {
     expect(sheet).not.toContain('()');
   });
 
+  it('DAG node sheet: the deadline and the time left are two words apart, "UTC (in …)" (ruling 8)', async () => {
+    dag = DAG_APPROVALS;
+    render(DagView);
+    await fireEvent.click(await screen.findByRole('button', { name: 'View Graph' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /approve-send/ }));
+    const dd = await waitFor(() => {
+      const d = [...document.querySelectorAll('.approval-dl div')].find((x) => x.querySelector('dt')?.textContent === 'Answer by');
+      if (!d) throw new Error('no Answer by row');
+      return d.querySelector('dd')!;
+    });
+    expect(dd.textContent).toMatch(/^Jan 1 12:00 UTC \(in \d+ d \d+ h\)$/);
+  });
+
   it('DAG view lists the question, explains an undelivered card, and names a deadline stop neutrally', async () => {
     const { container } = render(DagView);
     expect(await screen.findByText('Send the drafted weekly report?')).toBeTruthy();

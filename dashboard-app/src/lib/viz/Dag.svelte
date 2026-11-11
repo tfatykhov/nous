@@ -13,7 +13,7 @@
    *   onNodeClick — optional callback when user clicks a node
    */
   import { onMount } from 'svelte';
-  import { statusColor } from '$lib/status';
+  import { statusVar } from '$lib/status';
 
   export type DagNode = {
     id: string;
@@ -57,7 +57,9 @@
   const NODE_SPACING = 100;
   const NODE_RADIUS = 22;
 
-  // One status → colour map for the graph and the DAG view (lib/status.ts).
+  // One status → colour map for the graph and the DAG view (lib/status.ts): a token, so the ground restyles it.
+  // Colours go through .style(), never .attr(): an SVG presentation attribute does not reliably take var() or
+  // color-mix().
 
   function renderGraph(nodeList: DagNode[], edgeList: DagEdge[]): void {
     if (!container) return;
@@ -123,7 +125,7 @@
       .attr('orient', 'auto')
       .append('path')
       .attr('d', 'M0,0 L10,5 L0,10 Z')
-      .attr('fill', 'var(--muted, #8e8eab)');
+      .style('fill', 'var(--muted)');
 
     // Wave lane labels
     for (let wl = 0; wl <= maxWave; wl++) {
@@ -133,7 +135,7 @@
         .attr('x', MARGIN_LEFT + wl * WAVE_SPACING)
         .attr('y', 20)
         .attr('text-anchor', 'middle')
-        .attr('fill', 'var(--muted, #8e8eab)')
+        .style('fill', 'var(--muted)')
         .attr('font-size', '11px')
         .text(`Wave ${wl}`);
     }
@@ -150,7 +152,7 @@
         .attr('y1', from.y)
         .attr('x2', to.x - NODE_RADIUS)
         .attr('y2', to.y)
-        .attr('stroke', 'var(--muted, #8e8eab)')
+        .style('stroke', 'var(--muted)')
         .attr('stroke-width', 1.5)
         .attr('marker-end', 'url(#dag-arrow)');
     }
@@ -173,24 +175,23 @@
 
     nodeGroups.each(function (this: SVGGElement, d: DagNode) {
       const g = d3.select(this);
-      const color = statusColor(d.status);
-      const isRunning = d.status === 'running';
-      const isAwaiting = d.status === 'awaiting_check' || d.status === 'awaiting_input';
-      const anim = isRunning
-        ? 'pulse-running 1.5s infinite'
-        : isAwaiting
-          ? 'pulse-awaiting 3s infinite'
-          : 'none';
+      const color = statusVar(d.status);
+      // The old `${hex}30` fill: 0x30/255 is 18.8%.
+      const fill = `color-mix(in srgb, ${color} 18.8%, transparent)`;
 
       const r = NODE_RADIUS;
+      // The status in words (review I2): on paper several status colours read alike, and under red-green colour
+      // blindness running and failed are one colour, so colour is never the only signal. The title (first child, as
+      // SVG wants it) names the node, its type and its status for a hover and for assistive technology.
+      const word = d.status.replaceAll('_', ' ');
+      g.append('title').text(`${d.name}: ${d.node_type ?? 'subtask'}, ${word}`);
       if (d.node_type === 'check') {
         // Diamond
         g.append('polygon')
           .attr('points', `0,-${r} ${r},0 0,${r} -${r},0`)
-          .attr('fill', `${color}30`)
-          .attr('stroke', color)
-          .attr('stroke-width', 2)
-          .style('animation', anim);
+          .style('fill', fill)
+          .style('stroke', color)
+          .attr('stroke-width', 2);
       } else if (d.node_type === 'gate') {
         // Hexagon
         const hex = Array.from({ length: 6 }, (_, i) => {
@@ -199,44 +200,32 @@
         }).join(' ');
         g.append('polygon')
           .attr('points', hex)
-          .attr('fill', `${color}30`)
-          .attr('stroke', color)
-          .attr('stroke-width', 2)
-          .style('animation', anim);
+          .style('fill', fill)
+          .style('stroke', color)
+          .attr('stroke-width', 2);
       } else if (d.node_type === 'approval') {
-        // Rounded square with a "?" — an approval asks a person; its status is
-        // still also shown as text in the node sheet (colour is never alone).
+        // Rounded square, named by its label below like every node (no symbol inside: owner rule). Its type and
+        // status are words in the node list and the sheet, so colour and shape are never alone.
         g.append('rect')
           .attr('x', -r).attr('y', -r).attr('width', r * 2).attr('height', r * 2)
           .attr('rx', 6)
-          .attr('fill', `${color}30`)
-          .attr('stroke', color)
-          .attr('stroke-width', 2)
-          .style('animation', anim);
-        g.append('text')
-          .attr('text-anchor', 'middle')
-          .attr('dy', 5)
-          .attr('fill', color)
-          .attr('font-size', '15px')
-          .attr('font-weight', '700')
-          .attr('aria-hidden', 'true')
-          .text('?');
+          .style('fill', fill)
+          .style('stroke', color)
+          .attr('stroke-width', 2);
       } else if (d.node_type === 'callback') {
         // Triangle
         g.append('polygon')
           .attr('points', `0,-${r} ${r},${r * 0.8} -${r},${r * 0.8}`)
-          .attr('fill', `${color}30`)
-          .attr('stroke', color)
-          .attr('stroke-width', 2)
-          .style('animation', anim);
+          .style('fill', fill)
+          .style('stroke', color)
+          .attr('stroke-width', 2);
       } else {
         // Circle (subtask — default)
         g.append('circle')
           .attr('r', r)
-          .attr('fill', `${color}30`)
-          .attr('stroke', color)
-          .attr('stroke-width', 2)
-          .style('animation', anim);
+          .style('fill', fill)
+          .style('stroke', color)
+          .attr('stroke-width', 2);
       }
 
       // Label below node
@@ -244,9 +233,18 @@
         .attr('class', 'dag-node-label')
         .attr('dy', r + 16)
         .attr('text-anchor', 'middle')
-        .attr('fill', 'var(--text, #e2e8f0)')
+        .style('fill', 'var(--text)')
         .attr('font-size', '11px')
         .text(d.name.length > 12 ? d.name.slice(0, 11) + '…' : d.name);
+
+      // Status below the name, muted
+      g.append('text')
+        .attr('class', 'dag-node-status')
+        .attr('dy', r + 29)
+        .attr('text-anchor', 'middle')
+        .style('fill', 'var(--muted)')
+        .attr('font-size', '10px')
+        .text(word);
     });
 
     rendered = true;

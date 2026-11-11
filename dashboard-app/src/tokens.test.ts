@@ -200,6 +200,52 @@ const PR2: Record<string, [string, string]> = {
 };
 for (const [k, [dark]] of Object.entries(PR2)) NEW_DARK[k] = dark;
 
+// PR 3 (the Execution screens): [dark, paper]. Status (`--st-*`, dark = lib/status.ts's hex) and outcome (`--oc-*`,
+// dark = Subtasks' literals) colours, plus the one-off tokens each screen needs for an exact dark look.
+const ST: Record<string, [string, string]> = {
+  '--st-pending': ['#8e8eab', '#56687a'],
+  '--st-ready': ['#22d3ee', '#1b6a9c'],
+  '--st-running': ['#fbbf24', '#8a5a0e'],
+  '--st-awaiting-check': ['#f59e0b', '#9a4d0a'],
+  '--st-awaiting-input': ['#a78bfa', '#7b3fa0'], // = --waiting, both grounds
+  '--st-completed': ['#4ade80', '#23703d'],
+  '--st-failed': ['#f87171', '#b02a22'],
+  '--st-blocked': ['#f25c5c', '#8a1c2c'],
+  '--st-cancelled': ['#8a8a9a', '#55616c'], // fix round 0: #5f6b76 and #5c6b7d were 4.32:1 on a hovered row
+  '--st-skipped': ['#94a3b8', '#536170'],
+  '--st-partial': ['#fb923c', '#a14a08'],
+  '--st-success': ['#10b981', '#23703d'], // the ledger's success, Subtasks' completed
+  '--st-ledger-blocked': ['#f59e0b', '#8a5a0e'], // the ledger's blocked, Subtasks' incomplete_blocked
+  '--st-unknown': ['#f472b6', '#a3266f'], // = --unknown, both grounds
+  '--st-neutral': ['#6b7280', '#55616c'],
+};
+const OC: Record<string, [string, string]> = {
+  '--oc-failed': ['#ef4444', '#b02a22'], // Subtasks: incomplete_no_terminal, validation_failed
+  '--oc-timeout': ['#dc2626', '#881c34'], // re-review N1: #8a1c2c was 3.7 from errored under protanopia
+  '--oc-errored': ['#7c2d12', '#641400'],
+  '--oc-unknown': ['#9ca3af', '#7a8794'], // fix round 0: a lighter slate, not cancelled's grey
+  '--oc-blocked': ['#f59e0b', '#b7791f'], // Subtasks' incomplete_blocked as a mark (review I3: the text amber merged with failed)
+};
+const PR3: Record<string, [string, string]> = {
+  ...ST,
+  ...OC,
+  '--stack-bar': ['rgba(251, 191, 36, 0.7)', '#b7791f'], // Workflows: a token budget's consumed part
+  '--hit-good': ['#22c55e', '#23703d'], // Cache: the hit-rate line and the doughnut's cache-read part
+  '--hit-mid': ['#eab308', '#8a5a0e'],
+  '--hit-bad': ['#ef4444', '#b02a22'],
+  '--cache-blue': ['#3b82f6', '#1f5fa8'], // Cache: the doughnut's cache-created part
+  '--cache-grey': ['#4b5563', '#4f5f6f'], // Cache: the doughnut's uncached part
+  '--wait-ink': ['#c4b5fd', '#7b3fa0'], // Workflows: the Now column's waiting pill
+  '--wait-bg': ['rgba(167, 139, 250, 0.14)', '#efe3f6'],
+  '--wash': ['rgba(255, 255, 255, 0.03)', '#f4f7f8'], // Heartbeat: the tuning report's panel
+  '--hb-warn-ink': ['#fbbf24', '#8a5a0e'], // Heartbeat: amber as text (paper's --yellow is a mark colour)
+  '--effect-write': ['#60a5fa', '#1f5fa8'], // the Ledger's write effect pill
+  '--mc-section-1': ['#a99df9', '#8b5cf6'], // a model call's first context section (dark: the accent text; paper: a violet)
+  '--mc-section-7': ['#f472b6', '#7890d0'], // Messages (dark: the old --unknown; paper: a light blue, not a status colour)
+  '--mc-section-8': ['#9ca3af', '#382880'], // Tools (dark: the old --series-12; paper: an indigo, apart from Decisions and the link blue)
+};
+for (const [k, [dark]] of Object.entries(PR3)) NEW_DARK[k] = dark;
+
 // The legacy memory-type colours keep their golden dark values (ORIGIN_ROOT) and get paper ones (Retrieval's chips).
 const LEGACY_PAPER: Record<string, string> = {
   '--fact-color': '#159a7a', // review M6: one colour per memory type on paper, the Graph's
@@ -694,5 +740,123 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
       expect(contrast(PAPER[t], '#ffffff'), t).toBeGreaterThanOrEqual(4.5);
       expect(contrast(PAPER[t], PAPER['--surface-hover']), t).toBeGreaterThanOrEqual(4.5);
     }
+  });
+});
+
+// ── PR 3: status, outcome and the Execution screens' one-off colours ─────────────────────────────────────────────────
+
+describe('PR 3 tokens: status, outcomes, execution screens', () => {
+  it('every new token has the dark value the screens used, and a paper value', () => {
+    for (const [k, [dark, paper]] of Object.entries(PR3)) {
+      expect(DARK[k], k).toBe(dark);
+      expect(PAPER[k], k).toBe(paper);
+    }
+  });
+
+  it('a status colour is readable on its own badge: at least 4.5:1 on its 12.5% tint, over the white card and a hovered row', () => {
+    // Fix round 0, ruling 6: a table row's hover wash (--surface-hover) sits under the badge too.
+    for (const bg of ['#ffffff', PAPER['--surface-hover']]) {
+      for (const [k, [, p]] of Object.entries(ST)) expect(contrast(p, tint(p, 0.125, bg)), `${k} on ${bg}`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  it('one meaning each: awaiting input is the waiting colour and unknown the unknown colour, in both grounds', () => {
+    expect(DARK['--st-awaiting-input']).toBe(DARK['--waiting']);
+    expect(PAPER['--st-awaiting-input']).toBe(PAPER['--waiting']);
+    expect(DARK['--st-unknown']).toBe(DARK['--unknown']);
+    expect(PAPER['--st-unknown']).toBe(PAPER['--unknown']);
+    expect(PAPER['--st-blocked']).not.toBe(PAPER['--st-failed']);
+  });
+
+  it('marks one chart draws together keep 8 apart for normal vision and under protanopia and deuteranopia (review I3)', () => {
+    // Marks need 3:1, not the badge's 4.5:1, so a mark can take a lighter tone than its text token. The sets are the
+    // tokens the views draw together: Subtasks' outcomes (doughnut, bars and trend; no_terminal and validation_failed
+    // share --oc-failed by design) and Heartbeat's urgencies (stacked bars and timeline dots).
+    const sets: Record<string, string[]> = {
+      subtasks: ['--st-success', '--oc-blocked', '--oc-failed', '--oc-timeout', '--oc-errored', '--st-neutral', '--oc-unknown'],
+      heartbeat: ['--err-text', '--yellow', '--st-neutral'],
+    };
+    // Open pairs with no verified hex (the review's and the ones measured with it), each held at its present floor.
+    const open: Record<string, number> = {
+      '--st-success|--oc-failed': 5, // deutan 5.5
+      '--st-success|--oc-timeout': 5.5, // deutan 5.95
+      '--st-success|--st-neutral': 6.5, // deutan 6.9
+    };
+    for (const [chart, tokens] of Object.entries(sets)) {
+      for (let i = 0; i < tokens.length; i++) {
+        for (let j = i + 1; j < tokens.length; j++) {
+          const [a, b] = [tokens[i], tokens[j]];
+          const floor = open[`${a}|${b}`] ?? 8;
+          for (const cvd of [undefined, 'protan', 'deutan'] as const) {
+            expect(okDistance(PAPER[a], PAPER[b], cvd), `${chart}: ${a} and ${b} (${cvd ?? 'normal'})`).toBeGreaterThanOrEqual(floor);
+          }
+        }
+      }
+    }
+    expect(contrast(PAPER['--oc-blocked'], '#ffffff')).toBeGreaterThanOrEqual(3);
+  });
+
+  it('Subtasks\' cancelled and unknown outcomes are told apart on paper (ruling 5): at least 10 apart, as under dark', () => {
+    // Cancelled is --st-neutral, unknown --oc-unknown; the doughnut and the trend draw them side by side.
+    expect(okDistance(PAPER['--oc-unknown'], PAPER['--st-neutral'])).toBeGreaterThanOrEqual(10);
+    expect(okDistance(DARK['--oc-unknown'], DARK['--st-neutral'])).toBeGreaterThanOrEqual(10);
+  });
+
+  it('the nine context sections of a model call keep 7 apart for normal vision and under protanopia and deuteranopia (review M5, M6)', () => {
+    // CallDetail's PALETTE, in order. The closest pair is Decisions (teal) and Procedures (brick), 7.6 under deuteranopia.
+    const sections = ['--mc-section-1', '--series-1', '--series-9', '--series-2', '--series-6', '--series-4', '--mc-section-7', '--mc-section-8', '--series-13'];
+    for (let i = 0; i < sections.length; i++) {
+      expect(contrast(PAPER[sections[i]], '#ffffff'), sections[i]).toBeGreaterThanOrEqual(3);
+      for (let j = i + 1; j < sections.length; j++) {
+        for (const cvd of [undefined, 'protan', 'deutan'] as const) {
+          expect(okDistance(PAPER[sections[i]], PAPER[sections[j]], cvd), `${sections[i]} and ${sections[j]} (${cvd ?? 'normal'})`).toBeGreaterThanOrEqual(7);
+        }
+      }
+    }
+    // Re-review N2: no section reads as the link blue on the same card (the question frame's colour), under any vision.
+    for (const s of sections) {
+      for (const cvd of [undefined, 'protan', 'deutan'] as const) {
+        expect(okDistance(PAPER[s], PAPER['--f-question'], cvd), `${s} and the link blue (${cvd ?? 'normal'})`).toBeGreaterThanOrEqual(6);
+      }
+    }
+    // Messages is not the unknown status's colour (nor the creative frame's), on paper.
+    expect(PAPER['--mc-section-7']).not.toBe(PAPER['--unknown']);
+  });
+
+  it('the first two context sections of a model call are distinct on paper (ruling 5), and 3:1 on white', () => {
+    // Its own violet: not the question frame's link blue, and not tied to a series slot PR 2 owns (review I1).
+    expect(PAPER['--mc-section-1']).not.toBe(PAPER['--f-question']);
+    expect(okDistance(PAPER['--mc-section-1'], PAPER['--series-1'])).toBeGreaterThanOrEqual(12);
+    expect(contrast(PAPER['--mc-section-1'], '#ffffff')).toBeGreaterThanOrEqual(3);
+  });
+
+  it('PR 3\'s categorical colours keep the status distance: at least 6 (OKLab) from every status fill and text (review M2)', () => {
+    const status = ['--green', '--yellow', '--red', '--ok-text', '--warn-text', '--err-text'].map((t) => [t, PAPER[t]] as const);
+    for (const k of ['--mc-section-1', '--mc-section-7', '--mc-section-8', '--cache-blue', '--cache-grey', '--effect-write']) {
+      for (const [s, sc] of status) expect(okDistance(PAPER[k], sc), `${k} (${PAPER[k]}) and ${s}`).toBeGreaterThanOrEqual(6);
+    }
+  });
+
+  it('outcome marks and the budget bar are at least 3:1 on the white card', () => {
+    for (const [k, [, p]] of Object.entries(OC)) expect(contrast(p, '#ffffff'), k).toBeGreaterThanOrEqual(3);
+    expect(contrast(PAPER['--stack-bar'], '#ffffff')).toBeGreaterThanOrEqual(3);
+    for (const k of ['--hit-good', '--hit-mid', '--hit-bad', '--cache-blue', '--cache-grey']) expect(contrast(PAPER[k], '#ffffff'), k).toBeGreaterThanOrEqual(3);
+  });
+
+  it('Heartbeat\'s amber text on the card and on the wash: at least 4.5:1', () => {
+    expect(contrast(PAPER['--hb-warn-ink'], PAPER['--surface'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--hb-warn-ink'], PAPER['--wash'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--text'], PAPER['--wash'])).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('the Ledger\'s effect pills: text at least 4.5:1 on its tint over the white card', () => {
+    expect(contrast(PAPER['--effect-write'], tint(PAPER['--effect-write'], 0.15, '#ffffff'))).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--st-ledger-blocked'], PAPER['--badge-warn-bg'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--err-text'], PAPER['--badge-bad-bg'])).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('the waiting pill\'s text on its tint: at least 4.5:1 in both grounds', () => {
+    expect(contrast(PAPER['--wait-ink'], PAPER['--wait-bg'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(DARK['--wait-ink'], over(parseColor(DARK['--wait-bg']), parseColor(DARK['--surface'])))).toBeGreaterThanOrEqual(4.5);
   });
 });
