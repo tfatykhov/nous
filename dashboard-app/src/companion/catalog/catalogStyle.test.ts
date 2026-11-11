@@ -301,6 +301,12 @@ describe('no coloured side rule and no tracked capitals on paper (source contrac
   it("a flagged timeline entry's rail is --tl-flag-rule", () => {
     expect(style('TimelineView').split('li.flag {')[1].split('}')[0]).toContain('border-left-color: var(--tl-flag-rule)');
   });
+
+  it('a flagged timeline entry has a filled dot: a shape among hollow rings, not a hue alone (re-review call 3)', () => {
+    const rule = style('TimelineView').split('li.flag::before {')[1].split('}')[0];
+    expect(rule).toContain('border-color: var(--warn)');
+    expect(rule).toContain('background: var(--warn)');
+  });
 });
 
 describe('figures are condensed through --figure-stretch (source contract, fix round I4)', () => {

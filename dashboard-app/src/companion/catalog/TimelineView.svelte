@@ -106,8 +106,11 @@
     background: var(--surface);
     border: var(--tl-dot-ring);
   }
+  /* The flag is a filled dot among hollow rings: a shape, not a hue alone. A
+     legacy theme's dot is 0 by 0, so this paints nothing there. */
   li.flag::before {
     border-color: var(--warn);
+    background: var(--warn);
   }
   .at {
     color: var(--muted);
