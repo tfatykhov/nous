@@ -211,7 +211,8 @@
        labelled cells' own text: a detail panel inherits nothing, and an element a cell snippet renders keeps word
        wrapping (anywhere would let a squeezed flex item break a normal word). The child is global: a snippet's elements
        carry the calling view's scope, not this one's. The reset has no specificity (:where), so it only replaces the
-       inherited value and a view's own rule for its element still wins. */
+       inherited value, and a view's own scoped rule for its element still wins. A Tailwind utility on that element does
+       not: utilities sit in a cascade layer and this rule is unlayered. */
     .dt--cards td[data-label] {
       overflow-wrap: anywhere;
     }
