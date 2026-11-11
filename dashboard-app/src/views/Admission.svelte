@@ -166,8 +166,8 @@
       datasets: [{
         label: 'Avg Score',
         data: d.daily_trend.map((t) => t.avg_score),
-        borderColor: 'var(--accent)',
-        backgroundColor: tint('--accent', 0.1),
+        borderColor: 'var(--series-0)',
+        backgroundColor: tint('--series-0', 0.1),
         fill: true,
         spanGaps: true,
       }],
@@ -184,7 +184,7 @@
 
   function bypassChartData(d: AdmissionData) {
     const reasons = Object.keys(d.bypass_breakdown);
-    const palette = ['var(--accent)', 'var(--series-1)', 'var(--series-2)', 'var(--series-4)', 'var(--series-5)', 'var(--series-7)'];
+    const palette = ['var(--series-0)', 'var(--series-1)', 'var(--series-2)', 'var(--series-4)', 'var(--series-5)', 'var(--series-7)'];
     return {
       labels: reasons,
       datasets: [{

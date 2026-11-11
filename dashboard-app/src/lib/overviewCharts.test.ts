@@ -30,13 +30,15 @@ describe('the chart palette', () => {
     expect(p.barBorder).toBe('#7c6af7');
   });
 
-  it('under the paper look it is the paper palette: status fills, the series-7 slate, the link blue (no violet)', () => {
+  it('under the paper look it is the paper palette: status fills, the series-7 slate, the series-0 violet (no frame colour)', () => {
     const p = chartPalette((n) => PAPER[n] ?? '');
     expect(['success', 'partial', 'failure', 'pending'].map((l) => p.outcome(l))).toEqual(['#2f8a4e', '#b7791f', '#d2352b', '#4f5f6f']);
     // Review N2: pending is "not known yet", a neutral as under dark, and far from partial's amber.
     expect(p.outcome('pending')).not.toBe(p.outcome('partial'));
-    expect(p.barBorder).toBe('#2346c8');
-    expect(p.bar).toBe('rgba(35, 70, 200, 0.5)');
+    // Review M1 (PR 2): the bars were the accent, on paper the question frame's blue, beside the day timeline's frames.
+    expect(p.barBorder).toBe('#8b5cf6');
+    expect(p.bar).toBe('rgba(139, 92, 246, 0.5)');
+    expect(p.barBorder).not.toBe(PAPER['--f-question']);
     for (const c of [p.outcome('success'), p.outcome('pending'), p.bar, p.barBorder]) expect(c).not.toMatch(/7c6af7|124, 106, 247/);
   });
 

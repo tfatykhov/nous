@@ -190,6 +190,7 @@ const PR2: Record<string, [string, string]> = {
   '--glow-blur': ['6px', '0px'],
   '--chart-text': ['#94a3b8', '#56687a'], // a chart's ticks and legend on a paper ground
   '--chart-grid': ['#1e293b', '#e3e9ec'],
+  '--series-0': ['#7c6af7', '#8b5cf6'], // review M1: violet marks; was --accent, on paper the question frame's blue
   '--save-ok': ['#4ade80', '#23703d'], // Browse: a censor's save message (not --ok-text, whose dark is #34d399)
   '--save-err': ['#f87171', '#b02a22'],
   '--tone-bad': ['#ef4444', '#b02a22'], // Memory write health: a tripped rule's border and tint (not --err-text's #f87171)
@@ -614,7 +615,7 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
   it('no categorical paper colour is within 6 (OKLab) of a status fill or text: a hue carries one meaning (review M2)', () => {
     const status = ['--green', '--yellow', '--red', '--ok-text', '--warn-text', '--err-text'].map((t) => [t, PAPER[t]] as const);
     const categorical: [string, string][] = [
-      ...Object.entries({ ...SERIES, ...GV_NODES, '--gv-other': GV['--gv-other'], ...REL, ...DISP }).map(([k, [, p]]) => [k, p] as [string, string]),
+      ...Object.entries({ ...SERIES, '--series-0': PR2['--series-0'], ...GV_NODES, '--gv-other': GV['--gv-other'], ...REL, ...DISP }).map(([k, [, p]]) => [k, p] as [string, string]),
       ...Object.entries(LEGACY_PAPER).filter(([k]) => k !== '--pending'),
     ];
     for (const [k, c] of categorical) {

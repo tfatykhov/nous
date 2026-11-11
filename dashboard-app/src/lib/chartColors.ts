@@ -20,6 +20,7 @@ export const DARK_FALLBACK: Record<string, string> = {
   '--yellow': '#fbbf24',
   '--red': '#f87171',
   '--pending': '#22d3ee',
+  '--series-0': '#7c6af7',
   '--series-1': '#60a5fa',
   '--series-2': '#34d399',
   '--series-3': '#a78bfa',

@@ -424,13 +424,17 @@ describe('Memory health charts read tokens', () => {
     await waitFor(() => expect(configs.length).toBe(5));
     expect(dataset('Node Count').borderColor).toBe(PAPER['--series-1']);
     expect(dataset('Auto-linked').borderColor).toBe(PAPER['--series-2']);
-    expect(dataset('Density').borderColor).toBe(PAPER['--accent']);
+    // Review M1: the marks that were violet take --series-0, not the accent (on paper the question frame's blue).
+    for (const l of ['Density', 'Edges Created', 'Manual']) expect(dataset(l).borderColor, l).toBe(PAPER['--series-0']);
     expect(dataset('Orphan Nodes').borderColor).toBe(PAPER['--red']);
     expect(dataset('Density').pointBackgroundColor).toEqual([PAPER['--yellow'], PAPER['--yellow']]);
     const o = chartOf('Node Count').options;
     expect(o.scales.x.ticks.color).toBe(PAPER['--chart-text']);
     expect(o.scales.y.grid.color).toBe(PAPER['--chart-grid']);
-    for (const c of configs) expect(JSON.stringify(c.data), c.type).not.toMatch(/7c6af7|124, 106, 247/);
+    for (const c of configs) {
+      expect(JSON.stringify(c.data), c.type).not.toMatch(/7c6af7|124, 106, 247/);
+      expect(JSON.stringify(c.data), c.type).not.toMatch(/2346c8|35, 70, 200/); // no frame colour in a chart
+    }
   });
 
   it('the orphan-rate badges keep their classes and read the badge tokens', async () => {
@@ -483,7 +487,11 @@ describe('Memory health: the Writes tab\'s admission charts read tokens', () => 
     await waitFor(() => expect(configs.length).toBe(6));
     const bySource = configs.find((c) => c.data.datasets.length === 3)!.data.datasets;
     expect(bySource.map((d) => d.backgroundColor)).toEqual([PAPER['--green'], PAPER['--red'], PAPER['--series-7']]);
-    expect(configs.find((c) => c.type === 'doughnut')!.data.datasets[0].borderColor).toBe(PAPER['--surface']);
+    const bypass = configs.find((c) => c.type === 'doughnut')!.data.datasets[0];
+    expect(bypass.borderColor).toBe(PAPER['--surface']);
+    // Review M1: the first slice is --series-0, not a second blue beside --series-1.
+    expect(bypass.backgroundColor).toEqual([PAPER['--series-0'], PAPER['--series-1']]); // two bypass reasons in the fixture
+    expect(dataset('Avg Score').borderColor).toBe(PAPER['--series-0']);
   });
 
   it('the box plots tint with color-mix (no hex alpha suffix), and the score note is in words', async () => {

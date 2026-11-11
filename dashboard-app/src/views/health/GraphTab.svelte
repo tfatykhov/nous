@@ -66,8 +66,8 @@
         {
           label: 'Density',
           data: d.density_history.map((p) => p.density),
-          borderColor: 'var(--accent)',
-          backgroundColor: tint('--accent', 0.1),
+          borderColor: 'var(--series-0)',
+          backgroundColor: tint('--series-0', 0.1),
           fill: true,
           pointBackgroundColor: d.density_history.map((p) =>
             // Status: good, watch, bad.
@@ -121,8 +121,8 @@
         {
           label: 'Edges Created',
           data: d.daily_edges.map((p) => p.count),
-          backgroundColor: tint('--accent', 0.5),
-          borderColor: 'var(--accent)',
+          backgroundColor: tint('--series-0', 0.5),
+          borderColor: 'var(--series-0)',
           borderWidth: 1,
         },
       ],
@@ -216,8 +216,8 @@
         {
           label: 'Manual',
           data: d.daily_edges.map((p) => p.manual),
-          backgroundColor: tint('--accent', 0.5),
-          borderColor: 'var(--accent)',
+          backgroundColor: tint('--series-0', 0.5),
+          borderColor: 'var(--series-0)',
           borderWidth: 1,
         },
       ],

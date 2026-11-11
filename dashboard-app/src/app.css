@@ -150,6 +150,7 @@
     /* ---- PR 2, the Memory screens: chart, graph and funnel colours (marks, not text) ----
        A canvas cannot read var(): lib/chartColors.ts resolves these against the element a chart draws into. */
     /* Categorical series ramp (slot 7 is above) */
+    --series-0: #7c6af7;                       /* violet marks (was --accent, the question frame's blue on paper) */
     --series-1: #60a5fa;
     --series-2: #34d399;
     --series-3: #a78bfa;
@@ -290,6 +291,7 @@
     --censor-color: #905860;
     --heartbeat-color: #4f5f6f;
     --chunk-color: #8b5cf6;
+    --series-0: #8b5cf6;
     --series-1: #1f5fa8;
     --series-2: #159a7a;
     --series-3: #a8408f;
