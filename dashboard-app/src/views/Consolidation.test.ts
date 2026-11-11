@@ -21,6 +21,8 @@ const DETAIL = {
     { action_id: 'a-1', phase: 'merge', op: 'merge', target_ids: ['f-11111111', 'f-22222222'], rationale: 'same fact twice',
       before: { content: LONG }, after: { content: 'one fact' }, created_at: T },
     { action_id: 'a-2', phase: 'supersede', op: 'supersede', target_ids: ['f-3'], rationale: null, before: null, after: { content: 'new' }, created_at: T },
+    // A side whose recorded value is the string "none": it must not read like a missing side.
+    { action_id: 'a-3', phase: 'supersede', op: 'supersede', target_ids: ['f-4'], rationale: null, before: 'none', after: { content: 'x' }, created_at: T },
   ],
 };
 const ACTIVITY = {
@@ -59,20 +61,22 @@ describe('Consolidation on the paper look', () => {
     expect(css).toContain('.badge-bad  { background: var(--badge-bad-bg); color: var(--err-text); }');
   });
 
-  it('a cycle\'s actions show Before and After side by side, with no arrow and no empty-set sign', async () => {
+  it('a cycle\'s actions show Before and After side by side, with no arrow; a missing side is not the string "none"', async () => {
     install();
     const { container } = render(Consolidation);
     await waitFor(() => expect(container.querySelector('tr.cycle-row')).not.toBeNull());
     await fireEvent.click(container.querySelector('tr.cycle-row')!);
     await screen.findByText('same fact twice');
     const diffs = Array.from(container.querySelectorAll('.diff'));
-    expect(diffs).toHaveLength(2);
+    expect(diffs).toHaveLength(3);
     for (const d of diffs) {
       expect(Array.from(d.querySelectorAll('.diff-label')).map((l) => l.textContent)).toEqual(['Before', 'After']);
       expect(d.querySelector('.diff-arrow')).toBeNull();
     }
-    expect(diffs[1].querySelector('.diff-before pre')?.textContent).toBe('none'); // nothing before a supersede's new row
-    expect(document.body.textContent).not.toMatch(/[→∅]/);
+    // Review M9: a missing side prints as before (the empty-set sign), so it differs from a recorded "none".
+    expect(diffs[1].querySelector('.diff-before pre')?.textContent).toBe('∅'); // nothing before a supersede's new row
+    expect(diffs[2].querySelector('.diff-before pre')?.textContent).toBe('none');
+    expect(document.body.textContent).not.toMatch(/→/);
     expect(diffs[0].textContent).toContain(LONG);
     const css = styleBlocks(SRC);
     expect(css).toContain('.diff-before pre { border-left: 2px solid var(--red); }');

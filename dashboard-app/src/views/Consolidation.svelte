@@ -109,7 +109,8 @@
 
   /** Pretty-print a before/after JSON blob for diff display. */
   function fmtJson(val: unknown): string {
-    if (val === null || val === undefined) return 'none'; // a word, not the empty-set sign
+    // A missing side: the empty-set sign, as before, so it never reads like a recorded string "none" (review M9).
+    if (val === null || val === undefined) return '∅';
     if (typeof val === 'string') return val;
     try {
       return JSON.stringify(val, null, 2);
