@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, fireEvent, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import ConfidenceMeterView from './ConfidenceMeterView.svelte';
+import StatTileView from './StatTileView.svelte';
 import DecisionCardView from './DecisionCardView.svelte';
 import MemoryGraphView from './MemoryGraphView.svelte';
 import DagGraphView from './DagGraphView.svelte';
@@ -66,6 +67,46 @@ describe('ConfidenceMeterView', () => {
   it('colors the low band red', () => {
     const { container } = renderMeter(0.2);
     expect(container.querySelector('.fill')?.classList.contains('low')).toBe(true);
+  });
+
+  it('names the band in words after the number, and to a screen reader (review I2: the band colour is not the only cue)', () => {
+    for (const [v, words] of [
+      [0.2, '0.20, low'],
+      [0.55, '0.55, medium'],
+      [0.72, '0.72, high'],
+    ] as const) {
+      const { container } = renderMeter(v);
+      expect(container.querySelector('.num')?.textContent).toBe(words);
+      expect(container.querySelector('[role="meter"]')?.getAttribute('aria-valuetext')).toBe(words);
+      cleanup();
+    }
+  });
+});
+
+describe('StatTileView', () => {
+  function renderTile(extra: Record<string, unknown>) {
+    seedSurface({});
+    return render(StatTileView, {
+      props: { surfaceId: SURFACE, comp: { id: 't', component: 'StatTile', label: 'Errors', value: '0', ...extra } },
+    });
+  }
+
+  it('says its intent in a word when there is no delta (review I2: the value colour is not the only cue)', () => {
+    for (const [intent, word] of [
+      ['good', 'good'],
+      ['warn', 'warning'],
+      ['bad', 'bad'],
+    ]) {
+      const { container } = renderTile({ intent });
+      expect(container.querySelector('.delta')?.textContent, intent).toBe(word);
+      cleanup();
+    }
+  });
+
+  it('a delta speaks for itself, and a neutral tile has no word', () => {
+    expect(renderTile({ intent: 'bad', delta: 'up 3' }).container.querySelector('.delta')?.textContent).toBe('up 3');
+    cleanup();
+    expect(renderTile({}).container.querySelector('.delta')).toBeNull();
   });
 });
 

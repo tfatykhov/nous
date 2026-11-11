@@ -366,6 +366,9 @@ function newLegacy(id: string): Record<string, string> {
     '--tl-dot-ring': '0 solid transparent',
     '--meter-track': o['--surface-hover'],
     '--figure-stretch': '100%',
+    '--ok-mark': o['--ok'],
+    '--warn-mark': o['--warn'],
+    '--crit-mark': o['--crit'],
     '--graph-edge': o['--border'],
     '--graph-edge-opacity': '1',
     '--line-width': '1.5',
@@ -406,7 +409,7 @@ function matrix(t: Record<string, string>): [string, string, number][] {
   // ChipRow paints a chip's tone ink on --bg
   for (const fg of ['--ok', '--warn', '--crit', '--soft']) if (!pairs.some(([f, b]) => f === fg && b === '--bg')) pairs.push([fg, '--bg', 4.5]);
   pairs.push(['--on-accent', '--accent', 4.5], ['--accent', '--accent-glow', 4.5], ['--chart-axis', '--surface', 4.5]);
-  for (const k of Object.keys(t)) if (/^--(series-\d+|node-[\w-]+)$/.test(k)) pairs.push([k, '--surface', 3]);
+  for (const k of Object.keys(t)) if (/^--(series-\d+|node-[\w-]+|[a-z]+-mark)$/.test(k)) pairs.push([k, '--surface', 3]);
   return pairs;
 }
 
@@ -488,7 +491,10 @@ const PAPER_ROOT: Record<string, string> = {
   '--series-1': '#274455',
   '--series-2': '#1f5fa8',
   '--series-3': '#159a7a',
-  '--series-4': '#7a8a1a',
+  '--series-4': '#8b5cf6',
+  '--ok-mark': '#21694b',
+  '--warn-mark': '#b7791f',
+  '--crit-mark': '#b02a22',
   '--chart-axis': '#56687a',
   '--chart-grid': '#e3e9ec',
   ...PAPER_FRAMES,
@@ -713,7 +719,7 @@ describe('contrast per theme (WCAG: text 4.5, marks 3)', () => {
     const t = SHEET.resolved('nous-default');
     const close: string[] = [];
     for (const s of ['--series-1', '--series-2', '--series-3', '--series-4']) {
-      for (const st of ['--ok', '--warn', '--crit', '--locked', '--chart-axis']) {
+      for (const st of ['--ok', '--warn', '--crit', '--locked', '--chart-axis', '--ok-mark', '--warn-mark', '--crit-mark']) {
         for (const cvd of [undefined, 'protan', 'deutan'] as const) {
           const d = cvdDistance(t[s], t[st], cvd);
           if (d < 6) close.push(`${s} ${st} ${cvd ?? 'normal'} ${d.toFixed(1)}`);
@@ -723,9 +729,33 @@ describe('contrast per theme (WCAG: text 4.5, marks 3)', () => {
     expect(close).toEqual([]);
   });
 
-  it('paper: series and node marks are 3:1 on the card and on a nested tile', () => {
+  it('paper: the three status marks are 8 apart in all three visions (the PR 3 review floor)', () => {
     const t = SHEET.resolved('nous-default');
-    for (const k of Object.keys(t).filter((k) => /^--(series-\d|node-)/.test(k))) {
+    const marks = ['--ok-mark', '--warn-mark', '--crit-mark'];
+    const close: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      for (let j = i + 1; j < 3; j++) {
+        for (const cvd of [undefined, 'protan', 'deutan'] as const) {
+          const d = cvdDistance(t[marks[i]], t[marks[j]], cvd);
+          if (d < 8) close.push(`${marks[i]} ${marks[j]} ${cvd ?? 'normal'} ${d.toFixed(1)}`);
+        }
+      }
+    }
+    expect(close).toEqual([]);
+  });
+
+  it('the mark tokens exist (chart.ts builds them in a template, which the inventory test cannot see)', () => {
+    for (const k of ['--ok-mark', '--warn-mark', '--crit-mark']) expect(SHEET.root[k], k).toBeDefined();
+  });
+
+  it.each(LEGACY)('%s: its marks are its own --ok, --warn and --crit (nothing moves in a legacy chart)', (id) => {
+    const t = SHEET.resolved(id);
+    expect([t['--ok-mark'], t['--warn-mark'], t['--crit-mark']]).toEqual([t['--ok'], t['--warn'], t['--crit']]);
+  });
+
+  it('paper: series, node and status marks are 3:1 on the card and on a nested tile', () => {
+    const t = SHEET.resolved('nous-default');
+    for (const k of Object.keys(t).filter((k) => /^--(series-\d|node-|[a-z]+-mark$)/.test(k))) {
       expect(contrast(t[k], t['--surface']), k).toBeGreaterThanOrEqual(3);
       expect(contrast(t[k], t['--nested-bg']), k).toBeGreaterThanOrEqual(3);
     }

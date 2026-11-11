@@ -33,7 +33,10 @@ describe('tone + series colour (renderer-owned, model picks the name only)', () 
   });
 
   it('maps tone and series index to tokens, never to colours', () => {
-    expect(toneVar('ok')).toBe('var(--ok)');
+    // a tone drawn as a mark reads the mark token (review I2): the text tones merge under colour blindness
+    expect(toneVar('ok')).toBe('var(--ok-mark)');
+    expect(toneVar('warn')).toBe('var(--warn-mark)');
+    expect(toneVar('crit')).toBe('var(--crit-mark)');
     expect(toneVar('neutral')).toBe('var(--chart-axis)');
     expect(seriesVar(0)).toBe('var(--series-1)');
     expect(seriesVar(3)).toBe('var(--series-4)');

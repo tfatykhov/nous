@@ -67,13 +67,21 @@
   --node-chunk: #8b5cf6;
 
   /* F094 §2 — ordered series ramp assigned by the renderer for multi-series
-     charts: the dashboard ramp from its slot 0, and its olive slot 5 for the
-     fourth (its magenta slot 3 is 4.2 from the blue under protanopia; see
-     companionParity.test.ts and themes.test.ts). */
+     charts: the dashboard ramp from its slot 0, and its violet slot 10 for the
+     fourth (its magenta slot 3 is 4.2 from the blue under protanopia, and the
+     olive slot 5 merges with the amber mark; see companionParity.test.ts and
+     themes.test.ts). */
   --series-1: #274455;
   --series-2: #1f5fa8;
   --series-3: #159a7a;
-  --series-4: #7a8a1a;
+  --series-4: #8b5cf6;
+  /* A status tone drawn as a MARK (a chart line or swatch, a meter band): the
+     text tones above merge under red-green colour blindness as marks (warn
+     and crit are 0.7 apart under deuteranopia). 8 or more apart in every
+     vision, 3:1 on the card. */
+  --ok-mark: #21694b;
+  --warn-mark: #b7791f;
+  --crit-mark: #b02a22;
   --chart-axis: #56687a;
   --chart-grid: #e3e9ec;
 
@@ -195,6 +203,9 @@
   --tab-active-shadow: 0 0 #0000;
   --tab-underline: var(--accent);
   --figure-stretch: 100%;
+  --ok-mark: var(--ok);
+  --warn-mark: var(--warn);
+  --crit-mark: var(--crit);
   --tile-rule-width: 3px;
   --badge-tint: 0%;
   --badge-edge: 100%;

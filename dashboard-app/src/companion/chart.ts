@@ -84,7 +84,8 @@ export function normalizeTone(raw: unknown): Tone {
 /** A tone → CSS custom property. neutral has no semantic token, so it maps
  * to the axis grey (a series that means nothing gets a neutral hue). */
 export function toneVar(tone: Tone): string {
-  return tone === 'neutral' ? 'var(--chart-axis)' : `var(--${tone})`;
+  // A mark, not text: the tone's mark token (the text tones merge as marks under colour blindness).
+  return tone === 'neutral' ? 'var(--chart-axis)' : `var(--${tone}-mark)`;
 }
 
 /** A tone → the INK token for text and pills (F096 §3). A chart stroke maps

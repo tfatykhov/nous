@@ -28,13 +28,17 @@
   const intent = $derived(
     typeof comp.intent === 'string' && INTENTS.includes(comp.intent) ? comp.intent : 'neutral',
   );
+  // With no delta, the value's colour would be the only sign of the intent (and warn and bad text merge under
+  // red-green colour blindness): say it in a word, in every theme.
+  const INTENT_WORDS: Record<string, string> = { good: 'good', warn: 'warning', bad: 'bad' };
+  const line = $derived(delta || (INTENT_WORDS[intent] ?? ''));
 </script>
 
 <div class="tile {intent}" style:flex-grow={flexGrow(comp.weight)}>
   <span class="label">{label}</span>
   <span class="value">{value}</span>
-  {#if delta}
-    <span class="delta">{delta}</span>
+  {#if line}
+    <span class="delta">{line}</span>
   {/if}
 </div>
 

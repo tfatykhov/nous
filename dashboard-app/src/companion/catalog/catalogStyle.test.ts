@@ -139,6 +139,13 @@ describe('tiles, cards, tables and the timeline take the paper shape through tok
     expect(css).toMatch(/li\.flag::before \{[^}]*border-color: var\(--warn\)/);
   });
 
+  it('the confidence meter bands are the status marks (review I2)', () => {
+    const css = style('ConfidenceMeterView');
+    for (const [band, mark] of [['low', 'crit'], ['mid', 'warn'], ['high', 'ok']]) {
+      expect(css, band).toMatch(new RegExp(`\\.fill\\.${band} \\{[^}]*background: var\\(--${mark}-mark\\)`));
+    }
+  });
+
   it('the confidence meter track is --meter-track (a hairline on white, the old soft fill in a legacy theme)', () => {
     // (T7 charts follow in the next describe)
     expect(style('ConfidenceMeterView')).toMatch(/\.track \{[^}]*background: var\(--meter-track\)/);

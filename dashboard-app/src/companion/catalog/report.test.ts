@@ -72,7 +72,7 @@ describe('MetricCardView', () => {
     const { container } = mount(MetricCardView, { ...card, trend: '/hr' });
     const root = container.querySelector('.metric') as HTMLElement;
     expect(root.style.getPropertyValue('--ink')).toBe('var(--ok)');
-    expect(root.style.getPropertyValue('--tone')).toBe('var(--ok)');
+    expect(root.style.getPropertyValue('--tone')).toBe('var(--ok-mark)');
     expect(container.querySelector('.pill')?.textContent).toBe('↓4.3 bpm · improving');
     expect(container.querySelector('.value')?.textContent).toBe('65.0bpm');
     expect(container.querySelector('.caption')?.textContent).toBe('68.9 → 64.6 (28d avg, n=28)');

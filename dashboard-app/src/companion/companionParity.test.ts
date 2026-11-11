@@ -40,12 +40,15 @@ const PARITY: Record<string, string> = {
   '--node-chunk': '--gv-chunk',
   '--node-decision': '--gv-decision',
   // The series ramp, shifted one slot: the companion's first-drawn series is the dashboard's slot 0 (the slate navy
-  // of single marks). The fourth is the dashboard's olive slot 5: slot 3 (magenta) is 4.2 from slot 1 (blue) under
-  // protanopia and 3.8 from the axis grey under deuteranopia; slot 4 (orange) sits next to warn.
+  // of single marks). The fourth is the dashboard's violet slot 10 (review I2): slot 3 (magenta) is 4.2 from slot 1
+  // under protanopia, slot 4 (orange) sits next to warn, and the olive slot 5 merges with the amber status mark.
   '--series-1': '--series-0',
   '--series-2': '--series-1',
   '--series-3': '--series-2',
-  '--series-4': '--series-5',
+  '--series-4': '--series-10',
+  // status tones drawn as marks (a chart line, a meter band): the dashboard's outcome marks
+  '--warn-mark': '--oc-blocked',
+  '--crit-mark': '--err-text',
   '--chart-axis': '--chart-text',
   '--chart-grid': '--chart-grid',
   // shape
@@ -88,6 +91,7 @@ const COMPANION_OWN: Record<string, string> = {
   '--scrim': 'the modal backdrop and the BarChart negative hatching',
   '--font-display': 'an alias of the UI face that themes may swap for a serif',
   '--font-numeric': 'the figure face (F096): the UI face on paper, set condensed with tabular figures; the mono face in a legacy theme',
+  '--ok-mark': "the ok tone as a mark: #21694b, not the dashboard's #3f8772 (4.2 from the companion's teal series under deuteranopia); 3.5 from the ok text tone, so not a second visible green",
   '--figure-stretch': "the figures' width: 82% on paper (Archivo's width axis, as the dashboard's figures), 100% in a legacy theme",
   '--nested-bg': 'a card inside a surface card: a soft tile instead of a shadow on a shadow',
   '--ctl-bg': "a default button's fill (the prototype .btn: white)",

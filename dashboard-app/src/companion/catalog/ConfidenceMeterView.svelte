@@ -25,13 +25,16 @@
   });
   // Confidence bands: red below coin-flip territory, yellow mid, green high.
   const band = $derived(value < 0.4 ? 'low' : value < 0.7 ? 'mid' : 'high');
+  // The band in words too: its colour is not the only cue (and red and amber merge for a red-green colour-blind reader).
+  const BAND_WORDS: Record<string, string> = { low: 'low', mid: 'medium', high: 'high' };
+  const text = $derived(`${value.toFixed(2)}, ${BAND_WORDS[band]}`);
 </script>
 
 <div class="meter" style:flex-grow={flexGrow(comp.weight)}>
-  <div class="track" role="meter" aria-valuemin={0} aria-valuemax={1} aria-valuenow={value}>
+  <div class="track" role="meter" aria-valuemin={0} aria-valuemax={1} aria-valuenow={value} aria-valuetext={text}>
     <div class="fill {band}" style:width="{value * 100}%"></div>
   </div>
-  <span class="num">{value.toFixed(2)}</span>
+  <span class="num">{text}</span>
 </div>
 
 <style>
@@ -54,13 +57,13 @@
     transition: var(--transition);
   }
   .fill.low {
-    background: var(--crit);
+    background: var(--crit-mark);
   }
   .fill.mid {
-    background: var(--warn);
+    background: var(--warn-mark);
   }
   .fill.high {
-    background: var(--ok);
+    background: var(--ok-mark);
   }
   .num {
     color: var(--muted);
