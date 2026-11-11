@@ -179,3 +179,26 @@ export function withChartDefaults(type: string, options: Record<string, any>, te
   if (ids.size) base.scales = Object.fromEntries([...ids].map((id) => [id, id === 'r' ? radial : axis]));
   return mergeUnder(base, options);
 }
+
+/** The chart text size: the DOM's 12px label size (finish review fix 7). */
+export const CHART_FONT_SIZE = 12;
+const UI_FACE = "'Archivo', system-ui, sans-serif";
+let redrawQueued = false;
+
+/**
+ * Chart.js draws on a canvas, which takes no CSS font: its global default font becomes the UI face (--font-ui, the
+ * Archivo stack) at 12px. A canvas drawn before the web fonts load keeps the fallback face, so every live chart is
+ * redrawn once `document.fonts.ready` resolves (once per page). Without Chart.js (a test stub) it does nothing.
+ */
+export function applyChartFont(C: any = (globalThis as any).Chart, doc: Document = document): void {
+  if (!C?.defaults?.font) return;
+  const family = getComputedStyle(doc.documentElement).getPropertyValue('--font-ui').trim() || UI_FACE;
+  C.defaults.font.family = family;
+  C.defaults.font.size = CHART_FONT_SIZE;
+  const ready = (doc as any).fonts?.ready as Promise<unknown> | undefined;
+  if (!ready || (redrawQueued && C === (globalThis as any).Chart)) return;
+  if (C === (globalThis as any).Chart) redrawQueued = true;
+  void ready.then(() => {
+    for (const chart of Object.values(C.instances ?? {})) (chart as any)?.update?.('none');
+  });
+}

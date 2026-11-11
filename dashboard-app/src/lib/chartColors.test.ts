@@ -1,7 +1,7 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { TOKEN_FALLBACK, cssColor, lineLegendLabels, resolveColors, seriesToken, tint, withChartDefaults } from './chartColors';
+import { CHART_FONT_SIZE, TOKEN_FALLBACK, applyChartFont, cssColor, lineLegendLabels, resolveColors, seriesToken, tint, withChartDefaults } from './chartColors';
 import { ROOT_SEL, block, parseBlocks, scriptBlocks } from './testing/css';
 import { sourceFiles } from './testing/sources';
 
@@ -196,5 +196,45 @@ describe('withChartDefaults', () => {
     expect(out.scales).toBeUndefined();
     expect(out.plugins).toEqual({ title: { color: 'T' }, legend: { position: 'bottom' } });
     expect(out.cutout).toBe('60%');
+  });
+});
+
+// Finish review fix 7: chart text is the UI face. Chart.js draws on a canvas, which takes no CSS font, so its global
+// default font is set to the --font-ui stack at the DOM's 12px label size, and every live chart is redrawn once the
+// web fonts have loaded (a canvas drawn before keeps the fallback face).
+describe('applyChartFont', () => {
+  it('sets the default family from --font-ui and the size, then redraws every chart when the fonts are ready', async () => {
+    let ready!: () => void;
+    const fonts = { ready: new Promise<void>((r) => { ready = r; }) };
+    const a = { update: vi.fn() };
+    const b = { update: vi.fn() };
+    const C = { defaults: { font: { family: 'Helvetica', size: 10 } }, instances: { 1: a, 2: b } };
+    document.documentElement.style.setProperty('--font-ui', "'Archivo', system-ui, sans-serif");
+    try {
+      applyChartFont(C, { fonts, documentElement: document.documentElement } as unknown as Document);
+      expect(C.defaults.font).toEqual({ family: "'Archivo', system-ui, sans-serif", size: CHART_FONT_SIZE });
+      expect(CHART_FONT_SIZE).toBe(12);
+      expect(a.update).not.toHaveBeenCalled();
+      ready();
+      await fonts.ready;
+      await Promise.resolve();
+      expect(a.update).toHaveBeenCalledWith('none');
+      expect(b.update).toHaveBeenCalledWith('none');
+    } finally {
+      document.documentElement.style.removeProperty('--font-ui');
+    }
+  });
+
+  it('falls back to the Archivo stack when the token is not readable, and does nothing without Chart.js', () => {
+    const C = { defaults: { font: {} as Record<string, unknown> }, instances: {} };
+    applyChartFont(C, { documentElement: document.documentElement } as unknown as Document);
+    expect(C.defaults.font.family).toBe("'Archivo', system-ui, sans-serif");
+    expect(() => applyChartFont(undefined, document)).not.toThrow();
+    expect(() => applyChartFont({}, document)).not.toThrow();
+  });
+
+  it('the Chart component applies it on mount (source contract)', () => {
+    const src = readFileSync(join(__dirname, 'viz/Chart.svelte'), 'utf-8');
+    expect(scriptBlocks(src)).toMatch(/applyChartFont\(\)/);
   });
 });

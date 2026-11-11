@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { cssColor, resolveColors, withChartDefaults } from '../chartColors';
+  import { applyChartFont, cssColor, resolveColors, withChartDefaults } from '../chartColors';
 
   // phoneHeight: the height under 768 px (200 px unless a chart with a dense legend or many lines asks for more).
   let { type, data, options = {}, height = '220px', phoneHeight = '200px' }:
@@ -17,6 +17,7 @@
   }
 
   onMount(() => {
+    applyChartFont(); // the UI face for chart text, redrawn once the web fonts are in (finish review fix 7)
     chart = new Chart(canvas, { type, ...config(data, options) });
     return () => {
       chart?.destroy();
