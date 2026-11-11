@@ -759,7 +759,7 @@
     text-align: left;
     background: none;
     border: none;
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--radius-sm);
     padding: 0.3rem 0.4rem;
     cursor: pointer;
     color: var(--text);

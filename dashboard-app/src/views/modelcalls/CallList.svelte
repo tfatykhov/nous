@@ -232,7 +232,7 @@
   .chip { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 999px; padding: 0.4rem 0.75rem; font-size: 0.8125rem; font-weight: 500; min-height: 36px; }
   .chip.on { border-color: var(--accent); background: var(--accent-glow); }
   .chip .n { color: var(--muted); }
-  .chip .note { color: var(--muted); font-size: 0.75rem; border: 1px dashed var(--border); border-radius: 6px; padding: 0 5px; margin-left: 2px; }
+  .chip .note { color: var(--muted); font-size: 0.75rem; border: 1px dashed var(--border); border-radius: var(--radius-sm); padding: 0 5px; margin-left: 2px; }
   .chip .remove { color: var(--muted); font-size: 0.75rem; margin-left: 2px; }
   .field { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); font-size: 0.875rem; }
   select { background: var(--surface); border: 1px solid var(--field-border); border-radius: var(--ctl-radius); color: var(--text); padding: 0.5rem 0.75rem; font: inherit; min-height: 40px; }

@@ -213,7 +213,7 @@
   td.why { padding-left: 1.25rem; font-size: 0.8125rem; line-height: 1.45; }
   .reasons { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.25rem; overflow-wrap: anywhere; }
   .fails { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.75rem; }
-  a.fail { display: grid; grid-template-columns: minmax(0, 140px) minmax(0, 1fr) 3rem; gap: 0.25rem 0.75rem; align-items: center; color: inherit; text-decoration: none; border-radius: 6px; }
+  a.fail { display: grid; grid-template-columns: minmax(0, 140px) minmax(0, 1fr) 3rem; gap: 0.25rem 0.75rem; align-items: center; color: inherit; text-decoration: none; border-radius: var(--radius-sm); }
   a.fail:hover { background: var(--surface-hover); }
   .fname { font-family: var(--font-mono); font-size: 0.8125rem; overflow-wrap: anywhere; }
   .rate { text-align: right; font-size: 0.8125rem; }

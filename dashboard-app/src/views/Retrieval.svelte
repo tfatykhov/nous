@@ -1344,7 +1344,7 @@
   .funnel-track {
     display: flex;
     height: 34px;
-    border-radius: 12px;
+    border-radius: var(--card-radius-sm);
     overflow: hidden;
     gap: 2px;
   }
@@ -1354,7 +1354,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    transition: filter var(--transition, 0.2s ease);
+    transition: filter var(--transition);
   }
   .funnel-seg:hover { filter: brightness(1.15); }
   /* Counts sit ON the bar, so the bar is the figure rather than a decoration
@@ -1667,7 +1667,7 @@
     padding: 0.5rem 0.7rem;
     background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     margin-bottom: 0.5rem;
   }
   /* The counts and the node names are the content: ink, against the muted words around them. They named --fg, which

@@ -502,10 +502,10 @@
     align-items: center;
     gap: 0.5rem;
     padding: 0.5rem 0.375rem;
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     cursor: pointer;
     font-size: 0.8125rem;
-    transition: background 0.1s;
+    transition: background var(--transition);
   }
 
   .trace-row:hover,

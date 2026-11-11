@@ -732,8 +732,8 @@
   /* Room for the pill, so a narrow table scrolls in its box rather than squeezing it; a 0.75rem radius is a pill on
      one line and a rounded block when the text wraps. */
   .now-cell { min-width: 10rem; }
-  .now-waiting { display: inline-block; padding: 3px 10px; border-radius: 0.75rem; font-weight: 600; color: var(--waiting); background: var(--wait-bg); }
-  .now-held { display: inline-block; padding: 3px 10px; border-radius: 0.75rem; font-weight: 600; color: var(--st-running); background: color-mix(in srgb, var(--st-running) 10%, transparent); }
+  .now-waiting { display: inline-block; padding: 3px 10px; border-radius: var(--card-radius-sm); font-weight: 600; color: var(--waiting); background: var(--wait-bg); }
+  .now-held { display: inline-block; padding: 3px 10px; border-radius: var(--card-radius-sm); font-weight: 600; color: var(--st-running); background: color-mix(in srgb, var(--st-running) 10%, transparent); }
   .now-plain { color: var(--muted); }
   .node-list { list-style: none; margin: 0; padding: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.5rem; border-top: 1px solid var(--border); }
   .node-btn { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; padding: 0.375rem 0.625rem; border-radius: var(--card-radius-sm);
@@ -787,7 +787,7 @@
     height: 100%;
     background: var(--series-0);
     border-radius: 2px;
-    transition: width 0.3s ease;
+    transition: width var(--transition);
   }
 
   /* ── Graph panel ── */

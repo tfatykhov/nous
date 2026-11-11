@@ -360,7 +360,7 @@
       border-right: 1px solid var(--border);
       z-index: 300;
       transform: translateX(-100%);
-      transition: transform 0.25s ease;
+      transition: transform var(--transition);
       overflow-y: auto;
       /* Safe area for notched phones */
       padding-bottom: env(safe-area-inset-bottom);

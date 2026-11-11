@@ -123,8 +123,8 @@ describe('Workflows: status by token', () => {
     expect(css).toMatch(/\.now-waiting \{[^}]*color: var\(--waiting\); background: var\(--wait-bg\);/);
     // At phone width the Now column squeezed each pill over four lines; a pill radius on a block of text cut it.
     expect(css).toMatch(/\.now-cell \{ min-width: 10rem; \}/);
-    expect(css).toMatch(/\.now-waiting \{[^}]*border-radius: 0\.75rem;/);
-    expect(css).toMatch(/\.now-held \{[^}]*border-radius: 0\.75rem;/);
+    expect(css).toMatch(/\.now-waiting \{[^}]*border-radius: var\(--card-radius-sm\);/); // 12px, now as its token (final step A8)
+    expect(css).toMatch(/\.now-held \{[^}]*border-radius: var\(--card-radius-sm\);/); // 12px, now as its token (final step A8)
   });
 
   it('a hostile node name is text', async () => {
