@@ -190,6 +190,7 @@
   .elapsed {
     font-family: var(--font-numeric);
     font-variant-numeric: tabular-nums;
+    font-stretch: var(--figure-stretch);
   }
   .note {
     color: var(--muted);

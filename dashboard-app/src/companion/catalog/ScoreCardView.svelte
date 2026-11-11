@@ -163,6 +163,7 @@
     margin-top: 0.35rem;
     font-family: var(--font-numeric);
     font-variant-numeric: tabular-nums;
+    font-stretch: var(--figure-stretch);
     font-size: 2rem;
     font-weight: 600;
     line-height: 1;
@@ -220,6 +221,7 @@
     color: var(--row-ink);
     font-family: var(--font-numeric);
     font-variant-numeric: tabular-nums;
+    font-stretch: var(--figure-stretch);
     font-size: 0.8rem;
     font-weight: 600;
   }
@@ -239,6 +241,7 @@
     margin-left: 0;
     font-family: var(--font-ui);
     font-variant-numeric: normal;
+    font-stretch: normal;
     font-weight: 500;
     font-size: 0.82rem;
   }

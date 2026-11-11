@@ -48,11 +48,14 @@
   --soft: #4f5f6f;
   /* --font-display defaults to the UI font; themes may swap in a serif. */
   --font-display: var(--font-ui);
-  /* F096 §4.5 — every FIGURE renders in this face with tabular-nums. The
-     var() alias is substituted HERE, at :root, so every theme that changes
-     --font-mono re-declares --font-numeric itself (the legacy group below
-     does it for all of them). */
-  --font-numeric: var(--font-mono);
+  /* F096 §4.5 — every FIGURE renders in this face with tabular-nums. On
+     paper that is the UI face, set condensed (--figure-stretch: Archivo's
+     width axis, as the dashboard draws its figures); mono stays for code and
+     ids. The var() alias is substituted HERE, at :root, so every theme
+     re-declares --font-numeric itself (the legacy group below does it for all
+     six, with their mono face). */
+  --font-numeric: var(--font-ui);
+  --figure-stretch: 82%;
 
   /* F093 §1(a) — literals that themes re-skin. */
   --on-accent: #ffffff; /* text on a filled --accent button (ButtonView) */
@@ -191,6 +194,7 @@
   --tab-active-bg: transparent;
   --tab-active-shadow: 0 0 #0000;
   --tab-underline: var(--accent);
+  --figure-stretch: 100%;
   --tile-rule-width: 3px;
   --badge-tint: 0%;
   --badge-edge: 100%;

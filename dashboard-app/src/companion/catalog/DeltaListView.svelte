@@ -105,6 +105,7 @@
     color: var(--row-ink);
     font-family: var(--font-numeric);
     font-variant-numeric: tabular-nums;
+    font-stretch: var(--figure-stretch);
     font-size: 0.85rem;
     font-weight: 700;
     white-space: nowrap;
@@ -113,6 +114,7 @@
     color: var(--muted);
     font-family: var(--font-numeric);
     font-variant-numeric: tabular-nums;
+    font-stretch: var(--figure-stretch);
     font-size: 0.72rem;
     min-width: 6.5rem;
     text-align: right;

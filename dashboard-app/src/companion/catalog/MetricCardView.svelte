@@ -142,6 +142,7 @@
     margin-top: 0.3rem;
     font-family: var(--font-numeric);
     font-variant-numeric: tabular-nums;
+    font-stretch: var(--figure-stretch);
     font-size: 1.55rem;
     font-weight: 600;
     line-height: 1.15;

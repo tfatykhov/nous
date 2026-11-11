@@ -365,6 +365,7 @@ function newLegacy(id: string): Record<string, string> {
     '--tl-dot': '0px',
     '--tl-dot-ring': '0 solid transparent',
     '--meter-track': o['--surface-hover'],
+    '--figure-stretch': '100%',
     '--graph-edge': o['--border'],
     '--graph-edge-opacity': '1',
     '--line-width': '1.5',
@@ -470,7 +471,8 @@ const PAPER_ROOT: Record<string, string> = {
   '--font-ui': "'Archivo', system-ui, sans-serif",
   '--font-mono': "'Red Hat Mono', ui-monospace, monospace",
   '--font-display': "'Archivo', system-ui, sans-serif",
-  '--font-numeric': "'Red Hat Mono', ui-monospace, monospace",
+  '--font-numeric': "'Archivo', system-ui, sans-serif",
+  '--figure-stretch': '82%',
   '--ok': '#23703d',
   '--warn': '#8a5a0e',
   '--crit': '#b02a22',
@@ -528,9 +530,11 @@ describe('the default is the paper world', () => {
     expect(SHEET.resolved('nous-default')).toEqual(PAPER_ROOT);
   });
 
-  it('figures are Red Hat Mono in the default and JetBrains Mono in nous-dark', () => {
-    expect(SHEET.resolved('nous-default')['--font-numeric']).toBe("'Red Hat Mono', ui-monospace, monospace");
+  it('figures are condensed Archivo in the default (the contract: Archivo with tabular figures) and JetBrains Mono in nous-dark', () => {
+    expect(SHEET.resolved('nous-default')['--font-numeric']).toBe("'Archivo', system-ui, sans-serif");
+    expect(SHEET.resolved('nous-default')['--figure-stretch']).toBe('82%');
     expect(SHEET.resolved('nous-dark')['--font-numeric']).toBe(JETBRAINS);
+    expect(SHEET.resolved('nous-dark')['--figure-stretch']).toBe('100%');
   });
 
   it('the page is light: html and :root say so, body sets tabular figures, and a legacy theme turns them off', () => {
@@ -567,7 +571,12 @@ describe('no theme inherits a token from :root by accident', () => {
     for (const k of NEW_COLOUR) expect(block[k], `${id} ${k}`).toMatch(/^#[0-9a-f]{6}$/);
   });
 
-  it.each(THEMES)('%s: --font-numeric is its own --font-mono', (id) => {
+  it('nous-default: --font-numeric is its own --font-ui (mono stays for code and ids)', () => {
+    const t = SHEET.resolved('nous-default');
+    expect(t['--font-numeric']).toBe(t['--font-ui']);
+  });
+
+  it.each(LEGACY)('%s: --font-numeric is its own --font-mono', (id) => {
     const t = SHEET.resolved(id);
     expect(t['--font-numeric']).toBe(t['--font-mono']);
   });

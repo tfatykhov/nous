@@ -61,6 +61,7 @@
     font-weight: 600;
     line-height: 1.15;
     overflow-wrap: anywhere;
+    font-stretch: var(--figure-stretch);
   }
   .delta {
     color: var(--muted);

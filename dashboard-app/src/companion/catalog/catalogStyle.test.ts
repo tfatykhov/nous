@@ -145,6 +145,38 @@ describe('tiles, cards, tables and the timeline take the paper shape through tok
   });
 });
 
+describe('figures are condensed through --figure-stretch (source contract, fix round I4)', () => {
+  it.each([
+    ['MetricCardView', '.value'],
+    ['ScoreCardView', '.value'],
+    ['ScoreCardView', '.rv'],
+    ['SparklineView', '.cur'],
+    ['SparklineView', '.single'],
+    ['DeltaListView', '.d'],
+    ['DeltaListView', '.r'],
+    ['DataTableView', 'td.end'],
+    ['AppHeaderView', '.elapsed'],
+    ['StatTileView', '.value'],
+  ])('%s %s', (name, sel) => {
+    const at = style(name).indexOf(`${sel} {`);
+    expect(at, `${name} ${sel}`).toBeGreaterThan(-1);
+    expect(style(name).slice(at).split('}')[0]).toContain('font-stretch: var(--figure-stretch)');
+  });
+
+  it('words keep their width: the MetricCard pill and the ChipRow value take the figure face, not the stretch', () => {
+    const pill = style('MetricCardView').split('.pill {')[1].split('}')[0];
+    expect(pill).toContain('font-family: var(--font-numeric)');
+    expect(pill).not.toContain('font-stretch');
+    expect(style('ChipRowView').split('.v {')[1].split('}')[0]).not.toContain('font-stretch');
+  });
+
+  it("the slider's value is a figure (--font-numeric); the decision id and code stay mono", () => {
+    expect(style('SliderView').split('.value {')[1].split('}')[0]).toContain('font-family: var(--font-numeric)');
+    expect(style('DecisionCardView').split('.id {')[1].split('}')[0]).toContain('font-family: var(--font-mono)');
+    expect(style('Text')).toMatch(/pre code \{[^}]*font-family: var\(--font-mono\)/);
+  });
+});
+
 describe('charts and graphs read the paper ramp and node colours (source contract, PR 6 T7)', () => {
   it('MemoryGraph colours a node by its type token', () => {
     const script = scriptBlocks(src('MemoryGraphView'));
