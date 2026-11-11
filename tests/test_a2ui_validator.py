@@ -338,6 +338,28 @@ def test_load_catalog_returns_none_for_an_unknown_name() -> None:
     assert load_catalog("no-such-catalog") is None
 
 
+def test_nous_core_catalog_teaches_words_not_arrows() -> None:
+    """The catalog's examples teach the composer what to write: no arrow or check glyph.
+
+    The companion prints words ("down 4.3 bpm", "68.9 to 64.6"); an example with an
+    arrow teaches the agent to emit one (dashboard redesign PR 6, re-review N4).
+    """
+    catalog = load_catalog("nous-core")
+    assert catalog is not None
+    glyphs = set("←↑→↓▲▼✓✔")
+
+    def strings(node: object) -> list[str]:
+        if isinstance(node, str):
+            return [node]
+        if isinstance(node, dict):
+            return [s for v in node.values() for s in strings(v)]
+        if isinstance(node, list):
+            return [s for v in node for s in strings(v)]
+        return []
+
+    assert [s for s in strings(catalog) if glyphs & set(s)] == []
+
+
 def test_served_catalog_ids_match_what_surfaces_declare() -> None:
     """The renderer maps a surface's catalogId to a local fetch path, so the
 

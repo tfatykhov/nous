@@ -600,7 +600,7 @@
         },
         "delta": {
           "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
-          "description": "The change pill text, preformatted, e.g. '↓4.3 bpm · improving'."
+          "description": "The change pill text, preformatted, e.g. 'down 4.3 bpm · improving'."
         },
         "tone": {
           "description": "What the delta MEANS (default neutral): colours the pill and the embedded trend, never the value. Either a literal from the enum or a {\"path\": …} binding (so each card of a repeat template carries its own record's tone); the renderer maps an unknown resolved value to neutral.",
@@ -631,7 +631,7 @@
         },
         "caption": {
           "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
-          "description": "The comparison line under the value, e.g. '68.9 → 64.6 (28d avg, n=28)'."
+          "description": "The comparison line under the value, e.g. '68.9 to 64.6 (28d avg, n=28)'."
         },
         "trend": {
           "type": "string",
