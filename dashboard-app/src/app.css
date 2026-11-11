@@ -159,6 +159,7 @@
     --cache-grey: #4f5f6f;
     --wait-bg: #efe3f6;
     --wash: #f4f7f8;
+    --info-bg: #e3ecf3;                        /* the info pill's tint: --pending at 12.5% over white */
     --effect-write: #1f5fa8;
     --mc-section-1: #8b5cf6;                   /* a violet, not the link blue beside series 1 */
     --mc-section-7: #7890d0;                   /* not the unknown status's magenta; 12+ from every section, all vision types */
@@ -294,6 +295,26 @@
     letter-spacing: -0.022em;
     margin: 0.25rem 0;
   }
+
+  /* One status pill for every status on every screen (finish review fix 2): a tint and its text, no outline. The
+     Badge component's ok / warn / error / info / neutral variants draw the same pill (same metrics, same tokens). */
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    height: 1.25rem;
+    padding: 0 0.5rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    line-height: 1;
+    white-space: nowrap;
+    background: var(--wash);
+    color: var(--muted);
+  }
+  .status-pill--ok { background: var(--ok-bg); color: var(--ok-text); }
+  .status-pill--warn { background: var(--warn-bg); color: var(--warn-text); }
+  .status-pill--bad { background: var(--err-bg); color: var(--err-text); }
+  .status-pill--info { background: var(--info-bg); color: var(--pending); }
 
   @media (prefers-reduced-motion: reduce) {
     * {

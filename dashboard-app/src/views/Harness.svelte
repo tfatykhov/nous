@@ -38,6 +38,8 @@
     ),
   );
 
+  /** A rule's mode as a status pill: enforcing is ok, warn and shadow are warnings, off is neutral. */
+  const MODE_PILL: Record<string, string> = { enforce: 'ok', warn: 'warn', shadow: 'warn' };
   const WIN_LABEL: Record<string, string> = { '24h': '24 h', '7d': '7 d', '30d': '30 d' };
   // Series colours outside the status set (spec §4.1), as tokens: Chart.svelte resolves them against the canvas's
   // ground, and the DOM paints them through --fill (dark: the old literals; claims is the ramp's cyan, not a teal).
@@ -169,7 +171,7 @@
             <h2 id="rule-{c.id}">{c.title}</h2>
             <div class="env">{c.env}</div>
           </div>
-          <span class="mode-pill mode-{c.mode}">{c.mode}</span>
+          <span class="mode status-pill status-pill--{MODE_PILL[c.mode] ?? 'neutral'}">{c.mode}</span>
         </div>
         <div>
           <div class="big">{d.events_persisted ? c.total : '—'}</div>
@@ -344,10 +346,7 @@
   .card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 0.75rem; }
   .min0 { min-width: 0; }
   .env { color: var(--muted); margin-top: 0.125rem; overflow-wrap: anywhere; }
-  .mode-pill { flex-shrink: 0; font-size: 0.6875rem; font-weight: 600; padding: 0.125rem 0.5rem; border-radius: 999px; border: 1px solid currentColor; }
-  .mode-enforce { color: var(--ok-text); }
-  .mode-warn, .mode-shadow { color: var(--warn-text); }
-  .mode-off { color: var(--muted); border-color: var(--border); }
+  .mode { flex-shrink: 0; } /* app.css .status-pill */
   .big { font-size: 2rem; font-weight: 700; line-height: 1.1; }
   .breakdown { display: flex; flex-direction: column; gap: 0.5rem; }
   .label { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: none;

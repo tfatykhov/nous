@@ -30,6 +30,8 @@
 
   // Bar, swatch and share colours are tokens, set on the element as --fill and painted by the stylesheet. An outcome bar
   // sits beside its label; the shares have a legend and an accessible name.
+  /** A job fix's state as a status pill: in progress is info, the rest by its tone. */
+  const FIX_PILL: Record<string, string> = { live: 'info', ok: 'ok', warn: 'warn', muted: 'neutral' };
   const OUTCOME_TOKEN: Record<string, string> = {
     done_verified: '--green', done_checked: '--series-2', done_self: '--series-1', partial: '--warn-text', failed: '--red', not_scored: '--muted',
   };
@@ -310,7 +312,7 @@
             {#if successes(t) === 0}
               <span class="small muted">no successful run</span>
             {:else}
-              <span class="pill" class:pill-warn={t.de_facto_level !== 'L0'}>{LEVEL_LABEL[t.de_facto_level] ?? t.de_facto_level}</span>
+              <span class="status-pill" class:status-pill--warn={t.de_facto_level !== 'L0'}>{LEVEL_LABEL[t.de_facto_level] ?? t.de_facto_level}</span>
             {/if}
           {:else if c.key === 'undo'}
             <span class="small" class:muted={!t.compensable}>{t.compensable ? 'yes' : 'no'}</span>
@@ -357,7 +359,7 @@
             <span class="job" title={r.job}>{r.job}</span>
           {:else if c.key === 'state'}
             {@const s = fixState(r)}
-            <span class="pill fix-{s.tone}">{s.label}</span>
+            <span class="status-pill status-pill--{FIX_PILL[s.tone]}">{s.label}</span>
           {:else if c.key === 'why'}
             {@const before = fixBaseline(r)}
             <span class="small">{r.trigger ? FIX_TRIGGER_LABEL[r.trigger] ?? r.trigger : '—'}</span>
@@ -438,8 +440,8 @@
             {#each g.schedules as s (s.schedule_id)}
               <tr>
                 <th scope="row"><span class="job" title={s.job}>{s.job}</span></th>
-                <td><span class="mono">{s.name ?? '—'}</span>{#if !s.allowlisted}{' '}<span class="pill pill-warn">not allowlisted</span>{/if}</td>
-                <td><span class="pill" class:pill-warn={s.mode !== 'shadow' && s.mode !== 'skip'}>{guardMode(s.mode)}</span></td>
+                <td><span class="mono">{s.name ?? '—'}</span>{#if !s.allowlisted}{' '}<span class="status-pill status-pill--warn">not allowlisted</span>{/if}</td>
+                <td><span class="status-pill" class:status-pill--warn={s.mode !== 'shadow' && s.mode !== 'skip'}>{guardMode(s.mode)}</span></td>
                 <td>{s.runs}</td>
                 <td>{s.skipped}</td>
                 <td>{s.would_skip}</td>
@@ -470,12 +472,12 @@
           <tbody>
             {#each g.checks as c (c.check_id)}
               <tr>
-                <th scope="row"><span class="mono">{c.check ?? c.check_id}</span>{#if c.enabled === false}{' '}<span class="pill">disabled</span>{/if}</th>
+                <th scope="row"><span class="mono">{c.check ?? c.check_id}</span>{#if c.enabled === false}{' '}<span class="status-pill">disabled</span>{/if}</th>
                 <td>
                   {#if c.mode === null}<span class="small muted">guard removed</span>
-                  {:else}<span class="mono">{c.name ?? '—'}</span>{#if !c.allowlisted}{' '}<span class="pill pill-warn">not allowlisted</span>{/if}{/if}
+                  {:else}<span class="mono">{c.name ?? '—'}</span>{#if !c.allowlisted}{' '}<span class="status-pill status-pill--warn">not allowlisted</span>{/if}{/if}
                 </td>
-                <td>{#if c.mode !== null}<span class="pill" class:pill-warn={c.mode !== 'shadow' && c.mode !== 'skip'}>{guardMode(c.mode)}</span>{:else}—{/if}</td>
+                <td>{#if c.mode !== null}<span class="status-pill" class:status-pill--warn={c.mode !== 'shadow' && c.mode !== 'skip'}>{guardMode(c.mode)}</span>{:else}—{/if}</td>
                 <td>{c.runs}</td>
                 <td>{c.skipped}</td>
                 <td>{c.would_skip}</td>
@@ -642,12 +644,7 @@
     background: var(--fill); }
   .stack { display: flex; width: 8rem; max-width: 100%; height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
   .stack > div { background: var(--fill); }
-  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.6875rem; font-weight: 600;
-    border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
-  .pill-warn { color: var(--st-partial); border-color: color-mix(in srgb, var(--st-partial) 50%, transparent); }
-  .fix-live { color: var(--accent); border-color: var(--accent); }
-  .fix-ok { color: var(--ok-text); border-color: color-mix(in srgb, var(--ok-text) 50%, transparent); }
-  .fix-warn { color: var(--st-partial); border-color: color-mix(in srgb, var(--st-partial) 50%, transparent); }
+  /* The states and levels are app.css's .status-pill (one tinted pill on every screen). */
   /* Two lines at most. It wraps anywhere, because an unbreakable line would widen the page on a phone (min-content). */
   .job { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
     overflow-wrap: anywhere; max-width: 28rem; font-size: 0.8125rem; }

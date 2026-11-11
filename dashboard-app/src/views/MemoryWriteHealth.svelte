@@ -8,6 +8,9 @@
   import { fmtWhen } from '../lib/harness';
   import { dayRows, fmtValue, ruleTiles, stateTone, RULE_LABEL, SOURCE_COLUMNS, STATE_LABEL } from '../lib/memoryWriteHealth';
 
+  /** A rule's tone as a status pill (app.css .status-pill). */
+  const PILL: Record<string, string> = { bad: 'bad', warn: 'warn', ok: 'ok', muted: 'neutral' };
+
   // GET /dashboard/memory-write-health: the daily write-health rollup and its rules. These findings never go to
   // Telegram: this page (and the companion card) is where they show. Acknowledge records who accepted a rule's
   // evidence (a deliberate restore or delete) and restarts that rule's baseline.
@@ -89,7 +92,7 @@
         <section class="tile tone-{stateTone(t.state)}" aria-labelledby="rule-{t.id}">
           <div class="tile-head">
             <h2 id="rule-{t.id}"><span class="rule-id">{t.id}</span> {t.label}</h2>
-            <span class="pill pill-{stateTone(t.state)}">{STATE_LABEL[t.state]}</span>
+            <span class="status-pill status-pill--{PILL[stateTone(t.state)]}">{STATE_LABEL[t.state]}</span>
           </div>
           <div class="value">{fmtValue(t.id, t.value)} <span class="small muted">/ threshold {fmtValue(t.id, t.threshold)}</span></div>
           <p class="small muted">{t.hint}</p>
@@ -229,11 +232,7 @@
   .ack button { align-self: flex-start; padding: 0.375rem 0.875rem; border-radius: var(--ctl-radius); border: 1px solid var(--accent);
     background: var(--accent); color: var(--on-accent); font-size: 0.8125rem; font-weight: 600; cursor: pointer; }
   .ack button:disabled { opacity: 0.6; cursor: default; }
-  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.6875rem; font-weight: 600;
-    border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
-  .pill-bad { color: var(--err-text); border-color: color-mix(in srgb, var(--tone-bad) 60%, transparent); }
-  .pill-warn { color: var(--warn-text); border-color: color-mix(in srgb, var(--warn-text) 50%, transparent); }
-  .pill-ok { color: var(--ok-text); border-color: color-mix(in srgb, var(--ok-text) 50%, transparent); }
+  /* A rule's state is app.css's .status-pill (one tinted pill on every screen). */
   .panel { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow);
     padding: 1.25rem; min-width: 0; margin-top: 1.25rem; }
   .panel p { margin: 0.5rem 0 0; }

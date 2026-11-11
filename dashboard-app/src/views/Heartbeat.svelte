@@ -70,12 +70,19 @@
     low: 'var(--st-neutral)',
   };
 
-  const STATE_COLOR: Record<string, string> = {
-    new: 'var(--pending)',
-    acknowledged: 'var(--yellow)',
-    resolved: 'var(--st-completed)',
-    suppressed: 'var(--st-neutral)',
+  /** A lifecycle state's status pill (app.css .status-pill): new is info, acknowledged a warning, resolved ok. */
+  const STATE_PILL: Record<string, string> = {
+    new: 'info',
+    acknowledged: 'warn',
+    resolved: 'ok',
   };
+
+  /** A check's status, in a word and a pill: an open circuit breaker, failures on the way to it, or ok. */
+  function checkStatus(c: { circuit_breaker_open: boolean; consecutive_failures: number }): { word: string; pill: string } {
+    if (c.circuit_breaker_open) return { word: 'open', pill: 'bad' };
+    if (c.consecutive_failures > 0) return { word: 'failing', pill: 'warn' };
+    return { word: 'ok', pill: 'ok' };
+  }
 
   // ── Chart data builders ───────────────────────────────────────────────────
 
@@ -168,19 +175,19 @@
     <span class="hb-dot" class:hb-dot--ok={enabled && tripped === 0} class:hb-dot--warn={enabled && tripped > 0} class:hb-dot--off={!enabled}></span>
     <span class="hb-banner-label">{enabled ? 'Heartbeat Active' : 'Heartbeat Disabled'}</span>
     <div class="hb-pills">
-      <span class="hb-pill" class:hb-pill--warn={qh.active}>
+      <span class="status-pill" class:status-pill--warn={qh.active}>
         Quiet hours: {qh.active ? `active (${qh.start}:00–${qh.end}:00)` : 'inactive'}
       </span>
       <span
-        class="hb-pill"
-        class:hb-pill--ok={budgetPct < 80}
-        class:hb-pill--warn={budgetPct >= 80 && budgetPct < 100}
-        class:hb-pill--bad={budgetPct >= 100}
+        class="status-pill"
+        class:status-pill--ok={budgetPct < 80}
+        class:status-pill--warn={budgetPct >= 80 && budgetPct < 100}
+        class:status-pill--bad={budgetPct >= 100}
       >
         Budget: {budgetPct >= 100 ? 'exhausted' : budgetPct + '% used'}
       </span>
       {#if st.last_tick}
-        <span class="hb-pill">Last tick: {fmtAgo(st.last_tick)}</span>
+        <span class="status-pill">Last tick: {fmtAgo(st.last_tick)}</span>
       {/if}
     </div>
   </div>
@@ -248,11 +255,15 @@
             interval_fmt: fmtInterval(c.interval),
             last_run_fmt: fmtAgo(c.last_run),
             failures_fmt: c.consecutive_failures + ' / ' + c.max_failures,
-            status_fmt: c.circuit_breaker_open ? 'OPEN' : c.consecutive_failures > 0 ? 'warn' : 'ok',
+            status_fmt: checkStatus(c).word,
           }))}
           mode="cards"
           rowKey={(r) => r.name}
-        />
+        >
+          {#snippet cell(r, c)}
+            {#if c.key === 'status_fmt'}<span class="status-pill status-pill--{checkStatus(r).pill}">{r.status_fmt}</span>{:else}{r[c.key]}{/if}
+          {/snippet}
+        </DataTable>
       {:else}
         <p class="empty">No checks configured</p>
       {/if}
@@ -269,11 +280,11 @@
         <!-- State pills -->
         <div class="state-pills">
           {#each ['new', 'acknowledged', 'resolved', 'suppressed', 'auto_closed_known_fp'] as st}
-            <span class="hb-pill" style:border-color={STATE_COLOR[st] ?? 'var(--st-neutral)'}>
+            <span class="status-pill status-pill--{STATE_PILL[st] ?? 'neutral'}">
               {st}: {byState[st] ?? 0}
             </span>
           {/each}
-          <span class="hb-pill hb-pill--total">total: {lc.stats.total}</span>
+          <span class="status-pill">total: {lc.stats.total}</span>
         </div>
 
         {#if activeFindings.length > 0}
@@ -432,7 +443,8 @@
     margin-bottom: 1rem;
   }
 
-  .hb-banner--warn { border-color: var(--yellow); }
+  /* A tripped breaker tints the banner (no coloured outline); the pills and the dot say what is wrong. */
+  .hb-banner--warn { background: var(--warn-bg); }
   /* A disabled banner is not dimmed (its muted pills at 65% were 2.8:1 on the white card): the grey dot and the words
      "Heartbeat Disabled" say it. */
 
@@ -460,18 +472,7 @@
     margin-left: auto;
   }
 
-  .hb-pill {
-    font-size: 0.75rem;
-    padding: 0.125rem 0.5rem;
-    border: 1px solid var(--border);
-    border-radius: 999px;
-    color: var(--muted);
-    white-space: nowrap;
-  }
-  .hb-pill--ok { border-color: var(--st-completed); color: var(--st-completed); }
-  .hb-pill--warn { border-color: var(--yellow); color: var(--warn-text); }
-  .hb-pill--bad { border-color: var(--red); color: var(--err-text); }
-  /* The total is not dimmed (muted text at 60% was 2.5:1 on the white card). */
+  /* The pills are app.css's .status-pill (one tinted pill on every screen). The total is not dimmed. */
 
   /* ── Layout ── */
   .chart-row {

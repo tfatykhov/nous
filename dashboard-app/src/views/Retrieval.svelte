@@ -891,7 +891,7 @@
                 {#if e.n_expansions > 0}
                   <span class="expn">{e.n_expansions} graph edges</span>
                 {/if}
-                {#if e.truncated}<span class="chip sm warnchip">capped</span>{/if}
+                {#if e.truncated}<span class="status-pill status-pill--warn">capped</span>{/if}
                 <span class="spacer"></span>
                 <span class="muted" title={e.timestamp}>{fmtClock(e.timestamp)} · {fmtAge(e.timestamp, nowMs)}</span>
               </div>
@@ -1696,7 +1696,6 @@
   }
   .chip.sm { font-size: 0.68rem; }
   .chip.restored { opacity: 0.85; }
-  .chip.warnchip { color: var(--warn-text); border-color: var(--yellow); }
   .chip.prov { color: var(--muted); border-style: dashed; }
   /* Memory-type identity, reusing the palette the rest of the dashboard uses. */
   .chip.t-fact      { color: color-mix(in srgb, var(--fact-color) 70%, var(--text));      border-color: var(--fact-color); }

@@ -15,6 +15,8 @@
 				ok: "bg-[var(--ok-bg)] text-[var(--ok-text)]",
 				warn: "bg-[var(--warn-bg)] text-[var(--warn-text)]",
 				error: "bg-[var(--err-bg)] text-[var(--err-text)]",
+				info: "bg-[var(--info-bg)] text-[var(--pending)]",
+				neutral: "bg-[var(--wash)] text-[var(--muted)]",
 			},
 		},
 		defaultVariants: {

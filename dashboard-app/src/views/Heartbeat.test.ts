@@ -98,21 +98,27 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
       [['High', PAPER['--err-text']], ['Normal', PAPER['--yellow']], ['Low', PAPER['--st-neutral']]]);
   });
 
-  it('the state pills show all five states with a word and a count, each edged in its state token', async () => {
+  it('the state pills show all five states with a word and a count, each a tinted status pill by state (finish review fix 2)', async () => {
     render(Heartbeat);
     await screen.findByRole('heading', { level: 2, name: 'Finding Lifecycle' });
-    const pills = Array.from(section('Finding Lifecycle').querySelectorAll<HTMLElement>('.state-pills .hb-pill'));
+    const pills = Array.from(section('Finding Lifecycle').querySelectorAll<HTMLElement>('.state-pills .status-pill'));
     expect(pills.map((p) => p.textContent?.trim())).toEqual(
       ['new: 2', 'acknowledged: 1', 'resolved: 3', 'suppressed: 1', 'auto_closed_known_fp: 2', 'total: 9']);
-    expect(pills.slice(0, 5).map((p) => p.style.borderColor)).toEqual(
-      ['var(--pending)', 'var(--yellow)', 'var(--st-completed)', 'var(--st-neutral)', 'var(--st-neutral)']);
-    // The total is not dimmed (muted text at 60% was 2.5:1 on the white card): no inline opacity, and no rule that
-    // lowers it (the dark look's 0.6 went with the fold, PR 7 T6b).
-    const total = pills[5];
-    expect(total.classList.contains('hb-pill--total')).toBe(true);
-    expect(total.style.opacity).toBe('');
+    const variant = (p: HTMLElement) => [...p.classList].find((c) => c.startsWith('status-pill--')) ?? 'plain';
+    expect(pills.map(variant)).toEqual(['status-pill--info', 'status-pill--warn', 'status-pill--ok', 'status-pill--neutral',
+      'status-pill--neutral', 'plain']);
+    // No outline and no inline colour: the pill is the shared tint (app.css .status-pill). The total is not dimmed.
+    for (const p of pills) expect([p.style.borderColor, p.style.opacity]).toEqual(['', '']);
     const css = styleBlocks(readFileSync(join(__dirname, 'Heartbeat.svelte'), 'utf-8'));
-    expect(css).not.toMatch(/hb-pill--total|opacity: 0\.6/);
+    expect(css).not.toMatch(/\.hb-pill(?!s)|opacity: 0\.6/);
+  });
+
+  it('check status is a tinted pill in a word: open, failing or ok (it was plain text "OPEN / warn / ok")', async () => {
+    render(Heartbeat);
+    await screen.findByRole('heading', { level: 2, name: 'Check Status' });
+    const pills = Array.from(section('Check Status').querySelectorAll<HTMLElement>('.status-pill'));
+    expect(pills.map((p) => [p.textContent, [...p.classList].find((c) => c.startsWith('status-pill--'))])).toEqual(
+      [['ok', 'status-pill--ok']]);
   });
 
   it('the escalation note is in words', async () => {
@@ -164,11 +170,19 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
     expect(css).not.toMatch(/hb-banner--disabled|opacity: 0\.65/);
   });
 
-  it('source contract: the banner and pills read status tokens: text tokens for words; the dots have no glow', () => {
+  it('the banner pills are tinted status pills: quiet hours, budget by how much is used, last tick', async () => {
+    budget = { used: 8500, limit: 10000, percentage: 85 };
+    const { container } = render(Heartbeat);
+    await screen.findByText(/^Budget:/);
+    const pills = Array.from(container.querySelectorAll<HTMLElement>('.hb-pills .status-pill'));
+    expect(pills.map((p) => [p.textContent?.trim().split(':')[0], [...p.classList].find((c) => c.startsWith('status-pill--')) ?? 'plain']))
+      .toEqual([['Quiet hours', 'plain'], ['Budget', 'status-pill--warn'], ['Last tick', 'plain']]);
+  });
+
+  it('source contract: no outlined pill is left; a tripped breaker tints the banner; the dots have no glow', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'Heartbeat.svelte'), 'utf-8'));
-    expect(css).toMatch(/\.hb-pill--warn \{ border-color: var\(--yellow\); color: var\(--warn-text\); \}/);
-    expect(css).toMatch(/\.hb-pill--bad \{ border-color: var\(--red\); color: var\(--err-text\); \}/);
-    expect(css).toMatch(/\.hb-pill--ok \{ border-color: var\(--st-completed\); color: var\(--st-completed\); \}/);
+    expect(css).not.toMatch(/\.hb-pill(?!s)/);
+    expect(css).toMatch(/\.hb-banner--warn \{ background: var\(--warn-bg\); \}/);
     // The dark look's glow (a blur that was 0 px on paper) is gone with its token (PR 7 T5).
     expect(css).toMatch(/\.hb-dot--ok \{ background: var\(--st-completed\); \}/);
     expect(css).toMatch(/\.hb-dot--warn \{ background: var\(--yellow\); \}/);

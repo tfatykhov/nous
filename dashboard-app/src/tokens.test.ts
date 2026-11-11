@@ -238,6 +238,11 @@ const KEPT: Record<string, string> = {
   '--overlay-bg': 'rgba(0, 0, 0, 0.6)',
 };
 
+// Tokens added after the flip, each with the fix that needed it.
+const ADDED: Record<string, string> = {
+  '--info-bg': '#e3ecf3', // finish review fix 2: the info status pill's tint (--pending at 12.5% over white)
+};
+
 // PR 2 (the Memory screens): the paper values.
 const SERIES: Record<string, string> = {
   '--series-1': '#1f5fa8',
@@ -398,10 +403,11 @@ describe('the tokens of the one look', () => {
     expect([...BLOCKS.keys()].filter((k) => k.startsWith('html[') || k.includes('[data-'))).toEqual([]);
   });
 
-  it(':root is the paper block moved verbatim (PAPER_GOLDEN), less the tokens deleted since, plus the kept ones', () => {
+  it(':root is the paper block moved verbatim (PAPER_GOLDEN), less the tokens deleted since, plus the kept and added ones', () => {
     const got = Object.fromEntries(tokens(PAPER).map((k) => [k, PAPER[k]]));
     const golden = Object.fromEntries(Object.entries(PAPER_GOLDEN).filter(([k]) => !(k in DELETED)));
-    expect(got).toEqual({ ...golden, ...KEPT });
+    expect(got).toEqual({ ...golden, ...KEPT, ...ADDED });
+    for (const k of Object.keys(ADDED)) expect(k in PAPER_GOLDEN, `${k} is new`).toBe(false);
     expect(Object.keys(PAPER_GOLDEN)).toHaveLength(181);
     for (const k of Object.keys(DELETED)) expect(k in PAPER_GOLDEN, `${k} was in the golden`).toBe(true);
   });
@@ -1130,5 +1136,38 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     // D3, the perfect-calibration line: --muted at 40%. A reference line, not data: recorded.
     const at40 = (c: string, bg: string) => over([...parseColor(c).slice(0, 3), 0.4] as RGBA, parseColor(bg));
     expect(contrast(at40(PAPER['--muted'], white), white)).toBeCloseTo(1.79, 1);
+  });
+});
+
+// Finish review fix 2: one tinted status pill on every screen (app.css .status-pill), the Badge's metrics and tokens.
+describe('the status pill', () => {
+  const css = readFileSync(join(__dirname, 'app.css'), 'utf-8');
+  const badge = readFileSync(join(__dirname, 'lib/ui/badge/badge.svelte'), 'utf-8');
+
+  it("is one rule with the Badge metrics: 20px high, 8px side padding, 12px medium text, fully round", () => {
+    expect(BLOCKS.get('.status-pill')).toMatchObject({ height: '1.25rem', padding: '0 0.5rem', 'font-size': '0.75rem',
+      'font-weight': '500', 'border-radius': '999px', background: 'var(--wash)', color: 'var(--muted)' });
+    for (const cls of ['h-5', 'px-2', 'text-xs', 'font-medium', 'rounded-full']) expect(badge, cls).toContain(cls);
+    expect(css).not.toMatch(/\.status-pill[^{]*\{[^}]*border:/);
+  });
+
+  it('each variant is a tint and its text, the same pair as the Badge variant of that name', () => {
+    const pairs: Record<string, [string, string, string]> = {
+      ok: ['ok', '--ok-bg', '--ok-text'], warn: ['warn', '--warn-bg', '--warn-text'], bad: ['error', '--err-bg', '--err-text'],
+      info: ['info', '--info-bg', '--pending'],
+    };
+    for (const [v, [badgeVariant, bg, fg]] of Object.entries(pairs)) {
+      expect(BLOCKS.get(`.status-pill--${v}`), v).toEqual({ background: `var(${bg})`, color: `var(${fg})` });
+      expect(badge, badgeVariant).toContain(`${badgeVariant}: "bg-[var(${bg})] text-[var(${fg})]"`);
+    }
+    expect(badge).toContain('neutral: "bg-[var(--wash)] text-[var(--muted)]"');
+  });
+
+  it('every pill text is at least 4.5:1 on its tint', () => {
+    for (const [fg, bg] of [['--ok-text', '--ok-bg'], ['--warn-text', '--warn-bg'], ['--err-text', '--err-bg'],
+      ['--pending', '--info-bg'], ['--muted', '--wash']]) {
+      expect(contrast(PAPER[fg], PAPER[bg]), `${fg} on ${bg}`).toBeGreaterThanOrEqual(4.5);
+    }
+    expect(contrast(PAPER['--pending'], tint(PAPER['--pending'], 0.125, '#ffffff'))).toBeGreaterThanOrEqual(4.5);
   });
 });

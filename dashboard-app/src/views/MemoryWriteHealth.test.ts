@@ -137,9 +137,10 @@ describe('Memory write health on the paper look (PR 2)', () => {
     await screen.findByText('2 rules tripped: you decide');
     expect(container.querySelector('section.strip')?.classList.contains('verdict-bad')).toBe(true);
     const tones = Array.from(container.querySelectorAll('.tile')).map((t) => [...t.classList].find((c) => c.startsWith('tone-')));
-    const pills = Array.from(container.querySelectorAll('.tile .pill')).map((p) => [...p.classList].find((c) => c.startsWith('pill-')));
+    // Each tile's state is the shared tinted status pill (finish review fix 2); muted maps to the neutral pill.
+    const pills = Array.from(container.querySelectorAll('.tile .status-pill')).map((p) => [...p.classList].find((c) => c.startsWith('status-pill--')));
     expect(tones).toContain('tone-bad');
-    expect(pills.map((p) => p?.replace('pill-', 'tone-'))).toEqual(tones);
+    expect(pills.map((p) => p?.replace('status-pill--', 'tone-').replace('tone-neutral', 'tone-muted'))).toEqual(tones);
   });
 
   it('a quiet day gets the ok verdict', async () => {
@@ -154,7 +155,7 @@ describe('Memory write health on the paper look (PR 2)', () => {
     expect(css).toMatch(/\.verdict-ok \{ color: var\(--ok-text\); border-color: color-mix\(in srgb, var\(--ok-text\) 35%, transparent\);/);
     expect(css).toMatch(/\.verdict-bad \{ color: var\(--err-text\); border-color: color-mix\(in srgb, var\(--tone-bad\) 50%, transparent\);/);
     expect(css).toContain('.tile.tone-bad { border-color: color-mix(in srgb, var(--tone-bad) 60%, transparent); }');
-    expect(css).toContain('.pill-warn { color: var(--warn-text); border-color: color-mix(in srgb, var(--warn-text) 50%, transparent); }');
+    expect(css).not.toMatch(/\.pill\b|\.pill-/); // the states are app.css's .status-pill (finish review fix 2)
     expect(css).toMatch(/background: var\(--accent\); color: var\(--on-accent\);/);
     expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/);
   });
