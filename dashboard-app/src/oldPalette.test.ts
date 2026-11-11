@@ -17,7 +17,14 @@ const OLD = [
   '#0a0a0f', '#12121a', '#181824', '#1e1e2e', '#7c6af7', '#4f46a8', '#a99df9', '#e2e2f0', '#8e8eab', '#6b6b8a', '#0b0b10',
   '#863bff', '#7e14ff',
 ];
-const OLD_SOURCE = [...OLD, String.raw`rgba\(\s*124\s*,\s*106\s*,\s*247\b`, String.raw`DM[ +]Sans`, String.raw`JetBrains[ +]Mono`].join('|');
+/** Each old hex as its channels, so the same colour written as rgb()/rgba() (comma or space syntax) is caught too: the
+ * render tests these lists replaced compared colours by value, whatever the notation. */
+const rgbOf = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+const OLD_RGB = OLD.map((h) => {
+  const [r, g, b] = rgbOf(h);
+  return String.raw`rgba?\(\s*${r}\s*[,\s]\s*${g}\s*[,\s]\s*${b}(?!\d)`;
+});
+const OLD_SOURCE = [...OLD, ...OLD_RGB, String.raw`DM[ +]Sans`, String.raw`JetBrains[ +]Mono`].join('|');
 const OLD_PALETTE = new RegExp(OLD_SOURCE, 'i');
 const OLD_ALL = new RegExp(OLD_SOURCE, 'gi');
 
@@ -76,8 +83,13 @@ const hit = (f: string) => OLD_PALETTE.test(allowed(f, read(f)));
 describe('no old palette anywhere in the dashboard', () => {
   it('the pattern matches each old value in its own sample, any case, and spares the new palette', () => {
     for (const h of OLD) {
-      for (const s of [`color: ${h};`, `color: ${h.toUpperCase()};`, `'${h}33'`]) expect(s, s).toMatch(OLD_PALETTE);
+      const [r, g, b] = rgbOf(h);
+      for (const s of [`color: ${h};`, `color: ${h.toUpperCase()};`, `'${h}33'`, `rgb(${r}, ${g}, ${b})`, `rgba(${r},${g},${b},.5)`,
+        `rgb(${r} ${g} ${b} / 40%)`]) {
+        expect(s, s).toMatch(OLD_PALETTE);
+      }
     }
+    expect('rgb(107, 107, 1380)').not.toMatch(OLD_PALETTE); // a channel is matched whole
     for (const s of ['rgba(124, 106, 247, 0.15)', 'rgba(124,106,247,.5)', "font-family: 'DM Sans'", 'family=DM+Sans:wght@400',
       "'JetBrains Mono', monospace", 'family=JetBrains+Mono']) {
       expect(s, s).toMatch(OLD_PALETTE);
