@@ -126,7 +126,7 @@ describe('App styles', () => {
     expect(src).toMatch(/\.sidebar-title\s*\{[^}]*font-size:\s*var\(--brand-size\)/);
   });
 
-  it('main may shrink below its content (a flex item), so a wide table or chart never widens the page at phone width', () => {
+  it('source contract (jsdom cannot lay out; the 390 px overflow check in the screenshot round is the proof): main has min-width: 0, so as a flex item it may shrink below its content', () => {
     expect(src).toMatch(/\.main-content \{[^}]*min-width: 0;/);
   });
 

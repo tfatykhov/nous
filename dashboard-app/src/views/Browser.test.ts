@@ -149,7 +149,7 @@ describe('Browse', () => {
     expect(css).toMatch(/\.save-status\.save-err\s*\{\s*color:\s*var\(--save-err\)/);
   });
 
-  it('the tabs are pills read from the SubNav tokens; no colour literal anywhere in the file', () => {
+  it('source contract: the tab rules read the SubNav tokens; no colour literal anywhere in the file', () => {
     const src = readFileSync(join(__dirname, 'Browser.svelte'), 'utf-8');
     const css = styleBlocks(src);
     expect(css).toMatch(/\.tab-btn\s*\{[^}]*border-radius:\s*var\(--ctl-radius\)/);

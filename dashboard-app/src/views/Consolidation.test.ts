@@ -95,7 +95,7 @@ describe('Consolidation on the paper look', () => {
     expect(SRC).not.toContain('{@html');
   });
 
-  it('at phone width nothing widens the page: the header wraps, the cycle table scrolls in its own box', async () => {
+  it('source contract (jsdom cannot lay out; the 390 px overflow check in the screenshot round is the proof): the header may wrap, and the cycle table sits in an overflow-x box', async () => {
     const css = styleBlocks(SRC);
     expect(css).toMatch(/\.view-head \{[^}]*flex-wrap: wrap;/);
     expect(css).toMatch(/\.table-wrap \{[^}]*overflow-x: auto;/);

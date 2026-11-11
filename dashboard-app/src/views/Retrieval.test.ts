@@ -141,19 +141,20 @@ describe('Retrieval on the paper look', () => {
     }
   });
 
-  it('the badges read the badge tokens; no colour literal anywhere in the file', () => {
+  it('source contract: the badge rules read the badge tokens; no colour literal anywhere in the file', () => {
     const css = styleBlocks(SRC);
     expect(css).toContain('.badge-good { background: var(--badge-good-bg); color: var(--ok-text); }');
     expect(css).toContain('.badge-bad  { background: var(--badge-bad-bg); color: var(--err-text); }');
     expect(SRC).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/);
   });
-  it('at phone width nothing widens the page: the header wraps, and the split\'s cards may shrink below their content', () => {
+
+  it('source contract (jsdom cannot lay out; the 390 px overflow check in the screenshot round is the proof): the header may wrap, and the split\'s cards have min-width: 0', () => {
     const css = styleBlocks(SRC);
     expect(css).toMatch(/\.view-head \{[^}]*flex-wrap: wrap;/);
     expect(css).toContain('.split > * { min-width: 0; }');
   });
 
-  it('at phone width the funnel bar keeps its own row, a row\'s metadata wraps by item, and a marker sits on the first line', () => {
+  it('source contract (jsdom cannot lay out; the 390 px captures are the proof): under 640 px the funnel bar has a grid row of its own, row metadata wraps by item, a summary row is baseline-aligned', () => {
     const css = styleBlocks(SRC);
     // Squeezed between the two headline numbers, the bar had no width left at 390 px.
     expect(css).toMatch(/@media \(max-width: 640px\) \{[^@]*\.funnel \{[^}]*grid-template-areas: "in out" "bar bar";/);

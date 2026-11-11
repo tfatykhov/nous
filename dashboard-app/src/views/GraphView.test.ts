@@ -230,7 +230,7 @@ describe('Graph on the paper look', () => {
     }
   });
 
-  it('at phone width the header wraps instead of widening the page', () => {
+  it('source contract (jsdom cannot lay out; the 390 px overflow check in the screenshot round is the proof): the header rule has flex-wrap: wrap', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'GraphView.svelte'), 'utf-8'));
     expect(css).toMatch(/\.view-head \{[^}]*flex-wrap: wrap;/);
   });
