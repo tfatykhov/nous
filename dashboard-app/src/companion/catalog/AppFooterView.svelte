@@ -271,6 +271,7 @@
   .ctl {
     font: inherit;
     font-size: 0.85rem;
+    min-height: var(--tap-min);
     color: var(--text);
     background: var(--ctl-bg);
     border: 1px solid var(--ctl-border);

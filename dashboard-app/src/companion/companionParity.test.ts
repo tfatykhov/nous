@@ -101,6 +101,7 @@ const COMPANION_OWN: Record<string, string> = {
   '--callout-bg': "the ApprovalPanel's fill: none on paper (it sits on the card, as the prototype's approval), the old tile in a legacy theme",
   '--callout-pad': "the ApprovalPanel's padding",
   '--tl-flag-rule': "a flagged timeline entry's rail: the plain rail on paper (its ringed dot and label carry the flag), warn in a legacy theme",
+  '--tap-min': "a control's minimum height: 44px on paper (a phone's tap target), auto (the initial value) in a legacy theme",
   '--figure-stretch': "the figures' width: 82% on paper (Archivo's width axis, as the dashboard's figures), 100% in a legacy theme",
   '--nested-bg': 'a card inside a surface card: a soft tile instead of a shadow on a shadow',
   '--ctl-bg': "a default button's fill (the prototype .btn: white)",

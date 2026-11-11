@@ -104,6 +104,7 @@
     border: 1px solid var(--ctl-border);
     border-radius: var(--ctl-radius);
     padding: 0.45rem 0.9rem;
+    min-height: var(--tap-min);
     cursor: pointer;
     transition: var(--transition);
   }

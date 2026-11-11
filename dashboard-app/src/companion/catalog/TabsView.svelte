@@ -125,6 +125,7 @@
     border-bottom: 2px solid transparent;
     border-radius: var(--tablist-radius);
     padding: 0.45rem 0.8rem;
+    min-height: var(--tap-min);
     cursor: pointer;
     white-space: nowrap;
     transition: var(--transition);

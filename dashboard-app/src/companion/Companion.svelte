@@ -332,7 +332,11 @@
     {:else}
       {#each feed as surface (surface.surfaceId)}
         <section class="surface linked" data-theme={surface.theme || null} aria-label={surface.surfaceId}>
-          <a class="permalink" href={'#/s/' + encodeURIComponent(surface.surfaceId)}>Link</a>
+          <a
+            class="permalink"
+            href={'#/s/' + encodeURIComponent(surface.surfaceId)}
+            aria-label={'Open ' + chipLabel(surface) + ' on its own'}
+          >Link</a>
           <Renderer surfaceId={surface.surfaceId} componentId="root" />
         </section>
       {/each}
@@ -429,6 +433,9 @@
     border: 1px solid var(--border);
     border-radius: var(--ctl-radius);
     padding: 0.25rem 0.8rem;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
     text-decoration: none;
     cursor: pointer;
     transition: var(--transition);
@@ -484,12 +491,17 @@
      its own above the content, so the word never sits on the surface's first
      component (an app's header stamp, an ApprovalPanel's border). */
   .surface.linked {
-    padding-top: 2rem;
+    padding-top: 2.75rem;
   }
+  /* A 44px-tall target across the strip's corner. */
   .permalink {
     position: absolute;
-    top: 0.55rem;
-    right: 1.1rem;
+    top: 0;
+    right: 0;
+    height: 2.75rem;
+    padding: 0 1.1rem;
+    display: inline-flex;
+    align-items: center;
     color: var(--muted);
     text-decoration: none;
     font-size: 0.75rem;

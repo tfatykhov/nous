@@ -741,6 +741,8 @@ describe('Companion shell — the Atlantic-blue bar on chart paper (PR 6)', () =
     const { container } = render(Companion);
     const link = container.querySelector('a.permalink');
     expect(link?.textContent).toBe('Link');
+    // review M13: its name says what it opens
+    expect(link?.getAttribute('aria-label')).toBe('Open app on its own');
     expect(link?.getAttribute('href')).toBe('#/s/' + encodeURIComponent('nous:chat:micro_app:aaa001'));
   });
 

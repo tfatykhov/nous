@@ -148,6 +148,9 @@
     border: none;
     border-radius: var(--ctl-radius);
     padding: 0.3rem 0.95rem;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
     font: inherit;
     font-weight: 600;
     cursor: pointer;
@@ -162,6 +165,9 @@
     border-radius: var(--ctl-radius);
     color: var(--muted);
     padding: 0.3rem 0.6rem;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
     cursor: pointer;
   }
   .go:focus-visible,

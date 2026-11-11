@@ -139,6 +139,7 @@
   }
   .filter {
     font: inherit;
+    min-height: var(--tap-min);
     color: var(--text);
     background: var(--field-bg);
     border: 1px solid var(--field-border);
@@ -186,6 +187,7 @@
      stays in the DOM and focusable so keyboard and screen readers are
      unaffected. */
   .options.chips .option {
+    min-height: var(--tap-min);
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 0.25rem 0.7rem;

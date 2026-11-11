@@ -160,6 +160,35 @@ describe('tiles, cards, tables and the timeline take the paper shape through tok
   });
 });
 
+describe('every control is a 44px tap target on paper through --tap-min (source contract, review I5)', () => {
+  it.each([
+    ['ButtonView', '.btn'],
+    ['TabsView', 'button'],
+    ['AppFooterView', '.ctl'],
+    ['TextFieldView', 'textarea'],
+    ['DateTimeInputView', 'input'],
+    ['ChoicePickerView', '.filter'],
+    ['ChoicePickerView', '.options.chips .option'],
+  ])('%s %s', (name, sel) => {
+    expect(style(name).split(`${sel} {`)[1].split('}')[0]).toContain('min-height: var(--tap-min)');
+  });
+
+  it('the shell (always paper) sizes its pills and the install buttons at 44px', () => {
+    const shell = styleBlocks(readFileSync(join(SHELL, 'Companion.svelte'), 'utf-8'));
+    expect(shell.split('.chip {')[1].split('}')[0]).toMatch(/min-height: 44px;[^}]*display: inline-flex;[^}]*align-items: center/);
+    const install = styleBlocks(readFileSync(join(SHELL, 'InstallPrompt.svelte'), 'utf-8'));
+    for (const sel of ['.go', '.x']) {
+      expect(install.split(`${sel} {`)[1].split('}')[0], sel).toMatch(/min-height: 44px;[^}]*display: inline-flex;[^}]*align-items: center/);
+    }
+  });
+
+  it('"Link" is a 44px-tall target in a strip of its own', () => {
+    const shell = styleBlocks(readFileSync(join(SHELL, 'Companion.svelte'), 'utf-8'));
+    expect(shell.split('.surface.linked {')[1].split('}')[0]).toContain('padding-top: 2.75rem');
+    expect(shell.split('.permalink {')[1].split('}')[0]).toMatch(/top: 0;[^}]*right: 0;[^}]*height: 2\.75rem;[^}]*display: inline-flex;[^}]*align-items: center/);
+  });
+});
+
 describe('no coloured side rule and no tracked capitals on paper (source contract, review I3)', () => {
   it.each([
     ['ApprovalPanelView', '.panel', 'warn'],

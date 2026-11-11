@@ -77,6 +77,7 @@
   input,
   textarea {
     font: inherit;
+    min-height: var(--tap-min);
     color: var(--text);
     background: var(--field-bg);
     border: 1px solid var(--field-border);

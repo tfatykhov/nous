@@ -96,6 +96,7 @@
   --callout-bg: transparent; /* the ApprovalPanel sits on the card */
   --callout-pad: 0;
   --tl-flag-rule: var(--border);
+  --tap-min: 44px; /* a control's minimum height: a phone's tap target */
   --chart-axis: #56687a;
   --chart-grid: #e3e9ec;
 
@@ -229,6 +230,7 @@
   --callout-bg: var(--surface);
   --callout-pad: 0.9rem 1rem;
   --tl-flag-rule: var(--warn);
+  --tap-min: auto;
   --tile-rule-width: 3px;
   --badge-tint: 0%;
   --badge-edge: 100%;
