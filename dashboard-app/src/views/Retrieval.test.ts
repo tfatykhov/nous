@@ -147,4 +147,9 @@ describe('Retrieval on the paper look', () => {
     expect(css).toContain('.badge-bad  { background: var(--badge-bad-bg); color: var(--err-text); }');
     expect(SRC).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/);
   });
+  it('at phone width nothing widens the page: the header wraps, and the split\'s cards may shrink below their content', () => {
+    const css = styleBlocks(SRC);
+    expect(css).toMatch(/\.view-head \{[^}]*flex-wrap: wrap;/);
+    expect(css).toContain('.split > * { min-width: 0; }');
+  });
 });

@@ -1240,6 +1240,7 @@
   /* ── Header ──────────────────────────────────────────────── */
   .view-head {
     display: flex;
+    flex-wrap: wrap; /* at phone width the actions drop below the title rather than widen the page */
     align-items: flex-start;
     justify-content: space-between;
     gap: 1rem;
@@ -1431,6 +1432,8 @@
     gap: 1rem;
     align-items: start;
   }
+  /* A card may shrink below its content (a long query, a wide table), so the column never widens the page. */
+  .split > * { min-width: 0; }
   @media (max-width: 1180px) {
     .split { grid-template-columns: 1fr; }
     .detail-card { position: static !important; }

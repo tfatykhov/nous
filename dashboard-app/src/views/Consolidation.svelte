@@ -153,6 +153,7 @@
   <!-- ── Cycle list ──────────────────────────────────────────────────────── -->
   <section class="chart-card">
     <h2>Recent Cycles</h2>
+    <div class="table-wrap">
     <table class="data-table">
       <thead>
         <tr>
@@ -192,6 +193,7 @@
         {/each}
       </tbody>
     </table>
+    </div>
   </section>
 
   <!-- ── Cycle detail ────────────────────────────────────────────────────── -->
@@ -295,6 +297,7 @@
   /* ── Header ──────────────────────────────────────────────── */
   .view-head {
     display: flex;
+    flex-wrap: wrap; /* at phone width the actions drop below the title rather than widen the page */
     align-items: flex-start;
     justify-content: space-between;
     gap: 1rem;
@@ -343,6 +346,9 @@
   .mt { margin-top: 1rem; }
 
   /* ── Data table ──────────────────────────────────────────── */
+  /* A wide table scrolls in its own box instead of widening the page. */
+  .table-wrap { overflow-x: auto; }
+
   .data-table {
     width: 100%;
     border-collapse: collapse;

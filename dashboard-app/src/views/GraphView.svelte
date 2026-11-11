@@ -474,6 +474,7 @@
      paper-ground selector, so the dark look keeps its shapes and fonts. */
   .view-head {
     display: flex;
+    flex-wrap: wrap; /* at phone width the actions drop below the title rather than widen the page */
     align-items: flex-start;
     justify-content: space-between;
     gap: 1rem;

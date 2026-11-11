@@ -90,4 +90,13 @@ describe('Consolidation on the paper look', () => {
     expect(SRC).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/);
     expect(SRC).not.toContain('{@html');
   });
+
+  it('at phone width nothing widens the page: the header wraps, the cycle table scrolls in its own box', async () => {
+    const css = styleBlocks(SRC);
+    expect(css).toMatch(/\.view-head \{[^}]*flex-wrap: wrap;/);
+    expect(css).toMatch(/\.table-wrap \{[^}]*overflow-x: auto;/);
+    install();
+    const { container } = render(Consolidation);
+    await waitFor(() => expect(container.querySelector('.table-wrap > table.data-table')).not.toBeNull());
+  });
 });

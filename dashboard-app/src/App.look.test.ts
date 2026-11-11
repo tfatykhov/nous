@@ -126,6 +126,10 @@ describe('App styles', () => {
     expect(src).toMatch(/\.sidebar-title\s*\{[^}]*font-size:\s*var\(--brand-size\)/);
   });
 
+  it('main may shrink below its content (a flex item), so a wide table or chart never widens the page at phone width', () => {
+    expect(src).toMatch(/\.main-content \{[^}]*min-width: 0;/);
+  });
+
   it('Svelte writes no data-look (only look.ts does)', () => {
     expect(src).not.toMatch(/data-look|dataset\.look/);
   });

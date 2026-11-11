@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import GraphView from './GraphView.svelte';
 import { setLook } from '../lib/look';
 import { currentRoute } from '../lib/router';
-import { DARK_SEL, PAPER_SEL, parseBlocks } from '../lib/testing/css';
+import { DARK_SEL, PAPER_SEL, parseBlocks, styleBlocks } from '../lib/testing/css';
 
 // The Graph on the paper look: node, edge, ring and legend colours are tokens. Cytoscape draws on a canvas, so its
 // colours are resolved against the graph's own element; a look switch restyles in place and never re-runs the layout
@@ -203,5 +203,10 @@ describe('Graph on the paper look', () => {
       expect(src, f).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/);
       expect(src, f).not.toContain('{@html');
     }
+  });
+
+  it('at phone width the header wraps instead of widening the page', () => {
+    const css = styleBlocks(readFileSync(join(__dirname, 'GraphView.svelte'), 'utf-8'));
+    expect(css).toMatch(/\.view-head \{[^}]*flex-wrap: wrap;/);
   });
 });
