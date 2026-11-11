@@ -21,6 +21,31 @@ const style = (name: string) => styleBlocks(src(name));
 /** A colour literal: a hex colour, or an rgb/hsl/oklch function. */
 const LITERAL = /#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?|oklch)\(/;
 
+// PR 5's guard (hexGuard.test.ts, re-review R3), applied to the companion: a status FILL or a mark token is never a
+// text colour. On paper the fills (--green, --yellow, --red) and the marks (--series-N, --node-*, --*-mark) fall
+// below 4.5:1 as text; text takes --ok, --warn or --crit (the text tones). A legacy theme's values do not change.
+const MARK_AS_TEXT = /(^|[^-\w])color:\s*var\(\s*--(?:red|green|yellow|series-\d+|node-[\w-]+|[a-z]+-mark)(?![\w-])/;
+
+describe('a companion style never sets a status fill or a mark as a text colour (source contract)', () => {
+  it('the pattern catches text and spares backgrounds, borders and text tones', () => {
+    for (const bad of ['.x { color: var(--green); }', '  color: var(--yellow);', '.x { color: var(--red); }', 'color: var(--ok-mark);', 'color: var( --series-2 );']) {
+      expect(bad, bad).toMatch(MARK_AS_TEXT);
+    }
+    for (const ok of ['border-color: var(--red);', 'background: var(--ok-mark);', 'color: var(--ok);', 'color: var(--crit);', 'accent-color: var(--accent);']) {
+      expect(ok, ok).not.toMatch(MARK_AS_TEXT);
+    }
+  });
+
+  it.each([...FILES.map((f) => [f.slice(SHELL.length + 1).replace(/\\/g, '/'), f]), ['companion.css', join(SHELL, 'companion.css')]])(
+    '%s',
+    (_, file) => {
+      const source = readFileSync(file, 'utf-8');
+      const text = file.endsWith('.css') ? source.replace(/\/\*[\s\S]*?\*\//g, '') : styleBlocks(source) + '\n' + markupOf(source);
+      expect(text.split('\n').filter((line) => MARK_AS_TEXT.test(line)).map((l) => l.trim())).toEqual([]);
+    },
+  );
+});
+
 describe('companion components: no colour literal (source contract)', () => {
   it('the literal pattern catches each form and spares a route and a token', () => {
     for (const bad of ['color: #fff;', 'fill="#12304f"', 'background: rgba(0, 0, 0, 0.3)', 'hsl(210 50% 40%)']) {
