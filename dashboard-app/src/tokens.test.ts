@@ -239,6 +239,7 @@ const PR3: Record<string, [string, string]> = {
   '--wash': ['rgba(255, 255, 255, 0.03)', '#f4f7f8'], // Heartbeat: the tuning report's panel
   '--hb-warn-ink': ['#fbbf24', '#8a5a0e'], // Heartbeat: amber as text (paper's --yellow is a mark colour)
   '--effect-write': ['#60a5fa', '#1f5fa8'], // the Ledger's write effect pill
+  '--mc-section-1': ['#a99df9', '#8b5cf6'], // a model call's first context section (the accent text under dark)
 };
 for (const [k, [dark]] of Object.entries(PR3)) NEW_DARK[k] = dark;
 
@@ -768,6 +769,19 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
     // Cancelled is --st-neutral, unknown --oc-unknown; the doughnut and the trend draw them side by side.
     expect(okDistance(PAPER['--oc-unknown'], PAPER['--st-neutral'])).toBeGreaterThanOrEqual(10);
     expect(okDistance(DARK['--oc-unknown'], DARK['--st-neutral'])).toBeGreaterThanOrEqual(10);
+  });
+
+  it('the first two context sections of a model call are distinct on paper (ruling 5), and 3:1 on white', () => {
+    expect(PAPER['--mc-section-1']).toBe(PAPER['--series-0']); // the violet series, not the question frame's blue
+    expect(okDistance(PAPER['--mc-section-1'], PAPER['--series-1'])).toBeGreaterThanOrEqual(12);
+    expect(contrast(PAPER['--mc-section-1'], '#ffffff')).toBeGreaterThanOrEqual(3);
+  });
+
+  it('PR 3\'s categorical colours keep the status distance: at least 6 (OKLab) from every status fill and text (review M2)', () => {
+    const status = ['--green', '--yellow', '--red', '--ok-text', '--warn-text', '--err-text'].map((t) => [t, PAPER[t]] as const);
+    for (const k of ['--mc-section-1', '--cache-blue', '--cache-grey', '--effect-write']) {
+      for (const [s, sc] of status) expect(okDistance(PAPER[k], sc), `${k} (${PAPER[k]}) and ${s}`).toBeGreaterThanOrEqual(6);
+    }
   });
 
   it('outcome marks and the budget bar are at least 3:1 on the white card', () => {

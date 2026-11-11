@@ -728,6 +728,10 @@ describe('Model calls on paper: tokens and words', () => {
     for (const t of tokens) expect(t).toMatch(/^var\(--[\w-]+\)$/);
     expect(items.map((li) => li.querySelector<HTMLElement>('.dot')!.style.background)).toEqual(tokens);
     expect(tokens.map((t) => DARK[t.slice(4, -1)])).toEqual(OLD_PALETTE);
+    // Fix round 0, ruling 5: on paper --accent-text is the link blue, beside series 1's blue; the first section has its
+    // own token (the accent text under dark, the violet series 0 on paper). No section reads an accent token.
+    expect(tokens[0]).toBe('var(--mc-section-1)');
+    expect(tokens.filter((t) => t.includes('--accent'))).toEqual([]);
   });
 
   it('the list and the detail carry no arrow, cross or times glyph: the words Back to calls, Remove and N calls', async () => {
