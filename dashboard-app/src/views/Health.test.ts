@@ -384,16 +384,18 @@ describe('Memory health charts read tokens', () => {
     recordCharts();
     render(Health);
     await waitFor(() => expect(configs.length).toBe(5));
+    // Finish review fix 8: Node count, a single series, is the neutral --series-0 (it was --series-1); a bar has no
+    // outline (the Chart component sets its width to 0), so its fill is the mark.
     const want: [string, string, number][] = [
       ['Density', '--series-0', 0.1],
       ['Edges created', '--series-0', 0.5],
-      ['Node count', '--series-1', 0.5],
+      ['Node count', '--series-0', 0.5],
       ['Orphan nodes', '--red', 0.1],
       ['Auto-linked', '--series-2', 0.5],
       ['Manual', '--series-0', 0.5],
     ];
     for (const [label, token, a] of want) {
-      expect(norm(dataset(label).borderColor), label).toBe(norm(PAPER[token]));
+      if (label !== 'Node count') expect(norm(dataset(label).borderColor), label).toBe(norm(PAPER[token]));
       expect(norm(dataset(label).backgroundColor), label).toBe(norm(withAlpha(PAPER[token], a)));
     }
     // Density 1.4 and 1.5: "watch" (amber); orphans' points in red.
@@ -436,7 +438,7 @@ describe('Memory health charts read tokens', () => {
     recordCharts();
     render(Health, { target });
     await waitFor(() => expect(configs.length).toBe(5));
-    expect(dataset('Node count').borderColor).toBe(PAPER['--series-1']);
+    expect(norm(dataset('Node count').backgroundColor)).toBe(norm(withAlpha(PAPER['--series-0'], 0.5))); // the neutral single series
     expect(dataset('Auto-linked').borderColor).toBe(PAPER['--series-2']);
     // Review M1: the marks that were violet take --series-0, not the accent (on paper the question frame's blue).
     for (const l of ['Density', 'Edges created', 'Manual']) expect(dataset(l).borderColor, l).toBe(PAPER['--series-0']);

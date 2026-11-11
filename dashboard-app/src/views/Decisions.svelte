@@ -337,9 +337,7 @@
             datasets: [{
               label: 'Decisions',
               data: d.daily_decisions.map((p) => p.count),
-              backgroundColor: tint('--series-3', 0.5),
-              borderColor: 'var(--series-3)',
-              borderWidth: 1,
+              backgroundColor: tint('--series-0', 0.5),
             }],
           }}
           options={{

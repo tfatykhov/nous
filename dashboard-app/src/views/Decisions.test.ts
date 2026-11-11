@@ -162,8 +162,9 @@ describe('Decisions: chart colours are tokens', () => {
     expect(brier.data.datasets[0].borderColor).toBe(s0);
     expect(brier.data.datasets[0].pointBackgroundColor).toBe(s0);
     expect(alpha(brier.data.datasets[0].backgroundColor)).toBe(0.1);
-    expect(daily.data.datasets[0].borderColor).toBe(PAPER['--series-3']);
-    expect(rgb(daily.data.datasets[0].backgroundColor)).toBe(rgb(PAPER['--series-3']));
+    // Finish review fix 8: a single series is the neutral --series-0, rounded with no outline (it was --series-3).
+    expect(daily.data.datasets[0].borderWidth).toBe(0);
+    expect(rgb(daily.data.datasets[0].backgroundColor)).toBe(rgb(PAPER['--series-0']));
     expect(alpha(daily.data.datasets[0].backgroundColor)).toBe(0.5);
   });
 
@@ -186,7 +187,7 @@ describe('Decisions: chart colours are tokens', () => {
     expect(rgb(curve.data.datasets[1].borderColor)).toBe(rgb(PAPER['--muted']));
     expect(hist.data.datasets[0].borderColor).toBe(PAPER['--series-0']);
     expect(cat.data.datasets.map((d) => d.backgroundColor)).toEqual(['--oc-success', '--yellow', '--err-text', '--series-7'].map((t) => PAPER[t]));
-    expect(configs[6].data.datasets[0].borderColor).toBe(PAPER['--series-3']);
+    expect(rgb(configs[6].data.datasets[0].backgroundColor)).toBe(rgb(PAPER['--series-0'])); // the neutral single series
     expect(curve.options.scales.x.ticks.color).toBe(PAPER['--chart-text']);
   });
 

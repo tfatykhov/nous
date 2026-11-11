@@ -176,8 +176,22 @@ export function withChartDefaults(type: string, options: Record<string, any>, te
   const axis = { ticks: { color: text }, title: { color: text }, grid: { color: grid }, border: { color: grid } };
   const radial = { ...axis, angleLines: { color: grid }, pointLabels: { color: text } };
   const base: Record<string, any> = { color: text, plugins: { title: { color: text } } };
+  // Legends are 8px dots, as the authored legends are (finish review fix 8); a line chart keeps its own labels (its
+  // dash samples carry the series).
+  if (type !== 'line') base.plugins.legend = { labels: { usePointStyle: true, pointStyle: 'circle', boxWidth: 8, boxHeight: 8 } };
   if (ids.size) base.scales = Object.fromEntries([...ids].map((id) => [id, id === 'r' ? radial : axis]));
   return mergeUnder(base, options);
+}
+
+/** Bars are rounded with no outline (finish review fix 8: smooth and rounded, no square stock bars): every bar dataset
+ * (by its own type or the chart's) takes borderWidth 0 and a 4px radius unless it sets one. Other datasets are left. */
+export function finishBars(type: string, data: Record<string, any>): Record<string, any> {
+  if (!Array.isArray(data?.datasets)) return data;
+  return {
+    ...data,
+    datasets: data.datasets.map((ds: Record<string, any>) =>
+      (ds.type ?? type) === 'bar' ? { ...ds, borderWidth: 0, borderRadius: ds.borderRadius ?? 4, borderSkipped: false } : ds),
+  };
 }
 
 /** The chart text size: the DOM's 12px label size (finish review fix 7). */

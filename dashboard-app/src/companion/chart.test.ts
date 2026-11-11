@@ -8,6 +8,7 @@ import {
   countDropped,
   classify,
   yDomain,
+  niceTicks,
   yScale,
   xScale,
   lineSegments,
@@ -268,5 +269,25 @@ describe('F096 sparkline additions (renderer-owned)', () => {
     expect(readSeries({ ...base, meta: { focus_from: 42 } }).focusFrom).toBeNull();
     expect(readSeries(base).focusFrom).toBeNull();
     expect(readSeries([1, 2]).focusFrom).toBeNull();
+  });
+});
+
+// Finish review fix 8: the LineChart's axis reads in round numbers ("0 / 25 / 50", not "0 / 23.7 / 47.4"): the domain
+// widens to the nearest step of 1, 2, 2.5 or 5 times a power of ten, and the ticks sit on those steps.
+describe('niceTicks', () => {
+  it('rounds the domain out to a nice step and puts the ticks on it', () => {
+    expect(niceTicks({ min: 0, max: 47.36, zeroBreak: false }, 3)).toEqual({ domain: { min: 0, max: 50, zeroBreak: false }, ticks: [0, 25, 50] });
+    expect(niceTicks({ min: 0, max: 1, zeroBreak: false }, 3).ticks).toEqual([0, 0.5, 1]);
+    expect(niceTicks({ min: 57.7, max: 62.3, zeroBreak: true }, 3)).toEqual({ domain: { min: 57.5, max: 62.5, zeroBreak: true }, ticks: [57.5, 60, 62.5] });
+    expect(niceTicks({ min: -48, max: 0, zeroBreak: false }, 3).ticks).toEqual([-50, -25, 0]);
+  });
+
+  it('every tick is a round number and the domain still holds the data', () => {
+    for (const [min, max] of [[0, 3.3], [12, 980], [0.02, 0.37], [-7, 113]]) {
+      const n = niceTicks({ min, max, zeroBreak: false }, 3);
+      expect(n.domain.min).toBeLessThanOrEqual(min);
+      expect(n.domain.max).toBeGreaterThanOrEqual(max);
+      for (const t of n.ticks) expect(Number(t.toPrecision(3)), `${t}`).toBe(t);
+    }
   });
 });

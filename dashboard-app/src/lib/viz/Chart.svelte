@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { applyChartFont, cssColor, resolveColors, withChartDefaults } from '../chartColors';
+  import { applyChartFont, cssColor, finishBars, resolveColors, withChartDefaults } from '../chartColors';
 
   // phoneHeight: the height under 768 px (200 px unless a chart with a dense legend or many lines asks for more).
   let { type, data, options = {}, height = '220px', phoneHeight = '200px' }:
@@ -13,7 +13,7 @@
   // element the canvas sits in. The axes and legend take the chart text and grid colours beneath the caller's own.
   function config(d: any, o: any) {
     const opts = withChartDefaults(type, resolveColors(o, canvas), cssColor(canvas, '--chart-text'), cssColor(canvas, '--chart-grid'));
-    return { data: resolveColors(d, canvas), options: { responsive: true, maintainAspectRatio: false, ...opts } };
+    return { data: finishBars(type, resolveColors(d, canvas)), options: { responsive: true, maintainAspectRatio: false, ...opts } };
   }
 
   onMount(() => {

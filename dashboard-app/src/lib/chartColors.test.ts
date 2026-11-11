@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { CHART_FONT_SIZE, TOKEN_FALLBACK, applyChartFont, cssColor, lineLegendLabels, resolveColors, seriesToken, tint, withChartDefaults } from './chartColors';
+import { CHART_FONT_SIZE, TOKEN_FALLBACK, applyChartFont, cssColor, finishBars, lineLegendLabels, resolveColors, seriesToken, tint, withChartDefaults } from './chartColors';
 import { ROOT_SEL, block, parseBlocks, scriptBlocks } from './testing/css';
 import { sourceFiles } from './testing/sources';
 
@@ -194,7 +194,8 @@ describe('withChartDefaults', () => {
   it('adds no scales to a doughnut (it would grow axes), and keeps the caller\'s plugins', () => {
     const out = withChartDefaults('doughnut', { cutout: '60%', plugins: { legend: { position: 'bottom' } } }, 'T', 'G');
     expect(out.scales).toBeUndefined();
-    expect(out.plugins).toEqual({ title: { color: 'T' }, legend: { position: 'bottom' } });
+    // The legend is dots under the caller's own settings (finish review fix 8).
+    expect(out.plugins).toEqual({ title: { color: 'T' }, legend: { labels: { usePointStyle: true, pointStyle: 'circle', boxWidth: 8, boxHeight: 8 }, position: 'bottom' } });
     expect(out.cutout).toBe('60%');
   });
 });
@@ -236,5 +237,34 @@ describe('applyChartFont', () => {
   it('the Chart component applies it on mount (source contract)', () => {
     const src = readFileSync(join(__dirname, 'viz/Chart.svelte'), 'utf-8');
     expect(scriptBlocks(src)).toMatch(/applyChartFont\(\)/);
+  });
+});
+
+// Finish review fix 8: chart furniture in the world's language. Legends are dots (a line chart keeps its dash samples,
+// which carry the series), bars are rounded with no outline, and a single series is the one neutral colour.
+describe('chart furniture', () => {
+  it('legends are 8px dots on bar, doughnut and radar charts; a line chart keeps its own labels', () => {
+    for (const type of ['bar', 'doughnut', 'radar']) {
+      expect(withChartDefaults(type, {}, '#000', '#ccc').plugins.legend.labels, type).toMatchObject(
+        { usePointStyle: true, pointStyle: 'circle', boxWidth: 8, boxHeight: 8 });
+    }
+    expect(withChartDefaults('line', {}, '#000', '#ccc').plugins.legend?.labels?.pointStyle).toBeUndefined();
+  });
+
+  it('finishBars rounds every bar dataset and removes its outline; line datasets are left alone', () => {
+    const data = { datasets: [{ data: [1], borderColor: 'x', borderWidth: 1 }, { type: 'line', data: [2], borderWidth: 2 }] };
+    const out = finishBars('bar', data);
+    expect(out.datasets[0]).toMatchObject({ borderWidth: 0, borderRadius: 4, borderSkipped: false });
+    expect(out.datasets[1]).toEqual({ type: 'line', data: [2], borderWidth: 2 });
+    expect(finishBars('line', { datasets: [{ data: [1], borderWidth: 2 }] }).datasets[0]).toEqual({ data: [1], borderWidth: 2 });
+    expect(finishBars('bar', { datasets: [{ data: [1], borderRadius: 2 }] }).datasets[0].borderRadius).toBe(2);
+    expect(scriptBlocks(readFileSync(join(__dirname, 'viz/Chart.svelte'), 'utf-8'))).toMatch(/finishBars\(type, resolveColors\(d, canvas\)\)/);
+  });
+
+  it('a single series with no meaning in its colour is the neutral --series-0 (Node degree, Decisions per day)', () => {
+    const graph = readFileSync(join(__dirname, '../views/health/GraphTab.svelte'), 'utf-8');
+    expect(graph).toMatch(/label: 'Node count',\s*data: [^\n]*\n\s*backgroundColor: tint\('--series-0', 0\.5\),/);
+    const dec = readFileSync(join(__dirname, '../views/Decisions.svelte'), 'utf-8');
+    expect(dec).toMatch(/label: 'Decisions',\s*data: [^\n]*\n\s*backgroundColor: tint\('--series-0', 0\.5\),/);
   });
 });

@@ -73,7 +73,7 @@ describe('Chart.svelte', () => {
     render(Chart, { target: pageEl({ '--chart-text': '#56687a', '--chart-grid': '#e3e9ec' }), props: { type: 'doughnut', data, options } });
     expect(made[0].data).toEqual(data);
     expect(made[0].options).toEqual({ responsive: true, maintainAspectRatio: false, cutout: '60%', color: '#56687a',
-      plugins: { title: { color: '#56687a' }, legend: { position: 'bottom' } } });
+      plugins: { title: { color: '#56687a' }, legend: { labels: { usePointStyle: true, pointStyle: 'circle', boxWidth: 8, boxHeight: 8 }, position: 'bottom' } } }); // dots under the caller's settings
     expect(made[0].options.scales).toBeUndefined(); // a doughnut grows no axes
   });
 

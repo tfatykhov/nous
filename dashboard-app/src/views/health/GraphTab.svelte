@@ -147,9 +147,7 @@
         {
           label: 'Node count',
           data: d.degree_distribution.map((p) => p.count),
-          backgroundColor: tint('--series-1', 0.5),
-          borderColor: 'var(--series-1)',
-          borderWidth: 1,
+          backgroundColor: tint('--series-0', 0.5),
         },
       ],
     };
