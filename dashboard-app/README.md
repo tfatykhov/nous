@@ -1,7 +1,7 @@
 # Svelte + TS + Vite
 
 **Look switch (dashboard redesign, staged):** the "New look" switch at the foot of the navigation turns the paper look on (`<html data-look="paper">`); it is off (dark) by default.
-`?look=paper` or `?look=dark` in the page URL sets it and remembers it; `public/look-boot.js` applies it before the app loads, so the page never flashes.
+`?look=paper` or `?look=dark` in the page URL sets it and remembers it, then is removed from the address bar (so a reload never overrides the switch); `public/look-boot.js` applies it before the app loads, so the page never flashes.
 The choice is kept per browser in `localStorage['nous.look']`; delete that key to go back to the default.
 
 This template should help get you started developing with Svelte and TypeScript in Vite.

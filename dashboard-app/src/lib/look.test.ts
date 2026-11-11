@@ -23,10 +23,11 @@ const TABLE: [string, string | null, Look, boolean][] = [
   ['', 'sepia', 'dark', false],
   ['?look=paper', 'dark', 'paper', true], // the URL wins
   ['?look=dark&look=paper', null, 'dark', true], // a repeated parameter counts by its first value
+  ['?x=1&look=paper&y=2', null, 'paper', true], // the other parameters stay when the look one is removed
 ];
 
 /** Run public/look-boot.js against a fake page; returns the attribute it left and what it stored. */
-function boot(search: string, stored: string | null, storage?: Storage) {
+function boot(search: string, stored: string | null, storage?: Storage, history?: Pick<History, 'replaceState' | 'state'>) {
   const attrs = new Map<string, string>();
   const document = {
     documentElement: {
@@ -35,7 +36,9 @@ function boot(search: string, stored: string | null, storage?: Storage) {
       getAttribute: (k: string) => attrs.get(k) ?? null,
     },
   };
-  const location = { search };
+  const location = { search, pathname: '/dashboard/v2/', hash: '#/work/s/x' };
+  const urls: string[] = [];
+  const hist = history ?? { state: null, replaceState: (_s: unknown, _t: string, url?: string | URL | null) => { urls.push(String(url)); } };
   const data = new Map<string, string>();
   if (stored !== null) data.set(LOOK_KEY, stored);
   const writes: [string, string][] = [];
@@ -48,8 +51,8 @@ function boot(search: string, stored: string | null, storage?: Storage) {
         data.set(k, v);
       },
     } as unknown as Storage);
-  new Function('document', 'location', 'localStorage', BOOT)(document, location, localStorage);
-  return { attr: attrs.get('data-look') ?? null, writes };
+  new Function('document', 'location', 'localStorage', 'history', BOOT)(document, location, localStorage, hist);
+  return { attr: attrs.get('data-look') ?? null, writes, urls };
 }
 
 describe('resolveLook', () => {
@@ -63,6 +66,27 @@ describe('look-boot.js', () => {
     const { attr, writes } = boot(search, stored);
     expect(attr).toBe(want === 'paper' ? 'paper' : null); // absent = dark
     expect(writes).toEqual(persist ? [[LOOK_KEY, want]] : []);
+  });
+
+  // Review I1: a ?look= left in the URL would re-apply on every reload and overwrite the switch. Once applied it is
+  // removed (the hash and the other parameters stay); an invalid value is left alone, as it changed nothing.
+  it.each(TABLE)('removes an applied ?look= from the URL for (%j, %j)', (search, stored, _want, persist) => {
+    const { urls } = boot(search, stored);
+    if (!persist) return expect(urls).toEqual([]);
+    const rest = new URLSearchParams(search);
+    rest.delete('look');
+    const q = rest.toString();
+    expect(urls).toEqual([`/dashboard/v2/${q ? `?${q}` : ''}#/work/s/x`]);
+  });
+
+  it('the URL after ?x=1&look=paper&y=2 keeps x, y and the hash', () => {
+    expect(boot('?x=1&look=paper&y=2', null).urls).toEqual(['/dashboard/v2/?x=1&y=2#/work/s/x']);
+    expect(boot('?look=paper', null).urls).toEqual(['/dashboard/v2/#/work/s/x']);
+  });
+
+  it('a throwing history still applies the look', () => {
+    const throwing = { state: null, replaceState: () => { throw new Error('SecurityError'); } };
+    expect(boot('?look=paper', null, undefined, throwing).attr).toBe('paper');
   });
 
   it('never throws when storage throws (private mode), and the URL override still applies', () => {
