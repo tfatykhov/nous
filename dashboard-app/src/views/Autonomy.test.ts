@@ -550,6 +550,16 @@ describe('Autonomy: colours by token', () => {
     expect(text).toContain('df_guard not allowlisted');
   });
 
+  it('only the all-number tables are set in the narrow width; the run-guard and grade tables, with words and pills, are not (review M6)', async () => {
+    const { container } = render(Autonomy);
+    await screen.findByText('Scorer running');
+    const nums = [...container.querySelectorAll('table.nums')];
+    expect(nums.map((t) => t.querySelector('caption, th')?.textContent?.trim())).toEqual(['Scores (−1 to 1) · settled: Oct 2 – Oct 9', '', 'Censors, last 30 d']);
+    for (const t of container.querySelectorAll('table.guards')) expect(t.classList.contains('nums')).toBe(false);
+    const grades = screen.getByText('Reviewer').closest('table')!;
+    expect(grades.classList.contains('nums')).toBe(false);
+  });
+
   it('the scorer strip\'s class follows the verdict\'s tone', async () => {
     const { container } = render(Autonomy);
     await screen.findByText('Scorer running');
@@ -578,7 +588,8 @@ describe('Autonomy: colours by token', () => {
     expect(rules.get('.strip-meta dt, .tiles dt, .triple dt, .detail dt, .label')).toMatchObject({
       'text-transform': 'var(--label-transform)', 'letter-spacing': 'var(--label-tracking)',
     });
-    expect(rules.get(':global(html[data-look="paper"] [data-ground="paper"]) .stats td:not(:first-child)')).toMatchObject({ 'font-stretch': '85%' });
+    expect(rules.get(':global(html[data-look="paper"] [data-ground="paper"]) .nums td:not(:first-child)')).toMatchObject({ 'font-stretch': '85%' });
+    expect(rules.get(':global(html[data-look="paper"] [data-ground="paper"]) .stats td:not(:first-child)')).toBeUndefined();
     expect(rules.get(':global(html[data-look="paper"] [data-ground="paper"]) h1')).toMatchObject({ 'font-size': '30px' });
   });
 });

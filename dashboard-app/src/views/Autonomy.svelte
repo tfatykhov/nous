@@ -190,7 +190,7 @@
         {/each}
       </div>
       <div class="table-wrap">
-      <table class="stats">
+      <table class="stats nums">
         <caption class="label">Scores (−1 to 1) · settled: {settledSpan(ts.settled_window)}</caption>
         <thead><tr><th scope="col"></th><th scope="col">Count</th><th scope="col">Mean</th><th scope="col">p10</th><th scope="col">p50</th><th scope="col">p90</th><th scope="col">Overrides</th></tr></thead>
         <tbody>
@@ -212,7 +212,7 @@
       <span class="small muted">Counted apart: never added into a subtask's score</span>
     </div>
     <div class="table-wrap">
-      <table class="stats">
+      <table class="stats nums">
         <thead>
           <tr>
             <th scope="col"></th><th scope="col">Count</th>
@@ -326,7 +326,7 @@
         {/snippet}
       </DataTable>
     {/if}
-    <table class="stats censors">
+    <table class="stats censors nums">
       <caption class="label">Censors, last {d.inventory.censors.days} d</caption>
       <thead><tr><th scope="col">Written by</th><th scope="col">Created</th><th scope="col">Deactivated</th></tr></thead>
       <tbody>
@@ -628,7 +628,8 @@
   .stats thead th { font-size: 0.6875rem; font-weight: 600; color: var(--muted); }
   /* The paper look's dense table (the prototype's): a 12px header, numbers in the narrow width. */
   :global(html[data-look="paper"] [data-ground="paper"]) .stats thead th { font-size: 12px; }
-  :global(html[data-look="paper"] [data-ground="paper"]) .stats td:not(:first-child) { font-stretch: 85%; }
+  /* Only the all-number tables (.nums): the run-guard and grade tables hold words and pills. */
+  :global(html[data-look="paper"] [data-ground="paper"]) .nums td:not(:first-child) { font-stretch: 85%; }
   .censors { margin-top: 1.25rem; max-width: 28rem; }
   .guards { margin-bottom: 1rem; }
   .guards td.wrap { white-space: normal; text-align: left; min-width: 12rem; }
