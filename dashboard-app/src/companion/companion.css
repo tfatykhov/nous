@@ -103,6 +103,7 @@
   --dim-opacity: 1;
   --settled-ink: var(--muted);
   --field-focus: 2px solid var(--accent); /* a focused text field's ring */
+  --video-bg: var(--accent); /* a video frame before its first frame: the prototype's navy */
   --chart-axis: #56687a;
   --chart-grid: #e3e9ec;
 
@@ -241,6 +242,7 @@
   --dim-opacity: 0.72;
   --settled-ink: var(--text);
   --field-focus: 0 solid transparent;
+  --video-bg: var(--surface-hover);
   --tile-rule-width: 3px;
   --badge-tint: 0%;
   --badge-edge: 100%;

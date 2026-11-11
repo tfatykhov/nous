@@ -79,6 +79,8 @@ describe('the three prototype phones render from catalog components', () => {
     expect(container.querySelectorAll('.metric').length).toBe(2);
     expect(container.querySelectorAll('.line polyline').length).toBe(4);
     expect(container.querySelector('video.vid')).not.toBeNull();
+    // the fixture carries a poster, as an agent's clip would (review M5)
+    expect(container.querySelector('video.vid')?.getAttribute('poster')).toBe('/dashboard/v2/media/recall-drop.png');
     expect(container.querySelectorAll('.hrow').length).toBe(4);
     // a count is never negative (review M4); the negative hatch is covered by charts.test.ts
     expect(container.querySelectorAll('.hrow i.neg').length).toBe(0);

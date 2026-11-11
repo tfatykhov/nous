@@ -106,6 +106,7 @@ const COMPANION_OWN: Record<string, string> = {
   '--dim-opacity': "a Section's opacity while its data refreshes: 1 on paper (the header says it is working), 0.72 in a legacy theme",
   '--settled-ink': "a settled decision's title: muted on paper, the text colour in a legacy theme",
   '--field-focus': "a focused text field's ring: 2px navy on paper (the border change alone was 3.7:1 on a 1px line), none in a legacy theme",
+  '--video-bg': "a video frame's fill before its first frame: the prototype's navy on paper (WebKit paints no frame without a poster), the soft tile in a legacy theme",
   '--figure-stretch': "the figures' width: 82% on paper (Archivo's width axis, as the dashboard's figures), 100% in a legacy theme",
   '--nested-bg': 'a card inside a surface card: a soft tile instead of a shadow on a shadow',
   '--ctl-bg': "a default button's fill (the prototype .btn: white)",

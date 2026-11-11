@@ -69,7 +69,7 @@
     width: 100%;
     max-width: 100%;
     border-radius: var(--radius-md);
-    background: var(--surface-hover);
+    background: var(--video-bg);
     overflow: hidden;
   }
   .vid {

@@ -160,6 +160,12 @@ describe('tiles, cards, tables and the timeline take the paper shape through tok
   });
 });
 
+describe('a video frame waits on --video-bg (source contract, review M5)', () => {
+  it('the <video> and the embed frame read --video-bg', () => {
+    expect(style('VideoView')).toMatch(/\.vid,\s*\.frame \{[^}]*background: var\(--video-bg\)/);
+  });
+});
+
 describe('a focused field shows a ring (source contract, review M2)', () => {
   it.each([
     ['TextFieldView', 'textarea:focus'],

@@ -47,7 +47,7 @@
     },
     { "id": "s-video", "component": "Section", "title": "The recall drop, replayed", "child": "video-col" },
     { "id": "video-col", "component": "Column", "children": ["video", "video-cap"] },
-    { "id": "video", "component": "Video", "url": "/dashboard/v2/media/recall-drop.mp4" },
+    { "id": "video", "component": "Video", "url": "/dashboard/v2/media/recall-drop.mp4", "posterUrl": "/dashboard/v2/media/recall-drop.png" },
     {
       "id": "video-cap",
       "component": "Text",
