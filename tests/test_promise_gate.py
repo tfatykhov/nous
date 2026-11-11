@@ -98,6 +98,11 @@ def test_a_clock_time_with_tomorrow_or_today_is_read_on_that_day():
     # "today" at a time already past: the default, not tomorrow (a day late to notice the miss).
     [past_today] = detector.scan("I'll relaunch the service today at 08:00 UTC.", now=nine)
     assert not past_today.due_parsed and past_today.due_at == nine + timedelta(minutes=60)
+    [after] = detector.scan("I'll relaunch the service at 08:00 UTC tomorrow.", now=nine)
+    assert after.due_at == tomorrow.replace(hour=8)
+    # A day word elsewhere in the sentence does not qualify the clock time.
+    [elsewhere] = detector.scan("I'll check at 10:00 UTC whether tomorrow's run is queued.", now=nine)
+    assert elsewhere.due_parsed and elsewhere.due_at == nine.replace(hour=10)
 
 
 def test_a_relative_time_goes_through_schedule_tasks_resolver():

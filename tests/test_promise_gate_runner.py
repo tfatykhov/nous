@@ -53,12 +53,14 @@ class _Cognitive:
 
     def __init__(self) -> None:
         self.post_turn_texts: list[str] = []
+        self.post_turn_errors: list[str | None] = []
 
     async def pre_turn(self, agent_id, session_id, user_input, **kwargs):
         return _turn_context()
 
     async def post_turn(self, agent_id, session_id, turn_result, turn_context, **kwargs):
         self.post_turn_texts.append(turn_result.response_text)
+        self.post_turn_errors.append(turn_result.error)
         return Assessment(actual=turn_result.response_text[:200])
 
     async def end_session(self, *args, **kwargs):
@@ -422,7 +424,7 @@ async def test_a_run_turn_cancelled_in_the_gate_still_writes_one_cancelled_turn_
 
 async def test_a_stream_cancelled_in_the_gate_writes_one_cancelled_turn_row():
     store, rows = _SlowStore(), _TurnRows()
-    runner, _ = _runner("shadow", store, [_reply_segment(NOV10["reply"])])
+    runner, cognitive = _runner("shadow", store, [_reply_segment(NOV10["reply"])])
     runner.set_tool_call_recorder(rows)
     task = asyncio.ensure_future(_stream(runner, "s-cancel-stream"))
     await asyncio.sleep(0.1)  # inside the gate's 0.3 s write
@@ -431,6 +433,7 @@ async def test_a_stream_cancelled_in_the_gate_writes_one_cancelled_turn_row():
         await task
     await asyncio.wait_for(store.finished.wait(), timeout=3)
     assert [t.error for t in rows.turns] == ["cancelled"]
+    assert cognitive.post_turn_errors == [None]  # only the row: the reply was stored, post_turn sees it as before
 
 
 async def test_commit_in_a_stream_turn_is_keyed_on_the_turn_id():

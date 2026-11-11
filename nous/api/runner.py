@@ -3658,9 +3658,10 @@ class AgentRunner:
                             turn_id=str(_stream_turn_id),
                         )
                     except asyncio.CancelledError:
-                        # The except clauses above do not see a cancel raised in this else: the finally's turn row
-                        # would say the turn succeeded. The cancel still propagates.
-                        error = "cancelled"
+                        # The except clauses above do not see a cancel raised in this else: without this the
+                        # finally's turn row would say the turn succeeded. Handled as GeneratorExit is: the row
+                        # says "cancelled", post_turn gets what it got before, and the cancel propagates.
+                        _consumer_closed = True
                         raise
 
                 # F024 F4/F5: record memory on the SUCCESS path only (needs
