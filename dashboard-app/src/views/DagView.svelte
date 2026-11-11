@@ -604,7 +604,7 @@
     margin: 0 0 0.25rem;
   }
 
-  :global(html[data-look="paper"] [data-ground="paper"]) .view-title { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; }
+  :global(html[data-look="paper"] .page-ground) .view-title { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; }
 
   .view-subtitle {
     font-size: 0.8125rem;

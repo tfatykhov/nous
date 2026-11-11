@@ -485,7 +485,7 @@
     margin: 0 0 0.125rem;
   }
 
-  :global(html[data-look="paper"] [data-ground="paper"]) h1 {
+  :global(html[data-look="paper"] .page-ground) h1 {
     font-size: 30px;
     font-weight: 650;
     letter-spacing: -0.022em;
@@ -505,7 +505,7 @@
     margin: 0 0 0.5rem;
   }
 
-  :global(html[data-look="paper"] [data-ground="paper"]) h2 {
+  :global(html[data-look="paper"] .page-ground) h2 {
     font-size: 15px;
     font-weight: 650;
   }
@@ -574,7 +574,7 @@
     padding: 1rem;
   }
 
-  :global(html[data-look="paper"] [data-ground="paper"]) .chart-card {
+  :global(html[data-look="paper"] .page-ground) .chart-card {
     padding: 1.125rem 1.25rem;
   }
 

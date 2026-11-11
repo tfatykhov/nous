@@ -8,8 +8,6 @@
     DrawerOverlay,
     DrawerPortal,
   } from '$lib/ui/drawer';
-  import { currentRoute } from '$lib/router';
-  import { groundFor } from '$lib/look';
 
   let {
     open = $bindable(false),
@@ -25,9 +23,8 @@
 <Drawer bind:open direction="bottom">
   <DrawerPortal>
     <DrawerOverlay />
-    <!-- Portalled to <body>, outside <main>: the sheet takes its route's ground itself (a paper sheet on a paper page,
-         a dark one on an unconverted page). -->
-    <DrawerContent aria-label={title} class="nous-sheet" data-ground={groundFor($currentRoute)}>
+    <!-- Portalled to <body>, outside <main>: the sheet is a page ground itself. -->
+    <DrawerContent aria-label={title} class="nous-sheet page-ground">
       <!-- Drag handle is rendered inside DrawerContent by shadcn; header adds context -->
       <DrawerHeader>
         <DrawerTitle>{title}</DrawerTitle>

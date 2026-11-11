@@ -9,7 +9,7 @@ import type { RouteName } from './router';
  */
 export type Look = 'dark' | 'paper';
 export const LOOK_KEY = 'nous.look';
-/** The routes the redesign has migrated: their `<main>` is a paper ground under the paper look. */
+/** The routes the redesign has migrated: all 18 (every `<main>` is the page ground). Goes with the switch (PR 7 T3). */
 export const PAPER_ROUTES: readonly RouteName[] = ['overview', 'work', 'graph', 'browser', 'health', 'retrieval', 'consolidation', 'model-calls', 'dag', 'subtasks', 'heartbeat', 'decisions', 'rubric', 'autonomy', 'intentions', 'harness', 'observability', 'identity'];
 
 function isLook(value: unknown): value is Look {
@@ -25,11 +25,6 @@ export function resolveLook(search: string, stored: string | null): { look: Look
   if (isLook(fromUrl)) return { look: fromUrl, persist: true };
   if (isLook(stored)) return { look: stored, persist: false };
   return { look: 'dark', persist: false };
-}
-
-/** The ground of a route's `<main>`: paper for a migrated route, dark for every other. */
-export function groundFor(route: RouteName): 'paper' | 'dark' {
-  return PAPER_ROUTES.includes(route) ? 'paper' : 'dark';
 }
 
 /** The look `<html>` carries now. */

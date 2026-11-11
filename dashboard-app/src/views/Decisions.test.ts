@@ -50,7 +50,7 @@ function install() {
 /** A paper <main> with the paper tokens set on it (jsdom has no stylesheet). */
 function paperMain(withTokens = true): HTMLElement {
   const main = document.createElement('main');
-  main.setAttribute('data-ground', 'paper');
+  main.classList.add('page-ground');
   if (withTokens) setPaperTokens(main);
   document.body.appendChild(main);
   return main;
@@ -219,7 +219,7 @@ describe('Decisions: the paper look\'s structure (source contracts)', () => {
   });
 
   it('the title takes the paper size under the paper look only, and chart cells may shrink at phone width', () => {
-    expect(rules.get(':global(html[data-look="paper"] [data-ground="paper"]) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
+    expect(rules.get(':global(html[data-look="paper"] .page-ground) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
     expect(rules.get('.chart-row > *')).toMatchObject({ 'min-width': '0' });
     expect(rules.get('.view-head')).toMatchObject({ 'flex-wrap': 'wrap' });
   });

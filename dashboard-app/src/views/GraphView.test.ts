@@ -102,7 +102,7 @@ function install(detail: unknown = DETAIL) {
 /** A paper <main> with the paper ground's tokens set on it (jsdom has no stylesheet), as App renders it. */
 function paperMain(): HTMLElement {
   const main = document.createElement('main');
-  main.setAttribute('data-ground', 'paper');
+  main.classList.add('page-ground');
   for (const [k, v] of Object.entries(PAPER)) if (k.startsWith('--')) main.style.setProperty(k, v);
   document.body.appendChild(main);
   return main;
@@ -188,7 +188,7 @@ describe('Graph on the paper look', () => {
     cyto.tap('n-episode');
     const sheet = await screen.findByLabelText('Episode Detail');
     await waitFor(() => expect(sheet.querySelectorAll('button.conn-item')).toHaveLength(2));
-    expect(sheet.getAttribute('data-ground')).toBe('paper'); // the route's ground, though portalled
+    expect(sheet.classList.contains('page-ground')).toBe(true); // the page ground, though portalled
     expect(sheet.textContent).toContain(HOSTILE);
     expect(sheet.querySelector('img')).toBeNull();
     expect(sheet.textContent).toContain(LONG);
@@ -205,7 +205,7 @@ describe('Graph on the paper look', () => {
   it('the type badge: the colour on its 12.5% tint under dark; on paper the text mixed 70% with the ink, 4.5:1 or more (review I3)', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'GraphView.svelte'), 'utf-8'));
     expect(css).toMatch(/\.type-badge \{[^}]*background: color-mix\(in srgb, var\(--type\) 12\.5%, transparent\);[^}]*color: var\(--type\);/);
-    expect(css).toMatch(/\[data-ground="paper"\]\) \.type-badge \{\s*color: color-mix\(in srgb, var\(--type\) 70%, var\(--text\)\);/);
+    expect(css).toMatch(/\.page-ground\) \.type-badge \{\s*color: color-mix\(in srgb, var\(--type\) 70%, var\(--text\)\);/);
     // On paper the plain node colours are 3:1 marks (fact 3.06:1 as 11px text on its tint); mixed, every type passes.
     const rgb = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
     const lum = (c: number[]) => {

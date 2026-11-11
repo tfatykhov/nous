@@ -134,9 +134,9 @@ export function resolveColors<T>(value: T, el: Element | null): T {
   return walk(value) as T;
 }
 
-/** The element draws on a paper ground: the paper look is on and its closest ground is paper (not a dark island). */
+/** The element draws on the page ground (`<main>` or the bottom sheet, class page-ground) under the paper look. */
 export function isPaperGround(el: Element | null): boolean {
-  return getLook() === 'paper' && el?.closest('[data-ground]')?.getAttribute('data-ground') === 'paper';
+  return getLook() === 'paper' && !!el?.closest('.page-ground');
 }
 
 /** `var(--series-N)` for the i-th series, cycling through the thirteen slots. */

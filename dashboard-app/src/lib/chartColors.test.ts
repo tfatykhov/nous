@@ -9,9 +9,11 @@ import { DARK_SEL, PAPER_SEL, parseBlocks, scriptBlocks } from './testing/css';
 // resolves dark. Every other value passes through untouched, which keeps every unconverted chart byte for byte.
 const DARK = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(DARK_SEL) ?? {};
 
+/** A box with token values set on it (jsdom has no stylesheet): the page ground (class page-ground) for 'paper', a plain
+ * box (no ground) for 'dark'. */
 function ground(kind: 'paper' | 'dark', vars: Record<string, string>, parent: HTMLElement = document.body): HTMLElement {
   const el = document.createElement('div');
-  el.setAttribute('data-ground', kind);
+  if (kind === 'paper') el.classList.add('page-ground');
   for (const [k, v] of Object.entries(vars)) el.style.setProperty(k, v);
   parent.appendChild(el);
   return el;
@@ -161,18 +163,18 @@ describe('resolveColors', () => {
     expect(resolveColors(tint('--green', 0.5), null)).toBe('rgba(52, 211, 153, 0.5)');
   });
 
-  it('a dark island inside a paper page resolves the island\'s value (the closest ground wins)', () => {
+  it('a token declared closer to the canvas wins (CSS inheritance), and anything inside the page ground is paper', () => {
     document.documentElement.setAttribute('data-look', 'paper');
     const page = ground('paper', { '--series-1': '#1f5fa8' });
-    const island = ground('dark', { '--series-1': '#60a5fa' }, page);
-    const inIsland = document.createElement('canvas');
-    island.appendChild(inIsland);
+    const inner = ground('dark', { '--series-1': '#60a5fa' }, page);
+    const inInner = document.createElement('canvas');
+    inner.appendChild(inInner);
     const onPage = document.createElement('canvas');
     page.appendChild(onPage);
-    expect(resolveColors('var(--series-1)', inIsland)).toBe('#60a5fa');
+    expect(resolveColors('var(--series-1)', inInner)).toBe('#60a5fa');
     expect(resolveColors('var(--series-1)', onPage)).toBe('#1f5fa8');
     expect(isPaperGround(onPage)).toBe(true);
-    expect(isPaperGround(inIsland)).toBe(false);
+    expect(isPaperGround(inInner)).toBe(true); // PR 7 T2: there is no dark island any more
   });
 });
 

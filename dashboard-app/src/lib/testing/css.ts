@@ -42,7 +42,7 @@ export function markupOf(source: string): string {
     .replace(/<!--[\s\S]*?-->/g, '');
 }
 
-/** The dark block of app.css (`:root` and a dark island) and the two grounds of the paper look. */
-export const DARK_SEL = ':root, [data-ground="dark"]';
-export const PAPER_SEL = 'html[data-look="paper"] [data-ground="paper"]';
-export const RAIL_SEL = 'html[data-look="paper"] [data-ground="rail"]';
+/** The dark block of app.css (`:root`) and the two regions of the paper look: the page ground and the rail. */
+export const DARK_SEL = ':root';
+export const PAPER_SEL = 'html[data-look="paper"] .page-ground';
+export const RAIL_SEL = 'html[data-look="paper"] .rail';

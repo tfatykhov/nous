@@ -494,7 +494,7 @@
     margin: 0 0 0.25rem;
   }
 
-  :global(html[data-look="paper"] [data-ground="paper"]) .view-title {
+  :global(html[data-look="paper"] .page-ground) .view-title {
     font-size: 30px;
     font-weight: 650;
     letter-spacing: -0.022em;
@@ -576,12 +576,12 @@
     border-color: var(--accent);
   }
 
-  :global(html[data-look="paper"] [data-ground="paper"]) .search-input {
+  :global(html[data-look="paper"] .page-ground) .search-input {
     background: var(--surface);
     padding: 0.3125rem 0.875rem;
   }
 
-  :global(html[data-look="paper"] [data-ground="paper"]) .search-input:focus-visible {
+  :global(html[data-look="paper"] .page-ground) .search-input:focus-visible {
     outline: 2px solid var(--focus-ring);
     outline-offset: 1px;
   }
@@ -603,7 +603,7 @@
   }
 
   /* Each type filter is a pill on paper: the box, the dot and the word inside one rounded chip. */
-  :global(html[data-look="paper"] [data-ground="paper"]) .type-check {
+  :global(html[data-look="paper"] .page-ground) .type-check {
     padding: 0.1875rem 0.625rem 0.1875rem 0.4375rem;
     border-radius: 999px;
     background: var(--surface);
@@ -611,7 +611,7 @@
     color: var(--text);
   }
 
-  :global(html[data-look="paper"] [data-ground="paper"]) .type-check input {
+  :global(html[data-look="paper"] .page-ground) .type-check input {
     accent-color: var(--accent);
   }
 
@@ -695,7 +695,7 @@
   }
 
   /* On paper the node colours are 3:1 marks, not text: the badge's word is mixed toward the ink (4.5:1 or more). */
-  :global(html[data-look="paper"] [data-ground="paper"]) .type-badge {
+  :global(html[data-look="paper"] .page-ground) .type-badge {
     color: color-mix(in srgb, var(--type) 70%, var(--text));
   }
 
@@ -709,8 +709,8 @@
     font-family: ui-monospace, monospace;
   }
 
-  :global(html[data-look="paper"] [data-ground="paper"]) .mono,
-  :global(html[data-look="paper"] [data-ground="paper"]) .conn-weight {
+  :global(html[data-look="paper"] .page-ground) .mono,
+  :global(html[data-look="paper"] .page-ground) .conn-weight {
     font-family: var(--font-mono);
   }
 
@@ -802,7 +802,7 @@
     font-size: 0.6875rem;
   }
 
-  :global(html[data-look="paper"] [data-ground="paper"]) .conn-dir {
+  :global(html[data-look="paper"] .page-ground) .conn-dir {
     font-family: var(--font-ui);
   }
 

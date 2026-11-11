@@ -579,7 +579,7 @@
   .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   h1 { font-size: 1.375rem; font-weight: 700; margin: 0 0 0.25rem; }
-  :global(html[data-look="paper"] [data-ground="paper"]) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
+  :global(html[data-look="paper"] .page-ground) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
   h2 { font-size: 0.9375rem; font-weight: 600; margin: 0; }
   .subtitle { font-size: 0.8125rem; color: var(--muted); margin: 0; }
   .strip { display: flex; justify-content: space-between; align-items: center; gap: 1rem 2rem; flex-wrap: wrap;
@@ -627,9 +627,9 @@
   .stats th:first-child, .stats td:first-child { text-align: left; }
   .stats thead th { font-size: 0.6875rem; font-weight: 600; color: var(--muted); }
   /* The paper look's dense table (the prototype's): a 12px header, numbers in the narrow width. */
-  :global(html[data-look="paper"] [data-ground="paper"]) .stats thead th { font-size: 12px; }
+  :global(html[data-look="paper"] .page-ground) .stats thead th { font-size: 12px; }
   /* Only the all-number tables (.nums): the run-guard and grade tables hold words and pills. */
-  :global(html[data-look="paper"] [data-ground="paper"]) .nums td:not(:first-child) { font-stretch: 85%; }
+  :global(html[data-look="paper"] .page-ground) .nums td:not(:first-child) { font-stretch: 85%; }
   .censors { margin-top: 1.25rem; max-width: 28rem; }
   .guards { margin-bottom: 1rem; }
   .guards td.wrap { white-space: normal; text-align: left; min-width: 12rem; }

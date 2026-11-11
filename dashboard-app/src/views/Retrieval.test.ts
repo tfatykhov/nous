@@ -126,7 +126,7 @@ describe('Retrieval on the paper look', () => {
   });
 
   it('on paper, a memory-type chip\'s text is its colour mixed 70% with the ink: 4.5:1 or more on the chip', () => {
-    const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get('html[data-look="paper"] [data-ground="paper"]') ?? {};
+    const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get('html[data-look="paper"] .page-ground') ?? {};
     const rgb = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
     const lum = (c: number[]) => {
       const [r, g, b] = c.map((v) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; });

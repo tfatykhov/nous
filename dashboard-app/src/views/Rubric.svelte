@@ -468,7 +468,7 @@
   }
 
   /* The paper look's title size; the dark title keeps the rule above. */
-  :global(html[data-look="paper"] [data-ground="paper"]) h1 {
+  :global(html[data-look="paper"] .page-ground) h1 {
     font-size: 30px;
     font-weight: 650;
     letter-spacing: -0.022em;

@@ -206,15 +206,15 @@ describe('Work Changes tab', () => {
   it('Changes renders the Ledger straight into the paper page: no dark island, one level-1 heading', async () => {
     go('#/work/changes');
     const main = document.createElement('main');
-    main.setAttribute('data-ground', 'paper');
+    main.classList.add('page-ground');
     document.body.appendChild(main);
     const { container } = render(Work, { target: main });
     await screen.findByText('1 send ended without confirming delivery');
     // Review Focus 5: nothing inside the paper route keeps a dark ground.
-    expect(main.querySelector('[data-ground="dark"]')).toBeNull();
+    expect(main.querySelector('[data-ground], .page-ground')).toBeNull();
     expect(container.querySelector('.island')).toBeNull();
     const subtitle = screen.getByText(/Every side-effecting tool call, kept durably/);
-    expect(subtitle.closest('[data-ground]')).toBe(main);
+    expect(subtitle.closest('.page-ground')).toBe(main);
     expect(main.querySelector('code.sql')).not.toBeNull();
     // The Work title only: the embedded ledger drops its own, and the Changes frame's h2 is gone.
     expect(screen.getAllByRole('heading', { level: 1 }).map((h) => h.textContent)).toEqual(['Work']);

@@ -1,11 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, cleanup, fireEvent } from '@testing-library/svelte';
-import { createRawSnippet, tick } from 'svelte';
-import { readFileSync } from 'node:fs';
+import { tick } from 'svelte';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ROUTES } from './lib/router';
-import { PAPER_ROUTES } from './lib/look';
-import Ground from './lib/ui/Ground.svelte';
 
 // The shell only: every screen is a stub (the real ones need Chart.js, cytoscape and their data).
 vi.mock('./views/Overview.svelte', () => ({ default: () => {} }));
@@ -50,21 +48,23 @@ describe('App shell grounds', () => {
     vi.unstubAllGlobals();
   });
 
-  it('main is a paper ground on the migrated routes and dark on every other', async () => {
+  it('main is the page ground (class page-ground) on every route, and nothing carries data-ground', async () => {
     for (const route of ROUTES) {
       cleanup();
       const { container } = await renderAt(`#/${route}`);
       const main = container.querySelector('main#main-content');
-      expect(main?.getAttribute('data-ground'), route).toBe(PAPER_ROUTES.includes(route) ? 'paper' : 'dark');
+      expect(main?.classList.contains('page-ground'), route).toBe(true);
+      expect(container.querySelector('[data-ground]'), route).toBeNull();
     }
   });
 
-  it('the sidebar, the mobile header and the drawer are rail grounds; the skip link is in no ground', async () => {
+  it('the sidebar, the mobile header and the drawer are the rail (class rail); the skip link is in neither region', async () => {
     const { container } = await renderAt('#/work');
-    expect(container.querySelector('aside.sidebar')?.getAttribute('data-ground')).toBe('rail');
-    expect(container.querySelector('header.mobile-header')?.getAttribute('data-ground')).toBe('rail');
-    expect(container.querySelector('#mobile-drawer')?.getAttribute('data-ground')).toBe('rail');
-    expect(container.querySelector('a.skip-link')?.closest('[data-ground]')).toBeNull();
+    expect(container.querySelector('aside.sidebar')?.classList.contains('rail')).toBe(true);
+    expect(container.querySelector('header.mobile-header')?.classList.contains('rail')).toBe(true);
+    expect(container.querySelector('#mobile-drawer')?.classList.contains('rail')).toBe(true);
+    expect(Array.from(container.querySelectorAll('.rail')).map((e) => e.id || e.tagName.toLowerCase())).toEqual(['aside', 'header', 'mobile-drawer']);
+    expect(container.querySelector('a.skip-link')?.closest('.rail, .page-ground')).toBeNull();
   });
 
   it('the look switch sits at the foot of the sidebar and of the drawer', async () => {
@@ -107,17 +107,6 @@ describe('App shell grounds', () => {
   });
 });
 
-describe('Ground', () => {
-  it('wraps its children in a data-ground box', () => {
-    const children = createRawSnippet(() => ({ render: () => '<p class="inside">ledger</p>' }));
-    const { container } = render(Ground, { props: { ground: 'dark', class: 'island', children } });
-    const box = container.querySelector('[data-ground]');
-    expect(box?.getAttribute('data-ground')).toBe('dark');
-    expect(box?.classList.contains('island')).toBe(true);
-    expect(box?.querySelector('p.inside')?.textContent).toBe('ledger');
-  });
-});
-
 describe('App styles', () => {
   const src = readFileSync(join(__dirname, 'App.svelte'), 'utf-8');
 
@@ -132,5 +121,10 @@ describe('App styles', () => {
 
   it('Svelte writes no data-look (only look.ts does)', () => {
     expect(src).not.toMatch(/data-look|dataset\.look/);
+  });
+
+  it('the dark island component is gone (every route is paper; it had no importer)', () => {
+    expect(existsSync(join(__dirname, 'lib/ui/Ground.svelte'))).toBe(false);
+    expect(src).not.toMatch(/data-ground|groundFor/);
   });
 });

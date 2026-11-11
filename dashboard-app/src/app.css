@@ -8,11 +8,8 @@
    ============================================================ */
 
 @layer base {
-  /* The dark tokens: the default look, and a dark island inside a paper page (a dark ground re-declares them, as
-     inheritance would otherwise hand it the paper values). Every value above "Redesign" is unchanged
-     (tokens.test.ts pins them). */
-  :root,
-  [data-ground="dark"] {
+  /* The dark tokens: the default look. Every value above "Redesign" is unchanged (tokens.test.ts pins them). */
+  :root {
     /* --- Nous dark palette --- */
     --bg: #0a0a0f;
     --surface: #12121a;
@@ -260,8 +257,8 @@
     --oc-success: #34d399;                     /* a success mark: decision outcomes (Decisions, Overview), Scoring's completed */
   }
 
-  /* ---- The paper ground: page content under the paper look ---- */
-  html[data-look="paper"] [data-ground="paper"] {
+  /* ---- The paper ground: page content (.page-ground: <main>, the bottom sheet) under the paper look ---- */
+  html[data-look="paper"] .page-ground {
     --bg: #eef2f3;
     --surface: #ffffff;
     --surface-hover: #f4f7f8;
@@ -460,8 +457,8 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* ---- The rail ground: the Atlantic-blue navigation under the paper look ---- */
-  html[data-look="paper"] [data-ground="rail"] {
+  /* ---- The rail: the Atlantic-blue navigation (.rail: the sidebar, the mobile header, the drawer) under the paper look ---- */
+  html[data-look="paper"] .rail {
     --bg: #12304f;                     /* also the nav badge's text */
     --surface: #12304f;
     --surface-hover: #1a3d62;
@@ -616,28 +613,23 @@
 
   /* A ground sets its own background, text colour and font: the body resolved them once, at :root. Likewise
      Tailwind's mono default (a bare <code> or <pre>), which :root resolved to the dark mono font. */
-  html[data-look="paper"] [data-ground] {
+  html[data-look="paper"] .page-ground,
+  html[data-look="paper"] .rail {
     background: var(--bg);
     color: var(--text);
     font-family: var(--font-ui);
     --default-mono-font-family: var(--font-mono);
   }
 
-  html[data-look="paper"] [data-ground="paper"] {
+  html[data-look="paper"] .page-ground {
     color-scheme: light;
   }
 
-  html[data-look="paper"] [data-ground="dark"],
-  html[data-look="paper"] [data-ground="rail"] {
+  html[data-look="paper"] .rail {
     color-scheme: dark;
   }
 
-  /* A dark island inside a paper page: undo what the paper ground hands down that no token resets. */
-  html[data-look="paper"] [data-ground="dark"] {
-    font-variant-numeric: normal;
-  }
-
-  html[data-look="paper"] [data-ground="paper"] .page-h1 {
+  html[data-look="paper"] .page-ground .page-h1 {
     font-size: 30px;
     font-weight: 650;
     letter-spacing: -0.022em;

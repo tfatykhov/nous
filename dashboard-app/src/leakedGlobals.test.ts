@@ -35,7 +35,7 @@ const OTHERS = ['views/Decisions.svelte', 'views/Rubric.svelte', 'views/Autonomy
   'views/Harness.svelte', 'views/Observability.svelte'];
 
 /** The paper-only scoped prefix, followed by the file's own selector (not a brace, a comma or another pseudo). */
-const PAPER_SCOPE = /:global\(html\[data-look="paper"\](?:\s+\[data-ground="paper"\])?\)(?=\s+[^\s{,:])/g;
+const PAPER_SCOPE = /:global\(html\[data-look="paper"\](?:\s+\.page-ground)?\)(?=\s+[^\s{,:])/g;
 
 /** What makes a rule global: `:global`, and the forms that never say it (`:root`, `:host`, a `-global-` keyframes name),
  * which Svelte leaves unscoped (PR 5 re-review R1). */
@@ -60,12 +60,12 @@ describe('no global rule leaks from the converted dense screens', () => {
   });
 
   it('the scoped paper form is allowed, any other :global( is a leak', () => {
-    expect(leaks(':global(html[data-look="paper"] [data-ground="paper"]) h1 { font-size: 30px; }')).toEqual([]);
+    expect(leaks(':global(html[data-look="paper"] .page-ground) h1 { font-size: 30px; }')).toEqual([]);
     expect(leaks(':global(html[data-look="paper"]) h1 { font-size: 30px; }')).toEqual([]);
     expect(leaks(':global(.mono) { font-family: monospace; }')).toEqual([':global(.mono) { font-family: monospace; }']);
     expect(leaks(':global(html[data-look="paper"] .x) { color: red; }')).toHaveLength(1); // the whole selector is global
     // PR 5 review I3: a global behind the allowed prefix, a second selector on the same line, and Svelte 5's block form.
-    expect(leaks(':global(html[data-look="paper"] [data-ground="paper"]) :global(.mono) { font-family: var(--font-mono); }')).toHaveLength(1);
+    expect(leaks(':global(html[data-look="paper"] .page-ground) :global(.mono) { font-family: var(--font-mono); }')).toHaveLength(1);
     expect(leaks(':global(html[data-look="paper"]) h1, :global(.dl) { color: red; }')).toHaveLength(1);
     expect(leaks(':global { .dl { color: var(--text); } }')).toHaveLength(1);
     // PR 5 re-review R1: global rules that never say :global. Svelte leaves :root and :host unscoped, and a -global-

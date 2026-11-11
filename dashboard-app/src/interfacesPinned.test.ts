@@ -67,7 +67,7 @@ describe('interfaces PR 4 and PR 5 build on', () => {
 
   it('look.ts, chartColors.ts and the CSS test helpers export the names the plan uses', () => {
     expect(Array.isArray(lookModule.PAPER_ROUTES)).toBe(true);
-    expect(typeof lookModule.groundFor).toBe('function');
+    expect('groundFor' in lookModule).toBe(false); // every route is paper (PR 7 T2)
     expect(typeof lookModule.setLook).toBe('function');
     expect(typeof lookModule.look.subscribe).toBe('function');
     for (const name of ['cssColor', 'tint', 'resolveColors', 'isPaperGround', 'seriesToken', 'withPaperDefaults'] as const) {
@@ -79,8 +79,9 @@ describe('interfaces PR 4 and PR 5 build on', () => {
     for (const name of ['parseBlocks', 'styleBlocks', 'scriptBlocks', 'markupOf'] as const) {
       expect(typeof css[name], name).toBe('function');
     }
-    expect(css.DARK_SEL).toBe(':root, [data-ground="dark"]');
-    expect(css.PAPER_SEL).toBe('html[data-look="paper"] [data-ground="paper"]');
+    expect(css.DARK_SEL).toBe(':root');
+    expect(css.PAPER_SEL).toBe('html[data-look="paper"] .page-ground');
+    expect(css.RAIL_SEL).toBe('html[data-look="paper"] .rail');
   });
 
   it('DARK_FALLBACK holds every token a chart on these screens reads (a missing one resolves to "" in jsdom)', () => {

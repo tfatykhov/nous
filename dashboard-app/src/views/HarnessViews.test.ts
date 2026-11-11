@@ -439,7 +439,7 @@ describe('harness dashboard views', () => {
   it('Guards: paper, the lines and axes take the paper values (the explicit grid beats the paper default)', async () => {
     const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
     const main = document.createElement('main');
-    main.setAttribute('data-ground', 'paper');
+    main.classList.add('page-ground');
     for (const [k, v] of Object.entries(PAPER)) if (k.startsWith('--')) main.style.setProperty(k, v);
     document.body.appendChild(main);
     setLook('paper');

@@ -60,7 +60,7 @@ function install() {
 }
 function paperMain(): HTMLElement {
   const main = document.createElement('main');
-  main.setAttribute('data-ground', 'paper');
+  main.classList.add('page-ground');
   for (const [k, v] of Object.entries(PAPER)) if (k.startsWith('--')) main.style.setProperty(k, v);
   document.body.appendChild(main);
   return main;
@@ -114,7 +114,7 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
     expect(total.style.opacity).toBe('');
     const css = styleBlocks(readFileSync(join(__dirname, 'Heartbeat.svelte'), 'utf-8'));
     expect(css).toMatch(/\.hb-pill--total \{ opacity: 0\.6; \}/);
-    expect(css).toMatch(/:global\(html\[data-look="paper"\] \[data-ground="paper"\]\) \.hb-pill--total \{ opacity: 1; \}/);
+    expect(css).toMatch(/:global\(html\[data-look="paper"\] \.page-ground\) \.hb-pill--total \{ opacity: 1; \}/);
   });
 
   it('the escalation note is in words', async () => {
@@ -164,7 +164,7 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
   it('source contract: a disabled banner is dimmed under dark only; on paper its muted pills would be 2.8:1 (review M3)', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'Heartbeat.svelte'), 'utf-8'));
     expect(css).toMatch(/\.hb-banner--disabled \{ opacity: 0\.65; \}/);
-    expect(css).toMatch(/:global\(html\[data-look="paper"\] \[data-ground="paper"\]\) \.hb-banner--disabled \{ opacity: 1; \}/);
+    expect(css).toMatch(/:global\(html\[data-look="paper"\] \.page-ground\) \.hb-banner--disabled \{ opacity: 1; \}/);
   });
 
   it('source contract: the banner and pills read status tokens: text tokens for words, the glow by --glow-blur', () => {

@@ -79,7 +79,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); setLook('dark'); document.bo
 /** A paper <main> with the paper tokens set on it (jsdom has no stylesheet). */
 function paperMain(withTokens = true): HTMLElement {
   const main = document.createElement('main');
-  main.setAttribute('data-ground', 'paper');
+  main.classList.add('page-ground');
   if (withTokens) for (const [k, v] of Object.entries(PAPER)) if (k.startsWith('--')) main.style.setProperty(k, v);
   document.body.appendChild(main);
   return main;
@@ -259,7 +259,7 @@ describe('Observability: the paper look\'s structure (source contracts)', () => 
   it('cards read the card tokens, labels the label tokens, and the title takes the paper size under paper only', () => {
     expect(rules.get('.chart-card')).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius)', 'box-shadow': 'var(--card-shadow)' });
     expect(rules.get('.event-badge')).toMatchObject({ 'text-transform': 'var(--label-transform)', 'letter-spacing': 'var(--label-tracking)' });
-    expect(rules.get(':global(html[data-look="paper"] [data-ground="paper"]) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
+    expect(rules.get(':global(html[data-look="paper"] .page-ground) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
   });
 
   it('the dot paints its own token, the severity word reads a text token, and the badges are tints', () => {

@@ -73,7 +73,7 @@ function install() {
 }
 function paperMain(): HTMLElement {
   const main = document.createElement('main');
-  main.setAttribute('data-ground', 'paper');
+  main.classList.add('page-ground');
   for (const [k, v] of Object.entries(PAPER)) if (k.startsWith('--')) main.style.setProperty(k, v);
   document.body.appendChild(main);
   return main;
@@ -303,6 +303,6 @@ describe('Scoring: the paper look\'s structure (source contracts)', () => {
   });
 
   it('the title takes the paper size under the paper look only', () => {
-    expect(rules.get(':global(html[data-look="paper"] [data-ground="paper"]) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
+    expect(rules.get(':global(html[data-look="paper"] .page-ground) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
   });
 });

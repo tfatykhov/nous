@@ -4,8 +4,8 @@ import { join } from 'node:path';
 import { LANE_COLORS } from './lib/work';
 import { DARK_SEL, PAPER_SEL, RAIL_SEL, parseBlocks } from './lib/testing/css';
 
-// The redesign is staged behind <html data-look="paper">. app.css keeps today's dark values on `:root` (and on a
-// dark island, `[data-ground="dark"]`), and puts the new values on the paper and rail grounds. These tests pin the
+// The redesign is staged behind <html data-look="paper">. app.css keeps today's dark values on `:root`, and puts the
+// new values on the paper ground (`.page-ground`) and the rail (`.rail`). These tests pin the
 // dark values (so no un-migrated screen moves), keep the grounds in step, and check the contrast of the new values.
 
 const CSS = readFileSync(join(__dirname, 'app.css'), 'utf-8');
@@ -290,7 +290,11 @@ describe('the dark tokens', () => {
     expect(BLOCKS.has(DARK_SEL)).toBe(true);
     expect(BLOCKS.has(PAPER_SEL)).toBe(true);
     expect(BLOCKS.has(RAIL_SEL)).toBe(true);
-    expect(BLOCKS.has(':root')).toBe(false); // every :root token is in the shared dark block
+    // PR 7 T2: the regions are classes (.page-ground, .rail), and the dark island is gone.
+    expect(DARK_SEL).toBe(':root');
+    expect(PAPER_SEL).toBe('html[data-look="paper"] .page-ground');
+    expect(RAIL_SEL).toBe('html[data-look="paper"] .rail');
+    expect([...BLOCKS.keys()].filter((k) => k.includes('data-ground'))).toEqual([]);
   });
 
   it("dark golden: every token of origin/main's :root keeps its value byte for byte", () => {
@@ -365,7 +369,7 @@ describe('the grounds', () => {
   });
 
   it('a ground sets its own background, text colour and font (the body resolves them once, at :root)', () => {
-    const ground = BLOCKS.get('html[data-look="paper"] [data-ground]') ?? {};
+    const ground = BLOCKS.get('html[data-look="paper"] .page-ground, html[data-look="paper"] .rail') ?? {};
     expect(ground).toMatchObject({
       background: 'var(--bg)',
       color: 'var(--text)',
@@ -373,12 +377,9 @@ describe('the grounds', () => {
       // Tailwind's preflight sets a bare <code>/<pre> in --default-mono-font-family, declared (and resolved) at :root.
       '--default-mono-font-family': 'var(--font-mono)',
     });
-    // A dark island inside a paper page resets what the paper ground hands down and the island's tokens do not.
-    expect(BLOCKS.get('html[data-look="paper"] [data-ground="dark"]')).toMatchObject({
-      'font-variant-numeric': 'normal',
-    });
     // Scoped to the paper look: with the look off, <main> stays transparent over the body's gradient.
-    expect(BLOCKS.has('[data-ground]')).toBe(false);
+    expect(BLOCKS.has('.page-ground')).toBe(false);
+    expect(BLOCKS.has('.rail')).toBe(false);
     expect(BLOCKS.get('html[data-look="paper"] body')).toMatchObject({ background: '#eef2f3', 'background-image': 'none' });
   });
 

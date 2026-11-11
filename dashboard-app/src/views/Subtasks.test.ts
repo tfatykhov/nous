@@ -58,7 +58,7 @@ function install() {
 }
 function paperMain(): HTMLElement {
   const main = document.createElement('main');
-  main.setAttribute('data-ground', 'paper');
+  main.classList.add('page-ground');
   for (const [k, v] of Object.entries(PAPER)) if (k.startsWith('--')) main.style.setProperty(k, v);
   document.body.appendChild(main);
   return main;

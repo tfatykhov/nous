@@ -2,7 +2,6 @@
   import { currentRoute, initRouter } from '$lib/router';
   import Nav from '$lib/ui/Nav.svelte';
   import LookToggle from '$lib/ui/LookToggle.svelte';
-  import { groundFor } from '$lib/look';
   import DagView from './views/DagView.svelte';
   import Heartbeat from './views/Heartbeat.svelte';
   import Observability from './views/Observability.svelte';
@@ -99,8 +98,8 @@
 <a href="#main-content" class="skip-link">Skip to content</a>
 
 <!-- ── Desktop sidebar ───────────────────────────────────────── -->
-<!-- The navigation is a rail ground: the Atlantic-blue rail under the paper look, today's sidebar otherwise. -->
-<aside class="sidebar" aria-label="Site navigation" data-ground="rail">
+<!-- The navigation is the rail: the Atlantic-blue rail under the paper look, today's sidebar otherwise. -->
+<aside class="sidebar rail" aria-label="Site navigation">
   <div class="sidebar-header">
     <span class="sidebar-logo" aria-hidden="true">&#x1D6B9;</span>
     <span class="sidebar-title">Nous</span>
@@ -110,7 +109,7 @@
 </aside>
 
 <!-- ── Mobile header ─────────────────────────────────────────── -->
-<header class="mobile-header" data-ground="rail">
+<header class="mobile-header rail">
   <button
     bind:this={hamburgerBtn}
     class="hamburger"
@@ -141,9 +140,8 @@
 <div
   id="mobile-drawer"
   bind:this={drawerEl}
-  class="drawer"
+  class="drawer rail"
   class:drawer-open={drawerOpen}
-  data-ground="rail"
   role="dialog"
   aria-modal="true"
   aria-label="Navigation menu"
@@ -169,8 +167,8 @@
 </div>
 
 <!-- ── Main content ───────────────────────────────────────────── -->
-<!-- A paper ground on the routes the redesign has migrated (PAPER_ROUTES), a dark one on every other. -->
-<main id="main-content" class="main-content" data-ground={groundFor($currentRoute)}>
+<!-- The page ground: paper under the paper look, on every route. -->
+<main id="main-content" class="main-content page-ground">
   <!--
     Route switch: {#if} (not {#key}) so each view's component state
     (scroll, loaded data) survives tab switching.

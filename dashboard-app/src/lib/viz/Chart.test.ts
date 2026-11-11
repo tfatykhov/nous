@@ -32,7 +32,7 @@ function stubChart() {
 /** A paper-or-dark ground to render into, with token values set on it (jsdom has no stylesheet). */
 function groundEl(kind: 'paper' | 'dark', vars: Record<string, string> = {}): HTMLElement {
   const el = document.createElement('main');
-  el.setAttribute('data-ground', kind);
+  if (kind === 'paper') el.classList.add('page-ground');
   for (const [k, v] of Object.entries(vars)) el.style.setProperty(k, v);
   document.body.appendChild(el);
   return el;

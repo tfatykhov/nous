@@ -368,7 +368,7 @@ const norm = (c: unknown): any => (Array.isArray(c) ? c.map(norm) : String(c).re
 /** A paper <main> with the paper ground's tokens set on it (jsdom has no stylesheet), as App renders it. */
 function paperMain(): HTMLElement {
   const main = document.createElement('main');
-  main.setAttribute('data-ground', 'paper');
+  main.classList.add('page-ground');
   for (const [k, v] of Object.entries(PAPER)) if (k.startsWith('--')) main.style.setProperty(k, v);
   document.body.appendChild(main);
   return main;
