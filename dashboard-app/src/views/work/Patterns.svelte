@@ -3,18 +3,19 @@
   import { makePollStore } from '../../lib/stores/registry';
   import { usePoll } from '../../lib/poll';
   import { currentRoute, currentSub, currentQuery, routeHref } from '../../lib/router';
-  import { fmtDays, laneColor } from '../../lib/work';
+  import { fmtDays, laneVar } from '../../lib/work';
   import type { WorkKind, WorkPatternsData } from '../../lib/types/api';
   import StaleBadge from '../../lib/ui/StaleBadge.svelte';
+  import { Button } from '../../lib/ui/button';
 
   // F108 Work patterns: which tools are used for which kind of work and why, which fail most, and the wasted steps.
   // Fetched once per open and per window change, plus a Refresh button, no polling. Every string here (tool names,
   // reasons) came from a model and is shown as a text node only.
   const WINDOWS = [7, 14, 30];
   const KINDS: { id: WorkKind; label: string; color: string }[] = [
-    { id: 'conversation', label: 'Conversations', color: '#a99df9' },
-    { id: 'task', label: 'Tasks', color: '#22d3ee' },
-    { id: 'background', label: 'Background', color: '#8e8eab' },
+    { id: 'conversation', label: 'Conversations', color: 'var(--accent-text)' },
+    { id: 'task', label: 'Tasks', color: 'var(--kind-task)' },
+    { id: 'background', label: 'Background', color: 'var(--muted)' },
   ];
 
   // Route, sub and query are read together, and never written.
@@ -83,7 +84,7 @@
         {#each WINDOWS as w (w)}<option value={String(w)}>Last {w} days</option>{/each}
       </select>
     </label>
-    <button type="button" class="refresh" onclick={() => void store.refresh()}>Refresh</button>
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void store.refresh()}>Refresh</Button>
     {#if $store.loading}<span class="loading" role="status">Loading…</span>{/if}
     <StaleBadge state={$store} />
   </div>
@@ -113,13 +114,13 @@
             {#each tools as t (t.tool)}
               <tr>
                 <th scope="row">
-                  <span class="tool"><span class="dot" aria-hidden="true" style:background={laneColor(t.lane)}></span><span class="tool-name">{t.tool}</span></span>
+                  <span class="tool"><span class="dot" aria-hidden="true" style:--dot={laneVar(t.lane)}></span><span class="tool-name">{t.tool}</span></span>
                 </th>
                 {#each KINDS as k (k.id)}
                   {@const n = t.by_kind[k.id].calls}
                   <td>
                     {#if n > 0}
-                      <span class="cell"><span class="track"><span class="fill" style:width={width(n, maxima[k.id])} style:background={k.color}></span></span><span class="num">{fmt(n)}</span></span>
+                      <span class="cell"><span class="track"><span class="fill" style:width={width(n, maxima[k.id])} style:--fill={k.color}></span></span><span class="num">{fmt(n)}</span></span>
                     {:else}
                       <span class="cell"><span class="num none">—</span></span>
                     {/if}
@@ -155,7 +156,7 @@
             <li>
               <a class="fail" href={routeHref('work', '', { tool: f.tool, lens: 'error', kind: 'any', days: String(data.window_days) })}>
                 <span class="fname">{f.tool}</span>
-                <span class="track"><span class="fill" style:width={pct(f.error_rate)} style:background="#f87171"></span></span>
+                <span class="track"><span class="fill" style:width={pct(f.error_rate)} style:--fill="var(--red)"></span></span>
                 <span class="rate">{pct(f.error_rate)}</span>
                 <span class="of muted">{fmt(f.errors)} of {fmt(f.calls)} calls</span>
               </a>
@@ -187,15 +188,13 @@
   .subtitle { color: var(--muted); font-size: 0.9375rem; margin: 0; max-width: 75ch; }
   .muted { color: var(--muted); font-size: 0.8125rem; margin: 0; }
   .loading { color: var(--muted); font-size: 0.8125rem; }
-  .notice { padding: 0.75rem 1rem; border-radius: 8px; background: rgba(245, 158, 11, 0.08);
-    border: 1px solid rgba(245, 158, 11, 0.4); font-size: 0.875rem; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--radius-sm); background: var(--notice-bg);
+    border: 1px solid var(--notice-border); font-size: 0.875rem; }
   .empty { color: var(--muted); margin: 0.5rem 0; font-size: 0.9375rem; }
-  button { font: inherit; cursor: pointer; }
-  button:focus-visible, select:focus-visible, a:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
-  .refresh { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 0.5rem 0.875rem; min-height: 36px; }
+  select:focus-visible, a:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
   .field { display: flex; align-items: center; gap: 0.5rem; color: var(--muted); font-size: 0.875rem; }
-  select { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 0.5rem 0.75rem; font: inherit; min-height: 36px; }
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 1.25rem; display: flex; flex-direction: column; gap: 0.75rem; min-width: 0; }
+  select { background: var(--surface); border: 1px solid var(--border); border-radius: var(--ctl-radius); color: var(--text); padding: 0.5rem 0.875rem; font: inherit; min-height: 36px; }
+  .card { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow); padding: 1.25rem; display: flex; flex-direction: column; gap: 0.75rem; min-width: 0; }
   .card-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.5rem; align-items: baseline; }
   .two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.25rem; }
   .scroll { overflow-x: auto; }
@@ -205,10 +204,10 @@
   tbody tr { border-bottom: 1px solid var(--border); }
   tbody th, tbody td { padding: 0.625rem 0.5rem; text-align: left; font-weight: 400; vertical-align: top; }
   .tool { display: inline-flex; align-items: center; gap: 8px; font-family: var(--font-mono); font-size: 0.8125rem; overflow-wrap: anywhere; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--dot); }
   .cell { display: flex; align-items: center; gap: 8px; }
   .track { flex: 1 1 auto; height: 8px; background: var(--border); border-radius: 3px; display: block; }
-  .fill { display: block; height: 100%; border-radius: 3px; }
+  .fill { display: block; height: 100%; border-radius: 3px; background: var(--fill); }
   .num { min-width: 3rem; text-align: right; font-variant-numeric: tabular-nums; }
   .num.none { color: var(--muted); }
   td.why { padding-left: 1.25rem; font-size: 0.8125rem; line-height: 1.45; }
@@ -225,6 +224,6 @@
   @media (max-width: 768px) {
     a.fail { min-height: 44px; }
     .two { grid-template-columns: minmax(0, 1fr); }
-    .refresh, select { min-height: 44px; }
+    select { min-height: 44px; }
   }
 </style>

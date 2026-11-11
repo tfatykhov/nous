@@ -104,6 +104,8 @@ const NEW_DARK: Record<string, string> = {
   '--stale-err-bg': 'rgba(248, 113, 113, 0.08)', // StaleBadge's error tint
   '--notice-bg': 'rgba(245, 158, 11, 0.08)', // the Work screens' "recording is off" box (not the --warn-* amber)
   '--notice-border': 'rgba(245, 158, 11, 0.4)',
+  '--kind-task': '#22d3ee', // SessionList's .kind-task and Patterns' Tasks bars
+  '--seg-bg': 'var(--surface)', // SessionList's kind selector
   '--f-conversation': '#8fa3b5',
   '--f-question': '#8aa4ff',
   '--f-task': '#3fc3d1',
@@ -328,6 +330,8 @@ describe('contrast of the new values', () => {
     }
     expect(contrast(PAPER['--err-text'], PAPER['--stale-err-bg'])).toBeGreaterThanOrEqual(4.5);
     expect(contrast(PAPER['--text'], PAPER['--notice-bg'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--kind-task'], PAPER['--surface'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--kind-task'], PAPER['--bg'])).toBeGreaterThanOrEqual(4.5);
     for (const s of ['--stat-warn', '--stat-ok', '--red']) {
       expect(contrast(PAPER[s], PAPER['--surface']), s).toBeGreaterThanOrEqual(s === '--red' ? 3 : 4.5);
     }

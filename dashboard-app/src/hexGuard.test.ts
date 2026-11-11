@@ -20,6 +20,10 @@ export const HEX_GUARDED: readonly string[] = [
   'lib/ui/button/button.svelte',
   'lib/ui/badge/badge.svelte',
   'views/work/Trace.svelte',
+  'views/Work.svelte',
+  'views/work/SessionList.svelte',
+  'views/work/Patterns.svelte',
+  'views/work/FullResult.svelte',
 ];
 
 const SRC = __dirname;

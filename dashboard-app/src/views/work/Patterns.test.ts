@@ -69,12 +69,23 @@ describe('Work patterns', () => {
     expect(cells[2].textContent).toContain('50');
     const dot = bash.querySelector('.dot') as HTMLElement;
     expect(dot.getAttribute('aria-hidden')).toBe('true');
-    expect(dot.style.backgroundColor).toBe('rgb(156, 163, 175)');
+    expect(dot.style.getPropertyValue('--dot')).toBe('var(--lane-workspace)');
     // The widest value in a column fills it; the rest are in proportion.
     const bar = (tr: HTMLElement, i: number) => (tr.querySelectorAll('td')[i].querySelector('.fill') as HTMLElement | null)?.style.width;
     expect(bar(bash, 0)).toBe('100%');
     expect(bar(rowOf('recall_deep'), 0)).toBe('40%');
     expect(bar(bash, 1)).toBeUndefined(); // zero: no bar at all
+  });
+
+  it('the kind bars and the failing bars read tokens', async () => {
+    render(Work);
+    await screen.findByText('bash', { selector: '.tool-name' });
+    const fill = (tr: HTMLElement, i: number) => tr.querySelectorAll('td')[i].querySelector('.fill') as HTMLElement;
+    expect(fill(rowOf('recall_deep'), 0).style.getPropertyValue('--fill')).toBe('var(--accent-text)');
+    expect(fill(rowOf('recall_deep'), 1).style.getPropertyValue('--fill')).toBe('var(--kind-task)');
+    expect(fill(rowOf('bash'), 2).style.getPropertyValue('--fill')).toBe('var(--muted)');
+    const fail = (await screen.findByRole('link', { name: /learn_skill/ })).querySelector('.fill') as HTMLElement;
+    expect(fail.style.getPropertyValue('--fill')).toBe('var(--red)');
   });
 
   it('shows the common reasons under each tool', async () => {

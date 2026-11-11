@@ -188,6 +188,21 @@ describe('Work Changes tab', () => {
     expect(urls.some((u) => u.startsWith('/dashboard/work/sessions'))).toBe(false);
   });
 
+  it('Changes renders the Ledger inside a data-ground="dark" island; the Work title stays outside it', async () => {
+    go('#/work/changes');
+    const { container } = render(Work);
+    await screen.findByText('1 send ended without confirming delivery');
+    const island = container.querySelector('[data-ground="dark"]') as HTMLElement;
+    expect(island).not.toBeNull();
+    expect(island.textContent).toContain('Every side-effecting tool call, kept durably');
+    expect(island.querySelector('code.sql')).not.toBeNull();
+    const h1 = screen.getByRole('heading', { level: 1 });
+    expect(island.contains(h1)).toBe(false);
+    // The frame's title names the tab (no second level-1 heading, no "Execution Ledger").
+    expect(container.querySelector('.island #changes-h')?.textContent).toBe('Changes');
+    expect(island.closest('.island')).not.toBeNull();
+  });
+
   it('the sessions list has no ledger in it', async () => {
     go('#/work');
     const { container } = render(Work);
