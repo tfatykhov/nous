@@ -594,6 +594,12 @@ describe('no theme inherits a token from :root by accident', () => {
     expect(Object.keys(SHEET.root).filter((k) => k.startsWith('--') && !(k in own) && !CHROME.includes(k))).toEqual([]);
   });
 
+  it('a themed surface re-asserts its own text colour and face (review M8)', () => {
+    // body computes color and font-family from the paper :root; without this rule an element that merely inherits
+    // keeps them, and all six legacy looks turn Archivo (the pixel comparison, run without web fonts, cannot see it)
+    expect(SHEET.rules.get('[data-theme]')).toEqual({ color: 'var(--text)', 'font-family': 'var(--font-ui)' });
+  });
+
   it('the chrome tokens are read only by the shell, outside every surface', () => {
     // The bar and its pill: Companion.svelte's header, which is never under a [data-theme].
     const users = CHROME.flatMap((k) =>
