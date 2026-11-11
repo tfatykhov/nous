@@ -136,6 +136,25 @@ const ROWS: Row[] = [
   ['views/Harness.svelte', '.state-msg.error', 'color', 'var(--err-text)', '#f87171'],
   ['views/Harness.svelte', '.badge', 'color', 'var(--accent)', '#7c6af7'],
   ['views/Harness.svelte', '.badge', 'background', 'color-mix(in srgb, var(--accent) 12%, transparent)', 'rgba(124, 106, 247, 0.12)'],
+  // Observability (the handler dots and the trend chart: Observability.look.test.ts)
+  ['views/Observability.svelte', '.chart-card', 'border', 'var(--card-border)', '1px solid #1e1e2e'],
+  ['views/Observability.svelte', '.handler-rate--warn', 'color', 'var(--err-text)', '#f87171'],
+  ['views/Observability.svelte', '.trace-row:hover, .trace-row--expanded', 'background', 'var(--surface-hover)', '#181824'],
+  // The global :focus-visible ring the row had (2px solid var(--accent)), now its own rule on --focus-ring.
+  ['views/Observability.svelte', '.trace-row:focus-visible', 'outline', '2px solid var(--focus-ring)', '2px solid #7c6af7'],
+  ['views/Observability.svelte', '.trace-badge--mod', 'color', 'var(--st-partial)', '#fb923c'],
+  ['views/Observability.svelte', '.mod-type', 'background', 'var(--badge-good-bg)', 'rgba(52, 211, 153, 0.15)'],
+  ['views/Observability.svelte', '.mod-type', 'color', 'var(--ok-text)', '#34d399'],
+  ['views/Observability.svelte', '.anomaly', 'background', 'color-mix(in srgb, var(--yellow) 10%, transparent)', 'rgba(251, 191, 36, 0.1)'],
+  ['views/Observability.svelte', '.anomaly', 'border-left', '3px solid var(--yellow)', '3px solid #fbbf24'],
+  ['views/Observability.svelte', '.anomaly--alert', 'background', 'var(--err-bg)', 'rgba(248, 113, 113, 0.1)'],
+  ['views/Observability.svelte', '.anomaly--alert', 'border-left-color', 'var(--red)', '#f87171'],
+  ['views/Observability.svelte', '.event-badge', 'color', 'var(--accent)', '#7c6af7'],
+  ['views/Observability.svelte', '.event-badge', 'background', 'color-mix(in srgb, var(--accent) 12%, transparent)', 'rgba(124, 106, 247, 0.12)'],
+  ['views/Observability.svelte', '.event-badge', 'text-transform', 'var(--label-transform)', 'uppercase'],
+  ['views/Observability.svelte', '.event-badge', 'letter-spacing', 'var(--label-tracking)', '0.05em'],
+  ['views/Observability.svelte', '.empty.error', 'color', 'var(--err-text)', '#f87171'], // was var(--red, #ef4444): --red is #f87171
+  ['views/Observability.svelte', '.status-msg.error', 'color', 'var(--err-text)', '#f87171'],
 ];
 
 /** The plan's listed dark changes: [file, selector, property, value now, old literal, the dark value it resolves to]. */
@@ -162,6 +181,16 @@ const CHANGES: Change[] = [
   ['views/Harness.svelte', '.rule-pill', 'color', 'var(--text)', '#60a5fa', '#e2e2f0', 'the pill text is the ink; the rule colour is its dot and border'],
   ['views/Harness.svelte', '.rule-pill', 'border-radius', '999px', '4px', '999px', 'a rule pill is a pill, as the badges of PR 2 and PR 3'],
   ['views/Harness.svelte', '.badge', 'border-radius', '999px', '4px', '999px', 'the censor count is a pill, as the badges of PR 2 and PR 3'],
+  ['views/Observability.svelte', '.chart-card', 'border-radius', 'var(--card-radius)', '10px', '12px', 'D2: a chart card takes the card radius'],
+  ['views/Observability.svelte', '.trace-type', 'color', 'var(--accent-text)', '#38bdf8', '#a99df9', 'D4: the trace type is the accent text, not a one-off sky blue'],
+  ['views/Observability.svelte', '.trace-badge', 'background', 'var(--wash)', 'rgba(96, 165, 250, 0.15)', 'rgba(255, 255, 255, 0.03)', 'D4: the event count is a neutral badge on the wash'],
+  ['views/Observability.svelte', '.trace-badge', 'color', 'var(--muted)', '#60a5fa', '#8e8eab', 'D4: the event count is a neutral badge, not blue'],
+  ['views/Observability.svelte', '.trace-badge', 'border-radius', '999px', '4px', '999px', 'a badge is a pill, as the badges of PR 2 to PR 4'],
+  ['views/Observability.svelte', '.trace-badge--mod', 'background', 'color-mix(in srgb, var(--st-partial) 12.5%, transparent)', 'rgba(251, 146, 60, 0.15)', 'rgba(251, 146, 60, 0.125)', "PR 3's badge tint: at 15% the paper text is 4.49:1 on a hovered row"],
+  ['views/Observability.svelte', '.trace-detail', 'background', 'var(--wash)', 'rgba(255, 255, 255, 0.025)', 'rgba(255, 255, 255, 0.03)', 'D4: the open trace sits on the wash'],
+  ['views/Observability.svelte', '.mod-type', 'border-radius', '999px', '4px', '999px', 'a badge is a pill, as the badges of PR 2 to PR 4'],
+  ['views/Observability.svelte', '.event-badge', 'border-radius', '999px', '4px', '999px', 'a badge is a pill, as the badges of PR 2 to PR 4'],
+  ['views/Observability.svelte', '.mono', 'font-family', 'var(--font-mono)', 'monospace', "'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace", "the trace id in the look's mono font (Red Hat Mono on paper); scoped, so no other screen moves"],
 ];
 
 /** PR 4 and PR 5's routes and their views. */

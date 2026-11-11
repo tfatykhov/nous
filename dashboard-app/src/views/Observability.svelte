@@ -8,6 +8,8 @@
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import Chart from '../lib/viz/Chart.svelte';
+  import { Button } from '../lib/ui/button';
+  import { tint } from '../lib/chartColors';
 
   const store = usePoll(
     makePollStore<ObservabilityData>(
@@ -104,10 +106,12 @@
     return parts.length >= 2 ? parts[parts.length - 2] : name;
   }
 
-  function handlerDotColor(errorRate: number): string {
-    if (errorRate > 0.1) return '#f87171';
-    if (errorRate > 0) return '#fbbf24';
-    return '#4ade80';
+  /** The dot's token by error rate. The top band is --err-text, not --red: under deuteranopia it stays apart from the
+   *  amber (12.5, red 5.1); both are #f87171 under dark. The rate itself is printed beside the dot. */
+  function handlerDotToken(errorRate: number): string {
+    if (errorRate > 0.1) return '--err-text';
+    if (errorRate > 0) return '--yellow';
+    return '--st-completed';
   }
 
   // ── Drift trend chart builders ────────────────────────────────────────────
@@ -125,8 +129,8 @@
       datasets: [{
         label: 'Error rate',
         data: points.map((p) => p.v),
-        borderColor: '#f87171',
-        backgroundColor: 'rgba(248,113,113,0.1)',
+        borderColor: 'var(--red)',
+        backgroundColor: tint('--red', 0.1),
         fill: true,
         borderWidth: 2,
         pointRadius: 2,
@@ -177,7 +181,7 @@
         {#each handlerNames as name}
           {@const h = handlers[name]}
           <div class="handler-row">
-            <span class="handler-dot" style="background:{handlerDotColor(h.error_rate ?? 0)}"></span>
+            <span class="handler-dot" style:--dot={`var(${handlerDotToken(h.error_rate ?? 0)})`}></span>
             <span class="handler-name">{shortHandler(name)}</span>
             <span class="handler-stat">{h.successes ?? 0}/{h.invocations ?? 0}</span>
             <span class="handler-stat">{(h.avg_duration_ms ?? 0).toFixed(1)}ms</span>
@@ -210,11 +214,15 @@
               onclick={() => toggleTrace(t.trace_id)}
               role="button"
               tabindex="0"
-              onkeydown={(e) => e.key === 'Enter' && toggleTrace(t.trace_id)}
+              onkeydown={(e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                e.preventDefault(); // Space would scroll the page
+                toggleTrace(t.trace_id);
+              }}
               aria-expanded={expandedTraces.has(t.trace_id)}
             >
-              <span class="trace-arrow">{expandedTraces.has(t.trace_id) ? '▼' : '▶'}</span>
-              <span class="trace-type">{t.root_type ?? '?'}</span>
+              <span class="trace-toggle">{expandedTraces.has(t.trace_id) ? 'Hide' : 'Show'}</span>
+              <span class="trace-type">{t.root_type ?? 'unknown'}</span>
               <span class="trace-badge">{t.event_count} events</span>
               {#if t.has_modifications}
                 <span class="trace-badge trace-badge--mod">MOD</span>
@@ -259,7 +267,7 @@
         <div class="mod-list">
           {#each d.recent_modifications as m}
             <div class="mod-row">
-              <span class="mod-type">{m.modifies ?? '?'}</span>
+              <span class="mod-type">{m.modifies ?? 'unknown'}</span>
               <span class="mod-event">{m.type}</span>
               <span class="mod-age">{fmtAgo(m.timestamp)}</span>
             </div>
@@ -279,9 +287,11 @@
       <h2>Active Drift Anomalies</h2>
       {#each d.drift.anomalies as a}
         <div class="anomaly" class:anomaly--alert={a.severity === 'alert'}>
+          <!-- The severity in a word as well as the tint (status is never colour alone). -->
+          <span class="anomaly-level">{a.severity === 'alert' ? 'Alert' : 'Warning'}</span>
           <strong>{a.metric}</strong>:
           {#if a.residualized_by}
-            {a.raw_current} raw → {a.current} unexplained after {a.residualized_by}
+            {a.raw_current} raw, {a.current} unexplained after {a.residualized_by}
           {:else}
             {a.current}
           {/if}
@@ -310,7 +320,7 @@
   {#if d.drift}
     {@const m = d.drift.metrics}
     <StatGrid stats={[
-      { label: 'Facts',       value: (m.fact_count ?? 0) + (m.fact_count_delta != null ? ' (Δ' + (m.fact_count_delta > 0 ? '+' : '') + m.fact_count_delta + ')' : '') },
+      { label: 'Facts',       value: (m.fact_count ?? 0) + (m.fact_count_delta != null ? ' (change ' + (m.fact_count_delta > 0 ? '+' : '') + m.fact_count_delta + ')' : '') },
       { label: 'Episodes',   value: String(m.episode_count ?? 0) },
       { label: 'Censors',    value: String(m.active_censor_count ?? 0) },
       { label: 'Procedures', value: String(m.procedure_count ?? 0) },
@@ -329,9 +339,9 @@
 <section class="chart-card">
   <div class="section-head">
     <h2>Event Timeline</h2>
-    <button class="refresh-btn" onclick={() => void activity.refresh()} disabled={$activity.loading}>
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void activity.refresh()} disabled={$activity.loading}>
       {$activity.loading ? 'Loading…' : 'Refresh'}
-    </button>
+    </Button>
   </div>
   {#if $activity.data}
     {@const d = $activity.data}
@@ -369,6 +379,7 @@
     align-items: flex-start;
     justify-content: space-between;
     gap: 1rem;
+    flex-wrap: wrap;
     margin-bottom: 1.25rem;
   }
 
@@ -378,6 +389,8 @@
     color: var(--text);
     margin: 0 0 0.125rem;
   }
+
+  :global(html[data-look="paper"] [data-ground="paper"]) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
 
   .subtitle {
     font-size: 0.8125rem;
@@ -403,10 +416,13 @@
     .chart-row { grid-template-columns: 1fr; }
   }
 
+  .chart-row > * { min-width: 0; }
+
   .chart-card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
     padding: 1rem;
     margin-top: 1rem;
   }
@@ -430,6 +446,7 @@
     height: 8px;
     border-radius: 50%;
     flex-shrink: 0;
+    background: var(--dot);
   }
 
   .handler-name {
@@ -451,7 +468,7 @@
   }
 
   .handler-rate--warn {
-    color: #f87171;
+    color: var(--err-text);
   }
 
   /* ── Causal traces ── */
@@ -473,34 +490,43 @@
 
   .trace-row:hover,
   .trace-row--expanded {
-    background: var(--surface-hover, rgba(255,255,255,0.04));
+    background: var(--surface-hover);
   }
 
-  .trace-arrow {
-    font-size: 0.625rem;
+  .trace-row:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  /* The open or closed state in a word (it was a triangle glyph); aria-expanded carries it for assistive tech. */
+  .trace-toggle {
+    font-size: 0.75rem;
     color: var(--muted);
-    width: 10px;
+    min-width: 2.25rem;
     flex-shrink: 0;
   }
 
   .trace-type {
     font-weight: 600;
-    color: #38bdf8;
+    color: var(--accent-text);
     flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .trace-badge {
     font-size: 0.6875rem;
     padding: 0.125rem 0.375rem;
-    border-radius: 4px;
-    background: rgba(96,165,250,0.15);
-    color: #60a5fa;
+    border-radius: 999px;
+    background: var(--wash);
+    color: var(--muted);
     white-space: nowrap;
   }
 
+  /* PR 3's badge tint: at 15% the paper text is 4.49:1 on a hovered row. */
   .trace-badge--mod {
-    background: rgba(251,146,60,0.15);
-    color: #fb923c;
+    background: color-mix(in srgb, var(--st-partial) 12.5%, transparent);
+    color: var(--st-partial);
   }
 
   .trace-age {
@@ -512,7 +538,7 @@
 
   .trace-detail {
     padding: 0.5rem 0.75rem 0.5rem 1.5rem;
-    background: rgba(255,255,255,0.025);
+    background: var(--wash);
     border-left: 2px solid var(--border);
     margin: 0 0 0.25rem 1rem;
     border-radius: 0 6px 6px 0;
@@ -533,7 +559,7 @@
   }
 
   .mono {
-    font-family: monospace;
+    font-family: var(--font-mono);
     font-size: 0.75rem;
     word-break: break-all;
     color: var(--muted);
@@ -562,9 +588,9 @@
   .mod-type {
     font-size: 0.6875rem;
     padding: 0.125rem 0.375rem;
-    border-radius: 4px;
-    background: rgba(52,211,153,0.15);
-    color: #34d399;
+    border-radius: 999px;
+    background: var(--badge-good-bg);
+    color: var(--ok-text);
     white-space: nowrap;
     font-weight: 600;
   }
@@ -584,16 +610,26 @@
   .anomaly {
     padding: 0.5rem 0.75rem;
     border-radius: 6px;
-    background: rgba(251,191,36,0.1);
-    border-left: 3px solid #fbbf24;
+    background: color-mix(in srgb, var(--yellow) 10%, transparent);
+    border-left: 3px solid var(--yellow);
     font-size: 0.8125rem;
     margin-bottom: 0.5rem;
     color: var(--text);
+    overflow-wrap: anywhere;
   }
 
   .anomaly--alert {
-    background: rgba(248,113,113,0.1);
-    border-left-color: #f87171;
+    background: var(--err-bg);
+    border-left-color: var(--red);
+  }
+
+  .anomaly-level {
+    font-weight: 700;
+    color: var(--warn-text);
+  }
+
+  .anomaly--alert .anomaly-level {
+    color: var(--err-text);
   }
 
   .snapshot-ts {
@@ -614,18 +650,6 @@
   .section-head h2 {
     margin: 0;
   }
-
-  .refresh-btn {
-    font-size: 0.8125rem;
-    padding: 0.25rem 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
-    background: var(--surface);
-    color: var(--text);
-    cursor: pointer;
-  }
-  .refresh-btn:hover:not(:disabled) { background: var(--surface-hover); }
-  .refresh-btn:disabled { opacity: 0.5; cursor: default; }
 
   .timeline {
     display: flex;
@@ -652,11 +676,11 @@
   .event-badge {
     font-size: 0.6875rem;
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
     color: var(--accent);
-    background: rgba(124, 106, 247, 0.12);
-    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border-radius: 999px;
     padding: 0.125rem 0.375rem;
     white-space: nowrap;
   }
@@ -675,7 +699,7 @@
   }
 
   .empty.error {
-    color: var(--red, #ef4444);
+    color: var(--err-text);
   }
 
   .retry-link {
@@ -714,6 +738,6 @@
   }
 
   .status-msg.error {
-    color: var(--red, #ef4444);
+    color: var(--err-text);
   }
 </style>
