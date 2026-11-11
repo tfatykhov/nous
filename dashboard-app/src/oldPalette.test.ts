@@ -132,6 +132,45 @@ describe('no old palette anywhere in the dashboard', () => {
     expect(read('public/favicon.svg')).toMatch(/#863bff/i);
   });
 
+  // PR 7 T7 took the old-palette entries out of three render tests' lists of forbidden colours (each still forbids
+  // the old status colours that are not in OLD). This guard covers them only if every file those renders can draw a
+  // colour from is read here: the test itself and everything it imports, followed through relative and $lib imports
+  // (packages draw no colour: Chart is a stub in these tests).
+  const TRIMMED: Record<string, string[]> = {
+    'src/views/Decisions.test.ts': ['#7c6af7', '#6b6b8a'],
+    'src/views/Rubric.test.ts': ['#7c6af7', '#6b6b8a', '#1e1e2e'],
+    'src/views/HarnessViews.test.ts': ['#8e8eab', '#1e1e2e'],
+  };
+  /** Every source file `entry` reaches through static and dynamic imports and re-exports, as paths under APP. */
+  function closure(entry: string): string[] {
+    const seen = new Set<string>();
+    const visit = (file: string) => {
+      if (seen.has(file)) return;
+      seen.add(file);
+      const src = readFileSync(join(APP, file), 'utf-8');
+      const specs = [...src.matchAll(/(?:^\s*import\s+(?!type\b)[^'"]*?|^\s*export\s+(?!type\b)[^'"]*?from\s*|\bimport\(\s*)['"]([^'"]+)['"]/gm)].map((m) => m[1]);
+      for (const spec of specs) {
+        const base = spec.startsWith('$lib/') ? join(APP, 'src/lib', spec.slice(5)) : spec.startsWith('.') ? resolve(join(APP, file, '..'), spec) : null;
+        if (!base) continue;
+        const hitFile = [base, base.replace(/\.js$/, '.ts'), `${base}.ts`, `${base}.svelte`, join(base, 'index.ts')]
+          .find((c) => existsSync(c) && !c.endsWith('\\') && /\.(svelte|ts|css)$/.test(c));
+        if (hitFile) visit(relative(APP, hitFile).replace(/\\/g, '/'));
+      }
+    };
+    visit(entry);
+    return [...seen];
+  }
+
+  it.each(Object.keys(TRIMMED))('the trimmed list of %s: each removed value is in OLD, and every file its render reads is scanned and clean', (test) => {
+    for (const h of TRIMMED[test]) expect(OLD, h).toContain(h);
+    const files = closure(test);
+    expect(files.length, 'the closure reached the view and its libs').toBeGreaterThan(3);
+    expect(files.some((f) => f.startsWith('src/views/') && f.endsWith('.svelte'))).toBe(true);
+    expect(files.filter((f) => !scanned().includes(f))).toEqual([]);
+    expect(files.filter((f) => hit(f))).toEqual([]);
+    expect(scanned()).toContain('src/app.css'); // the token values a render resolves come from here
+  });
+
   it('the stylesheet and the page the dark look lived in are clean (its other files are gone: flipResidue.test.ts)', () => {
     expect(existsSync(join(APP, 'src/app.css'))).toBe(true);
     expect(hit('src/app.css')).toBe(false);
