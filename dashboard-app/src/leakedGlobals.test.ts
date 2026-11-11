@@ -37,10 +37,15 @@ const OTHERS = ['views/Decisions.svelte', 'views/Rubric.svelte', 'views/Autonomy
 /** The paper-only scoped prefix, followed by the file's own selector (not a brace, a comma or another pseudo). */
 const PAPER_SCOPE = /:global\(html\[data-look="paper"\](?:\s+\[data-ground="paper"\])?\)(?=\s+[^\s{,:])/g;
 
-/** Each line with a `:global` left once every allowed paper prefix is removed: a parenthesised one behind the prefix, a
- * second selector on the line, or Svelte 5's block form `:global { … }` (PR 5 review I3). */
+/** What makes a rule global: `:global`, and the forms that never say it (`:root`, `:host`, a `-global-` keyframes name),
+ * which Svelte leaves unscoped (PR 5 re-review R1). */
+const LEAK = /:global\b|:root\b|:host\b|@keyframes\s+-global-/;
+
+/** Each line with a global form left once every allowed paper prefix is removed: a parenthesised `:global` behind the
+ * prefix, a second selector on the line, Svelte 5's block form `:global { … }` (PR 5 review I3), or one of the forms
+ * above. */
 function leaks(css: string): string[] {
-  return css.split('\n').filter((l) => /:global\b/.test(l.replace(PAPER_SCOPE, ''))).map((l) => l.trim());
+  return css.split('\n').filter((l) => LEAK.test(l.replace(PAPER_SCOPE, ''))).map((l) => l.trim());
 }
 
 describe('no global rule leaks from the converted dense screens', () => {
@@ -63,6 +68,12 @@ describe('no global rule leaks from the converted dense screens', () => {
     expect(leaks(':global(html[data-look="paper"] [data-ground="paper"]) :global(.mono) { font-family: var(--font-mono); }')).toHaveLength(1);
     expect(leaks(':global(html[data-look="paper"]) h1, :global(.dl) { color: red; }')).toHaveLength(1);
     expect(leaks(':global { .dl { color: var(--text); } }')).toHaveLength(1);
+    // PR 5 re-review R1: global rules that never say :global. Svelte leaves :root and :host unscoped, and a -global-
+    // keyframes name is global; a plain @keyframes is scoped to the file.
+    expect(leaks(':root { --muted: red; }')).toHaveLength(1);
+    expect(leaks(':host { color: red; }')).toHaveLength(1);
+    expect(leaks('@keyframes -global-spin { to { transform: rotate(1turn); } }')).toHaveLength(1);
+    expect(leaks('@keyframes spin { to { transform: rotate(1turn); } }')).toEqual([]);
   });
 
   it.each(OTHERS)('%s adds no global rule', (file) => {
