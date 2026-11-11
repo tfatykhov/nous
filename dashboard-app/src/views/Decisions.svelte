@@ -107,10 +107,10 @@
     <p class="subtitle">How well calibrated the decisions are, how confident, and how they were reasoned.</p>
   </div>
   <div class="head-right">
+    <StaleBadge state={$store} />
     <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void store.refresh()} disabled={$store.loading}>
       {$store.loading ? 'Loading…' : 'Refresh'}
     </Button>
-    <StaleBadge state={$store} />
   </div>
 </header>
 

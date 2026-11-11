@@ -200,10 +200,10 @@
     <p class="subtitle">F024: the dimensions each turn is scored on, the outcome signals, and how the weights evolve.</p>
   </div>
   <div class="head-actions">
+    <StaleBadge state={$store} />
     <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void store.refresh()} disabled={$store.loading}>
       {$store.loading ? 'Loading…' : 'Refresh'}
     </Button>
-    <StaleBadge state={$store} />
   </div>
 </header>
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Button } from '../lib/ui/button';
   import { fmtUtc } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
@@ -15,6 +16,8 @@
       30_000,
     ),
   );
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
+  const refreshPage = () => store.refresh();
 
   // ── Formatters ────────────────────────────────────────────────────────────
 
@@ -157,7 +160,10 @@
     <h1>Heartbeat</h1>
     <p class="subtitle">What Nous checks on its own, what it found, and what it looked into.</p>
   </div>
-  <StaleBadge state={$store} />
+  <div class="head-right">
+    <StaleBadge state={$store} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading}>{$store.loading ? 'Loading…' : 'Refresh'}</Button>
+  </div>
 </header>
 
 {#if $store.data}
@@ -401,6 +407,7 @@
 {/if}
 
 <style>
+  .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   .view-head {
     display: flex;
     align-items: flex-start;

@@ -480,12 +480,14 @@ describe('Activity split', () => {
       before: 'weekly report digest', after: 'monthly invoice sweep' },
   ];
   for (const c of REFRESH_CASES) {
-    it(`${c.name}: after a good load, the section's Refresh fetches the activity again and shows the new data`, async () => {
+    it(`${c.name}: after a good load, the page Refresh (it covers the activity; the section's own went) fetches it again and shows the new data`, async () => {
       render(c.view);
       const s = await sectionOf(c.section);
       await waitFor(() => expect(within(s).getByText(c.before)).toBeTruthy());
       expect(activityUrls()).toHaveLength(1);
-      const button = within(s).getByRole('button', { name: 'Refresh' }) as HTMLButtonElement;
+      // Finish review fix 8: one Refresh per page, in the header, after "updated"; the section has none of its own.
+      expect(within(s).queryByRole('button', { name: 'Refresh' })).toBeNull();
+      const button = (await within(document.querySelector('.view-head') as HTMLElement).findByRole('button', { name: 'Refresh' })) as HTMLButtonElement;
       expect(button.disabled).toBe(false);
 
       let release: () => void = () => {};

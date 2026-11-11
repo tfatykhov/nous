@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Button } from '../lib/ui/button';
   import { fmtUtc } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
@@ -40,6 +41,8 @@
       0, // fetch-once
     ),
   );
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
+  const refreshPage = () => Promise.all([store.refresh(), activity.refresh()]);
 
   function formatDateTime(dateStr: string | null): string {
     return fmtUtc(dateStr);
@@ -158,6 +161,7 @@
       {/each}
     </select>
     <StaleBadge state={$store} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading || $activity.loading}>{$store.loading || $activity.loading ? 'Loading…' : 'Refresh'}</Button>
   </div>
 </header>
 
@@ -296,9 +300,6 @@
 <section class="chart-card">
   <div class="section-head">
     <h2>Upcoming schedules</h2>
-    <button class="refresh-btn" onclick={() => void activity.refresh()} disabled={$activity.loading}>
-      {$activity.loading ? 'Loading…' : 'Refresh'}
-    </button>
   </div>
   {#if $activity.data}
     {@const ss = $activity.data.schedule_stats}
@@ -444,17 +445,6 @@
     margin: 0;
   }
 
-  .refresh-btn {
-    font-size: 0.8125rem;
-    padding: 0.25rem 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: var(--ctl-radius);
-    background: var(--surface);
-    color: var(--text);
-    cursor: pointer;
-  }
-  .refresh-btn:hover:not(:disabled) { background: var(--surface-hover); }
-  .refresh-btn:disabled { opacity: 0.5; cursor: default; }
 
   ul.item-list {
     list-style: none;

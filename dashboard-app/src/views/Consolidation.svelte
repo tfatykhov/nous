@@ -137,10 +137,10 @@
     <p class="subtitle">What each sleep cycle merged, superseded and deactivated in memory.</p>
   </div>
   <div class="head-right">
+    <StaleBadge state={$store} />
     <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={$store.loading}>
       {$store.loading ? 'Loading…' : 'Refresh'}
     </Button>
-    <StaleBadge state={$store} />
   </div>
 </header>
 

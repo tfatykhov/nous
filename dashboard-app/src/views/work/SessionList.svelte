@@ -204,9 +204,9 @@
     </p>
   </div>
   <div class="head-right">
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refresh}>Refresh</Button>
     {#if $store.loading}<span class="loading" role="status">Loading…</span>{/if}
     <StaleBadge state={$store} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refresh}>Refresh</Button>
   </div>
 </header>
 

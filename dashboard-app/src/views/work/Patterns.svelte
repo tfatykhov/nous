@@ -84,9 +84,9 @@
         {#each WINDOWS as w (w)}<option value={String(w)}>Last {w} days</option>{/each}
       </select>
     </label>
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void store.refresh()}>Refresh</Button>
     {#if $store.loading}<span class="loading" role="status">Loading…</span>{/if}
     <StaleBadge state={$store} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void store.refresh()}>Refresh</Button>
   </div>
 </header>
 

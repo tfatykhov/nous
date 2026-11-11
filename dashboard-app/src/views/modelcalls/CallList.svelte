@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Button } from '../../lib/ui/button';
   import { apiGet } from '../../lib/api';
   import { makePollStore } from '../../lib/stores/registry';
   import { usePoll } from '../../lib/poll';
@@ -53,6 +54,8 @@
       });
     }, 60000),
   );
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
+  const refreshPage = () => store.refresh();
 
   let extra = $state<ModelCallRow[]>([]);
   let moreCursor = $state<string | null | undefined>(undefined);
@@ -141,6 +144,7 @@
     <div class="head-right">
       {#if $store.loading && (!data || refetching)}<span class="loading" role="status">Loading…</span>{/if}
       <StaleBadge state={$store} />
+      <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading}>{$store.loading ? 'Loading…' : 'Refresh'}</Button>
     </div>
   </header>
 

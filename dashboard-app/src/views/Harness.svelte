@@ -37,6 +37,8 @@
       0, // fetch-once
     ),
   );
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
+  const refreshPage = () => Promise.all([store.refresh(), activity.refresh()]);
 
   /** A rule's mode as a status pill: enforcing is ok, warn and shadow are warnings, off is neutral. */
   const MODE_PILL: Record<string, string> = { enforce: 'ok', warn: 'warn', shadow: 'warn' };
@@ -150,6 +152,7 @@
     <FilterBar label="Window" required bind:value={windowSel}
       options={[{ value: '24h', label: '24 h' }, { value: '7d', label: '7 d' }, { value: '30d', label: '30 d' }]} />
     <StaleBadge state={$store} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading || $activity.loading}>{$store.loading || $activity.loading ? 'Loading…' : 'Refresh'}</Button>
   </div>
 </header>
 
@@ -291,9 +294,6 @@
 <section class="panel censors">
   <div class="section-head">
     <h2>Most active censors</h2>
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void activity.refresh()} disabled={$activity.loading}>
-      {$activity.loading ? 'Loading…' : 'Refresh'}
-    </Button>
   </div>
   {#if $activity.data}
     {@const cs = $activity.data.censor_stats}

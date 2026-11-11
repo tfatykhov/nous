@@ -90,10 +90,10 @@
 <header class="view-head">
   <p class="subtitle">Facts, episodes and decisions created over 30 days, fact categories, and the fact growth rate</p>
   <div class="head-right">
+    <StaleBadge state={$store} />
     <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={$store.loading || $obs.loading}>
       {$store.loading || $obs.loading ? 'Loading…' : 'Refresh'}
     </Button>
-    <StaleBadge state={$store} />
   </div>
 </header>
 

@@ -214,13 +214,6 @@
   }
 </script>
 
-<header class="view-head">
-  <div>
-    <h1>Browse</h1>
-    <p class="subtitle">Search and read every kind of memory.</p>
-  </div>
-</header>
-
 <!-- ── Tab bar ─────────────────────────────────────────────────────────── -->
 <div class="tab-bar" role="tablist">
   {#each TABS as tab}
@@ -235,6 +228,14 @@
     </button>
   {/each}
 </div>
+
+<header class="view-head">
+  <div>
+    <h1>Browse</h1>
+    <p class="subtitle">Search and read every kind of memory.</p>
+  </div>
+</header>
+
 
 <!-- ── Tab content ──────────────────────────────────────────────────────── -->
 <div class="tab-body">

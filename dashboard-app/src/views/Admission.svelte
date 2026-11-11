@@ -247,10 +247,10 @@
     <p class="subtitle">F023 memory admission: how new facts score, and what a threshold would let in.</p>
   </div>
   <div class="head-right">
+    <StaleBadge state={$store} />
     <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void store.refresh()} disabled={$store.loading}>
       {$store.loading ? 'Loading…' : 'Refresh'}
     </Button>
-    <StaleBadge state={$store} />
   </div>
 </header>
 

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Button } from '../lib/ui/button';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -44,6 +45,8 @@
   const store = usePoll(
     makePollStore<ExecutionData>((signal) => apiGet<ExecutionData>(query(), { signal }), 15_000),
   );
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
+  const refreshPage = () => store.refresh();
 
   // Refetch on a filter change (the poll itself keeps the head fresh).
   let first = true;
@@ -168,7 +171,10 @@
     {#if !embedded}<h1>Execution ledger</h1>{/if}
     <p class="subtitle">Every side-effecting tool call, kept durably: it survives restarts and ended sessions.</p>
   </div>
-  <StaleBadge state={$store} />
+  <div class="head-right">
+    <StaleBadge state={$store} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading}>{$store.loading ? 'Loading…' : 'Refresh'}</Button>
+  </div>
 </header>
 
 {#if $store.data}
@@ -352,6 +358,7 @@
 {/if}
 
 <style>
+  .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: 1.25rem; }
   h1 { font-size: 1.375rem; font-weight: 700; color: var(--text); margin: 0 0 0.125rem; }
   .subtitle { font-size: 0.8125rem; color: var(--muted); margin: 0; }

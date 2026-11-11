@@ -244,10 +244,10 @@
 <header class="view-head">
   <p class="subtitle">How dense the graph is getting, how many edges are made, and how connected the nodes are.</p>
   <div class="head-right">
+    <StaleBadge state={$store} />
     <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={$store.loading || $density.loading}>
       {$store.loading || $density.loading ? 'Loading…' : 'Refresh'}
     </Button>
-    <StaleBadge state={$store} />
   </div>
 </header>
 
@@ -267,7 +267,6 @@
     <span class="orphan-label">Overall orphan rate</span>
     <span class="badge {orphanRateClass(d.orphan_rate)}">{orphanRateLabel(d.orphan_rate)}</span>
     <span class="orphan-meta">({d.total_orphans.toLocaleString()} of {d.total_nodes.toLocaleString()} nodes unconnected)</span>
-    <span class="banner-stale"><StaleBadge state={$density} /></span>
   </div>
 {:else if $density.error}
   <p class="status-msg error">
@@ -610,9 +609,6 @@
     color: var(--muted);
   }
 
-  .banner-stale {
-    margin-left: auto;
-  }
 
   /* ── Badge (from Density) ────────────────────────────────── */
   .badge {

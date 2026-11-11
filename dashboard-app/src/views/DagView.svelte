@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { Button } from '../lib/ui/button';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -19,6 +20,8 @@
       15_000,
     ),
   );
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
+  const refreshPage = () => store.refresh();
 
   // ── Selected active DAG for graph view ───────────────────────────────────
   let selectedDagId = $state<string | null>(null);
@@ -270,7 +273,10 @@
     <h1 class="view-title">Workflows</h1>
     <p class="view-subtitle">Unified execution DAGs, node progress, and graph visualization</p>
   </div>
-  <StaleBadge state={$store} />
+  <div class="head-right">
+    <StaleBadge state={$store} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading}>{$store.loading ? 'Loading…' : 'Refresh'}</Button>
+  </div>
 </div>
 
 {#if $store.loading && $store.data === null}
@@ -589,6 +595,7 @@
 </BottomSheet>
 
 <style>
+  .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   .view-head {
     display: flex;
     align-items: flex-start;

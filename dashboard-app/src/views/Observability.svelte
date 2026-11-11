@@ -27,6 +27,8 @@
       0, // fetch-once
     ),
   );
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
+  const refreshPage = () => Promise.all([store.refresh(), activity.refresh()]);
 
   function formatDateTime(dateStr: string | null): string {
     return fmtUtc(dateStr);
@@ -155,7 +157,10 @@
     <h1>Observability</h1>
     <p class="subtitle">How the event bus is doing, the causal traces, and drift in behaviour.</p>
   </div>
-  <StaleBadge state={$store} />
+  <div class="head-right">
+    <StaleBadge state={$store} />
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading || $activity.loading}>{$store.loading || $activity.loading ? 'Loading…' : 'Refresh'}</Button>
+  </div>
 </header>
 
 {#if $store.data}
@@ -344,9 +349,6 @@
 <section class="chart-card">
   <div class="section-head">
     <h2>Event timeline</h2>
-    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void activity.refresh()} disabled={$activity.loading}>
-      {$activity.loading ? 'Loading…' : 'Refresh'}
-    </Button>
   </div>
   {#if $activity.data}
     {@const d = $activity.data}
@@ -379,6 +381,7 @@
 <p class="moved">Model calls moved to <a href={routeHref('model-calls')}>Model calls</a></p>
 
 <style>
+  .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   .view-head {
     display: flex;
     align-items: flex-start;

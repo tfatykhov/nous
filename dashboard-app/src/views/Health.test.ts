@@ -148,7 +148,7 @@ describe('Memory health: Graph tab', () => {
     expect(new Set(texts).size).toBe(texts.length);
   });
 
-  it('moves Density\'s tables with their rows, and keeps both sources\' staleness badges', async () => {
+  it('moves Density\'s tables with their rows; "updated" is said once, in the header (finish review fix 8)', async () => {
     start('#/health/graph');
     const { container } = render(Health);
     const edges = (await screen.findByRole('heading', { level: 2, name: 'Edge distribution' })).closest('section') as HTMLElement;
@@ -157,7 +157,8 @@ describe('Memory health: Graph tab', () => {
     expect(within(backfill).getByText('2026-11-08')).toBeTruthy();
     const orphans = screen.getByRole('heading', { level: 2, name: 'Orphan breakdown by type' }).closest('section') as HTMLElement;
     expect(within(orphans).getByText('facts')).toBeTruthy();
-    expect(container.querySelectorAll('.stale-badge')).toHaveLength(2);
+    // The orphan banner had its own badge for the density source; the header's Refresh covers both sources.
+    expect(container.querySelectorAll('.stale-badge')).toHaveLength(1);
   });
 
   it('keeps Density\'s orphan rate by type, with the per-type totals and rates the breakdown does not show', async () => {
