@@ -106,6 +106,27 @@ describe('Observability: handler dots and the error trend read tokens', () => {
     expect(text(screen.getByText('sleep_handler').closest('.handler-row'))).toContain('20.0% err');
   });
 
+  it('a handler\'s error figure is in the error colour when that handler is above 10%, whatever the bus as a whole', async () => {
+    render(Observability);
+    await screen.findByText('fact_extractor');
+    const warned = (name: string) => screen.getByText(name).closest('.handler-row')!.querySelector('.handler-rate')!
+      .classList.contains('handler-rate--warn');
+    // The bus is at 3 errors in 70 (4.3%); the 20% handler's figure still says so in colour, like its dot.
+    expect(['fact_extractor', 'episode_summarizer', 'sleep_handler'].map(warned)).toEqual([false, false, true]);
+  });
+
+  it('a healthy handler\'s figure stays muted when the bus as a whole is above 10%', async () => {
+    obs = { ...OBS, event_bus: { ...OBS.event_bus, handlers: {
+      'nous.handlers.flaky.handle': handler(10, 5, 0.5),
+      'nous.handlers.steady.handle': handler(20, 0, 0),
+    } } };
+    render(Observability);
+    await screen.findByText('steady');
+    const rate = (name: string) => screen.getByText(name).closest('.handler-row')!.querySelector('.handler-rate')!;
+    expect(rate('steady').classList.contains('handler-rate--warn')).toBe(false); // the bus is at 5 in 30, 16.7%
+    expect(rate('flaky').classList.contains('handler-rate--warn')).toBe(true);
+  });
+
   it('dark: the error-trend line and fill are today\'s red', async () => {
     render(Observability);
     await waitFor(() => expect(configs).toHaveLength(1));

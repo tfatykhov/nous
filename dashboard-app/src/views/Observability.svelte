@@ -161,9 +161,6 @@
   {@const eb = d.event_bus}
   {@const handlers = eb.handlers ?? {}}
   {@const handlerNames = Object.keys(handlers)}
-  {@const totalInvoc = handlerNames.reduce((s, n) => s + (handlers[n].invocations ?? 0), 0)}
-  {@const totalErrors = handlerNames.reduce((s, n) => s + (handlers[n].errors ?? 0), 0)}
-  {@const overallErrRate = totalInvoc > 0 ? totalErrors / totalInvoc : 0}
 
   <!-- ── Section 1: Event Bus Health ── -->
   <StatGrid stats={[
@@ -191,7 +188,7 @@
               {#if h.last_invoked_ago_s != null}
                 <span class="handler-stat">{Math.round(h.last_invoked_ago_s)}s ago</span>
               {/if}
-              <span class="handler-rate" class:handler-rate--warn={overallErrRate > 0.1}>
+              <span class="handler-rate" class:handler-rate--warn={(h.error_rate ?? 0) > 0.1}>
                 {(h.error_rate * 100).toFixed(1)}% err
               </span>
             </span>
