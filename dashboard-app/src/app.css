@@ -288,7 +288,7 @@
     --pending: #1b6a9c;
     --fact-color: #159a7a;                     /* one colour per memory type on paper: the Graph's (--gv-*) */
     --episode-color: #1f5fa8;
-    --decision-color: #a8408f;
+    --decision-color: #802c66;
     --procedure-color: #d0620d;
     --censor-color: #985c50;
     --heartbeat-color: #4f5f6f;
@@ -310,7 +310,7 @@
     --series-13: #7a3f3f;
     --gv-fact: #159a7a;
     --gv-episode: #1f5fa8;
-    --gv-decision: #a8408f;
+    --gv-decision: #802c66;                    /* a plum of its own: #a8408f was 4.2 from episode under protanopia */
     --gv-procedure: #d0620d;
     --gv-chunk: #8b5cf6;                       /* not the olive: it merged with procedure under red-green colour blindness */
     --gv-other: #4f5f6f;

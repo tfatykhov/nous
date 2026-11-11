@@ -137,7 +137,7 @@ const SERIES: Record<string, [string, string]> = {
 const GV_NODES: Record<string, [string, string]> = {
   '--gv-fact': ['#34d399', '#159a7a'],
   '--gv-episode': ['#60a5fa', '#1f5fa8'],
-  '--gv-decision': ['#a78bfa', '#a8408f'],
+  '--gv-decision': ['#a78bfa', '#802c66'], // re-review: #a8408f was 4.2 from episode under protanopia
   '--gv-procedure': ['#fbbf24', '#d0620d'],
   '--gv-chunk': ['#06b6d4', '#8b5cf6'], // review I4: the olive merged with procedure under red-green colour blindness
 };
@@ -204,7 +204,7 @@ for (const [k, [dark]] of Object.entries(PR2)) NEW_DARK[k] = dark;
 const LEGACY_PAPER: Record<string, string> = {
   '--fact-color': '#159a7a', // review M6: one colour per memory type on paper, the Graph's
   '--episode-color': '#1f5fa8',
-  '--decision-color': '#a8408f',
+  '--decision-color': '#802c66',
   '--procedure-color': '#d0620d',
   '--censor-color': '#985c50',
   '--heartbeat-color': '#4f5f6f',
@@ -605,9 +605,8 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
   });
 
   it('graph node colours under red-green colour blindness: chunk at least 12 from every type, other pairs at least 8', () => {
-    // Review I4: the olive chunk and the orange procedure read as one colour under deuteranopia (3.4). The one pair
-    // left below 8 is episode and decision under protanopia (4.2): fixing it means moving --gv-decision, which the
-    // series ramp shares (recorded in the PR 2 report, not this PR's to change).
+    // Review I4: the olive chunk and the orange procedure read as one colour under deuteranopia (3.4). The re-review:
+    // episode and decision were 4.2 apart under protanopia; --gv-decision moved, so no pair is exempt.
     const nodes = Object.entries(GV_NODES).map(([k, [, p]]) => [k.replace('--gv-', ''), p] as const);
     for (const cvd of ['protan', 'deutan'] as const) {
       for (let i = 0; i < nodes.length; i++) {
@@ -615,7 +614,7 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
           const [a, b] = [nodes[i], nodes[j]];
           const d = okDistance(a[1], b[1], cvd);
           if (a[0] === 'chunk' || b[0] === 'chunk') expect(d, `${cvd}: ${a[0]} and ${b[0]}`).toBeGreaterThanOrEqual(12);
-          else if (!(cvd === 'protan' && a[0] === 'episode' && b[0] === 'decision')) expect(d, `${cvd}: ${a[0]} and ${b[0]}`).toBeGreaterThanOrEqual(8);
+          else expect(d, `${cvd}: ${a[0]} and ${b[0]}`).toBeGreaterThanOrEqual(8);
         }
       }
     }
