@@ -19,6 +19,7 @@ export const HEX_GUARDED: readonly string[] = [
   'lib/ui/card/card.svelte',
   'lib/ui/button/button.svelte',
   'lib/ui/badge/badge.svelte',
+  'views/work/Trace.svelte',
 ];
 
 const SRC = __dirname;

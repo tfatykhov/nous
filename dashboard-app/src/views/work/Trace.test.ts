@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/svelte';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import Trace from './Trace.svelte';
 import Work from '../Work.svelte';
 import { setLastListQuery } from '../../lib/work';
@@ -21,12 +23,13 @@ const turn = (id: string, n: number | null, over: Record<string, unknown> = {}) 
   frame_id: 'question', trigger: `Message ${n}`,
   memory: { decision: [], fact: [], procedure: [], episode: [] },
   critic: null, claim_check: null, reply: `Reply ${n}`, error: null, tool_call_count: 0,
+  frame_reason: 'pattern', critic_frame: null, had_error: false, input_tokens: 18200, model_call_count: 1,
   model_calls: [], calls: [], ...over,
 });
 const session = (over: Record<string, unknown> = {}) => ({
   session_id: 'sess/one', parent_session_id: null, kind: 'conversation', work_kind: 'interactive',
   title: 'Gap Scout status check', started_at: '2026-11-07T00:07:00+00:00', ended_at: '2026-11-07T00:31:00+00:00',
-  turns: 2, tool_calls: 3, errors: 1, ...over,
+  turns: 2, tool_calls: 3, errors: 1, gated: 0, ...over,
 });
 const trace = (turns: unknown[], over: Record<string, unknown> = {}) => ({
   enabled: true, session: session(), turns, next_after: null, ...over,
@@ -207,23 +210,216 @@ describe('Work trace', () => {
     expect(container.textContent).not.toContain('Claim check');
   });
 
-  it('critic line, heuristic disagreement, and a collapsed rationale', async () => {
+  it('critic pill with a collapsed Why under it', async () => {
     respond = () => ({ body: trace([
-      turn(T1, 1, { critic: { critic_frame: 'question', heuristic_frame: 'task', agreed: false, rationale: 'It asks, not orders.' } }),
-      turn(T2, 2, { critic: { critic_frame: 'task', heuristic_frame: 'task', agreed: true } }),
+      turn(T1, 1, { frame_id: 'question', frame_reason: 'critic', critic_frame: 'question',
+        critic: { critic_frame: 'question', heuristic_frame: 'task', agreed: false, rationale: 'It asks, not orders.' } }),
+      turn(T2, 2, { frame_id: 'task', critic_frame: 'task', critic: { critic_frame: 'task', heuristic_frame: 'task', agreed: true } }),
     ]) });
     const { container } = render(Trace, { sessionId: 'sess/one' });
     await screen.findByText('Reply 1');
     const arts = Array.from(container.querySelectorAll('article.turn')) as HTMLElement[];
-    expect(arts[0].textContent).toContain('Critic: question');
-    expect(arts[0].textContent).toContain('(heuristic said task)');
-    const det = arts[0].querySelector('details')!;
+    expect(arts[0].querySelector('.crit')!.textContent).toBe('Critic overrode it');
+    const det = arts[0].querySelector('.gutter details') as HTMLDetailsElement;
     expect(det.open).toBe(false);
+    expect(det.querySelector('summary')!.textContent).toBe('Why');
     expect(det.textContent).toContain('It asks, not orders.');
-    expect(arts[1].textContent).toContain('Critic: task');
-    expect(arts[1].textContent).not.toContain('heuristic said');
+    expect(arts[1].querySelector('.crit')!.textContent).toBe('Critic agreed');
     expect(arts[1].querySelector('details')).toBeNull();
     expect(arts[1].textContent).not.toContain('undefined');
+  });
+
+  it('critic pill: agreed, disagreed and kept the frame, overrode it; none without a model recommendation or a reason', async () => {
+    respond = () => ({ body: trace([
+      turn('a1', 1, { frame_id: 'question', critic_frame: 'question' }),
+      turn('a2', 2, { frame_id: 'question', critic_frame: 'task' }),
+      turn('a3', 3, { frame_id: 'decision', frame_reason: 'critic', critic_frame: 'decision' }),
+      turn('a4', 4, { frame_id: 'question', critic_frame: null }),
+      turn('a5', 5, { frame_id: 'question', critic_frame: 'unknown' }),
+      turn('a6', 6, { frame_id: 'question', frame_reason: null, critic_frame: 'task' }),
+    ]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 6');
+    const pills = Array.from(container.querySelectorAll('article.turn')).map((a) => a.querySelector('.crit'));
+    expect(pills.map((p) => p?.textContent ?? null)).toEqual([
+      'Critic agreed', 'Critic disagreed, kept question', 'Critic overrode it', null, null, null,
+    ]);
+    expect(pills[2]!.classList.contains('no')).toBe(true);
+    expect(pills[0]!.classList.contains('no')).toBe(false);
+    expect(pills[1]!.classList.contains('no')).toBe(false);
+    expect(container.textContent).not.toContain('passed it');
+  });
+
+  it('a critic rationale with no pill still shows, folded', async () => {
+    respond = () => ({ body: trace([turn(T1, 1, { critic_frame: null, critic: { heuristic_frame: 'question', rationale: 'Kept the heuristic.' } })]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 1');
+    expect(container.querySelector('.crit')).toBeNull();
+    const det = container.querySelector('.gutter details') as HTMLDetailsElement;
+    expect(det.open).toBe(false);
+    expect(det.textContent).toContain('Kept the heuristic.');
+  });
+
+  it('the frame column shows time, frame, chosen by, tokens in, seconds to reply and tool calls', async () => {
+    respond = () => ({ body: trace([turn(T1, 1, {
+      started_at: '2026-11-10T09:12:04+00:00', ended_at: '2026-11-10T09:12:11.800+00:00', tool_call_count: 3, frame_id: 'question',
+    })]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 1');
+    const g = container.querySelector('article.turn .gutter') as HTMLElement;
+    for (const s of ['09:12:04', 'question', 'chosen by pattern', '18.2K tokens in', '7.8 s to reply', '3 tool calls']) {
+      expect(g.textContent, s).toContain(s);
+    }
+    expect(g.querySelector('.frame')!.textContent).toBe('question');
+    expect((container.querySelector('article.turn') as HTMLElement).style.getPropertyValue('--fc')).toBe('var(--f-question)');
+  });
+
+  it('one tool call is singular in the frame column', async () => {
+    respond = () => ({ body: trace([turn(T1, 1, { tool_call_count: 1 })]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 1');
+    expect(container.querySelector('.gutter')!.textContent).toContain('1 tool call');
+    expect(container.querySelector('.gutter')!.textContent).not.toContain('1 tool calls');
+  });
+
+  it('a frame change between two turns is said in one sentence with its reason', async () => {
+    respond = () => ({ body: trace([
+      turn('c1', 1, { frame_id: 'question' }),
+      turn('c2', 2, { frame_id: 'task', frame_reason: 'referent' }),
+      turn('c3', 3, { frame_id: 'decision', frame_reason: 'critic', critic_frame: 'decision', critic: { heuristic_frame: 'task' } }),
+      turn('c4', 4, { frame_id: 'debug', frame_reason: 'pattern' }),
+    ]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 4');
+    const sentences = Array.from(container.querySelectorAll('.change')).map((c) => c.textContent?.replace(/\s+/g, ' ').trim());
+    expect(sentences).toEqual([
+      'Frame changed from question to task. Your short reply answered my offer.',
+      'Frame changed from task to decision. The critic chose decision over task.',
+      'Frame changed from decision to debug. A new topic.',
+    ]);
+    // Each sentence sits between the two turns it joins.
+    const c = container.querySelector('.change') as HTMLElement;
+    expect(c.previousElementSibling?.id).toBe('turn-c1');
+    expect(c.nextElementSibling?.id).toBe('turn-c2');
+    expect(c.style.getPropertyValue('--from')).toBe('var(--f-question)');
+    expect(c.style.getPropertyValue('--to')).toBe('var(--f-task)');
+  });
+
+  it('no sentence for a carried frame, an unchanged frame, or the first turn', async () => {
+    respond = () => ({ body: trace([
+      turn('d1', 1, { frame_id: 'question' }),
+      turn('d2', 2, { frame_id: 'question', frame_reason: 'pattern' }),
+      turn('d3', 3, { frame_id: 'task', frame_reason: 'carried' }),
+    ]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 3');
+    expect(container.querySelectorAll('.change')).toHaveLength(0);
+  });
+
+  it('Review Focus 4: no reason, no frame, no end, no tokens', async () => {
+    respond = () => ({ body: trace([turn(T1, 1, { frame_reason: null, frame_id: null, ended_at: null, input_tokens: null, critic_frame: 'task' })]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 1');
+    const g = container.querySelector('.gutter') as HTMLElement;
+    expect(g.textContent).toContain('No frame recorded');
+    expect(g.textContent).toContain('reason not recorded');
+    expect(g.textContent).toContain('— tokens in');
+    expect(g.textContent).toContain('— to reply');
+    expect(container.querySelector('.crit')).toBeNull();
+    expect((container.querySelector('article.turn') as HTMLElement).style.getPropertyValue('--fc')).toBe('var(--f-conversation)');
+    expect(container.textContent).not.toContain('undefined');
+    expect(container.textContent).not.toContain('null');
+  });
+
+  it('an older API without the new keys reads as not recorded', async () => {
+    const old = turn(T1, 1);
+    for (const k of ['frame_reason', 'critic_frame', 'had_error', 'input_tokens', 'model_call_count']) delete (old as Record<string, unknown>)[k];
+    const s = session();
+    delete (s as Record<string, unknown>).gated;
+    respond = () => ({ body: trace([old, turn(T2, 2, { frame_id: 'task' })], { session: s }) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 1');
+    const g = container.querySelector('.gutter') as HTMLElement;
+    expect(g.textContent).toContain('reason not recorded');
+    expect(g.textContent).toContain('— tokens in');
+    expect(container.querySelector('.crit')).toBeNull();
+    expect(container.querySelector('header')!.textContent).not.toContain('gated');
+    expect(container.textContent).not.toContain('undefined');
+    expect(container.textContent).not.toContain('NaN');
+  });
+
+  it('Review Focus 3: hostile ids and texts render as text; the layout contract is in the source', async () => {
+    const reason = 'r'.repeat(1000) + HOSTILE;
+    const frame = 'f'.repeat(30);
+    const result = JSON.stringify({ rows: 'x'.repeat(5000) });
+    respond = () => ({ body: trace([turn(T1, 1, { frame_id: frame, frame_reason: HOSTILE,
+      calls: [call(0, { reason, result })] })]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText(reason);
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.querySelector('.gutter .frame')!.textContent).toBe(frame);
+    expect(container.textContent).toContain(`chosen by ${HOSTILE}`);
+    expect(container.textContent).toContain(result);
+    const src = readFileSync(resolve(__dirname, 'Trace.svelte'), 'utf-8');
+    expect(src).not.toContain('{@html');
+    expect(src).toMatch(/\.rows \{[^}]*min-width: 0/);
+    expect(src.match(/overflow-wrap: anywhere/g)!.length).toBeGreaterThanOrEqual(4);
+    expect(src).toMatch(/\.gutter[^{]*\{[^}]*overflow-wrap: anywhere/);
+    expect(src).toMatch(/@media \(max-width: 640px\) \{[^@]*\.turn \{ grid-template-columns: minmax\(0, 1fr\)/);
+    expect(src).toMatch(/@media \(max-width: 640px\) \{[^@]*\.gutter \{[^}]*flex-wrap: wrap/);
+    expect(src).toMatch(/color-mix\(in srgb, var\(--fc\) 7%, transparent\)/);
+  });
+
+  it('header pills: gated only when there is one, the error count keeps its tint', async () => {
+    respond = () => ({ body: trace([turn(T1, 1)], { session: session({ gated: 1 }) }) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 1');
+    const head = container.querySelector('header')!;
+    const gated = within(head as HTMLElement).getByText('1 gated');
+    expect(gated.classList.contains('warn')).toBe(true);
+    expect(within(head as HTMLElement).getByText('1 error').classList.contains('bad')).toBe(true);
+    cleanup();
+    respond = () => ({ body: trace([turn(T1, 1)]) });
+    const r2 = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 1');
+    expect(r2.container.querySelector('header')!.textContent).not.toContain('gated');
+  });
+
+  it('replay: one step per loaded turn; moving it marks that turn, a gutter click moves it', async () => {
+    const scroll = vi.fn();
+    Element.prototype.scrollIntoView = scroll;
+    respond = () => ({ body: trace([
+      turn('e1', 1, { started_at: '2026-11-10T09:12:04+00:00' }),
+      turn('e2', 2, { started_at: '2026-11-10T09:14:36+00:00' }),
+      turn('e3', 3, { started_at: '2026-11-10T09:21:10+00:00' }),
+    ]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 3');
+    const range = screen.getByRole('slider', { name: 'Replay turn' }) as HTMLInputElement;
+    expect(range.min).toBe('0');
+    expect(range.max).toBe('2');
+    expect(range.step).toBe('1');
+    expect(scroll).not.toHaveBeenCalled();
+    await fireEvent.input(range, { target: { value: '1' } });
+    const arts = Array.from(container.querySelectorAll('article.turn'));
+    expect(arts.map((a) => a.classList.contains('hl'))).toEqual([false, true, false]);
+    expect(container.querySelector('output')!.textContent).toContain('09:14:36');
+    expect(scroll).toHaveBeenCalledTimes(1);
+    expect(scroll.mock.instances[0]).toBe(arts[1]);
+    await fireEvent.click(arts[2].querySelector('.gutter')!);
+    expect(range.value).toBe('2');
+    expect(arts.map((a) => a.classList.contains('hl'))).toEqual([false, false, true]);
+    expect(container.querySelector('output')!.textContent).toContain('09:21:10');
+  });
+
+  it('the frame key lists only the frames of the loaded turns', async () => {
+    respond = () => ({ body: trace([
+      turn('k1', 1, { frame_id: 'task' }), turn('k2', 2, { frame_id: 'question' }), turn('k3', 3, { frame_id: 'task' }), turn('k4', 4, { frame_id: null }),
+    ]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 4');
+    const key = container.querySelector('.key')!;
+    expect(Array.from(key.querySelectorAll('li')).map((l) => l.textContent?.trim())).toEqual(['task', 'question']);
   });
 
   it('unknown ledger status shows the undo statements; success does not; a ref shows the status pill', async () => {
@@ -270,15 +466,20 @@ describe('Work trace', () => {
     expect(container.querySelectorAll('article.turn')).toHaveLength(3);
   });
 
-  it('the rail has one coloured segment per step, in order', async () => {
+  it('the lane is a plain word in the step; a failed call tints its row', async () => {
     respond = () => ({ body: trace([turn(T1, 1, { calls: [
-      call(0, { lane: 'memory' }), call(1, { lane: 'live' }), call(2, { lane: 'acts' }),
+      call(0, { lane: 'memory' }), call(1, { lane: 'live', is_error: true, outcome: 'error', error: 'boom' }), call(2, { lane: 'nonsense' }),
     ] })]) });
     const { container } = render(Trace, { sessionId: 'sess/one' });
     await screen.findByText('Reason 0', { selector: '.step *' });
-    const segs = Array.from(container.querySelectorAll('.rail .seg')) as HTMLElement[];
-    expect(segs).toHaveLength(3);
-    expect(segs.map((s) => s.style.backgroundColor)).toEqual(['rgb(96, 165, 250)', 'rgb(251, 191, 36)', 'rgb(244, 114, 182)']);
+    const steps = Array.from(container.querySelectorAll('.step')) as HTMLElement[];
+    expect(steps.map((s) => s.querySelector('.lane')!.textContent)).toEqual(['Memory', 'Live state', 'Other']);
+    expect(steps.map((s) => s.querySelector('.lane')!.getAttribute('style'))).toEqual([null, null, null]);
+    expect(steps.map((s) => s.classList.contains('err'))).toEqual([false, true, false]);
+    expect(container.querySelector('.rail')).toBeNull();
+    // The "What it used" dot carries the lane's token.
+    const dot = container.querySelector('section.used .dot') as HTMLElement;
+    expect(dot.style.getPropertyValue('--dot')).toBe('var(--lane-memory)');
   });
 
   it('a turn without a turn row is labelled and still lists its calls; repeated turn numbers both render', async () => {
