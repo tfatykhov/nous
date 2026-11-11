@@ -160,6 +160,15 @@ describe('tiles, cards, tables and the timeline take the paper shape through tok
   });
 });
 
+describe('dimmed content keeps its contrast on paper (source contract, review M1)', () => {
+  it('a settled decision dims by --settled-opacity and its title takes --settled-ink; a refreshing section dims by --dim-opacity', () => {
+    const card = style('DecisionCardView');
+    expect(card.split('.card.settled {')[1].split('}')[0]).toContain('opacity: var(--settled-opacity)');
+    expect(card).toMatch(/\.card\.settled \.desc \{[^}]*color: var\(--settled-ink\)/);
+    expect(style('SectionView').split('.app-section.dim {')[1].split('}')[0]).toContain('opacity: var(--dim-opacity)');
+  });
+});
+
 describe('every control is a 44px tap target on paper through --tap-min (source contract, review I5)', () => {
   it.each([
     ['ButtonView', '.btn'],

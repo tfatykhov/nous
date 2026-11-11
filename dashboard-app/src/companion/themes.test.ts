@@ -379,6 +379,9 @@ function newLegacy(id: string): Record<string, string> {
     '--callout-pad': '0.9rem 1rem',
     '--tl-flag-rule': o['--warn'],
     '--tap-min': 'auto',
+    '--settled-opacity': '0.65',
+    '--dim-opacity': '0.72',
+    '--settled-ink': o['--text'],
     '--graph-edge': o['--border'],
     '--graph-edge-opacity': '1',
     '--line-width': '1.5',
@@ -515,6 +518,9 @@ const PAPER_ROOT: Record<string, string> = {
   '--callout-pad': '0',
   '--tl-flag-rule': '#e3e9ec',
   '--tap-min': '44px',
+  '--settled-opacity': '1',
+  '--dim-opacity': '1',
+  '--settled-ink': '#56687a',
   '--chart-axis': '#56687a',
   '--chart-grid': '#e3e9ec',
   ...PAPER_FRAMES,
@@ -805,6 +811,20 @@ describe('contrast per theme (WCAG: text 4.5, marks 3)', () => {
     const t = SHEET.resolved('nous-default');
     expect(contrast(t['--chip-selected-bg'], t['--surface-hover'])).toBeGreaterThanOrEqual(3);
     expect(contrast(t['--chip-selected-ink'], t['--chip-selected-bg'])).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('paper: a settled decision and a dimmed section keep their text at 4.5:1 (review M1)', () => {
+    const t = SHEET.resolved('nous-default');
+    const at = (hex: string, alpha: string, ground: string) => {
+      const [r, g, b] = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+      return contrast(over(`rgba(${r}, ${g}, ${b}, ${alpha})`, ground), ground);
+    };
+    // a settled card: its muted badges and id, and its title in --settled-ink, on a nested tile
+    for (const ink of ['--muted', '--settled-ink', '--ok', '--crit', '--warn']) {
+      expect(at(t[ink], t['--settled-opacity'], t['--nested-bg']), ink).toBeGreaterThanOrEqual(4.5);
+    }
+    // a dimmed section's muted text on the card
+    expect(at(t['--muted'], t['--dim-opacity'], t['--surface'])).toBeGreaterThanOrEqual(4.5);
   });
 
   it('every recorded shortfall names a pair the matrix measures', () => {

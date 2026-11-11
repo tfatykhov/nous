@@ -101,7 +101,7 @@
     padding: 0.6rem 0 0.2rem;
   }
   .app-section.dim {
-    opacity: 0.72;
+    opacity: var(--dim-opacity);
     transition: opacity var(--transition);
   }
   .app-section.model {

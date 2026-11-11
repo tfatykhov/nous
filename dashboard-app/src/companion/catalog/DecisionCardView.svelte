@@ -74,8 +74,11 @@
     min-width: 0;
   }
   .card.settled {
-    opacity: 0.65;
+    opacity: var(--settled-opacity);
     border-left-color: var(--border);
+  }
+  .card.settled .desc {
+    color: var(--settled-ink);
   }
   .desc {
     margin: 0 0 0.4rem;
