@@ -1599,6 +1599,266 @@ async def test_trace_unrenderable_payload_is_the_plain_500(client, monkeypatch, 
 
 
 # ---------------------------------------------------------------------------------------------------------------------
+# GET /dashboard/work/today
+# ---------------------------------------------------------------------------------------------------------------------
+
+TODAY = "/dashboard/work/today"
+# A fixed "now" for the tests that call get_today directly: the day is 2026-11-10 (UTC), so no test depends on the
+# wall clock or on the time of day it runs at.
+NOW = datetime(2026, 11, 10, 12, 0, 0, tzinfo=UTC)
+DAY_START = datetime(2026, 11, 10, tzinfo=UTC)
+ZERO_TOTALS = {
+    "owner_turns": 0,
+    "background_turns": 0,
+    "tool_calls": 0,
+    "errors": 0,
+    "gated": 0,
+    "median_seconds": None,
+    "model_calls": None,
+    "input_tokens": None,
+    "cache_read_tokens": None,
+}
+
+
+async def get_today(db, agent_id: str, *, now: datetime = NOW, model: bool = False) -> dict:
+    async with db.session() as session:
+        return await wv.get_today(session, agent_id, now=now, model_calls_enabled=model)
+
+
+def _today_ids(body: dict) -> list[str]:
+    return [t["id"] for t in body["turns"]]
+
+
+def test_disabled_today_has_the_page_keys_and_nothing_in_them():
+    assert wv.disabled_today(NOW) == {
+        "enabled": False,
+        "day": "2026-11-10",
+        "now": NOW.isoformat(),
+        "turns": [],
+        "truncated": False,
+        "totals": ZERO_TOTALS,
+    }
+
+
+@pytest.mark.postgres_only
+async def test_today_lists_only_todays_turns_oldest_first(db, agent_id, cleanup):
+    await insert_turn(db, agent_id, "sess-Y", started_at=NOW - timedelta(days=1))  # yesterday (UTC)
+    late = await insert_turn(
+        db,
+        agent_id,
+        "sess-T2",
+        started_at=DAY_START + timedelta(hours=9),
+        ended_at=DAY_START + timedelta(hours=9, seconds=7),
+        work_kind="heartbeat",
+        frame_id="task",
+        tool_call_count=None,  # no count: the calls listed
+    )
+    await insert_call(db, agent_id, late, 0, session_id="sess-T2", started_at=DAY_START + timedelta(hours=9))
+    await insert_call(db, agent_id, late, 1, session_id="sess-T2", started_at=DAY_START + timedelta(hours=9))
+    early = await insert_turn(
+        db, agent_id, "sess-T1", started_at=DAY_START + timedelta(seconds=1), frame_id="question", tool_call_count=3
+    )
+    await insert_turn(db, agent_id, "sess-F", started_at=NOW + timedelta(minutes=1))  # after now
+
+    body = await get_today(db, agent_id)
+    assert (body["enabled"], body["day"], body["now"], body["truncated"]) == (
+        True,
+        "2026-11-10",
+        NOW.isoformat(),
+        False,
+    )
+    assert _today_ids(body) == [str(early), str(late)]
+    assert body["turns"][0] == {
+        "id": str(early),
+        "session_id": "sess-T1",
+        "started_at": (DAY_START + timedelta(seconds=1)).isoformat(),
+        "ended_at": None,
+        "work_kind": "conversation",
+        "frame_id": "question",
+        "error": False,
+        "gated": False,
+        "tool_calls": 3,
+    }
+    second = body["turns"][1]
+    assert (second["work_kind"], second["frame_id"], second["tool_calls"]) == ("heartbeat", "task", 2)
+    assert second["ended_at"] == (DAY_START + timedelta(hours=9, seconds=7)).isoformat()
+    assert body["totals"]["tool_calls"] == 5
+
+
+@pytest.mark.postgres_only
+async def test_today_flags_error_and_gated_separately(db, agent_id, cleanup):
+    at = DAY_START + timedelta(hours=1)
+    turns = {}
+    for i, name in enumerate(("failed_call", "had_error", "error_text", "gated", "both", "clean")):
+        turns[name] = await insert_turn(
+            db,
+            agent_id,
+            f"sess-{name}",
+            started_at=at + timedelta(minutes=i),
+            had_error=True if name == "had_error" else None,
+            error="boom" if name == "error_text" else None,
+        )
+    await insert_call(
+        db, agent_id, turns["failed_call"], 0, session_id="sess-failed_call", is_error=True, outcome="error"
+    )
+    await insert_call(db, agent_id, turns["gated"], 0, session_id="sess-gated", outcome="gated")
+    await insert_call(db, agent_id, turns["gated"], 1, session_id="sess-gated", outcome="ran")
+    await insert_call(db, agent_id, turns["both"], 0, session_id="sess-both", is_error=True, outcome="error")
+    await insert_call(db, agent_id, turns["both"], 1, session_id="sess-both", outcome="gated")
+    await insert_call(db, agent_id, turns["clean"], 0, session_id="sess-clean", outcome="ran")
+    other = _agent()
+    try:
+        # Another agent's failed and gated calls under my clean turn's id are not mine.
+        await insert_call(db, other, turns["clean"], 1, session_id="sess-clean", is_error=True, outcome="gated")
+        body = await get_today(db, agent_id)
+    finally:
+        await delete_agent_rows(db, other)
+
+    flags = {t["id"]: (t["error"], t["gated"]) for t in body["turns"]}
+    assert flags == {
+        str(turns["failed_call"]): (True, False),
+        str(turns["had_error"]): (True, False),
+        str(turns["error_text"]): (True, False),
+        str(turns["gated"]): (False, True),
+        str(turns["both"]): (True, True),  # the UI shows the red one
+        str(turns["clean"]): (False, False),
+    }
+    # The totals count turns, as the flags do: four with an error, two gated.
+    assert (body["totals"]["errors"], body["totals"]["gated"]) == (4, 2)
+
+
+@pytest.mark.postgres_only
+async def test_today_totals_cover_the_whole_day_even_when_the_list_is_capped(db, agent_id, cleanup, monkeypatch):
+    ids = [
+        await insert_turn(
+            db,
+            agent_id,
+            f"sess-C{i}",
+            started_at=DAY_START + timedelta(hours=i),
+            work_kind="conversation" if i % 2 else "heartbeat",
+            tool_call_count=1,
+        )
+        for i in range(8)
+    ]
+    monkeypatch.setattr(wv, "TODAY_TURNS_MAX", 5)
+    body = await get_today(db, agent_id)
+    assert body["truncated"] is True
+    # A cut drops the morning: the latest 5, oldest first.
+    assert _today_ids(body) == [str(i) for i in ids[3:]]
+    totals = body["totals"]
+    assert totals["owner_turns"] + totals["background_turns"] == 8
+    assert (totals["owner_turns"], totals["background_turns"], totals["tool_calls"]) == (4, 4, 8)
+
+    monkeypatch.setattr(wv, "TODAY_TURNS_MAX", 8)
+    body = await get_today(db, agent_id)
+    assert body["truncated"] is False and _today_ids(body) == [str(i) for i in ids]
+
+
+@pytest.mark.postgres_only
+async def test_today_owner_vs_background_split(db, agent_id, cleanup):
+    kinds = ["conversation", "conversation", "heartbeat", "background_check", "subtask", "workflow_step", "intention"]
+    kinds.append("some_new_kind")  # any other kind is background
+    for i, kind in enumerate(kinds):
+        await insert_turn(db, agent_id, f"sess-K{i}", started_at=DAY_START + timedelta(minutes=i), work_kind=kind)
+    totals = (await get_today(db, agent_id))["totals"]
+    assert (totals["owner_turns"], totals["background_turns"]) == (2, 6)
+
+
+@pytest.mark.postgres_only
+async def test_today_median_seconds(db, agent_id, cleanup):
+    start = DAY_START + timedelta(hours=2)
+    await insert_turn(db, agent_id, "sess-open", started_at=start)  # still running: no end, not counted
+    assert (await get_today(db, agent_id))["totals"]["median_seconds"] is None
+    for i, seconds in enumerate((2, 10, 4)):
+        at = start + timedelta(minutes=i + 1)
+        await insert_turn(db, agent_id, f"sess-M{i}", started_at=at, ended_at=at + timedelta(seconds=seconds))
+    assert (await get_today(db, agent_id))["totals"]["median_seconds"] == 4.0
+
+
+@pytest.mark.postgres_only
+async def test_today_model_figures_follow_the_model_log_flag(db, agent_id, cleanup):
+    on = (await get_today(db, agent_id, model=True))["totals"]
+    assert (on["model_calls"], on["input_tokens"], on["cache_read_tokens"]) == (None, None, None)  # no rows yet
+
+    at = DAY_START + timedelta(hours=3)
+    await insert_model_call(db, agent_id, started_at=at)  # 100 uncached + 50 read
+    # A minute bucket of 5 calls counts 5.
+    await insert_model_call(
+        db, agent_id, started_at=at, call_kind="aggregated", call_count=5, input_uncached=10, cache_read=20
+    )
+    # No usage: one call, no tokens.
+    await insert_model_call(db, agent_id, started_at=at, status="error", input_uncached=None, cache_read=None)
+    await insert_model_call(db, agent_id, started_at=NOW - timedelta(days=1))  # yesterday
+    other = _agent()
+    try:
+        await insert_model_call(db, other, started_at=at)
+        on = (await get_today(db, agent_id, model=True))["totals"]
+        off = (await get_today(db, agent_id, model=False))["totals"]
+    finally:
+        await delete_agent_rows(db, other)
+    assert (on["model_calls"], on["input_tokens"], on["cache_read_tokens"]) == (7, 180, 70)
+    assert (off["model_calls"], off["input_tokens"], off["cache_read_tokens"]) == (None, None, None)
+
+
+@pytest.mark.postgres_only
+async def test_today_is_agent_scoped_and_flag_off_is_empty(db, agent_id, cleanup, monkeypatch):
+    mine = await insert_turn(db, agent_id, "sess-mine", started_at=DAY_START + timedelta(hours=1))
+    other = _agent()
+    try:
+        await insert_turn(db, other, "sess-theirs", started_at=DAY_START + timedelta(hours=1))
+        body = await get_today(db, agent_id)
+    finally:
+        await delete_agent_rows(db, other)
+    assert _today_ids(body) == [str(mine)]
+    assert body["totals"]["owner_turns"] + body["totals"]["background_turns"] == 1
+
+    opened = 0
+    real_session = db.session
+
+    def counting_session(*args, **kwargs):
+        nonlocal opened
+        opened += 1
+        return real_session(*args, **kwargs)
+
+    monkeypatch.setattr(db, "session", counting_session)
+    off = make_app(db, _settings(agent_id, tool_call_log_enabled=False, model_call_log_enabled=True))
+    async with AsyncClient(transport=ASGITransport(app=off), base_url="http://test") as c:
+        body = await get_json(c, TODAY)
+    assert opened == 0
+    assert (body["enabled"], body["turns"], body["truncated"], body["totals"]) == (False, [], False, ZERO_TOTALS)
+    assert body["day"] == datetime.fromisoformat(body["now"]).date().isoformat()
+
+
+@pytest.mark.postgres_only
+async def test_today_http_returns_this_days_turns(client, db, agent_id, cleanup):
+    started = datetime.now(UTC)
+    turn = await insert_turn(db, agent_id, "sess-http", started_at=started)
+    body = await get_json(client, TODAY)
+    if body["day"] != started.date().isoformat():
+        pytest.skip("the UTC day changed between the insert and the request")
+    assert body["enabled"] is True and _today_ids(body) == [str(turn)]
+    assert datetime.fromisoformat(body["now"]) >= started
+
+
+@pytest.mark.postgres_only
+async def test_today_runs_under_a_10s_statement_timeout(db, agent_id):
+    async with db.session() as session:
+        await wv.get_today(session, agent_id, now=NOW, model_calls_enabled=True)
+        assert (await session.execute(text("SHOW statement_timeout"))).scalar_one() == "10s"
+
+
+@pytest.mark.postgres_only
+async def test_today_query_failure_is_a_plain_500(client, monkeypatch, caplog):
+    async def boom(*args, **kwargs):
+        raise RuntimeError("secret detail from the database")
+
+    monkeypatch.setattr(wv, "get_today", boom)
+    resp = await client.get(TODAY)
+    assert resp.status_code == 500 and resp.json() == {"error": "work view query failed"}
+    assert any(r.levelname == "WARNING" and r.exc_info for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 # GET /dashboard/work/patterns
 # ---------------------------------------------------------------------------------------------------------------------
 

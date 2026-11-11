@@ -2327,6 +2327,27 @@ def create_app(
             logger.warning("dashboard_work_trace: the work view query failed", exc_info=True)
             return JSONResponse({"error": "work view query failed"}, status_code=500)
 
+    async def dashboard_work_today(request: Request) -> JSONResponse:
+        """GET /dashboard/work/today — the turns of the current UTC day up to now, one compact row each (oldest
+        first, at most the latest 3,000) and the whole day's totals, for the Overview's timeline. Read-only. With
+        the tool-call log off: 200 {"enabled": false} and no session."""
+        from datetime import UTC, datetime
+
+        from nous.api import work_view_dashboard as wv
+
+        now = datetime.now(UTC)
+        if not settings.tool_call_log_enabled:
+            return JSONResponse(wv.disabled_today(now))
+        try:
+            async with database.session() as session:
+                data = await wv.get_today(
+                    session, settings.agent_id, now=now, model_calls_enabled=settings.model_call_log_enabled
+                )
+            return JSONResponse(data)
+        except Exception:
+            logger.warning("dashboard_work_today: the work view query failed", exc_info=True)
+            return JSONResponse({"error": "work view query failed"}, status_code=500)
+
     async def dashboard_work_patterns(request: Request) -> JSONResponse:
         """GET /dashboard/work/patterns — F108: tool use over the last ``days`` days (default 7): the most used tools
         by kind of work with their common reasons, the tools that fail most, and the wasted steps. Read-only. With
@@ -3978,6 +3999,7 @@ def create_app(
         Route("/dashboard/work/sessions", dashboard_work_sessions),
         Route("/dashboard/work/sessions/{session_id}", dashboard_work_trace),
         Route("/dashboard/work/patterns", dashboard_work_patterns),
+        Route("/dashboard/work/today", dashboard_work_today),
         Route("/dashboard/work/calls/{call_id}/result", dashboard_work_call_result),
         Route("/dashboard/model-calls", dashboard_model_calls),
         Route("/dashboard/model-calls/{call_id}", dashboard_model_call),
