@@ -56,6 +56,8 @@ const REJECTED: unknown[] = [
   // /a2ui/x.mp4, raw or percent-encoded.
   '/dashboard/v2/..\\..\\a2ui\\x.mp4',
   '/dashboard/v2/a%5C..%5C..%5Cx.mp4',
+  // An empty path segment.
+  '/dashboard/v2/trip//a.mp4',
 ];
 
 describe('classifyVideoUrl', () => {
@@ -64,6 +66,13 @@ describe('classifyVideoUrl', () => {
     expect(classifyVideoUrl('/dashboard/v2/trip/a.webm?x=1')).toEqual({
       kind: 'video',
       src: '/dashboard/v2/trip/a.webm?x=1',
+    });
+  });
+
+  it('a `//` inside the query does not reject an overlay file', () => {
+    expect(classifyVideoUrl('/dashboard/v2/trip/a.mp4?u=http://x')).toEqual({
+      kind: 'video',
+      src: '/dashboard/v2/trip/a.mp4?u=http://x',
     });
   });
 

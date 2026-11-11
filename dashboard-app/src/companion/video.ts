@@ -5,8 +5,8 @@
 // the only place it can be checked. VideoView only renders the verdict.
 //
 // Accepted (anything else is `none`):
-//   - overlay file: root-relative /dashboard/v2/<path>.mp4|.webm, no `//`,
-//     no `\`, no `.`/`..` segment (plain or percent-encoded);
+//   - overlay file: root-relative /dashboard/v2/<path>.mp4|.webm, no `//` in
+//     the path, no `\`, no `.`/`..` segment (plain or percent-encoded);
 //   - direct file: https:, no userinfo, path ending .mp4|.webm, any host;
 //   - YouTube watch?v= / shorts / youtu.be and Vimeo /<digits> links, whose
 //     embed src is built from constants plus the matched id — no other part
@@ -42,8 +42,9 @@ function cleaned(raw: unknown): string | null {
 
 /** The path (query/fragment removed) of a safe overlay url, else null. */
 function overlayPath(s: string): string | null {
-  if (!s.startsWith(OVERLAY_PREFIX) || s.includes('//') || s.includes('\\')) return null;
+  if (!s.startsWith(OVERLAY_PREFIX) || s.includes('\\')) return null;
   const path = s.split(/[?#]/, 1)[0];
+  if (path.includes('//')) return null;
   for (const segment of path.split('/')) {
     let decoded: string;
     try {
