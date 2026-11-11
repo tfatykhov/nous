@@ -268,7 +268,7 @@ describe('Scoring at phone width (the screenshot round)', () => {
     expect(heights).toEqual(['300px', '200px', '300px', '300px']); // radar, doughnut, trend, weight evolution
   });
 
-  it('the signal trend labels its days month-day (as Decisions does), so a phone does not tilt them over the plot', async () => {
+  it('the signal trend labels its days month-day (as Decisions does)', async () => {
     render(Rubric);
     await waitFor(() => expect(configs).toHaveLength(4));
     expect(chart('line', 'Completed').data.labels).toEqual(['11-01']);
