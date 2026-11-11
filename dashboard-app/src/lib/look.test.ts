@@ -162,6 +162,15 @@ describe('groundFor', () => {
     for (const r of ROUTES) expect(['paper', 'dark']).toContain(groundFor(r));
     expect(ROUTES.filter((r) => groundFor(r) === 'paper')).toEqual(['overview', 'graph', 'browser', 'health', 'retrieval', 'consolidation', 'work', 'model-calls', 'dag', 'subtasks', 'heartbeat', 'decisions', 'rubric', 'autonomy', 'intentions', 'harness', 'observability', 'identity']);
   });
+
+  // After PR 5 the redesign has converted every screen: no route is left on the dark ground under the paper look.
+  it('every route in the router\'s list is a paper route, and PAPER_ROUTES holds nothing else (all 18, once each)', () => {
+    expect(ROUTES).toHaveLength(18);
+    expect(new Set(PAPER_ROUTES).size, 'no route listed twice').toBe(PAPER_ROUTES.length);
+    expect(ROUTES.filter((r) => !PAPER_ROUTES.includes(r)), 'routes still dark').toEqual([]);
+    expect(PAPER_ROUTES.filter((r) => !(ROUTES as readonly string[]).includes(r)), 'not a route').toEqual([]);
+    expect(PAPER_ROUTES).toHaveLength(18);
+  });
 });
 
 function sources(dir: string): string[] {
