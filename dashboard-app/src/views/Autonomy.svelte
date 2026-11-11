@@ -191,7 +191,7 @@
           </div>
         {/each}
       </div>
-      <div class="table-wrap">
+      <div class="table-wrap table-scroll">
       <table class="stats nums">
         <caption class="label">Scores (−1 to 1) · settled: {settledSpan(ts.settled_window)}</caption>
         <thead><tr><th scope="col"></th><th scope="col">Count</th><th scope="col">Mean</th><th scope="col">p10</th><th scope="col">p50</th><th scope="col">p90</th><th scope="col">Overrides</th></tr></thead>
@@ -213,7 +213,7 @@
       <h2 id="rollups-title">DAG runs and intentions</h2>
       <span class="small muted">Counted apart: never added into a subtask's score</span>
     </div>
-    <div class="table-wrap">
+    <div class="table-wrap table-scroll">
       <table class="stats nums">
         <thead>
           <tr>
@@ -267,7 +267,7 @@
         {#if d.decision_grades.length === 0}
           <p class="empty">No decisions graded in this window.</p>
         {:else}
-          <div class="table-wrap">
+          <div class="table-wrap table-scroll">
           <table class="stats">
             <thead><tr><th scope="col">Reviewer</th><th scope="col">Outcome</th><th scope="col">Count</th></tr></thead>
             <tbody>
@@ -328,6 +328,7 @@
         {/snippet}
       </DataTable>
     {/if}
+    <div class="table-scroll">
     <table class="stats censors nums">
       <caption class="label">Censors, last {d.inventory.censors.days} d</caption>
       <thead><tr><th scope="col">Written by</th><th scope="col">Created</th><th scope="col">Deactivated</th></tr></thead>
@@ -337,6 +338,7 @@
         {/each}
       </tbody>
     </table>
+    </div>
   </section>
 
   <section class="panel" aria-labelledby="fix-title">
@@ -433,7 +435,7 @@
     {:else if g.schedules.length === 0 && !g.other}
       <p class="small muted">No schedule has a guard.</p>
     {:else}
-      <div class="table-wrap">
+      <div class="table-wrap table-scroll">
         <table class="stats guards">
           <thead><tr><th scope="col">Job</th><th scope="col">Guard</th><th scope="col">Mode</th><th scope="col">Runs</th><th scope="col">Skipped</th><th scope="col">Would skip</th><th scope="col">Shadow misses</th></tr></thead>
           <tbody>
@@ -466,7 +468,7 @@
       </div>
     {/if}
     {#if g.checks.length > 0}
-      <div class="table-wrap">
+      <div class="table-wrap table-scroll">
         <table class="stats guards" data-testid="guard-checks">
           <thead><tr><th scope="col">Heartbeat check</th><th scope="col">Guard</th><th scope="col">Mode</th><th scope="col">Runs</th><th scope="col">Skipped</th><th scope="col">Would skip</th><th scope="col">Shadow misses</th></tr></thead>
           <tbody>
@@ -515,7 +517,7 @@
       {/if}
     {/snippet}
     {#snippet guardRecords(rows: GuardRecord[], caption?: string)}
-      <div class="table-wrap">
+      <div class="table-wrap table-scroll">
         <!-- Command output and job text: plain text interpolation only, never {@html}. -->
         <table class="stats guards">
           {#if caption}<caption class="label">{caption}</caption>{/if}
@@ -551,7 +553,7 @@
     {:else if d.warn_classes.length === 0}
       <p class="empty">Nothing flagged in this window.</p>
     {:else}
-      <div class="table-wrap">
+      <div class="table-wrap table-scroll">
       <DataTable columns={warnCols} rows={d.warn_classes}
         rowKey={(r: AutonomyData['warn_classes'][number]) => JSON.stringify([r.mode, r.context_kind, r.violation, r.tool_name])}>
         {#snippet cell(r: AutonomyData['warn_classes'][number], c: { key: string })}

@@ -928,6 +928,7 @@
           Legs are recorded on every retrieval, sampled or not. Select one on the
           left to see its candidates and graph expansion.
         </p>
+        <div class="table-scroll">
         <table class="data-table compact">
           <thead>
             <tr>
@@ -965,6 +966,7 @@
             {/each}
           </tbody>
         </table>
+        </div>
       {:else}
         <div class="detail-head">
           <h2>Retrieval {shortId(selectedId)}</h2>
@@ -1008,6 +1010,7 @@
 
           <!-- Legs -->
           <h3 class="phase-head">Legs</h3>
+          <div class="table-scroll">
           <table class="data-table compact">
             <thead>
               <tr><th>Leg</th><th class="num">Returned</th><th class="num">Corroborated</th><th class="num">Dropped</th><th>State</th></tr>
@@ -1051,6 +1054,7 @@
               {/each}
             </tbody>
           </table>
+          </div>
 
           <!-- Graph expansion -->
           <h3 class="phase-head">Graph expansion</h3>
@@ -1187,6 +1191,7 @@
                   <span class="count">{items.length}</span>
                   <span class="help">{DISPOSITION_HELP[disp] ?? ''}</span>
                 </span></summary>
+                <div class="table-scroll">
                 <table class="data-table compact">
                   <thead>
                     <tr>
@@ -1221,6 +1226,7 @@
                     {/each}
                   </tbody>
                 </table>
+                </div>
               </details>
             {/each}
           {/if}

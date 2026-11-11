@@ -297,6 +297,20 @@
     margin: 0.25rem 0;
   }
 
+  /* A wide table on a narrow screen (finish review fix 5): it scrolls in its own box, its first column stays put, and
+     the right edge fades while there is more to see (a cover attached to the content hides the fade at the end). */
+  .table-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    background: linear-gradient(to left, var(--surface) 40%, transparent) right center / 2.5rem 100% no-repeat local, linear-gradient(to left, color-mix(in srgb, var(--text) 16%, transparent), transparent) right center / 1rem 100% no-repeat scroll;
+  }
+  .table-scroll :is(th, td):first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: var(--surface);
+  }
+
   /* One status pill for every status on every screen (finish review fix 2): a tint and its text, no outline. The
      Badge component's ok / warn / error / info / neutral variants draw the same pill (same metrics, same tokens). */
   .status-pill {

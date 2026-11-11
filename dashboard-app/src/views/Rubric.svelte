@@ -617,10 +617,15 @@
     }
   }
 
+  /* Two up at every width; the odd seventh card takes the row (three up left it alone; finish review fix 5). */
   .dim-cards {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 0.75rem;
+  }
+
+  .dim-card:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
   }
 
   .dim-card {
@@ -656,9 +661,7 @@
   }
 
   /* ── Correlation heatmap table ───────────────────────────────── */
-  .table-scroll {
-    overflow-x: auto;
-  }
+  /* .table-scroll is app.css's (a fixed first column and an edge fade). */
 
   .corr-table {
     border-collapse: collapse;

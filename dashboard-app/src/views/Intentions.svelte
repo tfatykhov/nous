@@ -83,7 +83,7 @@
         {m.stalls.stall_escalations} ended by the stall budget.
       </p>
       <p class="small muted">{m.arrivals_ungradable} arrivals have no decision record, so calibration cannot grade them.</p>
-      <div class="scroll">
+      <div class="scroll table-scroll">
         <table>
           <caption>Arrivals by decision and outcome</caption>
           <thead><tr><th>Decision</th><th>Outcome</th><th>Gate</th><th>Count</th></tr></thead>
@@ -94,7 +94,7 @@
           </tbody>
         </table>
       </div>
-      <div class="scroll">
+      <div class="scroll table-scroll">
         <table>
           <caption>Why chains were escalated</caption>
           <thead><tr><th>Cause</th><th>Count</th></tr></thead>
@@ -114,7 +114,7 @@
         continuation turns only (subtask and DAG sessions have their own ids), so it is not the whole of the budget
         column. The budget does not count cached tokens (issue 744), which is what this page is evidence for.
       </p>
-      <div class="scroll">
+      <div class="scroll table-scroll">
         <table>
           <caption>Budget count against context log</caption>
           <thead><tr><th>Root</th><th>Budget total</th><th>Arrivals out</th><th>Failed (in + out)</th><th>Log output</th><th>Log cache read</th><th>Output not in an arrival</th></tr></thead>
@@ -164,7 +164,7 @@
           {/if}
           {#if root.children.length > 0}<ul class="tree">{#each root.children as c (c.id)}{@render node(c)}{/each}</ul>{/if}
           {#if root.arrivals.length > 0}
-            <div class="scroll">
+            <div class="scroll table-scroll">
               <table>
                 <caption>Arrivals</caption>
                 <thead><tr><th>n</th><th>Decision</th><th>Outcome</th><th>Gate</th><th>Progress</th><th>Graded</th><th>Latency</th><th>Note</th></tr></thead>
@@ -182,7 +182,7 @@
             </div>
           {/if}
           {#if root.proposals.length > 0}
-            <div class="scroll">
+            <div class="scroll table-scroll">
               <table>
                 <caption>Proposals</caption>
                 <thead><tr><th>Id</th><th>Tool</th><th>State</th><th>Why</th><th>Arguments</th><th>Result</th></tr></thead>
@@ -195,7 +195,7 @@
             </div>
           {/if}
           {#if root.owner_rows.length > 0}
-            <div class="scroll">
+            <div class="scroll table-scroll">
               <table>
                 <caption>Messages to the owner</caption>
                 <thead><tr><th>Kind</th><th>Title</th><th>Created</th><th>Pushed</th><th>Delivered</th></tr></thead>

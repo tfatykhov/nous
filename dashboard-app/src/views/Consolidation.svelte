@@ -150,7 +150,7 @@
   <!-- ── Cycle list ──────────────────────────────────────────────────────── -->
   <section class="chart-card">
     <h2>Recent Cycles</h2>
-    <div class="table-wrap">
+    <div class="table-wrap table-scroll">
     <table class="data-table">
       <thead>
         <tr>

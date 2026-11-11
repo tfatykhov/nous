@@ -201,6 +201,7 @@
     }
 
     .dt--cards tr {
+      position: relative;
       margin-bottom: 0.75rem;
       border: 1px solid var(--border);
       border-radius: var(--card-radius-sm);
@@ -237,10 +238,22 @@
       overflow-wrap: normal;
     }
 
-    /* The disclosure button leads the card: a 44px target. */
+    /* The disclosure button sits at the end of the card's first labelled row (a 44px target), not on a row of its
+       own (finish review fix 5); that row leaves room for it. */
     .dt--cards td.dt-disclose-col {
+      position: absolute;
+      top: 0;
+      right: 0;
       width: auto;
-      justify-content: flex-end;
+      padding: 0;
+      border: none;
+      background: transparent;
+      z-index: 1;
+    }
+
+    .dt--cards td.dt-disclose-col + td {
+      padding-right: 3.5rem;
+      min-height: 2.75rem;
     }
 
     .dt--cards td.dt-disclose-col::before {

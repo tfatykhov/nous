@@ -333,7 +333,7 @@
     {#if data.active_dags.length === 0}
       <p class="empty-state">No active DAGs</p>
     {:else}
-      <div class="table-wrap">
+      <div class="table-wrap table-scroll">
         <table class="dag-table">
           <thead>
             <tr>
@@ -439,7 +439,7 @@
         }))}
         rowKey={(r) => r._dag.id}
         rowLabel={(r) => r.name}
-        mode="scroll"
+        mode="cards"
       >
         {#snippet cell(row, c)}
           {#if c.key === 'statusBadge'}

@@ -618,7 +618,8 @@
   }
   @media (max-width: 640px) {
     .chart-row { grid-template-columns: minmax(0, 1fr); }
-    .special-cards { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 0.75rem; }
+    .special-cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.75rem; }
+    .special-cards > *:last-child:nth-child(odd) { grid-column: 1 / -1; }
     .sec, .field { padding-left: 1rem; padding-right: 1rem; }
   }
 </style>

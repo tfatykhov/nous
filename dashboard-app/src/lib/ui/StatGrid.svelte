@@ -68,9 +68,14 @@
   .tone-ok { color: var(--ok-text); }
 
   @media (max-width: 640px) {
+    /* Two up, and an odd last tile takes the whole row: never one lone tile (finish review fix 5). */
     .stat-grid {
-      grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 0.75rem;
+    }
+
+    .stat-card:last-child:nth-child(odd) {
+      grid-column: 1 / -1;
     }
 
     .stat-card {

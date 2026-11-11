@@ -262,6 +262,7 @@
       {:else}
         <div class="table-card">
         <DataTable
+          mode="cards"
           columns={[
             { key: 'content_short',  label: 'Content' },
             { key: 'category',       label: 'Category' },
@@ -325,6 +326,7 @@
       {:else}
         <div class="table-card">
         <DataTable
+          mode="cards"
           columns={[
             { key: 'title_fmt',     label: 'Title' },
             { key: 'summary_short', label: 'Summary' },
@@ -396,6 +398,7 @@
       {:else}
         <div class="table-card">
         <DataTable
+          mode="cards"
           columns={[
             { key: 'desc_short',  label: 'Description' },
             { key: 'category',    label: 'Category' },
@@ -471,6 +474,7 @@
       {:else}
         <div class="table-card">
         <DataTable
+          mode="cards"
           columns={[
             { key: 'name_short', label: 'Name' },
             { key: 'domain',     label: 'Domain' },
@@ -531,6 +535,7 @@
       {:else}
         <div class="table-card">
         <DataTable
+          mode="cards"
           columns={[
             { key: 'trigger_short', label: 'Trigger' },
             { key: 'action',        label: 'Action' },
@@ -648,6 +653,7 @@
       {:else}
         <div class="table-card">
         <DataTable
+          mode="cards"
           columns={[
             { key: 'content_short', label: 'Content' },
             { key: 'chunk_index',   label: 'Idx' },
