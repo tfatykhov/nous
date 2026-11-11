@@ -216,8 +216,31 @@
   <!-- ── Needs you (harness dashboard §4.6, plus the open heartbeat findings) ── -->
   <section class="card sec" aria-labelledby="needs-h">
     <h2 id="needs-h">Needs you</h2>
+    {#snippet findingItems()}
+      {#each openFindings.slice(0, FINDINGS_SHOWN) as f (f.fingerprint)}
+        <li class="item">
+          <Badge variant={f.urgency === 'high' ? 'error' : 'warn'}>Open</Badge>
+          <a class="wrap" href={routeHref('heartbeat')}>{f.summary}</a>
+          <span class="k">Heartbeat finding from {f.check_name}, {f.urgency} urgency. Last seen {fmtUtc(f.last_seen)}.</span>
+        </li>
+      {/each}
+    {/snippet}
+    {#snippet moreFindings()}
+      {#if openFindings.length > FINDINGS_SHOWN}
+        {@const rest = openFindings.length - FINDINGS_SHOWN}
+        <a class="more-link" href={routeHref('heartbeat')}>{rest} more open finding{rest === 1 ? '' : 's'} on Heartbeat</a>
+      {/if}
+    {/snippet}
     {#if !a}
       <p class="muted">{$attentionPoll.error ? "Questions and sends in doubt could not be loaded." : "Loading…"}</p>
+      <!-- The findings come from the heartbeat's own store, so they show even when the attention counts fail. -->
+      {#if openFindings.length > 0}
+        <ul class="items">
+          {@render findingItems()}
+        </ul>
+        {@render moreFindings()}
+      {/if}
+      {#if $findings.error}<p class="muted small">Heartbeat findings could not be loaded.</p>{/if}
     {:else}
       {#if a.questions_waiting > 0 || a.sends_in_doubt > 0 || openFindings.length > 0}
         <ul class="items">
@@ -241,18 +264,9 @@
               {/if}
             </li>
           {/if}
-          {#each openFindings.slice(0, FINDINGS_SHOWN) as f (f.fingerprint)}
-            <li class="item">
-              <Badge variant={f.urgency === 'high' ? 'error' : 'warn'}>Open</Badge>
-              <a class="wrap" href={routeHref('heartbeat')}>{f.summary}</a>
-              <span class="k">Heartbeat finding from {f.check_name}, {f.urgency} urgency. Last seen {fmtUtc(f.last_seen)}.</span>
-            </li>
-          {/each}
+          {@render findingItems()}
         </ul>
-        {#if openFindings.length > FINDINGS_SHOWN}
-          {@const rest = openFindings.length - FINDINGS_SHOWN}
-          <a class="more-link" href={routeHref('heartbeat')}>{rest} more open finding{rest === 1 ? '' : 's'} on Heartbeat</a>
-        {/if}
+        {@render moreFindings()}
       {:else if !a.ledger_persisted}
         <p class="all-clear">
           No questions waiting. Ledger persistence is off (NOUS_EXECUTION_LEDGER_PERSIST_ENABLED), so a send whose delivery went unconfirmed is not recorded — none can be shown here.

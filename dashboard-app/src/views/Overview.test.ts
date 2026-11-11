@@ -175,12 +175,17 @@ describe('Overview', () => {
     const { default: Fresh } = await import('./Overview.svelte');
     const { attentionPoll: freshPoll } = await import('../lib/stores/attention');
     replies['/dashboard/attention'] = () => ({ status: 404, body: { error: 'no' } });
+    replies['/heartbeat/findings'] = () => ({ body: { stats: {}, findings: [
+      { fingerprint: 'fp-x', check_name: 'disk_usage', summary: 'Disk at 81% on the database volume', urgency: 'normal', state: 'new', first_seen: '2026-11-10T15:00:00Z', last_seen: '2026-11-10T15:00:00Z' },
+    ] } });
     await freshPoll.refresh();
     tl.render(Fresh);
     try {
       await waitFor(() => expect(card('Needs you').textContent).toContain('Questions and sends in doubt could not be loaded.'));
       expect(card('Health').textContent).toContain('Guards and the ledger could not be loaded.');
       expect(card('Needs you').textContent).not.toContain('Loading');
+      // Codex on #898: the findings come from another source, so they still show.
+      await waitFor(() => expect(card('Needs you').textContent).toContain('Disk at 81% on the database volume'));
     } finally {
       tl.cleanup();
     }
