@@ -47,7 +47,8 @@ _META_KEY = "meta"
 # F093 §3 — the closed theme enum. Unknown ⇒ validation error (a silently
 # ignored theme is indistinguishable from a broken one). Absent ⇒ default.
 _THEMES: dict[str, str] = {
-    "nous-default": "violet-on-dark, the standard companion look",
+    "nous-default": "chart-paper light with an Atlantic-blue bar, the standard companion look",
+    "nous-dark": "a dark violet card (the previous standard look)",
     "alpine-dusk": "warm near-black with an alpenglow accent — trips, outdoor plans",
     "harbor": "cool blue-grey — status, ops, monitoring dashboards",
     "paper": "warm light with a serif display — reading, briefings, digests",
@@ -394,8 +395,9 @@ class SurfaceComposer:
             "refine_options": refine_options,
             "data_sources": data_sources,
             "provenance": provenance,
-            # Validated against _THEMES in _validate; default is byte-identical
-            # to today's render (F093 §3.1).
+            # Validated against _THEMES in _validate. The default, nous-default,
+            # is the paper look since the dashboard redesign (PR 6); the old
+            # violet-on-dark default stays pickable as nous-dark (F093 §3.1).
             "theme": str(parsed.get("theme") or _DEFAULT_THEME),
         }
         if agent_actions:

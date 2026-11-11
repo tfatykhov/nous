@@ -6,6 +6,8 @@ import Companion from './Companion.svelte';
 import SectionView from './catalog/SectionView.svelte';
 import { store } from './store.svelte';
 import { transport } from './transport';
+import { contrast, hexLuminance } from './testing/color';
+import { parseThemes } from './testing/themes';
 
 // F093 §3 — theme wire (data-theme per surface) + §6.1 Section.layout, and
 // the R2 contrast guard: themes are code, so they get a WCAG-AA test.
@@ -85,49 +87,27 @@ describe('Section.layout (F093 §6.1)', () => {
 });
 
 // --- F093 R2: WCAG-AA contrast on each theme's text-on-bg -----------------
-
-function parseVars(block: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const m of block.matchAll(/(--[\w-]+):\s*([^;]+);/g)) out[m[1]] = m[2].trim();
-  return out;
-}
-
-function luminance(hex: string): number {
-  const h = hex.replace('#', '');
-  const rgb = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
-  const lin = rgb.map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
-  return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.4152 * lin[2];
-}
-
-function contrast(a: string, b: string): number {
-  const [l1, l2] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-  return (l1 + 0.05) / (l2 + 0.05);
-}
+// Colour maths and the theme cascade come from the shared test helpers (testing/color.ts, testing/themes.ts); the
+// local copy weighted blue by 0.4152 where WCAG says 0.0722.
 
 describe('theme contrast (F093 R2 — themes are code, so they get tests)', () => {
   // Read the source file directly (vitest cwd = dashboard-app). The tailwind
   // vite plugin rewrites `.css` imports, so a `?raw` import would not be the
   // literal file — fs is the only way to assert on the authored tokens.
-  const css = readFileSync('src/companion/companion.css', 'utf-8');
+  const sheet = parseThemes(readFileSync('src/companion/companion.css', 'utf-8'));
 
-  const themes: Record<string, Record<string, string>> = { 'nous-default': {} };
-  const rootMatch = css.match(/:root\s*\{([^}]+)\}/);
-  if (rootMatch) themes['nous-default'] = parseVars(rootMatch[1]);
-  for (const m of css.matchAll(/\[data-theme='([\w-]+)'\]\s*\{([^}]+)\}/g)) {
-    themes[m[1]] = { ...themes['nous-default'], ...parseVars(m[2]) };
-  }
+  const ALL = ['nous-default', 'nous-dark', 'alpine-dusk', 'harbor', 'paper', 'signal', 'report'];
+  const themes: Record<string, Record<string, string>> = Object.fromEntries(ALL.map((id) => [id, sheet.resolved(id)]));
 
-  const ALL = ['nous-default', 'alpine-dusk', 'harbor', 'paper', 'signal', 'report'];
-
-  it('parsed all six themes', () => {
-    expect(Object.keys(themes).sort()).toEqual([...ALL].sort());
+  it('parsed all seven themes (the default and the old default, nous-dark, among them)', () => {
+    expect([...sheet.ids, 'nous-default'].sort()).toEqual([...ALL].sort());
   });
 
   it('report: --soft is lighter than --muted so a neutral pill never reads weaker than its caption', () => {
     // F096 §5 — caught on the design canvas: the reference's "flat" slate
     // (#94a3b8) is the neutral ink, and it sits ABOVE muted (#8d99ae).
     const t = themes['report'];
-    expect(luminance(t['--soft'])).toBeGreaterThan(luminance(t['--muted']));
+    expect(hexLuminance(t['--soft'])).toBeGreaterThan(hexLuminance(t['--muted']));
     expect(contrast(t['--soft'], t['--surface'])).toBeGreaterThanOrEqual(4.5);
   });
 
@@ -176,9 +156,14 @@ describe('Section.layout accordion', () => {
   it('expands on click and collapses again', async () => {
     const { container } = renderAccordion();
     const btn = container.querySelector('button.toggle') as HTMLButtonElement;
+    // the toggle says what it will do in a word, not a caret glyph (review I6)
+    expect(btn.querySelector('.caret')?.textContent).toBe('Show');
+    // the word is part of the button's name (re-review N3); aria-expanded keeps the state
+    expect(btn.querySelector('.caret')?.hasAttribute('aria-hidden')).toBe(false);
     await fireEvent.click(btn);
     expect(btn.getAttribute('aria-expanded')).toBe('true');
     expect(container.textContent).toContain('hidden detail');
+    expect(btn.querySelector('.caret')?.textContent).toBe('Hide');
     await fireEvent.click(btn);
     expect(container.textContent).not.toContain('hidden detail');
   });

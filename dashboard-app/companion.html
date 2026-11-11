@@ -22,8 +22,12 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="Nous" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#0b0b10" />
+    <!-- The paper default (PR 6): a light page under the Atlantic-blue bar.
+         Android paints its status bar in theme-color; iOS ignores it and the
+         page draws under the black-translucent status bar, whose white text
+         sits on the bar's navy. -->
+    <meta name="color-scheme" content="light" />
+    <meta name="theme-color" content="#12304f" />
     <title>Nous Companion</title>
   </head>
   <body>

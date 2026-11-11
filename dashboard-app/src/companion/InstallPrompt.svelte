@@ -114,7 +114,7 @@
     {:else}
       <button class="go" onclick={() => (showIOSHelp = !showIOSHelp)}>How</button>
     {/if}
-    <button class="x" onclick={dismiss} aria-label="dismiss">×</button>
+    <button class="x" onclick={dismiss} aria-label="dismiss">Dismiss</button>
     {#if showIOSHelp}
       <p class="help">
         Tap the Share button, then <strong>Add to Home Screen</strong>.
@@ -124,17 +124,18 @@
 {/if}
 
 <style>
+  /* Shell chrome: always the paper :root (never under a [data-theme]). */
   .install {
     display: flex;
     align-items: center;
     gap: 0.5rem;
     flex-wrap: wrap;
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
-    padding: 0.45rem 0.6rem;
-    margin-bottom: 0.6rem;
-    font-size: 0.82rem;
+    border: var(--card-border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--card-shadow);
+    padding: 0.55rem 0.6rem 0.55rem 0.9rem;
+    font-size: 0.85rem;
   }
   .msg {
     color: var(--text);
@@ -145,8 +146,11 @@
     background: var(--accent);
     color: var(--on-accent);
     border: none;
-    border-radius: var(--radius-sm);
-    padding: 0.25rem 0.7rem;
+    border-radius: var(--ctl-radius);
+    padding: 0.3rem 0.95rem;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
     font: inherit;
     font-weight: 600;
     cursor: pointer;
@@ -155,13 +159,21 @@
     background: var(--accent-dim);
   }
   .x {
+    font: inherit;
     background: none;
     border: none;
+    border-radius: var(--ctl-radius);
     color: var(--muted);
-    font-size: 1.1rem;
-    line-height: 1;
-    padding: 0 0.2rem;
+    padding: 0.3rem 0.6rem;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
     cursor: pointer;
+  }
+  .go:focus-visible,
+  .x:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
   .x:hover {
     color: var(--text);

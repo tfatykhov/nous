@@ -25,7 +25,7 @@
 
 <div class="panel">
   <div class="head">
-    <span class="badge">escalation</span>
+    <span class="badge">Escalation</span>
     <h2>{title}</h2>
   </div>
   {#if summary}
@@ -38,11 +38,11 @@
 
 <style>
   .panel {
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--warn);
-    border-radius: var(--radius-sm);
-    background: var(--surface);
-    padding: 0.9rem 1rem;
+    background: var(--callout-bg);
+    border: var(--card-border);
+    border-left: var(--side-rule) solid var(--warn);
+    border-radius: var(--radius-md);
+    padding: var(--callout-pad);
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
@@ -54,10 +54,12 @@
   }
   .badge {
     font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
+    text-transform: var(--label-transform);
+    letter-spacing: calc(0.06em * var(--caps));
+    white-space: nowrap;
     color: var(--warn);
-    border: 1px solid var(--warn);
+    border: 1px solid color-mix(in srgb, currentColor var(--badge-edge), transparent);
+    background: color-mix(in srgb, currentColor var(--badge-tint), transparent);
     border-radius: 999px;
     padding: 0.1rem 0.5rem;
   }

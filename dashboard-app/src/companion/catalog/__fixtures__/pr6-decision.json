@@ -1,0 +1,55 @@
+{
+  "components": [
+    { "id": "root", "component": "Column", "children": ["tabs"] },
+    {
+      "id": "tabs",
+      "component": "Tabs",
+      "tabs": [
+        { "title": "Due for review 2", "child": "due" },
+        { "title": "Decided 14", "child": "decided" }
+      ]
+    },
+    {
+      "id": "due",
+      "component": "Column",
+      "children": ["from", "title", "chips", "meter-label", "meter", "s-why", "s-changed", "kv", "actions"]
+    },
+    { "id": "from", "component": "Text", "variant": "caption", "text": "Decision 8f027e1a, in the decision frame" },
+    { "id": "title", "component": "Text", "text": "## Keep frame carry off until 13 November" },
+    { "id": "chips", "component": "ChipRow", "items": { "path": "/chips" } },
+    { "id": "meter-label", "component": "Text", "variant": "caption", "text": "Confidence when decided" },
+    { "id": "meter", "component": "ConfidenceMeter", "value": 0.68 },
+    { "id": "s-why", "component": "Section", "title": "Why", "child": "why" },
+    {
+      "id": "why",
+      "component": "Text",
+      "text": "- Only 3 of your turns ran with frame context\n- Carry changes how short replies are framed\n- A thin baseline can't show the effect"
+    },
+    { "id": "s-changed", "component": "Section", "title": "What changed since", "child": "deltas" },
+    { "id": "deltas", "component": "DeltaList", "rows": { "path": "/changed" } },
+    { "id": "kv", "component": "KeyValueTable", "rows": { "path": "/record" } },
+    { "id": "actions", "component": "Row", "children": ["review", "open"] },
+    { "id": "review", "component": "Button", "variant": "primary", "child": "review-label", "action": { "event": { "name": "review" } } },
+    { "id": "review-label", "component": "Text", "text": "Review it now" },
+    { "id": "open", "component": "Button", "child": "open-label", "action": { "event": { "name": "open" } } },
+    { "id": "open-label", "component": "Text", "text": "Open in dashboard" },
+    { "id": "decided", "component": "Text", "text": "14 decisions are settled. None is due." }
+  ],
+  "dataModel": {
+    "chips": [
+      { "label": "Category", "value": "process" },
+      { "label": "Stakes", "value": "medium", "tone": "warn" },
+      { "label": "Review due", "value": "13 Nov" }
+    ],
+    "changed": [
+      { "label": "Your turns", "delta": "+8", "from": "3", "to": "11", "tone": "ok" },
+      { "label": "Background turns", "delta": "+335", "from": "77", "to": "412", "tone": "neutral" },
+      { "label": "Errors", "delta": "+1", "from": "0", "to": "1", "tone": "crit" }
+    ],
+    "record": [
+      { "key": "Recorded", "value": "10 Nov, 09:30 UTC" },
+      { "key": "By", "value": "You, on the companion" },
+      { "key": "Outcome", "value": "Not reviewed yet" }
+    ]
+  }
+}

@@ -68,7 +68,7 @@
     const out: GEdge[] = [];
     for (const e of raw as GEdge[]) {
       if (!e || !e.source || !e.target) continue;
-      const key = `${e.source}→${e.target}:${e.relation ?? ''}`;
+      const key = `${e.source}\u2192${e.target}:${e.relation ?? ''}`;
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(e);
@@ -95,11 +95,11 @@
   });
 
   const TYPE_COLORS: Record<string, string> = {
-    fact: 'var(--accent)',
+    fact: 'var(--node-fact)',
     decision: 'var(--node-decision)',
-    episode: 'var(--ok)',
-    procedure: 'var(--warn)',
-    chunk: 'var(--muted)',
+    episode: 'var(--node-episode)',
+    procedure: 'var(--node-procedure)',
+    chunk: 'var(--node-chunk)',
   };
 
   function short(label: string | undefined, id: string): string {
@@ -139,7 +139,7 @@
         dmNodes.push(n);
       }
     }
-    const key = (e: GEdge) => `${e.source}→${e.target}:${e.relation ?? ''}`;
+    const key = (e: GEdge) => `${e.source}\u2192${e.target}:${e.relation ?? ''}`;
     const knownE = new Set(dmEdges.map(key));
     for (const e of value.edges ?? []) {
       if (e?.source && e?.target && !knownE.has(key(e))) {
@@ -157,11 +157,11 @@
       {@const b = positions.get(edge.target)}
       {#if a && b}
         <line
+          class="edge"
           x1={a.x}
           y1={a.y}
           x2={b.x}
           y2={b.y}
-          stroke="var(--border)"
           stroke-width={Math.max(1, (edge.weight ?? 0.5) * 2.5)}
         >
           <title>{edge.relation ?? 'related'}</title>
@@ -210,10 +210,14 @@
 
 <style>
   .graph {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
+    background: var(--nested-bg);
+    border: var(--card-border);
+    border-radius: var(--radius-md);
     padding: 0.4rem;
+  }
+  .edge {
+    stroke: var(--graph-edge);
+    stroke-opacity: var(--graph-edge-opacity);
   }
   svg {
     display: block;

@@ -92,6 +92,7 @@
     font-size: 0.85rem;
     font-family: var(--font-numeric);
     font-variant-numeric: tabular-nums;
+    font-stretch: var(--figure-stretch);
     font-weight: 600;
   }
   .state,
@@ -106,6 +107,7 @@
     color: var(--text);
     font-family: var(--font-numeric);
     font-variant-numeric: tabular-nums;
+    font-stretch: var(--figure-stretch);
   }
   .foot {
     margin-top: 0.15rem;

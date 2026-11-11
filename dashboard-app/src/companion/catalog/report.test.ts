@@ -72,7 +72,7 @@ describe('MetricCardView', () => {
     const { container } = mount(MetricCardView, { ...card, trend: '/hr' });
     const root = container.querySelector('.metric') as HTMLElement;
     expect(root.style.getPropertyValue('--ink')).toBe('var(--ok)');
-    expect(root.style.getPropertyValue('--tone')).toBe('var(--ok)');
+    expect(root.style.getPropertyValue('--tone')).toBe('var(--ok-mark)');
     expect(container.querySelector('.pill')?.textContent).toBe('↓4.3 bpm · improving');
     expect(container.querySelector('.value')?.textContent).toBe('65.0bpm');
     expect(container.querySelector('.caption')?.textContent).toBe('68.9 → 64.6 (28d avg, n=28)');
@@ -286,7 +286,7 @@ describe('DeltaListView', () => {
     const rows = container.querySelectorAll('li');
     expect(rows.length).toBe(2);
     expect(rows[0].querySelector('.d')?.textContent).toBe('↓4.3 bpm');
-    expect(rows[0].querySelector('.r')?.textContent).toBe('68.9 → 64.6');
+    expect(rows[0].querySelector('.r')?.textContent).toBe('68.9 to 64.6'); // a word, not an arrow (review I6)
     expect((rows[0] as HTMLElement).style.getPropertyValue('--row-ink')).toBe('var(--ok)');
     expect(rows[1].querySelector('.r')?.textContent).toBe('91.3'); // one side only
     expect((rows[1] as HTMLElement).style.getPropertyValue('--row-ink')).toBe('var(--crit)');

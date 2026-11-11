@@ -68,8 +68,8 @@
     display: block;
     width: 100%;
     max-width: 100%;
-    border-radius: var(--radius-sm);
-    background: var(--surface-hover);
+    border-radius: var(--radius-md);
+    background: var(--video-bg);
     overflow: hidden;
   }
   .vid {

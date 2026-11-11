@@ -64,7 +64,7 @@
       const result = await transport.postAction(surfaceId, action.event.name, comp.id, resolved);
       if (!result.ok) error = result.message || 'action failed';
       else {
-        notice = result.message || 'Done ✓';
+        notice = result.message || 'Done';
         store.noticeOwner[noticeGroup] = comp.id;
       }
     } finally {
@@ -100,15 +100,20 @@
   .btn {
     font: inherit;
     color: var(--text);
-    background: var(--surface-hover);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
+    background: var(--ctl-bg);
+    border: 1px solid var(--ctl-border);
+    border-radius: var(--ctl-radius);
     padding: 0.45rem 0.9rem;
+    min-height: var(--tap-min);
     cursor: pointer;
     transition: var(--transition);
   }
   .btn:hover:not(:disabled) {
     border-color: var(--accent);
+  }
+  .btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
   .btn:disabled {
     opacity: 0.5;

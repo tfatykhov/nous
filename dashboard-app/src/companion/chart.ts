@@ -84,13 +84,14 @@ export function normalizeTone(raw: unknown): Tone {
 /** A tone → CSS custom property. neutral has no semantic token, so it maps
  * to the axis grey (a series that means nothing gets a neutral hue). */
 export function toneVar(tone: Tone): string {
-  return tone === 'neutral' ? 'var(--chart-axis)' : `var(--${tone})`;
+  // A mark, not text: the tone's mark token (the text tones merge as marks under colour blindness).
+  return tone === 'neutral' ? 'var(--chart-axis)' : `var(--${tone}-mark)`;
 }
 
 /** A tone → the INK token for text and pills (F096 §3). A chart stroke maps
  * neutral to the axis grey; ink maps it to --soft, which every theme keeps
- * lighter than --muted so a neutral pill never reads weaker than its own
- * caption. Two greys on a neutral card are deliberate: a pill is ink, a line
+ * at least as contrasty as --muted (lighter on a dark ground, darker on the
+ * paper default) so a neutral pill never reads weaker than its own caption. Two greys on a neutral card are deliberate: a pill is ink, a line
  * is a mark. */
 export function toneInkVar(tone: Tone): string {
   return tone === 'neutral' ? 'var(--soft)' : `var(--${tone})`;
@@ -170,12 +171,15 @@ export function yDomain(values: number[], zeroBase: boolean): Domain {
     // all-equal (Line/Spark only): pad symmetrically so a flat line sits
     // mid-height rather than collapsing.
     const pad = Math.abs(min) > 0 ? Math.abs(min) * 0.1 : 1;
-    return { min: min - pad, max: max + pad, zeroBreak: false };
+    // never pad across zero: an all-zero count sits on zero, not mid-axis above a negative label
+    if (min === 0) return { min: 0, max: pad, zeroBreak: false };
+    return { min: min > 0 ? Math.max(0, min - pad) : min - pad, max: max < 0 ? Math.min(0, max + pad) : max + pad, zeroBreak: false };
   }
   const span = max - min;
   const pad = span * 0.08;
-  const paddedMin = min - pad;
-  const paddedMax = max + pad;
+  // The pad never crosses zero: a count from 2 to 44 is labelled from 0, not "-1.36" (review M4).
+  const paddedMin = min >= 0 ? Math.max(0, min - pad) : min - pad;
+  const paddedMax = max <= 0 ? Math.min(0, max + pad) : max + pad;
   // A break is honest only when the padded domain still excludes zero.
   const zeroBreak = paddedMin > 0 || paddedMax < 0;
   return { min: paddedMin, max: paddedMax, zeroBreak };

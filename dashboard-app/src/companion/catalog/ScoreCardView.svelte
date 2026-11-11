@@ -119,10 +119,12 @@
     gap: 0.3rem;
     min-width: 0;
     padding: 0.95rem 1rem 0.75rem;
-    background: var(--surface);
-    border: 1px solid var(--border);
+    background: var(--nested-bg);
+    border: var(--card-border);
     border-top: 3px solid var(--ink);
-    border-radius: var(--radius);
+    /* 12px in every theme (a legacy --radius-md is 8px): on paper --radius is
+       18px, larger than the tiles beside it, and the top rule curled like a lid */
+    border-radius: max(var(--radius-md), 12px);
   }
   .head {
     display: flex;
@@ -151,8 +153,8 @@
     margin-left: auto;
     font-size: 0.66rem;
     font-weight: 700;
-    letter-spacing: 0.09em;
-    text-transform: uppercase;
+    letter-spacing: calc(0.09em * var(--caps));
+    text-transform: var(--label-transform);
     padding: 0.15rem 0.55rem;
     border-radius: 999px;
     white-space: nowrap;
@@ -163,6 +165,7 @@
     margin-top: 0.35rem;
     font-family: var(--font-numeric);
     font-variant-numeric: tabular-nums;
+    font-stretch: var(--figure-stretch);
     font-size: 2rem;
     font-weight: 600;
     line-height: 1;
@@ -220,6 +223,7 @@
     color: var(--row-ink);
     font-family: var(--font-numeric);
     font-variant-numeric: tabular-nums;
+    font-stretch: var(--figure-stretch);
     font-size: 0.8rem;
     font-weight: 600;
   }
@@ -239,6 +243,7 @@
     margin-left: 0;
     font-family: var(--font-ui);
     font-variant-numeric: normal;
+    font-stretch: normal;
     font-weight: 500;
     font-size: 0.82rem;
   }

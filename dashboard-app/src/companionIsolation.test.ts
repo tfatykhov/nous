@@ -4,7 +4,8 @@ import { join, relative, resolve } from 'node:path';
 
 // The companion (/dashboard/v2/companion.html) is a separate app with its own stylesheet. The dashboard redesign is
 // staged behind a look switch that the companion must never see: no app.css, no look module or boot script, no
-// data-look, no new fonts.
+// data-look. Its default theme is the paper world (PR 6), so companion.css, and only companion.css, names the paper
+// faces (Archivo, Red Hat Mono): a component reads them through --font-ui and --font-mono.
 const APP = resolve(__dirname, '..');
 const COMPANION = join(__dirname, 'companion');
 
@@ -22,8 +23,10 @@ const FORBIDDEN: [string, RegExp][] = [
   ['the boot script', /look-boot/],
   ['data-look', /data-look|dataset\.look/],
   ['the look key', /nous\.look/],
-  ['Archivo', /Archivo/],
 ];
+
+/** The paper faces: named in companion.css, nowhere else. */
+const PAPER_FACES = /Archivo|Red[ +]Hat[ +]Mono/;
 
 describe('the companion is untouched by the redesign', () => {
   const sources = [join(APP, 'companion.html'), ...files(COMPANION)];
@@ -45,6 +48,13 @@ describe('the companion is untouched by the redesign', () => {
 
   it.each(FORBIDDEN)('no file holds %s', (_, pattern) => {
     const hits = sources.filter((f) => pattern.test(readFileSync(f, 'utf-8'))).map((f) => relative(APP, f));
+    expect(hits).toEqual([]);
+  });
+
+  it('no companion file but companion.css names Archivo or Red Hat Mono', () => {
+    const css = join(COMPANION, 'companion.css');
+    expect(PAPER_FACES.test(readFileSync(css, 'utf-8'))).toBe(true);
+    const hits = sources.filter((f) => f !== css && PAPER_FACES.test(readFileSync(f, 'utf-8'))).map((f) => relative(APP, f));
     expect(hits).toEqual([]);
   });
 

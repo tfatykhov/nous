@@ -31,7 +31,7 @@
 </script>
 
 {#if depth > MAX_DEPTH || cycle}
-  <span class="ph" title="cycle or depth limit at {componentId}">⟳</span>
+  <span class="ph" title="cycle or depth limit at {componentId}">not shown</span>
 {:else if !surface || !comp}
   <span class="ph" title="waiting for {componentId}">…</span>
 {:else if !Adapter}

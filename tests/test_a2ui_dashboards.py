@@ -682,7 +682,17 @@ async def test_theme_survives_dedup_replacement(service, db):
 
 
 def test_theme_enum_is_closed():
-    assert set(_THEMES) == {"nous-default", "alpine-dusk", "harbor", "paper", "signal", "report"}
+    assert set(_THEMES) == {"nous-default", "nous-dark", "alpine-dusk", "harbor", "paper", "signal", "report"}
+
+
+def test_validate_accepts_nous_dark_and_still_rejects_an_unknown_theme(settings):
+    # Dashboard redesign PR 6: nous-default became the paper look and the old
+    # violet-on-dark default stayed pickable as nous-dark; the enum stays closed.
+    composer = SurfaceComposer(object(), settings, SourceRegistry())
+    components = [{"id": "x", "component": "Text", "text": "hi"}]
+    assert not any("theme" in e for e in composer._validate({"components": components, "theme": "nous-dark"}, {}))
+    errs = composer._validate({"components": components, "theme": "nous-midnight"}, {})
+    assert any("theme 'nous-midnight' is not one of" in e for e in errs)
 
 
 # ---------------------------------------------------------------------------

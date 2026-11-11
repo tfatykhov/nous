@@ -34,7 +34,7 @@
 
 <div class="review">
   <div class="head">
-    <span class="badge">action review</span>
+    <span class="badge">Action review</span>
     <h2>{title}</h2>
   </div>
   <dl>
@@ -57,10 +57,10 @@
 
 <style>
   .review {
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--accent);
-    border-radius: var(--radius-sm);
-    background: var(--surface);
+    background: var(--nested-bg);
+    border: var(--card-border);
+    border-left: var(--side-rule) solid var(--accent);
+    border-radius: var(--radius-md);
     padding: 0.9rem 1rem;
     display: flex;
     flex-direction: column;
@@ -73,10 +73,12 @@
   }
   .badge {
     font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
+    text-transform: var(--label-transform);
+    letter-spacing: calc(0.06em * var(--caps));
+    white-space: nowrap;
     color: var(--accent);
-    border: 1px solid var(--accent);
+    border: 1px solid color-mix(in srgb, currentColor var(--badge-edge), transparent);
+    background: color-mix(in srgb, currentColor var(--badge-tint), transparent);
     border-radius: 999px;
     padding: 0.1rem 0.5rem;
   }

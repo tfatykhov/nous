@@ -126,7 +126,7 @@
 
 <dialog bind:this={dialog} onclick={onDialogClick} onclose={() => (isOpen = false)}>
   <div class="content">
-    <button type="button" class="close" aria-label="Close dialog" onclick={close}>✕</button>
+    <button type="button" class="close" aria-label="Close dialog" onclick={close}>Close</button>
     {#if isOpen && typeof comp.content === 'string'}
       <Renderer {surfaceId} componentId={comp.content} {scope} {depth} {ancestors} />
     {/if}
@@ -146,8 +146,9 @@
   dialog {
     color: var(--text);
     background: var(--surface);
-    border: 1px solid var(--border);
+    border: var(--card-border);
     border-radius: var(--radius);
+    box-shadow: var(--card-shadow);
     padding: 0;
     max-width: min(560px, calc(100vw - 2rem));
     width: 100%;
@@ -162,16 +163,18 @@
     flex-direction: column;
     gap: 0.6rem;
   }
+  /* A row of its own at the top right of the content column, so the word never
+     sits on the content's first line. */
   .close {
-    position: absolute;
-    top: 0.5rem;
-    right: 0.6rem;
+    align-self: flex-end;
+    margin: -0.7rem -0.5rem 0 0;
     font: inherit;
     color: var(--muted);
     background: none;
     border: none;
     cursor: pointer;
     padding: 0.15rem 0.35rem;
+    min-height: var(--tap-min);
     border-radius: var(--radius-sm);
   }
   .close:hover {

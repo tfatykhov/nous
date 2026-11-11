@@ -104,9 +104,9 @@
     gap: 0.15rem;
     min-width: 0;
     padding: 0.8rem 0.9rem 0.55rem;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
+    background: var(--nested-bg);
+    border: var(--card-border);
+    border-radius: var(--radius-md);
   }
   .top {
     display: flex;
@@ -142,6 +142,7 @@
     margin-top: 0.3rem;
     font-family: var(--font-numeric);
     font-variant-numeric: tabular-nums;
+    font-stretch: var(--figure-stretch);
     font-size: 1.55rem;
     font-weight: 600;
     line-height: 1.15;

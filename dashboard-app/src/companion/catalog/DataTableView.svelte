@@ -139,6 +139,7 @@
     text-align: right;
     font-family: var(--font-numeric);
     font-variant-numeric: tabular-nums;
+    font-stretch: var(--figure-stretch);
   }
   td.end,
   td.token {

@@ -1,12 +1,271 @@
 /* Nous Companion — standalone entry stylesheet.
    Deliberately does NOT import app.css: the companion needs no Tailwind
-   utilities and no dashboard chrome. The core token values below are a
-   copy of the Nous palette in src/app.css (:root) — if that palette
-   changes, change both (P3 tradeoff accepted in the F092 plan review:
-   duplicating ~20 vars beats re-plumbing the dashboard's CSS load order). */
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+   utilities, no dashboard chrome and no look switch. Its default theme
+   (:root below) is the paper world of the dashboard redesign: the values it
+   shares with the dashboard's paper ground are COPIES, kept in sync by
+   companionParity.test.ts, which reads app.css and fails when one drifts.
+   The previous default lives on as the named theme nous-dark. */
+@import url('https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=Red+Hat+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 
 :root {
+  /* nous-default: chart-paper ground, white rounded cards, the Atlantic-blue
+     rail navy as the accent. */
+  color-scheme: light;
+  --bg: #eef2f3;
+  --surface: #ffffff;
+  --surface-hover: #f4f7f8;
+  --border: #e3e9ec;
+  --accent: #12304f;
+  --accent-dim: #1a3d62; /* hover of a filled accent */
+  --accent-glow: #f3f6fa; /* the selected option row's wash */
+  --text: #14202b;
+  --muted: #56687a;
+  /* Status FILLS, kept for any older reader; text and marks use the
+     semantic --ok/--warn/--crit below. */
+  --green: #2f8a4e;
+  --red: #d2352b;
+  --yellow: #b7791f;
+  --radius: 18px; /* the surface card */
+  --radius-md: 12px; /* a nested card, tile, meter */
+  --radius-sm: 8px; /* chips and inputs inside rows */
+  --ctl-radius: 999px; /* buttons, tabs, option pills */
+  --card-shadow: 0 1px 2px rgba(18, 48, 79, 0.06), 0 6px 20px rgba(18, 48, 79, 0.07);
+  --card-border: 1px solid transparent;
+  --select-border: var(--accent);
+  --transition: 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  --font-ui: 'Archivo', system-ui, sans-serif;
+  --font-mono: 'Red Hat Mono', ui-monospace, monospace;
+
+  /* F093 §4 — semantic tokens. On paper they are TEXT colours (a tile value,
+     a pill), so they are the dashboard's text tones, 4.5:1 on every ground. */
+  --ok: #23703d;
+  --warn: #8a5a0e;
+  --crit: #b02a22;
+  --locked: #0b6e7a;
+  /* the neutral ink (a neutral pill, delta, chip value): never weaker than
+     --muted, and 4.5:1 on its own 13-14% tint over a nested tile (the
+     muted #56687a reads 4.48 there) */
+  --soft: #4f5f6f;
+  /* --font-display defaults to the UI font; themes may swap in a serif. */
+  --font-display: var(--font-ui);
+  /* F096 §4.5 — every FIGURE renders in this face with tabular-nums. On
+     paper that is the UI face, set condensed (--figure-stretch: Archivo's
+     width axis, as the dashboard draws its figures); mono stays for code and
+     ids. The var() alias is substituted HERE, at :root, so every theme
+     re-declares --font-numeric itself (the legacy group below does it for all
+     six, with their mono face). */
+  --font-numeric: var(--font-ui);
+  --figure-stretch: 82%;
+
+  /* F093 §1(a) — literals that themes re-skin. */
+  --on-accent: #ffffff; /* text on a filled --accent button (ButtonView) */
+  --scrim: rgba(20, 32, 43, 0.45); /* modal backdrop; BarChart negative hatching */
+  --node-decision: #802c66; /* MemoryGraph node types: the dashboard Graph's */
+  --node-fact: #159a7a;
+  --node-episode: #1f5fa8;
+  --node-procedure: #d0620d;
+  --node-chunk: #8b5cf6;
+
+  /* F094 §2 — ordered series ramp assigned by the renderer for multi-series
+     charts: the dashboard ramp from its slot 0, and its violet slot 10 for the
+     fourth (its magenta slot 3 is 4.2 from the blue under protanopia, and the
+     olive slot 5 merges with the amber mark; see companionParity.test.ts and
+     themes.test.ts). */
+  --series-1: #274455;
+  --series-2: #1f5fa8;
+  --series-3: #159a7a;
+  --series-4: #8b5cf6;
+  /* A status tone drawn as a MARK (a chart line or swatch, a meter band): the
+     text tones above merge under red-green colour blindness as marks (warn
+     and crit are 0.7 apart under deuteranopia). 8 or more apart in every
+     vision, 3:1 on the card. */
+  --ok-mark: #21694b;
+  --warn-mark: #b4771e; /* 0.8 from the dashboard's #b7791f, which is 2.97:1 on the track */
+  --crit-mark: #b02a22;
+  /* A selected ChoicePicker chip: navy with a white word (the wash was the
+     same colour as an unselected chip, so focus looked like selection); a
+     focused chip gets its own ring. */
+  --chip-selected-bg: var(--accent);
+  --chip-selected-ink: var(--on-accent);
+  --chip-focus: 2px solid var(--accent);
+  /* No coloured side rule over 1px and no tracked capitals on paper (the
+     craft floor); a legacy theme keeps both. */
+  --side-rule: 0px;
+  --side-rule-pad: 0;
+  --caps: 0;
+  --callout-bg: transparent; /* the ApprovalPanel sits on the card */
+  --callout-pad: 0;
+  --tl-flag-rule: var(--border);
+  --tap-min: 44px; /* a control's minimum height: a phone's tap target */
+  /* Dimmed content stays 4.5:1 on paper: a settled decision is told by its
+     muted title and outcome badge, a refreshing section by its header. */
+  --settled-opacity: 1;
+  --dim-opacity: 1;
+  --settled-ink: var(--muted);
+  --field-focus: 2px solid var(--accent); /* a focused text field's ring */
+  --video-bg: var(--accent); /* a video frame before its first frame: the prototype's navy */
+  --stat-min: 96px; /* three evidence tiles fit a phone */
+  --section-ink: var(--text); /* section headings in ink, as the prototype's */
+  --chart-axis: #56687a;
+  --chart-grid: #e3e9ec;
+
+  /* The seven frame colours (a future frame label; nothing reads them yet). */
+  --f-conversation: #55697a;
+  --f-question: #2346c8;
+  --f-task: #0b6e7a;
+  --f-decision: #7b3fa0;
+  --f-debug: #b4531c;
+  --f-creative: #a3266f;
+  --f-initiation: #8f5c0f;
+
+  /* Component shape switches (PR 6). Each is a choice between the paper look
+     and the old one; the legacy group below holds the old value, so a named
+     theme renders exactly as before. */
+  --nested-bg: var(--surface-hover); /* a card inside a surface: a soft tile, no shadow on shadow */
+  --ctl-bg: var(--surface); /* a default button, a footer control */
+  --ctl-border: #c9d4da;
+  --field-bg: var(--surface); /* a text field */
+  --field-border: #7a8896; /* its boundary: 3:1 on white (the dashboard's field ruling) */
+  --option-pad: 0.7rem 0.8rem; /* a ChoicePicker option is a bordered rounded card */
+  --option-border: 1.5px solid var(--border);
+  --option-selected-bg: var(--accent-glow);
+  --picker-pad: 0;
+  --label-transform: none; /* small labels and section heads in sentence case */
+  --label-tracking: 0;
+  --tablist-bg: var(--surface-hover); /* tabs: pill segments on a soft track */
+  --tablist-rule: 0 solid transparent;
+  --tablist-pad: 3px;
+  --tablist-radius: 999px;
+  --tab-active-bg: var(--surface);
+  --tab-active-shadow: 0 1px 3px rgba(18, 48, 79, 0.12);
+  --tab-underline: transparent;
+  --tile-rule-width: 0; /* a stat tile's tone rule: none (its value carries the tone) */
+  --badge-tint: 13%; /* a coloured badge: a tinted pill ... */
+  --badge-edge: 0%; /* ... with no outline */
+  --tl-dot: 10px; /* a timeline entry's ringed dot on the rail */
+  --tl-dot-ring: 2px solid var(--accent);
+  --meter-track: var(--border); /* the confidence meter's track: a hairline grey on white */
+  --graph-edge: var(--chart-axis); /* graph edges: a --border hairline vanishes on white */
+  --graph-edge-opacity: 0.75; /* 3.2:1 on a nested tile (0.6 was 2.4) */
+  --line-width: 2; /* chart lines: thicker, with round ends and corners */
+  --line-cap: round;
+  --line-join: round;
+  --spark-ring: var(--surface); /* the sparkline's end dot, ringed in the card colour */
+
+  /* Chrome: the Atlantic-blue bar. It sits outside every surface, never under
+     a [data-theme], so no theme declares these (themes.test.ts lists them). */
+  --rail: #12304f;
+  --rail-ink: #dbe6ef; /* the brand, and the light pill the state word sits on */
+  --rail-mute: #9fb6c9;
+  --rail-focus: #ffffff;
+}
+
+/* A themed root MUST re-assert the inherited properties it re-defines.
+   `body { color: var(--text) }` is substituted at the BODY, in root scope, and
+   that already-computed colour inherits into the themed subtree — so an
+   element which merely inherits (a plain Text, the app title) keeps the
+   :root colour while its siblings that re-declare `color: var(--text)`
+   pick the theme up. Measured on `paper`: the surface's --text token resolved
+   correctly to #2a2622 while the title still painted #e2e2f0. Re-declaring
+   here recomputes the inherited value inside the theme scope. Same reason
+   F093 rejected `--green: var(--ok)` aliases in :root. */
+[data-theme] {
+  color: var(--text);
+  font-family: var(--font-ui);
+}
+
+/* ── F093 §3 themes ────────────────────────────────────────────────────
+   Hand-designed, contrast-checked (see chart/theme contrast test), never
+   generated. Stamped as data-theme on the APP ROOT (not :root) so two
+   apps in the switcher theme independently. nous-default needs no block —
+   an absent or 'nous-default' data-theme inherits :root above. */
+
+/* The legacy shape. Every theme below was designed against the old :root and
+   declares its colours only; whatever it does not declare it inherits from
+   :root. This group re-declares, for each of them, every :root token none of
+   their blocks set, with the old values, so a change to :root never reaches
+   them (themes.test.ts checks each theme declares every :root token itself).
+   A var() here is substituted at the themed element, with that theme's
+   values. It sits BEFORE the blocks so a block can still override it. */
+[data-theme='nous-dark'],
+[data-theme='alpine-dusk'],
+[data-theme='harbor'],
+[data-theme='paper'],
+[data-theme='signal'],
+[data-theme='report'] {
+  --green: #34d399;
+  --red: #f87171;
+  --yellow: #fbbf24;
+  --radius: 12px;
+  --radius-md: 8px;
+  --radius-sm: 8px;
+  --ctl-radius: 8px;
+  --card-shadow: 0 0 #0000;
+  --card-border: 1px solid var(--border);
+  --select-border: var(--accent);
+  --transition: 0.2s ease;
+  --font-ui: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+  --font-display: var(--font-ui);
+  --font-numeric: var(--font-mono);
+  --nested-bg: var(--surface);
+  --ctl-bg: var(--surface-hover);
+  --ctl-border: var(--border);
+  --field-bg: var(--bg);
+  --field-border: var(--border);
+  --option-pad: 0;
+  --option-border: 0 solid transparent;
+  --option-selected-bg: transparent;
+  --picker-pad: 0.6rem 0.75rem 0.75rem;
+  --label-transform: uppercase;
+  --label-tracking: 0.05em;
+  --tablist-bg: transparent;
+  --tablist-rule: 1px solid var(--border);
+  --tablist-pad: 0;
+  --tablist-radius: 0;
+  --tab-active-bg: transparent;
+  --tab-active-shadow: 0 0 #0000;
+  --tab-underline: var(--accent);
+  --figure-stretch: 100%;
+  --ok-mark: var(--ok);
+  --warn-mark: var(--warn);
+  --crit-mark: var(--crit);
+  --chip-selected-bg: var(--accent-glow);
+  --chip-selected-ink: var(--text);
+  --chip-focus: 0 solid transparent;
+  --side-rule: 3px;
+  --side-rule-pad: 0.7rem;
+  --caps: 1;
+  --callout-bg: var(--surface);
+  --callout-pad: 0.9rem 1rem;
+  --tl-flag-rule: var(--warn);
+  --tap-min: auto;
+  --settled-opacity: 0.65;
+  --dim-opacity: 0.72;
+  --settled-ink: var(--text);
+  --field-focus: 0 solid transparent;
+  --video-bg: var(--surface-hover);
+  --stat-min: 120px;
+  --section-ink: var(--muted);
+  --tile-rule-width: 3px;
+  --badge-tint: 0%;
+  --badge-edge: 100%;
+  --tl-dot: 0px;
+  --tl-dot-ring: 0 solid transparent;
+  --meter-track: var(--surface-hover);
+  --graph-edge: var(--border);
+  --graph-edge-opacity: 1;
+  --line-width: 1.5;
+  --line-cap: butt;
+  --line-join: miter;
+  --spark-ring: transparent;
+  font-variant-numeric: normal;
+}
+
+[data-theme='nous-dark'] {
+  /* the previous default: violet on near-black, for night reading. The old
+     :root, value for value. */
+  color-scheme: dark;
   --bg: #0a0a0f;
   --surface: #12121a;
   --surface-hover: #181824;
@@ -24,67 +283,38 @@
   --transition: 0.2s ease;
   --font-ui: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
-
-  /* F093 §4 — semantic tokens. --ok/--warn/--crit default to the exact
-     --green/--red/--yellow values they name, so nous-default renders
-     byte-identical (AC1). --locked/--soft take their alpine-dusk values as
-     universal defaults per §4 (a token absent from :root resolves to
-     nothing and silently drops the property). */
   --ok: #34d399;
   --warn: #fbbf24;
   --crit: #f87171;
   --locked: #5fb3a1;
   --soft: #8a8fa3;
-  /* --font-display defaults to the UI font (no visual change under
-     nous-default); themes may swap in a serif for editorial character. */
   --font-display: var(--font-ui);
-  /* F096 §4.5 — every FIGURE (MetricCard/ScoreCard values, deltas, table
-     numbers, the sparkline current value) renders in this face with
-     tabular-nums. A var() alias is safe at :root only because no theme
-     changes its mono stack (signal re-declares an identical one); a theme
-     that does MUST re-declare --font-numeric in its own block, for the
-     inheritance reason documented under [data-theme] below. */
   --font-numeric: var(--font-mono);
-
-  /* F093 §1(a) — the three hardcoded literals migrate here so themes
-     re-skin them too. */
-  --on-accent: #ffffff; /* text on a filled --accent button (ButtonView) */
-  --scrim: rgba(10, 10, 15, 0.72); /* modal backdrop (ModalView) */
-  --node-decision: #a78bfa; /* MemoryGraph 'decision' node type — semantic */
-
-  /* F094 §2 — ordered series ramp assigned by the renderer for multi-series
-     charts. The model never picks a color; it picks a `tone` or a series
-     `key`, and the renderer maps it here. */
+  --on-accent: #ffffff;
+  --scrim: rgba(10, 10, 15, 0.72);
+  --node-decision: #a78bfa;
   --series-1: #7c6af7;
   --series-2: #34d399;
   --series-3: #fbbf24;
   --series-4: #60a5fa;
   --chart-axis: #6b6b8a;
   --chart-grid: #1e1e2e;
+  --node-fact: #7c6af7;
+  --node-episode: #34d399;
+  --node-procedure: #fbbf24;
+  --node-chunk: #6b6b8a;
+  --f-conversation: #8fa3b5;
+  --f-question: #8aa4ff;
+  --f-task: #3fc3d1;
+  --f-decision: #c08be0;
+  --f-debug: #f09a5a;
+  --f-creative: #ee82bd;
+  --f-initiation: #e0b050;
 }
-
-/* A themed root MUST re-assert the inherited properties it re-defines.
-   `body { color: var(--text) }` is substituted at the BODY, in root scope, and
-   that already-computed colour inherits into the themed subtree — so an
-   element which merely inherits (a plain Text, the app title) keeps the
-   DARK-theme colour while its siblings that re-declare `color: var(--text)`
-   pick the theme up. Measured on `paper`: the surface's --text token resolved
-   correctly to #2a2622 while the title still painted #e2e2f0. Re-declaring
-   here recomputes the inherited value inside the theme scope. Same reason
-   F093 rejected `--green: var(--ok)` aliases in :root. */
-[data-theme] {
-  color: var(--text);
-  font-family: var(--font-ui);
-}
-
-/* ── F093 §3 themes ────────────────────────────────────────────────────
-   Hand-designed, contrast-checked (see chart/theme contrast test), never
-   generated. Stamped as data-theme on the APP ROOT (not :root) so two
-   apps in the switcher theme independently. nous-default needs no block —
-   an absent or 'nous-default' data-theme inherits :root above. */
 
 [data-theme='alpine-dusk'] {
   /* warm near-black, for trips and outdoor plans */
+  color-scheme: dark;
   --bg: #0e1014;
   --surface: #161a20;
   --surface-hover: #1e232b;
@@ -109,10 +339,22 @@
   --chart-axis: #8a8072;
   --chart-grid: #232a33;
   --font-display: Fraunces, 'Georgia', 'Times New Roman', serif;
+  --node-fact: #e8833a;
+  --node-episode: #5fb3a1;
+  --node-procedure: #e8a33a;
+  --node-chunk: #8a8072;
+  --f-conversation: #8fa3b5;
+  --f-question: #8aa4ff;
+  --f-task: #3fc3d1;
+  --f-decision: #c08be0;
+  --f-debug: #f09a5a;
+  --f-creative: #ee82bd;
+  --f-initiation: #e0b050;
 }
 
 [data-theme='harbor'] {
   /* cool blue-grey, for status and monitoring */
+  color-scheme: dark;
   --bg: #0b1016;
   --surface: #121a24;
   --surface-hover: #182230;
@@ -136,13 +378,24 @@
   --series-4: #a98fd9;
   --chart-axis: #7089a0;
   --chart-grid: #1f2c3a;
+  --node-fact: #4a90d9;
+  --node-episode: #3fb6a0;
+  --node-procedure: #e0a94a;
+  --node-chunk: #7089a0;
+  --f-conversation: #8fa3b5;
+  --f-question: #8aa4ff;
+  --f-task: #3fc3d1;
+  --f-decision: #c08be0;
+  --f-debug: #f09a5a;
+  --f-creative: #ee82bd;
+  --f-initiation: #e0b050;
 }
 
 [data-theme='paper'] {
   /* warm light, for reading and briefings */
-  /* `html { color-scheme: dark }` is global; without this the light theme's
-     scrollbars and form controls render dark-scheme. color-scheme is honored
-     per-element, so declaring it on the themed surface is enough (F7). */
+  /* Every theme declares its own color-scheme (the page's is light since
+     the paper default; the dark themes say dark). It is honored per element,
+     so declaring it on the themed surface is enough (F7). */
   color-scheme: light;
   --bg: #f4f1ea;
   --surface: #fbf9f4;
@@ -168,10 +421,22 @@
   --chart-axis: #6e675b;
   --chart-grid: #ddd6c8;
   --font-display: Fraunces, 'Georgia', 'Times New Roman', serif;
+  --node-fact: #b5651d;
+  --node-episode: #2f8f6b;
+  --node-procedure: #b5811d;
+  --node-chunk: #6e675b;
+  --f-conversation: #55697a;
+  --f-question: #2346c8;
+  --f-task: #0b6e7a;
+  --f-decision: #7b3fa0;
+  --f-debug: #b4531c;
+  --f-creative: #a3266f;
+  --f-initiation: #8f5c0f;
 }
 
 [data-theme='signal'] {
   /* high-contrast, for alerts and dense data */
+  color-scheme: dark;
   --bg: #08080a;
   --surface: #101014;
   --surface-hover: #17171d;
@@ -196,7 +461,19 @@
   --chart-axis: #7a7a92;
   --chart-grid: #24242e;
   --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+  --font-numeric: var(--font-mono);
   --font-display: 'JetBrains Mono', 'Cascadia Code', monospace;
+  --node-fact: #00d9a3;
+  --node-episode: #00d9a3;
+  --node-procedure: #ffcc33;
+  --node-chunk: #7a7a92;
+  --f-conversation: #8fa3b5;
+  --f-question: #8aa4ff;
+  --f-task: #3fc3d1;
+  --f-decision: #c08be0;
+  --f-debug: #f09a5a;
+  --f-creative: #ee82bd;
+  --f-initiation: #e0b050;
 }
 
 [data-theme='report'] {
@@ -205,6 +482,7 @@
      health trend report this vocabulary generalizes. System serif faces:
      no webfont, no load cost. --soft is deliberately LIGHTER than --muted
      so a neutral pill or delta never reads weaker than its own caption. */
+  color-scheme: dark;
   --bg: #0a0c11;
   --surface: #131822;
   --surface-hover: #182030;
@@ -229,10 +507,31 @@
   --chart-axis: #8d99ae;
   --chart-grid: #212b3b;
   --font-display: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
+  --node-fact: #7c9cd0;
+  --node-episode: #4ade80;
+  --node-procedure: #fbbf24;
+  --node-chunk: #8d99ae;
+  --f-conversation: #8fa3b5;
+  --f-question: #8aa4ff;
+  --f-task: #3fc3d1;
+  --f-decision: #c08be0;
+  --f-debug: #f09a5a;
+  --f-creative: #ee82bd;
+  --f-initiation: #e0b050;
 }
 
 html {
-  color-scheme: dark;
+  color-scheme: light;
+}
+
+/* A field's placeholder on the paper default. The one paper rule that names a
+   theme id: a legacy look keeps the browser's own placeholder grey, which
+   differs by browser (Chromium #757575, WebKit darkgray), so no token value
+   could mean "as before". --muted is 5.7:1 on the white field. */
+.surface:not([data-theme]) ::placeholder,
+.surface[data-theme='nous-default'] ::placeholder {
+  color: var(--muted);
+  opacity: 1;
 }
 
 * {
@@ -247,4 +546,5 @@ body {
   font-size: 15px;
   line-height: 1.5;
   min-height: 100dvh;
+  font-variant-numeric: tabular-nums;
 }

@@ -67,15 +67,18 @@
 <style>
   .card {
     padding: 0.65rem 0.8rem;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--accent);
-    border-radius: var(--radius-sm);
+    background: var(--nested-bg);
+    border: var(--card-border);
+    border-left: var(--side-rule) solid var(--accent);
+    border-radius: var(--radius-md);
     min-width: 0;
   }
   .card.settled {
-    opacity: 0.65;
+    opacity: var(--settled-opacity);
     border-left-color: var(--border);
+  }
+  .card.settled .desc {
+    color: var(--settled-ink);
   }
   .desc {
     margin: 0 0 0.4rem;
@@ -89,29 +92,33 @@
   }
   .badge {
     font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    text-transform: var(--label-transform);
+    letter-spacing: calc(0.04em * var(--caps));
     padding: 0.1rem 0.45rem;
     border: 1px solid var(--border);
     border-radius: 999px;
     color: var(--muted);
   }
+  /* A coloured badge: a tinted pill on paper, an outline in a legacy theme
+     (--badge-tint 0% and --badge-edge 100% there: exactly the old border). */
   .badge.stakes-high,
-  .badge.stakes-critical {
+  .badge.stakes-critical,
+  .badge.outcome-failure {
     color: var(--crit);
-    border-color: var(--crit);
   }
   .badge.outcome-success {
     color: var(--ok);
-    border-color: var(--ok);
-  }
-  .badge.outcome-failure {
-    color: var(--crit);
-    border-color: var(--crit);
   }
   .badge.outcome-partial {
     color: var(--warn);
-    border-color: var(--warn);
+  }
+  .badge.stakes-high,
+  .badge.stakes-critical,
+  .badge.outcome-success,
+  .badge.outcome-failure,
+  .badge.outcome-partial {
+    border-color: color-mix(in srgb, currentColor var(--badge-edge), transparent);
+    background: color-mix(in srgb, currentColor var(--badge-tint), transparent);
   }
   .id {
     margin-left: auto;

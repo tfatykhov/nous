@@ -1,0 +1,40 @@
+{
+  "components": [
+    { "id": "root", "component": "Column", "children": ["panel", "evidence", "picker", "actions"] },
+    {
+      "id": "panel",
+      "component": "ApprovalPanel",
+      "title": "Turn on frame carry?",
+      "summary": "Raised by the 09:21 turn, in the decision frame, which the critic chose.\nFrame carry keeps the last turn's frame when you reply with a few words, like \"yes\". Frame context has been on since 04:51, but only 3 of your turns have run under it, too few to show whether carry helps.",
+      "risk": "Turning it on changes how short replies are framed from the next turn."
+    },
+    { "id": "evidence", "component": "StatRow", "children": ["t-turns", "t-background", "t-errors"] },
+    { "id": "t-turns", "component": "StatTile", "label": "Your turns since 04:51", "value": "3", "intent": "warn", "delta": "too few to judge" },
+    { "id": "t-background", "component": "StatTile", "label": "Background turns", "value": "77" },
+    { "id": "t-errors", "component": "StatTile", "label": "Errors", "value": "0", "intent": "good" },
+    {
+      "id": "picker",
+      "component": "ChoicePicker",
+      "label": "What should Nous do?",
+      "variant": "mutuallyExclusive",
+      "value": { "path": "/choice" },
+      "options": [
+        { "value": "wait", "label": "Wait three days, then decide (recommended)" },
+        { "value": "on", "label": "Turn it on now" },
+        { "value": "off", "label": "Keep it off" }
+      ]
+    },
+    { "id": "actions", "component": "Row", "children": ["confirm", "ask"] },
+    {
+      "id": "confirm",
+      "component": "Button",
+      "variant": "primary",
+      "child": "confirm-label",
+      "action": { "event": { "name": "confirm", "context": { "choice": { "path": "/choice" } } } }
+    },
+    { "id": "confirm-label", "component": "Text", "text": "Confirm choice" },
+    { "id": "ask", "component": "Button", "child": "ask-label", "action": { "event": { "name": "ask" } } },
+    { "id": "ask-label", "component": "Text", "text": "Ask Nous" }
+  ],
+  "dataModel": { "choice": ["wait"] }
+}

@@ -52,7 +52,7 @@ describe('SparklineView', () => {
     expect(container.textContent).toContain('61 bpm'); // last value
     // tone → token, never a literal colour
     expect((container.querySelector('.spark') as HTMLElement).style.getPropertyValue('--tone')).toBe(
-      'var(--ok)',
+      'var(--ok-mark)',
     );
   });
 

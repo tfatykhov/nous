@@ -115,7 +115,7 @@
       {#each lines as ln, li (li)}
         {#each ln.segments as seg, si (si)}
           {#if seg.includes(' ')}
-            <polyline points={seg} fill="none" stroke={ln.stroke} stroke-width="1.5" />
+            <polyline class="ln" points={seg} fill="none" stroke={ln.stroke} />
           {:else}
             <!-- A one-coordinate segment (single timestamp, or a lone reading
                  between two gaps) has no line to stroke — draw the point as a
@@ -153,6 +153,11 @@
     display: block;
     width: 100%;
     height: auto;
+  }
+  .ln {
+    stroke-width: var(--line-width);
+    stroke-linecap: var(--line-cap);
+    stroke-linejoin: var(--line-join);
   }
   .tick,
   .axl {

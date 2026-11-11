@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, fireEvent, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import ConfidenceMeterView from './ConfidenceMeterView.svelte';
+import StatTileView from './StatTileView.svelte';
 import DecisionCardView from './DecisionCardView.svelte';
 import MemoryGraphView from './MemoryGraphView.svelte';
 import DagGraphView from './DagGraphView.svelte';
@@ -66,6 +67,46 @@ describe('ConfidenceMeterView', () => {
   it('colors the low band red', () => {
     const { container } = renderMeter(0.2);
     expect(container.querySelector('.fill')?.classList.contains('low')).toBe(true);
+  });
+
+  it('names the band in words after the number, and to a screen reader (review I2: the band colour is not the only cue)', () => {
+    for (const [v, words] of [
+      [0.2, '0.20, low'],
+      [0.55, '0.55, medium'],
+      [0.72, '0.72, high'],
+    ] as const) {
+      const { container } = renderMeter(v);
+      expect(container.querySelector('.num')?.textContent).toBe(words);
+      expect(container.querySelector('[role="meter"]')?.getAttribute('aria-valuetext')).toBe(words);
+      cleanup();
+    }
+  });
+});
+
+describe('StatTileView', () => {
+  function renderTile(extra: Record<string, unknown>) {
+    seedSurface({});
+    return render(StatTileView, {
+      props: { surfaceId: SURFACE, comp: { id: 't', component: 'StatTile', label: 'Errors', value: '0', ...extra } },
+    });
+  }
+
+  it('says its intent in a word when there is no delta (review I2: the value colour is not the only cue)', () => {
+    for (const [intent, word] of [
+      ['good', 'good'],
+      ['warn', 'warning'],
+      ['bad', 'bad'],
+    ]) {
+      const { container } = renderTile({ intent });
+      expect(container.querySelector('.delta')?.textContent, intent).toBe(word);
+      cleanup();
+    }
+  });
+
+  it('a delta speaks for itself, and a neutral tile has no word', () => {
+    expect(renderTile({ intent: 'bad', delta: 'up 3' }).container.querySelector('.delta')?.textContent).toBe('up 3');
+    cleanup();
+    expect(renderTile({}).container.querySelector('.delta')).toBeNull();
   });
 });
 
@@ -175,6 +216,39 @@ describe('DagGraphView', () => {
     expect(circles[1].getAttribute('fill')).toBe('var(--crit)');
     expect(container.querySelectorAll('line').length).toBe(2);
     expect(container.textContent).toContain('analyze');
+  });
+
+  it('names each node status in words under its name: colour is not the only carrier (PR 6)', () => {
+    // pending, ready, cancelled and skipped share one grey, and running/failed merge under red-green colour
+    // blindness: the word tells them apart.
+    seedSurface({
+      nodes: [
+        { name: 'fetch', status: 'completed' },
+        { name: 'score', status: 'running' },
+        { name: 'write', status: 'failed' },
+        { name: 'notify', status: 'ready' },
+        { name: 'archive', status: 'skipped' },
+        { name: 'later' },
+      ],
+      edges: [{ from: 'fetch', to: 'score' }],
+    });
+    const { container } = render(DagGraphView, {
+      props: {
+        surfaceId: SURFACE,
+        comp: { id: 'g', component: 'DagGraph', nodes: { path: '/nodes' }, edges: { path: '/edges' } },
+      },
+    });
+    const words = [...container.querySelectorAll('g.node')].map((g) =>
+      [...g.querySelectorAll('text')].map((t) => t.textContent?.trim()),
+    );
+    expect(words).toEqual([
+      ['fetch', 'completed'],
+      ['score', 'running'],
+      ['write', 'failed'],
+      ['notify', 'ready'],
+      ['archive', 'skipped'],
+      ['later', 'pending'],
+    ]);
   });
 
   it('dedupes parallel edges between the same pair (duplicate keyed-each crash)', () => {

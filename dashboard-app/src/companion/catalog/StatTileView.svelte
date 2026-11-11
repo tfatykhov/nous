@@ -28,13 +28,17 @@
   const intent = $derived(
     typeof comp.intent === 'string' && INTENTS.includes(comp.intent) ? comp.intent : 'neutral',
   );
+  // With no delta, the value's colour would be the only sign of the intent (and warn and bad text merge under
+  // red-green colour blindness): say it in a word, in every theme.
+  const INTENT_WORDS: Record<string, string> = { good: 'good', warn: 'warning', bad: 'bad' };
+  const line = $derived(delta || (INTENT_WORDS[intent] ?? ''));
 </script>
 
 <div class="tile {intent}" style:flex-grow={flexGrow(comp.weight)}>
   <span class="label">{label}</span>
   <span class="value">{value}</span>
-  {#if delta}
-    <span class="delta">{delta}</span>
+  {#if line}
+    <span class="delta">{line}</span>
   {/if}
 </div>
 
@@ -45,22 +49,23 @@
     gap: 0.15rem;
     padding: 0.7rem 0.85rem;
     min-width: 0;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--border);
-    border-radius: var(--radius-sm);
+    background: var(--nested-bg);
+    border: var(--card-border);
+    border-left: var(--tile-rule-width) solid var(--border);
+    border-radius: var(--radius-md);
   }
   .label {
     color: var(--muted);
     font-size: 0.78rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
   }
   .value {
     font-size: 1.4rem;
     font-weight: 600;
     line-height: 1.15;
     overflow-wrap: anywhere;
+    font-stretch: var(--figure-stretch);
   }
   .delta {
     color: var(--muted);

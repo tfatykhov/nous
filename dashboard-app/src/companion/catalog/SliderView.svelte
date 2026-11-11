@@ -89,7 +89,7 @@
     font-size: 0.82rem;
   }
   .value {
-    font-family: var(--font-mono);
+    font-family: var(--font-numeric);
     font-size: 0.85rem;
   }
   input {

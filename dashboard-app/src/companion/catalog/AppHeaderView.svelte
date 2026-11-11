@@ -123,7 +123,6 @@
       </span>
     {:else if flashing}
       <span class="stamp done" aria-hidden="true">
-        <svg class="check" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
         updated just now
       </span>
     {:else if pendingStale}
@@ -190,6 +189,7 @@
   .elapsed {
     font-family: var(--font-numeric);
     font-variant-numeric: tabular-nums;
+    font-stretch: var(--figure-stretch);
   }
   .note {
     color: var(--muted);
@@ -206,10 +206,6 @@
   .dot.warn {
     background: var(--warn);
     animation: none;
-  }
-  .check {
-    width: 12px;
-    height: 12px;
   }
   @keyframes pulse {
     0%,
