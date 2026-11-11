@@ -257,7 +257,7 @@
                 r: {
                   min: 0,
                   max: 0.5,
-                  ticks: { stepSize: 0.1 },
+                  ticks: { stepSize: 0.1, showLabelBackdrop: false }, // the labels sit on the weights: no box hides them
                   grid: { color: 'var(--border)' },
                   angleLines: { color: 'var(--border)' },
                   pointLabels: { font: { size: 12 } },

@@ -155,6 +155,8 @@ describe('Scoring: chart colours are tokens', () => {
     expect(radar.data.datasets[2].borderDash).toEqual([8, 4]);
     expect(radar.options.scales.r.grid.color).toBe('#1e1e2e');
     expect(radar.options.scales.r.angleLines.color).toBe('#1e1e2e');
+    // Review M2: the tick labels sit on the weights; with no backdrop box they do not hide them.
+    expect(radar.options.scales.r.ticks).toMatchObject({ stepSize: 0.1, showLabelBackdrop: false });
     const doughnut = chart('doughnut');
     expect(doughnut.data.labels).toEqual(['completed', 'praised', 'corrected', 'reworked', 'self corrected', 'mystery']);
     expect(doughnut.data.datasets[0].backgroundColor).toEqual(['#34d399', '#60a5fa', '#fb923c', '#f87171', '#a78bfa', '#6b6b8a']);
