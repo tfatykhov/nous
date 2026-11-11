@@ -44,14 +44,14 @@ export const HEX_GUARDED: readonly string[] = [
 ];
 
 const SRC = __dirname;
-const LITERAL = /#[0-9a-fA-F]{3,8}\b|rgba?\(/;
+const LITERAL = /#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\((?!\s*var\()|oklch\((?!\s*var\()/; // hsl(var(--primary)) is a token
 
 describe('no colour literal in a migrated component style', () => {
   it('the pattern catches hex and rgb(a), and spares tokens, ids and comments', () => {
-    for (const bad of ['color: #fff;', 'background: #12304f;', 'border: 1px solid rgba(0, 0, 0, 0.1);', 'fill: rgb(1 2 3);']) {
+    for (const bad of ['color: #fff;', 'background: #12304f;', 'border: 1px solid rgba(0, 0, 0, 0.1);', 'fill: rgb(1 2 3);', 'color: hsl(210 50% 40%);', 'color: oklch(0.6 0.1 200);']) {
       expect(bad).toMatch(LITERAL);
     }
-    for (const ok of ['color: var(--text);', ':global(#app) { display: flex; }', 'grid-area: main;']) {
+    for (const ok of ['color: var(--text);', ':global(#app) { display: flex; }', 'grid-area: main;', 'background: hsl(var(--primary));']) {
       expect(ok).not.toMatch(LITERAL);
     }
     expect(styleBlocks('<style>/* #a99df9 on the glow */ a { color: var(--x); }</style>')).not.toMatch(LITERAL);
@@ -120,9 +120,20 @@ export const SCRIPT_GUARDED: readonly string[] = [
   'views/Consolidation.svelte',
 ];
 
-/** A literal colour, or a two-hex-digit alpha glued onto one (`c + '33'`, `"{color}20"`, `` `${color}30` ``), which
- * cannot work on a var(). */
-const LITERAL_SCRIPT = /#[0-9a-fA-F]{3,8}\b|rgba?\(|\+\s*['"`][0-9a-fA-F]{2}['"`]|\}[0-9a-fA-F]{2}['"`]/;
+/** A literal colour (hex, rgb/hsl/oklch, a named colour in a fill/stroke attribute), or a two-hex-digit alpha glued onto
+ * one (`c + '33'`, `"{color}20"`, `{c}55;` mid-string, `` `${color}30` ``), which cannot work on a var(). The suffix is
+ * found by what follows the brace (not a letter, digit, `_` or `-`), not by a closing quote (review I2). */
+const LITERAL_SCRIPT = new RegExp(
+  [
+    String.raw`#[0-9a-fA-F]{3,8}\b`,
+    String.raw`rgba?\(`,
+    String.raw`hsla?\((?!\s*var\()`, // hsl(var(--primary)) is a token
+    String.raw`oklch\((?!\s*var\()`,
+    String.raw`\+\s*['"` + '`' + String.raw`][0-9a-fA-F]{2}['"` + '`' + ']',
+    String.raw`\}[0-9a-fA-F]{2}(?![0-9a-zA-Z_-])`,
+    String.raw`\b(?:fill|stroke|stop-color|flood-color|lighting-color)=["'](?!(?:none|currentColor|transparent|inherit)["'])[a-zA-Z]+["']`,
+  ].join('|'),
+);
 
 describe('no colour literal in a migrated view script or markup', () => {
   it('the helpers keep code and drop comments', () => {
@@ -139,13 +150,17 @@ describe('no colour literal in a migrated view script or markup', () => {
     expect(markupOf(sv)).not.toMatch(/const x|#34d399|#fff/);
   });
 
-  it('the script pattern catches hex, rgb(a) and an alpha suffix, and spares tokens and tints', () => {
+  it('the script pattern catches hex, rgb(a), hsl(a), oklch, a named fill or stroke and an alpha suffix; spares tokens and tints', () => {
     for (const bad of ["const c = '#34d399';", 'const t = rgba(1,2,3,.1);', "const t = color + '33';", "outcomeColor(o) + '20'",
-      'style:background="{typeColor(head.type)}20"', 'fill: `${color}30`']) {
+      'style:background="{typeColor(head.type)}20"', 'fill: `${color}30`',
+      // Review I2: a suffix in the middle of a string, other colour functions, a named colour attribute.
+      'style="border-color: {c}55; color: {c}"', 'style="background: {s.color}30; flex: 1"', '`${c}55 solid`',
+      'fill="hsl(210 50% 40%)"', 'fill="white"', "stroke='black'", 'const c = hsla(1, 2%, 3%, .5);', 'color: oklch(0.6 0.1 200)']) {
       expect(bad, bad).toMatch(LITERAL_SCRIPT);
     }
     for (const ok of ["const v = 'var(--series-1)';", "const t = tint('--series-1', 0.1);", "routeHref('dag')", 'href="#/health/graph"',
-      "const n = count + '1';", 'style:background={typeVar(head.type)}', '{n} seeds']) {
+      "const n = count + '1';", 'style:background={typeVar(head.type)}', '{n} seeds', 'fill="none" stroke="currentColor"',
+      '`${n}ms`', '{count} items', '{a}{b}', "`${x}px`", 'background: hsl(var(--primary))']) {
       expect(ok, ok).not.toMatch(LITERAL_SCRIPT);
     }
   });
