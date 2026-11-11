@@ -337,7 +337,7 @@ A name-only check would have missed F096, which added props to components that w
 
 ### 8.4 Themes
 
-All 24 custom properties of each of the six theme blocks in `companion.css` are ported to Compose token sets, applied per surface through a `CompositionLocal`. ~~A JVM test parses `companion.css` and asserts every `(theme, token, value)` equals the Kotlin table~~ *(correction, 2026-11: no such test exists; `android/app/src/test` has none, and `Theme.kt` holds hand-copied token sets).*
+All 24 custom properties of each of the six theme blocks in `companion.css` are ported to Compose token sets, applied per surface through a `CompositionLocal`. ~~A JVM test parses `companion.css` and asserts every `(theme, token, value)` equals the Kotlin table~~ *(correction, 2026-11: no such test exists: none of the six test files in `android/app/src/test` parses `companion.css`, and `Theme.kt` holds hand-copied token sets).*
 
 **Not ported: the paper default (dashboard redesign PR 6, 2026-11).** On the web, `nous-default` is now the paper look and the old violet-on-dark default is the named theme `nous-dark`. Android keeps its six hand-copied sets, so there `nous-default` is still the dark violet set: the same surface looks different on the two clients until a follow-up ports the paper default. `nous-dark` is an unknown id on Android and falls back to `nous-default` (R14), which there is the dark violet look, the intended one by accident. Porting the paper default (its tokens, Archivo and Red Hat Mono, and the shape tokens of the legacy group) is a separate follow-up.
 

@@ -48,7 +48,7 @@ _META_KEY = "meta"
 # ignored theme is indistinguishable from a broken one). Absent ⇒ default.
 _THEMES: dict[str, str] = {
     "nous-default": "chart-paper light with an Atlantic-blue bar, the standard companion look",
-    "nous-dark": "the previous standard look: violet on near-black, for night reading",
+    "nous-dark": "a dark violet card (the previous standard look)",
     "alpine-dusk": "warm near-black with an alpenglow accent — trips, outdoor plans",
     "harbor": "cool blue-grey — status, ops, monitoring dashboards",
     "paper": "warm light with a serif display — reading, briefings, digests",

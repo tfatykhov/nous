@@ -68,7 +68,7 @@
     const out: GEdge[] = [];
     for (const e of raw as GEdge[]) {
       if (!e || !e.source || !e.target) continue;
-      const key = `${e.source}→${e.target}:${e.relation ?? ''}`;
+      const key = `${e.source}\u2192${e.target}:${e.relation ?? ''}`;
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(e);
@@ -139,7 +139,7 @@
         dmNodes.push(n);
       }
     }
-    const key = (e: GEdge) => `${e.source}→${e.target}:${e.relation ?? ''}`;
+    const key = (e: GEdge) => `${e.source}\u2192${e.target}:${e.relation ?? ''}`;
     const knownE = new Set(dmEdges.map(key));
     for (const e of value.edges ?? []) {
       if (e?.source && e?.target && !knownE.has(key(e))) {

@@ -56,7 +56,7 @@
     const out: DEdge[] = [];
     for (const e of raw as DEdge[]) {
       if (!e || !names.has(e.from) || !names.has(e.to)) continue;
-      const key = `${e.from}→${e.to}`;
+      const key = `${e.from}\u2192${e.to}`;
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(e);
@@ -134,7 +134,7 @@
         <path d="M0 0 L8 4 L0 8 z" fill="var(--muted)" />
       </marker>
     </defs>
-    {#each edges as edge (edge.from + '→' + edge.to)}
+    {#each edges as edge (edge.from + '\u2192' + edge.to)}
       {@const a = layout.pos.get(edge.from)}
       {@const b = layout.pos.get(edge.to)}
       {#if a && b}

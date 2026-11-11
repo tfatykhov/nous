@@ -712,7 +712,7 @@
         },
         "items": {
           "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicValue",
-          "description": "Path to an array of {label, value, tone?} evidence rows — value preformatted (e.g. '↓0.4 kg'), tone ∈ neutral|ok|warn|crit colours that row's value."
+          "description": "Path to an array of {label, value, tone?} evidence rows — value preformatted (e.g. 'down 0.4 kg'), tone ∈ neutral|ok|warn|crit colours that row's value."
         },
         "note": {
           "$ref": "https://a2ui.org/specification/v1_0/common_types.json#/$defs/DynamicString",
@@ -739,7 +739,7 @@
     },
     "DeltaList": {
       "type": "object",
-      "description": "F096: ranked movers — one row per metric that moved: label · tone-coloured delta · from → to. An EMPTY list is a state, never a blank block: it renders emptyText in italics ('no significant adverse moves' is the good news). Values arrive PREFORMATTED (the StatTile contract): the agent already chose the decimals and the unit; the renderer never rounds, re-signs or adds units.",
+      "description": "F096: ranked movers — one row per metric that moved: label · tone-coloured delta · from to to (the word, never an arrow). An EMPTY list is a state, never a blank block: it renders emptyText in italics ('no significant adverse moves' is the good news). Values arrive PREFORMATTED (the StatTile contract): the agent already chose the decimals and the unit; the renderer never rounds, re-signs or adds units.",
       "properties": {
         "component": {
           "const": "DeltaList"

@@ -156,9 +156,12 @@ describe('Section.layout accordion', () => {
   it('expands on click and collapses again', async () => {
     const { container } = renderAccordion();
     const btn = container.querySelector('button.toggle') as HTMLButtonElement;
+    // the toggle says what it will do in a word, not a caret glyph (review I6)
+    expect(btn.querySelector('.caret')?.textContent).toBe('Show');
     await fireEvent.click(btn);
     expect(btn.getAttribute('aria-expanded')).toBe('true');
     expect(container.textContent).toContain('hidden detail');
+    expect(btn.querySelector('.caret')?.textContent).toBe('Hide');
     await fireEvent.click(btn);
     expect(container.textContent).not.toContain('hidden detail');
   });

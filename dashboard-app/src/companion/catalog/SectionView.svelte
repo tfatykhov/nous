@@ -74,7 +74,7 @@
         {#if caption}
           <span class="caption">{caption}</span>
         {/if}
-        <span class="caret" aria-hidden="true">{open ? '▾' : '▸'}</span>
+        <span class="caret" aria-hidden="true">{open ? 'Hide' : 'Show'}</span>
       </button>
     </h3>
   {:else}

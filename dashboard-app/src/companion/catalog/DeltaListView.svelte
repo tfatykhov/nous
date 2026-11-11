@@ -46,7 +46,7 @@
       return {
         label: toDisplayString(r.label),
         delta: toDisplayString(r.delta),
-        range: from && to ? `${from} → ${to}` : from || to,
+        range: from && to ? `${from} to ${to}` : from || to,
         ink: toneInkVar(normalizeTone(r.tone)),
       };
     });

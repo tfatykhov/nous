@@ -126,7 +126,7 @@
 
 <dialog bind:this={dialog} onclick={onDialogClick} onclose={() => (isOpen = false)}>
   <div class="content">
-    <button type="button" class="close" aria-label="Close dialog" onclick={close}>✕</button>
+    <button type="button" class="close" aria-label="Close dialog" onclick={close}>Close</button>
     {#if isOpen && typeof comp.content === 'string'}
       <Renderer {surfaceId} componentId={comp.content} {scope} {depth} {ancestors} />
     {/if}
@@ -173,6 +173,7 @@
     border: none;
     cursor: pointer;
     padding: 0.15rem 0.35rem;
+    min-height: var(--tap-min);
     border-radius: var(--radius-sm);
   }
   .close:hover {

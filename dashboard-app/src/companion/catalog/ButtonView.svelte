@@ -64,7 +64,7 @@
       const result = await transport.postAction(surfaceId, action.event.name, comp.id, resolved);
       if (!result.ok) error = result.message || 'action failed';
       else {
-        notice = result.message || 'Done ✓';
+        notice = result.message || 'Done';
         store.noticeOwner[noticeGroup] = comp.id;
       }
     } finally {
