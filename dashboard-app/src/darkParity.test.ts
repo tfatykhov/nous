@@ -197,7 +197,7 @@ const CHANGES: Change[] = [
   ['views/Harness.svelte', '.badge', 'border-radius', '999px', '4px', '999px', 'the censor count is a pill, as the badges of PR 2 and PR 3'],
   ['views/Observability.svelte', '.chart-card', 'border-radius', 'var(--card-radius)', '10px', '12px', 'D2: a chart card takes the card radius'],
   ['views/Observability.svelte', '.trace-type', 'color', 'var(--accent-text)', '#38bdf8', '#a99df9', 'D4: the trace type is the accent text, not a one-off sky blue'],
-  ['views/Observability.svelte', '.trace-badge', 'background', 'var(--wash)', 'rgba(96, 165, 250, 0.15)', 'rgba(255, 255, 255, 0.03)', 'D4: the event count is a neutral badge on the wash'],
+  ['views/Observability.svelte', '.trace-badge', 'background', 'color-mix(in srgb, var(--muted) 10%, transparent)', 'rgba(96, 165, 250, 0.15)', 'rgba(142, 142, 171, 0.1)', 'D4 and review M2: the event count is a neutral badge, a tint that keeps its shape on a hovered row'],
   ['views/Observability.svelte', '.trace-badge', 'color', 'var(--muted)', '#60a5fa', '#8e8eab', 'D4: the event count is a neutral badge, not blue'],
   ['views/Observability.svelte', '.trace-badge', 'border-radius', '999px', '4px', '999px', 'a badge is a pill, as the badges of PR 2 to PR 4'],
   ['views/Observability.svelte', '.trace-badge--mod', 'background', 'color-mix(in srgb, var(--st-partial) 12.5%, transparent)', 'rgba(251, 146, 60, 0.15)', 'rgba(251, 146, 60, 0.125)', "PR 3's badge tint: at 15% the paper text is 4.49:1 on a hovered row"],

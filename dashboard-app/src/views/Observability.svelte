@@ -141,7 +141,8 @@
 
   const trendLineOpts = {
     scales: {
-      x: { display: true, ticks: { maxTicksLimit: 8, font: { size: 10 } } },
+      // Level labels: at phone width Chart.js skips some instead of tilting them over the plot.
+      x: { display: true, ticks: { maxTicksLimit: 8, maxRotation: 0, font: { size: 10 } } },
       y: { beginAtZero: true },
     },
     plugins: { legend: { display: false } },
@@ -185,9 +186,8 @@
             <span class="handler-stats">
               <span class="handler-stat">{h.successes ?? 0}/{h.invocations ?? 0}</span>
               <span class="handler-stat">{(h.avg_duration_ms ?? 0).toFixed(1)}ms</span>
-              {#if h.last_invoked_ago_s != null}
-                <span class="handler-stat">{Math.round(h.last_invoked_ago_s)}s ago</span>
-              {/if}
+              <!-- Always the slot, empty when the handler never ran, so the rate stays in its column. -->
+              <span class="handler-stat">{h.last_invoked_ago_s != null ? `${Math.round(h.last_invoked_ago_s)}s ago` : ''}</span>
               <span class="handler-rate" class:handler-rate--warn={(h.error_rate ?? 0) > 0.1}>
                 {(h.error_rate * 100).toFixed(1)}% err
               </span>
@@ -224,9 +224,9 @@
             >
               <span class="trace-toggle">{expandedTraces.has(t.trace_id) ? 'Hide' : 'Show'}</span>
               <span class="trace-type">{t.root_type ?? 'unknown'}</span>
-              <span class="trace-badge">{t.event_count} events</span>
+              <span class="trace-badge">{t.event_count} {t.event_count === 1 ? 'event' : 'events'}</span>
               {#if t.has_modifications}
-                <span class="trace-badge trace-badge--mod">MOD</span>
+                <span class="trace-badge trace-badge--mod">modified</span>
               {/if}
               <span class="trace-age">{fmtAgo(t.timestamp)}</span>
             </div>
@@ -536,7 +536,8 @@
     font-size: 0.6875rem;
     padding: 0.125rem 0.375rem;
     border-radius: 999px;
-    background: var(--wash);
+    /* A tint, not the wash: on paper the wash is the hovered row's own fill, so the badge lost its shape there. */
+    background: color-mix(in srgb, var(--muted) 10%, transparent);
     color: var(--muted);
     white-space: nowrap;
   }

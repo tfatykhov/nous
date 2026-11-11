@@ -211,9 +211,34 @@ describe('Observability: words, not glyphs', () => {
     const shown = document.body.textContent ?? '';
     for (const g of ['→', 'Δ', '▶', '▼']) expect(shown, g).not.toContain(g);
     // A trace or modification with no type says so in a word (it showed "?").
-    expect(text(screen.getAllByText('unknown')[0])).toBe('unknown');
+    expect(screen.getAllByText('unknown')).toHaveLength(2); // one trace, one modification
     expect(document.querySelectorAll('.trace-type, .mod-type').length).toBe(4);
     for (const el of document.querySelectorAll('.trace-type, .mod-type')) expect(text(el)).not.toBe('?');
+  });
+
+  it('a handler row is its dot, its name, then its four figures in fixed slots (an empty one when it never ran)', async () => {
+    render(Observability);
+    const row = (await screen.findByText('sleep_handler')).closest('.handler-row')!;
+    const stats = row.querySelector('.handler-stats')!;
+    // This handler has no last-invoked time: the slot stays, so its rate sits under the others' rates (review M7).
+    expect([...stats.children].map((c) => text(c))).toEqual(['8/10', '3.2ms', '', '20.0% err']);
+    expect(row.firstElementChild?.classList.contains('handler-dot')).toBe(true);
+    expect(stats.previousElementSibling?.classList.contains('handler-name')).toBe(true);
+  });
+
+  it('a trace counts its events in words that agree with the number, and a modified trace says "modified"', async () => {
+    render(Observability);
+    await screen.findByText('turn_completed');
+    const rowOf = async (type: string) => [...document.querySelectorAll('.trace-row')].find((r) => text(r.querySelector('.trace-type')) === type)!;
+    expect(text((await rowOf('turn_completed')).querySelector('.trace-badge'))).toBe('3 events');
+    expect(text((await rowOf('unknown')).querySelector('.trace-badge'))).toBe('1 event'); // review M3: was "1 events"
+    expect(text((await rowOf('turn_completed')).querySelector('.trace-badge--mod'))).toBe('modified'); // review M9: was "MOD"
+  });
+
+  it('the trend chart\'s x labels stay level at phone width: Chart.js skips labels instead of tilting them', async () => {
+    render(Observability);
+    await waitFor(() => expect(configs).toHaveLength(1));
+    expect(configs[0].options.scales.x.ticks).toMatchObject({ maxTicksLimit: 8, maxRotation: 0 });
   });
 
   it('Refresh on the Event Timeline is the shared outline pill button', async () => {
@@ -236,21 +261,14 @@ describe('Observability: the paper look\'s structure (source contracts)', () => 
     expect(rules.get(':global(html[data-look="paper"] [data-ground="paper"]) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
   });
 
-  it('the dot paints its own token, the severity word reads a text token, and the MOD badge the 12.5% badge tint', () => {
+  it('the dot paints its own token, the severity word reads a text token, and the badges are tints', () => {
     expect(rules.get('.handler-dot')).toMatchObject({ background: 'var(--dot)' });
     expect(rules.get('.anomaly-level')).toMatchObject({ color: 'var(--warn-text)' });
     expect(rules.get('.anomaly--alert .anomaly-level')).toMatchObject({ color: 'var(--err-text)' });
     expect(rules.get('.trace-badge--mod')).toMatchObject({ background: 'color-mix(in srgb, var(--st-partial) 12.5%, transparent)' });
-  });
-
-  it('a handler row keeps its four figures together, after the name', async () => {
-    render(Observability);
-    const row = (await screen.findByText('sleep_handler')).closest('.handler-row')!;
-    const stats = row.querySelector('.handler-stats')!;
-    // No last-invoked time in this fixture, so three figures.
-    expect([...stats.children].map((c) => text(c))).toEqual(['8/10', '3.2ms', '20.0% err']);
-    expect(row.firstElementChild?.classList.contains('handler-dot')).toBe(true);
-    expect(stats.previousElementSibling?.classList.contains('handler-name')).toBe(true);
+    // Review M2: a tint composes over whatever row it sits on, so on a hovered or open row (--surface-hover, the same
+    // #f4f7f8 as --wash on paper) the event count keeps its shape.
+    expect(rules.get('.trace-badge')).toMatchObject({ background: 'color-mix(in srgb, var(--muted) 10%, transparent)' });
   });
 
   it('source contract: at phone width the rows wrap (name, then the figures) instead of widening the page', () => {

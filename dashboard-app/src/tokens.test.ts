@@ -1031,6 +1031,13 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     expect(DARK['--oc-success']).toBe('#34d399');
     expect(contrast(DARK['--oc-success'], surface)).toBeGreaterThanOrEqual(3);
     expect(contrast(DARK['--muted'], over(parseColor(DARK['--wash']), parseColor(surface)))).toBeGreaterThanOrEqual(4.5); // count badge
+    // Observability's event count (review M2): --muted on its own 10% tint, over the card and over a hovered or open row,
+    // in both looks (dark 5.17 / 4.82, paper 5.02 / 4.68). On paper the wash it had equals the hovered row's fill.
+    for (const [b, card, hovered] of [[DARK, DARK['--surface'], DARK['--surface-hover']], [PAPER, white, PAPER['--surface-hover']]] as const) {
+      expect(contrast(b['--muted'], tint(b['--muted'], 0.1, card)), 'count badge on the card').toBeGreaterThanOrEqual(4.5);
+      expect(contrast(b['--muted'], tint(b['--muted'], 0.1, hovered)), 'count badge on a hovered row').toBeGreaterThanOrEqual(4.5);
+    }
+    expect(PAPER['--wash']).toBe(PAPER['--surface-hover']); // why the wash could not be the badge's fill
     // D3, the perfect-calibration line: --muted at 40% instead of #6b6b8a at 40%. A reference line, not data: recorded.
     const at40 = (c: string, bg: string) => over([...parseColor(c).slice(0, 3), 0.4] as RGBA, parseColor(bg));
     expect(contrast(at40('#6b6b8a', surface), surface)).toBeCloseTo(1.57, 1);
