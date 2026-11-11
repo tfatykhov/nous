@@ -248,6 +248,7 @@
     --wait-bg: rgba(167, 139, 250, 0.14);
     --wash: rgba(255, 255, 255, 0.03);         /* Heartbeat: the tuning report's panel */
     --hb-warn-ink: #fbbf24;                    /* Heartbeat: amber as text (paper's --yellow is a mark colour) */
+    --effect-write: #60a5fa;                   /* the Ledger's write effect pill */
   }
 
   /* ---- The paper ground: page content under the paper look ---- */
@@ -418,6 +419,7 @@
     --wait-bg: #efe3f6;
     --wash: #f4f7f8;
     --hb-warn-ink: #8a5a0e;
+    --effect-write: #1f5fa8;
 
     /* shadcn, HSL of the paper hex */
     --background: 192 17% 94%;

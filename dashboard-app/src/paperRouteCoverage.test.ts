@@ -11,10 +11,6 @@ const SRC = __dirname;
 
 const ALLOWED: { match: (file: string) => boolean; reason: string }[] = [
   {
-    match: (f) => f === 'views/Ledger.svelte',
-    reason: "Work's Changes tab renders the Ledger inside a dark island (data-ground=\"dark\") until PR 3 converts it",
-  },
-  {
     match: (f) => f.startsWith('lib/ui/drawer/'),
     reason:
       "shadcn's drawer primitives: BottomSheet gives the sheet its surface (.nous-sheet) and its route's ground; their " +
@@ -126,8 +122,8 @@ describe('every paper route renders only guarded files', () => {
     expect(graph.svelte).toEqual(expect.arrayContaining(['lib/viz/Graph.svelte', 'lib/ui/BottomSheet.svelte', 'lib/ui/button/button.svelte']));
     expect(graph.allowedReached).toEqual(expect.arrayContaining(['lib/ui/drawer/drawer-content.svelte', 'lib/ui/drawer/drawer-overlay.svelte']));
     expect(rendered('views/Health.svelte').svelte).toEqual(expect.arrayContaining(['views/Admission.svelte', 'views/MemoryWriteHealth.svelte']));
-    // An island stops the walk: the Ledger's own imports are not Work's.
-    expect(rendered('views/Work.svelte').allowedReached).toContain('views/Ledger.svelte');
+    // PR 3 removed the Changes tab's dark island: the Ledger and what it imports are Work's, and are walked.
+    expect(rendered('views/Work.svelte').svelte).toEqual(expect.arrayContaining(['views/Ledger.svelte', 'lib/ui/FilterBar.svelte', 'lib/ui/HoldUndo.svelte']));
     // Review R1: Overview's Badge comes through an index.ts that only re-exports it.
     expect(rendered('views/Overview.svelte').svelte).toContain('lib/ui/badge/badge.svelte');
   });

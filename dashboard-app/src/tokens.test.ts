@@ -238,6 +238,7 @@ const PR3: Record<string, [string, string]> = {
   '--wait-bg': ['rgba(167, 139, 250, 0.14)', '#efe3f6'],
   '--wash': ['rgba(255, 255, 255, 0.03)', '#f4f7f8'], // Heartbeat: the tuning report's panel
   '--hb-warn-ink': ['#fbbf24', '#8a5a0e'], // Heartbeat: amber as text (paper's --yellow is a mark colour)
+  '--effect-write': ['#60a5fa', '#1f5fa8'], // the Ledger's write effect pill
 };
 for (const [k, [dark]] of Object.entries(PR3)) NEW_DARK[k] = dark;
 
@@ -770,6 +771,12 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
     expect(contrast(PAPER['--hb-warn-ink'], PAPER['--surface'])).toBeGreaterThanOrEqual(4.5);
     expect(contrast(PAPER['--hb-warn-ink'], PAPER['--wash'])).toBeGreaterThanOrEqual(4.5);
     expect(contrast(PAPER['--text'], PAPER['--wash'])).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('the Ledger\'s effect pills: text at least 4.5:1 on its tint over the white card', () => {
+    expect(contrast(PAPER['--effect-write'], tint(PAPER['--effect-write'], 0.15, '#ffffff'))).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--st-ledger-blocked'], PAPER['--badge-warn-bg'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--err-text'], PAPER['--badge-bad-bg'])).toBeGreaterThanOrEqual(4.5);
   });
 
   it('the waiting pill\'s text on its tint: at least 4.5:1 in both grounds', () => {
