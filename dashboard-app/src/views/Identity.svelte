@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { apiGet, apiSend } from '../lib/api';
   import DataTable from '../lib/ui/DataTable.svelte';
+  import { Button } from '../lib/ui/button';
   import type {
     IdentityResponse,
     ProfileFactsResponse,
@@ -102,7 +103,7 @@
       content_display: truncate(f.content, 120),
       confidence_display: f.confidence.toFixed(2),
       active_display: f.active ? 'yes' : 'no',
-      core_display: isCore(f) ? '★ core' : '',
+      core_display: isCore(f) ? 'yes' : '', // the column is headed Core; Active beside it says yes or no
     })),
   );
 
@@ -206,8 +207,10 @@
           bind:value={sectionDrafts[name]}
         ></textarea>
         <div class="card-actions">
-          <button
-            class="btn btn-sm"
+          <Button
+            variant="outline"
+            size="sm"
+            class="max-md:min-h-11 max-md:px-4"
             onclick={() => saveSection(name)}
             disabled={
               sectionStatus[name] === 'saving' ||
@@ -216,7 +219,7 @@
             }
           >
             {sectionStatus[name] === 'saving' ? 'Saving…' : 'Save'}
-          </button>
+          </Button>
           {#if sectionMsg[name]}
             <span
               class="save-status"
@@ -264,75 +267,92 @@
     {#if factRows.length === 0}
       <p class="empty">No Tier-1 profile facts found.</p>
     {:else}
-      <DataTable
-        columns={[
-          { key: 'subject',            label: 'Subject' },
-          { key: 'category',           label: 'Category' },
-          { key: 'content_display',    label: 'Content' },
-          { key: 'confidence_display', label: 'Confidence' },
-          { key: 'active_display',     label: 'Active' },
-          { key: 'core_display',       label: 'Core' },
-        ]}
-        rows={factRows}
-        rowKey={(r: BrowserFact) => r.id}
-        onrowclick={(row: BrowserFact) => initFactDraft(row)}
-      >
-        {#snippet detail(row: BrowserFact)}
-          <div class="detail-grid">
-            <span class="dl">Subject</span><span>{row.subject ?? '—'}</span>
-            <span class="dl">Category</span><span>{row.category ?? '—'}</span>
-            <span class="dl">Confidence</span><span>{row.confidence.toFixed(2)}</span>
-            <span class="dl">Active</span><span>{row.active ? 'yes' : 'no'}</span>
-            <span class="dl">ID</span><span class="mono">{row.id}</span>
-          </div>
-
-          <!-- Edit = supersede (new versioned fact); Deactivate = soft delete -->
-          <div
-            class="fact-edit"
-            onclick={(e) => e.stopPropagation()}
-            onkeydown={(e) => e.stopPropagation()}
-            role="presentation"
-          >
-            <textarea
-              class="fact-textarea"
-              rows={4}
-              bind:value={factDrafts[row.id]}
-            ></textarea>
-            <div class="fact-actions">
-              <button
-                class="btn btn-sm"
-                onclick={() => saveFact(row)}
-                disabled={factStatus[row.id] === 'saving' || !(factDrafts[row.id] ?? '').trim()}
-              >
-                {factStatus[row.id] === 'saving' ? 'Saving…' : 'Save'}
-              </button>
-              <button
-                class="btn btn-sm"
-                onclick={() => setCore(row, !isCore(row))}
-                disabled={factStatus[row.id] === 'saving'}
-              >
-                {isCore(row) ? 'Unset core' : 'Set core'}
-              </button>
-              <button
-                class="btn btn-sm btn-danger"
-                onclick={() => deactivateFact(row)}
-                disabled={factStatus[row.id] === 'saving'}
-              >
-                Deactivate
-              </button>
-              {#if factMsg[row.id]}
-                <span
-                  class="save-status"
-                  class:save-ok={factStatus[row.id] === 'saved'}
-                  class:save-err={factStatus[row.id] === 'error'}
-                >
-                  {factMsg[row.id]}
-                </span>
-              {/if}
+      <div class="facts-card">
+        <DataTable
+          columns={[
+            { key: 'subject',            label: 'Subject' },
+            { key: 'category',           label: 'Category' },
+            { key: 'content_display',    label: 'Content' },
+            { key: 'confidence_display', label: 'Confidence' },
+            { key: 'active_display',     label: 'Active' },
+            { key: 'core_display',       label: 'Core' },
+          ]}
+          rows={factRows}
+          mode="cards"
+          rowKey={(r: BrowserFact) => r.id}
+          onrowclick={(row: BrowserFact) => initFactDraft(row)}
+        >
+          <!-- The content in its own element, which may break anywhere: a long unbroken fact cannot widen the table, and
+               with it the open fact's form, past its box (between phone width and wide desktop). -->
+          {#snippet cell(row: BrowserFact & Record<string, string>, c: { key: string })}
+            {#if c.key === 'content_display'}<span class="fact-content">{row.content_display}</span>{:else}{row[c.key]}{/if}
+          {/snippet}
+          {#snippet detail(row: BrowserFact)}
+            <div class="detail-grid">
+              <span class="dl">Subject</span><span>{row.subject ?? '—'}</span>
+              <span class="dl">Category</span><span>{row.category ?? '—'}</span>
+              <span class="dl">Confidence</span><span>{row.confidence.toFixed(2)}</span>
+              <span class="dl">Active</span><span>{row.active ? 'yes' : 'no'}</span>
+              <span class="dl">ID</span><span class="mono">{row.id}</span>
             </div>
-          </div>
-        {/snippet}
-      </DataTable>
+
+            <!-- Edit = supersede (new versioned fact); Deactivate = soft delete -->
+            <div
+              class="fact-edit"
+              onclick={(e) => e.stopPropagation()}
+              onkeydown={(e) => e.stopPropagation()}
+              role="presentation"
+            >
+              <textarea
+                class="fact-textarea"
+                aria-label="Fact content"
+                rows={4}
+                bind:value={factDrafts[row.id]}
+              ></textarea>
+              <div class="fact-actions">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="max-md:min-h-11 max-md:px-4"
+                  onclick={() => saveFact(row)}
+                  disabled={factStatus[row.id] === 'saving' || !(factDrafts[row.id] ?? '').trim()}
+                >
+                  {factStatus[row.id] === 'saving' ? 'Saving…' : 'Save'}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="max-md:min-h-11 max-md:px-4"
+                  onclick={() => setCore(row, !isCore(row))}
+                  disabled={factStatus[row.id] === 'saving'}
+                >
+                  {isCore(row) ? 'Unset core' : 'Set core'}
+                </Button>
+                <!-- The hover says "destructive" in the error colour; utilities, since a scoped class cannot reach the
+                     Button's element. -->
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="max-md:min-h-11 max-md:px-4 hover:border-[var(--err-text)] hover:text-[var(--err-text)]"
+                  onclick={() => deactivateFact(row)}
+                  disabled={factStatus[row.id] === 'saving'}
+                >
+                  Deactivate
+                </Button>
+                {#if factMsg[row.id]}
+                  <span
+                    class="save-status"
+                    class:save-ok={factStatus[row.id] === 'saved'}
+                    class:save-err={factStatus[row.id] === 'error'}
+                  >
+                    {factMsg[row.id]}
+                  </span>
+                {/if}
+              </div>
+            </div>
+          {/snippet}
+        </DataTable>
+      </div>
     {/if}
   {/if}
 
@@ -355,6 +375,8 @@
     margin: 0 0 0.125rem;
   }
 
+  :global(html[data-look="paper"] [data-ground="paper"]) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
+
   .subtitle {
     font-size: 0.8125rem;
     color: var(--muted);
@@ -376,7 +398,7 @@
   /* ── Identity section cards ── */
   .section-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
     gap: 1rem;
   }
 
@@ -386,25 +408,27 @@
     gap: 0.5rem;
     padding: 0.875rem;
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
+    border: var(--card-border);
+    border-radius: var(--card-radius-sm);
+    box-shadow: var(--card-shadow);
   }
 
   .section-label {
     font-size: 0.75rem;
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
     color: var(--muted);
   }
 
+  /* A field's boundary is 3:1 on paper (--field-border, WCAG 1.4.11); dark keeps its --border. */
   textarea {
     width: 100%;
     box-sizing: border-box;
     padding: 0.5rem 0.625rem;
-    background: var(--bg, var(--surface));
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
+    background: var(--bg);
+    border: 1px solid var(--field-border);
+    border-radius: var(--radius-sm);
     color: var(--text);
     font-family: inherit;
     font-size: 0.8125rem;
@@ -412,9 +436,9 @@
     resize: vertical;
   }
 
-  textarea:focus {
-    outline: none;
-    border-color: var(--accent, #22d3ee);
+  textarea:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
   }
 
   .card-actions {
@@ -440,38 +464,6 @@
     cursor: pointer;
   }
 
-  /* ── Buttons ── */
-  .btn {
-    padding: 0.4375rem 0.875rem;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
-    color: var(--text);
-    font-size: 0.875rem;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-
-  .btn:hover:not(:disabled) {
-    border-color: var(--accent, #22d3ee);
-    color: var(--accent, #22d3ee);
-  }
-
-  .btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-
-  .btn-sm {
-    padding: 0.3125rem 0.625rem;
-    font-size: 0.8125rem;
-  }
-
-  .btn-danger:hover:not(:disabled) {
-    border-color: var(--red, #ef4444);
-    color: var(--red, #ef4444);
-  }
-
   /* ── Info notes ── */
   .info-note {
     font-size: 0.8125rem;
@@ -483,8 +475,9 @@
   .info-highlight {
     color: var(--text);
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
+    border: var(--card-border);
+    border-radius: var(--card-radius-sm);
+    box-shadow: var(--card-shadow);
     padding: 0.625rem 0.75rem;
     margin-bottom: 0.875rem;
   }
@@ -498,7 +491,7 @@
   }
 
   .status-msg.error {
-    color: var(--red, #ef4444);
+    color: var(--err-text);
   }
 
   .empty {
@@ -514,11 +507,11 @@
   }
 
   .save-status.save-ok {
-    color: #4ade80;
+    color: var(--save-ok);
   }
 
   .save-status.save-err {
-    color: #f87171;
+    color: var(--save-err);
   }
 
   /* ── Detail grid (inside expanded rows) ── */
@@ -540,6 +533,26 @@
   :global(.mono) {
     font-family: monospace;
     font-size: 0.75rem;
+  }
+
+  /* Identity's own fact id in the look's mono font (Red Hat Mono on paper). Scoped: the global .mono above stays as it
+     is for the other screens that use it. */
+  .detail-grid .mono {
+    font-family: var(--font-mono);
+  }
+
+  /* ── The facts table, in a card like every other block (on the page ground its rules were 1.09:1) ── */
+  .facts-card {
+    background: var(--surface);
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
+    padding: 0.25rem 0.75rem;
+  }
+
+  /* In cards mode too: DataTable's reset of a cell's elements has no specificity, so this rule wins there. */
+  .facts-card .fact-content {
+    overflow-wrap: anywhere;
   }
 
   /* ── Fact edit controls ── */

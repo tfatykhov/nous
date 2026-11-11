@@ -8,6 +8,8 @@
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import Chart from '../lib/viz/Chart.svelte';
+  import { Button } from '../lib/ui/button';
+  import { tint } from '../lib/chartColors';
 
   const store = usePoll(
     makePollStore<ObservabilityData>(
@@ -104,10 +106,13 @@
     return parts.length >= 2 ? parts[parts.length - 2] : name;
   }
 
-  function handlerDotColor(errorRate: number): string {
-    if (errorRate > 0.1) return '#f87171';
-    if (errorRate > 0) return '#fbbf24';
-    return '#4ade80';
+  /** The dot's token by error rate: the success mark, the amber, and --err-text (not --red: under deuteranopia it stays
+   *  apart from the amber, 12.5 where red is 5.1; both are #f87171 under dark). Every pair is 9.8 or more apart under
+   *  all three visions, and the rate itself is printed beside the dot. */
+  function handlerDotToken(errorRate: number): string {
+    if (errorRate > 0.1) return '--err-text';
+    if (errorRate > 0) return '--yellow';
+    return '--oc-success';
   }
 
   // ── Drift trend chart builders ────────────────────────────────────────────
@@ -125,8 +130,8 @@
       datasets: [{
         label: 'Error rate',
         data: points.map((p) => p.v),
-        borderColor: '#f87171',
-        backgroundColor: 'rgba(248,113,113,0.1)',
+        borderColor: 'var(--red)',
+        backgroundColor: tint('--red', 0.1),
         fill: true,
         borderWidth: 2,
         pointRadius: 2,
@@ -136,7 +141,9 @@
 
   const trendLineOpts = {
     scales: {
-      x: { display: true, ticks: { maxTicksLimit: 8, font: { size: 10 } } },
+      // Level labels: at phone width Chart.js skips some instead of tilting them over the plot, and keeps a gap between
+      // the ones it draws (with its default 3 px they ran together).
+      x: { display: true, ticks: { maxTicksLimit: 8, maxRotation: 0, autoSkipPadding: 16, font: { size: 10 } } },
       y: { beginAtZero: true },
     },
     plugins: { legend: { display: false } },
@@ -156,9 +163,6 @@
   {@const eb = d.event_bus}
   {@const handlers = eb.handlers ?? {}}
   {@const handlerNames = Object.keys(handlers)}
-  {@const totalInvoc = handlerNames.reduce((s, n) => s + (handlers[n].invocations ?? 0), 0)}
-  {@const totalErrors = handlerNames.reduce((s, n) => s + (handlers[n].errors ?? 0), 0)}
-  {@const overallErrRate = totalInvoc > 0 ? totalErrors / totalInvoc : 0}
 
   <!-- ── Section 1: Event Bus Health ── -->
   <StatGrid stats={[
@@ -177,15 +181,17 @@
         {#each handlerNames as name}
           {@const h = handlers[name]}
           <div class="handler-row">
-            <span class="handler-dot" style="background:{handlerDotColor(h.error_rate ?? 0)}"></span>
+            <span class="handler-dot" style:--dot={`var(${handlerDotToken(h.error_rate ?? 0)})`}></span>
             <span class="handler-name">{shortHandler(name)}</span>
-            <span class="handler-stat">{h.successes ?? 0}/{h.invocations ?? 0}</span>
-            <span class="handler-stat">{(h.avg_duration_ms ?? 0).toFixed(1)}ms</span>
-            {#if h.last_invoked_ago_s != null}
-              <span class="handler-stat">{Math.round(h.last_invoked_ago_s)}s ago</span>
-            {/if}
-            <span class="handler-rate" class:handler-rate--warn={overallErrRate > 0.1}>
-              {(h.error_rate * 100).toFixed(1)}% err
+            <!-- The figures as one group: at phone width it wraps under the name as a whole. -->
+            <span class="handler-stats">
+              <span class="handler-stat">{h.successes ?? 0}/{h.invocations ?? 0}</span>
+              <span class="handler-stat">{(h.avg_duration_ms ?? 0).toFixed(1)}ms</span>
+              <!-- Always the slot, empty when the handler never ran, so the rate stays in its column. -->
+              <span class="handler-stat">{h.last_invoked_ago_s != null ? `${Math.round(h.last_invoked_ago_s)}s ago` : ''}</span>
+              <span class="handler-rate" class:handler-rate--warn={(h.error_rate ?? 0) > 0.1}>
+                {(h.error_rate * 100).toFixed(1)}% err
+              </span>
             </span>
           </div>
         {/each}
@@ -210,14 +216,18 @@
               onclick={() => toggleTrace(t.trace_id)}
               role="button"
               tabindex="0"
-              onkeydown={(e) => e.key === 'Enter' && toggleTrace(t.trace_id)}
+              onkeydown={(e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                e.preventDefault(); // Space would scroll the page
+                toggleTrace(t.trace_id);
+              }}
               aria-expanded={expandedTraces.has(t.trace_id)}
             >
-              <span class="trace-arrow">{expandedTraces.has(t.trace_id) ? '▼' : '▶'}</span>
-              <span class="trace-type">{t.root_type ?? '?'}</span>
-              <span class="trace-badge">{t.event_count} events</span>
+              <span class="trace-toggle">{expandedTraces.has(t.trace_id) ? 'Hide' : 'Show'}</span>
+              <span class="trace-type">{t.root_type ?? 'unknown'}</span>
+              <span class="trace-badge">{t.event_count} {t.event_count === 1 ? 'event' : 'events'}</span>
               {#if t.has_modifications}
-                <span class="trace-badge trace-badge--mod">MOD</span>
+                <span class="trace-badge trace-badge--mod">modified</span>
               {/if}
               <span class="trace-age">{fmtAgo(t.timestamp)}</span>
             </div>
@@ -259,7 +269,7 @@
         <div class="mod-list">
           {#each d.recent_modifications as m}
             <div class="mod-row">
-              <span class="mod-type">{m.modifies ?? '?'}</span>
+              <span class="mod-type">{m.modifies ?? 'unknown'}</span>
               <span class="mod-event">{m.type}</span>
               <span class="mod-age">{fmtAgo(m.timestamp)}</span>
             </div>
@@ -279,9 +289,11 @@
       <h2>Active Drift Anomalies</h2>
       {#each d.drift.anomalies as a}
         <div class="anomaly" class:anomaly--alert={a.severity === 'alert'}>
+          <!-- The severity in a word as well as the tint (status is never colour alone). -->
+          <span class="anomaly-level">{a.severity === 'alert' ? 'Alert' : 'Warning'}</span>
           <strong>{a.metric}</strong>:
           {#if a.residualized_by}
-            {a.raw_current} raw → {a.current} unexplained after {a.residualized_by}
+            {a.raw_current} raw, {a.current} unexplained after {a.residualized_by}
           {:else}
             {a.current}
           {/if}
@@ -309,13 +321,16 @@
   <!-- Latest snapshot -->
   {#if d.drift}
     {@const m = d.drift.metrics}
-    <StatGrid stats={[
-      { label: 'Facts',       value: (m.fact_count ?? 0) + (m.fact_count_delta != null ? ' (Δ' + (m.fact_count_delta > 0 ? '+' : '') + m.fact_count_delta + ')' : '') },
-      { label: 'Episodes',   value: String(m.episode_count ?? 0) },
-      { label: 'Censors',    value: String(m.active_censor_count ?? 0) },
-      { label: 'Procedures', value: String(m.procedure_count ?? 0) },
-      { label: 'Error rate', value: ((m.handler_error_rate ?? 0) * 100).toFixed(1) + '%' },
-    ]} />
+    <div class="snapshot-grid">
+      <StatGrid stats={[
+        { label: 'Facts',       value: String(m.fact_count ?? 0),
+          note: m.fact_count_delta != null ? 'change ' + (m.fact_count_delta > 0 ? '+' : '') + m.fact_count_delta : undefined },
+        { label: 'Episodes',   value: String(m.episode_count ?? 0) },
+        { label: 'Censors',    value: String(m.active_censor_count ?? 0) },
+        { label: 'Procedures', value: String(m.procedure_count ?? 0) },
+        { label: 'Error rate', value: ((m.handler_error_rate ?? 0) * 100).toFixed(1) + '%' },
+      ]} />
+    </div>
     <p class="snapshot-ts">Snapshot: {fmtAgo(d.drift.timestamp)}</p>
   {/if}
 
@@ -329,9 +344,9 @@
 <section class="chart-card">
   <div class="section-head">
     <h2>Event Timeline</h2>
-    <button class="refresh-btn" onclick={() => void activity.refresh()} disabled={$activity.loading}>
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void activity.refresh()} disabled={$activity.loading}>
       {$activity.loading ? 'Loading…' : 'Refresh'}
-    </button>
+    </Button>
   </div>
   {#if $activity.data}
     {@const d = $activity.data}
@@ -369,6 +384,7 @@
     align-items: flex-start;
     justify-content: space-between;
     gap: 1rem;
+    flex-wrap: wrap;
     margin-bottom: 1.25rem;
   }
 
@@ -378,6 +394,8 @@
     color: var(--text);
     margin: 0 0 0.125rem;
   }
+
+  :global(html[data-look="paper"] [data-ground="paper"]) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
 
   .subtitle {
     font-size: 0.8125rem;
@@ -403,10 +421,13 @@
     .chart-row { grid-template-columns: 1fr; }
   }
 
+  .chart-row > * { min-width: 0; }
+
   .chart-card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
     padding: 1rem;
     margin-top: 1rem;
   }
@@ -418,8 +439,10 @@
     gap: 0.5rem;
   }
 
+  /* At phone width the figures wrap under the name as one group, instead of widening the page. */
   .handler-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.625rem;
     font-size: 0.8125rem;
@@ -430,28 +453,40 @@
     height: 8px;
     border-radius: 50%;
     flex-shrink: 0;
+    background: var(--dot);
   }
 
+  /* A basis, not auto: a long name wraps beside its dot rather than leaving the dot alone on a line. */
   .handler-name {
-    flex: 1;
+    flex: 1 1 8rem;
+    min-width: 0;
+    overflow-wrap: anywhere;
     color: var(--text);
     font-weight: 500;
+  }
+
+  .handler-stats {
+    display: flex;
+    gap: 0.625rem;
+    margin-left: auto;
   }
 
   .handler-stat {
     color: var(--muted);
     min-width: 60px;
     text-align: right;
+    white-space: nowrap;
   }
 
   .handler-rate {
     min-width: 60px;
     text-align: right;
     color: var(--muted);
+    white-space: nowrap;
   }
 
   .handler-rate--warn {
-    color: #f87171;
+    color: var(--err-text);
   }
 
   /* ── Causal traces ── */
@@ -462,6 +497,7 @@
 
   .trace-row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.5rem;
     padding: 0.5rem 0.375rem;
@@ -473,34 +509,44 @@
 
   .trace-row:hover,
   .trace-row--expanded {
-    background: var(--surface-hover, rgba(255,255,255,0.04));
+    background: var(--surface-hover);
   }
 
-  .trace-arrow {
-    font-size: 0.625rem;
+  .trace-row:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
+  }
+
+  /* The open or closed state in a word (it was a triangle glyph); aria-expanded carries it for assistive tech. */
+  .trace-toggle {
+    font-size: 0.75rem;
     color: var(--muted);
-    width: 10px;
+    min-width: 2.25rem;
     flex-shrink: 0;
   }
 
   .trace-type {
     font-weight: 600;
-    color: #38bdf8;
-    flex: 1;
+    color: var(--accent-text);
+    flex: 1 1 8rem; /* a basis: a long type wraps in its place instead of taking a line of its own */
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .trace-badge {
     font-size: 0.6875rem;
     padding: 0.125rem 0.375rem;
-    border-radius: 4px;
-    background: rgba(96,165,250,0.15);
-    color: #60a5fa;
+    border-radius: 999px;
+    /* A tint, not the wash: on paper the wash is the hovered row's own fill, so the badge lost its shape there. */
+    background: color-mix(in srgb, var(--muted) 10%, transparent);
+    color: var(--muted);
     white-space: nowrap;
   }
 
+  /* PR 3's badge tint: at 15% the paper text is 4.49:1 on a hovered row. */
   .trace-badge--mod {
-    background: rgba(251,146,60,0.15);
-    color: #fb923c;
+    background: color-mix(in srgb, var(--st-partial) 12.5%, transparent);
+    color: var(--st-partial);
   }
 
   .trace-age {
@@ -512,7 +558,7 @@
 
   .trace-detail {
     padding: 0.5rem 0.75rem 0.5rem 1.5rem;
-    background: rgba(255,255,255,0.025);
+    background: var(--wash);
     border-left: 2px solid var(--border);
     margin: 0 0 0.25rem 1rem;
     border-radius: 0 6px 6px 0;
@@ -533,7 +579,7 @@
   }
 
   .mono {
-    font-family: monospace;
+    font-family: var(--font-mono);
     font-size: 0.75rem;
     word-break: break-all;
     color: var(--muted);
@@ -562,9 +608,9 @@
   .mod-type {
     font-size: 0.6875rem;
     padding: 0.125rem 0.375rem;
-    border-radius: 4px;
-    background: rgba(52,211,153,0.15);
-    color: #34d399;
+    border-radius: 999px;
+    background: var(--badge-good-bg);
+    color: var(--ok-text);
     white-space: nowrap;
     font-weight: 600;
   }
@@ -584,16 +630,30 @@
   .anomaly {
     padding: 0.5rem 0.75rem;
     border-radius: 6px;
-    background: rgba(251,191,36,0.1);
-    border-left: 3px solid #fbbf24;
+    background: color-mix(in srgb, var(--yellow) 10%, transparent);
+    border-left: 3px solid var(--yellow);
     font-size: 0.8125rem;
     margin-bottom: 0.5rem;
     color: var(--text);
+    overflow-wrap: anywhere;
   }
 
   .anomaly--alert {
-    background: rgba(248,113,113,0.1);
-    border-left-color: #f87171;
+    background: var(--err-bg);
+    border-left-color: var(--red);
+  }
+
+  .anomaly-level {
+    font-weight: 700;
+    color: var(--warn-text);
+  }
+
+  .anomaly--alert .anomaly-level {
+    color: var(--err-text);
+  }
+
+  .snapshot-grid {
+    margin-top: 1rem;
   }
 
   .snapshot-ts {
@@ -615,18 +675,6 @@
     margin: 0;
   }
 
-  .refresh-btn {
-    font-size: 0.8125rem;
-    padding: 0.25rem 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
-    background: var(--surface);
-    color: var(--text);
-    cursor: pointer;
-  }
-  .refresh-btn:hover:not(:disabled) { background: var(--surface-hover); }
-  .refresh-btn:disabled { opacity: 0.5; cursor: default; }
-
   .timeline {
     display: flex;
     flex-direction: column;
@@ -643,6 +691,7 @@
 
   .event-header {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
@@ -652,13 +701,14 @@
   .event-badge {
     font-size: 0.6875rem;
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
     color: var(--accent);
-    background: rgba(124, 106, 247, 0.12);
-    border-radius: 4px;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border-radius: 999px;
     padding: 0.125rem 0.375rem;
-    white-space: nowrap;
+    max-width: 100%;
+    overflow-wrap: anywhere;
   }
 
   .event-time {
@@ -675,7 +725,7 @@
   }
 
   .empty.error {
-    color: var(--red, #ef4444);
+    color: var(--err-text);
   }
 
   .retry-link {
@@ -714,6 +764,6 @@
   }
 
   .status-msg.error {
-    color: var(--red, #ef4444);
+    color: var(--err-text);
   }
 </style>

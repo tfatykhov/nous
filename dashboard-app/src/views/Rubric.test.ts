@@ -275,7 +275,7 @@ describe('Scoring at phone width (the screenshot round)', () => {
     expect(chart('line', 'Completed').data.labels).toEqual(['11-01']);
   });
 
-  it('source contract: under 768 px the radar cell does not reserve 320 px around a 200 px chart', () => {
+  it('source contract: under 768 px the radar cell does not reserve 320 px around its 300 px chart', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'Rubric.svelte'), 'utf-8'));
     expect(css).toMatch(/@media \(max-width: 768px\) \{[^@]*\.radar-wrap \{\s*min-height: 0;/);
     // ... and after the 320 px rule, which would win otherwise (same specificity).

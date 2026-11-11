@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 import { get } from 'svelte/store';
 import { LOOK_KEY, PAPER_ROUTES, groundFor, look, resolveLook, setLook, getLook, type Look } from './look';
-import { ROUTES } from './router';
+import { ROUTES, type RouteName } from './router';
 
 const APP = resolve(__dirname, '../..');
 const SRC = resolve(__dirname, '..');
@@ -153,13 +153,23 @@ describe('setLook, getLook and the look store', () => {
 
 describe('groundFor', () => {
   it('is paper for the migrated routes and dark for every other', () => {
-    expect(PAPER_ROUTES).toEqual(['overview', 'work', 'graph', 'browser', 'health', 'retrieval', 'consolidation', 'model-calls', 'dag', 'subtasks', 'heartbeat', 'decisions', 'rubric', 'autonomy', 'intentions', 'harness']);
+    expect(PAPER_ROUTES).toEqual(['overview', 'work', 'graph', 'browser', 'health', 'retrieval', 'consolidation', 'model-calls', 'dag', 'subtasks', 'heartbeat', 'decisions', 'rubric', 'autonomy', 'intentions', 'harness', 'observability', 'identity']);
     expect(groundFor('work')).toBe('paper');
     expect(groundFor('overview')).toBe('paper');
     expect(groundFor('graph')).toBe('paper');
-    expect(groundFor('observability')).toBe('dark');
+    // Anything outside PAPER_ROUTES is dark: an id no route has, since by the end of PR 5 every route is paper.
+    expect(groundFor('not-a-route' as RouteName)).toBe('dark');
     for (const r of ROUTES) expect(['paper', 'dark']).toContain(groundFor(r));
-    expect(ROUTES.filter((r) => groundFor(r) === 'paper')).toEqual(['overview', 'graph', 'browser', 'health', 'retrieval', 'consolidation', 'work', 'model-calls', 'dag', 'subtasks', 'heartbeat', 'decisions', 'rubric', 'autonomy', 'intentions', 'harness']);
+    expect(ROUTES.filter((r) => groundFor(r) === 'paper')).toEqual(['overview', 'graph', 'browser', 'health', 'retrieval', 'consolidation', 'work', 'model-calls', 'dag', 'subtasks', 'heartbeat', 'decisions', 'rubric', 'autonomy', 'intentions', 'harness', 'observability', 'identity']);
+  });
+
+  // After PR 5 the redesign has converted every screen: no route is left on the dark ground under the paper look.
+  it('every route in the router\'s list is a paper route, and PAPER_ROUTES holds nothing else (all 18, once each)', () => {
+    expect(ROUTES).toHaveLength(18);
+    expect(new Set(PAPER_ROUTES).size, 'no route listed twice').toBe(PAPER_ROUTES.length);
+    expect(ROUTES.filter((r) => !PAPER_ROUTES.includes(r)), 'routes still dark').toEqual([]);
+    expect(PAPER_ROUTES.filter((r) => !(ROUTES as readonly string[]).includes(r)), 'not a route').toEqual([]);
+    expect(PAPER_ROUTES).toHaveLength(18);
   });
 });
 

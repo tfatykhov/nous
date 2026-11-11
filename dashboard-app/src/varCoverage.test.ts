@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PAPER_ROUTES } from './lib/look';
-import { DARK_SEL, PAPER_SEL, parseBlocks, scriptBlocks } from './lib/testing/css';
+import { DARK_SEL, PAPER_SEL, markupOf, parseBlocks, scriptBlocks } from './lib/testing/css';
 import { DARK_FALLBACK } from './lib/chartColors';
 
 // Redesign PR 4 and PR 5: a converted screen reads only tokens with a value in both looks. A token defined in the dark
@@ -34,22 +34,26 @@ function guardList(name: string): string[] {
   return [...body.matchAll(/'([^']+)'/g)].map((m) => m[1]);
 }
 
-/** The tokens a source reads (a `var(--x)` anywhere, or a quoted `'--x'` in its script, which is built into var() or
- * tinted later: review M5), and the custom properties it sets itself (a `style:--x` directive or a `--x:` declaration). */
+/** A component's code: its script and its markup (the source without its style), where a chart's props are written. */
+const codeOf = (src: string) => scriptBlocks(src) + '\n' + markupOf(src);
+
+/** The tokens a source reads (a `var(--x)` anywhere, or a quoted `'--x'` in its script or markup, which is built into
+ * var() or tinted later: PR 4 review M5, re-review N2), and the custom properties it sets itself (a `style:--x` directive
+ * or a `--x:` declaration). */
 function tokensOf(src: string): { read: string[]; own: Set<string> } {
-  const named = [...scriptBlocks(src).matchAll(/['"`](--[\w-]+)['"`]/g)].map((m) => m[1]);
+  const named = [...codeOf(src).matchAll(/['"`](--[\w-]+)['"`]/g)].map((m) => m[1]);
   const read = [...new Set([...[...src.matchAll(/var\(\s*(--[\w-]+)/g)].map((m) => m[1]), ...named])];
   const own = new Set([...src.matchAll(/(?:style:(--[\w-]+)|[{;\s"](--[\w-]+)\s*:)/g)].map((m) => m[1] ?? m[2]));
   return { read, own };
 }
 
 /** Every token `src` reads that would carry its dark value onto paper (or is not defined at all); in a file that draws a
- * Chart, also every token its script names that DARK_FALLBACK lacks (it would resolve to '' in jsdom). */
+ * Chart, also every token its script or markup names that DARK_FALLBACK lacks (it would resolve to '' in jsdom). */
 function uncovered(src: string): string[] {
   const { read, own } = tokensOf(src);
   const missing = read.filter((t) => !own.has(t) && !(t in DARK && (t in PAPER || STRUCTURAL.has(t))));
   if (!/import Chart from/.test(src)) return missing;
-  const js = scriptBlocks(src);
+  const js = codeOf(src);
   const scripted = [...new Set([...js.matchAll(/var\(\s*(--[\w-]+)/g), ...js.matchAll(/['"`](--[\w-]+)['"`]/g)].map((m) => m[1]))];
   return [...new Set([...missing, ...scripted.filter((t) => !(t in DARK_FALLBACK))])];
 }
@@ -66,6 +70,11 @@ describe('a converted dense screen reads only tokens with a paper value', () => 
     const chartFile = "<script>import Chart from '../lib/viz/Chart.svelte';\nconst c = 'var(--kind-task)';</script>";
     expect(uncovered(chartFile)).toEqual(['--kind-task']);
     expect(uncovered(chartFile.replace('--kind-task', '--series-2'))).toEqual([]);
+    // PR 4 re-review N2: a chart's tokens written inline in the markup (Decisions and Scoring pass some that way).
+    const inline = "<script>import Chart from '../lib/viz/Chart.svelte';</script>\n";
+    expect(uncovered(inline + "<Chart options={{ scales: { r: { grid: { color: 'var(--kind-task)' } } } }} />")).toEqual(['--kind-task']);
+    expect(uncovered(inline + "<Chart data={{ datasets: [{ backgroundColor: tint('--made-up', 0.2) }] }} />")).toEqual(['--made-up']);
+    expect(uncovered(inline + "<Chart options={{ scales: { r: { grid: { color: 'var(--border)' } } } }} />")).toEqual([]);
   });
 
   it('finds a token missing from either look, and spares the ones the file sets itself', () => {

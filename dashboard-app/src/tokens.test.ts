@@ -896,6 +896,13 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     expect(contrast(PAPER['--field-border'], page)).toBeGreaterThanOrEqual(3); // 3.22
   });
 
+  it('Identity\'s form: the focus ring 3:1 on the card and on the field\'s fill; the typed text and the hovered Deactivate 4.5:1', () => {
+    expect(contrast(PAPER['--focus-ring'], white)).toBeGreaterThanOrEqual(3); // 7.55
+    expect(contrast(PAPER['--focus-ring'], page)).toBeGreaterThanOrEqual(3); // 6.70
+    expect(contrast(PAPER['--text'], page)).toBeGreaterThanOrEqual(4.5); // what is typed, on the field
+    expect(contrast(PAPER['--err-text'], white)).toBeGreaterThanOrEqual(4.5); // Deactivate, hovered
+  });
+
   it('Scoring\'s heatmap: ink on the strongest cell (65% of the fill over the card) is at least 4.5:1 on paper', () => {
     expect(contrast(PAPER['--text'], tint(PAPER['--green'], 0.65, white))).toBeGreaterThanOrEqual(4.5); // 6.78
     expect(contrast(PAPER['--text'], tint(PAPER['--red'], 0.65, white))).toBeGreaterThanOrEqual(4.5); // 5.78
@@ -947,6 +954,9 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     'autonomy contexts': ['--series-1', '--series-2', '--series-4'],
     // Guards' flags per day: one line per rule, each with its own dash as well.
     'guards rules': ['--series-1', '--series-4', '--series-9'],
+    // Observability's handler dots: no errors, some, more than 10%. The success mark and --err-text (dark: the old
+    // #34d399 family and #f87171) keep every pair 9.8 or more apart; --red was 5.1 from the amber, --st-completed 5.5 from red.
+    'observability handler dots': ['--oc-success', '--yellow', '--err-text'],
   };
   const OPEN_PAIRS: Record<string, number> = {
     '--series-1|--series-3': 4, // protan 4.2 (Scoring's dimensions 3 and 6)
@@ -982,6 +992,17 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     }
   });
 
+  it('Observability\'s anomaly lines: the severity word and the line on their tint over the card, at least 4.5:1 in both looks', () => {
+    const yellowOn = (b: Record<string, string>, bg: string) => tint(b['--yellow'], 0.1, bg);
+    expect(contrast(PAPER['--warn-text'], yellowOn(PAPER, white))).toBeGreaterThanOrEqual(4.5); // 5.30
+    expect(contrast(PAPER['--text'], yellowOn(PAPER, white))).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--err-text'], PAPER['--err-bg'])).toBeGreaterThanOrEqual(4.5); // 5.60
+    expect(contrast(PAPER['--text'], PAPER['--err-bg'])).toBeGreaterThanOrEqual(4.5);
+    const surface = DARK['--surface'];
+    expect(contrast(DARK['--warn-text'], yellowOn(DARK, surface))).toBeGreaterThanOrEqual(4.5); // 9.28
+    expect(contrast(DARK['--err-text'], over(parseColor(DARK['--err-bg']), parseColor(surface)))).toBeGreaterThanOrEqual(4.5); // 5.93
+  });
+
   it('Scoring\'s radar bounds are full-strength lines: 3:1 or more on the card and over the weight polygon\'s 20% fill (review I1)', () => {
     // At 40% they were 1.87:1 and 1.68:1 on white. Min and Max also differ by dash kind (Rubric.test.ts).
     const polygon = tint(PAPER['--series-0'], 0.2, white);
@@ -1005,7 +1026,18 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     expect(contrast(DARK['--st-neutral'], surface)).toBeGreaterThanOrEqual(3); // was #6b6b8a (3.63), now 3.85
     expect(contrast(DARK['--series-9'], surface)).toBeGreaterThanOrEqual(3); // Guards' claims, was #2dd4bf
     expect(contrast(DARK['--accent-text'], surface)).toBeGreaterThanOrEqual(4.5); // Observability's trace type, was #38bdf8
+    expect(contrast(DARK['--accent-text'], DARK['--surface-hover'])).toBeGreaterThanOrEqual(4.5); // the same on a hovered row (7.43)
+    // Observability's no-error handler dot: --oc-success (#34d399) where it was #4ade80, a dark-only shift (review M1).
+    expect(DARK['--oc-success']).toBe('#34d399');
+    expect(contrast(DARK['--oc-success'], surface)).toBeGreaterThanOrEqual(3);
     expect(contrast(DARK['--muted'], over(parseColor(DARK['--wash']), parseColor(surface)))).toBeGreaterThanOrEqual(4.5); // count badge
+    // Observability's event count (review M2): --muted on its own 10% tint, over the card and over a hovered or open row,
+    // in both looks (dark 5.17 / 4.82, paper 5.02 / 4.68). On paper the wash it had equals the hovered row's fill.
+    for (const [b, card, hovered] of [[DARK, DARK['--surface'], DARK['--surface-hover']], [PAPER, white, PAPER['--surface-hover']]] as const) {
+      expect(contrast(b['--muted'], tint(b['--muted'], 0.1, card)), 'count badge on the card').toBeGreaterThanOrEqual(4.5);
+      expect(contrast(b['--muted'], tint(b['--muted'], 0.1, hovered)), 'count badge on a hovered row').toBeGreaterThanOrEqual(4.5);
+    }
+    expect(PAPER['--wash']).toBe(PAPER['--surface-hover']); // why the wash could not be the badge's fill
     // D3, the perfect-calibration line: --muted at 40% instead of #6b6b8a at 40%. A reference line, not data: recorded.
     const at40 = (c: string, bg: string) => over([...parseColor(c).slice(0, 3), 0.4] as RGBA, parseColor(bg));
     expect(contrast(at40('#6b6b8a', surface), surface)).toBeCloseTo(1.57, 1);

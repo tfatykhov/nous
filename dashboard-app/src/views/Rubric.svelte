@@ -70,8 +70,8 @@
     reworked: '--err-text',
     self_corrected: '--signal-self-corrected',
   };
-  // 12 px swatches: at phone width (Chart.svelte's 200 px) the default 40 px ones took the legend to three or four rows
-  // and left the trend and the weight lines a plot about 20 px tall.
+  // 12 px swatches: at phone width (300 px for the radar, the trend and the weights, 200 px for the doughnut) the default
+  // 40 px ones took the legend to three or four rows and squeezed the plot (about 20 px tall in the old 200 px).
   const LEGEND_LABELS = { boxWidth: 12 };
   // Dashed lines (the weights, the radar's bounds) are told apart by their dash as well: the legend samples the line,
   // 28 px wide, with its dash (lib/chartColors.ts).
@@ -615,7 +615,7 @@
     min-height: 320px;
   }
 
-  /* After the rule above: the chart is 200 px tall here (Chart.svelte), so the cell does not reserve 320 px around it. */
+  /* After the rule above: the radar asks for 300 px here (its phoneHeight), so the cell does not reserve 320 px around it. */
   @media (max-width: 768px) {
     .radar-wrap {
       min-height: 0;

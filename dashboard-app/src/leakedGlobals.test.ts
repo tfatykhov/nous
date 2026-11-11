@@ -34,16 +34,29 @@ const IDENTITY_GLOBALS = `  :global(.detail-grid) {
 const OTHERS = ['views/Decisions.svelte', 'views/Rubric.svelte', 'views/Autonomy.svelte', 'views/Intentions.svelte',
   'views/Harness.svelte', 'views/Observability.svelte'];
 
-/** Each `:global(` that is not the paper-only scoped form, and the line it is on. */
+/** The paper-only scoped prefix, followed by the file's own selector (not a brace, a comma or another pseudo). */
+const PAPER_SCOPE = /:global\(html\[data-look="paper"\](?:\s+\[data-ground="paper"\])?\)(?=\s+[^\s{,:])/g;
+
+/** What makes a rule global: `:global`, and the forms that never say it (`:root`, `:host`, a `-global-` keyframes name),
+ * which Svelte leaves unscoped (PR 5 re-review R1). */
+const LEAK = /:global\b|:root\b|:host\b|@keyframes\s+-global-/;
+
+/** Each line with a global form left once every allowed paper prefix is removed: a parenthesised `:global` behind the
+ * prefix, a second selector on the line, Svelte 5's block form `:global { … }` (PR 5 review I3), or one of the forms
+ * above. */
 function leaks(css: string): string[] {
-  return css.split('\n').filter((l) => /:global\(/.test(l) && !/^\s*:global\(html\[data-look="paper"\](?:\s+\[data-ground="paper"\])?\)\s+[^\s{,]/.test(l)).map((l) => l.trim());
+  return css.split('\n').filter((l) => LEAK.test(l.replace(PAPER_SCOPE, ''))).map((l) => l.trim());
 }
 
 describe('no global rule leaks from the converted dense screens', () => {
   it('Identity\'s three global blocks are byte for byte as on origin/main', () => {
     const src = readFileSync(join(SRC, 'views/Identity.svelte'), 'utf-8').replace(/\r\n/g, '\n');
     expect(src).toContain(IDENTITY_GLOBALS);
-    expect(src.match(/:global\(/g)?.length, 'no other :global( in Identity').toBe(3);
+    // No other global rule: besides the three pinned blocks, only the paper-only scoped form the other six files may
+    // use (Identity's paper title, PR 5).
+    expect(leaks(styleBlocks(src)), 'no other :global( in Identity').toEqual([':global(.detail-grid) {', ':global(.dl) {', ':global(.mono) {']);
+    // And a count, which catches what a line-based reading can miss: the three blocks and the paper title, nothing else.
+    expect(styleBlocks(src).match(/:global\b/g), 'the :global count in Identity').toHaveLength(4);
   });
 
   it('the scoped paper form is allowed, any other :global( is a leak', () => {
@@ -51,6 +64,16 @@ describe('no global rule leaks from the converted dense screens', () => {
     expect(leaks(':global(html[data-look="paper"]) h1 { font-size: 30px; }')).toEqual([]);
     expect(leaks(':global(.mono) { font-family: monospace; }')).toEqual([':global(.mono) { font-family: monospace; }']);
     expect(leaks(':global(html[data-look="paper"] .x) { color: red; }')).toHaveLength(1); // the whole selector is global
+    // PR 5 review I3: a global behind the allowed prefix, a second selector on the same line, and Svelte 5's block form.
+    expect(leaks(':global(html[data-look="paper"] [data-ground="paper"]) :global(.mono) { font-family: var(--font-mono); }')).toHaveLength(1);
+    expect(leaks(':global(html[data-look="paper"]) h1, :global(.dl) { color: red; }')).toHaveLength(1);
+    expect(leaks(':global { .dl { color: var(--text); } }')).toHaveLength(1);
+    // PR 5 re-review R1: global rules that never say :global. Svelte leaves :root and :host unscoped, and a -global-
+    // keyframes name is global; a plain @keyframes is scoped to the file.
+    expect(leaks(':root { --muted: red; }')).toHaveLength(1);
+    expect(leaks(':host { color: red; }')).toHaveLength(1);
+    expect(leaks('@keyframes -global-spin { to { transform: rotate(1turn); } }')).toHaveLength(1);
+    expect(leaks('@keyframes spin { to { transform: rotate(1turn); } }')).toEqual([]);
   });
 
   it.each(OTHERS)('%s adds no global rule', (file) => {

@@ -56,6 +56,8 @@ export const HEX_GUARDED: readonly string[] = [
   'views/Autonomy.svelte',
   'views/Intentions.svelte',
   'views/Harness.svelte',
+  'views/Observability.svelte',
+  'views/Identity.svelte',
 ];
 
 const SRC = __dirname;
@@ -83,13 +85,21 @@ describe('no colour literal in a migrated component style', () => {
 
 // Review M3 (PR 2): on paper the status fills (--green, --yellow, --red) are marks; as text they fall below 4.5:1 on the
 // page (red is 4.35:1 on #eef2f3). Text takes --ok-text, --warn-text or --err-text, which equal the fills under dark.
-const STATUS_FILL_AS_TEXT = /(^|[^-\w])color:\s*var\(--(red|green|yellow)\)/;
+// PR 5 re-review R3: the mark tokens of N1 as well (`--oc-*`, `--series-N`, `--signal-*`), and var() with a space or a
+// fallback.
+const STATUS_FILL_AS_TEXT = /(^|[^-\w])color:\s*var\(\s*--(?:red|green|yellow|oc-[\w-]+|series-\d+|signal-[\w-]+)(?![\w-])/;
 
 describe('a migrated style never sets a status fill as a text colour', () => {
   it('the pattern catches text, and spares borders, backgrounds and accent colours', () => {
     expect('.x { color: var(--red); }').toMatch(STATUS_FILL_AS_TEXT);
     expect('  color: var(--green);').toMatch(STATUS_FILL_AS_TEXT);
-    for (const ok of ['border-color: var(--red);', 'background-color: var(--green);', 'accent-color: var(--yellow);', 'color: var(--err-text);']) {
+    // PR 5 re-review R3: the mark tokens N1 added to the markup check, and var() with a space or a fallback.
+    for (const bad of ['.x { color: var(--oc-success); }', '.x { color: var(--series-2); }', '.x { color: var(--signal-praised); }',
+      '.x { color: var( --oc-success ); }', '.x { color: var(--oc-success, green); }']) {
+      expect(bad, bad).toMatch(STATUS_FILL_AS_TEXT);
+    }
+    for (const ok of ['border-color: var(--red);', 'background-color: var(--green);', 'accent-color: var(--yellow);', 'color: var(--err-text);',
+      'color: var(--st-partial);']) {
       expect(ok, ok).not.toMatch(STATUS_FILL_AS_TEXT);
     }
   });
@@ -149,6 +159,8 @@ export const SCRIPT_GUARDED: readonly string[] = [
   'views/Autonomy.svelte',
   'views/Intentions.svelte',
   'views/Harness.svelte',
+  'views/Observability.svelte',
+  'views/Identity.svelte',
 ];
 
 /** A literal colour (hex, rgb/hsl/oklch, a named colour in a fill/stroke attribute), or a two-hex-digit alpha glued onto
@@ -245,22 +257,54 @@ describe('no Tailwind colour class in a migrated markup or script', () => {
   });
 });
 
+// PR 5 re-review R3: a mark token can also reach text through a utility class (`text-[var(--oc-success)]`, Tailwind 4's
+// `text-(--oc-success)`), the form a view must use to colour a shared Button, since a scoped class cannot reach it.
+// Text tokens (`--err-text`, `--on-accent`) are spared, and so is a non-colour utility (`text-[length:…]`).
+const MARK_AS_TEXT_CLASS = /(?<![\w-])text-(?:\[(?:color:)?var\(\s*|\()--(?:red|green|yellow|oc-[\w-]+|series-\d+|signal-[\w-]+)(?![\w-])/;
+
+describe('a migrated markup or script never colours text with a mark token through a utility class', () => {
+  it('the pattern catches the bracket, short and typed forms, and spares text tokens, borders and lengths', () => {
+    for (const bad of ['class="text-[var(--oc-success)]"', 'class="hover:text-[var(--red)]"', 'class="text-(--oc-success)"',
+      'class="text-[color:var(--oc-success)]"']) {
+      expect(bad, bad).toMatch(MARK_AS_TEXT_CLASS);
+    }
+    for (const ok of ['class="text-[var(--err-text)]"', 'class="text-(--err-text)"', 'class="text-[var(--on-accent)]"',
+      'class="border-[var(--red)]"', 'class="border-(--red)"', 'class="text-[length:var(--series-2)]"']) {
+      expect(ok, ok).not.toMatch(MARK_AS_TEXT_CLASS);
+    }
+  });
+
+  it.each(SCRIPT_GUARDED)('%s', (file) => {
+    const source = readFileSync(join(SRC, file), 'utf-8');
+    const lines = [...scriptBlocks(source).split('\n'), ...markupOf(source).split('\n')];
+    expect(lines.filter((line) => MARK_AS_TEXT_CLASS.test(line)).map((l) => l.trim())).toEqual([]);
+  });
+});
+
 // Review M1 (PR 3): a status fill used as text can also come from the markup, through a map of mark colours
 // (`style:color={URGENCY_COLOR[u]}`, the form Heartbeat had) or a literal fill token. A text colour reads a text map,
 // named `*_INK` by convention (Heartbeat's URGENCY_INK), or a text token.
 // Only a text colour counts: a `style:color` directive's value, or the `color:` declaration of an inline style attribute
 // (not `border-color`, and not a `color:` key in an object literal, as Admission's box-plot marks have).
 // PR 4 review M5: a map of mark token names (`*_TOKEN`) and the helpers that build a mark's var() from one (`fill(`,
-// `seriesVar(`) are marks too.
+// `seriesVar(`) are marks too. PR 4 re-review N1: so are the plural maps (`OUTCOME_COLORS`, `SIGNAL_TOKENS`), the series
+// and dimension helpers (`seriesToken(`, `dimColor(`, `signalToken(`) and a literal mark token (`--oc-*`, `--series-N`,
+// `--signal-*`). Still out of reach of a line pattern, and left to review: a bare constant (`style:color={MARK}`), a `}`
+// or `"` earlier in the expression, and a directive split over two lines.
 const FILL_MAP_AS_TEXT =
-  /(style:color=[{"][^}"]*|style="[^"]*?(?<![-\w])color:[^";]*)(\b[A-Z][A-Z_]*_(?:COLOR|TOKEN)\b|\bfill\(|\bseriesVar\(|var\(--(red|green|yellow)\))/;
+  /(style:color=[{"][^}"]*|style="[^"]*?(?<![-\w])color:[^";]*)(\b[A-Z][A-Z_]*_(?:COLORS?|TOKENS?)\b|\b(?:fill|seriesVar|seriesToken|dimColor|signalToken)\(|var\(\s*--(?:red|green|yellow|oc-[\w-]+|series-\d+|signal-[\w-]+)(?![\w-]))/;
 
 describe('a migrated markup never colours text with a mark map or a status fill', () => {
   it('the pattern catches a colour map or a fill as text, and spares ink maps, borders and backgrounds', () => {
     for (const bad of ['<span style:color={URGENCY_COLOR[row.urgency]}>', '<span style="color:{URGENCY_COLOR[row.urgency] ?? \'x\'}">',
       '<b style:color="var(--red)">', '<i style="color: var(--yellow)">',
       // PR 4 review M5: a mark map of token names, and the helpers that build a mark's var() from one.
-      '<span style:color={fill(OUTCOME_TOKEN[k])}>', '<span style:color={seriesVar(p.rule)}>', '<b style:color={CONTEXT_TOKEN[k]}>']) {
+      '<span style:color={fill(OUTCOME_TOKEN[k])}>', '<span style:color={seriesVar(p.rule)}>', '<b style:color={CONTEXT_TOKEN[k]}>',
+      // PR 4 re-review N1: the plural maps the views use, the series and dimension helpers, and a literal mark token.
+      // PR 5 re-review R3: var() with a space or a fallback.
+      '<b style:color="var( --oc-success )">', '<b style:color="var(--oc-success, green)">',
+      '<span style:color={OUTCOME_COLORS[o]}>', '<span style:color={`var(${SIGNAL_TOKENS[t]})`}>', '<b style:color={signalToken(t)}>',
+      '<b style:color={dimColor(i)}>', '<b style:color={seriesToken(i)}>', '<b style:color="var(--oc-success)">', '<i style="color: var(--series-2)">']) {
       expect(bad, bad).toMatch(FILL_MAP_AS_TEXT);
     }
     for (const ok of ['<span style:color={URGENCY_INK[row.urgency]}>', '<span style:border-color={STATE_COLOR[st]}>',

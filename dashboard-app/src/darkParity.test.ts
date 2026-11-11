@@ -136,6 +136,39 @@ const ROWS: Row[] = [
   ['views/Harness.svelte', '.state-msg.error', 'color', 'var(--err-text)', '#f87171'],
   ['views/Harness.svelte', '.badge', 'color', 'var(--accent)', '#7c6af7'],
   ['views/Harness.svelte', '.badge', 'background', 'color-mix(in srgb, var(--accent) 12%, transparent)', 'rgba(124, 106, 247, 0.12)'],
+  // Observability (the handler dots and the trend chart: Observability.look.test.ts)
+  ['views/Observability.svelte', '.chart-card', 'border', 'var(--card-border)', '1px solid #1e1e2e'],
+  ['views/Observability.svelte', '.handler-rate--warn', 'color', 'var(--err-text)', '#f87171'],
+  ['views/Observability.svelte', '.trace-row:hover, .trace-row--expanded', 'background', 'var(--surface-hover)', '#181824'],
+  // The global :focus-visible ring the row had (2px solid var(--accent)), now its own rule on --focus-ring.
+  ['views/Observability.svelte', '.trace-row:focus-visible', 'outline', '2px solid var(--focus-ring)', '2px solid #7c6af7'],
+  ['views/Observability.svelte', '.trace-badge--mod', 'color', 'var(--st-partial)', '#fb923c'],
+  ['views/Observability.svelte', '.mod-type', 'background', 'var(--badge-good-bg)', 'rgba(52, 211, 153, 0.15)'],
+  ['views/Observability.svelte', '.mod-type', 'color', 'var(--ok-text)', '#34d399'],
+  ['views/Observability.svelte', '.anomaly', 'background', 'color-mix(in srgb, var(--yellow) 10%, transparent)', 'rgba(251, 191, 36, 0.1)'],
+  ['views/Observability.svelte', '.anomaly', 'border-left', '3px solid var(--yellow)', '3px solid #fbbf24'],
+  ['views/Observability.svelte', '.anomaly--alert', 'background', 'var(--err-bg)', 'rgba(248, 113, 113, 0.1)'],
+  ['views/Observability.svelte', '.anomaly--alert', 'border-left-color', 'var(--red)', '#f87171'],
+  ['views/Observability.svelte', '.event-badge', 'color', 'var(--accent)', '#7c6af7'],
+  ['views/Observability.svelte', '.event-badge', 'background', 'color-mix(in srgb, var(--accent) 12%, transparent)', 'rgba(124, 106, 247, 0.12)'],
+  ['views/Observability.svelte', '.event-badge', 'text-transform', 'var(--label-transform)', 'uppercase'],
+  ['views/Observability.svelte', '.event-badge', 'letter-spacing', 'var(--label-tracking)', '0.05em'],
+  ['views/Observability.svelte', '.empty.error', 'color', 'var(--err-text)', '#f87171'], // was var(--red, #ef4444): --red is #f87171
+  ['views/Observability.svelte', '.status-msg.error', 'color', 'var(--err-text)', '#f87171'],
+  // Identity (the buttons are the shared outline pill; Identity.test.ts)
+  ['views/Identity.svelte', '.section-card', 'border', 'var(--card-border)', '1px solid #1e1e2e'],
+  ['views/Identity.svelte', '.section-card', 'border-radius', 'var(--card-radius-sm)', '8px'], // was var(--radius-sm, 6px): 8px
+  ['views/Identity.svelte', '.section-label', 'text-transform', 'var(--label-transform)', 'uppercase'],
+  ['views/Identity.svelte', '.section-label', 'letter-spacing', 'var(--label-tracking)', '0.05em'],
+  ['views/Identity.svelte', 'textarea', 'background', 'var(--bg)', '#0a0a0f'], // was var(--bg, var(--surface))
+  ['views/Identity.svelte', 'textarea', 'border', '1px solid var(--field-border)', '1px solid #1e1e2e'],
+  ['views/Identity.svelte', 'textarea', 'border-radius', 'var(--radius-sm)', '8px'],
+  ['views/Identity.svelte', '.save-status.save-ok', 'color', 'var(--save-ok)', '#4ade80'],
+  ['views/Identity.svelte', '.save-status.save-err', 'color', 'var(--save-err)', '#f87171'],
+  ['views/Identity.svelte', '.status-msg.error', 'color', 'var(--err-text)', '#f87171'], // was var(--red, #ef4444): --red is #f87171
+  ['views/Identity.svelte', '.info-highlight', 'border', 'var(--card-border)', '1px solid #1e1e2e'],
+  ['views/Identity.svelte', '.info-highlight', 'border-radius', 'var(--card-radius-sm)', '8px'],
+  ['views/Identity.svelte', '.fact-edit', 'border-top', '1px solid var(--border)', '1px solid #1e1e2e'],
 ];
 
 /** The plan's listed dark changes: [file, selector, property, value now, old literal, the dark value it resolves to]. */
@@ -162,6 +195,21 @@ const CHANGES: Change[] = [
   ['views/Harness.svelte', '.rule-pill', 'color', 'var(--text)', '#60a5fa', '#e2e2f0', 'the pill text is the ink; the rule colour is its dot and border'],
   ['views/Harness.svelte', '.rule-pill', 'border-radius', '999px', '4px', '999px', 'a rule pill is a pill, as the badges of PR 2 and PR 3'],
   ['views/Harness.svelte', '.badge', 'border-radius', '999px', '4px', '999px', 'the censor count is a pill, as the badges of PR 2 and PR 3'],
+  ['views/Observability.svelte', '.chart-card', 'border-radius', 'var(--card-radius)', '10px', '12px', 'D2: a chart card takes the card radius'],
+  ['views/Observability.svelte', '.trace-type', 'color', 'var(--accent-text)', '#38bdf8', '#a99df9', 'D4: the trace type is the accent text, not a one-off sky blue'],
+  ['views/Observability.svelte', '.trace-badge', 'background', 'color-mix(in srgb, var(--muted) 10%, transparent)', 'rgba(96, 165, 250, 0.15)', 'rgba(142, 142, 171, 0.1)', 'D4 and review M2: the event count is a neutral badge, a tint that keeps its shape on a hovered row'],
+  ['views/Observability.svelte', '.trace-badge', 'color', 'var(--muted)', '#60a5fa', '#8e8eab', 'D4: the event count is a neutral badge, not blue'],
+  ['views/Observability.svelte', '.trace-badge', 'border-radius', '999px', '4px', '999px', 'a badge is a pill, as the badges of PR 2 to PR 4'],
+  ['views/Observability.svelte', '.trace-badge--mod', 'background', 'color-mix(in srgb, var(--st-partial) 12.5%, transparent)', 'rgba(251, 146, 60, 0.15)', 'rgba(251, 146, 60, 0.125)', "PR 3's badge tint: at 15% the paper text is 4.49:1 on a hovered row"],
+  ['views/Observability.svelte', '.trace-detail', 'background', 'var(--wash)', 'rgba(255, 255, 255, 0.025)', 'rgba(255, 255, 255, 0.03)', 'D4: the open trace sits on the wash'],
+  ['views/Observability.svelte', '.mod-type', 'border-radius', '999px', '4px', '999px', 'a badge is a pill, as the badges of PR 2 to PR 4'],
+  ['views/Observability.svelte', '.event-badge', 'border-radius', '999px', '4px', '999px', 'a badge is a pill, as the badges of PR 2 to PR 4'],
+  ['views/Observability.svelte', '.mono', 'font-family', 'var(--font-mono)', 'monospace', "'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace", "the trace id in the look's mono font (Red Hat Mono on paper); scoped, so no other screen moves"],
+  ['views/Identity.svelte', 'textarea:focus-visible', 'outline', '2px solid var(--focus-ring)', 'none', '2px solid #7c6af7', 'the plan\'s form rule: the focus ring replaces outline: none and the accent border'],
+  ['views/Identity.svelte', '.detail-grid .mono', 'font-family', 'var(--font-mono)', 'monospace', "'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace", "the fact id in the look's mono font; a scoped rule, so the global .mono other screens use is unchanged"],
+  // Review M6: the facts table sits in a card, under dark too (it was on the page ground).
+  ['views/Identity.svelte', '.facts-card', 'background', 'var(--surface)', 'transparent', '#12121a', 'review M6: the facts table sits in a card'],
+  ['views/Identity.svelte', '.facts-card', 'border', 'var(--card-border)', 'none', '1px solid #1e1e2e', 'review M6: the facts table sits in a card'],
 ];
 
 /** PR 4 and PR 5's routes and their views. */

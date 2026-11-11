@@ -2,7 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { render, cleanup, screen } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import BottomSheet from './BottomSheet.svelte';
-import { currentRoute } from '../router';
+import { currentRoute, type RouteName } from '../router';
 import { groundFor } from '../look';
 
 // The sheet is portalled to <body>, outside <main>: without a ground of its own it would read the :root (dark) tokens
@@ -13,7 +13,8 @@ afterEach(() => {
 });
 
 describe('BottomSheet', () => {
-  for (const route of ['overview', 'observability'] as const) {
+  // Every route is paper once PR 5 lands, so the dark case is an id outside PAPER_ROUTES.
+  for (const route of ['overview', 'not-a-route'] as RouteName[]) {
     it(`carries the ground of its route (${route}: ${groundFor(route)})`, async () => {
       currentRoute.set(route);
       render(BottomSheet, { props: { open: true, title: 'Node detail' } });
@@ -29,7 +30,7 @@ describe('BottomSheet', () => {
     render(BottomSheet, { props: { open: true, title: 'Node detail' } });
     const sheet = await screen.findByLabelText('Node detail');
     expect(sheet.getAttribute('data-ground')).toBe('paper');
-    currentRoute.set('observability');
+    currentRoute.set('not-a-route' as RouteName);
     await tick();
     expect(sheet.getAttribute('data-ground')).toBe('dark');
   });
