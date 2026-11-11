@@ -20,7 +20,11 @@
 // channel with deep links; a second delivery channel splits notification
 // state — the same failure mode §5.4 exists to prevent.
 
-const CACHE = 'nous-companion-v1';
+// v2 (dashboard redesign PR 6, the paper default): the worker's bytes change,
+// so an installed client re-runs `install` (re-warms the new shell) and
+// `activate` deletes v1. Assets are content-hashed and companion.html is
+// network-first, so the bump is for the warm, not for correctness.
+const CACHE = 'nous-companion-v2';
 
 async function warmCache() {
   // Seed the offline cache AT INSTALL (codex P1): registration happens

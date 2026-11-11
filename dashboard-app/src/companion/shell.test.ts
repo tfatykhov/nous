@@ -720,3 +720,41 @@ describe('Companion shell — close-all confirms the set the user SAW', () => {
     expect(spy).not.toHaveBeenCalledWith('nous:chat:micro_app:ccc003', 'app.close', 'footer', {});
   });
 });
+
+describe('Companion shell — the Atlantic-blue bar on chart paper (PR 6)', () => {
+  /** Characters the shell's own copy may use beyond ASCII: the ellipsis and the em dash (typography, not symbols). */
+  const ALLOWED = new Set(['\u2026', '\u2014']);
+
+  it('the header is the rail bar with the brand and the connection state as a word', () => {
+    seed('nous:chat:micro_app:aaa001');
+    const { container } = render(Companion);
+    const bar = container.querySelector('header.rail');
+    expect(bar).not.toBeNull();
+    expect(bar?.querySelector('.brand')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Nous Companion');
+    const conn = bar?.querySelector('.conn');
+    expect(conn?.textContent).toBe('live');
+    expect(conn?.classList.contains('live')).toBe(true);
+  });
+
+  it('the permalink is the word "Link", not a glyph', () => {
+    seed('nous:chat:micro_app:aaa001');
+    const { container } = render(Companion);
+    const link = container.querySelector('a.permalink');
+    expect(link?.textContent).toBe('Link');
+    expect(link?.getAttribute('href')).toBe('#/s/' + encodeURIComponent('nous:chat:micro_app:aaa001'));
+  });
+
+  it('no symbol character in the shell text (the brand, the state, the switcher, the permalink, the empty feed)', () => {
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:chat:micro_app:bbb002');
+    const { container } = render(Companion);
+    const shellText = [
+      ...container.querySelectorAll('header.rail, .switcher, a.permalink'),
+    ].map((e) => e.textContent ?? '');
+    cleanup();
+    store.reset();
+    const empty = render(Companion).container.querySelector('p.empty')?.textContent ?? '';
+    const odd = [...(shellText.join(' ') + empty)].filter((ch) => ch.charCodeAt(0) > 126 && !ALLOWED.has(ch));
+    expect(odd).toEqual([]);
+  });
+});

@@ -77,6 +77,13 @@
   --f-debug: #b4531c;
   --f-creative: #a3266f;
   --f-initiation: #8f5c0f;
+
+  /* Chrome: the Atlantic-blue bar. It sits outside every surface, never under
+     a [data-theme], so no theme declares these (themes.test.ts lists them). */
+  --rail: #12304f;
+  --rail-ink: #dbe6ef; /* the brand, and the light pill the state word sits on */
+  --rail-mute: #9fb6c9;
+  --rail-focus: #ffffff;
 }
 
 /* A themed root MUST re-assert the inherited properties it re-defines.

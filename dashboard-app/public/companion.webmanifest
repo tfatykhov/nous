@@ -6,8 +6,8 @@
   "start_url": "/dashboard/v2/companion.html",
   "scope": "/dashboard/v2/",
   "display": "standalone",
-  "background_color": "#0b0b10",
-  "theme_color": "#0b0b10",
+  "background_color": "#eef2f3",
+  "theme_color": "#12304f",
   "icons": [
     {
       "src": "/dashboard/v2/icons/companion-192.png",

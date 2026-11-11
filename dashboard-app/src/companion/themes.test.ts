@@ -302,6 +302,18 @@ function newLegacy(id: string): Record<string, string> {
   };
 }
 const JETBRAINS = "'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace";
+/** :root-only chrome tokens (the shell's bar): no theme needs them. */
+const CHROME_VALUES = { '--rail': '#12304f', '--rail-ink': '#dbe6ef', '--rail-mute': '#9fb6c9', '--rail-focus': '#ffffff' };
+const CHROME = Object.keys(CHROME_VALUES);
+
+/** The companion's source files (components, scripts, the stylesheet), without tests and test helpers. */
+function sourcesOf(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) return e.name === 'testing' || e.name === '__fixtures__' ? [] : sourcesOf(p);
+    return /\.(svelte|css)$/.test(e.name) || (/\.ts$/.test(e.name) && !e.name.endsWith('.test.ts')) ? [p] : [];
+  });
+}
 
 /** A token value as an opaque colour: a translucent one (the selected-row glow) painted over the theme's surface. */
 function opaque(t: Record<string, string>, token: string): string {
@@ -352,7 +364,8 @@ describe('the theme reader follows the cascade the browser does', () => {
 
 describe('the old default (now nous-dark) and the five named themes render exactly as on origin/main', () => {
   it.each(LEGACY)('%s resolves to its origin table plus the new tokens, nothing else', (id) => {
-    expect(SHEET.resolved(id)).toEqual({ ...ORIGIN_OF(id), ...newLegacy(id) });
+    // (plus the chrome tokens it inherits from :root and never reads)
+    expect(SHEET.resolved(id)).toEqual({ ...ORIGIN_OF(id), ...newLegacy(id), ...CHROME_VALUES });
   });
 
 });
@@ -403,6 +416,7 @@ const PAPER_ROOT: Record<string, string> = {
   '--chart-axis': '#56687a',
   '--chart-grid': '#e3e9ec',
   ...PAPER_FRAMES,
+  ...CHROME_VALUES,
 };
 
 describe('the default is the paper world', () => {
@@ -433,7 +447,15 @@ describe('the default is the paper world', () => {
 describe('no theme inherits a token from :root by accident', () => {
   it.each(LEGACY)('%s declares every :root token itself (its own block or a group naming it)', (id) => {
     const own = SHEET.declared(id);
-    expect(Object.keys(SHEET.root).filter((k) => k.startsWith('--') && !(k in own))).toEqual([]);
+    expect(Object.keys(SHEET.root).filter((k) => k.startsWith('--') && !(k in own) && !CHROME.includes(k))).toEqual([]);
+  });
+
+  it('the chrome tokens are read only by the shell, outside every surface', () => {
+    // The bar and its pill: Companion.svelte's header, which is never under a [data-theme].
+    const users = CHROME.flatMap((k) =>
+      sourcesOf(__dirname).filter((f) => readFileSync(f, 'utf-8').includes(`var(${k})`)).map((f) => relative(__dirname, f)),
+    );
+    expect([...new Set(users)]).toEqual(['Companion.svelte']);
   });
 
   it.each(LEGACY)('%s declares each new colour token in its OWN block, as a literal hex', (id) => {
@@ -461,13 +483,7 @@ describe('color-scheme follows the ground', () => {
 
 describe('every token a companion component reads exists', () => {
   const COMPANION = __dirname;
-  function sources(dir: string): string[] {
-    return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
-      const p = join(dir, e.name);
-      if (e.isDirectory()) return e.name === 'testing' || e.name === '__fixtures__' ? [] : sources(p);
-      return /\.(svelte|css)$/.test(e.name) || (/\.ts$/.test(e.name) && !e.name.endsWith('.test.ts')) ? [p] : [];
-    });
-  }
+  const sources = sourcesOf;
 
   it('every var(--x) without a fallback is defined in :root or declared in its own file (style:--x)', () => {
     const missing: string[] = [];
@@ -499,6 +515,16 @@ describe('contrast per theme (WCAG: text 4.5, marks 3)', () => {
       expect(fails).toEqual([]);
     });
   }
+
+  it('the bar: the brand on navy, and each connection state word on its light pill, at least 4.5; the focus ring 3', () => {
+    const r = SHEET.resolved('nous-default');
+    expect(contrast(r['--rail-ink'], r['--rail'])).toBeGreaterThanOrEqual(4.5); // "Nous"
+    expect(contrast(r['--rail-mute'], r['--rail'])).toBeGreaterThanOrEqual(4.5); // "Companion"
+    for (const word of ['--rail', '--ok', '--warn']) {
+      expect(contrast(r[word], r['--rail-ink']), word).toBeGreaterThanOrEqual(4.5); // connecting, live, error
+    }
+    expect(contrast(r['--rail-focus'], r['--rail'])).toBeGreaterThanOrEqual(3);
+  });
 
   it('every recorded shortfall names a pair the matrix measures', () => {
     const measured = new Set(THEMES.flatMap((id) => matrix(SHEET.resolved(id)).map(([fg, bg]) => `${id}|${fg}|${bg}`)));

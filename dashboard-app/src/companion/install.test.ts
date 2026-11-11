@@ -97,6 +97,16 @@ describe('install affordance', () => {
     expect(second.container.querySelector('.install')).toBeNull();
   });
 
+  it('says its buttons in words: no symbol for dismiss (PR 6)', async () => {
+    setUA('Mozilla/5.0 Chrome/120');
+    parkEvent();
+    const { container, getByLabelText } = render(InstallPrompt);
+    await tick();
+    expect(getByLabelText('dismiss').textContent?.trim()).toBe('Dismiss');
+    const odd = [...(container.textContent ?? '')].filter((ch) => ch.charCodeAt(0) > 126);
+    expect(odd).toEqual([]);
+  });
+
   it('detects iPadOS, which reports itself as a Mac', async () => {
     setUA('Mozilla/5.0 (Macintosh; Intel Mac OS X) Safari', {
       platform: 'MacIntel',

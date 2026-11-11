@@ -12,7 +12,7 @@ const source = readFileSync(resolve(__dirname, '../../public/companion-sw.js'), 
 
 type Listener = (event: unknown) => void;
 
-function loadWorker(caches: unknown = {}): Record<string, Listener[]> {
+function loadWorker(caches: unknown = {}, fetchImpl: unknown = vi.fn()): Record<string, Listener[]> {
   const listeners: Record<string, Listener[]> = {};
   const self = {
     location: { origin: 'https://t' },
@@ -22,7 +22,7 @@ function loadWorker(caches: unknown = {}): Record<string, Listener[]> {
     skipWaiting: vi.fn(),
     clients: { claim: vi.fn() },
   };
-  new Function('self', 'caches', 'fetch', source)(self, caches, vi.fn());
+  new Function('self', 'caches', 'fetch', source)(self, caches, fetchImpl);
   return listeners;
 }
 
@@ -59,4 +59,30 @@ describe('companion service worker', () => {
     expect(event.respondWith).toHaveBeenCalledTimes(1);
     await expect(event.respondWith.mock.calls[0][0]).resolves.toBe(cached);
   });
+
+  it('the shell cache is v2: a changed worker re-runs install, re-warms the new shell and drops v1 (PR 6)', async () => {
+    expect(source).toMatch(/const CACHE = 'nous-companion-v2';/);
+    const keys = vi.fn().mockResolvedValue(['nous-companion-v1', 'nous-companion-v2']);
+    const del = vi.fn().mockResolvedValue(true);
+    const listeners = loadWorker({ keys, delete: del });
+    let done: Promise<unknown> = Promise.resolve();
+    for (const l of listeners.activate ?? []) l({ waitUntil: (p: Promise<unknown>) => (done = p) });
+    await done;
+    expect(del).toHaveBeenCalledWith('nous-companion-v1');
+    expect(del).not.toHaveBeenCalledWith('nous-companion-v2');
+  });
+
+  it.each(['/dashboard/v2/companion.html', '/dashboard/v2/companion.webmanifest'])(
+    '%s is network-first, so a new theme colour reaches an installed app',
+    async (path) => {
+      const fresh = new Response('fresh');
+      const stale = new Response('stale');
+      const put = vi.fn();
+      const caches = { match: vi.fn().mockResolvedValue(stale), open: vi.fn().mockResolvedValue({ put }) };
+      const listeners = loadWorker(caches, vi.fn().mockResolvedValue(fresh));
+      const event = dispatchFetch(listeners, path, {}, 'document');
+      await expect(event.respondWith.mock.calls[0][0]).resolves.toBe(fresh);
+      expect(caches.open).toHaveBeenCalledWith('nous-companion-v2');
+    },
+  );
 });

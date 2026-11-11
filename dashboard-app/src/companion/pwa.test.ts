@@ -8,6 +8,8 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const html = readFileSync(resolve(__dirname, '../../companion.html'), 'utf-8');
+const manifest = JSON.parse(readFileSync(resolve(__dirname, '../../public/companion.webmanifest'), 'utf-8'));
+const meta = (name: string) => new RegExp(`<meta name="${name}" content="([^"]*)"`).exec(html)?.[1];
 
 describe('companion PWA install criteria', () => {
   it('fetches the manifest WITH credentials (oauth2-proxy 401 regression)', () => {
@@ -20,5 +22,15 @@ describe('companion PWA install criteria', () => {
     expect(html).toContain('name="mobile-web-app-capable"');
     expect(html).toContain('name="apple-mobile-web-app-capable"');
     expect(html).toContain('rel="apple-touch-icon"');
+  });
+
+  it('the browser chrome is the paper look: a light page under the Atlantic-blue bar (PR 6)', () => {
+    expect(meta('color-scheme')).toBe('light');
+    // Android paints the status bar in theme-color: the bar's navy, so the bar runs up under it.
+    expect(meta('theme-color')).toBe('#12304f');
+    // iOS ignores the manifest colours; the page draws under the status bar, whose white text sits on the navy bar.
+    expect(meta('apple-mobile-web-app-status-bar-style')).toBe('black-translucent');
+    expect(manifest.theme_color).toBe('#12304f');
+    expect(manifest.background_color).toBe('#eef2f3');
   });
 });

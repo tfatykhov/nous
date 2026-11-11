@@ -2,14 +2,16 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { PAPER_SEL, parseBlocks } from '../lib/testing/css';
+import { PAPER_SEL, RAIL_SEL, parseBlocks } from '../lib/testing/css';
 import { parseThemes } from './testing/themes';
 
 // The companion keeps its own stylesheet (it never imports app.css), so the paper values it shares with the
 // dashboard are copies. This test is the sync: it reads the dashboard's paper ground from app.css and fails when a
 // shared value drifts, and it fails on any companion :root token that is neither shared nor listed as its own.
 
-const DASH = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
+const BLOCKS = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8'));
+const DASH = BLOCKS.get(PAPER_SEL) ?? {};
+const RAIL = BLOCKS.get(RAIL_SEL) ?? {};
 const ROOT = parseThemes(readFileSync(join(__dirname, 'companion.css'), 'utf-8')).resolved('nous-default');
 
 /** companion :root token -> the dashboard paper token it must equal. */
@@ -62,6 +64,14 @@ const PARITY: Record<string, string> = {
   '--f-initiation': '--f-initiation',
 };
 
+/** The companion's bar (chrome tokens) -> the dashboard's rail ground: the same Atlantic blue. */
+const RAIL_PARITY: Record<string, string> = {
+  '--rail': '--surface',
+  '--rail-ink': '--text',
+  '--rail-mute': '--muted',
+  '--rail-focus': '--focus-ring',
+};
+
 /** companion :root tokens with no dashboard counterpart, each with the reason. */
 const COMPANION_OWN: Record<string, string> = {
   '--accent': 'the rail navy is the companion accent (primary button, selected row, active tab); the dashboard accent is its link blue',
@@ -85,8 +95,13 @@ describe('the companion paper default and the dashboard paper ground share their
     expect(ROOT[mine], mine).toBe(DASH[theirs]);
   });
 
+  it.each(Object.entries(RAIL_PARITY))('the bar: %s equals the dashboard rail %s', (mine, theirs) => {
+    expect(RAIL[theirs], theirs).toBeDefined();
+    expect(ROOT[mine], mine).toBe(RAIL[theirs]);
+  });
+
   it('every companion :root token is shared or listed as the companion own, with a reason', () => {
-    const unlisted = Object.keys(ROOT).filter((k) => !(k in PARITY) && !(k in COMPANION_OWN));
+    const unlisted = Object.keys(ROOT).filter((k) => !(k in PARITY) && !(k in RAIL_PARITY) && !(k in COMPANION_OWN));
     expect(unlisted).toEqual([]);
     for (const [k, why] of Object.entries(COMPANION_OWN)) {
       expect(ROOT[k], k).toBeDefined();

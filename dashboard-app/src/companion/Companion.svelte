@@ -267,12 +267,16 @@
   }
 </script>
 
-<div class="shell">
-  <header>
+<!-- The Atlantic-blue bar runs edge to edge and up under the status bar of an
+     installed app; the shell below keeps the reading width. -->
+<header class="rail">
+  <div class="rail-inner">
     <a class="brand" href="#/">Nous <span>Companion</span></a>
     <span class="conn {store.connection}">{store.connection}</span>
-  </header>
+  </div>
+</header>
 
+<div class="shell">
   <InstallPrompt />
 
   {#if feed.length > 1}
@@ -324,8 +328,8 @@
       </p>
     {:else}
       {#each feed as surface (surface.surfaceId)}
-        <section class="surface" data-theme={surface.theme || null} aria-label={surface.surfaceId}>
-          <a class="permalink" href={'#/s/' + encodeURIComponent(surface.surfaceId)}>⧉</a>
+        <section class="surface linked" data-theme={surface.theme || null} aria-label={surface.surfaceId}>
+          <a class="permalink" href={'#/s/' + encodeURIComponent(surface.surfaceId)}>Link</a>
           <Renderer surfaceId={surface.surfaceId} componentId="root" />
         </section>
       {/each}
@@ -334,52 +338,70 @@
 </div>
 
 <style>
+  /* The bar: chrome outside every surface, so it reads the paper :root's
+     chrome tokens (--rail*) and never a theme. black-translucent +
+     viewport-fit=cover extends an installed app's viewport UNDER the status
+     bar / notch / Dynamic Island, so the bar takes the top inset (env() is 0
+     in a browser tab) and its navy fills the space behind the status text.
+     Left/right insets cover landscape notches. */
+  .rail {
+    background: var(--rail);
+    color: var(--rail-ink);
+    padding: calc(0.9rem + env(safe-area-inset-top)) calc(1rem + env(safe-area-inset-right)) 0.9rem
+      calc(1rem + env(safe-area-inset-left));
+  }
+  .rail-inner {
+    max-width: 688px; /* the shell's 720px less its padding: the brand lines up with the cards */
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+  }
   .shell {
     max-width: 720px;
     margin: 0 auto;
-    /* black-translucent + viewport-fit=cover extends the viewport UNDER the
-       status bar / notch / Dynamic Island once installed, so the top needs
-       its inset exactly like the bottom already had (codex P2). Left/right
-       cover landscape notches. env() is 0 in a normal browser tab. */
-    padding: calc(1rem + env(safe-area-inset-top)) calc(1rem + env(safe-area-inset-right))
-      calc(2rem + env(safe-area-inset-bottom)) calc(1rem + env(safe-area-inset-left));
+    padding: 1rem calc(1rem + env(safe-area-inset-right)) calc(2rem + env(safe-area-inset-bottom))
+      calc(1rem + env(safe-area-inset-left));
     display: flex;
     flex-direction: column;
     gap: 1rem;
   }
-  header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0.25rem 0;
-  }
   .brand {
-    color: var(--text);
+    color: var(--rail-ink);
     text-decoration: none;
-    font-weight: 600;
-    font-size: 1.05rem;
+    font-weight: 700;
+    font-size: 1.2rem;
+    letter-spacing: -0.01em;
   }
   .brand span {
-    color: var(--accent);
+    color: var(--rail-mute);
+    font-weight: 500;
   }
+  .brand:focus-visible,
+  .conn:focus-visible {
+    outline: 2px solid var(--rail-focus);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+  /* The connection state: a word on a light pill, in a status ink when it
+     matters (never colour alone: the word is the state). */
   .conn {
     font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    padding: 0.15rem 0.6rem;
+    font-weight: 600;
+    padding: 0.15rem 0.65rem;
     border-radius: 999px;
-    border: 1px solid var(--border);
-    color: var(--muted);
+    background: var(--rail-ink);
+    color: var(--rail);
   }
   .conn.live {
-    color: var(--green);
-    border-color: var(--green);
+    color: var(--ok);
   }
   .conn.error,
   .conn.resyncing {
-    color: var(--yellow);
-    border-color: var(--yellow);
+    color: var(--warn);
   }
+  /* The live surfaces: pill segments on the paper ground. */
   .switcher {
     display: flex;
     gap: 0.4rem;
@@ -388,12 +410,12 @@
   }
   .chip {
     font: inherit;
-    font-size: 0.78rem;
+    font-size: 0.8rem;
     color: var(--muted);
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 999px;
-    padding: 0.2rem 0.7rem;
+    border-radius: var(--ctl-radius);
+    padding: 0.25rem 0.8rem;
     text-decoration: none;
     cursor: pointer;
     transition: var(--transition);
@@ -403,8 +425,14 @@
     color: var(--text);
   }
   .chip.active {
-    color: var(--accent);
+    color: var(--on-accent);
+    background: var(--accent);
     border-color: var(--accent);
+    font-weight: 600;
+  }
+  .chip:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
   .chip.close-all.armed {
     color: var(--crit);
@@ -416,8 +444,8 @@
     background: none;
   }
   .chip.close-all:hover:not(:disabled) {
-    color: var(--red);
-    border-color: var(--red);
+    color: var(--crit);
+    border-color: var(--crit);
   }
   .chip.close-all:disabled {
     opacity: 0.5;
@@ -428,23 +456,36 @@
     flex-direction: column;
     gap: 1rem;
   }
+  /* A surface is a card in its own theme: these tokens resolve at the
+     section, which carries data-theme. The named themes keep the old card
+     (radius 12, a hairline border, no shadow) through the legacy group. */
   .surface {
     position: relative;
     background: var(--surface);
-    border: 1px solid var(--border);
+    border: var(--card-border);
     border-radius: var(--radius);
+    box-shadow: var(--card-shadow);
     padding: 1.1rem;
+  }
+  /* In the feed a card carries its "Link" (to the focused view) in a strip of
+     its own above the content, so the word never sits on the surface's first
+     component (an app's header stamp, an ApprovalPanel's border). */
+  .surface.linked {
+    padding-top: 2rem;
   }
   .permalink {
     position: absolute;
-    top: 0.6rem;
-    right: 0.8rem;
+    top: 0.55rem;
+    right: 1.1rem;
     color: var(--muted);
     text-decoration: none;
-    font-size: 0.85rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    line-height: 1.2;
   }
   .permalink:hover {
     color: var(--accent);
+    text-decoration: underline;
   }
   .empty {
     color: var(--muted);
