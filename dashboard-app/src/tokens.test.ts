@@ -239,7 +239,7 @@ const PR3: Record<string, [string, string]> = {
   '--wash': ['rgba(255, 255, 255, 0.03)', '#f4f7f8'], // Heartbeat: the tuning report's panel
   '--hb-warn-ink': ['#fbbf24', '#8a5a0e'], // Heartbeat: amber as text (paper's --yellow is a mark colour)
   '--effect-write': ['#60a5fa', '#1f5fa8'], // the Ledger's write effect pill
-  '--mc-section-1': ['#a99df9', '#8b5cf6'], // a model call's first context section (the accent text under dark)
+  '--mc-section-1': ['#a99df9', '#8b5cf6'], // a model call's first context section (dark: the accent text; paper: a violet)
 };
 for (const [k, [dark]] of Object.entries(PR3)) NEW_DARK[k] = dark;
 
@@ -772,7 +772,8 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
   });
 
   it('the first two context sections of a model call are distinct on paper (ruling 5), and 3:1 on white', () => {
-    expect(PAPER['--mc-section-1']).toBe(PAPER['--series-0']); // the violet series, not the question frame's blue
+    // Its own violet: not the question frame's link blue, and not tied to a series slot PR 2 owns (review I1).
+    expect(PAPER['--mc-section-1']).not.toBe(PAPER['--f-question']);
     expect(okDistance(PAPER['--mc-section-1'], PAPER['--series-1'])).toBeGreaterThanOrEqual(12);
     expect(contrast(PAPER['--mc-section-1'], '#ffffff')).toBeGreaterThanOrEqual(3);
   });

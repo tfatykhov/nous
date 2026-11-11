@@ -422,7 +422,7 @@
     --wash: #f4f7f8;
     --hb-warn-ink: #8a5a0e;
     --effect-write: #1f5fa8;
-    --mc-section-1: #8b5cf6;                   /* = --series-0: not the link blue beside series 1 */
+    --mc-section-1: #8b5cf6;                   /* a violet, not the link blue beside series 1 */
 
     /* shadcn, HSL of the paper hex */
     --background: 192 17% 94%;
