@@ -384,7 +384,7 @@
       <!-- Meta rows: render from detail when loaded, else from the head -->
       <div class="node-row">
         <span class="detail-label">Type</span>
-        <span class="type-badge" style:background="color-mix(in srgb, {typeColor(head.type)} 12.5%, transparent)" style:color={typeColor(head.type)}>
+        <span class="type-badge" style:--type={typeColor(head.type)}>
           {head.type}
         </span>
       </div>
@@ -676,6 +676,7 @@
     letter-spacing: var(--label-tracking);
   }
 
+  /* The type's colour (--type, set inline) on its own 12.5% tint (the old hex `20` alpha). */
   .type-badge {
     display: inline-block;
     padding: 2px 8px;
@@ -683,6 +684,13 @@
     font-size: 0.6875rem;
     font-weight: 600;
     border: 1px solid transparent;
+    background: color-mix(in srgb, var(--type) 12.5%, transparent);
+    color: var(--type);
+  }
+
+  /* On paper the node colours are 3:1 marks, not text: the badge's word is mixed toward the ink (4.5:1 or more). */
+  :global(html[data-look="paper"] [data-ground="paper"]) .type-badge {
+    color: color-mix(in srgb, var(--type) 70%, var(--text));
   }
 
   .mono {

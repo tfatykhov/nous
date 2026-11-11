@@ -191,10 +191,30 @@ describe('Graph on the paper look', () => {
     expect(dirs.map((d) => d.textContent?.trim())).toEqual(['from', 'to']);
     expect(dirs.map((d) => d.getAttribute('title'))).toEqual(['from the neighbour to this node', 'from this node to the neighbour']);
     expect(sheet.textContent).not.toMatch(/[→←]/);
+    // The badge carries its type's colour as --type; the stylesheet draws the tint and the text from it.
     const badge = sheet.querySelector('.type-badge')!;
-    expect(badge.getAttribute('style')).toContain('color-mix(in srgb, var(--gv-episode) 12.5%, transparent)');
-    expect(badge.getAttribute('style')).toContain('color: var(--gv-episode)');
+    expect(badge.getAttribute('style')).toBe('--type: var(--gv-episode);');
     expect(sheet.querySelector('.rel-dot')?.getAttribute('style')).toContain('var(--rel-supports)');
+  });
+
+  it('the type badge: the colour on its 12.5% tint under dark; on paper the text mixed 70% with the ink, 4.5:1 or more (review I3)', () => {
+    const css = styleBlocks(readFileSync(join(__dirname, 'GraphView.svelte'), 'utf-8'));
+    expect(css).toMatch(/\.type-badge \{[^}]*background: color-mix\(in srgb, var\(--type\) 12\.5%, transparent\);[^}]*color: var\(--type\);/);
+    expect(css).toMatch(/\[data-ground="paper"\]\) \.type-badge \{\s*color: color-mix\(in srgb, var\(--type\) 70%, var\(--text\)\);/);
+    // On paper the plain node colours are 3:1 marks (fact 3.06:1 as 11px text on its tint); mixed, every type passes.
+    const rgb = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+    const lum = (c: number[]) => {
+      const [r, g, b] = c.map((v) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; });
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const ratio = (a: number[], b: number[]) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+    const ink = rgb(PAPER['--text']);
+    for (const t of ['fact', 'episode', 'decision', 'procedure', 'chunk']) {
+      const c = rgb(PAPER[`--gv-${t}`]);
+      const text = c.map((v, i) => 0.7 * v + 0.3 * ink[i]);
+      const tintBg = c.map((v) => 0.125 * v + 0.875 * 255); // the sheet is white on paper
+      expect(ratio(text, tintBg), t).toBeGreaterThanOrEqual(4.5);
+    }
   });
 
   it('the sources hold no colour literal and no {@html', () => {
