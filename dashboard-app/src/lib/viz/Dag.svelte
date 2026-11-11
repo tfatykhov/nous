@@ -187,6 +187,11 @@
           : 'none';
 
       const r = NODE_RADIUS;
+      // The status in words (review I2): on paper several status colours read alike, and under red-green colour
+      // blindness running and failed are one colour, so colour is never the only signal. The title (first child, as
+      // SVG wants it) names the node, its type and its status for a hover and for assistive technology.
+      const word = d.status.replaceAll('_', ' ');
+      g.append('title').text(`${d.name}: ${d.node_type ?? 'subtask'}, ${word}`);
       if (d.node_type === 'check') {
         // Diamond
         g.append('polygon')
@@ -243,6 +248,15 @@
         .style('fill', 'var(--text)')
         .attr('font-size', '11px')
         .text(d.name.length > 12 ? d.name.slice(0, 11) + '…' : d.name);
+
+      // Status below the name, muted
+      g.append('text')
+        .attr('class', 'dag-node-status')
+        .attr('dy', r + 29)
+        .attr('text-anchor', 'middle')
+        .style('fill', 'var(--muted)')
+        .attr('font-size', '10px')
+        .text(word);
     });
 
     rendered = true;

@@ -152,13 +152,30 @@ describe('Workflows: the DAG graph', () => {
   });
 });
 
+describe('Workflows: a node\'s status is a word, never colour alone (review I2)', () => {
+  it('every node shows its status in words under its name, and its title names it, its type and its status', () => {
+    const nodes = EVERY.map(({ id, name, status, node_type, wave }) => ({ id, name, status, node_type, wave }));
+    render(Dag, { props: { nodes, edges: [] } });
+    for (const n of nodes) {
+      const mine = calls.filter((c) => c.id === n.id && c.kind === 'text');
+      const label = n.name.length > 12 ? n.name.slice(0, 11) + '…' : n.name;
+      const word = n.status.replaceAll('_', ' ');
+      expect([...new Set(mine.filter((c) => c.tag === 'text').map((c) => c.v))], n.status).toEqual([label, word]);
+      expect([...new Set(mine.filter((c) => c.tag === 'title').map((c) => c.v))], n.status).toEqual([`${n.name}: ${n.node_type}, ${word}`]);
+    }
+    // The status line is muted text, by token.
+    const statusFill = calls.filter((c) => c.tag === 'text' && c.k === 'fill').map((c) => c.v);
+    expect(statusFill).toContain('var(--muted)');
+  });
+});
+
 describe('Workflows: no invented glyph in the graph', () => {
   it('an approval node is a plain rounded square named by its label below: no question mark (ruling 4)', () => {
     const nodes = [{ id: 'a1', name: 'approve-send', status: 'awaiting_input', node_type: 'approval', wave: 0 }];
     render(Dag, { props: { nodes, edges: [] } });
     const mine = calls.filter((c) => c.id === 'a1');
     // (The graph draws on mount and again from its effect: compare the set of texts.)
-    expect([...new Set(mine.filter((c) => c.kind === 'text').map((c) => c.v))]).toEqual(['approve-send']);
+    expect([...new Set(mine.filter((c) => c.kind === 'text' && c.tag === 'text').map((c) => c.v))]).toEqual(['approve-send', 'awaiting input']);
     expect(mine.some((c) => c.tag === 'rect' && c.k === 'stroke' && c.v === 'var(--st-awaiting-input)')).toBe(true);
     expect(readFileSync(join(__dirname, '..', 'lib', 'viz', 'Dag.svelte'), 'utf-8')).not.toMatch(/\.text\('\?'\)/);
   });
