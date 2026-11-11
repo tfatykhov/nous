@@ -76,6 +76,12 @@ export function frameChange(prev: WorkTurn | undefined, cur: WorkTurn): { from: 
   return { from: prev.frame_id, to: cur.frame_id, why: changeWhy(cur) };
 }
 
+/** The last turn before `i` that has a frame: a turn without one (a missing turn record) must not hide a change. */
+export function lastFramed(turns: readonly WorkTurn[], i: number): WorkTurn | undefined {
+  for (let j = i - 1; j >= 0; j--) if (turns[j].frame_id != null && turns[j].frame_id !== '') return turns[j];
+  return undefined;
+}
+
 const msOf = (iso: string | null | undefined): number | null => {
   if (!iso) return null;
   const ms = Date.parse(iso);

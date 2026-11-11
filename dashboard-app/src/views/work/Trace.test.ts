@@ -325,6 +325,19 @@ describe('Work trace', () => {
     expect(c.style.getPropertyValue('--to')).toBe('var(--f-task)');
   });
 
+  it('a turn record missing between two framed turns does not hide their frame change (review M7)', async () => {
+    respond = () => ({ body: trace([
+      turn('m1', 1, { frame_id: 'question' }),
+      turn('m2', null, { has_turn_row: false, frame_id: null, frame_reason: null, trigger: null, reply: null, calls: [call(0)] }),
+      turn('m3', 3, { frame_id: 'task', frame_reason: 'pattern' }),
+    ]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 3');
+    const changes = Array.from(container.querySelectorAll('.change'));
+    expect(changes.map((c) => c.textContent?.replace(/\s+/g, ' ').trim())).toEqual(['Frame changed from question to task. A new topic.']);
+    expect(changes[0].nextElementSibling?.id).toBe('turn-m3');
+  });
+
   it('no sentence for a carried frame, an unchanged frame, or the first turn', async () => {
     respond = () => ({ body: trace([
       turn('d1', 1, { frame_id: 'question' }),

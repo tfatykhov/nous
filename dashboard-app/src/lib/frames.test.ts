@@ -10,6 +10,7 @@ import {
   frameChange,
   frameLabel,
   frameVar,
+  lastFramed,
   replySeconds,
   verdictText,
 } from './frames';
@@ -80,6 +81,14 @@ describe('frame change sentence', () => {
     expect(frameChange(prev, turn({ frame_id: 'question', frame_reason: 'pattern' }))).toBeNull();
     expect(frameChange(prev, turn({ frame_id: null, has_turn_row: false }))).toBeNull();
     expect(frameChange(turn({ frame_id: null }), turn({ frame_id: 'task' }))).toBeNull();
+  });
+
+  it('the previous turn to compare with is the last earlier one that has a frame (review M7)', () => {
+    const list = [turn({ turn_id: 'a', frame_id: 'question' }), turn({ turn_id: 'b', frame_id: null, has_turn_row: false }), turn({ turn_id: 'c', frame_id: 'task' })];
+    expect(lastFramed(list, 2)?.turn_id).toBe('a');
+    expect(lastFramed(list, 1)?.turn_id).toBe('a');
+    expect(lastFramed(list, 0)).toBeUndefined();
+    expect(frameChange(lastFramed(list, 2), list[2])).toEqual({ from: 'question', to: 'task', why: 'A new topic.' });
   });
 
   it('an older API (no frame_reason key) still gets a sentence, with the reason not recorded', () => {

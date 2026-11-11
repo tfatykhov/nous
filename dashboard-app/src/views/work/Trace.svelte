@@ -4,7 +4,7 @@
   import { usePoll } from '../../lib/poll';
   import { routeHref } from '../../lib/router';
   import { fmtDuration, fmtTime, fmtTokens, getLastListQuery, laneVar } from '../../lib/work';
-  import { chosenBy, clockTime, criticVerdict, fmtSeconds, frameChange, frameLabel, frameVar, replySeconds, verdictText } from '../../lib/frames';
+  import { chosenBy, clockTime, criticVerdict, fmtSeconds, frameChange, frameLabel, frameVar, lastFramed, replySeconds, verdictText } from '../../lib/frames';
   import type { WorkCall, WorkTrace, WorkTurn } from '../../lib/types/api';
   import StaleBadge from '../../lib/ui/StaleBadge.svelte';
   import HoldUndo from '../../lib/ui/HoldUndo.svelte';
@@ -262,7 +262,7 @@
         {/if}
 
         {#each turns as t, i (t.turn_id)}
-          {@const change = frameChange(turns[i - 1], t)}
+          {@const change = frameChange(lastFramed(turns, i), t)}
           {@const chips = contextChips(t)}
           {@const claim = claimLine(t)}
           {@const verdict = criticVerdict(t)}
