@@ -9,6 +9,8 @@
   import { fmtTokens } from '../lib/work';
   import { fmtSeconds } from '../lib/frames';
   import { hhmm, utcMinute } from '../lib/dayTimeline';
+  import { look } from '../lib/look';
+  import { chartPalette, readToken } from '../lib/overviewCharts';
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import { Button } from '../lib/ui/button';
@@ -102,9 +104,14 @@
     return 'bad';
   }
 
-  const OUTCOME_COLORS: Record<string, string> = {
-    success: '#34d399', partial: '#fbbf24', failure: '#f87171', pending: '#6b6b8a',
-  };
+  // The charts' colours come from the ground's tokens, read off the chart row itself (a canvas cannot read var()),
+  // and again whenever the look changes: today's colours exactly under dark, the paper palette under paper.
+  let chartRow = $state<HTMLElement>();
+  let palette = $derived.by(() => {
+    void $look;
+    const el = chartRow;
+    return el ? chartPalette((name) => readToken(el, name)) : null;
+  });
 
   // ── Today ─────────────────────────────────────────────────────────────
 
@@ -391,19 +398,21 @@
   </p>
 
   <!-- ── Charts ───────────────────────────────────────────────────────── -->
-  <div class="chart-row">
+  <div class="chart-row" bind:this={chartRow}>
     <!-- Decision outcomes (doughnut) -->
     <section class="chart-card">
       <h2>Decision outcomes</h2>
       {#if Object.keys(dist.decision_outcomes).length > 0}
         {@const do_ = sortedDistribution(dist.decision_outcomes)}
+        {#if palette}
+        {@const pal = palette}
         <Chart
           type="doughnut"
           data={{
             labels: do_.labels,
             datasets: [{
               data: do_.values,
-              backgroundColor: do_.labels.map((l) => OUTCOME_COLORS[l.toLowerCase()] ?? '#6b6b8a'),
+              backgroundColor: do_.labels.map((l) => pal.outcome(l)),
               borderWidth: 0,
               hoverOffset: 4,
             }],
@@ -411,6 +420,7 @@
           options={{ cutout: '60%', plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } } }}
           height="240px"
         />
+        {/if}
       {:else}
         <p class="empty">No decisions recorded yet</p>
       {/if}
@@ -421,11 +431,13 @@
       <h2>Edge types</h2>
       {#if Object.keys(dist.edge_relations).length > 0}
         {@const er = sortedDistribution(dist.edge_relations)}
+        {#if palette}
+        {@const pal = palette}
         <Chart
           type="bar"
           data={{
             labels: er.labels.map((l) => l.replace(/_/g, ' ')),
-            datasets: [{ data: er.values, backgroundColor: 'rgba(124,106,247,0.5)', borderColor: '#7c6af7', borderWidth: 1 }],
+            datasets: [{ data: er.values, backgroundColor: pal.bar, borderColor: pal.barBorder, borderWidth: 1 }],
           }}
           options={{
             indexAxis: 'y',
@@ -437,6 +449,7 @@
           }}
           height="240px"
         />
+        {/if}
       {:else}
         <p class="empty">No graph edges yet</p>
       {/if}

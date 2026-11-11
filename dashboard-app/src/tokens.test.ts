@@ -106,6 +106,7 @@ const NEW_DARK: Record<string, string> = {
   '--notice-border': 'rgba(245, 158, 11, 0.4)',
   '--kind-task': '#22d3ee', // SessionList's .kind-task and Patterns' Tasks bars
   '--seg-bg': 'var(--surface)', // SessionList's kind selector
+  '--series-7': '#6b6b8a', // Overview's pending outcomes (the PR 2/3 plan's ramp, slot 7)
   '--f-conversation': '#8fa3b5',
   '--f-question': '#8aa4ff',
   '--f-task': '#3fc3d1',
@@ -332,6 +333,9 @@ describe('contrast of the new values', () => {
     expect(contrast(PAPER['--text'], PAPER['--notice-bg'])).toBeGreaterThanOrEqual(4.5);
     expect(contrast(PAPER['--kind-task'], PAPER['--surface'])).toBeGreaterThanOrEqual(4.5);
     expect(contrast(PAPER['--kind-task'], PAPER['--bg'])).toBeGreaterThanOrEqual(4.5);
+    // Chart marks (non-text) on the white card: pending's series colour and the accent bars.
+    expect(contrast(PAPER['--series-7'], '#ffffff')).toBeGreaterThanOrEqual(3);
+    expect(contrast(PAPER['--accent'], '#ffffff')).toBeGreaterThanOrEqual(3);
     for (const s of ['--stat-warn', '--stat-ok', '--red']) {
       expect(contrast(PAPER[s], PAPER['--surface']), s).toBeGreaterThanOrEqual(s === '--red' ? 3 : 4.5);
     }

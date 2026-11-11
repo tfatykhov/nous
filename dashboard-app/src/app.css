@@ -107,6 +107,7 @@
     --notice-border: rgba(245, 158, 11, 0.4);
     --kind-task: #22d3ee;                      /* the Work screens' "Task" kind (text and bars) */
     --seg-bg: var(--surface);                  /* the Work list's kind selector, behind its buttons */
+    --series-7: #6b6b8a;                       /* PR 2/3 plan's series ramp, slot 7: the Overview's pending outcomes */
     /* Frame colours, one each (7.1 to 9.3:1 on --surface) */
     --f-conversation: #8fa3b5;
     --f-question: #8aa4ff;
@@ -182,6 +183,7 @@
     --notice-border: transparent;
     --kind-task: #0b6e7a;
     --seg-bg: transparent;
+    --series-7: #8a5a2b;
 
     --f-conversation: #55697a;
     --f-question: #2346c8;

@@ -26,6 +26,14 @@ export function styleBlocks(source: string): string {
     .join('\n');
 }
 
+/** The text of every <script> block of a Svelte component, comments removed (block comments, and line comments
+ * that start a line or follow whitespace, so a URL's '//' stays). */
+export function scriptBlocks(source: string): string {
+  return [...source.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/g)]
+    .map((m) => m[1].replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\s)\/\/.*$/gm, '$1'))
+    .join('\n');
+}
+
 /** The dark block of app.css (`:root` and a dark island) and the two grounds of the paper look. */
 export const DARK_SEL = ':root, [data-ground="dark"]';
 export const PAPER_SEL = 'html[data-look="paper"] [data-ground="paper"]';
