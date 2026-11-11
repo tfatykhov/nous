@@ -117,6 +117,25 @@ def test_basic_only_envelope_validates() -> None:
     assert errors == []
 
 
+def test_video_surface_passes_schema() -> None:
+    """Video is in the vendored basic catalog: url required, posterUrl optional."""
+    video = {
+        "id": "root",
+        "component": "Video",
+        "url": "/dashboard/v2/trip/a.mp4",
+        "posterUrl": "/dashboard/v2/trip/p.jpg",
+    }
+    assert validate_envelope(_envelope([video])) == []
+    assert validate_structure([video], []) == []
+
+    no_url = {k: v for k, v in video.items() if k != "url"}
+    errors = validate_envelope(_envelope([no_url]))
+
+    assert len(errors) == 1
+    assert errors[0]["code"] == "VALIDATION_FAILED"
+    assert "'url' is a required property" in errors[0]["message"]
+
+
 def test_unknown_component_is_rejected() -> None:
     errors = validate_envelope(
         _envelope([{"id": "root", "component": "NotAComponent", "text": "x"}])

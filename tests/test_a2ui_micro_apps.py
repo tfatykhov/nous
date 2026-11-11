@@ -1473,6 +1473,26 @@ def test_catalog_summary_covers_every_allowed_component() -> None:
         assert f"- {name}:" not in summary, f"{name} is banned but summarized"
 
 
+def test_catalog_summary_lists_video_required_url() -> None:
+    from nous.a2ui.catalog_summary import catalog_property_summary
+
+    summary = catalog_property_summary()
+
+    assert "- Video: required url" in summary
+    video_line = next(line for line in summary.splitlines() if line.startswith("- Video:"))
+    assert "posterUrl" in video_line
+
+
+def test_usage_block_names_the_three_video_sources() -> None:
+    """The property line cannot say WHICH urls render; the usage block must."""
+    from nous.a2ui.compose import _COMPONENT_USAGE
+
+    usage = _COMPONENT_USAGE["Video"]
+
+    for needle in ("companion-assets", "youtube", "vimeo", "https"):
+        assert needle in usage, needle
+
+
 def test_catalog_summary_names_the_properties_that_broke_in_production() -> None:
     """The 2026-08-30 compose instrumentation: 4 of 6 repair rounds failed on
     props the model was never shown. ``DecisionCard.decisionId`` was reported

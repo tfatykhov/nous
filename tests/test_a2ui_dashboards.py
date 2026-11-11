@@ -1841,6 +1841,13 @@ def test_report_components_are_allowed_in_micro_apps():
         assert name in grammar.ALLOWED_COMPONENTS, name
 
 
+def test_video_is_allowed_in_micro_apps():
+    assert "Video" in grammar.ALLOWED_COMPONENTS
+    assert "AudioPlayer" not in grammar.ALLOWED_COMPONENTS
+    video = _skel([{"id": "c", "component": "Video", "url": "/dashboard/v2/trip/a.mp4"}])
+    assert grammar.lint_micro_app(video) == []
+
+
 # ---------------------------------------------------------------------------
 # F096 sources — focus_from and the series-aware _bound (spec §6.1 / §6.2 / AC4)
 # ---------------------------------------------------------------------------

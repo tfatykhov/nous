@@ -253,6 +253,15 @@ _COMPONENT_USAGE: dict[str, str] = {
         "NOT a Button, see above) + `content` component ids; open/close is "
         "renderer-owned, no action wiring needed."
     ),
+    "Video": (
+        "a playable video: url (required) is ONE of — a file you saved under "
+        "companion-assets, written /dashboard/v2/<app>/<name>.mp4 or .webm; a "
+        "direct https link ending .mp4/.webm; a youtube.com/watch?v=, "
+        "youtu.be/, youtube.com/shorts/ or vimeo.com/<digits> link "
+        "(embedded). Anything else renders 'Video unavailable'. posterUrl? is "
+        "an image URL. GET a remote url first and confirm 200 + video/*; never "
+        "invent a url."
+    ),
 }
 
 _COMPONENT_USAGE_BLOCK = "WHEN TO USE (easy-to-miss components):\n" + "\n".join(

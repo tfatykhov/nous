@@ -478,15 +478,38 @@ Get the structure clean locally, then write the intent to *describe that
 structure* — naming each section, path and series key. The composer reproduces
 it in one or two repairs instead of failing out.
 
-## Images and links: possible, but not the obvious way
+## Images, video and links: possible, but not the obvious way
 
-Both work in a micro-app. Neither works the way you would first reach for.
+All three work in a micro-app. Images and links do not work the way you would
+first reach for.
 
 **Images** — the `Image` component is real and registered in the renderer.
 Props: `url` (DynamicString, so bind it), `description` (alt text; omit and the
 image is treated as decorative), `fit` (object-fit), `variant`
 (`icon|avatar|smallFeature|mediumFeature|largeFeature|header`). `src` is passed
 through unfiltered and there is no CSP, so any https URL renders.
+
+**Video** — the `Video` component plays a video in the companion. Props: `url`
+(DynamicString) and an optional `posterUrl` (an image URL; without one the
+first frame shows). Unlike `Image`, the renderer filters `url`: it accepts
+exactly these, and nothing else:
+- a file you saved under `companion-assets/`, written root-relative:
+  `/dashboard/v2/<app>/<name>.mp4` or `.webm` (no `..`, no `//`);
+- a direct `https:` link whose path ends `.mp4` or `.webm` (any host, no
+  `user:password@`);
+- YouTube: `https://www.youtube.com/watch?v=<id>`, `https://youtu.be/<id>` or
+  `https://www.youtube.com/shorts/<id>` (`youtube.com` and `m.youtube.com` work
+  too) with the 11-character id; it is embedded from
+  `youtube-nocookie.com/embed/<id>`;
+- Vimeo: `https://vimeo.com/<digits>`; it is embedded from
+  `player.vimeo.com/video/<id>?dnt=1`. An unlisted `vimeo.com/<id>/<hash>` link
+  is NOT supported.
+
+Anything else (`http:`, `data:`, `javascript:`, an unknown host, a web page,
+`.mov`, over 2048 characters) renders a quiet "Video unavailable" placeholder;
+an empty url renders nothing. For iPhone the file must be H.264 video with AAC
+audio in an `.mp4`: other codecs play on a desktop and fail on iOS. Never invent
+a url: GET a remote file and assert `200` + `video/*` before composing.
 
 **Links** — put them in `Text` as markdown, NOT on a `Button`.
 - A `Button` CANNOT be a hyperlink here: `_validate` rejects ANY component
@@ -528,14 +551,18 @@ sat in the workspace (2026-09-28).
 
 Rules the server enforces, so design for them rather than discovering them:
 
-- **Images only**: `.png .jpg .jpeg .webp .gif .avif .svg`. Anything else —
-  `.html`, `.js`, `.json` — returns 404 from this directory, by design.
+- **Images and video only**: `.png .jpg .jpeg .webp .gif .avif .svg` and
+  `.mp4 .webm`; transcode `.mov` to an H.264/AAC `.mp4` first. Anything else —
+  `.html`, `.js`, `.json`, `.mov` — returns 404 from this directory, by design.
 - **The app's own files win a name clash.** Use a per-app subdirectory and you
   will never collide.
 - A new file is served immediately; no restart, no registration.
 - Verify the same way as a remote image: GET the URL and assert `200` +
-  `image/*` BEFORE composing. A freshness chip that checks the served path
-  must check `companion-assets/`, not `dist/`.
+  `image/*` (or `video/*`) BEFORE composing. A freshness chip that checks the
+  served path must check `companion-assets/`, not `dist/`.
+- For a video, also verify Range before composing:
+  `curl -s -o /dev/null -D - -r 0-9 <url>` must answer `206` with a
+  `Content-Range` header. An iPhone will not play a file served without it.
 
 ## agent_script: exec the file, never `import` it
 
