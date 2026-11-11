@@ -105,8 +105,8 @@
     transition: opacity var(--transition);
   }
   .app-section.model {
-    border-left: 3px solid var(--warn);
-    padding-left: 0.7rem;
+    border-left: var(--side-rule) solid var(--warn);
+    padding-left: var(--side-rule-pad);
   }
   .toggle-head {
     margin: 0 0 0.45rem;
@@ -151,8 +151,8 @@
   }
   .chip {
     font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
+    text-transform: var(--label-transform);
+    letter-spacing: calc(0.06em * var(--caps));
     color: var(--warn);
     border: 1px solid var(--warn);
     border-radius: 999px;

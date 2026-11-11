@@ -69,7 +69,7 @@
     padding: 0.65rem 0.8rem;
     background: var(--nested-bg);
     border: var(--card-border);
-    border-left: 3px solid var(--accent);
+    border-left: var(--side-rule) solid var(--accent);
     border-radius: var(--radius-md);
     min-width: 0;
   }
@@ -89,8 +89,8 @@
   }
   .badge {
     font-size: 0.72rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    text-transform: var(--label-transform);
+    letter-spacing: calc(0.04em * var(--caps));
     padding: 0.1rem 0.45rem;
     border: 1px solid var(--border);
     border-radius: 999px;

@@ -88,6 +88,14 @@
   --chip-selected-bg: var(--accent);
   --chip-selected-ink: var(--on-accent);
   --chip-focus: 2px solid var(--accent);
+  /* No coloured side rule over 1px and no tracked capitals on paper (the
+     craft floor); a legacy theme keeps both. */
+  --side-rule: 0px;
+  --side-rule-pad: 0;
+  --caps: 0;
+  --callout-bg: transparent; /* the ApprovalPanel sits on the card */
+  --callout-pad: 0;
+  --tl-flag-rule: var(--border);
   --chart-axis: #56687a;
   --chart-grid: #e3e9ec;
 
@@ -215,6 +223,12 @@
   --chip-selected-bg: var(--accent-glow);
   --chip-selected-ink: var(--text);
   --chip-focus: 0 solid transparent;
+  --side-rule: 3px;
+  --side-rule-pad: 0.7rem;
+  --caps: 1;
+  --callout-bg: var(--surface);
+  --callout-pad: 0.9rem 1rem;
+  --tl-flag-rule: var(--warn);
   --tile-rule-width: 3px;
   --badge-tint: 0%;
   --badge-edge: 100%;

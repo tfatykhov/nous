@@ -90,7 +90,7 @@
     padding-left: 0.7rem;
   }
   li.flag {
-    border-left-color: var(--warn);
+    border-left-color: var(--tl-flag-rule);
   }
   /* Paper: a ringed dot on the rail per entry, centred on the 2px rule (a
      drawn mark, not a glyph). A legacy theme holds a zero-size dot. */

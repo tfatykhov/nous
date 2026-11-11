@@ -151,8 +151,8 @@
     margin-left: auto;
     font-size: 0.66rem;
     font-weight: 700;
-    letter-spacing: 0.09em;
-    text-transform: uppercase;
+    letter-spacing: calc(0.09em * var(--caps));
+    text-transform: var(--label-transform);
     padding: 0.15rem 0.55rem;
     border-radius: 999px;
     white-space: nowrap;

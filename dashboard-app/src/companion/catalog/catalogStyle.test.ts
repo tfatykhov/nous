@@ -116,12 +116,12 @@ describe('tiles, cards, tables and the timeline take the paper shape through tok
     expect(css).toMatch(/\.label \{[^}]*text-transform: var\(--label-transform\);[^}]*letter-spacing: var\(--label-tracking\)/);
   });
 
-  it('metric, score, decision, approval and review cards sit on --nested-bg with --card-border', () => {
+  // (the ApprovalPanel is a callout since review I3: --callout-bg, tested below)
+  it('metric, score, decision and review cards sit on --nested-bg with --card-border', () => {
     for (const [name, cls] of [
       ['MetricCardView', 'metric'],
       ['ScoreCardView', 'score'],
       ['DecisionCardView', 'card'],
-      ['ApprovalPanelView', 'panel'],
       ['ActionReviewCardView', 'review'],
     ]) {
       expect(style(name), name).toMatch(new RegExp(`\\.${cls} \\{[^}]*background: var\\(--nested-bg\\);[^}]*border: var\\(--card-border\\)`));
@@ -157,6 +157,51 @@ describe('tiles, cards, tables and the timeline take the paper shape through tok
   it('the confidence meter track is --meter-track (a hairline on white, the old soft fill in a legacy theme)', () => {
     // (T7 charts follow in the next describe)
     expect(style('ConfidenceMeterView')).toMatch(/\.track \{[^}]*background: var\(--meter-track\)/);
+  });
+});
+
+describe('no coloured side rule and no tracked capitals on paper (source contract, review I3)', () => {
+  it.each([
+    ['ApprovalPanelView', '.panel', 'warn'],
+    ['ActionReviewCardView', '.review', 'accent'],
+    ['DecisionCardView', '.card', 'accent'],
+    ['SectionView', '.app-section.model', 'warn'],
+  ])('%s %s: its side rule is --side-rule wide', (name, sel, ink) => {
+    const rule = style(name).split(`${sel} {`)[1].split('}')[0];
+    expect(rule).toContain(`border-left: var(--side-rule) solid var(--${ink})`);
+    expect(rule).not.toMatch(/border-left: \d/);
+  });
+
+  it('the model-supplied section insets by --side-rule-pad; the ApprovalPanel is a callout (--callout-bg, --callout-pad)', () => {
+    expect(style('SectionView').split('.app-section.model {')[1].split('}')[0]).toContain('padding-left: var(--side-rule-pad)');
+    const panel = style('ApprovalPanelView').split('.panel {')[1].split('}')[0];
+    expect(panel).toContain('background: var(--callout-bg)');
+    expect(panel).toContain('padding: var(--callout-pad)');
+  });
+
+  it.each([
+    ['ApprovalPanelView', '.badge', '0.06em'],
+    ['ActionReviewCardView', '.badge', '0.06em'],
+    ['DecisionCardView', '.badge', '0.04em'],
+    ['SectionView', '.chip', '0.06em'],
+    ['ScoreCardView', '.status', '0.09em'],
+  ])('%s %s: capitals and tracking only through --label-transform and --caps', (name, sel, em) => {
+    const rule = style(name).split(`${sel} {`)[1].split('}')[0];
+    expect(rule).toContain('text-transform: var(--label-transform)');
+    expect(rule).toContain(`letter-spacing: calc(${em} * var(--caps))`);
+    expect(rule).not.toContain('uppercase');
+  });
+
+  it('the two fixed badges are written in sentence case and never wrap', () => {
+    expect(markupOf(src('ApprovalPanelView'))).toContain('<span class="badge">Escalation</span>');
+    expect(markupOf(src('ActionReviewCardView'))).toContain('<span class="badge">Action review</span>');
+    for (const name of ['ApprovalPanelView', 'ActionReviewCardView']) {
+      expect(style(name).split('.badge {')[1].split('}')[0], name).toContain('white-space: nowrap');
+    }
+  });
+
+  it("a flagged timeline entry's rail is --tl-flag-rule", () => {
+    expect(style('TimelineView').split('li.flag {')[1].split('}')[0]).toContain('border-left-color: var(--tl-flag-rule)');
   });
 });
 
