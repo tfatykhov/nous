@@ -896,7 +896,7 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     expect(contrast(PAPER['--field-border'], page)).toBeGreaterThanOrEqual(3); // 3.22
   });
 
-  it('Identity\'s text fields: the focus ring is at least 3:1 on the card and on the field\'s own fill (the page colour)', () => {
+  it('Identity\'s form: the focus ring 3:1 on the card and on the field\'s fill; the typed text and the hovered Deactivate 4.5:1', () => {
     expect(contrast(PAPER['--focus-ring'], white)).toBeGreaterThanOrEqual(3); // 7.55
     expect(contrast(PAPER['--focus-ring'], page)).toBeGreaterThanOrEqual(3); // 6.70
     expect(contrast(PAPER['--text'], page)).toBeGreaterThanOrEqual(4.5); // what is typed, on the field
