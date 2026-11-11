@@ -261,3 +261,30 @@ describe('a migrated markup never colours text with a mark map or a status fill'
     expect(lines.filter((line) => FILL_MAP_AS_TEXT.test(line)).map((l) => l.trim())).toEqual([]);
   });
 });
+
+// Review M2 (PR 3): lib/status.ts still exports its hex helpers for the dark screens that have not moved. A migrated file
+// using them would carry the dark hex onto paper with no literal for the guards above to see
+// (`style={badgeStyle(statusColor(s))}`), so no guarded file may import them: it takes statusVar, ledgerStatusVar,
+// badgeStyleVar and WAITING_VAR instead.
+const HEX_STATUS_HELPERS = ['statusColor', 'ledgerStatusColor', 'badgeStyle', 'MUTED', 'WAITING', 'UNKNOWN', 'PENDING'];
+
+/** The names a source imports from lib/status (any relative or $lib path), `as` aliases resolved to the imported name. */
+function statusImports(src: string): string[] {
+  return [...src.matchAll(/import\s*\{([^}]*)\}\s*from\s*['"][^'"]*\/status(?:\.(?:ts|js))?['"]/g)]
+    .flatMap((m) => m[1].split(','))
+    .map((n) => n.trim().replace(/^type\s+/, '').split(/\s+as\s+/)[0].trim())
+    .filter(Boolean);
+}
+
+describe('no migrated file imports the hex status helpers', () => {
+  it('reads the names imported from lib/status, whatever the path or alias', () => {
+    expect(statusImports("import { statusColor, badgeStyle as b, WAITING } from '../lib/status';")).toEqual(['statusColor', 'badgeStyle', 'WAITING']);
+    expect(statusImports("import { statusVar } from '$lib/status';\nimport { status } from './lib/statusbar';")).toEqual(['statusVar']);
+    expect(statusImports("import {\n  badgeStyleVar,\n  ledgerStatusVar,\n} from '../../lib/status.ts';")).toEqual(['badgeStyleVar', 'ledgerStatusVar']);
+  });
+
+  it.each(SCRIPT_GUARDED)('%s', (file) => {
+    const hits = statusImports(scriptBlocks(readFileSync(join(SRC, file), 'utf-8'))).filter((n) => HEX_STATUS_HELPERS.includes(n));
+    expect(hits).toEqual([]);
+  });
+});
