@@ -1657,7 +1657,9 @@
     border-radius: 6px;
     margin-bottom: 0.5rem;
   }
-  .xsummary strong { font-variant-numeric: tabular-nums; }
+  /* The counts and the node names are the content: ink, against the muted words around them. They named --fg, which
+     was never declared (since PR 596), so they inherited (the counts muted). */
+  .xsummary strong { color: var(--text); font-variant-numeric: tabular-nums; }
   .conv-note { color: var(--accent); }
   /* The node's identity is the content, so it takes the flexible space and
      truncates; the numbers next to it are fixed-width and must never wrap. */
@@ -1668,7 +1670,8 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .seed-label { font-weight: 500; }
+  .seed-label { color: var(--text); font-weight: 500; }
+  .nbr-label { color: var(--text); }
   .nowrap { white-space: nowrap; flex: 0 0 auto; }
   .chip.conv { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 

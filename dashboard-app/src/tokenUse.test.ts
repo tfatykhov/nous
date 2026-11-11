@@ -112,6 +112,11 @@ describe('token use, both ways', () => {
     expect(READS.has('--bg')).toBe(true); // body reads it in app.css
   });
 
+  it('(a) catches a read of a token declared nowhere: the var(--fg) of Retrieval, unnoticed from #596 to PR 7', () => {
+    const old = scan('<style>.xsummary strong { color: var(--fg); font-variant-numeric: tabular-nums; }</style>');
+    expect([...old.reads].filter((t) => !DECLARED.has(t) && !OWN.has(t))).toEqual(['--fg']);
+  });
+
   it('(a) every token a source reads is declared (at :root, .rail, @theme) or set by a component itself', () => {
     const missing = SCANS.flatMap(([f, s]) => [...s.reads].filter((t) => !DECLARED.has(t) && !OWN.has(t)).map((t) => `${f}: ${t}`));
     missing.push(...[...CSS_SCAN.reads].filter((t) => !DECLARED.has(t)).map((t) => `app.css: ${t}`));

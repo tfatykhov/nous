@@ -143,6 +143,17 @@ describe('Retrieval on the paper look', () => {
     expect(SRC).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/);
   });
 
+  it('the counts and node names of the expansion are ink: --text, a declared token (they named the undeclared --fg)', () => {
+    const rules = parseBlocks(styleBlocks(SRC));
+    expect(rules.get('.xsummary strong')).toMatchObject({ color: 'var(--text)' });
+    expect(rules.get('.seed-label')).toMatchObject({ color: 'var(--text)' });
+    expect(rules.get('.nbr-label')).toMatchObject({ color: 'var(--text)' });
+    const ROOT = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
+    expect(ROOT['--text']).toBeDefined();
+    expect(ROOT['--fg']).toBeUndefined();
+    expect(styleBlocks(SRC)).not.toContain('var(--fg)');
+  });
+
   it('source contract (jsdom cannot lay out; the 390 px overflow check in the screenshot round is the proof): the header may wrap, and the split\'s cards have min-width: 0', () => {
     const css = styleBlocks(SRC);
     expect(css).toMatch(/\.view-head \{[^}]*flex-wrap: wrap;/);
