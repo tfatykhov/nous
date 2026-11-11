@@ -123,11 +123,22 @@ self.addEventListener('activate', (event) => {
   event.waitUntil(
     (async () => {
       const keys = await caches.keys();
-      await Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)));
+      // Drop the older caches only once this one holds the shell: the warm is
+      // best-effort, and an install while offline (or mid-deploy) leaves this
+      // cache empty; deleting the old one then would leave an offline launch
+      // with no shell at all. The kept one goes at the next worker change.
+      const fresh = await (await caches.open(CACHE)).match('/dashboard/v2/companion.html');
+      if (fresh) await Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)));
       await self.clients.claim();
     })(),
   );
 });
+
+/** This worker's cache first, then any other: caches.match searches caches in
+ * the order they were created, so a kept older cache would otherwise answer. */
+async function fromCache(request) {
+  return (await (await caches.open(CACHE)).match(request)) ?? (await caches.match(request));
+}
 
 function isImmutableAsset(url) {
   return url.pathname.startsWith('/dashboard/v2/assets/');
@@ -149,7 +160,7 @@ function isSnapshotApi(url) {
 }
 
 async function cacheFirst(request) {
-  const cached = await caches.match(request);
+  const cached = await fromCache(request);
   if (cached) return cached;
   const response = await fetch(request);
   if (response.ok) {
@@ -168,7 +179,7 @@ async function networkFirst(request) {
     }
     return response;
   } catch (err) {
-    const cached = await caches.match(request);
+    const cached = await fromCache(request);
     if (cached) return cached;
     throw err;
   }

@@ -54,22 +54,53 @@ describe('companion service worker', () => {
 
   it('still intercepts an immutable asset', async () => {
     const cached = new Response('cached');
-    const listeners = loadWorker({ match: vi.fn().mockResolvedValue(cached) });
+    const listeners = loadWorker({
+      match: vi.fn().mockResolvedValue(undefined),
+      open: vi.fn().mockResolvedValue({ match: vi.fn().mockResolvedValue(cached), put: vi.fn() }),
+    });
     const event = dispatchFetch(listeners, '/dashboard/v2/assets/app.js', {}, 'script');
     expect(event.respondWith).toHaveBeenCalledTimes(1);
     await expect(event.respondWith.mock.calls[0][0]).resolves.toBe(cached);
   });
 
-  it('the shell cache is v2: a changed worker re-runs install, re-warms the new shell and drops v1 (PR 6)', async () => {
-    expect(source).toMatch(/const CACHE = 'nous-companion-v2';/);
+  async function activate(v2HasShell: boolean) {
     const keys = vi.fn().mockResolvedValue(['nous-companion-v1', 'nous-companion-v2']);
     const del = vi.fn().mockResolvedValue(true);
-    const listeners = loadWorker({ keys, delete: del });
+    const v2 = { match: vi.fn().mockResolvedValue(v2HasShell ? new Response('shell') : undefined) };
+    const open = vi.fn().mockResolvedValue(v2);
+    const listeners = loadWorker({ keys, delete: del, open });
     let done: Promise<unknown> = Promise.resolve();
     for (const l of listeners.activate ?? []) l({ waitUntil: (p: Promise<unknown>) => (done = p) });
     await done;
+    return { del, open, v2 };
+  }
+
+  it('the shell cache is v2: a changed worker re-runs install, re-warms the new shell and drops v1 (PR 6)', async () => {
+    expect(source).toMatch(/const CACHE = 'nous-companion-v2';/);
+    const { del, open, v2 } = await activate(true);
+    expect(open).toHaveBeenCalledWith('nous-companion-v2');
+    expect(v2.match).toHaveBeenCalledWith('/dashboard/v2/companion.html');
     expect(del).toHaveBeenCalledWith('nous-companion-v1');
     expect(del).not.toHaveBeenCalledWith('nous-companion-v2');
+  });
+
+  it('a failed warm (no shell in v2) keeps the old cache, so an offline launch still has a shell (review M6)', async () => {
+    const { del } = await activate(false);
+    expect(del).not.toHaveBeenCalled();
+  });
+
+  it('with an entry in both caches, v2 answers first: cache-first and the network-first fallback (review M6)', async () => {
+    const v1 = new Response('v1');
+    const v2entry = new Response('v2');
+    const caches = {
+      match: vi.fn().mockResolvedValue(v1), // caches.match searches the older v1 first
+      open: vi.fn().mockResolvedValue({ match: vi.fn().mockResolvedValue(v2entry), put: vi.fn() }),
+    };
+    const asset = dispatchFetch(loadWorker(caches), '/dashboard/v2/assets/app.js', {}, 'script');
+    await expect(asset.respondWith.mock.calls[0][0]).resolves.toBe(v2entry);
+    const offline = vi.fn().mockRejectedValue(new TypeError('offline'));
+    const shell = dispatchFetch(loadWorker(caches, offline), '/dashboard/v2/companion.html', {}, 'document');
+    await expect(shell.respondWith.mock.calls[0][0]).resolves.toBe(v2entry);
   });
 
   it.each(['/dashboard/v2/companion.html', '/dashboard/v2/companion.webmanifest'])(
