@@ -255,16 +255,22 @@ describe('no Tailwind colour class in a migrated markup or script', () => {
 // Only a text colour counts: a `style:color` directive's value, or the `color:` declaration of an inline style attribute
 // (not `border-color`, and not a `color:` key in an object literal, as Admission's box-plot marks have).
 // PR 4 review M5: a map of mark token names (`*_TOKEN`) and the helpers that build a mark's var() from one (`fill(`,
-// `seriesVar(`) are marks too.
+// `seriesVar(`) are marks too. PR 4 re-review N1: so are the plural maps (`OUTCOME_COLORS`, `SIGNAL_TOKENS`), the series
+// and dimension helpers (`seriesToken(`, `dimColor(`, `signalToken(`) and a literal mark token (`--oc-*`, `--series-N`,
+// `--signal-*`). Still out of reach of a line pattern, and left to review: a bare constant (`style:color={MARK}`), a `}`
+// or `"` earlier in the expression, and a directive split over two lines.
 const FILL_MAP_AS_TEXT =
-  /(style:color=[{"][^}"]*|style="[^"]*?(?<![-\w])color:[^";]*)(\b[A-Z][A-Z_]*_(?:COLOR|TOKEN)\b|\bfill\(|\bseriesVar\(|var\(--(red|green|yellow)\))/;
+  /(style:color=[{"][^}"]*|style="[^"]*?(?<![-\w])color:[^";]*)(\b[A-Z][A-Z_]*_(?:COLORS?|TOKENS?)\b|\b(?:fill|seriesVar|seriesToken|dimColor|signalToken)\(|var\(--(?:red|green|yellow|oc-[\w-]+|series-\d+|signal-[\w-]+)\))/;
 
 describe('a migrated markup never colours text with a mark map or a status fill', () => {
   it('the pattern catches a colour map or a fill as text, and spares ink maps, borders and backgrounds', () => {
     for (const bad of ['<span style:color={URGENCY_COLOR[row.urgency]}>', '<span style="color:{URGENCY_COLOR[row.urgency] ?? \'x\'}">',
       '<b style:color="var(--red)">', '<i style="color: var(--yellow)">',
       // PR 4 review M5: a mark map of token names, and the helpers that build a mark's var() from one.
-      '<span style:color={fill(OUTCOME_TOKEN[k])}>', '<span style:color={seriesVar(p.rule)}>', '<b style:color={CONTEXT_TOKEN[k]}>']) {
+      '<span style:color={fill(OUTCOME_TOKEN[k])}>', '<span style:color={seriesVar(p.rule)}>', '<b style:color={CONTEXT_TOKEN[k]}>',
+      // PR 4 re-review N1: the plural maps the views use, the series and dimension helpers, and a literal mark token.
+      '<span style:color={OUTCOME_COLORS[o]}>', '<span style:color={`var(${SIGNAL_TOKENS[t]})`}>', '<b style:color={signalToken(t)}>',
+      '<b style:color={dimColor(i)}>', '<b style:color={seriesToken(i)}>', '<b style:color="var(--oc-success)">', '<i style="color: var(--series-2)">']) {
       expect(bad, bad).toMatch(FILL_MAP_AS_TEXT);
     }
     for (const ok of ['<span style:color={URGENCY_INK[row.urgency]}>', '<span style:border-color={STATE_COLOR[st]}>',
