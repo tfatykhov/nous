@@ -108,6 +108,20 @@ describe('DayTimeline', () => {
     expect(out()).toBe('09:40 UTC');
     await fireEvent.keyDown(range, { key: 'PageUp' });
     expect(out()).toBe('09:40 UTC');
+    // Review M8: Shift with an arrow moves one minute, so any minute can be reached from the keyboard.
+    await fireEvent.keyDown(range, { key: 'ArrowLeft', shiftKey: true });
+    expect(out()).toBe('09:39 UTC');
+    await fireEvent.keyDown(range, { key: 'ArrowDown', shiftKey: true });
+    expect(out()).toBe('09:38 UTC');
+    await fireEvent.keyDown(range, { key: 'ArrowRight', shiftKey: true });
+    expect(out()).toBe('09:39 UTC');
+  });
+
+  it('the slider speaks its time once: aria-valuetext on the range, no live region on the sentence (review M9)', () => {
+    const { container } = render(DayTimeline, { turns: TURNS, now: NOW, truncated: false });
+    const range = screen.getByRole('slider', { name: 'Replay time, minutes after 00:00 UTC' });
+    expect(range.getAttribute('aria-valuetext')).toBe('09:40 UTC');
+    expect(container.querySelector('[aria-live]')).toBeNull();
   });
 
   it('says when the list was cut, and the sentence says it counts the turns shown', () => {
@@ -123,24 +137,20 @@ describe('DayTimeline', () => {
     expect(container.querySelector('.at')!.textContent).toBe('09:40 UTC. 0 turns so far: 0 yours, 0 background; 0 errors, 0 gated.');
   });
 
-  // A smoke bound, not a benchmark: it catches a per-bar pass over every turn (quadratic), not a slow machine. Warm,
-  // alone, the mount takes about 300 ms in jsdom; under the full suite's parallel load it has taken 920 ms, so the
-  // bound is 1,500 ms rather than the plan's 500 (which failed under load).
-  it('3,000 turns render in under 1,500 ms (a smoke bound, not a benchmark)', () => {
+  // Review M4: no wall-clock bound (it measured 920 ms under load and would flake on a slow runner). What keeps
+  // 3,000 bars cheap is structural: one <a> per turn and no inline style on any bar (colour by class).
+  it('3,000 turns: one link each, and no inline style on a bar or its link', () => {
     const many = Array.from({ length: 3000 }, (_, i) => {
       const m = Math.floor((i * 580) / 3000);
       const hh = String(Math.floor(m / 60)).padStart(2, '0');
       const mm = String(m % 60).padStart(2, '0');
       return t(`t${i}`, `${hh}:${mm}`, { work_kind: ['conversation', 'heartbeat', 'subtask', 'workflow_step'][i % 4], error: i % 97 === 0 });
     });
-    // Warm up once (the first mount pays for compiling the component's code paths), then time a cold DOM.
-    render(DayTimeline, { turns: many.slice(0, 50), now: NOW, truncated: false });
-    cleanup();
-    const t0 = performance.now();
     const { container } = render(DayTimeline, { turns: many, now: NOW, truncated: true });
-    const ms = performance.now() - t0;
-    expect(container.querySelectorAll('svg a')).toHaveLength(3000);
-    expect(ms).toBeLessThan(1500);
+    const links = Array.from(container.querySelectorAll('svg a'));
+    expect(links).toHaveLength(3000);
+    expect(links.filter((a) => a.hasAttribute('style'))).toEqual([]);
+    expect(Array.from(container.querySelectorAll('svg rect.bar')).filter((r) => r.hasAttribute('style'))).toEqual([]);
   });
 
   it('text only: no raw-HTML directive, no colour literal in the style', () => {

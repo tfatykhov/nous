@@ -54,16 +54,17 @@
     const v = Number((e.currentTarget as HTMLInputElement).value);
     if (Number.isFinite(v)) setMinute(v);
   }
-  // Native arrows step one minute, which takes too long across a day: five minutes, an hour with Page Up/Down.
-  const KEYS: Record<string, (m: number) => number> = {
-    ArrowLeft: (m) => m - 5, ArrowDown: (m) => m - 5, ArrowRight: (m) => m + 5, ArrowUp: (m) => m + 5,
+  // Native arrows step one minute, which takes too long across a day: five minutes, an hour with Page Up/Down, and
+  // one minute with Shift and an arrow (so every minute can be reached from the keyboard).
+  const KEYS: Record<string, (m: number, fine: boolean) => number> = {
+    ArrowLeft: (m, fine) => m - (fine ? 1 : 5), ArrowDown: (m, fine) => m - (fine ? 1 : 5),
+    ArrowRight: (m, fine) => m + (fine ? 1 : 5), ArrowUp: (m, fine) => m + (fine ? 1 : 5),
     PageDown: (m) => m - 60, PageUp: (m) => m + 60, Home: () => 0, End: () => Infinity,
   };
   function onKey(e: KeyboardEvent) {
-    const step = KEYS[e.key];
-    if (!step) return;
+    if (!Object.hasOwn(KEYS, e.key)) return;
     e.preventDefault();
-    setMinute(step(minute));
+    setMinute(KEYS[e.key](minute, e.shiftKey));
   }
 
   let summary = $derived(summaryAt(turns, minute));
@@ -130,7 +131,8 @@
       aria-label="Replay time, minutes after 00:00 UTC" aria-valuetext={`${hhmm(minute)} UTC`} oninput={onInput} onkeydown={onKey} />
     <output for="day-replay" class="readout">{hhmm(minute)} UTC</output>
   </div>
-  <p class="at" aria-live="polite">{sentence(minute, summary, truncated)}</p>
+  <!-- No live region: the slider already speaks its time (aria-valuetext); the sentence is there to read. -->
+  <p class="at">{sentence(minute, summary, truncated)}</p>
 </div>
 
 <style>
