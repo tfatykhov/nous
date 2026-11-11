@@ -855,7 +855,7 @@
   }
 
   .status-msg.error {
-    color: var(--red);
+    color: var(--err-text);
   }
 
   .empty {

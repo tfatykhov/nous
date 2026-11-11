@@ -263,7 +263,7 @@
 
   .status-msg.error,
   .empty.error {
-    color: var(--red);
+    color: var(--err-text);
   }
 
   .retry-link {

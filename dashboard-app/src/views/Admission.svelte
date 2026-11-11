@@ -739,7 +739,7 @@
     margin: 0;
   }
 
-  .status-msg.error { color: var(--red); }
+  .status-msg.error { color: var(--err-text); }
 
   .retry-link {
     background: none;

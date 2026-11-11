@@ -212,7 +212,7 @@
     background: color-mix(in srgb, var(--tone-bad) 10%, transparent); }
   .verdict-title { font-size: 0.9375rem; font-weight: 700; }
   .strip .small { color: var(--text); }
-  .ack-error { color: var(--red); font-size: 0.8125rem; margin: 0 0 1rem; }
+  .ack-error { color: var(--err-text); font-size: 0.8125rem; margin: 0 0 1rem; }
   .tiles-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(250px, 100%), 1fr)); gap: 1rem; }
   .tile { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow); padding: 1rem 1.125rem;
     display: flex; flex-direction: column; gap: 0.5rem; min-width: 0; }
@@ -247,12 +247,12 @@
   .stats th, .stats td { padding: 0.375rem 0.5rem; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
   .stats th:first-child, .stats td:first-child { text-align: left; }
   .stats thead th { font-size: 0.6875rem; font-weight: 600; color: var(--muted); }
-  .stats td.hot { color: var(--red); font-weight: 700; }
+  .stats td.hot { color: var(--err-text); font-weight: 700; }
   .acks td, .acks th { text-align: left; }
   .acks td.note { white-space: normal; overflow-wrap: anywhere; min-width: 12rem; }
   .empty { color: var(--muted); font-size: 0.875rem; text-align: center; padding: 1rem 0; margin: 0; }
   .small { font-size: 0.75rem; }
   .muted { color: var(--muted); }
   .state-msg { margin-top: 2rem; text-align: center; color: var(--muted); font-size: 0.875rem; }
-  .state-msg.error { color: var(--red); }
+  .state-msg.error { color: var(--err-text); }
 </style>

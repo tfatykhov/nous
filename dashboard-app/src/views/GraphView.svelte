@@ -516,7 +516,7 @@
   }
 
   .state-msg.error {
-    color: var(--red);
+    color: var(--err-text);
   }
 
   .link-btn {
@@ -819,7 +819,7 @@
     font-size: 0.625rem;
     text-transform: var(--label-transform);
     letter-spacing: var(--label-tracking);
-    color: var(--red);
+    color: var(--err-text);
     border: 1px solid var(--red);
     border-radius: 999px;
     padding: 0 0.375rem;

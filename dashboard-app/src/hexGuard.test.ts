@@ -66,6 +66,25 @@ describe('no colour literal in a migrated component style', () => {
   });
 });
 
+// Review M3 (PR 2): on paper the status fills (--green, --yellow, --red) are marks; as text they fall below 4.5:1 on the
+// page (red is 4.35:1 on #eef2f3). Text takes --ok-text, --warn-text or --err-text, which equal the fills under dark.
+const STATUS_FILL_AS_TEXT = /(^|[^-\w])color:\s*var\(--(red|green|yellow)\)/;
+
+describe('a migrated style never sets a status fill as a text colour', () => {
+  it('the pattern catches text, and spares borders, backgrounds and accent colours', () => {
+    expect('.x { color: var(--red); }').toMatch(STATUS_FILL_AS_TEXT);
+    expect('  color: var(--green);').toMatch(STATUS_FILL_AS_TEXT);
+    for (const ok of ['border-color: var(--red);', 'background-color: var(--green);', 'accent-color: var(--yellow);', 'color: var(--err-text);']) {
+      expect(ok, ok).not.toMatch(STATUS_FILL_AS_TEXT);
+    }
+  });
+
+  it.each(HEX_GUARDED)('%s', (file) => {
+    const css = styleBlocks(readFileSync(join(SRC, file), 'utf-8'));
+    expect(css.split('\n').filter((line) => STATUS_FILL_AS_TEXT.test(line)).map((l) => l.trim())).toEqual([]);
+  });
+});
+
 // Review I4: the views the redesign migrated keep no colour literal in their <script> or their markup either. A canvas
 // colour is a token (`var(--x)`, or the `tint(--x, a)` sentinel) that lib/chartColors.ts resolves against the ground
 // the chart sits in; DOM and SVG colours use var() and color-mix() directly. chartColors.ts holds the one table of dark
