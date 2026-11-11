@@ -143,12 +143,13 @@
       {#if d.roots.length === 0}<p class="empty">No intention roots yet.</p>{/if}
       {#each d.roots as root (root.id)}
         <details class="root">
-          <summary>
+          <!-- The summary stays a list item, so the browser draws its own disclosure marker; the row is the span inside. -->
+          <summary><span class="sum-row">
             <span class="pill">{root.state}</span>
             <span class="muted small">{root.short_id}</span>
             <span class="intent">{root.intent}</span>
             <span class="small muted">{countNodes(root)} below · {root.arrivals.length} arrivals · {when(root.created_at)}</span>
-          </summary>
+          </span></summary>
           <p class="small muted">
             {root.wake_policy} · {root.authority} · from {root.origin_kind}{root.origin_channel ? ` (${root.origin_channel})` : ''}
             {#if root.root_cancelled_at} · cancelled {when(root.root_cancelled_at)}{/if}
@@ -220,27 +221,39 @@
   .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   h1 { font-size: 1.375rem; font-weight: 700; margin: 0 0 0.25rem; }
+  :global(html[data-look="paper"] [data-ground="paper"]) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
   h2 { font-size: 0.9375rem; font-weight: 600; margin: 0 0 0.75rem; }
   .subtitle { font-size: 0.8125rem; color: var(--muted); margin: 0; }
-  .notice { padding: 0.75rem 1rem; border-radius: 8px; background: rgba(245, 158, 11, 0.08);
-    border: 1px solid rgba(245, 158, 11, 0.4); font-size: 0.8125rem; margin-bottom: 1rem; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--notice-bg);
+    border: 1px solid var(--notice-border); font-size: 0.8125rem; margin-bottom: 1rem; }
   .notice code { font-family: var(--font-mono); font-size: 0.75rem; }
-  .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; margin-top: 1.25rem; }
+  .panel { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow);
+    padding: 1.25rem; margin-top: 1.25rem; }
   .empty { color: var(--muted); font-size: 0.875rem; text-align: center; padding: 1.5rem 0; margin: 0; }
   .small { font-size: 0.75rem; }
   .muted { color: var(--muted); }
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0.75rem; margin: 0 0 1rem; }
-  .tiles div { border: 1px solid var(--border); border-radius: 8px; padding: 0.625rem 0.75rem; }
-  .tiles dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .tiles div { border: var(--card-border); border-radius: var(--card-radius-sm); padding: 0.625rem 0.75rem; }
+  /* On paper the tile border is clear, so a tile is a soft fill inside the white panel. */
+  :global(html[data-look="paper"] [data-ground="paper"]) .tiles div { background: var(--wash); }
+  .tiles dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking); }
   .tiles dd { margin: 0.25rem 0 0; font-size: 1.25rem; font-weight: 700; }
   .scroll { overflow-x: auto; margin-top: 0.75rem; }
   table { border-collapse: collapse; width: 100%; font-size: 0.8125rem; }
   caption { text-align: left; font-weight: 600; padding-bottom: 0.375rem; }
   th, td { text-align: left; padding: 0.25rem 0.625rem 0.25rem 0; border-bottom: 1px solid var(--border); vertical-align: top; }
+  /* The paper look's dense table header (the prototype's): 12px, semibold, secondary ink. */
+  :global(html[data-look="paper"] [data-ground="paper"]) thead th { font-size: 12px; font-weight: 600; color: var(--muted); }
   .tree, .tree ul { list-style: none; padding-left: 1.25rem; }
   .row { display: flex; gap: 0.5rem; align-items: baseline; flex-wrap: wrap; }
   .intent { overflow-wrap: anywhere; }
+  /* A row header holds a root's intent: wrapping anywhere keeps an unbroken one from pushing the numbers out of view. */
+  tbody th { overflow-wrap: anywhere; min-width: 8rem; }
   .pill { border: 1px solid var(--border); border-radius: 999px; padding: 0 0.5rem; font-size: 0.6875rem; }
   details.root { border-top: 1px solid var(--border); padding: 0.5rem 0; }
-  details.root > summary { cursor: pointer; display: flex; gap: 0.5rem; align-items: baseline; flex-wrap: wrap; }
+  /* A summary stays a list item, so the browser draws its own disclosure marker (no glyph of ours); its row is the span. */
+  details.root > summary { cursor: pointer; }
+  details.root > summary::marker { color: var(--muted); }
+  .sum-row { display: inline-flex; gap: 0.5rem; align-items: baseline; flex-wrap: wrap; width: calc(100% - 1.25em); min-width: 0; }
 </style>

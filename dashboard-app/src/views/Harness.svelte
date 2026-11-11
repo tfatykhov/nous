@@ -8,6 +8,8 @@
   import DataTable from '../lib/ui/DataTable.svelte';
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import Chart from '../lib/viz/Chart.svelte';
+  import { Button } from '../lib/ui/button';
+  import { lineLegendLabels } from '../lib/chartColors';
   import { ruleVerdict, claimVerdict, fmtUtc, FLAG_GLOSS, type Verdict } from '../lib/harness';
 
   // Harness dashboard §3.3 / §4.3: what each rule flagged — the evidence for
@@ -37,8 +39,10 @@
   );
 
   const WIN_LABEL: Record<string, string> = { '24h': '24 h', '7d': '7 d', '30d': '30 d' };
-  // Series colours outside the status set (spec §4.1).
-  const SERIES = { offered_set: '#60a5fa', context_policy: '#fb923c', claims: '#2dd4bf' };
+  // Series colours outside the status set (spec §4.1), as tokens: Chart.svelte resolves them against the canvas's
+  // ground, and the DOM paints them through --fill (dark: the old literals; claims is the ramp's cyan, not a teal).
+  const SERIES_TOKEN = { offered_set: '--series-1', context_policy: '--series-4', claims: '--series-9' };
+  const seriesVar = (rule: string) => `var(${SERIES_TOKEN[rule as keyof typeof SERIES_TOKEN] ?? '--muted'})`;
   const RULE_LABEL: Record<string, string> = {
     offered_set: 'Offered-tool rule', context_policy: 'Context policy', claims: 'Claim check',
   };
@@ -93,7 +97,7 @@
         verdict: claimVerdict(cl, d.events_persisted),
       },
     ] as {
-      id: keyof typeof SERIES; title: string; env: string; mode: string; total: number; totalLabel: string;
+      id: keyof typeof SERIES_TOKEN; title: string; env: string; mode: string; total: number; totalLabel: string;
       since: string; breakdownLabel: string; breakdown: { key: string; count: number; pct: number }[]; verdict: Verdict;
     }[];
   }
@@ -108,18 +112,20 @@
     return {
       labels: d.daily.map((x) => x.date.slice(5)),
       datasets: [
-        line('Offered-tool rule', 'offered_set', SERIES.offered_set, []),
-        line('Context policy', 'context_policy', SERIES.context_policy, [6, 4]),
-        line('Claims without evidence', 'claims_none', SERIES.claims, [2, 3]),
+        line('Offered-tool rule', 'offered_set', seriesVar('offered_set'), []),
+        line('Context policy', 'context_policy', seriesVar('context_policy'), [6, 4]),
+        line('Claims without evidence', 'claims_none', seriesVar('claims'), [2, 3]),
       ],
     };
   }
 
+  // Explicit axis colours (today's under dark) beat Chart.svelte's paper defaults, so they are the paper tokens' too.
   const chartOptions = {
-    plugins: { legend: { labels: { color: '#8e8eab' } } },
+    // The legend samples each line with its dash (a box outline turns four corners); see Rubric.svelte.
+    plugins: { legend: { labels: lineLegendLabels({ color: 'var(--muted)' }) } },
     scales: {
-      x: { ticks: { color: '#8e8eab' }, grid: { color: '#1e1e2e' } },
-      y: { beginAtZero: true, ticks: { color: '#8e8eab', precision: 0 }, grid: { color: '#1e1e2e' } },
+      x: { ticks: { color: 'var(--muted)' }, grid: { color: 'var(--border)' } },
+      y: { beginAtZero: true, ticks: { color: 'var(--muted)', precision: 0 }, grid: { color: 'var(--border)' } },
     },
   };
 
@@ -176,7 +182,7 @@
             {#each c.breakdown as b (b.key)}
               <div class="bar-row">
                 <span class="bar-key" title={FLAG_GLOSS[b.key] ?? ''}>{b.key}</span>
-                <div class="bar"><div class="bar-fill" style:width="{b.pct}%" style:background={SERIES[c.id]}></div></div>
+                <div class="bar"><div class="bar-fill" style:width="{b.pct}%" style:--fill={seriesVar(c.id)}></div></div>
                 <span class="bar-count">{b.count}</span>
               </div>
             {/each}
@@ -200,7 +206,8 @@
         <Chart type="line" data={chartData(d)} options={chartOptions} height="220px" />
       </div>
       <p class="small muted">A gap is a day the record cannot vouch for. The offered-tool rule and the context policy write only when they flag a call, so before a rule's first flag a quiet day may be clean or may predate the rule; a rule that is off records nothing. Claim checks write every turn.</p>
-      <table class="sr-only">
+      <!-- A table cannot be 1 px wide: the box hides it, the table stays readable to a screen reader. -->
+      <div class="sr-only"><table>
         <caption>Flags per day, per rule</caption>
         <thead><tr><th>Day</th><th>Offered-tool rule</th><th>Context policy</th><th>Claims without evidence</th></tr></thead>
         <tbody>
@@ -213,7 +220,7 @@
             </tr>
           {/each}
         </tbody>
-      </table>
+      </table></div>
     {/if}
   </section>
 
@@ -232,7 +239,7 @@
         rowLabel={(p: HarnessData['patterns'][number]) => `${RULE_LABEL[p.rule]} ${p.violation}`}>
         {#snippet cell(p: HarnessData['patterns'][number], c: { key: string })}
           {#if c.key === 'rule'}
-            <span class="rule-pill" style:color={SERIES[p.rule]} style:border-color="{SERIES[p.rule]}66">{RULE_LABEL[p.rule]}</span>
+            <span class="rule-pill" style:--fill={seriesVar(p.rule)}>{RULE_LABEL[p.rule]}</span>
           {:else if c.key === 'context'}
             <span class="small muted">{p.context ?? '—'}</span>
           {:else if c.key === 'tool'}
@@ -268,8 +275,8 @@
       <p class="small muted">A call the offered-tool rule refuses under enforce never reaches the context policy, so switching that rule first hides calls from the policy's evidence.</p>
     </div>
     <ol>
-      <li><strong>Context policy → enforce</strong><code>NOUS_TOOL_CONTEXT_POLICY_MODE=enforce</code></li>
-      <li><strong>Offered-tool rule → enforce</strong><code>NOUS_TOOL_OFFERED_SET_ENFORCEMENT_MODE=enforce</code></li>
+      <li><strong>Move context policy to enforce</strong><code>NOUS_TOOL_CONTEXT_POLICY_MODE=enforce</code></li>
+      <li><strong>Move the offered-tool rule to enforce</strong><code>NOUS_TOOL_OFFERED_SET_ENFORCEMENT_MODE=enforce</code></li>
     </ol>
   </section>
 {:else if $store.error}
@@ -282,9 +289,9 @@
 <section class="panel censors">
   <div class="section-head">
     <h2>Most Active Censors</h2>
-    <button class="refresh-btn" onclick={() => void activity.refresh()} disabled={$activity.loading}>
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void activity.refresh()} disabled={$activity.loading}>
       {$activity.loading ? 'Loading…' : 'Refresh'}
-    </button>
+    </Button>
   </div>
   {#if $activity.data}
     {@const cs = $activity.data.censor_stats}
@@ -323,13 +330,15 @@
   .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   h1 { font-size: 1.375rem; font-weight: 700; margin: 0 0 0.25rem; }
+  :global(html[data-look="paper"] [data-ground="paper"]) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
   h2 { font-size: 0.9375rem; font-weight: 600; margin: 0; }
   .subtitle { font-size: 0.8125rem; color: var(--muted); margin: 0; }
-  .notice { padding: 0.75rem 1rem; border-radius: 8px; background: rgba(245, 158, 11, 0.08);
-    border: 1px solid rgba(245, 158, 11, 0.4); font-size: 0.8125rem; margin-bottom: 1rem; }
+  .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--notice-bg);
+    border: 1px solid var(--notice-border); font-size: 0.8125rem; margin-bottom: 1rem; }
   .notice code, .order code, .env, .mono { font-family: var(--font-mono); font-size: 0.75rem; }
   .rules { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }
-  .card, .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; }
+  .card, .panel { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow);
+    padding: 1.25rem; }
   .card { display: flex; flex-direction: column; gap: 0.875rem; }
   .panel { margin-top: 1.25rem; }
   .panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
@@ -337,26 +346,34 @@
   .min0 { min-width: 0; }
   .env { color: var(--muted); margin-top: 0.125rem; overflow-wrap: anywhere; }
   .mode-pill { flex-shrink: 0; font-size: 0.6875rem; font-weight: 600; padding: 0.125rem 0.5rem; border-radius: 999px; border: 1px solid currentColor; }
-  .mode-enforce { color: #10b981; }
-  .mode-warn, .mode-shadow { color: #f59e0b; }
+  .mode-enforce { color: var(--stat-ok); }
+  .mode-warn, .mode-shadow { color: var(--stat-warn); }
   .mode-off { color: var(--muted); border-color: var(--border); }
   .big { font-size: 2rem; font-weight: 700; line-height: 1.1; }
   .breakdown { display: flex; flex-direction: column; gap: 0.5rem; }
-  .label { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .label { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking); }
   .bar-row { display: grid; grid-template-columns: minmax(0, 9.5rem) minmax(0, 1fr) 2.25rem; gap: 0.625rem; align-items: center; }
   .bar-key { font-family: var(--font-mono); font-size: 0.75rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .bar { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
-  .bar-fill { height: 100%; border-radius: 4px; }
+  .bar-fill { height: 100%; border-radius: 4px; background: var(--fill); }
   .bar-count { font-size: 0.8125rem; font-weight: 600; text-align: right; }
-  .verdict { padding: 0.75rem 0.875rem; border-radius: 8px; border: 1px solid; }
-  .verdict-warn { color: #f59e0b; border-color: rgba(245, 158, 11, 0.35); background: rgba(245, 158, 11, 0.08); }
-  .verdict-ok { color: #10b981; border-color: rgba(16, 185, 129, 0.35); background: rgba(16, 185, 129, 0.08); }
+  .verdict { padding: 0.75rem 0.875rem; border-radius: var(--card-radius-sm); border: 1px solid; }
+  /* Status by token: the alphas of the old literals are the mix percentages (dark identical). */
+  .verdict-warn { color: var(--stat-warn); border-color: color-mix(in srgb, var(--stat-warn) 35%, transparent);
+    background: color-mix(in srgb, var(--stat-warn) 8%, transparent); }
+  .verdict-ok { color: var(--stat-ok); border-color: color-mix(in srgb, var(--stat-ok) 35%, transparent);
+    background: color-mix(in srgb, var(--stat-ok) 8%, transparent); }
   .verdict-muted { color: var(--muted); border-color: var(--border); background: transparent; }
   .verdict-title { font-size: 0.8125rem; font-weight: 700; }
   .verdict-detail { font-size: 0.8125rem; color: var(--text); margin-top: 0.125rem; }
-  .rule-pill { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.6875rem; font-weight: 600; border: 1px solid; white-space: nowrap; }
+  /* The rule's colour is its dot and border (a series colour is a mark); its name is the ink. */
+  .rule-pill { display: inline-flex; align-items: center; gap: 0.375rem; padding: 2px 8px; border-radius: 999px; font-size: 0.6875rem;
+    font-weight: 600; color: var(--text); border: 1px solid color-mix(in srgb, var(--fill) 40%, transparent); white-space: nowrap; }
+  .rule-pill::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--fill); flex-shrink: 0; }
   .detail { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 0.5rem 1.5rem; margin: 0; padding: 0.5rem 0; }
-  .detail dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .detail dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking); }
   .detail dd { margin: 0.125rem 0 0; font-size: 0.8125rem; }
   .glossary { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 0.375rem 1.5rem; margin: 1rem 0 0; font-size: 0.75rem; }
   .glossary div { display: flex; gap: 0.5rem; }
@@ -366,26 +383,22 @@
   .order ol { margin: 0; padding-left: 1.25rem; display: flex; flex-direction: column; gap: 0.75rem; font-size: 0.875rem; }
   .order code { display: block; color: var(--muted); margin-top: 0.25rem; overflow-wrap: anywhere; }
   .empty { color: var(--muted); font-size: 0.875rem; text-align: center; padding: 1.5rem 0; margin: 0; }
-  .empty.error { color: var(--red); }
+  .empty.error { color: var(--err-text); }
   /* Most Active Censors (from Activity) */
   .censors { display: flex; flex-direction: column; gap: 0.75rem; }
   .section-head { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
-  .refresh-btn { font-size: 0.8125rem; padding: 0.25rem 0.75rem; border: 1px solid var(--border); border-radius: var(--radius-sm, 6px);
-    background: var(--surface); color: var(--text); cursor: pointer; }
-  .refresh-btn:hover:not(:disabled) { background: var(--surface-hover); }
-  .refresh-btn:disabled { opacity: 0.5; cursor: default; }
   ul.item-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0; }
   .item-row { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; padding: 0.5rem 0;
     border-bottom: 1px solid var(--border); font-size: 0.8125rem; }
   .item-row:last-child { border-bottom: none; }
   .item-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; color: var(--text); }
-  .badge { font-size: 0.75rem; font-weight: 600; color: var(--accent); background: rgba(124, 106, 247, 0.12);
-    border-radius: 4px; padding: 0.125rem 0.375rem; white-space: nowrap; flex-shrink: 0; }
+  .badge { font-size: 0.75rem; font-weight: 600; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border-radius: 999px; padding: 0.125rem 0.5rem; white-space: nowrap; flex-shrink: 0; }
   .retry-link { background: none; border: none; color: var(--accent); cursor: pointer; font-size: inherit; padding: 0;
     text-decoration: underline; }
   .small { font-size: 0.75rem; }
   .muted { color: var(--muted); }
   .state-msg { margin-top: 2rem; text-align: center; color: var(--muted); font-size: 0.875rem; }
-  .state-msg.error { color: var(--red); }
+  .state-msg.error { color: var(--err-text); }
   .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 </style>

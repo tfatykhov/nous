@@ -6,6 +6,8 @@
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import Chart from '../lib/viz/Chart.svelte';
+  import { Button } from '../lib/ui/button';
+  import { lineLegendLabels, seriesToken, tint } from '../lib/chartColors';
 
   // Load-once (rubric.js has no polling)
   const store = usePoll(
@@ -28,11 +30,11 @@
 
   // ── Correlation heatmap helpers ───────────────────────────────────────────
 
+  /** The cell's tint: the status fill mixed with transparent at the old alpha (5% to 65%); the text stays the ink. */
   function correlationColor(r: number): string {
     const abs = Math.min(Math.abs(r), 1.0);
-    const alpha = (abs * 0.6 + 0.05).toFixed(2);
-    if (r >= 0) return `rgba(52, 211, 153, ${alpha})`;
-    return `rgba(248, 113, 113, ${alpha})`;
+    const pct = Math.round((abs * 0.6 + 0.05) * 100);
+    return `color-mix(in srgb, var(${r >= 0 ? '--green' : '--red'}) ${pct}%, transparent)`;
   }
 
   /** Build {dims, sigTypes, matrix} from flat correlations array. */
@@ -50,15 +52,32 @@
 
   // ── Chart data builders ───────────────────────────────────────────────────
 
-  const DIM_COLORS = ['#7c6af7', '#34d399', '#60a5fa', '#fb923c', '#f87171', '#a78bfa', '#fbbf24'];
+  // Chart colours are tokens that Chart.svelte resolves against the canvas's ground (dark: the old literals). The
+  // first dimension and the radar take --series-0, not the accent, whose paper value is the question frame's blue.
+  const DIM_TOKENS = ['--series-0', '--series-2', '--series-1', '--series-4', '--series-5', '--series-3', '--series-6', '--series-8', '--series-9'];
+  const dimColor = (i: number) => (i < DIM_TOKENS.length ? `var(${DIM_TOKENS[i]})` : seriesToken(i));
+  // A dash per line as well as a hue: some dimension hues merge under red-green colour blindness (tokens.test.ts), and
+  // each such pair gets dashes of different kinds (solid, long dash, dotted, dash-dot).
+  const DIM_DASHES = [[], [10, 4], [2, 3], [8, 3, 2, 3], [2, 2], [14, 5], [6, 2, 2, 2], [2, 4], [8, 3, 1, 3, 1, 3]];
+  const dimDash = (i: number) => DIM_DASHES[i] ?? [i + 2, 3];
 
-  const SIGNAL_COLORS: Record<string, string> = {
-    completed: '#34d399',
-    praised: '#60a5fa',
-    corrected: '#fb923c',
-    reworked: '#f87171',
-    self_corrected: '#a78bfa',
+  // Reworked is --err-text (dark: the old red), apart from corrected's orange under deuteranopia; self-corrected a mark
+  // of its own (--series-3 was 4.2 from praised's blue under protanopia); an unknown type --series-7 (dark: #6b6b8a).
+  const SIGNAL_TOKENS: Record<string, string> = {
+    completed: '--oc-success',
+    praised: '--series-1',
+    corrected: '--series-4',
+    reworked: '--err-text',
+    self_corrected: '--signal-self-corrected',
   };
+  // 12 px swatches: at phone width (Chart.svelte's 200 px) the default 40 px ones took the legend to three or four rows
+  // and left the trend and the weight lines a plot about 20 px tall.
+  const LEGEND_LABELS = { boxWidth: 12 };
+  // Dashed lines (the weights, the radar's bounds) are told apart by their dash as well: the legend samples the line,
+  // 28 px wide, with its dash (lib/chartColors.ts).
+  const DASH_LEGEND_LABELS = lineLegendLabels();
+
+  const signalToken = (t: string) => (Object.hasOwn(SIGNAL_TOKENS, t) ? SIGNAL_TOKENS[t] : '--series-7');
 
   function radarChartData(d: RubricData) {
     const dims = d.active_rubric!.dimensions;
@@ -68,26 +87,27 @@
         {
           label: 'Current Weight',
           data: dims.map((x) => x.weight),
-          borderColor: '#7c6af7',
-          backgroundColor: 'rgba(124, 106, 247, 0.2)',
-          pointBackgroundColor: '#7c6af7',
+          borderColor: 'var(--series-0)',
+          backgroundColor: tint('--series-0', 0.2),
+          pointBackgroundColor: 'var(--series-0)',
           borderWidth: 2,
         },
         {
+          // Full-strength lines (3:1 or more on paper), dashes of different kinds: Min dotted, Max dashed.
           label: 'Min Bound',
           data: dims.map((x) => x.min_weight ?? 0.10),
-          borderColor: 'rgba(248, 113, 113, 0.4)',
+          borderColor: 'var(--red)',
           backgroundColor: 'transparent',
-          borderDash: [4, 4],
+          borderDash: [2, 3],
           borderWidth: 1,
           pointRadius: 0,
         },
         {
           label: 'Max Bound',
           data: dims.map((x) => x.max_weight ?? 0.40),
-          borderColor: 'rgba(52, 211, 153, 0.4)',
+          borderColor: 'var(--green)',
           backgroundColor: 'transparent',
-          borderDash: [4, 4],
+          borderDash: [8, 4],
           borderWidth: 1,
           pointRadius: 0,
         },
@@ -101,8 +121,8 @@
       labels: types.map((t) => t.replace('_', ' ')),
       datasets: [{
         data: types.map((t) => byType[t]),
-        backgroundColor: types.map((t) => SIGNAL_COLORS[t] ?? '#6b6b8a'),
-        borderColor: '#111118',
+        backgroundColor: types.map((t) => `var(${signalToken(t)})`),
+        borderColor: 'var(--surface)',
         borderWidth: 2,
       }],
     };
@@ -110,14 +130,18 @@
 
   function signalTrendData(d: RubricData) {
     const trend = d.outcome_signals.daily_trend;
+    const line = (label: string, data: number[], type: string, fill: string) => {
+      const token = signalToken(type);
+      return { label, data, borderColor: `var(${token})`, backgroundColor: tint(token, 0.15), fill };
+    };
     return {
-      labels: trend.map((x) => x.date),
+      labels: trend.map((x) => x.date.slice(5)), // month-day: a phone keeps the labels level
       datasets: [
-        { label: 'Completed', data: trend.map((x) => x.completed), borderColor: '#34d399', backgroundColor: 'rgba(52,211,153,0.15)', fill: 'origin' },
-        { label: 'Praised', data: trend.map((x) => x.praised), borderColor: '#60a5fa', backgroundColor: 'rgba(96,165,250,0.15)', fill: '-1' },
-        { label: 'Corrected', data: trend.map((x) => x.corrected), borderColor: '#fb923c', backgroundColor: 'rgba(251,146,60,0.15)', fill: '-1' },
-        { label: 'Reworked', data: trend.map((x) => x.reworked), borderColor: '#f87171', backgroundColor: 'rgba(248,113,113,0.15)', fill: '-1' },
-        { label: 'Self-corrected', data: trend.map((x) => x.self_corrected), borderColor: '#a78bfa', backgroundColor: 'rgba(167,139,250,0.15)', fill: '-1' },
+        line('Completed', trend.map((x) => x.completed), 'completed', 'origin'),
+        line('Praised', trend.map((x) => x.praised), 'praised', '-1'),
+        line('Corrected', trend.map((x) => x.corrected), 'corrected', '-1'),
+        line('Reworked', trend.map((x) => x.reworked), 'reworked', '-1'),
+        line('Self-corrected', trend.map((x) => x.self_corrected), 'self_corrected', '-1'),
       ],
     };
   }
@@ -125,15 +149,19 @@
   function weightHistoryData(d: RubricData) {
     // Oldest first
     const wh = d.weight_history.slice().reverse();
-    const allDims = new Set<string>();
-    for (const v of wh) Object.keys(v.weights).forEach((k) => allDims.add(k));
-    const dimList = Array.from(allDims);
+    const seen = new Set<string>();
+    for (const v of wh) Object.keys(v.weights).forEach((k) => seen.add(k));
+    // A dimension's hue and dash follow its name, not the history's order (the endpoint sends the newest 20 versions, so
+    // the oldest one changes): the active rubric's dimensions first, then any name seen only in the history, sorted.
+    const active = d.active_rubric?.dimensions.map((x) => x.name) ?? [];
+    const order = [...active.filter((n) => seen.has(n)), ...[...seen].filter((n) => !active.includes(n)).sort()];
     return {
       labels: wh.map((v) => `v${v.version}`),
-      datasets: dimList.map((dim, i) => ({
+      datasets: order.map((dim, i) => ({
         label: dim,
         data: wh.map((v) => v.weights[dim] ?? null),
-        borderColor: DIM_COLORS[i % DIM_COLORS.length],
+        borderColor: dimColor(i),
+        borderDash: dimDash(i),
         backgroundColor: 'transparent',
         spanGaps: true,
       })),
@@ -171,9 +199,9 @@
     <p class="subtitle">F024 Phase 3b — Evaluation dimensions, outcome signals, and evolution tracking</p>
   </div>
   <div class="head-actions">
-    <button class="refresh-btn" onclick={() => void store.refresh()} disabled={$store.loading}>
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void store.refresh()} disabled={$store.loading}>
       {$store.loading ? 'Loading…' : 'Refresh'}
-    </button>
+    </Button>
     <StaleBadge state={$store} />
   </div>
 </header>
@@ -227,18 +255,19 @@
             type="radar"
             data={radarChartData(d)}
             height="320px"
+            phoneHeight="300px"
             options={{
               scales: {
                 r: {
                   min: 0,
                   max: 0.5,
-                  ticks: { stepSize: 0.1 },
-                  grid: { color: '#1e1e2e' },
-                  angleLines: { color: '#1e1e2e' },
+                  ticks: { stepSize: 0.1, showLabelBackdrop: false }, // the labels sit on the weights: no box hides them
+                  grid: { color: 'var(--border)' },
+                  angleLines: { color: 'var(--border)' },
                   pointLabels: { font: { size: 12 } },
                 },
               },
-              plugins: { legend: { display: true, position: 'bottom' } },
+              plugins: { legend: { display: true, position: 'bottom', labels: DASH_LEGEND_LABELS } },
             }}
           />
         </div>
@@ -264,7 +293,7 @@
             type="doughnut"
             data={signalDoughnutData(d.outcome_signals.by_type)}
             height="280px"
-            options={{ plugins: { legend: { position: 'bottom' } } }}
+            options={{ plugins: { legend: { position: 'bottom', labels: LEGEND_LABELS } } }}
           />
         </div>
       </section>
@@ -278,8 +307,9 @@
           type="line"
           data={signalTrendData(d)}
           height="280px"
+          phoneHeight="300px"
           options={{
-            plugins: { legend: { display: true, position: 'bottom' } },
+            plugins: { legend: { display: true, position: 'bottom', labels: LEGEND_LABELS } },
             scales: {
               x: { title: { display: true, text: 'Date' } },
               y: { title: { display: true, text: 'Signals' }, beginAtZero: true, stacked: true },
@@ -292,7 +322,7 @@
     <!-- ── Correlation Heatmap ────────────────────────────────────── -->
     {#if d.correlations.data.length === 0}
       <section class="chart-card mt">
-        <h2>Dimension ↔ Signal Correlations</h2>
+        <h2>Dimension and signal correlations</h2>
         <p class="section-note">
           No correlation data yet. Need {cfg.min_episodes_for_correlation}+ episodes with outcome signals before correlations are computed.
         </p>
@@ -300,7 +330,7 @@
     {:else}
       {@const { dims, sigTypes, matrix } = buildCorrMatrix(d)}
       <section class="chart-card mt">
-        <h2>Dimension ↔ Signal Correlations</h2>
+        <h2>Dimension and signal correlations</h2>
         <p class="section-note">Pearson r (Spearman ρ in tooltip). Sample size: {d.correlations.sample_size} episodes.</p>
         <div class="table-scroll">
           <table class="corr-table">
@@ -321,7 +351,7 @@
                     {#if entry}
                       <td
                         class="corr-cell"
-                        style="background:{correlationColor(entry.pearson_r)}"
+                        style:--heat={correlationColor(entry.pearson_r)}
                         title="Pearson r={entry.pearson_r.toFixed(3)}, Spearman ρ={entry.spearman_rho.toFixed(3)}"
                       >{entry.pearson_r.toFixed(2)}</td>
                     {:else}
@@ -345,8 +375,9 @@
           type="line"
           data={weightHistoryData(d)}
           height="280px"
+          phoneHeight="300px"
           options={{
-            plugins: { legend: { display: true, position: 'bottom' } },
+            plugins: { legend: { display: true, position: 'bottom', labels: DASH_LEGEND_LABELS } },
             scales: {
               x: { title: { display: true, text: 'Version' } },
               y: { title: { display: true, text: 'Weight' }, min: 0, max: 0.5 },
@@ -436,6 +467,14 @@
     color: var(--text);
   }
 
+  /* The paper look's title size; the dark title keeps the rule above. */
+  :global(html[data-look="paper"] [data-ground="paper"]) h1 {
+    font-size: 30px;
+    font-weight: 650;
+    letter-spacing: -0.022em;
+    line-height: 1.15;
+  }
+
   .subtitle {
     margin: 0;
     color: var(--muted);
@@ -449,21 +488,6 @@
     flex-shrink: 0;
   }
 
-  .refresh-btn {
-    padding: 0.375rem 0.875rem;
-    border-radius: var(--radius-sm, 6px);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--text);
-    font-size: 0.8125rem;
-    cursor: pointer;
-  }
-
-  .refresh-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
   /* ── States ──────────────────────────────────────────────────── */
   .status-msg {
     text-align: center;
@@ -472,13 +496,13 @@
   }
 
   .status-msg.error {
-    color: #f87171;
+    color: var(--err-text);
   }
 
   .retry-link {
     background: none;
     border: none;
-    color: var(--accent, #7c6af7);
+    color: var(--accent);
     cursor: pointer;
     text-decoration: underline;
     font-size: inherit;
@@ -489,13 +513,14 @@
     text-align: center;
     color: var(--muted);
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 8px);
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
   }
 
   .empty-state code {
-    font-family: monospace;
-    background: rgba(255,255,255,0.08);
+    font-family: var(--font-mono);
+    background: var(--track-strong);
     padding: 0.125rem 0.375rem;
     border-radius: 4px;
   }
@@ -506,19 +531,19 @@
     align-items: flex-start;
     gap: 0.75rem;
     padding: 0.875rem 1rem;
-    border-radius: var(--radius-sm, 8px);
+    border-radius: var(--card-radius);
     border: 1px solid var(--border);
     margin-bottom: 1.25rem;
     font-size: 0.875rem;
   }
 
   .config-banner--active {
-    background: rgba(52, 211, 153, 0.06);
-    border-color: rgba(52, 211, 153, 0.3);
+    background: color-mix(in srgb, var(--green) 6%, transparent);
+    border-color: color-mix(in srgb, var(--green) 30%, transparent);
   }
 
   .config-banner--off {
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--wash);
   }
 
   .banner-dot {
@@ -529,8 +554,8 @@
     margin-top: 3px;
   }
 
-  .dot-active { background: #34d399; }
-  .dot-off    { background: #6b7280; }
+  .dot-active { background: var(--green); }
+  .dot-off    { background: var(--st-neutral); }
 
   .banner-text {
     color: var(--text);
@@ -548,8 +573,9 @@
 
   .chart-card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 8px);
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
     padding: 1.25rem;
   }
 
@@ -574,6 +600,11 @@
     align-items: start;
   }
 
+  /* A grid cell may shrink below the radar canvas's width, so a phone never scrolls sideways. */
+  .dim-grid > * {
+    min-width: 0;
+  }
+
   @media (max-width: 768px) {
     .dim-grid {
       grid-template-columns: 1fr;
@@ -584,6 +615,13 @@
     min-height: 320px;
   }
 
+  /* After the rule above: the chart is 200 px tall here (Chart.svelte), so the cell does not reserve 320 px around it. */
+  @media (max-width: 768px) {
+    .radar-wrap {
+      min-height: 0;
+    }
+  }
+
   .dim-cards {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
@@ -591,9 +629,9 @@
   }
 
   .dim-card {
-    background: var(--bg, #0a0a12);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
+    background: var(--bg);
+    border: var(--card-border);
+    border-radius: var(--card-radius-sm);
     padding: 0.75rem;
   }
 
@@ -642,7 +680,7 @@
   }
 
   .corr-table th {
-    background: var(--bg, #0a0a12);
+    background: var(--bg);
     color: var(--muted);
     font-weight: 600;
     text-transform: capitalize;
@@ -654,9 +692,11 @@
     font-weight: 500;
   }
 
+  /* --heat is the cell's tint, set per cell (correlationColor) */
   .corr-cell {
     font-weight: 600;
     color: var(--text);
+    background: var(--heat, transparent);
     cursor: default;
   }
 
@@ -684,12 +724,12 @@
     color: var(--muted);
     font-weight: 600;
     font-size: 0.75rem;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
   }
 
   .data-table tbody tr:hover {
-    background: rgba(255, 255, 255, 0.02);
+    background: var(--wash);
   }
 
   .content-cell {
@@ -710,8 +750,10 @@
     white-space: nowrap;
   }
 
-  .badge-success { background: rgba(52, 211, 153, 0.15); color: #34d399; }
-  .badge-failure { background: rgba(248, 113, 113, 0.15); color: #f87171; }
-  .badge-partial { background: rgba(251, 146, 60, 0.15); color: #fb923c; }
-  .badge-pending { background: rgba(167, 139, 250, 0.15); color: #a78bfa; }
+  /* Text tokens on their tints; a pending or unknown status is neutral. The partial tint is PR 3's badge tint (12.5%):
+     at 15% the paper text is 4.49:1 on a hovered row. */
+  .badge-success { background: var(--badge-good-bg); color: var(--ok-text); }
+  .badge-failure { background: var(--badge-bad-bg); color: var(--err-text); }
+  .badge-partial { background: color-mix(in srgb, var(--st-partial) 12.5%, transparent); color: var(--st-partial); }
+  .badge-pending { background: var(--wash); color: var(--muted); }
 </style>

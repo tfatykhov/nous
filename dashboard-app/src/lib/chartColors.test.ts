@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DARK_FALLBACK, cssColor, isPaperGround, resolveColors, seriesToken, tint, withPaperDefaults } from './chartColors';
+import { DARK_FALLBACK, cssColor, isPaperGround, lineLegendLabels, resolveColors, seriesToken, tint, withPaperDefaults } from './chartColors';
 import { DARK_SEL, PAPER_SEL, parseBlocks, scriptBlocks } from './testing/css';
 
 // A canvas (Chart.js) or cytoscape cannot read var(): their colours are tokens (`var(--x)`, or the `tint(--x, a)`
@@ -77,6 +77,25 @@ describe('every token a migrated script names exists', () => {
   it.each(scripts.map(([f]) => f))('%s', (file) => {
     const js = scripts.find(([f]) => f === file)![1];
     expect(named(js).filter((t) => !(t in DARK))).toEqual([]);
+  });
+});
+
+// Redesign PR 4 review M1: a legend that samples each line with its dash. Chart.js 4.5.1's default label generator reads
+// the first point's style under usePointStyle (`getStyle(usePointStyle ? 0 : undefined)`), which has no dash, so the
+// sample came out solid and 1 px (seen in the capture): the labels take the dash and a 2 px width from the dataset.
+describe('lineLegendLabels', () => {
+  afterEach(() => { delete (globalThis as any).Chart; });
+
+  it('a 28 px line sample (pointStyleWidth: under usePointStyle Chart.js caps boxWidth at the font size), keeping other options', () => {
+    expect(lineLegendLabels({ color: 'var(--muted)' })).toMatchObject({ color: 'var(--muted)', usePointStyle: true, pointStyle: 'line', pointStyleWidth: 28 });
+  });
+
+  it('each label takes its dataset\'s dash and colour and a 2 px line over Chart.js\'s own labels', () => {
+    const base = [{ datasetIndex: 0, text: 'a', lineDash: undefined, lineWidth: 1, strokeStyle: '#000' }, { datasetIndex: 1, text: 'b', lineWidth: 1 }];
+    (globalThis as any).Chart = { defaults: { plugins: { legend: { labels: { generateLabels: () => base } } } } };
+    const chart = { data: { datasets: [{ borderDash: [2, 3], borderColor: '#f87171', borderWidth: 1 }, { borderColor: '#34d399', borderWidth: 3 }] } };
+    const items = lineLegendLabels().generateLabels(chart);
+    expect(items.map((i: any) => [i.text, i.lineDash, i.strokeStyle, i.lineWidth])).toEqual([['a', [2, 3], '#f87171', 2], ['b', [], '#34d399', 3]]);
   });
 });
 

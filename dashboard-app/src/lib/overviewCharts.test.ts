@@ -30,9 +30,10 @@ describe('the chart palette', () => {
     expect(p.barBorder).toBe('#7c6af7');
   });
 
-  it('under the paper look it is the paper palette: status fills, the series-7 slate, the series-0 violet (no frame colour)', () => {
+  it('under the paper look it is the paper palette: outcome marks, the series-7 slate, the series-0 violet (no frame colour)', () => {
     const p = chartPalette((n) => PAPER[n] ?? '');
-    expect(['success', 'partial', 'failure', 'pending'].map((l) => p.outcome(l))).toEqual(['#2f8a4e', '#b7791f', '#d2352b', '#4f5f6f']);
+    // PR 4 review I2: success is --oc-success and failure --err-text, apart under red-green colour blindness (as Decisions).
+    expect(['success', 'partial', 'failure', 'pending'].map((l) => p.outcome(l))).toEqual(['#3f8772', '#b7791f', '#b02a22', '#4f5f6f']);
     // Review N2: pending is "not known yet", a neutral as under dark, and far from partial's amber.
     expect(p.outcome('pending')).not.toBe(p.outcome('partial'));
     // Review M1 (PR 2): the bars were the accent, on paper the question frame's blue, beside the day timeline's frames.

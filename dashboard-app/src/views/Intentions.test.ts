@@ -3,6 +3,7 @@ import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/sv
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import Intentions from './Intentions.svelte';
+import { parseBlocks, styleBlocks } from '../lib/testing/css';
 
 const HOSTILE = '<img src=x onerror=alert(1)>';
 const limits = { depth: 1, spawns: 1, turns: 2, tokens: 12000, stalls: 0, spawn_blocked: false, escalate: null };
@@ -97,11 +98,70 @@ describe('Intentions view', () => {
     await waitFor(() => expect(urls.some((u) => u.includes('window=30d'))).toBe(true));
   });
 
+  it('each root opens from its summary, whose row sits in one span inside it', async () => {
+    const { container } = render(Intentions);
+    await screen.findAllByText(HOSTILE);
+    const summaries = [...container.querySelectorAll('details.root > summary')];
+    expect(summaries.length).toBe(1);
+    for (const s of summaries) {
+      expect(s.children.length).toBe(1);
+      expect(s.firstElementChild?.classList.contains('sum-row')).toBe(true);
+      expect(s.querySelector('.pill')?.textContent).toBe('deciding');
+    }
+  });
+
+  it('a hostile intent of 2,000 unbroken characters is shown as text', async () => {
+    const long = HOSTILE + 'x'.repeat(2000);
+    body = { ...DATA, roots: [{ ...DATA.roots[0], intent: long }] };
+    const { container } = render(Intentions);
+    expect((await screen.findAllByText(long)).length).toBeGreaterThan(0);
+    expect(container.querySelector('img')).toBeNull();
+    expect(container.querySelector('summary .intent')?.textContent).toBe(long);
+  });
+
   it('PIN: no view file uses the raw-HTML directive', () => {
     // Mutation: add the directive to any of these files and this fails.
     // Resolved from this file's directory, so the pin does not depend on where vitest is started.
     for (const f of [resolve(__dirname, 'Intentions.svelte'), resolve(__dirname, '../lib/intentions.ts')]) {
       expect(readFileSync(f, 'utf-8')).not.toContain('{@html');
     }
+  });
+});
+
+// Redesign PR 4: Intentions on paper (style only: the view has no colour in its script).
+describe('Intentions: the paper look (source contracts)', () => {
+  const rules = parseBlocks(styleBlocks(readFileSync(resolve(__dirname, 'Intentions.svelte'), 'utf-8')));
+
+  it('a root is a native disclosure: its summary stays a list item with the browser\'s marker, the row inside it is the flex box (review M7)', () => {
+    // A summary laid out as flex loses its marker (the PR 2 fix on Retrieval); no glyph of ours replaces it.
+    const summary = rules.get('details.root > summary') ?? {};
+    expect(summary.display).toBeUndefined();
+    expect(rules.get('.sum-row')).toMatchObject({ display: 'inline-flex' });
+    const css = styleBlocks(readFileSync(resolve(__dirname, 'Intentions.svelte'), 'utf-8'));
+    expect(css).not.toMatch(/details-marker|content: '[^']/);
+  });
+
+  it('an unbroken intent wraps anywhere, so it never widens the page', () => {
+    expect(rules.get('.intent')).toMatchObject({ 'overflow-wrap': 'anywhere' });
+  });
+
+  it('a row header (a root\'s id and intent) wraps anywhere, so an unbroken intent never pushes the numbers out of view', () => {
+    expect(rules.get('tbody th')).toMatchObject({ 'overflow-wrap': 'anywhere', 'min-width': '8rem' });
+  });
+
+  it('the notice reads the notice tokens; panels and tiles the card tokens; labels the label tokens', () => {
+    expect(rules.get('.notice')).toMatchObject({
+      background: 'var(--notice-bg)', border: '1px solid var(--notice-border)', 'border-radius': 'var(--card-radius-sm)',
+    });
+    expect(rules.get('.panel')).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius)', 'box-shadow': 'var(--card-shadow)' });
+    expect(rules.get('.tiles div')).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius-sm)' });
+    expect(rules.get('.tiles dt')).toMatchObject({ 'text-transform': 'var(--label-transform)', 'letter-spacing': 'var(--label-tracking)' });
+  });
+
+  it('under the paper look only: the title size, soft tiles and the prototype\'s table header', () => {
+    const paper = (sel: string) => rules.get(`:global(html[data-look="paper"] [data-ground="paper"]) ${sel}`);
+    expect(paper('h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
+    expect(paper('.tiles div')).toMatchObject({ background: 'var(--wash)' });
+    expect(paper('thead th')).toMatchObject({ 'font-size': '12px', 'font-weight': '600', color: 'var(--muted)' });
   });
 });

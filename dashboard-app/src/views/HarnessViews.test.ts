@@ -6,6 +6,10 @@ import Ledger from './Ledger.svelte';
 import DagView from './DagView.svelte';
 import Overview from './Overview.svelte';
 import { attentionOverride, attentionPoll } from '../lib/stores/attention';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { setLook } from '../lib/look';
+import { PAPER_SEL, parseBlocks, scriptBlocks, markupOf, styleBlocks } from '../lib/testing/css';
 
 // Render smoke for the harness dashboard views (spec 2026-09-25 v2 §5).
 // Fixtures carry ONLY shapes the backend stores (§4.5): hashed free text,
@@ -139,6 +143,8 @@ const TODAY_OFF = {
 const FINDINGS = { findings: [], stats: {} };
 
 let harnessPersisted = true;
+/** Every Chart the views built (redesign PR 4: Guards' line chart colours are checked through it). */
+let charts: { type: string; data: any; options: any }[] = [];
 
 function install() {
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
@@ -162,7 +168,12 @@ function install() {
     if (!body) throw new Error(`unexpected ${url}`);
     return { ok: true, status: 200, json: async () => body } as Response;
   }));
-  vi.stubGlobal('Chart', class { destroy() {} update() {} data = {}; options = {}; });
+  charts = [];
+  vi.stubGlobal('Chart', class {
+    data = {}; options = {};
+    constructor(_el: unknown, cfg: { type: string; data: any; options: any }) { charts.push(cfg); }
+    destroy() {} update() {}
+  });
   // d3 is a CDN global in the app: a chainable no-op stands in for it.
   const d3: any = new Proxy(function () {}, {
     get: (_t, k) => (k === Symbol.toPrimitive ? () => '' : k === 'then' ? undefined : d3),
@@ -385,6 +396,90 @@ describe('harness dashboard views', () => {
       return d.querySelector('dd')!;
     });
     expect(dd.textContent).toMatch(/^Jan 1 12:00 UTC \(in \d+ d \d+ h\)$/);
+  });
+
+  // Redesign PR 4: Guards on paper.
+  it('Guards: a rule pill carries its rule\'s series token, and its text is the ink', async () => {
+    harnessPatterns = [{ rule: 'context_policy', mode: 'warn', context: 'subtask', tool: 'bash', violation: 'level:external',
+      count: 3, last_seen: '2026-09-25T13:02:00+00:00', latest_session: 's', snippet: null }];
+    render(Harness);
+    const pill = (await screen.findAllByText('Context policy', { selector: '.rule-pill' }))[0] as HTMLElement;
+    expect(pill.style.getPropertyValue('--fill')).toBe('var(--series-4)');
+    expect(pill.style.color).toBe('');
+  });
+
+  it('Guards: a rule\'s breakdown bars carry its series token', async () => {
+    render(Harness);
+    const key = await screen.findByText('heartbeat_callback', { selector: '.bar-key' });
+    expect((key.closest('.bar-row')!.querySelector('.bar-fill') as HTMLElement).style.getPropertyValue('--fill')).toBe('var(--series-1)');
+  });
+
+  it('Guards: the switch order is said in words, with no arrow', async () => {
+    const { container } = render(Harness);
+    expect(await screen.findByText('Move context policy to enforce')).toBeTruthy();
+    expect(screen.getByText('Move the offered-tool rule to enforce')).toBeTruthy();
+    expect(container.querySelector('.order')?.textContent).not.toMatch(/\u2192/);
+  });
+
+  it('Guards: dark, the three lines are today\'s colours with their own dashes, on today\'s axis colours', async () => {
+    render(Harness);
+    await waitFor(() => expect(charts).toHaveLength(1));
+    const [c] = charts;
+    expect(c.data.datasets.map((d: any) => d.borderColor)).toEqual(['#60a5fa', '#fb923c', '#22d3ee']); // claims: D4, was #2dd4bf
+    expect(c.data.datasets.map((d: any) => d.backgroundColor)).toEqual(['#60a5fa', '#fb923c', '#22d3ee']);
+    expect(c.data.datasets.map((d: any) => d.borderDash)).toEqual([[], [6, 4], [2, 3]]);
+    expect(c.options.plugins.legend.labels.color).toBe('#8e8eab');
+    // Review M1: the legend samples each line with its dash, not a filled box with a dashed outline.
+    expect(c.options.plugins.legend.labels).toMatchObject({ usePointStyle: true, pointStyle: 'line', pointStyleWidth: 28 });
+    expect(typeof c.options.plugins.legend.labels.generateLabels).toBe('function'); // the dash comes from the dataset
+    expect(c.options.scales.x.ticks.color).toBe('#8e8eab');
+    expect(c.options.scales.y.grid.color).toBe('#1e1e2e');
+  });
+
+  it('Guards: paper, the lines and axes take the paper values (the explicit grid beats the paper default)', async () => {
+    const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
+    const main = document.createElement('main');
+    main.setAttribute('data-ground', 'paper');
+    for (const [k, v] of Object.entries(PAPER)) if (k.startsWith('--')) main.style.setProperty(k, v);
+    document.body.appendChild(main);
+    setLook('paper');
+    try {
+      render(Harness, { target: main });
+      await waitFor(() => expect(charts).toHaveLength(1));
+      const [c] = charts;
+      expect(c.data.datasets.map((d: any) => d.borderColor)).toEqual(['--series-1', '--series-4', '--series-9'].map((t) => PAPER[t]));
+      for (const old of ['#60a5fa', '#fb923c', '#2dd4bf', '#8e8eab', '#1e1e2e']) expect(JSON.stringify(c)).not.toContain(old);
+      expect(c.options.scales.x.ticks.color).toBe(PAPER['--muted']);
+      expect(c.options.scales.y.grid.color).toBe(PAPER['--border']);
+    } finally {
+      cleanup();
+      setLook('dark');
+      document.body.innerHTML = '';
+    }
+  });
+
+  it('Guards: the screen-reader table sits in a visually hidden box (a table cannot be 1 px wide, so it widened the page at 390 px)', async () => {
+    const { container } = render(Harness);
+    await waitFor(() => expect(container.querySelector('caption')?.textContent).toBe('Flags per day, per rule'));
+    const table = [...container.querySelectorAll('table')].find((t) => t.caption?.textContent === 'Flags per day, per rule')!;
+    expect(table.classList.contains('sr-only')).toBe(false);
+    expect(table.parentElement?.matches('div.sr-only')).toBe(true);
+  });
+
+  it('Guards: Refresh is the shared outline pill button', async () => {
+    render(Harness);
+    expect((await screen.findByRole('button', { name: 'Refresh' })).getAttribute('data-slot')).toBe('button');
+  });
+
+  it('Guards, source contract: no hex alpha glued to a colour; the pill border mixes its fill at 40%', () => {
+    const src = readFileSync(join(__dirname, 'Harness.svelte'), 'utf-8');
+    expect(scriptBlocks(src) + markupOf(src)).not.toMatch(/\}66/);
+    const rules = parseBlocks(styleBlocks(src));
+    expect(rules.get('.rule-pill')).toMatchObject({ color: 'var(--text)', border: '1px solid color-mix(in srgb, var(--fill) 40%, transparent)' });
+    expect(rules.get('.rule-pill::before')).toMatchObject({ background: 'var(--fill)' });
+    expect(rules.get('.badge')).toMatchObject({ color: 'var(--accent)', background: 'color-mix(in srgb, var(--accent) 12%, transparent)' });
+    expect(rules.get('.card, .panel')).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius)', 'box-shadow': 'var(--card-shadow)' });
+    expect(rules.get('.notice')).toMatchObject({ background: 'var(--notice-bg)', border: '1px solid var(--notice-border)' });
   });
 
   it('DAG view lists the question, explains an undelivered card, and names a deadline stop neutrally', async () => {

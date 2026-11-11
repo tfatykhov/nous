@@ -153,13 +153,13 @@ describe('setLook, getLook and the look store', () => {
 
 describe('groundFor', () => {
   it('is paper for the migrated routes and dark for every other', () => {
-    expect(PAPER_ROUTES).toEqual(['overview', 'work', 'graph', 'browser', 'health', 'retrieval', 'consolidation', 'model-calls', 'dag', 'subtasks', 'heartbeat']);
+    expect(PAPER_ROUTES).toEqual(['overview', 'work', 'graph', 'browser', 'health', 'retrieval', 'consolidation', 'model-calls', 'dag', 'subtasks', 'heartbeat', 'decisions', 'rubric', 'autonomy', 'intentions', 'harness']);
     expect(groundFor('work')).toBe('paper');
     expect(groundFor('overview')).toBe('paper');
     expect(groundFor('graph')).toBe('paper');
     expect(groundFor('observability')).toBe('dark');
     for (const r of ROUTES) expect(['paper', 'dark']).toContain(groundFor(r));
-    expect(ROUTES.filter((r) => groundFor(r) === 'paper')).toEqual(['overview', 'graph', 'browser', 'health', 'retrieval', 'consolidation', 'work', 'model-calls', 'dag', 'subtasks', 'heartbeat']);
+    expect(ROUTES.filter((r) => groundFor(r) === 'paper')).toEqual(['overview', 'graph', 'browser', 'health', 'retrieval', 'consolidation', 'work', 'model-calls', 'dag', 'subtasks', 'heartbeat', 'decisions', 'rubric', 'autonomy', 'intentions', 'harness']);
   });
 });
 

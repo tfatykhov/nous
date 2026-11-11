@@ -28,10 +28,13 @@
     void store.refresh();
   });
 
-  const OUTCOME_COLOR: Record<string, string> = {
-    done_verified: 'var(--green)', done_checked: '#34d399', done_self: '#60a5fa', partial: '#f59e0b', failed: 'var(--red)', not_scored: 'var(--muted)',
+  // Bar, swatch and share colours are tokens, set on the element as --fill and painted by the stylesheet (dark: the old
+  // literals). An outcome bar sits beside its label; the shares have a legend and an accessible name.
+  const OUTCOME_TOKEN: Record<string, string> = {
+    done_verified: '--green', done_checked: '--series-2', done_self: '--series-1', partial: '--stat-warn', failed: '--red', not_scored: '--muted',
   };
-  const CONTEXT_COLOR: Record<string, string> = { owner_present: '#60a5fa', approved: '#34d399', autonomous: '#fb923c' };
+  const CONTEXT_TOKEN: Record<string, string> = { owner_present: '--series-1', approved: '--series-2', autonomous: '--series-4' };
+  const fill = (token: string | undefined) => `var(${token ?? '--muted'})`;
   const CONTEXTS = ['owner_present', 'approved', 'autonomous'] as const;
 
   const outcomeBars = (byOutcome: Record<string, number>) => bars(OUTCOMES.map((o) => [o, byOutcome[o] ?? 0]));
@@ -145,7 +148,7 @@
           </div>
         {/each}
       </div>
-      <p class="small muted">A subtask counts when the harness confirmed it or you graded it a success. A score is final 14 days after its task, so Settled reads subtasks that finished {settledSpan(ts.settled_window)}, a window as long as this one that ends 14 days ago.{#if ts.settled_window.held > 0} {ts.settled_window.held} of them {ts.settled_window.held === 1 ? 'is' : 'are'} not settled, so not counted as settled.{/if}</p>
+      <p class="small muted">A subtask counts when the harness confirmed it or you graded it a success. A score is final 14 days after its task, so Settled reads subtasks that finished {settledSpan(ts.settled_window)}, a window as long as this one that ends 14 days ago.{#if ts.settled_window.held > 0}{' '}{ts.settled_window.held} of them {ts.settled_window.held === 1 ? 'is' : 'are'} not settled, so not counted as settled.{/if}</p>
     </section>
     <section class="card" aria-labelledby="h-overrides">
       <h2 id="h-overrides">Your overrides</h2>
@@ -181,13 +184,13 @@
         {#each outcomeBars(ts.subtasks.by_outcome) as b (b.key)}
           <div class="bar-row">
             <span class="bar-key">{OUTCOME_LABEL[b.key] ?? b.key}</span>
-            <div class="bar"><div class="bar-fill" style:width="{b.pct}%" style:background={OUTCOME_COLOR[b.key]}></div></div>
+            <div class="bar"><div class="bar-fill" style:width="{b.pct}%" style:--fill={fill(OUTCOME_TOKEN[b.key])}></div></div>
             <span class="bar-count">{b.count}</span>
           </div>
         {/each}
       </div>
       <div class="table-wrap">
-      <table class="stats">
+      <table class="stats nums">
         <caption class="label">Scores (−1 to 1) · settled: {settledSpan(ts.settled_window)}</caption>
         <thead><tr><th scope="col"></th><th scope="col">Count</th><th scope="col">Mean</th><th scope="col">p10</th><th scope="col">p50</th><th scope="col">p90</th><th scope="col">Overrides</th></tr></thead>
         <tbody>
@@ -209,7 +212,7 @@
       <span class="small muted">Counted apart: never added into a subtask's score</span>
     </div>
     <div class="table-wrap">
-      <table class="stats">
+      <table class="stats nums">
         <thead>
           <tr>
             <th scope="col"></th><th scope="col">Count</th>
@@ -251,7 +254,7 @@
           {#each bars(d.taps.by_action.map((a) => [a.action_name, a.count])) as b (b.key)}
             <div class="bar-row">
               <span class="bar-key mono" title={b.key}>{b.key}</span>
-              <div class="bar"><div class="bar-fill" style:width="{b.pct}%" style:background="var(--accent)"></div></div>
+              <div class="bar"><div class="bar-fill" style:width="{b.pct}%" style:--fill="var(--series-0)"></div></div>
               <span class="bar-count">{b.count}</span>
             </div>
           {/each}
@@ -287,7 +290,7 @@
     {:else}
       <p class="small">{acting} of {d.inventory.tools.length} tools ran at least once without you in the loop.</p>
       <div class="legend" aria-hidden="true">
-        {#each CONTEXTS as k (k)}<span><i style:background={CONTEXT_COLOR[k]}></i>{CONTEXT_LABEL[k]}</span>{/each}
+        {#each CONTEXTS as k (k)}<span><i style:--fill={fill(CONTEXT_TOKEN[k])}></i>{CONTEXT_LABEL[k]}</span>{/each}
       </div>
       <DataTable columns={toolCols} rows={d.inventory.tools} mode="cards"
         rowKey={(t: InventoryTool) => t.tool_name} rowLabel={(t: InventoryTool) => t.tool_name}>
@@ -300,7 +303,7 @@
             <div class="stack" role="img"
               aria-label={CONTEXTS.map((k) => `${CONTEXT_LABEL[k]} ${t.by_context[k]}`).join(', ')}>
               {#each CONTEXTS as k (k)}
-                {#if t.by_context[k] > 0}<div style:width="{share(t, k)}%" style:background={CONTEXT_COLOR[k]}></div>{/if}
+                {#if t.by_context[k] > 0}<div style:width="{share(t, k)}%" style:--fill={fill(CONTEXT_TOKEN[k])}></div>{/if}
               {/each}
             </div>
           {:else if c.key === 'level'}
@@ -323,7 +326,7 @@
         {/snippet}
       </DataTable>
     {/if}
-    <table class="stats censors">
+    <table class="stats censors nums">
       <caption class="label">Censors, last {d.inventory.censors.days} d</caption>
       <thead><tr><th scope="col">Written by</th><th scope="col">Created</th><th scope="col">Deactivated</th></tr></thead>
       <tbody>
@@ -435,7 +438,7 @@
             {#each g.schedules as s (s.schedule_id)}
               <tr>
                 <th scope="row"><span class="job" title={s.job}>{s.job}</span></th>
-                <td><span class="mono">{s.name ?? '—'}</span>{#if !s.allowlisted} <span class="pill pill-warn">not allowlisted</span>{/if}</td>
+                <td><span class="mono">{s.name ?? '—'}</span>{#if !s.allowlisted}{' '}<span class="pill pill-warn">not allowlisted</span>{/if}</td>
                 <td><span class="pill" class:pill-warn={s.mode !== 'shadow' && s.mode !== 'skip'}>{guardMode(s.mode)}</span></td>
                 <td>{s.runs}</td>
                 <td>{s.skipped}</td>
@@ -467,10 +470,10 @@
           <tbody>
             {#each g.checks as c (c.check_id)}
               <tr>
-                <th scope="row"><span class="mono">{c.check ?? c.check_id}</span>{#if c.enabled === false} <span class="pill">disabled</span>{/if}</th>
+                <th scope="row"><span class="mono">{c.check ?? c.check_id}</span>{#if c.enabled === false}{' '}<span class="pill">disabled</span>{/if}</th>
                 <td>
                   {#if c.mode === null}<span class="small muted">guard removed</span>
-                  {:else}<span class="mono">{c.name ?? '—'}</span>{#if !c.allowlisted} <span class="pill pill-warn">not allowlisted</span>{/if}{/if}
+                  {:else}<span class="mono">{c.name ?? '—'}</span>{#if !c.allowlisted}{' '}<span class="pill pill-warn">not allowlisted</span>{/if}{/if}
                 </td>
                 <td>{#if c.mode !== null}<span class="pill" class:pill-warn={c.mode !== 'shadow' && c.mode !== 'skip'}>{guardMode(c.mode)}</span>{:else}—{/if}</td>
                 <td>{c.runs}</td>
@@ -521,7 +524,7 @@
                 <td>{fmtWhen(r.at)}</td>
                 <td><span class="mono">{r.name ?? '—'}</span> <span class="small muted">{recordMode(r)}</span></td>
                 <td>{guardOutcome(r)}</td>
-                <td>{r.timed_out ? 'timed out' : (r.exit_code ?? '—')}{#if r.duration_ms !== null} <span class="small muted">{r.duration_ms} ms</span>{/if}</td>
+                <td>{r.timed_out ? 'timed out' : (r.exit_code ?? '—')}{#if r.duration_ms !== null}{' '}<span class="small muted">{r.duration_ms} ms</span>{/if}</td>
                 <td class:acted={r.acted === true}>{guardActed(r)}</td>
                 <td class="wrap">{#if r.stderr_head}<pre>{r.stderr_head}</pre>{:else}—{/if}</td>
               </tr>
@@ -576,23 +579,29 @@
   .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   h1 { font-size: 1.375rem; font-weight: 700; margin: 0 0 0.25rem; }
+  :global(html[data-look="paper"] [data-ground="paper"]) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
   h2 { font-size: 0.9375rem; font-weight: 600; margin: 0; }
   .subtitle { font-size: 0.8125rem; color: var(--muted); margin: 0; }
   .strip { display: flex; justify-content: space-between; align-items: center; gap: 1rem 2rem; flex-wrap: wrap;
-    padding: 0.875rem 1.125rem; border-radius: 8px; border: 1px solid; margin-bottom: 1rem; }
-  .verdict-warn { color: #f59e0b; border-color: rgba(245, 158, 11, 0.35); background: rgba(245, 158, 11, 0.08); }
-  .verdict-ok { color: #10b981; border-color: rgba(16, 185, 129, 0.35); background: rgba(16, 185, 129, 0.08); }
-  .verdict-bad { color: var(--red); border-color: rgba(239, 68, 68, 0.5); background: rgba(239, 68, 68, 0.1); margin: 0 0 1rem; }
+    padding: 0.875rem 1.125rem; border-radius: var(--card-radius); border: 1px solid; margin-bottom: 1rem; }
+  /* Status by token: the alphas of the old literals are the mix percentages (dark identical). */
+  .verdict-warn { color: var(--stat-warn); border-color: color-mix(in srgb, var(--stat-warn) 35%, transparent);
+    background: color-mix(in srgb, var(--stat-warn) 8%, transparent); }
+  .verdict-ok { color: var(--stat-ok); border-color: color-mix(in srgb, var(--stat-ok) 35%, transparent);
+    background: color-mix(in srgb, var(--stat-ok) 8%, transparent); }
+  .verdict-bad { color: var(--err-text); border-color: color-mix(in srgb, var(--tone-bad) 50%, transparent);
+    background: color-mix(in srgb, var(--tone-bad) 10%, transparent); margin: 0 0 1rem; }
   .verdict-bad .verdict-title { font-size: 1rem; }
   .verdict-muted { color: var(--muted); border-color: var(--border); background: transparent; }
   .verdict-title { font-size: 0.875rem; font-weight: 700; }
   .verdict-detail { font-size: 0.8125rem; color: var(--text); margin-top: 0.125rem; }
   .strip-meta { display: flex; gap: 1.5rem; flex-wrap: wrap; margin: 0; }
   .strip-meta dt, .tiles dt, .triple dt, .detail dt, .label { font-size: 0.6875rem; font-weight: 600; color: var(--muted);
-    text-transform: uppercase; letter-spacing: 0.04em; }
+    text-transform: var(--label-transform); letter-spacing: var(--label-tracking); }
   .strip-meta dd { margin: 0.125rem 0 0; font-size: 0.8125rem; color: var(--text); }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); gap: 1rem; }
-  .card, .panel { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; min-width: 0; }
+  .card, .panel { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow);
+    padding: 1.25rem; min-width: 0; }
   .card { display: flex; flex-direction: column; gap: 0.75rem; }
   .card p { margin: 0; }
   .panel { margin-top: 1.25rem; }
@@ -608,7 +617,7 @@
   .bar-row { display: grid; grid-template-columns: minmax(0, 10rem) minmax(0, 1fr) 2.75rem; gap: 0.625rem; align-items: center; margin-top: 0.375rem; }
   .bar-key { font-size: 0.8125rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .bar { height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
-  .bar-fill { height: 100%; border-radius: 4px; }
+  .bar-fill { height: 100%; border-radius: 4px; background: var(--fill); }
   .bar-count { font-size: 0.8125rem; font-weight: 600; text-align: right; }
   /* contain: a wide table scrolls in its own box instead of widening the page (main is a flex item). */
   .table-wrap { overflow-x: auto; contain: inline-size; }
@@ -617,24 +626,30 @@
   .stats th, .stats td { padding: 0.375rem 0.5rem; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
   .stats th:first-child, .stats td:first-child { text-align: left; }
   .stats thead th { font-size: 0.6875rem; font-weight: 600; color: var(--muted); }
+  /* The paper look's dense table (the prototype's): a 12px header, numbers in the narrow width. */
+  :global(html[data-look="paper"] [data-ground="paper"]) .stats thead th { font-size: 12px; }
+  /* Only the all-number tables (.nums): the run-guard and grade tables hold words and pills. */
+  :global(html[data-look="paper"] [data-ground="paper"]) .nums td:not(:first-child) { font-stretch: 85%; }
   .censors { margin-top: 1.25rem; max-width: 28rem; }
   .guards { margin-bottom: 1rem; }
   .guards td.wrap { white-space: normal; text-align: left; min-width: 12rem; }
   .guards td.wrap pre { margin: 0; font-family: var(--font-mono); font-size: 0.75rem; white-space: pre-wrap; overflow-wrap: anywhere;
     max-height: 8rem; overflow-y: auto; }
-  .guards td.acted { color: #fb923c; font-weight: 600; }
+  .guards td.acted { color: var(--st-partial); font-weight: 600; }
   .guard-tiles { margin-top: 0.25rem; }
   .guards tr.last-runs > td { text-align: left; white-space: normal; }
   .guards tr.last-runs .guards { margin: 0.25rem 0 0.5rem; }
   .legend { display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.75rem; color: var(--muted); margin: 0.5rem 0 0.75rem; }
-  .legend i { display: inline-block; width: 0.625rem; height: 0.625rem; border-radius: 2px; margin-right: 0.375rem; vertical-align: -1px; }
+  .legend i { display: inline-block; width: 0.625rem; height: 0.625rem; border-radius: 2px; margin-right: 0.375rem; vertical-align: -1px;
+    background: var(--fill); }
   .stack { display: flex; width: 8rem; max-width: 100%; height: 8px; border-radius: 4px; background: var(--border); overflow: hidden; }
+  .stack > div { background: var(--fill); }
   .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 0.6875rem; font-weight: 600;
     border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
-  .pill-warn { color: #fb923c; border-color: rgba(251, 146, 60, 0.5); }
+  .pill-warn { color: var(--st-partial); border-color: color-mix(in srgb, var(--st-partial) 50%, transparent); }
   .fix-live { color: var(--accent); border-color: var(--accent); }
-  .fix-ok { color: #10b981; border-color: rgba(16, 185, 129, 0.5); }
-  .fix-warn { color: #fb923c; border-color: rgba(251, 146, 60, 0.5); }
+  .fix-ok { color: var(--stat-ok); border-color: color-mix(in srgb, var(--stat-ok) 50%, transparent); }
+  .fix-warn { color: var(--st-partial); border-color: color-mix(in srgb, var(--st-partial) 50%, transparent); }
   /* Two lines at most. It wraps anywhere, because an unbreakable line would widen the page on a phone (min-content). */
   .job { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden;
     overflow-wrap: anywhere; max-width: 28rem; font-size: 0.8125rem; }
@@ -648,7 +663,7 @@
   .small { font-size: 0.75rem; }
   .muted { color: var(--muted); }
   .state-msg { margin-top: 2rem; text-align: center; color: var(--muted); font-size: 0.875rem; }
-  .state-msg.error { color: var(--red); }
+  .state-msg.error { color: var(--err-text); }
   @media (max-width: 520px) {
     .triple { grid-template-columns: 1fr 1fr; }
     .bar-row { grid-template-columns: minmax(0, 7rem) minmax(0, 1fr) 2.5rem; }

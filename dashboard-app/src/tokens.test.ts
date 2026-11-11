@@ -246,6 +246,22 @@ const PR3: Record<string, [string, string]> = {
 };
 for (const [k, [dark]] of Object.entries(PR3)) NEW_DARK[k] = dark;
 
+// PR 4 and PR 5 (the Decisions, Autonomy and System groups): [dark, paper].
+const PR4: Record<string, [string, string]> = {
+  // A text field's boundary. Dark: the --border the fields used (Identity's fields do not move). Paper: 3:1 on the card
+  // and the page (WCAG 1.4.11); the prototype's rule-2 #c9d4da is about 1.5:1.
+  '--field-border': ['var(--border)', '#7a8896'],
+  // Scoring's self-corrected signal mark. Dark: the old #a78bfa. Paper: a soft mauve, 13.4 (OKLab) from every other signal
+  // colour under all three visions; --series-3 (#a8408f) was 4.2 from praised's blue under protanopia.
+  '--signal-self-corrected': ['#a78bfa', '#b87ab3'],
+  // Review I2: the success mark of Decisions' outcomes, the Overview's doughnut and Scoring's completed signal. Dark: the
+  // old #34d399. Paper: a green 9.8 or more from partial, failure (--err-text) and the other signal marks under all three
+  // visions, where --green was 4.6 from partial under protanopia and 5.9 from failure under deuteranopia. It sits close
+  // to --green on purpose (the same meaning), so it is kept out of the categorical-against-status checks.
+  '--oc-success': ['#34d399', '#3f8772'],
+};
+for (const [k, [dark]] of Object.entries(PR4)) NEW_DARK[k] = dark;
+
 // The legacy memory-type colours keep their golden dark values (ORIGIN_ROOT) and get paper ones (Retrieval's chips).
 const LEGACY_PAPER: Record<string, string> = {
   '--fact-color': '#159a7a', // review M6: one colour per memory type on paper, the Graph's
@@ -858,5 +874,142 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
   it('the waiting pill\'s text on its tint: at least 4.5:1 in both grounds', () => {
     expect(contrast(PAPER['--wait-ink'], PAPER['--wait-bg'])).toBeGreaterThanOrEqual(4.5);
     expect(contrast(DARK['--wait-ink'], over(parseColor(DARK['--wait-bg']), parseColor(DARK['--surface'])))).toBeGreaterThanOrEqual(4.5);
+  });
+});
+
+// ── PR 4 and PR 5: the Decisions, Autonomy and System groups ──────────────────────────────────────────────────────
+
+describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
+  const page = PAPER['--bg'];
+  const white = '#ffffff';
+  const hover = PAPER['--surface-hover'];
+
+  it('every new token has its dark and paper value; the dark one is built from var() and redefined on paper', () => {
+    for (const [k, [dark, paper]] of Object.entries(PR4)) {
+      expect(DARK[k], k).toBe(dark);
+      expect(PAPER[k], k).toBe(paper);
+    }
+  });
+
+  it('a text field\'s boundary is at least 3:1 on the white card and on the page (WCAG 1.4.11)', () => {
+    expect(contrast(PAPER['--field-border'], white)).toBeGreaterThanOrEqual(3); // 3.63
+    expect(contrast(PAPER['--field-border'], page)).toBeGreaterThanOrEqual(3); // 3.22
+  });
+
+  it('Scoring\'s heatmap: ink on the strongest cell (65% of the fill over the card) is at least 4.5:1 on paper', () => {
+    expect(contrast(PAPER['--text'], tint(PAPER['--green'], 0.65, white))).toBeGreaterThanOrEqual(4.5); // 6.78
+    expect(contrast(PAPER['--text'], tint(PAPER['--red'], 0.65, white))).toBeGreaterThanOrEqual(4.5); // 5.78
+    // Dark is today's, recorded and not fixed: the strongest green cell is 3.1:1, red 4.2:1.
+    expect(contrast(DARK['--text'], tint(DARK['--green'], 0.65, DARK['--surface']))).toBeCloseTo(3.11, 1);
+    expect(contrast(DARK['--text'], tint(DARK['--red'], 0.65, DARK['--surface']))).toBeCloseTo(4.18, 1);
+  });
+
+  it('Guards\' censor count: the accent on its 12% tint over the card is at least 4.5:1 on paper', () => {
+    expect(contrast(PAPER['--accent'], tint(PAPER['--accent'], 0.12, white))).toBeGreaterThanOrEqual(4.5); // 6.22
+    expect(contrast(DARK['--accent'], tint(DARK['--accent'], 0.12, DARK['--surface']))).toBeCloseTo(4.11, 1); // today's
+  });
+
+  it('status strips and pills: text on a tint of itself, over the card, a hovered row and the page, at least 4.5:1', () => {
+    // Autonomy's scorer strip sits on the page; Guards' verdicts in a card; badges and pills in hoverable rows.
+    for (const bg of [white, hover, page]) {
+      expect(contrast(PAPER['--stat-ok'], tint(PAPER['--stat-ok'], 0.08, bg)), `ok on ${bg}`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(PAPER['--stat-warn'], tint(PAPER['--stat-warn'], 0.08, bg)), `warn on ${bg}`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(PAPER['--err-text'], tint(PAPER['--tone-bad'], 0.1, bg)), `bad on ${bg}`).toBeGreaterThanOrEqual(4.5);
+    }
+    // The partial badge takes PR 3's 12.5% badge tint: at 15% it is 4.49:1 on a hovered row.
+    for (const bg of [white, hover]) {
+      expect(contrast(PAPER['--st-partial'], tint(PAPER['--st-partial'], 0.125, bg)), `partial on ${bg}`).toBeGreaterThanOrEqual(4.5);
+    }
+    expect(contrast(PAPER['--st-partial'], tint(PAPER['--st-partial'], 0.15, hover))).toBeLessThan(4.5);
+    // Border-only pills and coloured counts, on a hovered row.
+    for (const t of ['--st-partial', '--stat-ok', '--stat-warn', '--err-text', '--muted', '--accent']) {
+      expect(contrast(PAPER[t], hover), t).toBeGreaterThanOrEqual(4.5);
+    }
+    // The neutral badge (a pending or unknown status): muted text on the wash, in both looks.
+    expect(contrast(PAPER['--muted'], PAPER['--wash'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(DARK['--muted'], over(parseColor(DARK['--wash']), parseColor(DARK['--surface'])))).toBeGreaterThanOrEqual(4.5);
+  });
+
+  // Marks one chart draws together keep 8 apart for normal vision and under protanopia and deuteranopia (PR 3 review I3).
+  // Each screen task adds the sets its charts draw. An open pair is held at its present floor, named, with the cue that
+  // tells its marks apart besides colour; it is listed in the PR 4 report for the owner.
+  const MARK_SETS: Record<string, string[]> = {
+    // Decisions' outcome by category and by stakes (stacked bars), and the Overview's outcome doughnut: one palette, so a
+    // hue means the same outcome on both screens. Review I2: success --oc-success, failure --err-text (both dark-exact).
+    'decisions outcomes': ['--oc-success', '--yellow', '--err-text', '--series-7'],
+    // Scoring's signal doughnut and stacked trend. Reworked is drawn in --err-text (dark: the old #f87171), which keeps it
+    // apart from corrected's orange under deuteranopia (5.2 with --red); --series-7 is an unknown signal type's slice.
+    'scoring signals': ['--oc-success', '--series-1', '--series-4', '--err-text', '--signal-self-corrected', '--series-7'],
+    // Scoring's weight evolution: one line per dimension. Each line also has a dash of its own (Rubric.test.ts).
+    'scoring dimensions': ['--series-0', '--series-2', '--series-1', '--series-4', '--series-5', '--series-3', '--series-6', '--series-8', '--series-9'],
+    // Autonomy's "who was there" shares and their legend. (Its outcome bars each sit beside their label, so they are
+    // never matched by colour.)
+    'autonomy contexts': ['--series-1', '--series-2', '--series-4'],
+    // Guards' flags per day: one line per rule, each with its own dash as well.
+    'guards rules': ['--series-1', '--series-4', '--series-9'],
+  };
+  const OPEN_PAIRS: Record<string, number> = {
+    '--series-1|--series-3': 4, // protan 4.2 (Scoring's dimensions 3 and 6)
+    // Scoring's dimensions: told apart by the dash as well as the hue.
+    '--series-0|--series-8': 7, // 7.2 normal
+    '--series-2|--series-6': 7.5, // deutan 7.6
+    '--series-4|--series-5': 3, // deutan 3.4: orange and olive (the accepted paper series 5)
+    '--series-3|--series-9': 3.5, // deutan 3.7
+    '--series-1|--series-9': 7.5, // protan 7.95 (8.0 normal)
+  };
+  const openFloor = (a: string, b: string) => OPEN_PAIRS[`${a}|${b}`] ?? OPEN_PAIRS[`${b}|${a}`] ?? 8;
+
+  it('marks one chart draws together keep 8 apart under normal vision, protanopia and deuteranopia, or a named floor', () => {
+    for (const [chart, set] of Object.entries(MARK_SETS)) {
+      for (let i = 0; i < set.length; i++) {
+        expect(contrast(PAPER[set[i]], white), `${chart}: ${set[i]} on white`).toBeGreaterThanOrEqual(3);
+        for (let j = i + 1; j < set.length; j++) {
+          const floor = openFloor(set[i], set[j]);
+          for (const cvd of [undefined, 'protan', 'deutan'] as const) {
+            expect(okDistance(PAPER[set[i]], PAPER[set[j]], cvd), `${chart}: ${set[i]} and ${set[j]} (${cvd ?? 'normal'})`)
+              .toBeGreaterThanOrEqual(floor);
+          }
+        }
+      }
+    }
+  });
+
+  it('the self-corrected mark is a colour of its own: 3:1 on white, 6 or more from every status and frame colour', () => {
+    const c = PAPER['--signal-self-corrected'];
+    expect(contrast(c, white)).toBeGreaterThanOrEqual(3);
+    for (const t of ['--green', '--yellow', '--red', '--ok-text', '--warn-text', '--err-text', ...FRAMES.map((f) => `--f-${f}`)]) {
+      expect(okDistance(c, PAPER[t]), t).toBeGreaterThanOrEqual(6);
+    }
+  });
+
+  it('Scoring\'s radar bounds are full-strength lines: 3:1 or more on the card and over the weight polygon\'s 20% fill (review I1)', () => {
+    // At 40% they were 1.87:1 and 1.68:1 on white. Min and Max also differ by dash kind (Rubric.test.ts).
+    const polygon = tint(PAPER['--series-0'], 0.2, white);
+    for (const t of ['--red', '--green']) {
+      expect(contrast(PAPER[t], white), `${t} on white`).toBeGreaterThanOrEqual(3);
+      expect(contrast(PAPER[t], polygon), `${t} over the polygon`).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  it('every named open pair is drawn together by some chart and is really below 8 (no stale exemption)', () => {
+    for (const key of Object.keys(OPEN_PAIRS)) {
+      const [a, b] = key.split('|');
+      expect(Object.values(MARK_SETS).some((s) => s.includes(a) && s.includes(b)), key).toBe(true);
+      const worst = Math.min(...([undefined, 'protan', 'deutan'] as const).map((cvd) => okDistance(PAPER[a], PAPER[b], cvd)));
+      expect(worst, key).toBeLessThan(8);
+    }
+  });
+
+  it('the listed dark changes (D3, D4): each new dark pair on the dark card, 3:1 for a mark and 4.5:1 for text', () => {
+    const surface = DARK['--surface'];
+    expect(contrast(DARK['--st-neutral'], surface)).toBeGreaterThanOrEqual(3); // was #6b6b8a (3.63), now 3.85
+    expect(contrast(DARK['--series-9'], surface)).toBeGreaterThanOrEqual(3); // Guards' claims, was #2dd4bf
+    expect(contrast(DARK['--accent-text'], surface)).toBeGreaterThanOrEqual(4.5); // Observability's trace type, was #38bdf8
+    expect(contrast(DARK['--muted'], over(parseColor(DARK['--wash']), parseColor(surface)))).toBeGreaterThanOrEqual(4.5); // count badge
+    // D3, the perfect-calibration line: --muted at 40% instead of #6b6b8a at 40%. A reference line, not data: recorded.
+    const at40 = (c: string, bg: string) => over([...parseColor(c).slice(0, 3), 0.4] as RGBA, parseColor(bg));
+    expect(contrast(at40('#6b6b8a', surface), surface)).toBeCloseTo(1.57, 1);
+    expect(contrast(at40(DARK['--muted'], surface), surface)).toBeCloseTo(1.94, 1);
+    expect(contrast(at40(PAPER['--muted'], white), white)).toBeCloseTo(1.79, 1);
   });
 });
