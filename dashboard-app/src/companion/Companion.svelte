@@ -335,8 +335,8 @@
           <a
             class="permalink"
             href={'#/s/' + encodeURIComponent(surface.surfaceId)}
-            aria-label={'Open ' + chipLabel(surface) + ' on its own'}
-          >Link</a>
+            aria-label={'Open ' + (chipName(surface) || chipLabel(surface)) + ' on its own'}
+          >Open</a>
           <Renderer surfaceId={surface.surfaceId} componentId="root" />
         </section>
       {/each}
@@ -487,7 +487,7 @@
     box-shadow: var(--card-shadow);
     padding: 1.1rem;
   }
-  /* In the feed a card carries its "Link" (to the focused view) in a strip of
+  /* In the feed a card carries its "Open" (to the focused view) in a strip of
      its own above the content, so the word never sits on the surface's first
      component (an app's header stamp, an ApprovalPanel's border). */
   .surface.linked {

@@ -251,7 +251,7 @@ describe('every control is a 44px tap target on paper through --tap-min (source 
     }
   });
 
-  it('"Link" is a 44px-tall target in a strip of its own', () => {
+  it('"Open" is a 44px-tall target in a strip of its own', () => {
     const shell = styleBlocks(readFileSync(join(SHELL, 'Companion.svelte'), 'utf-8'));
     expect(shell.split('.surface.linked {')[1].split('}')[0]).toContain('padding-top: 2.75rem');
     expect(shell.split('.permalink {')[1].split('}')[0]).toMatch(/top: 0;[^}]*right: 0;[^}]*height: 2\.75rem;[^}]*display: inline-flex;[^}]*align-items: center/);

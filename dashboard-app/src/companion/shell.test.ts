@@ -736,14 +736,21 @@ describe('Companion shell — the Atlantic-blue bar on chart paper (PR 6)', () =
     expect(conn?.classList.contains('live')).toBe(true);
   });
 
-  it('the permalink is the word "Link", not a glyph', () => {
+  it('the permalink is the word "Open", not a glyph, and its name starts with that word', () => {
     seed('nous:chat:micro_app:aaa001');
     const { container } = render(Companion);
     const link = container.querySelector('a.permalink');
-    expect(link?.textContent).toBe('Link');
-    // review M13: its name says what it opens
+    expect(link?.textContent).toBe('Open');
+    // review M13 and re-review call 1: the name says what it opens and starts with the visible word (WCAG 2.5.3)
     expect(link?.getAttribute('aria-label')).toBe('Open app on its own');
     expect(link?.getAttribute('href')).toBe('#/s/' + encodeURIComponent('nous:chat:micro_app:aaa001'));
+  });
+
+  it("the permalink's name carries an app's whole title, not the switcher chip's cut one", () => {
+    const title = 'Quarterly Revenue Breakdown By Region';
+    seed('nous:chat:micro_app:long001', 0, undefined, title);
+    const { container } = render(Companion);
+    expect(container.querySelector('a.permalink')?.getAttribute('aria-label')).toBe(`Open ${title} on its own`);
   });
 
   it('no symbol character in the shell text (the brand, the state, the switcher, the permalink, the empty feed)', () => {
