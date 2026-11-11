@@ -19,7 +19,7 @@ export function readToken(el: Element, name: string): string {
   return getComputedStyle(el).getPropertyValue(name).trim();
 }
 
-/** `#7c6af7` or `rgb(…)` at `alpha`, as `rgba(…)`; anything else is returned unchanged. */
+/** `#12304f` or `rgb(…)` at `alpha`, as `rgba(…)`; anything else is returned unchanged. */
 export function withAlpha(color: string, alpha: number): string {
   const hex = color.match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
   if (hex) {

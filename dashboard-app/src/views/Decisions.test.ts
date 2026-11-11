@@ -10,7 +10,7 @@ import { ROOT_SEL, block, parseBlocks, styleBlocks } from '../lib/testing/css';
 // element the canvas sits in (with no stylesheet, jsdom, the :root values through TOKEN_FALLBACK).
 
 const PAPER = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
-const OLD = ['#7c6af7', '#34d399', '#fbbf24', '#f87171', '#6b6b8a', '#a78bfa'];
+const OLD = ['#34d399', '#fbbf24', '#f87171', '#a78bfa']; // the old palette itself (the violet accent, the dark greys) is guarded in every file by oldPalette.test.ts
 
 const DATA = {
   calibration_curve: [

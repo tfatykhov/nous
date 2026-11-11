@@ -61,8 +61,8 @@
   const DIM_DASHES = [[], [10, 4], [2, 3], [8, 3, 2, 3], [2, 2], [14, 5], [6, 2, 2, 2], [2, 4], [8, 3, 1, 3, 1, 3]];
   const dimDash = (i: number) => DIM_DASHES[i] ?? [i + 2, 3];
 
-  // Reworked is --err-text (dark: the old red), apart from corrected's orange under deuteranopia; self-corrected a mark
-  // of its own (--series-3 was 4.2 from praised's blue under protanopia); an unknown type --series-7 (dark: #6b6b8a).
+  // Reworked is --err-text, apart from corrected's orange under deuteranopia; self-corrected a mark of its own
+  // (--series-3 was 4.2 from praised's blue under protanopia); an unknown type --series-7.
   const SIGNAL_TOKENS: Record<string, string> = {
     completed: '--oc-success',
     praised: '--series-1',

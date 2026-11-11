@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import Overview from './Overview.svelte';
 import { attentionOverride, attentionPoll } from '../lib/stores/attention';
+import { sourceFiles } from '../lib/testing/sources';
 
 // The redesigned Overview: Needs you, Today so far and Health on top, the compact day timeline below them, then the
 // memory numbers as before. Each card reads data the dashboard already serves; nothing is invented.
@@ -268,7 +269,7 @@ describe('Overview', () => {
     const src = readFileSync(resolve(__dirname, 'Overview.svelte'), 'utf-8');
     expect(src).not.toContain('{@html');
     expect(src).not.toMatch(/#[0-9a-fA-F]{6}\b|rgba?\(/); // markup and script too, not only the style
-    const guard = readFileSync(resolve(__dirname, '..', 'hexGuard.test.ts'), 'utf-8');
-    for (const f of ['views/Overview.svelte', 'lib/viz/DayTimeline.svelte']) expect(guard).toContain(`'${f}'`);
+    // The hex guard walks every source file (PR 7: lib/testing/sources.ts), these two among them.
+    expect(sourceFiles()).toEqual(expect.arrayContaining(['views/Overview.svelte', 'lib/viz/DayTimeline.svelte']));
   });
 });

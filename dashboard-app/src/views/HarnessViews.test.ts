@@ -449,7 +449,7 @@ describe('harness dashboard views', () => {
       await waitFor(() => expect(charts).toHaveLength(1));
       const [c] = charts;
       expect(c.data.datasets.map((d: any) => d.borderColor)).toEqual(['--series-1', '--series-4', '--series-9'].map((t) => PAPER[t]));
-      for (const old of ['#60a5fa', '#fb923c', '#2dd4bf', '#8e8eab', '#1e1e2e']) expect(JSON.stringify(c)).not.toContain(old);
+      for (const old of ['#60a5fa', '#fb923c', '#2dd4bf']) expect(JSON.stringify(c)).not.toContain(old);
       expect(c.options.scales.x.ticks.color).toBe(PAPER['--muted']);
       expect(c.options.scales.y.grid.color).toBe(PAPER['--border']);
     } finally {

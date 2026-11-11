@@ -3,7 +3,6 @@
 </script>
 
 <div class="placeholder">
-  <div class="placeholder-icon" aria-hidden="true">🚧</div>
   <p class="placeholder-text">
     <strong>{route}</strong> — this view is being migrated. Use the classic dashboard at
     <a href="/dashboard/" class="placeholder-link">/dashboard/</a> for now.
@@ -21,11 +20,6 @@
     text-align: center;
     color: var(--muted);
     min-height: 200px;
-  }
-
-  .placeholder-icon {
-    font-size: 2.5rem;
-    line-height: 1;
   }
 
   .placeholder-text {

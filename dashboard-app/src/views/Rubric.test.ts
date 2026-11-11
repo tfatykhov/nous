@@ -9,7 +9,7 @@ import { ROOT_SEL, block, parseBlocks, styleBlocks } from '../lib/testing/css';
 // the canvas sits in; the heatmap's cells mix a token with transparent; no arrow glyph in a heading.
 
 const PAPER = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
-const OLD = ['#7c6af7', '#34d399', '#60a5fa', '#fb923c', '#f87171', '#a78bfa', '#fbbf24', '#6b6b8a', '#111118', '#1e1e2e'];
+const OLD = ['#34d399', '#60a5fa', '#fb923c', '#f87171', '#a78bfa', '#fbbf24', '#111118']; // the old palette itself (the violet accent, the dark greys) is guarded in every file by oldPalette.test.ts
 const DIM_TOKENS = ['--series-0', '--series-2', '--series-1', '--series-4', '--series-5', '--series-3', '--series-6', '--series-8', '--series-9'];
 
 const dims = (n: number) => Array.from({ length: n }, (_, i) => `dim_${i + 1}`);

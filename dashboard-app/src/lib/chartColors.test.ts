@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { TOKEN_FALLBACK, cssColor, lineLegendLabels, resolveColors, seriesToken, tint, withChartDefaults } from './chartColors';
 import { ROOT_SEL, block, parseBlocks, scriptBlocks } from './testing/css';
+import { sourceFiles } from './testing/sources';
 
 // A canvas (Chart.js) or cytoscape cannot read var(): their colours are tokens (`var(--x)`, or the `tint(--x, a)`
 // sentinel) that chartColors resolves against the element the chart draws into. Every other value passes through
@@ -51,12 +52,14 @@ describe('TOKEN_FALLBACK', () => {
 });
 
 // Review M5: a mistyped token (`var(--sereis-1)`) resolves to '' and draws in the library's default colour, silently.
-// Every token a migrated script names by a literal string must exist in app.css.
-describe('every token a migrated script names exists', () => {
-  const guard = readFileSync(join(__dirname, '..', 'hexGuard.test.ts'), 'utf-8');
-  const files = [...(guard.match(/export const SCRIPT_GUARDED[^=]*=\s*\[([\s\S]*?)\];/)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
-  const scripts = [...files.map((f) => [f, scriptBlocks(readFileSync(join(__dirname, '..', f), 'utf-8'))] as const),
-    ['lib/overviewCharts.ts', readFileSync(join(__dirname, 'overviewCharts.ts'), 'utf-8')] as const];
+// Every token a script names by a literal string must exist in app.css. PR 7: every source file's script or code
+// (lib/testing/sources.ts), not the list the screens joined one PR at a time.
+describe('every token a script names exists', () => {
+  const code = (f: string) => {
+    const src = readFileSync(join(__dirname, '..', f), 'utf-8');
+    return scriptBlocks(f.endsWith('.svelte') ? src : `<script>${src}</script>`);
+  };
+  const scripts = sourceFiles().map((f) => [f, code(f)] as const);
   /** Token names in a script's string literals: `var(--x)`, `tint(--x, …)`/`tint('--x', …)`, and a bare `'--x'`. */
   const named = (js: string) => [...new Set([
     ...[...js.matchAll(/var\(\s*(--[a-z0-9-]+)\s*\)/gi)].map((m) => m[1]),
@@ -66,7 +69,8 @@ describe('every token a migrated script names exists', () => {
 
   it('finds the names (and would catch a typo)', () => {
     expect(named("const a = 'var(--sereis-1)'; tint('--green', 0.1); c('--gv-select'); `var(--gv-${t})`")).toEqual(['--sereis-1', '--green', '--gv-select']);
-    expect(files.length).toBeGreaterThan(20);
+    expect(scripts.length).toBeGreaterThan(100);
+    expect(scripts.map(([f]) => f)).toEqual(expect.arrayContaining(['lib/overviewCharts.ts', 'views/Overview.svelte']));
   });
 
   it.each(scripts.map(([f]) => f))('%s', (file) => {

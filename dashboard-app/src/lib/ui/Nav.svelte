@@ -195,7 +195,6 @@
 
   .nav-link.active {
     background: var(--accent-glow);
-    /* #a99df9 on the glow: 6.69:1 (the raw accent was 3.96:1) */
     color: var(--accent-text);
     font-weight: var(--nav-active-weight);
   }
