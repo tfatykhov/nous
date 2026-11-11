@@ -516,7 +516,7 @@
         </div>
         <dl class="approval-dl">
           <div><dt>Asked</dt><dd>{fmtUtc(a.asked_at)}</dd></div>
-          <div><dt>Answer by</dt><dd>{fmtUtc(a.deadline)}{#if waiting && !a.answer && a.deadline} ({relUntil(a.deadline)}){/if}</dd></div>
+          <div><dt>Answer by</dt><dd>{fmtUtc(a.deadline)}{#if waiting && !a.answer && a.deadline}{' '}({relUntil(a.deadline)}){/if}</dd></div>
           <div><dt>If no answer</dt><dd>'{a.default_label}' — the DAG stops here</dd></div>
           <div><dt>Answer</dt><dd>{answerLine(a, live.status)}</dd></div>
         </dl>
