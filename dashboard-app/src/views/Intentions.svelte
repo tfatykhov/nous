@@ -242,6 +242,11 @@
   .tiles dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: none;
     letter-spacing: 0; }
   .tiles dd { margin: 0.25rem 0 0; font-size: 1.25rem; font-weight: 700; }
+  @media (max-width: 640px) {
+    /* Two up on a phone, an odd last tile across: one per row made eight tiles a long column. */
+    .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .tiles > div:last-child:nth-child(odd) { grid-column: 1 / -1; }
+  }
   .scroll { overflow-x: auto; margin-top: 0.75rem; }
   table { border-collapse: collapse; width: 100%; font-size: 0.8125rem; }
   caption { text-align: left; font-weight: 600; padding-bottom: 0.375rem; }

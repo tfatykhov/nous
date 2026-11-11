@@ -422,6 +422,7 @@
   }
 
   .chart-row > * { min-width: 0; }
+  .chart-row > :only-child { grid-column: 1 / -1; } /* one chart: the full width */
 
   .chart-card {
     background: var(--surface);

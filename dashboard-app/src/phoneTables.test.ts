@@ -69,3 +69,37 @@ describe('phone tables', () => {
     expect(phoneRules('lib/ui/StatGrid.svelte').get('.stat-grid')).toMatchObject({ 'grid-template-columns': 'repeat(2, minmax(0, 1fr))' });
   });
 });
+
+// Design batch 1, from the captures at 390 and 1440: what the first look at every screen showed.
+describe('the details the captures showed', () => {
+  it('Consolidation: a cycle\'s start time and its totals stay on one line (the table scrolls instead)', () => {
+    expect(STYLE('views/Consolidation.svelte').get('.ts')).toMatchObject({ 'white-space': 'nowrap' });
+    expect(STYLE('views/Consolidation.svelte').get('.totals-cell')).toMatchObject({ 'white-space': 'nowrap' });
+  });
+
+  it('Intentions: the metric tiles are two up on a phone (they were one per row), an odd last tile across', () => {
+    expect(phoneRules('views/Intentions.svelte').get('.tiles')).toMatchObject({ 'grid-template-columns': 'repeat(2, minmax(0, 1fr))' });
+    expect(phoneRules('views/Intentions.svelte').get('.tiles > div:last-child:nth-child(odd)')).toMatchObject({ 'grid-column': '1 / -1' });
+  });
+
+  it('Retrieval: on a phone a legend family starts a new line (the hairline between families sat at line ends)', () => {
+    expect(phoneRules('views/Retrieval.svelte').get('.disp-legend li.fam-sep')).toEqual({ 'flex-basis': '100%', height: '0', margin: '0' });
+  });
+
+  it.each(['views/health/GraphTab.svelte', 'views/health/GrowthTab.svelte'])('%s: the subtitle keeps its width; "updated" and Refresh wrap below it', (f) => {
+    expect(STYLE(f).get('.view-head')).toMatchObject({ 'flex-wrap': 'wrap' });
+    expect(STYLE(f).get('.subtitle')).toMatchObject({ flex: '1 1 20rem' });
+  });
+
+  it('Observability: a chart row with one chart gives it the full width (the error-rate card sat at half width)', () => {
+    expect(STYLE('views/Observability.svelte').get('.chart-row > :only-child')).toEqual({ 'grid-column': '1 / -1' });
+  });
+
+  it('Health: the numbers in the three density tables are right-aligned in tabular figures, and the headers are sentence case', () => {
+    expect(STYLE('views/health/GraphTab.svelte').get('.data-table .num')).toEqual({ 'text-align': 'right', 'font-variant-numeric': 'tabular-nums' });
+    const m = markupOf(read('views/health/GraphTab.svelte'));
+    expect((m.match(/<th class="num">/g) ?? []).length).toBe(4);
+    expect((m.match(/<td class="num">/g) ?? []).length).toBe(4);
+    expect(m).toContain('<th class="num">Auto-linked edges</th>');
+  });
+});

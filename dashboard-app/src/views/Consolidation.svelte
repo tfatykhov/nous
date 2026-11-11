@@ -375,14 +375,14 @@
   .cycle-row:hover td { background: var(--surface-hover); }
   .cycle-row.selected td { background: var(--accent-glow); }
 
-  .ts { display: block; }
+  .ts { display: block; white-space: nowrap; } /* one line: the table scrolls on a phone instead */
   .trace {
     font-size: 0.7rem;
     color: var(--muted);
     font-family: var(--font-mono, monospace);
   }
 
-  .totals-cell { color: var(--muted); }
+  .totals-cell { color: var(--muted); white-space: nowrap; }
 
   .empty-cell {
     text-align: center;

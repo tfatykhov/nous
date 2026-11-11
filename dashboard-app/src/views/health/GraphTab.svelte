@@ -390,14 +390,14 @@
       <h2>Orphan rate by type</h2>
       <table class="data-table">
         <thead>
-          <tr><th>Type</th><th>Total</th><th>Orphans</th><th>Rate</th></tr>
+          <tr><th>Type</th><th class="num">Total</th><th class="num">Orphans</th><th>Rate</th></tr>
         </thead>
         <tbody>
           {#each Object.entries(d.density_by_type) as [type, stats]}
             <tr>
               <td class="type-cell">{TYPE_LABEL[type] ?? type}</td>
-              <td>{stats.total.toLocaleString()}</td>
-              <td>{stats.orphan.toLocaleString()}</td>
+              <td class="num">{stats.total.toLocaleString()}</td>
+              <td class="num">{stats.orphan.toLocaleString()}</td>
               <td><span class="badge {orphanRateClass(stats.orphan_rate)}">{(stats.orphan_rate * 100).toFixed(1)}%</span></td>
             </tr>
           {:else}
@@ -412,13 +412,13 @@
       <h2>Edge distribution</h2>
       <table class="data-table">
         <thead>
-          <tr><th>Relation</th><th>Count</th></tr>
+          <tr><th>Relation</th><th class="num">Count</th></tr>
         </thead>
         <tbody>
           {#each Object.entries(d.edge_distribution) as [relation, count]}
             <tr>
               <td>{relation}</td>
-              <td>{count.toLocaleString()}</td>
+              <td class="num">{count.toLocaleString()}</td>
             </tr>
           {:else}
             <tr><td colspan="2" class="empty-cell">No edges</td></tr>
@@ -434,13 +434,13 @@
     <h2>Backfill progress (last 7 days)</h2>
     <table class="data-table">
       <thead>
-        <tr><th>Date</th><th>Auto-linked Edges</th></tr>
+        <tr><th>Date</th><th class="num">Auto-linked edges</th></tr>
       </thead>
       <tbody>
         {#each d.backfill_progress as row}
           <tr>
             <td>{fmtDay(row.date)}</td>
-            <td>{row.edges.toLocaleString()}</td>
+            <td class="num">{row.edges.toLocaleString()}</td>
           </tr>
         {:else}
           <tr><td colspan="2" class="empty-cell">No backfill activity</td></tr>
@@ -453,6 +453,7 @@
 <style>
   .view-head {
     display: flex;
+    flex-wrap: wrap;
     align-items: flex-start;
     justify-content: space-between;
     gap: 1rem;
@@ -460,6 +461,7 @@
   }
 
   .subtitle {
+    flex: 1 1 20rem; /* a phone puts "updated" and Refresh under it, not beside it */
     font-size: 0.8125rem;
     color: var(--muted);
     margin: 0;
@@ -648,6 +650,9 @@
   .data-table tbody tr:last-child td { border-bottom: none; }
 
   .data-table tbody tr:hover td { background: var(--surface-hover); }
+
+  /* A number column: right-aligned in tabular figures, as in the shared table (finish review fix 3). */
+  .data-table .num { text-align: right; font-variant-numeric: tabular-nums; }
 
   .type-cell {
     font-weight: 500;

@@ -178,6 +178,7 @@
 <style>
   .view-head {
     display: flex;
+    flex-wrap: wrap;
     align-items: flex-start;
     justify-content: space-between;
     gap: 1rem;
@@ -185,6 +186,7 @@
   }
 
   .subtitle {
+    flex: 1 1 20rem; /* a phone puts "updated" and Refresh under it, not beside it */
     font-size: 0.8125rem;
     color: var(--muted);
     margin: 0;

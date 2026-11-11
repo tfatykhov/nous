@@ -1294,6 +1294,8 @@
   /* At phone width the two headline numbers side by side, the bar on its own row below them: squeezed between
      them it had no width left. */
   @media (max-width: 640px) {
+    /* A family starts a new line: the hairline between families sat at the ends of wrapped lines. */
+    .disp-legend li.fam-sep { flex-basis: 100%; height: 0; margin: 0; }
     .funnel { grid-template-columns: 1fr 1fr; grid-template-areas: "in out" "bar bar"; gap: 0.75rem 1rem; }
     .funnel-in { grid-area: in; text-align: left; }
     .funnel-out { grid-area: out; }
