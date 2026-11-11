@@ -116,8 +116,7 @@ describe('no old palette anywhere in the dashboard', () => {
   });
 
   it('no file holds the old palette outside its allowances', () => {
-    const excluded = ['public/favicon.svg', 'src/oldPalette.test.ts'];
-    expect(scanned().filter((f) => !excluded.includes(f)).filter(hit)).toEqual([]);
+    expect(scanned().filter((f) => f !== 'src/oldPalette.test.ts').filter(hit)).toEqual([]);
   });
 
   it.each(ALLOWED.map((a, i) => [i, a.file, a.reason] as const))('allowance %i (%s) still spares something: %s', (i) => {
@@ -127,9 +126,9 @@ describe('no old palette anywhere in the dashboard', () => {
     expect(scopes.some((m) => (m.match(a.values) ?? []).some((v) => OLD_PALETTE.test(v))), 'it spares no old value: drop it').toBe(true);
   });
 
-  it('the guard itself and the old mark are the only files left out (the mark until Task 8 re-draws it)', () => {
+  it('the guard itself is the only file left out, and the re-drawn favicon (PR 7 Task 8) is read like any other', () => {
     expect(OLD_PALETTE.test(read('src/oldPalette.test.ts'))).toBe(true);
-    expect(read('public/favicon.svg')).toMatch(/#863bff/i);
+    expect(hit('public/favicon.svg')).toBe(false);
   });
 
   // PR 7 T7 took the old-palette entries out of three render tests' lists of forbidden colours (each still forbids
