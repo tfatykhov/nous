@@ -254,6 +254,8 @@ const KNOWN_BELOW: Record<string, number> = {
   'paper|--locked|--surface-hover': 3.38,
   'paper|--on-accent|--accent': 4.12,
   'paper|--accent|--accent-glow': 3.56,
+  'paper|--ok|--bg': 3.53, // ChipRow tone ink on --bg (row added with the paper default)
+  'paper|--warn|--bg': 3.04,
   'signal|--muted|--surface-hover': 4.27,
   'signal|--soft|--surface-hover': 4.27,
 };
@@ -400,6 +402,8 @@ function matrix(t: Record<string, string>): [string, string, number][] {
   for (const bg of ['--surface', '--surface-hover']) {
     for (const fg of ['--ok', '--warn', '--crit', '--locked']) pairs.push([fg, bg, 4.5]); // tone text: tile values, pills
   }
+  // ChipRow paints a chip's tone ink on --bg
+  for (const fg of ['--ok', '--warn', '--crit', '--soft']) if (!pairs.some(([f, b]) => f === fg && b === '--bg')) pairs.push([fg, '--bg', 4.5]);
   pairs.push(['--on-accent', '--accent', 4.5], ['--accent', '--accent-glow', 4.5], ['--chart-axis', '--surface', 4.5]);
   for (const k of Object.keys(t)) if (/^--(series-\d+|node-[\w-]+)$/.test(k)) pairs.push([k, '--surface', 3]);
   return pairs;
@@ -512,7 +516,7 @@ const PAPER_ROOT: Record<string, string> = {
   '--tl-dot-ring': '2px solid #12304f',
   '--meter-track': '#e3e9ec',
   '--graph-edge': '#56687a',
-  '--graph-edge-opacity': '0.6',
+  '--graph-edge-opacity': '0.75',
   '--line-width': '2',
   '--line-cap': 'round',
   '--line-join': 'round',
@@ -716,6 +720,13 @@ describe('contrast per theme (WCAG: text 4.5, marks 3)', () => {
       expect(contrast(t[k], t['--surface']), k).toBeGreaterThanOrEqual(3);
       expect(contrast(t[k], t['--nested-bg']), k).toBeGreaterThanOrEqual(3);
     }
+  });
+
+  it('paper: a graph edge (the axis grey at --graph-edge-opacity) is a 3:1 mark on the nested tile it is drawn on', () => {
+    const t = SHEET.resolved('nous-default');
+    const [r, g, b] = [1, 3, 5].map((i) => parseInt(t['--graph-edge'].slice(i, i + 2), 16));
+    const edge = over(`rgba(${r}, ${g}, ${b}, ${t['--graph-edge-opacity']})`, t['--nested-bg']);
+    expect(contrast(edge, t['--nested-bg'])).toBeGreaterThanOrEqual(3);
   });
 
   it('a negative bar keeps a visible hatch: the --scrim stripe against each bar fill, 1.5 or more (and on paper, against the card)', () => {

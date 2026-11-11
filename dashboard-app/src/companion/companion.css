@@ -111,7 +111,7 @@
   --tl-dot-ring: 2px solid var(--accent);
   --meter-track: var(--border); /* the confidence meter's track: a hairline grey on white */
   --graph-edge: var(--chart-axis); /* graph edges: a --border hairline vanishes on white */
-  --graph-edge-opacity: 0.6;
+  --graph-edge-opacity: 0.75; /* 3.2:1 on a nested tile (0.6 was 2.4) */
   --line-width: 2; /* chart lines: thicker, with round ends and corners */
   --line-cap: round;
   --line-join: round;
