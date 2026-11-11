@@ -241,7 +241,8 @@ function niceStep(raw: number): number {
 }
 
 /** Round axis numbers (finish review fix 8): the domain widened to the nearest nice step and `count` ticks on it, so an
- * axis reads "0 / 25 / 50", never "0 / 23.7 / 47.4". The zero break is kept as the domain had it. */
+ * axis reads "0 / 25 / 50", never "0 / 23.7 / 47.4". The zero break is recomputed from the rounded bounds: a domain
+ * rounded down (or up) to zero no longer breaks (Codex round 3). */
 export function niceTicks(domain: Domain, count = 3): { domain: Domain; ticks: number[] } {
   const span = domain.max - domain.min || 1;
   let step = niceStep(span / (count - 1));
@@ -255,7 +256,9 @@ export function niceTicks(domain: Domain, count = 3): { domain: Domain; ticks: n
   }
   const round = (v: number) => Number(v.toPrecision(12));
   const ticksOut = Array.from({ length: count }, (_, k) => round(min + step * k));
-  return { domain: { min: round(min), max: round(max), zeroBreak: domain.zeroBreak }, ticks: ticksOut };
+  const lo = round(min);
+  const hi = round(max);
+  return { domain: { min: lo, max: hi, zeroBreak: lo > 0 || hi < 0 }, ticks: ticksOut };
 }
 
 /** A few evenly-spaced tick values across a domain. */

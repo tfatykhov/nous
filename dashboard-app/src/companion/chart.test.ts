@@ -291,3 +291,32 @@ describe('niceTicks', () => {
     }
   });
 });
+
+// Codex round 3 (#904, P3): niceTicks kept the domain's zero break after rounding, so a domain rounded down to zero
+// still drew the break mark under a zero-based axis. The flag is recomputed from the rounded bounds.
+describe('niceTicks: the zero break follows the rounded domain', () => {
+  it('a domain rounded down to zero has no break (the finding: 2 to 10)', () => {
+    const before = yDomain([2, 10], false);
+    expect(before.zeroBreak).toBe(true);
+    const nice = niceTicks(before);
+    expect(nice.ticks[0]).toBe(0);
+    expect(nice.domain.zeroBreak).toBe(false);
+  });
+
+  it('a rounded domain that still excludes zero keeps its break', () => {
+    const nice = niceTicks(yDomain([100, 120], false));
+    expect(nice.ticks[0]).toBeGreaterThan(0);
+    expect(nice.domain.zeroBreak).toBe(true);
+  });
+
+  it('a count series floors at zero with no break', () => {
+    const nice = niceTicks(yDomain([2, 44], false));
+    expect(nice.ticks[0]).toBe(0);
+    expect(nice.domain.zeroBreak).toBe(false);
+  });
+
+  it('a series below zero that rounds up to zero has no break either', () => {
+    expect(niceTicks(yDomain([-10, -2], false)).domain.zeroBreak).toBe(false);
+  });
+});
+
