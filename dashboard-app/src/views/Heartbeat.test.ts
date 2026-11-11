@@ -161,6 +161,12 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
     expect(css).toMatch(/\.tl-summary \{[^}]*overflow-wrap: anywhere;/);
   });
 
+  it('source contract: a disabled banner is dimmed under dark only; on paper its muted pills would be 2.8:1 (review M3)', () => {
+    const css = styleBlocks(readFileSync(join(__dirname, 'Heartbeat.svelte'), 'utf-8'));
+    expect(css).toMatch(/\.hb-banner--disabled \{ opacity: 0\.65; \}/);
+    expect(css).toMatch(/:global\(html\[data-look="paper"\] \[data-ground="paper"\]\) \.hb-banner--disabled \{ opacity: 1; \}/);
+  });
+
   it('the banner and pills read status tokens: text tokens for words, the glow by --glow-blur', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'Heartbeat.svelte'), 'utf-8'));
     expect(css).toMatch(/\.hb-pill--warn \{ border-color: var\(--yellow\); color: var\(--hb-warn-ink\); \}/);

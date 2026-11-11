@@ -439,6 +439,8 @@
 
   .hb-banner--warn { border-color: var(--yellow); }
   .hb-banner--disabled { opacity: 0.65; }
+  /* Muted pills at 65% are 2.8:1 on the white card: on paper the grey dot and the words "Heartbeat Disabled" say it. */
+  :global(html[data-look="paper"] [data-ground="paper"]) .hb-banner--disabled { opacity: 1; }
 
   .hb-dot {
     width: 10px;
