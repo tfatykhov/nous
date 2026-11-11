@@ -323,6 +323,17 @@ describe('Identity: the fact write paths (requests and the screen after them)', 
     for (const name of ['Save', 'Set core', 'Deactivate']) expect(button(edit, name).disabled, name).toBe(false);
   });
 
+  // PR 5 re-review R2: the other two writes' error paths. A catch that cleared its message, or left the row "saving"
+  // (three dead buttons), passed every test before.
+  it.each([['Set core', 'HTTP 500 for /facts/fact-1/core'], ['Deactivate', 'HTTP 500 for /facts/fact-1']])(
+    'a failed %s shows the server\'s message and leaves the three buttons usable', async (name, message) => {
+      const edit = await open('fact-1');
+      fail = true;
+      await fireEvent.click(button(edit, name));
+      await waitFor(() => expect(within(edit).getByText(message)).toBeTruthy());
+      for (const n of ['Save', 'Set core', 'Deactivate']) expect(button(edit, n).disabled, n).toBe(false);
+    });
+
   it('a save the server merged into an existing fact says so above the list, with the stored text, and the list reloads', async () => {
     putReply = { status: 'merged_into_existing', stored_content: 'Tim prefers Celsius, always' };
     const edit = await open('fact-1');
