@@ -290,7 +290,7 @@
       {#each d.drift.anomalies as a}
         <div class="anomaly" class:anomaly--alert={a.severity === 'alert'}>
           <!-- The severity in a word as well as the tint (status is never colour alone). -->
-          <span class="anomaly-level">{a.severity === 'alert' ? 'Alert' : 'Warning'}</span>
+          <span class="anomaly-level status-pill" class:status-pill--bad={a.severity === 'alert'} class:status-pill--warn={a.severity !== 'alert'}>{a.severity === 'alert' ? 'Alert' : 'Warning'}</span>
           <strong>{a.metric}</strong>:
           {#if a.residualized_by}
             {a.raw_current} raw, {a.current} unexplained after {a.residualized_by}
@@ -556,12 +556,12 @@
     margin-left: auto;
   }
 
+  /* A tinted block at the world's radius, indented under its row (no side stripe: the craft floor). */
   .trace-detail {
-    padding: 0.5rem 0.75rem 0.5rem 1.5rem;
+    padding: 0.5rem 0.75rem;
     background: var(--wash);
-    border-left: 2px solid var(--border);
     margin: 0 0 0.25rem 1rem;
-    border-radius: 0 6px 6px 0;
+    border-radius: var(--card-radius-sm);
   }
 
   .trace-detail-row {
@@ -627,29 +627,20 @@
   }
 
   /* ── Drift anomalies ── */
+  /* A tinted block at the world's radius; the severity is the tinted pill in front (Alert red, Warning amber). No side
+     stripe (the craft floor). */
   .anomaly {
     padding: 0.5rem 0.75rem;
-    border-radius: 6px;
-    background: color-mix(in srgb, var(--yellow) 10%, transparent);
-    border-left: 3px solid var(--yellow);
+    border-radius: var(--card-radius-sm);
+    background: var(--wash);
     font-size: 0.8125rem;
     margin-bottom: 0.5rem;
     color: var(--text);
     overflow-wrap: anywhere;
   }
 
-  .anomaly--alert {
-    background: var(--err-bg);
-    border-left-color: var(--red);
-  }
-
   .anomaly-level {
-    font-weight: 700;
-    color: var(--warn-text);
-  }
-
-  .anomaly--alert .anomaly-level {
-    color: var(--err-text);
+    margin-right: 0.375rem;
   }
 
   .snapshot-grid {

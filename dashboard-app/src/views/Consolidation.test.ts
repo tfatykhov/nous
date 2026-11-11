@@ -84,8 +84,9 @@ describe('Consolidation on the paper look', () => {
     expect(document.body.textContent).not.toMatch(/[→∅]/);
     expect(diffs[0].textContent).toContain(LONG);
     const css = styleBlocks(SRC);
-    expect(css).toContain('.diff-before pre { border-left: 2px solid var(--red); }');
-    expect(css).toContain('.diff-after pre  { border-left: 2px solid var(--green); }');
+    // Finish review fix 6: tinted blocks, no side stripes (stripes.test.ts guards every style).
+    expect(css).toContain('.diff-before pre { background: var(--err-bg); }');
+    expect(css).toContain('.diff-after pre  { background: var(--ok-bg); }');
     expect(css).not.toContain('diff-arrow');
   });
 

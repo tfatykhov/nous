@@ -874,9 +874,11 @@
     overflow-wrap: anywhere;
   }
 
+  /* A tinted block at the world's radius (no side stripe: the craft floor). */
   .detail-postmortem {
-    border-left: 3px solid var(--st-running);
-    padding-left: 0.625rem;
+    background: var(--wash);
+    padding: 0.5rem 0.75rem;
+    border-radius: var(--card-radius-sm);
   }
 
   /* ── Node detail (bottom sheet) ── */

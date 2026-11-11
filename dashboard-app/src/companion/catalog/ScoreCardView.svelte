@@ -121,9 +121,12 @@
     padding: 0.95rem 1rem 0.75rem;
     background: var(--nested-bg);
     border: var(--card-border);
-    border-top: 3px solid var(--ink);
+    /* The ink top rule is a legacy look: --side-rule is 0 on paper (no card in
+       the paper world carries a rule; finish review fix 6) and 3px in a legacy
+       theme, so those render as before. */
+    border-top: var(--side-rule) solid var(--ink);
     /* 12px in every theme (a legacy --radius-md is 8px): on paper --radius is
-       18px, larger than the tiles beside it, and the top rule curled like a lid */
+       18px, larger than the tiles beside it */
     border-radius: max(var(--radius-md), 12px);
   }
   .head {

@@ -248,8 +248,10 @@ describe('Observability: the paper look\'s structure (source contracts)', () => 
 
   it('the dot paints its own token, the severity word reads a text token, and the badges are tints', () => {
     expect(rules.get('.handler-dot')).toMatchObject({ background: 'var(--dot)' });
-    expect(rules.get('.anomaly-level')).toMatchObject({ color: 'var(--warn-text)' });
-    expect(rules.get('.anomaly--alert .anomaly-level')).toMatchObject({ color: 'var(--err-text)' });
+    // Finish review fix 6: the severity word is the shared tinted status pill (warn or bad), so its colour is the pill's
+    // text token; the view keeps only its spacing.
+    expect(rules.get('.anomaly-level')).toEqual({ 'margin-right': '0.375rem' });
+    expect(rules.has('.anomaly--alert .anomaly-level')).toBe(false);
     expect(rules.get('.trace-badge--mod')).toMatchObject({ background: 'color-mix(in srgb, var(--st-partial) 12.5%, transparent)' });
     // Review M2: a tint composes over whatever row it sits on, so on a hovered or open row (--surface-hover, the same
     // #f4f7f8 as --wash on paper) the event count keeps its shape.

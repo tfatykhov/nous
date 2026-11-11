@@ -1102,12 +1102,11 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     }
   });
 
-  it('Observability\'s anomaly lines: the severity word and the line on their tint over the card, at least 4.5:1', () => {
-    const yellowOn = (b: Record<string, string>, bg: string) => tint(b['--yellow'], 0.1, bg);
-    expect(contrast(PAPER['--warn-text'], yellowOn(PAPER, white))).toBeGreaterThanOrEqual(4.5); // 5.30
-    expect(contrast(PAPER['--text'], yellowOn(PAPER, white))).toBeGreaterThanOrEqual(4.5);
+  it('Observability\'s anomaly lines: the line on its wash block, the severity word on its pill tint, at least 4.5:1', () => {
+    // Finish review fix 6: a neutral tinted block, and the severity in a tinted pill (it was a yellow or red stripe).
+    expect(contrast(PAPER['--text'], PAPER['--wash'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--warn-text'], PAPER['--warn-bg'])).toBeGreaterThanOrEqual(4.5);
     expect(contrast(PAPER['--err-text'], PAPER['--err-bg'])).toBeGreaterThanOrEqual(4.5); // 5.60
-    expect(contrast(PAPER['--text'], PAPER['--err-bg'])).toBeGreaterThanOrEqual(4.5);
   });
 
   it('Scoring\'s radar bounds are full-strength lines: 3:1 or more on the card and over the weight polygon\'s 20% fill (review I1)', () => {

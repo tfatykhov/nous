@@ -557,8 +557,9 @@
     overflow-x: auto;
   }
 
-  .diff-before pre { border-left: 2px solid var(--red); }
-  .diff-after pre  { border-left: 2px solid var(--green); }
+  /* Before and after are tinted blocks (the err and ok tints), not side stripes; the labels name them. */
+  .diff-before pre { background: var(--err-bg); }
+  .diff-after pre  { background: var(--ok-bg); }
 
   /* ── Status messages ─────────────────────────────────────── */
   .status-msg {
