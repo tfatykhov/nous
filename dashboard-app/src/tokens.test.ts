@@ -162,7 +162,7 @@ const REL: Record<string, [string, string]> = {
   '--rel-summarized-by': ['#06b6d4', '#8b5cf6'],
 };
 const DISP: Record<string, [string, string]> = {
-  '--disp-rendered': ['#34d399', '#007078'], // review M2: 5.9 from ok text before
+  '--disp-rendered': ['#34d399', '#045c4c'], // review M2 then N1: apart from ok text, from f071 under protanopia, from the task frame
   '--disp-returned-to-script': ['#22d3ee', '#1c5d99'],
   '--disp-sliced-off': ['#f59e0b', '#883800'], // review M2: 3.8 from warn text before
   '--disp-budget-truncated': ['#fcd34d', '#b05a09'],
@@ -650,6 +650,16 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
     expect(taken.size).toBeGreaterThanOrEqual(14);
     const categorical = { ...SERIES, ...GV_NODES, '--gv-other': GV['--gv-other'], ...REL, ...DISP };
     for (const [k, [, p]] of Object.entries(categorical)) expect(taken.has(p.toLowerCase()), k).toBe(false);
+  });
+
+  it('rendered, the one good outcome, stands apart in the funnel under red-green colour blindness and from the task frame (review N1)', () => {
+    const rendered = PAPER['--disp-rendered'];
+    for (const [k, [, p]] of Object.entries(DISP)) {
+      if (k === '--disp-rendered') continue;
+      expect(okDistance(rendered, p), k).toBeGreaterThanOrEqual(7);
+      for (const cvd of ['protan', 'deutan'] as const) expect(okDistance(rendered, p, cvd), `${cvd}: ${k}`).toBeGreaterThanOrEqual(4);
+    }
+    expect(okDistance(rendered, PAPER['--f-task'])).toBeGreaterThanOrEqual(6);
   });
 
   it('every disposition fill takes the white count label at 4.5:1 or more', () => {
