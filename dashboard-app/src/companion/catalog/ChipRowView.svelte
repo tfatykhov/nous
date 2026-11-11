@@ -71,9 +71,9 @@
     min-width: 0;
   }
   .chip {
-    border: 1px solid var(--border);
+    border: var(--card-border);
     background: var(--bg);
-    border-radius: var(--radius-sm);
+    border-radius: var(--ctl-radius);
     padding: 0.45rem 0.7rem;
     font-size: 0.78rem;
     min-width: 0;
@@ -82,8 +82,8 @@
     display: block;
     font-size: 0.66rem;
     color: var(--muted);
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
+    letter-spacing: var(--label-tracking);
+    text-transform: var(--label-transform);
     margin-bottom: 0.15rem;
   }
   .v {

@@ -299,6 +299,25 @@ function newLegacy(id: string): Record<string, string> {
     '--node-procedure': o['--warn'],
     '--node-chunk': o['--muted'],
     ...(id === 'paper' ? PAPER_FRAMES : DARK_FRAMES),
+    // component shape switches (T5): the old look's values
+    '--nested-bg': o['--surface'],
+    '--ctl-bg': o['--surface-hover'],
+    '--ctl-border': o['--border'],
+    '--field-bg': o['--bg'],
+    '--field-border': o['--border'],
+    '--option-pad': '0',
+    '--option-border': '0 solid transparent',
+    '--option-selected-bg': 'transparent',
+    '--picker-pad': '0.6rem 0.75rem 0.75rem',
+    '--label-transform': 'uppercase',
+    '--label-tracking': '0.05em',
+    '--tablist-bg': 'transparent',
+    '--tablist-rule': `1px solid ${o['--border']}`,
+    '--tablist-pad': '0',
+    '--tablist-radius': '0',
+    '--tab-active-bg': 'transparent',
+    '--tab-active-shadow': '0 0 #0000',
+    '--tab-underline': o['--accent'],
   };
 }
 const JETBRAINS = "'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace";
@@ -417,6 +436,24 @@ const PAPER_ROOT: Record<string, string> = {
   '--chart-grid': '#e3e9ec',
   ...PAPER_FRAMES,
   ...CHROME_VALUES,
+  '--nested-bg': '#f4f7f8',
+  '--ctl-bg': '#ffffff',
+  '--ctl-border': '#c9d4da',
+  '--field-bg': '#ffffff',
+  '--field-border': '#7a8896',
+  '--option-pad': '0.7rem 0.8rem',
+  '--option-border': '1.5px solid #e3e9ec',
+  '--option-selected-bg': '#f3f6fa',
+  '--picker-pad': '0',
+  '--label-transform': 'none',
+  '--label-tracking': '0',
+  '--tablist-bg': '#f4f7f8',
+  '--tablist-rule': '0 solid transparent',
+  '--tablist-pad': '3px',
+  '--tablist-radius': '999px',
+  '--tab-active-bg': '#ffffff',
+  '--tab-active-shadow': '0 1px 3px rgba(18, 48, 79, 0.12)',
+  '--tab-underline': 'transparent',
 };
 
 describe('the default is the paper world', () => {
@@ -524,6 +561,14 @@ describe('contrast per theme (WCAG: text 4.5, marks 3)', () => {
       expect(contrast(r[word], r['--rail-ink']), word).toBeGreaterThanOrEqual(4.5); // connecting, live, error
     }
     expect(contrast(r['--rail-focus'], r['--rail'])).toBeGreaterThanOrEqual(3);
+  });
+
+  it('paper: a text field boundary is at least 3:1 on the card and on a nested tile (it identifies the field)', () => {
+    const r = SHEET.resolved('nous-default');
+    expect(contrast(r['--field-border'], r['--surface'])).toBeGreaterThanOrEqual(3);
+    expect(contrast(r['--field-border'], r['--nested-bg'])).toBeGreaterThanOrEqual(3);
+    // the chosen option's navy outline against the plain rows' hairline
+    expect(contrast(r['--select-border'], r['--surface'])).toBeGreaterThanOrEqual(3);
   });
 
   it('every recorded shortfall names a pair the matrix measures', () => {

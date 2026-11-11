@@ -106,10 +106,15 @@
     flex-direction: column;
     min-width: 0;
   }
+  /* Paper: pill segments on a soft track, the active one raised. A legacy
+     theme holds no track and the accent underline. */
   .tablist {
     display: flex;
     gap: 0.15rem;
-    border-bottom: 1px solid var(--border);
+    background: var(--tablist-bg);
+    border-bottom: var(--tablist-rule);
+    padding: var(--tablist-pad);
+    border-radius: var(--tablist-radius);
     overflow-x: auto;
   }
   button {
@@ -118,6 +123,7 @@
     background: none;
     border: none;
     border-bottom: 2px solid transparent;
+    border-radius: var(--tablist-radius);
     padding: 0.45rem 0.8rem;
     cursor: pointer;
     white-space: nowrap;
@@ -128,7 +134,9 @@
   }
   button.active {
     color: var(--accent);
-    border-bottom-color: var(--accent);
+    background: var(--tab-active-bg);
+    box-shadow: var(--tab-active-shadow);
+    border-bottom-color: var(--tab-underline);
   }
   button:focus-visible {
     outline: 2px solid var(--accent);

@@ -68,7 +68,7 @@
     display: block;
     width: 100%;
     max-width: 100%;
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     background: var(--surface-hover);
     overflow: hidden;
   }

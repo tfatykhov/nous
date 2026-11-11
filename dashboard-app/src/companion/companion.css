@@ -78,6 +78,28 @@
   --f-creative: #a3266f;
   --f-initiation: #8f5c0f;
 
+  /* Component shape switches (PR 6). Each is a choice between the paper look
+     and the old one; the legacy group below holds the old value, so a named
+     theme renders exactly as before. */
+  --nested-bg: var(--surface-hover); /* a card inside a surface: a soft tile, no shadow on shadow */
+  --ctl-bg: var(--surface); /* a default button, a footer control */
+  --ctl-border: #c9d4da;
+  --field-bg: var(--surface); /* a text field */
+  --field-border: #7a8896; /* its boundary: 3:1 on white (the dashboard's field ruling) */
+  --option-pad: 0.7rem 0.8rem; /* a ChoicePicker option is a bordered rounded card */
+  --option-border: 1.5px solid var(--border);
+  --option-selected-bg: var(--accent-glow);
+  --picker-pad: 0;
+  --label-transform: none; /* small labels and section heads in sentence case */
+  --label-tracking: 0;
+  --tablist-bg: var(--surface-hover); /* tabs: pill segments on a soft track */
+  --tablist-rule: 0 solid transparent;
+  --tablist-pad: 3px;
+  --tablist-radius: 999px;
+  --tab-active-bg: var(--surface);
+  --tab-active-shadow: 0 1px 3px rgba(18, 48, 79, 0.12);
+  --tab-underline: transparent;
+
   /* Chrome: the Atlantic-blue bar. It sits outside every surface, never under
      a [data-theme], so no theme declares these (themes.test.ts lists them). */
   --rail: #12304f;
@@ -134,6 +156,24 @@
   --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
   --font-display: var(--font-ui);
   --font-numeric: var(--font-mono);
+  --nested-bg: var(--surface);
+  --ctl-bg: var(--surface-hover);
+  --ctl-border: var(--border);
+  --field-bg: var(--bg);
+  --field-border: var(--border);
+  --option-pad: 0;
+  --option-border: 0 solid transparent;
+  --option-selected-bg: transparent;
+  --picker-pad: 0.6rem 0.75rem 0.75rem;
+  --label-transform: uppercase;
+  --label-tracking: 0.05em;
+  --tablist-bg: transparent;
+  --tablist-rule: 1px solid var(--border);
+  --tablist-pad: 0;
+  --tablist-radius: 0;
+  --tab-active-bg: transparent;
+  --tab-active-shadow: 0 0 #0000;
+  --tab-underline: var(--accent);
   font-variant-numeric: normal;
 }
 

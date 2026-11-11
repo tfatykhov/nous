@@ -100,15 +100,19 @@
   .btn {
     font: inherit;
     color: var(--text);
-    background: var(--surface-hover);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
+    background: var(--ctl-bg);
+    border: 1px solid var(--ctl-border);
+    border-radius: var(--ctl-radius);
     padding: 0.45rem 0.9rem;
     cursor: pointer;
     transition: var(--transition);
   }
   .btn:hover:not(:disabled) {
     border-color: var(--accent);
+  }
+  .btn:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
   .btn:disabled {
     opacity: 0.5;

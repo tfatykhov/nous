@@ -54,6 +54,10 @@ const PARITY: Record<string, string> = {
   '--ctl-radius': '--ctl-radius',
   '--card-shadow': '--card-shadow',
   '--card-border': '--card-border',
+  '--label-transform': '--label-transform',
+  '--label-tracking': '--label-tracking',
+  '--tab-active-bg': '--tab-active-bg',
+  '--tab-active-shadow': '--tab-active-shadow',
   // the seven frames
   '--f-conversation': '--f-conversation',
   '--f-question': '--f-question',
@@ -83,6 +87,20 @@ const COMPANION_OWN: Record<string, string> = {
   '--scrim': 'the modal backdrop and the BarChart negative hatching',
   '--font-display': 'an alias of the UI face that themes may swap for a serif',
   '--font-numeric': 'an alias of the mono face for figures (F096)',
+  '--nested-bg': 'a card inside a surface card: a soft tile instead of a shadow on a shadow',
+  '--ctl-bg': "a default button's fill (the prototype .btn: white)",
+  '--ctl-border': "a default button's outline (the prototype rule-2)",
+  '--field-bg': "a text field's fill",
+  '--field-border': "a text field's boundary; the dashboard's --field-border (#7a8896) is in PR 4, not on main yet",
+  '--option-pad': 'a ChoicePicker option card: its padding',
+  '--option-border': 'a ChoicePicker option card: its outline',
+  '--option-selected-bg': 'a ChoicePicker option card: the chosen wash',
+  '--picker-pad': 'a ChoicePicker frame: none on paper (the options are the cards)',
+  '--tablist-bg': 'the tab track (the prototype .tabs)',
+  '--tablist-rule': 'the legacy underline rule under the tabs; none on paper',
+  '--tablist-pad': 'the tab track inset',
+  '--tablist-radius': 'the tab track and segment rounding; square in a legacy theme',
+  '--tab-underline': "the legacy active tab's underline; none on paper",
 };
 
 describe('the companion paper default and the dashboard paper ground share their values', () => {

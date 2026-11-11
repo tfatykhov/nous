@@ -1,0 +1,101 @@
+/// <reference types="node" />
+import { describe, it, expect } from 'vitest';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { markupOf, scriptBlocks, styleBlocks } from '../../lib/testing/css';
+
+// Source contracts for the companion's components (jsdom cannot lay out or resolve var(), so these read the source;
+// the screenshot round is the visual proof). Every colour comes from a token, so a theme re-skins every component;
+// the paper default and the legacy themes differ only through tokens that the legacy group in companion.css holds at
+// the old values.
+
+const CATALOG = __dirname;
+const SHELL = join(__dirname, '..');
+const FILES = [
+  ...readdirSync(CATALOG).filter((f) => f.endsWith('.svelte')).map((f) => join(CATALOG, f)),
+  ...readdirSync(SHELL).filter((f) => f.endsWith('.svelte')).map((f) => join(SHELL, f)),
+];
+const src = (name: string) => readFileSync(join(CATALOG, `${name}.svelte`), 'utf-8');
+const style = (name: string) => styleBlocks(src(name));
+
+/** A colour literal: a hex colour, or an rgb/hsl/oklch function. */
+const LITERAL = /#[0-9a-fA-F]{3,8}\b|\b(?:rgba?|hsla?|oklch)\(/;
+
+describe('companion components: no colour literal (source contract)', () => {
+  it('the literal pattern catches each form and spares a route and a token', () => {
+    for (const bad of ['color: #fff;', 'fill="#12304f"', 'background: rgba(0, 0, 0, 0.3)', 'hsl(210 50% 40%)']) {
+      expect(bad).toMatch(LITERAL);
+    }
+    for (const good of ["href={'#/s/' + id}", 'color: var(--accent);', 'color-mix(in srgb, var(--ink) 13%, transparent)']) {
+      expect(good).not.toMatch(LITERAL);
+    }
+  });
+
+  it.each(FILES.map((f) => [f.slice(SHELL.length + 1).replace(/\\/g, '/'), f]))(
+    '%s: style, markup and script read colours from tokens only',
+    (_, file) => {
+      const source = readFileSync(file, 'utf-8');
+      // markup without its route hrefs (#/s/...), which are not colours
+      const markup = markupOf(source).replace(/['"]#\/[^'"]*['"]/g, '');
+      for (const [part, text] of [
+        ['style', styleBlocks(source)],
+        ['markup', markup],
+        ['script', scriptBlocks(source)],
+      ]) {
+        expect(text.match(LITERAL)?.[0] ?? null, `${part}`).toBeNull();
+      }
+    },
+  );
+});
+
+describe('containers, inputs and media take the paper shape through tokens (source contract, PR 6 T5)', () => {
+  it('buttons and chip rows are pills through --ctl-radius, tabs through --tablist-radius', () => {
+    expect(style('ButtonView')).toMatch(/\.btn \{[^}]*border-radius: var\(--ctl-radius\)/);
+    // Tabs round through --tablist-radius: a legacy tab keeps square ends, or its underline would curve.
+    expect(style('TabsView')).toMatch(/button \{[^}]*border-radius: var\(--tablist-radius\)/);
+    expect(style('ChipRowView')).toMatch(/\.chip \{[^}]*border-radius: var\(--ctl-radius\)/);
+  });
+
+  it('a default button is the control fill and outline (--ctl-bg, --ctl-border), with a visible focus ring', () => {
+    const css = style('ButtonView');
+    expect(css).toMatch(/\.btn \{[^}]*background: var\(--ctl-bg\);[^}]*border: 1px solid var\(--ctl-border\)/);
+    expect(css).toMatch(/\.btn:focus-visible \{[^}]*outline: 2px solid var\(--accent\)/);
+  });
+
+  it('option rows are bordered rounded cards; the chosen one takes --select-border and its wash', () => {
+    const css = style('ChoicePickerView');
+    expect(css).toMatch(/\.option \{[^}]*padding: var\(--option-pad\);[^}]*border: var\(--option-border\);[^}]*border-radius: var\(--radius-md\)/);
+    expect(css).toMatch(/\.option\.selected \{[^}]*border-color: var\(--select-border\);[^}]*background: var\(--option-selected-bg\)/);
+    expect(css).toMatch(/\.picker \{[^}]*border: var\(--card-border\);[^}]*padding: var\(--picker-pad\)/);
+  });
+
+  it('a nested card and media take --radius-md; a nested card sits on --nested-bg with --card-border', () => {
+    expect(style('CardView')).toMatch(/\.card \{[^}]*background: var\(--nested-bg\);[^}]*border: var\(--card-border\);[^}]*border-radius: var\(--radius-md\)/);
+    expect(style('ImageView')).toMatch(/\.img \{[^}]*border-radius: var\(--radius-md\)/);
+    expect(style('VideoView')).toMatch(/\.frame \{[^}]*border-radius: var\(--radius-md\)/);
+  });
+
+  it('section headings and chip labels are sentence case on paper through --label-transform', () => {
+    expect(style('SectionView')).toMatch(/h3 \{[^}]*text-transform: var\(--label-transform\);[^}]*letter-spacing: var\(--label-tracking\)/);
+    expect(style('ChipRowView')).toMatch(/\.l \{[^}]*letter-spacing: var\(--label-tracking\);[^}]*text-transform: var\(--label-transform\)/);
+  });
+
+  it('text fields have a field border and fill (--field-border, --field-bg)', () => {
+    for (const name of ['TextFieldView', 'DateTimeInputView']) {
+      expect(style(name), name).toMatch(/background: var\(--field-bg\);[^}]*border: 1px solid var\(--field-border\)/);
+    }
+    expect(style('ChoicePickerView')).toMatch(/\.filter \{[^}]*background: var\(--field-bg\);[^}]*border: 1px solid var\(--field-border\)/);
+  });
+
+  it('tabs: a pill track with a raised active segment on paper, the underline in a legacy theme', () => {
+    const css = style('TabsView');
+    expect(css).toMatch(/\.tablist \{[^}]*background: var\(--tablist-bg\);[^}]*border-bottom: var\(--tablist-rule\);[^}]*padding: var\(--tablist-pad\)/);
+    expect(css).toMatch(/button\.active \{[^}]*background: var\(--tab-active-bg\);[^}]*box-shadow: var\(--tab-active-shadow\);[^}]*border-bottom-color: var\(--tab-underline\)/);
+  });
+
+  it('the modal is a card: --radius, --card-border, --card-shadow over the --scrim backdrop', () => {
+    const css = style('ModalView');
+    expect(css).toMatch(/dialog \{[^}]*border: var\(--card-border\);[^}]*border-radius: var\(--radius\);[^}]*box-shadow: var\(--card-shadow\)/);
+    expect(css).toMatch(/dialog::backdrop \{[^}]*background: var\(--scrim\)/);
+  });
+});

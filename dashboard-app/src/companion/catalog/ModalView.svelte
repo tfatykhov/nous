@@ -146,8 +146,9 @@
   dialog {
     color: var(--text);
     background: var(--surface);
-    border: 1px solid var(--border);
+    border: var(--card-border);
     border-radius: var(--radius);
+    box-shadow: var(--card-shadow);
     padding: 0;
     max-width: min(560px, calc(100vw - 2rem));
     width: 100%;

@@ -145,8 +145,8 @@
   h3 {
     margin: 0;
     font-size: 0.82rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
     color: var(--muted);
   }
   .chip {

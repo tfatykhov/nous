@@ -123,9 +123,9 @@
 
 <style>
   .picker {
-    border: 1px solid var(--border);
+    border: var(--card-border);
     border-radius: var(--radius-sm);
-    padding: 0.6rem 0.75rem 0.75rem;
+    padding: var(--picker-pad);
     margin: 0;
     min-width: 0;
     display: flex;
@@ -140,8 +140,8 @@
   .filter {
     font: inherit;
     color: var(--text);
-    background: var(--bg);
-    border: 1px solid var(--border);
+    background: var(--field-bg);
+    border: 1px solid var(--field-border);
     border-radius: var(--radius-sm);
     padding: 0.35rem 0.5rem;
   }
@@ -159,11 +159,23 @@
     flex-wrap: wrap;
     gap: 0.4rem;
   }
+  /* Paper: each option is a bordered rounded card and the chosen one takes
+     the navy outline and a wash (the input stays in the DOM and focusable).
+     A legacy theme holds zero padding and no border, so its options are the
+     plain rows they were. */
   .option {
     display: flex;
     align-items: center;
     gap: 0.5rem;
     cursor: pointer;
+    padding: var(--option-pad);
+    border: var(--option-border);
+    border-radius: var(--radius-md);
+    transition: var(--transition);
+  }
+  .option.selected {
+    border-color: var(--select-border);
+    background: var(--option-selected-bg);
   }
   .option input {
     margin: 0;

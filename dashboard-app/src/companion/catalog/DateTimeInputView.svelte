@@ -128,8 +128,8 @@
   input {
     font: inherit;
     color: var(--text);
-    background: var(--bg);
-    border: 1px solid var(--border);
+    background: var(--field-bg);
+    border: 1px solid var(--field-border);
     border-radius: var(--radius-sm);
     padding: 0.45rem 0.6rem;
   }
