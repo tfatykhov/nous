@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { LANES } from './lib/work';
-import { ROOT_SEL, RAIL_SEL, block, parseBlocks } from './lib/testing/css';
+import { ROOT_SEL, RAIL_SEL, block, parseBlocks, styleBlocks } from './lib/testing/css';
 
 // The dashboard has one look (paper, PR 7). Its tokens are at `:root`, the Atlantic-blue rail's at `.rail`. These tests
 // pin the values (the flip moved the paper block to :root verbatim: PAPER_GOLDEN) and check their contrast and their
@@ -241,6 +241,7 @@ const KEPT: Record<string, string> = {
 // Tokens added after the flip, each with the fix that needed it.
 const ADDED: Record<string, string> = {
   '--info-bg': '#e3ecf3', // finish review fix 2: the info status pill's tint (--pending at 12.5% over white)
+  '--action': '#12304f', // finish review fix 2: the primary action, Atlantic (the companion primary, the rail)
 };
 
 // PR 2 (the Memory screens): the paper values.
@@ -1169,5 +1170,31 @@ describe('the status pill', () => {
       expect(contrast(PAPER[fg], PAPER[bg]), `${fg} on ${bg}`).toBeGreaterThanOrEqual(4.5);
     }
     expect(contrast(PAPER['--pending'], tint(PAPER['--pending'], 0.125, '#ffffff'))).toBeGreaterThanOrEqual(4.5);
+  });
+});
+
+// Finish review fix 2: one primary-action colour across the dashboard and the companion, Atlantic; the saturated blue
+// (--accent, the same value as the question frame) is left to links, the focus ring and the question frame.
+describe('the primary action', () => {
+  const style = (f: string) => parseBlocks(styleBlocks(readFileSync(join(__dirname, f), 'utf-8')));
+
+  it('is Atlantic (--action, the companion primary and the rail), white on it at least 4.5:1', () => {
+    expect(PAPER['--action']).toBe('#12304f');
+    expect(PAPER['--action']).toBe(RAIL['--bg']);
+    expect(contrast(PAPER['--on-accent'], PAPER['--action'])).toBeGreaterThanOrEqual(4.5);
+    expect(PAPER['--f-question']).toBe(PAPER['--accent']); // why the blue cannot be the action colour
+  });
+
+  it('every filled action reads it: Answer in companion (DagView) and Acknowledge (Memory write health)', () => {
+    expect(style('views/DagView.svelte').get('.btn-primary')).toMatchObject({ background: 'var(--action)', color: 'var(--on-accent)' });
+    expect(style('views/MemoryWriteHealth.svelte').get('.ack button')).toMatchObject({ background: 'var(--action)', color: 'var(--on-accent)' });
+  });
+
+  it('no component fills anything with the saturated blue but the skip link (a link)', () => {
+    const files = ['views/DagView.svelte', 'views/MemoryWriteHealth.svelte', 'lib/ui/FilterBar.svelte', 'views/Retrieval.svelte',
+      'views/Autonomy.svelte', 'views/Harness.svelte', 'views/Intentions.svelte'];
+    for (const f of files) {
+      expect(styleBlocks(readFileSync(join(__dirname, f), 'utf-8')), f).not.toMatch(/background(?:-color)?:\s*var\(--accent\)/);
+    }
   });
 });

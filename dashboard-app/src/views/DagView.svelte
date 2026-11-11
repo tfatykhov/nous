@@ -716,7 +716,7 @@
   .mono { font-family: var(--font-mono); font-size: 0.75rem; }
   .q-actions { display: flex; gap: 0.5rem; justify-content: flex-end; flex-wrap: wrap; }
   .btn-primary { display: inline-flex; align-items: center; min-height: 36px; padding: 0 0.875rem; border-radius: var(--ctl-radius);
-    background: var(--accent); color: var(--on-accent); font-size: 0.8125rem; font-weight: 700; text-decoration: none; white-space: nowrap; }
+    background: var(--action); color: var(--on-accent); font-size: 0.8125rem; font-weight: 700; text-decoration: none; white-space: nowrap; }
   .btn-primary:focus-visible, .node-btn:focus-visible, .card-link:focus-visible { outline: 2px solid var(--accent-text); outline-offset: 2px; }
   .btn-tall { min-height: 36px; }
   .now { font-size: 0.75rem; }
@@ -776,7 +776,7 @@
 
   .progress-fill {
     height: 100%;
-    background: var(--accent);
+    background: var(--series-0);
     border-radius: 2px;
     transition: width 0.3s ease;
   }

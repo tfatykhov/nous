@@ -156,7 +156,7 @@ describe('Memory write health on the paper look (PR 2)', () => {
     expect(css).toMatch(/\.verdict-bad \{ color: var\(--err-text\); border-color: color-mix\(in srgb, var\(--tone-bad\) 50%, transparent\);/);
     expect(css).toContain('.tile.tone-bad { border-color: color-mix(in srgb, var(--tone-bad) 60%, transparent); }');
     expect(css).not.toMatch(/\.pill\b|\.pill-/); // the states are app.css's .status-pill (finish review fix 2)
-    expect(css).toMatch(/background: var\(--accent\); color: var\(--on-accent\);/);
+    expect(css).toMatch(/background: var\(--action\); color: var\(--on-accent\);/); // Atlantic, the primary action (finish review fix 2)
     expect(css).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/);
   });
 });

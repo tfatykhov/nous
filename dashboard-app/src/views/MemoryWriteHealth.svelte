@@ -229,8 +229,8 @@
   .ack { display: flex; flex-direction: column; gap: 0.375rem; margin-top: 0.25rem; }
   .ack input { padding: 0.375rem 0.5rem; border: 1px solid var(--border); border-radius: var(--ctl-radius); background: var(--bg);
     color: var(--text); font-size: 0.8125rem; min-width: 0; }
-  .ack button { align-self: flex-start; padding: 0.375rem 0.875rem; border-radius: var(--ctl-radius); border: 1px solid var(--accent);
-    background: var(--accent); color: var(--on-accent); font-size: 0.8125rem; font-weight: 600; cursor: pointer; }
+  .ack button { align-self: flex-start; padding: 0.375rem 0.875rem; border-radius: var(--ctl-radius); border: 1px solid var(--action);
+    background: var(--action); color: var(--on-accent); font-size: 0.8125rem; font-weight: 600; cursor: pointer; }
   .ack button:disabled { opacity: 0.6; cursor: default; }
   /* A rule's state is app.css's .status-pill (one tinted pill on every screen). */
   .panel { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow);
