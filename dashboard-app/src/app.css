@@ -409,7 +409,7 @@
     --oc-failed: #b02a22;
     --oc-timeout: #8a1c2c;
     --oc-errored: #6b2a12;
-    --oc-unknown: #5f6b76;
+    --oc-unknown: #7a8794;                     /* lighter than --st-neutral (cancelled), as under dark */
     --stack-bar: #b7791f;
     --hit-good: #23703d;
     --hit-mid: #8a5a0e;

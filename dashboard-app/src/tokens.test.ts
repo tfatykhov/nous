@@ -223,7 +223,7 @@ const OC: Record<string, [string, string]> = {
   '--oc-failed': ['#ef4444', '#b02a22'], // Subtasks: incomplete_no_terminal, validation_failed
   '--oc-timeout': ['#dc2626', '#8a1c2c'],
   '--oc-errored': ['#7c2d12', '#6b2a12'],
-  '--oc-unknown': ['#9ca3af', '#5f6b76'],
+  '--oc-unknown': ['#9ca3af', '#7a8794'], // fix round 0: a lighter slate, not cancelled's grey
 };
 const PR3: Record<string, [string, string]> = {
   ...ST,
@@ -762,6 +762,12 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
     expect(DARK['--st-unknown']).toBe(DARK['--unknown']);
     expect(PAPER['--st-unknown']).toBe(PAPER['--unknown']);
     expect(PAPER['--st-blocked']).not.toBe(PAPER['--st-failed']);
+  });
+
+  it('Subtasks\' cancelled and unknown outcomes are told apart on paper (ruling 5): at least 10 apart, as under dark', () => {
+    // Cancelled is --st-neutral, unknown --oc-unknown; the doughnut and the trend draw them side by side.
+    expect(okDistance(PAPER['--oc-unknown'], PAPER['--st-neutral'])).toBeGreaterThanOrEqual(10);
+    expect(okDistance(DARK['--oc-unknown'], DARK['--st-neutral'])).toBeGreaterThanOrEqual(10);
   });
 
   it('outcome marks and the budget bar are at least 3:1 on the white card', () => {
