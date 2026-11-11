@@ -389,7 +389,8 @@
     --tone-bad: #b02a22;
     --btn-ink: #ffffff;
 
-    /* PR 3: each status colour reads at 4.5:1 or more on its own 12.5% badge tint over the white card */
+    /* PR 3: each status colour reads at 4.5:1 or more on its own 12.5% badge tint, over the white card and over a
+       hovered row (--surface-hover) */
     --st-pending: #56687a;
     --st-ready: #1b6a9c;
     --st-running: #8a5a0e;
@@ -398,13 +399,13 @@
     --st-completed: #23703d;
     --st-failed: #b02a22;
     --st-blocked: #8a1c2c;
-    --st-cancelled: #5f6b76;
-    --st-skipped: #5c6b7d;
+    --st-cancelled: #55616c;
+    --st-skipped: #536170;
     --st-partial: #a14a08;
     --st-success: #23703d;
     --st-ledger-blocked: #8a5a0e;
     --st-unknown: #a3266f;
-    --st-neutral: #5f6b76;
+    --st-neutral: #55616c;
     --oc-failed: #b02a22;
     --oc-timeout: #8a1c2c;
     --oc-errored: #6b2a12;

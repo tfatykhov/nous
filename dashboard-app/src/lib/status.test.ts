@@ -99,10 +99,10 @@ describe('status tokens: var() siblings of the hex map', () => {
     }
   });
 
-  it('every token a badge can take is readable on the paper card: 4.5:1 on its own 12.5% tint', () => {
+  it('every token a badge can take is readable on the paper card and on a hovered row: 4.5:1 on its own 12.5% tint', () => {
     const vars = new Set([...[...DAG_NODE_STATUSES, 'partial'].map(statusVar), ...LEDGER_STATUSES.map(ledgerStatusVar), statusVar('x')]);
-    const failing = [...vars].map(token).map((t): [string, string] => [t, PAPER[t]])
-      .filter(([, hex]) => !hex || contrast(rgb(hex), over(rgb(hex), 0.125, rgb('#ffffff'))) < 4.5);
+    const failing = ['#ffffff', PAPER['--surface-hover']].flatMap((bg) => [...vars].map(token).map((t): [string, string, string] => [t, PAPER[t], bg])
+      .filter(([, hex]) => !hex || contrast(rgb(hex), over(rgb(hex), 0.125, rgb(bg))) < 4.5));
     expect(failing).toEqual([]);
   });
 

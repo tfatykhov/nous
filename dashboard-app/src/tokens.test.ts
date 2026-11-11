@@ -211,13 +211,13 @@ const ST: Record<string, [string, string]> = {
   '--st-completed': ['#4ade80', '#23703d'],
   '--st-failed': ['#f87171', '#b02a22'],
   '--st-blocked': ['#f25c5c', '#8a1c2c'],
-  '--st-cancelled': ['#8a8a9a', '#5f6b76'],
-  '--st-skipped': ['#94a3b8', '#5c6b7d'],
+  '--st-cancelled': ['#8a8a9a', '#55616c'], // fix round 0: #5f6b76 and #5c6b7d were 4.32:1 on a hovered row
+  '--st-skipped': ['#94a3b8', '#536170'],
   '--st-partial': ['#fb923c', '#a14a08'],
   '--st-success': ['#10b981', '#23703d'], // the ledger's success, Subtasks' completed
   '--st-ledger-blocked': ['#f59e0b', '#8a5a0e'], // the ledger's blocked, Subtasks' incomplete_blocked
   '--st-unknown': ['#f472b6', '#a3266f'], // = --unknown, both grounds
-  '--st-neutral': ['#6b7280', '#5f6b76'],
+  '--st-neutral': ['#6b7280', '#55616c'],
 };
 const OC: Record<string, [string, string]> = {
   '--oc-failed': ['#ef4444', '#b02a22'], // Subtasks: incomplete_no_terminal, validation_failed
@@ -749,8 +749,11 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
     }
   });
 
-  it('a status colour is readable on its own badge: at least 4.5:1 on its 12.5% tint over the white card', () => {
-    for (const [k, [, p]] of Object.entries(ST)) expect(contrast(p, tint(p, 0.125, '#ffffff')), k).toBeGreaterThanOrEqual(4.5);
+  it('a status colour is readable on its own badge: at least 4.5:1 on its 12.5% tint, over the white card and a hovered row', () => {
+    // Fix round 0, ruling 6: a table row's hover wash (--surface-hover) sits under the badge too.
+    for (const bg of ['#ffffff', PAPER['--surface-hover']]) {
+      for (const [k, [, p]] of Object.entries(ST)) expect(contrast(p, tint(p, 0.125, bg)), `${k} on ${bg}`).toBeGreaterThanOrEqual(4.5);
+    }
   });
 
   it('one meaning each: awaiting input is the waiting colour and unknown the unknown colour, in both grounds', () => {
