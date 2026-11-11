@@ -250,7 +250,10 @@ New `:root` token `--font-numeric: var(--font-mono)`; every figure in the five c
 the standalone sparkline's current-value uses it with `font-variant-numeric: tabular-nums`.
 The `var()` alias is safe here because no theme changes its mono stack (`signal` re-declares an
 identical one); a theme that does must re-declare `--font-numeric` in its own block — stated as
-a comment beside the token. **This changes the font of every existing sparkline's `.cur`**
+a comment beside the token. *(Since the dashboard redesign, PR 6: the default `:root` is Red Hat
+Mono, so figures are Red Hat Mono in `nous-default` and JetBrains Mono in `nous-dark` and the
+five named themes; the legacy group in `companion.css` re-declares `--font-numeric` for all six,
+and `themes.test.ts` asserts each theme's `--font-numeric` resolves to its own `--font-mono`.)* **This changes the font of every existing sparkline's `.cur`**
 from the UI face to the mono face; deliberate, so a figure looks the same everywhere.
 
 ---
@@ -475,7 +478,7 @@ recipe.
 5. **Focus window.** `to_series(..., focus_from=date(...))` stores a string; it survives
    `_downsample_series`; `readSeries` yields `focusFrom`; the partial emits the shaded `<rect>`
    from the first point at or after it.
-6. **Themes.** `theme.test.ts` parses six themes and every one meets AA on text/bg. An app
+6. **Themes.** `theme.test.ts` parses six themes (seven since the dashboard redesign added `nous-dark`) and every one meets AA on text/bg. An app
    without a theme, without any new prop **and without a Sparkline** renders the same DOM as
    before this change (asserted by the existing micro-app adapter tests, which are unchanged).
 7. **Summary.** `catalog_property_summary()` names every new component with its required

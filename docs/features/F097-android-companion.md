@@ -40,7 +40,7 @@ F092 resolved Q2 as "PWA only for v1" and kept Telegram as the only push channel
    - `dashboard-app/src/companion/catalog/__fixtures__/f096-report-app.json` is a whole report app, CI-locked to its Python builder (`tests/test_a2ui_report.py:466-474`).
 5. **Graph layouts are not modules.** The MemoryGraph radial and DagGraph wave layouts live inline in `$derived` blocks inside `MemoryGraphView.svelte` and `DagGraphView.svelte`, and have no tests. Porting them is extraction, not translation (§8.5).
 6. **Drift from the docs:**
-   - there are six themes, not five (`compose.py:47-57`), and each declares **24** CSS custom properties;
+   - there are six themes, not five (`compose.py:47-57`), and each declares **24** CSS custom properties (since the dashboard redesign, PR 6: seven themes, `nous-dark` added, and more tokens per theme; see §8.4);
    - `/a2ui/message` (F092 §5.1) was never built;
    - F092 §10.7's per-connection session check is not implemented in `a2ui_stream` (`rest.py:3044-3072`);
    - web push was deliberately absent (`companion-sw.js:16-18`).
@@ -337,7 +337,9 @@ A name-only check would have missed F096, which added props to components that w
 
 ### 8.4 Themes
 
-All 24 custom properties of each of the six theme blocks in `companion.css` are ported to Compose token sets, applied per surface through a `CompositionLocal`. A JVM test parses `companion.css` and asserts every `(theme, token, value)` equals the Kotlin table, which inherits the web's contrast checks (`theme.test.ts:107-140`).
+All 24 custom properties of each of the six theme blocks in `companion.css` are ported to Compose token sets, applied per surface through a `CompositionLocal`. ~~A JVM test parses `companion.css` and asserts every `(theme, token, value)` equals the Kotlin table~~ *(correction, 2026-11: no such test exists; `android/app/src/test` has none, and `Theme.kt` holds hand-copied token sets).*
+
+**Not ported: the paper default (dashboard redesign PR 6, 2026-11).** On the web, `nous-default` is now the paper look and the old violet-on-dark default is the named theme `nous-dark`. Android keeps its six hand-copied sets, so there `nous-default` is still the dark violet set: the same surface looks different on the two clients until a follow-up ports the paper default. `nous-dark` is an unknown id on Android and falls back to `nous-default` (R14), which there is the dark violet look, the intended one by accident. Porting the paper default (its tokens, Archivo and Red Hat Mono, and the shape tokens of the legacy group) is a separate follow-up.
 
 ### 8.5 Charts and graphs
 

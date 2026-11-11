@@ -115,12 +115,22 @@ arbitrates this mid-compose, because by then the surface type is already chosen.
 Add an optional `theme` to the app envelope, validated against a **closed enum**:
 
 ```
-theme: "nous-default" | "alpine-dusk" | "harbor" | "paper" | "signal"
+theme: "nous-default" | "nous-dark" | "alpine-dusk" | "harbor" | "paper" | "signal" | "report"
 ```
 
 Unknown value ⇒ validation error (not silent fallback — a silently ignored theme is
 indistinguishable from a broken one). Absent ⇒ `nous-default`, byte-identical to today's
 render.
+
+> **Amended by the dashboard redesign (PR 6, 2026-11):** `nous-default` is now the paper
+> look of the redesign (chart-paper ground, white rounded cards, an Atlantic-blue bar, Archivo
+> and Red Hat Mono), so "absent ⇒ `nous-default`" means that paper default. The previous
+> violet-on-dark default is kept as the named theme `nous-dark`. `nous-dark` and the five
+> named themes render byte-identically to before: `themes.test.ts` pins their resolved token
+> tables as of 9e4953f3 (`ORIGIN_THEMES`), and a legacy selector group in `companion.css`
+> re-declares, for each of them, every `:root` token their blocks do not set. Every stored
+> `app_spec` carries `"theme": "nous-default"` explicitly, so existing apps turn paper on
+> deploy.
 
 ### 3.2 Renderer
 
@@ -326,7 +336,7 @@ P1 ships alone and is worth shipping alone.
 
 ## 10. Acceptance criteria
 
-1. A composed app with `theme: "alpine-dusk"` renders in the alpine palette; the same app with the theme removed renders byte-identically to today's `nous-default`.
+1. A composed app with `theme: "alpine-dusk"` renders in the alpine palette; the same app with the theme removed renders byte-identically to today's `nous-default`. *(Amended, dashboard redesign PR 6: `nous-default` is the paper default; byte-identity now holds for `nous-dark`, the old default, and the five named themes, proven by `themes.test.ts` `ORIGIN_THEMES`.)*
 2. Two apps open simultaneously in the switcher with different themes render correctly and independently.
 3. Every catalog view references semantic tokens; `grep` for `--green|--red|--yellow` in `catalog/` returns only the alias definitions.
 4. A `Countdown` bound to a departure timestamp shows a value that decrements without recomposition, and is correct after the app is closed and rebuilt the next day.
