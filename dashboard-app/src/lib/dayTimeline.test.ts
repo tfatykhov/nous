@@ -55,6 +55,34 @@ describe('layout', () => {
     for (const b of [...bars.owner, ...bars.heartbeat, ...bars.workflows]) expect(b.w).toBeGreaterThanOrEqual(MIN_BAR);
   });
 
+  // Review I3: at 0.88 px a minute (the 1440 layout, an 18-hour span) a heartbeat every 5 minutes is one bar every
+  // 4.4 px. A bar's padding up to MIN_BAR may not reach the next bar, so a missed beat stays a visible hole and each
+  // bar can be hovered; the error underline is clamped the same way, so it marks one turn.
+  it('12 turns 5 minutes apart at 0.88 px a minute never overlap, nor do their underlines', () => {
+    const twelve = Array.from({ length: 12 }, (_, i) => t(`h${i}`, `01:${String(i * 5).padStart(2, '0')}`, { work_kind: 'heartbeat', error: true }));
+    const bars = layout(twelve, NOW, 720 * 0.88).heartbeat;
+    expect(bars).toHaveLength(12);
+    for (let i = 0; i + 1 < bars.length; i++) {
+      const gap = bars[i + 1].x - bars[i].x;
+      expect(gap).toBeCloseTo(4.4, 5);
+      expect(bars[i].x + bars[i].w, `bar ${i}`).toBeLessThanOrEqual(bars[i + 1].x - 1 + 1e-9);
+      expect(bars[i].x + bars[i].uw, `underline ${i}`).toBeLessThanOrEqual(bars[i + 1].x - 1 + 1e-9);
+      expect(bars[i].w).toBeCloseTo(3.4, 5);
+    }
+    // The last bar has no neighbour: it keeps MIN_BAR, and its underline the full 8 px.
+    expect(bars[11].w).toBe(MIN_BAR);
+    expect(bars[11].uw).toBe(8);
+  });
+
+  it('padding never squeezes a bar below 1.5 px, and a long turn keeps its true width', () => {
+    const bars = layout([
+      t('a', '02:00'), t('b', '02:00', { started_at: '2026-11-10T02:00:30+00:00' }),   // 0.44 px apart
+      t('long', '03:00', { ended_at: '2026-11-10T03:30:00+00:00' }), t('after', '03:05'),
+    ], NOW, 720 * 0.88).owner;
+    expect(bars.find((b) => b.id === 'a')!.w).toBe(1.5);
+    expect(bars.find((b) => b.id === 'long')!.w).toBeCloseTo(30 * 0.88, 5);   // overlaps 'after': it ran that long
+  });
+
   it('a long turn is as wide as it ran; a turn with no end still gets a bar', () => {
     const bars = layout([
       t('long', '08:00', { ended_at: '2026-11-10T08:30:00+00:00' }),

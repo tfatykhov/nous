@@ -19,8 +19,11 @@ export function rowOf(kind: string | null | undefined): RowId {
   return row ? row.id : 'heartbeat';
 }
 
-/** The narrowest bar, in px: a turn of a few seconds still shows. */
+/** The width a short turn is padded to, in px, so a turn of a few seconds still shows; never past the next bar. */
 export const MIN_BAR = 5;
+/** The narrowest a padded bar gets when the next one is close; the error or gated underline is padded to UNDERLINE. */
+const MIN_SQUEEZED = 1.5;
+const UNDERLINE = 8;
 
 /** Minutes after 00:00 UTC of a timestamp, seconds as a fraction; null when unreadable. */
 export function utcMinute(iso: string | null | undefined): number | null {
@@ -45,9 +48,11 @@ export function hhmm(minute: number): string {
 export interface Bar {
   id: string;
   row: RowId;
-  /** px from the axis start, and the width (at least MIN_BAR). */
+  /** px from the axis start; the width (as long as it ran, padded towards MIN_BAR but never into the next bar); and the
+   * underline's width (padded towards 8 px the same way). */
   x: number;
   w: number;
+  uw: number;
   frame: string | null;
   /** error wins over gated (the underline shows the red one). */
   status: 'error' | 'gated' | null;
@@ -66,8 +71,10 @@ function title(minute: number, frame: string | null, calls: number, status: Bar[
 }
 
 /**
- * The bars of each row over an axis `width` px wide spanning `spanMinutes` of now's UTC day. A turn's bar is as
- * wide as it ran (to now, if it has not ended), at least MIN_BAR; turns that start after now, or before the day, or
+ * The bars of each row over an axis `width` px wide spanning `spanMinutes` of now's UTC day, in time order. A turn's
+ * bar is as wide as it ran (to now, if it has not ended). A shorter one is padded towards MIN_BAR, but the padding
+ * stops 1 px before the next bar (and never below 1.5 px), so a dense row keeps its gaps (a missed heartbeat is a
+ * hole), each bar can be hovered, and an underline marks one turn. Turns that start after now, or before the day, or
  * with an unreadable start are left out.
  */
 export function layout(turns: readonly WorkTodayTurn[], nowMs: number, width: number): Record<RowId, Bar[]> {
@@ -88,12 +95,22 @@ export function layout(turns: readonly WorkTodayTurn[], nowMs: number, width: nu
       id: t.id,
       row,
       x: px(minute),
-      w: Math.max(MIN_BAR, px((end - start) / 60000)),
+      w: px((end - start) / 60000), // the true width; padded below
+      uw: 0,
       frame: t.frame_id,
       status,
       href: routeHref('work', ['s', t.session_id, t.id]),
       title: title(minute, t.frame_id, t.tool_calls, status),
       minute,
+    });
+  }
+  for (const bars of Object.values(rows)) {
+    bars.sort((a, b) => a.x - b.x);
+    bars.forEach((b, i) => {
+      const room = i + 1 < bars.length ? bars[i + 1].x - b.x - 1 : Infinity;
+      const real = b.w;
+      b.w = Math.max(real, Math.min(MIN_BAR, Math.max(MIN_SQUEEZED, room)));
+      b.uw = Math.max(b.w, Math.min(UNDERLINE, room));
     });
   }
   return rows;
