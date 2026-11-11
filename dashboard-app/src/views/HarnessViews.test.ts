@@ -431,6 +431,7 @@ describe('harness dashboard views', () => {
     expect(c.options.plugins.legend.labels.color).toBe('#8e8eab');
     // Review M1: the legend samples each line with its dash, not a filled box with a dashed outline.
     expect(c.options.plugins.legend.labels).toMatchObject({ usePointStyle: true, pointStyle: 'line', pointStyleWidth: 28 });
+    expect(typeof c.options.plugins.legend.labels.generateLabels).toBe('function'); // the dash comes from the dataset
     expect(c.options.scales.x.ticks.color).toBe('#8e8eab');
     expect(c.options.scales.y.grid.color).toBe('#1e1e2e');
   });

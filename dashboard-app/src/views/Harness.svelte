@@ -9,6 +9,7 @@
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import Chart from '../lib/viz/Chart.svelte';
   import { Button } from '../lib/ui/button';
+  import { lineLegendLabels } from '../lib/chartColors';
   import { ruleVerdict, claimVerdict, fmtUtc, FLAG_GLOSS, type Verdict } from '../lib/harness';
 
   // Harness dashboard §3.3 / §4.3: what each rule flagged — the evidence for
@@ -121,7 +122,7 @@
   // Explicit axis colours (today's under dark) beat Chart.svelte's paper defaults, so they are the paper tokens' too.
   const chartOptions = {
     // The legend samples each line with its dash (a box outline turns four corners); see Rubric.svelte.
-    plugins: { legend: { labels: { color: 'var(--muted)', usePointStyle: true, pointStyle: 'line', pointStyleWidth: 28 } } },
+    plugins: { legend: { labels: lineLegendLabels({ color: 'var(--muted)' }) } },
     scales: {
       x: { ticks: { color: 'var(--muted)' }, grid: { color: 'var(--border)' } },
       y: { beginAtZero: true, ticks: { color: 'var(--muted)', precision: 0 }, grid: { color: 'var(--border)' } },

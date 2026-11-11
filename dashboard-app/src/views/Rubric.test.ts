@@ -257,6 +257,7 @@ describe('Scoring at phone width (the screenshot round)', () => {
     // Under usePointStyle Chart.js caps boxWidth at the font size, so the width is pointStyleWidth.
     for (const c of [chart('radar'), evolution()]) {
       expect(c.options.plugins.legend.labels, c.type).toMatchObject({ usePointStyle: true, pointStyle: 'line', pointStyleWidth: 28 });
+      expect(typeof c.options.plugins.legend.labels.generateLabels, c.type).toBe('function'); // the dash comes from the dataset
     }
     for (const c of [chart('doughnut'), chart('line', 'Completed')]) expect(c.options.plugins.legend.labels?.boxWidth, c.type).toBe(12);
   });

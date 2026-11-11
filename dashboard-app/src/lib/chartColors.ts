@@ -144,6 +144,25 @@ export function seriesToken(i: number): string {
   return `var(--series-${(((i % 13) + 13) % 13) + 1})`;
 }
 
+/**
+ * Legend labels that sample each line with its own dash, 28 px wide (a dashed box outline turns four corners). Chart.js
+ * 4.5.1 reads the first point's style for a label under usePointStyle, which has no dash and a 1 px border, so the
+ * label takes its dataset's dash, colour and width (2 px at least). `extra` is merged in (a label colour).
+ */
+export function lineLegendLabels(extra: Record<string, unknown> = {}): Record<string, any> {
+  return {
+    ...extra,
+    usePointStyle: true,
+    pointStyle: 'line',
+    pointStyleWidth: 28,
+    generateLabels: (chart: any) =>
+      (globalThis as any).Chart.defaults.plugins.legend.labels.generateLabels(chart).map((item: any) => {
+        const ds = chart.data.datasets[item.datasetIndex] ?? {};
+        return { ...item, lineDash: ds.borderDash ?? [], strokeStyle: ds.borderColor ?? item.strokeStyle, lineWidth: Math.max(2, ds.borderWidth ?? 0) };
+      }),
+  };
+}
+
 const CARTESIAN = new Set(['bar', 'line', 'scatter', 'bubble']);
 const RADIAL = new Set(['radar', 'polarArea']);
 

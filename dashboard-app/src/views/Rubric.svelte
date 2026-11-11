@@ -7,7 +7,7 @@
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import Chart from '../lib/viz/Chart.svelte';
   import { Button } from '../lib/ui/button';
-  import { seriesToken, tint } from '../lib/chartColors';
+  import { lineLegendLabels, seriesToken, tint } from '../lib/chartColors';
 
   // Load-once (rubric.js has no polling)
   const store = usePoll(
@@ -74,8 +74,8 @@
   // and left the trend and the weight lines a plot about 20 px tall.
   const LEGEND_LABELS = { boxWidth: 12 };
   // Dashed lines (the weights, the radar's bounds) are told apart by their dash as well: the legend samples the line,
-  // 28 px wide, where a dashed box outline turns four corners (Chart.js caps boxWidth at the font size under usePointStyle).
-  const DASH_LEGEND_LABELS = { usePointStyle: true, pointStyle: 'line', pointStyleWidth: 28 };
+  // 28 px wide, with its dash (lib/chartColors.ts).
+  const DASH_LEGEND_LABELS = lineLegendLabels();
 
   const signalToken = (t: string) => (Object.hasOwn(SIGNAL_TOKENS, t) ? SIGNAL_TOKENS[t] : '--series-7');
 
