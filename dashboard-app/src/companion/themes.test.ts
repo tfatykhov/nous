@@ -369,6 +369,9 @@ function newLegacy(id: string): Record<string, string> {
     '--ok-mark': o['--ok'],
     '--warn-mark': o['--warn'],
     '--crit-mark': o['--crit'],
+    '--chip-selected-bg': o['--accent-glow'],
+    '--chip-selected-ink': o['--text'],
+    '--chip-focus': '0 solid transparent',
     '--graph-edge': o['--border'],
     '--graph-edge-opacity': '1',
     '--line-width': '1.5',
@@ -495,6 +498,9 @@ const PAPER_ROOT: Record<string, string> = {
   '--ok-mark': '#21694b',
   '--warn-mark': '#b7791f',
   '--crit-mark': '#b02a22',
+  '--chip-selected-bg': '#12304f',
+  '--chip-selected-ink': '#ffffff',
+  '--chip-focus': '2px solid #12304f',
   '--chart-axis': '#56687a',
   '--chart-grid': '#e3e9ec',
   ...PAPER_FRAMES,
@@ -777,6 +783,14 @@ describe('contrast per theme (WCAG: text 4.5, marks 3)', () => {
         expect(contrast(over(t['--scrim'], t[fill]), t[fill]), `${id} ${fill}`).toBeGreaterThanOrEqual(1.5);
       }
     }
+  });
+
+  it('paper: a selected chip is told from an unselected one by its fill (3:1), and its word reads on it (4.5:1)', () => {
+    // review I1: the selected wash #f3f6fa against the unselected #f4f7f8 was 1.007:1, so focus (a navy border) looked
+    // like selection
+    const t = SHEET.resolved('nous-default');
+    expect(contrast(t['--chip-selected-bg'], t['--surface-hover'])).toBeGreaterThanOrEqual(3);
+    expect(contrast(t['--chip-selected-ink'], t['--chip-selected-bg'])).toBeGreaterThanOrEqual(4.5);
   });
 
   it('every recorded shortfall names a pair the matrix measures', () => {

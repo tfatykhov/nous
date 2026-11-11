@@ -69,6 +69,14 @@ describe('containers, inputs and media take the paper shape through tokens (sour
     expect(css).toMatch(/\.picker \{[^}]*border: var\(--card-border\);[^}]*padding: var\(--picker-pad\)/);
   });
 
+  it('a selected chip is filled through --chip-selected-bg and -ink; focus has its own ring, --chip-focus (review I1)', () => {
+    const css = style('ChoicePickerView');
+    expect(css).toMatch(
+      /\.options\.chips \.option\.selected \{[^}]*border-color: var\(--accent\);[^}]*background: var\(--chip-selected-bg\);[^}]*color: var\(--chip-selected-ink\)/,
+    );
+    expect(css).toMatch(/\.options\.chips \.option:focus-within \{[^}]*border-color: var\(--accent\);[^}]*outline: var\(--chip-focus\);[^}]*outline-offset: 2px/);
+  });
+
   it('a nested card and media take --radius-md; a nested card sits on --nested-bg with --card-border', () => {
     expect(style('CardView')).toMatch(/\.card \{[^}]*background: var\(--nested-bg\);[^}]*border: var\(--card-border\);[^}]*border-radius: var\(--radius-md\)/);
     expect(style('ImageView')).toMatch(/\.img \{[^}]*border-radius: var\(--radius-md\)/);

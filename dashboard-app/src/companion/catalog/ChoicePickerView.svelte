@@ -200,11 +200,13 @@
   }
   .options.chips .option.selected {
     border-color: var(--accent);
-    background: var(--accent-glow);
-    color: var(--text);
+    background: var(--chip-selected-bg);
+    color: var(--chip-selected-ink);
   }
   .options.chips .option:focus-within {
     border-color: var(--accent);
+    outline: var(--chip-focus);
+    outline-offset: 2px;
   }
   .none {
     color: var(--muted);

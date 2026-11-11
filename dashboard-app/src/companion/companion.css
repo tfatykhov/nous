@@ -82,6 +82,12 @@
   --ok-mark: #21694b;
   --warn-mark: #b7791f;
   --crit-mark: #b02a22;
+  /* A selected ChoicePicker chip: navy with a white word (the wash was the
+     same colour as an unselected chip, so focus looked like selection); a
+     focused chip gets its own ring. */
+  --chip-selected-bg: var(--accent);
+  --chip-selected-ink: var(--on-accent);
+  --chip-focus: 2px solid var(--accent);
   --chart-axis: #56687a;
   --chart-grid: #e3e9ec;
 
@@ -206,6 +212,9 @@
   --ok-mark: var(--ok);
   --warn-mark: var(--warn);
   --crit-mark: var(--crit);
+  --chip-selected-bg: var(--accent-glow);
+  --chip-selected-ink: var(--text);
+  --chip-focus: 0 solid transparent;
   --tile-rule-width: 3px;
   --badge-tint: 0%;
   --badge-edge: 100%;
