@@ -112,6 +112,8 @@ const COMPANION_OWN: Record<string, string> = {
   '--callout-pad': "the ApprovalPanel's padding",
   '--tl-flag-rule': "a flagged timeline entry's rail: the plain rail on paper (its ringed dot and label carry the flag), warn in a legacy theme",
   '--tap-min': "a control's minimum height: 44px on paper (a phone's tap target), auto (the initial value) in a legacy theme",
+  '--tap-pad': "a CheckBox row's padding above and below: 11px on paper, so a one-line row is a 44px target with its label " +
+    'centred in it; 0 (as before) in a legacy theme',
   '--settled-opacity': "a settled DecisionCard's opacity: 1 on paper (dimmed content fell to 2.6:1), 0.65 in a legacy theme",
   '--dim-opacity': "a Section's opacity while its data refreshes: 1 on paper (the header says it is working), 0.72 in a legacy theme",
   '--settled-ink': "a settled decision's title: muted on paper, the text colour in a legacy theme",

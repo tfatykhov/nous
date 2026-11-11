@@ -97,6 +97,7 @@
   --callout-pad: 0;
   --tl-flag-rule: var(--border);
   --tap-min: 44px; /* a control's minimum height: a phone's tap target */
+  --tap-pad: 11px; /* a CheckBox row's padding above and below: its 22px line becomes a 44px target */
   /* Dimmed content stays 4.5:1 on paper: a settled decision is told by its
      muted title and outcome badge, a refreshing section by its header. */
   --settled-opacity: 1;
@@ -240,6 +241,7 @@
   --callout-pad: 0.9rem 1rem;
   --tl-flag-rule: var(--warn);
   --tap-min: auto;
+  --tap-pad: 0;
   --settled-opacity: 0.65;
   --dim-opacity: 0.72;
   --settled-ink: var(--text);

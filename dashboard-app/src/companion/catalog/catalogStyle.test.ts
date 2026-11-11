@@ -249,9 +249,18 @@ describe('every control is a 44px tap target on paper through --tap-min (source 
     ['ChoicePickerView', '.options.chips .option'],
     ['ModalView', '.close'],
     ['SectionView', '.toggle'],
-    ['CheckBoxView', '.box'], // PR 6 fix round 2's list for PR 7: the whole label row was about 24px
   ])('%s %s', (name, sel) => {
     expect(style(name).split(`${sel} {`)[1].split('}')[0]).toContain('min-height: var(--tap-min)');
+  });
+
+  // Code review M8: a CheckBox row grows by padding, not a minimum height. With min-height the one-line label sat in the
+  // top 22px of a 44px row (two rows looked double-spaced); 11px above and below centres it and keeps a wrapped label's
+  // first line beside the box. The legacy themes set --tap-pad to 0 and render as before.
+  it('CheckBoxView .box: the whole label row is the target, padded by --tap-pad, with no minimum height', () => {
+    const rule = style('CheckBoxView').split('.box {')[1].split('}')[0];
+    expect(rule).toContain('padding-block: var(--tap-pad)');
+    expect(rule).toContain('align-items: flex-start');
+    expect(rule).not.toMatch(/min-height/);
   });
 
   it('the shell (always paper) sizes its pills and the install buttons at 44px', () => {
