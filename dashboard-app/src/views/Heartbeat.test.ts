@@ -154,7 +154,7 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
     expect(heads('Cognitive Sessions')).toEqual(['Time', 'Session', 'Findings', 'Tokens']);
   });
 
-  it('a long unbroken finding wraps, and the two-column rows never widen the page (screenshot round: 2,744 px at 390)', () => {
+  it('source contract: a long unbroken finding may wrap, and a two-column row\'s cells may shrink (2,744 px at 390 before)', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'Heartbeat.svelte'), 'utf-8'));
     expect(css).toMatch(/\.chart-row > \* \{ min-width: 0; \}/);
     expect(css).toMatch(/\.tl-source \{[^}]*overflow-wrap: anywhere;/);
@@ -167,7 +167,7 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
     expect(css).toMatch(/:global\(html\[data-look="paper"\] \[data-ground="paper"\]\) \.hb-banner--disabled \{ opacity: 1; \}/);
   });
 
-  it('the banner and pills read status tokens: text tokens for words, the glow by --glow-blur', () => {
+  it('source contract: the banner and pills read status tokens: text tokens for words, the glow by --glow-blur', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'Heartbeat.svelte'), 'utf-8'));
     expect(css).toMatch(/\.hb-pill--warn \{ border-color: var\(--yellow\); color: var\(--hb-warn-ink\); \}/);
     expect(css).toMatch(/\.hb-pill--bad \{ border-color: var\(--red\); color: var\(--err-text\); \}/);

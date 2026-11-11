@@ -106,7 +106,7 @@ describe('Subtasks: outcome colours are status tokens', () => {
     expect(chart('line').options.scales.x.ticks.color).toBe(PAPER['--chart-text']);
   });
 
-  it('the header wraps at phone width: the paper title, the window select and the badge never widen the page', () => {
+  it('source contract: the header may wrap, so the paper title, the window select and the badge fit a phone', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'Subtasks.svelte'), 'utf-8'));
     expect(css).toMatch(/\.view-head \{[^}]*flex-wrap: wrap;/);
   });

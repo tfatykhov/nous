@@ -751,19 +751,22 @@ describe('Model calls on paper: tokens and words', () => {
     expect(container.textContent).not.toMatch(/[✕×←→]/);
   });
 
-  it('a hostile 5,000-character prompt block is text in Red Hat Mono (the ground\'s mono), wrapping anywhere, in a soft rounded block', async () => {
+  it('a hostile 5,000-character prompt block is text', async () => {
     const body = HOSTILE + 'p'.repeat(5000 - HOSTILE.length);
     start(`#/model-calls/c/${ID1}`, (u) => (u === `/dashboard/model-calls/${ID1}` ? { body: detail() }
       : u.includes('/blocks/') ? { body: { part: 'response', ord: 0, size_chars: 5000, body } } : { body: list([row(ID1)]) }));
     const { container } = render(ModelCalls);
     await waitFor(() => expect(container.querySelector('details.block pre')?.textContent).toBe(body));
     expect(container.querySelector('details.block img')).toBeNull();
+  });
+
+  it('source contract: a prompt block is in the ground\'s mono (Red Hat Mono on paper), may wrap anywhere, in a soft rounded block', () => {
     const css = styleBlocks(source('modelcalls/CallBlock.svelte'));
     expect(css).toMatch(/pre\.wrap \{[^}]*font-family: var\(--font-mono\);[^}]*overflow-wrap: anywhere;/);
     expect(css).toMatch(/\.block \{[^}]*border-radius: var\(--card-radius-sm\);/);
   });
 
-  it('the recording-off notices read the notice tokens; error text the error text token', () => {
+  it('source contract: the recording-off notices read the notice tokens; error text the error text token', () => {
     for (const f of ['modelcalls/CallList.svelte', 'modelcalls/CallDetail.svelte']) {
       const css = styleBlocks(source(f));
       expect(css, f).toMatch(/\.notice \{[^}]*background: var\(--notice-bg\);[^}]*border: 1px solid var\(--notice-border\);/);

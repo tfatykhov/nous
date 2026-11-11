@@ -106,7 +106,7 @@ describe('Workflows: status by token', () => {
     }
   });
 
-  it('a DAG waiting on you shows its badge in the waiting colour; the Now pill reads the wait tokens', async () => {
+  it('a DAG waiting on you shows its badge in the waiting colour, and its Now pill names the question', async () => {
     const { container } = render(DagView);
     const badge = await waitFor(() => {
       const b = Array.from(container.querySelectorAll<HTMLElement>('.dag-table .status-badge')).find((x) => x.textContent === 'waiting on you');
@@ -115,6 +115,9 @@ describe('Workflows: status by token', () => {
     });
     expect(badge.style.color).toBe('var(--waiting)');
     expect(container.querySelector('.now-waiting')?.textContent).toBe('Question · approve-send');
+  });
+
+  it('source contract: the Now pills read the wait and running tokens, have room, and round as blocks when wrapped', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'DagView.svelte'), 'utf-8'));
     expect(css).toMatch(/\.now-waiting \{[^}]*color: var\(--wait-ink\); background: var\(--wait-bg\);/);
     // At phone width the Now column squeezed each pill over four lines; a pill radius on a block of text cut it.
@@ -123,11 +126,14 @@ describe('Workflows: status by token', () => {
     expect(css).toMatch(/\.now-held \{[^}]*border-radius: 0\.75rem;/);
   });
 
-  it('a hostile node name is text, and the node button wraps it', async () => {
+  it('a hostile node name is text', async () => {
     const { container } = render(DagView);
     await fireEvent.click((await screen.findAllByRole('button', { name: 'View Graph' }))[0]);
     expect(container.textContent).toContain(HOSTILE);
     expect(container.querySelector('.node-list img')).toBeNull();
+  });
+
+  it('source contract: a node button may wrap its name anywhere, with the small card radius', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'DagView.svelte'), 'utf-8'));
     expect(css).toMatch(/\.node-btn \.mono \{[^}]*overflow-wrap: anywhere;/);
     // Wrapped over several lines, a pill (999px on paper) cuts the text at its corners: the button takes the small card radius.

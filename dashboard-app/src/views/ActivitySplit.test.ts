@@ -289,19 +289,22 @@ describe('Ledger: status and effect by token', () => {
     }
   });
 
-  it('every effect renders a pill whose colours are tokens', async () => {
+  it('every effect renders its pill', async () => {
     execution = { ...EXECUTION, attention: [], attention_total: 0,
       rows: ['write', 'external', 'irreversible'].map((e) => row({ side_effect_type: e, tool_name: `tool_${e}` })) };
     const { container } = render(Ledger);
     await screen.findByText('tool_write');
     expect(Array.from(container.querySelectorAll('.pill[class*="effect-"]')).map((p) => p.className.match(/effect-\w+/)?.[0]))
       .toEqual(['effect-write', 'effect-external', 'effect-irreversible']);
+  });
+
+  it('source contract: the effect pills\' colours are tokens', () => {
     expect(css()).toMatch(/\.effect-write \{ background: color-mix\(in srgb, var\(--effect-write\) 15%, transparent\); color: var\(--effect-write\); \}/);
     expect(css()).toMatch(/\.effect-external \{ background: var\(--badge-warn-bg\); color: var\(--st-ledger-blocked\); \}/);
     expect(css()).toMatch(/\.effect-irreversible \{ background: var\(--badge-bad-bg\); color: var\(--err-text\); \}/);
   });
 
-  it('the banner, the modes and the sends-in-doubt card read status tokens', () => {
+  it('source contract: the banner, the modes and the sends-in-doubt card read status tokens', () => {
     const c = css();
     expect(c).toMatch(/\.banner-dot \{[^}]*background: var\(--st-success\);/);
     expect(c).toMatch(/\.banner-off \.banner-dot \{ background: var\(--st-ledger-blocked\); \}/);
