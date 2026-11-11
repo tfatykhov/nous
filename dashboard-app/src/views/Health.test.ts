@@ -81,6 +81,7 @@ const OBS = {
 let urls: string[] = [];
 let obs: Record<string, unknown> = OBS;
 let admission: Record<string, unknown> = ADMISSION;
+let status: Record<string, unknown> = STATUS;
 /** While set, /dashboard/density answers only once it resolves (a slow density endpoint). */
 let densityGate: Promise<void> | null = null;
 function install() {
@@ -94,7 +95,7 @@ function install() {
       : url.startsWith('/dashboard/memory-write-health') ? MWH
       : url.startsWith('/dashboard/admission/rejected') ? REJECTED
       : url === '/dashboard/admission' ? admission
-      : url === '/status?dashboard=true' ? STATUS
+      : url === '/status?dashboard=true' ? status
       : url === '/dashboard/observability' ? obs
       : null;
     if (!body) return { ok: false, status: 404, json: async () => ({}) } as Response;
@@ -125,7 +126,7 @@ const statLabel = (label: string) => screen.queryAllByText(label, { selector: '.
 const statValue = (label: string) => screen.getByText(label, { selector: '.stat-label' }).previousElementSibling?.textContent?.trim();
 const GROWTH_HEADINGS = ['Memory growth (30 days)', 'Fact categories', 'Fact Growth Rate (7d)'];
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); obs = OBS; admission = ADMISSION; densityGate = null; });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); obs = OBS; admission = ADMISSION; status = STATUS; densityGate = null; });
 
 describe('Memory health: Graph tab', () => {
   for (const hash of ['#/health', '#/health/graph']) {
@@ -413,6 +414,19 @@ describe('Memory health charts read tokens', () => {
     expect(norm(dataset('Fact delta').backgroundColor)).toBe('rgba(96,165,250,0.1)');
     const doughnut = configs.find((c) => c.type === 'doughnut')!;
     expect(doughnut.data.datasets[0].backgroundColor).toEqual(['#60a5fa', '#34d399']); // two categories in the fixture
+  });
+
+  it('a ninth fact category gets series 9, not series 1 again beside its twin (review M7)', async () => {
+    const cats = Object.fromEntries(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'].map((k, i) => [k, 90 - i]));
+    status = { ...STATUS, dashboard: { ...STATUS.dashboard, distributions: { ...STATUS.dashboard.distributions, fact_categories: cats } } };
+    start('#/health/growth');
+    recordCharts();
+    render(Health);
+    await waitFor(() => expect(configs.length).toBe(3));
+    const colours = configs.find((c) => c.type === 'doughnut')!.data.datasets[0].backgroundColor;
+    expect(colours).toHaveLength(9);
+    expect(colours[8]).toBe('#22d3ee'); // dark series 9
+    expect(new Set(colours).size).toBe(9);
   });
 
   it('paper: the same datasets take the paper series and status colours, and the axes the chart text and grid', async () => {

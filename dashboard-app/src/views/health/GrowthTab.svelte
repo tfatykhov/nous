@@ -51,8 +51,8 @@
     };
   }
 
-  /** The doughnut's segment colours: series 1 to 8, repeating after eight as before. */
-  const doughnutColors = (n: number) => Array.from({ length: n }, (_, i) => seriesToken(i % 8));
+  /** The doughnut's segment colours: series 1 to 13, so a ninth category never repeats the first beside it. */
+  const doughnutColors = (n: number) => Array.from({ length: n }, (_, i) => seriesToken(i));
 
   // ── From Observability ────────────────────────────────────────────────
 
