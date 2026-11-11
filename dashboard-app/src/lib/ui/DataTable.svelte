@@ -1,7 +1,9 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import { columnKind, type ColumnKind } from './dataTableKinds';
 
-  type Col = { key: string; label: string };
+  /** A column; its kind (num, time, text) is read off its values unless declared. */
+  type Col = { key: string; label: string; kind?: ColumnKind };
 
   let {
     columns,
@@ -27,6 +29,8 @@
   } = $props();
 
   let expanded = $state<Record<string, boolean>>({});
+  // Number columns are right-aligned in tabular figures, time columns never wrap (finish review fix 3).
+  let kinds = $derived(columns.map((c) => c.kind ?? columnKind(rows.map((r) => r?.[c.key]))));
   // Harness dashboard §4.6: a real <button> per expandable row, so the
   // detail is reachable by keyboard and announced (aria-expanded) — a click
   // handler on <tr> alone was mouse-only.
@@ -43,8 +47,8 @@
     <thead>
       <tr>
         {#if detail}<th class="dt-disclose-col"><span class="sr-only">Details</span></th>{/if}
-        {#each columns as c}
-          <th>{c.label}</th>
+        {#each columns as c, ci}
+          <th class:num={kinds[ci] === 'num'}>{c.label}</th>
         {/each}
       </tr>
     </thead>
@@ -72,8 +76,8 @@
               </button>
             </td>
           {/if}
-          {#each columns as c}
-            <td data-label={c.label}>
+          {#each columns as c, ci}
+            <td data-label={c.label} class:num={kinds[ci] === 'num'} class:time={kinds[ci] === 'time'}>
               {#if cell}{@render cell(row, c)}{:else}{row[c.key]}{/if}
             </td>
           {/each}
@@ -101,11 +105,23 @@
     border-collapse: collapse;
   }
 
+  /* The scale of the hand-built tables: 13px text in about 32px rows (finish review fix 3). */
   th,
   td {
     text-align: left;
-    padding: 0.75rem;
+    padding: 0.4375rem 0.75rem;
+    font-size: 0.8125rem;
+    line-height: 1.35;
     border-bottom: 1px solid var(--border);
+  }
+
+  .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  td.time {
+    white-space: nowrap;
   }
 
   th {

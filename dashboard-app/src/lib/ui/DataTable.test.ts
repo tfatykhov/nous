@@ -74,3 +74,35 @@ describe('DataTable — cards mode at phone width (source contract)', () => {
     expect(parseBlocks(phoneBlock()).get(':where(.dt--cards td[data-label]) > :global(*)')).toMatchObject({ 'overflow-wrap': 'normal' });
   });
 });
+
+// Finish review fix 3: the shared table at the scale of the hand-built ones (13px text, about 32px rows), numbers right
+// aligned in tabular figures, and a time cell that never wraps. A column's kind is read off its values, or declared.
+describe('DataTable density and column kinds', () => {
+  it('columnKind: numbers (counts, percentages, sizes, fractions), timestamps and relative times, else text', async () => {
+    const { columnKind } = await import('./dataTableKinds');
+    expect(columnKind([1, 2.5, '1,234', '44.4%', '4.2K', '0 / 3', '12 ms', null, ''])).toBe('num');
+    expect(columnKind(['Nov 10 09:31 UTC', '2h ago', 'just now', 'Nov 9 22:00 UTC · 3h ago'])).toBe('time');
+    expect(columnKind(['completed', '12'])).toBe('text');
+    expect(columnKind([null, undefined, ''])).toBe('text');
+  });
+
+  it('a numeric column is right-aligned (head and cells) and a time column does not wrap; a declared kind wins', () => {
+    const columns = [{ key: 'name', label: 'Name' }, { key: 'n', label: 'Count' }, { key: 'at', label: 'When' },
+      { key: 'code', label: 'Code', kind: 'text' as const }];
+    const data = [{ name: 'a', n: 1, at: 'Nov 10 09:31 UTC', code: 7 }, { name: 'b', n: 22, at: '2h ago', code: 8 }];
+    const { container } = render(DataTable, { props: { columns, rows: data } });
+    const heads = [...container.querySelectorAll('th')].map((th) => [th.textContent, th.className.includes('num')]);
+    expect(heads).toEqual([['Name', false], ['Count', true], ['When', false], ['Code', false]]);
+    const first = [...container.querySelectorAll('tbody tr:first-child td')];
+    expect(first.map((td) => [td.classList.contains('num'), td.classList.contains('time')])).toEqual(
+      [[false, false], [true, false], [false, true], [false, false]]);
+  });
+
+  it('source contract: 13px cells in about 32px rows; .num right and tabular; .time nowrap; cards mode keeps its own padding', () => {
+    const css = parseBlocks(styleBlocks(readFileSync(join(__dirname, 'DataTable.svelte'), 'utf-8')));
+    expect(css.get('th, td')).toMatchObject({ padding: '0.4375rem 0.75rem', 'font-size': '0.8125rem', 'line-height': '1.35' });
+    expect(css.get('.num')).toEqual({ 'text-align': 'right', 'font-variant-numeric': 'tabular-nums' });
+    expect(css.get('td.time')).toEqual({ 'white-space': 'nowrap' });
+    expect(css.get('.dt--cards td')).toMatchObject({ padding: '0.75rem', 'padding-top': '0.6875rem' });
+  });
+});
