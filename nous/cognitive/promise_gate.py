@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from nous.brain.commitments import MAX_DUE_DAYS, CommitmentStore
+from nous.brain.commitments import MAX_DUE_DAYS, SOURCE_KIND_BY_CONTEXT, CommitmentStore, normalise_what
 from nous.handlers.time_parser import parse_when
 
 logger = logging.getLogger(__name__)
@@ -182,7 +182,7 @@ class PromiseDetector:
             promises.append(
                 Promise(
                     text=clipped,
-                    what=" ".join(clipped.split())[:300],
+                    what=normalise_what(clipped),
                     due_at=due_at,
                     due_parsed=parsed,
                     consent="silence" if silence else "none",
@@ -311,15 +311,6 @@ class BackingResolver:
 # ---------------------------------------------------------------------------
 
 GateMode = Literal["off", "shadow", "warn", "enforce"]
-_SOURCE_KIND = {
-    "subtask": "subtask",
-    "dag_node": "dag_node",
-    "scheduled": "scheduled",
-    "heartbeat_triage": "heartbeat",
-    "heartbeat_check": "heartbeat",
-    "heartbeat_callback": "heartbeat",
-    "continuation": "continuation",
-}
 
 
 @dataclass
@@ -336,8 +327,8 @@ class GateOutcome:
 
 
 def source_kind_for(path: str, context_kind: str | None) -> str:
-    if context_kind in _SOURCE_KIND:
-        return _SOURCE_KIND[context_kind]
+    if context_kind in SOURCE_KIND_BY_CONTEXT:
+        return SOURCE_KIND_BY_CONTEXT[context_kind]
     return "chat_stream" if path == "stream" else "chat_turn"
 
 

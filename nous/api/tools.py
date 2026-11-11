@@ -3111,21 +3111,10 @@ _COMMIT_SCHEMA = {
     "required": ["what", "due"],
 }
 
-# The ledger's source_kind for each turn kind (ExecutionContext.kind); a foreground turn is a chat turn.
-_COMMIT_SOURCE_KIND: dict[str, str] = {
-    "subtask": "subtask",
-    "dag_node": "dag_node",
-    "scheduled": "scheduled",
-    "heartbeat_triage": "heartbeat",
-    "heartbeat_check": "heartbeat",
-    "heartbeat_callback": "heartbeat",
-    "continuation": "continuation",
-}
-
 
 def create_commit_tool(store: Any) -> Callable[..., Any]:
     """The ``commit`` handler over a ``CommitmentStore``. Idempotent within a turn (same ``what``, one row)."""
-    from nous.brain.commitments import LIVE_STATUSES, CommitmentRefused
+    from nous.brain.commitments import LIVE_STATUSES, SOURCE_KIND_BY_CONTEXT, CommitmentRefused
     from nous.handlers.time_parser import parse_when
 
     async def commit(
@@ -3144,7 +3133,7 @@ def create_commit_tool(store: Any) -> Callable[..., Any]:
         if consent not in ("none", "explicit", "silence"):
             return _tool_error("commit: consent must be one of none, explicit, silence.")
         row_args = {
-            "source_kind": _COMMIT_SOURCE_KIND.get(_context_kind or "", "chat_turn"),
+            "source_kind": SOURCE_KIND_BY_CONTEXT.get(_context_kind or "", "chat_turn"),
             "detected_by": "tool",
             "promise_text": str(what),
             "what": str(what),

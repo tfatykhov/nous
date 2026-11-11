@@ -30,8 +30,16 @@ WHAT_MAX = 300
 LIVE_STATUSES: frozenset[str] = frozenset({"open", "backed", "proposed"})
 # What /drop, /done and the store's callers may move a live row to.
 CLOSING_STATUSES: frozenset[str] = frozenset({"done", "broken", "cancelled", "deferred", "superseded"})
-# Never pinged as overdue: a standing goal, or a promise whose next move is the owner's (spec R3).
-UNWATCHED_KINDS: frozenset[str] = frozenset({"goal", "awaiting_user"})
+# The ledger's source_kind for each turn kind (ExecutionContext.kind); any other turn is a chat turn.
+SOURCE_KIND_BY_CONTEXT: dict[str, str] = {
+    "subtask": "subtask",
+    "dag_node": "dag_node",
+    "scheduled": "scheduled",
+    "heartbeat_triage": "heartbeat",
+    "heartbeat_check": "heartbeat",
+    "heartbeat_callback": "heartbeat",
+    "continuation": "continuation",
+}
 
 _SHORT_ID_RE = re.compile(r"^(?:c-?)?0*(\d{1,12})$", re.IGNORECASE)
 
