@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { scriptBlocks, markupOf } from './lib/testing/css';
 import { sourceFiles } from './lib/testing/sources';
-import { fmtDay, fmtDayMonth, fmtUtc } from './lib/harness';
+import { fmtDay, fmtDayMonth, fmtHour, fmtUtc } from './lib/harness';
 
 // Finish review fix 4: one timestamp format everywhere, "Nov 10 09:31 UTC" (lib/harness.ts fmtUtc; Work's fmtTime is
 // the same). A browser-locale date ("11/10/2026, 10:20:00 AM") was printed on five screens. Numbers keep
@@ -52,5 +52,42 @@ describe('one timestamp format', () => {
 
   it.each(sourceFiles().filter((f) => f.startsWith('views/') || f.startsWith('lib/')))('%s formats no date with toLocale*', (file) => {
     expect(dateLocaleCalls(code(file))).toEqual([]);
+  });
+});
+
+// Design batch 1, from the captures: the charts and a few cells still printed a date their own way: "10-12" (an ISO
+// date cut at 5), "2026-11-04" (the ISO date itself), "2026-11-10 09:00 UTC" (cut at 16) and "11/10 15:00" (the
+// browser's local month, day and hour). A day is fmtDay ("Oct 12"), an hour fmtHour ("Nov 10 15:00", UTC), a moment
+// fmtUtc. Cutting an ISO string is allowed only for a key (`toISOString().slice(0, 10)`), never for display.
+
+/** The lines that print a date by local-time getters or by cutting an ISO string. */
+export function handMadeDates(code: string): string[] {
+  return code.split('\n').filter((line) => /\.get(?:Month|Date|Day|Hours|Minutes|FullYear)\(\)/.test(line)
+    || /\.replace\(\s*'T'\s*,\s*' '\s*\)/.test(line)
+    || /\.slice\(\s*5\s*[,)]/.test(line)
+    || (/\.slice\(\s*0\s*,\s*(?:10|16)\s*\)/.test(line) && !/toISOString\(\)\.slice\(\s*0\s*,\s*10\s*\)/.test(line)))
+    .map((l) => l.trim());
+}
+
+describe('one date format in charts and cells', () => {
+  it('fmtHour prints "Nov 10 15:00" in UTC', () => {
+    expect(fmtHour('2026-11-10T15:42:00Z')).toBe('Nov 10 15:00');
+    expect(fmtHour(null)).toBe('—');
+  });
+
+  it('the guard catches a local getter or a cut ISO string, and spares a key and a number', () => {
+    for (const bad of ['labels: d.daily.map((x) => x.date.slice(5)),', 'return iso.slice(5, 10);',
+      "f.created_at ? f.created_at.slice(0, 10) : '-'", "iso.replace('T', ' ').slice(0, 16) + ' UTC'",
+      'return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:00`;']) {
+      expect(handMadeDates(bad), bad).not.toEqual([]);
+    }
+    for (const ok of ['const utcDate = () => new Date().toISOString().slice(0, 10);', 'd.getUTCMonth()', 'items.slice(0, 5)',
+      "label.slice(0, 80) + '…'", 'arr.slice(50)']) {
+      expect(handMadeDates(ok), ok).toEqual([]);
+    }
+  });
+
+  it.each(sourceFiles().filter((f) => f.startsWith('views/') || f.startsWith('lib/')))('%s prints no hand-made date', (file) => {
+    expect(handMadeDates(code(file))).toEqual([]);
   });
 });

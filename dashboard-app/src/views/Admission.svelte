@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtDay } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -140,7 +141,7 @@
 
   function trendRateChartData(d: AdmissionData) {
     return {
-      labels: d.daily_trend.map((t) => t.date.slice(5)),
+      labels: d.daily_trend.map((t) => fmtDay(t.date)),
       datasets: [{
         label: 'Admission rate (%)',
         data: d.daily_trend.map((t) => t.scored > 0 ? +((t.admitted / t.scored) * 100).toFixed(1) : null),
@@ -162,7 +163,7 @@
 
   function trendScoreChartData(d: AdmissionData) {
     return {
-      labels: d.daily_trend.map((t) => t.date.slice(5)),
+      labels: d.daily_trend.map((t) => fmtDay(t.date)),
       datasets: [{
         label: 'Avg score',
         data: d.daily_trend.map((t) => t.avg_score),
@@ -235,7 +236,7 @@
       novelty:      f.scores.novelty     != null ? f.scores.novelty.toFixed(2)     : '-',
       recency:      f.scores.recency     != null ? f.scores.recency.toFixed(2)     : '-',
       type_prior:   f.scores.type_prior  != null ? f.scores.type_prior.toFixed(2)  : '-',
-      created_at_fmt: f.created_at ? f.created_at.slice(0, 10) : '-',
+      created_at_fmt: f.created_at ? fmtDay(f.created_at) : '-',
     }));
   }
 </script>

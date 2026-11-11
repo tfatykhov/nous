@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtDay } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -38,8 +39,8 @@
   }
 
   function fmtDate(iso: string): string {
-    // Show MM-DD from YYYY-MM-DD
-    return iso.length >= 10 ? iso.slice(5, 10) : iso;
+    // The one day format, "Oct 20" (finish review fix 4)
+    return fmtDay(iso);
   }
 
   function brierClass(b: number | null): 'good' | 'warn' | 'bad' | 'neutral' {

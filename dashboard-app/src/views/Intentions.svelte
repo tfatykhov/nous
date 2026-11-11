@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtUtc } from '../lib/harness';
   import { Button } from '../lib/ui/button';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
@@ -27,7 +28,7 @@
     void store.refresh();
   });
   const fmt = (n: number) => n.toLocaleString('en-US');
-  const when = (iso: string | null) => (iso ? iso.replace('T', ' ').slice(0, 16) + ' UTC' : '—');
+  const when = (iso: string | null) => fmtUtc(iso);
   const pretty = (v: unknown) => JSON.stringify(v);
 </script>
 

@@ -10,7 +10,7 @@
   import Chart from '../lib/viz/Chart.svelte';
   import { Button } from '../lib/ui/button';
   import { lineLegendLabels } from '../lib/chartColors';
-  import { ruleVerdict, claimVerdict, fmtUtc, FLAG_GLOSS, type Verdict } from '../lib/harness';
+  import { ruleVerdict, claimVerdict, fmtUtc, FLAG_GLOSS, type Verdict, fmtDay } from '../lib/harness';
 
   // Harness dashboard §3.3 / §4.3: what each rule flagged — the evidence for
   // moving it from warn to enforce. Never summed across rules: one call in
@@ -114,7 +114,7 @@
       borderWidth: 2, borderDash: dash, pointRadius: 2, tension: 0.2, fill: false, spanGaps: false,
     });
     return {
-      labels: d.daily.map((x) => x.date.slice(5)),
+      labels: d.daily.map((x) => fmtDay(x.date)),
       datasets: [
         line('Offered-tool rule', 'offered_set', seriesVar('offered_set'), []),
         line('Context policy', 'context_policy', seriesVar('context_policy'), [6, 4]),

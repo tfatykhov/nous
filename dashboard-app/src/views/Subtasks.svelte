@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Button } from '../lib/ui/button';
-  import { fmtUtc } from '../lib/harness';
+  import { fmtUtc, fmtDay } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -112,7 +112,7 @@
     daily.forEach((d) => Object.keys(d.by_outcome).forEach((k) => allOutcomes.add(k)));
     const outcomes = Array.from(allOutcomes).sort();
     return {
-      labels: daily.map((d) => d.date),
+      labels: daily.map((d) => fmtDay(d.date)),
       datasets: outcomes.map((outcome) => ({
         label: outcome,
         data: daily.map((d) => d.by_outcome[outcome] ?? 0),

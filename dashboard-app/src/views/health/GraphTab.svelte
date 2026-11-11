@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtDay } from '../../lib/harness';
   // F108 Memory health, Graph tab: Density's totals and overall orphan rate first, then Graph Health's charts
   // (/dashboard/health), then Density's tables (/dashboard/density). "Orphan Rate by Type" stays beside "Orphan
   // Breakdown by Type": the orphan counts agree, but only the former has each type's total and rate.
@@ -55,8 +56,8 @@
   // ── Chart data builders ────────────────────────────────────────────────
 
   function shortDate(iso: string): string {
-    // Slice MM-DD from YYYY-MM-DD
-    return iso.length >= 10 ? iso.slice(5) : iso;
+    // The one day format, "Oct 20" (finish review fix 4)
+    return fmtDay(iso);
   }
 
   function densityChartData(d: HealthData) {
@@ -438,7 +439,7 @@
       <tbody>
         {#each d.backfill_progress as row}
           <tr>
-            <td>{row.date}</td>
+            <td>{fmtDay(row.date)}</td>
             <td>{row.edges.toLocaleString()}</td>
           </tr>
         {:else}

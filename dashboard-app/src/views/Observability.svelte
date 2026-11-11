@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { fmtUtc } from '../lib/harness';
+  import { fmtUtc, fmtHour } from '../lib/harness';
   import { SvelteSet } from 'svelte/reactivity';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
@@ -120,10 +120,7 @@
   // ── Drift trend chart builders ────────────────────────────────────────────
 
   function trendLabels(points: { t: string }[]): string[] {
-    return points.map((p) => {
-      const d = new Date(p.t);
-      return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:00`;
-    });
+    return points.map((p) => fmtHour(p.t)); // "Nov 10 15:00", UTC like every other time
   }
 
   function errorTrendData(points: { t: string; v: number }[]) {

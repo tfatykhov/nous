@@ -1,6 +1,6 @@
 <script lang="ts">
   import { Button } from '../lib/ui/button';
-  import { fmtUtc } from '../lib/harness';
+  import { fmtUtc, fmtDay } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -105,7 +105,7 @@
 
   function findingsBarData(byDay: HeartbeatData['findings_by_day']) {
     return {
-      labels: byDay.map((d) => d.date.slice(5)), // MM-DD
+      labels: byDay.map((d) => fmtDay(d.date)),
       datasets: [
         {
           label: 'High',

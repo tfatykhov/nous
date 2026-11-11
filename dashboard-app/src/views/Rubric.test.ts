@@ -268,10 +268,10 @@ describe('Scoring at phone width (the screenshot round)', () => {
     expect(heights).toEqual(['300px', '200px', '300px', '300px']); // radar, doughnut, trend, weight evolution
   });
 
-  it('the signal trend labels its days month-day (as Decisions does)', async () => {
+  it('the signal trend labels its days in the one day format, "Nov 1" (as Decisions does)', async () => {
     render(Rubric);
     await waitFor(() => expect(configs).toHaveLength(4));
-    expect(chart('line', 'Completed').data.labels).toEqual(['11-01']);
+    expect(chart('line', 'Completed').data.labels).toEqual(['Nov 1']);
   });
 
   it('source contract: under 768 px the radar cell does not reserve 320 px around its 300 px chart', () => {

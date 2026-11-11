@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { fmtUtc } from '../lib/harness';
+  import { fmtUtc, fmtDay } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -136,7 +136,7 @@
       return { label, data, borderColor: `var(${token})`, backgroundColor: tint(token, 0.15), fill };
     };
     return {
-      labels: trend.map((x) => x.date.slice(5)), // month-day: a phone keeps the labels level
+      labels: trend.map((x) => fmtDay(x.date)), // "Oct 20": a phone keeps the labels level
       datasets: [
         line('Completed', trend.map((x) => x.completed), 'completed', 'origin'),
         line('Praised', trend.map((x) => x.praised), 'praised', '-1'),

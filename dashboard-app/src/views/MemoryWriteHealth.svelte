@@ -6,7 +6,7 @@
   import type { MemoryWriteHealthData, MwhRuleId } from '../lib/types/api';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import FilterBar from '../lib/ui/FilterBar.svelte';
-  import { fmtWhen } from '../lib/harness';
+  import { fmtWhen, fmtDay } from '../lib/harness';
   import { dayRows, fmtValue, ruleTiles, stateTone, RULE_LABEL, SOURCE_COLUMNS, STATE_LABEL } from '../lib/memoryWriteHealth';
 
   /** A rule's tone as a status pill (app.css .status-pill). */
@@ -122,7 +122,7 @@
       <section class="panel" aria-labelledby="hd-title">
         <div class="panel-head">
           <h2 id="hd-title">Hard-delete signals</h2>
-          <span class="small muted">Observed {fmtWhen(l.observed_at)} · ledger since {l.ledger_oldest ? l.ledger_oldest.slice(0, 10) : '—'}</span>
+          <span class="small muted">Observed {fmtWhen(l.observed_at)} · ledger since {fmtDay(l.ledger_oldest)}</span>
         </div>
         <dl class="tiles">
           <div><dt>Facts (all rows)</dt><dd>{n(l.facts_total)}</dd></div>

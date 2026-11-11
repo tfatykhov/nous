@@ -24,6 +24,14 @@ export function fmtDay(iso: string | null | undefined): string {
   return Number.isNaN(d.getTime()) ? '—' : `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}`;
 }
 
+/** A chart's hour: "Nov 10 15:00" (UTC; the axis has no room for the suffix). */
+export function fmtHour(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()} ${String(d.getUTCHours()).padStart(2, '0')}:00`;
+}
+
 /** A heading's day: "10 November" (UTC). */
 export function fmtDayMonth(iso: string | null | undefined): string {
   if (!iso) return '—';

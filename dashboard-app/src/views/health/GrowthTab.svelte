@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fmtDay, fmtHour } from '../../lib/harness';
   import { apiGet } from '../../lib/api';
   import { makePollStore } from '../../lib/stores/registry';
   import { usePoll } from '../../lib/poll';
@@ -33,7 +34,7 @@
 
   /** Convert [{date, count},...] arrays into Chart.js-ready {labels, datasets data}. */
   function normalizeTimeseries(raw: { facts: StatusTimeseriesPoint[]; episodes: StatusTimeseriesPoint[]; decisions: StatusTimeseriesPoint[] }) {
-    const labels = raw.facts.map((p) => p.date.slice(5)); // MM-DD
+    const labels = raw.facts.map((p) => fmtDay(p.date));
     return {
       labels,
       facts: raw.facts.map((p) => p.count),
@@ -57,10 +58,7 @@
   // ── From Observability ────────────────────────────────────────────────
 
   function trendLabels(points: { t: string }[]): string[] {
-    return points.map((p) => {
-      const d = new Date(p.t);
-      return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:00`;
-    });
+    return points.map((p) => fmtHour(p.t)); // "Nov 10 15:00", UTC like every other time
   }
 
   function factTrendData(points: { t: string; v: number }[]) {

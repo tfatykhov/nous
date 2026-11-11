@@ -154,7 +154,7 @@ describe('Memory health: Graph tab', () => {
     const edges = (await screen.findByRole('heading', { level: 2, name: 'Edge distribution' })).closest('section') as HTMLElement;
     expect(within(edges).getByText('related_to')).toBeTruthy();
     const backfill = screen.getByRole('heading', { level: 2, name: 'Backfill progress (last 7 days)' }).closest('section') as HTMLElement;
-    expect(within(backfill).getByText('2026-11-08')).toBeTruthy();
+    expect(within(backfill).getByText('Nov 8')).toBeTruthy(); // the one day format (design batch 1)
     const orphans = screen.getByRole('heading', { level: 2, name: 'Orphan breakdown by type' }).closest('section') as HTMLElement;
     expect(within(orphans).getByText('facts')).toBeTruthy();
     // The orphan banner had its own badge for the density source; the header's Refresh covers both sources.
