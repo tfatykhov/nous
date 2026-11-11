@@ -57,3 +57,34 @@ export function ledgerStatusColor(status: string): string {
 export function badgeStyle(color: string): string {
   return `background:${color}20;color:${color};border-color:${color}40`;
 }
+
+// ── Redesign: the var() siblings ─────────────────────────────────────────────────────────────────────────────────────
+// The views paint status with tokens (app.css `--st-*`), so a ground can restyle them; each token's dark value is the
+// hex above for the same status (status.test.ts proves it). The hex functions stay for anything that parses hex.
+
+/** `var(--st-<status>)` for a DAG node status (or `partial`); an unknown status takes the pending (muted) token. */
+export function statusVar(status: string): string {
+  return Object.hasOwn(DAG, status) ? `var(--st-${status.replaceAll('_', '-')})` : 'var(--st-pending)';
+}
+
+const LEDGER_VAR: Record<string, string> = {
+  pending: 'var(--pending)',
+  success: 'var(--st-success)',
+  error: 'var(--st-failed)',
+  blocked: 'var(--st-ledger-blocked)',
+  unknown: 'var(--st-unknown)',
+};
+
+/** The token of a ledger status; an unknown status takes the pending (muted) token. */
+export function ledgerStatusVar(status: string): string {
+  return Object.hasOwn(LEDGER_VAR, status) ? LEDGER_VAR[status] : 'var(--st-pending)';
+}
+
+/** Inline style for a status badge from a colour token: its 12.5% tint, the colour as text, a 25% border (the old
+ * `20` and `40` hex alphas, so a dark badge composites as before). */
+export function badgeStyleVar(cssColor: string): string {
+  return `background:color-mix(in srgb, ${cssColor} 12.5%, transparent);color:${cssColor};border-color:color-mix(in srgb, ${cssColor} 25%, transparent)`;
+}
+
+/** The waiting colour (an approval, a step awaiting an answer, a DAG stopped at one) as a token. */
+export const WAITING_VAR = 'var(--waiting)';

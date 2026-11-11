@@ -215,6 +215,30 @@
     --save-err: #f87171;
     --tone-bad: #ef4444;                       /* Memory write health: a tripped rule's border and tint */
     --btn-ink: #fff;                           /* text on an accent-filled button (not --on-accent: dark keeps white) */
+
+    /* ---- PR 3, the Execution screens ----
+       Status (one meaning each; lib/status.ts's statusVar/ledgerStatusVar name them, its hex map mirrors these dark
+       values) and Subtasks' outcomes. */
+    --st-pending: #8e8eab;
+    --st-ready: #22d3ee;
+    --st-running: #fbbf24;
+    --st-awaiting-check: #f59e0b;
+    --st-awaiting-input: #a78bfa;              /* = --waiting */
+    --st-completed: #4ade80;
+    --st-failed: #f87171;
+    --st-blocked: #f25c5c;
+    --st-cancelled: #8a8a9a;
+    --st-skipped: #94a3b8;
+    --st-partial: #fb923c;
+    --st-success: #10b981;                     /* the ledger's success, Subtasks' completed */
+    --st-ledger-blocked: #f59e0b;              /* the ledger's blocked, Subtasks' incomplete_blocked */
+    --st-unknown: #f472b6;                     /* = --unknown */
+    --st-neutral: #6b7280;
+    --oc-failed: #ef4444;
+    --oc-timeout: #dc2626;
+    --oc-errored: #7c2d12;
+    --oc-unknown: #9ca3af;
+    --stack-bar: rgba(251, 191, 36, 0.7);      /* Workflows: a token budget's consumed part */
   }
 
   /* ---- The paper ground: page content under the paper look ---- */
@@ -354,6 +378,28 @@
     --save-err: #b02a22;
     --tone-bad: #b02a22;
     --btn-ink: #ffffff;
+
+    /* PR 3: each status colour reads at 4.5:1 or more on its own 12.5% badge tint over the white card */
+    --st-pending: #56687a;
+    --st-ready: #1b6a9c;
+    --st-running: #8a5a0e;
+    --st-awaiting-check: #9a4d0a;
+    --st-awaiting-input: #7b3fa0;
+    --st-completed: #23703d;
+    --st-failed: #b02a22;
+    --st-blocked: #8a1c2c;
+    --st-cancelled: #5f6b76;
+    --st-skipped: #5c6b7d;
+    --st-partial: #a14a08;
+    --st-success: #23703d;
+    --st-ledger-blocked: #8a5a0e;
+    --st-unknown: #a3266f;
+    --st-neutral: #5f6b76;
+    --oc-failed: #b02a22;
+    --oc-timeout: #8a1c2c;
+    --oc-errored: #6b2a12;
+    --oc-unknown: #5f6b76;
+    --stack-bar: #b7791f;
 
     /* shadcn, HSL of the paper hex */
     --background: 192 17% 94%;

@@ -200,6 +200,38 @@ const PR2: Record<string, [string, string]> = {
 };
 for (const [k, [dark]] of Object.entries(PR2)) NEW_DARK[k] = dark;
 
+// PR 3 (the Execution screens): [dark, paper]. Status (`--st-*`, dark = lib/status.ts's hex) and outcome (`--oc-*`,
+// dark = Subtasks' literals) colours, plus the one-off tokens each screen needs for an exact dark look.
+const ST: Record<string, [string, string]> = {
+  '--st-pending': ['#8e8eab', '#56687a'],
+  '--st-ready': ['#22d3ee', '#1b6a9c'],
+  '--st-running': ['#fbbf24', '#8a5a0e'],
+  '--st-awaiting-check': ['#f59e0b', '#9a4d0a'],
+  '--st-awaiting-input': ['#a78bfa', '#7b3fa0'], // = --waiting, both grounds
+  '--st-completed': ['#4ade80', '#23703d'],
+  '--st-failed': ['#f87171', '#b02a22'],
+  '--st-blocked': ['#f25c5c', '#8a1c2c'],
+  '--st-cancelled': ['#8a8a9a', '#5f6b76'],
+  '--st-skipped': ['#94a3b8', '#5c6b7d'],
+  '--st-partial': ['#fb923c', '#a14a08'],
+  '--st-success': ['#10b981', '#23703d'], // the ledger's success, Subtasks' completed
+  '--st-ledger-blocked': ['#f59e0b', '#8a5a0e'], // the ledger's blocked, Subtasks' incomplete_blocked
+  '--st-unknown': ['#f472b6', '#a3266f'], // = --unknown, both grounds
+  '--st-neutral': ['#6b7280', '#5f6b76'],
+};
+const OC: Record<string, [string, string]> = {
+  '--oc-failed': ['#ef4444', '#b02a22'], // Subtasks: incomplete_no_terminal, validation_failed
+  '--oc-timeout': ['#dc2626', '#8a1c2c'],
+  '--oc-errored': ['#7c2d12', '#6b2a12'],
+  '--oc-unknown': ['#9ca3af', '#5f6b76'],
+};
+const PR3: Record<string, [string, string]> = {
+  ...ST,
+  ...OC,
+  '--stack-bar': ['rgba(251, 191, 36, 0.7)', '#b7791f'], // Workflows: a token budget's consumed part
+};
+for (const [k, [dark]] of Object.entries(PR3)) NEW_DARK[k] = dark;
+
 // The legacy memory-type colours keep their golden dark values (ORIGIN_ROOT) and get paper ones (Retrieval's chips).
 const LEGACY_PAPER: Record<string, string> = {
   '--fact-color': '#159a7a', // review M6: one colour per memory type on paper, the Graph's
@@ -694,5 +726,33 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
       expect(contrast(PAPER[t], '#ffffff'), t).toBeGreaterThanOrEqual(4.5);
       expect(contrast(PAPER[t], PAPER['--surface-hover']), t).toBeGreaterThanOrEqual(4.5);
     }
+  });
+});
+
+// ── PR 3: status, outcome and the Execution screens' one-off colours ─────────────────────────────────────────────────
+
+describe('PR 3 tokens: status, outcomes, execution screens', () => {
+  it('every new token has the dark value the screens used, and a paper value', () => {
+    for (const [k, [dark, paper]] of Object.entries(PR3)) {
+      expect(DARK[k], k).toBe(dark);
+      expect(PAPER[k], k).toBe(paper);
+    }
+  });
+
+  it('a status colour is readable on its own badge: at least 4.5:1 on its 12.5% tint over the white card', () => {
+    for (const [k, [, p]] of Object.entries(ST)) expect(contrast(p, tint(p, 0.125, '#ffffff')), k).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('one meaning each: awaiting input is the waiting colour and unknown the unknown colour, in both grounds', () => {
+    expect(DARK['--st-awaiting-input']).toBe(DARK['--waiting']);
+    expect(PAPER['--st-awaiting-input']).toBe(PAPER['--waiting']);
+    expect(DARK['--st-unknown']).toBe(DARK['--unknown']);
+    expect(PAPER['--st-unknown']).toBe(PAPER['--unknown']);
+    expect(PAPER['--st-blocked']).not.toBe(PAPER['--st-failed']);
+  });
+
+  it('outcome marks and the budget bar are at least 3:1 on the white card', () => {
+    for (const [k, [, p]] of Object.entries(OC)) expect(contrast(p, '#ffffff'), k).toBeGreaterThanOrEqual(3);
+    expect(contrast(PAPER['--stack-bar'], '#ffffff')).toBeGreaterThanOrEqual(3);
   });
 });
