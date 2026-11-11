@@ -125,13 +125,13 @@ const SERIES: Record<string, [string, string]> = {
   '--series-3': ['#a78bfa', '#a8408f'],
   '--series-4': ['#fb923c', '#d0620d'],
   '--series-5': ['#f87171', '#7a8a1a'],
-  '--series-6': ['#fbbf24', '#8a5a2b'],
+  '--series-6': ['#fbbf24', '#905860'], // review M2: the brown #8a5a2b was 2.1 from warn text
   '--series-7': ['#6b6b8a', '#4f5f6f'],
   '--series-8': ['#e2e2f0', '#1c2f55'],
   '--series-9': ['#22d3ee', '#0e7490'],
   '--series-10': ['#e879f9', '#8b5cf6'],
   '--series-11': ['#f472b6', '#6b7280'],
-  '--series-12': ['#9ca3af', '#a8741a'],
+  '--series-12': ['#9ca3af', '#908870'], // review M2: the amber #a8741a was 3.1 from the warn fill
   '--series-13': ['#c4c4d8', '#7a3f3f'],
 };
 const GV_NODES: Record<string, [string, string]> = {
@@ -154,7 +154,7 @@ const REL: Record<string, [string, string]> = {
   '--rel-supports': ['#34d399', '#159a7a'],
   '--rel-informed-by': ['#a78bfa', '#a8408f'],
   '--rel-evidence-for': ['#fbbf24', '#d0620d'],
-  '--rel-contradicts': ['#f87171', '#8a5a2b'],
+  '--rel-contradicts': ['#f87171', '#905860'],
   '--rel-supersedes': ['#fb923c', '#7a8a1a'],
   '--rel-caused-by': ['#e2e2f0', '#1c2f55'],
   '--rel-discussed-in': ['#6b6b8a', '#6b7280'],
@@ -162,9 +162,9 @@ const REL: Record<string, [string, string]> = {
   '--rel-summarized-by': ['#06b6d4', '#8b5cf6'],
 };
 const DISP: Record<string, [string, string]> = {
-  '--disp-rendered': ['#34d399', '#0f6e63'],
+  '--disp-rendered': ['#34d399', '#007078'], // review M2: 5.9 from ok text before
   '--disp-returned-to-script': ['#22d3ee', '#1c5d99'],
-  '--disp-sliced-off': ['#f59e0b', '#8a4b08'],
+  '--disp-sliced-off': ['#f59e0b', '#883800'], // review M2: 3.8 from warn text before
   '--disp-budget-truncated': ['#fcd34d', '#b05a09'],
   '--disp-below-floor': ['#a78bfa', '#5b2fb3'],
   '--disp-filter-dropped': ['#c4b5fd', '#7c4dd0'],
@@ -203,7 +203,7 @@ const LEGACY_PAPER: Record<string, string> = {
   '--episode-color': '#1f5fa8',
   '--decision-color': '#a8408f',
   '--procedure-color': '#d0620d',
-  '--censor-color': '#8a5a2b',
+  '--censor-color': '#905860',
   '--heartbeat-color': '#4f5f6f',
   '--chunk-color': '#8b5cf6',
   '--pending': '#1b6a9c',
@@ -608,6 +608,17 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
           else if (!(cvd === 'protan' && a[0] === 'episode' && b[0] === 'decision')) expect(d, `${cvd}: ${a[0]} and ${b[0]}`).toBeGreaterThanOrEqual(8);
         }
       }
+    }
+  });
+
+  it('no categorical paper colour is within 6 (OKLab) of a status fill or text: a hue carries one meaning (review M2)', () => {
+    const status = ['--green', '--yellow', '--red', '--ok-text', '--warn-text', '--err-text'].map((t) => [t, PAPER[t]] as const);
+    const categorical: [string, string][] = [
+      ...Object.entries({ ...SERIES, ...GV_NODES, '--gv-other': GV['--gv-other'], ...REL, ...DISP }).map(([k, [, p]]) => [k, p] as [string, string]),
+      ...Object.entries(LEGACY_PAPER).filter(([k]) => k !== '--pending'),
+    ];
+    for (const [k, c] of categorical) {
+      for (const [s, sc] of status) expect(okDistance(c, sc), `${k} (${c}) and ${s} (${sc})`).toBeGreaterThanOrEqual(6);
     }
   });
 

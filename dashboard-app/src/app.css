@@ -287,7 +287,7 @@
     --episode-color: #1f5fa8;
     --decision-color: #a8408f;
     --procedure-color: #d0620d;
-    --censor-color: #8a5a2b;
+    --censor-color: #905860;
     --heartbeat-color: #4f5f6f;
     --chunk-color: #8b5cf6;
     --series-1: #1f5fa8;
@@ -295,12 +295,12 @@
     --series-3: #a8408f;
     --series-4: #d0620d;
     --series-5: #7a8a1a;
-    --series-6: #8a5a2b;
+    --series-6: #905860;                       /* at least 6 (OKLab) from every status colour (tokens.test.ts) */
     --series-8: #1c2f55;
     --series-9: #0e7490;
     --series-10: #8b5cf6;
     --series-11: #6b7280;
-    --series-12: #a8741a;
+    --series-12: #908870;
     --series-13: #7a3f3f;
     --gv-fact: #159a7a;
     --gv-episode: #1f5fa8;
@@ -316,15 +316,15 @@
     --rel-supports: #159a7a;
     --rel-informed-by: #a8408f;
     --rel-evidence-for: #d0620d;
-    --rel-contradicts: #8a5a2b;
+    --rel-contradicts: #905860;
     --rel-supersedes: #7a8a1a;
     --rel-caused-by: #1c2f55;
     --rel-discussed-in: #6b7280;
     --rel-part-of: #0e7490;
     --rel-summarized-by: #8b5cf6;
-    --disp-rendered: #0f6e63;
+    --disp-rendered: #007078;
     --disp-returned-to-script: #1c5d99;
-    --disp-sliced-off: #8a4b08;
+    --disp-sliced-off: #883800;
     --disp-budget-truncated: #b05a09;
     --disp-below-floor: #5b2fb3;
     --disp-filter-dropped: #7c4dd0;
