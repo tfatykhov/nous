@@ -73,10 +73,15 @@ describe('Consolidation on the paper look', () => {
       expect(Array.from(d.querySelectorAll('.diff-label')).map((l) => l.textContent)).toEqual(['Before', 'After']);
       expect(d.querySelector('.diff-arrow')).toBeNull();
     }
-    // Review M9: a missing side prints as before (the empty-set sign), so it differs from a recorded "none".
-    expect(diffs[1].querySelector('.diff-before pre')?.textContent).toBe('∅'); // nothing before a supersede's new row
+    // Review M9 (owner's no-symbol rule): a missing side is a muted italic word outside the code block, so it differs
+    // from a recorded value "none", which stays in its <pre>.
+    const missing = diffs[1].querySelector('.diff-before');
+    expect(missing?.querySelector('pre')).toBeNull(); // nothing before a supersede's new row
+    expect(missing?.querySelector('em.diff-none')?.textContent).toBe('none');
     expect(diffs[2].querySelector('.diff-before pre')?.textContent).toBe('none');
-    expect(document.body.textContent).not.toMatch(/→/);
+    expect(diffs[2].querySelector('.diff-before .diff-none')).toBeNull();
+    expect(styleBlocks(SRC)).toMatch(/\.diff-none \{[^}]*color: var\(--muted\);[^}]*font-style: italic;/);
+    expect(document.body.textContent).not.toMatch(/[→∅]/);
     expect(diffs[0].textContent).toContain(LONG);
     const css = styleBlocks(SRC);
     expect(css).toContain('.diff-before pre { border-left: 2px solid var(--red); }');

@@ -107,10 +107,8 @@
     return entries.map(([k, v]) => `${k} ${v}`).join(' · ');
   }
 
-  /** Pretty-print a before/after JSON blob for diff display. */
+  /** Pretty-print a before/after JSON blob for diff display (a missing side is drawn by the markup, not here). */
   function fmtJson(val: unknown): string {
-    // A missing side: the empty-set sign, as before, so it never reads like a recorded string "none" (review M9).
-    if (val === null || val === undefined) return '∅';
     if (typeof val === 'string') return val;
     try {
       return JSON.stringify(val, null, 2);
@@ -240,13 +238,15 @@
                 {/if}
                 {#if action.before !== null || action.after !== null}
                   <div class="diff">
+                    <!-- A missing side is a muted italic word outside the code block (no symbol, review M9), so it
+                         never reads like a recorded value "none", which stays in its <pre>. -->
                     <div class="diff-side diff-before">
                       <span class="diff-label">Before</span>
-                      <pre>{fmtJson(action.before)}</pre>
+                      {#if action.before == null}<em class="diff-none">none</em>{:else}<pre>{fmtJson(action.before)}</pre>{/if}
                     </div>
                     <div class="diff-side diff-after">
                       <span class="diff-label">After</span>
-                      <pre>{fmtJson(action.after)}</pre>
+                      {#if action.after == null}<em class="diff-none">none</em>{:else}<pre>{fmtJson(action.after)}</pre>{/if}
                     </div>
                   </div>
                 {/if}
@@ -535,6 +535,12 @@
     font-weight: 600;
     color: var(--muted);
     text-transform: var(--label-transform);
+  }
+
+  .diff-none {
+    font-size: 0.75rem;
+    color: var(--muted);
+    font-style: italic;
   }
 
   .diff pre {
