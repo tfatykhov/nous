@@ -107,6 +107,19 @@ describe('y-domain zero-basing (§3 — the axis must not be able to lie)', () =
     expect(d.zeroBreak).toBe(true);
   });
 
+  it('never pads a count across zero, in either direction (review M4: a count axis labelled -1.36)', () => {
+    // 2 to 44 padded 8% each way was -1.36 to 47.36, and the axis printed "-1.36"
+    expect(yDomain([2, 44], false).min).toBe(0);
+    expect(yDomain([2, 44], false).max).toBeCloseTo(47.36, 5);
+    expect(yDomain([-44, -2], false).max).toBe(0);
+    expect(yDomain([0, 0, 0], false).min).toBe(0); // an all-zero count sits on zero
+    expect(yDomain([0, 0, 0], false).max).toBeGreaterThan(0); // and the domain does not collapse
+    // a series that really crosses zero still pads below its minimum
+    expect(yDomain([-5, 44], false).min).toBeLessThan(-5);
+    // and a series far from zero still breaks the axis
+    expect(yDomain([58, 62, 60], false).zeroBreak).toBe(true);
+  });
+
   it('pads an all-equal series symmetrically instead of collapsing', () => {
     const d = yDomain([50, 50, 50], false);
     expect(d.min).toBeLessThan(50);

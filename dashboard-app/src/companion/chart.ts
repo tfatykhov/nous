@@ -171,12 +171,15 @@ export function yDomain(values: number[], zeroBase: boolean): Domain {
     // all-equal (Line/Spark only): pad symmetrically so a flat line sits
     // mid-height rather than collapsing.
     const pad = Math.abs(min) > 0 ? Math.abs(min) * 0.1 : 1;
-    return { min: min - pad, max: max + pad, zeroBreak: false };
+    // never pad across zero: an all-zero count sits on zero, not mid-axis above a negative label
+    if (min === 0) return { min: 0, max: pad, zeroBreak: false };
+    return { min: min > 0 ? Math.max(0, min - pad) : min - pad, max: max < 0 ? Math.min(0, max + pad) : max + pad, zeroBreak: false };
   }
   const span = max - min;
   const pad = span * 0.08;
-  const paddedMin = min - pad;
-  const paddedMax = max + pad;
+  // The pad never crosses zero: a count from 2 to 44 is labelled from 0, not "-1.36" (review M4).
+  const paddedMin = min >= 0 ? Math.max(0, min - pad) : min - pad;
+  const paddedMax = max <= 0 ? Math.min(0, max + pad) : max + pad;
   // A break is honest only when the padded domain still excludes zero.
   const zeroBreak = paddedMin > 0 || paddedMax < 0;
   return { min: paddedMin, max: paddedMax, zeroBreak };

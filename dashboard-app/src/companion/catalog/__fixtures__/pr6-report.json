@@ -98,7 +98,7 @@
         { "t": "question", "v": 4 },
         { "t": "task", "v": 6 },
         { "t": "decision", "v": 5 },
-        { "t": "conversation", "v": -2 }
+        { "t": "conversation", "v": 2 }
       ],
       "meta": { "dropped": 0, "downsampled_from": null }
     },

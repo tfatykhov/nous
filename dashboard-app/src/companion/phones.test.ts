@@ -72,7 +72,7 @@ describe('the three prototype phones render from catalog components', () => {
     expect(container.querySelectorAll('.option.selected').length).toBe(1);
   });
 
-  it('report: header, two metric cards, a four-series line chart, the video, bars, the tool table, a meter and the timeline', () => {
+  it('report: header, two metric cards, a four-series line chart, the video, bars (counts, none negative), the tool table, a meter and the timeline', () => {
     const { container } = mount('report');
     expect(container.querySelector('.ph')).toBeNull();
     expect(container.querySelector('.app-header h2')?.textContent).toBe('Recall since frame context');
@@ -80,7 +80,8 @@ describe('the three prototype phones render from catalog components', () => {
     expect(container.querySelectorAll('.line polyline').length).toBe(4);
     expect(container.querySelector('video.vid')).not.toBeNull();
     expect(container.querySelectorAll('.hrow').length).toBe(4);
-    expect(container.querySelectorAll('.hrow i.neg').length).toBe(1);
+    // a count is never negative (review M4); the negative hatch is covered by charts.test.ts
+    expect(container.querySelectorAll('.hrow i.neg').length).toBe(0);
     expect([...container.querySelectorAll('table.dtable tbody tr')].map((r) => r.firstElementChild?.textContent)).toEqual([
       'recall_deep',
       'db_query',
