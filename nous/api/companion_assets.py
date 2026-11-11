@@ -19,8 +19,10 @@ Two rules, both deliberate:
   persistent, agent-writable directory served on the dashboard's own origin,
   and what an agent writes can originate from a fetched web page. HTML or
   JavaScript served from there would run with the same origin as
-  `/a2ui/action`. So: raster images, and SVG behind a sandboxing CSP (an SVG
-  in an `<img>` cannot run script; one opened directly can).
+  `/a2ui/action`. So: raster images, SVG behind a sandboxing CSP (an SVG
+  in an `<img>` cannot run script; one opened directly can), and mp4/webm
+  video (a `<video>` cannot run script; served with nosniff, Range handled by
+  `FileResponse`).
 """
 
 from __future__ import annotations
@@ -35,7 +37,7 @@ from starlette.types import Scope
 
 # An allowlist, not a denylist: a new executable type must not become
 # servable by default.
-ALLOWED_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif", ".svg"})
+ALLOWED_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif", ".svg", ".mp4", ".webm"})
 
 _SVG_CSP = "sandbox; default-src 'none'; style-src 'unsafe-inline'"
 

@@ -69,7 +69,10 @@ async def test_the_application_bundle_always_wins_a_name_clash(dirs) -> None:
     assert "content-security-policy" not in response.headers, "dist files are not sandboxed"
 
 
-@pytest.mark.parametrize("name", ["evil.html", "evil.js", "evil.mjs", "evil.css", "data.json", "noext"])
+@pytest.mark.parametrize(
+    "name",
+    ["evil.html", "evil.js", "evil.mjs", "evil.css", "data.json", "noext", "clip.mov", "clip.m4v", "clip.mp4.html"],
+)
 async def test_the_overlay_serves_nothing_outside_the_allowlist(dirs, name: str) -> None:
     """Same-origin HTML or script from an agent-writable directory is the risk.
 
@@ -147,3 +150,44 @@ async def test_an_asset_added_after_startup_is_served(dirs) -> None:
 
 def test_the_allowlist_holds_no_executable_type() -> None:
     assert not ALLOWED_EXTENSIONS & {".html", ".htm", ".js", ".mjs", ".css", ".json", ".xml", ".wasm"}
+
+
+VIDEO = bytes(range(100))
+
+
+@pytest.mark.parametrize(("name", "media_type"), [("clip.mp4", "video/mp4"), ("clip.webm", "video/webm")])
+async def test_an_overlay_video_is_served_with_nosniff_and_a_video_type(dirs, name: str, media_type: str) -> None:
+    """A `<video>` cannot run script, so mp4/webm join the allowlist as plain media."""
+    dist, overlay = dirs
+    (overlay / "trip").mkdir()
+    (overlay / "trip" / name).write_bytes(VIDEO)
+
+    async with _client(dist, overlay) as client:
+        response = await client.get(f"/dashboard/v2/trip/{name}")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith(media_type)
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["accept-ranges"] == "bytes"
+    assert response.content == VIDEO
+    assert "content-security-policy" not in response.headers
+
+
+async def test_overlay_video_range_request_returns_206_with_content_range(dirs) -> None:
+    """iOS plays a video only when the server answers Range with 206."""
+    dist, overlay = dirs
+    (overlay / "trip").mkdir()
+    (overlay / "trip" / "clip.mp4").write_bytes(VIDEO)
+
+    async with _client(dist, overlay) as client:
+        head = await client.get("/dashboard/v2/trip/clip.mp4", headers={"Range": "bytes=0-9"})
+        tail = await client.get("/dashboard/v2/trip/clip.mp4", headers={"Range": "bytes=90-"})
+        beyond = await client.get("/dashboard/v2/trip/clip.mp4", headers={"Range": "bytes=500-"})
+
+    assert head.status_code == 206
+    assert head.headers["content-range"] == "bytes 0-9/100"
+    assert head.content == VIDEO[:10]
+    assert head.headers["x-content-type-options"] == "nosniff"
+    assert tail.status_code == 206
+    assert tail.headers["content-range"] == "bytes 90-99/100"
+    assert beyond.status_code == 416
