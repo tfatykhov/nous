@@ -234,3 +234,30 @@ describe('no Tailwind colour class in a migrated markup or script', () => {
     expect(overlay).toMatch(TAILWIND_COLOUR);
   });
 });
+
+// Review M1 (PR 3): a status fill used as text can also come from the markup, through a map of mark colours
+// (`style:color={URGENCY_COLOR[u]}`, the form Heartbeat had) or a literal fill token. A text colour reads a text map,
+// named `*_INK` by convention (Heartbeat's URGENCY_INK), or a text token.
+// Only a text colour counts: a `style:color` directive's value, or the `color:` declaration of an inline style attribute
+// (not `border-color`, and not a `color:` key in an object literal, as Admission's box-plot marks have).
+const FILL_MAP_AS_TEXT =
+  /(style:color=[{"][^}"]*|style="[^"]*?(?<![-\w])color:[^";]*)(\b[A-Z][A-Z_]*_COLOR\b|var\(--(red|green|yellow)\))/;
+
+describe('a migrated markup never colours text with a mark map or a status fill', () => {
+  it('the pattern catches a colour map or a fill as text, and spares ink maps, borders and backgrounds', () => {
+    for (const bad of ['<span style:color={URGENCY_COLOR[row.urgency]}>', '<span style="color:{URGENCY_COLOR[row.urgency] ?? \'x\'}">',
+      '<b style:color="var(--red)">', '<i style="color: var(--yellow)">']) {
+      expect(bad, bad).toMatch(FILL_MAP_AS_TEXT);
+    }
+    for (const ok of ['<span style:color={URGENCY_INK[row.urgency]}>', '<span style:border-color={STATE_COLOR[st]}>',
+      '<span style:background={URGENCY_COLOR[f.urgency]}>', '<span style="border-color: var(--red)">', '<b style:color={dispositionColor(d)}>',
+      "{#each [{ label: 'Admitted', stats: entry.admitted, color: 'var(--green)' }] as { label, stats, color }}"]) {
+      expect(ok, ok).not.toMatch(FILL_MAP_AS_TEXT);
+    }
+  });
+
+  it.each(SCRIPT_GUARDED)('%s', (file) => {
+    const lines = markupOf(readFileSync(join(SRC, file), 'utf-8')).split('\n');
+    expect(lines.filter((line) => FILL_MAP_AS_TEXT.test(line)).map((l) => l.trim())).toEqual([]);
+  });
+});
