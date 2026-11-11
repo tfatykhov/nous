@@ -428,7 +428,7 @@
     padding: 0.5rem 0.625rem;
     background: var(--bg);
     border: 1px solid var(--field-border);
-    border-radius: var(--radius-sm);
+    border-radius: var(--card-radius-sm);
     color: var(--text);
     font-family: inherit;
     font-size: 0.8125rem;

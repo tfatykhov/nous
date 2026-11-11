@@ -337,3 +337,23 @@
     }
   }
 }
+
+/* The browser's own surfaces carry the design (finish review ceiling; the craft floor). Unlayered and anchored at :root
+   so a view's scoped rule (a `background` shorthand on its select, say) cannot reset them: a checkbox or radio takes
+   the action colour; a select draws its arrow from tokens, with room for it; every disclosure marker is the muted ink. */
+:root input[type="checkbox"], :root input[type="radio"] {
+  accent-color: var(--action);
+}
+
+:root select:not([multiple]) {
+  appearance: none;
+  padding-right: 2rem;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 0.95rem) 50%, calc(100% - 0.65rem) 50%;
+  background-size: 0.3rem 0.3rem;
+  background-repeat: no-repeat;
+}
+
+summary::marker {
+  color: var(--muted);
+}
