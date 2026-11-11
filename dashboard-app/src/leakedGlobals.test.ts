@@ -53,11 +53,10 @@ describe('no global rule leaks from the converted dense screens', () => {
   it('Identity\'s three global blocks are byte for byte as on origin/main', () => {
     const src = readFileSync(join(SRC, 'views/Identity.svelte'), 'utf-8').replace(/\r\n/g, '\n');
     expect(src).toContain(IDENTITY_GLOBALS);
-    // No other global rule: besides the three pinned blocks, only the paper-only scoped form the other six files may
-    // use (Identity's paper title, PR 5).
+    // No other global rule besides the three pinned blocks (its paper title, anchored in PR 5, folded in PR 7 T6c).
     expect(leaks(styleBlocks(src)), 'no other :global( in Identity').toEqual([':global(.detail-grid) {', ':global(.dl) {', ':global(.mono) {']);
-    // And a count, which catches what a line-based reading can miss: the three blocks and the paper title, nothing else.
-    expect(styleBlocks(src).match(/:global\b/g), 'the :global count in Identity').toHaveLength(4);
+    // And a count, which catches what a line-based reading can miss: the three blocks, nothing else.
+    expect(styleBlocks(src).match(/:global\b/g), 'the :global count in Identity').toHaveLength(3);
   });
 
   it('the anchor form is allowed, any other :global( is a leak', () => {

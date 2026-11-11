@@ -289,17 +289,10 @@
 
   /* The page title of the Work, Model calls and Memory health screens */
   .page-h1 {
-    font-size: 1.75rem;
-    font-weight: 700;
-    letter-spacing: -0.02em;
-    margin: 0.25rem 0;
-  }
-
-  /* Anchored at html:root .page-ground (0,3,1), the specificity it had behind the look switch */
-  html:root .page-ground .page-h1 {
     font-size: 30px;
     font-weight: 650;
     letter-spacing: -0.022em;
+    margin: 0.25rem 0;
   }
 
   @media (prefers-reduced-motion: reduce) {

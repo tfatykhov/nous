@@ -118,14 +118,12 @@ describe('the anchor of the paper rules in the views', () => {
     expect(extra).toEqual({});
   });
 
-  // PR 7 T6 folds the dark base rules into the anchored ones and drops the anchor where nothing in the file can out-rank
-  // the plain rule; the anchors left are counted here per file (each fold group shrinks the list).
+  // PR 7 T6 folded the dark base rules into the anchored ones and dropped the anchor where nothing in the file can
+  // out-rank the plain rule; the three anchors left are counted here per file.
   const ANCHORS_LEFT: Record<string, number> = {
-    // T6a, kept on purpose (each with its reason in the file): Browser's .btn out-ranks .btn-sm, Retrieval's .chart-card
+    // Kept on purpose (each with its reason in the file): Browser's .btn out-ranks .btn-sm, Retrieval's .chart-card
     // out-ranks .list-card, Memory write health's h2 out-ranks .verdict-title.
     'views/Browser.svelte': 1, 'views/Retrieval.svelte': 1, 'views/MemoryWriteHealth.svelte': 1,
-    'views/Autonomy.svelte': 3, 'views/Decisions.svelte': 1, 'views/Harness.svelte': 1, 'views/Identity.svelte': 1,
-    'views/Intentions.svelte': 3, 'views/Observability.svelte': 1, 'views/Rubric.svelte': 1,
   };
 
   it('the anchors left are the counted ones, and the old scoped form is gone', () => {

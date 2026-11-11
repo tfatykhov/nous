@@ -462,17 +462,11 @@
 
   .view-head h1 {
     margin: 0 0 0.25rem;
-    font-size: 1.5rem;
-    font-weight: 700;
-    color: var(--text);
-  }
-
-  /* The paper look's title size; the dark title keeps the rule above. */
-  :global(html:root .page-ground) h1 {
     font-size: 30px;
     font-weight: 650;
     letter-spacing: -0.022em;
     line-height: 1.15;
+    color: var(--text);
   }
 
   .subtitle {

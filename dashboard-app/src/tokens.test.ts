@@ -508,10 +508,9 @@ describe('the document level', () => {
     expect(CSS).not.toMatch(/radial-gradient/);
   });
 
-  it('the page region needs no rule of its own (body carries the ground); only the page title is anchored to it', () => {
-    expect(BLOCKS.has('.page-ground')).toBe(false);
-    expect(BLOCKS.get('html:root .page-ground .page-h1')).toEqual({ 'font-size': '30px', 'font-weight': '650', 'letter-spacing': '-0.022em' });
-    expect([...BLOCKS.keys()].filter((k) => k.includes('.page-ground'))).toEqual(['html:root .page-ground .page-h1']);
+  it('the page region needs no rule of its own (body carries the ground); the page title is one plain rule (T6c fold)', () => {
+    expect([...BLOCKS.keys()].filter((k) => k.includes('.page-ground'))).toEqual([]);
+    expect(BLOCKS.get('.page-h1')).toEqual({ 'font-size': '30px', 'font-weight': '650', 'letter-spacing': '-0.022em', margin: '0.25rem 0' });
   });
 
   it('the fonts: Archivo and Red Hat Mono only, loaded and named in @theme (a bare <code> follows --font-mono)', () => {

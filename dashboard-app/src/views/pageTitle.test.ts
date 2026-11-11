@@ -4,7 +4,7 @@ import { join, relative, resolve } from 'node:path';
 
 // The F108 screens share one page-title style, `.page-h1` in app.css, instead of a copy of the rule in each file.
 const SRC = resolve(__dirname, '..');
-const RULE = /font-size:\s*1\.75rem;\s*font-weight:\s*700;\s*letter-spacing:\s*-0\.02em;\s*margin:\s*0\.25rem 0;?/;
+const RULE = /font-size:\s*30px;\s*font-weight:\s*650;\s*letter-spacing:\s*-0\.022em;\s*margin:\s*0\.25rem 0;?/;
 const SCREENS = [
   'views/Work.svelte', 'views/work/SessionList.svelte', 'views/work/Patterns.svelte',
   'views/ModelCalls.svelte', 'views/Health.svelte',

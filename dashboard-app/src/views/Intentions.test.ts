@@ -158,8 +158,8 @@ describe('Intentions: the paper look (source contracts)', () => {
     expect(rules.get('.tiles dt')).toMatchObject({ 'text-transform': 'none', 'letter-spacing': '0' });
   });
 
-  it('under the paper look only: the title size, soft tiles and the prototype\'s table header', () => {
-    const paper = (sel: string) => rules.get(`:global(html:root .page-ground) ${sel}`);
+  it('the title size, soft tiles and the prototype\'s table header', () => {
+    const paper = (sel: string) => rules.get(sel); // the folded rules (PR 7 T6c): the paper look is the only one
     expect(paper('h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
     expect(paper('.tiles div')).toMatchObject({ background: 'var(--wash)' });
     expect(paper('thead th')).toMatchObject({ 'font-size': '12px', 'font-weight': '600', color: 'var(--muted)' });

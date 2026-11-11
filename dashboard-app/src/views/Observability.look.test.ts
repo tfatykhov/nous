@@ -240,10 +240,10 @@ describe('Observability: the paper look\'s structure (source contracts)', () => 
     expect(rules.get('.trace-row:focus-visible')).toMatchObject({ outline: '2px solid var(--focus-ring)', 'outline-offset': '2px' });
   });
 
-  it('cards read the card tokens, labels the label tokens, and the title takes the paper size under paper only', () => {
+  it('cards read the card tokens, labels the label tokens, and the title takes the paper size', () => {
     expect(rules.get('.chart-card')).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius)', 'box-shadow': 'var(--card-shadow)' });
     expect(rules.get('.event-badge')).toMatchObject({ 'text-transform': 'none', 'letter-spacing': '0' });
-    expect(rules.get(':global(html:root .page-ground) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
+    expect(rules.get('h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
   });
 
   it('the dot paints its own token, the severity word reads a text token, and the badges are tints', () => {

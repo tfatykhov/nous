@@ -377,16 +377,10 @@
   }
 
   h1 {
-    font-size: 1.4rem;
-    font-weight: 700;
-    color: var(--text);
-    margin: 0 0 0.125rem;
-  }
-
-  /* The paper look's title size; the dark title keeps the rule above. */
-  :global(html:root .page-ground) h1 {
     font-size: 30px;
     font-weight: 650;
+    color: var(--text);
+    margin: 0 0 0.125rem;
     letter-spacing: -0.022em;
     line-height: 1.15;
   }

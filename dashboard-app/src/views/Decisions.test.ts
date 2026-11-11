@@ -202,8 +202,8 @@ describe('Decisions: the paper look\'s structure (source contracts)', () => {
     expect(rules.get('.stat-label')).toMatchObject({ 'text-transform': 'none', 'letter-spacing': '0' });
   });
 
-  it('the title takes the paper size under the paper look only, and chart cells may shrink at phone width', () => {
-    expect(rules.get(':global(html:root .page-ground) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
+  it('the title takes the paper size, and chart cells may shrink at phone width', () => {
+    expect(rules.get('h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
     expect(rules.get('.chart-row > *')).toMatchObject({ 'min-width': '0' });
     expect(rules.get('.view-head')).toMatchObject({ 'flex-wrap': 'wrap' });
   });

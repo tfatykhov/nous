@@ -235,7 +235,7 @@ describe('Identity: the paper look\'s structure (source contracts)', () => {
     expect(rules.get('.section-label')).toMatchObject({ 'text-transform': 'none', 'letter-spacing': '0' });
     expect(rules.get('.save-status.save-ok')).toMatchObject({ color: 'var(--save-ok)' });
     expect(rules.get('.save-status.save-err')).toMatchObject({ color: 'var(--save-err)' });
-    expect(rules.get(':global(html:root .page-ground) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
+    expect(rules.get('h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
   });
 
   it('the fact id takes the look\'s mono font through a scoped rule, leaving the shared global .mono alone', () => {

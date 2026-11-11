@@ -301,7 +301,8 @@ describe('Scoring: the paper look\'s structure (source contracts)', () => {
     expect(rules.get('.badge-pending')).toEqual({ background: 'var(--wash)', color: 'var(--muted)' });
   });
 
-  it('the title takes the paper size under the paper look only', () => {
-    expect(rules.get(':global(html:root .page-ground) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
+  it('the title takes the paper size (folded into the header rule, PR 7 T6c: a plain `h1` would lose to it)', () => {
+    expect(rules.get('.view-head h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650', 'letter-spacing': '-0.022em' });
+    expect(rules.has('h1')).toBe(false);
   });
 });

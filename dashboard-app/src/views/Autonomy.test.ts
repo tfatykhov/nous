@@ -588,8 +588,8 @@ describe('Autonomy: colours by token', () => {
     expect(rules.get('.strip-meta dt, .tiles dt, .triple dt, .detail dt, .label')).toMatchObject({
       'text-transform': 'none', 'letter-spacing': '0',
     });
-    expect(rules.get(':global(html:root .page-ground) .nums td:not(:first-child)')).toMatchObject({ 'font-stretch': '85%' });
-    expect(rules.get(':global(html:root .page-ground) .stats td:not(:first-child)')).toBeUndefined();
-    expect(rules.get(':global(html:root .page-ground) h1')).toMatchObject({ 'font-size': '30px' });
+    expect(rules.get('.nums td:not(:first-child)')).toMatchObject({ 'font-stretch': '85%' });
+    expect(rules.get('.stats td:not(:first-child)')).toBeUndefined();
+    expect(rules.get('h1')).toMatchObject({ 'font-size': '30px' });
   });
 });
