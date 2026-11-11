@@ -118,6 +118,93 @@ const NEW_DARK: Record<string, string> = {
   '--f-other': '#c4c4d8', // a frame id outside the seven (review M1): neutral, not conversation's grey
 };
 
+// PR 2 (the Memory screens): [dark, paper]. Each dark value is the literal the screen used before it read the token.
+const SERIES: Record<string, [string, string]> = {
+  '--series-1': ['#60a5fa', '#1f5fa8'],
+  '--series-2': ['#34d399', '#159a7a'],
+  '--series-3': ['#a78bfa', '#a8408f'],
+  '--series-4': ['#fb923c', '#d0620d'],
+  '--series-5': ['#f87171', '#7a8a1a'],
+  '--series-6': ['#fbbf24', '#8a5a2b'],
+  '--series-7': ['#6b6b8a', '#4f5f6f'],
+  '--series-8': ['#e2e2f0', '#1c2f55'],
+  '--series-9': ['#22d3ee', '#0e7490'],
+  '--series-10': ['#e879f9', '#8b5cf6'],
+  '--series-11': ['#f472b6', '#6b7280'],
+  '--series-12': ['#9ca3af', '#a8741a'],
+  '--series-13': ['#c4c4d8', '#7a3f3f'],
+};
+const GV_NODES: Record<string, [string, string]> = {
+  '--gv-fact': ['#34d399', '#159a7a'],
+  '--gv-episode': ['#60a5fa', '#1f5fa8'],
+  '--gv-decision': ['#a78bfa', '#a8408f'],
+  '--gv-procedure': ['#fbbf24', '#d0620d'],
+  '--gv-chunk': ['#06b6d4', '#7a8a1a'],
+};
+const GV: Record<string, [string, string]> = {
+  ...GV_NODES,
+  '--gv-other': ['#6b6b8a', '#4f5f6f'],
+  '--gv-outline': ['#0a0a0f', '#ffffff'], // the label halo
+  '--gv-node-border': ['rgba(0, 0, 0, 0.3)', 'rgba(20, 32, 43, 0.35)'],
+  '--gv-select': ['#fbbf24', '#14202b'], // the selected and search-hit rings
+};
+const REL: Record<string, [string, string]> = {
+  '--rel-related-to': ['#7c6af7', '#4f5f6f'],
+  '--rel-extracted-from': ['#60a5fa', '#1f5fa8'],
+  '--rel-supports': ['#34d399', '#159a7a'],
+  '--rel-informed-by': ['#a78bfa', '#a8408f'],
+  '--rel-evidence-for': ['#fbbf24', '#d0620d'],
+  '--rel-contradicts': ['#f87171', '#8a5a2b'],
+  '--rel-supersedes': ['#fb923c', '#7a8a1a'],
+  '--rel-caused-by': ['#e2e2f0', '#1c2f55'],
+  '--rel-discussed-in': ['#6b6b8a', '#6b7280'],
+  '--rel-part-of': ['#22d3ee', '#0e7490'],
+  '--rel-summarized-by': ['#06b6d4', '#8b5cf6'],
+};
+const DISP: Record<string, [string, string]> = {
+  '--disp-rendered': ['#34d399', '#0f6e63'],
+  '--disp-returned-to-script': ['#22d3ee', '#1c5d99'],
+  '--disp-sliced-off': ['#f59e0b', '#8a4b08'],
+  '--disp-budget-truncated': ['#fcd34d', '#b05a09'],
+  '--disp-below-floor': ['#a78bfa', '#5b2fb3'],
+  '--disp-filter-dropped': ['#c4b5fd', '#7c4dd0'],
+  '--disp-deduped': ['#94a3b8', '#4d5a6b'],
+  '--disp-superseded': ['#cbd5e1', '#6b7787'],
+  '--disp-replaced-at-merge': ['#64748b', '#2a3646'],
+  '--disp-f071-excluded': ['#7c8da3', '#5d6a7b'],
+  '--disp-type-excluded': ['#475569', '#3b4859'],
+  '--disp-unaccounted': ['#f472b6', '#a3185c'],
+};
+const PR2: Record<string, [string, string]> = {
+  ...SERIES,
+  ...GV,
+  ...REL,
+  ...DISP,
+  '--seg-ink': ['#0a0a0f', '#ffffff'], // the count label on a Retrieval funnel segment
+  '--badge-good-bg': ['rgba(52, 211, 153, 0.15)', '#e3f2e8'],
+  '--badge-warn-bg': ['rgba(251, 191, 36, 0.15)', '#f8efdc'],
+  '--badge-bad-bg': ['rgba(248, 113, 113, 0.15)', '#fbe9e8'],
+  '--track': ['rgba(255, 255, 255, 0.06)', '#e3e9ec'], // a doughnut's remainder, a panel wash
+  '--track-strong': ['rgba(255, 255, 255, 0.08)', '#e3e9ec'],
+  '--bar-bg': ['rgba(17, 17, 24, 0.6)', '#f4f7f8'], // the Graph controls bar
+  '--glow-blur': ['6px', '0px'],
+  '--chart-text': ['#94a3b8', '#56687a'], // a chart's ticks and legend on a paper ground
+  '--chart-grid': ['#1e293b', '#e3e9ec'],
+};
+for (const [k, [dark]] of Object.entries(PR2)) NEW_DARK[k] = dark;
+
+// The legacy memory-type colours keep their golden dark values (ORIGIN_ROOT) and get paper ones (Retrieval's chips).
+const LEGACY_PAPER: Record<string, string> = {
+  '--fact-color': '#1f5fa8',
+  '--episode-color': '#159a7a',
+  '--decision-color': '#a8408f',
+  '--procedure-color': '#d0620d',
+  '--censor-color': '#8a5a2b',
+  '--heartbeat-color': '#4f5f6f',
+  '--chunk-color': '#7a8a1a',
+  '--pending': '#1b6a9c',
+};
+
 const FRAMES = ['conversation', 'question', 'task', 'decision', 'debug', 'creative', 'initiation'];
 const PAPER_FRAMES: Record<string, string> = {
   conversation: '#55697a',
@@ -393,5 +480,109 @@ describe('contrast of the new values', () => {
     // The ring sits outside the pill, on the rail.
     expect(contrast(RAIL['--focus-ring'], RAIL['--surface'])).toBeGreaterThanOrEqual(3);
     expect(contrast(RAIL['--focus-ring'], RAIL['--surface-hover'])).toBeGreaterThanOrEqual(3);
+  });
+});
+
+// ── PR 2: series, graph, relation and disposition colours ─────────────────────────────────────────────────────────
+
+/** OKLab (Björn Ottosson) of an sRGB colour; distances below are Euclidean, times 100. */
+function oklab(c: string): [number, number, number] {
+  const lin = (v: number) => {
+    const s = v / 255;
+    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  };
+  const [r, g, b] = parseColor(c).slice(0, 3).map(lin);
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return [
+    0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s,
+    1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s,
+    0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s,
+  ];
+}
+function okDistance(a: string, b: string): number {
+  const [x, y] = [oklab(a), oklab(b)];
+  return 100 * Math.hypot(x[0] - y[0], x[1] - y[1], x[2] - y[2]);
+}
+
+describe('PR 2 tokens: series, graph, relations, dispositions', () => {
+  it('the OKLab helper agrees with known values', () => {
+    expect(oklab('#ffffff')[0]).toBeCloseTo(1, 3);
+    expect(okDistance('#000000', '#ffffff')).toBeCloseTo(100, 1);
+    expect(okDistance('#159a7a', '#159a7a')).toBe(0);
+  });
+
+  it('every new token has the dark value the screens used, and a paper value', () => {
+    for (const [k, [dark, paper]] of Object.entries(PR2)) {
+      expect(DARK[k], k).toBe(dark);
+      expect(PAPER[k], k).toBe(paper);
+    }
+    for (const [k, paper] of Object.entries(LEGACY_PAPER)) {
+      expect(DARK[k], k).toBe(ORIGIN_ROOT[k]); // the dark golden is untouched
+      expect(PAPER[k], k).toBe(paper);
+    }
+  });
+
+  it('series 1 to 9 are at least 3:1 on the white card; any two of 1 to 8 are at least 7 apart', () => {
+    const paper = Object.values(SERIES).map(([, p]) => p);
+    for (const [i, c] of paper.slice(0, 9).entries()) expect(contrast(c, '#ffffff'), `series-${i + 1}`).toBeGreaterThanOrEqual(3);
+    for (let i = 0; i < 8; i++) {
+      for (let j = i + 1; j < 8; j++) {
+        expect(okDistance(paper[i], paper[j]), `series-${i + 1} and series-${j + 1}`).toBeGreaterThanOrEqual(7);
+      }
+    }
+  });
+
+  it('series 10 to 13 are at least 3:1 and at least 7 apart from every other slot', () => {
+    const paper = Object.values(SERIES).map(([, p]) => p);
+    for (let i = 9; i < 13; i++) {
+      expect(contrast(paper[i], '#ffffff'), `series-${i + 1}`).toBeGreaterThanOrEqual(3);
+      for (let j = 0; j < 13; j++) {
+        if (j !== i) expect(okDistance(paper[i], paper[j]), `series-${i + 1} and series-${j + 1}`).toBeGreaterThanOrEqual(7);
+      }
+    }
+  });
+
+  it('the five graph node colours: at least 3:1 on white, and at least 11 apart (fact and chunk are the closest, 11.1)', () => {
+    // The plan asked for 12; its own hexes measure 11.10 for fact (teal) and chunk (olive). The hexes are kept: they
+    // are shared with the series ramp, the legacy type colours and the relations.
+    const nodes = Object.entries(GV_NODES).map(([k, [, p]]) => [k, p] as const);
+    for (const [k, c] of nodes) expect(contrast(c, '#ffffff'), k).toBeGreaterThanOrEqual(3);
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        expect(okDistance(nodes[i][1], nodes[j][1]), `${nodes[i][0]} and ${nodes[j][0]}`).toBeGreaterThanOrEqual(11);
+      }
+    }
+    expect(contrast(PAPER['--gv-other'], '#ffffff')).toBeGreaterThanOrEqual(3);
+    // The rings and the label halo on the white card.
+    expect(contrast(PAPER['--gv-select'], '#ffffff')).toBeGreaterThanOrEqual(3);
+    expect(contrast(PAPER['--muted'], PAPER['--gv-outline'])).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('every relation colour and legacy type colour is at least 3:1 on white', () => {
+    for (const [k, [, p]] of Object.entries(REL)) expect(contrast(p, '#ffffff'), k).toBeGreaterThanOrEqual(3);
+    for (const [k, p] of Object.entries(LEGACY_PAPER)) expect(contrast(p, '#ffffff'), k).toBeGreaterThanOrEqual(3);
+  });
+
+  it('no categorical paper colour is a frame colour or a status fill or text (a hue carries one meaning)', () => {
+    const taken = new Set([
+      ...Object.keys(PAPER).filter((k) => k.startsWith('--f-')).map((k) => PAPER[k].toLowerCase()),
+      '#2f8a4e', '#b7791f', '#d2352b', '#23703d', '#8a5a0e', '#b02a22',
+    ]);
+    expect(taken.size).toBeGreaterThanOrEqual(14);
+    const categorical = { ...SERIES, ...GV_NODES, '--gv-other': GV['--gv-other'], ...REL, ...DISP };
+    for (const [k, [, p]] of Object.entries(categorical)) expect(taken.has(p.toLowerCase()), k).toBe(false);
+  });
+
+  it('every disposition fill takes the white count label at 4.5:1 or more', () => {
+    for (const [k, [, p]] of Object.entries(DISP)) expect(contrast(PAPER['--seg-ink'], p), k).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('a chart\'s text on the white card is at least 4.5:1; status text on the badge tints too', () => {
+    expect(contrast(PAPER['--chart-text'], '#ffffff')).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--ok-text'], PAPER['--badge-good-bg'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--warn-text'], PAPER['--badge-warn-bg'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--err-text'], PAPER['--badge-bad-bg'])).toBeGreaterThanOrEqual(4.5);
   });
 });

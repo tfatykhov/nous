@@ -146,6 +146,68 @@
     --tab-active-shadow: inset 0 0 0 1px var(--accent);
     --focus-ring: var(--accent);
     --btn-focus-width: 0px;                    /* a focused Button's outline: none under dark, as before */
+
+    /* ---- PR 2, the Memory screens: chart, graph and funnel colours (marks, not text) ----
+       A canvas cannot read var(): lib/chartColors.ts resolves these against the element a chart draws into. */
+    /* Categorical series ramp (slot 7 is above) */
+    --series-1: #60a5fa;
+    --series-2: #34d399;
+    --series-3: #a78bfa;
+    --series-4: #fb923c;
+    --series-5: #f87171;
+    --series-6: #fbbf24;
+    --series-8: #e2e2f0;
+    --series-9: #22d3ee;
+    --series-10: #e879f9;
+    --series-11: #f472b6;
+    --series-12: #9ca3af;
+    --series-13: #c4c4d8;
+    /* Graph: node types (not the legacy --*-color, whose fact and episode are swapped), label halo, rings */
+    --gv-fact: #34d399;
+    --gv-episode: #60a5fa;
+    --gv-decision: #a78bfa;
+    --gv-procedure: #fbbf24;
+    --gv-chunk: #06b6d4;
+    --gv-other: #6b6b8a;
+    --gv-outline: #0a0a0f;
+    --gv-node-border: rgba(0, 0, 0, 0.3);
+    --gv-select: #fbbf24;
+    /* Graph: edge relations */
+    --rel-related-to: #7c6af7;
+    --rel-extracted-from: #60a5fa;
+    --rel-supports: #34d399;
+    --rel-informed-by: #a78bfa;
+    --rel-evidence-for: #fbbf24;
+    --rel-contradicts: #f87171;
+    --rel-supersedes: #fb923c;
+    --rel-caused-by: #e2e2f0;
+    --rel-discussed-in: #6b6b8a;
+    --rel-part-of: #22d3ee;
+    --rel-summarized-by: #06b6d4;
+    /* Retrieval: candidate dispositions, and the count label on a funnel segment */
+    --disp-rendered: #34d399;
+    --disp-returned-to-script: #22d3ee;
+    --disp-sliced-off: #f59e0b;
+    --disp-budget-truncated: #fcd34d;
+    --disp-below-floor: #a78bfa;
+    --disp-filter-dropped: #c4b5fd;
+    --disp-deduped: #94a3b8;
+    --disp-superseded: #cbd5e1;
+    --disp-replaced-at-merge: #64748b;
+    --disp-f071-excluded: #7c8da3;
+    --disp-type-excluded: #475569;
+    --disp-unaccounted: #f472b6;
+    --seg-ink: #0a0a0f;
+    /* Small structure */
+    --badge-good-bg: rgba(52, 211, 153, 0.15);
+    --badge-warn-bg: rgba(251, 191, 36, 0.15);
+    --badge-bad-bg: rgba(248, 113, 113, 0.15);
+    --track: rgba(255, 255, 255, 0.06);        /* a doughnut's remainder, a panel wash */
+    --track-strong: rgba(255, 255, 255, 0.08);
+    --bar-bg: rgba(17, 17, 24, 0.6);           /* the Graph controls bar */
+    --glow-blur: 6px;
+    --chart-text: #94a3b8;                     /* a chart's ticks and legend on a paper ground (dark charts keep Chart.js's) */
+    --chart-grid: #1e293b;
   }
 
   /* ---- The paper ground: page content under the paper look ---- */
@@ -214,6 +276,70 @@
     --tab-active-shadow: 0 1px 3px rgba(18, 48, 79, 0.12);
     --focus-ring: #2346c8;
     --btn-focus-width: 2px;
+
+    /* PR 2: at least 3:1 on the white card; no categorical value is a frame or status colour (tokens.test.ts) */
+    --pending: #1b6a9c;
+    --fact-color: #1f5fa8;
+    --episode-color: #159a7a;
+    --decision-color: #a8408f;
+    --procedure-color: #d0620d;
+    --censor-color: #8a5a2b;
+    --heartbeat-color: #4f5f6f;
+    --chunk-color: #7a8a1a;
+    --series-1: #1f5fa8;
+    --series-2: #159a7a;
+    --series-3: #a8408f;
+    --series-4: #d0620d;
+    --series-5: #7a8a1a;
+    --series-6: #8a5a2b;
+    --series-8: #1c2f55;
+    --series-9: #0e7490;
+    --series-10: #8b5cf6;
+    --series-11: #6b7280;
+    --series-12: #a8741a;
+    --series-13: #7a3f3f;
+    --gv-fact: #159a7a;
+    --gv-episode: #1f5fa8;
+    --gv-decision: #a8408f;
+    --gv-procedure: #d0620d;
+    --gv-chunk: #7a8a1a;
+    --gv-other: #4f5f6f;
+    --gv-outline: #ffffff;
+    --gv-node-border: rgba(20, 32, 43, 0.35);
+    --gv-select: #14202b;
+    --rel-related-to: #4f5f6f;
+    --rel-extracted-from: #1f5fa8;
+    --rel-supports: #159a7a;
+    --rel-informed-by: #a8408f;
+    --rel-evidence-for: #d0620d;
+    --rel-contradicts: #8a5a2b;
+    --rel-supersedes: #7a8a1a;
+    --rel-caused-by: #1c2f55;
+    --rel-discussed-in: #6b7280;
+    --rel-part-of: #0e7490;
+    --rel-summarized-by: #8b5cf6;
+    --disp-rendered: #0f6e63;
+    --disp-returned-to-script: #1c5d99;
+    --disp-sliced-off: #8a4b08;
+    --disp-budget-truncated: #b05a09;
+    --disp-below-floor: #5b2fb3;
+    --disp-filter-dropped: #7c4dd0;
+    --disp-deduped: #4d5a6b;
+    --disp-superseded: #6b7787;
+    --disp-replaced-at-merge: #2a3646;
+    --disp-f071-excluded: #5d6a7b;
+    --disp-type-excluded: #3b4859;
+    --disp-unaccounted: #a3185c;
+    --seg-ink: #ffffff;
+    --badge-good-bg: #e3f2e8;
+    --badge-warn-bg: #f8efdc;
+    --badge-bad-bg: #fbe9e8;
+    --track: #e3e9ec;
+    --track-strong: #e3e9ec;
+    --bar-bg: #f4f7f8;
+    --glow-blur: 0px;
+    --chart-text: #56687a;
+    --chart-grid: #e3e9ec;
 
     /* shadcn, HSL of the paper hex */
     --background: 192 17% 94%;
