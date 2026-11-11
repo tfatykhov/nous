@@ -731,6 +731,11 @@ describe('Model calls on paper: tokens and words', () => {
     // Fix round 0, ruling 5: on paper --accent-text is the link blue, beside series 1's blue; the first section has its
     // own token (the accent text under dark, the violet series 0 on paper). No section reads an accent token.
     expect(tokens[0]).toBe('var(--mc-section-1)');
+    // Review M5 and M6: Messages has its own colour (not the unknown status's), and Tools one that Decisions does not
+    // merge with under red-green colour blindness. Both keep today's dark values.
+    expect(tokens[6]).toBe('var(--mc-section-7)');
+    expect(tokens[7]).toBe('var(--mc-section-8)');
+    expect(tokens).not.toContain('var(--unknown)');
     expect(tokens.filter((t) => t.includes('--accent'))).toEqual([]);
   });
 

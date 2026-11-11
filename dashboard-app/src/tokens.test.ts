@@ -241,6 +241,8 @@ const PR3: Record<string, [string, string]> = {
   '--hb-warn-ink': ['#fbbf24', '#8a5a0e'], // Heartbeat: amber as text (paper's --yellow is a mark colour)
   '--effect-write': ['#60a5fa', '#1f5fa8'], // the Ledger's write effect pill
   '--mc-section-1': ['#a99df9', '#8b5cf6'], // a model call's first context section (dark: the accent text; paper: a violet)
+  '--mc-section-7': ['#f472b6', '#7890d0'], // Messages (dark: the old --unknown; paper: a light blue, not a status colour)
+  '--mc-section-8': ['#9ca3af', '#2020e0'], // Tools (dark: the old --series-12; paper: apart from Decisions under red-green CVD)
 };
 for (const [k, [dark]] of Object.entries(PR3)) NEW_DARK[k] = dark;
 
@@ -802,6 +804,21 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
     expect(okDistance(DARK['--oc-unknown'], DARK['--st-neutral'])).toBeGreaterThanOrEqual(10);
   });
 
+  it('the nine context sections of a model call keep 7 apart for normal vision and under protanopia and deuteranopia (review M5, M6)', () => {
+    // CallDetail's PALETTE, in order. The closest pair is Decisions (teal) and Procedures (brick), 7.6 under deuteranopia.
+    const sections = ['--mc-section-1', '--series-1', '--series-9', '--series-2', '--series-6', '--series-4', '--mc-section-7', '--mc-section-8', '--series-13'];
+    for (let i = 0; i < sections.length; i++) {
+      expect(contrast(PAPER[sections[i]], '#ffffff'), sections[i]).toBeGreaterThanOrEqual(3);
+      for (let j = i + 1; j < sections.length; j++) {
+        for (const cvd of [undefined, 'protan', 'deutan'] as const) {
+          expect(okDistance(PAPER[sections[i]], PAPER[sections[j]], cvd), `${sections[i]} and ${sections[j]} (${cvd ?? 'normal'})`).toBeGreaterThanOrEqual(7);
+        }
+      }
+    }
+    // Messages is not the unknown status's colour (nor the creative frame's), on paper.
+    expect(PAPER['--mc-section-7']).not.toBe(PAPER['--unknown']);
+  });
+
   it('the first two context sections of a model call are distinct on paper (ruling 5), and 3:1 on white', () => {
     // Its own violet: not the question frame's link blue, and not tied to a series slot PR 2 owns (review I1).
     expect(PAPER['--mc-section-1']).not.toBe(PAPER['--f-question']);
@@ -811,7 +828,7 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
 
   it('PR 3\'s categorical colours keep the status distance: at least 6 (OKLab) from every status fill and text (review M2)', () => {
     const status = ['--green', '--yellow', '--red', '--ok-text', '--warn-text', '--err-text'].map((t) => [t, PAPER[t]] as const);
-    for (const k of ['--mc-section-1', '--cache-blue', '--cache-grey', '--effect-write']) {
+    for (const k of ['--mc-section-1', '--mc-section-7', '--mc-section-8', '--cache-blue', '--cache-grey', '--effect-write']) {
       for (const [s, sc] of status) expect(okDistance(PAPER[k], sc), `${k} (${PAPER[k]}) and ${s}`).toBeGreaterThanOrEqual(6);
     }
   });

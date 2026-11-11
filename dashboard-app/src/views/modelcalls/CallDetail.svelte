@@ -48,7 +48,7 @@
   let sectionTotal = $derived((data?.sections ?? []).reduce((a, s) => a + s.tokens_est, 0));
   // Each section's colour is a token (the bar and its legend dot use var() directly); every legend entry names its
   // section, so colour is never the only signal.
-  const PALETTE = ['--mc-section-1', '--series-1', '--series-9', '--series-2', '--series-6', '--series-4', '--unknown', '--series-12', '--series-13']
+  const PALETTE = ['--mc-section-1', '--series-1', '--series-9', '--series-2', '--series-6', '--series-4', '--mc-section-7', '--mc-section-8', '--series-13']
     .map((t) => `var(${t})`);
   const madeBy = (t: NonNullable<ModelCallDetail['turn']>) => t.session_title || t.session_id || '';
 </script>

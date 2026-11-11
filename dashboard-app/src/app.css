@@ -251,6 +251,8 @@
     --hb-warn-ink: #fbbf24;                    /* Heartbeat: amber as text (paper's --yellow is a mark colour) */
     --effect-write: #60a5fa;                   /* the Ledger's write effect pill */
     --mc-section-1: #a99df9;                   /* a model call's first context section (was --accent-text) */
+    --mc-section-7: #f472b6;                   /* its Messages section (was --unknown) */
+    --mc-section-8: #9ca3af;                   /* its Tools section (was --series-12) */
   }
 
   /* ---- The paper ground: page content under the paper look ---- */
@@ -425,6 +427,8 @@
     --hb-warn-ink: #8a5a0e;
     --effect-write: #1f5fa8;
     --mc-section-1: #8b5cf6;                   /* a violet, not the link blue beside series 1 */
+    --mc-section-7: #7890d0;                   /* not the unknown status's magenta; 12+ from every section, all vision types */
+    --mc-section-8: #2020e0;                   /* not the khaki that merged with Decisions' teal under protanopia */
 
     /* shadcn, HSL of the paper hex */
     --background: 192 17% 94%;
