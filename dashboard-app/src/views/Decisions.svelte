@@ -103,8 +103,8 @@
 
 <header class="view-head">
   <div>
-    <h1>Decision Intelligence</h1>
-    <p class="subtitle">Calibration, confidence, and reasoning analytics</p>
+    <h1>Decisions</h1>
+    <p class="subtitle">How well calibrated the decisions are, how confident, and how they were reasoned.</p>
   </div>
   <div class="head-right">
     <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void store.refresh()} disabled={$store.loading}>
@@ -143,7 +143,7 @@
   <!-- ── Row 1: Calibration curve + Confidence histogram ───────────────── -->
   <div class="chart-row">
     <section class="chart-card">
-      <h2>Calibration Curve</h2>
+      <h2>Calibration curve</h2>
       {#if d.calibration_curve.length > 0}
         <Chart
           type="line"
@@ -151,7 +151,7 @@
             labels: d.calibration_curve.map((p) => p.bucket),
             datasets: [
               {
-                label: 'Actual Success Rate',
+                label: 'Actual success rate',
                 data: d.calibration_curve.map((p) => p.actual_success_rate),
                 borderColor: MARK,
                 backgroundColor: tint('--series-0', 0.1),
@@ -187,7 +187,7 @@
     </section>
 
     <section class="chart-card">
-      <h2>Confidence Distribution</h2>
+      <h2>Confidence distribution</h2>
       {#if d.confidence_histogram.length > 0}
         <Chart
           type="bar"
@@ -219,7 +219,7 @@
   <!-- ── Row 2: Outcome by category + Outcome by stakes ────────────────── -->
   <div class="chart-row">
     <section class="chart-card">
-      <h2>Outcome by Category</h2>
+      <h2>Outcome by category</h2>
       {#if Object.keys(d.outcome_by_category).length > 0}
         {@const chart = buildStackedOutcomeChart(d.outcome_by_category)}
         <Chart
@@ -240,7 +240,7 @@
     </section>
 
     <section class="chart-card">
-      <h2>Outcome by Stakes</h2>
+      <h2>Outcome by stakes</h2>
       {#if Object.keys(d.outcome_by_stakes).length > 0}
         {@const chart = buildStackedOutcomeChart(d.outcome_by_stakes)}
         <Chart
@@ -263,7 +263,7 @@
 
   <!-- ── Row 3: Reason type usage (full width) ─────────────────────────── -->
   <section class="chart-card">
-    <h2>Reason Type Usage</h2>
+    <h2>Reason type usage</h2>
     {#if Object.keys(d.reason_type_stats).length > 0}
       {@const r = buildReasonChart(d.reason_type_stats)}
       <Chart
@@ -271,7 +271,7 @@
         data={{
           labels: r.labels,
           datasets: [{
-            label: 'Usage Count',
+            label: 'Usage count',
             data: r.data,
             backgroundColor: tint('--series-0', 0.5),
             borderColor: MARK,
@@ -296,14 +296,14 @@
   <!-- ── Row 4: Brier score over time + Decisions per day ──────────────── -->
   <div class="chart-row">
     <section class="chart-card">
-      <h2>Brier Score Over Time</h2>
+      <h2>Brier score over time</h2>
       {#if d.brier_history.length > 0}
         <Chart
           type="line"
           data={{
             labels: d.brier_history.map((p) => fmtDate(p.date)),
             datasets: [{
-              label: 'Brier Score',
+              label: 'Brier score',
               data: d.brier_history.map((p) => p.brier_score),
               borderColor: MARK,
               backgroundColor: tint('--series-0', 0.1),
@@ -328,7 +328,7 @@
     </section>
 
     <section class="chart-card">
-      <h2>Decisions Per Day</h2>
+      <h2>Decisions per day</h2>
       {#if d.daily_decisions.length > 0}
         <Chart
           type="bar"

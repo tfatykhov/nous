@@ -160,7 +160,7 @@
 <!-- Fact growth rate (line), from Observability's drift trends -->
 <section class="chart-card mt">
   <div class="card-head">
-    <h2>Fact Growth Rate (7d)</h2>
+    <h2>Fact growth rate (7d)</h2>
     <StaleBadge state={$obs} />
   </div>
   {#if $obs.data}

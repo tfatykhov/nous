@@ -156,10 +156,10 @@ const sectionOf = async (name: string) =>
   (await screen.findByRole('heading', { level: 2, name })).closest('section') as HTMLElement;
 const activityUrls = () => urls.filter((u) => u.startsWith('/dashboard/activity'));
 
-const SECTIONS = ['Event Timeline', 'Most Active Censors', 'Upcoming Schedules', 'Sleep Activity'];
-const CENSOR_STATS = ['Censor Activations (7d)', 'Auto-created Censors', 'Manual Censors', 'False Positives (7d)'];
-const SCHEDULE_STATS = ['Active Schedules', 'Schedule Fires (7d)'];
-const SLEEP_STATS = ['Last Sleep', 'Sleep Facts Created'];
+const SECTIONS = ['Event timeline', 'Most active censors', 'Upcoming schedules', 'Sleep activity'];
+const CENSOR_STATS = ['Censor activations (7d)', 'Auto-created censors', 'Manual censors', 'False positives (7d)'];
+const SCHEDULE_STATS = ['Active schedules', 'Schedule fires (7d)'];
+const SLEEP_STATS = ['Last sleep', 'Sleep Facts Created'];
 
 beforeEach(() => {
   failing = [];
@@ -196,7 +196,7 @@ describe('Work Changes tab', () => {
     expect(screen.getAllByText('write_file').length).toBeGreaterThan(0);
     // The screen's title, not the ledger's; the ledger keeps its subtitle and its staleness badge.
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Work');
-    expect(screen.queryByText('Execution Ledger')).toBeNull();
+    expect(screen.queryByText('Execution ledger')).toBeNull();
     expect(container.textContent).toContain('Every side-effecting tool call, kept durably');
     expect(container.querySelector('.stale-badge')).not.toBeNull();
     expect(urls.some((u) => u.startsWith('/dashboard/execution'))).toBe(true);
@@ -233,7 +233,7 @@ describe('Work Changes tab', () => {
     await screen.findByText('Gap Scout status check');
     expect(urls.some((u) => u.startsWith('/dashboard/execution'))).toBe(false);
     expect(container.textContent).not.toContain('Side-effecting calls');
-    expect(container.textContent).not.toContain('Execution Ledger');
+    expect(container.textContent).not.toContain('Execution ledger');
     expect(container.querySelector('code.sql')).toBeNull();
     const nav = screen.getByRole('navigation', { name: 'Work views' });
     expect(within(nav).getByRole('link', { name: 'Sessions' }).getAttribute('aria-current')).toBe('page');
@@ -254,7 +254,7 @@ describe('Work Changes tab', () => {
 describe('Ledger embedded prop', () => {
   it('standalone, the ledger keeps its own title', async () => {
     render(Ledger);
-    expect((await screen.findByRole('heading', { level: 1 })).textContent).toBe('Execution Ledger');
+    expect((await screen.findByRole('heading', { level: 1 })).textContent).toBe('Execution ledger');
   });
 
   it('embedded, it drops only its title: subtitle and staleness badge stay', async () => {
@@ -347,20 +347,20 @@ type Dest = {
   stats: string[]; absentStats: string[];
 };
 const DESTS: Dest[] = [
-  { name: 'Observability', view: Observability as unknown as Component, section: 'Event Timeline', content: 'Censor c-9 fired — matched: rm -rf',
-    host: '/dashboard/observability', hostMarker: 'Handler Health', stats: [], absentStats: [...CENSOR_STATS, ...SCHEDULE_STATS, ...SLEEP_STATS] },
-  { name: 'Guards (Harness)', view: Harness as unknown as Component, section: 'Most Active Censors', content: 'never email the board',
+  { name: 'Observability', view: Observability as unknown as Component, section: 'Event timeline', content: 'Censor c-9 fired — matched: rm -rf',
+    host: '/dashboard/observability', hostMarker: 'Handler health', stats: [], absentStats: [...CENSOR_STATS, ...SCHEDULE_STATS, ...SLEEP_STATS] },
+  { name: 'Guards (Harness)', view: Harness as unknown as Component, section: 'Most active censors', content: 'never email the board',
     host: '/dashboard/harness', hostMarker: 'Flags per day', stats: CENSOR_STATS, absentStats: [...SCHEDULE_STATS, ...SLEEP_STATS] },
-  { name: 'Subtasks', view: Subtasks as unknown as Component, section: 'Upcoming Schedules', content: 'weekly report digest',
+  { name: 'Subtasks', view: Subtasks as unknown as Component, section: 'Upcoming schedules', content: 'weekly report digest',
     host: '/dashboard/subtasks', hostMarker: 'Outcome distribution', stats: SCHEDULE_STATS, absentStats: [...CENSOR_STATS, ...SLEEP_STATS] },
-  { name: 'Consolidation', view: Consolidation as unknown as Component, section: 'Sleep Activity', content: 'Censors Retired',
-    host: '/dashboard/consolidation', hostMarker: 'Recent Cycles', stats: [], absentStats: [...CENSOR_STATS, ...SCHEDULE_STATS, 'Sleep Facts Created'] },
+  { name: 'Consolidation', view: Consolidation as unknown as Component, section: 'Sleep activity', content: 'Censors retired',
+    host: '/dashboard/consolidation', hostMarker: 'Recent cycles', stats: [], absentStats: [...CENSOR_STATS, ...SCHEDULE_STATS, 'Sleep Facts Created'] },
 ];
 
 describe('Activity split', () => {
   it('Observability shows the Event Timeline, from /dashboard/activity', async () => {
     render(Observability);
-    const s = await sectionOf('Event Timeline');
+    const s = await sectionOf('Event timeline');
     await waitFor(() => expect(within(s).getByText('censor triggered')).toBeTruthy());
     expect(within(s).getByText('Censor c-9 fired — matched: rm -rf')).toBeTruthy();
     expect(within(s).getByText('sleep completed')).toBeTruthy();
@@ -370,31 +370,31 @@ describe('Activity split', () => {
 
   it('Guards shows Most Active Censors with the censor numbers', async () => {
     render(Harness);
-    const s = await sectionOf('Most Active Censors');
+    const s = await sectionOf('Most active censors');
     await waitFor(() => expect(within(s).getByText('never email the board')).toBeTruthy());
     const item = within(s).getByText('never email the board').closest('li') as HTMLElement;
     expect(within(item).getByText('11')).toBeTruthy();
     const card = (label: string) => within(s).getByText(label).closest('.stat-card') as HTMLElement;
-    expect(within(card('Censor Activations (7d)')).getByText('17')).toBeTruthy();
-    expect(within(card('Auto-created Censors')).getByText('2')).toBeTruthy();
-    expect(within(card('Manual Censors')).getByText('1')).toBeTruthy();
-    expect(within(card('False Positives (7d)')).getByText('6')).toBeTruthy();
+    expect(within(card('Censor activations (7d)')).getByText('17')).toBeTruthy();
+    expect(within(card('Auto-created censors')).getByText('2')).toBeTruthy();
+    expect(within(card('Manual censors')).getByText('1')).toBeTruthy();
+    expect(within(card('False positives (7d)')).getByText('6')).toBeTruthy();
   });
 
   it('Subtasks shows Upcoming Schedules with the schedule numbers', async () => {
     render(Subtasks);
-    const s = await sectionOf('Upcoming Schedules');
+    const s = await sectionOf('Upcoming schedules');
     await waitFor(() => expect(within(s).getByText('weekly report digest')).toBeTruthy());
     expect(within(s).getByText('Next: Jan 5 09:00 UTC')).toBeTruthy(); // one timestamp format (finish review fix 4)
     const card = (label: string) => within(s).getByText(label).closest('.stat-card') as HTMLElement;
-    expect(within(card('Active Schedules')).getByText('4')).toBeTruthy();
-    expect(within(card('Schedule Fires (7d)')).getByText('9')).toBeTruthy();
+    expect(within(card('Active schedules')).getByText('4')).toBeTruthy();
+    expect(within(card('Schedule fires (7d)')).getByText('9')).toBeTruthy();
   });
 
   // The moved numbers keep Activity's fixed windows, under screens that have a window selector of their own.
   it('Guards says its censor numbers do not follow the window selector', async () => {
     render(Harness);
-    const s = await sectionOf('Most Active Censors');
+    const s = await sectionOf('Most active censors');
     await waitFor(() => expect(within(s).getByText('never email the board')).toBeTruthy());
     expect(within(s).getByText(
       'Numbers marked (7d) are the last 7 days, whatever the window above. The count beside each censor is its all-time activations.',
@@ -404,7 +404,7 @@ describe('Activity split', () => {
 
   it('Subtasks says its schedule numbers do not follow the window selector', async () => {
     render(Subtasks);
-    const s = await sectionOf('Upcoming Schedules');
+    const s = await sectionOf('Upcoming schedules');
     await waitFor(() => expect(within(s).getByText('weekly report digest')).toBeTruthy());
     expect(within(s).getByText('Numbers marked (7d) are the last 7 days, whatever the window above.')).toBeTruthy();
     expect(screen.getByRole('combobox', { name: 'Window' })).toBeTruthy();
@@ -412,14 +412,14 @@ describe('Activity split', () => {
 
   it('Consolidation shows Sleep Activity', async () => {
     render(Consolidation);
-    const s = await sectionOf('Sleep Activity');
-    await waitFor(() => expect(within(s).getByText('Total Sleeps')).toBeTruthy());
+    const s = await sectionOf('Sleep activity');
+    await waitFor(() => expect(within(s).getByText('Total sleeps')).toBeTruthy());
     const dd = (term: string) => within(s).getByText(term).nextElementSibling?.textContent;
-    expect(dd('Last Sleep')).toBe('Nov 8 03:00 UTC'); // one timestamp format (finish review fix 4)
-    expect(dd('Total Sleeps')).toBe('23');
-    expect(dd('Facts Created')).toBe('41');
+    expect(dd('Last sleep')).toBe('Nov 8 03:00 UTC'); // one timestamp format (finish review fix 4)
+    expect(dd('Total sleeps')).toBe('23');
+    expect(dd('Facts created')).toBe('41');
     expect(dd('Procedures')).toBe('5');
-    expect(dd('Censors Retired')).toBe('8');
+    expect(dd('Censors retired')).toBe('8');
   });
 
   it('Consolidation says Never when no sleep has run', async () => {
@@ -429,14 +429,14 @@ describe('Activity split', () => {
       return { ok: true, status: 200, json: async () => body } as Response;
     }));
     render(Consolidation);
-    const s = await sectionOf('Sleep Activity');
-    await waitFor(() => expect(within(s).getByText('Last Sleep').nextElementSibling?.textContent).toBe('Never'));
+    const s = await sectionOf('Sleep activity');
+    await waitFor(() => expect(within(s).getByText('Last sleep').nextElementSibling?.textContent).toBe('Never'));
   });
 
   it('Consolidation Refresh reloads the sleep numbers too', async () => {
     render(Consolidation);
-    const s = await sectionOf('Sleep Activity');
-    await waitFor(() => expect(within(s).getByText('Total Sleeps')).toBeTruthy());
+    const s = await sectionOf('Sleep activity');
+    await waitFor(() => expect(within(s).getByText('Total sleeps')).toBeTruthy());
     await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh' }) as HTMLButtonElement).disabled).toBe(false));
     expect(activityUrls()).toHaveLength(1);
     await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
@@ -472,11 +472,11 @@ describe('Activity split', () => {
     schedule_stats: { ...ACTIVITY.schedule_stats, next_fires: [{ id: 'sch-2', task: 'monthly invoice sweep', next_fire_at: '2099-02-01T09:00:00+00:00' }] },
   };
   const REFRESH_CASES = [
-    { name: 'Observability', view: Observability as unknown as Component, section: 'Event Timeline',
+    { name: 'Observability', view: Observability as unknown as Component, section: 'Event timeline',
       before: 'Censor c-9 fired — matched: rm -rf', after: 'Censor c-77 fired — matched: DROP TABLE' },
-    { name: 'Guards', view: Harness as unknown as Component, section: 'Most Active Censors',
+    { name: 'Guards', view: Harness as unknown as Component, section: 'Most active censors',
       before: 'never email the board', after: 'never post secrets' },
-    { name: 'Subtasks', view: Subtasks as unknown as Component, section: 'Upcoming Schedules',
+    { name: 'Subtasks', view: Subtasks as unknown as Component, section: 'Upcoming schedules',
       before: 'weekly report digest', after: 'monthly invoice sweep' },
   ];
   for (const c of REFRESH_CASES) {

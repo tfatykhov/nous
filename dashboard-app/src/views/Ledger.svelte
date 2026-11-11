@@ -165,8 +165,8 @@
 
 <header class="view-head">
   <div>
-    {#if !embedded}<h1>Execution Ledger</h1>{/if}
-    <p class="subtitle">Every side-effecting tool call, kept durably — it survives restarts and ended sessions</p>
+    {#if !embedded}<h1>Execution ledger</h1>{/if}
+    <p class="subtitle">Every side-effecting tool call, kept durably: it survives restarts and ended sessions.</p>
   </div>
   <StaleBadge state={$store} />
 </header>

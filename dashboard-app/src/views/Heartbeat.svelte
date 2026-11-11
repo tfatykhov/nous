@@ -155,7 +155,7 @@
 <header class="view-head">
   <div>
     <h1>Heartbeat</h1>
-    <p class="subtitle">Autonomous monitoring, checks, and cognitive triage</p>
+    <p class="subtitle">What Nous checks on its own, what it found, and what it looked into.</p>
   </div>
   <StaleBadge state={$store} />
 </header>
@@ -209,7 +209,7 @@
     <!-- ── Charts row ── -->
     <div class="chart-row">
       <section class="chart-card">
-        <h2>Token Budget</h2>
+        <h2>Token budget</h2>
         <div class="budget-wrap">
           <Chart
             type="doughnut"
@@ -225,7 +225,7 @@
       </section>
 
       <section class="chart-card">
-        <h2>Findings by Urgency (7d)</h2>
+        <h2>Findings by urgency (7d)</h2>
         {#if d.findings_by_day.length > 0}
           <Chart
             type="bar"
@@ -247,7 +247,7 @@
 
     <!-- ── Check status table ── -->
     <section class="table-card">
-      <h2>Check Status</h2>
+      <h2>Check status</h2>
       {#if d.checks.length > 0}
         <DataTable
           columns={checkCols}
@@ -276,7 +276,7 @@
       {@const byState = lc.stats.by_state}
       {@const activeFindings = lc.findings.filter((f) => f.state !== 'resolved')}
       <section class="table-card">
-        <h2>Finding Lifecycle</h2>
+        <h2>Finding lifecycle</h2>
 
         <!-- State pills -->
         <div class="state-pills">
@@ -328,7 +328,7 @@
     <!-- ── Tuning status ── -->
     {#if d.tuning}
       <section class="chart-card">
-        <h2>Self-Tuning</h2>
+        <h2>Self-tuning</h2>
         {#if !d.tuning.enabled}
           <p class="empty">Tuning disabled (set NOUS_HEARTBEAT_TUNING_ENABLED=true)</p>
         {:else if d.tuning.last_report}
@@ -350,7 +350,7 @@
     <!-- ── Findings timeline + cognitive sessions ── -->
     <div class="chart-row">
       <section class="chart-card">
-        <h2>Findings (Last 24h)</h2>
+        <h2>Findings (last 24h)</h2>
         {#if d.findings_timeline.length > 0}
           <div class="timeline">
             {#each d.findings_timeline as f}
@@ -373,7 +373,7 @@
       </section>
 
       <section class="chart-card">
-        <h2>Cognitive Sessions</h2>
+        <h2>Cognitive sessions</h2>
         {#if d.cognitive_sessions.length > 0}
           <DataTable
             columns={sessionCols}

@@ -48,7 +48,7 @@ function go(hash: string) {
   location.hash = hash;
   window.dispatchEvent(new HashChangeEvent('hashchange'));
 }
-const recentCalls = () => screen.getByRole('heading', { level: 2, name: 'Recent Calls' }).closest('section') as HTMLElement;
+const recentCalls = () => screen.getByRole('heading', { level: 2, name: 'Recent calls' }).closest('section') as HTMLElement;
 const sessions = () => screen.getByRole('heading', { level: 2, name: 'Sessions' }).closest('section') as HTMLElement;
 
 describe('Model calls Cache tab', () => {
@@ -57,7 +57,7 @@ describe('Model calls Cache tab', () => {
 
   it('renders the Cache content under the Model calls header, the Cache sub view current', async () => {
     render(ModelCalls);
-    for (const name of ['Token Breakdown', 'Break Components', 'Efficiency Timeline', 'Sessions', 'Recent Calls']) {
+    for (const name of ['Token breakdown', 'Break components', 'Efficiency timeline', 'Sessions', 'Recent calls']) {
       expect(await screen.findByRole('heading', { level: 2, name })).toBeTruthy();
     }
     expect(screen.getByRole('heading', { level: 1, name: 'Model calls' })).toBeTruthy();
@@ -71,14 +71,14 @@ describe('Model calls Cache tab', () => {
 
   it('reads the cache endpoint only: the call list is not mounted', async () => {
     render(ModelCalls);
-    await screen.findByRole('heading', { level: 2, name: 'Recent Calls' });
+    await screen.findByRole('heading', { level: 2, name: 'Recent calls' });
     expect(urls.some((u) => u.startsWith('/dashboard/cache'))).toBe(true);
     expect(urls.some((u) => u.startsWith('/dashboard/model-calls'))).toBe(false);
   });
 
   it('a Recent Calls row links to its call when it carries an id, and not otherwise', async () => {
     render(ModelCalls);
-    await screen.findByRole('heading', { level: 2, name: 'Recent Calls' });
+    await screen.findByRole('heading', { level: 2, name: 'Recent calls' });
     const links = within(recentCalls()).getAllByRole('link');
     expect(links).toHaveLength(1);
     expect(links[0].getAttribute('href')).toBe(`#/model-calls/c/${CALL}`);
@@ -88,7 +88,7 @@ describe('Model calls Cache tab', () => {
 
   it('a null session shows — in Recent Calls and in Sessions', async () => {
     render(ModelCalls);
-    await screen.findByRole('heading', { level: 2, name: 'Recent Calls' });
+    await screen.findByRole('heading', { level: 2, name: 'Recent calls' });
     const recentRows = within(recentCalls()).getAllByRole('row').slice(1);
     expect(recentRows).toHaveLength(2);
     expect(within(recentRows[1]).getByText('—')).toBeTruthy();
@@ -105,14 +105,14 @@ describe('Cache standalone (embedded false)', () => {
   it('keeps its own Cache header', async () => {
     render(Cache);
     expect(screen.getByRole('heading', { level: 1, name: 'Cache' })).toBeTruthy();
-    expect(await screen.findByRole('heading', { level: 2, name: 'Recent Calls' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { level: 2, name: 'Recent calls' })).toBeTruthy();
   });
 
   it('embedded drops the h1 and keeps the subtitle and the staleness badge row', async () => {
     const { container } = render(Cache, { props: { embedded: true } });
-    await screen.findByRole('heading', { level: 2, name: 'Recent Calls' });
+    await screen.findByRole('heading', { level: 2, name: 'Recent calls' });
     expect(screen.queryByRole('heading', { level: 1 })).toBeNull();
-    expect(container.querySelector('.view-head .subtitle')?.textContent).toContain('API cache performance');
+    expect(container.querySelector('.view-head .subtitle')?.textContent).toContain('How the API cache performs'); // the plain-sentence subtitle (finish review fix 8)
     expect(container.querySelector('.view-head')?.textContent).toMatch(/updated .* ago/);
   });
 });
@@ -178,7 +178,7 @@ describe('Cache charts read tokens', () => {
 
   it('a cache break is marked with the word yes, not a glyph', async () => {
     render(Cache, { props: { embedded: true } });
-    await screen.findByRole('heading', { level: 2, name: 'Recent Calls' });
+    await screen.findByRole('heading', { level: 2, name: 'Recent calls' });
     const rows = within(recentCalls()).getAllByRole('row').slice(1);
     expect(within(rows[0]).getByText('yes')).toBeTruthy();
     expect(recentCalls().textContent).not.toContain('●');

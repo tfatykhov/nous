@@ -172,7 +172,7 @@ describe('Observability: words, not glyphs', () => {
 
   it('each anomaly is one sentence with its severity in words, a comma where the arrow was, and its spaces', async () => {
     render(Observability);
-    await screen.findByText('Active Drift Anomalies');
+    await screen.findByText('Active drift anomalies');
     const lines = [...document.querySelectorAll('.anomaly')].map((a) => text(a));
     expect(lines).toEqual([
       'Alert fact_count_delta: 12 raw, 4 unexplained after inactive_fact_delta (up from 2 ± 1.5)',
@@ -186,7 +186,7 @@ describe('Observability: words, not glyphs', () => {
 
   it('the Facts stat says "change", and no arrow, delta sign, triangle or lone question mark is shown', async () => {
     render(Observability);
-    await screen.findByText('Active Drift Anomalies');
+    await screen.findByText('Active drift anomalies');
     // The change is the stat's note, so the value stays one short figure (in the value, "120 (change +3)" took three
     // lines of the large type at phone width).
     const facts = screen.getByText('Facts');

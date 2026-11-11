@@ -153,7 +153,7 @@
 <header class="view-head">
   <div>
     <h1>Observability</h1>
-    <p class="subtitle">Event bus health, causal traces, and behavioral drift</p>
+    <p class="subtitle">How the event bus is doing, the causal traces, and drift in behaviour.</p>
   </div>
   <StaleBadge state={$store} />
 </header>
@@ -175,7 +175,7 @@
 
   <!-- Handler health list -->
   <section class="chart-card">
-    <h2>Handler Health</h2>
+    <h2>Handler health</h2>
     {#if handlerNames.length > 0}
       <div class="handler-list">
         {#each handlerNames as name}
@@ -205,7 +205,7 @@
   <div class="chart-row">
     <!-- Recent traces with expand/collapse tree -->
     <section class="chart-card">
-      <h2>Recent Causal Traces</h2>
+      <h2>Recent causal traces</h2>
       {#if d.recent_traces.length > 0}
         <div class="trace-list">
           {#each d.recent_traces as t (t.trace_id)}
@@ -264,7 +264,7 @@
 
     <!-- Autonomous modifications -->
     <section class="chart-card">
-      <h2>Autonomous Modifications (24h)</h2>
+      <h2>Autonomous modifications (24h)</h2>
       {#if d.recent_modifications.length > 0}
         <div class="mod-list">
           {#each d.recent_modifications as m}
@@ -286,7 +286,7 @@
   <!-- Anomalies banner -->
   {#if d.drift?.anomalies && d.drift.anomalies.length > 0}
     <section class="chart-card">
-      <h2>Active Drift Anomalies</h2>
+      <h2>Active drift anomalies</h2>
       {#each d.drift.anomalies as a}
         <div class="anomaly" class:anomaly--alert={a.severity === 'alert'}>
           <!-- The severity in a word as well as the tint (status is never colour alone). -->
@@ -308,7 +308,7 @@
   {#if errPts.length > 0}
     <div class="chart-row">
       <section class="chart-card">
-        <h2>Handler Error Rate (7d)</h2>
+        <h2>Handler error rate (7d)</h2>
         <Chart type="line" data={errorTrendData(errPts)} options={trendLineOpts} height="180px" />
       </section>
     </div>
@@ -343,7 +343,7 @@
 <!-- ── Event Timeline (moved from the Activity screen, F108) ── -->
 <section class="chart-card">
   <div class="section-head">
-    <h2>Event Timeline</h2>
+    <h2>Event timeline</h2>
     <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void activity.refresh()} disabled={$activity.loading}>
       {$activity.loading ? 'Loading…' : 'Refresh'}
     </Button>

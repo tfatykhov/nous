@@ -144,7 +144,7 @@
 <header class="view-head">
   <div>
     <h1>Guards</h1>
-    <p class="subtitle">What each safety rule flagged — the evidence for moving it from warn to enforce</p>
+    <p class="subtitle">What each safety rule flagged, and the evidence for moving it from warn to enforce.</p>
   </div>
   <div class="head-right">
     <FilterBar label="Window" required bind:value={windowSel}
@@ -290,7 +290,7 @@
 <!-- Most Active Censors, with the censor numbers (moved from the Activity screen, F108) -->
 <section class="panel censors">
   <div class="section-head">
-    <h2>Most Active Censors</h2>
+    <h2>Most active censors</h2>
     <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void activity.refresh()} disabled={$activity.loading}>
       {$activity.loading ? 'Loading…' : 'Refresh'}
     </Button>
@@ -299,10 +299,10 @@
     {@const cs = $activity.data.censor_stats}
     <p class="small muted">Numbers marked (7d) are the last 7 days, whatever the window above. The count beside each censor is its all-time activations.</p>
     <StatGrid stats={[
-      { label: 'Censor Activations (7d)',  value: cs.total_activations_7d },
-      { label: 'Auto-created Censors',     value: cs.auto_created },
-      { label: 'Manual Censors',           value: cs.manual_created },
-      { label: 'False Positives (7d)',     value: cs.false_positives_7d },
+      { label: 'Censor activations (7d)',  value: cs.total_activations_7d },
+      { label: 'Auto-created censors',     value: cs.auto_created },
+      { label: 'Manual censors',           value: cs.manual_created },
+      { label: 'False positives (7d)',     value: cs.false_positives_7d },
     ]} />
     {#if cs.top_censors.length > 0}
       <ul class="item-list">

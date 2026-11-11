@@ -82,7 +82,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); document.body.innerHTML = ''
 describe('Decisions: the view', () => {
   it('shows the title, the four stats and the latest Brier score with its word', async () => {
     render(Decisions);
-    expect(await screen.findByRole('heading', { level: 1, name: 'Decision Intelligence' })).toBeTruthy();
+    expect(await screen.findByRole('heading', { level: 1, name: 'Decisions' })).toBeTruthy();
     await screen.findByText('Decisions (30d)');
     const valueOf = (label: string) => screen.getByText(label).previousElementSibling?.textContent?.trim();
     expect(valueOf('Decisions (30d)')).toBe('10');

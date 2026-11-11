@@ -144,7 +144,7 @@
 <header class="view-head">
   <div>
     <h1>Subtasks</h1>
-    <p class="subtitle">F061 outcome metrics — last {$store.data?.window_hours ?? hours}h</p>
+    <p class="subtitle">F061: how background subtasks ended in the last {$store.data?.window_hours ?? hours} hours.</p>
   </div>
   <div class="head-right">
     <label class="hours-label" for="hours-select">Window</label>
@@ -295,7 +295,7 @@
 <!-- Upcoming Schedules, with the schedule numbers (moved from the Activity screen, F108) -->
 <section class="chart-card">
   <div class="section-head">
-    <h2>Upcoming Schedules</h2>
+    <h2>Upcoming schedules</h2>
     <button class="refresh-btn" onclick={() => void activity.refresh()} disabled={$activity.loading}>
       {$activity.loading ? 'Loading…' : 'Refresh'}
     </button>
@@ -304,8 +304,8 @@
     {@const ss = $activity.data.schedule_stats}
     <p class="caption">Numbers marked (7d) are the last 7 days, whatever the window above.</p>
     <StatGrid stats={[
-      { label: 'Active Schedules',         value: ss.active },
-      { label: 'Schedule Fires (7d)',      value: ss.fires_7d },
+      { label: 'Active schedules',         value: ss.active },
+      { label: 'Schedule fires (7d)',      value: ss.fires_7d },
     ]} />
     {#if ss.next_fires.length > 0}
       <ul class="item-list">

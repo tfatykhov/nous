@@ -134,7 +134,7 @@
 <header class="view-head">
   <div>
     <h1>Consolidation</h1>
-    <p class="subtitle">Per-sleep-cycle memory consolidation audit — merges, supersessions, and deactivations</p>
+    <p class="subtitle">What each sleep cycle merged, superseded and deactivated in memory.</p>
   </div>
   <div class="head-right">
     <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={$store.loading}>
@@ -149,7 +149,7 @@
 
   <!-- ── Cycle list ──────────────────────────────────────────────────────── -->
   <section class="chart-card">
-    <h2>Recent Cycles</h2>
+    <h2>Recent cycles</h2>
     <div class="table-wrap table-scroll">
     <table class="data-table">
       <thead>
@@ -267,19 +267,19 @@
 
 <!-- ── Sleep Activity (moved from the Activity screen, F108) ─────────────── -->
 <section class="chart-card mt">
-  <h2>Sleep Activity</h2>
+  <h2>Sleep activity</h2>
   {#if $activity.data}
     {@const sl = $activity.data.sleep_stats}
     <dl class="detail-grid">
-      <dt>Last Sleep</dt>
+      <dt>Last sleep</dt>
       <dd>{sl.last_sleep ? formatDateTime(sl.last_sleep) : 'Never'}</dd>
-      <dt>Total Sleeps</dt>
+      <dt>Total sleeps</dt>
       <dd>{sl.total_sleeps}</dd>
-      <dt>Facts Created</dt>
+      <dt>Facts created</dt>
       <dd>{sl.facts_created}</dd>
       <dt>Procedures</dt>
       <dd>{sl.procedures_created}</dd>
-      <dt>Censors Retired</dt>
+      <dt>Censors retired</dt>
       <dd>{sl.censors_retired}</dd>
     </dl>
   {:else if $activity.error}

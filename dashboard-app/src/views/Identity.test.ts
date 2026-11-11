@@ -75,8 +75,8 @@ describe('Identity view', () => {
   it('renders both panels, seeds identity sections, and lists profile facts', async () => {
     render(Identity);
 
-    expect(await screen.findByText('Agent Identity')).toBeTruthy();
-    expect(screen.getByText('User Profile Facts (Tier-1)')).toBeTruthy();
+    expect(await screen.findByText('Agent identity')).toBeTruthy();
+    expect(screen.getByText('User profile facts (Tier-1)')).toBeTruthy();
 
     // Section textarea seeded from GET /identity (findByDisplayValue retries
     // until the async load flushes to the bound textarea).

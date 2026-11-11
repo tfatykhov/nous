@@ -95,7 +95,7 @@ describe('Consolidation on the paper look', () => {
     const { container } = render(Consolidation);
     await waitFor(() => expect(container.querySelectorAll('.detail-grid dt')).toHaveLength(5));
     expect(Array.from(container.querySelectorAll('.detail-grid dt')).map((d) => d.textContent)).toEqual(
-      ['Last Sleep', 'Total Sleeps', 'Facts Created', 'Procedures', 'Censors Retired'],
+      ['Last sleep', 'Total sleeps', 'Facts created', 'Procedures', 'Censors retired'],
     );
     expect(SRC).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/);
     expect(SRC).not.toContain('{@html');

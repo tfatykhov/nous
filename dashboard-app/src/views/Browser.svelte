@@ -216,8 +216,8 @@
 
 <header class="view-head">
   <div>
-    <h1>Memory Browser</h1>
-    <p class="subtitle">Search and explore all memory types</p>
+    <h1>Browse</h1>
+    <p class="subtitle">Search and read every kind of memory.</p>
   </div>
 </header>
 
@@ -348,7 +348,7 @@
               <span class="dl">Outcome</span><span>{row.outcome ?? '—'}</span>
               <span class="dl">Started</span><span>{fmtDate(row.started_at)}</span>
               {#if row.structured_summary?.key_points?.length}
-                <span class="dl">Key Points</span>
+                <span class="dl">Key points</span>
                 <span>{(row.structured_summary.key_points as string[]).join('; ')}</span>
               {/if}
               {#if row.structured_summary?.outcome_rationale}
@@ -561,7 +561,7 @@
               <span class="dl">Reason</span><span>{row.reason}</span>
               <span class="dl">Domain</span><span>{row.domain ?? '—'}</span>
               <span class="dl">Activations</span><span>{row.activation_count}</span>
-              <span class="dl">False Positives</span><span>{row.false_positive_count}</span>
+              <span class="dl">False positives</span><span>{row.false_positive_count}</span>
               <span class="dl">ID</span><span class="mono">{row.id}</span>
             </div>
 
@@ -671,7 +671,7 @@
           {#snippet detail(row: BrowserChunk)}
             <div class="detail-grid">
               <span class="dl">Content</span><span>{row.content}</span>
-              <span class="dl">Chunk Index</span><span>{row.chunk_index}</span>
+              <span class="dl">Chunk index</span><span>{row.chunk_index}</span>
               <span class="dl">Episode</span><span class="mono">{row.episode_id}</span>
               <span class="dl">Created</span><span>{fmtDate(row.created_at)}</span>
               <span class="dl">ID</span><span class="mono">{row.id}</span>

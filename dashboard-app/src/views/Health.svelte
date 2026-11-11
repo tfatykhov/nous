@@ -24,7 +24,7 @@
 </script>
 
 <div class="health">
-  <h1 class="page-h1">Memory health</h1>
+  <h1 class="page-h1">Health</h1>
   <SubNav {items} current={tab ?? ''} label="Memory health views" />
 
   {#if tab === 'graph'}

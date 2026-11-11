@@ -100,8 +100,8 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
 
   it('the state pills show all five states with a word and a count, each a tinted status pill by state (finish review fix 2)', async () => {
     render(Heartbeat);
-    await screen.findByRole('heading', { level: 2, name: 'Finding Lifecycle' });
-    const pills = Array.from(section('Finding Lifecycle').querySelectorAll<HTMLElement>('.state-pills .status-pill'));
+    await screen.findByRole('heading', { level: 2, name: 'Finding lifecycle' });
+    const pills = Array.from(section('Finding lifecycle').querySelectorAll<HTMLElement>('.state-pills .status-pill'));
     expect(pills.map((p) => p.textContent?.trim())).toEqual(
       ['new: 2', 'acknowledged: 1', 'resolved: 3', 'suppressed: 1', 'auto_closed_known_fp: 2', 'total: 9']);
     const variant = (p: HTMLElement) => [...p.classList].find((c) => c.startsWith('status-pill--')) ?? 'plain';
@@ -115,8 +115,8 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
 
   it('check status is a tinted pill in a word: open, failing or ok (it was plain text "OPEN / warn / ok")', async () => {
     render(Heartbeat);
-    await screen.findByRole('heading', { level: 2, name: 'Check Status' });
-    const pills = Array.from(section('Check Status').querySelectorAll<HTMLElement>('.status-pill'));
+    await screen.findByRole('heading', { level: 2, name: 'Check status' });
+    const pills = Array.from(section('Check status').querySelectorAll<HTMLElement>('.status-pill'));
     expect(pills.map((p) => [p.textContent, [...p.classList].find((c) => c.startsWith('status-pill--'))])).toEqual(
       [['ok', 'status-pill--ok']]);
   });
@@ -131,8 +131,8 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
 
   it('the findings timeline lists each finding with its source, time and summary, its dot by urgency', async () => {
     render(Heartbeat);
-    await screen.findByRole('heading', { level: 2, name: 'Findings (Last 24h)' });
-    const items = Array.from(section('Findings (Last 24h)').querySelectorAll<HTMLElement>('.tl-item'));
+    await screen.findByRole('heading', { level: 2, name: 'Findings (last 24h)' });
+    const items = Array.from(section('Findings (last 24h)').querySelectorAll<HTMLElement>('.tl-item'));
     expect(items.map((i) => i.querySelector('.tl-source')?.textContent)).toEqual(['disk', 'mail', 'feeds']);
     expect(items.map((i) => i.querySelector('.tl-summary')?.textContent)).toEqual(['Disk at 91%', 'Inbox backlog', 'A feed is slow']);
     for (const i of items) expect(i.querySelector('.tl-time')?.textContent).toMatch(/ago$/);
@@ -141,8 +141,8 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
 
   it('an urgency written as text takes a text token: the error and warn text, the neutral grey', async () => {
     render(Heartbeat);
-    await screen.findByRole('heading', { level: 2, name: 'Finding Lifecycle' });
-    const life = section('Finding Lifecycle');
+    await screen.findByRole('heading', { level: 2, name: 'Finding lifecycle' });
+    const life = section('Finding lifecycle');
     for (const b of within(life).getAllByRole('button', { name: /Show details for/ })) await fireEvent.click(b);
     const inks = Array.from(life.querySelectorAll<HTMLElement>('.finding-detail .urgency')).map((u) => [u.textContent, u.style.color]);
     expect(inks).toEqual([['high', 'var(--err-text)'], ['normal', 'var(--warn-text)'], ['low', 'var(--st-neutral)']]);
@@ -150,12 +150,12 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
 
   it('every table keeps its columns', async () => {
     render(Heartbeat);
-    await screen.findByRole('heading', { level: 2, name: 'Check Status' });
+    await screen.findByRole('heading', { level: 2, name: 'Check status' });
     // (A table with row details has a first, visually hidden "Details" column.)
     const heads = (name: string) => within(section(name)).getAllByRole('columnheader').map((th) => th.textContent).filter((t) => t && t !== 'Details');
-    expect(heads('Check Status')).toEqual(['Check', 'Interval', 'Last run', 'Failures', 'Status']);
-    expect(heads('Finding Lifecycle')).toEqual(['State', 'Check', 'Summary', 'Seen', 'Age']);
-    expect(heads('Cognitive Sessions')).toEqual(['Time', 'Session', 'Findings', 'Tokens']);
+    expect(heads('Check status')).toEqual(['Check', 'Interval', 'Last run', 'Failures', 'Status']);
+    expect(heads('Finding lifecycle')).toEqual(['State', 'Check', 'Summary', 'Seen', 'Age']);
+    expect(heads('Cognitive sessions')).toEqual(['Time', 'Session', 'Findings', 'Tokens']);
   });
 
   it('source contract: a long unbroken finding may wrap, and a two-column row\'s cells may shrink (2,744 px at 390 before)', () => {

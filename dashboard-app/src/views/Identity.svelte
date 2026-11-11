@@ -185,13 +185,13 @@
 <header class="view-head">
   <div>
     <h1>Identity</h1>
-    <p class="subtitle">Agent identity sections and Tier-1 user-profile facts</p>
+    <p class="subtitle">The sections of the agent's identity, and the Tier-1 facts about you it always sees.</p>
   </div>
 </header>
 
 <!-- ═══════════════════════ AGENT IDENTITY ═══════════════════════ -->
 <section class="panel">
-  <h2>Agent Identity</h2>
+  <h2>Agent identity</h2>
 
   {#if identityError}
     <p class="status-msg error">{identityError}</p>
@@ -242,7 +242,7 @@
 
 <!-- ═══════════════════════ USER PROFILE FACTS ═══════════════════════ -->
 <section class="panel">
-  <h2>User Profile Facts (Tier-1)</h2>
+  <h2>User profile facts (Tier-1)</h2>
 
   <div class="controls-bar">
     <label class="check-label">

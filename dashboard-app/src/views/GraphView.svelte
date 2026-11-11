@@ -163,8 +163,8 @@
     const orphanTotal = Object.values(s.orphan_counts).reduce((a, b) => a + b, 0);
     return [
       { label: 'Nodes', value: String(s.node_count) },
-      { label: 'Total Edges', value: String(s.total_edges) },
-      { label: 'Shown Edges', value: String(s.displayed_edges) },
+      { label: 'Total edges', value: String(s.total_edges) },
+      { label: 'Shown edges', value: String(s.displayed_edges) },
       { label: 'Orphans', value: String(orphanTotal) },
     ];
   });
@@ -302,7 +302,7 @@
 
 <div class="view-head">
   <div>
-    <h1 class="view-title">Knowledge Graph</h1>
+    <h1 class="view-title">Graph</h1>
     <p class="view-subtitle">
       {$store.data ? graphSliceText($store.data.stats) : 'Memory nodes and the links between them.'}
     </p>

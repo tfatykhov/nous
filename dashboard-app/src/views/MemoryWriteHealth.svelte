@@ -60,7 +60,7 @@
 <header class="view-head">
   <div>
     {#if !embedded}<h1>Memory write health</h1>{/if}
-    <p class="subtitle">What the memory write paths stored each day, and the rules that watch them. Shown here and on the companion only, never on Telegram</p>
+    <p class="subtitle">What the memory write paths stored each day, and the rules that watch them. Shown here and on the companion only, never on Telegram.</p>
   </div>
   <div class="head-right">
     <FilterBar label="Window" required bind:value={days}

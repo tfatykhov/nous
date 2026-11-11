@@ -59,7 +59,7 @@
 <header class="view-head">
   <div>
     {#if !embedded}<h1>Cache</h1>{/if}
-    <p class="subtitle">API cache performance, token savings, and break analysis</p>
+    <p class="subtitle">How the API cache performs: hit rate, tokens saved, and what broke it.</p>
   </div>
   <StaleBadge state={$store} />
 </header>
@@ -79,11 +79,11 @@
   <!-- Row 2: two charts side by side -->
   <div class="chart-row">
     <section class="chart-card">
-      <h2>Token Breakdown</h2>
+      <h2>Token breakdown</h2>
       <Chart
         type="doughnut"
         data={{
-          labels: ['Cache Read', 'Cache Created', 'Uncached'],
+          labels: ['Cache read', 'Cache Created', 'Uncached'],
           datasets: [{
             data: [s.total_cache_read, s.total_cache_created, uncached],
             backgroundColor: ['var(--hit-good)', 'var(--cache-blue)', 'var(--cache-grey)'],
@@ -96,7 +96,7 @@
     </section>
 
     <section class="chart-card">
-      <h2>Break Components</h2>
+      <h2>Break components</h2>
       {#if Object.keys(d.break_components).length > 0}
         <Chart
           type="bar"
@@ -124,7 +124,7 @@
 
   <!-- Row 3: efficiency timeline -->
   <section class="chart-card">
-    <h2>Efficiency Timeline</h2>
+    <h2>Efficiency timeline</h2>
     {#if d.timeline.length > 0}
       {@const sorted = [...d.timeline].reverse()}
       <Chart
@@ -132,7 +132,7 @@
         data={{
           labels: sorted.map((t) => formatTime(t.timestamp)),
           datasets: [{
-            label: 'Hit Rate %',
+            label: 'Hit rate %',
             data: sorted.map((t) => t.hit_rate),
             borderColor: 'var(--hit-good)',
             backgroundColor: tint('--hit-good', 0.1),
@@ -179,7 +179,7 @@
 
   <!-- Row 5: recent calls table -->
   <section class="table-card">
-    <h2>Recent Calls</h2>
+    <h2>Recent calls</h2>
     {#if d.timeline.length > 0}
       <DataTable
         columns={callCols}

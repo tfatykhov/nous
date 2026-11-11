@@ -86,7 +86,7 @@
       labels: dims.map((x) => x.name),
       datasets: [
         {
-          label: 'Current Weight',
+          label: 'Current weight',
           data: dims.map((x) => x.weight),
           borderColor: 'var(--series-0)',
           backgroundColor: tint('--series-0', 0.2),
@@ -95,7 +95,7 @@
         },
         {
           // Full-strength lines (3:1 or more on paper), dashes of different kinds: Min dotted, Max dashed.
-          label: 'Min Bound',
+          label: 'Min bound',
           data: dims.map((x) => x.min_weight ?? 0.10),
           borderColor: 'var(--red)',
           backgroundColor: 'transparent',
@@ -104,7 +104,7 @@
           pointRadius: 0,
         },
         {
-          label: 'Max Bound',
+          label: 'Max bound',
           data: dims.map((x) => x.max_weight ?? 0.40),
           borderColor: 'var(--green)',
           backgroundColor: 'transparent',
@@ -197,7 +197,7 @@
 <header class="view-head">
   <div>
     <h1>Scoring</h1>
-    <p class="subtitle">F024 Phase 3b — Evaluation dimensions, outcome signals, and evolution tracking</p>
+    <p class="subtitle">F024: the dimensions each turn is scored on, the outcome signals, and how the weights evolve.</p>
   </div>
   <div class="head-actions">
     <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void store.refresh()} disabled={$store.loading}>
@@ -228,28 +228,28 @@
     <div class="config-banner" class:config-banner--active={cfg.evolution_enabled} class:config-banner--off={!cfg.evolution_enabled}>
       <span class="banner-dot" class:dot-active={cfg.evolution_enabled} class:dot-off={!cfg.evolution_enabled}></span>
       <div class="banner-text">
-        <strong>Rubric v{rubric.version}</strong> — {rubric.dimension_count} dimensions
-        {cfg.evolution_enabled ? ' | Evolution ACTIVE' : ' | Evolution OFF (observation mode)'}
+        <strong>Rubric v{rubric.version}</strong>, {rubric.dimension_count} dimensions.
+        {cfg.evolution_enabled ? 'The weights evolve.' : 'The weights are fixed (observation only).'}
         <div class="banner-stats">
-          Outcome detection: {cfg.outcome_detection_enabled ? 'ON' : 'OFF'} |
-          Signals collected: {d.outcome_signals.total.toLocaleString()} |
-          Min episodes for correlation: {cfg.min_episodes_for_correlation} |
-          Weight cap: ±{(cfg.weight_change_cap * 100).toFixed(0)}%
+          Outcome detection is {cfg.outcome_detection_enabled ? 'on' : 'off'};
+          {d.outcome_signals.total.toLocaleString()} signals collected;
+          a correlation needs {cfg.min_episodes_for_correlation} episodes;
+          a weight moves at most ±{(cfg.weight_change_cap * 100).toFixed(0)}% at a time.
         </div>
       </div>
     </div>
 
     <!-- ── Stat grid ──────────────────────────────────────────────── -->
     <StatGrid stats={[
-      { label: 'Rubric Version', value: rubric.version },
+      { label: 'Rubric version', value: rubric.version },
       { label: 'Dimensions', value: rubric.dimension_count },
-      { label: 'Total Signals', value: d.outcome_signals.total.toLocaleString() },
+      { label: 'Total signals', value: d.outcome_signals.total.toLocaleString() },
       { label: 'Versions', value: d.version_history.length },
     ]} />
 
     <!-- ── Current Dimensions & Weights ──────────────────────────── -->
     <section class="chart-card mt">
-      <h2>Current Dimensions &amp; Weights</h2>
+      <h2>Current dimensions &amp; weights</h2>
       <div class="dim-grid">
         <div class="radar-wrap">
           <Chart
@@ -287,7 +287,7 @@
     <!-- ── Outcome Signal Distribution ───────────────────────────── -->
     {#if Object.keys(d.outcome_signals.by_type).length > 0}
       <section class="chart-card mt">
-        <h2>Outcome Signal Distribution</h2>
+        <h2>Outcome signal distribution</h2>
         <p class="section-note">Total: {d.outcome_signals.total.toLocaleString()} signals detected from episodes</p>
         <div class="doughnut-wrap">
           <Chart
@@ -303,7 +303,7 @@
     <!-- ── Signal Trend (30 days) ─────────────────────────────────── -->
     {#if hasTrendData(d)}
       <section class="chart-card mt">
-        <h2>Signal Trend (30 Days)</h2>
+        <h2>Signal trend (30 days)</h2>
         <Chart
           type="line"
           data={signalTrendData(d)}
@@ -370,7 +370,7 @@
     <!-- ── Weight Evolution ───────────────────────────────────────── -->
     {#if d.weight_history.length >= 2}
       <section class="chart-card mt">
-        <h2>Weight Evolution</h2>
+        <h2>Weight evolution</h2>
         <p class="section-note">How dimension weights have changed across rubric versions</p>
         <Chart
           type="line"
@@ -391,7 +391,7 @@
     <!-- ── Version History ───────────────────────────────────────── -->
     {#if d.version_history.length > 0}
       <section class="chart-card mt">
-        <h2>Version History</h2>
+        <h2>Version history</h2>
         <div class="table-scroll">
           <table class="data-table">
             <thead>
@@ -399,7 +399,7 @@
                 <th>Version</th>
                 <th>Status</th>
                 <th>Dimensions</th>
-                <th>Change Reason</th>
+                <th>Change reason</th>
                 <th>Created</th>
               </tr>
             </thead>
@@ -422,7 +422,7 @@
     <!-- ── Recent Outcome Signals ─────────────────────────────────── -->
     {#if d.outcome_signals.recent.length > 0}
       <section class="chart-card mt">
-        <h2>Recent Outcome Signals</h2>
+        <h2>Recent outcome signals</h2>
         <div class="table-scroll">
           <table class="data-table">
             <thead>

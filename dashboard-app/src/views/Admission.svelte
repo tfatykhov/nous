@@ -142,7 +142,7 @@
     return {
       labels: d.daily_trend.map((t) => t.date.slice(5)),
       datasets: [{
-        label: 'Admission Rate (%)',
+        label: 'Admission rate (%)',
         data: d.daily_trend.map((t) => t.scored > 0 ? +((t.admitted / t.scored) * 100).toFixed(1) : null),
         borderColor: 'var(--green)',
         backgroundColor: tint('--green', 0.1),
@@ -164,7 +164,7 @@
     return {
       labels: d.daily_trend.map((t) => t.date.slice(5)),
       datasets: [{
-        label: 'Avg Score',
+        label: 'Avg score',
         data: d.daily_trend.map((t) => t.avg_score),
         borderColor: 'var(--series-0)',
         backgroundColor: tint('--series-0', 0.1),
@@ -243,8 +243,8 @@
 <!-- ── Header ──────────────────────────────────────────────────────────── -->
 <header class="view-head">
   <div>
-    {#if !embedded}<h1>Admission Control</h1>{/if}
-    <p class="subtitle">F023 Memory Admission — score analysis and threshold tuning</p>
+    {#if !embedded}<h1>Admission control</h1>{/if}
+    <p class="subtitle">F023 memory admission: how new facts score, and what a threshold would let in.</p>
   </div>
   <div class="head-right">
     <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void store.refresh()} disabled={$store.loading}>
@@ -269,18 +269,17 @@
       <div class="banner-dot"></div>
       <div class="banner-body">
         {#if d.config.shadow_mode}
-          <strong>SHADOW MODE ACTIVE</strong> — All facts are being admitted. Scores are logged but not enforced.
+          <strong>Shadow mode</strong>: every fact is admitted; scores are logged, not enforced.
           <span class="banner-meta">
-            Threshold: {d.config.threshold} &nbsp;|&nbsp;
-            Facts scored: {d.summary.total_scored.toLocaleString()} &nbsp;|&nbsp;
-            Would reject: {d.summary.would_reject.toLocaleString()} ({(d.summary.rejection_rate * 100).toFixed(1)}%)
+            At the threshold of {d.config.threshold}, {d.summary.would_reject.toLocaleString()} of the
+            {d.summary.total_scored.toLocaleString()} facts scored ({(d.summary.rejection_rate * 100).toFixed(1)}%) would be rejected.
           </span>
         {:else}
-          <strong>ENFORCEMENT ACTIVE</strong> — Facts below {d.config.threshold} are rejected.
+          <strong>Enforced</strong>: facts scoring below {d.config.threshold} are rejected.
           <span class="banner-meta">
-            Admitted: {d.summary.admitted.toLocaleString()} ({((1 - d.summary.rejection_rate) * 100).toFixed(0)}%) &nbsp;|&nbsp;
-            Rejected: {d.summary.would_reject.toLocaleString()} ({(d.summary.rejection_rate * 100).toFixed(1)}%) &nbsp;|&nbsp;
-            Bypassed: {d.summary.bypassed.toLocaleString()}
+            {d.summary.admitted.toLocaleString()} admitted ({((1 - d.summary.rejection_rate) * 100).toFixed(0)}%),
+            {d.summary.would_reject.toLocaleString()} rejected ({(d.summary.rejection_rate * 100).toFixed(1)}%),
+            {d.summary.bypassed.toLocaleString()} bypassed.
           </span>
         {/if}
       </div>
@@ -288,18 +287,18 @@
 
     <!-- ── Stat cards ─────────────────────────────────────────────────────── -->
     <StatGrid stats={[
-      { label: 'Total Scored',    value: d.summary.total_scored.toLocaleString() },
+      { label: 'Total scored',    value: d.summary.total_scored.toLocaleString() },
       { label: 'Admitted',        value: d.summary.admitted.toLocaleString() },
       { label: 'Rejected',        value: d.summary.would_reject.toLocaleString() },
       { label: 'Bypassed',        value: d.summary.bypassed.toLocaleString() },
-      { label: 'Rejection Rate',  value: `${(d.summary.rejection_rate * 100).toFixed(1)}%` },
-      { label: 'Avg Score',       value: d.summary.avg_composite_score.toFixed(3) },
+      { label: 'Rejection rate',  value: `${(d.summary.rejection_rate * 100).toFixed(1)}%` },
+      { label: 'Avg score',       value: d.summary.avg_composite_score.toFixed(3) },
     ]} />
 
     <!-- ── Score distribution ─────────────────────────────────────────────── -->
     {#if d.score_distribution.length > 0}
       <section class="chart-card mt">
-        <h2>Score Distribution</h2>
+        <h2>Score distribution</h2>
         <p class="section-note">Green bars at or above the threshold ({d.config.threshold}); red bars below. Colors update with simulator.</p>
         <Chart type="bar" data={scoreDistChartData(d, simThreshold)} options={scoreDistOptions} height="260px" />
       </section>
@@ -309,7 +308,7 @@
     {#if d.score_distribution.length > 0}
       {@const sim = simulatorResult(d, simThreshold)}
       <section class="chart-card mt">
-        <h2>Threshold Simulator</h2>
+        <h2>Threshold simulator</h2>
         <p class="section-note">Slide to explore different thresholds. Read-only — does not change actual config.</p>
         <div class="sim-controls">
           <input
@@ -332,7 +331,7 @@
 
     <!-- ── Rejected facts table ───────────────────────────────────────────── -->
     <section class="chart-card mt">
-      <h2>Rejected Facts</h2>
+      <h2>Rejected facts</h2>
       <p class="section-note">Review this list to decide if the threshold is safe to enforce.</p>
 
       {#if rejectedLoading}
@@ -381,7 +380,7 @@
     <!-- ── Dimension box plots ────────────────────────────────────────────── -->
     {#if Object.keys(d.dimension_stats).length > 1}
       <section class="chart-card mt">
-        <h2>Per-Dimension Breakdown</h2>
+        <h2>Per-dimension breakdown</h2>
         <p class="section-note">Score spread for admitted vs rejected facts. Excludes bypassed.</p>
         <div class="dim-grid">
           {#each DIMS as dim}
@@ -418,7 +417,7 @@
       <!-- By source -->
       {#if Object.keys(d.by_source).length > 0}
         <section class="chart-card">
-          <h2>By Source</h2>
+          <h2>By source</h2>
           <Chart type="bar" data={bySourceChartData(d)} options={bySourceOptions} height="220px" />
         </section>
       {/if}
@@ -426,7 +425,7 @@
       <!-- By category -->
       {#if Object.keys(d.by_category).length > 0}
         <section class="chart-card">
-          <h2>By Category</h2>
+          <h2>By category</h2>
           <Chart type="bar" data={byCategoryChartData(d)} options={byCategoryOptions} height="220px" />
         </section>
       {/if}
@@ -434,7 +433,7 @@
       <!-- Trend: admission rate -->
       {#if d.daily_trend.length > 0}
         <section class="chart-card">
-          <h2>Admission Rate Over Time</h2>
+          <h2>Admission rate over time</h2>
           <Chart type="line" data={trendRateChartData(d)} options={trendRateOptions} height="220px" />
         </section>
       {/if}
@@ -442,7 +441,7 @@
       <!-- Trend: avg score -->
       {#if d.daily_trend.length > 0}
         <section class="chart-card">
-          <h2>Avg Score Over Time</h2>
+          <h2>Avg score over time</h2>
           <Chart type="line" data={trendScoreChartData(d)} options={trendScoreOptions} height="220px" />
         </section>
       {/if}
@@ -450,7 +449,7 @@
       <!-- Bypass breakdown -->
       {#if Object.keys(d.bypass_breakdown).length > 0}
         <section class="chart-card">
-          <h2>Bypass Breakdown</h2>
+          <h2>Bypass breakdown</h2>
           <Chart type="doughnut" data={bypassChartData(d)} options={bypassOptions} height="220px" />
         </section>
       {/if}

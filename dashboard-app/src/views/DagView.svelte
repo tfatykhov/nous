@@ -163,8 +163,8 @@
       { label: 'Active DAGs', value: String(s.active_count) },
       { label: 'Waiting on you', value: String(s.waiting_count ?? 0), tone: (s.waiting_count ? 'waiting' : undefined) as 'waiting' | undefined },
       { label: 'Nodes (24 h)', value: String(s.nodes_completed_24h) },
-      { label: 'Success Rate', value: successPct },
-      { label: 'Avg Duration', value: fmtDuration(s.avg_completion_seconds) },
+      { label: 'Success rate', value: successPct },
+      { label: 'Avg duration', value: fmtDuration(s.avg_completion_seconds) },
     ];
   });
 
@@ -414,7 +414,7 @@
   <!-- Token budget chart (only when active DAGs have budgets) -->
   {#if budgetDags.length > 0 && budgetChartData() !== null}
     <section class="chart-card">
-      <h2 class="section-title">Token Budgets</h2>
+      <h2 class="section-title">Token budgets</h2>
       <Chart type="bar" data={budgetChartData()!} height="240px" options={{
         plugins: { legend: { labels: { color: 'var(--chart-text)' } } },
         scales: {
@@ -462,12 +462,12 @@
           <div class="detail-grid">
             <div><span class="detail-label">Source</span><span>{dag.source || '--'}</span></div>
             <div><span class="detail-label">Duration</span><span>{dagDuration(dag)}</span></div>
-            <div><span class="detail-label">Token Budget</span><span>{fmtTokens(dag.token_budget)}</span></div>
+            <div><span class="detail-label">Token budget</span><span>{fmtTokens(dag.token_budget)}</span></div>
             <div><span class="detail-label">Created</span><span>{fmtAgo(dag.created_at)}</span></div>
           </div>
           {#if dag.result_summary}
             <div class="detail-section">
-              <div class="detail-label">Result Summary</div>
+              <div class="detail-label">Result summary</div>
               <div class="detail-text">{dag.result_summary}</div>
             </div>
           {/if}

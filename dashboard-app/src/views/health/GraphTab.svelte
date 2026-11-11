@@ -119,7 +119,7 @@
       labels: d.daily_edges.map((p) => shortDate(p.date)),
       datasets: [
         {
-          label: 'Edges Created',
+          label: 'Edges created',
           data: d.daily_edges.map((p) => p.count),
           backgroundColor: tint('--series-0', 0.5),
           borderColor: 'var(--series-0)',
@@ -145,7 +145,7 @@
       labels: d.degree_distribution.map((p) => p.degree),
       datasets: [
         {
-          label: 'Node Count',
+          label: 'Node count',
           data: d.degree_distribution.map((p) => p.count),
           backgroundColor: tint('--series-1', 0.5),
           borderColor: 'var(--series-1)',
@@ -175,7 +175,7 @@
       labels: d.orphan_trend.map((p) => shortDate(p.date)),
       datasets: [
         {
-          label: 'Orphan Nodes',
+          label: 'Orphan nodes',
           data: d.orphan_trend.map((p) => p.count),
           // Orphans are a defect: the status red.
           borderColor: 'var(--red)',
@@ -242,7 +242,7 @@
 </script>
 
 <header class="view-head">
-  <p class="subtitle">Density trends, edge creation, and node connectivity</p>
+  <p class="subtitle">How dense the graph is getting, how many edges are made, and how connected the nodes are.</p>
   <div class="head-right">
     <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={refreshAll} disabled={$store.loading || $density.loading}>
       {$store.loading || $density.loading ? 'Loading…' : 'Refresh'}
@@ -256,15 +256,15 @@
   {@const d = $density.data}
 
   <StatGrid stats={[
-    { label: 'Total Nodes',    value: d.total_nodes.toLocaleString() },
-    { label: 'Total Edges',    value: d.total_edges.toLocaleString() },
-    { label: 'Avg Degree',     value: d.avg_degree.toFixed(2) },
-    { label: 'Connected Nodes', value: d.connected_nodes.toLocaleString() },
+    { label: 'Total nodes',    value: d.total_nodes.toLocaleString() },
+    { label: 'Total edges',    value: d.total_edges.toLocaleString() },
+    { label: 'Avg degree',     value: d.avg_degree.toFixed(2) },
+    { label: 'Connected nodes', value: d.connected_nodes.toLocaleString() },
   ]} />
 
   <!-- Orphan rate — single-card banner with colour badge; Density's staleness badge at its end -->
   <div class="orphan-banner">
-    <span class="orphan-label">Overall Orphan Rate</span>
+    <span class="orphan-label">Overall orphan rate</span>
     <span class="badge {orphanRateClass(d.orphan_rate)}">{orphanRateLabel(d.orphan_rate)}</span>
     <span class="orphan-meta">({d.total_orphans.toLocaleString()} of {d.total_nodes.toLocaleString()} nodes unconnected)</span>
     <span class="banner-stale"><StaleBadge state={$density} /></span>
@@ -300,7 +300,7 @@
          orphan trend, a running sum whose backend query counts its boundary day twice (pre-existing, parked as a
          follow-up), so it can differ from the banner. -->
     <StatGrid stats={[
-      { label: 'Current Density', value: latestDensity.toFixed(1) },
+      { label: 'Current density', value: latestDensity.toFixed(1) },
       { label: 'Edges (30d)',     value: totalEdges30d },
       { label: 'Auto-linked',     value: `${autoPercent}%` },
     ]} />
@@ -311,7 +311,7 @@
       <!-- Density over time -->
       {#if d.density_history.length > 0}
         <section class="chart-card">
-          <h2>Graph Density Over Time</h2>
+          <h2>Graph density over time</h2>
           <Chart type="line" data={densityChartData(d)} options={densityOptions} height="220px" />
         </section>
       {/if}
@@ -319,7 +319,7 @@
       <!-- Edge creation rate -->
       {#if d.daily_edges.length > 0}
         <section class="chart-card">
-          <h2>Edge Creation Rate</h2>
+          <h2>Edge creation rate</h2>
           <Chart type="bar" data={edgeRateChartData(d)} options={edgeRateOptions} height="220px" />
         </section>
       {/if}
@@ -327,7 +327,7 @@
       <!-- Degree distribution -->
       {#if d.degree_distribution.length > 0}
         <section class="chart-card">
-          <h2>Node Degree Distribution</h2>
+          <h2>Node degree distribution</h2>
           <Chart type="bar" data={degreeChartData(d)} options={degreeOptions} height="220px" />
         </section>
       {/if}
@@ -335,7 +335,7 @@
       <!-- Orphan nodes over time -->
       {#if d.orphan_trend.length > 0}
         <section class="chart-card">
-          <h2>Orphan Nodes Over Time</h2>
+          <h2>Orphan nodes over time</h2>
           <p class="chart-note">Running total; may differ from the count above</p>
           <Chart type="line" data={orphanChartData(d)} options={orphanOptions} height="220px" />
         </section>
@@ -344,7 +344,7 @@
       <!-- Auto vs Manual edges — full width -->
       {#if d.daily_edges.length > 0}
         <section class="chart-card full-width">
-          <h2>Auto vs Manual Edges</h2>
+          <h2>Auto vs manual edges</h2>
           <Chart type="bar" data={autoManualChartData(d)} options={autoManualOptions} height="220px" />
         </section>
       {/if}
@@ -354,7 +354,7 @@
     <!-- ── Orphan breakdown ──────────────────────────────────────────────── -->
     {#if d.total_orphans > 0}
       <section class="chart-card orphan-section">
-        <h2>Orphan Breakdown by Type</h2>
+        <h2>Orphan breakdown by type</h2>
         <ul class="orphan-list">
           {#each Object.entries(d.orphan_counts) as [type, count]}
             <li class="orphan-row">
@@ -389,7 +389,7 @@
 
     <!-- Orphan rate by type -->
     <section class="chart-card">
-      <h2>Orphan Rate by Type</h2>
+      <h2>Orphan rate by type</h2>
       <table class="data-table">
         <thead>
           <tr><th>Type</th><th>Total</th><th>Orphans</th><th>Rate</th></tr>
@@ -411,7 +411,7 @@
 
     <!-- Edge distribution -->
     <section class="chart-card">
-      <h2>Edge Distribution</h2>
+      <h2>Edge distribution</h2>
       <table class="data-table">
         <thead>
           <tr><th>Relation</th><th>Count</th></tr>
@@ -433,7 +433,7 @@
 
   <!-- ── Backfill progress ───────────────────────────────────────────────── -->
   <section class="chart-card mt">
-    <h2>Backfill Progress (Last 7 Days)</h2>
+    <h2>Backfill progress (last 7 days)</h2>
     <table class="data-table">
       <thead>
         <tr><th>Date</th><th>Auto-linked Edges</th></tr>
