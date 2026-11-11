@@ -96,6 +96,23 @@ describe('Overview', () => {
     }
   });
 
+  // Final step A2: the two coloured dots said their state by colour alone; each now says it in a word, as Decisions'
+  // Brier dot does. No figure, no word.
+  it('Graph density and Brier score say their state in a word beside the dot', async () => {
+    replies['/status'] = () => ({ body: { ...STATUS, dashboard: { ...STATUS.dashboard, graph_density: 2.4 }, calibration: { brier_score: 0.028 } } });
+    await show();
+    await screen.findByText('Graph density');
+    const tile = (label: string) => [...document.querySelectorAll('.stat-card')].find((t) => t.querySelector('.stat-label')?.textContent === label)!;
+    expect(tile('Graph density').querySelector('.indicator-word')?.textContent).toBe('fair');
+    expect(tile('Brier score').querySelector('.indicator-word')?.textContent).toBe('good');
+  });
+
+  it('with no figures the dots say no word', async () => {
+    await show();
+    await screen.findByText('Graph density');
+    expect(document.querySelectorAll('.indicator-word')).toHaveLength(0);
+  });
+
   it('the title is the UTC day and the header pills come from the day totals', async () => {
     const { container } = await show();
     // The endpoint's UTC day wins over the browser's clock once it arrives.

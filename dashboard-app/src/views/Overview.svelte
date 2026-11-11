@@ -117,6 +117,9 @@
     };
   }
 
+  /** A dot's state in a word, as Decisions' Brier dot says it (final step: the colour was alone). */
+  const DOT_WORD: Record<string, string> = { good: 'good', warn: 'fair', bad: 'poor' };
+
   function densityClass(d: number | null): 'good' | 'warn' | 'bad' {
     if (d == null) return 'warn';
     if (d >= 3.0) return 'good';
@@ -390,6 +393,7 @@
         <div class="stat-value">
           <span class="indicator {densityClass(db.graph_density)}"></span>
           {db.graph_density != null ? db.graph_density.toFixed(1) : '—'}
+          {#if db.graph_density != null}<span class="indicator-word">{DOT_WORD[densityClass(db.graph_density)]}</span>{/if}
         </div>
         <div class="stat-label">Graph density</div>
       </div>
@@ -397,6 +401,7 @@
         <div class="stat-value">
           <span class="indicator {brierClass(d.calibration.brier_score)}"></span>
           {d.calibration.brier_score != null ? d.calibration.brier_score.toFixed(3) : '—'}
+          {#if DOT_WORD[brierClass(d.calibration.brier_score)]}<span class="indicator-word">{DOT_WORD[brierClass(d.calibration.brier_score)]}</span>{/if}
         </div>
         <div class="stat-label">Brier score</div>
       </div>
@@ -587,6 +592,7 @@
   .indicator.warn    { background: var(--yellow); }
   .indicator.bad     { background: var(--red); }
   .indicator.neutral { background: var(--muted); }
+  .indicator-word { font-size: 0.75rem; font-weight: 500; color: var(--muted); }
 
   .integrity-section { margin-top: 1rem; }
   .section-title-row { display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 0.75rem; }
