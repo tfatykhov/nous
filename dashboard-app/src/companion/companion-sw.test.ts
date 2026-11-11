@@ -344,6 +344,38 @@ describe('companion service worker', () => {
     expect(JSON.parse(storage.entry(V2, INDEX)!)).toMatchObject({ ...OLD_INDEX, partial: false });
   });
 
+  it.each([
+    ['a snapshot only v1 holds is carried, and the index says partial', ['s1'], ['s1']],
+    ['a snapshot no cache holds is dropped from the index', ['s1', 's2'], ['s1']],
+  ])(
+    "retiring v1 checks v2's own index too: %s",
+    async (_, listed, kept) => {
+      // v2's index came from the runtime's network-first fetch, which stored it
+      // without its snapshots (the page closed, or they were served from v1).
+      const storage = await withV1();
+      const v2 = await storage.open(V2);
+      for (const [path, body] of [
+        [SHELL, NEW_HTML],
+        [JS, 'new js'],
+        [SHARED, 'shared js'],
+        [CSS, 'new css'],
+        [INDEX, JSON.stringify({ surfaces: listed.map((surface_id) => ({ surface_id })), latest_seq: 9 })],
+      ]) {
+        v2.entries.set(path, body);
+      }
+      const listeners = loadWorker(storage, network({}));
+      await lifecycle(listeners, 'activate');
+      expect(await storage.keys()).toEqual([V2]);
+      expect(storage.entry(V2, SURFACE)).toBe('old snapshot');
+      // The carried snapshot is older than v2's watermark.
+      expect(JSON.parse(storage.entry(V2, INDEX)!)).toMatchObject({
+        surfaces: kept.map((surface_id) => ({ surface_id })),
+        partial: true,
+        latest_seq: 0,
+      });
+    },
+  );
+
   it('a second activation after a failed one completes the warm, and only then retires v1', async () => {
     const storage = await withV1();
     const routes: Record<string, string | number> = {};

@@ -140,23 +140,35 @@ async function putIndex(cache, data, stored, partial) {
   );
 }
 
-/** The index did not refresh: carry the older cache's index and the snapshots
- * it lists, unless this cache already has an index of its own. Local only. */
+/** Before the older caches go, make this cache's feed stand on its own: its
+ * index (else the older cache's, carried in) lists only snapshots it holds,
+ * carrying from the older cache any it lacks. The runtime's network-first
+ * fetch can store an index without its snapshots. Local only. */
 async function carryIndex(cache) {
-  if (await cache.match(INDEX)) return;
-  const previous = await older(INDEX);
-  if (!previous) return;
+  const own = await cache.match(INDEX);
+  const source = own ?? (await older(INDEX));
+  if (!source) return;
   let data;
   try {
-    data = await previous.json();
+    data = await source.json();
   } catch {
     return; // an unreadable index is no feed to keep
   }
   const listed = data.surfaces ?? [];
   const stored = [];
-  for (const surface of listed) if (await keep(cache, snapshotUrl(surface))) stored.push(surface);
+  let stale = false; // a carried snapshot older than this index's watermark
+  for (const surface of listed) {
+    const url = snapshotUrl(surface);
+    if (await cache.match(url)) {
+      stored.push(surface);
+    } else if (await keep(cache, url)) {
+      stored.push(surface);
+      if (own) stale = true;
+    }
+  }
+  if (own && !stale && stored.length === listed.length) return; // whole already
   // Carried whole, the old index and its snapshots are the pair v1 served.
-  await putIndex(cache, data, stored, data.partial === true || stored.length < listed.length);
+  await putIndex(cache, data, stored, stale || data.partial === true || stored.length < listed.length);
 }
 
 /** Warm the surface snapshots so the offline feed exists from visit one. A
