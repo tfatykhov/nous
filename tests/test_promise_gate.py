@@ -325,6 +325,16 @@ class FakeStore:
         self.rows[key] = row
         return row
 
+    async def record_gate_turn(self, rows: list[dict], log: dict) -> list[Commitment | None]:
+        written: list[Commitment | None] = []
+        for spec in rows:
+            try:
+                written.append(await self.create_idempotent(**spec))
+            except CommitmentRefused:
+                written.append(None)
+        self.logs.append(log)
+        return written
+
     async def log_gate_turn(self, **kw) -> None:
         self.logs.append(kw)
 
@@ -360,6 +370,43 @@ async def test_commit_tool_rejects_a_what_too_short_to_check():
     assert out["is_error"] is True
 
 
+async def test_commit_tool_refuses_an_unknown_consent():
+    from nous.api.tools import create_commit_tool
+
+    store = FakeStore()
+    out = await create_commit_tool(store)(what="relaunch the chain", due="in 1 hour", consent="silent")
+    assert out["is_error"] is True and "consent" in out["content"][0]["text"] and store.rows == {}
+
+
+async def test_commit_tool_reports_a_failed_ledger_write_as_an_error(caplog):
+    from nous.api.tools import create_commit_tool
+
+    class Down(FakeStore):
+        async def create_idempotent(self, **kw):
+            raise RuntimeError("database is down")
+
+    with caplog.at_level("WARNING", logger="nous.api.tools"):
+        out = await create_commit_tool(Down())(what="relaunch the chain", due="in 1 hour", _turn_number=1)
+    assert out["is_error"] is True and "may not have been recorded" in out["content"][0]["text"]
+    assert "ledger write failed" in caplog.text
+
+
+async def test_commit_tool_writes_a_new_row_when_the_turn_key_names_a_closed_one():
+    """A continuation thread is discarded before each step, so its turn numbers restart: the same key can name a
+    row an earlier step wrote and the owner has since closed."""
+    from dataclasses import replace
+
+    from nous.api.tools import create_commit_tool
+
+    store = FakeStore()
+    tool = create_commit_tool(store)
+    await tool(what="check the deploy of PR 812", due="in 1 hour", _session_id="intent-x", _turn_number=1)
+    [key] = store.rows
+    store.rows[key] = replace(store.rows[key], status="done")
+    out = await tool(what="check the deploy of PR 812", due="in 1 hour", _session_id="intent-x", _turn_number=1)
+    assert "C-0002" in out["content"][0]["text"] and len(store.rows) == 2
+
+
 async def test_commit_tool_takes_its_source_kind_from_the_turn_kind():
     from nous.api.tools import create_commit_tool
 
@@ -382,10 +429,15 @@ async def _ledger_tables_exist(db) -> bool:
     return bool(found)
 
 
+MIGRATION_107 = Path(__file__).resolve().parents[1] / "sql" / "migrations" / "107_commitments.sql"
+NO_MIGRATION_YET = "sql/migrations/107_commitments.sql is not in the tree yet (its DDL: docs/features/F111)"
+
+
 @pytest.fixture
 async def store(db):
-    if not await _ledger_tables_exist(db):
-        pytest.skip("brain.commitments does not exist: migration 107 is not applied")
+    if not MIGRATION_107.exists():
+        pytest.skip(NO_MIGRATION_YET)
+    assert await _ledger_tables_exist(db), "migration 107 is in the tree but brain.commitments does not exist"
     agent = f"pg-test-{uuid.uuid4().hex[:8]}"
     yield CommitmentStore(db, agent)
     from sqlalchemy import text
@@ -408,6 +460,14 @@ def _new(**over) -> dict:
         consent="silence",
     )
     return {**base, **over}
+
+
+def test_the_migration_file_is_the_ddl_the_feature_doc_records():
+    if not MIGRATION_107.exists():
+        pytest.skip(NO_MIGRATION_YET)
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "features" / "F111-obligation-ledger.md").read_text()
+    ddl = doc.split("```sql\n", 1)[1].split("```", 1)[0]
+    assert MIGRATION_107.read_text() == ddl
 
 
 @pytest.mark.postgres_only
@@ -451,6 +511,31 @@ async def test_store_link_mark_and_watchable(store):
     assert [c.id for c in watch] == [late.id]  # never backed, awaiting_user, cancelled or deferred rows
     assert await store.list_watchable(now=now) == []  # nothing is overdue before due + grace
     assert awaiting.kind == "awaiting_user"
+
+
+@pytest.mark.postgres_only
+async def test_store_records_a_gate_turn_in_one_transaction(store):
+    rows = await store.record_gate_turn(
+        [_new(turn_id="g1"), _new(turn_id="g1", what="x"), _new(turn_id="g1", what="I'll check back tomorrow.")],
+        {"path": "stream", "mode": "warn", "detected": 3, "backed": 0, "unbacked": 3, "outcome": "footer"},
+    )
+    assert rows[0] is not None and rows[1] is None and rows[2] is not None  # the refused one is skipped
+    stats = await store.stats_week()
+    assert stats["gate"]["turns"] == 1 and stats["commitments"] == {"open": 2}
+
+
+@pytest.mark.postgres_only
+async def test_a_failed_gate_turn_writes_nothing(store, monkeypatch):
+    import nous.brain.commitments as commitments
+
+    monkeypatch.setattr(commitments, "_LOG", commitments.text("INSERT INTO nous_system.no_such_table VALUES (1)"))
+    with pytest.raises(Exception):
+        await store.record_gate_turn(
+            [_new(turn_id="g2")],
+            {"path": "stream", "mode": "shadow", "detected": 1, "backed": 0, "unbacked": 1, "outcome": "clean"},
+        )
+    monkeypatch.undo()
+    assert (await store.stats_week())["commitments"] == {}  # the row before the failing log insert rolled back
 
 
 @pytest.mark.postgres_only

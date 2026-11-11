@@ -236,6 +236,45 @@ async def test_mode_off_and_no_gate_do_nothing():
         assert store.rows == {} and store.logs == []
 
 
+async def test_an_awaiting_user_promise_is_recorded_without_a_footer():
+    store = FakeStore()
+    runner, _ = _runner("warn", store, [_reply_segment("Done with the review. I'll merge it once you confirm.")])
+    shown = await _stream(runner, "s-await")
+    [row] = store.rows.values()
+    assert row.kind == "awaiting_user" and "C-" not in shown and store.logs[0]["outcome"] == "clean"
+
+
+async def test_a_mixed_reply_names_only_the_action_row():
+    store = FakeStore()
+    reply = "I'll merge it once you confirm. I'll check back tomorrow."
+    runner, _ = _runner("warn", store, [_reply_segment(reply)])
+    shown = await _stream(runner, "s-mixed")
+    footer = shown[len(reply) :]
+    assert len(store.rows) == 2 and "C-0002" in footer and "C-0001" not in footer
+
+
+async def test_nov10_run_turn_shadow_returns_the_reply_unchanged():
+    store = FakeStore()
+    runner, _ = _runner("shadow", store)
+    results = [ToolResult(**r) for r in NOV10["tool_results"]]
+    runner._tool_loop = AsyncMock(return_value=(NOV10["reply"], results, {"input_tokens": 1, "output_tokens": 1}, []))
+    try:
+        text, _ctx, _usage = await runner.run_turn("s-nov10-rt-shadow", NOV10["user_message"])
+    finally:
+        await runner.close()
+    [row] = store.rows.values()
+    assert text == NOV10["reply"] and row.consent == "silence" and store.logs[0]["outcome"] == "clean"
+
+
+async def test_a_far_promise_is_clamped_not_lost():
+    store = FakeStore()
+    runner, _ = _runner(
+        "warn", store, [_reply_segment("I'll revisit the pricing in 20 weeks. I'll check back tomorrow.")]
+    )
+    await _stream(runner, "s-far")
+    assert len(store.rows) == 2 and store.logs[0]["outcome"] == "footer"
+
+
 async def test_a_clean_turn_still_logs_the_denominator():
     store = FakeStore()
     runner, _ = _runner("warn", store, [_reply_segment("Here is the summary you asked for.")])
@@ -286,13 +325,20 @@ async def test_oct08_retrospective_reply_is_clean():
 
 
 class _BrokenStore(FakeStore):
-    async def create_idempotent(self, **kw):
+    async def record_gate_turn(self, rows, log):
         raise RuntimeError("database is down")
 
 
 class _SlowStore(FakeStore):
-    async def create_idempotent(self, **kw):
-        await asyncio.sleep(5)
+    def __init__(self) -> None:
+        super().__init__()
+        self.finished = asyncio.Event()
+
+    async def record_gate_turn(self, rows, log):
+        await asyncio.sleep(0.3)
+        written = await super().record_gate_turn(rows, log)
+        self.finished.set()
+        return written
 
 
 async def test_a_gate_that_raises_leaves_the_stream_reply_unchanged(caplog):
@@ -300,6 +346,7 @@ async def test_a_gate_that_raises_leaves_the_stream_reply_unchanged(caplog):
     runner, cognitive = _runner("warn", store, [_reply_segment(NOV10["reply"])])
     with caplog.at_level(logging.WARNING, logger="nous.api.runner"):
         shown = await _stream(runner, "s-broken")
+        await asyncio.sleep(0)  # the error row is written in the background
     assert shown == NOV10["reply"] and cognitive.post_turn_texts == [NOV10["reply"]]
     assert "promise gate failed" in caplog.text
     assert [log["outcome"] for log in store.logs] == ["error"]
@@ -312,18 +359,53 @@ async def test_a_gate_that_raises_leaves_the_run_turn_reply_unchanged(caplog):
     with caplog.at_level(logging.WARNING, logger="nous.api.runner"):
         try:
             text, _ctx, _usage = await runner.run_turn("s-broken-rt", "go")
+            await asyncio.sleep(0)  # the error row is written in the background
         finally:
             await runner.close()
     assert text == NOV10["reply"] and "promise gate failed" in caplog.text
     assert store.logs[0]["outcome"] == "error"
 
 
-async def test_a_slow_gate_times_out_and_the_reply_goes_out(monkeypatch):
+async def test_a_slow_gate_times_out_the_reply_goes_out_and_the_gate_is_not_cancelled(monkeypatch, caplog):
     monkeypatch.setattr(runner_module, "PROMISE_GATE_TIMEOUT_SECONDS", 0.05)
     store = _SlowStore()
     runner, _ = _runner("warn", store, [_reply_segment(NOV10["reply"])])
-    shown = await asyncio.wait_for(_stream(runner, "s-slow"), timeout=3)
-    assert shown == NOV10["reply"]
+    with caplog.at_level(logging.WARNING, logger="nous.api.runner"):
+        shown = await asyncio.wait_for(_stream(runner, "s-slow"), timeout=3)
+    assert shown == NOV10["reply"] and "took longer than" in caplog.text
+    await asyncio.wait_for(store.finished.wait(), timeout=3)  # the gate finished its transaction in the background
+    await asyncio.sleep(0)  # the done callback runs one loop tick after the task ends
+    assert len(store.rows) == 1 and store.logs[0]["outcome"] == "footer" and not runner._promise_gate_tasks
+
+
+async def test_a_cancelled_turn_is_still_cancelled_while_the_gate_runs():
+    store = _SlowStore()
+    runner, _ = _runner("shadow", store)
+    runner._tool_loop = AsyncMock(return_value=(NOV10["reply"], [], {"input_tokens": 1, "output_tokens": 1}, []))
+    task = asyncio.ensure_future(runner.run_turn("s-cancel", "go"))
+    await asyncio.sleep(0.1)  # inside the gate's 0.3 s write
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.wait_for(store.finished.wait(), timeout=3)  # the shielded write still completed
+    await runner.close()
+
+
+async def test_a_consumer_that_closes_at_the_footer_loses_nothing():
+    """The footer is the last text delta; a consumer that stops there (aclose) finds the reply stored and claimed."""
+    store = FakeStore()
+    runner, cognitive = _runner("warn", store, [_reply_segment(NOV10["reply"])])
+    gen = runner.stream_chat("s-close", "go")
+    deltas = []
+    async for event in gen:
+        if event.type == "text_delta":
+            deltas.append(event.text)
+            if len(deltas) == 2:  # the reply, then the footer
+                break
+    await gen.aclose()
+    await runner.close()
+    assert "C-0001" in deltas[1]
+    assert _stored_reply(runner, "s-close") == NOV10["reply"] and cognitive.post_turn_texts == [NOV10["reply"]]
 
 
 # ---- background turns: rows, never a footer ---------------------------------------------------------------------
@@ -418,11 +500,32 @@ async def test_drop_without_one_id_is_not_ours(text):
     bot._chat_streaming.assert_called_once()
 
 
-async def test_drop_from_another_chat_or_for_an_unknown_id_goes_on_to_chat():
+async def test_drop_from_another_chat_goes_on_to_chat():
     bot = _bot()
     await bot._handle_update(_message("/drop C-0042", chat=99, user=42))
+    assert _sent(bot) == [] and bot._chat_streaming.call_count == 1
+
+
+async def test_drop_of_an_unknown_id_is_answered_not_passed_to_chat():
+    bot = _bot()
     await bot._handle_update(_message("/drop C-0042"))  # 404: no such commitment
-    assert _sent(bot) == [] and bot._chat_streaming.call_count == 2
+    assert _sent(bot) == ["No commitment C-0042."]
+    bot._chat_streaming.assert_not_called()
+
+
+async def test_the_route_answers_400_404_and_500_without_a_database(monkeypatch):
+    from nous.api import commitment_routes
+
+    async def boom(self, short_id, status, *, close_reason=None):
+        raise RuntimeError("database is down")
+
+    monkeypatch.setattr(commitment_routes.CommitmentStore, "mark", boom)
+    app = Starlette(routes=build_commitment_routes(database=None, settings=MagicMock(agent_id="a")))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+        bad = await client.post("/commitments/nope/drop")
+        verb = await client.post("/commitments/C-1/explode")
+        down = await client.post("/commitments/C-1/done")
+    assert (bad.status_code, verb.status_code, down.status_code) == (400, 404, 500)
 
 
 async def _ledger_tables_exist(db) -> bool:
@@ -434,8 +537,11 @@ async def _ledger_tables_exist(db) -> bool:
 
 @pytest.mark.postgres_only
 async def test_the_drop_route_cancels_the_row_and_the_watcher_never_sees_it(db):
-    if not await _ledger_tables_exist(db):
-        pytest.skip("brain.commitments does not exist: migration 107 is not applied")
+    from test_promise_gate import MIGRATION_107, NO_MIGRATION_YET
+
+    if not MIGRATION_107.exists():
+        pytest.skip(NO_MIGRATION_YET)
+    assert await _ledger_tables_exist(db)
     from datetime import UTC, datetime, timedelta
 
     from sqlalchemy import text

@@ -11,6 +11,7 @@ the key is md5 of the turn key and the normalised ``what``. Nothing here sends, 
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -18,6 +19,8 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import text
+
+logger = logging.getLogger(__name__)
 
 MAX_DUE_DAYS = 90  # a due_at further out than this is refused (a junk commit, not an obligation)
 MIN_WHAT_CHARS = 8  # "do it" is not an obligation anyone can check
@@ -36,6 +39,49 @@ _COLUMNS = (
     "id, short_id, status, kind, what, promise_text, due_at, grace_seconds, consent, source_kind, detected_by, "
     "session_id, turn_id, artifact_kind, artifact_id, close_reason, created_at"
 )
+
+
+_INSERT = text(
+    "INSERT INTO brain.commitments (agent_id, source_kind, session_id, turn_id, detected_by, detector_version, "
+    "promise_text, what, kind, consent, due_at, grace_seconds, status, artifact_kind, artifact_id, artifact_linked_at, "
+    "dedupe_key) VALUES (:agent_id, :source_kind, :session_id, :turn_id, :detected_by, :detector_version, "
+    ":promise_text, :what, :kind, :consent, :due_at, :grace_seconds, :status, :artifact_kind, :artifact_id, "
+    "CASE WHEN :linked THEN now() END, :dedupe_key) "
+    f"ON CONFLICT (agent_id, dedupe_key) DO NOTHING RETURNING {_COLUMNS}"
+)
+_BY_KEY = text(f"SELECT {_COLUMNS} FROM brain.commitments WHERE agent_id = :agent_id AND dedupe_key = :dedupe_key")
+_LOG = text(
+    "INSERT INTO nous_system.promise_gate_log (agent_id, session_id, turn_id, path, context_kind, mode, detected, "
+    "backed, unbacked, outcome, latency_ms) VALUES (:agent_id, :session_id, :turn_id, :path, :context_kind, :mode, "
+    ":detected, :backed, :unbacked, :outcome, :latency_ms)"
+)
+
+
+def _log_params(
+    *,
+    path: str,
+    mode: str,
+    detected: int,
+    backed: int,
+    unbacked: int,
+    outcome: str,
+    session_id: str | None = None,
+    turn_id: str | None = None,
+    context_kind: str | None = None,
+    latency_ms: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "path": path,
+        "mode": mode,
+        "detected": detected,
+        "backed": backed,
+        "unbacked": unbacked,
+        "outcome": outcome,
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "context_kind": context_kind,
+        "latency_ms": latency_ms,
+    }
 
 
 class CommitmentRefused(ValueError):
@@ -137,7 +183,7 @@ class CommitmentStore:
         self._db = database
         self._agent_id = agent_id
 
-    async def create_idempotent(
+    def _params(
         self,
         *,
         source_kind: str,
@@ -155,15 +201,12 @@ class CommitmentStore:
         artifact_kind: str | None = None,
         artifact_id: str | None = None,
         now: datetime | None = None,
-    ) -> Commitment:
-        """Insert the row, or return the one an earlier write of the same promise in the same turn made
-        (``inserted`` False). Raises ``CommitmentRefused`` on a bad deadline or a ``what`` too short to check."""
+    ) -> dict[str, Any]:
+        """The insert's bind values, validated: raises ``CommitmentRefused`` before any SQL runs."""
         what = normalise_what(what)
         if len(what) < MIN_WHAT_CHARS:
             raise CommitmentRefused(f"what must say what will be done (at least {MIN_WHAT_CHARS} characters)")
-        due_at = validate_due_at(due_at, now)
-        key = dedupe_key(turn_id, what)
-        params = {
+        return {
             "agent_id": self._agent_id,
             "source_kind": source_kind,
             "session_id": session_id,
@@ -174,40 +217,50 @@ class CommitmentStore:
             "what": what,
             "kind": kind,
             "consent": consent,
-            "due_at": due_at,
+            "due_at": validate_due_at(due_at, now),
             "grace_seconds": grace_seconds,
             "status": status,
             "artifact_kind": artifact_kind,
             "artifact_id": artifact_id,
             "linked": artifact_id is not None,
-            "dedupe_key": key,
+            "dedupe_key": dedupe_key(turn_id, what),
         }
+
+    async def _insert(self, session: Any, params: dict[str, Any]) -> Commitment:
+        result = await session.execute(_INSERT, params)
+        row = result.first()
+        if row is not None:
+            return _row(row, inserted=True)
+        result = await session.execute(_BY_KEY, {"agent_id": self._agent_id, "dedupe_key": params["dedupe_key"]})
+        return _row(result.one(), inserted=False)
+
+    async def create_idempotent(self, **kwargs: Any) -> Commitment:
+        """Insert the row, or return the one an earlier write of the same promise in the same turn made
+        (``inserted`` False). Raises ``CommitmentRefused`` on a bad deadline or a ``what`` too short to check.
+        Keyword arguments as ``_params``."""
+        params = self._params(**kwargs)
         async with self._db.session() as session:
-            result = await session.execute(
-                text(
-                    "INSERT INTO brain.commitments (agent_id, source_kind, session_id, turn_id, detected_by, "
-                    "detector_version, promise_text, what, kind, consent, due_at, grace_seconds, status, "
-                    "artifact_kind, artifact_id, artifact_linked_at, dedupe_key) "
-                    "VALUES (:agent_id, :source_kind, :session_id, :turn_id, :detected_by, :detector_version, "
-                    ":promise_text, :what, :kind, :consent, :due_at, :grace_seconds, :status, :artifact_kind, "
-                    ":artifact_id, CASE WHEN :linked THEN now() END, :dedupe_key) "
-                    f"ON CONFLICT (agent_id, dedupe_key) DO NOTHING RETURNING {_COLUMNS}"
-                ),
-                params,
-            )
-            row = result.first()
-            inserted = row is not None
-            if row is None:
-                result = await session.execute(
-                    text(
-                        f"SELECT {_COLUMNS} FROM brain.commitments "
-                        "WHERE agent_id = :agent_id AND dedupe_key = :dedupe_key"
-                    ),
-                    {"agent_id": self._agent_id, "dedupe_key": key},
-                )
-                row = result.one()
+            row = await self._insert(session, params)
             await session.commit()
-        return _row(row, inserted)
+        return row
+
+    async def record_gate_turn(self, rows: list[dict[str, Any]], log: dict[str, Any]) -> list[Commitment | None]:
+        """The promise gate's writes for one turn, in ONE transaction: a row per promise (``_params`` keywords) and
+        the ``promise_gate_log`` row (``log_gate_turn`` keywords). A failure or a cancellation part-way writes
+        nothing, so no row exists that the owner was not shown. A row the store refuses is ``None`` and the rest
+        are written."""
+        prepared: list[dict[str, Any] | None] = []
+        for spec in rows:
+            try:
+                prepared.append(self._params(**spec))
+            except CommitmentRefused as refused:
+                logger.info("promise gate: a promise was not recorded (%s)", refused)
+                prepared.append(None)
+        async with self._db.session() as session:
+            written = [await self._insert(session, p) if p is not None else None for p in prepared]
+            await session.execute(_LOG, {"agent_id": self._agent_id, **_log_params(**log)})
+            await session.commit()
+        return written
 
     async def get(self, short_id: int) -> Commitment | None:
         async with self._db.session() as session:
@@ -274,42 +327,10 @@ class CommitmentStore:
             return _row(row), True
         return await self.get(short_id), False
 
-    async def log_gate_turn(
-        self,
-        *,
-        path: str,
-        mode: str,
-        detected: int,
-        backed: int,
-        unbacked: int,
-        outcome: str,
-        session_id: str | None = None,
-        turn_id: str | None = None,
-        context_kind: str | None = None,
-        latency_ms: int | None = None,
-    ) -> None:
-        """One ``promise_gate_log`` row: the denominator, written for clean turns too."""
+    async def log_gate_turn(self, **log: Any) -> None:
+        """One ``promise_gate_log`` row on its own (the gate's error row); keywords as ``_log_params``."""
         async with self._db.session() as session:
-            await session.execute(
-                text(
-                    "INSERT INTO nous_system.promise_gate_log (agent_id, session_id, turn_id, path, context_kind, "
-                    "mode, detected, backed, unbacked, outcome, latency_ms) VALUES (:agent_id, :session_id, "
-                    ":turn_id, :path, :context_kind, :mode, :detected, :backed, :unbacked, :outcome, :latency_ms)"
-                ),
-                {
-                    "agent_id": self._agent_id,
-                    "session_id": session_id,
-                    "turn_id": turn_id,
-                    "path": path,
-                    "context_kind": context_kind,
-                    "mode": mode,
-                    "detected": detected,
-                    "backed": backed,
-                    "unbacked": unbacked,
-                    "outcome": outcome,
-                    "latency_ms": latency_ms,
-                },
-            )
+            await session.execute(_LOG, {"agent_id": self._agent_id, **_log_params(**log)})
             await session.commit()
 
     async def stats_week(self, now: datetime | None = None) -> dict[str, Any]:

@@ -8,7 +8,6 @@ Manages the tool use loop internally.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import dataclasses
 import functools
 import itertools
@@ -516,6 +515,7 @@ class AgentRunner:
         self._tool_call_recorder: ToolCallRecorder | None = None
         # F111: the turn-close promise gate (set_promise_gate); None: no gate, no rows.
         self._promise_gate: PromiseGate | None = None
+        self._promise_gate_tasks: set[asyncio.Future] = set()  # F111: gate work still running after its timeout
 
         # F026: Execution Integrity
         self._ledgers: dict[str, ExecutionLedger] = {}
@@ -2941,6 +2941,8 @@ class AgentRunner:
             error = None
             _claim_check: dict | None = None  # F108: the claim check's result, for the turn row
             _consumer_closed = False  # F108: the consumer closed this generator mid-turn, for the turn row
+            _gate_due = False  # F111: the loop reached its terminal point (not the max_turns fallback)
+            _gate_footer: str | None = None  # F111: yielded just before "done", never stored
 
             # F071: scope the per-turn exclusion set to the streaming tool
             # loop — recall_deep can be dispatched inside the for-turn
@@ -3127,18 +3129,7 @@ class AgentRunner:
                     # are no tool calls to dispatch.
                     if not tool_calls:
                         response_text = "".join(text_parts)
-                        # F111: the promise gate. The text is already on the wire; a warn footer follows it as one
-                        # more delta and never joins response_text (the stored reply, the episode, the claim check).
-                        _gate_footer = await self._promise_gate_step(
-                            _ctx,
-                            response_text,
-                            all_tool_results,
-                            path="stream",
-                            session_id=session_id,
-                            turn_id=str(_stream_turn_id),
-                        )
-                        if _gate_footer:
-                            yield StreamEvent(type="text_delta", text=f"\n\n{_gate_footer}")
+                        _gate_due = True  # F111: the gate runs below, once the reply is stored and checked
                         break
 
                     # Build assistant message preserving ALL blocks in index order
@@ -3635,6 +3626,17 @@ class AgentRunner:
 
                 # F026: Post-response claim verification (streaming: warn+inject only)
                 _claim_check = self._verify_claims(session_id, response_text, all_tool_results, ledger)
+                # F111: the promise gate, after the reply is stored and claim-checked, so a consumer that goes away
+                # here or at the footer below loses nothing. The footer never joins response_text.
+                if _gate_due:
+                    _gate_footer = await self._promise_gate_step(
+                        _ctx,
+                        response_text,
+                        all_tool_results,
+                        path="stream",
+                        session_id=session_id,
+                        turn_id=str(_stream_turn_id),
+                    )
 
                 # F024 F4/F5: record memory on the SUCCESS path only (needs
                 # response_text). Fix A: link the fact to the active episode so
@@ -3705,6 +3707,9 @@ class AgentRunner:
             # path calibrates per-call which is more accurate. Streaming-only turns
             # (no tools) are typically short Telegram messages where chars/4 is fine.
 
+            if _gate_footer:
+                # F111: the text is already on the wire; the footer follows as one more delta.
+                yield StreamEvent(type="text_delta", text=f"\n\n{_gate_footer}")
             yield StreamEvent(type="done", stop_reason="end_turn", usage=total_usage)
 
     # ------------------------------------------------------------------
@@ -5094,27 +5099,45 @@ Rules:
         gate = self._promise_gate
         if gate is None:
             return None
-        try:
-            outcome = await asyncio.wait_for(
-                gate.run(
-                    response_text,
-                    tool_results,
-                    path=path,
-                    session_id=session_id,
-                    turn_id=turn_id,
-                    context_kind=ctx.kind,
-                ),
-                timeout=PROMISE_GATE_TIMEOUT_SECONDS,
+        # A task of its own, awaited through a shield: a timeout (or the turn's cancellation) never cancels the gate
+        # inside a database transaction; it finishes in the background and _promise_gate_done logs a failure.
+        task = asyncio.ensure_future(
+            gate.run(
+                response_text, tool_results, path=path, session_id=session_id, turn_id=turn_id, context_kind=ctx.kind
             )
+        )
+        self._track_promise_gate_task(task)
+        try:
+            outcome = await asyncio.wait_for(asyncio.shield(task), timeout=PROMISE_GATE_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.warning(
+                "F111 promise gate took longer than %.1f s on a %s turn; the reply is unchanged (it finishes in the "
+                "background, without a footer)",
+                PROMISE_GATE_TIMEOUT_SECONDS,
+                path,
+            )
+            return None
         except Exception:
             logger.warning("F111 promise gate failed on a %s turn; the reply is unchanged", path, exc_info=True)
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(
-                    gate.log_error(path=path, session_id=session_id, turn_id=turn_id, context_kind=ctx.kind),
-                    timeout=PROMISE_GATE_TIMEOUT_SECONDS,
+            self._track_promise_gate_task(
+                asyncio.ensure_future(
+                    gate.log_error(path=path, session_id=session_id, turn_id=turn_id, context_kind=ctx.kind)
                 )
+            )
             return None
         return outcome.footer
+
+    def _track_promise_gate_task(self, task: asyncio.Future) -> None:
+        """Hold a strong reference until the task ends (asyncio keeps only weak ones), then log a failure no one
+        awaited: a gate run that outlived its timeout, or the error row."""
+        self._promise_gate_tasks.add(task)
+        task.add_done_callback(self._promise_gate_done)
+
+    def _promise_gate_done(self, task: asyncio.Future) -> None:
+        self._promise_gate_tasks.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            # Retrieved here, so asyncio does not report it again as "never retrieved".
+            logger.warning("F111 promise gate background work failed", exc_info=task.exception())
 
     def _check_safety_net(
         self,

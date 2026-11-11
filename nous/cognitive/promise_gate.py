@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from nous.brain.commitments import CommitmentStore
+from nous.brain.commitments import MAX_DUE_DAYS, CommitmentStore
 from nous.handlers.time_parser import parse_when
 
 logger = logging.getLogger(__name__)
@@ -403,41 +403,46 @@ class PromiseGate:
         if mode == "enforce":
             # PR A has no re-entry: enforce acts as warn (spec scope decision 8).
             logger.info("promise gate: mode enforce is handled as warn until the re-entry ships (PR B)")
-        rows = []
-        for promise in unbacked:
-            rows.append(
-                await self._store.create_idempotent(
-                    source_kind=source_kind_for(path, context_kind),
-                    detected_by="gate",
-                    promise_text=promise.text,
-                    what=promise.what,
-                    due_at=promise.due_at,
-                    session_id=session_id,
-                    turn_id=turn_id,
-                    kind=promise.kind,
-                    consent=promise.consent,
-                    grace_seconds=self._settings.promise_gate_grace_seconds,
-                    detector_version=DETECTOR_VERSION,
-                    now=now,
-                )
-            )
-        result.labels = [r.label for r in rows]
-        footer_rows = [(p, r) for p, r in zip(unbacked, rows, strict=True) if p.kind == "action"]
-        if mode in ("warn", "enforce") and footer_rows:
-            result.footer = render_footer([r.label for _, r in footer_rows], footer_rows[0][0], now)
-            result.outcome = "footer"
-        await self._store.log_gate_turn(
-            path=path,
-            mode=mode,
-            detected=result.detected,
-            backed=result.backed,
-            unbacked=result.unbacked,
-            outcome=result.outcome,
-            session_id=session_id,
-            turn_id=turn_id,
-            context_kind=context_kind,
-            latency_ms=result.latency_ms,
+        source_kind = source_kind_for(path, context_kind)
+        latest = now + timedelta(days=MAX_DUE_DAYS) - timedelta(minutes=1)  # a far promise is clamped, not lost
+        specs = [
+            {
+                "source_kind": source_kind,
+                "detected_by": "gate",
+                "promise_text": promise.text,
+                "what": promise.what,
+                "due_at": min(promise.due_at, latest),
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "kind": promise.kind,
+                "consent": promise.consent,
+                "grace_seconds": self._settings.promise_gate_grace_seconds,
+                "detector_version": DETECTOR_VERSION,
+                "now": now,
+            }
+            for promise in unbacked
+        ]
+        footer_wanted = mode in ("warn", "enforce") and any(p.kind == "action" for p in unbacked)
+        result.outcome = "footer" if footer_wanted else "clean"
+        rows = await self._store.record_gate_turn(
+            specs,
+            {
+                "path": path,
+                "mode": mode,
+                "detected": result.detected,
+                "backed": result.backed,
+                "unbacked": result.unbacked,
+                "outcome": result.outcome,
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "context_kind": context_kind,
+                "latency_ms": result.latency_ms,
+            },
         )
+        result.labels = [r.label for r in rows if r is not None]
+        shown = [(p, r) for p, r in zip(unbacked, rows, strict=True) if r is not None and p.kind == "action"]
+        if footer_wanted and shown:
+            result.footer = render_footer([r.label for _, r in shown], shown[0][0], now)
         return result
 
     async def log_error(

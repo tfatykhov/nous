@@ -3125,7 +3125,7 @@ _COMMIT_SOURCE_KIND: dict[str, str] = {
 
 def create_commit_tool(store: Any) -> Callable[..., Any]:
     """The ``commit`` handler over a ``CommitmentStore``. Idempotent within a turn (same ``what``, one row)."""
-    from nous.brain.commitments import CommitmentRefused
+    from nous.brain.commitments import LIVE_STATUSES, CommitmentRefused
     from nous.handlers.time_parser import parse_when
 
     async def commit(
@@ -3142,26 +3142,30 @@ def create_commit_tool(store: Any) -> Callable[..., Any]:
         except ValueError as exc:
             return _tool_error(f"commit: could not read due ({exc}). Use e.g. 'in 2 hours' or an ISO 8601 time.")
         if consent not in ("none", "explicit", "silence"):
-            consent = "none"
+            return _tool_error("commit: consent must be one of none, explicit, silence.")
+        row_args = {
+            "source_kind": _COMMIT_SOURCE_KIND.get(_context_kind or "", "chat_turn"),
+            "detected_by": "tool",
+            "promise_text": str(what),
+            "what": str(what),
+            "due_at": due_at,
+            "session_id": _session_id,
+            "kind": "awaiting_user" if awaiting_owner else "action",
+            "consent": consent,
+        }
         # A retry of the same call in the same turn is the same row; without a turn number, no dedupe at all.
         turn_key = f"{_session_id}:{_turn_number}" if _turn_number is not None else f"{_session_id}:{uuid4().hex}"
         try:
-            row = await store.create_idempotent(
-                source_kind=_COMMIT_SOURCE_KIND.get(_context_kind or "", "chat_turn"),
-                detected_by="tool",
-                promise_text=str(what),
-                what=str(what),
-                due_at=due_at,
-                session_id=_session_id,
-                turn_id=turn_key,
-                kind="awaiting_user" if awaiting_owner else "action",
-                consent=consent,
-            )
+            row = await store.create_idempotent(turn_id=turn_key, **row_args)
+            if not row.inserted and row.status not in LIVE_STATUSES:
+                # A session's turn numbers restart (a continuation thread is discarded before each step), so the
+                # key can name a row an earlier turn wrote and the owner has since closed: this is a new obligation.
+                row = await store.create_idempotent(turn_id=f"{turn_key}:{uuid4().hex}", **row_args)
         except CommitmentRefused as exc:
             return _tool_error(f"commit: {exc}")
         except Exception:
             logger.warning("commit: the ledger write failed", exc_info=True)
-            return _tool_error("commit: the ledger could not be written; nothing was recorded.")
+            return _tool_error("commit: the ledger write failed; the obligation may not have been recorded.")
         # Wording: no "committed" (the claim verifier reads that word as a git claim).
         return {
             "is_error": False,

@@ -225,15 +225,17 @@ def describe_intentions(body: dict) -> str:
 
 
 def describe_commitment_close(status: int, body: dict, drop: bool, short_id: int) -> str:
-    """F111: the answer to /drop or /done, fixed vocabulary and the id only (the row's text is never echoed). Not
-    called for a 404: an id the server does not know goes on to chat, as /cancel_intention's does."""
+    """F111: the answer to /drop or /done, fixed vocabulary and the id only (the row's text is never echoed)."""
     label = format_short_id(short_id)
     if status == 200:
         if body.get("changed") is True:
             return f"Dropped {label}; it will not be followed up." if drop else f"Marked {label} as done."
         return f"{label} was already closed; nothing changed."
+    if status == 404:
+        return f"No commitment {label}."
     if status == 400:
         return "That is not a commitment id (use the form C-42)."
+    logger.warning("F111: /%s %s answered %s", "drop" if drop else "done", label, status)
     return f"Could not close {label} right now; try again."
 
 
@@ -1034,8 +1036,8 @@ class NousTelegramBot:
             status, body = await self._owner_post(
                 f"/commitments/{short_id}/{command[1:]}", {"actor": f"telegram:{user_id}"}
             )
-            if status == 404:
-                return False  # no such commitment: ordinary chat
+            # A 404 is answered too (unlike /cancel_intention): the id came from a footer, and passed on to chat the
+            # model could claim it dropped something.
             await self._send_owner(chat_id, describe_commitment_close(status, body, command == "/drop", short_id))
             return True
         reply_to = message.get("reply_to_message")
