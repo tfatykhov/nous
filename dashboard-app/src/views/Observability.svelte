@@ -106,12 +106,13 @@
     return parts.length >= 2 ? parts[parts.length - 2] : name;
   }
 
-  /** The dot's token by error rate. The top band is --err-text, not --red: under deuteranopia it stays apart from the
-   *  amber (12.5, red 5.1); both are #f87171 under dark. The rate itself is printed beside the dot. */
+  /** The dot's token by error rate: the success mark, the amber, and --err-text (not --red: under deuteranopia it stays
+   *  apart from the amber, 12.5 where red is 5.1; both are #f87171 under dark). Every pair is 9.8 or more apart under
+   *  all three visions, and the rate itself is printed beside the dot. */
   function handlerDotToken(errorRate: number): string {
     if (errorRate > 0.1) return '--err-text';
     if (errorRate > 0) return '--yellow';
-    return '--st-completed';
+    return '--oc-success';
   }
 
   // ── Drift trend chart builders ────────────────────────────────────────────

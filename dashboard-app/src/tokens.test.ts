@@ -954,9 +954,9 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     'autonomy contexts': ['--series-1', '--series-2', '--series-4'],
     // Guards' flags per day: one line per rule, each with its own dash as well.
     'guards rules': ['--series-1', '--series-4', '--series-9'],
-    // Observability's handler dots: no errors, some, more than 10%. The top band is --err-text (dark: the old #f87171),
-    // 12.5 from the amber under deuteranopia where --red is 5.1.
-    'observability handler dots': ['--st-completed', '--yellow', '--err-text'],
+    // Observability's handler dots: no errors, some, more than 10%. The success mark and --err-text (dark: the old
+    // #34d399 family and #f87171) keep every pair 9.8 or more apart; --red was 5.1 from the amber, --st-completed 5.5 from red.
+    'observability handler dots': ['--oc-success', '--yellow', '--err-text'],
   };
   const OPEN_PAIRS: Record<string, number> = {
     '--series-1|--series-3': 4, // protan 4.2 (Scoring's dimensions 3 and 6)
@@ -966,8 +966,6 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     '--series-4|--series-5': 3, // deutan 3.4: orange and olive (the accepted paper series 5)
     '--series-3|--series-9': 3.5, // deutan 3.7
     '--series-1|--series-9': 7.5, // protan 7.95 (8.0 normal)
-    // Observability's handler dots: each row also prints its error rate ("20.0% err") beside the dot.
-    '--st-completed|--err-text': 5.5, // deutan 5.52
   };
   const openFloor = (a: string, b: string) => OPEN_PAIRS[`${a}|${b}`] ?? OPEN_PAIRS[`${b}|${a}`] ?? 8;
 
@@ -1029,6 +1027,9 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     expect(contrast(DARK['--series-9'], surface)).toBeGreaterThanOrEqual(3); // Guards' claims, was #2dd4bf
     expect(contrast(DARK['--accent-text'], surface)).toBeGreaterThanOrEqual(4.5); // Observability's trace type, was #38bdf8
     expect(contrast(DARK['--accent-text'], DARK['--surface-hover'])).toBeGreaterThanOrEqual(4.5); // the same on a hovered row (7.43)
+    // Observability's no-error handler dot: --oc-success (#34d399) where it was #4ade80, a dark-only shift (review M1).
+    expect(DARK['--oc-success']).toBe('#34d399');
+    expect(contrast(DARK['--oc-success'], surface)).toBeGreaterThanOrEqual(3);
     expect(contrast(DARK['--muted'], over(parseColor(DARK['--wash']), parseColor(surface)))).toBeGreaterThanOrEqual(4.5); // count badge
     // D3, the perfect-calibration line: --muted at 40% instead of #6b6b8a at 40%. A reference line, not data: recorded.
     const at40 = (c: string, bg: string) => over([...parseColor(c).slice(0, 3), 0.4] as RGBA, parseColor(bg));

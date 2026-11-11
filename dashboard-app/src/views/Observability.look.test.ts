@@ -97,7 +97,8 @@ describe('Observability: handler dots and the error trend read tokens', () => {
     render(Observability);
     await screen.findByText('fact_extractor');
     const dotOf = (name: string) => screen.getByText(name).closest('.handler-row')!.querySelector<HTMLElement>('.handler-dot')!;
-    expect(dotOf('fact_extractor').style.getPropertyValue('--dot')).toBe('var(--st-completed)');
+    // The success mark (PR 4's --oc-success): 10.5 from the red dot under deuteranopia, where --st-completed was 5.5.
+    expect(dotOf('fact_extractor').style.getPropertyValue('--dot')).toBe('var(--oc-success)');
     expect(dotOf('episode_summarizer').style.getPropertyValue('--dot')).toBe('var(--yellow)');
     // --err-text, not --red, for the top band: under deuteranopia it is 12.5 from the amber (red: 5.1); dark is the same #f87171.
     expect(dotOf('sleep_handler').style.getPropertyValue('--dot')).toBe('var(--err-text)');
