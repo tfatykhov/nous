@@ -46,6 +46,12 @@ describe('companion service worker', () => {
     expect(event.respondWith).not.toHaveBeenCalled();
   });
 
+  it('does not intercept a video file opened as a document without a Range header', () => {
+    // A long-press "open video" navigates to the file itself.
+    const event = dispatchFetch(loadWorker(), '/dashboard/v2/assets/x.mp4', {}, 'document');
+    expect(event.respondWith).not.toHaveBeenCalled();
+  });
+
   it('still intercepts an immutable asset', async () => {
     const cached = new Response('cached');
     const listeners = loadWorker({ match: vi.fn().mockResolvedValue(cached) });
