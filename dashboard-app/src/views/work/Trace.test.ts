@@ -250,6 +250,26 @@ describe('Work trace', () => {
     expect(container.textContent).not.toContain('passed it');
   });
 
+  it('a turn older than migration 106 says what the critic recommended, in plain words, and no pill (review M5)', async () => {
+    const old = turn(T1, 1, { frame_id: 'question', frame_reason: null,
+      critic: { critic_frame: 'task', heuristic_frame: 'question', agreed: false } });
+    const absent = turn(T2, 2, { frame_id: 'task', critic: { critic_frame: 'task', heuristic_frame: 'task', agreed: true } });
+    delete (absent as Record<string, unknown>).frame_reason; // an older API
+    const now = turn(T3, 3, { frame_id: 'task', frame_reason: 'pattern', critic_frame: 'task',
+      critic: { critic_frame: 'task', heuristic_frame: 'task', agreed: true } });
+    respond = () => ({ body: trace([old, absent, now]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 3');
+    const g = Array.from(container.querySelectorAll('.gutter')) as HTMLElement[];
+    expect(g[0].querySelector('.crit-old')!.textContent).toBe('Critic recommended task; the heuristic said question.');
+    expect(g[1].querySelector('.crit-old')!.textContent).toBe('Critic recommended task.');
+    expect(g[0].querySelector('.crit')).toBeNull();
+    expect(g[2].querySelector('.crit-old')).toBeNull(); // a recorded reason: the verdict pill says it
+    expect(g[2].querySelector('.crit')!.textContent).toBe('Critic agreed');
+    // The change sentence for an unrecorded reason stays.
+    expect(container.querySelector('.change')!.textContent).toContain('The reason was not recorded.');
+  });
+
   it('a critic rationale with no pill still shows, folded', async () => {
     respond = () => ({ body: trace([turn(T1, 1, { critic_frame: null, critic: { heuristic_frame: 'question', rationale: 'Kept the heuristic.' } })]) });
     const { container } = render(Trace, { sessionId: 'sess/one' });

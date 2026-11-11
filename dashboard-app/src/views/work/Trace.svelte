@@ -285,6 +285,10 @@
                 <div><dt>{num(calls)}</dt> <dd>{calls === 1 ? 'tool call' : 'tool calls'}</dd></div>
               </dl>
               {#if verdict}<span class="crit" class:no={verdict === 'overrode'}>{verdictText(verdict, t.frame_id)}</span>{/if}
+              <!-- A turn older than migration 106 has no frame reason, so no verdict: say what its critic record names. -->
+              {#if t.frame_reason == null && t.critic?.critic_frame}
+                <p class="crit-old">Critic recommended {t.critic.critic_frame}{t.critic.heuristic_frame && t.critic.heuristic_frame !== t.critic.critic_frame ? `; the heuristic said ${t.critic.heuristic_frame}` : ''}.</p>
+              {/if}
               {#if t.critic?.rationale}
                 <details class="crit-why"><summary>{verdict ? 'Why' : "Critic's reasoning"}</summary><p class="wrap">{t.critic.rationale}</p></details>
               {/if}
@@ -456,6 +460,7 @@
   /* A pill on one line; a radius of half its height keeps a wrapped "Critic disagreed, kept initiation" rounded. */
   .crit { display: inline-block; margin-top: 0.625rem; font-size: 0.75rem; font-weight: 600; font-stretch: 88%; padding: 1px 9px; border-radius: 10px; background: var(--surface); color: var(--muted); }
   .crit.no { color: var(--err-text); background: var(--err-bg); }
+  .crit-old { margin: 0.625rem 0 0; }
   .crit-why { margin-top: 0.375rem; }
   .crit-why summary { cursor: pointer; color: var(--accent-text); }
   .crit-why p { margin: 4px 0 0; color: var(--text); }
@@ -536,7 +541,7 @@
     .gutter .frame, .gutter .chosen { margin: 0; }
     .gutter dl { display: flex; flex-wrap: wrap; gap: 0 0.75rem; }
     .gutter dl > div { display: inline-flex; gap: 4px; }
-    .crit, .crit-why { margin-top: 0; }
+    .crit, .crit-why, .crit-old { margin-top: 0; }
     .rows { padding: 0.5rem 0.25rem; }
     .line { grid-template-columns: minmax(0, 1fr); gap: 2px; }
     .step { grid-template-columns: minmax(0, 1fr) auto; }
