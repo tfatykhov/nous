@@ -28,7 +28,8 @@ const CONVERTED: [string, string, string, string, string][] = [
   ['DataTable.svelte', 'th', 'text-transform', 'none', 'uppercase'],
   ['DataTable.svelte', 'th', 'letter-spacing', '0', '0.05em'],
   ['DataTable.svelte', '.dt--cards tr', 'border-radius', 'var(--card-radius-sm)', '8px'],
-  ['FilterBar.svelte', '.filter-btn.active', 'color', 'var(--on-accent)', 'var(--bg)'],
+  // Finish review fix 2: the selected option is the white raised pill (selectedPill.test.ts pins the whole rule).
+  ['FilterBar.svelte', '.filter-btn.active', 'color', 'var(--text)', 'var(--bg), then var(--on-accent) on the link blue'],
   ['StaleBadge.svelte', '.stale-badge.error', 'color', 'var(--err-text)', 'var(--red)'],
   ['StaleBadge.svelte', '.stale-badge.error', 'border-color', 'var(--err-text)', 'var(--red)'],
   ['StaleBadge.svelte', '.stale-badge.error', 'background', 'var(--err-bg)', 'a red tint'], // --stale-err-bg was its alias

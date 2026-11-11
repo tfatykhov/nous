@@ -1454,9 +1454,10 @@
     margin-bottom: 0.6rem;
     padding: 0 0.25rem;
   }
-  .filters { display: flex; gap: 0.3rem; flex-wrap: wrap; }
+  /* The selected chip is the white raised pill (finish review fix 2); inside the white card its track is the wash. */
+  .filters { display: inline-flex; gap: 0.25rem; flex-wrap: wrap; background: var(--wash); border-radius: var(--ctl-radius); padding: 3px; }
   .chip-btn {
-    border: 1px solid var(--border);
+    border: 0;
     background: transparent;
     color: var(--muted);
     border-radius: 999px;
@@ -1465,7 +1466,7 @@
     cursor: pointer;
   }
   .chip-btn:hover { background: var(--surface-hover); color: var(--text); }
-  .chip-btn.on { background: var(--accent-glow); border-color: var(--accent-dim); color: var(--text); }
+  .chip-btn.on { background: var(--tab-active-bg); color: var(--text); font-weight: 600; box-shadow: var(--tab-active-shadow); }
 
   /* ── Retrieval rows ──────────────────────────────────────── */
   .rlist { list-style: none; margin: 0; padding: 0; max-height: 68vh; overflow-y: auto; }

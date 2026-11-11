@@ -58,10 +58,15 @@
 </div>
 
 <style>
+  /* A segmented control: the selected option is the white raised pill the Work filters and the sub-navigation use
+     (finish review fix 2); the others are plain words on the track. */
   .filter-bar {
-    display: flex;
+    display: inline-flex;
     flex-wrap: wrap;
-    gap: 0.375rem;
+    gap: 4px;
+    padding: 4px;
+    border: var(--card-border);
+    border-radius: var(--ctl-radius);
   }
 
   .filter-btn {
@@ -70,8 +75,8 @@
     padding: 0.375rem 0.75rem;
     min-height: 32px;
     border-radius: 999px;
-    border: 1px solid var(--border);
-    background: var(--surface);
+    border: 0;
+    background: transparent;
     color: var(--muted);
     font-size: 0.8125rem;
     font-weight: 500;
@@ -84,15 +89,13 @@
   .filter-btn:hover {
     background: var(--surface-hover);
     color: var(--text);
-    border-color: var(--muted);
   }
 
   .filter-btn.active {
-    background: var(--accent);
-    border-color: var(--accent);
-    /* White on the link blue. */
-    color: var(--on-accent);
+    background: var(--tab-active-bg);
+    color: var(--text);
     font-weight: 600;
+    box-shadow: var(--tab-active-shadow);
   }
 
   .filter-btn:focus-visible {
