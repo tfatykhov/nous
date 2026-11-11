@@ -483,6 +483,9 @@
     margin-top: 1rem;
   }
 
+  /* A grid item's min-width is auto: one unbroken finding would widen the row (and the page) to fit it. */
+  .chart-row > * { min-width: 0; }
+
   @media (max-width: 640px) {
     .chart-row { grid-template-columns: 1fr; }
   }
@@ -554,6 +557,8 @@
     font-size: 0.8125rem;
     font-weight: 600;
     color: var(--text);
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .tl-time {
@@ -567,6 +572,7 @@
     color: var(--muted);
     margin: 0;
     padding-left: 0.25rem;
+    overflow-wrap: anywhere;
   }
 
   /* ── Finding lifecycle ── */

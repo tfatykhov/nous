@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Subtasks from './Subtasks.svelte';
 import { setLook } from '../lib/look';
-import { PAPER_SEL, parseBlocks } from '../lib/testing/css';
+import { PAPER_SEL, parseBlocks, styleBlocks } from '../lib/testing/css';
 
 // Redesign PR 3: Subtasks on paper. The outcome colours are status tokens (`--st-*`, `--oc-*`) that the Chart
 // component resolves against its ground: today's colours under dark, the paper values under paper.
@@ -77,6 +77,9 @@ describe('Subtasks: outcome colours are status tokens', () => {
     await waitFor(() => expect(configs).toHaveLength(3));
     const doughnut = chart('doughnut');
     expect(doughnut.data.labels).toEqual(OUTCOMES); // the legend names every outcome: colour is never alone
+    // At phone width (200 px charts) eight 40 px swatches made a fourth legend row that Chart.js cut off.
+    expect(doughnut.options.plugins.legend.labels.boxWidth).toBe(12);
+    expect(chart('line').options.plugins.legend.labels.boxWidth).toBe(12); // the trend's eight entries left a 20 px plot
     expect(doughnut.data.datasets[0].backgroundColor).toEqual(OUTCOMES.map((o) => OLD[o]));
     expect(chart('bar').data.datasets[0].backgroundColor).toEqual(OUTCOMES.map((o) => OLD[o]));
   });
@@ -101,6 +104,11 @@ describe('Subtasks: outcome colours are status tokens', () => {
     expect(line.borderColor).toBe(PAPER['--st-success']);
     expect(norm(line.backgroundColor)).toBe(rgba(PAPER['--st-success'], 0.2));
     expect(chart('line').options.scales.x.ticks.color).toBe(PAPER['--chart-text']);
+  });
+
+  it('the header wraps at phone width: the paper title, the window select and the badge never widen the page', () => {
+    const css = styleBlocks(readFileSync(join(__dirname, 'Subtasks.svelte'), 'utf-8'));
+    expect(css).toMatch(/\.view-head \{[^}]*flex-wrap: wrap;/);
   });
 
   it('the failing-tasks and recent tables keep every column', async () => {

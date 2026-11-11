@@ -186,7 +186,7 @@
         <Chart
           type="doughnut"
           data={outcomeChartData(t.by_outcome)}
-          options={{ cutout: '55%', plugins: { legend: { position: 'bottom' } } }}
+          options={{ cutout: '55%', plugins: { legend: { position: 'bottom', labels: { boxWidth: 12 } } } }}
           height="240px"
         />
       {:else}
@@ -228,7 +228,7 @@
             x: { grid: { display: false } },
             y: { beginAtZero: true, ticks: { precision: 0 } },
           },
-          plugins: { legend: { position: 'bottom' } },
+          plugins: { legend: { position: 'bottom', labels: { boxWidth: 12 } } },
         }}
         height="220px"
       />
@@ -333,6 +333,7 @@
 <style>
   .view-head {
     display: flex;
+    flex-wrap: wrap;
     align-items: flex-start;
     justify-content: space-between;
     gap: 1rem;

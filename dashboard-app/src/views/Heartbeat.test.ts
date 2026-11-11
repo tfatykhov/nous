@@ -145,6 +145,13 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
     expect(heads('Cognitive Sessions')).toEqual(['Time', 'Session', 'Findings', 'Tokens']);
   });
 
+  it('a long unbroken finding wraps, and the two-column rows never widen the page (screenshot round: 2,744 px at 390)', () => {
+    const css = styleBlocks(readFileSync(join(__dirname, 'Heartbeat.svelte'), 'utf-8'));
+    expect(css).toMatch(/\.chart-row > \* \{ min-width: 0; \}/);
+    expect(css).toMatch(/\.tl-source \{[^}]*overflow-wrap: anywhere;/);
+    expect(css).toMatch(/\.tl-summary \{[^}]*overflow-wrap: anywhere;/);
+  });
+
   it('the banner and pills read status tokens: text tokens for words, the glow by --glow-blur', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'Heartbeat.svelte'), 'utf-8'));
     expect(css).toMatch(/\.hb-pill--warn \{ border-color: var\(--yellow\); color: var\(--hb-warn-ink\); \}/);

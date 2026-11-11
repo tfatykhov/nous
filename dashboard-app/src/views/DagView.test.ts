@@ -116,6 +116,10 @@ describe('Workflows: status by token', () => {
     expect(container.querySelector('.now-waiting')?.textContent).toBe('Question · approve-send');
     const css = styleBlocks(readFileSync(join(__dirname, 'DagView.svelte'), 'utf-8'));
     expect(css).toMatch(/\.now-waiting \{[^}]*color: var\(--wait-ink\); background: var\(--wait-bg\);/);
+    // At phone width the Now column squeezed each pill over four lines; a pill radius on a block of text cut it.
+    expect(css).toMatch(/\.now-cell \{ min-width: 10rem; \}/);
+    expect(css).toMatch(/\.now-waiting \{[^}]*border-radius: 0\.75rem;/);
+    expect(css).toMatch(/\.now-held \{[^}]*border-radius: 0\.75rem;/);
   });
 
   it('a hostile node name is text, and the node button wraps it', async () => {
@@ -125,6 +129,8 @@ describe('Workflows: status by token', () => {
     expect(container.querySelector('.node-list img')).toBeNull();
     const css = styleBlocks(readFileSync(join(__dirname, 'DagView.svelte'), 'utf-8'));
     expect(css).toMatch(/\.node-btn \.mono \{[^}]*overflow-wrap: anywhere;/);
+    // Wrapped over several lines, a pill (999px on paper) cuts the text at its corners: the button takes the small card radius.
+    expect(css).toMatch(/\.node-btn \{[^}]*border-radius: var\(--card-radius-sm\);/);
   });
 });
 
