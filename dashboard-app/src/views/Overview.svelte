@@ -375,7 +375,7 @@
   {@const dist = db.distributions}
 
   <!-- ── Stat cards ───────────────────────────────────────────────────── -->
-  <StatGrid stats={[
+  <StatGrid cols={5} stats={[
     { label: 'Facts', value: fmt(mem.total_facts), note: deltaNote(deltas.facts.last_7_days) },
     { label: 'Episodes', value: fmt(mem.total_episodes), note: deltaNote(deltas.episodes.last_7_days) },
     { label: 'Chunks',           value: fmt(mem.total_chunks) },

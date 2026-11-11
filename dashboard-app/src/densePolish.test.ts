@@ -4,7 +4,7 @@ import { createRawSnippet } from 'svelte';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { markupOf, parseBlocks, styleBlocks } from './lib/testing/css';
-import StatGrid from './lib/ui/StatGrid.svelte';
+import StatGrid, { balancedCols } from './lib/ui/StatGrid.svelte';
 
 // Finish review fix 8, the dense-screen finish: a tile inside a card is a flat tint (no shadow on a shadow, the floor's
 // nested card), Overview's 7-day change is a small note under the number, the donut is no taller than the timeline's
@@ -35,27 +35,41 @@ describe('flat tiles inside a card', () => {
 // and `cols` fixes a column count (Execution integrity: three, so six tiles are two rows of three).
 describe('one tile grid per group', () => {
   it('StatGrid renders its extra tiles inside the grid, and cols sets equal columns above phone width', () => {
-    const css = parseBlocks(styleBlocks(read('lib/ui/StatGrid.svelte')));
-    expect(css.get('.stat-grid--cols')).toEqual({ 'grid-template-columns': 'repeat(var(--cols), minmax(0, 1fr))' });
+    // Above phone width (the 640px block sets two up, so the first .stat-grid rule is the one read here).
+    expect(styleBlocks(read('lib/ui/StatGrid.svelte'))).toMatch(/\.stat-grid \{[^}]*grid-template-columns: repeat\(var\(--cols\), minmax\(0, 1fr\)\);/);
     const extra = createRawSnippet(() => ({ render: () => '<div class="stat-card x">extra</div>' }));
     const { container } = render(StatGrid, { props: { stats: [{ label: 'A', value: 1 }], cols: 3, extra } });
     const grid = container.querySelector('.stat-grid') as HTMLElement;
     expect(grid.querySelector('.x')?.parentElement).toBe(grid);
-    expect(grid.classList.contains('stat-grid--cols')).toBe(true);
     expect(grid.style.getPropertyValue('--cols')).toBe('3');
   });
+
+  // Design batch 2 (verdict pass 1): auto-fill at 200px fit five tiles at 1440 but four at 1280, so a row of five
+  // became four and one. The column count now comes from the tile count, not the width: at most five a row, the rows
+  // as even as they go, so no desktop width leaves one tile alone (the phone stays two up).
+  it('the columns come from the tile count: up to five in one row, then the rows as even as they go', () => {
+    expect([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map(balancedCols)).toEqual([1, 2, 3, 4, 5, 3, 4, 4, 5, 5, 4, 4]);
+    for (let n = 2; n <= 20; n++) expect(n % balancedCols(n), `${n} tiles`).not.toBe(1);
+    const { container } = render(StatGrid, { props: { stats: [1, 2, 3, 4, 5, 6].map((i) => ({ label: `S${i}`, value: i })) } });
+    expect((container.querySelector('.stat-grid') as HTMLElement).style.getPropertyValue('--cols')).toBe('3');
+  });
+
+  it.each([['views/Overview.svelte', 'memory grid: seven tiles and two extra'], ['views/Decisions.svelte', 'four tiles and one extra']])(
+    '%s: a grid with extra tiles names its columns (%s: one row of five, or five and four)', (f) => {
+      expect(markupOf(read(f))).toMatch(/<StatGrid cols=\{5\} stats=\{\[[\s\S]*?\]\}>\s*\{#snippet extra\(\)\}/);
+    });
 
   it('Overview: the dot tiles are in the memory grid (no second grid), Execution integrity is three columns', () => {
     const src = read('views/Overview.svelte');
     expect(src).not.toMatch(/special-cards/);
-    expect(markupOf(src)).toMatch(/<StatGrid stats=\{\[[\s\S]*?\]\}>\s*\{#snippet extra\(\)\}[\s\S]*?Graph density[\s\S]*?Brier score[\s\S]*?\{\/snippet\}\s*<\/StatGrid>/);
+    expect(markupOf(src)).toMatch(/<StatGrid cols=\{5\} stats=\{\[[\s\S]*?\]\}>\s*\{#snippet extra\(\)\}[\s\S]*?Graph density[\s\S]*?Brier score[\s\S]*?\{\/snippet\}\s*<\/StatGrid>/);
     expect((markupOf(src).match(/<StatGrid flat cols=\{3\}/g) ?? []).length).toBe(2);
   });
 
   it('Decisions: the Brier tile is in the StatGrid (no second grid)', () => {
     const src = read('views/Decisions.svelte');
     expect(src).not.toMatch(/indicator-row/);
-    expect(markupOf(src)).toMatch(/<StatGrid stats=\{\[[\s\S]*?\]\}>\s*\{#snippet extra\(\)\}[\s\S]*?Latest Brier score[\s\S]*?\{\/snippet\}\s*<\/StatGrid>/);
+    expect(markupOf(src)).toMatch(/<StatGrid cols=\{5\} stats=\{\[[\s\S]*?\]\}>\s*\{#snippet extra\(\)\}[\s\S]*?Latest Brier score[\s\S]*?\{\/snippet\}\s*<\/StatGrid>/);
   });
 });
 
