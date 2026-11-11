@@ -74,7 +74,7 @@ const ORIGIN_ROOT: Record<string, string> = {
 const NEW_DARK: Record<string, string> = {
   '--card-radius': '12px', // the 12px cards (session list, patterns, trace)
   '--card-radius-sm': '8px', // StatGrid's cards, DataTable's card mode
-  '--card-shadow': 'none',
+  '--card-shadow': '0 0 #0000', // no shadow before; a transparent zero shadow, as `none` breaks Tailwind's ring list
   '--card-border': '1px solid var(--border)',
   '--ctl-radius': '8px', // SubNav's tabs (var(--radius-sm))
   '--label-transform': 'uppercase',

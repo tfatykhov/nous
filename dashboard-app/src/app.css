@@ -120,7 +120,8 @@
     /* Structure */
     --card-radius: 12px;
     --card-radius-sm: 8px;
-    --card-shadow: none;
+    /* No shadow, as before; not `none`, which is invalid inside the shadow list Tailwind composes with its rings. */
+    --card-shadow: 0 0 #0000;
     --card-border: 1px solid var(--border);
     --ctl-radius: 8px;
     --label-transform: uppercase;

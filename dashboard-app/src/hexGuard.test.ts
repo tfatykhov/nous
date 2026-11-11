@@ -14,6 +14,11 @@ export const HEX_GUARDED: readonly string[] = [
   'lib/ui/FilterBar.svelte',
   'lib/ui/LookToggle.svelte',
   'App.svelte',
+  'lib/ui/StatGrid.svelte',
+  'lib/ui/StaleBadge.svelte',
+  'lib/ui/card/card.svelte',
+  'lib/ui/button/button.svelte',
+  'lib/ui/badge/badge.svelte',
 ];
 
 const SRC = __dirname;

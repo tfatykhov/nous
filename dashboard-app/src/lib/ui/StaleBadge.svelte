@@ -47,9 +47,9 @@
   }
 
   .stale-badge.error {
-    color: var(--red);
-    border-color: var(--red);
-    background: rgba(248, 113, 113, 0.08);
+    color: var(--err-text);
+    border-color: var(--err-text);
+    background: var(--stale-err-bg);
   }
 
   .stale-badge.loading {
