@@ -172,6 +172,10 @@ picking a hue. Add meaning-named tokens, each mapped per theme:
 | `--locked` | committed, immutable | `#5fb3a1` | `#5fb3a1` |
 | `--soft` | provisional, changeable | `#8a8fa3` | `#8a8fa3` |
 
+*(Since the dashboard redesign, PR 6: the "default" column is now `nous-dark`'s; the paper
+`:root` takes the dashboard's text tones, `#23703d` / `#8a5a0e` / `#b02a22`, `--locked`
+`#0b6e7a` and `--soft` `#4f5f6f`.)*
+
 Every token in this table **must carry a `:root` default**, including the two that only
 matter under a named theme. A token used by a view but absent from `:root` resolves to
 nothing and the property silently drops — this is not hypothetical, it is already live at

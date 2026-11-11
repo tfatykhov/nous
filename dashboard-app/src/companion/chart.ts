@@ -89,8 +89,8 @@ export function toneVar(tone: Tone): string {
 
 /** A tone → the INK token for text and pills (F096 §3). A chart stroke maps
  * neutral to the axis grey; ink maps it to --soft, which every theme keeps
- * lighter than --muted so a neutral pill never reads weaker than its own
- * caption. Two greys on a neutral card are deliberate: a pill is ink, a line
+ * at least as contrasty as --muted (lighter on a dark ground, darker on the
+ * paper default) so a neutral pill never reads weaker than its own caption. Two greys on a neutral card are deliberate: a pill is ink, a line
  * is a mark. */
 export function toneInkVar(tone: Tone): string {
   return tone === 'neutral' ? 'var(--soft)' : `var(--${tone})`;

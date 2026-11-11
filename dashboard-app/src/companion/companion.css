@@ -129,7 +129,7 @@
    `body { color: var(--text) }` is substituted at the BODY, in root scope, and
    that already-computed colour inherits into the themed subtree — so an
    element which merely inherits (a plain Text, the app title) keeps the
-   DARK-theme colour while its siblings that re-declare `color: var(--text)`
+   :root colour while its siblings that re-declare `color: var(--text)`
    pick the theme up. Measured on `paper`: the surface's --text token resolved
    correctly to #2a2622 while the title still painted #e2e2f0. Re-declaring
    here recomputes the inherited value inside the theme scope. Same reason
@@ -337,9 +337,9 @@
 
 [data-theme='paper'] {
   /* warm light, for reading and briefings */
-  /* `html { color-scheme: dark }` is global; without this the light theme's
-     scrollbars and form controls render dark-scheme. color-scheme is honored
-     per-element, so declaring it on the themed surface is enough (F7). */
+  /* Every theme declares its own color-scheme (the page's is light since
+     the paper default; the dark themes say dark). It is honored per element,
+     so declaring it on the themed surface is enough (F7). */
   color-scheme: light;
   --bg: #f4f1ea;
   --surface: #fbf9f4;
