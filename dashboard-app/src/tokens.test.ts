@@ -335,11 +335,11 @@ describe('contrast of the new values', () => {
     expect(DARK['--f-other']).not.toBe(DARK['--f-conversation']);
   });
 
-  it('each dark frame colour on the dark surface and on its 12% tint: at least 4.5', () => {
+  it('each dark frame colour on the dark surface and on its 7% tint (the trace gutter, both looks): at least 4.5', () => {
     for (const f of FRAMES) {
       const c = DARK[`--f-${f}`];
       expect(contrast(c, DARK['--surface']), f).toBeGreaterThanOrEqual(4.5);
-      expect(contrast(c, tint(c, 0.12, DARK['--surface'])), `${f} on its tint`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(c, tint(c, 0.07, DARK['--surface'])), `${f} on its tint`).toBeGreaterThanOrEqual(4.5);
     }
   });
 
