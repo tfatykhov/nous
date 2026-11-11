@@ -190,6 +190,8 @@ const PR2: Record<string, [string, string]> = {
   '--glow-blur': ['6px', '0px'],
   '--chart-text': ['#94a3b8', '#56687a'], // a chart's ticks and legend on a paper ground
   '--chart-grid': ['#1e293b', '#e3e9ec'],
+  '--gv-edge-opacity': ['0.5', '0.75'], // review M8: Graph edges, less faint on white
+  '--gv-edge-opacity-inferred': ['0.3', '0.5'],
   '--series-0': ['#7c6af7', '#8b5cf6'], // review M1: violet marks; was --accent, on paper the question frame's blue
   '--save-ok': ['#4ade80', '#23703d'], // Browse: a censor's save message (not --ok-text, whose dark is #34d399)
   '--save-err': ['#f87171', '#b02a22'],

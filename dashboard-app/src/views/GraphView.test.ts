@@ -152,6 +152,8 @@ describe('Graph on the paper look', () => {
     expect(styleValue(created.style, 'node', 'text-outline-color')).toBe('#0a0a0f');
     expect(styleValue(created.style, 'node:selected', 'border-color')).toBe('#fbbf24');
     expect(styleValue(created.style, 'node.searchHit', 'border-color')).toBe('#fbbf24');
+    expect(styleValue(created.style, 'edge', 'opacity')).toBe(0.5);
+    expect(styleValue(created.style, 'edge[extraction_method = "inferred"]', 'opacity')).toBe(0.3);
     expect(cyto.cy.layout).toHaveBeenCalledTimes(1);
     expect(cyto.cy.style).not.toHaveBeenCalled();
   });
@@ -174,6 +176,9 @@ describe('Graph on the paper look', () => {
     expect(styleValue(style, 'node', 'text-outline-color')).toBe('#ffffff');
     expect(edgeColor('e4')).toBe(PAPER['--rel-contradicts']);
     expect(nodeColor('n-chunk')).toBe(PAPER['--gv-chunk']);
+    // Review M8: on paper the edges are less faint (a light colour at 0.5 on white was 1.8:1).
+    expect(styleValue(style, 'edge', 'opacity')).toBe(0.75);
+    expect(styleValue(style, 'edge[extraction_method = "inferred"]', 'opacity')).toBe(0.5);
   });
 
   it('the node sheet: hostile and long labels render as text; connections say "to" and "from" in words', async () => {

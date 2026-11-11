@@ -16,6 +16,7 @@
   import { Button } from '../lib/ui/button';
   import GraphViz, { type GraphNode } from '../lib/viz/Graph.svelte';
   import { cssColor } from '../lib/chartColors';
+  import { readToken } from '../lib/overviewCharts';
 
   const store = usePoll(
     makePollStore<GraphData>(
@@ -172,6 +173,11 @@
   // (Graph.svelte rebuilds it when the look changes). Node and edge fills come from each element's `color` data.
   function cytoscapeStyle(el: Element) {
     const c = (token: string) => cssColor(el, token);
+    /** A number token on the graph's ground (the edge opacities); `fallback`, the dark value, when unset. */
+    const n = (token: string, fallback: number) => {
+      const v = parseFloat(el.isConnected ? readToken(el, token) : '');
+      return Number.isFinite(v) ? v : fallback;
+    };
     return [
     {
       selector: 'node',
@@ -213,7 +219,7 @@
       style: {
         'curve-style': 'bezier',
         'line-color': 'data(color)',
-        opacity: 0.5,
+        opacity: n('--gv-edge-opacity', 0.5),
         width: 'mapData(weight, 0, 1, 1, 4)',
         'target-arrow-color': 'data(color)',
         'target-arrow-shape': 'triangle',
@@ -222,7 +228,7 @@
     },
     {
       selector: 'edge[extraction_method = "inferred"]',
-      style: { opacity: 0.3, 'line-style': 'dashed' },
+      style: { opacity: n('--gv-edge-opacity-inferred', 0.3), 'line-style': 'dashed' },
     },
     {
       selector: 'edge.faded',
