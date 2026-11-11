@@ -242,7 +242,7 @@ const PR3: Record<string, [string, string]> = {
   '--effect-write': ['#60a5fa', '#1f5fa8'], // the Ledger's write effect pill
   '--mc-section-1': ['#a99df9', '#8b5cf6'], // a model call's first context section (dark: the accent text; paper: a violet)
   '--mc-section-7': ['#f472b6', '#7890d0'], // Messages (dark: the old --unknown; paper: a light blue, not a status colour)
-  '--mc-section-8': ['#9ca3af', '#2020e0'], // Tools (dark: the old --series-12; paper: apart from Decisions under red-green CVD)
+  '--mc-section-8': ['#9ca3af', '#382880'], // Tools (dark: the old --series-12; paper: an indigo, apart from Decisions and the link blue)
 };
 for (const [k, [dark]] of Object.entries(PR3)) NEW_DARK[k] = dark;
 
@@ -811,6 +811,12 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
         for (const cvd of [undefined, 'protan', 'deutan'] as const) {
           expect(okDistance(PAPER[sections[i]], PAPER[sections[j]], cvd), `${sections[i]} and ${sections[j]} (${cvd ?? 'normal'})`).toBeGreaterThanOrEqual(7);
         }
+      }
+    }
+    // Re-review N2: no section reads as the link blue on the same card (the question frame's colour), under any vision.
+    for (const s of sections) {
+      for (const cvd of [undefined, 'protan', 'deutan'] as const) {
+        expect(okDistance(PAPER[s], PAPER['--f-question'], cvd), `${s} and the link blue (${cvd ?? 'normal'})`).toBeGreaterThanOrEqual(6);
       }
     }
     // Messages is not the unknown status's colour (nor the creative frame's), on paper.
