@@ -11,6 +11,9 @@ import { store } from '../store.svelte';
 
 const SURFACE = 'video-test-surface';
 const YT_EMBED = 'https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ';
+// Exact, so an added capability (allow-forms, camera, autoplay…) fails a test.
+const SANDBOX = 'allow-scripts allow-same-origin allow-presentation allow-popups allow-popups-to-escape-sandbox';
+const ALLOW = 'encrypted-media; picture-in-picture; fullscreen';
 
 function renderVideo(props: Record<string, unknown>, dataModel: Record<string, unknown> = {}) {
   store.reset();
@@ -64,17 +67,18 @@ describe('VideoView', () => {
     const frame = frames[0];
     expect(frame.getAttribute('src')).toBe(YT_EMBED);
     expect(frame.getAttribute('referrerpolicy')).toBe('strict-origin-when-cross-origin');
-    expect(frame.getAttribute('sandbox')).toContain('allow-scripts');
-    expect(frame.getAttribute('sandbox')).not.toContain('allow-top-navigation');
-    expect(frame.getAttribute('allow')).not.toContain('autoplay');
+    expect(frame.getAttribute('sandbox')).toBe(SANDBOX);
+    expect(frame.getAttribute('allow')).toBe(ALLOW);
     expect(container.querySelector('video')).toBeNull();
   });
 
   it('Vimeo renders the player iframe', () => {
     const { container } = renderVideo({ url: 'https://vimeo.com/76979871' });
-    expect(container.querySelector('iframe')!.getAttribute('src')).toBe(
-      'https://player.vimeo.com/video/76979871?dnt=1',
-    );
+    const frame = container.querySelector('iframe')!;
+    expect(frame.getAttribute('src')).toBe('https://player.vimeo.com/video/76979871?dnt=1');
+    expect(frame.getAttribute('sandbox')).toBe(SANDBOX);
+    expect(frame.getAttribute('allow')).toBe(ALLOW);
+    expect(frame.getAttribute('referrerpolicy')).toBe('strict-origin-when-cross-origin');
   });
 
   it.each([
