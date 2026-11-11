@@ -108,6 +108,14 @@ const ROWS: Row[] = [
   ['views/Autonomy.svelte', '.fix-warn', 'color', 'var(--st-partial)', '#fb923c'],
   ['views/Autonomy.svelte', '.fix-warn', 'border-color', 'color-mix(in srgb, var(--st-partial) 50%, transparent)', 'rgba(251, 146, 60, 0.5)'],
   ['views/Autonomy.svelte', '.state-msg.error', 'color', 'var(--err-text)', '#f87171'],
+  // Intentions
+  ['views/Intentions.svelte', '.notice', 'background', 'var(--notice-bg)', 'rgba(245, 158, 11, 0.08)'],
+  ['views/Intentions.svelte', '.notice', 'border', '1px solid var(--notice-border)', '1px solid rgba(245, 158, 11, 0.4)'],
+  ['views/Intentions.svelte', '.notice', 'border-radius', 'var(--card-radius-sm)', '8px'],
+  ['views/Intentions.svelte', '.panel', 'border', 'var(--card-border)', '1px solid #1e1e2e'],
+  ['views/Intentions.svelte', '.tiles div', 'border', 'var(--card-border)', '1px solid #1e1e2e'],
+  ['views/Intentions.svelte', '.tiles div', 'border-radius', 'var(--card-radius-sm)', '8px'],
+  ['views/Intentions.svelte', '.tiles dt', 'text-transform', 'var(--label-transform)', 'uppercase'],
 ];
 
 /** The plan's listed dark changes: [file, selector, property, value now, old literal, the dark value it resolves to]. */
@@ -125,6 +133,8 @@ const CHANGES: Change[] = [
   ['views/Autonomy.svelte', '.strip', 'border-radius', 'var(--card-radius)', '8px', '12px', 'D2: the scorer strip takes the card radius'],
   ['views/Autonomy.svelte', '.card, .panel', 'border-radius', 'var(--card-radius)', '8px', '12px', 'D2: cards and panels take the card radius'],
   ['views/Autonomy.svelte', '.strip-meta dt, .tiles dt, .triple dt, .detail dt, .label', 'letter-spacing', 'var(--label-tracking)', '0.04em', '0.05em', 'D6: labels take the label tracking'],
+  ['views/Intentions.svelte', '.panel', 'border-radius', 'var(--card-radius)', '8px', '12px', 'D2: panels take the card radius'],
+  ['views/Intentions.svelte', '.tiles dt', 'letter-spacing', 'var(--label-tracking)', '0.04em', '0.05em', 'D6: labels take the label tracking'],
 ];
 
 /** PR 4 and PR 5's routes and their views. */
