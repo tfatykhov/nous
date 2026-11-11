@@ -95,8 +95,8 @@
   const scoreDistOptions = {
     plugins: { legend: { display: false } },
     scales: {
-      x: { title: { display: true, text: 'Composite Score' } },
-      y: { beginAtZero: true, title: { display: true, text: 'Fact Count' }, ticks: { precision: 0 } },
+      x: { title: { display: true, text: 'Composite score' } },
+      y: { beginAtZero: true, title: { display: true, text: 'Fact count' }, ticks: { precision: 0 } },
     },
   };
 
@@ -157,7 +157,7 @@
     plugins: { legend: { display: false } },
     scales: {
       x: { ticks: { maxTicksLimit: 10 }, grid: { display: false } },
-      y: { min: 0, max: 100, title: { display: true, text: 'Admission Rate (%)' } },
+      y: { min: 0, max: 100, title: { display: true, text: 'Admission rate (%)' } },
     },
   };
 
@@ -179,7 +179,7 @@
     plugins: { legend: { display: false } },
     scales: {
       x: { ticks: { maxTicksLimit: 10 }, grid: { display: false } },
-      y: { min: 0, max: 1, title: { display: true, text: 'Avg Composite Score' } },
+      y: { min: 0, max: 1, title: { display: true, text: 'Avg composite score' } },
     },
   };
 

@@ -88,7 +88,7 @@
       },
       y: {
         beginAtZero: true,
-        title: { display: true, text: 'Avg Edges per Node' },
+        title: { display: true, text: 'Avg edges per node' },
       },
     },
     plugins: {
@@ -157,13 +157,13 @@
   const degreeOptions = {
     scales: {
       x: {
-        title: { display: true, text: 'Edge Count (degree)' },
+        title: { display: true, text: 'Edge count (degree)' },
         grid: { display: false },
       },
       y: {
         beginAtZero: true,
         ticks: { precision: 0 },
-        title: { display: true, text: 'Number of Nodes' },
+        title: { display: true, text: 'Number of nodes' },
       },
     },
     plugins: { legend: { display: false } },
@@ -195,7 +195,7 @@
       y: {
         beginAtZero: true,
         ticks: { precision: 0 },
-        title: { display: true, text: 'Orphan Count' },
+        title: { display: true, text: 'Orphan count' },
       },
     },
     plugins: { legend: { display: false } },

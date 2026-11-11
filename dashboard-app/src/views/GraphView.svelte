@@ -384,7 +384,7 @@
 {/if}
 
 <!-- Node detail bottom sheet -->
-<BottomSheet bind:open={sheetOpen} title={selectedHead ? capitalize(selectedHead.type) + ' Detail' : 'Node Detail'}>
+<BottomSheet bind:open={sheetOpen} title={selectedHead ? capitalize(selectedHead.type) + ' detail' : 'Node detail'}>
   {#if selectedHead}
     {@const head = selectedHead}
     <div class="node-detail">

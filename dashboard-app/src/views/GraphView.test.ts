@@ -177,7 +177,7 @@ describe('Graph on the paper look', () => {
     render(GraphView);
     await waitFor(() => expect(cyto.factory).toHaveBeenCalledTimes(1));
     cyto.tap('n-episode');
-    const sheet = await screen.findByLabelText('Episode Detail');
+    const sheet = await screen.findByLabelText('Episode detail');
     await waitFor(() => expect(sheet.querySelectorAll('button.conn-item')).toHaveLength(2));
     expect(sheet.classList.contains('page-ground')).toBe(true); // the page ground, though portalled
     expect(sheet.textContent).toContain(HOSTILE);

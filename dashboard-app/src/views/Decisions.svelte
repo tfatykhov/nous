@@ -175,8 +175,8 @@
           }}
           options={{
             scales: {
-              x: { title: { display: true, text: 'Predicted Confidence' } },
-              y: { title: { display: true, text: 'Actual Success Rate' }, min: 0, max: 1 },
+              x: { title: { display: true, text: 'Predicted confidence' } },
+              y: { title: { display: true, text: 'Actual success rate' }, min: 0, max: 1 },
             },
             plugins: { legend: { display: false } },
           }}
@@ -204,7 +204,7 @@
           }}
           options={{
             scales: {
-              x: { title: { display: true, text: 'Confidence Range' }, grid: { display: false } },
+              x: { title: { display: true, text: 'Confidence range' }, grid: { display: false } },
               y: { beginAtZero: true, ticks: { precision: 0 }, title: { display: true, text: 'Count' } },
             },
             plugins: { legend: { display: false } },
@@ -317,7 +317,7 @@
           options={{
             scales: {
               x: { ticks: { maxTicksLimit: 10 }, grid: { display: false } },
-              y: { title: { display: true, text: 'Brier Score (lower is better)' }, min: 0, max: 0.5 },
+              y: { title: { display: true, text: 'Brier score (lower is better)' }, min: 0, max: 0.5 },
             },
             plugins: { legend: { display: false } },
           }}

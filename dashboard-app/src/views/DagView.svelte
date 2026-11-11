@@ -271,7 +271,7 @@
 <div class="view-head">
   <div>
     <h1 class="view-title">Workflows</h1>
-    <p class="view-subtitle">Unified execution DAGs, node progress, and graph visualization</p>
+    <p class="view-subtitle">The workflows Nous runs: where each one is, what it has spent, and what is waiting on you.</p>
   </div>
   <div class="head-right">
     <StaleBadge state={$store} />

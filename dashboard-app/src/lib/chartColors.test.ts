@@ -243,12 +243,28 @@ describe('applyChartFont', () => {
 // Finish review fix 8: chart furniture in the world's language. Legends are dots (a line chart keeps its dash samples,
 // which carry the series), bars are rounded with no outline, and a single series is the one neutral colour.
 describe('chart furniture', () => {
-  it('legends are 8px dots on bar, doughnut and radar charts; a line chart keeps its own labels', () => {
-    for (const type of ['bar', 'doughnut', 'radar']) {
+  it('legends are 8px dots on bar, doughnut, radar and line charts', () => {
+    for (const type of ['bar', 'doughnut', 'radar', 'line']) {
       expect(withChartDefaults(type, {}, '#000', '#ccc').plugins.legend.labels, type).toMatchObject(
         { usePointStyle: true, pointStyle: 'circle', boxWidth: 8, boxHeight: 8 });
     }
-    expect(withChartDefaults('line', {}, '#000', '#ccc').plugins.legend?.labels?.pointStyle).toBeUndefined();
+  });
+
+  // Design batch 2 (verdict pass 1): the two solid-line charts (Subtasks' daily trend, Scoring's signal trend) showed
+  // hollow squares, Chart.js's box filled with each line's pale area tint. A line's dot is solid, in the line's colour.
+  it('a line legend dot is solid in the line\'s colour, not its pale fill', () => {
+    const base = [{ datasetIndex: 0, text: 'a', fillStyle: 'rgba(1, 2, 3, 0.1)', strokeStyle: '#010203', lineWidth: 1 }];
+    (globalThis as any).Chart = { defaults: { plugins: { legend: { labels: { generateLabels: () => base } } } } };
+    const labels = withChartDefaults('line', {}, '#000', '#ccc').plugins.legend.labels;
+    const items = labels.generateLabels({ data: { datasets: [{ borderColor: '#159a7a', backgroundColor: 'rgba(21, 154, 122, 0.1)' }] } });
+    expect(items.map((i: any) => [i.text, i.fillStyle, i.strokeStyle])).toEqual([['a', '#159a7a', '#159a7a']]);
+    delete (globalThis as any).Chart;
+  });
+
+  it('a line chart whose dashes carry meaning keeps its dash samples, with nothing of the dot merged in', () => {
+    const dash = lineLegendLabels({ color: 'var(--muted)' });
+    const labels = withChartDefaults('line', { plugins: { legend: { labels: dash } } }, '#000', '#ccc').plugins.legend.labels;
+    expect(labels).toEqual(dash);
   });
 
   it('finishBars rounds every bar dataset and removes its outline; line datasets are left alone', () => {

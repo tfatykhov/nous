@@ -176,11 +176,22 @@ export function withChartDefaults(type: string, options: Record<string, any>, te
   const axis = { ticks: { color: text }, title: { color: text }, grid: { color: grid }, border: { color: grid } };
   const radial = { ...axis, angleLines: { color: grid }, pointLabels: { color: text } };
   const base: Record<string, any> = { color: text, plugins: { title: { color: text } } };
-  // Legends are 8px dots, as the authored legends are (finish review fix 8); a line chart keeps its own labels (its
-  // dash samples carry the series).
-  if (type !== 'line') base.plugins.legend = { labels: { usePointStyle: true, pointStyle: 'circle', boxWidth: 8, boxHeight: 8 } };
+  // Legends are 8px dots, as the authored legends are (finish review fix 8). A line's dot is solid in the line's colour
+  // (Chart.js filled it with the line's pale area tint: a hollow square); a line chart whose dashes carry meaning passes
+  // lineLegendLabels, its own generateLabels, and keeps those samples untouched (design batch 2).
+  const dots = { usePointStyle: true, pointStyle: 'circle', boxWidth: 8, boxHeight: 8 };
+  if (type !== 'line') base.plugins.legend = { labels: dots };
+  else if (!options.plugins?.legend?.labels?.generateLabels) base.plugins.legend = { labels: { ...dots, generateLabels: solidLineDots } };
   if (ids.size) base.scales = Object.fromEntries([...ids].map((id) => [id, id === 'r' ? radial : axis]));
   return mergeUnder(base, options);
+}
+
+/** Chart.js's own legend items, each dot filled and outlined in its line's colour. */
+function solidLineDots(chart: any): any[] {
+  return (globalThis as any).Chart.defaults.plugins.legend.labels.generateLabels(chart).map((item: any) => {
+    const c = chart.data.datasets[item.datasetIndex]?.borderColor ?? item.strokeStyle;
+    return { ...item, fillStyle: c, strokeStyle: c };
+  });
 }
 
 /** Bars are rounded with no outline (finish review fix 8: smooth and rounded, no square stock bars): every bar dataset

@@ -73,6 +73,35 @@ describe('Overview', () => {
   });
 });
 
+// Design batch 2, fix 8's leftovers (verdict pass 1): chart axis titles in sentence case, the Workflows subtitle as
+// a plain sentence, and the Graph sheet's title in sentence case.
+describe('copy inside charts and sheets', () => {
+  const AXIS_TITLE = /title: \{ display: true, text: '([^']*)'/g;
+  /** Words after the first that start with a capital and are not an acronym: Title Case. */
+  const titleCased = (t: string) => t.split(/\s+/).slice(1).filter((w) => /^[A-Z][a-z]/.test(w));
+  it('the check catches Title Case and spares sentence case and acronyms', () => {
+    expect(titleCased('Actual Success Rate')).toEqual(['Success', 'Rate']);
+    expect(titleCased('Brier score (lower is better)')).toEqual([]);
+    expect(titleCased('Admission rate (%) UTC')).toEqual([]);
+  });
+  it.each(['views/Admission.svelte', 'views/Decisions.svelte', 'views/health/GraphTab.svelte', 'views/Rubric.svelte'])(
+    '%s: every axis title is sentence case', (f) => {
+      const titles = [...read(f).matchAll(AXIS_TITLE)].map((m) => m[1]);
+      expect(titles.length).toBeGreaterThan(0);
+      expect(titles.filter((t) => titleCased(t).length > 0)).toEqual([]);
+    });
+  it('the Workflows subtitle is a plain sentence', () => {
+    const sub = markupOf(read('views/DagView.svelte')).match(/<p class="view-subtitle">([^<]*)<\/p>/)?.[1] ?? '';
+    expect(sub).toMatch(/^[A-Z].*\.$/); // a sentence: a capital, a full stop, no Title Case (Nous is a name)
+    expect(titleCased(sub).filter((w) => w !== 'Nous')).toEqual([]);
+    expect(sub).not.toMatch(/Unified|DAGs/);
+  });
+  it('the Graph sheet\'s title is sentence case', () => {
+    const src = read('views/GraphView.svelte');
+    expect(src).toContain("capitalize(selectedHead.type) + ' detail' : 'Node detail'");
+  });
+});
+
 describe('Retrieval flow bar', () => {
   it('each segment is a size container, and its count is hidden when the segment is too narrow for it', () => {
     const css = styleBlocks(read('views/Retrieval.svelte'));
