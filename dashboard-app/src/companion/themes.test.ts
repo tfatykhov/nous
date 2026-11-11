@@ -3,7 +3,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parseThemes } from './testing/themes';
-import { contrast, over } from './testing/color';
+import { contrast, hexLuminance, over } from './testing/color';
 
 // The companion's theme tokens, read from companion.css as the browser resolves them (testing/themes.ts), against
 // the tables of origin/main (9e4953f3). The five named themes and the old default look must not move.
@@ -235,6 +235,12 @@ const KNOWN_BELOW: Record<string, number> = {
   'nous-default|--on-accent|--accent': 3.99,
   'nous-default|--accent|--accent-glow': 3.96,
   'nous-default|--chart-axis|--surface': 3.63,
+  'nous-dark|--muted|--bg': 3.85,
+  'nous-dark|--muted|--surface': 3.63,
+  'nous-dark|--muted|--surface-hover': 3.42,
+  'nous-dark|--on-accent|--accent': 3.99,
+  'nous-dark|--accent|--accent-glow': 3.96,
+  'nous-dark|--chart-axis|--surface': 3.63,
   'alpine-dusk|--muted|--surface': 4.49,
   'alpine-dusk|--soft|--surface': 4.49,
   'alpine-dusk|--muted|--surface-hover': 4.06,
@@ -258,7 +264,50 @@ const KNOWN_BELOW: Record<string, number> = {
   'signal|--soft|--surface-hover': 4.27,
 };
 
-const THEMES = ['nous-default', 'alpine-dusk', 'harbor', 'paper', 'signal', 'report'];
+const THEMES = ['nous-default', 'nous-dark', 'alpine-dusk', 'harbor', 'paper', 'signal', 'report'];
+/** The old default under its new name, and the five named themes: the looks that must not move. */
+const LEGACY = ['nous-dark', 'alpine-dusk', 'harbor', 'paper', 'signal', 'report'];
+/** Each legacy look's origin table: nous-dark is the old :root. */
+const ORIGIN_OF = (id: string) => ORIGIN_THEMES[id === 'nous-dark' ? 'nous-default' : id];
+
+/** Tokens added by this PR. The structural ones keep the old shape in a legacy theme; the colour ones are what a
+ * legacy theme's components painted before (MemoryGraph: fact = accent, episode = ok, procedure = warn, chunk = muted)
+ * and, for the frames, the dashboard's dark-legible values (the paper values on `paper`). */
+const DARK_FRAMES = {
+  '--f-conversation': '#8fa3b5',
+  '--f-question': '#8aa4ff',
+  '--f-task': '#3fc3d1',
+  '--f-decision': '#c08be0',
+  '--f-debug': '#f09a5a',
+  '--f-creative': '#ee82bd',
+  '--f-initiation': '#e0b050',
+};
+const PAPER_FRAMES = {
+  '--f-conversation': '#55697a',
+  '--f-question': '#2346c8',
+  '--f-task': '#0b6e7a',
+  '--f-decision': '#7b3fa0',
+  '--f-debug': '#b4531c',
+  '--f-creative': '#a3266f',
+  '--f-initiation': '#8f5c0f',
+};
+const NEW_COLOUR = ['--node-fact', '--node-episode', '--node-procedure', '--node-chunk', ...Object.keys(DARK_FRAMES)];
+function newLegacy(id: string): Record<string, string> {
+  const o = ORIGIN_OF(id);
+  return {
+    '--radius-md': '8px',
+    '--ctl-radius': '8px',
+    '--card-shadow': '0 0 #0000',
+    '--card-border': `1px solid ${o['--border']}`,
+    '--select-border': o['--accent'],
+    '--node-fact': o['--accent'],
+    '--node-episode': o['--ok'],
+    '--node-procedure': o['--warn'],
+    '--node-chunk': o['--muted'],
+    ...(id === 'paper' ? PAPER_FRAMES : DARK_FRAMES),
+  };
+}
+const JETBRAINS = "'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace";
 
 /** A token value as an opaque colour: a translucent one (the selected-row glow) painted over the theme's surface. */
 function opaque(t: Record<string, string>, token: string): string {
@@ -300,15 +349,49 @@ describe('the theme reader follows the cascade the browser does', () => {
     expect(s.declared('x').color).toBe('var(--a)');
   });
 
-  it('reads the six themes of companion.css', () => {
+  it('reads the seven themes of companion.css', () => {
     expect(SHEET.root['--bg']).toBeDefined();
-    for (const id of THEMES.slice(1)) expect(SHEET.blocks.has(id), id).toBe(true);
+    for (const id of LEGACY) expect(SHEET.blocks.has(id), id).toBe(true);
+    expect(SHEET.blocks.has('nous-default')).toBe(false); // the default is :root
   });
 });
 
-describe('the five named themes and the default render exactly as on origin/main', () => {
-  it.each(THEMES)('%s resolves to its origin table', (id) => {
-    expect(SHEET.resolved(id)).toEqual(ORIGIN_THEMES[id]);
+describe('the old default (now nous-dark) and the five named themes render exactly as on origin/main', () => {
+  it.each(LEGACY)('%s resolves to its origin table plus the new tokens, nothing else', (id) => {
+    expect(SHEET.resolved(id)).toEqual({ ...ORIGIN_OF(id), ...newLegacy(id) });
+  });
+
+  it('nous-default still resolves to the old table in this step (the paper :root comes next)', () => {
+    expect(SHEET.resolved('nous-default')).toEqual({ ...ORIGIN_THEMES['nous-default'], ...newLegacy('nous-dark') });
+  });
+});
+
+describe('no theme inherits a token from :root by accident', () => {
+  it.each(LEGACY)('%s declares every :root token itself (its own block or a group naming it)', (id) => {
+    const own = SHEET.declared(id);
+    expect(Object.keys(SHEET.root).filter((k) => k.startsWith('--') && !(k in own))).toEqual([]);
+  });
+
+  it.each(LEGACY)('%s declares each new colour token in its OWN block, as a literal hex', (id) => {
+    const block = SHEET.blocks.get(id) ?? {};
+    for (const k of NEW_COLOUR) expect(block[k], `${id} ${k}`).toMatch(/^#[0-9a-f]{6}$/);
+  });
+
+  it.each(THEMES)('%s: --font-numeric is its own --font-mono', (id) => {
+    const t = SHEET.resolved(id);
+    expect(t['--font-numeric']).toBe(t['--font-mono']);
+  });
+
+  it('nous-dark and the five named themes keep JetBrains Mono for figures', () => {
+    for (const id of LEGACY) expect(SHEET.resolved(id)['--font-numeric'], id).toBe(JETBRAINS);
+  });
+});
+
+describe('color-scheme follows the ground', () => {
+  it.each(THEMES)('%s declares a color-scheme that matches the darkness of its --bg', (id) => {
+    const scheme = id === 'nous-default' ? SHEET.root['color-scheme'] ?? SHEET.rules.get('html')?.['color-scheme'] : SHEET.declared(id)['color-scheme'];
+    const dark = hexLuminance(SHEET.resolved(id)['--bg']) < 0.18;
+    expect(scheme).toBe(dark ? 'dark' : 'light');
   });
 });
 

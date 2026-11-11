@@ -96,10 +96,10 @@ describe('theme contrast (F093 R2 — themes are code, so they get tests)', () =
   // literal file — fs is the only way to assert on the authored tokens.
   const sheet = parseThemes(readFileSync('src/companion/companion.css', 'utf-8'));
 
-  const ALL = ['nous-default', 'alpine-dusk', 'harbor', 'paper', 'signal', 'report'];
+  const ALL = ['nous-default', 'nous-dark', 'alpine-dusk', 'harbor', 'paper', 'signal', 'report'];
   const themes: Record<string, Record<string, string>> = Object.fromEntries(ALL.map((id) => [id, sheet.resolved(id)]));
 
-  it('parsed all six themes', () => {
+  it('parsed all seven themes (the default and the old default, nous-dark, among them)', () => {
     expect([...sheet.ids, 'nous-default'].sort()).toEqual([...ALL].sort());
   });
 

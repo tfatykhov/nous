@@ -61,6 +61,26 @@
   --series-4: #60a5fa;
   --chart-axis: #6b6b8a;
   --chart-grid: #1e1e2e;
+
+  /* Dashboard redesign PR 6 — shape tokens (their values here are the old
+     shape until :root takes the paper look), node colours for MemoryGraph,
+     and the seven frame colours. */
+  --radius-md: 8px;
+  --ctl-radius: 8px;
+  --card-shadow: 0 0 #0000;
+  --card-border: 1px solid var(--border);
+  --select-border: var(--accent);
+  --node-fact: #7c6af7;
+  --node-episode: #34d399;
+  --node-procedure: #fbbf24;
+  --node-chunk: #6b6b8a;
+  --f-conversation: #8fa3b5;
+  --f-question: #8aa4ff;
+  --f-task: #3fc3d1;
+  --f-decision: #c08be0;
+  --f-debug: #f09a5a;
+  --f-creative: #ee82bd;
+  --f-initiation: #e0b050;
 }
 
 /* A themed root MUST re-assert the inherited properties it re-defines.
@@ -83,8 +103,90 @@
    apps in the switcher theme independently. nous-default needs no block —
    an absent or 'nous-default' data-theme inherits :root above. */
 
+/* The legacy shape. Every theme below was designed against the old :root and
+   declares its colours only; whatever it does not declare it inherits from
+   :root. This group re-declares, for each of them, every :root token none of
+   their blocks set, with the old values, so a change to :root never reaches
+   them (themes.test.ts checks each theme declares every :root token itself).
+   A var() here is substituted at the themed element, with that theme's
+   values. It sits BEFORE the blocks so a block can still override it. */
+[data-theme='nous-dark'],
+[data-theme='alpine-dusk'],
+[data-theme='harbor'],
+[data-theme='paper'],
+[data-theme='signal'],
+[data-theme='report'] {
+  --green: #34d399;
+  --red: #f87171;
+  --yellow: #fbbf24;
+  --radius: 12px;
+  --radius-md: 8px;
+  --radius-sm: 8px;
+  --ctl-radius: 8px;
+  --card-shadow: 0 0 #0000;
+  --card-border: 1px solid var(--border);
+  --select-border: var(--accent);
+  --transition: 0.2s ease;
+  --font-ui: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+  --font-display: var(--font-ui);
+  --font-numeric: var(--font-mono);
+  font-variant-numeric: normal;
+}
+
+[data-theme='nous-dark'] {
+  /* the previous default: violet on near-black, for night reading. The old
+     :root, value for value. */
+  color-scheme: dark;
+  --bg: #0a0a0f;
+  --surface: #12121a;
+  --surface-hover: #181824;
+  --border: #1e1e2e;
+  --accent: #7c6af7;
+  --accent-dim: #4f46a8;
+  --accent-glow: rgba(124, 106, 247, 0.15);
+  --text: #e2e2f0;
+  --muted: #6b6b8a;
+  --green: #34d399;
+  --red: #f87171;
+  --yellow: #fbbf24;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --transition: 0.2s ease;
+  --font-ui: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --crit: #f87171;
+  --locked: #5fb3a1;
+  --soft: #8a8fa3;
+  --font-display: var(--font-ui);
+  --font-numeric: var(--font-mono);
+  --on-accent: #ffffff;
+  --scrim: rgba(10, 10, 15, 0.72);
+  --node-decision: #a78bfa;
+  --series-1: #7c6af7;
+  --series-2: #34d399;
+  --series-3: #fbbf24;
+  --series-4: #60a5fa;
+  --chart-axis: #6b6b8a;
+  --chart-grid: #1e1e2e;
+  --node-fact: #7c6af7;
+  --node-episode: #34d399;
+  --node-procedure: #fbbf24;
+  --node-chunk: #6b6b8a;
+  --f-conversation: #8fa3b5;
+  --f-question: #8aa4ff;
+  --f-task: #3fc3d1;
+  --f-decision: #c08be0;
+  --f-debug: #f09a5a;
+  --f-creative: #ee82bd;
+  --f-initiation: #e0b050;
+}
+
 [data-theme='alpine-dusk'] {
   /* warm near-black, for trips and outdoor plans */
+  color-scheme: dark;
   --bg: #0e1014;
   --surface: #161a20;
   --surface-hover: #1e232b;
@@ -109,10 +211,22 @@
   --chart-axis: #8a8072;
   --chart-grid: #232a33;
   --font-display: Fraunces, 'Georgia', 'Times New Roman', serif;
+  --node-fact: #e8833a;
+  --node-episode: #5fb3a1;
+  --node-procedure: #e8a33a;
+  --node-chunk: #8a8072;
+  --f-conversation: #8fa3b5;
+  --f-question: #8aa4ff;
+  --f-task: #3fc3d1;
+  --f-decision: #c08be0;
+  --f-debug: #f09a5a;
+  --f-creative: #ee82bd;
+  --f-initiation: #e0b050;
 }
 
 [data-theme='harbor'] {
   /* cool blue-grey, for status and monitoring */
+  color-scheme: dark;
   --bg: #0b1016;
   --surface: #121a24;
   --surface-hover: #182230;
@@ -136,6 +250,17 @@
   --series-4: #a98fd9;
   --chart-axis: #7089a0;
   --chart-grid: #1f2c3a;
+  --node-fact: #4a90d9;
+  --node-episode: #3fb6a0;
+  --node-procedure: #e0a94a;
+  --node-chunk: #7089a0;
+  --f-conversation: #8fa3b5;
+  --f-question: #8aa4ff;
+  --f-task: #3fc3d1;
+  --f-decision: #c08be0;
+  --f-debug: #f09a5a;
+  --f-creative: #ee82bd;
+  --f-initiation: #e0b050;
 }
 
 [data-theme='paper'] {
@@ -168,10 +293,22 @@
   --chart-axis: #6e675b;
   --chart-grid: #ddd6c8;
   --font-display: Fraunces, 'Georgia', 'Times New Roman', serif;
+  --node-fact: #b5651d;
+  --node-episode: #2f8f6b;
+  --node-procedure: #b5811d;
+  --node-chunk: #6e675b;
+  --f-conversation: #55697a;
+  --f-question: #2346c8;
+  --f-task: #0b6e7a;
+  --f-decision: #7b3fa0;
+  --f-debug: #b4531c;
+  --f-creative: #a3266f;
+  --f-initiation: #8f5c0f;
 }
 
 [data-theme='signal'] {
   /* high-contrast, for alerts and dense data */
+  color-scheme: dark;
   --bg: #08080a;
   --surface: #101014;
   --surface-hover: #17171d;
@@ -196,7 +333,19 @@
   --chart-axis: #7a7a92;
   --chart-grid: #24242e;
   --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+  --font-numeric: var(--font-mono);
   --font-display: 'JetBrains Mono', 'Cascadia Code', monospace;
+  --node-fact: #00d9a3;
+  --node-episode: #00d9a3;
+  --node-procedure: #ffcc33;
+  --node-chunk: #7a7a92;
+  --f-conversation: #8fa3b5;
+  --f-question: #8aa4ff;
+  --f-task: #3fc3d1;
+  --f-decision: #c08be0;
+  --f-debug: #f09a5a;
+  --f-creative: #ee82bd;
+  --f-initiation: #e0b050;
 }
 
 [data-theme='report'] {
@@ -205,6 +354,7 @@
      health trend report this vocabulary generalizes. System serif faces:
      no webfont, no load cost. --soft is deliberately LIGHTER than --muted
      so a neutral pill or delta never reads weaker than its own caption. */
+  color-scheme: dark;
   --bg: #0a0c11;
   --surface: #131822;
   --surface-hover: #182030;
@@ -229,6 +379,17 @@
   --chart-axis: #8d99ae;
   --chart-grid: #212b3b;
   --font-display: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
+  --node-fact: #7c9cd0;
+  --node-episode: #4ade80;
+  --node-procedure: #fbbf24;
+  --node-chunk: #8d99ae;
+  --f-conversation: #8fa3b5;
+  --f-question: #8aa4ff;
+  --f-task: #3fc3d1;
+  --f-decision: #c08be0;
+  --f-debug: #f09a5a;
+  --f-creative: #ee82bd;
+  --f-initiation: #e0b050;
 }
 
 html {
