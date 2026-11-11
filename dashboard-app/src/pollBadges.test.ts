@@ -39,7 +39,14 @@ describe('one badge speaks for every store', () => {
     for (const s of stores) expect(badge, s).toContain(`$${s}`);
     const fn = markupOf(src).match(/<Button\b[^>]*onclick=\{(?:\(\) => void )?(\w+)(?:\(\))?\}[^>]*>\s*\{[^}]*'Refresh'/)?.[1] ?? '';
     expect(fn, 'a named page Refresh').not.toBe('');
-    const body = scriptBlocks(src).match(new RegExp(String.raw`(?:function ${fn}\(\)|const ${fn} = \(\) =>)[\s\S]*?(?:\n  \}|;\n)`))?.[0] ?? '';
+    // The whole function, whatever the checkout's line endings: a declaration or a block-bodied arrow runs to the
+    // closing brace at its own indent; an expression-bodied arrow is its one line.
+    const script = scriptBlocks(src).replace(/\r\n/g, '\n');
+    const body =
+      script.match(new RegExp(String.raw`\n( *)(?:function ${fn}\(\)|const ${fn} = \(\) =>) *\{[\s\S]*?\n\1\}`))?.[0] ??
+      script.match(new RegExp(String.raw`const ${fn} = \(\) =>[^\n]*`))?.[0] ??
+      '';
+    expect(body, `the body of ${fn}`).not.toBe('');
     for (const s of stores) expect(body, `${fn} refreshes ${s}`).toContain(`${s}.refresh()`);
   });
 });
