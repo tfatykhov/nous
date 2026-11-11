@@ -21,12 +21,13 @@
 
   const OUTCOME_ORDER = ['success', 'partial', 'failure', 'pending'] as const;
   // Chart colours are tokens that Chart.svelte resolves against the canvas's ground (dark: the old literals). The
-  // outcomes take the Overview's decision-outcome palette; the violet marks --series-0, not the accent, whose paper value
-  // is the question frame's blue.
+  // outcomes take the Overview's decision-outcome palette (success and failure apart from partial and from each other
+  // under red-green colour blindness); the violet marks --series-0, not the accent, whose paper value is the question
+  // frame's blue.
   const OUTCOME_COLORS: Record<string, string> = {
-    success: 'var(--green)',
+    success: 'var(--oc-success)',
     partial: 'var(--yellow)',
-    failure: 'var(--red)',
+    failure: 'var(--err-text)',
     pending: 'var(--series-7)',
   };
   const MARK = 'var(--series-0)';

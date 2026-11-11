@@ -208,7 +208,7 @@ describe('Scoring: chart colours are tokens', () => {
     const doughnut = chart('doughnut');
     expect(doughnut.data.datasets[0].borderColor).toBe(PAPER['--surface']);
     expect(doughnut.data.datasets[0].backgroundColor).toEqual(
-      ['--green', '--series-1', '--series-4', '--err-text', '--signal-self-corrected', '--series-7'].map((t) => PAPER[t]));
+      ['--oc-success', '--series-1', '--series-4', '--err-text', '--signal-self-corrected', '--series-7'].map((t) => PAPER[t]));
   });
 });
 

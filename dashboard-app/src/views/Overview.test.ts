@@ -249,7 +249,7 @@ describe('Overview', () => {
     });
     const root = document.documentElement.style;
     const set = (vars: Record<string, string>) => Object.entries(vars).forEach(([k, v]) => root.setProperty(k, v));
-    set({ '--green': '#34d399', '--yellow': '#fbbf24', '--red': '#f87171', '--series-7': '#6b6b8a', '--series-0': '#7c6af7' });
+    set({ '--oc-success': '#34d399', '--yellow': '#fbbf24', '--err-text': '#f87171', '--series-7': '#6b6b8a', '--series-0': '#7c6af7' });
     replies['/status'] = () => ({ body: { ...STATUS, dashboard: { ...STATUS.dashboard,
       distributions: { fact_categories: {}, decision_outcomes: { success: 3, pending: 1 }, edge_relations: { supports: 2 } } } } });
     try {
@@ -260,13 +260,13 @@ describe('Overview', () => {
       expect(outcomes().backgroundColor).toEqual(['#34d399', '#6b6b8a']);
       expect(bars().backgroundColor).toBe('rgba(124, 106, 247, 0.5)');
       expect(bars().borderColor).toBe('#7c6af7');
-      set({ '--green': '#2f8a4e', '--series-7': '#8a5a2b', '--series-0': '#274455' });
+      set({ '--oc-success': '#3f8772', '--series-7': '#8a5a2b', '--series-0': '#274455' });
       setLook('paper');
-      await waitFor(() => expect(outcomes().backgroundColor).toEqual(['#2f8a4e', '#8a5a2b']));
+      await waitFor(() => expect(outcomes().backgroundColor).toEqual(['#3f8772', '#8a5a2b']));
       expect(bars().borderColor).toBe('#274455');
     } finally {
       setLook('dark');
-      for (const k of ['--green', '--yellow', '--red', '--series-7', '--series-0']) root.removeProperty(k);
+      for (const k of ['--oc-success', '--yellow', '--err-text', '--series-7', '--series-0']) root.removeProperty(k);
     }
   });
 

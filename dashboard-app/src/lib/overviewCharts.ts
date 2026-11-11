@@ -5,11 +5,12 @@
 // paper value is the question frame's blue).
 // PR 2's `lib/chartColors.ts` is meant to generalise this for every chart.
 
-/** Outcome label (lower case) to its token; any other label is pending's. */
+/** Outcome label (lower case) to its token; any other label is pending's. Success and failure are marks that stay apart
+ * from partial and from each other under red-green colour blindness (redesign PR 4 review I2); Decisions shares the map. */
 const OUTCOME_TOKENS: Record<string, string> = {
-  success: '--green',
+  success: '--oc-success',
   partial: '--yellow',
-  failure: '--red',
+  failure: '--err-text',
   pending: '--series-7',
 };
 

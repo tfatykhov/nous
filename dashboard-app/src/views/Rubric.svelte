@@ -64,7 +64,7 @@
   // Reworked is --err-text (dark: the old red), apart from corrected's orange under deuteranopia; self-corrected a mark
   // of its own (--series-3 was 4.2 from praised's blue under protanopia); an unknown type --series-7 (dark: #6b6b8a).
   const SIGNAL_TOKENS: Record<string, string> = {
-    completed: '--green',
+    completed: '--oc-success',
     praised: '--series-1',
     corrected: '--series-4',
     reworked: '--err-text',

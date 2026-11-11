@@ -187,7 +187,7 @@ describe('Decisions: chart colours are tokens', () => {
     expect(curve.data.datasets[0].borderColor).toBe(PAPER['--series-0']); // not the accent: on paper that is the question frame's blue
     expect(rgb(curve.data.datasets[1].borderColor)).toBe(rgb(PAPER['--muted']));
     expect(hist.data.datasets[0].borderColor).toBe(PAPER['--series-0']);
-    expect(cat.data.datasets.map((d) => d.backgroundColor)).toEqual(['--green', '--yellow', '--red', '--series-7'].map((t) => PAPER[t]));
+    expect(cat.data.datasets.map((d) => d.backgroundColor)).toEqual(['--oc-success', '--yellow', '--err-text', '--series-7'].map((t) => PAPER[t]));
     expect(configs[6].data.datasets[0].borderColor).toBe(PAPER['--series-3']);
     expect(curve.options.scales.x.ticks.color).toBe(PAPER['--chart-text']);
   });
@@ -204,7 +204,7 @@ describe('Decisions: chart colours are tokens', () => {
     const after = updates.slice(before);
     expect(after).toHaveLength(7); // one redraw per chart
     expect(after[0].data.datasets[0].borderColor).toBe(PAPER['--series-0']);
-    expect(after[2].data.datasets[0].backgroundColor).toBe(PAPER['--green']);
+    expect(after[2].data.datasets[0].backgroundColor).toBe(PAPER['--oc-success']);
   });
 });
 

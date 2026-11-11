@@ -254,6 +254,11 @@ const PR4: Record<string, [string, string]> = {
   // Scoring's self-corrected signal mark. Dark: the old #a78bfa. Paper: a soft mauve, 13.4 (OKLab) from every other signal
   // colour under all three visions; --series-3 (#a8408f) was 4.2 from praised's blue under protanopia.
   '--signal-self-corrected': ['#a78bfa', '#b87ab3'],
+  // Review I2: the success mark of Decisions' outcomes, the Overview's doughnut and Scoring's completed signal. Dark: the
+  // old #34d399. Paper: a green 9.8 or more from partial, failure (--err-text) and the other signal marks under all three
+  // visions, where --green was 4.6 from partial under protanopia and 5.9 from failure under deuteranopia. It sits close
+  // to --green on purpose (the same meaning), so it is kept out of the categorical-against-status checks.
+  '--oc-success': ['#34d399', '#3f8772'],
 };
 for (const [k, [dark]] of Object.entries(PR4)) NEW_DARK[k] = dark;
 
@@ -929,12 +934,12 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
   // Each screen task adds the sets its charts draw. An open pair is held at its present floor, named, with the cue that
   // tells its marks apart besides colour; it is listed in the PR 4 report for the owner.
   const MARK_SETS: Record<string, string[]> = {
-    // Decisions' outcome by category and by stakes (stacked bars): the Overview's decision-outcome palette, so a hue
-    // means the same outcome on both screens.
-    'decisions outcomes': ['--green', '--yellow', '--red', '--series-7'],
+    // Decisions' outcome by category and by stakes (stacked bars), and the Overview's outcome doughnut: one palette, so a
+    // hue means the same outcome on both screens. Review I2: success --oc-success, failure --err-text (both dark-exact).
+    'decisions outcomes': ['--oc-success', '--yellow', '--err-text', '--series-7'],
     // Scoring's signal doughnut and stacked trend. Reworked is drawn in --err-text (dark: the old #f87171), which keeps it
     // apart from corrected's orange under deuteranopia (5.2 with --red); --series-7 is an unknown signal type's slice.
-    'scoring signals': ['--green', '--series-1', '--series-4', '--err-text', '--signal-self-corrected', '--series-7'],
+    'scoring signals': ['--oc-success', '--series-1', '--series-4', '--err-text', '--signal-self-corrected', '--series-7'],
     // Scoring's weight evolution: one line per dimension. Each line also has a dash of its own (Rubric.test.ts).
     'scoring dimensions': ['--series-0', '--series-2', '--series-1', '--series-4', '--series-5', '--series-3', '--series-6', '--series-8', '--series-9'],
     // Autonomy's "who was there" shares and their legend. (Its outcome bars each sit beside their label, so they are
@@ -944,13 +949,6 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     'guards rules': ['--series-1', '--series-4', '--series-9'],
   };
   const OPEN_PAIRS: Record<string, number> = {
-    // The status hues under red-green colour blindness; the stack order (success at the base) and the legend name them.
-    '--green|--yellow': 4.5, // protan 4.6
-    '--green|--red': 5.5, // deutan 5.9
-    '--yellow|--red': 5, // deutan 5.1
-    // Scoring's signals: the doughnut's and the trend's legend name each, and the trend stacks in a fixed order.
-    '--green|--series-4': 5.5, // protan 5.9
-    '--green|--err-text': 6.5, // deutan 6.6
     '--series-1|--series-3': 4, // protan 4.2 (Scoring's dimensions 3 and 6)
     // Scoring's dimensions: told apart by the dash as well as the hue.
     '--series-0|--series-8': 7, // 7.2 normal
