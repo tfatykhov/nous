@@ -160,6 +160,22 @@ describe('tiles, cards, tables and the timeline take the paper shape through tok
   });
 });
 
+describe('closer to the prototype phones (source contract, review M10, M11)', () => {
+  it("a ScoreCard's corners match its neighbours: max(--radius-md, 12px), 12px in every theme", () => {
+    const rule = style('ScoreCardView').split('.score {')[1].split('}')[0];
+    expect(rule).toContain('border-radius: max(var(--radius-md), 12px)');
+    expect(rule).not.toContain('border-radius: var(--radius)');
+  });
+
+  it('a StatRow tile is --stat-min wide at least', () => {
+    expect(style('StatRowView')).toContain('grid-template-columns: repeat(auto-fit, minmax(var(--stat-min), 1fr))');
+  });
+
+  it('a section heading is --section-ink', () => {
+    expect(style('SectionView')).toMatch(/\n  h3 \{[^}]*color: var\(--section-ink\)/);
+  });
+});
+
 describe('a video frame waits on --video-bg (source contract, review M5)', () => {
   it('the <video> and the embed frame read --video-bg', () => {
     expect(style('VideoView')).toMatch(/\.vid,\s*\.frame \{[^}]*background: var\(--video-bg\)/);

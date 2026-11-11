@@ -147,7 +147,7 @@
     font-size: 0.82rem;
     text-transform: var(--label-transform);
     letter-spacing: var(--label-tracking);
-    color: var(--muted);
+    color: var(--section-ink);
   }
   .chip {
     font-size: 0.7rem;

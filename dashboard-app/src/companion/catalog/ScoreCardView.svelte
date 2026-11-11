@@ -122,7 +122,9 @@
     background: var(--nested-bg);
     border: var(--card-border);
     border-top: 3px solid var(--ink);
-    border-radius: var(--radius);
+    /* 12px in every theme (a legacy --radius-md is 8px): on paper --radius is
+       18px, larger than the tiles beside it, and the top rule curled like a lid */
+    border-radius: max(var(--radius-md), 12px);
   }
   .head {
     display: flex;

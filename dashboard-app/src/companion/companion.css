@@ -104,6 +104,8 @@
   --settled-ink: var(--muted);
   --field-focus: 2px solid var(--accent); /* a focused text field's ring */
   --video-bg: var(--accent); /* a video frame before its first frame: the prototype's navy */
+  --stat-min: 96px; /* three evidence tiles fit a phone */
+  --section-ink: var(--text); /* section headings in ink, as the prototype's */
   --chart-axis: #56687a;
   --chart-grid: #e3e9ec;
 
@@ -243,6 +245,8 @@
   --settled-ink: var(--text);
   --field-focus: 0 solid transparent;
   --video-bg: var(--surface-hover);
+  --stat-min: 120px;
+  --section-ink: var(--muted);
   --tile-rule-width: 3px;
   --badge-tint: 0%;
   --badge-edge: 100%;
