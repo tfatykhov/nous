@@ -4,6 +4,10 @@ import Health from './Health.svelte';
 import Overview from './Overview.svelte';
 import Observability from './Observability.svelte';
 import { initRouter } from '../lib/router';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { setLook } from '../lib/look';
+import { PAPER_SEL, parseBlocks, styleBlocks } from '../lib/testing/css';
 
 // F108 Phase 2 T12: Graph Health, Density, Admission, Memory write health and the growth charts become one
 // "Memory health" screen with three tabs (Graph, Writes, Growth). Every value below is made up.
@@ -333,5 +337,109 @@ describe('Observability after the growth move', () => {
     render(Observability);
     expect(await screen.findByText('No drift trend data available yet')).toBeTruthy();
     expect(h2('Fact Growth Rate (7d)')).toHaveLength(0);
+  });
+});
+
+// ── PR 2: the charts read tokens (Chart.js resolves them against the ground the chart sits in) ────────────────────
+
+const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
+type Ds = Record<string, any>;
+let configs: { type: string; data: { datasets: Ds[] }; options: Record<string, any> }[] = [];
+/** Replaces the no-op Chart stub with one that records every chart's resolved config. */
+function recordCharts() {
+  configs = [];
+  vi.stubGlobal('Chart', class {
+    data = {}; options = {};
+    constructor(_el: unknown, cfg: (typeof configs)[number]) { configs.push(cfg); }
+    destroy() {}
+    update() {}
+  });
+}
+const dataset = (label: string) => {
+  const ds = configs.flatMap((c) => c.data.datasets).find((d) => d.label === label);
+  if (!ds) throw new Error(`no dataset ${label}`);
+  return ds;
+};
+const chartOf = (label: string) => configs.find((c) => c.data.datasets.some((d) => d.label === label))!;
+/** Compare colours by channels and alpha: the old literals were written with and without spaces. */
+const norm = (c: unknown): any => (Array.isArray(c) ? c.map(norm) : String(c).replace(/\s+/g, ''));
+/** A paper <main> with the paper ground's tokens set on it (jsdom has no stylesheet), as App renders it. */
+function paperMain(): HTMLElement {
+  const main = document.createElement('main');
+  main.setAttribute('data-ground', 'paper');
+  for (const [k, v] of Object.entries(PAPER)) if (k.startsWith('--')) main.style.setProperty(k, v);
+  document.body.appendChild(main);
+  return main;
+}
+
+describe('Memory health charts read tokens', () => {
+  afterEach(() => { setLook('dark'); document.body.innerHTML = ''; });
+
+  it('dark: the Graph tab\'s datasets are today\'s colours exactly', async () => {
+    start('#/health/graph');
+    recordCharts();
+    render(Health);
+    await waitFor(() => expect(configs.length).toBe(5));
+    const want: [string, string, unknown, unknown][] = [
+      ['Density', 'borderColor', '#7c6af7', 'rgba(124, 106, 247, 0.1)'],
+      ['Edges Created', 'borderColor', '#7c6af7', 'rgba(124, 106, 247, 0.5)'],
+      ['Node Count', 'borderColor', '#60a5fa', 'rgba(96, 165, 250, 0.5)'],
+      ['Orphan Nodes', 'borderColor', '#f87171', 'rgba(248, 113, 113, 0.1)'],
+      ['Auto-linked', 'borderColor', '#34d399', 'rgba(52, 211, 153, 0.5)'],
+      ['Manual', 'borderColor', '#7c6af7', 'rgba(124, 106, 247, 0.5)'],
+    ];
+    for (const [label, , border, fill] of want) {
+      expect(norm(dataset(label).borderColor), label).toBe(norm(border));
+      expect(norm(dataset(label).backgroundColor), label).toBe(norm(fill));
+    }
+    // Density 1.4 and 1.5: "watch" (amber); orphans' points in red.
+    expect(dataset('Density').pointBackgroundColor).toEqual(['#fbbf24', '#fbbf24']);
+    expect(dataset('Orphan Nodes').pointBackgroundColor).toBe('#f87171');
+    // Chart.js's own defaults stay on a dark ground: nothing is added to the options.
+    expect(chartOf('Node Count').options.color).toBeUndefined();
+  });
+
+  it('dark: the Growth tab\'s datasets and the doughnut are today\'s colours exactly', async () => {
+    start('#/health/growth');
+    recordCharts();
+    render(Health);
+    await waitFor(() => expect(configs.length).toBe(3));
+    expect(norm(['Facts', 'Episodes', 'Decisions'].map((l) => dataset(l).borderColor))).toEqual(['#60a5fa', '#34d399', '#a78bfa']);
+    expect(norm(['Facts', 'Episodes', 'Decisions'].map((l) => dataset(l).backgroundColor))).toEqual(
+      norm(['rgba(96,165,250,0.10)', 'rgba(52,211,153,0.10)', 'rgba(167,139,250,0.10)']).map((c: string) => c.replace('0.10)', '0.1)')),
+    );
+    expect(norm(dataset('Fact delta').borderColor)).toBe('#60a5fa');
+    expect(norm(dataset('Fact delta').backgroundColor)).toBe('rgba(96,165,250,0.1)');
+    const doughnut = configs.find((c) => c.type === 'doughnut')!;
+    expect(doughnut.data.datasets[0].backgroundColor).toEqual(['#60a5fa', '#34d399']); // two categories in the fixture
+  });
+
+  it('paper: the same datasets take the paper series and status colours, and the axes the chart text and grid', async () => {
+    setLook('paper');
+    const target = paperMain();
+    start('#/health/graph');
+    recordCharts();
+    render(Health, { target });
+    await waitFor(() => expect(configs.length).toBe(5));
+    expect(dataset('Node Count').borderColor).toBe(PAPER['--series-1']);
+    expect(dataset('Auto-linked').borderColor).toBe(PAPER['--series-2']);
+    expect(dataset('Density').borderColor).toBe(PAPER['--accent']);
+    expect(dataset('Orphan Nodes').borderColor).toBe(PAPER['--red']);
+    expect(dataset('Density').pointBackgroundColor).toEqual([PAPER['--yellow'], PAPER['--yellow']]);
+    const o = chartOf('Node Count').options;
+    expect(o.scales.x.ticks.color).toBe(PAPER['--chart-text']);
+    expect(o.scales.y.grid.color).toBe(PAPER['--chart-grid']);
+    for (const c of configs) expect(JSON.stringify(c.data), c.type).not.toMatch(/7c6af7|124, 106, 247/);
+  });
+
+  it('the orphan-rate badges keep their classes and read the badge tokens', async () => {
+    start('#/health/graph');
+    const { container } = render(Health);
+    await waitFor(() => expect(container.querySelectorAll('.badge')).not.toHaveLength(0));
+    const classes = Array.from(container.querySelectorAll('.badge')).map((b) => [...b.classList].find((c) => c.startsWith('badge-')));
+    expect(classes).toEqual(['badge-warn', 'badge-warn', 'badge-good']); // 22.2% overall, then facts 30.0%, decisions 12.5%
+    const css = styleBlocks(readFileSync(join(__dirname, 'health', 'GraphTab.svelte'), 'utf-8'));
+    expect(css).toMatch(/\.badge-good\s*\{\s*background:\s*var\(--badge-good-bg\);\s*color:\s*var\(--ok-text\);/);
+    expect(css).toMatch(/\.badge-bad\s*\{\s*background:\s*var\(--badge-bad-bg\);\s*color:\s*var\(--err-text\);/);
   });
 });
