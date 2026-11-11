@@ -204,7 +204,8 @@
         <Chart type="line" data={chartData(d)} options={chartOptions} height="220px" />
       </div>
       <p class="small muted">A gap is a day the record cannot vouch for. The offered-tool rule and the context policy write only when they flag a call, so before a rule's first flag a quiet day may be clean or may predate the rule; a rule that is off records nothing. Claim checks write every turn.</p>
-      <table class="sr-only">
+      <!-- A table cannot be 1 px wide: the box hides it, the table stays readable to a screen reader. -->
+      <div class="sr-only"><table>
         <caption>Flags per day, per rule</caption>
         <thead><tr><th>Day</th><th>Offered-tool rule</th><th>Context policy</th><th>Claims without evidence</th></tr></thead>
         <tbody>
@@ -217,7 +218,7 @@
             </tr>
           {/each}
         </tbody>
-      </table>
+      </table></div>
     {/if}
   </section>
 

@@ -202,6 +202,27 @@ describe('Scoring: chart colours are tokens', () => {
   });
 });
 
+describe('Scoring at phone width (the screenshot round)', () => {
+  it('every chart\'s legend uses 12 px swatches, so its rows leave the 200 px phone chart a readable plot', async () => {
+    render(Rubric);
+    await waitFor(() => expect(configs).toHaveLength(4));
+    for (const c of configs) expect(c.options.plugins.legend.labels?.boxWidth, c.type).toBe(12);
+  });
+
+  it('the signal trend labels its days month-day (as Decisions does), so a phone does not tilt them over the plot', async () => {
+    render(Rubric);
+    await waitFor(() => expect(configs).toHaveLength(4));
+    expect(chart('line', 'Completed').data.labels).toEqual(['11-01']);
+  });
+
+  it('source contract: under 768 px the radar cell does not reserve 320 px around a 200 px chart', () => {
+    const css = styleBlocks(readFileSync(join(__dirname, 'Rubric.svelte'), 'utf-8'));
+    expect(css).toMatch(/@media \(max-width: 768px\) \{[^@]*\.radar-wrap \{\s*min-height: 0;/);
+    // ... and after the 320 px rule, which would win otherwise (same specificity).
+    expect(css.search(/\.radar-wrap \{\s*min-height: 0;/)).toBeGreaterThan(css.search(/\.radar-wrap \{\s*min-height: 320px;/));
+  });
+});
+
 describe('Scoring: the paper look\'s structure (source contracts)', () => {
   const rules = parseBlocks(styleBlocks(readFileSync(join(__dirname, 'Rubric.svelte'), 'utf-8')));
 

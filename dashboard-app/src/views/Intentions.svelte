@@ -247,6 +247,8 @@
   .tree, .tree ul { list-style: none; padding-left: 1.25rem; }
   .row { display: flex; gap: 0.5rem; align-items: baseline; flex-wrap: wrap; }
   .intent { overflow-wrap: anywhere; }
+  /* A row header holds a root's intent: wrapping anywhere keeps an unbroken one from pushing the numbers out of view. */
+  tbody th { overflow-wrap: anywhere; min-width: 8rem; }
   .pill { border: 1px solid var(--border); border-radius: 999px; padding: 0 0.5rem; font-size: 0.6875rem; }
   details.root { border-top: 1px solid var(--border); padding: 0.5rem 0; }
   details.root > summary { cursor: pointer; display: flex; gap: 0.5rem; align-items: baseline; flex-wrap: wrap; }

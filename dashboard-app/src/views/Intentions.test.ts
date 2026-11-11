@@ -124,6 +124,10 @@ describe('Intentions: the paper look (source contracts)', () => {
     expect(rules.get('.intent')).toMatchObject({ 'overflow-wrap': 'anywhere' });
   });
 
+  it('a row header (a root\'s id and intent) wraps anywhere, so an unbroken intent never pushes the numbers out of view', () => {
+    expect(rules.get('tbody th')).toMatchObject({ 'overflow-wrap': 'anywhere', 'min-width': '8rem' });
+  });
+
   it('the notice reads the notice tokens; panels and tiles the card tokens; labels the label tokens', () => {
     expect(rules.get('.notice')).toMatchObject({
       background: 'var(--notice-bg)', border: '1px solid var(--notice-border)', 'border-radius': 'var(--card-radius-sm)',

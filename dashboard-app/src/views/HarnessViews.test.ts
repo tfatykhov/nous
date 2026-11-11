@@ -455,6 +455,14 @@ describe('harness dashboard views', () => {
     }
   });
 
+  it('Guards: the screen-reader table sits in a visually hidden box (a table cannot be 1 px wide, so it widened the page at 390 px)', async () => {
+    const { container } = render(Harness);
+    await waitFor(() => expect(container.querySelector('caption')?.textContent).toBe('Flags per day, per rule'));
+    const table = [...container.querySelectorAll('table')].find((t) => t.caption?.textContent === 'Flags per day, per rule')!;
+    expect(table.classList.contains('sr-only')).toBe(false);
+    expect(table.parentElement?.matches('div.sr-only')).toBe(true);
+  });
+
   it('Guards: Refresh is the shared outline pill button', async () => {
     render(Harness);
     expect((await screen.findByRole('button', { name: 'Refresh' })).getAttribute('data-slot')).toBe('button');

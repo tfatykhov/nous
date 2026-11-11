@@ -69,6 +69,10 @@
     reworked: '--err-text',
     self_corrected: '--series-3',
   };
+  // 12 px swatches: at phone width (Chart.svelte's 200 px) the default 40 px ones took the legend to three or four rows
+  // and left the trend and the weight lines a plot about 20 px tall.
+  const LEGEND_LABELS = { boxWidth: 12 };
+
   const signalToken = (t: string) => (Object.hasOwn(SIGNAL_TOKENS, t) ? SIGNAL_TOKENS[t] : '--series-7');
 
   function radarChartData(d: RubricData) {
@@ -126,7 +130,7 @@
       return { label, data, borderColor: `var(${token})`, backgroundColor: tint(token, 0.15), fill };
     };
     return {
-      labels: trend.map((x) => x.date),
+      labels: trend.map((x) => x.date.slice(5)), // month-day: a phone keeps the labels level
       datasets: [
         line('Completed', trend.map((x) => x.completed), 'completed', 'origin'),
         line('Praised', trend.map((x) => x.praised), 'praised', '-1'),
@@ -254,7 +258,7 @@
                   pointLabels: { font: { size: 12 } },
                 },
               },
-              plugins: { legend: { display: true, position: 'bottom' } },
+              plugins: { legend: { display: true, position: 'bottom', labels: LEGEND_LABELS } },
             }}
           />
         </div>
@@ -280,7 +284,7 @@
             type="doughnut"
             data={signalDoughnutData(d.outcome_signals.by_type)}
             height="280px"
-            options={{ plugins: { legend: { position: 'bottom' } } }}
+            options={{ plugins: { legend: { position: 'bottom', labels: LEGEND_LABELS } } }}
           />
         </div>
       </section>
@@ -295,7 +299,7 @@
           data={signalTrendData(d)}
           height="280px"
           options={{
-            plugins: { legend: { display: true, position: 'bottom' } },
+            plugins: { legend: { display: true, position: 'bottom', labels: LEGEND_LABELS } },
             scales: {
               x: { title: { display: true, text: 'Date' } },
               y: { title: { display: true, text: 'Signals' }, beginAtZero: true, stacked: true },
@@ -362,7 +366,7 @@
           data={weightHistoryData(d)}
           height="280px"
           options={{
-            plugins: { legend: { display: true, position: 'bottom' } },
+            plugins: { legend: { display: true, position: 'bottom', labels: LEGEND_LABELS } },
             scales: {
               x: { title: { display: true, text: 'Version' } },
               y: { title: { display: true, text: 'Weight' }, min: 0, max: 0.5 },
@@ -598,6 +602,13 @@
 
   .radar-wrap {
     min-height: 320px;
+  }
+
+  /* After the rule above: the chart is 200 px tall here (Chart.svelte), so the cell does not reserve 320 px around it. */
+  @media (max-width: 768px) {
+    .radar-wrap {
+      min-height: 0;
+    }
   }
 
   .dim-cards {
