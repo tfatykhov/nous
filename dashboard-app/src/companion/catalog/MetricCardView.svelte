@@ -104,9 +104,9 @@
     gap: 0.15rem;
     min-width: 0;
     padding: 0.8rem 0.9rem 0.55rem;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
+    background: var(--nested-bg);
+    border: var(--card-border);
+    border-radius: var(--radius-md);
   }
   .top {
     display: flex;

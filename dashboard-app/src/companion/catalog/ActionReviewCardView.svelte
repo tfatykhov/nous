@@ -57,10 +57,10 @@
 
 <style>
   .review {
-    border: 1px solid var(--border);
+    background: var(--nested-bg);
+    border: var(--card-border);
     border-left: 3px solid var(--accent);
-    border-radius: var(--radius-sm);
-    background: var(--surface);
+    border-radius: var(--radius-md);
     padding: 0.9rem 1rem;
     display: flex;
     flex-direction: column;
@@ -76,7 +76,8 @@
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--accent);
-    border: 1px solid var(--accent);
+    border: 1px solid color-mix(in srgb, currentColor var(--badge-edge), transparent);
+    background: color-mix(in srgb, currentColor var(--badge-tint), transparent);
     border-radius: 999px;
     padding: 0.1rem 0.5rem;
   }

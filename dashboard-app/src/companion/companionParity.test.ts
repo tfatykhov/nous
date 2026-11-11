@@ -83,7 +83,7 @@ const COMPANION_OWN: Record<string, string> = {
   '--accent-glow': "the selected option row's wash (the prototype's checked .opt)",
   '--select-border': "the selected option row's outline",
   '--locked': 'a companion meaning; the task-frame teal',
-  '--soft': 'the neutral pill and delta ink; the dashboard has no such token',
+  '--soft': 'the neutral pill and delta ink (#4f5f6f, a step darker than --muted so the pill reads 4.5 on its tint over a nested tile); the dashboard has no such token',
   '--scrim': 'the modal backdrop and the BarChart negative hatching',
   '--font-display': 'an alias of the UI face that themes may swap for a serif',
   '--font-numeric': 'an alias of the mono face for figures (F096)',
@@ -101,6 +101,12 @@ const COMPANION_OWN: Record<string, string> = {
   '--tablist-pad': 'the tab track inset',
   '--tablist-radius': 'the tab track and segment rounding; square in a legacy theme',
   '--tab-underline': "the legacy active tab's underline; none on paper",
+  '--tile-rule-width': "a stat tile's tone rule: none on paper",
+  '--badge-tint': "a coloured badge's tint on paper (the dashboard's badges are tinted pills too)",
+  '--badge-edge': "a coloured badge's outline: none on paper",
+  '--tl-dot': "a timeline entry's ringed dot (the prototype .tl)",
+  '--tl-dot-ring': "the dot's ring: the navy accent",
+  '--meter-track': "the confidence meter's track",
 };
 
 describe('the companion paper default and the dashboard paper ground share their values', () => {

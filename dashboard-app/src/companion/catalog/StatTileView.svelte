@@ -45,16 +45,16 @@
     gap: 0.15rem;
     padding: 0.7rem 0.85rem;
     min-width: 0;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--border);
-    border-radius: var(--radius-sm);
+    background: var(--nested-bg);
+    border: var(--card-border);
+    border-left: var(--tile-rule-width) solid var(--border);
+    border-radius: var(--radius-md);
   }
   .label {
     color: var(--muted);
     font-size: 0.78rem;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
   }
   .value {
     font-size: 1.4rem;

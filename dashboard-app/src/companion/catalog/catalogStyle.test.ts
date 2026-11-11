@@ -94,8 +94,52 @@ describe('containers, inputs and media take the paper shape through tokens (sour
   });
 
   it('the modal is a card: --radius, --card-border, --card-shadow over the --scrim backdrop', () => {
+    // (T6 adds its siblings below)
     const css = style('ModalView');
     expect(css).toMatch(/dialog \{[^}]*border: var\(--card-border\);[^}]*border-radius: var\(--radius\);[^}]*box-shadow: var\(--card-shadow\)/);
     expect(css).toMatch(/dialog::backdrop \{[^}]*background: var\(--scrim\)/);
+  });
+});
+
+describe('tiles, cards, tables and the timeline take the paper shape through tokens (source contract, PR 6 T6)', () => {
+  it('a stat tile is a soft tile; its tone rule is --tile-rule-width wide (none on paper, 3px in a legacy theme)', () => {
+    const css = style('StatTileView');
+    expect(css).toMatch(/\.tile \{[^}]*background: var\(--nested-bg\);[^}]*border: var\(--card-border\);[^}]*border-left: var\(--tile-rule-width\) solid var\(--border\);[^}]*border-radius: var\(--radius-md\)/);
+    expect(css).toMatch(/\.label \{[^}]*text-transform: var\(--label-transform\);[^}]*letter-spacing: var\(--label-tracking\)/);
+  });
+
+  it('metric, score, decision, approval and review cards sit on --nested-bg with --card-border', () => {
+    for (const [name, cls] of [
+      ['MetricCardView', 'metric'],
+      ['ScoreCardView', 'score'],
+      ['DecisionCardView', 'card'],
+      ['ApprovalPanelView', 'panel'],
+      ['ActionReviewCardView', 'review'],
+    ]) {
+      expect(style(name), name).toMatch(new RegExp(`\\.${cls} \\{[^}]*background: var\\(--nested-bg\\);[^}]*border: var\\(--card-border\\)`));
+    }
+  });
+
+  it('coloured badges are tinted pills on paper and outlined in a legacy theme (--badge-tint, --badge-edge)', () => {
+    const tint = /background: color-mix\(in srgb, currentColor var\(--badge-tint\), transparent\)/;
+    const edge = /border(?:-color)?: (?:1px solid )?color-mix\(in srgb, currentColor var\(--badge-edge\), transparent\)/;
+    for (const name of ['ApprovalPanelView', 'ActionReviewCardView', 'DecisionCardView']) {
+      expect(style(name), name).toMatch(tint);
+      expect(style(name), name).toMatch(edge);
+    }
+  });
+
+  it('footer controls are pills with the control fill and outline', () => {
+    expect(style('AppFooterView')).toMatch(/\.ctl \{[^}]*background: var\(--ctl-bg\);[^}]*border: 1px solid var\(--ctl-border\);[^}]*border-radius: var\(--ctl-radius\)/);
+  });
+
+  it('the timeline marks each entry with a ringed dot on paper (--tl-dot, --tl-dot-ring), drawn, not a glyph', () => {
+    const css = style('TimelineView');
+    expect(css).toMatch(/li::before \{[^}]*content: '';[^}]*width: var\(--tl-dot\);[^}]*height: var\(--tl-dot\);[^}]*border: var\(--tl-dot-ring\)/);
+    expect(css).toMatch(/li\.flag::before \{[^}]*border-color: var\(--warn\)/);
+  });
+
+  it('the confidence meter track is --meter-track (a hairline on white, the old soft fill in a legacy theme)', () => {
+    expect(style('ConfidenceMeterView')).toMatch(/\.track \{[^}]*background: var\(--meter-track\)/);
   });
 });

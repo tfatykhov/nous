@@ -42,7 +42,10 @@
   --warn: #8a5a0e;
   --crit: #b02a22;
   --locked: #0b6e7a;
-  --soft: #56687a; /* the neutral ink: never lighter than --muted */
+  /* the neutral ink (a neutral pill, delta, chip value): never weaker than
+     --muted, and 4.5:1 on its own 13-14% tint over a nested tile (the
+     muted #56687a reads 4.48 there) */
+  --soft: #4f5f6f;
   /* --font-display defaults to the UI font; themes may swap in a serif. */
   --font-display: var(--font-ui);
   /* F096 §4.5 — every FIGURE renders in this face with tabular-nums. The
@@ -99,6 +102,12 @@
   --tab-active-bg: var(--surface);
   --tab-active-shadow: 0 1px 3px rgba(18, 48, 79, 0.12);
   --tab-underline: transparent;
+  --tile-rule-width: 0; /* a stat tile's tone rule: none (its value carries the tone) */
+  --badge-tint: 13%; /* a coloured badge: a tinted pill ... */
+  --badge-edge: 0%; /* ... with no outline */
+  --tl-dot: 10px; /* a timeline entry's ringed dot on the rail */
+  --tl-dot-ring: 2px solid var(--accent);
+  --meter-track: var(--border); /* the confidence meter's track: a hairline grey on white */
 
   /* Chrome: the Atlantic-blue bar. It sits outside every surface, never under
      a [data-theme], so no theme declares these (themes.test.ts lists them). */
@@ -174,6 +183,12 @@
   --tab-active-bg: transparent;
   --tab-active-shadow: 0 0 #0000;
   --tab-underline: var(--accent);
+  --tile-rule-width: 3px;
+  --badge-tint: 0%;
+  --badge-edge: 100%;
+  --tl-dot: 0px;
+  --tl-dot-ring: 0 solid transparent;
+  --meter-track: var(--surface-hover);
   font-variant-numeric: normal;
 }
 

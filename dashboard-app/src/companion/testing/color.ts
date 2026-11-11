@@ -36,6 +36,18 @@ export function over(fg: string, bg: string): string {
   return toHex([r * a + br * (1 - a), g * a + bg2 * (1 - a), b * a + bb * (1 - a)]);
 }
 
+/** `color-mix(in srgb, a p%, b)` painted over an opaque backdrop. `b` may be `transparent`: the mix is then `a` at
+ * alpha p (premultiplied interpolation), which is what the companion's tinted pills and badges use. */
+export function mix(a: string, pct: number, b: string, backdrop: string): string {
+  const p = pct / 100;
+  const ca = parseColor(a);
+  const cb = b === 'transparent' ? [0, 0, 0, 0] : parseColor(b);
+  const alpha = ca[3] * p + cb[3] * (1 - p);
+  if (alpha === 0) return over(backdrop, backdrop);
+  const ch = [0, 1, 2].map((i) => (ca[i] * ca[3] * p + cb[i] * cb[3] * (1 - p)) / alpha);
+  return over(`rgba(${ch[0]}, ${ch[1]}, ${ch[2]}, ${alpha})`, backdrop);
+}
+
 function linear(v: number): number {
   const s = v / 255;
   return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;

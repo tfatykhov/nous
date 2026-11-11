@@ -3,7 +3,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { parseThemes } from './testing/themes';
-import { contrast, hexLuminance, over } from './testing/color';
+import { contrast, hexLuminance, mix, over } from './testing/color';
 
 // The companion's theme tokens, read from companion.css as the browser resolves them (testing/themes.ts), against
 // the tables of origin/main (9e4953f3). The five named themes and the old default look must not move.
@@ -259,6 +259,45 @@ const KNOWN_BELOW: Record<string, number> = {
 };
 
 const THEMES = ['nous-default', 'nous-dark', 'alpine-dusk', 'harbor', 'paper', 'signal', 'report'];
+
+/** Tone pills below 4.5 on origin/main (the legacy themes' own palettes, recorded, not fixed; a legacy theme's
+ * nested tile is its --surface, so both grounds are listed). */
+const PILL_BELOW: Record<string, number> = {
+  'alpine-dusk|--soft|13%|--nested-bg': 3.85,
+  'alpine-dusk|--soft|13%|--surface': 3.85,
+  'alpine-dusk|--soft|14%|--nested-bg': 3.8,
+  'alpine-dusk|--soft|14%|--surface': 3.8,
+  'alpine-dusk|--crit|13%|--nested-bg': 3.86,
+  'alpine-dusk|--crit|13%|--surface': 3.86,
+  'alpine-dusk|--crit|14%|--nested-bg': 3.84,
+  'alpine-dusk|--crit|14%|--surface': 3.84,
+  'harbor|--soft|13%|--nested-bg': 4.1,
+  'harbor|--soft|13%|--surface': 4.1,
+  'harbor|--soft|14%|--nested-bg': 4,
+  'harbor|--soft|14%|--surface': 4,
+  'harbor|--crit|14%|--nested-bg': 4.44,
+  'harbor|--crit|14%|--surface': 4.44,
+  'paper|--soft|13%|--nested-bg': 4.49,
+  'paper|--soft|13%|--surface': 4.49,
+  'paper|--soft|14%|--nested-bg': 4.44,
+  'paper|--soft|14%|--surface': 4.44,
+  'paper|--ok|13%|--nested-bg': 3.25,
+  'paper|--ok|13%|--surface': 3.25,
+  'paper|--ok|14%|--nested-bg': 3.22,
+  'paper|--ok|14%|--surface': 3.22,
+  'paper|--warn|13%|--nested-bg': 2.84,
+  'paper|--warn|13%|--surface': 2.84,
+  'paper|--warn|14%|--nested-bg': 2.81,
+  'paper|--warn|14%|--surface': 2.81,
+  'paper|--crit|13%|--nested-bg': 4.06,
+  'paper|--crit|13%|--surface': 4.06,
+  'paper|--crit|14%|--nested-bg': 4.03,
+  'paper|--crit|14%|--surface': 4.03,
+  'signal|--soft|13%|--nested-bg': 3.96,
+  'signal|--soft|13%|--surface': 3.96,
+  'signal|--soft|14%|--nested-bg': 3.91,
+  'signal|--soft|14%|--surface': 3.91,
+};
 /** The old default under its new name, and the five named themes: the looks that must not move. */
 const LEGACY = ['nous-dark', 'alpine-dusk', 'harbor', 'paper', 'signal', 'report'];
 /** Each legacy look's origin table: nous-dark is the old :root. */
@@ -318,6 +357,12 @@ function newLegacy(id: string): Record<string, string> {
     '--tab-active-bg': 'transparent',
     '--tab-active-shadow': '0 0 #0000',
     '--tab-underline': o['--accent'],
+    '--tile-rule-width': '3px',
+    '--badge-tint': '0%',
+    '--badge-edge': '100%',
+    '--tl-dot': '0px',
+    '--tl-dot-ring': '0 solid transparent',
+    '--meter-track': o['--surface-hover'],
   };
 }
 const JETBRAINS = "'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace";
@@ -420,7 +465,7 @@ const PAPER_ROOT: Record<string, string> = {
   '--warn': '#8a5a0e',
   '--crit': '#b02a22',
   '--locked': '#0b6e7a',
-  '--soft': '#56687a',
+  '--soft': '#4f5f6f',
   '--on-accent': '#ffffff',
   '--scrim': 'rgba(20, 32, 43, 0.45)',
   '--node-decision': '#802c66',
@@ -454,6 +499,12 @@ const PAPER_ROOT: Record<string, string> = {
   '--tab-active-bg': '#ffffff',
   '--tab-active-shadow': '0 1px 3px rgba(18, 48, 79, 0.12)',
   '--tab-underline': 'transparent',
+  '--tile-rule-width': '0',
+  '--badge-tint': '13%',
+  '--badge-edge': '0%',
+  '--tl-dot': '10px',
+  '--tl-dot-ring': '2px solid #12304f',
+  '--meter-track': '#e3e9ec',
 };
 
 describe('the default is the paper world', () => {
@@ -569,6 +620,43 @@ describe('contrast per theme (WCAG: text 4.5, marks 3)', () => {
     expect(contrast(r['--field-border'], r['--nested-bg'])).toBeGreaterThanOrEqual(3);
     // the chosen option's navy outline against the plain rows' hairline
     expect(contrast(r['--select-border'], r['--surface'])).toBeGreaterThanOrEqual(3);
+  });
+
+  it('the neutral ink is never weaker than the muted caption beside it, in every theme', () => {
+    for (const id of THEMES) {
+      const t = SHEET.resolved(id);
+      const [soft, muted] = [contrast(t['--soft'], t['--surface']), contrast(t['--muted'], t['--surface'])];
+      expect(soft, id).toBeGreaterThanOrEqual(muted - 0.005);
+    }
+  });
+
+  it('a tone pill (MetricCard 13%, ScoreCard 14% tint of its ink) reads at 4.5 on its tint, on a nested tile and on the card', () => {
+    const fails: string[] = [];
+    for (const id of THEMES) {
+      const t = SHEET.resolved(id);
+      for (const ink of ['--soft', '--ok', '--warn', '--crit']) {
+        for (const pct of [13, 14]) {
+          for (const ground of ['--nested-bg', '--surface']) {
+            const key = `${id}|${ink}|${pct}%|${ground}`;
+            const r = contrast(t[ink], mix(t[ink], pct, 'transparent', t[ground]));
+            if (key in PILL_BELOW) {
+              if (r >= 4.5) fails.push(`${key} now passes (${r.toFixed(2)}): remove it from PILL_BELOW`);
+              else if (r < PILL_BELOW[key]) fails.push(`${key} got worse: ${r.toFixed(2)}`);
+            } else if (r < 4.5) fails.push(`${key} ${r.toFixed(2)}`);
+          }
+        }
+      }
+    }
+    expect(fails).toEqual([]);
+  });
+
+  it('paper: a coloured badge reads at 4.5 on its --badge-tint pill over a nested tile', () => {
+    const t = SHEET.resolved('nous-default');
+    const pct = parseFloat(t['--badge-tint']);
+    expect(pct).toBeGreaterThan(0);
+    for (const ink of ['--warn', '--crit', '--ok', '--accent']) {
+      expect(contrast(t[ink], mix(t[ink], pct, 'transparent', t['--nested-bg'])), ink).toBeGreaterThanOrEqual(4.5);
+    }
   });
 
   it('every recorded shortfall names a pair the matrix measures', () => {

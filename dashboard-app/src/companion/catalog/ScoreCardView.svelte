@@ -119,8 +119,8 @@
     gap: 0.3rem;
     min-width: 0;
     padding: 0.95rem 1rem 0.75rem;
-    background: var(--surface);
-    border: 1px solid var(--border);
+    background: var(--nested-bg);
+    border: var(--card-border);
     border-top: 3px solid var(--ink);
     border-radius: var(--radius);
   }

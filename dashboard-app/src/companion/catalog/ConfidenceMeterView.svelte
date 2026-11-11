@@ -44,7 +44,7 @@
   .track {
     flex: 1;
     height: 6px;
-    background: var(--surface-hover);
+    background: var(--meter-track);
     border-radius: 3px;
     overflow: hidden;
   }

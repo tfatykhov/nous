@@ -82,6 +82,7 @@
     padding: 0;
   }
   li {
+    position: relative;
     display: flex;
     gap: 0.7rem;
     padding: 0.35rem 0;
@@ -90,6 +91,23 @@
   }
   li.flag {
     border-left-color: var(--warn);
+  }
+  /* Paper: a ringed dot on the rail per entry, centred on the 2px rule (a
+     drawn mark, not a glyph). A legacy theme holds a zero-size dot. */
+  li::before {
+    content: '';
+    position: absolute;
+    left: calc(-1px - var(--tl-dot) / 2);
+    top: 0.62rem;
+    width: var(--tl-dot);
+    height: var(--tl-dot);
+    box-sizing: border-box;
+    border-radius: 50%;
+    background: var(--surface);
+    border: var(--tl-dot-ring);
+  }
+  li.flag::before {
+    border-color: var(--warn);
   }
   .at {
     color: var(--muted);

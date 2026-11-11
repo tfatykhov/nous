@@ -272,9 +272,9 @@
     font: inherit;
     font-size: 0.85rem;
     color: var(--text);
-    background: var(--surface-hover);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
+    background: var(--ctl-bg);
+    border: 1px solid var(--ctl-border);
+    border-radius: var(--ctl-radius);
     padding: 0.3rem 0.7rem;
     cursor: pointer;
     transition: var(--transition);
