@@ -52,6 +52,10 @@ const REJECTED: unknown[] = [
   '/dashboard/v2/%zz/x.mp4',
   // An encoded slash hides a traversal inside one segment.
   '/dashboard/v2/a%2F..%2F..%2Fa2ui%2Fx.mp4',
+  // `\` is a path separator in an http(s) URL: a browser resolves this to
+  // /a2ui/x.mp4, raw or percent-encoded.
+  '/dashboard/v2/..\\..\\a2ui\\x.mp4',
+  '/dashboard/v2/a%5C..%5C..%5Cx.mp4',
 ];
 
 describe('classifyVideoUrl', () => {
@@ -111,7 +115,7 @@ describe('isSafePosterUrl', () => {
     expect(isSafePosterUrl(raw)).toBe(true);
   });
 
-  it.each(['http://a/b.jpg', 'javascript:1', 'data:image/png;base64,AA', '/dashboard/v2/../x'])(
+  it.each(['http://a/b.jpg', 'javascript:1', 'data:image/png;base64,AA', '/dashboard/v2/../x', '/dashboard/v2/..\\x'])(
     '%s is not safe',
     (raw) => {
       expect(isSafePosterUrl(raw)).toBe(false);
