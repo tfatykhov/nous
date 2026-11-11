@@ -76,25 +76,34 @@ describe('no colour literal in a component style', () => {
 
 // Code review M10: a CSS colour name is a literal too (`border: 1px solid white`, `color-mix(…, black)`). It is read in
 // the value of a declaration only, so a selector, a property name (`white-space`) and a token name (`--gray-1`) are not.
-const NAMED = /(?<![\w-])(?:white|black|red|green|blue|gr[ae]y|silver|orange|yellow|purple|pink|navy|teal|maroon|olive|gold|brown)(?![\w-])/;
-/** The values of the declarations on a style line: `prop: value` ended by `;`, `}` or the line's end (not a selector's `{`). */
-const declValues = (line: string) => [...line.matchAll(/(?:^|[{;])\s*-?-?[a-zA-Z][\w-]*\s*:\s*([^;{}]*)(?=[;}]|$)/g)].map((m) => m[1]);
-const namedHits = (lines: string[]) => lines.filter((l) => declValues(l).some((v) => NAMED.test(v))).map((l) => l.trim());
+// CSS colour names are case-insensitive (`Navy`), and a value can run over several lines (a wrapped shadow list).
+const NAMED = /(?<![\w-])(?:white|black|red|green|blue|gr[ae]y|silver|orange|yellow|purple|pink|navy|teal|maroon|olive|gold|brown)(?![\w-])/i;
+/** The values of a stylesheet's declarations. The text is cut at `{`, `}` and `;`: a piece ended by `;` or `}` (or the
+ * text's end) is a declaration, `prop: value` over as many lines as it takes; a piece ended by `{` is a selector. */
+function declValues(css: string): string[] {
+  return [...css.matchAll(/([^{};]*)([{};]|$)/g)]
+    .filter((m) => m[2] !== '{')
+    .map((m) => /^\s*-?-?[a-zA-Z][\w-]*\s*:([\s\S]*)$/.exec(m[1])?.[1].trim())
+    .filter((v): v is string => v !== undefined && v !== '');
+}
+const namedHits = (css: string) => declValues(css).filter((v) => NAMED.test(v));
 
 describe('no named colour in a component style', () => {
   it('the pattern catches a colour name in a value, and spares property names, tokens, keywords and selectors', () => {
     for (const bad of ['  border: 1px solid white;', '  background: color-mix(in srgb, var(--accent) 80%, black);', '.x { color: grey; }',
-      '  outline-color: navy;', '  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px blue']) {
-      expect(namedHits([bad]), bad).toEqual([bad.trim()]);
+      '  outline-color: Navy;', '  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px blue',
+      '.x {\n  box-shadow:\n    0 0 0 2px var(--surface),\n    0 0 0 4px white;\n}']) {
+      expect(namedHits(bad), bad).toHaveLength(1);
     }
     for (const ok of ['  white-space: nowrap;', '  background: transparent;', '  fill: currentColor;', '  color: var(--gray-1);',
-      '  border-color: var(--red);', '  --tone: var(--green);', '.chip.t-red:hover {', '  animation: pulse-red 1s;', '  grid-area: main;']) {
-      expect(namedHits([ok]), ok).toEqual([]);
+      '  border-color: var(--red);', '  --tone: var(--green);', '.chip.t-red:hover {', '.a:not(.white),\n.b {\n  color: var(--text);\n}',
+      '@media (max-width: 40rem) {\n  .x { animation: pulse-red 1s; }\n}', '  grid-area: main;']) {
+      expect(namedHits(ok), ok).toEqual([]);
     }
   });
 
   it.each(COMPONENTS)('%s', (file) => {
-    expect(namedHits(styleBlocks(read(file)).split('\n'))).toEqual([]);
+    expect(namedHits(styleBlocks(read(file)))).toEqual([]);
   });
 });
 
