@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { markupOf, scriptBlocks, styleBlocks } from './lib/testing/css';
 import { sourceFiles } from './lib/testing/sources';
@@ -40,12 +40,12 @@ const ALLOWED: Allowance[] = [
     reason: 'a resolved token written as rgba() at an alpha for the canvas: the channels are computed, not a colour',
   },
   {
-    files: /^lib\/ui\/(?:card|dialog|drawer|table)\//, guard: 'tailwind colour', allow: UNMAPPED,
-    reason: "shadcn's primitives as generated: their foreground, muted and popover classes map to no token and emit no " +
-      'colour (BottomSheet gives the drawer its surface; card, dialog and table are not rendered by the dashboard)',
+    files: /^lib\/ui\/drawer\//, guard: 'tailwind colour', allow: UNMAPPED,
+    reason: "shadcn's drawer as generated: its foreground, muted and popover classes map to no token and emit no " +
+      'colour (BottomSheet gives the drawer its surface)',
   },
   {
-    files: /^lib\/ui\/(?:dialog|drawer)\/(?:dialog|drawer)-overlay\.svelte$/, guard: 'tailwind colour', allow: /(?<![\w-])bg-black\/10(?![\w-])/g,
+    files: /^lib\/ui\/drawer\/drawer-overlay\.svelte$/, guard: 'tailwind colour', allow: /(?<![\w-])bg-black\/10(?![\w-])/g,
     reason: "the overlay's scrim, black at 10%: a shade of the page under it, not a palette colour",
   },
 ];
@@ -261,7 +261,7 @@ describe('no markup colours text with a mark map or a status fill', () => {
 
 describe('the walk and the allowances', () => {
   it('reads every component and module the walk finds (lib/testing/sources.ts)', () => {
-    expect(COMPONENTS.length).toBeGreaterThan(60);
+    expect(COMPONENTS.length).toBeGreaterThan(50); // 58 since code review M6 deleted 26 unused components
     expect(SOURCES.length).toBeGreaterThan(COMPONENTS.length);
   });
 
@@ -272,10 +272,25 @@ describe('the walk and the allowances', () => {
     expect(hits('lib/chartColors.ts', 'script literal', ["  '--accent': '#2346c8',", "  '--x': '#2346c8', c = '#fff',"], LITERAL_SCRIPT))
       .toEqual(["'--x': '#2346c8', c = '#fff',"]);
     expect(fallback.files.test('lib/overviewCharts.ts')).toBe(false);
-    expect(hits('lib/ui/dialog/dialog-description.svelte', 'tailwind colour', ['class="text-muted-foreground text-red-500"'], TAILWIND_COLOUR))
+    expect(hits('lib/ui/drawer/drawer-description.svelte', 'tailwind colour', ['class="text-muted-foreground text-red-500"'], TAILWIND_COLOUR))
       .toEqual(['class="text-muted-foreground text-red-500"']);
     expect(hits('views/Overview.svelte', 'tailwind colour', ['class="bg-popover"'], TAILWIND_COLOUR)).toEqual(['class="bg-popover"']);
     expect(unmapped.files.test('lib/ui/drawer/drawer-content.svelte')).toBe(true);
+  });
+
+  // Code review M6: the card, table and dialog primitives and Placeholder were rendered by nothing, and the unmapped-class
+  // allowance covered them, so the first view to use one would have shown ink where it meant muted. They are deleted, and
+  // the allowances name the drawer, the one generated primitive the dashboard renders (BottomSheet).
+  it('the unused primitives are gone, and the allowances name the drawer only', () => {
+    for (const f of ['lib/ui/card/index.ts', 'lib/ui/table/index.ts', 'lib/ui/dialog/index.ts', 'lib/ui/Placeholder.svelte']) {
+      expect(existsSync(join(SRC, f)), f).toBe(false);
+    }
+    const [, , unmapped, scrim] = ALLOWED;
+    for (const f of ['lib/ui/dialog/dialog-content.svelte', 'lib/ui/card/card-description.svelte', 'lib/ui/table/table-caption.svelte']) {
+      expect(unmapped.files.test(f), f).toBe(false);
+    }
+    expect(scrim.files.test('lib/ui/drawer/drawer-overlay.svelte')).toBe(true);
+    for (const f of ['lib/ui/dialog/dialog-overlay.svelte', 'lib/ui/drawer/drawer-content.svelte']) expect(scrim.files.test(f), f).toBe(false);
   });
 
   // Code review M2: the TOKEN_FALLBACK allowance goes by the shape of a line, and chartColors.test.ts proves the table

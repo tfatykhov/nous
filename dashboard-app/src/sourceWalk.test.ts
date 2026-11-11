@@ -9,7 +9,7 @@ describe('the source walk', () => {
   const files = sourceFiles();
 
   it('reads the shell, the views, the shared components, the charts and the plain modules', () => {
-    expect(files.length).toBeGreaterThan(100);
+    expect(files.length).toBeGreaterThan(75); // 83 since code review M6 deleted the 29 unused card, table, dialog and Placeholder files
     for (const f of ['App.svelte', 'main.ts', 'views/Overview.svelte', 'views/work/Trace.svelte', 'views/health/GraphTab.svelte',
       'lib/ui/Nav.svelte', 'lib/ui/drawer/drawer-content.svelte', 'lib/ui/badge/index.ts', 'lib/viz/Dag.svelte',
       'lib/chartColors.ts', 'lib/overviewCharts.ts', 'lib/status.ts']) {

@@ -69,7 +69,7 @@ describe('every token a script names exists', () => {
 
   it('finds the names (and would catch a typo)', () => {
     expect(named("const a = 'var(--sereis-1)'; tint('--green', 0.1); c('--gv-select'); `var(--gv-${t})`")).toEqual(['--sereis-1', '--green', '--gv-select']);
-    expect(scripts.length).toBeGreaterThan(100);
+    expect(scripts.length).toBeGreaterThan(75); // 83 since code review M6 deleted the 29 unused card, table, dialog and Placeholder files
     expect(scripts.map(([f]) => f)).toEqual(expect.arrayContaining(['lib/overviewCharts.ts', 'views/Overview.svelte']));
   });
 

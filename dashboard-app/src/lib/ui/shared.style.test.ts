@@ -169,17 +169,10 @@ describe('the variants the screens use', () => {
 });
 
 describe('shadcn pieces read tokens, no colour literals', () => {
-  it.each(['card/card.svelte', 'button/button.svelte', 'badge/badge.svelte'])('%s', (file) => {
+  // Code review M6: the card, table and dialog primitives were rendered by nothing and are deleted.
+  it.each(['button/button.svelte', 'badge/badge.svelte'])('%s', (file) => {
     const src = readFileSync(join(__dirname, file), 'utf-8');
     expect(src).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/);
-  });
-
-  it('Card is a rounded card with the ground\'s shadow and border, no ring', () => {
-    const src = readFileSync(join(__dirname, 'card/card.svelte'), 'utf-8');
-    expect(src).toContain('rounded-[var(--card-radius)]');
-    expect(src).toContain('shadow-[var(--card-shadow)]');
-    expect(src).toContain('[border:var(--card-border)]');
-    expect(src).not.toMatch(/\bring-1\b/);
   });
 });
 
