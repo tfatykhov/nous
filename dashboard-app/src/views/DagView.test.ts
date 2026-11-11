@@ -59,7 +59,7 @@ function install() {
 }
 
 // d3 is a CDN global: a fake that records every attr and style call, with the datum of the node it was made for.
-type Call = { tag: string; kind: 'attr' | 'style'; k: string; v: unknown; id?: string };
+type Call = { tag: string; kind: 'attr' | 'style' | 'text'; k: string; v: unknown; id?: string };
 let calls: Call[] = [];
 function sel(tag: string, datum?: { id: string }, data?: unknown[]): any {
   const s: any = {
@@ -67,7 +67,8 @@ function sel(tag: string, datum?: { id: string }, data?: unknown[]): any {
     append: (t: string) => sel(t, datum, s._data),
     attr: (k: string, v: unknown) => { calls.push({ tag, kind: 'attr', k, v: typeof v === 'function' ? '[fn]' : v, id: datum?.id }); return s; },
     style: (k: string, v: unknown) => { calls.push({ tag, kind: 'style', k, v, id: datum?.id }); return s; },
-    text: () => s, on: () => s, enter: () => s, remove: () => s, empty: () => true,
+    text: (v: unknown) => { calls.push({ tag, kind: 'text', k: 'text', v, id: datum?.id }); return s; },
+    on: () => s, enter: () => s, remove: () => s, empty: () => true,
     select: () => sel('?'), selectAll: () => s,
     data: (list: unknown[]) => { s._data = list; return s; },
     each: (fn: (this: unknown, d: unknown) => void) => { for (const d of s._data ?? []) fn.call({ __datum: d }, d); return s; },
@@ -148,6 +149,18 @@ describe('Workflows: the DAG graph', () => {
     expect(colours.length).toBeGreaterThan(EVERY.length * 2);
     expect(colours.filter((c) => c.kind === 'attr')).toEqual([]); // var() and color-mix only through style
     expect(colours.filter((c) => String(c.v).includes('#'))).toEqual([]);
+  });
+});
+
+describe('Workflows: no invented glyph in the graph', () => {
+  it('an approval node is a plain rounded square named by its label below: no question mark (ruling 4)', () => {
+    const nodes = [{ id: 'a1', name: 'approve-send', status: 'awaiting_input', node_type: 'approval', wave: 0 }];
+    render(Dag, { props: { nodes, edges: [] } });
+    const mine = calls.filter((c) => c.id === 'a1');
+    // (The graph draws on mount and again from its effect: compare the set of texts.)
+    expect([...new Set(mine.filter((c) => c.kind === 'text').map((c) => c.v))]).toEqual(['approve-send']);
+    expect(mine.some((c) => c.tag === 'rect' && c.k === 'stroke' && c.v === 'var(--st-awaiting-input)')).toBe(true);
+    expect(readFileSync(join(__dirname, '..', 'lib', 'viz', 'Dag.svelte'), 'utf-8')).not.toMatch(/\.text\('\?'\)/);
   });
 });
 

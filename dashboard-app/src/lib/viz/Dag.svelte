@@ -208,8 +208,8 @@
           .attr('stroke-width', 2)
           .style('animation', anim);
       } else if (d.node_type === 'approval') {
-        // Rounded square with a "?" — an approval asks a person; its status is
-        // still also shown as text in the node sheet (colour is never alone).
+        // Rounded square, named by its label below like every node (no symbol inside: owner rule). Its type and
+        // status are words in the node list and the sheet, so colour and shape are never alone.
         g.append('rect')
           .attr('x', -r).attr('y', -r).attr('width', r * 2).attr('height', r * 2)
           .attr('rx', 6)
@@ -217,14 +217,6 @@
           .style('stroke', color)
           .attr('stroke-width', 2)
           .style('animation', anim);
-        g.append('text')
-          .attr('text-anchor', 'middle')
-          .attr('dy', 5)
-          .style('fill', color)
-          .attr('font-size', '15px')
-          .attr('font-weight', '700')
-          .attr('aria-hidden', 'true')
-          .text('?');
       } else if (d.node_type === 'callback') {
         // Triangle
         g.append('polygon')
