@@ -69,6 +69,8 @@ const OWN = new Set(SCANS.flatMap(([, s]) => [...s.own]));
 const CSS_SCAN = scan(CSS_READS, false); // app.css declares the tokens it reads: none of them is "own"
 const READS = new Set([...SCANS.flatMap(([, s]) => [...s.reads]), ...CSS_SCAN.reads]);
 const FAMILY_READS = new Set(SCANS.flatMap(([, s]) => [...s.families]));
+/** The tokens a scan reads that no stylesheet declares (`scan` has already removed what the file sets itself). */
+const undeclared = (s: Scan) => [...s.reads].filter((t) => !DECLARED.has(t));
 
 const dash = (s: string) => s.replaceAll('_', '-');
 const graphSrc = FILES.find(([f]) => f === 'views/GraphView.svelte')![1];
@@ -114,11 +116,19 @@ describe('token use, both ways', () => {
 
   it('(a) catches a read of a token declared nowhere: the var(--fg) of Retrieval, unnoticed from #596 to PR 7', () => {
     const old = scan('<style>.xsummary strong { color: var(--fg); font-variant-numeric: tabular-nums; }</style>');
-    expect([...old.reads].filter((t) => !DECLARED.has(t) && !OWN.has(t))).toEqual(['--fg']);
+    expect(undeclared(old)).toEqual(['--fg']);
   });
 
-  it('(a) every token a source reads is declared (at :root, .rail, @theme) or set by a component itself', () => {
-    const missing = SCANS.flatMap(([f, s]) => [...s.reads].filter((t) => !DECLARED.has(t) && !OWN.has(t)).map((t) => `${f}: ${t}`));
+  // Code review M3: a component's own properties count for that file only. DayTimeline and Trace set --fc; a new view
+  // that reads var(--fc) without setting it inherits whatever an ancestor left, the --fg failure under another name.
+  it('(a) catches a read of a property another component sets but this one does not', () => {
+    expect(OWN.has('--fc')).toBe(true);
+    expect(undeclared(scan('<style>.x { color: var(--fc); }</style>'))).toEqual(['--fc']);
+    expect(undeclared(scan('<i style:--fc={c}></i><style>.x { color: var(--fc); }</style>'))).toEqual([]);
+  });
+
+  it('(a) every token a source reads is declared (at :root, .rail, @theme) or set by that component itself', () => {
+    const missing = SCANS.flatMap(([f, s]) => undeclared(s).map((t) => `${f}: ${t}`));
     missing.push(...[...CSS_SCAN.reads].filter((t) => !DECLARED.has(t)).map((t) => `app.css: ${t}`));
     expect(missing).toEqual([]);
   });
