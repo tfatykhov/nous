@@ -137,8 +137,10 @@
 
   // ── Needs you ─────────────────────────────────────────────────────────
 
-  // Open = new (not triaged yet) or acknowledged (triaged, not resolved): both are "in front of the owner" in the
-  // finding store's own words. Suppressed, auto-closed and resolved ones are not. High urgency first, then newest.
+  // Open = new or acknowledged, not resolved: both are "in front of the owner" in the finding store's own words.
+  // The heartbeat acknowledges a finding itself when it routes it to triage, so the two states are not the owner's
+  // and both get the one badge, Open. Suppressed, auto-closed and resolved ones are left out. High urgency first,
+  // then the most recently seen.
   const URGENCY: Record<string, number> = { high: 0, normal: 1, low: 2 };
   const FINDINGS_SHOWN = 3;
   let openFindings = $derived(
@@ -179,7 +181,7 @@
   <section class="card sec" aria-labelledby="needs-h">
     <h2 id="needs-h">Needs you</h2>
     {#if !a}
-      <p class="muted">Loading…</p>
+      <p class="muted">{$attentionPoll.error ? "Questions and sends in doubt could not be loaded." : "Loading…"}</p>
     {:else}
       {#if a.questions_waiting > 0 || a.sends_in_doubt > 0 || openFindings.length > 0}
         <ul class="items">
@@ -205,7 +207,7 @@
           {/if}
           {#each openFindings.slice(0, FINDINGS_SHOWN) as f (f.fingerprint)}
             <li class="item">
-              <Badge variant={f.urgency === 'high' ? 'error' : 'warn'}>{f.state === 'new' ? 'Triage' : 'Open'}</Badge>
+              <Badge variant={f.urgency === 'high' ? 'error' : 'warn'}>Open</Badge>
               <a class="wrap" href={routeHref('heartbeat')}>{f.summary}</a>
               <span class="k">Heartbeat finding from {f.check_name}, {f.urgency} urgency. Last seen {fmtUtc(f.last_seen)}.</span>
             </li>
@@ -249,6 +251,9 @@
   <!-- ── Health ── -->
   <section class="card sec" aria-labelledby="health-h">
     <h2 id="health-h">Health</h2>
+    {#if !a && $attentionPoll.error}
+      <p class="muted">Guards and the ledger could not be loaded.</p>
+    {/if}
     {#if a}
       {@const h = a.harness}
       {@const guardsWatch = !h.events_persisted || ruleCount(h.offered_set) + ruleCount(h.context_policy) > 0}

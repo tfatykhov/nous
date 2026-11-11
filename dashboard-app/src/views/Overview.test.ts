@@ -122,7 +122,8 @@ describe('Overview', () => {
     const items = Array.from(card('Needs you').querySelectorAll('li.item'));
     // High urgency first, then the most recently seen.
     expect(items.map((i) => i.querySelector('a')!.textContent)).toEqual(['Finding b', 'Finding g', 'Finding a']);
-    expect(items.map((i) => i.querySelector('[data-slot="badge"]')!.textContent?.trim())).toEqual(['Open', 'Triage', 'Triage']);
+    // The heartbeat acknowledges a finding itself when it routes it to triage: one badge for both states.
+    expect(items.map((i) => i.querySelector('[data-slot="badge"]')!.textContent?.trim())).toEqual(['Open', 'Open', 'Open']);
     for (const i of items) expect(i.querySelector('a')!.getAttribute('href')).toBe('#/heartbeat');
     expect(within(card('Needs you')).getByRole('link', { name: '1 more open finding on Heartbeat' }).getAttribute('href')).toBe('#/heartbeat');
     expect(card('Needs you').textContent).not.toContain('Nothing needs you');
@@ -142,6 +143,25 @@ describe('Overview', () => {
     await waitFor(() => expect(card('Needs you').textContent).toContain('Heartbeat findings could not be loaded.'));
     expect(card('Needs you').textContent).not.toContain('Nothing needs you');
     expect(card('Needs you').textContent).toContain('No questions waiting and no sends in doubt.');
+  });
+
+  it('the attention counts failing say so in Needs you and Health, never a lasting Loading', async () => {
+    // A fresh module graph (the app-wide attention poll keeps its last data after an error), the testing library
+    // included, so both share one Svelte runtime.
+    vi.resetModules();
+    const tl = await import('@testing-library/svelte');
+    const { default: Fresh } = await import('./Overview.svelte');
+    const { attentionPoll: freshPoll } = await import('../lib/stores/attention');
+    replies['/dashboard/attention'] = () => ({ status: 404, body: { error: 'no' } });
+    await freshPoll.refresh();
+    tl.render(Fresh);
+    try {
+      await waitFor(() => expect(card('Needs you').textContent).toContain('Questions and sends in doubt could not be loaded.'));
+      expect(card('Health').textContent).toContain('Guards and the ledger could not be loaded.');
+      expect(card('Needs you').textContent).not.toContain('Loading');
+    } finally {
+      tl.cleanup();
+    }
   });
 
   it('Health: guards, the ledger, and errors today on watch when a turn failed', async () => {

@@ -74,6 +74,22 @@ describe('DayTimeline', () => {
     expect(container.querySelector('.at')!.textContent).toBe('06:00 UTC. 2 turns so far: 0 yours, 2 background; 0 errors, 1 gated.');
   });
 
+  it('a bar fades exactly when the sentence stops counting it (the same minute rule)', async () => {
+    const edge = [
+      t('on', '06:00', { started_at: '2026-11-10T06:00:30+00:00' }),   // minute 360.5: counts at 06:00
+      t('next', '06:01', { started_at: '2026-11-10T06:01:00+00:00' }), // minute 361: not yet at 06:00
+    ];
+    const { container } = render(DayTimeline, { turns: edge, now: NOW, truncated: false });
+    const range = screen.getByRole('slider', { name: 'Replay time, minutes after 00:00 UTC' }) as HTMLInputElement;
+    const faded = () => Array.from(container.querySelectorAll('svg a.later')).map((a) => a.getAttribute('href'));
+    await fireEvent.input(range, { target: { value: '360' } });
+    expect(faded()).toEqual(['#/work/s/sess-1/next']);
+    expect(container.querySelector('.at')!.textContent).toContain('1 turn so far');
+    await fireEvent.input(range, { target: { value: '361' } });
+    expect(faded()).toEqual([]);
+    expect(container.querySelector('.at')!.textContent).toContain('2 turns so far');
+  });
+
   it('keyboard: arrows step five minutes, Page keys an hour, Home and End the ends', async () => {
     const { container } = render(DayTimeline, { turns: TURNS, now: NOW, truncated: false });
     const range = screen.getByRole('slider', { name: 'Replay time, minutes after 00:00 UTC' }) as HTMLInputElement;

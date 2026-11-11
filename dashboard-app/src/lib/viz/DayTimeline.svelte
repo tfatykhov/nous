@@ -108,7 +108,7 @@
       {#each rowIds as id, i (id)}
         <text class="rowlabel" x="0" y={narrow ? TOP + i * RH + 10 : barY(i) + BAR / 2 + 4.5}>{ROWS[i].label}</text>
         {#each bars[id] as b (b.id)}
-          <a href={b.href} tabindex="-1" class:later={b.minute > minute + 1}>
+          <a href={b.href} tabindex="-1" class:later={Math.floor(b.minute) > minute}>
             <title>{b.title}</title>
             <rect class="bar {frameClass(b.frame)}" x={X0 + b.x} y={barY(i)} width={b.w} height={BAR} rx="3" />
             {#if b.status}<rect class="under {b.status}" x={X0 + b.x} y={barY(i) + BAR + 3} width={Math.max(b.w, 8)} height="3" rx="1.5" />{/if}
