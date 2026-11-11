@@ -64,6 +64,13 @@ export const DARK_FALLBACK: Record<string, string> = {
   '--cache-blue': '#3b82f6',
   '--cache-grey': '#4b5563',
   '--stack-bar': 'rgba(251, 191, 36, 0.7)',
+  '--st-success': '#10b981',
+  '--st-ledger-blocked': '#f59e0b',
+  '--st-neutral': '#6b7280',
+  '--oc-failed': '#ef4444',
+  '--oc-timeout': '#dc2626',
+  '--oc-errored': '#7c2d12',
+  '--oc-unknown': '#9ca3af',
 };
 
 /** `#rgba` / `#rrggbbaa` as `rgba(r, g, b, a)`; anything else unchanged. The production build minifies an rgba() token

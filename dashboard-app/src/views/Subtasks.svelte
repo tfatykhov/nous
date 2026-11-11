@@ -7,6 +7,7 @@
   import DataTable from '../lib/ui/DataTable.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import Chart from '../lib/viz/Chart.svelte';
+  import { tint } from '../lib/chartColors';
 
   // ── Hours selector ────────────────────────────────────────────────────────
   // The fetcher closes over `hours` by reading it each time it is called.
@@ -44,20 +45,24 @@
     return new Date(dateStr).toLocaleString();
   }
 
-  // ── Outcome colours (mirrors subtasks.js OUTCOME_COLORS) ─────────────────
-  const OUTCOME_COLORS: Record<string, string> = {
-    completed: '#10b981',
-    incomplete_blocked: '#f59e0b',
-    incomplete_no_terminal: '#ef4444',
-    validation_failed: '#ef4444',
-    timed_out: '#dc2626',
-    errored: '#7c2d12',
-    cancelled: '#6b7280',
-    unknown: '#9ca3af',
+  // ── Outcome colours (mirrors subtasks.js OUTCOME_COLORS): status and outcome tokens, which Chart resolves ──
+  const OUTCOME_TOKENS: Record<string, string> = {
+    completed: '--st-success',
+    incomplete_blocked: '--st-ledger-blocked',
+    incomplete_no_terminal: '--oc-failed',
+    validation_failed: '--oc-failed',
+    timed_out: '--oc-timeout',
+    errored: '--oc-errored',
+    cancelled: '--st-neutral',
+    unknown: '--oc-unknown',
   };
 
+  function outcomeToken(name: string): string {
+    return OUTCOME_TOKENS[name] ?? '--st-neutral';
+  }
+
   function outcomeColor(name: string): string {
-    return OUTCOME_COLORS[name] ?? '#6b7280';
+    return `var(${outcomeToken(name)})`;
   }
 
   // ── Formatters ────────────────────────────────────────────────────────────
@@ -110,7 +115,7 @@
         label: outcome,
         data: daily.map((d) => d.by_outcome[outcome] ?? 0),
         borderColor: outcomeColor(outcome),
-        backgroundColor: outcomeColor(outcome) + '33',
+        backgroundColor: tint(outcomeToken(outcome), 0.2), // the old `33` alpha suffix (51/255)
         fill: false,
         borderWidth: 2,
         pointRadius: 2,
@@ -341,6 +346,12 @@
     margin: 0 0 0.125rem;
   }
 
+  :global(html[data-look="paper"] [data-ground="paper"]) h1 {
+    font-size: 30px;
+    font-weight: 650;
+    letter-spacing: -0.022em;
+  }
+
   .subtitle {
     font-size: 0.8125rem;
     color: var(--muted);
@@ -371,7 +382,7 @@
     font-size: 0.8125rem;
     padding: 0.25rem 0.5rem;
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--ctl-radius);
     background: var(--surface);
     color: var(--text);
     cursor: pointer;
@@ -393,8 +404,9 @@
   .chart-card,
   .table-card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
     padding: 1rem;
     margin-top: 1rem;
   }
@@ -421,7 +433,7 @@
   }
 
   .status-msg.error {
-    color: var(--red, #ef4444);
+    color: var(--err-text);
   }
 
   /* ── Upcoming Schedules (from Activity) ──────────────────────── */
@@ -441,7 +453,7 @@
     font-size: 0.8125rem;
     padding: 0.25rem 0.75rem;
     border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
+    border-radius: var(--ctl-radius);
     background: var(--surface);
     color: var(--text);
     cursor: pointer;
@@ -481,7 +493,7 @@
   }
 
   .empty.error {
-    color: var(--red, #ef4444);
+    color: var(--err-text);
   }
 
   .retry-link {
