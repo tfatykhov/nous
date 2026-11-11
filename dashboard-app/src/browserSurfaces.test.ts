@@ -35,6 +35,12 @@ describe('browser surfaces', () => {
     expect(wrong).toEqual([]);
   });
 
+  // Final step A6: StaleBadge's pulse (the one loop) ran on under reduced motion, which turned off only transitions.
+  it('reduced motion turns off every transition and stops every loop (the StaleBadge pulse among them)', () => {
+    expect(read('app.css')).toMatch(/@media \(prefers-reduced-motion: reduce\) \{\s*\* \{\s*transition: none !important;\s*animation: none !important;\s*\}/);
+    expect(styleBlocks(read('lib/ui/StaleBadge.svelte'))).toMatch(/animation: pulse /);
+  });
+
   it('a select draws its own arrow from tokens, beating a view\'s background shorthand, with room for it', () => {
     const rule = APP.get(':root select:not([multiple])');
     expect(rule).toMatchObject({ appearance: 'none', 'padding-right': '2rem', 'background-repeat': 'no-repeat' });
