@@ -514,7 +514,7 @@ _TRACE_HEADER_SQL = (
     _TRACE_TURNS_CTE
     + f""",
 trace_calls AS (
-    SELECT c.turn_id, c.call_index, c.is_error, c.subtask_id, c.work_kind, c.parent_session_id,
+    SELECT c.turn_id, c.call_index, c.is_error, c.outcome, c.subtask_id, c.work_kind, c.parent_session_id,
            tt.started_at AS turn_started_at
     FROM nous_system.tool_call_log c
     JOIN trace_turns tt ON tt.id = c.turn_id
@@ -540,7 +540,7 @@ first_subtask AS (
 SELECT
     (EXISTS (SELECT 1 FROM nous_system.agent_turn_log WHERE agent_id = :agent AND session_id = :sid)
      OR EXISTS (SELECT 1 FROM nous_system.tool_call_log WHERE agent_id = :agent AND session_id = :sid)) AS known,
-    tt.turns, tt.started_at, tt.ended_at, tc.tool_calls, tc.errors,
+    tt.turns, tt.started_at, tt.ended_at, tc.tool_calls, tc.errors, tc.gated,
     coalesce(ft.work_kind, fc.work_kind) AS work_kind,
     CASE WHEN ft.work_kind IS NOT NULL THEN ft.parent_session_id ELSE fc.parent_session_id END AS parent_session_id,
     coalesce(
@@ -549,7 +549,8 @@ SELECT
         left(nullif(ft.trigger_text, ''), :trigger_chars),
         :no_title) AS title
 FROM (SELECT count(*)::int AS turns, min(started_at) AS started_at, max(last_at) AS ended_at FROM trace_turns) tt
-CROSS JOIN (SELECT count(*)::int AS tool_calls, (count(*) FILTER (WHERE is_error))::int AS errors
+CROSS JOIN (SELECT count(*)::int AS tool_calls, (count(*) FILTER (WHERE is_error))::int AS errors,
+                   (count(*) FILTER (WHERE outcome = 'gated'))::int AS gated
             FROM trace_calls) tc
 LEFT JOIN first_turn ft ON true
 LEFT JOIN first_call fc ON true
@@ -567,7 +568,7 @@ def _trace_page_sql(*, after: bool) -> str:
         _TRACE_TURNS_CTE
         + """
 SELECT p.id, p.started_at, p.has_turn_row, t.turn_number, t.ended_at, t.frame_id, t.trigger_text, t.memory_context,
-       t.critic, t.claim_check, t.reply_text, t.error, t.tool_call_count
+       t.critic, t.claim_check, t.reply_text, t.error, t.tool_call_count, t.frame_reason, t.critic_frame, t.had_error
 FROM (SELECT id, started_at, has_turn_row FROM trace_turns
       """
         + where
@@ -604,6 +605,15 @@ FROM (
 ) x
 WHERE n <= :per_turn
 ORDER BY turn_id, started_at, id
+"""
+
+# Every model call that carries one of the page's turn ids, not only the listed few: a turn's call count and its
+# input tokens. SUM skips the calls with no usage (input_total_sql is NULL for them) and is NULL when none had any.
+_TRACE_MODEL_TOTALS_SQL = f"""
+SELECT m.turn_id, count(*)::int AS n, sum({input_total_sql("m")})::bigint AS input_tokens
+FROM nous_system.model_call_log m
+WHERE m.agent_id = :agent AND m.turn_id = ANY(CAST(:turn_ids AS uuid[]))
+GROUP BY m.turn_id
 """
 
 
@@ -647,7 +657,14 @@ def _call_out(row: Mapping[str, Any], ledger_persisted: bool) -> dict[str, Any]:
     }
 
 
-def _turn_out(row: Mapping[str, Any], calls: list[dict[str, Any]], model_calls: list[dict[str, Any]]) -> dict[str, Any]:
+def _turn_out(
+    row: Mapping[str, Any],
+    calls: list[dict[str, Any]],
+    model_calls: list[dict[str, Any]],
+    totals: tuple[int, int | None] = (0, None),
+) -> dict[str, Any]:
+    """One trace turn. ``totals`` is (model calls, input tokens) over all of the turn's main-loop calls: (0, None)
+    with the model-call log off or no call recorded."""
     count = row["tool_call_count"]
     return {
         "turn_id": str(row["id"]),
@@ -662,8 +679,14 @@ def _turn_out(row: Mapping[str, Any], calls: list[dict[str, Any]], model_calls: 
         "claim_check": row["claim_check"],
         "reply": row["reply_text"],
         "error": row["error"],
+        # Migration 106: NULL on older rows and on a synthetic turn (no turn row).
+        "frame_reason": row["frame_reason"],
+        "critic_frame": row["critic_frame"],
+        "had_error": row["had_error"],
         # The runner's count when the turn row has one, else the calls listed (a synthetic turn has no count).
         "tool_call_count": count if count is not None else len(calls),
+        "input_tokens": totals[1],
+        "model_call_count": totals[0],
         "model_calls": model_calls,
         "calls": calls,
     }
@@ -714,6 +737,7 @@ async def get_trace(
     turn_ids = [row["id"] for row in rows]
     calls: dict[str, list[dict[str, Any]]] = {str(t): [] for t in turn_ids}
     model_calls: dict[str, list[dict[str, Any]]] = {str(t): [] for t in turn_ids}
+    totals: dict[str, tuple[int, int | None]] = {}
     if turn_ids:
         ids = {"agent": agent_id, "turn_ids": turn_ids}
         for row in (await session.execute(text(_TRACE_CALLS_SQL), ids)).mappings():
@@ -731,6 +755,8 @@ async def get_trace(
                         "output_tokens": row["output_tokens"],
                     }
                 )
+            for row in (await session.execute(text(_TRACE_MODEL_TOTALS_SQL), ids)).mappings():
+                totals[str(row["turn_id"])] = (row["n"], row["input_tokens"])
 
     work_kind = header["work_kind"]
     return {
@@ -746,8 +772,12 @@ async def get_trace(
             "turns": header["turns"],
             "tool_calls": header["tool_calls"],
             "errors": header["errors"],
+            "gated": header["gated"],
         },
-        "turns": [_turn_out(row, calls[str(row["id"])], model_calls[str(row["id"])]) for row in rows],
+        "turns": [
+            _turn_out(row, calls[str(row["id"])], model_calls[str(row["id"])], totals.get(str(row["id"]), (0, None)))
+            for row in rows
+        ],
         "next_after": next_after,
     }
 

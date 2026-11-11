@@ -98,6 +98,9 @@ async def insert_turn(
     claim_check: dict | None = None,
     reply: str | None = None,
     error: str | None = None,
+    frame_reason: str | None = None,
+    critic_frame: str | None = None,
+    had_error: bool | None = None,
 ) -> uuid.UUID:
     """One ``agent_turn_log`` row; returns its id (the turn id)."""
     turn_id = turn_id or uuid.uuid4()
@@ -106,11 +109,15 @@ async def insert_turn(
             text(
                 "INSERT INTO nous_system.agent_turn_log (id, agent_id, session_id, parent_session_id, turn_number, "
                 "work_kind, context_kind, trigger_text, tool_call_count, started_at, ended_at, frame_id, "
-                "memory_context, critic, claim_check, reply_text, error) "
+                "memory_context, critic, claim_check, reply_text, error, frame_reason, critic_frame, had_error) "
                 "VALUES (:id, :a, :s, :p, :n, :wk, :ck, :trig, :tcc, :start, :end, :frame, CAST(:memory AS jsonb), "
-                "CAST(:critic AS jsonb), CAST(:claim AS jsonb), :reply, :error)"
+                "CAST(:critic AS jsonb), CAST(:claim AS jsonb), :reply, :error, :frame_reason, :critic_frame, "
+                ":had_error)"
             ),
             {
+                "frame_reason": frame_reason,
+                "critic_frame": critic_frame,
+                "had_error": had_error,
                 "frame": frame_id,
                 "memory": None if memory is None else json.dumps(memory),
                 "critic": None if critic is None else json.dumps(critic),
@@ -1110,7 +1117,12 @@ async def test_trace_turn_without_turn_row_is_synthetic(client, db, agent_id, cl
         "claim_check": None,
         "reply": None,
         "error": None,
+        "frame_reason": None,
+        "critic_frame": None,
+        "had_error": None,
         "tool_call_count": 2,
+        "input_tokens": None,
+        "model_call_count": 0,
         "model_calls": [],
     }
     assert [(c["call_index"], c["tool"]) for c in turn["calls"]] == [(0, "bash"), (1, "send_email")]
@@ -1126,6 +1138,7 @@ async def test_trace_turn_without_turn_row_is_synthetic(client, db, agent_id, cl
         "turns": 1,
         "tool_calls": 2,
         "errors": 0,
+        "gated": 0,
     }
 
 
@@ -1170,6 +1183,101 @@ async def test_trace_memory_critic_claim_check_pass_through(client, db, agent_id
     assert first["calls"] == [] and first["has_turn_row"] is True
     assert (second["memory"], second["critic"], second["claim_check"], second["reply"]) == (None, None, None, None)
     assert second["tool_call_count"] == 0  # no stored count: the calls listed
+
+
+@pytest.mark.postgres_only
+async def test_trace_turn_carries_frame_reason_critic_frame_and_had_error(client, db, agent_id, cleanup):
+    base = _hour_ago()
+    full = await insert_turn(
+        db,
+        agent_id,
+        "sess-FR",
+        started_at=base,
+        frame_id="question",
+        frame_reason="referent",
+        critic_frame="question",
+        had_error=True,
+    )
+    # A row older than migration 106: the three columns NULL.
+    old = await insert_turn(db, agent_id, "sess-FR", started_at=base + timedelta(minutes=1), turn_number=2)
+    ghost = uuid.uuid4()  # calls only, no turn row
+    await insert_call(db, agent_id, ghost, 0, session_id="sess-FR", started_at=base + timedelta(minutes=2))
+
+    turns = (await get_json(client, trace_path("sess-FR")))["turns"]
+    assert [t["turn_id"] for t in turns] == [str(full), str(old), str(ghost)]
+    first, second, synthetic = turns
+    assert (first["frame_reason"], first["critic_frame"], first["had_error"]) == ("referent", "question", True)
+    assert (second["frame_reason"], second["critic_frame"], second["had_error"]) == (None, None, None)
+    assert (synthetic["frame_reason"], synthetic["critic_frame"], synthetic["had_error"]) == (None, None, None)
+    assert synthetic["input_tokens"] is None
+
+
+@pytest.mark.postgres_only
+async def test_trace_input_tokens_sums_every_main_loop_call_past_the_cap(db, agent_id, cleanup):
+    base = _hour_ago()
+    busy = await insert_turn(db, agent_id, "sess-TK", started_at=base)
+    partial = await insert_turn(db, agent_id, "sess-TK", started_at=base + timedelta(minutes=1), turn_number=2)
+    bare = await insert_turn(db, agent_id, "sess-TK", started_at=base + timedelta(minutes=2), turn_number=3)
+    quiet = await insert_turn(db, agent_id, "sess-TK", started_at=base + timedelta(minutes=3), turn_number=4)
+    no_usage = {"input_uncached": None, "cache_read": None}
+    # 22 calls of 100 uncached + 50 read: more than the 20 the trace lists.
+    for i in range(22):
+        await insert_model_call(db, agent_id, busy, session_id="sess-TK", started_at=base + timedelta(seconds=i))
+    # One call with usage and one without: the one without adds nothing.
+    await insert_model_call(db, agent_id, partial, session_id="sess-TK", started_at=base + timedelta(minutes=1))
+    await insert_model_call(
+        db,
+        agent_id,
+        partial,
+        session_id="sess-TK",
+        status="error",
+        started_at=base + timedelta(minutes=1, seconds=1),
+        **no_usage,
+    )
+    # A turn whose only call recorded no usage: no tokens at all, not 0.
+    await insert_model_call(
+        db, agent_id, bare, session_id="sess-TK", status="error", started_at=base + timedelta(minutes=2), **no_usage
+    )
+    # A background call of the session carries no turn id.
+    await insert_model_call(db, agent_id, None, session_id="sess-TK", purpose="critic")
+    other = _agent()
+    try:
+        # Another agent's call under my turn id is not counted.
+        await insert_model_call(db, other, busy, session_id="sess-TK", purpose="theirs")
+        on = make_app(db, _settings(agent_id, tool_call_log_enabled=True, model_call_log_enabled=True))
+        async with AsyncClient(transport=ASGITransport(app=on), base_url="http://test") as c:
+            body_on = await get_json(c, trace_path("sess-TK"))
+        off = make_app(db, _settings(agent_id, tool_call_log_enabled=True, model_call_log_enabled=False))
+        async with AsyncClient(transport=ASGITransport(app=off), base_url="http://test") as c:
+            body_off = await get_json(c, trace_path("sess-TK"))
+    finally:
+        await delete_agent_rows(db, other)
+
+    assert [t["turn_id"] for t in body_on["turns"]] == [str(busy), str(partial), str(bare), str(quiet)]
+    first = body_on["turns"][0]
+    assert len(first["model_calls"]) == 20
+    assert (first["model_call_count"], first["input_tokens"]) == (22, 22 * 150)
+    assert [(t["model_call_count"], t["input_tokens"]) for t in body_on["turns"][1:]] == [
+        (2, 150),
+        (1, None),
+        (0, None),
+    ]
+    assert [(t["model_call_count"], t["input_tokens"]) for t in body_off["turns"]] == [(0, None)] * 4
+
+
+@pytest.mark.postgres_only
+async def test_trace_session_gated_counts_gated_outcomes(client, db, agent_id, cleanup):
+    base = _hour_ago()
+    turn = await insert_turn(db, agent_id, "sess-GT", started_at=base)
+    await insert_call(db, agent_id, turn, 0, session_id="sess-GT", outcome="gated", started_at=base)
+    await insert_call(db, agent_id, turn, 1, session_id="sess-GT", outcome="gated", started_at=base)
+    await insert_call(db, agent_id, turn, 2, session_id="sess-GT", outcome="refused", is_error=True, started_at=base)
+    await insert_call(db, agent_id, turn, 3, session_id="sess-GT", outcome="ran", started_at=base)
+    await insert_turn(db, agent_id, "sess-NC", started_at=base)  # a session with no calls
+
+    session = (await get_json(client, trace_path("sess-GT")))["session"]
+    assert (session["tool_calls"], session["errors"], session["gated"]) == (4, 1, 2)
+    assert (await get_json(client, trace_path("sess-NC")))["session"]["gated"] == 0
 
 
 @pytest.mark.postgres_only
@@ -1435,6 +1543,7 @@ async def test_trace_session_header(client, db, agent_id, cleanup):
         "turns": 3,
         "tool_calls": 1,
         "errors": 0,
+        "gated": 0,
     }
 
 
