@@ -9,7 +9,7 @@ from __future__ import annotations
 import contextlib
 import json
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1798,6 +1798,35 @@ async def test_today_model_figures_follow_the_model_log_flag(db, agent_id, clean
         await delete_agent_rows(db, other)
     assert (on["model_calls"], on["input_tokens"], on["cache_read_tokens"]) == (7, 180, 70)
     assert (off["model_calls"], off["input_tokens"], off["cache_read_tokens"]) == (None, None, None)
+
+
+@pytest.mark.postgres_only
+async def test_today_day_boundary_is_inclusive_at_midnight_utc(db, agent_id, cleanup):
+    """Review M2: a turn (and a model call) at exactly 00:00:00 UTC is today's; one a microsecond earlier is not.
+    A ``now`` given in another offset is converted first: 01:00+03:00 on the 10th is 22:00 UTC on the 9th."""
+    tick = timedelta(microseconds=1)
+    at_midnight = await insert_turn(db, agent_id, "sess-0", started_at=DAY_START)
+    await insert_turn(db, agent_id, "sess-before", started_at=DAY_START - tick)
+    await insert_model_call(db, agent_id, started_at=DAY_START, call_count=1)  # 100 uncached + 50 read
+    await insert_model_call(db, agent_id, started_at=DAY_START - tick, call_count=1)
+
+    body = await get_today(db, agent_id, model=True)
+    assert _today_ids(body) == [str(at_midnight)]
+    assert body["totals"]["owner_turns"] + body["totals"]["background_turns"] == 1
+    assert (body["totals"]["model_calls"], body["totals"]["input_tokens"]) == (1, 150)
+
+    # A now in another offset is converted to UTC first. 01:00 at +03:00 on the 10th is 22:00 UTC on the 9th: the
+    # day is the 9th, and nothing of it is before that now. 23:30 at -05:00 on the 9th is 04:30 UTC on the 10th: the
+    # day is the 10th (not the local 9th), with the midnight turn and call.
+    east = await get_today(
+        db, agent_id, now=datetime(2026, 11, 10, 1, 0, tzinfo=timezone(timedelta(hours=3))), model=True
+    )
+    assert (east["day"], _today_ids(east)) == ("2026-11-09", [])
+    west = await get_today(
+        db, agent_id, now=datetime(2026, 11, 9, 23, 30, tzinfo=timezone(timedelta(hours=-5))), model=True
+    )
+    assert (west["day"], _today_ids(west)) == ("2026-11-10", [str(at_midnight)])
+    assert (west["totals"]["model_calls"], west["totals"]["input_tokens"]) == (1, 150)
 
 
 @pytest.mark.postgres_only

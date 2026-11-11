@@ -836,6 +836,7 @@ call_flags AS (
     FROM nous_system.tool_call_log c
     JOIN day_turns d ON d.id = c.turn_id
     WHERE c.agent_id = :agent
+      AND c.started_at >= :day_start  -- redundant (a call starts after its turn), so the planner can range-scan by time
     GROUP BY c.turn_id
 ),
 flagged AS (
