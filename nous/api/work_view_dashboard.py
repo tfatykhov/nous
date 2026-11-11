@@ -811,6 +811,7 @@ def disabled_today(now: datetime) -> dict[str, Any]:
             "tool_calls": 0,
             "errors": 0,
             "gated": 0,
+            "tool_error_turns": 0,
             "median_seconds": None,
             "model_calls": None,
             "input_tokens": None,
@@ -843,6 +844,7 @@ flagged AS (
     SELECT d.id, d.session_id, d.started_at, d.ended_at, d.work_kind, d.frame_id,
            (d.had_error IS TRUE OR d.error IS NOT NULL OR coalesce(f.any_error, false)) AS error,
            coalesce(f.any_gated, false) AS gated,
+           coalesce(f.any_error, false) AS tool_error,
            coalesce(d.tool_call_count, f.calls, 0) AS tool_calls
     FROM day_turns d
     LEFT JOIN call_flags f ON f.turn_id = d.id
@@ -867,6 +869,7 @@ SELECT (count(*) FILTER (WHERE work_kind = ANY(CAST(:conversation_kinds AS text[
        coalesce(sum(tool_calls), 0)::int AS tool_calls,
        (count(*) FILTER (WHERE error))::int AS errors,
        (count(*) FILTER (WHERE gated))::int AS gated,
+       (count(*) FILTER (WHERE tool_error))::int AS tool_error_turns,
        percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM ended_at - started_at))
            FILTER (WHERE ended_at IS NOT NULL) AS median_seconds
 FROM flagged
@@ -925,6 +928,7 @@ async def get_today(
             "tool_calls": totals["tool_calls"],
             "errors": totals["errors"],
             "gated": totals["gated"],
+            "tool_error_turns": totals["tool_error_turns"],
             "median_seconds": float(median) if median is not None else None,
             "model_calls": model["model_calls"],
             "input_tokens": model["input_tokens"],

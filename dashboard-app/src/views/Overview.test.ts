@@ -28,7 +28,7 @@ const ATTENTION = {
   harness: { events_persisted: true, offered_set: { mode: 'warn', warn_7d: 0, refused_7d: 0 },
     context_policy: { mode: 'warn', warn_7d: 0, refused_7d: 0 } },
 };
-const TOTALS = { owner_turns: 7, background_turns: 135, tool_calls: 611, errors: 3, gated: 1, median_seconds: 6.4,
+const TOTALS = { owner_turns: 7, background_turns: 135, tool_calls: 611, errors: 3, gated: 1, tool_error_turns: 2, median_seconds: 6.4,
   model_calls: 1284, input_tokens: 4_100_000, cache_read_tokens: 3_300_000 };
 const TODAY = {
   enabled: true, day: '2026-11-10', now: '2026-11-10T09:40:00+00:00', truncated: false, totals: TOTALS,
@@ -163,6 +163,19 @@ describe('Overview', () => {
     } finally {
       tl.cleanup();
     }
+  });
+
+  it('Errors today links the Work list only when its "a tool failed" lens can match, and says it is the last 24 h (review M6)', async () => {
+    await show();
+    await waitFor(() => expect(card('Health').textContent).toContain('Errors today'));
+    const link = within(card('Health')).getByRole('link', { name: 'Sessions where a tool failed, last 24 h' });
+    expect(link.getAttribute('href')).toBe('#/work?lens=error&kind=any&days=1');
+    cleanup();
+    // Three turns had an error, none of them from a failed tool call (had_error or an error text): no link.
+    replies['/dashboard/work/today'] = () => ({ body: { ...TODAY, totals: { ...TOTALS, tool_error_turns: 0 } } });
+    await show();
+    await waitFor(() => expect(card('Health').textContent).toContain('3 turns had an error'));
+    expect(within(card('Health')).queryByRole('link', { name: /tool failed/ })).toBeNull();
   });
 
   it('Health: guards, the ledger, and errors today on watch when a turn failed', async () => {

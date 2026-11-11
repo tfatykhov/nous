@@ -2088,6 +2088,8 @@ export interface WorkTodayTotals {
   /** Turns, by the per-turn flags. */
   errors: number;
   gated: number;
+  /** Of `errors`, the turns with a failed tool call (what the Work list's "a tool failed" lens finds). */
+  tool_error_turns?: number;
   /** Over the ended turns; null when none ended. */
   median_seconds: number | null;
   /** The model figures: null with the model-call log off or no row (shown as absent, never 0). */

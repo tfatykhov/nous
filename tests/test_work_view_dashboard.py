@@ -1613,6 +1613,7 @@ ZERO_TOTALS = {
     "tool_calls": 0,
     "errors": 0,
     "gated": 0,
+    "tool_error_turns": 0,
     "median_seconds": None,
     "model_calls": None,
     "input_tokens": None,
@@ -1725,6 +1726,9 @@ async def test_today_flags_error_and_gated_separately(db, agent_id, cleanup):
     }
     # The totals count turns, as the flags do: four with an error, two gated.
     assert (body["totals"]["errors"], body["totals"]["gated"]) == (4, 2)
+    # Review M6: of the four, two had a failed tool call (the Work list's "a tool failed" lens can find them);
+    # had_error and an error text alone do not count.
+    assert body["totals"]["tool_error_turns"] == 2
 
 
 @pytest.mark.postgres_only

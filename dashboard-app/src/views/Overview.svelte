@@ -300,7 +300,10 @@
         <span class="k">
           {#if tt.errors > 0}
             {plural(tt.errors, 'turn', 'turns')} had an error{tt.gated > 0 ? `, ${plural(tt.gated, 'turn', 'turns')} a gated call` : ''}.
-            <a href={routeHref('work', '', { lens: 'error', kind: 'any', days: '1' })}>Sessions with a failed tool</a>
+            <!-- The Work list's lens finds failed tool calls over the last 24 h: linked only when one failed today. -->
+            {#if (tt.tool_error_turns ?? 0) > 0}
+              <a href={routeHref('work', '', { lens: 'error', kind: 'any', days: '1' })}>Sessions where a tool failed, last 24 h</a>
+            {/if}
           {:else}
             No turn has had an error today{tt.gated > 0 ? `; ${plural(tt.gated, 'turn', 'turns')} had a gated call` : ''}.
           {/if}
