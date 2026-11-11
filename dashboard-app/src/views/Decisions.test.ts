@@ -168,7 +168,7 @@ describe('Decisions: chart colours are tokens', () => {
     expect(alpha(daily.data.datasets[0].backgroundColor)).toBe(0.5);
   });
 
-  it('dark: the outcome colours mean what they mean on the Overview (one hue, one meaning)', async () => {
+  it("source contract: the outcome tokens are the Overview's (one hue, one meaning)", async () => {
     render(Decisions);
     await waitFor(() => expect(configs).toHaveLength(7));
     const tokenOf = chartPalette((name) => name).outcome; // the Overview's token per outcome
