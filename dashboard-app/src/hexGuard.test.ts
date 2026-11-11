@@ -176,7 +176,7 @@ describe('no Tailwind colour class in a markup, script or module', () => {
       'class="hover:bg-white"', 'class="bg-popover text-popover-foreground"']) {
       expect(bad, bad).toMatch(TAILWIND_COLOUR);
     }
-    for (const ok of ['class="bg-primary text-[var(--on-accent)]"', 'class="bg-clip-padding text-sm"', 'class="text-destructive"',
+    for (const ok of ['class="bg-primary text-[var(--on-accent)]"', 'class="bg-clip-padding text-sm"',
       'class="border-[var(--border)] shadow-[var(--card-shadow)]"', 'class="bg-muted-x"']) {
       expect(ok, ok).not.toMatch(TAILWIND_COLOUR);
     }
@@ -196,16 +196,19 @@ describe('no Tailwind colour class in a markup, script or module', () => {
 // PR 5 re-review R3: a mark token can also reach text through a utility class (`text-[var(--oc-success)]`, Tailwind 4's
 // `text-(--oc-success)`), the form a view must use to colour a shared Button, since a scoped class cannot reach it.
 // Text tokens (`--err-text`, `--on-accent`) are spared, and so is a non-colour utility (`text-[length:…]`).
-const MARK_AS_TEXT_CLASS = /(?<![\w-])text-(?:\[(?:color:)?var\(\s*|\()--(?:red|green|yellow|oc-[\w-]+|series-\d+|signal-[\w-]+)(?![\w-])/;
+// Code review M5: `text-destructive` too, shadcn's red fill (--destructive is hsl(4 66% 50%), the --red mark).
+const MARK_AS_TEXT_CLASS =
+  /(?<![\w-])text-(?:\[(?:color:)?var\(\s*|\()--(?:red|green|yellow|oc-[\w-]+|series-\d+|signal-[\w-]+)(?![\w-])|(?<![\w-])text-destructive(?![\w-])/;
 
 describe('no markup, script or module colours text with a mark token through a utility class', () => {
   it('the pattern catches the bracket, short and typed forms, and spares text tokens, borders and lengths', () => {
     for (const bad of ['class="text-[var(--oc-success)]"', 'class="hover:text-[var(--red)]"', 'class="text-(--oc-success)"',
-      'class="text-[color:var(--oc-success)]"']) {
+      'class="text-[color:var(--oc-success)]"', 'class="text-destructive"', 'destructive: "bg-[var(--err-bg)] hover:text-destructive"']) {
       expect(bad, bad).toMatch(MARK_AS_TEXT_CLASS);
     }
     for (const ok of ['class="text-[var(--err-text)]"', 'class="text-(--err-text)"', 'class="text-[var(--on-accent)]"',
-      'class="border-[var(--red)]"', 'class="border-(--red)"', 'class="text-[length:var(--series-2)]"']) {
+      'class="border-[var(--red)]"', 'class="border-(--red)"', 'class="text-[length:var(--series-2)]"',
+      'class="text-destructive-foreground"', 'class="border-destructive ring-destructive/20"']) {
       expect(ok, ok).not.toMatch(MARK_AS_TEXT_CLASS);
     }
   });

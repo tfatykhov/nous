@@ -47,7 +47,7 @@
     color: var(--text);
   }
 
-  /* The inset accent ring under the dark look; a white raised pill under the paper look. */
+  /* The selected tab is the white raised pill. */
   .subnav-link.active {
     background: var(--tab-active-bg);
     color: var(--text);

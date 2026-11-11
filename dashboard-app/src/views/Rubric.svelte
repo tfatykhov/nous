@@ -53,7 +53,7 @@
 
   // ── Chart data builders ───────────────────────────────────────────────────
 
-  // Chart colours are tokens that Chart.svelte resolves against the canvas's ground (dark: the old literals). The
+  // Chart colours are tokens that Chart.svelte resolves against the canvas's ground. The
   // first dimension and the radar take --series-0, not the accent, whose paper value is the question frame's blue.
   const DIM_TOKENS = ['--series-0', '--series-2', '--series-1', '--series-4', '--series-5', '--series-3', '--series-6', '--series-8', '--series-9'];
   const dimColor = (i: number) => (i < DIM_TOKENS.length ? `var(${DIM_TOKENS[i]})` : seriesToken(i));

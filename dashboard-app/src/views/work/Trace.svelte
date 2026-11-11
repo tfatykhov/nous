@@ -395,7 +395,7 @@
 </div>
 
 <style>
-  /* Colours are tokens only (hexGuard): the dark look reads today's values, the paper ground its own. */
+  /* Colours are tokens only (hexGuard). */
   .trace { display: flex; flex-direction: column; gap: 1.25rem; --gw: 168px; --lw: 86px; }
   .back { color: var(--accent-text); font-size: 0.8125rem; text-decoration: none; align-self: flex-start; text-underline-offset: 3px; }
   .back:hover { text-decoration: underline; }

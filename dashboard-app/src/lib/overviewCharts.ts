@@ -1,6 +1,5 @@
 // The Overview charts' colours, read from the ground's tokens. Chart.js draws on a canvas and cannot read var(), so
-// the colours are resolved against the chart's own element when the chart is built, and again when the look changes:
-// the dark look gets today's colours exactly, the paper look the paper palette. Token names follow the PR 2/3 plan
+// the colours are resolved against the chart's own element when the chart is built. Token names follow the PR 2/3 plan
 // (status hues for outcomes, `--series-7` for pending, `--series-0` for marks that were violet: not the accent, whose
 // paper value is the question frame's blue).
 // PR 2's `lib/chartColors.ts` is meant to generalise this for every chart.

@@ -44,7 +44,7 @@
   const MODE_PILL: Record<string, string> = { enforce: 'ok', warn: 'warn', shadow: 'warn' };
   const WIN_LABEL: Record<string, string> = { '24h': '24 h', '7d': '7 d', '30d': '30 d' };
   // Series colours outside the status set (spec §4.1), as tokens: Chart.svelte resolves them against the canvas's
-  // ground, and the DOM paints them through --fill (dark: the old literals; claims is the ramp's cyan, not a teal).
+  // ground, and the DOM paints them through --fill (claims is the ramp's cyan, not a teal).
   const SERIES_TOKEN = { offered_set: '--series-1', context_policy: '--series-4', claims: '--series-9' };
   const seriesVar = (rule: string) => `var(${SERIES_TOKEN[rule as keyof typeof SERIES_TOKEN] ?? '--muted'})`;
   const RULE_LABEL: Record<string, string> = {
@@ -123,7 +123,7 @@
     };
   }
 
-  // Explicit axis colours (today's under dark) beat Chart.svelte's paper defaults, so they are the paper tokens' too.
+  // Explicit axis colours beat Chart.svelte's defaults, so they name the same tokens.
   const chartOptions = {
     // The legend samples each line with its dash (a box outline turns four corners); see Rubric.svelte.
     plugins: { legend: { labels: lineLegendLabels({ color: 'var(--muted)' }) } },

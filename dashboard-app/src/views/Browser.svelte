@@ -696,9 +696,8 @@
 </div>
 
 <style>
-  /* Colours and structure are tokens only (hexGuard). The tabs are the SubNav's pills (an inset accent ring under the
-     dark look, a raised white pill on paper). Paper-only chrome (the 30px title, each table in a white rounded card,
-     the mono font) sits under a paper-ground selector, so the dark look keeps its tables on the page. */
+  /* Colours and structure are tokens only (hexGuard). The tabs are the SubNav's pills (the selected one a raised white
+     pill); each table sits in a white rounded card. */
   .view-head {
     margin-bottom: 1.25rem;
   }

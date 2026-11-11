@@ -3,7 +3,8 @@ import { render, cleanup } from '@testing-library/svelte';
 import { createRawSnippet } from 'svelte';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { ROOT_SEL, block, parseBlocks, styleBlocks } from '../testing/css';
+import { ROOT_SEL, block, markupOf, parseBlocks, scriptBlocks, styleBlocks } from '../testing/css';
+import { SRC, sourceFiles } from '../testing/sources';
 import StatGrid from './StatGrid.svelte';
 import StaleBadge from './StaleBadge.svelte';
 import { Badge } from './badge';
@@ -133,12 +134,27 @@ describe('Button', () => {
     expect(off.hasAttribute('href')).toBe(false);
   });
 
-  it('the default and outline variants never key off the OS colour scheme (dark:), only the ground', () => {
-    const src = readFileSync(join(__dirname, 'button/button.svelte'), 'utf-8');
-    const variant = (name: string) => src.match(new RegExp(`\\b${name}: "([^"]*)"`))?.[1] ?? '';
-    for (const v of ['default', 'outline']) {
-      expect(variant(v), v).not.toBe('');
-      expect(variant(v), v).not.toMatch(/\bdark:/);
+  // Code review M5: Tailwind's dark variant answers to the viewer's OS colour scheme. There is one look, so no source
+  // keys a class off it (the shadcn primitives came with eight).
+  it('no source keys a class off the OS colour scheme (dark:)', () => {
+    const DARK = /(?<![\w-])dark:(?=[\w[])/;
+    expect('dark:bg-destructive/20').toMatch(DARK);
+    expect('// (dark: the old literals)').not.toMatch(DARK);
+    const hits = sourceFiles().filter((f) => {
+      const src = readFileSync(join(SRC, f), 'utf-8');
+      const code = f.endsWith('.svelte') ? scriptBlocks(src) + '\n' + markupOf(src) : scriptBlocks(`<script>${src}</script>`);
+      return DARK.test(code);
+    });
+    expect(hits).toEqual([]);
+  });
+
+  it('the destructive variants are the error pill: the error tint and the error text, not the red fill as text', () => {
+    for (const [C, slot] of [[Button, 'button'], [Badge, 'badge']] as const) {
+      const { container } = render(C, { props: { variant: 'destructive', children: label } });
+      const classes = container.querySelector(`[data-slot="${slot}"]`)!.className.split(' ');
+      expect(classes, slot).toEqual(expect.arrayContaining(['bg-[var(--err-bg)]', 'text-[var(--err-text)]']));
+      expect(classes.filter((c) => /destructive\/\d+$|^text-destructive$/.test(c) && !c.startsWith('focus-visible:') && !c.startsWith('aria-invalid:')), slot)
+        .toEqual([]);
     }
   });
 });

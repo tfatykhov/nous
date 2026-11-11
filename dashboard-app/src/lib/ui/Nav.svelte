@@ -199,7 +199,7 @@
     font-weight: var(--nav-active-weight);
   }
 
-  /* The ground's ring: today's accent under the dark look, white on the rail (it sits outside the paper pill). */
+  /* The rail's focus ring, white (it sits outside the paper pill). */
   .nav-link:focus-visible {
     outline: 2px solid var(--focus-ring);
     outline-offset: 2px;

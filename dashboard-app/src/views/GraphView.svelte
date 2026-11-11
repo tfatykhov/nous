@@ -476,9 +476,7 @@
 </BottomSheet>
 
 <style>
-  /* Colours and structure are tokens only (hexGuard): today's values under the dark look, rounded white cards and
-     pills on the paper ground. Paper-only chrome (the title size, chips as pills, the mono font) sits under a
-     paper-ground selector, so the dark look keeps its shapes and fonts. */
+  /* Colours and structure are tokens only (hexGuard): rounded white cards and pills on the paper ground. */
   .view-head {
     display: flex;
     flex-wrap: wrap; /* at phone width the actions drop below the title rather than widen the page */

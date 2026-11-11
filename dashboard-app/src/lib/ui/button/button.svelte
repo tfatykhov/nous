@@ -4,17 +4,16 @@
 	import { type VariantProps, tv } from "tailwind-variants";
 
 	export const buttonVariants = tv({
-		base: "focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 aria-invalid:border-destructive dark:aria-invalid:border-destructive/50 rounded-full border border-transparent bg-clip-padding text-sm font-medium focus-visible:ring-3 active:not-aria-[haspopup]:translate-y-px aria-invalid:ring-3 [&_svg:not([class*='size-'])]:size-4 group/button inline-flex shrink-0 items-center justify-center whitespace-nowrap transition-all outline-none focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-[color:var(--focus-ring)] focus-visible:outline-offset-2 select-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0",
+		base: "focus-visible:border-ring focus-visible:ring-ring/50 aria-invalid:ring-destructive/20 aria-invalid:border-destructive rounded-full border border-transparent bg-clip-padding text-sm font-medium focus-visible:ring-3 active:not-aria-[haspopup]:translate-y-px aria-invalid:ring-3 [&_svg:not([class*='size-'])]:size-4 group/button inline-flex shrink-0 items-center justify-center whitespace-nowrap transition-all outline-none focus-visible:outline-solid focus-visible:outline-2 focus-visible:outline-[color:var(--focus-ring)] focus-visible:outline-offset-2 select-none disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0",
 		variants: {
 			variant: {
-				// The rail-blue pill under the paper look; the accent under the dark look. Its text is the ground's
-				// --on-accent (white on paper, near-black on the violet: white there is 3.99:1).
+				// The rail-blue pill; its text is --on-accent, white.
 				default: "bg-primary text-[var(--on-accent)] hover:bg-primary/90",
 				// A white pill with the rule border, raised by the ground's card shadow on hover.
 				outline: "border-[var(--border)] bg-[var(--surface)] text-[var(--text)] hover:border-[var(--muted)] hover:shadow-[var(--card-shadow)] aria-expanded:border-[var(--muted)]",
 				secondary: "bg-secondary text-secondary-foreground hover:bg-secondary/80 aria-expanded:bg-secondary aria-expanded:text-secondary-foreground",
 				ghost: "hover:bg-[var(--surface-hover)] hover:text-[var(--text)] aria-expanded:bg-[var(--surface-hover)] aria-expanded:text-[var(--text)]",
-				destructive: "bg-destructive/10 hover:bg-destructive/20 focus-visible:ring-destructive/20 dark:focus-visible:ring-destructive/40 dark:bg-destructive/20 text-destructive focus-visible:border-destructive/40 dark:hover:bg-destructive/30",
+				destructive: "bg-[var(--err-bg)] text-[var(--err-text)] focus-visible:ring-destructive/20 focus-visible:border-destructive/40",
 				link: "text-primary underline-offset-4 hover:underline",
 			},
 			size: {

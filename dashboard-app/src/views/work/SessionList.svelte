@@ -287,7 +287,7 @@
 {/if}
 
 <style>
-  /* Colours and structure are tokens (hexGuard): today's values under the dark look, rounded white cards on paper. */
+  /* Colours and structure are tokens (hexGuard): rounded white cards on paper. */
   .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; }
   .subtitle { color: var(--muted); font-size: 0.9375rem; margin: 0; max-width: 70ch; }

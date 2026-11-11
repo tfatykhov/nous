@@ -30,7 +30,7 @@
     gap: 1rem;
   }
 
-  /* Structure and tones read tokens whose dark values are the old literals (shared.style.test.ts). */
+  /* Structure and tones read tokens (shared.style.test.ts pins each one). */
   .stat-card {
     background: var(--surface);
     border: var(--card-border);

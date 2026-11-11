@@ -109,7 +109,7 @@
   }
 
   /** The dot's token by error rate: the success mark, the amber, and --err-text (not --red: under deuteranopia it stays
-   *  apart from the amber, 12.5 where red is 5.1; both are #f87171 under dark). Every pair is 9.8 or more apart under
+   *  apart from the amber, 12.5 where red is 5.1). Every pair is 9.8 or more apart under
    *  all three visions, and the rate itself is printed beside the dot. */
   function handlerDotToken(errorRate: number): string {
     if (errorRate > 0.1) return '--err-text';
