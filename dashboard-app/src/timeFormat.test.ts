@@ -59,12 +59,22 @@ describe('one timestamp format', () => {
 // date cut at 5), "2026-11-04" (the ISO date itself), "2026-11-10 09:00 UTC" (cut at 16) and "11/10 15:00" (the
 // browser's local month, day and hour). A day is fmtDay ("Oct 12"), an hour fmtHour ("Nov 10 15:00", UTC), a moment
 // fmtUtc. Cutting an ISO string is allowed only for a key (`toISOString().slice(0, 10)`), never for display.
+// Final step A9: a cut ISO time (`.slice(11, 19)`, "09:31:07") is caught too, and exactly one is allowed, by name:
+// lib/frames.ts clockTime, the trace's per-turn clock, which needs the seconds (DESIGN.md's One Timestamp Rule).
+
+/** The hand-cut forms allowed, each by file and function, with the reason. */
+const ALLOWED_CUTS: { file: string; fn: string; reason: string }[] = [
+  { file: 'lib/frames.ts', fn: 'clockTime', reason: "a turn's clock time in the trace, UTC with seconds (\"09:31:07\")" },
+];
+/** The body of `export function <fn>(…) { … }` in a module's code, or '' when it is not there. */
+const fnBody = (src: string, fn: string) => src.match(new RegExp(String.raw`export function ${fn}\([^)]*\)[^{]*\{[\s\S]*?\n\}`))?.[0] ?? '';
 
 /** The lines that print a date by local-time getters or by cutting an ISO string. */
 export function handMadeDates(code: string): string[] {
   return code.split('\n').filter((line) => /\.get(?:Month|Date|Day|Hours|Minutes|FullYear)\(\)/.test(line)
     || /\.replace\(\s*'T'\s*,\s*' '\s*\)/.test(line)
     || /\.slice\(\s*5\s*[,)]/.test(line)
+    || /\.slice\(\s*11\s*[,)]/.test(line)
     || (/\.slice\(\s*0\s*,\s*(?:10|16)\s*\)/.test(line) && !/toISOString\(\)\.slice\(\s*0\s*,\s*10\s*\)/.test(line)))
     .map((l) => l.trim());
 }
@@ -78,7 +88,7 @@ describe('one date format in charts and cells', () => {
   it('the guard catches a local getter or a cut ISO string, and spares a key and a number', () => {
     for (const bad of ['labels: d.daily.map((x) => x.date.slice(5)),', 'return iso.slice(5, 10);',
       "f.created_at ? f.created_at.slice(0, 10) : '-'", "iso.replace('T', ' ').slice(0, 16) + ' UTC'",
-      'return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:00`;']) {
+      'return `${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:00`;', 'return new Date(ms).toISOString().slice(11, 19);']) {
       expect(handMadeDates(bad), bad).not.toEqual([]);
     }
     for (const ok of ['const utcDate = () => new Date().toISOString().slice(0, 10);', 'd.getUTCMonth()', 'items.slice(0, 5)',
@@ -88,6 +98,14 @@ describe('one date format in charts and cells', () => {
   });
 
   it.each(sourceFiles().filter((f) => f.startsWith('views/') || f.startsWith('lib/')))('%s prints no hand-made date', (file) => {
-    expect(handMadeDates(code(file))).toEqual([]);
+    const src = code(file);
+    const allowed = ALLOWED_CUTS.filter((a) => a.file === file).map((a) => fnBody(src, a.fn));
+    expect(handMadeDates(allowed.reduce((t, body) => t.replace(body, ''), src))).toEqual([]);
+  });
+
+  it.each(ALLOWED_CUTS.map((a) => [a.file, a.fn, a.reason] as const))('%s %s is the allowed cut (%s), and still cuts', (file, fn) => {
+    const body = fnBody(code(file), fn);
+    expect(handMadeDates(body)).toHaveLength(1);
+    expect(body).toContain('.slice(11, 19)');
   });
 });
