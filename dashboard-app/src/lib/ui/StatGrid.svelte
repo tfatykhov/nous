@@ -7,10 +7,11 @@
     tone?: 'waiting' | 'unknown' | 'error' | 'warn' | 'ok';
   };
 
-  let { stats }: { stats: Stat[] } = $props();
+  /** flat: the tiles sit inside a card, so they are a flat tint, not a shadow on a shadow (finish review fix 8). */
+  let { stats, flat = false }: { stats: Stat[]; flat?: boolean } = $props();
 </script>
 
-<div class="stat-grid">
+<div class="stat-grid" class:stat-grid--flat={flat}>
   {#each stats as stat}
     <div class="stat-card">
       <div class="stat-value" class:tone-waiting={stat.tone === 'waiting'} class:tone-unknown={stat.tone === 'unknown'}
@@ -60,6 +61,8 @@
     font-size: 0.75rem;
     color: var(--muted);
   }
+
+  .stat-grid--flat .stat-card { background: var(--wash); box-shadow: none; }
 
   .tone-waiting { color: var(--waiting); }
   .tone-unknown { color: var(--unknown); }

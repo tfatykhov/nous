@@ -1348,6 +1348,7 @@
   }
   .funnel-seg {
     min-width: 3px;
+    container-type: inline-size;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1364,6 +1365,11 @@
     overflow: hidden;
     text-overflow: clip;
     white-space: nowrap;
+  }
+  /* A count that does not fit its segment is hidden, not clipped into its neighbour: the legend names it (finish review
+     fix 8; the counts collided at the right end of the bar). */
+  @container (max-width: 2.5rem) {
+    .seg-label { display: none; }
   }
 
   .disp-legend {

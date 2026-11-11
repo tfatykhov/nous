@@ -304,7 +304,7 @@
   {#if $activity.data}
     {@const ss = $activity.data.schedule_stats}
     <p class="caption">Numbers marked (7d) are the last 7 days, whatever the window above.</p>
-    <StatGrid stats={[
+    <StatGrid flat stats={[
       { label: 'Active schedules',         value: ss.active },
       { label: 'Schedule fires (7d)',      value: ss.fires_7d },
     ]} />

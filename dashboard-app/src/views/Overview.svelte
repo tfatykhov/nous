@@ -94,11 +94,10 @@
 
   const plural = (n: number, one: string, many: string) => `${fmt(n)} ${n === 1 ? one : many}`;
 
-  function fmtWithDelta(value: number, delta: number | null | undefined): string {
-    if (delta == null) return fmt(value);
-    if (delta === 0) return fmt(value);
-    const sign = delta > 0 ? '+' : '';
-    return `${fmt(value)} (${sign}${delta} 7d)`;
+  /** The 7-day change as a small note under the number (finish review fix 8); none when there is none. */
+  function deltaNote(delta: number | null | undefined): string | undefined {
+    if (delta == null || delta === 0) return undefined;
+    return `${delta > 0 ? '+' : ''}${fmt(delta)} in 7 days`;
   }
 
   /**
@@ -377,11 +376,11 @@
 
   <!-- ── Stat cards ───────────────────────────────────────────────────── -->
   <StatGrid stats={[
-    { label: 'Facts',            value: fmtWithDelta(mem.total_facts,      deltas.facts.last_7_days) },
-    { label: 'Episodes',         value: fmtWithDelta(mem.total_episodes,   deltas.episodes.last_7_days) },
+    { label: 'Facts', value: fmt(mem.total_facts), note: deltaNote(deltas.facts.last_7_days) },
+    { label: 'Episodes', value: fmt(mem.total_episodes), note: deltaNote(deltas.episodes.last_7_days) },
     { label: 'Chunks',           value: fmt(mem.total_chunks) },
-    { label: 'Decisions',        value: fmtWithDelta(mem.total_decisions,  deltas.decisions.last_7_days) },
-    { label: 'Procedures',       value: fmtWithDelta(mem.total_procedures, deltas.procedures.last_7_days) },
+    { label: 'Decisions', value: fmt(mem.total_decisions), note: deltaNote(deltas.decisions.last_7_days) },
+    { label: 'Procedures', value: fmt(mem.total_procedures), note: deltaNote(deltas.procedures.last_7_days) },
     { label: 'Active censors',   value: fmt(mem.active_censors) },
     { label: 'Active sessions',  value: fmt(mem.active_conversations) },
   ]} />
@@ -413,13 +412,13 @@
     </div>
     {#if x && !x.modes.persist}
       <p class="muted">Ledger persistence is off (NOUS_EXECUTION_LEDGER_PERSIST_ENABLED) — no calls are recorded and sends are not de-duplicated, so there are no numbers to show.</p>
-      <StatGrid stats={[
+      <StatGrid flat stats={[
         { label: 'Claim checks',          value: x.modes.claim_verification },
         { label: 'Context policy',        value: x.modes.context_policy },
         { label: 'Offered-tool rule',     value: x.modes.offered_set },
       ]} />
     {:else if x}
-      <StatGrid stats={[
+      <StatGrid flat stats={[
         { label: 'Calls (24 h)',          value: x.stats.calls },
         { label: 'Sends',                 value: x.stats.sends },
         { label: 'Repeat sends refused',  value: x.stats.repeat_sends_refused },
@@ -461,7 +460,7 @@
             }],
           }}
           options={{ cutout: '60%', plugins: { legend: { position: 'bottom', labels: { font: { size: 11 } } } } }}
-          height="240px"
+          height="160px"
         />
         {/if}
       {:else}
@@ -490,7 +489,7 @@
             },
             plugins: { legend: { display: false } },
           }}
-          height="240px"
+          height="160px"
         />
         {/if}
       {:else}
