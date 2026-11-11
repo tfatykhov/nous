@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { LANE_COLORS, laneColor, fmtDuration, fmtTokens, fmtTime, fmtDays, parseWorkSub, toolChips, callsOf } from './work';
+import * as work from './work';
+import { LANES, laneVar, fmtDuration, fmtTokens, fmtTime, fmtDays, parseWorkSub, toolChips, callsOf } from './work';
 
 describe('fmtDuration', () => {
   it('shows a dash for no duration', () => { expect(fmtDuration(null)).toBe('—'); });
@@ -39,23 +40,19 @@ describe('fmtDays', () => {
 });
 
 describe('lanes', () => {
-  it('has the mockup colour for each lane', () => {
-    expect(LANE_COLORS).toEqual({
-      memory: '#60a5fa',
-      live: '#fbbf24',
-      workspace: '#9ca3af',
-      acts: '#f472b6',
-      other: '#8e8eab',
-    });
-    expect(laneColor('memory')).toBe('#60a5fa');
-    expect(laneColor('acts')).toBe('#f472b6');
+  it('names the endpoints’ lanes; each lane’s colour is its token (no hex table: PR 7 T4)', () => {
+    expect(LANES).toEqual(['memory', 'live', 'workspace', 'acts', 'other']);
+    expect(laneVar('memory')).toBe('var(--lane-memory)');
+    expect(laneVar('acts')).toBe('var(--lane-acts)');
+    expect('laneColor' in work).toBe(false);
+    expect('LANE_COLORS' in work).toBe(false);
   });
-  it('gives an unknown lane the neutral colour, never undefined', () => {
-    expect(laneColor('unknown-lane')).toBe('#8e8eab');
-    expect(laneColor('')).toBe('#8e8eab');
+  it('gives an unknown lane the neutral token, never undefined', () => {
+    expect(laneVar('unknown-lane')).toBe('var(--lane-other)');
+    expect(laneVar('')).toBe('var(--lane-other)');
     // An inherited property name is not a lane either.
-    expect(laneColor('toString')).toBe('#8e8eab');
-    expect(laneColor('__proto__')).toBe('#8e8eab');
+    expect(laneVar('toString')).toBe('var(--lane-other)');
+    expect(laneVar('__proto__')).toBe('var(--lane-other)');
   });
 });
 

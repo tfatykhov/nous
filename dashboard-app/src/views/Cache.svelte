@@ -32,12 +32,6 @@
     return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
 
-  function hitRateColor(rate: number): string {
-    if (rate >= 50) return 'var(--hit-good)';
-    if (rate >= 20) return 'var(--hit-mid)';
-    return 'var(--hit-bad)';
-  }
-
   // ── Session table columns ─────────────────────────────────────────────
   const sessionCols = [
     { key: 'session_id_short', label: 'Session' },

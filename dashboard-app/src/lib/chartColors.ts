@@ -57,8 +57,6 @@ export const TOKEN_FALLBACK: Record<string, string> = {
   '--chart-text': '#56687a',
   '--chart-grid': '#e3e9ec',
   '--hit-good': '#23703d',
-  '--hit-mid': '#8a5a0e',
-  '--hit-bad': '#b02a22',
   '--cache-blue': '#1f5fa8',
   '--cache-grey': '#4f5f6f',
   '--stack-bar': '#b7791f',

@@ -14,6 +14,8 @@ import { ROOT_SEL, block, parseBlocks, styleBlocks } from '../lib/testing/css';
 const PAPER = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
 const HOSTILE = '<img src=x onerror=alert(1)>' + 'n'.repeat(300);
 const dash = (s: string) => s.replaceAll('_', '-');
+/** A status's token: its own --st-*, except awaiting input, which is the waiting colour itself (PR 7 T4). */
+const stVar = (s: string) => (s === 'awaiting_input' ? 'var(--waiting)' : `var(--st-${dash(s)})`);
 
 const node = (id: string, name: string, status: string, over: Record<string, unknown> = {}) => ({
   id, name, description: '', node_type: 'subtask', wave: 0, status, result: '', error: '', tokens_used: 0,
@@ -99,7 +101,7 @@ describe('Workflows: status by token', () => {
       const b = badges.find((x) => x.textContent === s);
       expect(b, s).toBeTruthy();
       const style = b!.getAttribute('style') ?? '';
-      expect(style, s).toContain(`var(--st-${dash(s)})`);
+      expect(style, s).toContain(stVar(s));
       expect(style, s).toContain('color-mix(in srgb');
       expect(style, s).not.toContain('#');
     }
@@ -146,7 +148,7 @@ describe('Workflows: the DAG graph', () => {
     render(Dag, { props: { nodes, edges: [{ from_node_id: 'n0', to_node_id: 'n1' }] } });
     for (const n of EVERY) {
       const shape = calls.filter((c) => c.id === n.id && c.tag !== 'text' && c.kind === 'style');
-      const v = `var(--st-${dash(n.status)})`;
+      const v = stVar(n.status);
       expect(shape.find((c) => c.k === 'fill')?.v, n.status).toBe(`color-mix(in srgb, ${v} 18.8%, transparent)`);
       expect(shape.find((c) => c.k === 'stroke')?.v, n.status).toBe(v);
     }
@@ -193,7 +195,7 @@ describe('Workflows: no invented glyph in the graph', () => {
     const mine = calls.filter((c) => c.id === 'a1');
     // (The graph draws on mount and again from its effect: compare the set of texts.)
     expect([...new Set(mine.filter((c) => c.kind === 'text' && c.tag === 'text').map((c) => c.v))]).toEqual(['approve-send', 'awaiting input']);
-    expect(mine.some((c) => c.tag === 'rect' && c.k === 'stroke' && c.v === 'var(--st-awaiting-input)')).toBe(true);
+    expect(mine.some((c) => c.tag === 'rect' && c.k === 'stroke' && c.v === 'var(--waiting)')).toBe(true);
     expect(readFileSync(join(__dirname, '..', 'lib', 'viz', 'Dag.svelte'), 'utf-8')).not.toMatch(/\.text\('\?'\)/);
   });
 });

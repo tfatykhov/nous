@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { LANE_COLORS } from './lib/work';
+import { LANES } from './lib/work';
 import { ROOT_SEL, RAIL_SEL, block, parseBlocks } from './lib/testing/css';
 
 // The dashboard has one look (paper, PR 7). Its tokens are at `:root`, the Atlantic-blue rail's at `.rail`. These tests
@@ -202,6 +202,13 @@ const PAPER_GOLDEN: Record<string, string> = {
   '--ring': '227 70% 46%',
 };
 
+// Tokens of the golden that were deleted after the flip, each with the commit's reason: a dead token (no reader) or a
+// parity alias (one value, one meaning, the same as another token's). Every entry must be in PAPER_GOLDEN.
+const DELETED: Record<string, string> = {
+  '--hit-mid': 'T4: dead, read only by Cache.svelte’s hitRateColor, which was never called',
+  '--hit-bad': 'T4: dead, read only by Cache.svelte’s hitRateColor, which was never called',
+};
+
 // The old :root's tokens that have no paper value and stay: structure, the skip link's text, and the shadcn variables
 // no utility maps (Task 5 deletes the last two kinds where nothing reads them).
 const KEPT: Record<string, string> = {
@@ -327,8 +334,6 @@ const PR3: Record<string, string> = {
   ...OC,
   '--stack-bar': '#b7791f', // Workflows: a token budget's consumed part
   '--hit-good': '#23703d', // Cache: the hit-rate line and the doughnut's cache-read part
-  '--hit-mid': '#8a5a0e',
-  '--hit-bad': '#b02a22',
   '--cache-blue': '#1f5fa8', // Cache: the doughnut's cache-created part
   '--cache-grey': '#4f5f6f', // Cache: the doughnut's uncached part
   '--wait-ink': '#7b3fa0', // Workflows: the Now column's waiting pill
@@ -387,14 +392,16 @@ describe('the tokens of the one look', () => {
     expect([...BLOCKS.keys()].filter((k) => k.startsWith('html[') || k.includes('[data-'))).toEqual([]);
   });
 
-  it(':root is the paper block moved verbatim (PAPER_GOLDEN), plus the kept tokens that had no paper value', () => {
+  it(':root is the paper block moved verbatim (PAPER_GOLDEN), less the tokens deleted since, plus the kept ones', () => {
     const got = Object.fromEntries(tokens(PAPER).map((k) => [k, PAPER[k]]));
-    expect(got).toEqual({ ...PAPER_GOLDEN, ...KEPT });
+    const golden = Object.fromEntries(Object.entries(PAPER_GOLDEN).filter(([k]) => !(k in DELETED)));
+    expect(got).toEqual({ ...golden, ...KEPT });
     expect(Object.keys(PAPER_GOLDEN)).toHaveLength(181);
+    for (const k of Object.keys(DELETED)) expect(k in PAPER_GOLDEN, `${k} was in the golden`).toBe(true);
   });
 
   it('every lane has its dot colour', () => {
-    for (const lane of Object.keys(LANE_COLORS)) expect(PAPER[`--lane-${lane}`], lane).toMatch(/^#[0-9a-f]{6}$/);
+    for (const lane of LANES) expect(PAPER[`--lane-${lane}`], lane).toMatch(/^#[0-9a-f]{6}$/);
   });
 
   it('every rail token is a :root token too (the rail re-declares a value, it adds no name) except its own nav ones', () => {
@@ -637,7 +644,7 @@ describe('contrast of the new values', () => {
   });
 
   it('paper lane dots on white: at least 3 (non-text)', () => {
-    for (const lane of Object.keys(LANE_COLORS)) {
+    for (const lane of LANES) {
       expect(contrast(PAPER[`--lane-${lane}`], '#ffffff'), lane).toBeGreaterThanOrEqual(3);
     }
   });
@@ -949,7 +956,7 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
   it('outcome marks and the budget bar are at least 3:1 on the white card', () => {
     for (const [k, p] of Object.entries(OC)) expect(contrast(p, '#ffffff'), k).toBeGreaterThanOrEqual(3);
     expect(contrast(PAPER['--stack-bar'], '#ffffff')).toBeGreaterThanOrEqual(3);
-    for (const k of ['--hit-good', '--hit-mid', '--hit-bad', '--cache-blue', '--cache-grey']) expect(contrast(PAPER[k], '#ffffff'), k).toBeGreaterThanOrEqual(3);
+    for (const k of ['--hit-good', '--cache-blue', '--cache-grey']) expect(contrast(PAPER[k], '#ffffff'), k).toBeGreaterThanOrEqual(3);
   });
 
   it('Heartbeat\'s amber text on the card and on the wash: at least 4.5:1', () => {

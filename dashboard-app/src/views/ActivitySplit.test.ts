@@ -272,7 +272,7 @@ describe('Ledger: status and effect by token', () => {
   const css = () => styleBlocks(readFileSync(join(__dirname, 'Ledger.svelte'), 'utf-8'));
   const WANT: Record<string, string> = {
     pending: 'var(--pending)', success: 'var(--st-success)', error: 'var(--st-failed)',
-    blocked: 'var(--st-ledger-blocked)', unknown: 'var(--st-unknown)',
+    blocked: 'var(--st-ledger-blocked)', unknown: 'var(--unknown)', // the unknown colour itself (PR 7 T4)
   };
 
   it('every ledger status renders a badge from its token with a color-mix tint, never a hex', async () => {

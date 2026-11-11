@@ -169,6 +169,13 @@ describe('Cache charts read tokens', () => {
     expect(configs.find((c) => c.type === 'line')!.options.scales.y.ticks.color).toBe(PAPER['--chart-text']);
   });
 
+  it('source contract: no dead hit-rate colour function, and its two tokens are gone (PR 7 T4)', () => {
+    expect(readFileSync(join(__dirname, '..', 'Cache.svelte'), 'utf-8')).not.toMatch(/hitRateColor|--hit-mid|--hit-bad/);
+    expect(PAPER['--hit-mid']).toBeUndefined();
+    expect(PAPER['--hit-bad']).toBeUndefined();
+    expect(PAPER['--hit-good']).toBeDefined();
+  });
+
   it('a cache break is marked with the word yes, not a glyph', async () => {
     render(Cache, { props: { embedded: true } });
     await screen.findByRole('heading', { level: 2, name: 'Recent Calls' });

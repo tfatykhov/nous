@@ -2,26 +2,15 @@
 import { fmtUtc } from './harness';
 
 /**
- * A tool lane (what the tool touches) to its colour, from the mockups. The lane names are the endpoints'
- * (`TOOL_LANES` in nous/api/work_view_dashboard.py); any tool not in a lane is `other`, the neutral colour.
+ * The tool lanes (what a tool touches). The names are the endpoints' (`TOOL_LANES` in nous/api/work_view_dashboard.py);
+ * any tool not in a lane is `other`, the neutral colour. Each lane's colour is its app.css token, `--lane-<name>`.
  */
-export const LANE_COLORS: Record<string, string> = {
-  memory: '#60a5fa',
-  live: '#fbbf24',
-  workspace: '#9ca3af',
-  acts: '#f472b6',
-  other: '#8e8eab',
-};
+export const LANES = ['memory', 'live', 'workspace', 'acts', 'other'] as const;
+const LANE_SET = new Set<string>(LANES);
 
-/** The colour of a lane; the neutral `other` colour for any lane not listed. */
-export function laneColor(lane: string): string {
-  return Object.hasOwn(LANE_COLORS, lane) ? LANE_COLORS[lane] : LANE_COLORS.other;
-}
-
-/** The lane's colour token, `var(--lane-memory)` (dark: the hex above; paper: its darker paper value); `other` for any
- * lane not listed. */
+/** The lane's colour token, `var(--lane-memory)`; `other` for any lane not listed. */
 export function laneVar(lane: string): string {
-  return `var(--lane-${Object.hasOwn(LANE_COLORS, lane) ? lane : 'other'})`;
+  return `var(--lane-${LANE_SET.has(lane) ? lane : 'other'})`;
 }
 
 /** `"40 ms"` under a second, `"1.4 s"` from a second; `"—"` when there is no duration. */
