@@ -443,6 +443,8 @@
   /* The replay mark tints the rows only: the 7% frame tint is measured over the white card (on --surface-hover the
      debug name would fall to 4.2:1). */
   .turn.hl .rows { background: var(--surface-hover); }
+  /* The soft blocks inside the marked rows share its colour: lift them to the card colour so they keep their shape. */
+  .turn.hl .rows .chip, .turn.hl .rows .step:not(.err) .got { background: var(--surface); }
   .turn.target { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   /* The frame column: the frame's colour at 7% (debug's name on its tint is 4.56:1), a ring on hover */
