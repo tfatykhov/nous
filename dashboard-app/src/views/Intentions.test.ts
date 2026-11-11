@@ -98,6 +98,18 @@ describe('Intentions view', () => {
     await waitFor(() => expect(urls.some((u) => u.includes('window=30d'))).toBe(true));
   });
 
+  it('each root opens from its summary, whose row sits in one span inside it', async () => {
+    const { container } = render(Intentions);
+    await screen.findAllByText(HOSTILE);
+    const summaries = [...container.querySelectorAll('details.root > summary')];
+    expect(summaries.length).toBe(1);
+    for (const s of summaries) {
+      expect(s.children.length).toBe(1);
+      expect(s.firstElementChild?.classList.contains('sum-row')).toBe(true);
+      expect(s.querySelector('.pill')?.textContent).toBe('deciding');
+    }
+  });
+
   it('a hostile intent of 2,000 unbroken characters is shown as text', async () => {
     const long = HOSTILE + 'x'.repeat(2000);
     body = { ...DATA, roots: [{ ...DATA.roots[0], intent: long }] };
@@ -119,6 +131,15 @@ describe('Intentions view', () => {
 // Redesign PR 4: Intentions on paper (style only: the view has no colour in its script).
 describe('Intentions: the paper look (source contracts)', () => {
   const rules = parseBlocks(styleBlocks(readFileSync(resolve(__dirname, 'Intentions.svelte'), 'utf-8')));
+
+  it('a root is a native disclosure: its summary stays a list item with the browser\'s marker, the row inside it is the flex box (review M7)', () => {
+    // A summary laid out as flex loses its marker (the PR 2 fix on Retrieval); no glyph of ours replaces it.
+    const summary = rules.get('details.root > summary') ?? {};
+    expect(summary.display).toBeUndefined();
+    expect(rules.get('.sum-row')).toMatchObject({ display: 'inline-flex' });
+    const css = styleBlocks(readFileSync(resolve(__dirname, 'Intentions.svelte'), 'utf-8'));
+    expect(css).not.toMatch(/details-marker|content: '[^']/);
+  });
 
   it('an unbroken intent wraps anywhere, so it never widens the page', () => {
     expect(rules.get('.intent')).toMatchObject({ 'overflow-wrap': 'anywhere' });

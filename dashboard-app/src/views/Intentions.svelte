@@ -143,12 +143,13 @@
       {#if d.roots.length === 0}<p class="empty">No intention roots yet.</p>{/if}
       {#each d.roots as root (root.id)}
         <details class="root">
-          <summary>
+          <!-- The summary stays a list item, so the browser draws its own disclosure marker; the row is the span inside. -->
+          <summary><span class="sum-row">
             <span class="pill">{root.state}</span>
             <span class="muted small">{root.short_id}</span>
             <span class="intent">{root.intent}</span>
             <span class="small muted">{countNodes(root)} below · {root.arrivals.length} arrivals · {when(root.created_at)}</span>
-          </summary>
+          </span></summary>
           <p class="small muted">
             {root.wake_policy} · {root.authority} · from {root.origin_kind}{root.origin_channel ? ` (${root.origin_channel})` : ''}
             {#if root.root_cancelled_at} · cancelled {when(root.root_cancelled_at)}{/if}
@@ -251,5 +252,8 @@
   tbody th { overflow-wrap: anywhere; min-width: 8rem; }
   .pill { border: 1px solid var(--border); border-radius: 999px; padding: 0 0.5rem; font-size: 0.6875rem; }
   details.root { border-top: 1px solid var(--border); padding: 0.5rem 0; }
-  details.root > summary { cursor: pointer; display: flex; gap: 0.5rem; align-items: baseline; flex-wrap: wrap; }
+  /* A summary stays a list item, so the browser draws its own disclosure marker (no glyph of ours); its row is the span. */
+  details.root > summary { cursor: pointer; }
+  details.root > summary::marker { color: var(--muted); }
+  .sum-row { display: inline-flex; gap: 0.5rem; align-items: baseline; flex-wrap: wrap; width: calc(100% - 1.25em); min-width: 0; }
 </style>
