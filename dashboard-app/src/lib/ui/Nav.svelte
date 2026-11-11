@@ -201,8 +201,8 @@
     color: var(--muted);
     font-size: 0.6875rem;
     font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+    letter-spacing: var(--nav-label-tracking);
+    text-transform: var(--label-transform);
   }
 
   .nav-link {
@@ -210,8 +210,8 @@
     align-items: center;
     gap: 0.625rem;
     padding: 0.5rem 0.75rem;
-    border-radius: var(--radius-sm);
-    color: var(--muted);
+    border-radius: var(--nav-radius);
+    color: var(--nav-ink);
     text-decoration: none;
     font-size: 0.875rem;
     font-weight: 500;
@@ -229,6 +229,13 @@
     background: var(--accent-glow);
     /* #a99df9 on the glow: 6.69:1 (the raw accent was 3.96:1) */
     color: var(--accent-text);
+    font-weight: var(--nav-active-weight);
+  }
+
+  /* The ground's ring: today's accent under the dark look, white on the rail (it sits outside the paper pill). */
+  .nav-link:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 2px;
   }
 
   .nav-label {
@@ -253,7 +260,9 @@
   .nav-badge--waiting { background: var(--waiting); }
   .nav-badge--unknown { background: var(--unknown); }
 
+  /* display: none on the rail (no icons there), so a hidden icon never takes space, focus or speech. */
   .nav-icon {
+    display: var(--nav-icon-display);
     width: 1.125rem;
     height: 1.125rem;
     flex-shrink: 0;

@@ -13,6 +13,7 @@ export const HEX_GUARDED: readonly string[] = [
   'lib/ui/DataTable.svelte',
   'lib/ui/FilterBar.svelte',
   'lib/ui/LookToggle.svelte',
+  'App.svelte',
 ];
 
 const SRC = __dirname;

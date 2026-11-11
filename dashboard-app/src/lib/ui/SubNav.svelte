@@ -35,7 +35,7 @@
 
   .subnav-link {
     padding: 8px 14px;
-    border-radius: var(--radius-sm);
+    border-radius: var(--ctl-radius);
     color: var(--muted);
     font-size: 0.875rem;
     text-decoration: none;
@@ -47,10 +47,11 @@
     color: var(--text);
   }
 
+  /* The inset accent ring under the dark look; a white raised pill under the paper look. */
   .subnav-link.active {
-    background: var(--surface-hover);
+    background: var(--tab-active-bg);
     color: var(--text);
     font-weight: 600;
-    box-shadow: inset 0 0 0 1px var(--accent);
+    box-shadow: var(--tab-active-shadow);
   }
 </style>

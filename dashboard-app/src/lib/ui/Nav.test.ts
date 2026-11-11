@@ -3,6 +3,9 @@ import { render, within, cleanup } from '@testing-library/svelte';
 import { get } from 'svelte/store';
 import Nav from './Nav.svelte';
 import { ROUTES, currentRoute, initRouter } from '../router';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { RAIL_SEL, parseBlocks, styleBlocks } from '../testing/css';
 
 // Regression guard: the Nav link hrefs MUST be in the exact hash format the
 // router accepts (`#/<route>`). They previously used `#<route>` (no slash),
@@ -113,5 +116,67 @@ describe('Nav groups', () => {
     expect(item?.getAttribute('aria-label')).toBe('Model calls');
     expect(item?.getAttribute('aria-current')).toBe('page');
     expect(container.querySelectorAll('[aria-current="page"]')).toHaveLength(1);
+  });
+});
+
+// Dashboard redesign: under the paper look the Nav sits on the Atlantic-blue rail as text pills (no icons). The
+// order, the names and the focus ring must hold on both looks.
+describe('Nav on the rail', () => {
+  beforeEach(() => { cleanup(); });
+  const src = readFileSync(join(__dirname, 'Nav.svelte'), 'utf-8');
+  const css = styleBlocks(src);
+  const rail = parseBlocks(readFileSync(join(__dirname, '../../app.css'), 'utf-8')).get(RAIL_SEL) ?? {};
+
+  it('Tab walks the links in route order: DOM order, nothing else focusable, no tabindex', () => {
+    const { container } = render(Nav, { props: { currentRoute: 'work' } });
+    const focusable = Array.from(
+      container.querySelectorAll<HTMLElement>('a[href], button, input, select, textarea, [tabindex]'),
+    );
+    expect(focusable.every((el) => el.matches('a.nav-link'))).toBe(true);
+    expect(focusable.map((a) => a.getAttribute('href'))).toEqual(ROUTES.map((r) => `#/${r}`));
+    expect(focusable.some((el) => el.hasAttribute('tabindex'))).toBe(false);
+  });
+
+  it('exactly one link is the current page, the current route', () => {
+    const { container } = render(Nav, { props: { currentRoute: 'work' } });
+    const current = container.querySelectorAll('[aria-current="page"]');
+    expect(current).toHaveLength(1);
+    expect(current[0].getAttribute('href')).toBe('#/work');
+    expect(current[0].classList.contains('active')).toBe(true);
+  });
+
+  it('a badge count stays in the link name', async () => {
+    const { pushCounts } = await import('../stores/attention');
+    pushCounts({ questions: 0, sends: 2 });
+    const { container } = render(Nav, { props: { currentRoute: 'overview' } });
+    expect(container.querySelector('a[href="#/work"]')?.getAttribute('aria-label')).toBe('Work, 2 sends in doubt');
+  });
+
+  it('icons are hidden from speech and, on the rail, from layout (display: none, not only invisible)', () => {
+    const { container } = render(Nav, { props: { currentRoute: 'overview' } });
+    const icons = Array.from(container.querySelectorAll('a.nav-link svg'));
+    expect(icons).toHaveLength(18);
+    for (const svg of icons) {
+      expect(svg.getAttribute('aria-hidden')).toBe('true');
+      expect(svg.classList.contains('nav-icon')).toBe(true);
+    }
+    expect(css).toMatch(/\.nav-icon\s*\{[^}]*display:\s*var\(--nav-icon-display\)/);
+    expect(rail['--nav-icon-display']).toBe('none');
+  });
+
+  it('the focus ring is the ground\'s --focus-ring, white on the rail', () => {
+    expect(css).toMatch(/\.nav-link:focus-visible\s*\{[^}]*outline:\s*2px solid var\(--focus-ring\)/);
+    expect(css).toMatch(/\.nav-link:focus-visible\s*\{[^}]*outline-offset:\s*2px/);
+    expect(rail['--focus-ring']).toBe('#ffffff');
+  });
+
+  it('labels, pills and the current item read tokens (dark values unchanged, paper values on the rail)', () => {
+    expect(css).toMatch(/\.nav-group-label\s*\{[^}]*text-transform:\s*var\(--label-transform\)/);
+    expect(css).toMatch(/\.nav-group-label\s*\{[^}]*letter-spacing:\s*var\(--nav-label-tracking\)/);
+    expect(css).toMatch(/\.nav-link\s*\{[^}]*border-radius:\s*var\(--nav-radius\)/);
+    expect(css).toMatch(/\.nav-link\s*\{[^}]*color:\s*var\(--nav-ink\)/);
+    expect(css).toMatch(/\.nav-link\.active\s*\{[^}]*font-weight:\s*var\(--nav-active-weight\)/);
+    expect(css).toMatch(/\.nav-link\.active\s*\{[^}]*background:\s*var\(--accent-glow\)/);
+    expect(css).toMatch(/\.nav-badge\s*\{[^}]*color:\s*var\(--bg\)/);
   });
 });
