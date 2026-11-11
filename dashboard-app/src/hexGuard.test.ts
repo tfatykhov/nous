@@ -24,6 +24,8 @@ export const HEX_GUARDED: readonly string[] = [
   'views/work/SessionList.svelte',
   'views/work/Patterns.svelte',
   'views/work/FullResult.svelte',
+  'views/Overview.svelte',
+  'lib/viz/DayTimeline.svelte',
 ];
 
 const SRC = __dirname;

@@ -106,6 +106,14 @@ const SESSIONS = {
   }],
 };
 
+// The Overview's day timeline and Needs-you findings (redesign PR 1): recording off, no open finding.
+const TODAY_OFF = {
+  enabled: false, day: '2026-11-08', now: '2026-11-08T12:00:00+00:00', turns: [], truncated: false,
+  totals: { owner_turns: 0, background_turns: 0, tool_calls: 0, errors: 0, gated: 0, median_seconds: null,
+    model_calls: null, input_tokens: null, cache_read_tokens: null },
+};
+const FINDINGS = { findings: [], stats: {} };
+
 // Routed by URL: /dashboard/activity serves the four moved sections; each host answers from its own endpoint.
 let urls: string[] = [];
 let failing: string[] = [];
@@ -126,6 +134,8 @@ function install() {
       : url.startsWith('/dashboard/observability') ? OBSERVABILITY
       : url.startsWith('/dashboard/attention') ? ATTENTION
       : url.startsWith('/dashboard/work/sessions') ? SESSIONS
+      : url.startsWith('/dashboard/work/today') ? TODAY_OFF
+      : url.startsWith('/heartbeat/findings') ? FINDINGS
       : url.startsWith('/status') ? STATUS
       : null;
     if (!body) throw new Error(`unexpected ${url}`);
