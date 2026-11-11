@@ -758,3 +758,20 @@ describe('Companion shell — the Atlantic-blue bar on chart paper (PR 6)', () =
     expect(odd).toEqual([]);
   });
 });
+
+describe('Companion shell — the status bar of an installed app stays on navy (PR 6)', () => {
+  it('a fixed navy strip the height of the top safe-area inset sits under the status bar (source contract)', async () => {
+    // black-translucent draws the page under an installed iPhone's status bar, whose text is white: once the page
+    // scrolls, the bar scrolls away and light paper would sit under the clock. env() is 0 in a browser tab.
+    const { readFileSync } = await import('node:fs');
+    const { styleBlocks } = await import('../lib/testing/css');
+    const { join } = await import('node:path');
+    const css = styleBlocks(readFileSync(join(__dirname, 'Companion.svelte'), 'utf-8'));
+    expect(css).toMatch(
+      /\.status-fill \{[^}]*position: fixed;[^}]*top: 0;[^}]*height: env\(safe-area-inset-top\);[^}]*background: var\(--rail\)/,
+    );
+    seed('nous:chat:micro_app:aaa001');
+    const { container } = render(Companion);
+    expect(container.querySelector('.status-fill')?.getAttribute('aria-hidden')).toBe('true');
+  });
+});

@@ -268,7 +268,10 @@
 </script>
 
 <!-- The Atlantic-blue bar runs edge to edge and up under the status bar of an
-     installed app; the shell below keeps the reading width. -->
+     installed app; the shell below keeps the reading width. The fixed strip
+     keeps navy under the (white) status-bar text once the page scrolls the bar
+     away; it is the top safe-area inset tall, so 0 in a browser tab. -->
+<div class="status-fill" aria-hidden="true"></div>
 <header class="rail">
   <div class="rail-inner">
     <a class="brand" href="#/">Nous <span>Companion</span></a>
@@ -349,6 +352,16 @@
     color: var(--rail-ink);
     padding: calc(0.9rem + env(safe-area-inset-top)) calc(1rem + env(safe-area-inset-right)) 0.9rem
       calc(1rem + env(safe-area-inset-left));
+  }
+  .status-fill {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: env(safe-area-inset-top);
+    background: var(--rail);
+    z-index: 10;
+    pointer-events: none;
   }
   .rail-inner {
     max-width: 688px; /* the shell's 720px less its padding: the brand lines up with the cards */
