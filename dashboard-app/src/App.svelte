@@ -316,8 +316,8 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      width: 2.25rem;
-      height: 2.25rem;
+      width: 2.75rem; /* a 44px tap target (final step) */
+      height: 2.75rem;
       background: none;
       border: none;
       border-radius: var(--radius-sm);
@@ -328,8 +328,8 @@
     }
     .hamburger-dot {
       position: absolute;
-      top: 0.25rem;
-      right: 0.25rem;
+      top: 0.5rem; /* the button grew 4px a side: the dot stays on the icon */
+      right: 0.5rem;
       width: 0.5rem;
       height: 0.5rem;
       border-radius: 50%;
@@ -374,7 +374,7 @@
       display: flex;
       align-items: center;
       gap: 0.625rem;
-      padding: 1.125rem 1rem;
+      padding: 0.75rem 1rem; /* with the 44px close, the header stays 68px tall */
       border-bottom: 1px solid var(--border);
       flex-shrink: 0;
     }
@@ -384,8 +384,8 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      width: 2rem;
-      height: 2rem;
+      width: 2.75rem; /* a 44px tap target (final step) */
+      height: 2.75rem;
       background: none;
       border: none;
       border-radius: var(--radius-sm);

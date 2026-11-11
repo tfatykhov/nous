@@ -103,3 +103,15 @@ describe('the details the captures showed', () => {
     expect(m).toContain('<th class="num">Auto-linked edges</th>');
   });
 });
+
+// Final step A3: the phone shell's two controls were under the 44px tap target (the menu 36px, the drawer's close 32px).
+describe('the phone shell\'s controls are 44px tap targets', () => {
+  it.each(['.hamburger', '.drawer-close'])('App.svelte %s is 44px square', (sel) => {
+    expect(STYLE('App.svelte').get(sel)).toMatchObject({ width: '2.75rem', height: '2.75rem' });
+  });
+
+  it('the menu\'s attention dot keeps its place on the icon, and the drawer header keeps its height', () => {
+    expect(STYLE('App.svelte').get('.hamburger-dot')).toMatchObject({ top: '0.5rem', right: '0.5rem' });
+    expect(STYLE('App.svelte').get('.drawer-header')).toMatchObject({ padding: '0.75rem 1rem' });
+  });
+});
