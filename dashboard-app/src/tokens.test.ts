@@ -221,8 +221,8 @@ const ST: Record<string, [string, string]> = {
 };
 const OC: Record<string, [string, string]> = {
   '--oc-failed': ['#ef4444', '#b02a22'], // Subtasks: incomplete_no_terminal, validation_failed
-  '--oc-timeout': ['#dc2626', '#8a1c2c'],
-  '--oc-errored': ['#7c2d12', '#6b2a12'],
+  '--oc-timeout': ['#dc2626', '#881c34'], // re-review N1: #8a1c2c was 3.7 from errored under protanopia
+  '--oc-errored': ['#7c2d12', '#641400'],
   '--oc-unknown': ['#9ca3af', '#7a8794'], // fix round 0: a lighter slate, not cancelled's grey
   '--oc-blocked': ['#f59e0b', '#b7791f'], // Subtasks' incomplete_blocked as a mark (review I3: the text amber merged with failed)
 };
@@ -779,10 +779,8 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
     // Open pairs with no verified hex (the review's and the ones measured with it), each held at its present floor.
     const open: Record<string, number> = {
       '--st-success|--oc-failed': 5, // deutan 5.5
-      '--st-success|--oc-timeout': 5.5, // deutan 5.8
+      '--st-success|--oc-timeout': 5.5, // deutan 5.95
       '--st-success|--st-neutral': 6.5, // deutan 6.9
-      '--oc-failed|--oc-timeout': 7.5, // protan 7.8
-      '--oc-timeout|--oc-errored': 3.5, // protan 3.7, deutan 4.8
     };
     for (const [chart, tokens] of Object.entries(sets)) {
       for (let i = 0; i < tokens.length; i++) {

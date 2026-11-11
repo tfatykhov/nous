@@ -411,8 +411,8 @@
     --st-unknown: #a3266f;
     --st-neutral: #55616c;
     --oc-failed: #b02a22;
-    --oc-timeout: #8a1c2c;
-    --oc-errored: #6b2a12;
+    --oc-timeout: #881c34;
+    --oc-errored: #641400;
     --oc-unknown: #7a8794;                     /* lighter than --st-neutral (cancelled), as under dark */
     --oc-blocked: #b7791f;                     /* a mark (3:1), not the badge amber, which merges with failed under deuteranopia */
     --stack-bar: #b7791f;
