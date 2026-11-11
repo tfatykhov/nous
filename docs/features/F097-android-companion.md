@@ -315,7 +315,7 @@ Everything the web renders:
 - **basic, 16 of 18:** Text, Image, Icon, Row, Column, List, Card, Tabs, Modal, Divider, Button, TextField, CheckBox, ChoicePicker, Slider, DateTimeInput;
 - **nous-core, 21:** ApprovalPanel, ActionReviewCard, StatTile, KeyValueTable, DecisionCard, ConfidenceMeter, MemoryGraph, DagGraph, AppHeader, AppFooter, Section, StatRow, Timeline, Sparkline, LineChart, BarChart, MetricCard, ScoreCard, DeltaList, DataTable, ChipRow.
 
-Video and AudioPlayer are unimplemented on the web too.
+Video is rendered on the web but not ported to Android yet (the fallback card links to the web view); AudioPlayer is unimplemented on both.
 
 ### 8.2 Fallback
 

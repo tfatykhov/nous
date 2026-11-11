@@ -9,7 +9,9 @@ package us.fatykhov.nous.companion.core
  * PR 3: the six template builders' vocabulary + basic layout/display.
  * PR 4: the basic-catalog inputs, Modal and Tabs (two-way binding).
  * PR 5: micro-app chrome, charts and the F096 report vocabulary. Only
- * Video/AudioPlayer remain unsupported (they are unimplemented on the web too).
+ * Video/AudioPlayer remain unsupported. Video is rendered on the web but not
+ * ported to Android yet (the fallback card links to the web view); AudioPlayer
+ * is unimplemented on both.
  */
 object Registry {
     val ported: Set<String> = setOf(
