@@ -68,7 +68,6 @@ const PARITY: Record<string, string> = {
   '--series-3': '--series-2',
   '--series-4': '--series-10',
   // status tones drawn as marks (a chart line, a meter band): the dashboard's outcome marks
-  '--warn-mark': '--oc-blocked',
   '--crit-mark': '--err-text',
   '--chart-axis': '--chart-text',
   '--chart-grid': '--chart-grid',
@@ -129,6 +128,7 @@ const COMPANION_OWN: Record<string, string> = {
   '--video-bg': "a video frame's fill before its first frame: the prototype's navy on paper (WebKit paints no frame without a poster), the soft tile in a legacy theme",
   '--stat-min': "a StatRow tile's minimum width: 96px on paper, so three evidence tiles fit a phone as in the prototype; 120px in a legacy theme",
   '--section-ink': "a section heading's colour: ink on paper (the prototype's headings), muted in a legacy theme",
+  '--warn-mark': "the amber mark #b4771e: the dashboard's #b7791f is 2.97:1 on the meter and bar track; this is 0.8 from it",
   '--figure-stretch': "the figures' width: 82% on paper (Archivo's width axis, as the dashboard's figures), 100% in a legacy theme",
   '--nested-bg': 'a card inside a surface card: a soft tile instead of a shadow on a shadow',
   '--ctl-bg': "a default button's fill (the prototype .btn: white)",

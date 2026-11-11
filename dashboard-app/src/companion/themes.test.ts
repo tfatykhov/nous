@@ -510,7 +510,7 @@ const PAPER_ROOT: Record<string, string> = {
   '--series-3': '#159a7a',
   '--series-4': '#8b5cf6',
   '--ok-mark': '#21694b',
-  '--warn-mark': '#b7791f',
+  '--warn-mark': '#b4771e',
   '--crit-mark': '#b02a22',
   '--chip-selected-bg': '#12304f',
   '--chip-selected-ink': '#ffffff',
@@ -782,6 +782,16 @@ describe('contrast per theme (WCAG: text 4.5, marks 3)', () => {
       }
     }
     expect(close).toEqual([]);
+  });
+
+  it('paper: each status mark is 3:1 on the meter track and on a bar track (--chart-grid) it is drawn on', () => {
+    // re-review call 2: the dashboard's amber #b7791f was 2.97:1 on the #e3e9ec track
+    const t = SHEET.resolved('nous-default');
+    for (const mark of ['--ok-mark', '--warn-mark', '--crit-mark']) {
+      for (const track of ['--meter-track', '--chart-grid']) {
+        expect(contrast(t[mark], t[track]), `${mark} on ${track}`).toBeGreaterThanOrEqual(3);
+      }
+    }
   });
 
   it('the mark tokens exist (chart.ts builds them in a template, which the inventory test cannot see)', () => {

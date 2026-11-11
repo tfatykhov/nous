@@ -80,7 +80,7 @@
      and crit are 0.7 apart under deuteranopia). 8 or more apart in every
      vision, 3:1 on the card. */
   --ok-mark: #21694b;
-  --warn-mark: #b7791f;
+  --warn-mark: #b4771e; /* 0.8 from the dashboard's #b7791f, which is 2.97:1 on the track */
   --crit-mark: #b02a22;
   /* A selected ChoicePicker chip: navy with a white word (the wash was the
      same colour as an unselected chip, so focus looked like selection); a
