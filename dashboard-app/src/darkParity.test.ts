@@ -56,11 +56,24 @@ function canonical(value: string): string {
 
 /** [file, selector, property, the value it reads now, the literal it had]. Each screen task appends its rows. */
 type Row = [file: string, selector: string, property: string, value: string, old: string];
-const ROWS: Row[] = [];
+const ROWS: Row[] = [
+  // Decisions
+  ['views/Decisions.svelte', '.stat-card', 'border', 'var(--card-border)', '1px solid #1e1e2e'],
+  ['views/Decisions.svelte', '.stat-card', 'border-radius', 'var(--card-radius-sm)', '8px'],
+  ['views/Decisions.svelte', '.stat-label', 'text-transform', 'var(--label-transform)', 'uppercase'],
+  ['views/Decisions.svelte', '.stat-label', 'letter-spacing', 'var(--label-tracking)', '0.05em'],
+  ['views/Decisions.svelte', '.indicator.good', 'background', 'var(--green)', '#34d399'],
+  ['views/Decisions.svelte', '.indicator.warn', 'background', 'var(--yellow)', '#fbbf24'],
+  ['views/Decisions.svelte', '.indicator.bad', 'background', 'var(--red)', '#f87171'],
+  ['views/Decisions.svelte', '.chart-card', 'border', 'var(--card-border)', '1px solid #1e1e2e'],
+  ['views/Decisions.svelte', '.status-msg.error', 'color', 'var(--err-text)', '#f87171'],
+];
 
 /** The plan's listed dark changes: [file, selector, property, value now, old literal, the dark value it resolves to]. */
 type Change = [file: string, selector: string, property: string, value: string, old: string, now: string, why: string];
-const CHANGES: Change[] = [];
+const CHANGES: Change[] = [
+  ['views/Decisions.svelte', '.chart-card', 'border-radius', 'var(--card-radius)', '10px', '12px', 'D2: a chart card takes the card radius'],
+];
 
 /** PR 4 and PR 5's routes and their views. */
 const SCREENS: Record<string, string> = {

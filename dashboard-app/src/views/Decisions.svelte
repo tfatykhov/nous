@@ -6,6 +6,8 @@
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import Chart from '../lib/viz/Chart.svelte';
+  import { Button } from '../lib/ui/button';
+  import { tint } from '../lib/chartColors';
 
   // Load-once: interval so large it never auto-fires. Refresh button handles manual reload.
   const store = usePoll(
@@ -18,12 +20,17 @@
   // ── Helpers ──────────────────────────────────────────────────────────────
 
   const OUTCOME_ORDER = ['success', 'partial', 'failure', 'pending'] as const;
+  // Chart colours are tokens that Chart.svelte resolves against the canvas's ground (dark: the old literals). The
+  // outcomes take the Overview's decision-outcome palette; the violet marks --series-0, not the accent, whose paper value
+  // is the question frame's blue.
   const OUTCOME_COLORS: Record<string, string> = {
-    success: '#34d399',
-    partial: '#fbbf24',
-    failure: '#f87171',
-    pending: '#6b6b8a',
+    success: 'var(--green)',
+    partial: 'var(--yellow)',
+    failure: 'var(--red)',
+    pending: 'var(--series-7)',
   };
+  const MARK = 'var(--series-0)';
+  const BRIER_WORD: Record<string, string> = { good: 'good', warn: 'fair', bad: 'poor' };
 
   function capitalize(s: string): string {
     return s.charAt(0).toUpperCase() + s.slice(1);
@@ -99,9 +106,9 @@
     <p class="subtitle">Calibration, confidence, and reasoning analytics</p>
   </div>
   <div class="head-right">
-    <button class="refresh-btn" onclick={() => void store.refresh()} disabled={$store.loading}>
+    <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void store.refresh()} disabled={$store.loading}>
       {$store.loading ? 'Loading…' : 'Refresh'}
-    </button>
+    </Button>
     <StaleBadge state={$store} />
   </div>
 </header>
@@ -126,6 +133,7 @@
       <div class="stat-value">
         <span class="indicator {brierClass(brier)}"></span>
         {brier != null ? brier.toFixed(4) : '—'}
+        {#if BRIER_WORD[brierClass(brier)]}<span class="indicator-word">{BRIER_WORD[brierClass(brier)]}</span>{/if}
       </div>
       <div class="stat-label">Latest Brier score (lower is better)</div>
     </div>
@@ -144,10 +152,10 @@
               {
                 label: 'Actual Success Rate',
                 data: d.calibration_curve.map((p) => p.actual_success_rate),
-                borderColor: '#7c6af7',
-                backgroundColor: 'rgba(124,106,247,0.10)',
+                borderColor: MARK,
+                backgroundColor: tint('--series-0', 0.1),
                 fill: true,
-                pointBackgroundColor: '#7c6af7',
+                pointBackgroundColor: MARK,
                 pointRadius: 5,
                 borderWidth: 2,
               },
@@ -155,7 +163,7 @@
                 // Perfect-calibration reference line (y = x)
                 label: 'Perfect calibration',
                 data: d.calibration_curve.map((p) => parseFloat(p.bucket)),
-                borderColor: 'rgba(107,107,138,0.4)',
+                borderColor: tint('--muted', 0.4),
                 borderDash: [5, 5],
                 borderWidth: 1,
                 pointRadius: 0,
@@ -187,8 +195,8 @@
             datasets: [{
               label: 'Count',
               data: d.confidence_histogram.map((b) => b.count),
-              backgroundColor: 'rgba(124,106,247,0.5)',
-              borderColor: '#7c6af7',
+              backgroundColor: tint('--series-0', 0.5),
+              borderColor: MARK,
               borderWidth: 1,
             }],
           }}
@@ -264,8 +272,8 @@
           datasets: [{
             label: 'Usage Count',
             data: r.data,
-            backgroundColor: 'rgba(124,106,247,0.5)',
-            borderColor: '#7c6af7',
+            backgroundColor: tint('--series-0', 0.5),
+            borderColor: MARK,
             borderWidth: 1,
           }],
         }}
@@ -296,10 +304,10 @@
             datasets: [{
               label: 'Brier Score',
               data: d.brier_history.map((p) => p.brier_score),
-              borderColor: '#7c6af7',
-              backgroundColor: 'rgba(124,106,247,0.10)',
+              borderColor: MARK,
+              backgroundColor: tint('--series-0', 0.1),
               fill: true,
-              pointBackgroundColor: '#7c6af7',
+              pointBackgroundColor: MARK,
               pointRadius: 3,
               borderWidth: 2,
             }],
@@ -328,8 +336,8 @@
             datasets: [{
               label: 'Decisions',
               data: d.daily_decisions.map((p) => p.count),
-              backgroundColor: 'rgba(167,139,250,0.5)',
-              borderColor: '#a78bfa',
+              backgroundColor: tint('--series-3', 0.5),
+              borderColor: 'var(--series-3)',
               borderWidth: 1,
             }],
           }}
@@ -363,6 +371,7 @@
     align-items: flex-start;
     justify-content: space-between;
     gap: 1rem;
+    flex-wrap: wrap;
     margin-bottom: 1.25rem;
   }
 
@@ -371,6 +380,14 @@
     font-weight: 700;
     color: var(--text);
     margin: 0 0 0.125rem;
+  }
+
+  /* The paper look's title size; the dark title keeps the rule above. */
+  :global(html[data-look="paper"] [data-ground="paper"]) h1 {
+    font-size: 30px;
+    font-weight: 650;
+    letter-spacing: -0.022em;
+    line-height: 1.15;
   }
 
   .subtitle {
@@ -393,23 +410,6 @@
     flex-shrink: 0;
   }
 
-  .refresh-btn {
-    font-size: 0.8125rem;
-    padding: 0.25rem 0.75rem;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 6px);
-    background: var(--surface);
-    color: var(--text);
-    cursor: pointer;
-  }
-  .refresh-btn:hover:not(:disabled) {
-    background: var(--surface-hover);
-  }
-  .refresh-btn:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-
   /* Brier indicator card */
   .indicator-row {
     display: grid;
@@ -418,10 +418,12 @@
     margin-top: 1rem;
   }
 
+  /* A copy of StatGrid's card, by the same tokens. */
   .stat-card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm, 8px);
+    border: var(--card-border);
+    border-radius: var(--card-radius-sm);
+    box-shadow: var(--card-shadow);
     padding: 1rem;
     display: flex;
     flex-direction: column;
@@ -442,8 +444,8 @@
     font-size: 0.75rem;
     font-weight: 500;
     color: var(--muted);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
+    text-transform: var(--label-transform);
+    letter-spacing: var(--label-tracking);
   }
 
   .indicator {
@@ -453,16 +455,28 @@
     border-radius: 50%;
     flex-shrink: 0;
   }
-  .indicator.good    { background: var(--green, #22c55e); }
-  .indicator.warn    { background: var(--yellow, #eab308); }
-  .indicator.bad     { background: var(--red, #ef4444); }
+  .indicator.good    { background: var(--green); }
+  .indicator.warn    { background: var(--yellow); }
+  .indicator.bad     { background: var(--red); }
   .indicator.neutral { background: var(--muted); }
+
+  /* The dot's meaning in a word: status is never colour alone. */
+  .indicator-word {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--muted);
+  }
 
   .chart-row {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 1rem;
     margin-top: 1rem;
+  }
+
+  /* A chart cell may shrink below its canvas's width (a grid item's min-width is auto), so a phone never scrolls sideways. */
+  .chart-row > * {
+    min-width: 0;
   }
 
   @media (max-width: 640px) {
@@ -476,8 +490,9 @@
 
   .chart-card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
     padding: 1rem;
     margin-top: 1rem;
   }
@@ -503,7 +518,7 @@
   }
 
   .status-msg.error {
-    color: var(--red, #ef4444);
+    color: var(--err-text);
   }
 
   .retry-link {

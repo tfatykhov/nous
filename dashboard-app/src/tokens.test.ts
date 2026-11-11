@@ -922,6 +922,36 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     expect(contrast(DARK['--muted'], over(parseColor(DARK['--wash']), parseColor(DARK['--surface'])))).toBeGreaterThanOrEqual(4.5);
   });
 
+  // Marks one chart draws together keep 8 apart for normal vision and under protanopia and deuteranopia (PR 3 review I3).
+  // Each screen task adds the sets its charts draw. An open pair is held at its present floor, named, with the cue that
+  // tells its marks apart besides colour; it is listed in the PR 4 report for the owner.
+  const MARK_SETS: Record<string, string[]> = {
+    // Decisions' outcome by category and by stakes (stacked bars): the Overview's decision-outcome palette, so a hue
+    // means the same outcome on both screens.
+    'decisions outcomes': ['--green', '--yellow', '--red', '--series-7'],
+  };
+  const OPEN_PAIRS: Record<string, number> = {
+    // The status hues under red-green colour blindness; the stack order (success at the base) and the legend name them.
+    '--green|--yellow': 4.5, // protan 4.6
+    '--green|--red': 5.5, // deutan 5.9
+    '--yellow|--red': 5, // deutan 5.1
+  };
+
+  it('marks one chart draws together keep 8 apart under normal vision, protanopia and deuteranopia, or a named floor', () => {
+    for (const [chart, set] of Object.entries(MARK_SETS)) {
+      for (let i = 0; i < set.length; i++) {
+        expect(contrast(PAPER[set[i]], white), `${chart}: ${set[i]} on white`).toBeGreaterThanOrEqual(3);
+        for (let j = i + 1; j < set.length; j++) {
+          const floor = OPEN_PAIRS[`${set[i]}|${set[j]}`] ?? 8;
+          for (const cvd of [undefined, 'protan', 'deutan'] as const) {
+            expect(okDistance(PAPER[set[i]], PAPER[set[j]], cvd), `${chart}: ${set[i]} and ${set[j]} (${cvd ?? 'normal'})`)
+              .toBeGreaterThanOrEqual(floor);
+          }
+        }
+      }
+    }
+  });
+
   it('the listed dark changes (D3, D4): each new dark pair on the dark card, 3:1 for a mark and 4.5:1 for text', () => {
     const surface = DARK['--surface'];
     expect(contrast(DARK['--st-neutral'], surface)).toBeGreaterThanOrEqual(3); // was #6b6b8a (3.63), now 3.85
