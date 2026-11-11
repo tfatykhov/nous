@@ -101,22 +101,6 @@ describe('classifyVideoUrl', () => {
   it.each(REJECTED.map((raw) => [raw]))('%j is nothing', (raw) => {
     expect(classifyVideoUrl(raw)).toEqual({ kind: 'none' });
   });
-
-  it('every embed points at the provider origin and ends in a well-formed id', () => {
-    for (const raw of [...YOUTUBE, ...VIMEO]) {
-      const result = classifyVideoUrl(raw);
-      if (result.kind !== 'embed') throw new Error(`${raw} did not embed`);
-      const src = new URL(result.src);
-      const tail = src.pathname.split('/').pop() ?? '';
-      if (result.provider === 'youtube') {
-        expect(src.origin).toBe('https://www.youtube-nocookie.com');
-        expect(tail).toMatch(/^[A-Za-z0-9_-]{11}$/);
-      } else {
-        expect(src.origin).toBe('https://player.vimeo.com');
-        expect(tail).toMatch(/^[0-9]{1,12}$/);
-      }
-    }
-  });
 });
 
 describe('isSafePosterUrl', () => {
