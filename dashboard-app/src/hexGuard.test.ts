@@ -49,6 +49,7 @@ export const HEX_GUARDED: readonly string[] = [
   'views/DagView.svelte',
   'lib/viz/Dag.svelte',
   'views/Subtasks.svelte',
+  'views/Heartbeat.svelte',
 ];
 
 const SRC = __dirname;
@@ -135,6 +136,7 @@ export const SCRIPT_GUARDED: readonly string[] = [
   'views/DagView.svelte',
   'lib/viz/Dag.svelte',
   'views/Subtasks.svelte',
+  'views/Heartbeat.svelte',
 ];
 
 /** A literal colour (hex, rgb/hsl/oklch, a named colour in a fill/stroke attribute), or a two-hex-digit alpha glued onto

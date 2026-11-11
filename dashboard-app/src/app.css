@@ -246,6 +246,8 @@
     --cache-grey: #4b5563;                     /* Cache: the doughnut's uncached part */
     --wait-ink: #c4b5fd;                       /* Workflows: the Now column's waiting pill */
     --wait-bg: rgba(167, 139, 250, 0.14);
+    --wash: rgba(255, 255, 255, 0.03);         /* Heartbeat: the tuning report's panel */
+    --hb-warn-ink: #fbbf24;                    /* Heartbeat: amber as text (paper's --yellow is a mark colour) */
   }
 
   /* ---- The paper ground: page content under the paper look ---- */
@@ -414,6 +416,8 @@
     --cache-grey: #4f5f6f;
     --wait-ink: #7b3fa0;
     --wait-bg: #efe3f6;
+    --wash: #f4f7f8;
+    --hb-warn-ink: #8a5a0e;
 
     /* shadcn, HSL of the paper hex */
     --background: 192 17% 94%;

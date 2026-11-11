@@ -49,23 +49,31 @@
     return new Date(iso).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
   }
 
+  // Colours are tokens: Chart resolves them against its ground, the DOM reads var() directly. Budget and urgency are
+  // status. A colour written as text takes a text token (URGENCY_INK): paper's amber and red fills are marks.
   function budgetColor(pct: number): string {
-    if (pct >= 100) return '#f87171';
-    if (pct > 80) return '#fbbf24';
-    return '#22d3ee';
+    if (pct >= 100) return 'var(--red)';
+    if (pct > 80) return 'var(--yellow)';
+    return 'var(--pending)';
   }
 
   const URGENCY_COLOR: Record<string, string> = {
-    high: '#f87171',
-    normal: '#fbbf24',
-    low: '#6b7280',
+    high: 'var(--red)',
+    normal: 'var(--yellow)',
+    low: 'var(--st-neutral)',
+  };
+
+  const URGENCY_INK: Record<string, string> = {
+    high: 'var(--err-text)',
+    normal: 'var(--hb-warn-ink)',
+    low: 'var(--st-neutral)',
   };
 
   const STATE_COLOR: Record<string, string> = {
-    new: '#22d3ee',
-    acknowledged: '#fbbf24',
-    resolved: '#4ade80',
-    suppressed: '#6b7280',
+    new: 'var(--pending)',
+    acknowledged: 'var(--yellow)',
+    resolved: 'var(--st-completed)',
+    suppressed: 'var(--st-neutral)',
   };
 
   // ── Chart data builders ───────────────────────────────────────────────────
@@ -77,7 +85,7 @@
       labels: ['Used', 'Remaining'],
       datasets: [{
         data: [used, remaining],
-        backgroundColor: [budgetColor(pct), 'rgba(255,255,255,0.06)'],
+        backgroundColor: [budgetColor(pct), 'var(--track)'],
         borderWidth: 0,
       }],
     };
@@ -90,19 +98,19 @@
         {
           label: 'High',
           data: byDay.map((d) => d.by_urgency.high),
-          backgroundColor: '#f87171',
+          backgroundColor: URGENCY_COLOR.high,
           borderWidth: 0,
         },
         {
           label: 'Normal',
           data: byDay.map((d) => d.by_urgency.normal),
-          backgroundColor: '#fbbf24',
+          backgroundColor: URGENCY_COLOR.normal,
           borderWidth: 0,
         },
         {
           label: 'Low',
           data: byDay.map((d) => d.by_urgency.low),
-          backgroundColor: '#6b7280',
+          backgroundColor: URGENCY_COLOR.low,
           borderWidth: 0,
         },
       ],
@@ -260,7 +268,7 @@
         <!-- State pills -->
         <div class="state-pills">
           {#each ['new', 'acknowledged', 'resolved', 'suppressed', 'auto_closed_known_fp'] as st}
-            <span class="hb-pill" style="border-color: {STATE_COLOR[st] ?? '#6b7280'}">
+            <span class="hb-pill" style:border-color={STATE_COLOR[st] ?? 'var(--st-neutral)'}>
               {st}: {byState[st] ?? 0}
             </span>
           {/each}
@@ -283,7 +291,7 @@
                 <div><span class="dl">Summary</span><span>{row.summary}</span></div>
                 <div><span class="dl">First seen</span><span>{fmtTs(row.first_seen)}</span></div>
                 <div><span class="dl">Last seen</span><span>{fmtTs(row.last_seen)}</span></div>
-                <div><span class="dl">Urgency</span><span style="color:{URGENCY_COLOR[row.urgency] ?? '#6b7280'}">{row.urgency}</span></div>
+                <div><span class="dl">Urgency</span><span class="urgency" style:color={URGENCY_INK[row.urgency] ?? 'var(--st-neutral)'}>{row.urgency}</span></div>
                 <div><span class="dl">Escalated</span><span>{row.escalated ? 'yes' : 'no'}</span></div>
                 {#if row.outcome}<div><span class="dl">Outcome</span><span>{row.outcome}</span></div>{/if}
                 {#if row.reopen_count > 0}<div><span class="dl">Reopens</span><span>{row.reopen_count}</span></div>{/if}
@@ -296,8 +304,8 @@
         {/if}
 
         <p class="escalation-note">
-          Escalation: low→normal {lc.escalation_policy.low_to_normal_hours}h,
-          normal→high {lc.escalation_policy.normal_to_high_hours}h,
+          Escalation: low to normal {lc.escalation_policy.low_to_normal_hours}h,
+          normal to high {lc.escalation_policy.normal_to_high_hours}h,
           high re-alert {lc.escalation_policy.high_realert_hours}h,
           accumulation threshold {lc.escalation_policy.accumulation_threshold}
         </p>
@@ -337,7 +345,7 @@
                 <div class="tl-row">
                   <span
                     class="tl-dot"
-                    style="background:{URGENCY_COLOR[f.urgency ?? ''] ?? '#6b7280'}"
+                    style:background={URGENCY_COLOR[f.urgency ?? ''] ?? 'var(--st-neutral)'}
                   ></span>
                   <span class="tl-source">{f.source ?? 'unknown'}</span>
                   <span class="tl-time">{fmtAgo(f.timestamp)}</span>
@@ -395,6 +403,12 @@
     margin: 0 0 0.125rem;
   }
 
+  :global(html[data-look="paper"] [data-ground="paper"]) h1 {
+    font-size: 30px;
+    font-weight: 650;
+    letter-spacing: -0.022em;
+  }
+
   .subtitle {
     font-size: 0.8125rem;
     color: var(--muted);
@@ -416,12 +430,13 @@
     flex-wrap: wrap;
     padding: 0.625rem 0.875rem;
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
     margin-bottom: 1rem;
   }
 
-  .hb-banner--warn { border-color: #fbbf24; }
+  .hb-banner--warn { border-color: var(--yellow); }
   .hb-banner--disabled { opacity: 0.65; }
 
   .hb-dot {
@@ -430,9 +445,9 @@
     border-radius: 50%;
     flex-shrink: 0;
   }
-  .hb-dot--ok   { background: #4ade80; box-shadow: 0 0 6px #4ade8099; }
-  .hb-dot--warn { background: #fbbf24; box-shadow: 0 0 6px #fbbf2499; }
-  .hb-dot--off  { background: #6b7280; }
+  .hb-dot--ok { background: var(--st-completed); box-shadow: 0 0 var(--glow-blur) color-mix(in srgb, var(--st-completed) 60%, transparent); }
+  .hb-dot--warn { background: var(--yellow); box-shadow: 0 0 var(--glow-blur) color-mix(in srgb, var(--yellow) 60%, transparent); }
+  .hb-dot--off { background: var(--st-neutral); }
 
   .hb-banner-label {
     font-size: 0.875rem;
@@ -456,9 +471,9 @@
     color: var(--muted);
     white-space: nowrap;
   }
-  .hb-pill--ok   { border-color: #4ade80; color: #4ade80; }
-  .hb-pill--warn { border-color: #fbbf24; color: #fbbf24; }
-  .hb-pill--bad  { border-color: #f87171; color: #f87171; }
+  .hb-pill--ok { border-color: var(--st-completed); color: var(--st-completed); }
+  .hb-pill--warn { border-color: var(--yellow); color: var(--hb-warn-ink); }
+  .hb-pill--bad { border-color: var(--red); color: var(--err-text); }
 
   /* ── Layout ── */
   .chart-row {
@@ -475,8 +490,9 @@
   .chart-card,
   .table-card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    border: var(--card-border);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
     padding: 1rem;
     margin-top: 1rem;
   }
@@ -596,9 +612,9 @@
 
   .tuning-pre {
     font-size: 0.6875rem;
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--wash);
     border: 1px solid var(--border);
-    border-radius: 6px;
+    border-radius: var(--card-radius-sm);
     padding: 0.75rem;
     overflow-x: auto;
     white-space: pre-wrap;
@@ -623,5 +639,5 @@
     text-align: center;
   }
 
-  .status-msg.error { color: var(--red, #ef4444); }
+  .status-msg.error { color: var(--err-text); }
 </style>
