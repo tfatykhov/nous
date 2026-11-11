@@ -58,7 +58,7 @@
   const dimColor = (i: number) => (i < DIM_TOKENS.length ? `var(${DIM_TOKENS[i]})` : seriesToken(i));
   // A dash per line as well as a hue: some dimension hues merge under red-green colour blindness (tokens.test.ts), and
   // each such pair gets dashes of different kinds (solid, long dash, dotted, dash-dot).
-  const DIM_DASHES = [[], [10, 4], [2, 3], [8, 3, 2, 3], [1, 4], [14, 5], [6, 2, 2, 2], [2, 6], [8, 3, 1, 3, 1, 3]];
+  const DIM_DASHES = [[], [10, 4], [2, 3], [8, 3, 2, 3], [2, 2], [14, 5], [6, 2, 2, 2], [2, 4], [8, 3, 1, 3, 1, 3]];
   const dimDash = (i: number) => DIM_DASHES[i] ?? [i + 2, 3];
 
   // Reworked is --err-text (dark: the old red), apart from corrected's orange under deuteranopia; self-corrected a mark
@@ -149,12 +149,15 @@
   function weightHistoryData(d: RubricData) {
     // Oldest first
     const wh = d.weight_history.slice().reverse();
-    const allDims = new Set<string>();
-    for (const v of wh) Object.keys(v.weights).forEach((k) => allDims.add(k));
-    const dimList = Array.from(allDims);
+    const seen = new Set<string>();
+    for (const v of wh) Object.keys(v.weights).forEach((k) => seen.add(k));
+    // A dimension's hue and dash follow its name, not the history's order (the endpoint sends the newest 20 versions, so
+    // the oldest one changes): the active rubric's dimensions first, then any name seen only in the history, sorted.
+    const active = d.active_rubric?.dimensions.map((x) => x.name) ?? [];
+    const order = [...active.filter((n) => seen.has(n)), ...[...seen].filter((n) => !active.includes(n)).sort()];
     return {
       labels: wh.map((v) => `v${v.version}`),
-      datasets: dimList.map((dim, i) => ({
+      datasets: order.map((dim, i) => ({
         label: dim,
         data: wh.map((v) => v.weights[dim] ?? null),
         borderColor: dimColor(i),

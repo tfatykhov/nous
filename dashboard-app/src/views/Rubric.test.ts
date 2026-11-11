@@ -189,6 +189,38 @@ describe('Scoring: chart colours are tokens', () => {
     for (const [a, b] of [[0, 7], [1, 6], [2, 5], [3, 4], [5, 8], [2, 8]]) expect(dash[a], `${DIM_TOKENS[a]} and ${DIM_TOKENS[b]}`).not.toBe(dash[b]);
   });
 
+  it('every weight line is at least a third ink, so a dotted one can be followed where lines cross (review M3)', async () => {
+    body = DATA(9);
+    render(Rubric);
+    await waitFor(() => expect(configs).toHaveLength(4));
+    for (const d of evolution().data.datasets) {
+      const dash: number[] = d.borderDash;
+      if (dash.length === 0) continue;
+      const ink = dash.filter((_, i) => i % 2 === 0).reduce((a, b) => a + b, 0) / dash.reduce((a, b) => a + b, 0);
+      expect(ink, `${d.label} ${JSON.stringify(dash)}`).toBeGreaterThanOrEqual(1 / 3);
+    }
+  });
+
+  it('a dimension keeps its hue and dash by name when the oldest version leaves the history (review M4)', async () => {
+    const version = (v: string, names: string[]) => ({ version: v, created_at: null, weights: Object.fromEntries(names.map((n) => [n, 0.2])) });
+    const active = ['accuracy', 'clarity', 'speed'];
+    const look = async (history: ReturnType<typeof version>[]) => {
+      configs = [];
+      body = { ...DATA(), weight_history: history };
+      const r = render(Rubric);
+      await waitFor(() => expect(configs).toHaveLength(4));
+      const sets = evolution().data.datasets;
+      r.unmount();
+      return Object.fromEntries(sets.map((d) => [d.label, [d.borderColor, JSON.stringify(d.borderDash)]]));
+    };
+    // The endpoint sends the 20 newest versions; the oldest here listed a retired dimension first.
+    const before = await look([version('4', active), version('3', active), version('2', ['legacy', ...active])]);
+    const after = await look([version('4', active), version('3', active)]);
+    for (const n of active) expect(after[n], n).toEqual(before[n]);
+    expect(before.accuracy[0]).toBe('#7c6af7'); // the active rubric's order first: accuracy is the first dimension
+    expect(Object.keys(before)).toEqual([...active, 'legacy']); // a name seen only in the history comes after, sorted
+  });
+
   it('dimensions past the seventh take series 8, then series 9, each with its own dash', async () => {
     body = DATA(9);
     render(Rubric);
