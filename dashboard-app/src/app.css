@@ -253,6 +253,9 @@
     --mc-section-1: #a99df9;                   /* a model call's first context section (was --accent-text) */
     --mc-section-7: #f472b6;                   /* its Messages section (was --unknown) */
     --mc-section-8: #9ca3af;                   /* its Tools section (was --series-12) */
+
+    /* ---- PR 4 and PR 5, the Decisions, Autonomy and System screens ---- */
+    --field-border: var(--border);             /* a text field's boundary (Identity's fields, as before) */
   }
 
   /* ---- The paper ground: page content under the paper look ---- */
@@ -429,6 +432,9 @@
     --mc-section-1: #8b5cf6;                   /* a violet, not the link blue beside series 1 */
     --mc-section-7: #7890d0;                   /* not the unknown status's magenta; 12+ from every section, all vision types */
     --mc-section-8: #382880;                   /* an indigo: apart from Decisions' teal and from the link blue under red-green CVD */
+
+    /* PR 4/5: 3:1 on the card and the page (WCAG 1.4.11); the prototype's rule-2 is about 1.5:1 */
+    --field-border: #7a8896;
 
     /* shadcn, HSL of the paper hex */
     --background: 192 17% 94%;

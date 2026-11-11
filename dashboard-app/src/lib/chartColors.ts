@@ -73,6 +73,7 @@ export const DARK_FALLBACK: Record<string, string> = {
   '--oc-unknown': '#9ca3af',
   '--oc-blocked': '#f59e0b',
   '--err-text': '#f87171',
+  '--border': '#1e1e2e', // Scoring's radar grid, Guards' grid: explicit, so it beats the paper chart-grid default
 };
 
 /** `#rgba` / `#rrggbbaa` as `rgba(r, g, b, a)`; anything else unchanged. The production build minifies an rgba() token

@@ -246,6 +246,14 @@ const PR3: Record<string, [string, string]> = {
 };
 for (const [k, [dark]] of Object.entries(PR3)) NEW_DARK[k] = dark;
 
+// PR 4 and PR 5 (the Decisions, Autonomy and System groups): [dark, paper].
+const PR4: Record<string, [string, string]> = {
+  // A text field's boundary. Dark: the --border the fields used (Identity's fields do not move). Paper: 3:1 on the card
+  // and the page (WCAG 1.4.11); the prototype's rule-2 #c9d4da is about 1.5:1.
+  '--field-border': ['var(--border)', '#7a8896'],
+};
+for (const [k, [dark]] of Object.entries(PR4)) NEW_DARK[k] = dark;
+
 // The legacy memory-type colours keep their golden dark values (ORIGIN_ROOT) and get paper ones (Retrieval's chips).
 const LEGACY_PAPER: Record<string, string> = {
   '--fact-color': '#159a7a', // review M6: one colour per memory type on paper, the Graph's
@@ -858,5 +866,72 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
   it('the waiting pill\'s text on its tint: at least 4.5:1 in both grounds', () => {
     expect(contrast(PAPER['--wait-ink'], PAPER['--wait-bg'])).toBeGreaterThanOrEqual(4.5);
     expect(contrast(DARK['--wait-ink'], over(parseColor(DARK['--wait-bg']), parseColor(DARK['--surface'])))).toBeGreaterThanOrEqual(4.5);
+  });
+});
+
+// ── PR 4 and PR 5: the Decisions, Autonomy and System groups ──────────────────────────────────────────────────────
+
+describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
+  const page = PAPER['--bg'];
+  const white = '#ffffff';
+  const hover = PAPER['--surface-hover'];
+
+  it('every new token has its dark and paper value; the dark one is built from var() and redefined on paper', () => {
+    for (const [k, [dark, paper]] of Object.entries(PR4)) {
+      expect(DARK[k], k).toBe(dark);
+      expect(PAPER[k], k).toBe(paper);
+    }
+  });
+
+  it('a text field\'s boundary is at least 3:1 on the white card and on the page (WCAG 1.4.11)', () => {
+    expect(contrast(PAPER['--field-border'], white)).toBeGreaterThanOrEqual(3); // 3.63
+    expect(contrast(PAPER['--field-border'], page)).toBeGreaterThanOrEqual(3); // 3.22
+  });
+
+  it('Scoring\'s heatmap: ink on the strongest cell (65% of the fill over the card) is at least 4.5:1 on paper', () => {
+    expect(contrast(PAPER['--text'], tint(PAPER['--green'], 0.65, white))).toBeGreaterThanOrEqual(4.5); // 6.78
+    expect(contrast(PAPER['--text'], tint(PAPER['--red'], 0.65, white))).toBeGreaterThanOrEqual(4.5); // 5.78
+    // Dark is today's, recorded and not fixed: the strongest green cell is 3.1:1, red 4.2:1.
+    expect(contrast(DARK['--text'], tint(DARK['--green'], 0.65, DARK['--surface']))).toBeCloseTo(3.11, 1);
+    expect(contrast(DARK['--text'], tint(DARK['--red'], 0.65, DARK['--surface']))).toBeCloseTo(4.18, 1);
+  });
+
+  it('Guards\' censor count: the accent on its 12% tint over the card is at least 4.5:1 on paper', () => {
+    expect(contrast(PAPER['--accent'], tint(PAPER['--accent'], 0.12, white))).toBeGreaterThanOrEqual(4.5); // 6.22
+    expect(contrast(DARK['--accent'], tint(DARK['--accent'], 0.12, DARK['--surface']))).toBeCloseTo(4.11, 1); // today's
+  });
+
+  it('status strips and pills: text on a tint of itself, over the card, a hovered row and the page, at least 4.5:1', () => {
+    // Autonomy's scorer strip sits on the page; Guards' verdicts in a card; badges and pills in hoverable rows.
+    for (const bg of [white, hover, page]) {
+      expect(contrast(PAPER['--stat-ok'], tint(PAPER['--stat-ok'], 0.08, bg)), `ok on ${bg}`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(PAPER['--stat-warn'], tint(PAPER['--stat-warn'], 0.08, bg)), `warn on ${bg}`).toBeGreaterThanOrEqual(4.5);
+      expect(contrast(PAPER['--err-text'], tint(PAPER['--tone-bad'], 0.1, bg)), `bad on ${bg}`).toBeGreaterThanOrEqual(4.5);
+    }
+    // The partial badge takes PR 3's 12.5% badge tint: at 15% it is 4.49:1 on a hovered row.
+    for (const bg of [white, hover]) {
+      expect(contrast(PAPER['--st-partial'], tint(PAPER['--st-partial'], 0.125, bg)), `partial on ${bg}`).toBeGreaterThanOrEqual(4.5);
+    }
+    expect(contrast(PAPER['--st-partial'], tint(PAPER['--st-partial'], 0.15, hover))).toBeLessThan(4.5);
+    // Border-only pills and coloured counts, on a hovered row.
+    for (const t of ['--st-partial', '--stat-ok', '--stat-warn', '--err-text', '--muted', '--accent']) {
+      expect(contrast(PAPER[t], hover), t).toBeGreaterThanOrEqual(4.5);
+    }
+    // The neutral badge (a pending or unknown status): muted text on the wash, in both looks.
+    expect(contrast(PAPER['--muted'], PAPER['--wash'])).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(DARK['--muted'], over(parseColor(DARK['--wash']), parseColor(DARK['--surface'])))).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it('the listed dark changes (D3, D4): each new dark pair on the dark card, 3:1 for a mark and 4.5:1 for text', () => {
+    const surface = DARK['--surface'];
+    expect(contrast(DARK['--st-neutral'], surface)).toBeGreaterThanOrEqual(3); // was #6b6b8a (3.63), now 3.85
+    expect(contrast(DARK['--series-9'], surface)).toBeGreaterThanOrEqual(3); // Guards' claims, was #2dd4bf
+    expect(contrast(DARK['--accent-text'], surface)).toBeGreaterThanOrEqual(4.5); // Observability's trace type, was #38bdf8
+    expect(contrast(DARK['--muted'], over(parseColor(DARK['--wash']), parseColor(surface)))).toBeGreaterThanOrEqual(4.5); // count badge
+    // D3, the perfect-calibration line: --muted at 40% instead of #6b6b8a at 40%. A reference line, not data: recorded.
+    const at40 = (c: string, bg: string) => over([...parseColor(c).slice(0, 3), 0.4] as RGBA, parseColor(bg));
+    expect(contrast(at40('#6b6b8a', surface), surface)).toBeCloseTo(1.57, 1);
+    expect(contrast(at40(DARK['--muted'], surface), surface)).toBeCloseTo(1.94, 1);
+    expect(contrast(at40(PAPER['--muted'], white), white)).toBeCloseTo(1.79, 1);
   });
 });
