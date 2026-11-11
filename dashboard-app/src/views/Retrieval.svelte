@@ -1289,6 +1289,14 @@
   }
   .funnel-in { text-align: right; }
   .funnel-out { text-align: left; }
+  /* At phone width the two headline numbers side by side, the bar on its own row below them: squeezed between
+     them it had no width left. */
+  @media (max-width: 640px) {
+    .funnel { grid-template-columns: 1fr 1fr; grid-template-areas: "in out" "bar bar"; gap: 0.75rem 1rem; }
+    .funnel-in { grid-area: in; text-align: left; }
+    .funnel-out { grid-area: out; }
+    .funnel-track { grid-area: bar; }
+  }
   .funnel-n {
     display: block;
     font-size: 2.4rem;
@@ -1526,7 +1534,9 @@
   }
   .rbar-n strong { color: var(--ok-text); font-weight: 600; }
 
-  .rrow-meta { display: flex; align-items: center; gap: 0.5rem; font-size: 0.7rem; color: var(--muted); }
+  .rrow-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.15rem 0.5rem; font-size: 0.7rem; color: var(--muted); }
+  /* At phone width a row's metadata wraps item by item, never inside "3 legs" or a time. */
+  .rrow-meta > * { white-space: nowrap; }
   .spacer { flex: 1; }
   /* Graph edges are the datum unique to this row and captured even unsampled,
      so it keeps colour while time and leg count recede. */
@@ -1632,7 +1642,6 @@
     gap: 0.55rem;
     align-items: center;
     flex-wrap: wrap;
-    vertical-align: middle;
     width: calc(100% - 1.25em);
     min-width: 0;
   }

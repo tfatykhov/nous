@@ -152,4 +152,15 @@ describe('Retrieval on the paper look', () => {
     expect(css).toMatch(/\.view-head \{[^}]*flex-wrap: wrap;/);
     expect(css).toContain('.split > * { min-width: 0; }');
   });
+
+  it('at phone width the funnel bar keeps its own row, a row\'s metadata wraps by item, and a marker sits on the first line', () => {
+    const css = styleBlocks(SRC);
+    // Squeezed between the two headline numbers, the bar had no width left at 390 px.
+    expect(css).toMatch(/@media \(max-width: 640px\) \{[^@]*\.funnel \{[^}]*grid-template-areas: "in out" "bar bar";/);
+    expect(css).toMatch(/\.funnel-track \{ grid-area: bar; \}/);
+    expect(css).toMatch(/\.rrow-meta \{[^}]*flex-wrap: wrap;/);
+    expect(css).toMatch(/\.rrow-meta > \* \{ white-space: nowrap; \}/);
+    // A summary's marker aligns with the first line of its row (the row's baseline), not the middle of a wrapped row.
+    expect(css).not.toMatch(/\.sum-row \{[^}]*vertical-align: middle/);
+  });
 });
