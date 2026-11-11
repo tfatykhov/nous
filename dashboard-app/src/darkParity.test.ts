@@ -88,6 +88,26 @@ const ROWS: Row[] = [
   ['views/Rubric.svelte', '.badge-failure', 'background', 'var(--badge-bad-bg)', 'rgba(248, 113, 113, 0.15)'],
   ['views/Rubric.svelte', '.badge-failure', 'color', 'var(--err-text)', '#f87171'],
   ['views/Rubric.svelte', '.badge-partial', 'color', 'var(--st-partial)', '#fb923c'],
+  // Autonomy
+  ['views/Autonomy.svelte', '.verdict-warn', 'color', 'var(--stat-warn)', '#f59e0b'],
+  ['views/Autonomy.svelte', '.verdict-warn', 'border-color', 'color-mix(in srgb, var(--stat-warn) 35%, transparent)', 'rgba(245, 158, 11, 0.35)'],
+  ['views/Autonomy.svelte', '.verdict-warn', 'background', 'color-mix(in srgb, var(--stat-warn) 8%, transparent)', 'rgba(245, 158, 11, 0.08)'],
+  ['views/Autonomy.svelte', '.verdict-ok', 'color', 'var(--stat-ok)', '#10b981'],
+  ['views/Autonomy.svelte', '.verdict-ok', 'border-color', 'color-mix(in srgb, var(--stat-ok) 35%, transparent)', 'rgba(16, 185, 129, 0.35)'],
+  ['views/Autonomy.svelte', '.verdict-ok', 'background', 'color-mix(in srgb, var(--stat-ok) 8%, transparent)', 'rgba(16, 185, 129, 0.08)'],
+  ['views/Autonomy.svelte', '.verdict-bad', 'color', 'var(--err-text)', '#f87171'],
+  ['views/Autonomy.svelte', '.verdict-bad', 'border-color', 'color-mix(in srgb, var(--tone-bad) 50%, transparent)', 'rgba(239, 68, 68, 0.5)'],
+  ['views/Autonomy.svelte', '.verdict-bad', 'background', 'color-mix(in srgb, var(--tone-bad) 10%, transparent)', 'rgba(239, 68, 68, 0.1)'],
+  ['views/Autonomy.svelte', '.strip-meta dt, .tiles dt, .triple dt, .detail dt, .label', 'text-transform', 'var(--label-transform)', 'uppercase'],
+  ['views/Autonomy.svelte', '.card, .panel', 'border', 'var(--card-border)', '1px solid #1e1e2e'],
+  ['views/Autonomy.svelte', '.guards td.acted', 'color', 'var(--st-partial)', '#fb923c'],
+  ['views/Autonomy.svelte', '.pill-warn', 'color', 'var(--st-partial)', '#fb923c'],
+  ['views/Autonomy.svelte', '.pill-warn', 'border-color', 'color-mix(in srgb, var(--st-partial) 50%, transparent)', 'rgba(251, 146, 60, 0.5)'],
+  ['views/Autonomy.svelte', '.fix-ok', 'color', 'var(--stat-ok)', '#10b981'],
+  ['views/Autonomy.svelte', '.fix-ok', 'border-color', 'color-mix(in srgb, var(--stat-ok) 50%, transparent)', 'rgba(16, 185, 129, 0.5)'],
+  ['views/Autonomy.svelte', '.fix-warn', 'color', 'var(--st-partial)', '#fb923c'],
+  ['views/Autonomy.svelte', '.fix-warn', 'border-color', 'color-mix(in srgb, var(--st-partial) 50%, transparent)', 'rgba(251, 146, 60, 0.5)'],
+  ['views/Autonomy.svelte', '.state-msg.error', 'color', 'var(--err-text)', '#f87171'],
 ];
 
 /** The plan's listed dark changes: [file, selector, property, value now, old literal, the dark value it resolves to]. */
@@ -102,6 +122,9 @@ const CHANGES: Change[] = [
   ['views/Rubric.svelte', '.badge-partial', 'background', 'color-mix(in srgb, var(--st-partial) 12.5%, transparent)', 'rgba(251, 146, 60, 0.15)', 'rgba(251, 146, 60, 0.125)', "PR 3's badge tint: at 15% the paper text is 4.49:1 on a hovered row"],
   ['views/Rubric.svelte', '.badge-pending', 'color', 'var(--muted)', '#a78bfa', '#8e8eab', 'D4: a pending or unknown status is neutral, not violet'],
   ['views/Rubric.svelte', '.badge-pending', 'background', 'var(--wash)', 'rgba(167, 139, 250, 0.15)', 'rgba(255, 255, 255, 0.03)', 'D4: the neutral badge sits on the wash'],
+  ['views/Autonomy.svelte', '.strip', 'border-radius', 'var(--card-radius)', '8px', '12px', 'D2: the scorer strip takes the card radius'],
+  ['views/Autonomy.svelte', '.card, .panel', 'border-radius', 'var(--card-radius)', '8px', '12px', 'D2: cards and panels take the card radius'],
+  ['views/Autonomy.svelte', '.strip-meta dt, .tiles dt, .triple dt, .detail dt, .label', 'letter-spacing', 'var(--label-tracking)', '0.04em', '0.05em', 'D6: labels take the label tracking'],
 ];
 
 /** PR 4 and PR 5's routes and their views. */

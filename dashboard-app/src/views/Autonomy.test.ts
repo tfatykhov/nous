@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/svelte';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import Autonomy from './Autonomy.svelte';
+import { markupOf, parseBlocks, styleBlocks } from '../lib/testing/css';
 
 // Render smoke for the Autonomy view. The fixture has the shape
 // nous/api/autonomy_dashboard.py returns; every value is made up.
@@ -491,5 +494,74 @@ describe('Autonomy view', () => {
     status = 400;
     render(Autonomy);
     expect(await screen.findByText('Failed to load autonomy data — retrying…')).toBeTruthy();
+  });
+});
+
+// Redesign PR 4: Autonomy on paper. A bar, a legend swatch or a stacked share carries its token as a custom property
+// (`--fill`), which the stylesheet paints: no hex in the script, and the same markup under both looks.
+describe('Autonomy: colours by token', () => {
+  beforeEach(() => { body = FULL(); status = 200; urls = []; install(); });
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+  const fillOf = (el: Element | null | undefined) => (el as HTMLElement | null)?.style.getPropertyValue('--fill');
+
+  it('each outcome bar carries its outcome\'s token, beside its label', async () => {
+    body = FULL();
+    (body.task_scores as any).subtasks.by_outcome = outcomes({ done_verified: 4, done_checked: 3, done_self: 2, partial: 2, failed: 1, not_scored: 1 });
+    render(Autonomy);
+    await screen.findByText('Scorer running');
+    const bar = (label: string) => screen.getByText(label, { selector: '.bar-key' }).closest('.bar-row')!.querySelector('.bar-fill');
+    expect(fillOf(bar('Done, verified'))).toBe('var(--green)');
+    expect(fillOf(bar('Done, checked'))).toBe('var(--series-2)');
+    expect(fillOf(bar('Done, self-reported'))).toBe('var(--series-1)');
+    expect(fillOf(bar('Partial'))).toBe('var(--stat-warn)');
+    expect(fillOf(bar('Failed'))).toBe('var(--red)');
+    expect(fillOf(bar('Not scored'))).toBe('var(--muted)');
+  });
+
+  it('the taps bars are the violet series mark, not the accent (the question frame\'s blue on paper)', async () => {
+    render(Autonomy);
+    const key = await screen.findByText('heartbeat.ack', { selector: '.bar-key' });
+    expect(fillOf(key.closest('.bar-row')!.querySelector('.bar-fill'))).toBe('var(--series-0)');
+  });
+
+  it('the "who was there" shares and their legend carry the context tokens', async () => {
+    const { container } = render(Autonomy);
+    await screen.findByText('Scorer running');
+    expect([...container.querySelectorAll('.legend i')].map(fillOf)).toEqual(['var(--series-1)', 'var(--series-2)', 'var(--series-4)']);
+    const stack = container.querySelector('.stack[aria-label^="You were there 60"]')!;
+    expect([...stack.querySelectorAll('div')].map(fillOf)).toEqual(['var(--series-1)', 'var(--series-4)']); // bash: present and on its own
+  });
+
+  it('the scorer strip\'s class follows the verdict\'s tone', async () => {
+    const { container } = render(Autonomy);
+    await screen.findByText('Scorer running');
+    expect(container.querySelector('section.strip')?.classList.contains('verdict-ok')).toBe(true);
+  });
+
+  it('source contract: no inline background is left; the stylesheet paints --fill', () => {
+    const src = readFileSync(join(__dirname, 'Autonomy.svelte'), 'utf-8');
+    expect(markupOf(src)).not.toMatch(/style:background=/);
+    const rules = parseBlocks(styleBlocks(src));
+    for (const sel of ['.bar-fill', '.legend i', '.stack > div']) expect(rules.get(sel)?.background, sel).toBe('var(--fill)');
+  });
+
+  it('source contract: status text reads the text tokens, cards the card tokens, labels the label tokens', () => {
+    const rules = parseBlocks(styleBlocks(readFileSync(join(__dirname, 'Autonomy.svelte'), 'utf-8')));
+    expect(rules.get('.verdict-warn')).toEqual({
+      color: 'var(--stat-warn)', 'border-color': 'color-mix(in srgb, var(--stat-warn) 35%, transparent)',
+      background: 'color-mix(in srgb, var(--stat-warn) 8%, transparent)',
+    });
+    expect(rules.get('.verdict-bad')).toMatchObject({
+      color: 'var(--err-text)', 'border-color': 'color-mix(in srgb, var(--tone-bad) 50%, transparent)',
+      background: 'color-mix(in srgb, var(--tone-bad) 10%, transparent)',
+    });
+    expect(rules.get('.card, .panel')).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius)', 'box-shadow': 'var(--card-shadow)' });
+    expect(rules.get('.strip')).toMatchObject({ 'border-radius': 'var(--card-radius)' });
+    expect(rules.get('.strip-meta dt, .tiles dt, .triple dt, .detail dt, .label')).toMatchObject({
+      'text-transform': 'var(--label-transform)', 'letter-spacing': 'var(--label-tracking)',
+    });
+    expect(rules.get(':global(html[data-look="paper"] [data-ground="paper"]) .stats td:not(:first-child)')).toMatchObject({ 'font-stretch': '85%' });
+    expect(rules.get(':global(html[data-look="paper"] [data-ground="paper"]) h1')).toMatchObject({ 'font-size': '30px' });
   });
 });

@@ -934,6 +934,9 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     'scoring signals': ['--green', '--series-1', '--series-4', '--err-text', '--series-3', '--series-7'],
     // Scoring's weight evolution: one line per dimension. Each line also has a dash of its own (Rubric.test.ts).
     'scoring dimensions': ['--series-0', '--series-2', '--series-1', '--series-4', '--series-5', '--series-3', '--series-6', '--series-8', '--series-9'],
+    // Autonomy's "who was there" shares and their legend. (Its outcome bars each sit beside their label, so they are
+    // never matched by colour.)
+    'autonomy contexts': ['--series-1', '--series-2', '--series-4'],
   };
   const OPEN_PAIRS: Record<string, number> = {
     // The status hues under red-green colour blindness; the stack order (success at the base) and the legend name them.
