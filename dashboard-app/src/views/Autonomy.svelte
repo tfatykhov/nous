@@ -148,7 +148,7 @@
           </div>
         {/each}
       </div>
-      <p class="small muted">A subtask counts when the harness confirmed it or you graded it a success. A score is final 14 days after its task, so Settled reads subtasks that finished {settledSpan(ts.settled_window)}, a window as long as this one that ends 14 days ago.{#if ts.settled_window.held > 0} {ts.settled_window.held} of them {ts.settled_window.held === 1 ? 'is' : 'are'} not settled, so not counted as settled.{/if}</p>
+      <p class="small muted">A subtask counts when the harness confirmed it or you graded it a success. A score is final 14 days after its task, so Settled reads subtasks that finished {settledSpan(ts.settled_window)}, a window as long as this one that ends 14 days ago.{#if ts.settled_window.held > 0}{' '}{ts.settled_window.held} of them {ts.settled_window.held === 1 ? 'is' : 'are'} not settled, so not counted as settled.{/if}</p>
     </section>
     <section class="card" aria-labelledby="h-overrides">
       <h2 id="h-overrides">Your overrides</h2>
@@ -438,7 +438,7 @@
             {#each g.schedules as s (s.schedule_id)}
               <tr>
                 <th scope="row"><span class="job" title={s.job}>{s.job}</span></th>
-                <td><span class="mono">{s.name ?? '—'}</span>{#if !s.allowlisted} <span class="pill pill-warn">not allowlisted</span>{/if}</td>
+                <td><span class="mono">{s.name ?? '—'}</span>{#if !s.allowlisted}{' '}<span class="pill pill-warn">not allowlisted</span>{/if}</td>
                 <td><span class="pill" class:pill-warn={s.mode !== 'shadow' && s.mode !== 'skip'}>{guardMode(s.mode)}</span></td>
                 <td>{s.runs}</td>
                 <td>{s.skipped}</td>
@@ -470,10 +470,10 @@
           <tbody>
             {#each g.checks as c (c.check_id)}
               <tr>
-                <th scope="row"><span class="mono">{c.check ?? c.check_id}</span>{#if c.enabled === false} <span class="pill">disabled</span>{/if}</th>
+                <th scope="row"><span class="mono">{c.check ?? c.check_id}</span>{#if c.enabled === false}{' '}<span class="pill">disabled</span>{/if}</th>
                 <td>
                   {#if c.mode === null}<span class="small muted">guard removed</span>
-                  {:else}<span class="mono">{c.name ?? '—'}</span>{#if !c.allowlisted} <span class="pill pill-warn">not allowlisted</span>{/if}{/if}
+                  {:else}<span class="mono">{c.name ?? '—'}</span>{#if !c.allowlisted}{' '}<span class="pill pill-warn">not allowlisted</span>{/if}{/if}
                 </td>
                 <td>{#if c.mode !== null}<span class="pill" class:pill-warn={c.mode !== 'shadow' && c.mode !== 'skip'}>{guardMode(c.mode)}</span>{:else}—{/if}</td>
                 <td>{c.runs}</td>
@@ -524,7 +524,7 @@
                 <td>{fmtWhen(r.at)}</td>
                 <td><span class="mono">{r.name ?? '—'}</span> <span class="small muted">{recordMode(r)}</span></td>
                 <td>{guardOutcome(r)}</td>
-                <td>{r.timed_out ? 'timed out' : (r.exit_code ?? '—')}{#if r.duration_ms !== null} <span class="small muted">{r.duration_ms} ms</span>{/if}</td>
+                <td>{r.timed_out ? 'timed out' : (r.exit_code ?? '—')}{#if r.duration_ms !== null}{' '}<span class="small muted">{r.duration_ms} ms</span>{/if}</td>
                 <td class:acted={r.acted === true}>{guardActed(r)}</td>
                 <td class="wrap">{#if r.stderr_head}<pre>{r.stderr_head}</pre>{:else}—{/if}</td>
               </tr>

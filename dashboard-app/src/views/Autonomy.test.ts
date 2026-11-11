@@ -533,6 +533,23 @@ describe('Autonomy: colours by token', () => {
     expect([...stack.querySelectorAll('div')].map(fillOf)).toEqual(['var(--series-1)', 'var(--series-4)']); // bash: present and on its own
   });
 
+  it('a word after an inline condition keeps its space (Svelte trims the space that opens an {#if})', async () => {
+    const full = FULL();
+    const g = full.guards as any;
+    body = { ...full, task_scores: { ...full.task_scores, settled_window: { ...full.task_scores.settled_window, held: 2 } },
+      guards: { ...g, schedules: [{ ...g.schedules[0], allowlisted: false }],
+        checks: [{ ...guardSchedule({ last_runs: [] }), check_id: 'c1'.repeat(16), check: 'disk_usage', enabled: false,
+          timeout_seconds: 60, name: 'df_guard', mode: 'shadow', allowlisted: false }] } };
+    const { container } = render(Autonomy);
+    await screen.findByText('Scorer running');
+    const text = container.textContent ?? '';
+    expect(text).toContain('that ends 14 days ago. 2 of them are not settled');
+    expect(text).toContain('0 41 ms'); // exit code 0, then the duration: not "041 ms"
+    expect(text).toContain('ledger_sweep not allowlisted');
+    expect(text).toContain('disk_usage disabled');
+    expect(text).toContain('df_guard not allowlisted');
+  });
+
   it('the scorer strip\'s class follows the verdict\'s tone', async () => {
     const { container } = render(Autonomy);
     await screen.findByText('Scorer running');
