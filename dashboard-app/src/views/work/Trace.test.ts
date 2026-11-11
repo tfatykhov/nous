@@ -412,6 +412,43 @@ describe('Work trace', () => {
     expect(container.querySelector('output')!.textContent).toContain('09:21:10');
   });
 
+  it('replay needs two turns: with one there is no slider', async () => {
+    respond = () => ({ body: trace([turn(T1, 1)]) });
+    render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 1');
+    expect(screen.queryByRole('slider', { name: 'Replay turn' })).toBeNull();
+  });
+
+  it('the first turn can be marked from the keyboard: Home or a step back at the start marks it', async () => {
+    Element.prototype.scrollIntoView = vi.fn();
+    respond = () => ({ body: trace([turn('f1', 1), turn('f2', 2)]) });
+    const { container } = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 2');
+    const range = screen.getByRole('slider', { name: 'Replay turn' });
+    const marked = () => Array.from(container.querySelectorAll('article.turn')).map((a) => a.classList.contains('hl'));
+    expect(marked()).toEqual([false, false]);
+    await fireEvent.keyDown(range, { key: 'Home' });
+    expect(marked()).toEqual([true, false]);
+    cleanup();
+    const r2 = render(Trace, { sessionId: 'sess/one' });
+    await screen.findByText('Reply 2');
+    await fireEvent.keyDown(screen.getByRole('slider', { name: 'Replay turn' }), { key: 'ArrowLeft' });
+    expect(Array.from(r2.container.querySelectorAll('article.turn')).map((a) => a.classList.contains('hl'))).toEqual([true, false]);
+  });
+
+  it('the replay card stays on screen while it scrolls the trace, and the highlight never sits under the frame column', () => {
+    const src = readFileSync(resolve(__dirname, 'Trace.svelte'), 'utf-8');
+    // Review I7: sticky, and a turn scrolled into view lands below it.
+    expect(src).toMatch(/\.replay \{[^}]*position: sticky;[^}]*top: 0\.5rem;[^}]*z-index: 1;/);
+    expect(src).toMatch(/\.turn \{[^}]*scroll-margin-top: 6rem;/);
+    // Under the fixed mobile header, the card sits below it.
+    expect(src).toMatch(/@media \(max-width: 768px\) \{[^@]*\.replay \{[^}]*top: calc\(3\.25rem \+ 0\.5rem\)/);
+    // Review I5: the 7% gutter tint is measured over white; on --surface-hover debug falls to 4.2:1. The highlight
+    // tints the rows only.
+    expect(src).not.toMatch(/\.turn\.hl \{[^}]*background/);
+    expect(src).toMatch(/\.turn\.hl \.rows \{[^}]*background: var\(--surface-hover\)/);
+  });
+
   it('the frame key lists only the frames of the loaded turns', async () => {
     respond = () => ({ body: trace([
       turn('k1', 1, { frame_id: 'task' }), turn('k2', 2, { frame_id: 'question' }), turn('k3', 3, { frame_id: 'task' }), turn('k4', 4, { frame_id: null }),

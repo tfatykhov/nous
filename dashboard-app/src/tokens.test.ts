@@ -317,6 +317,16 @@ describe('contrast of the new values', () => {
     }
   });
 
+  it('the replay highlight (--surface-hover) keeps the rows readable, and is why it never sits under the frame column', () => {
+    // Review I5: the 7% frame tint is measured over the white card. Mixed over --surface-hover, debug's name falls
+    // below 4.5 (about 4.2:1), so the trace's replay mark tints the rows only (Trace.test.ts pins the rule).
+    const hover = PAPER['--surface-hover'];
+    expect(contrast(PAPER['--f-debug'], tint(PAPER['--f-debug'], 0.07, hover))).toBeLessThan(4.5);
+    for (const fg of ['--text', '--muted', '--accent-text', '--ok-text', '--warn-text', '--err-text']) {
+      expect(contrast(PAPER[fg], hover), fg).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
   it('each dark frame colour on the dark surface and on its 12% tint: at least 4.5', () => {
     for (const f of FRAMES) {
       const c = DARK[`--f-${f}`];

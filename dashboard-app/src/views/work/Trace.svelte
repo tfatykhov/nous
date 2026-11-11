@@ -136,12 +136,20 @@
   let replay = $state<number | null>(null);
   let replayAt = $derived(turns.length === 0 ? 0 : Math.min(replay ?? 0, turns.length - 1));
   const reducedMotion = () => typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  function onReplay(e: Event) {
-    const i = Number((e.currentTarget as HTMLInputElement).value);
+  function mark(i: number) {
     if (!Number.isInteger(i) || i < 0 || i >= turns.length) return;
     replay = i;
     const el = document.getElementById(`turn-${turns[i].turn_id}`);
     el?.scrollIntoView?.({ block: 'nearest', behavior: reducedMotion() ? 'auto' : 'smooth' });
+  }
+  const onReplay = (e: Event) => mark(Number((e.currentTarget as HTMLInputElement).value));
+  // Before the first move the thumb already rests on the first turn, so Home or a step back changes nothing and fires
+  // no input: mark the first turn then (the keyboard's way to reach it); a click on the resting thumb marks it too.
+  function onReplayKey(e: KeyboardEvent) {
+    if (replay === null && ['Home', 'ArrowLeft', 'ArrowDown', 'PageDown'].includes(e.key)) mark(0);
+  }
+  function onReplayPointer(e: PointerEvent) {
+    if (replay === null) mark(Number((e.currentTarget as HTMLInputElement).value));
   }
 
   const turnLabel = (t: WorkTurn, i: number) => (t.has_turn_row ? `Turn ${t.turn_number ?? i + 1}` : 'Turn record missing (single call)');
@@ -228,12 +236,12 @@
       </div>
     </header>
 
-    {#if turns.length > 0}
+    {#if turns.length > 1}
       <div class="replay card">
         <label for="replay-turn">Replay</label>
         <input id="replay-turn" type="range" min="0" max={turns.length - 1} step="1" value={replayAt}
           aria-label="Replay turn" aria-valuetext={`${turnLabel(turns[replayAt], replayAt)}, ${clockTime(turns[replayAt].started_at)} UTC`}
-          oninput={onReplay} />
+          oninput={onReplay} onkeydown={onReplayKey} onpointerup={onReplayPointer} />
         <output for="replay-turn" class="readout">{clockTime(turns[replayAt].started_at)} UTC</output>
       </div>
     {/if}
@@ -406,7 +414,8 @@
   .meta a:hover { text-decoration: underline; }
 
   /* Replay: one round handle steps through the loaded turns */
-  .replay { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 1.125rem; padding: 0.75rem 1.25rem; }
+  /* Sticky, so dragging it never scrolls it out of view (the turns land below it: see .turn scroll-margin-top). */
+  .replay { position: sticky; top: 0.5rem; z-index: 1; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 1.125rem; padding: 0.75rem 1.25rem; }
   .replay label { font-size: 0.8125rem; color: var(--muted); }
   .readout { font-size: 0.9375rem; font-weight: 650; font-stretch: 82%; min-width: 9ch; text-align: right; }
   .replay input { width: 100%; height: 24px; margin: 0; background: transparent; appearance: none; -webkit-appearance: none; cursor: pointer; }
@@ -424,9 +433,10 @@
   .key li { display: inline-flex; align-items: center; gap: 6px; }
   .kdot { width: 10px; height: 10px; border-radius: 50%; background: var(--fc); flex: none; }
 
-  .turn { display: grid; grid-template-columns: var(--gw) minmax(0, 1fr); margin: 0.375rem 0.625rem; border-radius: var(--card-radius-sm); scroll-margin-top: 1rem;
-    transition: background var(--transition); }
-  .turn.hl { background: var(--surface-hover); }
+  .turn { display: grid; grid-template-columns: var(--gw) minmax(0, 1fr); margin: 0.375rem 0.625rem; border-radius: var(--card-radius-sm); scroll-margin-top: 6rem; }
+  /* The replay mark tints the rows only: the 7% frame tint is measured over the white card (on --surface-hover the
+     debug name would fall to 4.2:1). */
+  .turn.hl .rows { background: var(--surface-hover); }
   .turn.target { outline: 2px solid var(--accent); outline-offset: 2px; }
 
   /* The frame column: the frame's colour at 7% (debug's name on its tint is 4.56:1), a ring on hover */
@@ -449,7 +459,7 @@
   .crit-why p { margin: 4px 0 0; color: var(--text); }
 
   /* The rows beside it: your message, each call (reason first), the reply */
-  .rows { min-width: 0; padding: 0.5rem 0.5rem 0.5rem 1.375rem; display: flex; flex-direction: column; }
+  .rows { min-width: 0; padding: 0.5rem 0.5rem 0.5rem 1.375rem; display: flex; flex-direction: column; border-radius: var(--card-radius-sm); transition: background var(--transition); }
   .line { display: grid; grid-template-columns: var(--lw) minmax(0, 1fr); gap: 0.75rem; padding: 0.375rem 0 0.625rem; }
   .who { font-size: 0.78125rem; color: var(--muted); padding-top: 2px; }
   .said { font-size: 0.9375rem; line-height: 1.5; max-width: 72ch; overflow-wrap: anywhere; }
@@ -514,7 +524,8 @@
   }
   @media (max-width: 768px) {
     summary, .mcalls a, .back { min-height: 44px; display: inline-flex; align-items: center; }
-    .replay { gap: 0.75rem; padding: 0.625rem 1rem; }
+    .replay { top: calc(3.25rem + 0.5rem); gap: 0.75rem; padding: 0.625rem 1rem; }
+    .turn { scroll-margin-top: calc(3.25rem + 7rem); }
     .replay input { height: 44px; }
   }
   @media (max-width: 640px) {
