@@ -367,11 +367,13 @@
     background-image: none;
   }
 
-  /* A ground sets its own background, text colour and font: the body resolved them once, at :root. */
+  /* A ground sets its own background, text colour and font: the body resolved them once, at :root. Likewise
+     Tailwind's mono default (a bare <code> or <pre>), which :root resolved to the dark mono font. */
   html[data-look="paper"] [data-ground] {
     background: var(--bg);
     color: var(--text);
     font-family: var(--font-ui);
+    --default-mono-font-family: var(--font-mono);
   }
 
   html[data-look="paper"] [data-ground="paper"] {
@@ -381,6 +383,11 @@
   html[data-look="paper"] [data-ground="dark"],
   html[data-look="paper"] [data-ground="rail"] {
     color-scheme: dark;
+  }
+
+  /* A dark island inside a paper page: undo what the paper ground hands down that no token resets. */
+  html[data-look="paper"] [data-ground="dark"] {
+    font-variant-numeric: normal;
   }
 
   html[data-look="paper"] [data-ground="paper"] .page-h1 {

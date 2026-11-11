@@ -88,6 +88,7 @@ describe('Badge', () => {
     expect(el.className).toContain(bg);
     expect(el.className).toContain(fg);
     expect(el.className).toContain('rounded-full');
+    expect(el.className.split(' ')).toContain('text-xs');
   });
 });
 
@@ -103,6 +104,15 @@ describe('Button', () => {
     expect(el.textContent).toBe('Refresh');
     expect(el.className).toContain('rounded-full');
     expect(el.className).toContain('bg-primary');
+    expect(el.className.split(' ')).toContain('text-sm'); // text-[var(--on-accent)] merged as a colour, not a size
+  });
+
+  it('outline: the variant border colour replaces the transparent base border, and the size stays', () => {
+    const { container } = render(Button, { props: { variant: 'outline', children: label } });
+    const classes = container.querySelector('[data-slot="button"]')!.className.split(' ');
+    expect(classes).toContain('border-[var(--border)]');
+    expect(classes).not.toContain('border-transparent');
+    expect(classes).toContain('text-sm');
   });
 
   it('is an <a> with href; a disabled link has aria-disabled and no href', () => {

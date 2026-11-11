@@ -207,6 +207,12 @@ describe('the grounds', () => {
       background: 'var(--bg)',
       color: 'var(--text)',
       'font-family': 'var(--font-ui)',
+      // Tailwind's preflight sets a bare <code>/<pre> in --default-mono-font-family, declared (and resolved) at :root.
+      '--default-mono-font-family': 'var(--font-mono)',
+    });
+    // A dark island inside a paper page resets what the paper ground hands down and the island's tokens do not.
+    expect(BLOCKS.get('html[data-look="paper"] [data-ground="dark"]')).toMatchObject({
+      'font-variant-numeric': 'normal',
     });
     // Scoped to the paper look: with the look off, <main> stays transparent over the body's gradient.
     expect(BLOCKS.has('[data-ground]')).toBe(false);
