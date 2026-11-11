@@ -38,23 +38,20 @@ async function renderAt(hash: string) {
   return r;
 }
 
-describe('App shell grounds', () => {
+describe('App shell regions', () => {
   beforeEach(() => {
     cleanup();
-    document.documentElement.removeAttribute('data-look');
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => {}))); // the attention poll never answers
   });
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it('main is the page ground (class page-ground) on every route, and nothing carries data-ground', async () => {
+  it('main is the page ground (class page-ground) on every route', async () => {
     for (const route of ROUTES) {
       cleanup();
       const { container } = await renderAt(`#/${route}`);
-      const main = container.querySelector('main#main-content');
-      expect(main?.classList.contains('page-ground'), route).toBe(true);
-      expect(container.querySelector('[data-ground]'), route).toBeNull();
+      expect(container.querySelector('main#main-content')?.classList.contains('page-ground'), route).toBe(true);
     }
   });
 
@@ -67,23 +64,20 @@ describe('App shell grounds', () => {
     expect(container.querySelector('a.skip-link')?.closest('.rail, .page-ground')).toBeNull();
   });
 
-  it('the look switch sits at the foot of the sidebar and of the drawer', async () => {
+  it('there is no look switch in the navigation (one look)', async () => {
     const { container } = await renderAt('#/overview');
-    const switches = Array.from(container.querySelectorAll('[role="switch"]'));
-    expect(switches.map((s) => s.textContent?.replace(/\s+/g, ' ').trim())).toEqual(['New look Off', 'New look Off']);
-    expect(switches[0].closest('aside.sidebar')).not.toBeNull();
-    expect(switches[1].closest('#mobile-drawer')).not.toBeNull();
+    expect(container.querySelectorAll('[role="switch"]')).toHaveLength(0);
+    expect(container.textContent).not.toContain('New look');
   });
 
-  it('with no data-look, rendering App changes nothing on <html>', async () => {
+  it('rendering App changes nothing on <html>', async () => {
     const before = attrs(document.documentElement);
     await renderAt('#/work');
     await renderAt('#/observability');
     expect(attrs(document.documentElement)).toEqual(before);
-    expect(document.documentElement.hasAttribute('data-look')).toBe(false);
   });
 
-  it('the drawer still opens, traps Tab and closes on Escape', async () => {
+  it('the drawer opens, traps Tab and closes on Escape', async () => {
     const { container } = await renderAt('#/work');
     const hamburger = container.querySelector<HTMLButtonElement>('button.hamburger')!;
     const drawer = container.querySelector<HTMLElement>('#mobile-drawer')!;
@@ -93,9 +87,10 @@ describe('App shell grounds', () => {
     const focusable = Array.from(
       drawer.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'),
     );
-    // The close button first, the look switch last (after the 18 links).
+    // The close button first, the last of the 18 links last.
     expect(focusable[0].classList.contains('drawer-close')).toBe(true);
-    expect(focusable.at(-1)?.getAttribute('role')).toBe('switch');
+    expect(focusable).toHaveLength(19);
+    expect(focusable.at(-1)?.tagName).toBe('A');
     focusable.at(-1)!.focus();
     await fireEvent.keyDown(drawer, { key: 'Tab' });
     expect(document.activeElement).toBe(focusable[0]);
@@ -119,12 +114,7 @@ describe('App styles', () => {
     expect(src).toMatch(/\.main-content \{[^}]*min-width: 0;/);
   });
 
-  it('Svelte writes no data-look (only look.ts does)', () => {
-    expect(src).not.toMatch(/data-look|dataset\.look/);
-  });
-
   it('the dark island component is gone (every route is paper; it had no importer)', () => {
     expect(existsSync(join(__dirname, 'lib/ui/Ground.svelte'))).toBe(false);
-    expect(src).not.toMatch(/data-ground|groundFor/);
   });
 });

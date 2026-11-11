@@ -1,19 +1,17 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DARK_FALLBACK, cssColor, isPaperGround, lineLegendLabels, resolveColors, seriesToken, tint, withPaperDefaults } from './chartColors';
-import { DARK_SEL, PAPER_SEL, parseBlocks, scriptBlocks } from './testing/css';
+import { TOKEN_FALLBACK, cssColor, lineLegendLabels, resolveColors, seriesToken, tint, withChartDefaults } from './chartColors';
+import { ROOT_SEL, block, parseBlocks, scriptBlocks } from './testing/css';
 
 // A canvas (Chart.js) or cytoscape cannot read var(): their colours are tokens (`var(--x)`, or the `tint(--x, a)`
-// sentinel) that chartColors resolves against the element the chart draws into, so a dark island on a paper page
-// resolves dark. Every other value passes through untouched, which keeps every unconverted chart byte for byte.
-const DARK = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(DARK_SEL) ?? {};
+// sentinel) that chartColors resolves against the element the chart draws into. Every other value passes through
+// untouched.
+const ROOT = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
 
-/** A box with token values set on it (jsdom has no stylesheet): the page ground (class page-ground) for 'paper', a plain
- * box (no ground) for 'dark'. */
-function ground(kind: 'paper' | 'dark', vars: Record<string, string>, parent: HTMLElement = document.body): HTMLElement {
+/** A box with token values set on it (jsdom has no stylesheet). */
+function box(vars: Record<string, string>, parent: HTMLElement = document.body): HTMLElement {
   const el = document.createElement('div');
-  if (kind === 'paper') el.classList.add('page-ground');
   for (const [k, v] of Object.entries(vars)) el.style.setProperty(k, v);
   parent.appendChild(el);
   return el;
@@ -21,25 +19,23 @@ function ground(kind: 'paper' | 'dark', vars: Record<string, string>, parent: HT
 
 afterEach(() => {
   document.body.innerHTML = '';
-  document.documentElement.removeAttribute('data-look');
 });
 
-describe('DARK_FALLBACK', () => {
-  it('equals app.css\'s dark block for every token it lists (the dark parity proof)', () => {
-    expect(Object.keys(DARK_FALLBACK).length).toBeGreaterThan(30);
-    for (const [k, v] of Object.entries(DARK_FALLBACK)) expect(v, k).toBe(DARK[k]);
+describe('TOKEN_FALLBACK', () => {
+  it('equals app.css\'s :root for every token it lists (what jsdom resolves is what the page declares)', () => {
+    expect(Object.keys(TOKEN_FALLBACK).length).toBeGreaterThan(30);
+    for (const [k, v] of Object.entries(TOKEN_FALLBACK)) expect(v, k).toBe(ROOT[k]);
   });
 
   it('holds every series slot and every graph and relation colour token', () => {
-    for (let i = 0; i <= 13; i++) expect(DARK_FALLBACK[`--series-${i}`], `--series-${i}`).toBeDefined();
+    for (let i = 0; i <= 13; i++) expect(TOKEN_FALLBACK[`--series-${i}`], `--series-${i}`).toBeDefined();
     // The Graph's edge opacities are numbers, read by GraphView itself; the table holds colours only.
-    const colourTokens = Object.keys(DARK).filter((t) => (t.startsWith('--gv-') || t.startsWith('--rel-')) && !t.endsWith('-opacity') && !t.includes('-opacity-'));
-    for (const k of colourTokens) expect(DARK_FALLBACK[k], k).toBeDefined();
+    const colourTokens = Object.keys(ROOT).filter((t) => (t.startsWith('--gv-') || t.startsWith('--rel-')) && !t.endsWith('-opacity') && !t.includes('-opacity-'));
+    for (const k of colourTokens) expect(TOKEN_FALLBACK[k], k).toBeDefined();
   });
 
   // Review M4: tint() and withAlpha only parse hex and comma rgb(); any other form (space syntax, hsl, color-mix) would
-  // silently lose its alpha and draw opaque. Every token a chart reads must be in one of those forms on both grounds.
-  const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
+  // silently lose its alpha and draw opaque. Every token a chart reads must be in one of those forms.
   const TINTABLE = /^(#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})|rgba?\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*(,\s*[\d.]+\s*)?\))$/i;
 
   it('the tintable form: hex or comma rgb(a); not space syntax, hsl or color-mix', () => {
@@ -49,11 +45,8 @@ describe('DARK_FALLBACK', () => {
     }
   });
 
-  it('every token it lists is tintable on both grounds (the paper value, or the dark one where paper inherits it)', () => {
-    for (const k of Object.keys(DARK_FALLBACK)) {
-      expect(DARK[k], `${k} dark`).toMatch(TINTABLE);
-      expect(PAPER[k] ?? DARK[k], `${k} paper`).toMatch(TINTABLE);
-    }
+  it('every token it lists is tintable', () => {
+    for (const k of Object.keys(TOKEN_FALLBACK)) expect(ROOT[k], k).toMatch(TINTABLE);
   });
 });
 
@@ -78,7 +71,7 @@ describe('every token a migrated script names exists', () => {
 
   it.each(scripts.map(([f]) => f))('%s', (file) => {
     const js = scripts.find(([f]) => f === file)![1];
-    expect(named(js).filter((t) => !(t in DARK))).toEqual([]);
+    expect(named(js).filter((t) => !(t in ROOT))).toEqual([]);
   });
 });
 
@@ -103,22 +96,22 @@ describe('lineLegendLabels', () => {
 
 describe('cssColor', () => {
   it('reads the token off the element, as declared (a hex stays the hex)', () => {
-    const el = ground('paper', { '--series-1': ' #1f5fa8 ' });
+    const el = box({ '--series-1': ' #1f5fa8 ' });
     expect(cssColor(el, '--series-1')).toBe('#1f5fa8');
   });
 
   it('turns a hex with alpha into rgba(): the build minifies rgba() tokens to #rrggbbaa, which cytoscape cannot parse', () => {
-    const el = ground('paper', { '--gv-node-border': '#14202b59', '--track': '#fff1', '--gv-outline': '#fff' });
+    const el = box({ '--gv-node-border': '#14202b59', '--track': '#fff1', '--gv-outline': '#fff' });
     expect(cssColor(el, '--gv-node-border')).toBe('rgba(20, 32, 43, 0.349)');
     expect(cssColor(el, '--track')).toBe('rgba(255, 255, 255, 0.067)');
     expect(cssColor(el, '--gv-outline')).toBe('#fff'); // an opaque hex stays as declared
     expect(resolveColors('tint(--gv-node-border, 0.5)', el)).toBe('rgba(20, 32, 43, 0.5)');
   });
 
-  it('falls back to the dark value when nothing declares it (jsdom has no stylesheet), and to "" for an unknown token', () => {
-    const el = ground('dark', {});
-    expect(cssColor(el, '--series-1')).toBe('#60a5fa');
-    expect(cssColor(null, '--gv-fact')).toBe('#34d399');
+  it('falls back to the :root value when nothing declares it (jsdom has no stylesheet), and to "" for an unknown token', () => {
+    const el = box({});
+    expect(cssColor(el, '--series-1')).toBe('#1f5fa8');
+    expect(cssColor(null, '--gv-fact')).toBe('#159a7a');
     expect(() => cssColor(el, '--no-such-token')).not.toThrow();
     expect(cssColor(el, '--no-such-token')).toBe('');
   });
@@ -145,7 +138,7 @@ describe('resolveColors', () => {
   });
 
   it('replaces a whole-string var() and tint() token with the colour, in arrays and nested objects', () => {
-    const el = ground('paper', { '--series-1': '#1f5fa8', '--green': '#2f8a4e' });
+    const el = box({ '--series-1': '#1f5fa8', '--green': '#2f8a4e' });
     const out = resolveColors(
       { datasets: [{ borderColor: 'var(--series-1)', backgroundColor: tint('--series-1', 0.12), pointBackgroundColor: ['var(--green)', '#123456'] }] },
       el,
@@ -159,33 +152,19 @@ describe('resolveColors', () => {
 
   it('tint() is a sentinel string; resolved, it is the token at that alpha', () => {
     expect(tint('--series-1', 0.12)).toBe('tint(--series-1, 0.12)');
-    expect(resolveColors(tint('--series-1', 0.12), null)).toBe('rgba(96, 165, 250, 0.12)');
-    expect(resolveColors(tint('--green', 0.5), null)).toBe('rgba(52, 211, 153, 0.5)');
+    expect(resolveColors(tint('--series-1', 0.12), null)).toBe('rgba(31, 95, 168, 0.12)');
+    expect(resolveColors(tint('--green', 0.5), null)).toBe('rgba(47, 138, 78, 0.5)');
   });
 
-  it('a token declared closer to the canvas wins (CSS inheritance), and anything inside the page ground is paper', () => {
-    document.documentElement.setAttribute('data-look', 'paper');
-    const page = ground('paper', { '--series-1': '#1f5fa8' });
-    const inner = ground('dark', { '--series-1': '#60a5fa' }, page);
+  it('a token declared closer to the canvas wins (CSS inheritance)', () => {
+    const page = box({ '--series-1': '#1f5fa8' });
+    const inner = box({ '--series-1': '#60a5fa' }, page);
     const inInner = document.createElement('canvas');
     inner.appendChild(inInner);
     const onPage = document.createElement('canvas');
     page.appendChild(onPage);
     expect(resolveColors('var(--series-1)', inInner)).toBe('#60a5fa');
     expect(resolveColors('var(--series-1)', onPage)).toBe('#1f5fa8');
-    expect(isPaperGround(onPage)).toBe(true);
-    expect(isPaperGround(inInner)).toBe(true); // PR 7 T2: there is no dark island any more
-  });
-});
-
-describe('isPaperGround', () => {
-  it('only under the paper look, inside a paper ground', () => {
-    const page = ground('paper', {});
-    expect(isPaperGround(page)).toBe(false); // the look is off
-    document.documentElement.setAttribute('data-look', 'paper');
-    expect(isPaperGround(page)).toBe(true);
-    expect(isPaperGround(document.body)).toBe(false); // no ground at all
-    expect(isPaperGround(null)).toBe(false);
   });
 });
 
@@ -197,9 +176,9 @@ describe('seriesToken', () => {
   });
 });
 
-describe('withPaperDefaults', () => {
+describe('withChartDefaults', () => {
   it('gives every axis of a cartesian chart the text and grid colours, beneath the caller\'s own', () => {
-    const out = withPaperDefaults('bar', { indexAxis: 'y', scales: { y: { grid: { display: false } }, y2: { ticks: { color: 'red' } } } }, 'T', 'G');
+    const out = withChartDefaults('bar', { indexAxis: 'y', scales: { y: { grid: { display: false } }, y2: { ticks: { color: 'red' } } } }, 'T', 'G');
     expect(out.color).toBe('T'); // the legend
     expect(out.plugins.title.color).toBe('T');
     expect(out.indexAxis).toBe('y');
@@ -209,7 +188,7 @@ describe('withPaperDefaults', () => {
   });
 
   it('adds no scales to a doughnut (it would grow axes), and keeps the caller\'s plugins', () => {
-    const out = withPaperDefaults('doughnut', { cutout: '60%', plugins: { legend: { position: 'bottom' } } }, 'T', 'G');
+    const out = withChartDefaults('doughnut', { cutout: '60%', plugins: { legend: { position: 'bottom' } } }, 'T', 'G');
     expect(out.scales).toBeUndefined();
     expect(out.plugins).toEqual({ title: { color: 'T' }, legend: { position: 'bottom' } });
     expect(out.cutout).toBe('60%');

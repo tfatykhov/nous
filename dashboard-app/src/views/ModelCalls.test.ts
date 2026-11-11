@@ -4,7 +4,7 @@ import ModelCalls from './ModelCalls.svelte';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { initRouter } from '../lib/router';
-import { DARK_SEL, parseBlocks, styleBlocks } from '../lib/testing/css';
+import { ROOT_SEL, block as cssBlock, parseBlocks, styleBlocks } from '../lib/testing/css';
 
 const HOSTILE = '<img src=x onerror=alert(1)>';
 const ID1 = '11111111-1111-4111-8111-111111111111';
@@ -705,17 +705,16 @@ describe('Model calls PR4 fix round', () => {
 // ── Redesign PR 3: Model calls on paper ──────────────────────────────────────────────────────────────────────────────
 
 describe('Model calls on paper: tokens and words', () => {
-  const DARK = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(DARK_SEL) ?? {};
+  const ROOT = cssBlock(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
   const source = (f: string) => readFileSync(join(__dirname, f), 'utf-8');
   const NINE = ['System prompt', 'Identity', 'Facts', 'Decisions', 'Procedures', 'Episodes', 'Messages', 'Tools', 'Skills']
     .map((name, i) => ({ name, tokens_est: 100 * (i + 1) }));
-  const OLD_PALETTE = ['#a99df9', '#60a5fa', '#22d3ee', '#34d399', '#fbbf24', '#fb923c', '#f472b6', '#9ca3af', '#c4c4d8'];
   const start = (hash: string, r: (u: string) => Reply) => {
     respond = r; install(); location.hash = ''; initRouter(); go(hash);
   };
   afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-  it('nine context sections: nine bars and nine named legend entries, each a token whose dark value is the old colour', async () => {
+  it('nine context sections: nine bars and nine named legend entries, each a token declared at :root', async () => {
     start(`#/model-calls/c/${ID1}`, (u) => (u === `/dashboard/model-calls/${ID1}` ? { body: detail({ sections: NINE }) }
       : u.includes('/blocks/') ? { body: { part: 'response', ord: 0, size_chars: 1, body: 'x' } } : { body: list([row(ID1)]) }));
     const { container } = render(ModelCalls);
@@ -727,12 +726,13 @@ describe('Model calls on paper: tokens and words', () => {
     const tokens = bars.map((b) => b.style.background);
     for (const t of tokens) expect(t).toMatch(/^var\(--[\w-]+\)$/);
     expect(items.map((li) => li.querySelector<HTMLElement>('.dot')!.style.background)).toEqual(tokens);
-    expect(tokens.map((t) => DARK[t.slice(4, -1)])).toEqual(OLD_PALETTE);
+    for (const t of tokens) expect(ROOT[t.slice(4, -1)], t).toMatch(/^#[0-9a-f]{6}$/);
+    expect(new Set(tokens).size).toBe(9);
     // Fix round 0, ruling 5: on paper --accent-text is the link blue, beside series 1's blue; the first section has its
-    // own token (the accent text under dark, the violet series 0 on paper). No section reads an accent token.
+    // own token (a violet). No section reads an accent token.
     expect(tokens[0]).toBe('var(--mc-section-1)');
     // Review M5 and M6: Messages has its own colour (not the unknown status's), and Tools one that Decisions does not
-    // merge with under red-green colour blindness. Both keep today's dark values.
+    // merge with under red-green colour blindness.
     expect(tokens[6]).toBe('var(--mc-section-7)');
     expect(tokens[7]).toBe('var(--mc-section-8)');
     expect(tokens).not.toContain('var(--unknown)');

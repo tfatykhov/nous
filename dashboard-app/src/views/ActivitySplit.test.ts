@@ -211,7 +211,7 @@ describe('Work Changes tab', () => {
     const { container } = render(Work, { target: main });
     await screen.findByText('1 send ended without confirming delivery');
     // Review Focus 5: nothing inside the paper route keeps a dark ground.
-    expect(main.querySelector('[data-ground], .page-ground')).toBeNull();
+    expect(main.querySelector('.page-ground')).toBeNull();
     expect(container.querySelector('.island')).toBeNull();
     const subtitle = screen.getByText(/Every side-effecting tool call, kept durably/);
     expect(subtitle.closest('.page-ground')).toBe(main);
@@ -224,7 +224,7 @@ describe('Work Changes tab', () => {
 
   it('Work no longer imports the dark island', () => {
     const src = readFileSync(join(__dirname, 'Work.svelte'), 'utf-8');
-    expect(src).not.toMatch(/import Ground|<Ground|data-ground/);
+    expect(src).not.toMatch(/import Ground|<Ground/);
   });
 
   it('the sessions list has no ledger in it', async () => {

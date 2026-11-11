@@ -6,8 +6,8 @@ import Observability from './Observability.svelte';
 import { initRouter } from '../lib/router';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { setLook } from '../lib/look';
-import { PAPER_SEL, parseBlocks, styleBlocks } from '../lib/testing/css';
+import { ROOT_SEL, block, parseBlocks, styleBlocks } from '../lib/testing/css';
+import { withAlpha } from '../lib/overviewCharts';
 
 // F108 Phase 2 T12: Graph Health, Density, Admission, Memory write health and the growth charts become one
 // "Memory health" screen with three tabs (Graph, Writes, Growth). Every value below is made up.
@@ -344,7 +344,7 @@ describe('Observability after the growth move', () => {
 
 // ── PR 2: the charts read tokens (Chart.js resolves them against the ground the chart sits in) ────────────────────
 
-const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
+const PAPER = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
 type Ds = Record<string, any>;
 let configs: { type: string; data: { datasets: Ds[] }; options: Record<string, any> }[] = [];
 /** Replaces the no-op Chart stub with one that records every chart's resolved config. */
@@ -375,45 +375,45 @@ function paperMain(): HTMLElement {
 }
 
 describe('Memory health charts read tokens', () => {
-  afterEach(() => { setLook('dark'); document.body.innerHTML = ''; });
+  afterEach(() => { document.body.innerHTML = ''; });
 
-  it('dark: the Graph tab\'s datasets are today\'s colours exactly', async () => {
+  // With no stylesheet (jsdom) every token takes its :root value, through TOKEN_FALLBACK.
+  it('the Graph tab\'s datasets: each mark its token and alpha (no stylesheet: the :root values)', async () => {
     start('#/health/graph');
     recordCharts();
     render(Health);
     await waitFor(() => expect(configs.length).toBe(5));
-    const want: [string, string, unknown, unknown][] = [
-      ['Density', 'borderColor', '#7c6af7', 'rgba(124, 106, 247, 0.1)'],
-      ['Edges Created', 'borderColor', '#7c6af7', 'rgba(124, 106, 247, 0.5)'],
-      ['Node Count', 'borderColor', '#60a5fa', 'rgba(96, 165, 250, 0.5)'],
-      ['Orphan Nodes', 'borderColor', '#f87171', 'rgba(248, 113, 113, 0.1)'],
-      ['Auto-linked', 'borderColor', '#34d399', 'rgba(52, 211, 153, 0.5)'],
-      ['Manual', 'borderColor', '#7c6af7', 'rgba(124, 106, 247, 0.5)'],
+    const want: [string, string, number][] = [
+      ['Density', '--series-0', 0.1],
+      ['Edges Created', '--series-0', 0.5],
+      ['Node Count', '--series-1', 0.5],
+      ['Orphan Nodes', '--red', 0.1],
+      ['Auto-linked', '--series-2', 0.5],
+      ['Manual', '--series-0', 0.5],
     ];
-    for (const [label, , border, fill] of want) {
-      expect(norm(dataset(label).borderColor), label).toBe(norm(border));
-      expect(norm(dataset(label).backgroundColor), label).toBe(norm(fill));
+    for (const [label, token, a] of want) {
+      expect(norm(dataset(label).borderColor), label).toBe(norm(PAPER[token]));
+      expect(norm(dataset(label).backgroundColor), label).toBe(norm(withAlpha(PAPER[token], a)));
     }
     // Density 1.4 and 1.5: "watch" (amber); orphans' points in red.
-    expect(dataset('Density').pointBackgroundColor).toEqual(['#fbbf24', '#fbbf24']);
-    expect(dataset('Orphan Nodes').pointBackgroundColor).toBe('#f87171');
-    // Chart.js's own defaults stay on a dark ground: nothing is added to the options.
-    expect(chartOf('Node Count').options.color).toBeUndefined();
+    expect(dataset('Density').pointBackgroundColor).toEqual([PAPER['--yellow'], PAPER['--yellow']]);
+    expect(dataset('Orphan Nodes').pointBackgroundColor).toBe(PAPER['--red']);
+    // The legend and the axes take the chart text colour.
+    expect(chartOf('Node Count').options.color).toBe(PAPER['--chart-text']);
   });
 
-  it('dark: the Growth tab\'s datasets and the doughnut are today\'s colours exactly', async () => {
+  it('the Growth tab\'s datasets and the doughnut: series 1 to 3, a 10% fill (no stylesheet: the :root values)', async () => {
     start('#/health/growth');
     recordCharts();
     render(Health);
     await waitFor(() => expect(configs.length).toBe(3));
-    expect(norm(['Facts', 'Episodes', 'Decisions'].map((l) => dataset(l).borderColor))).toEqual(['#60a5fa', '#34d399', '#a78bfa']);
-    expect(norm(['Facts', 'Episodes', 'Decisions'].map((l) => dataset(l).backgroundColor))).toEqual(
-      norm(['rgba(96,165,250,0.10)', 'rgba(52,211,153,0.10)', 'rgba(167,139,250,0.10)']).map((c: string) => c.replace('0.10)', '0.1)')),
-    );
-    expect(norm(dataset('Fact delta').borderColor)).toBe('#60a5fa');
-    expect(norm(dataset('Fact delta').backgroundColor)).toBe('rgba(96,165,250,0.1)');
+    const series = ['--series-1', '--series-2', '--series-3'];
+    expect(norm(['Facts', 'Episodes', 'Decisions'].map((l) => dataset(l).borderColor))).toEqual(series.map((t) => PAPER[t]));
+    expect(norm(['Facts', 'Episodes', 'Decisions'].map((l) => dataset(l).backgroundColor))).toEqual(norm(series.map((t) => withAlpha(PAPER[t], 0.1))));
+    expect(norm(dataset('Fact delta').borderColor)).toBe(PAPER['--series-1']);
+    expect(norm(dataset('Fact delta').backgroundColor)).toBe(norm(withAlpha(PAPER['--series-1'], 0.1)));
     const doughnut = configs.find((c) => c.type === 'doughnut')!;
-    expect(doughnut.data.datasets[0].backgroundColor).toEqual(['#60a5fa', '#34d399']); // two categories in the fixture
+    expect(doughnut.data.datasets[0].backgroundColor).toEqual([PAPER['--series-1'], PAPER['--series-2']]); // two categories in the fixture
   });
 
   it('a ninth fact category gets series 9, not series 1 again beside its twin (review M7)', async () => {
@@ -425,12 +425,11 @@ describe('Memory health charts read tokens', () => {
     await waitFor(() => expect(configs.length).toBe(3));
     const colours = configs.find((c) => c.type === 'doughnut')!.data.datasets[0].backgroundColor;
     expect(colours).toHaveLength(9);
-    expect(colours[8]).toBe('#22d3ee'); // dark series 9
+    expect(colours[8]).toBe(PAPER['--series-9']);
     expect(new Set(colours).size).toBe(9);
   });
 
   it('paper: the same datasets take the paper series and status colours, and the axes the chart text and grid', async () => {
-    setLook('paper');
     const target = paperMain();
     start('#/health/graph');
     recordCharts();
@@ -472,28 +471,27 @@ describe('Memory health: the Writes tab\'s admission charts read tokens', () => 
     daily_trend: [{ date: '2026-11-07', scored: 4, admitted: 3, avg_score: 0.6 }, { date: '2026-11-08', scored: 6, admitted: 4, avg_score: 0.62 }],
     bypass_breakdown: { user_direct: 1, pinned: 1 },
   };
-  afterEach(() => { setLook('dark'); document.body.innerHTML = ''; });
+  afterEach(() => { document.body.innerHTML = ''; });
 
-  it('dark: admitted and rejected are the status green and red, bypassed the series slate, the trends today\'s colours', async () => {
+  it('admitted and rejected are the status green and red, bypassed the series slate, the trends series 0 (no stylesheet: the :root values)', async () => {
     admission = FULL_ADMISSION;
     start('#/health/writes');
     recordCharts();
     render(Health);
     await waitFor(() => expect(configs.length).toBe(6));
     const scores = configs.find((c) => c.data.datasets[0].label === 'Facts')!.data.datasets[0];
-    expect(scores.backgroundColor).toEqual(['#f87171', '#34d399']); // 0.40-0.45 below the 0.55 threshold, 0.60-0.65 above
+    expect(scores.backgroundColor).toEqual([PAPER['--red'], PAPER['--green']]); // 0.40-0.45 below the 0.55 threshold, 0.60-0.65 above
     const bySource = configs.find((c) => c.data.datasets.length === 3)!.data.datasets;
-    expect(bySource.map((d) => d.backgroundColor)).toEqual(['#34d399', '#f87171', '#6b6b8a']);
-    expect(norm(dataset('Admission Rate (%)').backgroundColor)).toBe('rgba(52,211,153,0.1)');
-    expect(dataset('Avg Score').borderColor).toBe('#7c6af7');
+    expect(bySource.map((d) => d.backgroundColor)).toEqual([PAPER['--green'], PAPER['--red'], PAPER['--series-7']]);
+    expect(norm(dataset('Admission Rate (%)').backgroundColor)).toBe(norm(withAlpha(PAPER['--green'], 0.1)));
+    expect(dataset('Avg Score').borderColor).toBe(PAPER['--series-0']);
     const bypass = configs.find((c) => c.type === 'doughnut')!.data.datasets[0];
-    expect(bypass.backgroundColor).toEqual(['#7c6af7', '#60a5fa']);
-    expect(bypass.borderColor).toBe('#12121a'); // the card behind it (it was an unreadable 'var(--surface)' string)
+    expect(bypass.backgroundColor).toEqual([PAPER['--series-0'], PAPER['--series-1']]);
+    expect(bypass.borderColor).toBe(PAPER['--surface']); // the card behind it (it was an unreadable 'var(--surface)' string)
   });
 
   it('paper: the same datasets take the paper status and series values', async () => {
     admission = FULL_ADMISSION;
-    setLook('paper');
     const target = paperMain();
     start('#/health/writes');
     recordCharts();

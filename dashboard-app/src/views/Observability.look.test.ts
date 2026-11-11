@@ -4,14 +4,13 @@ import { tick } from 'svelte';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Observability from './Observability.svelte';
-import { setLook } from '../lib/look';
-import { PAPER_SEL, parseBlocks, styleBlocks } from '../lib/testing/css';
+import { ROOT_SEL, block, parseBlocks, styleBlocks } from '../lib/testing/css';
 
 // Redesign PR 5: Observability on paper. The handler dots and the error-trend chart read tokens (Chart.svelte resolves
 // the chart's against the ground its canvas sits in), the trace toggle and the anomaly line are words, not glyphs, and
 // an anomaly's severity is said, not only coloured.
 
-const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
+const PAPER = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
 const SOURCE = readFileSync(join(__dirname, 'Observability.svelte'), 'utf-8');
 
 const handler = (invocations: number, errors: number, error_rate: number) => ({
@@ -74,7 +73,7 @@ beforeEach(() => {
     update() { updates.push({ data: this.data }); }
   });
 });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); setLook('dark'); document.body.innerHTML = ''; });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); document.body.innerHTML = ''; });
 
 /** A paper <main> with the paper tokens set on it (jsdom has no stylesheet). */
 function paperMain(withTokens = true): HTMLElement {
@@ -127,17 +126,16 @@ describe('Observability: handler dots and the error trend read tokens', () => {
     expect(rate('flaky').classList.contains('handler-rate--warn')).toBe(true);
   });
 
-  it('dark: the error-trend line and fill are today\'s red', async () => {
+  it('the error-trend line and its 10% fill are the red (no stylesheet: the :root value)', async () => {
     render(Observability);
     await waitFor(() => expect(configs).toHaveLength(1));
     const [ds] = configs[0].data.datasets;
-    expect(rgb(ds.borderColor)).toBe('248,113,113');
-    expect(rgb(ds.backgroundColor)).toBe('248,113,113');
+    expect(rgb(ds.borderColor)).toBe(rgb(PAPER['--red']));
+    expect(rgb(ds.backgroundColor)).toBe(rgb(PAPER['--red']));
     expect(alpha(ds.backgroundColor)).toBe(0.1);
   });
 
   it('paper: the error-trend line is the paper red, no old literal is left, and the axes take the chart text', async () => {
-    setLook('paper');
     render(Observability, { target: paperMain() });
     await waitFor(() => expect(configs).toHaveLength(1));
     const [ds] = configs[0].data.datasets;
@@ -148,20 +146,6 @@ describe('Observability: handler dots and the error trend read tokens', () => {
     expect(configs[0].options.scales.x.ticks.color).toBe(PAPER['--chart-text']);
   });
 
-  it('a look switch redraws the trend chart without a reload (paper to dark)', async () => {
-    setLook('paper');
-    const main = paperMain();
-    render(Observability, { target: main });
-    await waitFor(() => expect(configs).toHaveLength(1));
-    expect(configs[0].data.datasets[0].borderColor).toBe(PAPER['--red']);
-    const before = updates.length;
-    for (const k of Object.keys(PAPER)) main.style.removeProperty(k); // the paper ground's rule stops matching
-    setLook('dark');
-    await tick();
-    const after = updates.slice(before);
-    expect(after.length).toBeGreaterThanOrEqual(1);
-    expect(rgb(after.at(-1)!.data.datasets[0].borderColor)).toBe('248,113,113');
-  });
 });
 
 describe('Observability: words, not glyphs', () => {
@@ -259,7 +243,7 @@ describe('Observability: the paper look\'s structure (source contracts)', () => 
   it('cards read the card tokens, labels the label tokens, and the title takes the paper size under paper only', () => {
     expect(rules.get('.chart-card')).toMatchObject({ border: 'var(--card-border)', 'border-radius': 'var(--card-radius)', 'box-shadow': 'var(--card-shadow)' });
     expect(rules.get('.event-badge')).toMatchObject({ 'text-transform': 'var(--label-transform)', 'letter-spacing': 'var(--label-tracking)' });
-    expect(rules.get(':global(html[data-look="paper"] .page-ground) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
+    expect(rules.get(':global(html:root .page-ground) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
   });
 
   it('the dot paints its own token, the severity word reads a text token, and the badges are tints', () => {

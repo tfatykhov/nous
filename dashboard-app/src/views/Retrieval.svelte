@@ -1247,10 +1247,10 @@
     margin-bottom: 1.25rem;
   }
   h1 { font-size: 1.4rem; font-weight: 700; color: var(--text); margin: 0 0 0.125rem; }
-  :global(html[data-look="paper"] .page-ground) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
+  :global(html:root .page-ground) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
   .subtitle { font-size: 0.8125rem; color: var(--muted); margin: 0; }
   h2 { font-size: 0.875rem; font-weight: 600; color: var(--text); margin: 0; }
-  :global(html[data-look="paper"] .page-ground) h2 { font-size: 15px; font-weight: 650; }
+  :global(html:root .page-ground) h2 { font-size: 15px; font-weight: 650; }
   .head-right { display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; }
 
   /* ── Card ────────────────────────────────────────────────── */
@@ -1261,7 +1261,7 @@
     box-shadow: var(--card-shadow);
     padding: 1rem;
   }
-  :global(html[data-look="paper"] .page-ground) .chart-card { padding: 1.125rem 1.25rem; }
+  :global(html:root .page-ground) .chart-card { padding: 1.125rem 1.25rem; }
   .mt { margin-top: 1rem; }
 
   /* ── Window funnel ───────────────────────────────────────── */
@@ -1279,7 +1279,7 @@
     text-transform: var(--label-transform);
     color: var(--muted);
   }
-  :global(html[data-look="paper"] .page-ground) .funnel-head h2 { font-size: 15px; letter-spacing: 0; color: var(--text); }
+  :global(html:root .page-ground) .funnel-head h2 { font-size: 15px; letter-spacing: 0; color: var(--text); }
 
   .funnel {
     display: grid;
@@ -1344,7 +1344,7 @@
     overflow: hidden;
     gap: 2px;
   }
-  :global(html[data-look="paper"] .page-ground) .funnel-track { border-radius: 12px; }
+  :global(html:root .page-ground) .funnel-track { border-radius: 12px; }
   .funnel-seg {
     min-width: 3px;
     display: flex;
@@ -1414,7 +1414,7 @@
     letter-spacing: 0.08em;
     text-transform: var(--label-transform);
   }
-  :global(html[data-look="paper"] .page-ground) .timing-label { font-size: 0.75rem; letter-spacing: 0; font-weight: 600; }
+  :global(html:root .page-ground) .timing-label { font-size: 0.75rem; letter-spacing: 0; font-weight: 600; }
   .timing .slow strong { color: var(--err-text); }
   .timing-slow { color: var(--warn-text); margin-left: auto; }
 
@@ -1543,7 +1543,7 @@
   .expn { color: var(--chunk-color); }
   /* On paper the memory-type colours are marks (3:1 on white); as small text they are mixed toward the ink (4.5:1
      or more, Retrieval.test.ts). The dark look keeps the plain colour. */
-  :global(html[data-look="paper"] .page-ground) .expn { color: color-mix(in srgb, var(--chunk-color) 70%, var(--text)); }
+  :global(html:root .page-ground) .expn { color: color-mix(in srgb, var(--chunk-color) 70%, var(--text)); }
   .rrow-meta .muted { opacity: 0.75; }
 
   /* ── Detail ──────────────────────────────────────────────── */
@@ -1709,12 +1709,12 @@
   .chip.t-procedure { color: var(--procedure-color); border-color: var(--procedure-color); }
   .chip.t-chunk     { color: var(--chunk-color);     border-color: var(--chunk-color); }
   .chip.t-censor    { color: var(--censor-color);    border-color: var(--censor-color); }
-  :global(html[data-look="paper"] .page-ground) .chip.t-fact { color: color-mix(in srgb, var(--fact-color) 70%, var(--text)); }
-  :global(html[data-look="paper"] .page-ground) .chip.t-episode { color: color-mix(in srgb, var(--episode-color) 70%, var(--text)); }
-  :global(html[data-look="paper"] .page-ground) .chip.t-decision { color: color-mix(in srgb, var(--decision-color) 70%, var(--text)); }
-  :global(html[data-look="paper"] .page-ground) .chip.t-procedure { color: color-mix(in srgb, var(--procedure-color) 70%, var(--text)); }
-  :global(html[data-look="paper"] .page-ground) .chip.t-chunk { color: color-mix(in srgb, var(--chunk-color) 70%, var(--text)); }
-  :global(html[data-look="paper"] .page-ground) .chip.t-censor { color: color-mix(in srgb, var(--censor-color) 70%, var(--text)); }
+  :global(html:root .page-ground) .chip.t-fact { color: color-mix(in srgb, var(--fact-color) 70%, var(--text)); }
+  :global(html:root .page-ground) .chip.t-episode { color: color-mix(in srgb, var(--episode-color) 70%, var(--text)); }
+  :global(html:root .page-ground) .chip.t-decision { color: color-mix(in srgb, var(--decision-color) 70%, var(--text)); }
+  :global(html:root .page-ground) .chip.t-procedure { color: color-mix(in srgb, var(--procedure-color) 70%, var(--text)); }
+  :global(html:root .page-ground) .chip.t-chunk { color: color-mix(in srgb, var(--chunk-color) 70%, var(--text)); }
+  :global(html:root .page-ground) .chip.t-censor { color: color-mix(in srgb, var(--censor-color) 70%, var(--text)); }
 
   .badge {
     display: inline-block;

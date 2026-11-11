@@ -1,264 +1,16 @@
 /* Google Fonts must precede @import tailwindcss */
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Archivo:wdth,wght@62..125,100..900&family=Red+Hat+Mono:wght@400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=Red+Hat+Mono:wght@400;500&display=swap');
 @import "tailwindcss";
 
 /* ============================================================
-   Nous Dashboard – Dark Token Set
-   Ported from static/dashboard/css/dashboard.css
+   Nous Dashboard – the tokens of its one look (paper): chart-paper
+   ground, white rounded cards, ink; the Atlantic-blue rail (.rail)
    ============================================================ */
 
 @layer base {
-  /* The dark tokens: the default look. Every value above "Redesign" is unchanged (tokens.test.ts pins them). */
+  /* The tokens of the one look. Until PR 7 this block was the paper ground of a staged look and :root held the dark
+     one; it moved here verbatim (tokens.test.ts's PAPER_GOLDEN). */
   :root {
-    /* --- Nous dark palette --- */
-    --bg: #0a0a0f;
-    --surface: #12121a;
-    --surface-hover: #181824;
-    --border: #1e1e2e;
-    --accent: #7c6af7;
-    --accent-dim: #4f46a8;
-    --accent-glow: rgba(124, 106, 247, 0.15);
-    --text: #e2e2f0;
-    /* Harness dashboard §4.1: lifted from #6b6b8a (3.6:1 on --surface) to
-       #8e8eab (5.9:1) — secondary text must pass WCAG AA. */
-    --muted: #8e8eab;
-    /* Text in the accent colour: #a99df9 is 6.7:1 on --accent-glow. */
-    --accent-text: #a99df9;
-    /* One meaning each (spec §4.1); status.ts mirrors these as hex. */
-    --waiting: #a78bfa;
-    --unknown: #f472b6;
-    --pending: #22d3ee;
-
-    /* Status / type colours */
-    --green: #34d399;
-    --red: #f87171;
-    --yellow: #fbbf24;
-    --fact-color: #60a5fa;
-    --episode-color: #34d399;
-    --decision-color: #a78bfa;
-    --procedure-color: #fb923c;
-    --censor-color: #f87171;
-    --heartbeat-color: #22d3ee;
-    --chunk-color: #06b6d4;
-
-    /* Layout */
-    --sidebar-width: 220px;
-    --sidebar-collapsed: 56px;
-    --radius: 12px;
-    --radius-sm: 8px;
-    --transition: 0.2s ease;
-
-    /* Fonts */
-    --font-ui: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-    --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
-
-    /* ---- shadcn-svelte CSS variable contract ----
-       Map Nous tokens → shadcn semantic names so components
-       (Button, Card, Dialog, etc.) render correctly in dark mode.
-    ------------------------------------------------ */
-    --background: 222 13% 6%;          /* #0a0a0f */
-    --foreground: 240 33% 92%;         /* #e2e2f0 */
-
-    --card: 240 17% 8%;                /* #12121a */
-    --card-foreground: 240 33% 92%;
-
-    --popover: 240 17% 8%;
-    --popover-foreground: 240 33% 92%;
-
-    --primary: 249 89% 63%;            /* #7c6af7 */
-    --primary-foreground: 0 0% 100%;
-
-    --secondary: 240 16% 11%;          /* #181824 */
-    --secondary-foreground: 240 33% 92%;
-
-    --muted-token: 240 17% 61%;        /* #8e8eab  (--muted is taken as a raw hex above) */
-    --muted-foreground: 240 17% 61%;
-
-    --accent-token: 249 89% 63%;
-    --accent-foreground: 0 0% 100%;
-
-    --destructive: 0 91% 71%;          /* #f87171 */
-    --destructive-foreground: 0 0% 100%;
-
-    --border-token: 237 25% 14%;       /* #1e1e2e */
-    --input: 237 25% 14%;
-    --ring: 249 89% 63%;               /* accent */
-
-    --radius-tw: 0.75rem;              /* 12px = var(--radius) */
-
-    /* ---- Redesign (staged behind html[data-look="paper"]) ----
-       Each dark value is the literal the component used before it read the token, so the dark look does not
-       move. The paper and rail grounds below redefine them. */
-    /* Status text, tint and border */
-    --ok-text: #34d399;
-    --ok-bg: rgba(52, 211, 153, 0.12);
-    --warn-text: #fbbf24;
-    --warn-bg: rgba(251, 191, 36, 0.08);
-    --warn-border: rgba(251, 191, 36, 0.5);
-    --err-text: #f87171;
-    --err-bg: rgba(248, 113, 113, 0.1);
-    --stat-warn: #f59e0b;               /* StatGrid's warn tone */
-    --stat-ok: #10b981;                 /* StatGrid's ok tone */
-    --stale-err-bg: rgba(248, 113, 113, 0.08); /* StaleBadge's error tint */
-    --notice-bg: rgba(245, 158, 11, 0.08);     /* the Work screens' "recording is off" box */
-    --notice-border: rgba(245, 158, 11, 0.4);
-    --kind-task: #22d3ee;                      /* the Work screens' "Task" kind (text and bars) */
-    --seg-bg: var(--surface);                  /* the Work list's kind selector, behind its buttons */
-    --series-7: #6b6b8a;                       /* PR 2/3 plan's series ramp, slot 7: the Overview's pending outcomes */
-    /* Frame colours, one each (7.1 to 9.3:1 on --surface) */
-    --f-conversation: #8fa3b5;
-    --f-question: #8aa4ff;
-    --f-task: #3fc3d1;
-    --f-decision: #c08be0;
-    --f-debug: #f09a5a;
-    --f-creative: #ee82bd;
-    --f-initiation: #e0b050;
-    --f-other: #c4c4d8;                        /* a frame id outside the seven: neutral, not conversation */
-    /* Lane dots: work.ts LANE_COLORS */
-    --lane-memory: #60a5fa;
-    --lane-live: #fbbf24;
-    --lane-workspace: #9ca3af;
-    --lane-acts: #f472b6;
-    --lane-other: #8e8eab;
-    /* Structure */
-    --card-radius: 12px;
-    --card-radius-sm: 8px;
-    /* No shadow, as before; not `none`, which is invalid inside the shadow list Tailwind composes with its rings. */
-    --card-shadow: 0 0 #0000;
-    --card-border: 1px solid var(--border);
-    --ctl-radius: 8px;
-    --label-transform: uppercase;
-    --label-tracking: 0.05em;
-    --nav-label-tracking: 0.06em;
-    --nav-icon-display: inline;
-    --logo-display: inline;
-    --nav-radius: 8px;
-    --nav-ink: var(--muted);
-    --nav-active-weight: 500;
-    --brand-size: 1rem;
-    --on-accent: var(--bg);
-    --skip-link-text: #fff;
-    --overlay-bg: rgba(0, 0, 0, 0.6);
-    --tab-active-bg: var(--surface-hover);
-    --tab-active-shadow: inset 0 0 0 1px var(--accent);
-    --focus-ring: var(--accent);
-    --btn-focus-width: 0px;                    /* a focused Button's outline: none under dark, as before */
-
-    /* ---- PR 2, the Memory screens: chart, graph and funnel colours (marks, not text) ----
-       A canvas cannot read var(): lib/chartColors.ts resolves these against the element a chart draws into. */
-    /* Categorical series ramp (slot 7 is above) */
-    --gv-edge-opacity: 0.5;                    /* Graph edges (and inferred ones), as cytoscape drew them */
-    --gv-edge-opacity-inferred: 0.3;
-    --series-0: #7c6af7;                       /* violet marks (was --accent, the question frame's blue on paper) */
-    --series-1: #60a5fa;
-    --series-2: #34d399;
-    --series-3: #a78bfa;
-    --series-4: #fb923c;
-    --series-5: #f87171;
-    --series-6: #fbbf24;
-    --series-8: #e2e2f0;
-    --series-9: #22d3ee;
-    --series-10: #e879f9;
-    --series-11: #f472b6;
-    --series-12: #9ca3af;
-    --series-13: #c4c4d8;
-    /* Graph: node types (not the legacy --*-color, whose fact and episode are swapped), label halo, rings */
-    --gv-fact: #34d399;
-    --gv-episode: #60a5fa;
-    --gv-decision: #a78bfa;
-    --gv-procedure: #fbbf24;
-    --gv-chunk: #06b6d4;
-    --gv-other: #6b6b8a;
-    --gv-outline: #0a0a0f;
-    --gv-node-border: rgba(0, 0, 0, 0.3);
-    --gv-select: #fbbf24;
-    /* Graph: edge relations */
-    --rel-related-to: #7c6af7;
-    --rel-extracted-from: #60a5fa;
-    --rel-supports: #34d399;
-    --rel-informed-by: #a78bfa;
-    --rel-evidence-for: #fbbf24;
-    --rel-contradicts: #f87171;
-    --rel-supersedes: #fb923c;
-    --rel-caused-by: #e2e2f0;
-    --rel-discussed-in: #6b6b8a;
-    --rel-part-of: #22d3ee;
-    --rel-summarized-by: #06b6d4;
-    /* Retrieval: candidate dispositions, and the count label on a funnel segment */
-    --disp-rendered: #34d399;
-    --disp-returned-to-script: #22d3ee;
-    --disp-sliced-off: #f59e0b;
-    --disp-budget-truncated: #fcd34d;
-    --disp-below-floor: #a78bfa;
-    --disp-filter-dropped: #c4b5fd;
-    --disp-deduped: #94a3b8;
-    --disp-superseded: #cbd5e1;
-    --disp-replaced-at-merge: #64748b;
-    --disp-f071-excluded: #7c8da3;
-    --disp-type-excluded: #475569;
-    --disp-unaccounted: #f472b6;
-    --seg-ink: #0a0a0f;
-    /* Small structure */
-    --badge-good-bg: rgba(52, 211, 153, 0.15);
-    --badge-warn-bg: rgba(251, 191, 36, 0.15);
-    --badge-bad-bg: rgba(248, 113, 113, 0.15);
-    --track: rgba(255, 255, 255, 0.06);        /* a doughnut's remainder, a panel wash */
-    --track-strong: rgba(255, 255, 255, 0.08);
-    --bar-bg: rgba(17, 17, 24, 0.6);           /* the Graph controls bar */
-    --glow-blur: 6px;
-    --chart-text: #94a3b8;                     /* a chart's ticks and legend on a paper ground (dark charts keep Chart.js's) */
-    --chart-grid: #1e293b;
-    --save-ok: #4ade80;                        /* Browse: a censor's save message */
-    --save-err: #f87171;
-    --tone-bad: #ef4444;                       /* Memory write health: a tripped rule's border and tint */
-    --btn-ink: #fff;                           /* text on an accent-filled button (not --on-accent: dark keeps white) */
-
-    /* ---- PR 3, the Execution screens ----
-       Status (one meaning each; lib/status.ts's statusVar/ledgerStatusVar name them, its hex map mirrors these dark
-       values) and Subtasks' outcomes. */
-    --st-pending: #8e8eab;
-    --st-ready: #22d3ee;
-    --st-running: #fbbf24;
-    --st-awaiting-check: #f59e0b;
-    --st-awaiting-input: #a78bfa;              /* = --waiting */
-    --st-completed: #4ade80;
-    --st-failed: #f87171;
-    --st-blocked: #f25c5c;
-    --st-cancelled: #8a8a9a;
-    --st-skipped: #94a3b8;
-    --st-partial: #fb923c;
-    --st-success: #10b981;                     /* the ledger's success, Subtasks' completed */
-    --st-ledger-blocked: #f59e0b;              /* the ledger's blocked, Subtasks' incomplete_blocked */
-    --st-unknown: #f472b6;                     /* = --unknown */
-    --st-neutral: #6b7280;
-    --oc-failed: #ef4444;
-    --oc-timeout: #dc2626;
-    --oc-errored: #7c2d12;
-    --oc-unknown: #9ca3af;
-    --oc-blocked: #f59e0b;                     /* Subtasks' incomplete_blocked, as a chart mark */
-    --stack-bar: rgba(251, 191, 36, 0.7);      /* Workflows: a token budget's consumed part */
-    --hit-good: #22c55e;                       /* Cache: the hit-rate line, the doughnut's cache-read part */
-    --hit-mid: #eab308;
-    --hit-bad: #ef4444;
-    --cache-blue: #3b82f6;                     /* Cache: the doughnut's cache-created part */
-    --cache-grey: #4b5563;                     /* Cache: the doughnut's uncached part */
-    --wait-ink: #c4b5fd;                       /* Workflows: the Now column's waiting pill */
-    --wait-bg: rgba(167, 139, 250, 0.14);
-    --wash: rgba(255, 255, 255, 0.03);         /* Heartbeat: the tuning report's panel */
-    --hb-warn-ink: #fbbf24;                    /* Heartbeat: amber as text (paper's --yellow is a mark colour) */
-    --effect-write: #60a5fa;                   /* the Ledger's write effect pill */
-    --mc-section-1: #a99df9;                   /* a model call's first context section (was --accent-text) */
-    --mc-section-7: #f472b6;                   /* its Messages section (was --unknown) */
-    --mc-section-8: #9ca3af;                   /* its Tools section (was --series-12) */
-
-    /* ---- PR 4 and PR 5, the Decisions, Autonomy and System screens ---- */
-    --field-border: var(--border);             /* a text field's boundary (Identity's fields, as before) */
-    --signal-self-corrected: #a78bfa;          /* Scoring: the self-corrected signal mark */
-    --oc-success: #34d399;                     /* a success mark: decision outcomes (Decisions, Overview), Scoring's completed */
-  }
-
-  /* ---- The paper ground: page content (.page-ground: <main>, the bottom sheet) under the paper look ---- */
-  html[data-look="paper"] .page-ground {
     --bg: #eef2f3;
     --surface: #ffffff;
     --surface-hover: #f4f7f8;
@@ -454,11 +206,21 @@
     --input: 200 19% 91%;
     --ring: 227 70% 46%;
 
-    font-variant-numeric: tabular-nums;
+    /* With no paper value of their own (from the old :root): structure, the skip link's text, and the shadcn
+       variables no utility maps */
+    --sidebar-width: 220px;
+    --sidebar-collapsed: 56px;
+    --overlay-bg: rgba(0, 0, 0, 0.6);
+    --skip-link-text: #fff;
+    --popover-foreground: 240 33% 92%;
+    --muted-token: 240 17% 61%;        /* #8e8eab  (--muted is taken as a raw hex above) */
+    --accent-token: 249 89% 63%;
+    --destructive-foreground: 0 0% 100%;
+    --radius-tw: 0.75rem;              /* 12px = var(--radius) */
   }
 
-  /* ---- The rail: the Atlantic-blue navigation (.rail: the sidebar, the mobile header, the drawer) under the paper look ---- */
-  html[data-look="paper"] .rail {
+  /* ---- The rail: the Atlantic-blue navigation (class rail: the sidebar, the mobile header, the drawer) ---- */
+  .rail {
     --bg: #12304f;                     /* also the nav badge's text */
     --surface: #12304f;
     --surface-hover: #1a3d62;
@@ -471,11 +233,6 @@
     --focus-ring: #ffffff;
     --waiting: #c4b5fd;
     --unknown: #f9a8d4;
-    --transition: 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-    --font-ui: 'Archivo', system-ui, sans-serif;
-    --font-mono: 'Red Hat Mono', ui-monospace, monospace;
-    --label-transform: none;
-    --label-tracking: 0;
     --nav-label-tracking: 0;
     --nav-icon-display: none;          /* no icons or glyphs in the rail (owner rule) */
     --logo-display: none;
@@ -483,15 +240,20 @@
     --nav-ink: #dbe6ef;
     --nav-active-weight: 600;
     --brand-size: 21px;
+    color-scheme: dark;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-ui);
+    font-variant-numeric: normal;      /* proportional figures, as the rail has always had (body's are tabular) */
   }
 }
 
 /* ============================================================
    shadcn utilities (bg-card, bg-primary, border-border...): `inline`
-   keeps the var() live, so each resolves to its ground's set.
+   keeps the var() live, so each resolves where it is used (the rail too).
    Not mapped: foreground, muted, muted-foreground and popover. The
-   drawer (the bottom sheet of Graph and Workflows) already carries
-   those classes, and mapping them would change those dark screens.
+   drawer (the bottom sheet of Graph and Workflows) carries those
+   classes; BottomSheet.svelte paints the sheet itself.
    ============================================================ */
 @theme inline {
   --color-background: hsl(var(--background));
@@ -531,8 +293,8 @@
   --color-nous-heartbeat: #22d3ee;
   --color-nous-chunk:     #06b6d4;
 
-  --font-ui:   'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-  --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace;
+  --font-ui:   'Archivo', system-ui, sans-serif;
+  --font-mono: 'Red Hat Mono', ui-monospace, monospace;
 
   --radius-nous: 12px;
   --radius-nous-sm: 8px;
@@ -550,21 +312,17 @@
 
   html {
     height: 100%;
-    color-scheme: dark;
+    color-scheme: light;
   }
 
   body {
     height: 100%;
     font-family: var(--font-ui);
     background: var(--bg);
-    background-image: radial-gradient(
-      ellipse at 50% 0%,
-      rgba(124, 106, 247, 0.03) 0%,
-      transparent 60%
-    );
     color: var(--text);
     line-height: 1.5;
     -webkit-font-smoothing: antialiased;
+    font-variant-numeric: tabular-nums;
   }
 
   :focus-visible {
@@ -593,50 +351,15 @@
     margin: 0.25rem 0;
   }
 
-  /* ---- Grounds, under the paper look only (with the look off none of this matches) ---- */
-  html[data-look="paper"] {
-    color-scheme: light;
-  }
-
-  html[data-look="paper"] body {
-    background: #eef2f3;
-    background-image: none;
-  }
-
-  /* The skip link sits outside every ground, so under the paper look it would still read the dark :root accent
-     (white on #7c6af7 is 3.99:1). It takes the paper ground's link blue and white instead (7.4:1). The dark look is
-     untouched. */
-  html[data-look="paper"] .skip-link {
-    --accent: #2346c8;
-    --skip-link-text: #ffffff;
-  }
-
-  /* A ground sets its own background, text colour and font: the body resolved them once, at :root. Likewise
-     Tailwind's mono default (a bare <code> or <pre>), which :root resolved to the dark mono font. */
-  html[data-look="paper"] .page-ground,
-  html[data-look="paper"] .rail {
-    background: var(--bg);
-    color: var(--text);
-    font-family: var(--font-ui);
-    --default-mono-font-family: var(--font-mono);
-  }
-
-  html[data-look="paper"] .page-ground {
-    color-scheme: light;
-  }
-
-  html[data-look="paper"] .rail {
-    color-scheme: dark;
-  }
-
-  html[data-look="paper"] .page-ground .page-h1 {
+  /* Anchored at html:root .page-ground (0,3,1), the specificity it had behind the look switch */
+  html:root .page-ground .page-h1 {
     font-size: 30px;
     font-weight: 650;
     letter-spacing: -0.022em;
   }
 
   @media (prefers-reduced-motion: reduce) {
-    html[data-look="paper"] * {
+    * {
       transition: none !important;
     }
   }

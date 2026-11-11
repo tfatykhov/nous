@@ -8,8 +8,7 @@ import Overview from './Overview.svelte';
 import { attentionOverride, attentionPoll } from '../lib/stores/attention';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { setLook } from '../lib/look';
-import { PAPER_SEL, parseBlocks, scriptBlocks, markupOf, styleBlocks } from '../lib/testing/css';
+import { ROOT_SEL, block, parseBlocks, scriptBlocks, markupOf, styleBlocks } from '../lib/testing/css';
 
 // Render smoke for the harness dashboard views (spec 2026-09-25 v2 §5).
 // Fixtures carry ONLY shapes the backend stores (§4.5): hashed free text,
@@ -421,28 +420,30 @@ describe('harness dashboard views', () => {
     expect(container.querySelector('.order')?.textContent).not.toMatch(/\u2192/);
   });
 
-  it('Guards: dark, the three lines are today\'s colours with their own dashes, on today\'s axis colours', async () => {
+  it('Guards: the three lines are series 1, 4 and 9 with their own dashes, on the muted and border axis colours', async () => {
+    // With no stylesheet (jsdom) every token takes its :root value, through TOKEN_FALLBACK.
+    const ROOT = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
     render(Harness);
     await waitFor(() => expect(charts).toHaveLength(1));
     const [c] = charts;
-    expect(c.data.datasets.map((d: any) => d.borderColor)).toEqual(['#60a5fa', '#fb923c', '#22d3ee']); // claims: D4, was #2dd4bf
-    expect(c.data.datasets.map((d: any) => d.backgroundColor)).toEqual(['#60a5fa', '#fb923c', '#22d3ee']);
+    const lines = ['--series-1', '--series-4', '--series-9'].map((t) => ROOT[t]);
+    expect(c.data.datasets.map((d: any) => d.borderColor)).toEqual(lines);
+    expect(c.data.datasets.map((d: any) => d.backgroundColor)).toEqual(lines);
     expect(c.data.datasets.map((d: any) => d.borderDash)).toEqual([[], [6, 4], [2, 3]]);
-    expect(c.options.plugins.legend.labels.color).toBe('#8e8eab');
+    expect(c.options.plugins.legend.labels.color).toBe(ROOT['--muted']);
     // Review M1: the legend samples each line with its dash, not a filled box with a dashed outline.
     expect(c.options.plugins.legend.labels).toMatchObject({ usePointStyle: true, pointStyle: 'line', pointStyleWidth: 28 });
     expect(typeof c.options.plugins.legend.labels.generateLabels).toBe('function'); // the dash comes from the dataset
-    expect(c.options.scales.x.ticks.color).toBe('#8e8eab');
-    expect(c.options.scales.y.grid.color).toBe('#1e1e2e');
+    expect(c.options.scales.x.ticks.color).toBe(ROOT['--muted']);
+    expect(c.options.scales.y.grid.color).toBe(ROOT['--border']);
   });
 
   it('Guards: paper, the lines and axes take the paper values (the explicit grid beats the paper default)', async () => {
-    const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
+    const PAPER = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
     const main = document.createElement('main');
     main.classList.add('page-ground');
     for (const [k, v] of Object.entries(PAPER)) if (k.startsWith('--')) main.style.setProperty(k, v);
     document.body.appendChild(main);
-    setLook('paper');
     try {
       render(Harness, { target: main });
       await waitFor(() => expect(charts).toHaveLength(1));
@@ -453,7 +454,6 @@ describe('harness dashboard views', () => {
       expect(c.options.scales.y.grid.color).toBe(PAPER['--border']);
     } finally {
       cleanup();
-      setLook('dark');
       document.body.innerHTML = '';
     }
   });

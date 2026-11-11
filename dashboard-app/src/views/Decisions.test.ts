@@ -1,17 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, cleanup } from '@testing-library/svelte';
-import { tick } from 'svelte';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Decisions from './Decisions.svelte';
-import { setLook } from '../lib/look';
 import { chartPalette } from '../lib/overviewCharts';
-import { PAPER_SEL, parseBlocks, styleBlocks } from '../lib/testing/css';
+import { ROOT_SEL, block, parseBlocks, styleBlocks } from '../lib/testing/css';
 
 // Redesign PR 4: Decision Intelligence on paper. Every chart colour is a token that Chart.svelte resolves against the
-// ground the canvas sits in: today's colours under dark, the paper values under paper, again on a look switch.
+// element the canvas sits in (with no stylesheet, jsdom, the :root values through TOKEN_FALLBACK).
 
-const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
+const PAPER = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
 const OLD = ['#7c6af7', '#34d399', '#fbbf24', '#f87171', '#6b6b8a', '#a78bfa'];
 
 const DATA = {
@@ -79,7 +77,7 @@ const rgb = (c: string) => {
 const alpha = (c: string) => Number(/^rgba\([^)]*,\s*([\d.]+)\)$/.exec(c)?.[1] ?? 1);
 
 beforeEach(() => { body = DATA; status = 200; install(); });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); setLook('dark'); document.body.innerHTML = ''; });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); document.body.innerHTML = ''; });
 
 describe('Decisions: the view', () => {
   it('shows the title, the four stats and the latest Brier score with its word', async () => {
@@ -139,32 +137,33 @@ describe('Decisions: the view', () => {
 });
 
 describe('Decisions: chart colours are tokens', () => {
-  it('dark: every chart is today\'s colours (violet lines and bars, the outcome palette, the lilac daily bars)', async () => {
+  it('with no stylesheet every chart takes the :root values: series 0 lines and bars, the outcome palette, series 3 daily bars', async () => {
     render(Decisions);
     await waitFor(() => expect(configs).toHaveLength(7));
     const [curve, hist, cat, stakes, reason, brier, daily] = configs;
-    expect(curve.data.datasets[0].borderColor).toBe('#7c6af7');
-    expect(curve.data.datasets[0].pointBackgroundColor).toBe('#7c6af7');
-    expect(rgb(curve.data.datasets[0].backgroundColor)).toBe('124,106,247');
+    const s0 = PAPER['--series-0'];
+    expect(curve.data.datasets[0].borderColor).toBe(s0);
+    expect(curve.data.datasets[0].pointBackgroundColor).toBe(s0);
+    expect(rgb(curve.data.datasets[0].backgroundColor)).toBe(rgb(s0));
     expect(alpha(curve.data.datasets[0].backgroundColor)).toBe(0.1);
-    // D3: the perfect-calibration line is --muted at 40% (was #6b6b8a at 40%).
-    expect(rgb(curve.data.datasets[1].borderColor)).toBe('142,142,171');
+    // D3: the perfect-calibration line is --muted at 40%.
+    expect(rgb(curve.data.datasets[1].borderColor)).toBe(rgb(PAPER['--muted']));
     expect(alpha(curve.data.datasets[1].borderColor)).toBe(0.4);
     expect(curve.data.datasets[1].borderDash).toEqual([5, 5]);
     for (const c of [hist, reason]) {
-      expect(c.data.datasets[0].borderColor).toBe('#7c6af7');
-      expect(rgb(c.data.datasets[0].backgroundColor)).toBe('124,106,247');
+      expect(c.data.datasets[0].borderColor).toBe(s0);
+      expect(rgb(c.data.datasets[0].backgroundColor)).toBe(rgb(s0));
       expect(alpha(c.data.datasets[0].backgroundColor)).toBe(0.5);
     }
     for (const c of [cat, stakes]) {
       expect(c.data.datasets.map((d) => d.label)).toEqual(['Success', 'Partial', 'Failure', 'Pending']);
-      expect(c.data.datasets.map((d) => d.backgroundColor)).toEqual(['#34d399', '#fbbf24', '#f87171', '#6b6b8a']);
+      expect(c.data.datasets.map((d) => d.backgroundColor)).toEqual(['--oc-success', '--yellow', '--err-text', '--series-7'].map((t) => PAPER[t]));
     }
-    expect(brier.data.datasets[0].borderColor).toBe('#7c6af7');
-    expect(brier.data.datasets[0].pointBackgroundColor).toBe('#7c6af7');
+    expect(brier.data.datasets[0].borderColor).toBe(s0);
+    expect(brier.data.datasets[0].pointBackgroundColor).toBe(s0);
     expect(alpha(brier.data.datasets[0].backgroundColor)).toBe(0.1);
-    expect(daily.data.datasets[0].borderColor).toBe('#a78bfa');
-    expect(rgb(daily.data.datasets[0].backgroundColor)).toBe('167,139,250');
+    expect(daily.data.datasets[0].borderColor).toBe(PAPER['--series-3']);
+    expect(rgb(daily.data.datasets[0].backgroundColor)).toBe(rgb(PAPER['--series-3']));
     expect(alpha(daily.data.datasets[0].backgroundColor)).toBe(0.5);
   });
 
@@ -177,7 +176,6 @@ describe('Decisions: chart colours are tokens', () => {
   });
 
   it('paper: no old literal is left, and each colour is the paper value of its token', async () => {
-    setLook('paper');
     render(Decisions, { target: paperMain() });
     await waitFor(() => expect(configs).toHaveLength(7));
     for (const cfg of configs) {
@@ -192,20 +190,6 @@ describe('Decisions: chart colours are tokens', () => {
     expect(curve.options.scales.x.ticks.color).toBe(PAPER['--chart-text']);
   });
 
-  it('a look switch recolours every chart without a reload', async () => {
-    const main = paperMain(false);
-    render(Decisions, { target: main });
-    await waitFor(() => expect(configs).toHaveLength(7));
-    expect(configs[0].data.datasets[0].borderColor).toBe('#7c6af7');
-    const before = updates.length;
-    setPaperTokens(main); // what the paper ground's stylesheet declares once the look is on
-    setLook('paper');
-    await tick();
-    const after = updates.slice(before);
-    expect(after).toHaveLength(7); // one redraw per chart
-    expect(after[0].data.datasets[0].borderColor).toBe(PAPER['--series-0']);
-    expect(after[2].data.datasets[0].backgroundColor).toBe(PAPER['--oc-success']);
-  });
 });
 
 describe('Decisions: the paper look\'s structure (source contracts)', () => {
@@ -219,7 +203,7 @@ describe('Decisions: the paper look\'s structure (source contracts)', () => {
   });
 
   it('the title takes the paper size under the paper look only, and chart cells may shrink at phone width', () => {
-    expect(rules.get(':global(html[data-look="paper"] .page-ground) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
+    expect(rules.get(':global(html:root .page-ground) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
     expect(rules.get('.chart-row > *')).toMatchObject({ 'min-width': '0' });
     expect(rules.get('.view-head')).toMatchObject({ 'flex-wrap': 'wrap' });
   });

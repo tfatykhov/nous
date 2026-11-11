@@ -2,267 +2,360 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { LANE_COLORS } from './lib/work';
-import { DARK_SEL, PAPER_SEL, RAIL_SEL, parseBlocks } from './lib/testing/css';
+import { ROOT_SEL, RAIL_SEL, block, parseBlocks } from './lib/testing/css';
 
-// The redesign is staged behind <html data-look="paper">. app.css keeps today's dark values on `:root`, and puts the
-// new values on the paper ground (`.page-ground`) and the rail (`.rail`). These tests pin the
-// dark values (so no un-migrated screen moves), keep the grounds in step, and check the contrast of the new values.
+// The dashboard has one look (paper, PR 7). Its tokens are at `:root`, the Atlantic-blue rail's at `.rail`. These tests
+// pin the values (the flip moved the paper block to :root verbatim: PAPER_GOLDEN) and check their contrast and their
+// distances under colour blindness.
 
 const CSS = readFileSync(join(__dirname, 'app.css'), 'utf-8');
 const BLOCKS = parseBlocks(CSS);
-const DARK = BLOCKS.get(DARK_SEL) ?? {};
-const PAPER = BLOCKS.get(PAPER_SEL) ?? {};
-const RAIL = BLOCKS.get(RAIL_SEL) ?? {};
+/** The one look's tokens (the paper look's, named so the assertions read as before the flip). */
+const PAPER = block(BLOCKS, ROOT_SEL, 50);
+const RAIL = block(BLOCKS, RAIL_SEL, 10);
 const tokens = (block: Record<string, string>) => Object.keys(block).filter((k) => k.startsWith('--'));
 
-// Every `--name: value` of origin/main's `:root` (f4d735a1), byte for byte.
-const ORIGIN_ROOT: Record<string, string> = {
-  '--bg': '#0a0a0f',
-  '--surface': '#12121a',
-  '--surface-hover': '#181824',
-  '--border': '#1e1e2e',
-  '--accent': '#7c6af7',
-  '--accent-dim': '#4f46a8',
-  '--accent-glow': 'rgba(124, 106, 247, 0.15)',
-  '--text': '#e2e2f0',
-  '--muted': '#8e8eab',
-  '--accent-text': '#a99df9',
-  '--waiting': '#a78bfa',
-  '--unknown': '#f472b6',
-  '--pending': '#22d3ee',
-  '--green': '#34d399',
-  '--red': '#f87171',
-  '--yellow': '#fbbf24',
-  '--fact-color': '#60a5fa',
-  '--episode-color': '#34d399',
-  '--decision-color': '#a78bfa',
-  '--procedure-color': '#fb923c',
-  '--censor-color': '#f87171',
-  '--heartbeat-color': '#22d3ee',
-  '--chunk-color': '#06b6d4',
+// Every token of the paper block as parsed at the commit before the flip (PR 7 T2, e2a91aa1: the page ground's block
+// under the look switch), byte for byte. The flip moved the block to :root unchanged; its `font-variant-numeric:
+// tabular-nums` went to body.
+const PAPER_GOLDEN: Record<string, string> = {
+  '--bg': '#eef2f3',
+  '--surface': '#ffffff',
+  '--surface-hover': '#f4f7f8',
+  '--border': '#e3e9ec',
+  '--accent': '#2346c8',
+  '--accent-dim': '#12304f',
+  '--accent-glow': '#e6ecfb',
+  '--accent-text': '#2346c8',
+  '--text': '#14202b',
+  '--muted': '#56687a',
+  '--green': '#2f8a4e',
+  '--red': '#d2352b',
+  '--yellow': '#b7791f',
+  '--waiting': '#7b3fa0',
+  '--unknown': '#a3266f',
+  '--radius': '18px',
+  '--radius-sm': '8px',
+  '--transition': '0.2s cubic-bezier(0.16, 1, 0.3, 1)',
+  '--font-ui': "'Archivo', system-ui, sans-serif",
+  '--font-mono': "'Red Hat Mono', ui-monospace, monospace",
+  '--ok-text': '#23703d',
+  '--ok-bg': '#e3f2e8',
+  '--warn-text': '#8a5a0e',
+  '--warn-bg': '#f8efdc',
+  '--warn-border': 'transparent',
+  '--err-text': '#b02a22',
+  '--err-bg': '#fbe9e8',
+  '--stat-warn': '#8a5a0e',
+  '--stat-ok': '#23703d',
+  '--stale-err-bg': '#fbe9e8',
+  '--notice-bg': '#f8efdc',
+  '--notice-border': 'transparent',
+  '--kind-task': '#0b6e7a',
+  '--seg-bg': 'transparent',
+  '--series-7': '#4f5f6f',
+  '--f-conversation': '#55697a',
+  '--f-question': '#2346c8',
+  '--f-task': '#0b6e7a',
+  '--f-decision': '#7b3fa0',
+  '--f-debug': '#b4531c',
+  '--f-creative': '#a3266f',
+  '--f-initiation': '#8f5c0f',
+  '--f-other': '#14202b',
+  '--lane-memory': '#3a6ea5',
+  '--lane-live': '#946213',
+  '--lane-workspace': '#5f6b76',
+  '--lane-acts': '#96406b',
+  '--lane-other': '#56687a',
+  '--card-radius': '18px',
+  '--card-radius-sm': '12px',
+  '--card-shadow': '0 1px 2px rgba(18, 48, 79, 0.06), 0 6px 20px rgba(18, 48, 79, 0.07)',
+  '--card-border': '1px solid transparent',
+  '--ctl-radius': '999px',
+  '--label-transform': 'none',
+  '--label-tracking': '0',
+  '--on-accent': '#ffffff',
+  '--tab-active-bg': '#ffffff',
+  '--tab-active-shadow': '0 1px 3px rgba(18, 48, 79, 0.12)',
+  '--focus-ring': '#2346c8',
+  '--btn-focus-width': '2px',
+  '--pending': '#1b6a9c',
+  '--fact-color': '#159a7a',
+  '--episode-color': '#1f5fa8',
+  '--decision-color': '#802c66',
+  '--procedure-color': '#d0620d',
+  '--censor-color': '#985c50',
+  '--heartbeat-color': '#4f5f6f',
+  '--chunk-color': '#8b5cf6',
+  '--gv-edge-opacity': '0.75',
+  '--gv-edge-opacity-inferred': '0.5',
+  '--series-0': '#274455',
+  '--series-1': '#1f5fa8',
+  '--series-2': '#159a7a',
+  '--series-3': '#a8408f',
+  '--series-4': '#d0620d',
+  '--series-5': '#7a8a1a',
+  '--series-6': '#985c50',
+  '--series-8': '#1c2f55',
+  '--series-9': '#0e7490',
+  '--series-10': '#8b5cf6',
+  '--series-11': '#6b7280',
+  '--series-12': '#908870',
+  '--series-13': '#7a3f3f',
+  '--gv-fact': '#159a7a',
+  '--gv-episode': '#1f5fa8',
+  '--gv-decision': '#802c66',
+  '--gv-procedure': '#d0620d',
+  '--gv-chunk': '#8b5cf6',
+  '--gv-other': '#4f5f6f',
+  '--gv-outline': '#ffffff',
+  '--gv-node-border': 'rgba(20, 32, 43, 0.35)',
+  '--gv-select': '#14202b',
+  '--rel-related-to': '#4f5f6f',
+  '--rel-extracted-from': '#1f5fa8',
+  '--rel-supports': '#159a7a',
+  '--rel-informed-by': '#a8408f',
+  '--rel-evidence-for': '#d0620d',
+  '--rel-contradicts': '#985c50',
+  '--rel-supersedes': '#7a8a1a',
+  '--rel-caused-by': '#1c2f55',
+  '--rel-discussed-in': '#6b7280',
+  '--rel-part-of': '#0e7490',
+  '--rel-summarized-by': '#8b5cf6',
+  '--disp-rendered': '#045c4c',
+  '--disp-returned-to-script': '#1c5d99',
+  '--disp-sliced-off': '#883800',
+  '--disp-budget-truncated': '#b05a09',
+  '--disp-below-floor': '#5b2fb3',
+  '--disp-filter-dropped': '#7c4dd0',
+  '--disp-deduped': '#4d5a6b',
+  '--disp-superseded': '#6b7787',
+  '--disp-replaced-at-merge': '#2a3646',
+  '--disp-f071-excluded': '#5d6a7b',
+  '--disp-type-excluded': '#3b4859',
+  '--disp-unaccounted': '#a3185c',
+  '--seg-ink': '#ffffff',
+  '--badge-good-bg': '#e3f2e8',
+  '--badge-warn-bg': '#f8efdc',
+  '--badge-bad-bg': '#fbe9e8',
+  '--track': '#e3e9ec',
+  '--track-strong': '#e3e9ec',
+  '--bar-bg': '#f4f7f8',
+  '--glow-blur': '0px',
+  '--chart-text': '#56687a',
+  '--chart-grid': '#e3e9ec',
+  '--save-ok': '#23703d',
+  '--save-err': '#b02a22',
+  '--tone-bad': '#b02a22',
+  '--btn-ink': '#ffffff',
+  '--st-pending': '#56687a',
+  '--st-ready': '#1b6a9c',
+  '--st-running': '#8a5a0e',
+  '--st-awaiting-check': '#9a4d0a',
+  '--st-awaiting-input': '#7b3fa0',
+  '--st-completed': '#23703d',
+  '--st-failed': '#b02a22',
+  '--st-blocked': '#8a1c2c',
+  '--st-cancelled': '#55616c',
+  '--st-skipped': '#536170',
+  '--st-partial': '#a14a08',
+  '--st-success': '#23703d',
+  '--st-ledger-blocked': '#8a5a0e',
+  '--st-unknown': '#a3266f',
+  '--st-neutral': '#55616c',
+  '--oc-failed': '#b02a22',
+  '--oc-timeout': '#881c34',
+  '--oc-errored': '#641400',
+  '--oc-unknown': '#7a8794',
+  '--oc-blocked': '#b7791f',
+  '--stack-bar': '#b7791f',
+  '--hit-good': '#23703d',
+  '--hit-mid': '#8a5a0e',
+  '--hit-bad': '#b02a22',
+  '--cache-blue': '#1f5fa8',
+  '--cache-grey': '#4f5f6f',
+  '--wait-ink': '#7b3fa0',
+  '--wait-bg': '#efe3f6',
+  '--wash': '#f4f7f8',
+  '--hb-warn-ink': '#8a5a0e',
+  '--effect-write': '#1f5fa8',
+  '--mc-section-1': '#8b5cf6',
+  '--mc-section-7': '#7890d0',
+  '--mc-section-8': '#382880',
+  '--field-border': '#7a8896',
+  '--signal-self-corrected': '#b87ab3',
+  '--oc-success': '#3f8772',
+  '--background': '192 17% 94%',
+  '--foreground': '209 37% 12%',
+  '--card': '0 0% 100%',
+  '--card-foreground': '209 37% 12%',
+  '--popover': '0 0% 100%',
+  '--primary': '210 63% 19%',
+  '--primary-foreground': '0 0% 100%',
+  '--secondary': '195 22% 96%',
+  '--secondary-foreground': '209 37% 12%',
+  '--muted-foreground': '210 17% 41%',
+  '--accent-foreground': '0 0% 100%',
+  '--destructive': '4 66% 50%',
+  '--border-token': '200 19% 91%',
+  '--input': '200 19% 91%',
+  '--ring': '227 70% 46%',
+};
+
+// The old :root's tokens that have no paper value and stay: structure, the skip link's text, and the shadcn variables
+// no utility maps (Task 5 deletes the last two kinds where nothing reads them).
+const KEPT: Record<string, string> = {
   '--sidebar-width': '220px',
   '--sidebar-collapsed': '56px',
-  '--radius': '12px',
-  '--radius-sm': '8px',
-  '--transition': '0.2s ease',
-  '--font-ui': "'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif",
-  '--font-mono': "'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace",
-  '--background': '222 13% 6%',
-  '--foreground': '240 33% 92%',
-  '--card': '240 17% 8%',
-  '--card-foreground': '240 33% 92%',
-  '--popover': '240 17% 8%',
+  '--overlay-bg': 'rgba(0, 0, 0, 0.6)',
+  '--skip-link-text': '#fff',
   '--popover-foreground': '240 33% 92%',
-  '--primary': '249 89% 63%',
-  '--primary-foreground': '0 0% 100%',
-  '--secondary': '240 16% 11%',
-  '--secondary-foreground': '240 33% 92%',
   '--muted-token': '240 17% 61%',
-  '--muted-foreground': '240 17% 61%',
   '--accent-token': '249 89% 63%',
-  '--accent-foreground': '0 0% 100%',
-  '--destructive': '0 91% 71%',
   '--destructive-foreground': '0 0% 100%',
-  '--border-token': '237 25% 14%',
-  '--input': '237 25% 14%',
-  '--ring': '249 89% 63%',
   '--radius-tw': '0.75rem',
 };
 
-// The new dark-side tokens: each one's value is the literal the component used before it read the token, so the
-// dark look does not move. (Where one plan token would have two dark values, a token of its own carries each.)
-const NEW_DARK: Record<string, string> = {
-  '--card-radius': '12px', // the 12px cards (session list, patterns, trace)
-  '--card-radius-sm': '8px', // StatGrid's cards, DataTable's card mode
-  '--card-shadow': '0 0 #0000', // no shadow before; a transparent zero shadow, as `none` breaks Tailwind's ring list
-  '--card-border': '1px solid var(--border)',
-  '--ctl-radius': '8px', // SubNav's tabs (var(--radius-sm))
-  '--label-transform': 'uppercase',
-  '--label-tracking': '0.05em', // StatGrid's labels, DataTable's th
-  '--nav-label-tracking': '0.06em', // Nav's group labels
-  '--nav-icon-display': 'inline',
-  '--logo-display': 'inline',
-  '--nav-radius': '8px',
-  '--nav-ink': 'var(--muted)',
-  '--nav-active-weight': '500',
-  '--brand-size': '1rem',
-  '--on-accent': 'var(--bg)', // FilterBar's active text
-  '--skip-link-text': '#fff',
-  '--overlay-bg': 'rgba(0, 0, 0, 0.6)',
-  '--tab-active-bg': 'var(--surface-hover)',
-  '--tab-active-shadow': 'inset 0 0 0 1px var(--accent)',
-  '--focus-ring': 'var(--accent)', // the global :focus-visible ring the Nav links had
-  '--ok-text': '#34d399',
-  '--ok-bg': 'rgba(52, 211, 153, 0.12)',
-  '--warn-text': '#fbbf24',
-  '--warn-bg': 'rgba(251, 191, 36, 0.08)',
-  '--warn-border': 'rgba(251, 191, 36, 0.5)',
-  '--err-text': '#f87171',
-  '--err-bg': 'rgba(248, 113, 113, 0.1)',
-  '--stat-warn': '#f59e0b', // StatGrid's warn tone
-  '--stat-ok': '#10b981', // StatGrid's ok tone
-  '--stale-err-bg': 'rgba(248, 113, 113, 0.08)', // StaleBadge's error tint
-  '--notice-bg': 'rgba(245, 158, 11, 0.08)', // the Work screens' "recording is off" box (not the --warn-* amber)
-  '--notice-border': 'rgba(245, 158, 11, 0.4)',
-  '--kind-task': '#22d3ee', // SessionList's .kind-task and Patterns' Tasks bars
-  '--seg-bg': 'var(--surface)', // SessionList's kind selector
-  '--series-7': '#6b6b8a', // Overview's pending outcomes (the PR 2/3 plan's ramp, slot 7)
-  '--f-conversation': '#8fa3b5',
-  '--f-question': '#8aa4ff',
-  '--f-task': '#3fc3d1',
-  '--f-decision': '#c08be0',
-  '--f-debug': '#f09a5a',
-  '--f-creative': '#ee82bd',
-  '--f-initiation': '#e0b050',
-  '--btn-focus-width': '0px', // a focused shadcn Button's outline: none under dark, as before (review M11)
-  '--f-other': '#c4c4d8', // a frame id outside the seven (review M1): neutral, not conversation's grey
+// PR 2 (the Memory screens): the paper values.
+const SERIES: Record<string, string> = {
+  '--series-1': '#1f5fa8',
+  '--series-2': '#159a7a',
+  '--series-3': '#a8408f',
+  '--series-4': '#d0620d',
+  '--series-5': '#7a8a1a',
+  '--series-6': '#985c50', // review M2 (the brown #8a5a2b was 2.1 from warn text) then N2 (#905860 was 3.1 from related_to under protanopia)
+  '--series-7': '#4f5f6f',
+  '--series-8': '#1c2f55',
+  '--series-9': '#0e7490',
+  '--series-10': '#8b5cf6',
+  '--series-11': '#6b7280',
+  '--series-12': '#908870', // review M2: the amber #a8741a was 3.1 from the warn fill
+  '--series-13': '#7a3f3f',
 };
-
-// PR 2 (the Memory screens): [dark, paper]. Each dark value is the literal the screen used before it read the token.
-const SERIES: Record<string, [string, string]> = {
-  '--series-1': ['#60a5fa', '#1f5fa8'],
-  '--series-2': ['#34d399', '#159a7a'],
-  '--series-3': ['#a78bfa', '#a8408f'],
-  '--series-4': ['#fb923c', '#d0620d'],
-  '--series-5': ['#f87171', '#7a8a1a'],
-  '--series-6': ['#fbbf24', '#985c50'], // review M2 (the brown #8a5a2b was 2.1 from warn text) then N2 (#905860 was 3.1 from related_to under protanopia)
-  '--series-7': ['#6b6b8a', '#4f5f6f'],
-  '--series-8': ['#e2e2f0', '#1c2f55'],
-  '--series-9': ['#22d3ee', '#0e7490'],
-  '--series-10': ['#e879f9', '#8b5cf6'],
-  '--series-11': ['#f472b6', '#6b7280'],
-  '--series-12': ['#9ca3af', '#908870'], // review M2: the amber #a8741a was 3.1 from the warn fill
-  '--series-13': ['#c4c4d8', '#7a3f3f'],
+const GV_NODES: Record<string, string> = {
+  '--gv-fact': '#159a7a',
+  '--gv-episode': '#1f5fa8',
+  '--gv-decision': '#802c66', // re-review: #a8408f was 4.2 from episode under protanopia
+  '--gv-procedure': '#d0620d',
+  '--gv-chunk': '#8b5cf6', // review I4: the olive merged with procedure under red-green colour blindness
 };
-const GV_NODES: Record<string, [string, string]> = {
-  '--gv-fact': ['#34d399', '#159a7a'],
-  '--gv-episode': ['#60a5fa', '#1f5fa8'],
-  '--gv-decision': ['#a78bfa', '#802c66'], // re-review: #a8408f was 4.2 from episode under protanopia
-  '--gv-procedure': ['#fbbf24', '#d0620d'],
-  '--gv-chunk': ['#06b6d4', '#8b5cf6'], // review I4: the olive merged with procedure under red-green colour blindness
-};
-const GV: Record<string, [string, string]> = {
+const GV: Record<string, string> = {
   ...GV_NODES,
-  '--gv-other': ['#6b6b8a', '#4f5f6f'],
-  '--gv-outline': ['#0a0a0f', '#ffffff'], // the label halo
-  '--gv-node-border': ['rgba(0, 0, 0, 0.3)', 'rgba(20, 32, 43, 0.35)'],
-  '--gv-select': ['#fbbf24', '#14202b'], // the selected and search-hit rings
+  '--gv-other': '#4f5f6f',
+  '--gv-outline': '#ffffff', // the label halo
+  '--gv-node-border': 'rgba(20, 32, 43, 0.35)',
+  '--gv-select': '#14202b', // the selected and search-hit rings
 };
-const REL: Record<string, [string, string]> = {
-  '--rel-related-to': ['#7c6af7', '#4f5f6f'],
-  '--rel-extracted-from': ['#60a5fa', '#1f5fa8'],
-  '--rel-supports': ['#34d399', '#159a7a'],
-  '--rel-informed-by': ['#a78bfa', '#a8408f'],
-  '--rel-evidence-for': ['#fbbf24', '#d0620d'],
-  '--rel-contradicts': ['#f87171', '#985c50'],
-  '--rel-supersedes': ['#fb923c', '#7a8a1a'],
-  '--rel-caused-by': ['#e2e2f0', '#1c2f55'],
-  '--rel-discussed-in': ['#6b6b8a', '#6b7280'],
-  '--rel-part-of': ['#22d3ee', '#0e7490'],
-  '--rel-summarized-by': ['#06b6d4', '#8b5cf6'],
+const REL: Record<string, string> = {
+  '--rel-related-to': '#4f5f6f',
+  '--rel-extracted-from': '#1f5fa8',
+  '--rel-supports': '#159a7a',
+  '--rel-informed-by': '#a8408f',
+  '--rel-evidence-for': '#d0620d',
+  '--rel-contradicts': '#985c50',
+  '--rel-supersedes': '#7a8a1a',
+  '--rel-caused-by': '#1c2f55',
+  '--rel-discussed-in': '#6b7280',
+  '--rel-part-of': '#0e7490',
+  '--rel-summarized-by': '#8b5cf6',
 };
-const DISP: Record<string, [string, string]> = {
-  '--disp-rendered': ['#34d399', '#045c4c'], // review M2 then N1: apart from ok text, from f071 under protanopia, from the task frame
-  '--disp-returned-to-script': ['#22d3ee', '#1c5d99'],
-  '--disp-sliced-off': ['#f59e0b', '#883800'], // review M2: 3.8 from warn text before
-  '--disp-budget-truncated': ['#fcd34d', '#b05a09'],
-  '--disp-below-floor': ['#a78bfa', '#5b2fb3'],
-  '--disp-filter-dropped': ['#c4b5fd', '#7c4dd0'],
-  '--disp-deduped': ['#94a3b8', '#4d5a6b'],
-  '--disp-superseded': ['#cbd5e1', '#6b7787'],
-  '--disp-replaced-at-merge': ['#64748b', '#2a3646'],
-  '--disp-f071-excluded': ['#7c8da3', '#5d6a7b'],
-  '--disp-type-excluded': ['#475569', '#3b4859'],
-  '--disp-unaccounted': ['#f472b6', '#a3185c'],
+const DISP: Record<string, string> = {
+  '--disp-rendered': '#045c4c', // review M2 then N1: apart from ok text, from f071 under protanopia, from the task frame
+  '--disp-returned-to-script': '#1c5d99',
+  '--disp-sliced-off': '#883800', // review M2: 3.8 from warn text before
+  '--disp-budget-truncated': '#b05a09',
+  '--disp-below-floor': '#5b2fb3',
+  '--disp-filter-dropped': '#7c4dd0',
+  '--disp-deduped': '#4d5a6b',
+  '--disp-superseded': '#6b7787',
+  '--disp-replaced-at-merge': '#2a3646',
+  '--disp-f071-excluded': '#5d6a7b',
+  '--disp-type-excluded': '#3b4859',
+  '--disp-unaccounted': '#a3185c',
 };
-const PR2: Record<string, [string, string]> = {
+const PR2: Record<string, string> = {
   ...SERIES,
   ...GV,
   ...REL,
   ...DISP,
-  '--seg-ink': ['#0a0a0f', '#ffffff'], // the count label on a Retrieval funnel segment
-  '--badge-good-bg': ['rgba(52, 211, 153, 0.15)', '#e3f2e8'],
-  '--badge-warn-bg': ['rgba(251, 191, 36, 0.15)', '#f8efdc'],
-  '--badge-bad-bg': ['rgba(248, 113, 113, 0.15)', '#fbe9e8'],
-  '--track': ['rgba(255, 255, 255, 0.06)', '#e3e9ec'], // a doughnut's remainder, a panel wash
-  '--track-strong': ['rgba(255, 255, 255, 0.08)', '#e3e9ec'],
-  '--bar-bg': ['rgba(17, 17, 24, 0.6)', '#f4f7f8'], // the Graph controls bar
-  '--glow-blur': ['6px', '0px'],
-  '--chart-text': ['#94a3b8', '#56687a'], // a chart's ticks and legend on a paper ground
-  '--chart-grid': ['#1e293b', '#e3e9ec'],
-  '--gv-edge-opacity': ['0.5', '0.75'], // review M8: Graph edges, less faint on white
-  '--gv-edge-opacity-inferred': ['0.3', '0.5'],
-  '--series-0': ['#7c6af7', '#274455'], // review M1/R2: was --accent (the question blue), then violet; a slate navy of its own
-  '--save-ok': ['#4ade80', '#23703d'], // Browse: a censor's save message (not --ok-text, whose dark is #34d399)
-  '--save-err': ['#f87171', '#b02a22'],
-  '--tone-bad': ['#ef4444', '#b02a22'], // Memory write health: a tripped rule's border and tint (not --err-text's #f87171)
-  '--btn-ink': ['#fff', '#ffffff'], // text on an accent-filled button (--on-accent is near-black under dark)
+  '--seg-ink': '#ffffff', // the count label on a Retrieval funnel segment
+  '--badge-good-bg': '#e3f2e8',
+  '--badge-warn-bg': '#f8efdc',
+  '--badge-bad-bg': '#fbe9e8',
+  '--track': '#e3e9ec', // a doughnut's remainder, a panel wash
+  '--track-strong': '#e3e9ec',
+  '--bar-bg': '#f4f7f8', // the Graph controls bar
+  '--glow-blur': '0px',
+  '--chart-text': '#56687a', // a chart's ticks and legend on a paper ground
+  '--chart-grid': '#e3e9ec',
+  '--gv-edge-opacity': '0.75', // review M8: Graph edges, less faint on white
+  '--gv-edge-opacity-inferred': '0.5',
+  '--series-0': '#274455', // review M1/R2: was --accent (the question blue), then violet; a slate navy of its own
+  '--save-ok': '#23703d', // Browse: a censor's save message
+  '--save-err': '#b02a22',
+  '--tone-bad': '#b02a22', // Memory write health: a tripped rule's border and tint
+  '--btn-ink': '#ffffff', // text on an accent-filled button
 };
-for (const [k, [dark]] of Object.entries(PR2)) NEW_DARK[k] = dark;
 
-// PR 3 (the Execution screens): [dark, paper]. Status (`--st-*`, dark = lib/status.ts's hex) and outcome (`--oc-*`,
-// dark = Subtasks' literals) colours, plus the one-off tokens each screen needs for an exact dark look.
-const ST: Record<string, [string, string]> = {
-  '--st-pending': ['#8e8eab', '#56687a'],
-  '--st-ready': ['#22d3ee', '#1b6a9c'],
-  '--st-running': ['#fbbf24', '#8a5a0e'],
-  '--st-awaiting-check': ['#f59e0b', '#9a4d0a'],
-  '--st-awaiting-input': ['#a78bfa', '#7b3fa0'], // = --waiting, both grounds
-  '--st-completed': ['#4ade80', '#23703d'],
-  '--st-failed': ['#f87171', '#b02a22'],
-  '--st-blocked': ['#f25c5c', '#8a1c2c'],
-  '--st-cancelled': ['#8a8a9a', '#55616c'], // fix round 0: #5f6b76 and #5c6b7d were 4.32:1 on a hovered row
-  '--st-skipped': ['#94a3b8', '#536170'],
-  '--st-partial': ['#fb923c', '#a14a08'],
-  '--st-success': ['#10b981', '#23703d'], // the ledger's success, Subtasks' completed
-  '--st-ledger-blocked': ['#f59e0b', '#8a5a0e'], // the ledger's blocked, Subtasks' incomplete_blocked
-  '--st-unknown': ['#f472b6', '#a3266f'], // = --unknown, both grounds
-  '--st-neutral': ['#6b7280', '#55616c'],
+// PR 3 (the Execution screens): status (`--st-*`) and outcome (`--oc-*`) colours, and the screens' own tokens.
+const ST: Record<string, string> = {
+  '--st-pending': '#56687a',
+  '--st-ready': '#1b6a9c',
+  '--st-running': '#8a5a0e',
+  '--st-awaiting-check': '#9a4d0a',
+  '--st-awaiting-input': '#7b3fa0', // = --waiting
+  '--st-completed': '#23703d',
+  '--st-failed': '#b02a22',
+  '--st-blocked': '#8a1c2c',
+  '--st-cancelled': '#55616c', // fix round 0: #5f6b76 and #5c6b7d were 4.32:1 on a hovered row
+  '--st-skipped': '#536170',
+  '--st-partial': '#a14a08',
+  '--st-success': '#23703d', // the ledger's success, Subtasks' completed
+  '--st-ledger-blocked': '#8a5a0e', // the ledger's blocked, Subtasks' incomplete_blocked
+  '--st-unknown': '#a3266f', // = --unknown
+  '--st-neutral': '#55616c',
 };
-const OC: Record<string, [string, string]> = {
-  '--oc-failed': ['#ef4444', '#b02a22'], // Subtasks: incomplete_no_terminal, validation_failed
-  '--oc-timeout': ['#dc2626', '#881c34'], // re-review N1: #8a1c2c was 3.7 from errored under protanopia
-  '--oc-errored': ['#7c2d12', '#641400'],
-  '--oc-unknown': ['#9ca3af', '#7a8794'], // fix round 0: a lighter slate, not cancelled's grey
-  '--oc-blocked': ['#f59e0b', '#b7791f'], // Subtasks' incomplete_blocked as a mark (review I3: the text amber merged with failed)
+const OC: Record<string, string> = {
+  '--oc-failed': '#b02a22', // Subtasks: incomplete_no_terminal, validation_failed
+  '--oc-timeout': '#881c34', // re-review N1: #8a1c2c was 3.7 from errored under protanopia
+  '--oc-errored': '#641400',
+  '--oc-unknown': '#7a8794', // fix round 0: a lighter slate, not cancelled's grey
+  '--oc-blocked': '#b7791f', // Subtasks' incomplete_blocked as a mark (review I3: the text amber merged with failed)
 };
-const PR3: Record<string, [string, string]> = {
+const PR3: Record<string, string> = {
   ...ST,
   ...OC,
-  '--stack-bar': ['rgba(251, 191, 36, 0.7)', '#b7791f'], // Workflows: a token budget's consumed part
-  '--hit-good': ['#22c55e', '#23703d'], // Cache: the hit-rate line and the doughnut's cache-read part
-  '--hit-mid': ['#eab308', '#8a5a0e'],
-  '--hit-bad': ['#ef4444', '#b02a22'],
-  '--cache-blue': ['#3b82f6', '#1f5fa8'], // Cache: the doughnut's cache-created part
-  '--cache-grey': ['#4b5563', '#4f5f6f'], // Cache: the doughnut's uncached part
-  '--wait-ink': ['#c4b5fd', '#7b3fa0'], // Workflows: the Now column's waiting pill
-  '--wait-bg': ['rgba(167, 139, 250, 0.14)', '#efe3f6'],
-  '--wash': ['rgba(255, 255, 255, 0.03)', '#f4f7f8'], // Heartbeat: the tuning report's panel
-  '--hb-warn-ink': ['#fbbf24', '#8a5a0e'], // Heartbeat: amber as text (paper's --yellow is a mark colour)
-  '--effect-write': ['#60a5fa', '#1f5fa8'], // the Ledger's write effect pill
-  '--mc-section-1': ['#a99df9', '#8b5cf6'], // a model call's first context section (dark: the accent text; paper: a violet)
-  '--mc-section-7': ['#f472b6', '#7890d0'], // Messages (dark: the old --unknown; paper: a light blue, not a status colour)
-  '--mc-section-8': ['#9ca3af', '#382880'], // Tools (dark: the old --series-12; paper: an indigo, apart from Decisions and the link blue)
+  '--stack-bar': '#b7791f', // Workflows: a token budget's consumed part
+  '--hit-good': '#23703d', // Cache: the hit-rate line and the doughnut's cache-read part
+  '--hit-mid': '#8a5a0e',
+  '--hit-bad': '#b02a22',
+  '--cache-blue': '#1f5fa8', // Cache: the doughnut's cache-created part
+  '--cache-grey': '#4f5f6f', // Cache: the doughnut's uncached part
+  '--wait-ink': '#7b3fa0', // Workflows: the Now column's waiting pill
+  '--wait-bg': '#efe3f6',
+  '--wash': '#f4f7f8', // Heartbeat: the tuning report's panel
+  '--hb-warn-ink': '#8a5a0e', // Heartbeat: amber as text (paper's --yellow is a mark colour)
+  '--effect-write': '#1f5fa8', // the Ledger's write effect pill
+  '--mc-section-1': '#8b5cf6', // a model call's first context section: a violet
+  '--mc-section-7': '#7890d0', // Messages: a light blue, not a status colour
+  '--mc-section-8': '#382880', // Tools: an indigo, apart from Decisions and the link blue
 };
-for (const [k, [dark]] of Object.entries(PR3)) NEW_DARK[k] = dark;
 
-// PR 4 and PR 5 (the Decisions, Autonomy and System groups): [dark, paper].
-const PR4: Record<string, [string, string]> = {
-  // A text field's boundary. Dark: the --border the fields used (Identity's fields do not move). Paper: 3:1 on the card
-  // and the page (WCAG 1.4.11); the prototype's rule-2 #c9d4da is about 1.5:1.
-  '--field-border': ['var(--border)', '#7a8896'],
-  // Scoring's self-corrected signal mark. Dark: the old #a78bfa. Paper: a soft mauve, 13.4 (OKLab) from every other signal
-  // colour under all three visions; --series-3 (#a8408f) was 4.2 from praised's blue under protanopia.
-  '--signal-self-corrected': ['#a78bfa', '#b87ab3'],
-  // Review I2: the success mark of Decisions' outcomes, the Overview's doughnut and Scoring's completed signal. Dark: the
-  // old #34d399. Paper: a green 9.8 or more from partial, failure (--err-text) and the other signal marks under all three
-  // visions, where --green was 4.6 from partial under protanopia and 5.9 from failure under deuteranopia. It sits close
-  // to --green on purpose (the same meaning), so it is kept out of the categorical-against-status checks.
-  '--oc-success': ['#34d399', '#3f8772'],
+// PR 4 and PR 5 (the Decisions, Autonomy and System groups).
+const PR4: Record<string, string> = {
+  // A text field's boundary: 3:1 on the card and the page (WCAG 1.4.11); the prototype's rule-2 #c9d4da is about 1.5:1.
+  '--field-border': '#7a8896',
+  // Scoring's self-corrected signal mark: a soft mauve, 13.4 (OKLab) from every other signal colour under all three
+  // visions; --series-3 (#a8408f) was 4.2 from praised's blue under protanopia.
+  '--signal-self-corrected': '#b87ab3',
+  // Review I2: the success mark of Decisions' outcomes, the Overview's doughnut and Scoring's completed signal: a green
+  // 9.8 or more from partial, failure (--err-text) and the other signal marks under all three visions, where --green was
+  // 4.6 from partial under protanopia and 5.9 from failure under deuteranopia. It sits close to --green on purpose (the
+  // same meaning), so it is kept out of the categorical-against-status checks.
+  '--oc-success': '#3f8772',
 };
-for (const [k, [dark]] of Object.entries(PR4)) NEW_DARK[k] = dark;
 
-// The legacy memory-type colours keep their golden dark values (ORIGIN_ROOT) and get paper ones (Retrieval's chips).
+// The legacy memory-type colours (Retrieval's chips): one colour per memory type, the Graph's.
 const LEGACY_PAPER: Record<string, string> = {
   '--fact-color': '#159a7a', // review M6: one colour per memory type on paper, the Graph's
   '--episode-color': '#1f5fa8',
@@ -285,50 +378,37 @@ const PAPER_FRAMES: Record<string, string> = {
   initiation: '#8f5c0f',
 };
 
-describe('the dark tokens', () => {
-  it('the dark block and the paper and rail grounds exist', () => {
-    expect(BLOCKS.has(DARK_SEL)).toBe(true);
-    expect(BLOCKS.has(PAPER_SEL)).toBe(true);
+describe('the tokens of the one look', () => {
+  it(':root and .rail are the only token blocks; nothing is scoped to a look or a ground', () => {
+    expect(BLOCKS.has(ROOT_SEL)).toBe(true);
     expect(BLOCKS.has(RAIL_SEL)).toBe(true);
-    // PR 7 T2: the regions are classes (.page-ground, .rail), and the dark island is gone.
-    expect(DARK_SEL).toBe(':root');
-    expect(PAPER_SEL).toBe('html[data-look="paper"] .page-ground');
-    expect(RAIL_SEL).toBe('html[data-look="paper"] .rail');
-    expect([...BLOCKS.keys()].filter((k) => k.includes('data-ground'))).toEqual([]);
+    expect(ROOT_SEL).toBe(':root');
+    expect(RAIL_SEL).toBe('.rail');
+    expect([...BLOCKS.keys()].filter((k) => k.startsWith('html[') || k.includes('[data-'))).toEqual([]);
   });
 
-  it("dark golden: every token of origin/main's :root keeps its value byte for byte", () => {
-    const got = Object.fromEntries(Object.keys(ORIGIN_ROOT).map((k) => [k, DARK[k]]));
-    expect(got).toEqual(ORIGIN_ROOT);
+  it(':root is the paper block moved verbatim (PAPER_GOLDEN), plus the kept tokens that had no paper value', () => {
+    const got = Object.fromEntries(tokens(PAPER).map((k) => [k, PAPER[k]]));
+    expect(got).toEqual({ ...PAPER_GOLDEN, ...KEPT });
+    expect(Object.keys(PAPER_GOLDEN)).toHaveLength(181);
   });
 
-  it('new dark-side tokens equal the literals the components used', () => {
-    const got = Object.fromEntries(Object.keys(NEW_DARK).map((k) => [k, DARK[k]]));
-    expect(got).toEqual(NEW_DARK);
-    for (const [lane, hex] of Object.entries(LANE_COLORS)) expect(DARK[`--lane-${lane}`], lane).toBe(hex);
+  it('every lane has its dot colour', () => {
+    for (const lane of Object.keys(LANE_COLORS)) expect(PAPER[`--lane-${lane}`], lane).toMatch(/^#[0-9a-f]{6}$/);
   });
 
-  it('the dark block holds nothing but the golden and the new tokens', () => {
-    const lanes = Object.keys(LANE_COLORS).map((l) => `--lane-${l}`);
-    expect(tokens(DARK).sort()).toEqual([...Object.keys(ORIGIN_ROOT), ...Object.keys(NEW_DARK), ...lanes].sort());
-  });
-});
-
-describe('the grounds', () => {
-  it('every token of the paper or rail ground is also defined in the dark block', () => {
-    // A paper-only token would resolve to nothing on a dark island or with the look off.
-    const missing = [...tokens(PAPER), ...tokens(RAIL)].filter((t) => !(t in DARK));
-    expect(missing).toEqual([]);
+  it('every rail token is a :root token too (the rail re-declares a value, it adds no name) except its own nav ones', () => {
+    const own = ['--nav-label-tracking', '--nav-icon-display', '--logo-display', '--nav-radius', '--nav-ink', '--nav-active-weight', '--brand-size'];
+    expect(tokens(RAIL).filter((t) => !(t in PAPER)).sort()).toEqual([...own].sort());
+    for (const t of own) expect(PAPER[t], `${t} has no :root default`).toBeUndefined();
   });
 
-  it('every dark token built from var() is redefined on the paper ground', () => {
-    // A custom property's var() resolves where it is declared: inherited from :root it would carry the dark value.
-    const fromVar = tokens(DARK).filter((t) => DARK[t].includes('var(') && !t.startsWith('--nav-'));
-    expect(fromVar.filter((t) => !(t in PAPER))).toEqual([]);
-    expect('--nav-ink' in RAIL).toBe(true);
+  it('no token is built from var() (a var() resolves where it is declared, so an inherited one would not follow .rail)', () => {
+    expect(tokens(PAPER).filter((t) => PAPER[t].includes('var('))).toEqual([]);
+    expect(tokens(RAIL).filter((t) => RAIL[t].includes('var('))).toEqual([]);
   });
 
-  it('the paper ground carries the contract values', () => {
+  it(':root carries the contract values', () => {
     expect(PAPER).toMatchObject({
       '--bg': '#eef2f3',
       '--surface': '#ffffff',
@@ -337,59 +417,98 @@ describe('the grounds', () => {
       '--text': '#14202b',
       '--muted': '#56687a',
       '--accent': '#2346c8',
+      '--accent-text': '#2346c8',
+      '--focus-ring': '#2346c8',
       '--ok-text': '#23703d',
       '--ok-bg': '#e3f2e8',
       '--warn-text': '#8a5a0e',
       '--warn-bg': '#f8efdc',
       '--err-text': '#b02a22',
       '--err-bg': '#fbe9e8',
+      '--green': '#2f8a4e',
+      '--yellow': '#b7791f',
+      '--red': '#d2352b',
+      '--oc-success': '#3f8772',
+      '--field-border': '#7a8896',
+      '--radius': '18px',
       '--card-radius': '18px',
       '--card-shadow': '0 1px 2px rgba(18, 48, 79, 0.06), 0 6px 20px rgba(18, 48, 79, 0.07)',
       '--ctl-radius': '999px',
       '--font-ui': "'Archivo', system-ui, sans-serif",
       '--font-mono': "'Red Hat Mono', ui-monospace, monospace",
-      'font-variant-numeric': 'tabular-nums',
+      '--series-0': '#274455',
+      '--decision-color': '#802c66',
+      '--gv-decision': '#802c66',
     });
     for (const f of FRAMES) expect(PAPER[`--f-${f}`], f).toBe(PAPER_FRAMES[f]);
-    expect(RAIL).toMatchObject({
+    expect(PAPER['--f-other']).toBe('#14202b');
+  });
+
+  it('.rail carries the rail values and paints its own ground in the dark scheme', () => {
+    expect(RAIL).toEqual({
       '--bg': '#12304f',
       '--surface': '#12304f',
       '--surface-hover': '#1a3d62',
+      '--border': 'rgba(255, 255, 255, 0.12)',
       '--text': '#dbe6ef',
       '--muted': '#9fb6c9',
+      '--accent': '#9fb6c9',
       '--accent-glow': '#eef2f3',
       '--accent-text': '#14202b',
       '--focus-ring': '#ffffff',
+      '--waiting': '#c4b5fd',
+      '--unknown': '#f9a8d4',
+      '--nav-label-tracking': '0',
       '--nav-icon-display': 'none',
       '--logo-display': 'none',
-      '--brand-size': '21px',
       '--nav-radius': '10px',
+      '--nav-ink': '#dbe6ef',
       '--nav-active-weight': '600',
-    });
-  });
-
-  it('a ground sets its own background, text colour and font (the body resolves them once, at :root)', () => {
-    const ground = BLOCKS.get('html[data-look="paper"] .page-ground, html[data-look="paper"] .rail') ?? {};
-    expect(ground).toMatchObject({
+      '--brand-size': '21px',
+      'color-scheme': 'dark',
       background: 'var(--bg)',
       color: 'var(--text)',
       'font-family': 'var(--font-ui)',
-      // Tailwind's preflight sets a bare <code>/<pre> in --default-mono-font-family, declared (and resolved) at :root.
-      '--default-mono-font-family': 'var(--font-mono)',
+      'font-variant-numeric': 'normal', // the rail's badges keep the proportional figures they had (pixel oracle)
     });
-    // Scoped to the paper look: with the look off, <main> stays transparent over the body's gradient.
+  });
+});
+
+describe('the document level', () => {
+  it('html is the light scheme; body paints the ground and sets the text, the font and tabular figures, no gradient', () => {
+    expect(BLOCKS.get('html')).toMatchObject({ 'color-scheme': 'light' });
+    const body = block(BLOCKS, 'body', 5);
+    expect(body).toMatchObject({
+      background: 'var(--bg)',
+      color: 'var(--text)',
+      'font-family': 'var(--font-ui)',
+      'font-variant-numeric': 'tabular-nums',
+    });
+    expect(body['background-image']).toBeUndefined();
+    expect(CSS).not.toMatch(/radial-gradient/);
+  });
+
+  it('the page region needs no rule of its own (body carries the ground); only the page title is anchored to it', () => {
     expect(BLOCKS.has('.page-ground')).toBe(false);
-    expect(BLOCKS.has('.rail')).toBe(false);
-    expect(BLOCKS.get('html[data-look="paper"] body')).toMatchObject({ background: '#eef2f3', 'background-image': 'none' });
+    expect(BLOCKS.get('html:root .page-ground .page-h1')).toEqual({ 'font-size': '30px', 'font-weight': '650', 'letter-spacing': '-0.022em' });
+    expect([...BLOCKS.keys()].filter((k) => k.includes('.page-ground'))).toEqual(['html:root .page-ground .page-h1']);
   });
 
-  it('the fonts are loaded beside the old ones, and the dark fonts stay at :root', () => {
-    expect(CSS).toMatch(/@import url\('https:\/\/fonts\.googleapis\.com\/css2\?[^']*family=DM\+Sans/);
-    expect(CSS).toContain('family=Archivo:wdth,wght@62..125,100..900&family=Red+Hat+Mono:wght@400;500');
-    expect(CSS).toContain('family=JetBrains+Mono');
+  it('the fonts: Archivo and Red Hat Mono only, loaded and named in @theme (a bare <code> follows --font-mono)', () => {
+    expect(CSS).toContain("@import url('https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,100..900&family=Red+Hat+Mono:wght@400;500&display=swap');");
+    expect(CSS).not.toMatch(/DM\+?\s?Sans|JetBrains/);
+    expect(BLOCKS.get('@theme')).toMatchObject({
+      '--font-ui': "'Archivo', system-ui, sans-serif",
+      '--font-mono': "'Red Hat Mono', ui-monospace, monospace",
+    });
+    expect(CSS).not.toContain('--default-mono-font-family');
   });
 
-  it('the shadcn utilities resolve through @theme inline, live per ground', () => {
+  it('reduced motion turns every transition off', () => {
+    expect(CSS).toMatch(/@media \(prefers-reduced-motion: reduce\) \{\s*\* \{\s*transition: none !important;/);
+  });
+
+  it('the shadcn utilities resolve through @theme inline, live where they are used', () => {
     const theme = BLOCKS.get('@theme inline') ?? {};
     expect(theme).toMatchObject({
       '--color-background': 'hsl(var(--background))',
@@ -401,8 +520,7 @@ describe('the grounds', () => {
       '--color-border': 'hsl(var(--border-token))',
       '--color-ring': 'hsl(var(--ring))',
     });
-    // Not mapped: the drawer (Graph and Workflows' bottom sheet) already uses these classes, and mapping them would
-    // change those dark screens.
+    // Not mapped: the drawer (Graph and Workflows' bottom sheet) carries these classes and paints itself.
     for (const k of ['--color-foreground', '--color-muted', '--color-muted-foreground', '--color-popover']) {
       expect(theme[k], k).toBeUndefined();
     }
@@ -457,7 +575,7 @@ function contrast(fg: string | RGBA, bg: string | RGBA): number {
 describe('contrast of the new values', () => {
   it('the helper agrees with known ratios', () => {
     expect(contrast('#000000', '#ffffff')).toBeCloseTo(21, 1);
-    expect(contrast('#ffffff', '#7c6af7')).toBeCloseTo(3.99, 1); // the comment in FilterBar
+    expect(contrast('#767676', '#ffffff')).toBeCloseTo(4.54, 1); // the lightest grey that passes AA on white
   });
 
   it('paper text and secondary text on every paper surface: at least 4.5', () => {
@@ -486,19 +604,9 @@ describe('contrast of the new values', () => {
     }
   });
 
-  it('the neutral for an unknown frame: readable on its 7% tint in both looks, and not conversation\'s grey', () => {
+  it('the neutral for an unknown frame: readable on its 7% tint, and not conversation\'s grey', () => {
     expect(contrast(PAPER['--f-other'], tint(PAPER['--f-other'], 0.07, '#ffffff'))).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(DARK['--f-other'], tint(DARK['--f-other'], 0.07, DARK['--surface']))).toBeGreaterThanOrEqual(4.5);
     expect(PAPER['--f-other']).not.toBe(PAPER['--f-conversation']);
-    expect(DARK['--f-other']).not.toBe(DARK['--f-conversation']);
-  });
-
-  it('each dark frame colour on the dark surface and on its 7% tint (the trace gutter, both looks): at least 4.5', () => {
-    for (const f of FRAMES) {
-      const c = DARK[`--f-${f}`];
-      expect(contrast(c, DARK['--surface']), f).toBeGreaterThanOrEqual(4.5);
-      expect(contrast(c, tint(c, 0.07, DARK['--surface'])), `${f} on its tint`).toBeGreaterThanOrEqual(4.5);
-    }
   });
 
   it('paper status text on its own tint, and the StatGrid tones on white: at least 4.5', () => {
@@ -517,15 +625,11 @@ describe('contrast of the new values', () => {
     }
   });
 
-  it('the skip link under the paper look: the paper link blue and white, at least 4.5; dark untouched', () => {
-    const skip = BLOCKS.get('html[data-look="paper"] .skip-link') ?? {};
-    expect(skip).toEqual({ '--accent': PAPER['--accent'], '--skip-link-text': '#ffffff' });
-    expect(contrast(skip['--skip-link-text'], skip['--accent'])).toBeGreaterThanOrEqual(4.5);
-    // The App's rule reads exactly these two tokens, so the paper values reach it and the dark ones stay.
+  it('the skip link: white on the link blue, at least 4.5 (it reads :root; no override of its own is left)', () => {
+    expect([...BLOCKS.keys()].filter((k) => k.includes('skip-link'))).toEqual([]);
     const app = readFileSync(join(__dirname, 'App.svelte'), 'utf-8');
     expect(app).toMatch(/\.skip-link \{[^}]*background: var\(--accent\);[^}]*color: var\(--skip-link-text\);/);
-    expect(DARK['--skip-link-text']).toBe('#fff');
-    expect(contrast('#ffffff', DARK['--accent'])).toBeCloseTo(3.99, 1); // origin/main's dark skip link, kept as is
+    expect(contrast(PAPER['--skip-link-text'], PAPER['--accent'])).toBeGreaterThanOrEqual(4.5);
   });
 
   it('paper text on the accent (a primary button, an active filter): at least 4.5', () => {
@@ -609,19 +713,13 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
     expect(okDistance('#159a7a', '#159a7a')).toBe(0);
   });
 
-  it('every new token has the dark value the screens used, and a paper value', () => {
-    for (const [k, [dark, paper]] of Object.entries(PR2)) {
-      expect(DARK[k], k).toBe(dark);
-      expect(PAPER[k], k).toBe(paper);
-    }
-    for (const [k, paper] of Object.entries(LEGACY_PAPER)) {
-      expect(DARK[k], k).toBe(ORIGIN_ROOT[k]); // the dark golden is untouched
-      expect(PAPER[k], k).toBe(paper);
-    }
+  it('every token has its value', () => {
+    for (const [k, paper] of Object.entries(PR2)) expect(PAPER[k], k).toBe(paper);
+    for (const [k, paper] of Object.entries(LEGACY_PAPER)) expect(PAPER[k], k).toBe(paper);
   });
 
   it('series 1 to 9 are at least 3:1 on the white card; any two of 1 to 8 are at least 7 apart', () => {
-    const paper = Object.values(SERIES).map(([, p]) => p);
+    const paper = Object.values(SERIES);
     for (const [i, c] of paper.slice(0, 9).entries()) expect(contrast(c, '#ffffff'), `series-${i + 1}`).toBeGreaterThanOrEqual(3);
     for (let i = 0; i < 8; i++) {
       for (let j = i + 1; j < 8; j++) {
@@ -631,7 +729,7 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
   });
 
   it('series 10 to 13 are at least 3:1 and at least 7 apart from every other slot', () => {
-    const paper = Object.values(SERIES).map(([, p]) => p);
+    const paper = Object.values(SERIES);
     for (let i = 9; i < 13; i++) {
       expect(contrast(paper[i], '#ffffff'), `series-${i + 1}`).toBeGreaterThanOrEqual(3);
       for (let j = 0; j < 13; j++) {
@@ -643,7 +741,7 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
   it('series 0, the one-series chart mark: its own colour, at least 7 from every slot and 6 from every frame (review R2)', () => {
     const zero = PAPER['--series-0'];
     expect(contrast(zero, '#ffffff')).toBeGreaterThanOrEqual(3);
-    for (const [k, [, p]] of Object.entries(SERIES)) expect(okDistance(zero, p), `--series-0 and ${k}`).toBeGreaterThanOrEqual(7);
+    for (const [k, p] of Object.entries(SERIES)) expect(okDistance(zero, p), `--series-0 and ${k}`).toBeGreaterThanOrEqual(7);
     for (const f of [...FRAMES, 'other']) expect(okDistance(zero, PAPER[`--f-${f}`]), `--series-0 and --f-${f}`).toBeGreaterThanOrEqual(6);
   });
 
@@ -654,7 +752,7 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
   });
 
   it('the five graph node colours: at least 3:1 on white, and at least 12 apart', () => {
-    const nodes = Object.entries(GV_NODES).map(([k, [, p]]) => [k, p] as const);
+    const nodes = Object.entries(GV_NODES);
     for (const [k, c] of nodes) expect(contrast(c, '#ffffff'), k).toBeGreaterThanOrEqual(3);
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
@@ -670,7 +768,7 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
   it('graph node colours under red-green colour blindness: chunk at least 12 from every type, other pairs at least 8', () => {
     // Review I4: the olive chunk and the orange procedure read as one colour under deuteranopia (3.4). The re-review:
     // episode and decision were 4.2 apart under protanopia; --gv-decision moved, so no pair is exempt.
-    const nodes = Object.entries(GV_NODES).map(([k, [, p]]) => [k.replace('--gv-', ''), p] as const);
+    const nodes = Object.entries(GV_NODES).map(([k, p]) => [k.replace('--gv-', ''), p] as const);
     for (const cvd of ['protan', 'deutan'] as const) {
       for (let i = 0; i < nodes.length; i++) {
         for (let j = i + 1; j < nodes.length; j++) {
@@ -686,7 +784,7 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
   it('no categorical paper colour is within 6 (OKLab) of a status fill or text: a hue carries one meaning (review M2)', () => {
     const status = ['--green', '--yellow', '--red', '--ok-text', '--warn-text', '--err-text'].map((t) => [t, PAPER[t]] as const);
     const categorical: [string, string][] = [
-      ...Object.entries({ ...SERIES, '--series-0': PR2['--series-0'], ...GV_NODES, '--gv-other': GV['--gv-other'], ...REL, ...DISP }).map(([k, [, p]]) => [k, p] as [string, string]),
+      ...Object.entries({ ...SERIES, '--series-0': PR2['--series-0'], ...GV_NODES, '--gv-other': GV['--gv-other'], ...REL, ...DISP }).map(([k, p]) => [k, p] as [string, string]),
       ...Object.entries(LEGACY_PAPER).filter(([k]) => k !== '--pending'),
     ];
     for (const [k, c] of categorical) {
@@ -695,12 +793,12 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
   });
 
   it('a memory type has one colour on every Memory screen on paper: the legacy type colours are the Graph\'s', () => {
-    // Review M6. Under dark the legacy fact and episode colours are the Graph's the other way round (golden-pinned).
+    // Review M6.
     for (const t of ['fact', 'episode', 'decision', 'procedure', 'chunk']) expect(PAPER[`--${t}-color`], t).toBe(PAPER[`--gv-${t}`]);
   });
 
   it('every relation colour and legacy type colour is at least 3:1 on white', () => {
-    for (const [k, [, p]] of Object.entries(REL)) expect(contrast(p, '#ffffff'), k).toBeGreaterThanOrEqual(3);
+    for (const [k, p] of Object.entries(REL)) expect(contrast(p, '#ffffff'), k).toBeGreaterThanOrEqual(3);
     for (const [k, p] of Object.entries(LEGACY_PAPER)) expect(contrast(p, '#ffffff'), k).toBeGreaterThanOrEqual(3);
   });
 
@@ -711,7 +809,7 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
     ]);
     expect(taken.size).toBeGreaterThanOrEqual(14);
     const categorical = { ...SERIES, ...GV_NODES, '--gv-other': GV['--gv-other'], ...REL, ...DISP };
-    for (const [k, [, p]] of Object.entries(categorical)) expect(taken.has(p.toLowerCase()), k).toBe(false);
+    for (const [k, p] of Object.entries(categorical)) expect(taken.has(p.toLowerCase()), k).toBe(false);
   });
 
   it('a contradicts edge is told from a plain related_to edge under protanopia (review N2)', () => {
@@ -724,7 +822,7 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
 
   it('rendered, the one good outcome, stands apart in the funnel under red-green colour blindness and from the task frame (review N1)', () => {
     const rendered = PAPER['--disp-rendered'];
-    for (const [k, [, p]] of Object.entries(DISP)) {
+    for (const [k, p] of Object.entries(DISP)) {
       if (k === '--disp-rendered') continue;
       expect(okDistance(rendered, p), k).toBeGreaterThanOrEqual(7);
       for (const cvd of ['protan', 'deutan'] as const) expect(okDistance(rendered, p, cvd), `${cvd}: ${k}`).toBeGreaterThanOrEqual(4);
@@ -733,7 +831,7 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
   });
 
   it('every disposition fill takes the white count label at 4.5:1 or more', () => {
-    for (const [k, [, p]] of Object.entries(DISP)) expect(contrast(PAPER['--seg-ink'], p), k).toBeGreaterThanOrEqual(4.5);
+    for (const [k, p] of Object.entries(DISP)) expect(contrast(PAPER['--seg-ink'], p), k).toBeGreaterThanOrEqual(4.5);
   });
 
   it('a chart\'s text on the white card is at least 4.5:1; status text on the badge tints too', () => {
@@ -763,24 +861,19 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
 // ── PR 3: status, outcome and the Execution screens' one-off colours ─────────────────────────────────────────────────
 
 describe('PR 3 tokens: status, outcomes, execution screens', () => {
-  it('every new token has the dark value the screens used, and a paper value', () => {
-    for (const [k, [dark, paper]] of Object.entries(PR3)) {
-      expect(DARK[k], k).toBe(dark);
-      expect(PAPER[k], k).toBe(paper);
-    }
+  it('every token has its value', () => {
+    for (const [k, paper] of Object.entries(PR3)) expect(PAPER[k], k).toBe(paper);
   });
 
   it('a status colour is readable on its own badge: at least 4.5:1 on its 12.5% tint, over the white card and a hovered row', () => {
     // Fix round 0, ruling 6: a table row's hover wash (--surface-hover) sits under the badge too.
     for (const bg of ['#ffffff', PAPER['--surface-hover']]) {
-      for (const [k, [, p]] of Object.entries(ST)) expect(contrast(p, tint(p, 0.125, bg)), `${k} on ${bg}`).toBeGreaterThanOrEqual(4.5);
+      for (const [k, p] of Object.entries(ST)) expect(contrast(p, tint(p, 0.125, bg)), `${k} on ${bg}`).toBeGreaterThanOrEqual(4.5);
     }
   });
 
-  it('one meaning each: awaiting input is the waiting colour and unknown the unknown colour, in both grounds', () => {
-    expect(DARK['--st-awaiting-input']).toBe(DARK['--waiting']);
+  it('one meaning each: awaiting input is the waiting colour and unknown the unknown colour', () => {
     expect(PAPER['--st-awaiting-input']).toBe(PAPER['--waiting']);
-    expect(DARK['--st-unknown']).toBe(DARK['--unknown']);
     expect(PAPER['--st-unknown']).toBe(PAPER['--unknown']);
     expect(PAPER['--st-blocked']).not.toBe(PAPER['--st-failed']);
   });
@@ -813,10 +906,9 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
     expect(contrast(PAPER['--oc-blocked'], '#ffffff')).toBeGreaterThanOrEqual(3);
   });
 
-  it('Subtasks\' cancelled and unknown outcomes are told apart on paper (ruling 5): at least 10 apart, as under dark', () => {
+  it('Subtasks\' cancelled and unknown outcomes are told apart (ruling 5): at least 10 apart', () => {
     // Cancelled is --st-neutral, unknown --oc-unknown; the doughnut and the trend draw them side by side.
     expect(okDistance(PAPER['--oc-unknown'], PAPER['--st-neutral'])).toBeGreaterThanOrEqual(10);
-    expect(okDistance(DARK['--oc-unknown'], DARK['--st-neutral'])).toBeGreaterThanOrEqual(10);
   });
 
   it('the nine context sections of a model call keep 7 apart for normal vision and under protanopia and deuteranopia (review M5, M6)', () => {
@@ -855,7 +947,7 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
   });
 
   it('outcome marks and the budget bar are at least 3:1 on the white card', () => {
-    for (const [k, [, p]] of Object.entries(OC)) expect(contrast(p, '#ffffff'), k).toBeGreaterThanOrEqual(3);
+    for (const [k, p] of Object.entries(OC)) expect(contrast(p, '#ffffff'), k).toBeGreaterThanOrEqual(3);
     expect(contrast(PAPER['--stack-bar'], '#ffffff')).toBeGreaterThanOrEqual(3);
     for (const k of ['--hit-good', '--hit-mid', '--hit-bad', '--cache-blue', '--cache-grey']) expect(contrast(PAPER[k], '#ffffff'), k).toBeGreaterThanOrEqual(3);
   });
@@ -872,9 +964,8 @@ describe('PR 3 tokens: status, outcomes, execution screens', () => {
     expect(contrast(PAPER['--err-text'], PAPER['--badge-bad-bg'])).toBeGreaterThanOrEqual(4.5);
   });
 
-  it('the waiting pill\'s text on its tint: at least 4.5:1 in both grounds', () => {
+  it('the waiting pill\'s text on its tint: at least 4.5:1', () => {
     expect(contrast(PAPER['--wait-ink'], PAPER['--wait-bg'])).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(DARK['--wait-ink'], over(parseColor(DARK['--wait-bg']), parseColor(DARK['--surface'])))).toBeGreaterThanOrEqual(4.5);
   });
 });
 
@@ -885,11 +976,8 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
   const white = '#ffffff';
   const hover = PAPER['--surface-hover'];
 
-  it('every new token has its dark and paper value; the dark one is built from var() and redefined on paper', () => {
-    for (const [k, [dark, paper]] of Object.entries(PR4)) {
-      expect(DARK[k], k).toBe(dark);
-      expect(PAPER[k], k).toBe(paper);
-    }
+  it('every token has its value', () => {
+    for (const [k, paper] of Object.entries(PR4)) expect(PAPER[k], k).toBe(paper);
   });
 
   it('a text field\'s boundary is at least 3:1 on the white card and on the page (WCAG 1.4.11)', () => {
@@ -907,14 +995,10 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
   it('Scoring\'s heatmap: ink on the strongest cell (65% of the fill over the card) is at least 4.5:1 on paper', () => {
     expect(contrast(PAPER['--text'], tint(PAPER['--green'], 0.65, white))).toBeGreaterThanOrEqual(4.5); // 6.78
     expect(contrast(PAPER['--text'], tint(PAPER['--red'], 0.65, white))).toBeGreaterThanOrEqual(4.5); // 5.78
-    // Dark is today's, recorded and not fixed: the strongest green cell is 3.1:1, red 4.2:1.
-    expect(contrast(DARK['--text'], tint(DARK['--green'], 0.65, DARK['--surface']))).toBeCloseTo(3.11, 1);
-    expect(contrast(DARK['--text'], tint(DARK['--red'], 0.65, DARK['--surface']))).toBeCloseTo(4.18, 1);
   });
 
   it('Guards\' censor count: the accent on its 12% tint over the card is at least 4.5:1 on paper', () => {
     expect(contrast(PAPER['--accent'], tint(PAPER['--accent'], 0.12, white))).toBeGreaterThanOrEqual(4.5); // 6.22
-    expect(contrast(DARK['--accent'], tint(DARK['--accent'], 0.12, DARK['--surface']))).toBeCloseTo(4.11, 1); // today's
   });
 
   it('status strips and pills: text on a tint of itself, over the card, a hovered row and the page, at least 4.5:1', () => {
@@ -933,9 +1017,8 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     for (const t of ['--st-partial', '--stat-ok', '--stat-warn', '--err-text', '--muted', '--accent']) {
       expect(contrast(PAPER[t], hover), t).toBeGreaterThanOrEqual(4.5);
     }
-    // The neutral badge (a pending or unknown status): muted text on the wash, in both looks.
+    // The neutral badge (a pending or unknown status): muted text on the wash.
     expect(contrast(PAPER['--muted'], PAPER['--wash'])).toBeGreaterThanOrEqual(4.5);
-    expect(contrast(DARK['--muted'], over(parseColor(DARK['--wash']), parseColor(DARK['--surface'])))).toBeGreaterThanOrEqual(4.5);
   });
 
   // Marks one chart draws together keep 8 apart for normal vision and under protanopia and deuteranopia (PR 3 review I3).
@@ -943,10 +1026,10 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
   // tells its marks apart besides colour; it is listed in the PR 4 report for the owner.
   const MARK_SETS: Record<string, string[]> = {
     // Decisions' outcome by category and by stakes (stacked bars), and the Overview's outcome doughnut: one palette, so a
-    // hue means the same outcome on both screens. Review I2: success --oc-success, failure --err-text (both dark-exact).
+    // hue means the same outcome on both screens. Review I2: success --oc-success, failure --err-text.
     'decisions outcomes': ['--oc-success', '--yellow', '--err-text', '--series-7'],
-    // Scoring's signal doughnut and stacked trend. Reworked is drawn in --err-text (dark: the old #f87171), which keeps it
-    // apart from corrected's orange under deuteranopia (5.2 with --red); --series-7 is an unknown signal type's slice.
+    // Scoring's signal doughnut and stacked trend. Reworked is drawn in --err-text, which keeps it apart from corrected's
+    // orange under deuteranopia (5.2 with --red); --series-7 is an unknown signal type's slice.
     'scoring signals': ['--oc-success', '--series-1', '--series-4', '--err-text', '--signal-self-corrected', '--series-7'],
     // Scoring's weight evolution: one line per dimension. Each line also has a dash of its own (Rubric.test.ts).
     'scoring dimensions': ['--series-0', '--series-2', '--series-1', '--series-4', '--series-5', '--series-3', '--series-6', '--series-8', '--series-9'],
@@ -955,8 +1038,8 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     'autonomy contexts': ['--series-1', '--series-2', '--series-4'],
     // Guards' flags per day: one line per rule, each with its own dash as well.
     'guards rules': ['--series-1', '--series-4', '--series-9'],
-    // Observability's handler dots: no errors, some, more than 10%. The success mark and --err-text (dark: the old
-    // #34d399 family and #f87171) keep every pair 9.8 or more apart; --red was 5.1 from the amber, --st-completed 5.5 from red.
+    // Observability's handler dots: no errors, some, more than 10%. The success mark and --err-text keep every pair 9.8
+    // or more apart; --red was 5.1 from the amber, --st-completed 5.5 from red.
     'observability handler dots': ['--oc-success', '--yellow', '--err-text'],
   };
   const OPEN_PAIRS: Record<string, number> = {
@@ -993,15 +1076,12 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     }
   });
 
-  it('Observability\'s anomaly lines: the severity word and the line on their tint over the card, at least 4.5:1 in both looks', () => {
+  it('Observability\'s anomaly lines: the severity word and the line on their tint over the card, at least 4.5:1', () => {
     const yellowOn = (b: Record<string, string>, bg: string) => tint(b['--yellow'], 0.1, bg);
     expect(contrast(PAPER['--warn-text'], yellowOn(PAPER, white))).toBeGreaterThanOrEqual(4.5); // 5.30
     expect(contrast(PAPER['--text'], yellowOn(PAPER, white))).toBeGreaterThanOrEqual(4.5);
     expect(contrast(PAPER['--err-text'], PAPER['--err-bg'])).toBeGreaterThanOrEqual(4.5); // 5.60
     expect(contrast(PAPER['--text'], PAPER['--err-bg'])).toBeGreaterThanOrEqual(4.5);
-    const surface = DARK['--surface'];
-    expect(contrast(DARK['--warn-text'], yellowOn(DARK, surface))).toBeGreaterThanOrEqual(4.5); // 9.28
-    expect(contrast(DARK['--err-text'], over(parseColor(DARK['--err-bg']), parseColor(surface)))).toBeGreaterThanOrEqual(4.5); // 5.93
   });
 
   it('Scoring\'s radar bounds are full-strength lines: 3:1 or more on the card and over the weight polygon\'s 20% fill (review I1)', () => {
@@ -1022,27 +1102,14 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     }
   });
 
-  it('the listed dark changes (D3, D4): each new dark pair on the dark card, 3:1 for a mark and 4.5:1 for text', () => {
-    const surface = DARK['--surface'];
-    expect(contrast(DARK['--st-neutral'], surface)).toBeGreaterThanOrEqual(3); // was #6b6b8a (3.63), now 3.85
-    expect(contrast(DARK['--series-9'], surface)).toBeGreaterThanOrEqual(3); // Guards' claims, was #2dd4bf
-    expect(contrast(DARK['--accent-text'], surface)).toBeGreaterThanOrEqual(4.5); // Observability's trace type, was #38bdf8
-    expect(contrast(DARK['--accent-text'], DARK['--surface-hover'])).toBeGreaterThanOrEqual(4.5); // the same on a hovered row (7.43)
-    // Observability's no-error handler dot: --oc-success (#34d399) where it was #4ade80, a dark-only shift (review M1).
-    expect(DARK['--oc-success']).toBe('#34d399');
-    expect(contrast(DARK['--oc-success'], surface)).toBeGreaterThanOrEqual(3);
-    expect(contrast(DARK['--muted'], over(parseColor(DARK['--wash']), parseColor(surface)))).toBeGreaterThanOrEqual(4.5); // count badge
-    // Observability's event count (review M2): --muted on its own 10% tint, over the card and over a hovered or open row,
-    // in both looks (dark 5.17 / 4.82, paper 5.02 / 4.68). On paper the wash it had equals the hovered row's fill.
-    for (const [b, card, hovered] of [[DARK, DARK['--surface'], DARK['--surface-hover']], [PAPER, white, PAPER['--surface-hover']]] as const) {
-      expect(contrast(b['--muted'], tint(b['--muted'], 0.1, card)), 'count badge on the card').toBeGreaterThanOrEqual(4.5);
-      expect(contrast(b['--muted'], tint(b['--muted'], 0.1, hovered)), 'count badge on a hovered row').toBeGreaterThanOrEqual(4.5);
-    }
+  it('Observability\'s event count and the perfect-calibration line', () => {
+    // The event count (review M2): --muted on its own 10% tint, over the card and over a hovered or open row (5.02 /
+    // 4.68). The wash it had equals the hovered row's fill.
+    expect(contrast(PAPER['--muted'], tint(PAPER['--muted'], 0.1, white)), 'count badge on the card').toBeGreaterThanOrEqual(4.5);
+    expect(contrast(PAPER['--muted'], tint(PAPER['--muted'], 0.1, hover)), 'count badge on a hovered row').toBeGreaterThanOrEqual(4.5);
     expect(PAPER['--wash']).toBe(PAPER['--surface-hover']); // why the wash could not be the badge's fill
-    // D3, the perfect-calibration line: --muted at 40% instead of #6b6b8a at 40%. A reference line, not data: recorded.
+    // D3, the perfect-calibration line: --muted at 40%. A reference line, not data: recorded.
     const at40 = (c: string, bg: string) => over([...parseColor(c).slice(0, 3), 0.4] as RGBA, parseColor(bg));
-    expect(contrast(at40('#6b6b8a', surface), surface)).toBeCloseTo(1.57, 1);
-    expect(contrast(at40(DARK['--muted'], surface), surface)).toBeCloseTo(1.94, 1);
     expect(contrast(at40(PAPER['--muted'], white), white)).toBeCloseTo(1.79, 1);
   });
 });

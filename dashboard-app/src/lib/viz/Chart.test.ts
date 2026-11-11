@@ -2,7 +2,6 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import Chart from './Chart.svelte';
-import { setLook } from '../look';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { styleBlocks } from '../testing/css';
@@ -29,10 +28,10 @@ function stubChart() {
   return { ctor, made, updates, destroy };
 }
 
-/** A paper-or-dark ground to render into, with token values set on it (jsdom has no stylesheet). */
-function groundEl(kind: 'paper' | 'dark', vars: Record<string, string> = {}): HTMLElement {
+/** The page ground to render into, with token values set on it (jsdom has no stylesheet). */
+function pageEl(vars: Record<string, string> = {}): HTMLElement {
   const el = document.createElement('main');
-  if (kind === 'paper') el.classList.add('page-ground');
+  el.classList.add('page-ground');
   for (const [k, v] of Object.entries(vars)) el.style.setProperty(k, v);
   document.body.appendChild(el);
   return el;
@@ -41,7 +40,6 @@ function groundEl(kind: 'paper' | 'dark', vars: Record<string, string> = {}): HT
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
-  setLook('dark');
   document.body.innerHTML = '';
 });
 
@@ -68,29 +66,30 @@ describe('Chart.svelte', () => {
     expect(destroy).toHaveBeenCalledTimes(1);
   });
 
-  it('on a dark ground, literal colours and options pass through byte for byte (unconverted screens)', () => {
+  it('literal colours pass through byte for byte; the caller\'s options stay, over the chart text defaults', () => {
     const { made } = stubChart();
-    const data = { labels: ['a', 'b'], datasets: [{ data: [1, 2], backgroundColor: ['#34d399', 'rgba(124, 106, 247, 0.5)'], borderColor: '#7c6af7' }] };
+    const data = { labels: ['a', 'b'], datasets: [{ data: [1, 2], backgroundColor: ['#2f8a4e', 'rgba(31, 95, 168, 0.5)'], borderColor: '#1f5fa8' }] };
     const options = { cutout: '60%', plugins: { legend: { position: 'bottom' } } };
-    render(Chart, { target: groundEl('dark'), props: { type: 'doughnut', data, options } });
+    render(Chart, { target: pageEl({ '--chart-text': '#56687a', '--chart-grid': '#e3e9ec' }), props: { type: 'doughnut', data, options } });
     expect(made[0].data).toEqual(data);
-    expect(made[0].options).toEqual({ responsive: true, maintainAspectRatio: false, ...options });
+    expect(made[0].options).toEqual({ responsive: true, maintainAspectRatio: false, cutout: '60%', color: '#56687a',
+      plugins: { title: { color: '#56687a' }, legend: { position: 'bottom' } } });
+    expect(made[0].options.scales).toBeUndefined(); // a doughnut grows no axes
   });
 
-  it('on a dark ground, a token resolves to the dark value', () => {
+  it('with no stylesheet (jsdom) a token resolves to its :root value', () => {
     const { made } = stubChart();
     const data = { labels: ['a'], datasets: [{ data: [1], borderColor: 'var(--series-1)', backgroundColor: 'tint(--series-1, 0.1)' }] };
-    render(Chart, { target: groundEl('dark'), props: { type: 'line', data } });
-    expect(made[0].data.datasets[0].borderColor).toBe('#60a5fa');
-    expect(made[0].data.datasets[0].backgroundColor).toBe('rgba(96, 165, 250, 0.1)');
-    expect(made[0].options.color).toBeUndefined();
-    expect(made[0].options.scales).toBeUndefined();
+    render(Chart, { target: pageEl(), props: { type: 'line', data } });
+    expect(made[0].data.datasets[0].borderColor).toBe('#1f5fa8');
+    expect(made[0].data.datasets[0].backgroundColor).toBe('rgba(31, 95, 168, 0.1)');
+    expect(made[0].options.color).toBe('#56687a');
+    expect(made[0].options.scales.x.grid.color).toBe('#e3e9ec');
   });
 
-  it('on a paper ground, the axes and legend take the chart text and grid colours', () => {
-    setLook('paper');
+  it('the axes and legend take the chart text and grid colours', () => {
     const { made } = stubChart();
-    const target = groundEl('paper', { '--chart-text': '#56687a', '--chart-grid': '#e3e9ec' });
+    const target = pageEl({ '--chart-text': '#56687a', '--chart-grid': '#e3e9ec' });
     render(Chart, { target, props: { type: 'bar', data: { labels: [], datasets: [] }, options: { scales: { y: { grid: { display: false } } } } } });
     const o = made[0].options;
     expect(o.color).toBe('#56687a');
@@ -100,19 +99,19 @@ describe('Chart.svelte', () => {
     expect(o.responsive).toBe(true);
   });
 
-  it('a look switch re-resolves every token and updates the chart once', async () => {
-    const { made, updates } = stubChart();
-    const target = groundEl('paper');
+  it('new data re-resolves every token and updates the chart once, in place', async () => {
+    const { ctor, made, updates } = stubChart();
+    const target = pageEl({ '--series-1': '#1f5fa8', '--series-2': '#159a7a' });
     const data = { labels: ['a'], datasets: [{ data: [1], backgroundColor: ['var(--series-1)', '#123456'] }] };
-    render(Chart, { target, props: { type: 'doughnut', data } });
+    const { rerender } = render(Chart, { target, props: { type: 'doughnut', data } });
     await tick();
-    expect(made[0].data.datasets[0].backgroundColor).toEqual(['#60a5fa', '#123456']);
+    expect(made[0].data.datasets[0].backgroundColor).toEqual(['#1f5fa8', '#123456']);
     const before = updates.length;
-    target.style.setProperty('--series-1', '#1f5fa8'); // what the paper ground's stylesheet declares
-    setLook('paper');
+    await rerender({ type: 'doughnut', data: { labels: ['a'], datasets: [{ data: [2], backgroundColor: ['var(--series-2)', '#123456'] }] } });
     await tick();
     expect(updates.length - before).toBe(1);
-    expect(updates.at(-1)!.data.datasets[0].backgroundColor).toEqual(['#1f5fa8', '#123456']);
+    expect(updates.at(-1)!.data.datasets[0].backgroundColor).toEqual(['#159a7a', '#123456']);
     expect(updates.at(-1)!.options.color).toBeDefined();
+    expect(ctor).toHaveBeenCalledTimes(1);
   });
 });

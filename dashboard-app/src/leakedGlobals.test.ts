@@ -7,8 +7,9 @@ import { styleBlocks } from './lib/testing/css';
 // - Identity's three :global(.detail-grid | .dl | .mono) blocks style other screens too (Consolidation, Heartbeat,
 //   Ledger, DagView, GraphView and the model-call views use the global .mono and .dl). They stay byte for byte as on
 //   origin/main (f4d735a1), so `font-family: monospace` there never becomes var(--font-mono) for everyone.
-// - The other six files add no :global( rule, except the paper-only scoped form the redesign's titles use,
-//   `:global(html[data-look="paper"] …) x`, which matches nothing under the dark look and only the file's own element.
+// - The other six files add no :global( rule, except the anchor the redesign's titles use, `:global(html:root
+//   .page-ground) x` or `:global(html:root) x`, which only raises the rank of the file's own element (PR 7: the same
+//   specificity as the look-scoped form it replaced).
 
 const SRC = __dirname;
 const IDENTITY_GLOBALS = `  :global(.detail-grid) {
@@ -34,8 +35,8 @@ const IDENTITY_GLOBALS = `  :global(.detail-grid) {
 const OTHERS = ['views/Decisions.svelte', 'views/Rubric.svelte', 'views/Autonomy.svelte', 'views/Intentions.svelte',
   'views/Harness.svelte', 'views/Observability.svelte'];
 
-/** The paper-only scoped prefix, followed by the file's own selector (not a brace, a comma or another pseudo). */
-const PAPER_SCOPE = /:global\(html\[data-look="paper"\](?:\s+\.page-ground)?\)(?=\s+[^\s{,:])/g;
+/** The anchor prefix, followed by the file's own selector (not a brace, a comma or another pseudo). */
+const PAPER_SCOPE = /:global\(html:root(?:\s+\.page-ground)?\)(?=\s+[^\s{,:])/g;
 
 /** What makes a rule global: `:global`, and the forms that never say it (`:root`, `:host`, a `-global-` keyframes name),
  * which Svelte leaves unscoped (PR 5 re-review R1). */
@@ -59,14 +60,16 @@ describe('no global rule leaks from the converted dense screens', () => {
     expect(styleBlocks(src).match(/:global\b/g), 'the :global count in Identity').toHaveLength(4);
   });
 
-  it('the scoped paper form is allowed, any other :global( is a leak', () => {
-    expect(leaks(':global(html[data-look="paper"] .page-ground) h1 { font-size: 30px; }')).toEqual([]);
-    expect(leaks(':global(html[data-look="paper"]) h1 { font-size: 30px; }')).toEqual([]);
+  it('the anchor form is allowed, any other :global( is a leak', () => {
+    expect(leaks(':global(html:root .page-ground) h1 { font-size: 30px; }')).toEqual([]);
+    expect(leaks(':global(html:root) h1 { font-size: 30px; }')).toEqual([]);
     expect(leaks(':global(.mono) { font-family: monospace; }')).toEqual([':global(.mono) { font-family: monospace; }']);
-    expect(leaks(':global(html[data-look="paper"] .x) { color: red; }')).toHaveLength(1); // the whole selector is global
+    expect(leaks(':global(html:root .x) { color: red; }')).toHaveLength(1); // the whole selector is global
+    expect(leaks(':global(html:root .page-ground .x) { color: red; }')).toHaveLength(1);
+    expect(leaks(':global(html:root .page-ground) { color: red; }')).toHaveLength(1); // the region itself, no own element
     // PR 5 review I3: a global behind the allowed prefix, a second selector on the same line, and Svelte 5's block form.
-    expect(leaks(':global(html[data-look="paper"] .page-ground) :global(.mono) { font-family: var(--font-mono); }')).toHaveLength(1);
-    expect(leaks(':global(html[data-look="paper"]) h1, :global(.dl) { color: red; }')).toHaveLength(1);
+    expect(leaks(':global(html:root .page-ground) :global(.mono) { font-family: var(--font-mono); }')).toHaveLength(1);
+    expect(leaks(':global(html:root) h1, :global(.dl) { color: red; }')).toHaveLength(1);
     expect(leaks(':global { .dl { color: var(--text); } }')).toHaveLength(1);
     // PR 5 re-review R1: global rules that never say :global. Svelte leaves :root and :host unscoped, and a -global-
     // keyframes name is global; a plain @keyframes is scoped to the file.

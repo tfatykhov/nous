@@ -5,8 +5,8 @@ import Cache from '../Cache.svelte';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { initRouter } from '../../lib/router';
-import { setLook } from '../../lib/look';
-import { PAPER_SEL, parseBlocks } from '../../lib/testing/css';
+import { ROOT_SEL, block, parseBlocks } from '../../lib/testing/css';
+import { withAlpha } from '../../lib/overviewCharts';
 
 // F108 Phase 2 T10: the Cache screen is the Model calls screen's second tab. Its rows link to the call's detail when
 // the row carries the model-call id (the endpoint sends it when the model-call log is on).
@@ -120,7 +120,7 @@ describe('Cache standalone (embedded false)', () => {
 // ── Redesign PR 3: the Cache tab's charts read tokens ────────────────────────────────────────────────────────────────
 
 describe('Cache charts read tokens', () => {
-  const PAPER = parseBlocks(readFileSync(join(__dirname, '..', '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
+  const PAPER = block(parseBlocks(readFileSync(join(__dirname, '..', '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
   const RICH = {
     ...CACHE,
     break_components: { system_prompt: 8, tools: 7, messages: 6, model: 5, betas: 4, effort: 3, thinking: 2, other: 1 },
@@ -149,19 +149,18 @@ describe('Cache charts read tokens', () => {
     return main;
   }
   beforeEach(() => { installRich(); location.hash = ''; initRouter(); go('#/model-calls/cache'); });
-  afterEach(() => { cleanup(); vi.unstubAllGlobals(); setLook('dark'); document.body.innerHTML = ''; });
+  afterEach(() => { cleanup(); vi.unstubAllGlobals(); document.body.innerHTML = ''; });
 
-  it('dark: the doughnut, the eight break bars and the hit-rate line are today\'s colours exactly', async () => {
+  it('the doughnut, the eight break bars and the hit-rate line take their tokens (no stylesheet: the :root values)', async () => {
     render(Cache, { props: { embedded: true } });
     await waitFor(() => expect(configs).toHaveLength(3));
-    expect(byType('doughnut').backgroundColor).toEqual(['#22c55e', '#3b82f6', '#4b5563']);
-    expect(byType('bar').backgroundColor).toEqual(['#f87171', '#fbbf24', '#60a5fa', '#34d399', '#a78bfa', '#fb923c', '#22d3ee', '#e879f9']);
-    expect(byType('line').borderColor).toBe('#22c55e');
-    expect(norm(byType('line').backgroundColor)).toBe(norm('rgba(34,197,94,0.1)'));
+    expect(byType('doughnut').backgroundColor).toEqual([PAPER['--hit-good'], PAPER['--cache-blue'], PAPER['--cache-grey']]);
+    expect(byType('bar').backgroundColor).toEqual([5, 6, 1, 2, 3, 4, 9, 10].map((n) => PAPER[`--series-${n}`]));
+    expect(byType('line').borderColor).toBe(PAPER['--hit-good']);
+    expect(norm(byType('line').backgroundColor)).toBe(norm(withAlpha(PAPER['--hit-good'], 0.1)));
   });
 
   it('paper: the same datasets take the paper values', async () => {
-    setLook('paper');
     render(Cache, { props: { embedded: true }, target: paperMain() });
     await waitFor(() => expect(configs).toHaveLength(3));
     expect(byType('doughnut').backgroundColor).toEqual([PAPER['--hit-good'], PAPER['--cache-blue'], PAPER['--cache-grey']]);

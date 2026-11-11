@@ -1,81 +1,79 @@
 // Chart colours by token. Chart.js draws on a canvas and cytoscape on its own canvas: neither can read var(). A chart's
 // colours are therefore written as tokens, `var(--x)` or the `tint(--x, a)` sentinel, and resolved here against the
-// element the chart draws into, so a dark island on a paper page resolves dark. Every other value (a literal colour,
-// a number, a function) passes through untouched, which keeps the charts of the unconverted screens byte for byte.
-// Chart.svelte resolves its data and options here, and again when the look changes; lib/viz/Graph.svelte does the
-// same for its nodes and edges. DOM and SVG colours use var() and color-mix() directly and never come here.
+// element the chart draws into. Every other value (a literal colour, a number, a function) passes through untouched.
+// Chart.svelte resolves its data and options here; lib/viz/Graph.svelte does the same for its nodes and edges. DOM and
+// SVG colours use var() and color-mix() directly and never come here.
 import { readToken, withAlpha } from './overviewCharts';
-import { getLook } from './look';
 
 /**
- * The dark value of every token a chart reads through this module: what jsdom (no stylesheet) resolves to. The only
- * table of colour literals in the app's scripts; chartColors.test.ts proves each equals app.css's dark block.
+ * The :root value of every token a chart reads through this module: what jsdom (no stylesheet) resolves to. The only
+ * table of colour literals in the app's scripts; chartColors.test.ts proves each equals app.css's :root.
  */
-export const DARK_FALLBACK: Record<string, string> = {
-  '--accent': '#7c6af7',
-  '--surface': '#12121a',
-  '--text': '#e2e2f0',
-  '--muted': '#8e8eab',
-  '--green': '#34d399',
-  '--yellow': '#fbbf24',
-  '--red': '#f87171',
-  '--pending': '#22d3ee',
-  '--series-0': '#7c6af7',
-  '--series-1': '#60a5fa',
-  '--series-2': '#34d399',
-  '--series-3': '#a78bfa',
-  '--series-4': '#fb923c',
-  '--series-5': '#f87171',
-  '--series-6': '#fbbf24',
-  '--series-7': '#6b6b8a',
-  '--series-8': '#e2e2f0',
-  '--series-9': '#22d3ee',
-  '--series-10': '#e879f9',
-  '--series-11': '#f472b6',
-  '--series-12': '#9ca3af',
-  '--series-13': '#c4c4d8',
-  '--gv-fact': '#34d399',
-  '--gv-episode': '#60a5fa',
-  '--gv-decision': '#a78bfa',
-  '--gv-procedure': '#fbbf24',
-  '--gv-chunk': '#06b6d4',
-  '--gv-other': '#6b6b8a',
-  '--gv-outline': '#0a0a0f',
-  '--gv-node-border': 'rgba(0, 0, 0, 0.3)',
-  '--gv-select': '#fbbf24',
-  '--rel-related-to': '#7c6af7',
-  '--rel-extracted-from': '#60a5fa',
-  '--rel-supports': '#34d399',
-  '--rel-informed-by': '#a78bfa',
-  '--rel-evidence-for': '#fbbf24',
-  '--rel-contradicts': '#f87171',
-  '--rel-supersedes': '#fb923c',
-  '--rel-caused-by': '#e2e2f0',
-  '--rel-discussed-in': '#6b6b8a',
-  '--rel-part-of': '#22d3ee',
-  '--rel-summarized-by': '#06b6d4',
-  '--track': 'rgba(255, 255, 255, 0.06)',
-  '--track-strong': 'rgba(255, 255, 255, 0.08)',
-  '--chart-text': '#94a3b8',
-  '--chart-grid': '#1e293b',
-  '--hit-good': '#22c55e',
-  '--hit-mid': '#eab308',
-  '--hit-bad': '#ef4444',
-  '--cache-blue': '#3b82f6',
-  '--cache-grey': '#4b5563',
-  '--stack-bar': 'rgba(251, 191, 36, 0.7)',
-  '--st-success': '#10b981',
-  '--st-ledger-blocked': '#f59e0b',
-  '--st-neutral': '#6b7280',
-  '--oc-failed': '#ef4444',
-  '--oc-timeout': '#dc2626',
-  '--oc-errored': '#7c2d12',
-  '--oc-unknown': '#9ca3af',
-  '--oc-blocked': '#f59e0b',
-  '--err-text': '#f87171',
-  '--border': '#1e1e2e', // Scoring's radar grid, Guards' grid: explicit, so it beats the paper chart-grid default
-  '--signal-self-corrected': '#a78bfa',
-  '--oc-success': '#34d399',
+export const TOKEN_FALLBACK: Record<string, string> = {
+  '--accent': '#2346c8',
+  '--surface': '#ffffff',
+  '--text': '#14202b',
+  '--muted': '#56687a',
+  '--green': '#2f8a4e',
+  '--yellow': '#b7791f',
+  '--red': '#d2352b',
+  '--pending': '#1b6a9c',
+  '--series-0': '#274455',
+  '--series-1': '#1f5fa8',
+  '--series-2': '#159a7a',
+  '--series-3': '#a8408f',
+  '--series-4': '#d0620d',
+  '--series-5': '#7a8a1a',
+  '--series-6': '#985c50',
+  '--series-7': '#4f5f6f',
+  '--series-8': '#1c2f55',
+  '--series-9': '#0e7490',
+  '--series-10': '#8b5cf6',
+  '--series-11': '#6b7280',
+  '--series-12': '#908870',
+  '--series-13': '#7a3f3f',
+  '--gv-fact': '#159a7a',
+  '--gv-episode': '#1f5fa8',
+  '--gv-decision': '#802c66',
+  '--gv-procedure': '#d0620d',
+  '--gv-chunk': '#8b5cf6',
+  '--gv-other': '#4f5f6f',
+  '--gv-outline': '#ffffff',
+  '--gv-node-border': 'rgba(20, 32, 43, 0.35)',
+  '--gv-select': '#14202b',
+  '--rel-related-to': '#4f5f6f',
+  '--rel-extracted-from': '#1f5fa8',
+  '--rel-supports': '#159a7a',
+  '--rel-informed-by': '#a8408f',
+  '--rel-evidence-for': '#d0620d',
+  '--rel-contradicts': '#985c50',
+  '--rel-supersedes': '#7a8a1a',
+  '--rel-caused-by': '#1c2f55',
+  '--rel-discussed-in': '#6b7280',
+  '--rel-part-of': '#0e7490',
+  '--rel-summarized-by': '#8b5cf6',
+  '--track': '#e3e9ec',
+  '--track-strong': '#e3e9ec',
+  '--chart-text': '#56687a',
+  '--chart-grid': '#e3e9ec',
+  '--hit-good': '#23703d',
+  '--hit-mid': '#8a5a0e',
+  '--hit-bad': '#b02a22',
+  '--cache-blue': '#1f5fa8',
+  '--cache-grey': '#4f5f6f',
+  '--stack-bar': '#b7791f',
+  '--st-success': '#23703d',
+  '--st-ledger-blocked': '#8a5a0e',
+  '--st-neutral': '#55616c',
+  '--oc-failed': '#b02a22',
+  '--oc-timeout': '#881c34',
+  '--oc-errored': '#641400',
+  '--oc-unknown': '#7a8794',
+  '--oc-blocked': '#b7791f',
+  '--err-text': '#b02a22',
+  '--border': '#e3e9ec', // Scoring's radar grid, Guards' grid: explicit, so it beats the chart-grid default
+  '--signal-self-corrected': '#b87ab3',
+  '--oc-success': '#3f8772',
 };
 
 /** `#rgba` / `#rrggbbaa` as `rgba(r, g, b, a)`; anything else unchanged. The production build minifies an rgba() token
@@ -88,11 +86,11 @@ function alphaHexToRgba(c: string): string {
   return `rgba(${r}, ${g}, ${b}, ${Math.round((a / 255) * 1000) / 1000})`;
 }
 
-/** A token's colour on `el` as declared (an opaque hex stays the hex; a hex with alpha becomes rgba()), inherited from
- * its ground; the dark value when nothing declares it; '' for an unknown token. */
+/** A token's colour on `el` as declared (an opaque hex stays the hex; a hex with alpha becomes rgba()); the :root value
+ * when nothing declares it (jsdom); '' for an unknown token. */
 export function cssColor(el: Element | null, token: string): string {
   const declared = el && el.isConnected ? readToken(el, token) : '';
-  return alphaHexToRgba(declared || DARK_FALLBACK[token] || '');
+  return alphaHexToRgba(declared || TOKEN_FALLBACK[token] || '');
 }
 
 /** The sentinel for a token at an alpha, `tint(--series-1, 0.12)`; resolveColors turns it into `rgba(…, 0.12)`. */
@@ -134,11 +132,6 @@ export function resolveColors<T>(value: T, el: Element | null): T {
   return walk(value) as T;
 }
 
-/** The element draws on the page ground (`<main>` or the bottom sheet, class page-ground) under the paper look. */
-export function isPaperGround(el: Element | null): boolean {
-  return getLook() === 'paper' && !!el?.closest('.page-ground');
-}
-
 /** `var(--series-N)` for the i-th series, cycling through the thirteen slots. */
 export function seriesToken(i: number): string {
   return `var(--series-${(((i % 13) + 13) % 13) + 1})`;
@@ -173,11 +166,11 @@ function mergeUnder(base: Record<string, any>, over: Record<string, any>): Recor
 }
 
 /**
- * A paper ground's chart text and grid colours beneath the caller's options (the caller's own values win). Chart.js 4
- * reads a chart's root `color` for the legend only, so every axis gets its own: x and y on a cartesian chart, r on a
- * radial one, plus any axis the caller defines. A doughnut gets no `scales` (it would grow axes).
+ * The chart text and grid colours beneath the caller's options (the caller's own values win). Chart.js 4 reads a
+ * chart's root `color` for the legend only, so every axis gets its own: x and y on a cartesian chart, r on a radial
+ * one, plus any axis the caller defines. A doughnut gets no `scales` (it would grow axes).
  */
-export function withPaperDefaults(type: string, options: Record<string, any>, text: string, grid: string): Record<string, any> {
+export function withChartDefaults(type: string, options: Record<string, any>, text: string, grid: string): Record<string, any> {
   const ids = new Set(Object.keys(options.scales ?? {}));
   if (CARTESIAN.has(type)) ids.add('x').add('y');
   if (RADIAL.has(type)) ids.add('r');

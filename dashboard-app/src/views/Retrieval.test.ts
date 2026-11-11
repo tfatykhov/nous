@@ -3,21 +3,17 @@ import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/sv
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Retrieval from './Retrieval.svelte';
-import { DARK_SEL, parseBlocks, styleBlocks } from '../lib/testing/css';
+import { ROOT_SEL, block, parseBlocks, styleBlocks } from '../lib/testing/css';
 
 // Retrieval on the paper look: the disposition palette is tokens (four hue families, position stays authoritative),
 // the count on a funnel segment reads --seg-ink, and the notation glyphs are words; the <details> groups keep the
 // browser's own disclosure marker. Every value below is made up.
-const DARK = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(DARK_SEL) ?? {};
+const PAPER = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
 const SRC = readFileSync(join(__dirname, 'Retrieval.svelte'), 'utf-8');
 
-/** DISPOSITION_META's colours before the tokens, in segment order. */
-const OLD: [string, string][] = [
-  ['rendered', '#34d399'], ['returned_to_script', '#22d3ee'], ['sliced_off', '#f59e0b'], ['budget_truncated', '#fcd34d'],
-  ['below_floor', '#a78bfa'], ['filter_dropped', '#c4b5fd'], ['deduped', '#94a3b8'], ['superseded', '#cbd5e1'],
-  ['replaced_at_merge', '#64748b'], ['f071_excluded', '#7c8da3'], ['type_excluded', '#475569'], ['unaccounted', '#f472b6'],
-];
-const DISPOSITIONS = OLD.map(([d]) => d);
+/** The dispositions in segment order. */
+const DISPOSITIONS = ['rendered', 'returned_to_script', 'sliced_off', 'budget_truncated', 'below_floor', 'filter_dropped',
+  'deduped', 'superseded', 'replaced_at_merge', 'f071_excluded', 'type_excluded', 'unaccounted'];
 const token = (d: string) => `--disp-${d.replace(/_/g, '-')}`;
 
 const QUERY = 'q'.repeat(1000);
@@ -80,8 +76,8 @@ describe('Retrieval on the paper look', () => {
     expect(styleBlocks(SRC)).toMatch(/\.seg-label \{[^}]*color: var\(--seg-ink\);/);
   });
 
-  it('dark: every disposition token resolves to the colour it had (the dark parity table)', () => {
-    for (const [d, hex] of OLD) expect(DARK[token(d)], d).toBe(hex);
+  it('every disposition token is declared, and an unknown disposition falls back to replaced-at-merge', () => {
+    for (const d of DISPOSITIONS) expect(PAPER[token(d)], d).toMatch(/^#[0-9a-f]{6}$/);
     expect(SRC).toContain("return DISPOSITION_META[d]?.color ?? 'var(--disp-replaced-at-merge)';");
   });
 
@@ -126,7 +122,6 @@ describe('Retrieval on the paper look', () => {
   });
 
   it('on paper, a memory-type chip\'s text is its colour mixed 70% with the ink: 4.5:1 or more on the chip', () => {
-    const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get('html[data-look="paper"] .page-ground') ?? {};
     const rgb = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
     const lum = (c: number[]) => {
       const [r, g, b] = c.map((v) => { const s = v / 255; return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4; });

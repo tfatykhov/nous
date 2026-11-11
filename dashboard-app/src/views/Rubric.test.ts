@@ -3,15 +3,13 @@ import { render, screen, waitFor, cleanup } from '@testing-library/svelte';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Rubric from './Rubric.svelte';
-import { setLook } from '../lib/look';
-import { PAPER_SEL, parseBlocks, styleBlocks } from '../lib/testing/css';
+import { ROOT_SEL, block, parseBlocks, styleBlocks } from '../lib/testing/css';
 
-// Redesign PR 4: Scoring (the rubric) on paper. Chart colours are tokens that Chart.svelte resolves against the ground
-// (today's colours under dark); the heatmap's cells mix a token with transparent; no arrow glyph in a heading.
+// Redesign PR 4: Scoring (the rubric) on paper. Chart colours are tokens that Chart.svelte resolves against the element
+// the canvas sits in; the heatmap's cells mix a token with transparent; no arrow glyph in a heading.
 
-const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
+const PAPER = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
 const OLD = ['#7c6af7', '#34d399', '#60a5fa', '#fb923c', '#f87171', '#a78bfa', '#fbbf24', '#6b6b8a', '#111118', '#1e1e2e'];
-const DIM_OLD = ['#7c6af7', '#34d399', '#60a5fa', '#fb923c', '#f87171', '#a78bfa', '#fbbf24'];
 const DIM_TOKENS = ['--series-0', '--series-2', '--series-1', '--series-4', '--series-5', '--series-3', '--series-6', '--series-8', '--series-9'];
 
 const dims = (n: number) => Array.from({ length: n }, (_, i) => `dim_${i + 1}`);
@@ -95,7 +93,7 @@ const chart = (type: string, label?: string) =>
 const evolution = () => configs.filter((c) => c.type === 'line').find((c) => c.data.labels[0]?.startsWith('v'))!;
 
 beforeEach(() => { body = DATA(); install(); });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); setLook('dark'); document.body.innerHTML = ''; });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); document.body.innerHTML = ''; });
 
 describe('Scoring: the view', () => {
   it('names the correlations in words, with no arrow glyph', async () => {
@@ -141,39 +139,41 @@ describe('Scoring: the view', () => {
 });
 
 describe('Scoring: chart colours are tokens', () => {
-  it('dark: the radar, the doughnut and the signal trend are today\'s colours (the slice gap is the card colour)', async () => {
+  // With no stylesheet (jsdom) every token takes its :root value, through TOKEN_FALLBACK.
+  it('the radar, the doughnut and the signal trend: each mark its token, the slice gap the card colour (no stylesheet)', async () => {
     render(Rubric);
     await waitFor(() => expect(configs).toHaveLength(4));
     const radar = chart('radar');
-    expect(radar.data.datasets[0].borderColor).toBe('#7c6af7');
-    expect(rgb(radar.data.datasets[0].backgroundColor)).toBe('124,106,247');
+    expect(radar.data.datasets[0].borderColor).toBe(PAPER['--series-0']);
+    expect(rgb(radar.data.datasets[0].backgroundColor)).toBe(rgb(PAPER['--series-0']));
     expect(alpha(radar.data.datasets[0].backgroundColor)).toBe(0.2);
-    // Review I1: the bounds are full-strength lines (a dark-only shift from 40%), Min dotted and Max dashed.
-    expect(radar.data.datasets[1].borderColor).toBe('#f87171');
-    expect(radar.data.datasets[2].borderColor).toBe('#34d399');
+    // Review I1: the bounds are full-strength lines, Min dotted and Max dashed.
+    expect(radar.data.datasets[1].borderColor).toBe(PAPER['--red']);
+    expect(radar.data.datasets[2].borderColor).toBe(PAPER['--green']);
     expect(radar.data.datasets[1].borderDash).toEqual([2, 3]);
     expect(radar.data.datasets[2].borderDash).toEqual([8, 4]);
-    expect(radar.options.scales.r.grid.color).toBe('#1e1e2e');
-    expect(radar.options.scales.r.angleLines.color).toBe('#1e1e2e');
+    expect(radar.options.scales.r.grid.color).toBe(PAPER['--border']);
+    expect(radar.options.scales.r.angleLines.color).toBe(PAPER['--border']);
     // Review M2: the tick labels sit on the weights; with no backdrop box they do not hide them.
     expect(radar.options.scales.r.ticks).toMatchObject({ stepSize: 0.1, showLabelBackdrop: false });
     const doughnut = chart('doughnut');
     expect(doughnut.data.labels).toEqual(['completed', 'praised', 'corrected', 'reworked', 'self corrected', 'mystery']);
-    expect(doughnut.data.datasets[0].backgroundColor).toEqual(['#34d399', '#60a5fa', '#fb923c', '#f87171', '#a78bfa', '#6b6b8a']);
-    expect(doughnut.data.datasets[0].borderColor).toBe('#12121a'); // D4: was #111118, one step from the card
+    const signals = ['--oc-success', '--series-1', '--series-4', '--err-text', '--signal-self-corrected', '--series-7'].map((t) => PAPER[t]);
+    expect(doughnut.data.datasets[0].backgroundColor).toEqual(signals);
+    expect(doughnut.data.datasets[0].borderColor).toBe(PAPER['--surface']); // the slice gap is the card
     const trend = chart('line', 'Completed');
-    expect(trend.data.datasets.map((d) => d.borderColor)).toEqual(['#34d399', '#60a5fa', '#fb923c', '#f87171', '#a78bfa']);
+    expect(trend.data.datasets.map((d) => d.borderColor)).toEqual(signals.slice(0, 5));
     for (const d of trend.data.datasets) {
       expect(rgb(d.backgroundColor), d.label).toBe(rgb(d.borderColor));
       expect(alpha(d.backgroundColor), d.label).toBe(0.15);
     }
   });
 
-  it('dark: the weight evolution keeps the seven dimension colours, and every line has a dash of its own', async () => {
+  it('the weight evolution: the seven dimension colours in order, and every line has a dash of its own', async () => {
     render(Rubric);
     await waitFor(() => expect(configs).toHaveLength(4));
     const sets = evolution().data.datasets;
-    expect(sets.map((d) => d.borderColor)).toEqual(DIM_OLD);
+    expect(sets.map((d) => d.borderColor)).toEqual(DIM_TOKENS.slice(0, 7).map((t) => PAPER[t]));
     const dashes = sets.map((d) => JSON.stringify(d.borderDash));
     expect(new Set(dashes).size).toBe(sets.length); // red-green colour blindness merges some hues; the dash tells them apart
     expect(sets[0].borderDash).toEqual([]);
@@ -217,7 +217,7 @@ describe('Scoring: chart colours are tokens', () => {
     const before = await look([version('4', active), version('3', active), version('2', ['legacy', ...active])]);
     const after = await look([version('4', active), version('3', active)]);
     for (const n of active) expect(after[n], n).toEqual(before[n]);
-    expect(before.accuracy[0]).toBe('#7c6af7'); // the active rubric's order first: accuracy is the first dimension
+    expect(before.accuracy[0]).toBe(PAPER['--series-0']); // the active rubric's order first: accuracy is the first dimension
     expect(Object.keys(before)).toEqual([...active, 'legacy']); // a name seen only in the history comes after, sorted
   });
 
@@ -226,13 +226,12 @@ describe('Scoring: chart colours are tokens', () => {
     render(Rubric);
     await waitFor(() => expect(configs).toHaveLength(4));
     const sets = evolution().data.datasets;
-    expect(sets.map((d) => d.borderColor).slice(7)).toEqual(['#e2e2f0', '#22d3ee']);
+    expect(sets.map((d) => d.borderColor).slice(7)).toEqual([PAPER['--series-8'], PAPER['--series-9']]);
     expect(new Set(sets.map((d) => JSON.stringify(d.borderDash))).size).toBe(9);
   });
 
   it('paper: every colour is its token\'s paper value, and no old literal is left', async () => {
     body = DATA(9);
-    setLook('paper');
     render(Rubric, { target: paperMain() });
     await waitFor(() => expect(configs).toHaveLength(4));
     for (const cfg of configs) {
@@ -303,6 +302,6 @@ describe('Scoring: the paper look\'s structure (source contracts)', () => {
   });
 
   it('the title takes the paper size under the paper look only', () => {
-    expect(rules.get(':global(html[data-look="paper"] .page-ground) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
+    expect(rules.get(':global(html:root .page-ground) h1')).toMatchObject({ 'font-size': '30px', 'font-weight': '650' });
   });
 });

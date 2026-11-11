@@ -169,11 +169,11 @@
   });
 
   // ── Cytoscape style (mirrors graph.js) ──────────────────────────────────
-  // Cytoscape draws on a canvas and cannot read var(): the stylesheet's colours are read off the graph's own element
-  // (Graph.svelte rebuilds it when the look changes). Node and edge fills come from each element's `color` data.
+  // Cytoscape draws on a canvas and cannot read var(): the stylesheet's colours are read off the graph's own element.
+  // Node and edge fills come from each element's `color` data.
   function cytoscapeStyle(el: Element) {
     const c = (token: string) => cssColor(el, token);
-    /** A number token on the graph's ground (the edge opacities); `fallback`, the dark value, when unset. */
+    /** A number token on the graph's element (the edge opacities); `fallback`, the :root value, when unset (jsdom). */
     const n = (token: string, fallback: number) => {
       const v = parseFloat(el.isConnected ? readToken(el, token) : '');
       return Number.isFinite(v) ? v : fallback;
@@ -219,7 +219,7 @@
       style: {
         'curve-style': 'bezier',
         'line-color': 'data(color)',
-        opacity: n('--gv-edge-opacity', 0.5),
+        opacity: n('--gv-edge-opacity', 0.75),
         width: 'mapData(weight, 0, 1, 1, 4)',
         'target-arrow-color': 'data(color)',
         'target-arrow-shape': 'triangle',
@@ -228,7 +228,7 @@
     },
     {
       selector: 'edge[extraction_method = "inferred"]',
-      style: { opacity: n('--gv-edge-opacity-inferred', 0.3), 'line-style': 'dashed' },
+      style: { opacity: n('--gv-edge-opacity-inferred', 0.5), 'line-style': 'dashed' },
     },
     {
       selector: 'edge.faded',
@@ -494,7 +494,7 @@
     margin: 0 0 0.25rem;
   }
 
-  :global(html[data-look="paper"] .page-ground) .view-title {
+  :global(html:root .page-ground) .view-title {
     font-size: 30px;
     font-weight: 650;
     letter-spacing: -0.022em;
@@ -576,12 +576,12 @@
     border-color: var(--accent);
   }
 
-  :global(html[data-look="paper"] .page-ground) .search-input {
+  :global(html:root .page-ground) .search-input {
     background: var(--surface);
     padding: 0.3125rem 0.875rem;
   }
 
-  :global(html[data-look="paper"] .page-ground) .search-input:focus-visible {
+  :global(html:root .page-ground) .search-input:focus-visible {
     outline: 2px solid var(--focus-ring);
     outline-offset: 1px;
   }
@@ -603,7 +603,7 @@
   }
 
   /* Each type filter is a pill on paper: the box, the dot and the word inside one rounded chip. */
-  :global(html[data-look="paper"] .page-ground) .type-check {
+  :global(html:root .page-ground) .type-check {
     padding: 0.1875rem 0.625rem 0.1875rem 0.4375rem;
     border-radius: 999px;
     background: var(--surface);
@@ -611,7 +611,7 @@
     color: var(--text);
   }
 
-  :global(html[data-look="paper"] .page-ground) .type-check input {
+  :global(html:root .page-ground) .type-check input {
     accent-color: var(--accent);
   }
 
@@ -695,7 +695,7 @@
   }
 
   /* On paper the node colours are 3:1 marks, not text: the badge's word is mixed toward the ink (4.5:1 or more). */
-  :global(html[data-look="paper"] .page-ground) .type-badge {
+  :global(html:root .page-ground) .type-badge {
     color: color-mix(in srgb, var(--type) 70%, var(--text));
   }
 
@@ -709,8 +709,8 @@
     font-family: ui-monospace, monospace;
   }
 
-  :global(html[data-look="paper"] .page-ground) .mono,
-  :global(html[data-look="paper"] .page-ground) .conn-weight {
+  :global(html:root .page-ground) .mono,
+  :global(html:root .page-ground) .conn-weight {
     font-family: var(--font-mono);
   }
 
@@ -802,7 +802,7 @@
     font-size: 0.6875rem;
   }
 
-  :global(html[data-look="paper"] .page-ground) .conn-dir {
+  :global(html:root .page-ground) .conn-dir {
     font-family: var(--font-ui);
   }
 

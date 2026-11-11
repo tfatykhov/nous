@@ -311,7 +311,7 @@
     color: var(--text);
     margin: 0 0 0.125rem;
   }
-  :global(html[data-look="paper"] .page-ground) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
+  :global(html:root .page-ground) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
 
   .subtitle {
     font-size: 0.8125rem;
@@ -325,7 +325,7 @@
     color: var(--text);
     margin: 0 0 0.75rem;
   }
-  :global(html[data-look="paper"] .page-ground) h2 { font-size: 15px; font-weight: 650; }
+  :global(html:root .page-ground) h2 { font-size: 15px; font-weight: 650; }
 
   .head-right {
     display: flex;
@@ -342,7 +342,7 @@
     box-shadow: var(--card-shadow);
     padding: 1rem;
   }
-  :global(html[data-look="paper"] .page-ground) .chart-card { padding: 1.125rem 1.25rem; }
+  :global(html:root .page-ground) .chart-card { padding: 1.125rem 1.25rem; }
 
   .mt { margin-top: 1rem; }
 

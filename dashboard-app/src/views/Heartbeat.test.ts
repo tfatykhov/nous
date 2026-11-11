@@ -3,14 +3,13 @@ import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-li
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Heartbeat from './Heartbeat.svelte';
-import { setLook } from '../lib/look';
-import { PAPER_SEL, parseBlocks, styleBlocks } from '../lib/testing/css';
+import { ROOT_SEL, block, parseBlocks, styleBlocks } from '../lib/testing/css';
 
 // Redesign PR 3: Heartbeat on paper, a dense restyle (no frame treatment: HeartbeatData carries no frame). Urgency,
 // state and budget colours are tokens; a colour used as text takes a text token, since paper's amber and red fills
 // are marks, not text.
 
-const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
+const PAPER = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
 const NOW = Date.now();
 const ago = (min: number) => new Date(NOW - min * 60_000).toISOString();
 
@@ -69,23 +68,22 @@ const chart = (t: string) => configs.find((c) => c.type === t)!;
 const section = (name: string) => screen.getByRole('heading', { level: 2, name }).closest('section') as HTMLElement;
 
 beforeEach(() => { budget = { used: 5000, limit: 10000, percentage: 50 }; install(); });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); setLook('dark'); document.body.innerHTML = ''; });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); document.body.innerHTML = ''; });
 
 describe('Heartbeat: urgency, state and budget colours by token', () => {
   it.each([
-    [5000, '#22d3ee', '--pending'],
-    [8500, '#fbbf24', '--yellow'],
-    [10000, '#f87171', '--red'],
-  ])('a budget of %i of 10,000 used is %s under dark (%s), the remainder the track', async (used, hex) => {
+    [5000, '--pending'],
+    [8500, '--yellow'],
+    [10000, '--red'],
+  ])('a budget of %i of 10,000 used is %s, the remainder the track (no stylesheet: the :root values)', async (used, token) => {
     budget = { used, limit: 10000, percentage: used / 100 };
     render(Heartbeat);
     await waitFor(() => expect(configs.find((c) => c.type === 'doughnut')).toBeTruthy());
-    expect(chart('doughnut').data.datasets[0].backgroundColor).toEqual([hex, 'rgba(255, 255, 255, 0.06)']);
+    expect(chart('doughnut').data.datasets[0].backgroundColor).toEqual([PAPER[token], PAPER['--track']]);
   });
 
   it('paper: the budget, and the findings bars by urgency, take the paper values', async () => {
     budget = { used: 8500, limit: 10000, percentage: 85 };
-    setLook('paper');
     render(Heartbeat, { target: paperMain() });
     await waitFor(() => expect(configs).toHaveLength(2));
     expect(chart('doughnut').data.datasets[0].backgroundColor).toEqual([PAPER['--yellow'], PAPER['--track']]);
@@ -93,10 +91,11 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
     expect(chart('bar').data.datasets.map((d) => d.backgroundColor)).toEqual([PAPER['--err-text'], PAPER['--yellow'], PAPER['--st-neutral']]);
   });
 
-  it('dark: the findings bars by urgency are today\'s red, amber and grey', async () => {
+  it('the findings bars by urgency, each named: error text, amber and the neutral (no stylesheet: the :root values)', async () => {
     render(Heartbeat);
     await waitFor(() => expect(configs).toHaveLength(2));
-    expect(chart('bar').data.datasets.map((d) => [d.label, d.backgroundColor])).toEqual([['High', '#f87171'], ['Normal', '#fbbf24'], ['Low', '#6b7280']]);
+    expect(chart('bar').data.datasets.map((d) => [d.label, d.backgroundColor])).toEqual(
+      [['High', PAPER['--err-text']], ['Normal', PAPER['--yellow']], ['Low', PAPER['--st-neutral']]]);
   });
 
   it('the state pills show all five states with a word and a count, each edged in its state token', async () => {
@@ -114,7 +113,7 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
     expect(total.style.opacity).toBe('');
     const css = styleBlocks(readFileSync(join(__dirname, 'Heartbeat.svelte'), 'utf-8'));
     expect(css).toMatch(/\.hb-pill--total \{ opacity: 0\.6; \}/);
-    expect(css).toMatch(/:global\(html\[data-look="paper"\] \.page-ground\) \.hb-pill--total \{ opacity: 1; \}/);
+    expect(css).toMatch(/:global\(html:root \.page-ground\) \.hb-pill--total \{ opacity: 1; \}/);
   });
 
   it('the escalation note is in words', async () => {
@@ -164,7 +163,7 @@ describe('Heartbeat: urgency, state and budget colours by token', () => {
   it('source contract: a disabled banner is dimmed under dark only; on paper its muted pills would be 2.8:1 (review M3)', () => {
     const css = styleBlocks(readFileSync(join(__dirname, 'Heartbeat.svelte'), 'utf-8'));
     expect(css).toMatch(/\.hb-banner--disabled \{ opacity: 0\.65; \}/);
-    expect(css).toMatch(/:global\(html\[data-look="paper"\] \.page-ground\) \.hb-banner--disabled \{ opacity: 1; \}/);
+    expect(css).toMatch(/:global\(html:root \.page-ground\) \.hb-banner--disabled \{ opacity: 1; \}/);
   });
 
   it('source contract: the banner and pills read status tokens: text tokens for words, the glow by --glow-blur', () => {

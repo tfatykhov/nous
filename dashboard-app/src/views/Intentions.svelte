@@ -221,7 +221,7 @@
   .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
   .head-right { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
   h1 { font-size: 1.375rem; font-weight: 700; margin: 0 0 0.25rem; }
-  :global(html[data-look="paper"] .page-ground) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
+  :global(html:root .page-ground) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
   h2 { font-size: 0.9375rem; font-weight: 600; margin: 0 0 0.75rem; }
   .subtitle { font-size: 0.8125rem; color: var(--muted); margin: 0; }
   .notice { padding: 0.75rem 1rem; border-radius: var(--card-radius-sm); background: var(--notice-bg);
@@ -235,7 +235,7 @@
   .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0.75rem; margin: 0 0 1rem; }
   .tiles div { border: var(--card-border); border-radius: var(--card-radius-sm); padding: 0.625rem 0.75rem; }
   /* On paper the tile border is clear, so a tile is a soft fill inside the white panel. */
-  :global(html[data-look="paper"] .page-ground) .tiles div { background: var(--wash); }
+  :global(html:root .page-ground) .tiles div { background: var(--wash); }
   .tiles dt { font-size: 0.6875rem; font-weight: 600; color: var(--muted); text-transform: var(--label-transform);
     letter-spacing: var(--label-tracking); }
   .tiles dd { margin: 0.25rem 0 0; font-size: 1.25rem; font-weight: 700; }
@@ -244,7 +244,7 @@
   caption { text-align: left; font-weight: 600; padding-bottom: 0.375rem; }
   th, td { text-align: left; padding: 0.25rem 0.625rem 0.25rem 0; border-bottom: 1px solid var(--border); vertical-align: top; }
   /* The paper look's dense table header (the prototype's): 12px, semibold, secondary ink. */
-  :global(html[data-look="paper"] .page-ground) thead th { font-size: 12px; font-weight: 600; color: var(--muted); }
+  :global(html:root .page-ground) thead th { font-size: 12px; font-weight: 600; color: var(--muted); }
   .tree, .tree ul { list-style: none; padding-left: 1.25rem; }
   .row { display: flex; gap: 0.5rem; align-items: baseline; flex-wrap: wrap; }
   .intent { overflow-wrap: anywhere; }

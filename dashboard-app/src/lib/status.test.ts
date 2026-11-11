@@ -2,9 +2,9 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  DAG_NODE_STATUSES, LEDGER_STATUSES, MUTED, WAITING_VAR, badgeStyleVar, ledgerStatusColor, ledgerStatusVar, statusColor, statusVar,
+  DAG_NODE_STATUSES, LEDGER_STATUSES, WAITING_VAR, badgeStyleVar, ledgerStatusColor, ledgerStatusVar, statusColor, statusVar,
 } from './status';
-import { DARK_SEL, PAPER_SEL, parseBlocks } from './testing/css';
+import { ROOT_SEL, block, parseBlocks } from './testing/css';
 
 // WCAG relative luminance / contrast ratio.
 const rgb = (hex: string) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
@@ -63,40 +63,34 @@ describe('status colours — one map for the DAG view and the graph', () => {
 });
 
 // ── Redesign PR 3: the var() siblings ───────────────────────────────────────────────────────────────────────────────
-// The views paint status with tokens (`--st-*`, `--pending`), so the paper look can restyle them. Each token's dark
-// value is the hex the function above returns for the same status: the dark look does not move.
-const CSS_BLOCKS = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8'));
-const DARK = CSS_BLOCKS.get(DARK_SEL) ?? {};
-const PAPER = CSS_BLOCKS.get(PAPER_SEL) ?? {};
+// The views paint status with tokens (`--st-*`, `--pending`), declared at :root.
+const PAPER = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
 const token = (v: string) => v.match(/^var\((--[\w-]+)\)$/)?.[1] ?? '';
 const over = (fg: number[], a: number, bg: number[]) => fg.map((v, i) => v * a + bg[i] * (1 - a));
 
 describe('status tokens: var() siblings of the hex map', () => {
-  it('every DAG status (and partial) has its own --st-* token whose dark value is the old hex', () => {
-    const table = [...DAG_NODE_STATUSES, 'partial'].map((s) => [s, statusVar(s), DARK[token(statusVar(s))], statusColor(s)]);
-    for (const [s, v, dark, hex] of table) {
-      expect(v, s).toBe(`var(--st-${s.replaceAll('_', '-')})`);
-      expect(dark, s).toBe(hex);
+  it('every DAG status (and partial) has its own --st-* token, declared', () => {
+    for (const s of [...DAG_NODE_STATUSES, 'partial']) {
+      expect(statusVar(s), s).toBe(`var(--st-${s.replaceAll('_', '-')})`);
+      expect(PAPER[token(statusVar(s))], s).toMatch(/^#[0-9a-f]{6}$/);
     }
   });
 
-  it('every ledger status maps to a token whose dark value is the old hex', () => {
+  it('every ledger status maps to a declared token', () => {
     const want: Record<string, string> = {
       pending: 'var(--pending)', success: 'var(--st-success)', error: 'var(--st-failed)',
       blocked: 'var(--st-ledger-blocked)', unknown: 'var(--st-unknown)',
     };
     for (const s of LEDGER_STATUSES) {
       expect(ledgerStatusVar(s), s).toBe(want[s]);
-      expect(DARK[token(ledgerStatusVar(s))], s).toBe(ledgerStatusColor(s));
+      expect(PAPER[token(ledgerStatusVar(s))], s).toMatch(/^#[0-9a-f]{6}$/);
     }
   });
 
-  it('awaiting input is the waiting colour and an unknown send the unknown colour, in both grounds', () => {
+  it('awaiting input is the waiting colour and an unknown send the unknown colour', () => {
     expect(WAITING_VAR).toBe('var(--waiting)');
-    for (const g of [DARK, PAPER]) {
-      expect(g['--st-awaiting-input']).toBe(g['--waiting']);
-      expect(g['--st-unknown']).toBe(g['--unknown']);
-    }
+    expect(PAPER['--st-awaiting-input']).toBe(PAPER['--waiting']);
+    expect(PAPER['--st-unknown']).toBe(PAPER['--unknown']);
   });
 
   it('every token a badge can take is readable on the paper card and on a hovered row: 4.5:1 on its own 12.5% tint', () => {
@@ -106,8 +100,7 @@ describe('status tokens: var() siblings of the hex map', () => {
     expect(failing).toEqual([]);
   });
 
-  it('keeps blocked distinct from failed on both grounds', () => {
-    expect(DARK['--st-blocked']).not.toBe(DARK['--st-failed']);
+  it('keeps blocked distinct from failed', () => {
     expect(PAPER['--st-blocked']).not.toBe(PAPER['--st-failed']);
   });
 
@@ -126,6 +119,5 @@ describe('status tokens: var() siblings of the hex map', () => {
     expect(ledgerStatusVar('nonsense')).toBe('var(--st-pending)');
     expect(statusVar('constructor')).toBe('var(--st-pending)');
     expect(ledgerStatusVar('toString')).toBe('var(--st-pending)');
-    expect(DARK['--st-pending']).toBe(MUTED);
   });
 });

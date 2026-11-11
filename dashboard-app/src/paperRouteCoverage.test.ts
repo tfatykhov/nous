@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
-import { PAPER_ROUTES } from './lib/look';
+import { ROUTES as PAGE_ROUTES } from './lib/router';
 
-// Review Focus 5: a route turns paper (PAPER_ROUTES) only once every file it renders reads tokens. The files are not a
+// Review Focus 5: a route turns paper (PAGE_ROUTES) only once every file it renders reads tokens. The files are not a
 // hand-kept list (review I1): each route's view is read off App.svelte's route switch, and every .svelte file reached
 // from it through relative and $lib imports (index.ts and .js-to-.ts included) must be in both guards of
 // hexGuard.test.ts (style; script and markup), or in ALLOWED below with its reason. An allowed file is not walked into.
@@ -153,12 +153,12 @@ describe('every paper route renders only guarded files', () => {
     ]);
   });
 
-  it('PAPER_ROUTES: every file each route renders is in both guards, or allowed with a reason', () => {
-    expect(uncovered(PAPER_ROUTES, FILES, HEX, SCRIPT)).toEqual([]);
+  it('PAGE_ROUTES: every file each route renders is in both guards, or allowed with a reason', () => {
+    expect(uncovered(PAGE_ROUTES, FILES, HEX, SCRIPT)).toEqual([]);
   });
 
   it('every allowance is still reached by some paper route (none is stale)', () => {
-    const reached = PAPER_ROUTES.flatMap((r) => rendered(VIEWS[r]).allowedReached);
+    const reached = PAGE_ROUTES.flatMap((r) => rendered(VIEWS[r]).allowedReached);
     for (const a of ALLOWED) expect(reached.some((f) => a.match(f)), a.reason).toBe(true);
   });
 });

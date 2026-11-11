@@ -12,7 +12,6 @@ export const HEX_GUARDED: readonly string[] = [
   'lib/ui/SubNav.svelte',
   'lib/ui/DataTable.svelte',
   'lib/ui/FilterBar.svelte',
-  'lib/ui/LookToggle.svelte',
   'App.svelte',
   'lib/ui/StatGrid.svelte',
   'lib/ui/StaleBadge.svelte',
@@ -110,9 +109,9 @@ describe('a migrated style never sets a status fill as a text colour', () => {
 });
 
 // Review I4: the views the redesign migrated keep no colour literal in their <script> or their markup either. A canvas
-// colour is a token (`var(--x)`, or the `tint(--x, a)` sentinel) that lib/chartColors.ts resolves against the ground
-// the chart sits in; DOM and SVG colours use var() and color-mix() directly. chartColors.ts holds the one table of dark
-// literals (its DARK_FALLBACK), proven equal to app.css by chartColors.test.ts, so it is not listed here.
+// colour is a token (`var(--x)`, or the `tint(--x, a)` sentinel) that lib/chartColors.ts resolves against the element
+// the chart sits in; DOM and SVG colours use var() and color-mix() directly. chartColors.ts holds the one table of
+// literals (its TOKEN_FALLBACK), proven equal to app.css's :root by chartColors.test.ts, so it is not listed here.
 export const SCRIPT_GUARDED: readonly string[] = [
   'views/Overview.svelte',
   'views/Work.svelte',

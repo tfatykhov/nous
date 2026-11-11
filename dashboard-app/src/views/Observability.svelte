@@ -395,7 +395,7 @@
     margin: 0 0 0.125rem;
   }
 
-  :global(html[data-look="paper"] .page-ground) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
+  :global(html:root .page-ground) h1 { font-size: 30px; font-weight: 650; letter-spacing: -0.022em; line-height: 1.15; }
 
   .subtitle {
     font-size: 0.8125rem;

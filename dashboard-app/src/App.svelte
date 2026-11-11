@@ -1,7 +1,6 @@
 <script lang="ts">
   import { currentRoute, initRouter } from '$lib/router';
   import Nav from '$lib/ui/Nav.svelte';
-  import LookToggle from '$lib/ui/LookToggle.svelte';
   import DagView from './views/DagView.svelte';
   import Heartbeat from './views/Heartbeat.svelte';
   import Observability from './views/Observability.svelte';
@@ -98,14 +97,13 @@
 <a href="#main-content" class="skip-link">Skip to content</a>
 
 <!-- ── Desktop sidebar ───────────────────────────────────────── -->
-<!-- The navigation is the rail: the Atlantic-blue rail under the paper look, today's sidebar otherwise. -->
+<!-- The navigation is the rail (class rail): the Atlantic-blue sidebar. -->
 <aside class="sidebar rail" aria-label="Site navigation">
   <div class="sidebar-header">
     <span class="sidebar-logo" aria-hidden="true">&#x1D6B9;</span>
     <span class="sidebar-title">Nous</span>
   </div>
   <Nav currentRoute={$currentRoute} navLabel="Site navigation" />
-  <div class="sidebar-footer"><LookToggle /></div>
 </aside>
 
 <!-- ── Mobile header ─────────────────────────────────────────── -->
@@ -163,11 +161,10 @@
     </button>
   </div>
   <Nav currentRoute={$currentRoute} navLabel="Mobile navigation" onnavigate={closeDrawer} />
-  <div class="sidebar-footer"><LookToggle /></div>
 </div>
 
 <!-- ── Main content ───────────────────────────────────────────── -->
-<!-- The page ground: paper under the paper look, on every route. -->
+<!-- The page ground (class page-ground): chart paper, on every route. -->
 <main id="main-content" class="main-content page-ground">
   <!--
     Route switch: {#if} (not {#key}) so each view's component state
@@ -259,7 +256,7 @@
     flex-shrink: 0;
   }
 
-  /* The glyph is hidden in the rail (no glyphs under the paper look). */
+  /* The glyph is hidden in the rail (no glyphs: the owner's rule). */
   .sidebar-logo {
     display: var(--logo-display);
     font-size: 1.375rem;
@@ -272,12 +269,6 @@
     font-weight: 700;
     color: var(--text);
     letter-spacing: -0.01em;
-  }
-
-  .sidebar-footer {
-    margin-top: auto;
-    padding: 0.75rem 1.25rem 1rem;
-    flex-shrink: 0;
   }
 
   /* ── Mobile header (hidden on desktop) ──────────────────────── */

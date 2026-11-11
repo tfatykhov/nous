@@ -702,7 +702,7 @@
     margin: 0 0 0.125rem;
   }
 
-  :global(html[data-look="paper"] .page-ground) h1 {
+  :global(html:root .page-ground) h1 {
     font-size: 30px;
     font-weight: 650;
     letter-spacing: -0.022em;
@@ -775,11 +775,11 @@
     border-color: var(--accent);
   }
 
-  :global(html[data-look="paper"] .page-ground) .search-input {
+  :global(html:root .page-ground) .search-input {
     padding: 0.4375rem 1rem;
   }
 
-  :global(html[data-look="paper"] .page-ground) .search-input:focus-visible {
+  :global(html:root .page-ground) .search-input:focus-visible {
     outline: 2px solid var(--focus-ring);
     outline-offset: 1px;
   }
@@ -806,12 +806,12 @@
     cursor: not-allowed;
   }
 
-  :global(html[data-look="paper"] .page-ground) .btn {
+  :global(html:root .page-ground) .btn {
     padding: 0.4375rem 1rem;
     font-weight: 550;
   }
 
-  :global(html[data-look="paper"] .page-ground) .btn:hover:not(:disabled) {
+  :global(html:root .page-ground) .btn:hover:not(:disabled) {
     border-color: var(--muted);
     color: var(--text);
     box-shadow: var(--card-shadow);
@@ -823,7 +823,7 @@
   }
 
   /* ── Tables: a white rounded card on paper ── */
-  :global(html[data-look="paper"] .page-ground) .table-card {
+  :global(html:root .page-ground) .table-card {
     background: var(--surface);
     border: var(--card-border);
     border-radius: var(--card-radius);
@@ -892,7 +892,7 @@
     font-size: 0.75rem;
   }
 
-  :global(html[data-look="paper"] .page-ground) .tab-body :global(.mono) {
+  :global(html:root .page-ground) .tab-body :global(.mono) {
     font-family: var(--font-mono);
   }
 
@@ -930,11 +930,11 @@
     cursor: pointer;
   }
 
-  :global(html[data-look="paper"] .page-ground) .censor-select {
+  :global(html:root .page-ground) .censor-select {
     padding: 0.25rem 0.75rem;
   }
 
-  :global(html[data-look="paper"] .page-ground) .censor-label input {
+  :global(html:root .page-ground) .censor-label input {
     accent-color: var(--accent);
   }
 

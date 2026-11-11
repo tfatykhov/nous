@@ -5,7 +5,7 @@ import Nav from './Nav.svelte';
 import { ROUTES, currentRoute, initRouter } from '../router';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { RAIL_SEL, parseBlocks, styleBlocks } from '../testing/css';
+import { RAIL_SEL, block, parseBlocks, styleBlocks } from '../testing/css';
 
 // Regression guard: the Nav link hrefs MUST be in the exact hash format the
 // router accepts (`#/<route>`). They previously used `#<route>` (no slash),
@@ -119,13 +119,12 @@ describe('Nav groups', () => {
   });
 });
 
-// Dashboard redesign: under the paper look the Nav sits on the Atlantic-blue rail as text pills (no icons). The
-// order, the names and the focus ring must hold on both looks.
+// Dashboard redesign: the Nav sits on the Atlantic-blue rail as text pills (no icons).
 describe('Nav on the rail', () => {
   beforeEach(() => { cleanup(); });
   const src = readFileSync(join(__dirname, 'Nav.svelte'), 'utf-8');
   const css = styleBlocks(src);
-  const rail = parseBlocks(readFileSync(join(__dirname, '../../app.css'), 'utf-8')).get(RAIL_SEL) ?? {};
+  const rail = block(parseBlocks(readFileSync(join(__dirname, '../../app.css'), 'utf-8')), RAIL_SEL, 10);
 
   it('Tab walks the links in route order: DOM order, nothing else focusable, no tabindex', () => {
     const { container } = render(Nav, { props: { currentRoute: 'work' } });

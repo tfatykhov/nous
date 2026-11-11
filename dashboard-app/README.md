@@ -1,8 +1,6 @@
 # Svelte + TS + Vite
 
-**Look switch (dashboard redesign, staged):** the "New look" switch at the foot of the navigation turns the paper look on (`<html data-look="paper">`); it is off (dark) by default.
-`?look=paper` or `?look=dark` in the page URL sets it and remembers it, then is removed from the address bar (so a reload never overrides the switch); `public/look-boot.js` applies it before the app loads, so the page never flashes.
-The choice is kept per browser in `localStorage['nous.look']`; delete that key to go back to the default.
+**One look:** the dashboard has a single look (chart-paper ground, Atlantic-blue rail); its tokens live in `src/app.css` (`:root`, and `.rail` for the navigation). The companion (`companion.html`) has its own stylesheet and themes.
 
 This template should help get you started developing with Svelte and TypeScript in Vite.
 

@@ -3,22 +3,18 @@ import { render, screen, waitFor, cleanup, within } from '@testing-library/svelt
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Subtasks from './Subtasks.svelte';
-import { setLook } from '../lib/look';
-import { PAPER_SEL, parseBlocks, styleBlocks } from '../lib/testing/css';
+import { ROOT_SEL, block, parseBlocks, styleBlocks } from '../lib/testing/css';
 
 // Redesign PR 3: Subtasks on paper. The outcome colours are status tokens (`--st-*`, `--oc-*`) that the Chart
-// component resolves against its ground: today's colours under dark, the paper values under paper.
+// component resolves against the element its canvas sits in (with no stylesheet, jsdom: the :root values).
 
-const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
-const OLD: Record<string, string> = {
-  completed: '#10b981', incomplete_blocked: '#f59e0b', incomplete_no_terminal: '#ef4444', validation_failed: '#ef4444',
-  timed_out: '#dc2626', errored: '#7c2d12', cancelled: '#6b7280', unknown: '#9ca3af',
-};
+const PAPER = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
 const TOKEN: Record<string, string> = {
   completed: '--st-success', incomplete_blocked: '--oc-blocked', incomplete_no_terminal: '--oc-failed',
   validation_failed: '--oc-failed', timed_out: '--oc-timeout', errored: '--oc-errored', cancelled: '--st-neutral', unknown: '--oc-unknown',
 };
-const OUTCOMES = Object.keys(OLD);
+const OUTCOMES = Object.keys(TOKEN);
+const ROOT_OF = (o: string) => PAPER[TOKEN[o]];
 const per = (f: (o: string, i: number) => unknown) => Object.fromEntries(OUTCOMES.map((o, i) => [o, f(o, i)]));
 
 const SUBTASKS = {
@@ -69,10 +65,10 @@ const norm = (c: unknown) => String(c).replace(/\s+/g, '');
 const chart = (t: string) => configs.find((c) => c.type === t)!;
 
 beforeEach(install);
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); setLook('dark'); document.body.innerHTML = ''; });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); document.body.innerHTML = ''; });
 
 describe('Subtasks: outcome colours are status tokens', () => {
-  it('dark: the doughnut and the tokens bars are today\'s eight colours, and every outcome is named', async () => {
+  it('the doughnut and the tokens bars take the eight outcome tokens, and every outcome is named (no stylesheet)', async () => {
     render(Subtasks);
     await waitFor(() => expect(configs).toHaveLength(3));
     const doughnut = chart('doughnut');
@@ -80,23 +76,22 @@ describe('Subtasks: outcome colours are status tokens', () => {
     // At phone width (200 px charts) eight 40 px swatches made a fourth legend row that Chart.js cut off.
     expect(doughnut.options.plugins.legend.labels.boxWidth).toBe(12);
     expect(chart('line').options.plugins.legend.labels.boxWidth).toBe(12); // the trend's eight entries left a 20 px plot
-    expect(doughnut.data.datasets[0].backgroundColor).toEqual(OUTCOMES.map((o) => OLD[o]));
-    expect(chart('bar').data.datasets[0].backgroundColor).toEqual(OUTCOMES.map((o) => OLD[o]));
+    expect(doughnut.data.datasets[0].backgroundColor).toEqual(OUTCOMES.map(ROOT_OF));
+    expect(chart('bar').data.datasets[0].backgroundColor).toEqual(OUTCOMES.map(ROOT_OF));
   });
 
-  it('dark: the daily trend draws one dataset per outcome, its line in the outcome colour over a 20% tint', async () => {
+  it('the daily trend draws one dataset per outcome, its line in the outcome colour over a 20% tint (no stylesheet)', async () => {
     render(Subtasks);
     await waitFor(() => expect(configs).toHaveLength(3));
     const sets = chart('line').data.datasets;
     expect(sets.map((d) => d.label)).toEqual(['completed', 'errored', 'timed_out', 'unknown']);
     for (const d of sets) {
-      expect(d.borderColor, d.label).toBe(OLD[d.label]);
-      expect(norm(d.backgroundColor), d.label).toBe(rgba(OLD[d.label], 0.2)); // the old `${hex}33`
+      expect(d.borderColor, d.label).toBe(ROOT_OF(d.label));
+      expect(norm(d.backgroundColor), d.label).toBe(rgba(ROOT_OF(d.label), 0.2)); // the old `${hex}33`
     }
   });
 
   it('paper: the same datasets take the paper status and outcome values', async () => {
-    setLook('paper');
     render(Subtasks, { target: paperMain() });
     await waitFor(() => expect(configs).toHaveLength(3));
     expect(chart('doughnut').data.datasets[0].backgroundColor).toEqual(OUTCOMES.map((o) => PAPER[TOKEN[o]]));

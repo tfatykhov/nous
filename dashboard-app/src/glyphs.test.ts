@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { PAPER_ROUTES } from './lib/look';
+import { ROUTES as PAGE_ROUTES } from './lib/router';
 import { markupOf, scriptBlocks, styleBlocks } from './lib/testing/css';
 
 // The owner's rule: plain words and colour carry the meaning, no invented symbols or glyphs. On the screens PR 4 and
@@ -56,7 +56,7 @@ describe('no glyph icons on the Decisions, Autonomy and System screens', () => {
 
   it('every converted screen of the seven is in the list (a screen joins when its route turns paper)', () => {
     for (const [route, file] of Object.entries(SCREENS)) {
-      if ((PAPER_ROUTES as readonly string[]).includes(route)) expect(FILES, route).toContain(file);
+      if ((PAGE_ROUTES as readonly string[]).includes(route)) expect(FILES, route).toContain(file);
     }
     expect(FILES.length).toBeGreaterThanOrEqual(HELPERS.length);
   });

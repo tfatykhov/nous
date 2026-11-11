@@ -42,7 +42,17 @@ export function markupOf(source: string): string {
     .replace(/<!--[\s\S]*?-->/g, '');
 }
 
-/** The dark block of app.css (`:root`) and the two regions of the paper look: the page ground and the rail. */
-export const DARK_SEL = ':root';
-export const PAPER_SEL = 'html[data-look="paper"] .page-ground';
-export const RAIL_SEL = 'html[data-look="paper"] .rail';
+/** The token blocks of app.css: the one look's at `:root`, the Atlantic-blue rail's at `.rail`. */
+export const ROOT_SEL = ':root';
+export const RAIL_SEL = '.rail';
+
+/** A block of parseBlocks' map that must exist and hold at least `minDecls` declarations. A missing or emptied selector
+ * throws, where `blocks.get(sel) ?? {}` would hand every comparison an empty object (passing vacuously or failing
+ * confusingly). */
+export function block(blocks: Map<string, Record<string, string>>, selector: string, minDecls: number): Record<string, string> {
+  const found = blocks.get(selector);
+  if (!found) throw new Error(`app.css has no block for ${selector}`);
+  const n = Object.keys(found).length;
+  if (n < minDecls) throw new Error(`app.css's ${selector} has ${n} declarations, fewer than ${minDecls}`);
+  return found;
+}

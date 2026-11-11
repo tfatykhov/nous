@@ -404,7 +404,7 @@
     margin: 0 0 0.125rem;
   }
 
-  :global(html[data-look="paper"] .page-ground) h1 {
+  :global(html:root .page-ground) h1 {
     font-size: 30px;
     font-weight: 650;
     letter-spacing: -0.022em;
@@ -440,7 +440,7 @@
   .hb-banner--warn { border-color: var(--yellow); }
   .hb-banner--disabled { opacity: 0.65; }
   /* Muted pills at 65% are 2.8:1 on the white card: on paper the grey dot and the words "Heartbeat Disabled" say it. */
-  :global(html[data-look="paper"] .page-ground) .hb-banner--disabled { opacity: 1; }
+  :global(html:root .page-ground) .hb-banner--disabled { opacity: 1; }
 
   .hb-dot {
     width: 10px;
@@ -479,7 +479,7 @@
   .hb-pill--bad { border-color: var(--red); color: var(--err-text); }
   .hb-pill--total { opacity: 0.6; }
   /* Muted text at 60% is 2.5:1 on the white card: the paper ground shows the total at full strength. */
-  :global(html[data-look="paper"] .page-ground) .hb-pill--total { opacity: 1; }
+  :global(html:root .page-ground) .hb-pill--total { opacity: 1; }
 
   /* ── Layout ── */
   .chart-row {

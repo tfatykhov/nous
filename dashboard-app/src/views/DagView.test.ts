@@ -5,14 +5,13 @@ import { join } from 'node:path';
 import DagView from './DagView.svelte';
 import Dag from '../lib/viz/Dag.svelte';
 import { DAG_NODE_STATUSES } from '../lib/status';
-import { setLook } from '../lib/look';
-import { PAPER_SEL, parseBlocks, styleBlocks } from '../lib/testing/css';
+import { ROOT_SEL, block, parseBlocks, styleBlocks } from '../lib/testing/css';
 
 // Redesign PR 3: Workflows on paper. Status badges and DAG nodes are painted by token (`--st-*`, color-mix tints), so
 // the paper look restyles them and the dark look keeps today's colours; the budget chart's colours are tokens the
 // Chart component resolves against its ground.
 
-const PAPER = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')).get(PAPER_SEL) ?? {};
+const PAPER = block(parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8')), ROOT_SEL, 50);
 const HOSTILE = '<img src=x onerror=alert(1)>' + 'n'.repeat(300);
 const dash = (s: string) => s.replaceAll('_', '-');
 
@@ -89,7 +88,7 @@ function paperMain(): HTMLElement {
 }
 
 beforeEach(() => { install(); installD3(); });
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); setLook('dark'); document.body.innerHTML = ''; });
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); document.body.innerHTML = ''; });
 
 describe('Workflows: status by token', () => {
   it('every DAG status renders a badge from its --st-* token with a color-mix tint, never a hex', async () => {
@@ -201,27 +200,15 @@ describe('Workflows: no invented glyph in the graph', () => {
 
 describe('Workflows: the token budget chart', () => {
   const ds = (label: string) => configs.find((c) => c.type === 'bar')!.data.datasets.find((d) => d.label === label)!;
-  const norm = (c: unknown) => String(c).replace(/\s+/g, '');
 
-  it('dark: consumed, remaining and the axes are today\'s colours exactly', async () => {
-    render(DagView);
-    await waitFor(() => expect(configs.filter((c) => c.type === 'bar')).toHaveLength(1));
-    expect(norm(ds('Consumed').backgroundColor)).toBe('rgba(251,191,36,0.7)');
-    expect(norm(ds('Budget').backgroundColor)).toBe('rgba(255,255,255,0.08)');
-    const o = configs.find((c) => c.type === 'bar')!.options;
-    expect(o.plugins.legend.labels.color).toBe('#94a3b8');
-    expect([o.scales.x.ticks.color, o.scales.y.ticks.color]).toEqual(['#94a3b8', '#94a3b8']);
-    expect([o.scales.x.grid.color, o.scales.y.grid.color]).toEqual(['#1e293b', '#1e293b']);
-  });
-
-  it('paper: the same chart takes the paper values', async () => {
-    setLook('paper');
+  it('consumed, remaining and the axes take their tokens', async () => {
     render(DagView, { target: paperMain() });
     await waitFor(() => expect(configs.filter((c) => c.type === 'bar')).toHaveLength(1));
     expect(ds('Consumed').backgroundColor).toBe(PAPER['--stack-bar']);
     expect(ds('Budget').backgroundColor).toBe(PAPER['--track-strong']);
     const o = configs.find((c) => c.type === 'bar')!.options;
     expect(o.plugins.legend.labels.color).toBe(PAPER['--chart-text']);
-    expect(o.scales.y.grid.color).toBe(PAPER['--chart-grid']);
+    expect([o.scales.x.ticks.color, o.scales.y.ticks.color]).toEqual([PAPER['--chart-text'], PAPER['--chart-text']]);
+    expect([o.scales.x.grid.color, o.scales.y.grid.color]).toEqual([PAPER['--chart-grid'], PAPER['--chart-grid']]);
   });
 });

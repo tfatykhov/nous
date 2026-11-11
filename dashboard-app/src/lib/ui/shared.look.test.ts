@@ -3,19 +3,17 @@ import { render, cleanup } from '@testing-library/svelte';
 import { createRawSnippet } from 'svelte';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { DARK_SEL, PAPER_SEL, parseBlocks, styleBlocks } from '../testing/css';
+import { ROOT_SEL, block, parseBlocks, styleBlocks } from '../testing/css';
 import StatGrid from './StatGrid.svelte';
 import StaleBadge from './StaleBadge.svelte';
 import { Badge } from './badge';
 import { Button } from './button';
 
-// The shared pieces are used by every screen, migrated or not. Each declaration converted from a literal to a token
-// must resolve, in app.css's dark block, to the literal it replaced: that is the proof the dark screens do not move.
-const APP_CSS = parseBlocks(readFileSync(join(__dirname, '../../app.css'), 'utf-8'));
-const DARK = APP_CSS.get(DARK_SEL) ?? {};
-const PAPER = APP_CSS.get(PAPER_SEL) ?? {};
+// The shared pieces are used by every screen. Each declaration the redesign converted from a literal to a token reads that
+// token, and the token is declared at :root.
+const PAPER = block(parseBlocks(readFileSync(join(__dirname, '../../app.css'), 'utf-8')), ROOT_SEL, 50);
 
-// [file, selector, property, token, the literal the declaration held before]
+// [file, selector, property, token, the literal the declaration held before the redesign]
 const CONVERTED: [string, string, string, string, string][] = [
   ['StatGrid.svelte', '.stat-card', 'border-radius', '--card-radius-sm', '8px'],
   ['StatGrid.svelte', '.stat-card', 'border', '--card-border', '1px solid var(--border)'],
@@ -36,16 +34,11 @@ const CONVERTED: [string, string, string, string, string][] = [
   ['StaleBadge.svelte', '.stale-badge.error', 'background', '--stale-err-bg', 'rgba(248, 113, 113, 0.08)'],
 ];
 
-describe('converted declarations do not move in dark', () => {
-  it('--red, the old value of two of them, is the literal used below', () => {
-    expect(DARK['--red']).toBe('#f87171');
-  });
-
-  it.each(CONVERTED)('%s %s { %s } reads %s, whose dark value is %s', (file, selector, prop, token, literal) => {
+describe('converted declarations read their tokens', () => {
+  it.each(CONVERTED)('%s %s { %s } reads %s (it held %s)', (file, selector, prop, token) => {
     const blocks = parseBlocks(styleBlocks(readFileSync(join(__dirname, file), 'utf-8')));
     expect(blocks.get(selector)?.[prop], `${file} ${selector}`).toBe(`var(${token})`);
-    expect(DARK[token], token).toBe(literal);
-    expect(token in PAPER, `${token} has a paper value`).toBe(true);
+    expect(token in PAPER, `${token} is declared at :root`).toBe(true);
   });
 
   it('the filter pill keeps its 999px radius', () => {
@@ -115,9 +108,8 @@ describe('Button', () => {
     expect(classes).toContain('text-sm');
   });
 
-  // Review M11: on paper a focused button gets the screen's 2px --focus-ring outline (the 50% halo alone is about
-  // 2.3:1 on white); under dark the outline is 0px wide, so the dark focus look does not move.
-  it('focus: a --focus-ring outline whose width is the ground\'s --btn-focus-width (0 dark, 2px paper)', () => {
+  // Review M11: a focused button gets the screen's 2px --focus-ring outline (the 50% halo alone is about 2.3:1 on white).
+  it('focus: a --focus-ring outline whose width is --btn-focus-width (2px)', () => {
     for (const variant of ['default', 'outline'] as const) {
       const { container } = render(Button, { props: { variant, children: label } });
       const classes = container.querySelector('[data-slot="button"]')!.className.split(' ');
@@ -125,7 +117,6 @@ describe('Button', () => {
         'focus-visible:outline-[color:var(--focus-ring)]', 'focus-visible:outline-offset-2']) expect(classes, `${variant} ${c}`).toContain(c);
       cleanup();
     }
-    expect(DARK['--btn-focus-width']).toBe('0px');
     expect(PAPER['--btn-focus-width']).toBe('2px');
   });
 
@@ -147,6 +138,15 @@ describe('Button', () => {
       expect(variant(v), v).not.toBe('');
       expect(variant(v), v).not.toMatch(/\bdark:/);
     }
+  });
+});
+
+// From interfacesPinned.test.ts (deleted with the look switch, PR 7): the variants the screens use stay declared.
+describe('the variants the screens use', () => {
+  it('Badge has ok, warn, error and secondary; Button has outline', () => {
+    const badge = readFileSync(join(__dirname, 'badge/badge.svelte'), 'utf-8');
+    for (const v of ['ok', 'warn', 'error', 'secondary']) expect(badge, v).toMatch(new RegExp(`\\b${v}: "`));
+    expect(readFileSync(join(__dirname, 'button/button.svelte'), 'utf-8')).toMatch(/\boutline: "/);
   });
 });
 
