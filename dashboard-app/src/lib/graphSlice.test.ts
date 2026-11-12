@@ -1,46 +1,29 @@
 import { describe, it, expect } from 'vitest';
-import { dateSpan, graphSliceText } from './graphSlice';
+import { graphSliceText } from './graphSlice';
 import type { GraphStats } from './types/api';
 
 const stats = (over: Partial<GraphStats> = {}): GraphStats => ({
-  total_edges: 134838, displayed_edges: 1640, node_count: 901, orphan_counts: {}, all_links: false,
-  recent_edges: 666, linked_edges: 974, links_per_memory: 3,
-  recent_from: '2026-11-08T03:10:00+00:00', recent_to: '2026-11-09T16:25:17+00:00', ...over,
-});
-
-describe('dateSpan', () => {
-  it('names one day, a span in one month, a span across months and one across years (UTC)', () => {
-    expect(dateSpan('2026-11-09T01:00:00+00:00', '2026-11-09T23:00:00+00:00')).toBe('Nov 9');
-    expect(dateSpan('2026-11-07T02:44:52+00:00', '2026-11-09T16:25:17+00:00')).toBe('Nov 7–9');
-    expect(dateSpan('2026-10-30T10:00:00+00:00', '2026-11-02T10:00:00+00:00')).toBe('Oct 30 – Nov 2');
-    expect(dateSpan('2025-12-30T10:00:00+00:00', '2026-01-02T10:00:00+00:00')).toBe('Dec 30, 2025 – Jan 2, 2026');
-    expect(dateSpan('2025-11-09T10:00:00+00:00', '2026-11-09T10:00:00+00:00')).toBe('Nov 9, 2025 – Nov 9, 2026');
-  });
-  it('gives nothing for a missing or unreadable date', () => {
-    expect(dateSpan(null, '2026-11-09T00:00:00+00:00')).toBe('');
-    expect(dateSpan('nope', '2026-11-09T00:00:00+00:00')).toBe('');
-  });
+  total_edges: 66536, total_nodes: 24238, displayed_edges: 5033, node_count: 1500, largest_piece: 1470,
+  orphan_counts: {}, chunks_included: false, edges_truncated: false, ...over,
 });
 
 describe('graphSliceText', () => {
-  it('says the drawing is the newest links plus their best-linked neighbours, and how much is shown', () => {
+  it('says how much of the graph is drawn, how it was chosen, and that chunks are left out', () => {
     expect(graphSliceText(stats())).toBe(
-      'The newest 666 links (Nov 8–9), plus up to 3 links from each of their memories to its best-linked ' +
-      'neighbours. 1,640 of 134,838 links shown.',
+      '1,500 of 24,238 linked memories and 5,033 of 66,536 links, grown outward from the newest along their ' +
+      'strongest links. Chunks are left out.',
     );
   });
-  it('says "every link" when all of them fit, counting only the ones drawn', () => {
-    expect(graphSliceText(stats({ all_links: true, total_edges: 2, displayed_edges: 1, recent_edges: 1, linked_edges: 0 })))
-      .toBe('Every link between memories: 1 link.');
-    expect(graphSliceText(stats({ all_links: true, total_edges: 12, displayed_edges: 12, recent_edges: 12, linked_edges: 0 })))
-      .toBe('Every link between memories: 12 links.');
+  it('drops the chunks sentence when chunks are drawn, and says when the link cap was reached', () => {
+    expect(graphSliceText(stats({ chunks_included: true }))).not.toContain('Chunks');
+    expect(graphSliceText(stats({ edges_truncated: true }))).toContain(' Only the strongest links among them are drawn.');
   });
-  it('drops the neighbour clause when no linked edge was added', () => {
-    expect(graphSliceText(stats({ displayed_edges: 1, recent_edges: 1, linked_edges: 0 })))
-      .toBe('The newest 1 link (Nov 8–9). 1 of 134,838 links shown.');
+  it('says "every linked memory" when the whole graph fits, with one link in the singular', () => {
+    expect(graphSliceText(stats({ total_nodes: 2, node_count: 2, total_edges: 1, displayed_edges: 1, chunks_included: true })))
+      .toBe('Every linked memory: 2, with 1 link.');
   });
   it('falls back to a plain description with nothing drawn', () => {
-    expect(graphSliceText(stats({ total_edges: 0, displayed_edges: 0, recent_edges: 0, linked_edges: 0 })))
-      .toBe('Memory nodes and the links between them.');
+    expect(graphSliceText(stats({ total_edges: 0, total_nodes: 0, displayed_edges: 0, node_count: 0 })))
+      .toBe('Memories and the links between them.');
   });
 });

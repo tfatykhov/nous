@@ -205,6 +205,11 @@ const PAPER_GOLDEN: Record<string, string> = {
 // Tokens of the golden that were deleted after the flip, each with the commit's reason: a dead token (no reader) or a
 // parity alias (one value, one meaning, the same as another token's). Every entry must be in PAPER_GOLDEN.
 const DELETED: Record<string, string> = {
+  '--gv-edge-opacity': 'the 3D Graph: one fibre opacity for every link, set where the graph is drawn (the 2D graph read this)',
+  '--gv-edge-opacity-inferred': 'the 3D Graph: links are not drawn fainter by extraction method',
+  '--gv-outline': 'the 3D Graph: no label halo (labels are hover text, not drawn on the canvas)',
+  '--gv-node-border': 'the 3D Graph: memories are shaded bodies with no outline',
+  '--gv-select': 'the 3D Graph: no selected or search-hit ring (a match keeps its colour and the rest fade)',
   '--hit-mid': 'T4: dead, read only by Cache.svelte’s hitRateColor, which was never called',
   '--hit-bad': 'T4: dead, read only by Cache.svelte’s hitRateColor, which was never called',
   '--stat-warn': 'T5: an alias of --warn-text (one value, one meaning); its readers read --warn-text',
@@ -270,9 +275,6 @@ const GV_NODES: Record<string, string> = {
 const GV: Record<string, string> = {
   ...GV_NODES,
   '--gv-other': '#4f5f6f',
-  '--gv-outline': '#ffffff', // the label halo
-  '--gv-node-border': 'rgba(20, 32, 43, 0.35)',
-  '--gv-select': '#14202b', // the selected and search-hit rings
 };
 const REL: Record<string, string> = {
   '--rel-related-to': '#4f5f6f',
@@ -313,8 +315,6 @@ const PR2: Record<string, string> = {
   '--track': '#e3e9ec', // a doughnut's remainder, a panel wash
   '--chart-text': '#56687a', // a chart's ticks and legend on a paper ground
   '--chart-grid': '#e3e9ec',
-  '--gv-edge-opacity': '0.75', // review M8: Graph edges, less faint on white
-  '--gv-edge-opacity-inferred': '0.5',
   '--series-0': '#274455', // review M1/R2: was --accent (the question blue), then violet; a slate navy of its own
   '--save-ok': '#23703d', // Browse: a censor's save message
   '--save-err': '#b02a22',
@@ -785,9 +785,6 @@ describe('PR 2 tokens: series, graph, relations, dispositions', () => {
       }
     }
     expect(contrast(PAPER['--gv-other'], '#ffffff')).toBeGreaterThanOrEqual(3);
-    // The rings and the label halo on the white card.
-    expect(contrast(PAPER['--gv-select'], '#ffffff')).toBeGreaterThanOrEqual(3);
-    expect(contrast(PAPER['--muted'], PAPER['--gv-outline'])).toBeGreaterThanOrEqual(4.5);
   });
 
   it('graph node colours under red-green colour blindness: chunk at least 12 from every type, other pairs at least 8', () => {

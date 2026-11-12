@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, waitFor } from '@testing-library/svelte';
+import { render, screen, cleanup, waitFor, fireEvent } from '@testing-library/svelte';
 import { tick } from 'svelte';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -7,21 +7,22 @@ import GraphView from './GraphView.svelte';
 import { currentRoute } from '../lib/router';
 import { ROOT_SEL, block, parseBlocks, styleBlocks } from '../lib/testing/css';
 
-// The Graph: node, edge, ring and legend colours are tokens. Cytoscape draws on a canvas, so its colours are resolved
-// against the graph's own element; the layout runs once (it is random: re-running it would move every node). Every
-// value below is made up.
+// The Graph: node, link and legend colours are tokens. The 3D library draws on a WebGL canvas, so its colours are
+// resolved against the graph's own element; the layout runs once per fetch (it is a simulation: re-running it would
+// move every memory). The library is a recording stand-in here, and every value below is made up.
 const BLOCKS = parseBlocks(readFileSync(join(__dirname, '..', 'app.css'), 'utf-8'));
 const PAPER = block(BLOCKS, ROOT_SEL, 50);
 
 const HOSTILE = '<img src=x onerror="alert(1)">';
 const LONG = 'L'.repeat(300);
+const NOW = new Date().toISOString();
 const GRAPH = {
   nodes: [
-    { id: 'n-fact', type: 'fact', label: 'a fact', category: 'general' },
-    { id: 'n-episode', type: 'episode', label: HOSTILE, category: null },
-    { id: 'n-decision', type: 'decision', label: LONG, category: null },
-    { id: 'n-procedure', type: 'procedure', label: 'a procedure', category: null },
-    { id: 'n-chunk', type: 'chunk', label: 'a chunk', category: null },
+    { id: 'n-fact', type: 'fact', label: 'a fact', category: 'general', created_at: NOW },
+    { id: 'n-episode', type: 'episode', label: HOSTILE, category: null, created_at: NOW },
+    { id: 'n-decision', type: 'decision', label: LONG, category: null, created_at: NOW },
+    { id: 'n-procedure', type: 'procedure', label: 'a procedure', category: null, created_at: null },
+    { id: 'n-chunk', type: 'chunk', label: 'a chunk', category: null, created_at: NOW },
   ],
   edges: [
     { id: 'e1', source: 'n-fact', target: 'n-episode', source_type: 'fact', target_type: 'episode', relation: 'supports', weight: 0.8, auto_linked: true, extraction_method: 'heuristic' },
@@ -30,8 +31,8 @@ const GRAPH = {
     { id: 'e4', source: 'n-fact', target: 'n-chunk', source_type: 'fact', target_type: 'chunk', relation: 'contradicts', weight: 0.3, auto_linked: true, extraction_method: 'inferred' },
   ],
   stats: {
-    total_edges: 4, displayed_edges: 4, node_count: 5, orphan_counts: { facts: 1 }, all_links: true,
-    recent_edges: 4, linked_edges: 0, links_per_memory: 0, recent_from: null, recent_to: null,
+    total_edges: 40, total_nodes: 50, displayed_edges: 4, node_count: 5, largest_piece: 4, orphan_counts: { facts: 1 },
+    chunks_included: false, edges_truncated: false,
   },
 };
 const DETAIL = {
@@ -45,55 +46,65 @@ const DETAIL = {
   ],
 };
 
-type Ele = { data: Record<string, any>; classes: Set<string> };
+/** What the stand-in for 3d-force-graph recorded: every setter's arguments by name, and the data it was given. */
+const lib = vi.hoisted(() => ({
+  made: 0,
+  fail: false,
+  calls: {} as Record<string, any[][]>,
+  data: { nodes: [] as any[], links: [] as any[] },
+  controls: { autoRotate: false, autoRotateSpeed: 0, addEventListener: () => {} } as Record<string, any>,
+  scene: { fog: null as any },
+}));
 
-/** A recording stand-in for cytoscape: it keeps the elements, and counts style() and layout() calls. */
-function fakeCytoscape() {
-  let elements: Ele[] = [];
-  const handlers: Record<string, (evt: any) => void> = {};
-  const runs = vi.fn();
-  const cy = {
-    on: vi.fn((ev: string, _sel: string, fn: (evt: any) => void) => { handlers[ev] = fn; }),
-    destroy: vi.fn(),
-    json: vi.fn(({ elements: els }: { elements: any[] }) => { elements = els.map((e) => ({ data: { ...e.data }, classes: new Set() })); }),
-    layout: vi.fn(() => ({ run: runs })),
-    style: vi.fn(),
-    batch: (fn: () => void) => fn(),
-    nodes: () => wrapAll(elements.filter((e) => e.data.source == null)),
-    edges: () => wrapAll(elements.filter((e) => e.data.source != null)),
-    elements: () => wrapAll(elements),
-    get current() { return elements; },
-  };
-  function wrap(e: Ele): any {
-    const w: any = {
-      id: () => e.data.id,
-      data: (k: string, v?: unknown) => { if (v === undefined) return e.data[k]; e.data[k] = v; return w; },
-      style: () => w,
-      addClass: (c: string) => { c.split(' ').forEach((x) => e.classes.add(x)); return w; },
-      removeClass: (c: string) => { c.split(' ').forEach((x) => e.classes.delete(x)); return w; },
-      source: () => wrap(elements.find((x) => x.data.id === e.data.source)!),
-      target: () => wrap(elements.find((x) => x.data.id === e.data.target)!),
-    };
-    return w;
-  }
-  function wrapAll(list: Ele[]) {
-    return { forEach: (fn: (w: any) => void) => list.forEach((e) => fn(wrap(e))), removeClass: (c: string) => list.forEach((e) => wrap(e).removeClass(c)) };
-  }
-  const factory = vi.fn((opts: { elements: any[]; style: any[] }) => {
-    elements = opts.elements.map((e) => ({ data: { ...e.data }, classes: new Set() }));
-    return cy;
-  });
-  return { factory, cy, handlers, tap: (id: string) => handlers.tap({ target: wrap(elements.find((e) => e.data.id === id)!) }) };
-}
+vi.mock('three', () => ({
+  Fog: class { color: string; near: number; far: number; constructor(c: string, n: number, f: number) { this.color = c; this.near = n; this.far = f; } },
+}));
+vi.mock('3d-force-graph', () => ({
+  default: class {
+    constructor() {
+      if (lib.fail) throw new Error('no WebGL');
+      lib.made += 1;
+      const force = { strength: () => force, distance: () => force };
+      const special: Record<string, (...a: any[]) => any> = {
+        d3Force: (_name: string, fn?: unknown) => (fn === undefined ? force : proxy),
+        renderer: () => ({ setPixelRatio: () => {} }),
+        scene: () => lib.scene,
+        controls: () => lib.controls,
+        camera: () => ({ fov: 50, aspect: 1, position: { length: () => 1000 } }),
+        getGraphBbox: () => ({ x: [-100, 100], y: [-50, 50], z: [-80, 80] }),
+        graphData: (d?: { nodes: any[]; links: any[] }) => {
+          if (d === undefined) return lib.data;
+          // As the library does: the link ends become the node objects.
+          const byId = new Map(d.nodes.map((n) => [n.id, n]));
+          lib.data = { nodes: d.nodes, links: d.links.map((l) => Object.assign(l, { source: byId.get(l.source), target: byId.get(l.target) })) };
+          return proxy;
+        },
+      };
+      const proxy: any = new Proxy({}, {
+        get: (_t, name: string) => (...args: any[]) => {
+          (lib.calls[name] ??= []).push(args);
+          return special[name] ? special[name](...args) : proxy;
+        },
+      });
+      return proxy;
+    }
+  },
+}));
 
-let cyto: ReturnType<typeof fakeCytoscape>;
+/** The accessor the graph was last given for `name` (nodeColor, linkColor, nodeLabel, onNodeClick…). */
+const last = (name: string) => lib.calls[name]?.at(-1)?.[0];
+const node = (id: string) => lib.data.nodes.find((n) => n.id === id);
+const link = (id: string) => lib.data.links.find((l) => l.id === id);
+const loads = () => (lib.calls.graphData ?? []).filter((a) => a.length > 0).length;
+
+let fetched: string[] = [];
 function install(detail: unknown = DETAIL) {
-  cyto = fakeCytoscape();
-  vi.stubGlobal('cytoscape', cyto.factory);
+  fetched = [];
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+    fetched.push(url);
     const body = url.startsWith('/dashboard/graph/node/') ? detail : url.startsWith('/dashboard/graph') ? GRAPH : null;
     if (!body) return { ok: false, status: 404, json: async () => ({}) } as Response;
-    return { ok: true, status: 200, json: async () => body } as Response;
+    return { ok: true, status: 200, json: async () => structuredClone(body) } as Response; // a new object per response, as parsing gives
   }));
 }
 
@@ -106,14 +117,11 @@ function paperMain(): HTMLElement {
   return main;
 }
 
-const nodeColor = (id: string) => cyto.cy.current.find((e) => e.data.id === id)?.data.color;
-const edgeColor = (id: string) => cyto.cy.current.find((e) => e.data.id === id)?.data.color;
-/** The style array cytoscape got last: the value of `prop` under `selector`. */
-function styleValue(style: any[], selector: string, prop: string) {
-  return style.find((s) => s.selector === selector)?.style[prop];
-}
-
-beforeEach(() => { currentRoute.set('graph'); });
+beforeEach(() => {
+  currentRoute.set('graph');
+  Object.assign(lib, { made: 0, fail: false, calls: {}, data: { nodes: [], links: [] }, scene: { fog: null } });
+  lib.controls.autoRotate = false;
+});
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
@@ -121,62 +129,130 @@ afterEach(() => {
 });
 
 describe('Graph on the paper look', () => {
-  it('the legend names the five types in words, each with a dot in its --gv token', async () => {
+  it('the legend names the five types in words, each with a dot in its --gv token; chunks start unticked', async () => {
     install();
     const { container } = render(GraphView);
     await screen.findByLabelText('Search graph nodes');
-    const labels = Array.from(container.querySelectorAll('.type-check'));
+    const labels = Array.from(container.querySelectorAll('.type-filters .type-check'));
     expect(labels.map((l) => l.textContent?.trim())).toEqual(['Fact', 'Episode', 'Decision', 'Procedure', 'Chunk']);
     expect(labels.map((l) => l.querySelector('.type-dot')?.getAttribute('style'))).toEqual(
       ['fact', 'episode', 'decision', 'procedure', 'chunk'].map((t) => `background: var(--gv-${t});`),
     );
+    expect(labels.map((l) => (l.querySelector('input') as HTMLInputElement).checked)).toEqual([true, true, true, true, false]);
   });
 
   it('with no stylesheet (jsdom) the colours fall back to the :root values, and the layout runs once', async () => {
     install();
     render(GraphView);
-    await waitFor(() => expect(cyto.factory).toHaveBeenCalledTimes(1));
-    await tick();
-    const created = cyto.factory.mock.calls[0][0];
-    const color = (id: string) => created.elements.find((e: any) => e.data.id === id).data.color;
-    expect(['n-fact', 'n-episode', 'n-decision', 'n-procedure', 'n-chunk'].map(color)).toEqual(
-      ['--gv-fact', '--gv-episode', '--gv-decision', '--gv-procedure', '--gv-chunk'].map((t) => PAPER[t]),
+    await waitFor(() => expect(loads()).toBe(1));
+    expect(lib.made).toBe(1);
+    // A memory made today keeps its type's colour; one with no date is a quarter of the way to the card's surface.
+    expect(['n-fact', 'n-episode', 'n-decision', 'n-chunk'].map((id) => last('nodeColor')(node(id)))).toEqual(
+      ['--gv-fact', '--gv-episode', '--gv-decision', '--gv-chunk'].map((t) => PAPER[t]),
     );
-    expect(styleValue(created.style, 'node', 'border-color')).toBe('rgba(20, 32, 43, 0.35)');
-    expect(styleValue(created.style, 'node', 'color')).toBe(PAPER['--muted']);
-    expect(styleValue(created.style, 'edge', 'opacity')).toBe(0.75);
-    expect(styleValue(created.style, 'edge[extraction_method = "inferred"]', 'opacity')).toBe(0.5);
-    expect(cyto.cy.layout).toHaveBeenCalledTimes(1);
-    expect(cyto.cy.style).not.toHaveBeenCalled();
+    expect(last('nodeColor')(node('n-procedure'))).not.toBe(PAPER['--gv-procedure']);
+    expect(last('backgroundColor')).toBe(PAPER['--surface']);
+    expect(lib.scene.fog.color).toBe(PAPER['--surface']); // distance fades into the card
+    expect(last('linkColor')(link('e1'))).toBe(PAPER['--gv-other']); // every fibre is one quiet ink at rest
   });
 
-  it('on the page ground: nodes, edges and rings take its tokens, and nothing restyles or re-runs the layout', async () => {
+  it('on the page ground the nodes take its tokens; search and the type boxes repaint, they never lay out again', async () => {
     install();
     render(GraphView, { target: paperMain() });
-    await waitFor(() => expect(cyto.factory).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(loads()).toBe(1));
+    expect(last('nodeColor')(node('n-fact'))).toBe(PAPER['--gv-fact']);
+
+    await fireEvent.input(screen.getByLabelText('Search graph nodes'), { target: { value: 'a fact' } });
     await tick();
-    expect(nodeColor('n-fact')).toBe(PAPER['--gv-fact']); // the page ground's tokens are on <main> in this test
+    expect(last('nodeColor')(node('n-fact'))).toBe(PAPER['--gv-fact']); // the match keeps its colour
+    expect(last('nodeColor')(node('n-episode'))).not.toBe(PAPER['--gv-episode']); // the rest fade
+
+    await fireEvent.click(screen.getByLabelText(/Episode/));
     await tick();
-    expect(cyto.cy.style).not.toHaveBeenCalled(); // no look switch is left to restyle the graph
-    expect(cyto.cy.layout).toHaveBeenCalledTimes(1);
-    const style = cyto.factory.mock.calls[0][0].style;
-    // Rings and labels stay visible on the white card.
-    expect(styleValue(style, 'node:selected', 'border-color')).toBe('#14202b');
-    expect(styleValue(style, 'node.searchHit', 'border-color')).toBe('#14202b');
-    expect(styleValue(style, 'node', 'color')).toBe(PAPER['--muted']);
-    expect(styleValue(style, 'node', 'text-outline-color')).toBe('#ffffff');
-    expect(edgeColor('e4')).toBe(PAPER['--rel-contradicts']);
-    expect(nodeColor('n-chunk')).toBe(PAPER['--gv-chunk']);
-    // Review M8: on paper the edges are less faint (a light colour at 0.5 on white was 1.8:1).
-    expect(styleValue(style, 'edge', 'opacity')).toBe(0.75);
-    expect(styleValue(style, 'edge[extraction_method = "inferred"]', 'opacity')).toBe(0.5);
+    expect(last('nodeVisibility')(node('n-episode'))).toBe(false);
+    expect(last('nodeVisibility')(node('n-fact'))).toBe(true);
+    expect(last('linkVisibility')(link('e1'))).toBe(false); // a link to a hidden memory is hidden too
+    expect(last('linkVisibility')(link('e2'))).toBe(true);
+    // Before the layout the library hands a link over with its ends still ids: it is judged the same way.
+    expect(last('linkVisibility')({ id: 'e2', source: 'n-decision', target: 'n-fact', relation: 'informed_by' })).toBe(true);
+    expect(last('linkVisibility')({ id: 'e1', source: 'n-fact', target: 'n-episode', relation: 'supports' })).toBe(false);
+    expect(last('linkVisibility')({ id: 'ex', source: 'n-fact', target: 'gone', relation: 'supports' })).toBe(false);
+    expect(loads()).toBe(1);
+    expect(lib.made).toBe(1);
+  });
+
+  it('a tapped memory lights the links its activation crosses in their relation colours, and opens its sheet', async () => {
+    install();
+    render(GraphView);
+    await waitFor(() => expect(loads()).toBe(1));
+    last('onNodeClick')(node('n-episode'));
+    expect(last('linkColor')(link('e1'))).toBe(PAPER['--rel-supports']); // one step: episode to fact
+    expect(last('linkColor')(link('e2'))).toBe(PAPER['--rel-informed-by']); // two steps: fact to decision
+    expect(last('linkColor')(link('e3'))).not.toBe(PAPER['--rel-part-of']); // three steps away: not crossed
+    expect(last('nodeColor')(node('n-fact'))).toBe(PAPER['--gv-fact']);
+    expect(lib.calls.cameraPosition.at(-1)![1]).toBe(node('n-episode')); // the camera moves in on it
+    await screen.findByLabelText('Episode detail');
+
+    last('onBackgroundClick')();
+    expect(last('linkColor')(link('e1'))).toBe(PAPER['--gv-other']);
+  });
+
+  it('a hover label is written as HTML by the library: hostile memory text reaches it escaped, long text cut', async () => {
+    install();
+    render(GraphView);
+    await waitFor(() => expect(loads()).toBe(1));
+    const hostile = last('nodeLabel')(node('n-episode'));
+    expect(hostile).not.toMatch(/[<>"]/);
+    expect(hostile).toContain('&lt;img');
+    expect(last('nodeLabel')(node('n-decision')).length).toBeLessThan(100);
+  });
+
+  it('the endpoint chooses the memories: the size and the chunks box refetch, with their parameters', async () => {
+    install();
+    render(GraphView);
+    await waitFor(() => expect(loads()).toBe(1));
+    expect(fetched).toEqual(['/dashboard/graph?limit=1500']);
+    expect(screen.getByRole('button', { name: '1,500' }).getAttribute('aria-pressed')).toBe('true');
+
+    await fireEvent.click(screen.getByRole('button', { name: '600' }));
+    await waitFor(() => expect(fetched.at(-1)).toBe('/dashboard/graph?limit=600'));
+    await fireEvent.click(screen.getByLabelText(/Chunk/));
+    await waitFor(() => expect(fetched.at(-1)).toBe('/dashboard/graph?limit=600&chunks=1'));
+    await waitFor(() => expect(loads()).toBe(3)); // each fetch lays the graph out once
+    expect(lib.made).toBe(1);
+  });
+
+  it('"Turn slowly" drives the slow turn, and the header says what part of the graph is drawn', async () => {
+    install();
+    render(GraphView);
+    await waitFor(() => expect(loads()).toBe(1));
+    await waitFor(() => expect(lib.controls.autoRotate).toBe(true));
+    // It holds still under a mouse pointer, so a memory can be read and tapped; a touch never parks it.
+    const brain = screen.getByRole('application');
+    await fireEvent.pointerEnter(brain, { pointerType: 'mouse' });
+    await waitFor(() => expect(lib.controls.autoRotate).toBe(false));
+    await fireEvent.pointerLeave(brain);
+    await waitFor(() => expect(lib.controls.autoRotate).toBe(true));
+    await fireEvent.click(screen.getByLabelText(/Turn slowly/));
+    await waitFor(() => expect(lib.controls.autoRotate).toBe(false));
+    expect(document.body.textContent).toContain('5 of 50 linked memories and 4 of 40 links');
+    expect(document.body.textContent).toContain('Chunks are left out.');
+    expect(document.body.textContent).toContain('80%'); // four of the five drawn memories are one piece
+  });
+
+  it('without WebGL the screen says so in words, and keeps its controls', async () => {
+    install();
+    lib.fail = true;
+    render(GraphView);
+    await screen.findByText('The 3D graph could not start in this browser. It needs WebGL.');
+    expect(screen.getByLabelText('Search graph nodes')).toBeTruthy();
   });
 
   it('the node sheet: hostile and long labels render as text; connections say "to" and "from" in words', async () => {
     install();
     render(GraphView);
-    await waitFor(() => expect(cyto.factory).toHaveBeenCalledTimes(1));
-    cyto.tap('n-episode');
+    await waitFor(() => expect(loads()).toBe(1));
+    last('onNodeClick')(node('n-episode'));
     const sheet = await screen.findByLabelText('Episode detail');
     await waitFor(() => expect(sheet.querySelectorAll('button.conn-item')).toHaveLength(2));
     expect(sheet.classList.contains('page-ground')).toBe(true); // the page ground, though portalled
@@ -213,7 +289,7 @@ describe('Graph on the paper look', () => {
   });
 
   it('the sources hold no colour literal and no {@html', () => {
-    for (const f of ['GraphView.svelte', '../lib/viz/Graph.svelte']) {
+    for (const f of ['GraphView.svelte', '../lib/viz/BrainGraph.svelte', '../lib/brainGraph.ts']) {
       const src = readFileSync(join(__dirname, f), 'utf-8');
       expect(src, f).not.toMatch(/#[0-9a-fA-F]{3,8}\b|rgba?\(/);
       expect(src, f).not.toContain('{@html');

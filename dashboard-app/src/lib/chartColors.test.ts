@@ -30,8 +30,7 @@ describe('TOKEN_FALLBACK', () => {
 
   it('holds every series slot and every graph and relation colour token', () => {
     for (let i = 0; i <= 13; i++) expect(TOKEN_FALLBACK[`--series-${i}`], `--series-${i}`).toBeDefined();
-    // The Graph's edge opacities are numbers, read by GraphView itself; the table holds colours only.
-    const colourTokens = Object.keys(ROOT).filter((t) => (t.startsWith('--gv-') || t.startsWith('--rel-')) && !t.endsWith('-opacity') && !t.includes('-opacity-'));
+    const colourTokens = Object.keys(ROOT).filter((t) => t.startsWith('--gv-') || t.startsWith('--rel-'));
     for (const k of colourTokens) expect(TOKEN_FALLBACK[k], k).toBeDefined();
   });
 

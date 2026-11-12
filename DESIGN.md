@@ -446,6 +446,8 @@ A compact plot of the day's turns in labelled lanes, each turn a small rounded b
 ### Charts
 Chart text is 12px Archivo in muted ink on a rule-coloured grid. Legends are 8px dots beside words. Bars are rounded and unoutlined. Day and hour labels stay level and skip rather than tilt. Canvas charts resolve their colours from the same tokens as the page.
 
+The Graph screen draws memory as one mass in three dimensions (`lib/viz/BrainGraph.svelte`, on 3d-force-graph, loaded only on that screen): memories are bodies in their `--gv-*` type colour, sized by their links and paler with age; links are thin curved fibres in `--gv-other` that fade with distance into the card's surface. A tapped memory sends activation along its links, one step and then a second, and those links take their `--rel-*` relation colour. Memory text appears as a hover label and in the detail sheet, never drawn on the canvas.
+
 ### Companion
 - **Top bar:** Atlantic, with the product name and the connection state as a word on a light pill.
 - **Surface:** a white 18px card with the card shadow and about 18px padding; nested cards and evidence tiles are a wash at 12px with no shadow.
@@ -454,7 +456,7 @@ Chart text is 12px Archivo in muted ink on a rule-coloured grid. Legends are 8px
 - **Parity:** the companion keeps its own stylesheet; `companionParity.test.ts` fails when a value it shares with the dashboard drifts.
 
 ### Motion
-State changes take 0.2s on a decelerating curve (`cubic-bezier(0.16, 1, 0.3, 1)`): a hover fill, a chevron's turn, a replayed bar's fade. Nothing moves to decorate. The only loops are small waiting signs, such as the pulse of the "loading" word. Reduced motion turns every transition off and stops every loop.
+State changes take 0.2s on a decelerating curve (`cubic-bezier(0.16, 1, 0.3, 1)`): a hover fill, a chevron's turn, a replayed bar's fade. Nothing moves to decorate. The one standing exception is the Graph screen: its three-dimensional memory graph turns slowly, because the turn is what makes its depth readable; the turn has its own switch, holds still under a mouse pointer, and is off under reduced motion. The only loops are small waiting signs, such as the pulse of the "loading" word. Reduced motion turns every transition off and stops every loop.
 
 ## Do's and Don'ts
 
