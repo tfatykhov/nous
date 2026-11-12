@@ -49,7 +49,7 @@ def build_commitment_routes(*, database: Any, settings: Any) -> list[Route]:
     # The first field only: ``sha256sum`` prints the digest followed by "  -".
     fields = settings.owner_route_secret_sha256.split()
     digest = fields[0].lower() if fields else ""
-    problem = None
+    problem: str | None = None
     if not digest:
         problem = "NOUS_OWNER_ROUTE_SECRET_SHA256 is not set"
     elif not _SHA256_HEX_RE.fullmatch(digest):
