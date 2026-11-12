@@ -517,6 +517,24 @@ def test_a_secret_straddling_the_cut_is_redacted_before_the_cut():
     assert "sk-ant" not in params["what"] and "sk-ant" not in params["promise_text"]
 
 
+@pytest.mark.parametrize("cut", ["what", "sentence"])
+def test_a_secret_straddling_a_detector_cut_is_redacted_whole(cut):
+    """Re-review 3 and Codex on 793faa6a: the detector cut the sentence to 500 and ``what`` to 300 before anything
+    was redacted, so a key across either cut reached the store as a fragment no pattern matches."""
+    from nous.brain.commitments import PROMISE_TEXT_MAX, WHAT_MAX
+
+    key = "sk-ant-api03-" + "A" * 40
+    head = "I'll rotate the key tomorrow, "
+    boundary = WHAT_MAX if cut == "what" else PROMISE_TEXT_MAX
+    sentence = head + "x" * (boundary - len(head) - 10) + " " + key + " now."
+    assert sentence.index(key) < boundary < sentence.index(key) + len(key)
+    [promise] = PromiseDetector().scan(sentence, now=NOW)
+    params = _params(what=promise.what, promise_text=promise.text)
+    for text in (promise.what, promise.text, params["what"], params["promise_text"]):
+        assert "sk-ant" not in text and "AAAA" not in text, text
+    assert "[REDACTED" in promise.text  # the marker may itself be cut; the key never is
+
+
 def test_control_characters_are_stripped_and_whitespace_kept():
     text = "I'll relaunch\x00 it ‮tomorrow\x1b[31m.\tthen\nreport"
     params = _params(what=text, promise_text=text)

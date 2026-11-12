@@ -21,7 +21,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
-from nous.brain.commitments import MAX_DUE_DAYS, SOURCE_KIND_BY_CONTEXT, CommitmentStore, normalise_what
+from nous.brain.commitments import (
+    MAX_DUE_DAYS,
+    SOURCE_KIND_BY_CONTEXT,
+    CommitmentStore,
+    clean_text,
+    normalise_what,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +187,7 @@ _WORD_NUM = {"a": 1, "an": 1, "one": 1, "two": 2}
 class Promise:
     """One promise sentence."""
 
-    text: str  # the sentence, at most SENTENCE_MAX characters
+    text: str  # the sentence, cleaned and redacted whole, then cut to SENTENCE_MAX characters
     what: str  # the normalised one-liner stored in brain.commitments.what
     due_at: datetime
     due_parsed: bool  # False: the default due (no time in the sentence the detector could resolve)
@@ -276,11 +282,13 @@ class PromiseDetector:
             if not (strong or (weak and _VERB_RE.search(sentence))):
                 continue
             due_at, parsed = _due_at(sentence, now, self._default_due_minutes)
-            clipped = sentence[:SENTENCE_MAX]
+            # Cleaned and redacted whole before either cut: a key across a cut would leave a fragment that no
+            # pattern matches.
+            cleaned = clean_text(sentence)
             promises.append(
                 Promise(
-                    text=clipped,
-                    what=normalise_what(clipped),
+                    text=cleaned[:SENTENCE_MAX],
+                    what=normalise_what(cleaned),
                     due_at=due_at,
                     due_parsed=parsed,
                     consent="silence" if silence else "none",
