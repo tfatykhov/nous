@@ -1,8 +1,8 @@
 """F111 PR B1: migration 108, the overdue watcher's index (plan §2, §9 DDL test).
 
-The migration file is the owner's to add (a headless job may not write under sql/migrations/), so its DDL lives in
-the F111 doc's appendix. These tests read it from there: the file, once added, must be that block exactly; the block
-applies twice cleanly and builds the index the watcher's read uses.
+The owner added the migration file (a headless job may not write under sql/migrations/); its DDL is also in the F111
+doc's appendix. These tests read it from there: the file must exist and be that block exactly; the block applies twice
+cleanly and builds the index the watcher's read uses.
 """
 
 from __future__ import annotations
@@ -33,9 +33,7 @@ def test_the_ddl_has_no_semicolon_in_a_comment_and_no_grant():
     assert len(statements) == 2 and not [s for s in statements if "GRANT" in s.upper()]
 
 
-def test_the_migration_file_once_added_is_the_ddl_the_doc_records():
-    if not MIGRATION_108.exists():
-        pytest.skip("migration 108 is the owner's to add (see the PR); the doc's appendix is the DDL")
+def test_the_migration_file_is_the_ddl_the_doc_records():
     assert MIGRATION_108.read_text(encoding="utf-8") == _ddl()
 
 

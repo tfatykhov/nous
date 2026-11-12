@@ -250,7 +250,8 @@ class CommitmentWatcher:
         try:
             return await self._send(message)
         except Exception:
-            logger.warning("F111 promise watcher: the send raised; its outcome is unknown", exc_info=True)
+            # No traceback: an httpx one can carry the request URL, which holds the bot token.
+            logger.warning("F111 promise watcher: the send raised; its outcome is unknown")
             return SendResult.UNKNOWN
 
     def _warn_released(self, labels: str, result: SendResult, now: datetime) -> None:
