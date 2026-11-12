@@ -421,13 +421,14 @@ def _due_phrase(due_at: datetime, now: datetime) -> str:
     return f"{rel} ({due_at.astimezone(UTC):%H:%M} UTC)"
 
 
-def render_footer(labels: list[str], first: Promise, now: datetime) -> str:
-    """One line, whatever the number of rows (spec: at most one footer per turn). No 'committed' wording: the
-    claim verifier's vcs_commit check reads that word."""
+def render_footer(labels: list[str], due_at: datetime, now: datetime) -> str:
+    """One line, whatever the number of rows (spec: at most one footer per turn). ``due_at`` is the first row's, as
+    stored (a far promise is clamped). No 'committed' wording: the claim verifier's vcs_commit check reads that
+    word."""
     ids = ", ".join(labels)
     plural = "commitments" if len(labels) > 1 else "commitment"
     return (
-        f"⏱ Recorded as {plural} {ids}, due {_due_phrase(first.due_at, now)}; nothing is scheduled for it yet. "
+        f"⏱ Recorded as {plural} {ids}, due {_due_phrase(due_at, now)}; nothing is scheduled for it yet. "
         f"/drop {labels[0]} to cancel."
     )
 
@@ -516,7 +517,7 @@ class PromiseGate:
         result.labels = [r.label for r in rows if r is not None]
         shown = [(p, r) for p, r in zip(unbacked, rows, strict=True) if r is not None and p.kind == "action"]
         if footer_wanted and shown:
-            result.footer = render_footer([r.label for _, r in shown], shown[0][0], now)
+            result.footer = render_footer([r.label for _, r in shown], shown[0][1].due_at, now)
         return result
 
     async def log_error(

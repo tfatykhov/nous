@@ -327,9 +327,26 @@ def test_oct08_record_decision_does_not_back_but_a_dag_and_three_commits_do():
 
 def test_the_footer_is_one_line_with_the_id_and_a_relative_due():
     [promise] = PromiseDetector().scan("I'll remove it (option A) unless you object.", now=NOW)
-    footer = render_footer(["C-0042"], promise, NOW)
+    footer = render_footer(["C-0042"], promise.due_at, NOW)
     assert "\n" not in footer and "C-0042" in footer and "in 60 min (18:45 UTC)" in footer
     assert "/drop C-0042" in footer and "committed" not in footer.lower()
+
+
+async def test_the_footer_shows_the_deadline_the_row_stores():
+    """Codex P2 on b946f69f: the row is clamped to MAX_DUE_DAYS, the footer read the unclamped promise."""
+    store = FakeStore()
+    outcome = await _gate("warn", store).run(
+        "I'll revisit the pricing in 20 weeks.",
+        [],
+        path="stream",
+        session_id="s",
+        turn_id="t",
+        context_kind=None,
+        now=NOW,
+    )
+    [row] = store.rows.values()
+    assert row.due_at < NOW + timedelta(days=90)
+    assert f"due {row.due_at:%Y-%m-%d %H:%M} UTC" in outcome.footer
 
 
 # ---- 4. store helpers, the commit tool's validation and the store itself -----------------------------------------
@@ -800,7 +817,7 @@ def test_the_commit_wording_does_not_trip_the_vcs_commit_claim():
     [promise] = PromiseDetector().scan("I'll remove it (option A) unless you object.", now=NOW)
     texts = [
         REAL_RESULTS["commit"][0],
-        render_footer(["C-0042"], promise, NOW),
+        render_footer(["C-0042"], promise.due_at, NOW),
         "I've committed to relaunching it at 18:15 UTC (C-0042).",
     ]
     for reply in texts:
