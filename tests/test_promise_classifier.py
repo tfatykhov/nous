@@ -383,6 +383,8 @@ def test_every_fixture_sentence_has_a_label_and_a_reason():
     texts = {c["text"]: c["label"] for c in cases}
     assert texts["The market will be closed by then."] == "not_promise"  # plan K
     assert texts["The PR will be merged by then."] == "promise"
+    c1 = [t for t in texts if t.startswith("Nothing follows up on these yet, so I'll close each row myself")]
+    assert len(c1) == 1 and texts[c1[0]] == "not_promise"  # review I2: the sentence prod stored for C-1
 
 
 @pytest.mark.live_llm

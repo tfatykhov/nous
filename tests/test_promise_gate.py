@@ -1079,10 +1079,20 @@ def test_the_pr_merged_by_then_stays_a_stage1_positive():
     assert len(PromiseDetector().scan("The PR will be merged by then.", now=NOW)) == 1
 
 
+C1_PROD_SENTENCE = (
+    "Nothing follows up on these yet, so I'll close each row myself when the work is done or dropped; I also updated"
+    " my memory, which still said #897 wasn't deployed, and PR B is untouched."
+)
+
+
 def test_the_c1_class_is_left_to_stage_2():
     """Plan A: no stage-1 change for the C-1 class. Stage 1 as it stands at e09791f4: the conditional deploy is
-    flagged; the standing policy is not ("close" is not an action verb), and stage 2 labels it if it ever is."""
+    flagged; the short policy form is not ("close" is not an action verb). The sentence prod stored for C-1 IS
+    flagged (review I2): "I'll" is the future form and "when" the weak marker, and _VERB_RE searches the whole
+    sentence, where it finds "follows up" and "deployed" in the other clauses (the splitter does not split on ";").
+    Stage 2 labels it not_promise (tests/fixtures/promise_stage2.yaml)."""
     detector = PromiseDetector()
     assert len(detector.scan("I'll deploy it when CI is green.", now=NOW)) == 1
     assert len(detector.scan("I'll send you the summary once the job finishes.", now=NOW)) == 1
     assert detector.scan("I'll close each row myself when the work is done or dropped.", now=NOW) == []
+    assert len(detector.scan(C1_PROD_SENTENCE, now=NOW)) == 1

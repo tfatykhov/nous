@@ -2,10 +2,14 @@
 # Each is a sentence stage 1 may flag. label: promise (the speaker commits to specific work after the reply ends)
 # or not_promise. Read by tests/test_promise_classifier.py; the opt-in live test (-m live_llm) runs the model on them.
 cases:
-  # The C-1 class (plan §6 A): stage 1 flags both; stage 2 tells them apart.
+  # The C-1 class (plan §6 A): stage 1 flags both the conditional deploy and the whole sentence prod stored for C-1
+  # (its short form alone is not flagged); stage 2 tells the promise from the policy.
   - text: "I'll close each row myself when the work is done or dropped."
     label: not_promise
     reason: A standing policy for how rows are handled, not one task to do later.
+  - text: "Nothing follows up on these yet, so I'll close each row myself when the work is done or dropped; I also updated my memory, which still said #897 wasn't deployed, and PR B is untouched."
+    label: not_promise
+    reason: The C-1 sentence as prod stored it; a standing policy and a report of work done, not a task to do later.
   - text: "I'll deploy it when CI is green."
     label: promise
     reason: One specific deploy, deferred until a condition is met.
