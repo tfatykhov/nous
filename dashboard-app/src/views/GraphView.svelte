@@ -282,6 +282,7 @@
         {hiddenTypes}
         {minEdges}
         {turn}
+        covered={sheetOpen}
       />
       <p class="graph-hint">
         Tap a memory for its detail and to see activation spread · Drag to turn · Pinch or scroll to zoom

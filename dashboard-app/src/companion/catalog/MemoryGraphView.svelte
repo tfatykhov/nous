@@ -1,6 +1,6 @@
 <script lang="ts">
   // nous-core MemoryGraph — hand-rolled SVG radial graph (the companion
-  // entry ships no vendor JS; cytoscape/d3 are dashboard-only script tags).
+  // entry ships no vendor JS; Chart.js and d3 are dashboard-only script tags).
   // Focus node at the center, everything else on rings. Tapping a node
   // calls the agent-side expandGraphNode function over POST /a2ui/call and
   // merges the returned neighborhood into the surface's LOCAL data model —

@@ -79,6 +79,9 @@ describe('colour and framing sums', () => {
     expect(mixHex(black, white, 0)).toBe(black);
     expect(mixHex(black, white, 1)).toBe(white);
     expect(mixHex(black, white, 0.5)).toBe('#' + '80'.repeat(3));
+    // The built stylesheet carries white as three digits; a mix toward it must still mix.
+    expect(mixHex(black, '#' + 'f'.repeat(3), 0.5)).toBe('#' + '80'.repeat(3));
+    expect(mixHex('#' + 'f'.repeat(3), black, 1)).toBe(black);
     expect(mixHex('var(--x)', white, 0.5)).toBe('var(--x)');
     expect(mixHex(black, '', 0.5)).toBe(black);
   });

@@ -25,6 +25,7 @@
     hiddenTypes = new Set<string>(),
     minEdges = 0,
     turn = true,
+    covered = false,
   }: {
     nodes: BrainNode[];
     links: BrainLink[];
@@ -36,6 +37,8 @@
     minEdges?: number;
     /** Turn the mass slowly so its depth reads. Never on under reduced motion. */
     turn?: boolean;
+    /** Something (the detail sheet) is over the graph: the activation waits, and plays when it is uncovered. */
+    covered?: boolean;
   } = $props();
 
   let el: HTMLDivElement;
@@ -77,6 +80,11 @@
   const repaint = () => graph?.nodeColor(nodeColor).linkColor(linkColor).linkWidth((l: BrainLink) => (crossed(l) ? 0.9 : 0));
 
   const shown = (n: BrainNode) => !hiddenTypes.has(n.type) && n.degree >= minEdges;
+  /** The memories whose text holds the search words; null with nothing searched. */
+  function matchesOf(query: string): Set<string> | null {
+    const q = query.toLowerCase().trim();
+    return q ? new Set(nodes.filter((n) => n.label.toLowerCase().includes(q)).map((n) => n.id)) : null;
+  }
   // A link's ends are memory ids until the library has laid the graph out, and the node objects after.
   let byId = new Map<string, BrainNode>();
   const linkShown = (l: BrainLink) => {
@@ -135,18 +143,24 @@
     const far = Math.hypot(node.x ?? 0, node.y ?? 0, node.z ?? 0) || 1;
     const k = 1 + 300 / far;
     graph.cameraPosition({ x: (node.x ?? 0) * k, y: (node.y ?? 0) * k, z: (node.z ?? 0) * k }, node, reduced ? 0 : 900);
-    if (!reduced) {
-      const wave = (list: BrainLink[], ms: number) =>
-        setTimeout(() => { if (graph && active?.origin === origin) for (const l of list) graph.emitParticle(l); }, ms);
-      wave(active.first, 900);
-      wave(active.second, 1900);
-    }
     onNodeClick?.(node);
+    // The tap usually opens the detail sheet over the graph; then the waves wait for it to close (the effect below).
+    setTimeout(() => { if (!covered) pulse(origin); }, 900);
+  }
+
+  /** Activation crossing the links: the first step now, the second a second later. */
+  function pulse(origin: string) {
+    if (reduced || !graph || active?.origin !== origin) return;
+    const wave = (list: BrainLink[]) => { if (graph && active?.origin === origin) for (const l of list) graph.emitParticle(l); };
+    wave(active.first);
+    const second = active.second;
+    setTimeout(() => wave(second), 1000);
   }
 
   function load() {
     if (!graph) return;
     active = null;
+    matches = matchesOf(searchQuery);
     // Copies: the library writes positions onto the objects it is given.
     const copies = nodes.map((n) => ({ ...n }));
     byId = new Map(copies.map((n) => [n.id, n]));
@@ -212,6 +226,7 @@
     return () => {
       gone = true;
       observer?.disconnect();
+      graph?.renderer?.().forceContextLoss?.(); // a browser allows only a few WebGL contexts: give this one back now
       graph?._destructor?.();
       graph = null;
     };
@@ -236,11 +251,21 @@
   });
 
   $effect(() => {
-    const q = searchQuery.toLowerCase().trim();
+    const q = searchQuery;
     if (!ready) return;
     untrack(() => {
-      matches = q ? new Set(nodes.filter((n) => n.label.toLowerCase().includes(q)).map((n) => n.id)) : null;
+      matches = matchesOf(q);
       repaint();
+    });
+  });
+
+  // Uncovered again with a memory still active: its activation plays where it can be seen.
+  let wasCovered = false;
+  $effect(() => {
+    const now = covered;
+    untrack(() => {
+      if (wasCovered && !now && active) pulse(active.origin);
+      wasCovered = now;
     });
   });
 

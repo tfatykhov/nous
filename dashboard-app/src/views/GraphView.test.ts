@@ -167,6 +167,12 @@ describe('Graph on the paper look', () => {
     expect(last('nodeColor')(node('n-fact'))).toBe(PAPER['--gv-fact']); // the match keeps its colour
     expect(last('nodeColor')(node('n-episode'))).not.toBe(PAPER['--gv-episode']); // the rest fade
 
+    // A refetch keeps the search: the new drawing's matches are found again.
+    await fireEvent.click(screen.getByRole('button', { name: '600' }));
+    await waitFor(() => expect(loads()).toBe(2));
+    expect(last('nodeColor')(node('n-fact'))).toBe(PAPER['--gv-fact']);
+    expect(last('nodeColor')(node('n-episode'))).not.toBe(PAPER['--gv-episode']);
+
     await fireEvent.click(screen.getByLabelText(/Episode/));
     await tick();
     expect(last('nodeVisibility')(node('n-episode'))).toBe(false);
@@ -177,7 +183,7 @@ describe('Graph on the paper look', () => {
     expect(last('linkVisibility')({ id: 'e2', source: 'n-decision', target: 'n-fact', relation: 'informed_by' })).toBe(true);
     expect(last('linkVisibility')({ id: 'e1', source: 'n-fact', target: 'n-episode', relation: 'supports' })).toBe(false);
     expect(last('linkVisibility')({ id: 'ex', source: 'n-fact', target: 'gone', relation: 'supports' })).toBe(false);
-    expect(loads()).toBe(1);
+    expect(loads()).toBe(2);
     expect(lib.made).toBe(1);
   });
 
@@ -192,6 +198,12 @@ describe('Graph on the paper look', () => {
     expect(last('nodeColor')(node('n-fact'))).toBe(PAPER['--gv-fact']);
     expect(lib.calls.cameraPosition.at(-1)![1]).toBe(node('n-episode')); // the camera moves in on it
     await screen.findByLabelText('Episode detail');
+    // The sheet covers the graph, so no activation is sent yet; it crosses the links once the sheet is closed.
+    await new Promise((r) => setTimeout(r, 1000));
+    expect(lib.calls.emitParticle).toBeUndefined();
+    await fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    await waitFor(() => expect((lib.calls.emitParticle ?? []).map((a) => a[0].id)).toEqual(['e1']));
+    await waitFor(() => expect((lib.calls.emitParticle ?? []).map((a) => a[0].id)).toEqual(['e1', 'e2']), { timeout: 2000 });
 
     last('onBackgroundClick')();
     expect(last('linkColor')(link('e1'))).toBe(PAPER['--gv-other']);

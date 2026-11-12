@@ -122,12 +122,16 @@ export function ageFade(ageDays: number | null): number {
   return ageDays == null ? 0.25 : Math.min(0.5, ageDays / 120);
 }
 
+/** The production build shortens a token's colour where it can (white ships as three digits), so both forms are read. */
 function channels(hex: string): number[] | null {
-  const m = /^#([0-9a-f]{6})$/i.exec(hex.trim());
-  return m ? [0, 2, 4].map((i) => parseInt(m[1].slice(i, i + 2), 16)) : null;
+  const m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return null;
+  const h = m[1].length === 3 ? [...m[1]].map((c) => c + c).join('') : m[1];
+  return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
 }
 
-/** `a` mixed `t` of the way toward `b`, both six-digit hex colours; `a` unchanged when either is anything else. */
+/** `a` mixed `t` of the way toward `b`, both opaque hex colours (three or six digits); `a` unchanged when either is
+ * anything else. */
 export function mixHex(a: string, b: string, t: number): string {
   const x = channels(a);
   const y = channels(b);
