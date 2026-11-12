@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 
 DETECTOR_VERSION = "stage1-v1"
 SENTENCE_MAX = 500
+# The detector reads the end of a reply only (where a promise is made): it runs on the event loop, where the gate's
+# timeout cannot stop it, so its cost must not grow with NOUS_MAX_TOKENS.
+SCAN_MAX_CHARS = 32_000
 
 # ---------------------------------------------------------------------------
 # Stage 1 detector (spec D.4)
@@ -95,7 +98,8 @@ _AWAITING_USER_RE = re.compile(
 
 _FENCE_RE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
-_QUOTED_RE = re.compile(r"\"[^\"\n]*\"|“[^”\n]*”")
+# Neither quote class may contain an opening mark: "“[^”]*”" rescanned the line from every unclosed “ (quadratic).
+_QUOTED_RE = re.compile(r"\"[^\"\n]*\"|“[^“”\n]*”")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 
 # Due-time extraction for the cases the detector can resolve without guessing; anything else gets the default.
@@ -175,12 +179,12 @@ class PromiseDetector:
         self._default_due_minutes = default_due_minutes
 
     def scan(self, response_text: str, now: datetime | None = None) -> list[Promise]:
-        """The promises in a reply, one per sentence, in order (empty for none)."""
+        """The promises in the last ``SCAN_MAX_CHARS`` of a reply, one per sentence, in order (empty for none)."""
         if not response_text:
             return []
         now = now or datetime.now(UTC)
         promises: list[Promise] = []
-        for raw in _SENTENCE_SPLIT_RE.split(_strip_non_prose(response_text)):
+        for raw in _SENTENCE_SPLIT_RE.split(_strip_non_prose(response_text[-SCAN_MAX_CHARS:])):
             sentence = raw.strip(" \t-*•")
             if not sentence or sentence.endswith("?"):
                 continue

@@ -167,6 +167,25 @@ def test_stage1_p95_is_under_5_ms():
     assert p95 < 5.0, f"p95 {p95:.2f} ms"
 
 
+@pytest.mark.parametrize("unit", ["“a ", "„alpha“ "], ids=["unclosed-curly-quotes", "german-quotes"])
+def test_a_200_kb_line_of_quote_marks_scans_in_milliseconds(unit):
+    """Review finding 2: the quoted-string pattern rescanned the line from every unclosed “ (193 KB took 35 s of a
+    blocked event loop); German quoting („alpha“, where “ closes) hit the same path."""
+    reply = unit * (200_000 // len(unit))
+    start = time.perf_counter()
+    PromiseDetector().scan(reply, now=NOW)
+    assert time.perf_counter() - start < 0.1
+
+
+def test_the_detector_reads_the_last_32_kb_only():
+    from nous.cognitive.promise_gate import SCAN_MAX_CHARS
+
+    filler = "This paragraph explains the result. " * (SCAN_MAX_CHARS // 30)
+    early = PromiseDetector().scan("I'll check back tomorrow. " + filler, now=NOW)
+    late = PromiseDetector().scan(filler + "I'll check back tomorrow.", now=NOW)
+    assert early == [] and len(late) == 1
+
+
 # ---- 3. resolver -------------------------------------------------------------------------------------------------
 
 # The success text of each backing tool, as its handler writes it (nous/api/tools.py,
