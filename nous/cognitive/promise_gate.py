@@ -131,6 +131,37 @@ _VERB_RE = re.compile(
     + r")(?:s|es|ed|d|ing|ning)?\b",
     re.IGNORECASE,
 )
+
+
+def _participle(verb: str) -> str:
+    """The past participle of an ``ACTION_VERBS`` entry ("send" -> "sent", "kick off" -> "kicked off")."""
+    head, _, rest = verb.partition(" ")
+    irregular = {"run": "run", "rerun": "rerun", "re-run": "re-run", "send": "sent", "build": "built"}
+    if head in irregular:
+        done = irregular[head]
+    elif head.endswith("y") and head[-2:-1] not in "aeiou":
+        done = head[:-1] + "ied"
+    elif head.endswith("e"):
+        done = head + "d"
+    else:
+        done = head + "ed"
+    return f"{done} {rest}" if rest else done
+
+
+# F111 PR B1: a future passive of an action verb with a "by <time>" deadline is the agent's own promise ("The fix will
+# be deployed by morning."). The verb must be in ACTION_VERBS and the "by" must name a time, never someone ("will be
+# reviewed by Tim"); a past passive ("was merged by Tim") has no future form.
+_PASSIVE_DEADLINE_RE = re.compile(
+    rf"\b(?:will|{_APOS}ll|(?:is|are|{_APOS}s|{_APOS}re)\s+going\s+to)\s+be\s+"
+    r"(?:"
+    + "|".join(re.escape(_participle(v)).replace(r"\ ", r"\s+") for v in sorted(ACTION_VERBS, key=len, reverse=True))
+    + r")\b[^.!?;]*?\bby\s+(?:"
+    r"(?:the\s+)?(?:morning|tonight|tomorrow|noon|midnight|eod|eow|end\s+of\s+(?:the\s+)?(?:day|week))\b"
+    r"|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
+    rf"|{_MONTH}\.?\s+\d{{1,2}}(?:st|nd|rd|th)?\b|\d{{1,2}}(?:st|nd|rd|th)?\s+(?:of\s+)?{_MONTH}"
+    r"|\d{4}-\d{2}-\d{2}\b|\d{1,2}(?::\d{2})?\s*(?:am|pm|z|utc|gmt)\b|\d{1,2}:\d{2}\b)",
+    re.IGNORECASE,
+)
 # An offer to the owner is not a promise ("if you want, I can launch it").
 _OFFER_RE = re.compile(
     rf"\b(?:if\s+you(?:{_APOS}d)?\s+(?:want|like|prefer|wish)|want\s+me\s+to|should\s+I|shall\s+I|would\s+you\s+like"
@@ -282,10 +313,11 @@ class PromiseDetector:
             if not sentence or sentence.endswith("?"):
                 continue
             probe = _NEXT_STEP_YOURS_RE.sub("", sentence)  # the owner's next step is no future form or marker
-            if not _agent_future_form(probe) or _OFFER_RE.search(sentence):
+            passive = _PASSIVE_DEADLINE_RE.search(probe) is not None  # a future form and a deadline in one
+            if not (passive or _agent_future_form(probe)) or _OFFER_RE.search(sentence):
                 continue
             silence = _SILENCE_RE.search(sentence) is not None
-            strong = silence or any(r.search(probe) for r in _STRONG_RES)
+            strong = silence or passive or any(r.search(probe) for r in _STRONG_RES)
             awaiting = _AWAITING_USER_RE.search(sentence) is not None
             weak = _WEAK_RE.search(sentence) is not None or awaiting
             if not (strong or (weak and _VERB_RE.search(sentence))):

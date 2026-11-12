@@ -1013,3 +1013,53 @@ def test_settings_object_reads_the_gate_mode():
     from nous.cognitive.promise_gate import PromiseGate
 
     assert PromiseGate(FakeStore(), s).mode == "off"
+
+
+# ---- F111 PR B1: the passive with a deadline, and the C-1 class (plan §6) ------------------------------------------
+
+# A future passive of an action verb with a `by <time>` deadline is the agent's own promise. The due time is what the
+# existing _due_at parser makes of the sentence: only "by tomorrow" is parsed; "by morning" and "by November 20" get
+# the default (due_parsed False).
+PASSIVE_HITS = [
+    ("The fix will be deployed by morning.", False),
+    ("The summary will be sent by November 20.", False),
+    ("It'll be deployed by tomorrow.", True),
+    ("The new index is going to be built by tonight.", False),
+    ("The chain will be relaunched by 18:15 UTC.", True),
+]
+PASSIVE_MISSES = [
+    "Your order will be delivered by Friday.",
+    "The PR was merged by Tim.",
+    "It will be reviewed by Tim.",
+    "This was sent by morning courier.",
+    "The fix will not be deployed by morning.",
+    # Not in ACTION_VERBS ("do", "ready" are not), so the rule does not reach them (reported on the PR).
+    "It'll be done by tomorrow.",
+    "The report is going to be ready by 5pm.",
+]
+
+
+@pytest.mark.parametrize(("sentence", "parsed"), PASSIVE_HITS)
+def test_a_future_passive_with_a_deadline_is_one_promise(sentence, parsed):
+    [promise] = PromiseDetector(default_due_minutes=60).scan(sentence, now=NOW)
+    assert promise.kind == "action" and promise.due_parsed is parsed
+    assert promise.due_at > NOW
+
+
+@pytest.mark.parametrize("sentence", PASSIVE_MISSES)
+def test_a_passive_that_is_not_the_agents_deadline_is_no_promise(sentence):
+    assert PromiseDetector().scan(sentence, now=NOW) == []
+
+
+def test_the_pr_merged_by_then_stays_a_stage1_positive():
+    """Plan K: 'The market will be closed by then.' has the same shape, so it is stage 2's to reject, not stage 1's."""
+    assert len(PromiseDetector().scan("The PR will be merged by then.", now=NOW)) == 1
+
+
+def test_the_c1_class_is_left_to_stage_2():
+    """Plan A: no stage-1 change for the C-1 class. Stage 1 as it stands at e09791f4: the conditional deploy is
+    flagged; the standing policy is not ("close" is not an action verb), and stage 2 labels it if it ever is."""
+    detector = PromiseDetector()
+    assert len(detector.scan("I'll deploy it when CI is green.", now=NOW)) == 1
+    assert len(detector.scan("I'll send you the summary once the job finishes.", now=NOW)) == 1
+    assert detector.scan("I'll close each row myself when the work is done or dropped.", now=NOW) == []
