@@ -2,16 +2,171 @@
 
 All notable changes to Nous. Release notes for each version also live on the [GitHub releases page](https://github.com/tfatykhov/nous/releases).
 
-# Unreleased
+# v1.2.0 — The Legible Agent
 
-## 🖥️ Dashboard
-- **One look: chart paper.** All 18 dashboard screens have a new look: a light chart-paper ground, white rounded cards, an Atlantic-blue sidebar, Archivo and Red Hat Mono, frame colours with their names in plain words, and no symbol icons. The dark look and its switch are gone; a stored choice or a `?look=` link is ignored. The companion's default theme matches it, and its old theme stays as `nous-dark`. (#898 to #904)
+**112 commits, 112 pull requests, 776 files changed since v1.1.0** (October 22 → November 12, 2026)
+
+v1.1.0 made Nous accountable for the work it does on its own. v1.2.0 makes that work **legible**: the owner can see what Nous did and why, turn by turn and call by call; memory serves fewer wrong rows and says where each one came from; and every dashboard screen has one calm look, with memory drawn as the connected web it is.
+
+---
+
+## ✨ Highlights
+
+- **The agent work view (F108).** Every tool call is recorded with the reason the model gave for it, every model call with what it was for and what it cost, and one record per turn. Two new screens read them: Work (sessions and a session's trace) and Model calls.
+- **Tool notes (F108).** Nous detects the tool mistakes it repeats, reviews them into short capped notes during sleep, and reports guard patterns to the owner. Ships dark.
+- **A memory pass, end to end.** Three waves of fixes and flags on the read and write paths: recall stops re-serving, mis-ordering and dropping rows; writes fail closed on uncertain evidence; facts can carry when they were said and the span they hold true for; a cross-encoder can order what is served.
+- **Memory write health.** A daily rollup, six rules and a latched hard-delete detector, shown on the dashboard and the companion with an acknowledge action.
+- **Frame continuity (F110).** The turn log records why each frame was chosen. A short reply can keep the frame of the turn it answers, within a session and across the session roll. The new behaviour ships dark.
+- **An obligation ledger (F111).** Commitments Nous makes are recorded, and a promise gate watches replies for them in shadow mode. The stage-2 classifier and the overdue watcher ship dark.
+- **`db_query`.** A read-only database tool on its own Postgres login, so Nous can answer questions about its own state without write access.
+- **One look, and a graph that looks like memory.** All 18 dashboard screens moved to a light chart-paper look. The Graph screen draws memory as one connected, brain-like mass in three dimensions.
+
+---
+
+## 🔎 F108 — Agent Work View
+
+### Recording *(flag-gated)*
+- **Tool calls:** every call with the model's reason, including refused, gated and failed calls, and one record per turn (#870)
+- **Model calls:** every call with its purpose and cost (#871); full prompt and response text kept 7 days (#872)
+- **One recorder:** the model-call table is the single recorder, the context endpoints read it, and the 15 recording bugs found on the way have regressions (#873)
+- **Retention:** turns, tool calls and model-call numbers 30 days; model-call text and a call's full result 7 days (#882)
+
+### Screens
+- **Work:** a sessions list and a session trace (#875, #878). A continued session sorts first, shows its latest message, and search covers every turn (#885)
+- **Model calls,** with a Cache tab and Patterns (#877, #879)
+- **Navigation** regrouped into six groups; memory health in tabs, a Changes tab, and Activity split (#880)
+
+### Tool notes *(off by default)*
+- Repeated tool mistakes are detected, reviewed into capped notes, and guard patterns go to the owner (#881)
+- A Tool notes procedure with keep-or-retire (#884); the review sees how each offered tool is called (#887)
+
+---
+
+## 🧠 Memory
+
+### Retrieval
+- **Recall selection** stops re-serving, mis-ordering and dropping rows (#833); recall failures reach the retrieval trace instead of looking like empty results (#827)
+- **Own conversation left out:** `recall_deep` and the pre-turn context no longer return the conversation they are called from (#854, #857)
+- **HNSW horizon:** hybrid vector legs widen it so filtered searches return the rows they ask for (#824)
+- **Pre-turn context** keeps fresh decisions, bounds fact pinning and traces why items were dropped (#829); it can search on the user's words or the prompt's task instead of a keyword bag *(flags, off)* (#834)
+- **Precision controls** for `recall_deep`: a leg cut, a top-k with type floors and a section order *(off)* (#861)
+- **Cross-encoder order-only:** the cross-encoder can order Heart's served rows without selecting them *(off)* (#865)
+- **Spreading activation v2 (F105)** and **associative edges v2 (F106):** flagged changes, all off, with a replay harness (#808, #809, #841)
+
+### Time
+- **Facts record when they were said and the span they hold true for** *(off)* (#839)
+- **Facts are read by their date span and shown in date order:** date leg, resolver and rendering *(flags off)* (#848)
+- **Supersession can follow event time:** overlapping spans resolve by start date, disjoint spans coexist *(off)* (#847)
+- **Merged facts** can show the dated facts they were built from (#843, migration 098)
+
+### Write path
+- **Fail closed:** fact writes and merges no longer supersede on uncertain evidence (#831)
+- **Profile facts are learned again** (#832), and a bounded **profile card** is written by a sleep phase from cited profile facts *(off)* (#836, #840)
+- **Deactivation records why** on the row, and the stale scan keeps person and preference facts (#828)
+- **Leaked tool-call markup** is stripped on the write paths, with a script to clean stored rows (#855)
+- **Admission confidence** can score grounding as ROUGE-L precision *(off)* (#867)
+- **Embeddings** fail fast on read paths within a budget; write-side failures are logged and recoverable (#826)
+- **Episodes** stay per session (#825); sleep consolidation remembers refusals and a sleep run starts once (#835)
+
+### Write health
+- A daily rollup, six rules and a latched hard-delete detector (#858), on the dashboard and the companion with an acknowledge action (#859)
+
+### Graph
+- Densifier edges follow their relation's direction and edges to missing rows are pruned (#846)
+- A deliberated decision is linked again on its final description (#851)
+
+---
+
+## 🧭 F110 — Frame Continuity
+
+- The task frame matches write, draft, spec, send, deliver, add and edit (#889, migration 105)
+- The turn log records why the frame was chosen, the critic's frame and whether the turn failed (#890, migration 106)
+- Frame selection and the critic see the message the user is replying to (#891)
+- The frame carries over short replies within a session, for at most three turns *(off)* (#892)
+- A new session's first turn sees the channel's last reply *(off)* (#893)
+- The `db_query` reader reads the turn log's numbers, never its text (#894)
+
+---
+
+## 🤝 F111 — Obligation Ledger
+
+- An obligation ledger, a commit tool and a promise gate in shadow mode (#897, migration 107)
+- An overdue watcher and a stage-2 classifier, both off, with detector fixes (#906, migration 108)
+
+---
+
+## 🛠️ Tools and Runtime
+
+- **`db_query`:** a read-only database tool on its own Postgres login (#816); it logs the tables a statement reads (#868)
+- **Tool descriptions** say when to use each tool; old names resolve through aliases; `recall_recent` and `resolve_decision` merge into `recall_deep` and `resolve_decisions` (#822, #823)
+- **SmartCompress:** cuts the model can undo, line order kept, every cut marked, exception lines and the real last line kept (#818 to #821)
+- **Lineage shell:** owner-listed write dirs, read programs and refused-command heads (#817)
+- **DAGs:** wait nodes and typed waits (#813); the PR check can wait for the Claude Code job that opens the PR (#799)
+- **Continuation turns** that wait for the owner: the stall gate skips asks (#814)
+- **F103:** a flag-only prompt-injection and secret screen for `web_fetch` and `browser_task` (#805)
+- **F107 guards:** a run-level guard for scheduled script jobs, shadow mode and a Guards screen, guards for heartbeat dynamic checks (#810 to #812)
+
+---
 
 ## ⏱️ Scheduling
 - **F101: schedule concurrency and catch-up policies** (inspired by Paperclip routines). Each recurring schedule has a `concurrency_policy`: `coalesce_if_active` (the default), `skip_if_active` or `always_enqueue`. It also has a `catch_up_policy`: `skip_missed` (the default) or `enqueue_missed_with_cap`. Behaviour changes with the defaults: a fire that comes due while the previous run is still active is now coalesced and recorded, where before it was deferred and fired late. The previous run can be the run's subtask or a DAG it created, and a run that is only *pending* counts too, so it now uses up the slot. A `max_fires` schedule counts only the runs that started. `always_enqueue` cannot be combined with `continuation_turns`. Stale runs never block a schedule. `schedule_task` takes the policies and `list_tasks` shows them. `POST /schedules/{id}/run` starts a manual run, which obeys the policy. Migration 091 adds the columns and `execution_dags.schedule_id`. The new behaviour sits behind `NOUS_SCHEDULE_POLICIES_ENABLED` (default on); set it to false for the old behaviour.
 
 ## 📈 Learning From Experience
 - **Procedure versioning and create-time dedupe (F102).** Every procedure body write is a new version in `heart.procedures.version` and `heart.procedure_versions` (migration 092; existing rows backfilled as version 1). `update_body`, `append_notes` and the new `restore` take an optional `expected_version` and refuse a stale write with `ProcedureConflictError`. `store()` replays an `idempotency_key`, and with `NOUS_PROCEDURE_DEDUPE_ENABLED` (default on) merges an auto-learned procedure into a same-named or near-duplicate (cosine ≥ 0.85) auto-learned one instead of inserting a duplicate. A one-off dry-run report, `scripts/diag/procedure_dedupe_report.py`, lists the existing duplicate clusters. Adopted from paperclipai/paperclip's runner-created skills.
+
+---
+
+## 🖥️ Dashboard and Companion
+
+- **One look: chart paper.** All 18 dashboard screens have a new look: a light chart-paper ground, white rounded cards, an Atlantic-blue sidebar, Archivo and Red Hat Mono, frame colours with their names in plain words, and no symbol icons. The dark look and its switch are gone; a stored choice or a `?look=` link is ignored. The companion's default theme matches it, and its old theme stays as `nous-dark`. (#898 to #904)
+- **Graph in three dimensions.** `GET /dashboard/graph` chooses memories instead of links: it grows outward from the newest memories along their strongest links and returns every link among them, with chunks left out unless asked for. The screen draws them as one brain-like mass; a tapped memory sends activation along its links. The 3D library loads only on that screen, and Cytoscape is removed. `limit` now counts memories (1 to 3000), and the response's stats changed. (#886, #907)
+- **Video in the companion:** workspace files, https links and YouTube or Vimeo embeds (#896)
+
+---
+
+## 📏 Measurement and Evaluation
+
+- A served-precision eval library for `recall_deep` and the pre-turn entry points (#856)
+- A HaluMem harness that replays through the production write path (#866)
+- A tracked BEAM harness that ingests through the production write path (#842)
+
+---
+
+## 🔧 Fixes
+
+- The critic's stable prompt goes in the cached system block (#883)
+- `db_query` formats a result off the event loop (#876)
+- The memory write-health check gets 120 seconds for its cold first run (#862)
+- A fact's novelty is 1.0 when nothing comparable exists (#838)
+- The pre-turn recency resolver tags a chain of three or more facts the same in any order (#849)
+- Settled task scores read a window that ends 14 days ago (#798)
+- Claim verifier hardening (#796, #802); the merge gate reads inline Codex P1 comments on the current head (#795)
+
+---
+
+## 📊 By the Numbers
+
+| | v1.1.0 | v1.2.0 |
+|---|---|---|
+| Migrations | 090 | 108 |
+| Pull requests since the previous release | 129 | 112 |
+
+---
+
+## Upgrade Notes
+
+- **Migrations 091 to 108** run at startup.
+- **Database roles:** `db_query` reads through its own Postgres login, which `scripts/ops/db_roles.sql` creates; the tool is offered only when `NOUS_READER_DB_PASSWORD` is set. See `docs/reference/database-roles.md` before running the script.
+- **Behaviour that changes without a flag:**
+  - schedule policies (`NOUS_SCHEDULE_POLICIES_ENABLED`, default on) coalesce a fire that comes due while the previous run is active;
+  - procedure dedupe (`NOUS_PROCEDURE_DEDUPE_ENABLED`, default on);
+  - `recall_recent` and `resolve_decision` are aliases of `recall_deep` and `resolve_decisions`;
+  - `GET /dashboard/graph`: `limit` counts memories, and the stats fields changed (see `docs/reference/rest-api.md`).
+- **Everything marked off** stays off until its flag is set. With an explicit `environment:` list in `docker-compose.yml`, a new setting needs a compose line as well as a `.env` line.
+- **Dashboard:** the dark look is gone. The bundle is rebuilt by `docker compose build`.
+- `pyproject.toml` and `nous.__version__` now read `1.2.0`.
+
+---
 
 # v1.1.0 — The Accountable Agent
 
