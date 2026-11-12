@@ -43,7 +43,7 @@
     return surfaceId.split(':')[2] ?? '';
   }
 
-  /** Chip labels are ~a dozen characters before they crowd the switcher.
+  /** List labels are cut at ~two dozen characters, so one never fills the list's width.
    * Cut on a word boundary when one is close to the limit, else hard-cut. */
   const CHIP_MAX = 22;
   function shorten(title: string): string {
@@ -203,7 +203,7 @@
   // on a phone, a permanent sidebar on a wide screen. `wide` is the only
   // source for which it is (the stylesheet reads the class it sets, never a
   // media query of its own), so a visible sidebar can never be left inert.
-  // 900px keeps the 720px reading column whole beside the 240px list.
+  // From 900px the reading column beside the 240px list is never under 660px.
   // jsdom has no matchMedia: the shell is then the phone one.
   const mq = typeof matchMedia === 'function' ? matchMedia('(min-width: 900px)') : null;
   let wide = $state(mq?.matches === true);
@@ -211,40 +211,32 @@
   let menuBtn: HTMLButtonElement | null = $state(null);
   let listEl: HTMLElement | null = $state(null);
 
-  const focusable = () =>
-    [...(listEl?.querySelectorAll<HTMLElement>('a[href], button:not([disabled])') ?? [])];
+  // While the drawer is open the bar and the page are inert, so Tab and a
+  // screen reader stay in the list wherever focus was, with no trap to keep.
+  const drawerUp = $derived(drawerOpen && !wide);
 
   async function openDrawer() {
     drawerOpen = true;
     await tick(); // the list is inert until then
-    focusable()[0]?.focus();
+    listEl?.querySelector<HTMLElement>('a[href]')?.focus();
   }
 
-  function closeDrawer() {
+  async function closeDrawer() {
     if (!drawerOpen) return;
     drawerOpen = false;
+    // A confirmation armed in the list does not outlive the list being seen.
+    clearTimeout(closeAllTimer);
+    closeAllArmed = false;
+    armedIds = [];
+    await tick(); // the bar is inert until then
     menuBtn?.focus();
   }
 
-  /** Escape closes the drawer; Tab stays inside it while it is open. */
-  function onListKeydown(e: KeyboardEvent) {
-    if (wide || !drawerOpen) return;
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      closeDrawer();
-      return;
-    }
-    if (e.key !== 'Tab') return;
-    const items = focusable();
-    const first = items[0];
-    const last = items[items.length - 1];
-    if (e.shiftKey && document.activeElement === first) {
-      e.preventDefault();
-      last?.focus();
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault();
-      first?.focus();
-    }
+  /** Escape closes the drawer from anywhere: focus may have left the list (its item resolved). */
+  function onKeydown(e: KeyboardEvent) {
+    if (e.key !== 'Escape' || !drawerUp) return;
+    e.preventDefault();
+    void closeDrawer();
   }
   let initialized = false;
 
@@ -254,11 +246,14 @@
       initialized = true;
       window.addEventListener('hashchange', () => {
         route = parseHash();
+        drawerOpen = false; // Back, or a link in a card: never leave the list over the new view
       });
     }
     const onMq = () => {
       wide = mq?.matches === true;
       if (wide) drawerOpen = false;
+      // Narrowed: the list is a closed drawer now, and focus must not stay inside something inert.
+      else if (listEl?.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
     };
     mq?.addEventListener?.('change', onMq);
     void transport.connect();
@@ -339,9 +334,10 @@
      installed app, and stays put while the page scrolls. The fixed strip keeps
      navy under the (white) status-bar text; it is the top safe-area inset
      tall, so 0 in a browser tab. -->
+<svelte:window onkeydown={onKeydown} />
 <div class="status-fill" aria-hidden="true"></div>
 <div class="app" class:wide class:with-list={wide && hasList}>
-  <header class="rail">
+  <header class="rail" inert={drawerUp ? true : undefined}>
     <div class="rail-inner">
       {#if hasList && !wide}
         <button
@@ -356,7 +352,7 @@
         </button>
       {/if}
       {#if barTitle}
-        <span class="bar-title">{barTitle}</span>
+        <span class="bar-title" class:kind={focused && !chipName(focused)}>{barTitle}</span>
       {:else}
         <a class="brand" href="#/">Nous <span>Companion</span></a>
       {/if}
@@ -369,7 +365,6 @@
       <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
       <div class="scrim" aria-hidden="true" onclick={closeDrawer}></div>
     {/if}
-    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
     <nav
       id="surface-list"
       class="switcher"
@@ -377,14 +372,13 @@
       aria-label="live surfaces"
       inert={!wide && !drawerOpen ? true : undefined}
       bind:this={listEl}
-      onkeydown={onListKeydown}
     >
       <a class="chip" class:active={route.view === 'feed'} href="#/" onclick={closeDrawer}>Home</a>
       {#if raised.length > 0}
         <p class="group">From Nous</p>
         {#each raised as surface (surface.surfaceId)}
           <a
-            class="chip"
+            class="chip kind"
             class:active={route.view === 'surface' && route.id === surface.surfaceId}
             href={'#/s/' + encodeURIComponent(surface.surfaceId)}
             title={chipTooltip(surface)}
@@ -425,7 +419,7 @@
     </nav>
   {/if}
 
-  <div class="shell">
+  <div class="shell" inert={drawerUp ? true : undefined}>
     <InstallPrompt />
 
     <main>
@@ -520,8 +514,8 @@
     align-items: center;
     gap: 0.75rem;
   }
-  /* On a wide screen the brand sits over the list, not over the cards. */
-  .app.wide .rail-inner {
+  /* Beside a list the brand sits over the list, not over the cards. */
+  .app.with-list .rail-inner {
     max-width: none;
   }
   .shell {
@@ -685,8 +679,8 @@
     font-size: 0.6875rem;
     font-weight: 600;
   }
-  /* A list item. A block, so the label's first letter can be capitalised and
-     a long name is cut with an ellipsis. */
+  /* A list item. A block, so a kind word's first letter can be capitalised
+     and a long name is cut with an ellipsis. */
   .chip {
     display: block;
     box-sizing: border-box;
@@ -710,7 +704,8 @@
     cursor: pointer;
     transition: background var(--transition);
   }
-  .chip::first-letter {
+  /* Only the shell's own kind words ("approval"): an app's name is its author's, "iPhone budget" included. */
+  .kind::first-letter {
     text-transform: uppercase;
   }
   .chip:hover {
