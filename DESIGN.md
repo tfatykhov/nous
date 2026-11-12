@@ -446,7 +446,7 @@ A compact plot of the day's turns in labelled lanes, each turn a small rounded b
 ### Charts
 Chart text is 12px Archivo in muted ink on a rule-coloured grid. Legends are 8px dots beside words. Bars are rounded and unoutlined. Day and hour labels stay level and skip rather than tilt. Canvas charts resolve their colours from the same tokens as the page.
 
-The Graph screen draws memory as one mass in three dimensions (`lib/viz/BrainGraph.svelte`, on 3d-force-graph, loaded only on that screen): memories are bodies in their `--gv-*` type colour, sized by their links and paler with age; links are thin curved fibres in `--gv-other` that fade with distance into the card's surface. A tapped memory sends activation along its links, one step and then a second, and those links take their `--rel-*` relation colour. Memory text appears as a hover label and in the detail sheet, never drawn on the canvas.
+The Graph screen draws memory as one mass in three dimensions (`lib/viz/BrainGraph.svelte`, on 3d-force-graph, loaded only on that screen): memories are bodies in their `--gv-*` type colour, sized by their links and paler with age; links are thin curved fibres in `--gv-other` that fade with distance into the card's surface. A tapped memory sends activation along its links, one step and then a second: small ink (`--text`) marks travel them, and those links take their `--rel-*` relation colour. Memory text appears as a hover label and in the detail sheet, never drawn on the canvas.
 
 ### Companion
 - **Top bar:** Atlantic, with the product name and the connection state as a word on a light pill.

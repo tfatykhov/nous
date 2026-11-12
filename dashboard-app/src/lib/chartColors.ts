@@ -73,7 +73,7 @@ export const TOKEN_FALLBACK: Record<string, string> = {
 };
 
 /** `#rgba` / `#rrggbbaa` as `rgba(r, g, b, a)`; anything else unchanged. The production build minifies an rgba() token
- * to the 8-digit hex form, which cytoscape does not parse (it falls back to black) and withAlpha cannot tint. */
+ * to the 8-digit hex form, which a canvas library may not parse and withAlpha cannot tint. */
 function alphaHexToRgba(c: string): string {
   const m = /^#([0-9a-f]{4}|[0-9a-f]{8})$/i.exec(c);
   if (!m) return c;

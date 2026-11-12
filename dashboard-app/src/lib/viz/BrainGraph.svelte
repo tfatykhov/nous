@@ -47,6 +47,9 @@
   let ready = $state(false);
   let active: Activation | null = null;
   let matches: Set<string> | null = null;
+  let pulsed = false; // the active memory's activation has been sent
+  let framed = false; // this layout has been put in view
+  let radius = 400; // half the mass's width, for the fog
 
   const media = (q: string) => typeof matchMedia === 'function' && matchMedia(q).matches;
   const reduced = media('(prefers-reduced-motion: reduce)');
@@ -58,26 +61,37 @@
     if (!colors.has(k)) colors.set(k, resolveColors(colorFor(kind, key), el));
     return colors.get(k)!;
   }
-  const ground = () => cssColor(el, '--surface');
-  const fibre = () => cssColor(el, '--gv-other');
+  // The card's surface and the fibre ink, read once (a token read is a style computation, and a repaint asks per node).
+  let ground = '';
+  let fibre = '';
 
   function nodeColor(n: BrainNode): string {
     const own = color('node', n.type);
-    const base = mixHex(own, ground(), ageFade(n.ageDays));
+    const base = mixHex(own, ground, ageFade(n.ageDays));
     if (active) {
       if (n.id === active.origin || active.hop1.has(n.id)) return own;
-      if (active.hop2.has(n.id)) return mixHex(own, ground(), 0.3);
-      return mixHex(base, ground(), 0.74);
+      if (active.hop2.has(n.id)) return mixHex(own, ground, 0.3);
+      return mixHex(base, ground, 0.74);
     }
-    if (matches) return matches.has(n.id) ? own : mixHex(base, ground(), 0.8);
+    if (matches) return matches.has(n.id) ? own : mixHex(base, ground, 0.8);
     return base;
   }
-  const crossed = (l: BrainLink) => !!active && (active.first.includes(l) || active.second.includes(l));
+  /** The links the active memory's activation crosses. */
+  let crossed = new Set<BrainLink>();
   function linkColor(l: BrainLink): string {
-    if (crossed(l)) return color('edge', l.relation);
-    return active || matches ? mixHex(fibre(), ground(), 0.7) : fibre();
+    if (crossed.has(l)) return color('edge', l.relation);
+    return active || matches ? mixHex(fibre, ground, 0.7) : fibre;
   }
-  const repaint = () => graph?.nodeColor(nodeColor).linkColor(linkColor).linkWidth((l: BrainLink) => (crossed(l) ? 0.9 : 0));
+  /** New colours. A setter makes the library redraw, so only the accessors that changed are set. */
+  const repaint = () => graph?.nodeColor(nodeColor).linkColor(linkColor);
+  /** The active memory changed: the crossed links change width too (which rebuilds every link, so only here). */
+  function setActive(next: Activation | null) {
+    active = next;
+    crossed = new Set(next ? [...next.first, ...next.second] : []);
+    pulsed = false;
+    repaint();
+    graph?.linkWidth((l: BrainLink) => (crossed.has(l) ? 0.9 : 0));
+  }
 
   const shown = (n: BrainNode) => !hiddenTypes.has(n.type) && n.degree >= minEdges;
   /** The memories whose text holds the search words; null with nothing searched. */
@@ -118,27 +132,24 @@
     graph.cameraPosition({ x: center.x, y: center.y, z: center.z + distance }, center, ms);
   }
 
+  /** The fog follows the camera (the controls report every move, and every frame of the turn). */
   function updateFog() {
     const fog = graph?.scene().fog;
-    const box = graph?.getGraphBbox();
-    if (!fog || !box) return;
+    if (!fog) return;
     const d = graph.camera().position.length();
-    const r = Math.max(box.x[1] - box.x[0], box.z[1] - box.z[0]) / 2;
-    fog.near = Math.max(1, d - r * 0.6);
-    fog.far = d + r * 1.9;
+    fog.near = Math.max(1, d - radius * 0.6);
+    fog.far = d + radius * 1.9;
   }
 
   function clearActive() {
     if (!active) return;
-    active = null;
-    repaint();
+    setActive(null);
     frame(reduced ? 0 : 700);
   }
 
   function tap(node: BrainNode) {
     const origin = node.id;
-    active = activate(origin, graph.graphData().links.filter(linkShown));
-    repaint();
+    setActive(activate(origin, graph.graphData().links.filter(linkShown)));
     // Close enough to see the neighbourhood the activation crosses.
     const far = Math.hypot(node.x ?? 0, node.y ?? 0, node.z ?? 0) || 1;
     const k = 1 + 300 / far;
@@ -150,7 +161,8 @@
 
   /** Activation crossing the links: the first step now, the second a second later. */
   function pulse(origin: string) {
-    if (reduced || !graph || active?.origin !== origin) return;
+    if (reduced || !graph || active?.origin !== origin || pulsed) return;
+    pulsed = true;
     const wave = (list: BrainLink[]) => { if (graph && active?.origin === origin) for (const l of list) graph.emitParticle(l); };
     wave(active.first);
     const second = active.second;
@@ -159,8 +171,9 @@
 
   function load() {
     if (!graph) return;
-    active = null;
+    framed = false;
     matches = matchesOf(searchQuery);
+    setActive(null);
     // Copies: the library writes positions onto the objects it is given.
     const copies = nodes.map((n) => ({ ...n }));
     byId = new Map(copies.map((n) => [n.id, n]));
@@ -177,11 +190,13 @@
         const [{ default: ForceGraph3D }, three] = await Promise.all([import('3d-force-graph'), import('three')]);
         if (gone) return;
         const size = () => ({ width: el.clientWidth || 300, height: el.clientHeight || 300 });
+        ground = cssColor(el, '--surface');
+        fibre = cssColor(el, '--gv-other');
         // The library types its accessors on its own bare node and link objects; ours carry more, so the chain is untyped.
         graph = (new ForceGraph3D(el, { controlType: 'orbit', rendererConfig: { antialias: !phone, alpha: false } }) as any)
           .width(size().width)
           .height(size().height)
-          .backgroundColor(ground())
+          .backgroundColor(ground)
           .showNavInfo(false)
           .enableNodeDrag(false)
           .nodeRelSize(2.3)
@@ -198,10 +213,16 @@
           .linkHoverPrecision(0)
           .linkDirectionalParticleWidth(2.4)
           .linkDirectionalParticleSpeed(0.018)
-          .linkDirectionalParticleColor(() => cssColor(el, '--accent'))
+          .linkDirectionalParticleColor(() => cssColor(el, '--text'))
           .onNodeClick(tap)
           .onBackgroundClick(clearActive)
           .onEngineStop(() => {
+            // The library also reports a stop after every redraw (a new colour, a new width): the mass is put in
+            // view once per layout, or each repaint would undo the owner's own turn and zoom, and a tap's move in.
+            if (framed) return;
+            framed = true;
+            const box = graph.getGraphBbox();
+            if (box) radius = Math.max(box.x[1] - box.x[0], box.z[1] - box.z[0]) / 2;
             frame(reduced ? 0 : 700);
             setTimeout(updateFog, reduced ? 0 : 750);
           });
@@ -210,7 +231,7 @@
         graph.d3Force('center', null);
         graph.d3Force('shape', shapeForce());
         graph.renderer().setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 2));
-        graph.scene().fog = new three.Fog(ground(), 600, 3000);
+        graph.scene().fog = new three.Fog(ground, 600, 3000);
         graph.controls().addEventListener('change', updateFog);
         graph.controls().autoRotateSpeed = 0.45;
         repaint();
@@ -244,9 +265,8 @@
     void minEdges;
     if (!ready) return;
     untrack(() => {
-      active = null;
       graph.nodeVisibility(shown).linkVisibility(linkShown);
-      repaint();
+      setActive(null);
     });
   });
 

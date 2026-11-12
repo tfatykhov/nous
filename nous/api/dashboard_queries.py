@@ -170,7 +170,8 @@ async def get_dashboard_stats(session: AsyncSession, agent_id: str) -> dict:
 
 
 # The view draws memories, not links: it starts from the memories of the newest links and grows outward, each round
-# adding the memories at the far end of every frontier memory's strongest links, until it holds ``limit`` memories.
+# adding the memories at the far end of every frontier memory's strongest links, until it holds ``limit`` memories
+# (or fewer: a memory is on the frontier once, so one with more new neighbours than ``GRAPH_FANOUT`` leaves the rest).
 # Then it draws every link among them. Every memory after the seeds is added through a link to one already chosen,
 # so the drawing is as connected as the memory itself (on the 2026-11 production graph: 1,500 memories, 98% in one
 # piece, where the newest-links-first selection before it drew 15 pieces).
@@ -208,21 +209,26 @@ def _graph_sql(include_chunks: bool) -> dict[str, str]:
             ORDER BY e.created_at DESC, e.id DESC
             LIMIT :seed_n
         """,
-        # Each frontier memory's strongest links; the caller keeps the far ends it does not hold yet.
+        # Each frontier memory's strongest links to memories not held yet. The held ones are excluded before the
+        # ranking: a link back into the drawing, or a second link to one neighbour, must not use up a slot.
         "grow": f"""
             SELECT other_id, MAX(weight) AS weight
             FROM (
                 SELECT other_id, weight,
-                       ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY weight DESC, id) AS pick
+                       ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY weight DESC, other_id) AS pick
                 FROM (
-                    SELECT e.source_id AS node_id, e.target_id AS other_id, COALESCE(e.weight, 0) AS weight, e.id
-                    FROM brain.graph_edges e
-                    WHERE {scope} AND e.source_id = ANY(:frontier)
-                    UNION ALL
-                    SELECT e.target_id, e.source_id, COALESCE(e.weight, 0), e.id
-                    FROM brain.graph_edges e
-                    WHERE {scope} AND e.target_id = ANY(:frontier)
-                ) ends
+                    SELECT node_id, other_id, MAX(weight) AS weight
+                    FROM (
+                        SELECT e.source_id AS node_id, e.target_id AS other_id, COALESCE(e.weight, 0) AS weight
+                        FROM brain.graph_edges e
+                        WHERE {scope} AND e.source_id = ANY(:frontier) AND NOT (e.target_id = ANY(:held))
+                        UNION ALL
+                        SELECT e.target_id, e.source_id, COALESCE(e.weight, 0)
+                        FROM brain.graph_edges e
+                        WHERE {scope} AND e.target_id = ANY(:frontier) AND NOT (e.source_id = ANY(:held))
+                    ) ends
+                    GROUP BY node_id, other_id
+                ) neighbours
             ) ranked
             WHERE pick <= :fanout
             GROUP BY other_id
@@ -287,9 +293,10 @@ async def get_graph_data(
         if not frontier or len(chosen) >= limit:
             break
         grown = await session.execute(
-            text(sql["grow"]), {"agent_id": agent_id, "frontier": frontier, "fanout": GRAPH_FANOUT}
+            text(sql["grow"]),
+            {"agent_id": agent_id, "frontier": frontier, "held": chosen, "fanout": GRAPH_FANOUT},
         )
-        frontier = [r.other_id for r in grown if r.other_id not in held][: limit - len(chosen)]
+        frontier = [r.other_id for r in grown][: limit - len(chosen)]
         held.update(frontier)
         chosen.extend(frontier)
 

@@ -349,6 +349,51 @@ class TestGetGraphData:
         assert {n["id"] for n in data["nodes"]} == {str(s1), str(s2), str(strong), str(middle)}
 
     @pytest.mark.asyncio
+    async def test_a_memory_follows_only_its_strongest_links(self, session, monkeypatch):
+        """More neighbours than the fanout: the weakest are not reached through that memory."""
+        monkeypatch.setattr("nous.api.dashboard_queries.GRAPH_SEED_MEMORIES", 1)
+        monkeypatch.setattr("nous.api.dashboard_queries.GRAPH_FANOUT", 2)
+        hub, w1, w5, w9, w7 = [await _insert_fact(session) for _ in range(5)]
+        for other, weight in [(w1, 0.1), (w5, 0.5), (w9, 0.9)]:
+            await _insert_edge(session, other, hub, source_type="fact", days_ago=2, weight=weight)
+        await _insert_edge(session, hub, w7, source_type="fact", weight=0.7)  # the newest link; hub is the one seed
+
+        data = await get_graph_data(session, AGENT_ID, limit=5)
+        assert {n["id"] for n in data["nodes"]} == {str(hub), str(w9), str(w7)}
+
+    @pytest.mark.asyncio
+    async def test_links_back_into_the_drawing_do_not_use_up_a_memorys_slots(self, session, monkeypatch):
+        """A memory's strongest links run to memories already held, and twice to one neighbour: it still reaches
+        as many new memories as the fanout allows."""
+        monkeypatch.setattr("nous.api.dashboard_queries.GRAPH_SEED_MEMORIES", 2)
+        monkeypatch.setattr("nous.api.dashboard_queries.GRAPH_FANOUT", 2)
+        hub, seed, twice, n1, n2 = [await _insert_fact(session) for _ in range(5)]
+        await _insert_edge(session, hub, n1, source_type="fact", days_ago=3, weight=0.2)
+        await _insert_edge(session, hub, n2, source_type="fact", days_ago=3, weight=0.1)
+        await _insert_edge(session, hub, twice, source_type="fact", days_ago=2, weight=0.8)
+        await _insert_edge(session, twice, hub, source_type="fact", days_ago=2, weight=0.7, relation="supports")
+        await _insert_edge(session, seed, hub, source_type="fact", days_ago=1, weight=0.95)
+        await _insert_edge(session, hub, seed, source_type="fact", weight=0.9, relation="supports")  # the seeds
+
+        data = await get_graph_data(session, AGENT_ID, limit=4)
+        # hub's two slots go to `twice` and n1, not to its three stronger links that lead to seed or twice again.
+        assert {n["id"] for n in data["nodes"]} == {str(hub), str(seed), str(twice), str(n1)}
+
+    @pytest.mark.asyncio
+    async def test_another_agents_links_are_never_followed_or_drawn(self, session):
+        mine, other = await _insert_fact(session), await _insert_fact(session)
+        await _insert_edge(session, mine, other, source_type="fact")
+        await session.execute(
+            text("""
+                INSERT INTO brain.graph_edges (id, agent_id, source_id, target_id, source_type, target_type, relation)
+                VALUES (:id, 'someone-else', :src, :tgt, 'fact', 'fact', 'related_to')
+            """),
+            {"id": uuid.uuid4(), "src": mine, "tgt": uuid.uuid4()},
+        )
+        data = await get_graph_data(session, AGENT_ID)
+        assert data["stats"]["total_edges"] == 1 and data["stats"]["displayed_edges"] == 1
+
+    @pytest.mark.asyncio
     async def test_every_link_among_the_chosen_memories_is_drawn(self, session, monkeypatch):
         """A link between two chosen memories is drawn even though the growth never followed it."""
         monkeypatch.setattr("nous.api.dashboard_queries.GRAPH_FANOUT", 1)

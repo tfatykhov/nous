@@ -162,8 +162,11 @@ describe('Graph on the paper look', () => {
     await waitFor(() => expect(loads()).toBe(1));
     expect(last('nodeColor')(node('n-fact'))).toBe(PAPER['--gv-fact']);
 
+    // A new link width makes the library rebuild every link, so a search sets colours only.
+    const widths = lib.calls.linkWidth.length;
     await fireEvent.input(screen.getByLabelText('Search graph nodes'), { target: { value: 'a fact' } });
     await tick();
+    expect(lib.calls.linkWidth).toHaveLength(widths);
     expect(last('nodeColor')(node('n-fact'))).toBe(PAPER['--gv-fact']); // the match keeps its colour
     expect(last('nodeColor')(node('n-episode'))).not.toBe(PAPER['--gv-episode']); // the rest fade
 
@@ -187,6 +190,14 @@ describe('Graph on the paper look', () => {
     expect(lib.made).toBe(1);
   });
 
+  it('leaving the screen gives the WebGL context back and tears the graph down', async () => {
+    install();
+    const { unmount } = render(GraphView);
+    await waitFor(() => expect(loads()).toBe(1));
+    unmount();
+    expect(lib.calls._destructor).toHaveLength(1);
+  });
+
   it('a tapped memory lights the links its activation crosses in their relation colours, and opens its sheet', async () => {
     install();
     render(GraphView);
@@ -197,6 +208,13 @@ describe('Graph on the paper look', () => {
     expect(last('linkColor')(link('e3'))).not.toBe(PAPER['--rel-part-of']); // three steps away: not crossed
     expect(last('nodeColor')(node('n-fact'))).toBe(PAPER['--gv-fact']);
     expect(lib.calls.cameraPosition.at(-1)![1]).toBe(node('n-episode')); // the camera moves in on it
+    // The library reports an engine stop after every redraw. Only the first one of a layout frames the mass: a later
+    // one must leave the camera on the tapped memory (and leave the owner's own turn and zoom alone).
+    last('onEngineStop')();
+    const moves = lib.calls.cameraPosition.length;
+    last('onEngineStop')();
+    last('onEngineStop')();
+    expect(lib.calls.cameraPosition).toHaveLength(moves);
     await screen.findByLabelText('Episode detail');
     // The sheet covers the graph, so no activation is sent yet; it crosses the links once the sheet is closed.
     await new Promise((r) => setTimeout(r, 1000));
@@ -204,6 +222,9 @@ describe('Graph on the paper look', () => {
     await fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
     await waitFor(() => expect((lib.calls.emitParticle ?? []).map((a) => a[0].id)).toEqual(['e1']));
     await waitFor(() => expect((lib.calls.emitParticle ?? []).map((a) => a[0].id)).toEqual(['e1', 'e2']), { timeout: 2000 });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(lib.calls.emitParticle).toHaveLength(2); // sent once, not again by the tap's own timer
+    expect(last('linkDirectionalParticleColor')()).toBe(PAPER['--text']); // ink, not the link blue
 
     last('onBackgroundClick')();
     expect(last('linkColor')(link('e1'))).toBe(PAPER['--gv-other']);
