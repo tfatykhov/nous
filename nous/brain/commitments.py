@@ -11,6 +11,7 @@ the key is md5 of the turn key and the normalised ``what``. Nothing here sends, 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import unicodedata
@@ -55,9 +56,9 @@ _COLUMNS = (
 _INSERT = text(
     "INSERT INTO brain.commitments (agent_id, source_kind, session_id, turn_id, detected_by, detector_version, "
     "promise_text, what, kind, consent, due_at, grace_seconds, status, artifact_kind, artifact_id, artifact_linked_at, "
-    "dedupe_key) VALUES (:agent_id, :source_kind, :session_id, :turn_id, :detected_by, :detector_version, "
+    "dedupe_key, evidence) VALUES (:agent_id, :source_kind, :session_id, :turn_id, :detected_by, :detector_version, "
     ":promise_text, :what, :kind, :consent, :due_at, :grace_seconds, :status, :artifact_kind, :artifact_id, "
-    "CASE WHEN :linked THEN now() END, :dedupe_key) "
+    "CASE WHEN :linked THEN now() END, :dedupe_key, CAST(:evidence AS JSONB)) "
     f"ON CONFLICT (agent_id, dedupe_key) DO NOTHING RETURNING {_COLUMNS}"
 )
 _BY_KEY = text(f"SELECT {_COLUMNS} FROM brain.commitments WHERE agent_id = :agent_id AND dedupe_key = :dedupe_key")
@@ -222,6 +223,7 @@ class CommitmentStore:
         status: str = "open",
         artifact_kind: str | None = None,
         artifact_id: str | None = None,
+        evidence: dict[str, Any] | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         """The insert's bind values, validated: raises ``CommitmentRefused`` before any SQL runs. ``what`` and
@@ -248,6 +250,8 @@ class CommitmentStore:
             "artifact_id": artifact_id,
             "linked": artifact_id is not None,
             "dedupe_key": dedupe_key(turn_id, what),
+            # e.g. {"due_parsed": false}: the deadline is the default, not one the promise named
+            "evidence": json.dumps(evidence) if evidence is not None else None,
         }
 
     async def _insert(self, session: Any, params: dict[str, Any]) -> Commitment:

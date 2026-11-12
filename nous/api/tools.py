@@ -3101,8 +3101,9 @@ _COMMIT_SCHEMA = {
         "due": {
             "type": "string",
             "description": (
-                'When it is due, as schedule_task\'s "when" reads it: "in 2 hours", "in 30 minutes" or an ISO 8601 '
-                "time with an offset. Must be in the future and at most 90 days away."
+                'When it is due, in exactly one of two forms: "in N minutes|hours|days|weeks" ("in 2 hours") or an '
+                'ISO 8601 time with an offset ("2026-11-20T18:15:00+00:00"). Anything else is refused. Must be in '
+                "the future and at most 90 days away."
             ),
         },
         "consent": {
@@ -3124,8 +3125,27 @@ _COMMIT_SCHEMA = {
 
 def create_commit_tool(store: Any) -> Callable[..., Any]:
     """The ``commit`` handler over a ``CommitmentStore``. Idempotent within a turn (same ``what``, one row)."""
-    from nous.brain.commitments import LIVE_STATUSES, SOURCE_KIND_BY_CONTEXT, CommitmentRefused
-    from nous.handlers.time_parser import parse_when
+    from nous.brain.commitments import LIVE_STATUSES, MAX_DUE_DAYS, SOURCE_KIND_BY_CONTEXT, CommitmentRefused
+    from nous.handlers.time_parser import _RELATIVE_RE, _UNIT_SECONDS
+
+    def parse_due(due: str) -> datetime:
+        """Exactly the two documented forms: ``in N units`` or ISO 8601 with an offset. Anything else is a
+        ``ValueError`` (no fuzzy parse: it drops an unknown zone and ignores "tomorrow", moving a deadline by hours
+        or a day)."""
+        due = due.strip()
+        m = _RELATIVE_RE.fullmatch(due)
+        if m:
+            seconds = int(m.group(1)) * _UNIT_SECONDS[m.group(2).lower()]
+            if seconds > (MAX_DUE_DAYS + 1) * 86400:
+                raise ValueError(f"more than {MAX_DUE_DAYS} days away")
+            return datetime.now(UTC) + timedelta(seconds=seconds)
+        try:
+            at = datetime.fromisoformat(due)
+        except ValueError:
+            raise ValueError(f"{due!r} is neither 'in N minutes|hours|days|weeks' nor an ISO 8601 time") from None
+        if at.tzinfo is None:
+            raise ValueError(f"{due!r} has no UTC offset (add e.g. +00:00)")
+        return at
 
     async def commit(
         what: str,
@@ -3138,9 +3158,12 @@ def create_commit_tool(store: Any) -> Callable[..., Any]:
         _context_kind: str | None = None,
     ) -> dict[str, Any]:
         try:
-            due_at = parse_when(str(due))
+            due_at = parse_due(str(due))
         except ValueError as exc:
-            return _tool_error(f"commit: could not read due ({exc}). Use e.g. 'in 2 hours' or an ISO 8601 time.")
+            return _tool_error(
+                f"commit: could not read due ({exc}). Use 'in 2 hours' or an ISO 8601 time with an offset, e.g. "
+                "2026-11-20T18:15:00+00:00."
+            )
         if consent not in ("none", "explicit", "silence"):
             return _tool_error("commit: consent must be one of none, explicit, silence.")
         row_args = {
@@ -3152,6 +3175,7 @@ def create_commit_tool(store: Any) -> Callable[..., Any]:
             "session_id": _session_id,
             "kind": "awaiting_user" if awaiting_owner else "action",
             "consent": consent,
+            "evidence": {"due_parsed": True},
         }
         # A retry of the same call in the same turn is the same row. The key is the runner's id for the turn; a call
         # outside a turn falls back to the turn number, and without either there is no dedupe at all.

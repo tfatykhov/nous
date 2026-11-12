@@ -105,6 +105,32 @@ def test_a_clock_time_with_tomorrow_or_today_is_read_on_that_day():
     assert elsewhere.due_parsed and elsewhere.due_at == nine.replace(hour=10)
 
 
+# Review finding 4, run at 2026-11-11 09:00 UTC: each sentence, the deadline it names, and whether it was parsed.
+NOV11_0900 = datetime(2026, 11, 11, 9, 0, tzinfo=UTC)
+DEADLINES = [
+    ("I'll deploy the fix on 2026-11-20 at 18:15 UTC.", datetime(2026, 11, 20, 18, 15, tzinfo=UTC), True),
+    ("Tomorrow I'll relaunch at 18:15 UTC.", datetime(2026, 11, 12, 18, 15, tzinfo=UTC), True),
+    ("I'll relaunch tomorrow at around 18:15 UTC.", datetime(2026, 11, 12, 18, 15, tzinfo=UTC), True),
+    ("I'll relaunch it tomorrow by about 18:15 UTC.", datetime(2026, 11, 12, 18, 15, tzinfo=UTC), True),
+    ("I'll send the summary by Friday.", NOV11_0900 + timedelta(minutes=60), False),
+    ("I'll send the summary next week.", NOV11_0900 + timedelta(minutes=60), False),
+    # A clock time with a date the parser cannot bind: the unparsed default, never a parsed "today".
+    ("I'll send the summary on Friday at 18:15 UTC.", NOV11_0900 + timedelta(minutes=60), False),
+    ("I'll send the summary next week at 18:15 UTC.", NOV11_0900 + timedelta(minutes=60), False),
+    ("I'll send the summary on Nov 20 at 18:15 UTC.", NOV11_0900 + timedelta(minutes=60), False),
+    ("I'll deploy it the day after tomorrow at 18:15 UTC.", NOV11_0900 + timedelta(minutes=60), False),
+    # An explicit date with no time it binds to, or a past one: the default too.
+    ("I'll deploy the fix on 2026-11-20.", NOV11_0900 + timedelta(minutes=60), False),
+    ("I'll deploy the fix on 2026-11-02 at 18:15 UTC.", NOV11_0900 + timedelta(minutes=60), False),
+]
+
+
+@pytest.mark.parametrize(("sentence", "due_at", "parsed"), DEADLINES, ids=[d[0][:45] for d in DEADLINES])
+def test_each_deadline_of_the_review_table(sentence, due_at, parsed):
+    [promise] = PromiseDetector(default_due_minutes=60).scan(sentence, now=NOV11_0900)
+    assert (promise.due_at, promise.due_parsed) == (due_at, parsed)
+
+
 def test_a_relative_time_counts_from_the_given_now():
     """Review Minor 7: parse_when used the wall clock, so a replay at a stored reply's time was hours off."""
     [promise] = PromiseDetector().scan("I plan to deploy the fix in 2 hours.", now=NOW)
@@ -455,6 +481,34 @@ async def test_commit_tool_rejects_past_far_and_unreadable_dates(due):
     assert out["is_error"] is True and store.rows == {}
 
 
+@pytest.mark.parametrize(
+    "due",
+    ["Friday 9am EST", "tomorrow at 18:15 UTC", "2026-11-20 18:15", "next monday 8am", "in 2 hours please", "soon"],
+)
+async def test_commit_tool_accepts_only_the_two_documented_forms(due):
+    """Review finding 4: the fuzzy dateutil fallback read "Friday 9am EST" as 09:00 UTC (the zone dropped) and
+    "tomorrow at 18:15 UTC" as today."""
+    from nous.api.tools import create_commit_tool
+
+    store = FakeStore()
+    out = await create_commit_tool(store)(what="send the summary", due=due, _session_id="s", _turn_number=1)
+    assert out["is_error"] is True and store.calls == []
+
+
+async def test_commit_tool_reads_an_offset_time_and_a_relative_one():
+    from nous.api.tools import create_commit_tool
+
+    store = FakeStore()
+    tool = create_commit_tool(store)
+    at = (datetime.now(UTC) + timedelta(days=3)).replace(microsecond=0)
+    out = await tool(what="send the summary", due=at.astimezone().isoformat(), _session_id="s", _turn_number=1)
+    assert not out.get("is_error") and store.calls[0]["due_at"] == at
+    assert store.calls[0]["evidence"] == {"due_parsed": True}
+    before = datetime.now(UTC)
+    await tool(what="send the other summary", due="in 3 hours", _session_id="s", _turn_number=1)
+    assert before + timedelta(hours=3) <= store.calls[1]["due_at"] <= datetime.now(UTC) + timedelta(hours=3)
+
+
 async def test_commit_tool_rejects_a_what_too_short_to_check():
     from nous.api.tools import create_commit_tool
 
@@ -602,6 +656,40 @@ async def test_store_insert_is_idempotent_on_the_dedupe_key(store):
     third = await store.create_idempotent(**_new(turn_id="t2"))
     assert third.id != first.id and third.short_id > first.short_id
     assert first.status == "open" and first.consent == "silence" and first.label.startswith("C-")
+
+
+def _gate(mode: str = "shadow", store=None):
+    from nous.cognitive.promise_gate import PromiseGate
+
+    settings = SimpleNamespace(
+        promise_gate_enabled=True,
+        promise_gate_mode=mode,
+        promise_gate_default_due_minutes=60,
+        promise_gate_grace_seconds=900,
+    )
+    return PromiseGate(store if store is not None else FakeStore(), settings)
+
+
+async def test_the_gate_stores_whether_each_deadline_was_parsed():
+    """Review finding 4: Promise.due_parsed was dropped, so no row told a named deadline from the default."""
+    store = FakeStore()
+    reply = "I'll remove it (option A) unless you object. I'll relaunch it tomorrow at 18:15 UTC."
+    await _gate(store=store).run(reply, [], path="stream", session_id="s", turn_id="t", context_kind=None, now=NOW)
+    assert [c["evidence"] for c in store.calls] == [{"due_parsed": False}, {"due_parsed": True}]
+
+
+@pytest.mark.postgres_only
+async def test_store_keeps_the_evidence_json(store):
+    from sqlalchemy import text
+
+    row = await store.create_idempotent(**_new(turn_id="ev", evidence={"due_parsed": False}))
+    async with store._db.session() as s:
+        evidence = (
+            await s.execute(
+                text("SELECT evidence->>'due_parsed' FROM brain.commitments WHERE id = :id"), {"id": row.id}
+            )
+        ).scalar()
+    assert evidence == "false"
 
 
 @pytest.mark.postgres_only

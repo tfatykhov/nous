@@ -104,12 +104,21 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 # Due-time extraction for the cases the detector can resolve without guessing; anything else gets the default.
 _REL_RE = re.compile(r"\bin\s+(\d+|an?|one|two|half\s+an)\s+(minute|min|hour|hr|day|week)s?\b", re.I)
 _WITHIN_HOUR_RE = re.compile(r"\bwithin\s+(?:the|an?)\s+hour\b", re.I)
-_CLOCK_RE = re.compile(r"\b(?:at|by|around|before)?\s*(\d{1,2}):(\d{2})\s*(z|utc|gmt)?\b", re.I)
-_TOMORROW_RE = re.compile(r"\btomorrow\b", re.I)
-# The day word that qualifies a clock time: right before it ("tomorrow at 18:15 UTC") or right after ("18:15 UTC
-# tomorrow"), not anywhere in the sentence ("at 10:00 UTC, whether tomorrow's run is queued").
-_DAY_BEFORE_RE = re.compile(r"\b(today|tomorrow)(?:\s+(?:morning|afternoon|evening|night))?\s*,?\s*$", re.I)
-_DAY_AFTER_RE = re.compile(r"^\s*,?\s*(today|tomorrow)\b", re.I)
+_CLOCK_RE = re.compile(r"\b(\d{1,2}):(\d{2})\s*(z|utc|gmt)?\b", re.I)
+# A day word binds to a clock time anywhere in its sentence ("Tomorrow I'll relaunch at 18:15 UTC"); a possessive
+# ("tomorrow's run") names a thing, not the day of the deadline.
+_DAY_RE = re.compile(r"\b(today|tonight|tomorrow)\b(?!['’]s)", re.I)
+_ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
+# A date this parser cannot bind to a clock time: with one in the sentence the deadline is the unparsed default,
+# never a parsed "today" (a weekday, "next week", a month-day date, "the day after tomorrow").
+_UNBOUND_DATE_RE = re.compile(
+    r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|next\s+(?:week|month|year)"
+    r"|end\s+of\s+(?:the\s+)?(?:week|month)|eow|day\s+after\s+tomorrow"
+    r"|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?\b"
+    r"|\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b"
+    r"|\d{1,2}/\d{1,2})",
+    re.I,
+)
 _UNIT_MINUTES = {"minute": 1, "min": 1, "hour": 60, "hr": 60, "day": 1440, "week": 10080}
 # A relative time is capped here (the gate clamps the row to MAX_DUE_DAYS anyway): "in 3000000 days" is no
 # OverflowError, which would lose every promise of the reply.
@@ -152,25 +161,40 @@ def _due_at(sentence: str, now: datetime, default_minutes: int) -> tuple[datetim
             return now + timedelta(minutes=min(amount * unit_minutes, _REL_MAX_MINUTES)), True
     if _WITHIN_HOUR_RE.search(sentence):
         return now + timedelta(hours=1), True
+    default = now + timedelta(minutes=default_minutes), False
+    if _UNBOUND_DATE_RE.search(sentence):
+        return default
+    iso = _ISO_DATE_RE.search(sentence)
+    days = {d.group(1).lower().replace("tonight", "today") for d in _DAY_RE.finditer(sentence)}
     m = _CLOCK_RE.search(sentence)
     if m and m.group(3):
         hour, minute = int(m.group(1)), int(m.group(2))
-        if hour < 24 and minute < 60:
-            # "tomorrow" names the day; "today" at a time already past is unreadable (the default, not tomorrow:
-            # a deadline a day late would hide the miss); a bare clock time is its next occurrence.
-            at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            day = _DAY_BEFORE_RE.search(sentence[: m.start()]) or _DAY_AFTER_RE.search(sentence[m.end() :])
-            day_word = day.group(1).lower() if day else None
-            if day_word == "tomorrow":
-                return at + timedelta(days=1), True
-            if at > now:
-                return at, True
-            if day_word == "today":
-                return now + timedelta(minutes=default_minutes), False
+        if hour >= 24 or minute >= 60:
+            return default
+        if iso:
+            # An explicit date binds to the clock time ("on 2026-11-20 at 18:15 UTC").
+            try:
+                at = datetime(*(int(g) for g in iso.groups()), hour, minute, tzinfo=UTC)
+            except ValueError:
+                return default
+            return (at, True) if at > now else default
+        if len(days) > 1:
+            return default  # "today" and "tomorrow" both: which one the time belongs to is a guess
+        at = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if days == {"tomorrow"}:
             return at + timedelta(days=1), True
-    if _TOMORROW_RE.search(sentence):
+        if at > now:
+            return at, True
+        if days == {"today"}:
+            # "today" at a time already past is unreadable: the default, not tomorrow (a deadline a day late would
+            # hide the miss).
+            return default
+        return at + timedelta(days=1), True  # a bare clock time is its next occurrence
+    if iso:
+        return default  # a date without a time it binds to: the deadline within that day is a guess
+    if days == {"tomorrow"}:
         return now + timedelta(days=1), True
-    return now + timedelta(minutes=default_minutes), False
+    return default
 
 
 class PromiseDetector:
@@ -435,6 +459,7 @@ class PromiseGate:
                 "consent": promise.consent,
                 "grace_seconds": self._settings.promise_gate_grace_seconds,
                 "detector_version": DETECTOR_VERSION,
+                "evidence": {"due_parsed": promise.due_parsed},
                 "now": now,
             }
             for promise in unbacked
