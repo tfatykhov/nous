@@ -98,20 +98,20 @@ async def _insert_episode(session, *, frame="task", days_ago=0, active=True):
 
 async def _insert_edge(session, source_id, target_id, *,
                        source_type="decision", target_type="fact",
-                       relation="related_to", days_ago=0):
+                       relation="related_to", days_ago=0, weight=None):
     """Insert a graph edge."""
     created = datetime.now(timezone.utc) - timedelta(days=days_ago)
     await session.execute(
         text("""
             INSERT INTO brain.graph_edges
-                (id, agent_id, source_id, target_id, source_type, target_type, relation, created_at)
-            VALUES (:id, :agent_id, :src, :tgt, :stype, :ttype, :rel, :created)
+                (id, agent_id, source_id, target_id, source_type, target_type, relation, created_at, weight)
+            VALUES (:id, :agent_id, :src, :tgt, :stype, :ttype, :rel, :created, COALESCE(:weight, 1.0))
         """),
         {
             "id": uuid.uuid4(), "agent_id": AGENT_ID,
             "src": source_id, "tgt": target_id,
             "stype": source_type, "ttype": target_type,
-            "rel": relation, "created": created,
+            "rel": relation, "created": created, "weight": weight,
         },
     )
 
@@ -290,50 +290,112 @@ class TestGetGraphData:
         assert data["stats"]["orphan_counts"]["facts"] >= 1
 
     @pytest.mark.asyncio
-    async def test_edge_limit(self, session):
-        """Over the budget (limit * 4) the view shows the newest third of it, then up to 3 more links per memory."""
+    async def test_a_node_carries_its_created_at_and_the_stats_count_the_whole_graph(self, session):
+        d1 = await _insert_decision(session)
+        f1 = await _insert_fact(session)
+        await _insert_edge(session, d1, f1)
+
+        data = await get_graph_data(session, AGENT_ID)
+        assert all(n["created_at"] for n in data["nodes"])
+        s = data["stats"]
+        assert (s["total_edges"], s["total_nodes"], s["node_count"], s["largest_piece"]) == (1, 2, 2, 2)
+        assert s["chunks_included"] is False and s["edges_truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_limit_is_a_budget_of_memories(self, session):
         d1 = await _insert_decision(session)
         for _ in range(10):
-            f = await _insert_fact(session)
-            await _insert_edge(session, d1, f)
-
-        data = await get_graph_data(session, AGENT_ID, limit=2)
-        s = data["stats"]
-        # limit=2: budget 8, newest 8 // 3 = 2; d1's other 8 links offer 3 more (its cap), within the 6 left.
-        assert s["total_edges"] == 10
-        assert (s["recent_edges"], s["linked_edges"], s["displayed_edges"]) == (2, 3, 5)
-        assert s["links_per_memory"] == 3
-        assert s["recent_from"] is not None and s["recent_from"] <= s["recent_to"]
-
-    @pytest.mark.asyncio
-    async def test_every_edge_when_they_fit(self, session):
-        d1 = await _insert_decision(session)
-        for _ in range(3):
             await _insert_edge(session, d1, await _insert_fact(session))
 
-        s = (await get_graph_data(session, AGENT_ID, limit=2))["stats"]
-        assert (s["total_edges"], s["displayed_edges"], s["recent_edges"], s["linked_edges"]) == (3, 3, 3, 0)
+        data = await get_graph_data(session, AGENT_ID, limit=4)
+        s = data["stats"]
+        assert (s["total_edges"], s["total_nodes"]) == (10, 11)
+        assert (s["node_count"], s["displayed_edges"], s["largest_piece"]) == (4, 3, 4)
+        ids = {n["id"] for n in data["nodes"]}
+        assert str(d1) in ids
+        assert all(e["source"] in ids and e["target"] in ids for e in data["edges"])
 
     @pytest.mark.asyncio
-    async def test_new_memories_attach_through_their_best_linked_neighbour(self, session):
-        """Two new pairs that share an older, well-linked memory are drawn as one piece, not two islands."""
+    async def test_new_memories_are_drawn_attached_to_the_older_web(self, session, monkeypatch):
+        """Two new pairs that share an older memory are drawn as one piece, with that memory's own neighbours."""
+        monkeypatch.setattr("nous.api.dashboard_queries.GRAPH_SEED_MEMORIES", 2)  # the newest link's two ends
         hub = await _insert_fact(session)
-        for _ in range(5):
-            await _insert_edge(session, hub, await _insert_fact(session), source_type="fact", days_ago=3)
+        old = [await _insert_fact(session) for _ in range(5)]
+        for f in old:
+            await _insert_edge(session, hub, f, source_type="fact", days_ago=3)
         a1, a2, b1, b2 = [await _insert_fact(session) for _ in range(4)]
         await _insert_edge(session, a1, hub, source_type="fact", days_ago=2)
         await _insert_edge(session, b1, hub, source_type="fact", days_ago=2)
-        for _ in range(3):  # a1 has more older neighbours than its cap; the poorly linked ones must lose to hub
-            await _insert_edge(session, a1, await _insert_fact(session), source_type="fact", days_ago=2)
         await _insert_edge(session, a1, a2, source_type="fact")
         await _insert_edge(session, b1, b2, source_type="fact")
 
-        data = await get_graph_data(session, AGENT_ID, limit=2)  # budget 8, newest 2
+        data = await get_graph_data(session, AGENT_ID, limit=50)
+        ids = {n["id"] for n in data["nodes"]}
+        assert ids == {str(x) for x in [hub, *old, a1, a2, b1, b2]}
+        assert data["stats"]["largest_piece"] == data["stats"]["node_count"] == 10
+
+    @pytest.mark.asyncio
+    async def test_growth_follows_the_strongest_links_first(self, session, monkeypatch):
+        monkeypatch.setattr("nous.api.dashboard_queries.GRAPH_SEED_MEMORIES", 2)  # the newest link's two ends
+        s1, s2, strong, middle, weak = [await _insert_fact(session) for _ in range(5)]
+        await _insert_edge(session, s1, weak, source_type="fact", days_ago=2, weight=0.1)
+        await _insert_edge(session, s1, strong, source_type="fact", days_ago=2, weight=0.9)
+        await _insert_edge(session, s1, middle, source_type="fact", days_ago=2, weight=0.5)
+        await _insert_edge(session, s1, s2, source_type="fact", weight=0.2)  # the newest link: its ends are the seeds
+
+        data = await get_graph_data(session, AGENT_ID, limit=3)
+        assert {n["id"] for n in data["nodes"]} == {str(s1), str(s2), str(strong)}
+        data = await get_graph_data(session, AGENT_ID, limit=4)
+        assert {n["id"] for n in data["nodes"]} == {str(s1), str(s2), str(strong), str(middle)}
+
+    @pytest.mark.asyncio
+    async def test_every_link_among_the_chosen_memories_is_drawn(self, session, monkeypatch):
+        """A link between two chosen memories is drawn even though the growth never followed it."""
+        monkeypatch.setattr("nous.api.dashboard_queries.GRAPH_FANOUT", 1)
+        monkeypatch.setattr("nous.api.dashboard_queries.GRAPH_SEED_MEMORIES", 2)  # the newest link's two ends
+        a, b, c = [await _insert_fact(session) for _ in range(3)]
+        await _insert_edge(session, b, c, source_type="fact", days_ago=3, weight=0.1)
+        await _insert_edge(session, a, c, source_type="fact", days_ago=2, weight=0.95)
+        await _insert_edge(session, a, b, source_type="fact", weight=0.9)
+
+        data = await get_graph_data(session, AGENT_ID, limit=3)
         pairs = {frozenset((e["source"], e["target"])) for e in data["edges"]}
-        assert frozenset((str(a1), str(a2))) in pairs and frozenset((str(b1), str(b2))) in pairs
-        assert frozenset((str(a1), str(hub))) in pairs and frozenset((str(b1), str(hub))) in pairs
-        assert sum(1 for p in pairs if str(a1) in p and str(a2) not in p) == 3  # a1's cap
-        assert data["stats"]["recent_edges"] == 2 and data["stats"]["displayed_edges"] <= 8
+        assert pairs == {frozenset(map(str, p)) for p in [(a, b), (a, c), (b, c)]}
+
+    @pytest.mark.asyncio
+    async def test_the_drawn_links_are_capped_strongest_first(self, session, monkeypatch):
+        monkeypatch.setattr("nous.api.dashboard_queries.GRAPH_EDGES_PER_MEMORY", 1)
+        a, b, c, d = [await _insert_fact(session) for _ in range(4)]
+        for (x, y), w in zip([(c, d), (b, d), (b, c), (a, d), (a, c)], [0.1, 0.2, 0.6, 0.7, 0.8]):
+            await _insert_edge(session, x, y, source_type="fact", days_ago=1, weight=w)
+        await _insert_edge(session, a, b, source_type="fact", weight=0.9)
+
+        data = await get_graph_data(session, AGENT_ID, limit=4)  # four memories, six links among them, four allowed
+        assert data["stats"]["node_count"] == 4 and data["stats"]["edges_truncated"] is True
+        assert sorted(e["weight"] for e in data["edges"]) == [0.6, 0.7, 0.8, 0.9]
+
+        monkeypatch.setattr("nous.api.dashboard_queries.GRAPH_EDGES_PER_MEMORY", 2)
+        data = await get_graph_data(session, AGENT_ID, limit=4)
+        assert data["stats"]["displayed_edges"] == 6 and data["stats"]["edges_truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_chunks_are_left_out_unless_asked_for(self, session):
+        f1, f2 = await _insert_fact(session), await _insert_fact(session)
+        await _insert_edge(session, f1, f2, source_type="fact", days_ago=1)
+        eid = await _insert_episode(session)
+        cid = await _insert_compressed_chunk(session, eid)
+        await _insert_edge(session, cid, eid, source_type="chunk", target_type="episode", relation="part_of")
+        await _insert_edge(session, cid, f1, source_type="chunk", target_type="fact", relation="supersedes")
+
+        data = await get_graph_data(session, AGENT_ID)
+        assert {n["type"] for n in data["nodes"]} == {"fact"}
+        s = data["stats"]
+        assert (s["total_edges"], s["total_nodes"], s["chunks_included"]) == (1, 2, False)
+
+        data = await get_graph_data(session, AGENT_ID, include_chunks=True)
+        assert {n["type"] for n in data["nodes"]} == {"fact", "episode", "chunk"}
+        s = data["stats"]
+        assert (s["total_edges"], s["total_nodes"], s["chunks_included"], s["largest_piece"]) == (3, 4, True, 4)
 
     @pytest.mark.asyncio
     async def test_edge_to_a_missing_memory_is_left_out(self, session):
@@ -346,7 +408,7 @@ class TestGetGraphData:
         assert [(e["source"], e["target"]) for e in data["edges"]] == [(str(d1), str(f1))]
         assert sorted(n["id"] for n in data["nodes"]) == sorted([str(d1), str(f1)])
         s = data["stats"]
-        assert (s["displayed_edges"], s["total_edges"], s["all_links"], s["recent_edges"]) == (1, 2, True, 1)
+        assert (s["displayed_edges"], s["total_edges"], s["node_count"]) == (1, 2, 2)
 
     @pytest.mark.asyncio
     async def test_zero_budget_is_an_empty_graph(self, session):
@@ -355,34 +417,7 @@ class TestGetGraphData:
 
         data = await get_graph_data(session, AGENT_ID, limit=0)
         assert data["edges"] == [] and data["nodes"] == []
-        assert data["stats"]["total_edges"] == 1 and data["stats"]["all_links"] is False
-
-    @pytest.mark.asyncio
-    async def test_a_link_written_between_the_two_queries_is_not_returned_twice(self, session, monkeypatch):
-        """The linked query uses the recent links the first query returned, so a newer link written in between
-        cannot push one of them out of the window and back in as a linked edge."""
-        d1 = await _insert_decision(session)
-        facts = [await _insert_fact(session) for _ in range(10)]
-        for f in facts:
-            await _insert_edge(session, d1, f)
-        for _ in range(2):  # facts[-2] is the best-linked neighbour of d1, so it would be linked first
-            await _insert_edge(session, facts[-2], await _insert_fact(session), source_type="fact", days_ago=1)
-
-        real_execute = session.execute
-        wrote = []
-
-        async def execute(statement, *args, **kwargs):
-            result = await real_execute(statement, *args, **kwargs)
-            if not wrote and "LIMIT :recent_n" in str(statement):
-                wrote.append(True)
-                await _insert_edge(session, d1, await _insert_fact(session))  # newer than every recent link
-            return result
-
-        monkeypatch.setattr(session, "execute", execute)
-        data = await get_graph_data(session, AGENT_ID, limit=2)  # budget 8, newest 2
-        ids = [e["id"] for e in data["edges"]]
-        assert wrote and len(ids) == len(set(ids))
-        assert data["stats"]["displayed_edges"] == len(ids)
+        assert data["stats"]["total_edges"] == 1 and data["stats"]["largest_piece"] == 0
 
 
 # ── Compressed-chunk labels must not crash LEFT()-based truncation ──────
@@ -419,7 +454,7 @@ class TestCompressedChunkLabel:
         await _insert_edge(session, eid, cid, source_type="episode",
                            target_type="chunk", relation="part_of")
 
-        data = await get_graph_data(session, AGENT_ID)  # must not raise
+        data = await get_graph_data(session, AGENT_ID, include_chunks=True)  # must not raise
         chunk = next(n for n in data["nodes"] if n["type"] == "chunk")
         assert chunk["id"] == str(cid)
         assert chunk["label"]              # label hydrated, not dropped
