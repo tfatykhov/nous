@@ -417,7 +417,7 @@ def test_oct08_record_decision_does_not_back_but_a_dag_and_three_commits_do():
 
 def test_the_footer_is_one_line_with_the_id_and_a_relative_due():
     [promise] = PromiseDetector().scan("I'll remove it (option A) unless you object.", now=NOW)
-    footer = render_footer(["C-0042"], promise.due_at, NOW)
+    footer = render_footer([("C-0042", promise.due_at)], NOW)
     assert "\n" not in footer and "C-0042" in footer and "in 60 min (18:45 UTC)" in footer
     assert "/drop C-0042" in footer and "committed" not in footer.lower()
 
@@ -437,6 +437,24 @@ async def test_the_footer_shows_the_deadline_the_row_stores():
     [row] = store.rows.values()
     assert row.due_at < NOW + timedelta(days=90)
     assert f"due {row.due_at:%Y-%m-%d %H:%M} UTC" in outcome.footer
+
+
+async def test_a_footer_for_two_commitments_gives_each_its_own_deadline():
+    """Codex on 793faa6a: the footer gave every listed id the first row's deadline."""
+    store = FakeStore()
+    outcome = await _gate("warn", store).run(
+        "I'll deploy staging in 2 hours. I'll email the report in 30 hours.",
+        [],
+        path="stream",
+        session_id="s",
+        turn_id="t",
+        context_kind=None,
+        now=NOW,
+    )
+    assert "\n" not in outcome.footer
+    assert "C-0001 due in 2 h (19:45 UTC)" in outcome.footer
+    assert "C-0002 due 2026-11-11 23:45 UTC" in outcome.footer
+    assert "/drop C-0001" in outcome.footer
 
 
 @pytest.mark.parametrize(("tool", "key"), [("submit_final_report", "summary"), ("resolve_intention", "note")])
@@ -963,7 +981,7 @@ def test_the_commit_wording_does_not_trip_the_vcs_commit_claim():
     [promise] = PromiseDetector().scan("I'll remove it (option A) unless you object.", now=NOW)
     texts = [
         REAL_RESULTS["commit"][0],
-        render_footer(["C-0042"], promise.due_at, NOW),
+        render_footer([("C-0042", promise.due_at)], NOW),
         "I've committed to relaunching it at 18:15 UTC (C-0042).",
     ]
     for reply in texts:

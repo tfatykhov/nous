@@ -470,16 +470,13 @@ def _due_phrase(due_at: datetime, now: datetime) -> str:
     return f"{rel} ({due_at.astimezone(UTC):%H:%M} UTC)"
 
 
-def render_footer(labels: list[str], due_at: datetime, now: datetime) -> str:
-    """One line, whatever the number of rows (spec: at most one footer per turn). ``due_at`` is the first row's, as
-    stored (a far promise is clamped). No 'committed' wording: the claim verifier's vcs_commit check reads that
-    word."""
-    ids = ", ".join(labels)
-    plural = "commitments" if len(labels) > 1 else "commitment"
-    return (
-        f"⏱ Recorded as {plural} {ids}, due {_due_phrase(due_at, now)}; nothing is scheduled for it yet. "
-        f"/drop {labels[0]} to cancel."
-    )
+def render_footer(rows: list[tuple[str, datetime]], now: datetime) -> str:
+    """One line, whatever the number of rows (spec: at most one footer per turn): each row's label with its own
+    deadline, as stored (a far promise is clamped). No 'committed' wording: the claim verifier's vcs_commit check reads
+    that word."""
+    listed = ", ".join(f"{label} due {_due_phrase(due_at, now)}" for label, due_at in rows)
+    plural = "commitments" if len(rows) > 1 else "commitment"
+    return f"⏱ Recorded as {plural} {listed}; nothing is scheduled for it yet. /drop {rows[0][0]} to cancel."
 
 
 # The report argument of each terminal tool (TERMINAL_EXTRA_TOOLS in nous/api/runner.py). A turn that ends with one
@@ -590,7 +587,7 @@ class PromiseGate:
         result.labels = [r.label for r in rows if r is not None]
         shown = [(p, r) for p, r in zip(unbacked, rows, strict=True) if r is not None and p.kind == "action"]
         if footer_wanted and shown:
-            result.footer = render_footer([r.label for _, r in shown], shown[0][1].due_at, now)
+            result.footer = render_footer([(r.label, r.due_at) for _, r in shown], now)
         return result
 
     async def log_error(
