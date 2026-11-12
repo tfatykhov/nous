@@ -601,17 +601,47 @@ async def test_not_promise_rows_do_not_fill_the_selection(store, t0):
 def test_the_dead_man_line_shows_once_per_stall():
     t0 = datetime(2026, 11, 12, 9, 0, tzinfo=UTC)
     w = CommitmentWatcher(object(), _settings(promise_watcher_since=t0.isoformat()), Send(), started_at=t0)
-    assert w.dead_man_line(t0 + timedelta(seconds=600)) is None  # 2 intervals is not yet a stall
-    line = w.dead_man_line(t0 + timedelta(seconds=601))
+    assert w.dead_man_line(t0 + timedelta(seconds=900)) is None  # 3 intervals is not yet a stall
+    line = w.dead_man_line(t0 + timedelta(seconds=901))
     assert line is None  # start-up checks not passed: the watcher is not running
     assert w.start_checks()
-    line = w.dead_man_line(t0 + timedelta(seconds=601))
+    line = w.dead_man_line(t0 + timedelta(seconds=901))
     assert line == ("⚠ Commitment watcher has not run since 09:00 UTC; overdue promises are not being checked.")
-    assert w.dead_man_line(t0 + timedelta(seconds=900)) is None  # once per stall
-    w.note_tick(t0 + timedelta(seconds=1000))
-    assert w.dead_man_line(t0 + timedelta(seconds=1100)) is None  # a fresh tick
-    again = w.dead_man_line(t0 + timedelta(seconds=1000 + 601))
-    assert again is not None and "09:16 UTC" in again  # a new stall
+    assert w.dead_man_line(t0 + timedelta(seconds=1200)) is None  # once per stall
+    w.note_tick(t0 + timedelta(seconds=1300))
+    assert w.dead_man_line(t0 + timedelta(seconds=1400)) is None  # a fresh tick
+    again = w.dead_man_line(t0 + timedelta(seconds=1300 + 901))
+    assert again is not None and "09:21 UTC" in again  # a new stall
+
+
+async def test_one_failed_run_does_not_show_the_dead_man_line(caplog):
+    """Review M1: a failed run is no tick, so with a threshold of 2 intervals one failed run between two good ones
+    showed the line to a chat reply while the next run was still under way."""
+
+    class FailsOnce:
+        def __init__(self) -> None:
+            self.runs = 0
+
+        async def expire_stale_claims(self, older_than):
+            self.runs += 1
+            if self.runs == 2:
+                raise RuntimeError("one bad run")
+            return []
+
+        async def list_watchable(self, **kwargs):
+            return []
+
+    t0 = datetime(2026, 11, 12, 9, 0, tzinfo=UTC)
+    w = CommitmentWatcher(FailsOnce(), _settings(promise_watcher_since=t0.isoformat()), Send(), started_at=t0)
+    assert w.start_checks()
+    await w.run_once(t0 + timedelta(seconds=300))  # ticks at 09:05
+    with caplog.at_level(logging.WARNING):
+        await w.run_once(t0 + timedelta(seconds=600))  # fails: no tick
+    assert w.last_tick_at == t0 + timedelta(seconds=300)
+    # The next run starts at 09:15 and takes a few seconds; a chat reply meanwhile sees no line.
+    assert w.dead_man_line(t0 + timedelta(seconds=300 + 600 + 30)) is None
+    await w.run_once(t0 + timedelta(seconds=960))
+    assert w.dead_man_line(t0 + timedelta(seconds=1000)) is None
 
 
 # ---- 16. error isolation ---------------------------------------------------------------------------------------

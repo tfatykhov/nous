@@ -37,7 +37,10 @@ TEXT_MAX = 120  # characters of the promise shown in the ping
 # Rows read per run. Rows stage 2 called not_promise are left out by the query, so the rest are pinged or suppressed
 # within a run or two and the overdue set stays small.
 CANDIDATE_LIMIT = 500
-STALL_INTERVALS = 2  # the dead-man line and the stale-claim expiry both wait this many intervals
+STALL_INTERVALS = 2  # a claim left behind is marked orphaned after this many intervals
+# The dead-man line waits one interval more: a run that fails is no tick, so with 2 one failed run between two
+# good ones would already show it (review M1 on PR #906).
+DEAD_MAN_INTERVALS = 3
 MAX_STAGE2_ATTEMPTS = 2
 # Stage-2 retries per run, per row listed: a backlog of unclassified rows is worked off over several runs, so one run
 # never takes longer than the dead-man line allows.
@@ -120,12 +123,12 @@ class CommitmentWatcher:
         self.last_tick_at = now
 
     def dead_man_line(self, now: datetime | None = None) -> str | None:
-        """The warning a live chat reply carries when the watcher is running but no run finished for 2 intervals;
+        """The warning a live chat reply carries when the watcher is running but no run finished for 3 intervals;
         at most once per stall (shown again only after a new tick and a new stall)."""
         if not self.active:
             return None
         now = now or datetime.now(UTC)
-        if now - self.last_tick_at <= timedelta(seconds=STALL_INTERVALS * self.interval_seconds):
+        if now - self.last_tick_at <= timedelta(seconds=DEAD_MAN_INTERVALS * self.interval_seconds):
             return None
         if self._stall_shown_for == self.last_tick_at:
             return None
