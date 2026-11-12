@@ -213,7 +213,8 @@
           .linkResolution(phone ? 5 : 8)
           .linkHoverPrecision(0)
           .linkDirectionalParticleWidth(2.4)
-          .linkDirectionalParticleSpeed(0.018)
+          // A mark leaves the memory the activation came from: against the link's own direction where it must.
+          .linkDirectionalParticleSpeed((l: BrainLink) => (active?.backward.has(l) ? -0.018 : 0.018))
           .linkDirectionalParticleColor(() => cssColor(el, '--text'))
           .onNodeClick(tap)
           .onBackgroundClick(clearActive)
@@ -278,7 +279,9 @@
     if (!ready) return;
     untrack(() => {
       matches = matchesOf(q);
-      repaint();
+      // A search replaces a tapped memory's neighbourhood: otherwise its colours would hide the matches.
+      if (active && matches) setActive(null);
+      else repaint();
     });
   });
 

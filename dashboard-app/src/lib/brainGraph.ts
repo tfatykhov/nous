@@ -62,6 +62,8 @@ export interface Activation {
   /** The links the activation crosses, in the two waves it crosses them. */
   first: BrainLink[];
   second: BrainLink[];
+  /** The crossed links the activation travels against, from target to source: a link is followed either way. */
+  backward: Set<BrainLink>;
   /** The second step stopped at the cap. */
   capped: boolean;
 }
@@ -84,11 +86,13 @@ export function activate(origin: string, links: BrainLink[], cap = 150): Activat
   const hop2 = new Set<string>();
   const first: BrainLink[] = [];
   const second: BrainLink[] = [];
+  const backward = new Set<BrainLink>();
   let capped = false;
   for (const [m, l] of near.get(origin) ?? []) {
     if (m === origin) continue;
     hop1.add(m);
     first.push(l);
+    if (endId(l.target) === origin) backward.add(l);
   }
   for (const m of hop1) {
     for (const [k, l] of near.get(m) ?? []) {
@@ -99,9 +103,10 @@ export function activate(origin: string, links: BrainLink[], cap = 150): Activat
       }
       hop2.add(k);
       second.push(l);
+      if (endId(l.target) === m) backward.add(l);
     }
   }
-  return { origin, hop1, hop2, first, second, capped };
+  return { origin, hop1, hop2, first, second, backward, capped };
 }
 
 const ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };

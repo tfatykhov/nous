@@ -256,6 +256,19 @@ describe('Graph on the paper look', () => {
     await waitFor(() => expect((lib.calls.emitParticle ?? []).map((a) => a[0].id)).toEqual(['e1']));
     await waitFor(() => expect((lib.calls.emitParticle ?? []).map((a) => a[0].id)).toEqual(['e1', 'e2']), { timeout: 2000 });
     expect(last('linkDirectionalParticleColor')()).toBe(PAPER['--text']); // ink, not the link blue
+    // The marks run outward from the tapped episode: against e1 (fact to episode) and against e2 (decision to fact).
+    expect([link('e1'), link('e2'), link('e3')].map((l) => Math.sign(last('linkDirectionalParticleSpeed')(l)))).toEqual([-1, -1, 1]);
+
+    // A search replaces the tapped neighbourhood: its match is lit, and the tapped memory fades with the rest.
+    await fireEvent.input(screen.getByLabelText('Search graph nodes'), { target: { value: 'a procedure' } });
+    await tick();
+    expect(last('linkColor')(link('e1'))).not.toBe(PAPER['--rel-supports']);
+    expect(last('nodeColor')(node('n-episode'))).not.toBe(PAPER['--gv-episode']);
+    await fireEvent.input(screen.getByLabelText('Search graph nodes'), { target: { value: '' } });
+    await tick();
+    last('onNodeClick')(node('n-episode'));
+    await fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
+    expect(last('linkColor')(link('e1'))).toBe(PAPER['--rel-supports']);
 
     last('onBackgroundClick')();
     expect(last('linkColor')(link('e1'))).toBe(PAPER['--gv-other']);

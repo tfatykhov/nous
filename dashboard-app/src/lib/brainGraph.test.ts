@@ -39,6 +39,18 @@ describe('activate', () => {
     expect(act.first.map((l) => l.id).sort()).toEqual(['ab', 'ae']);
     expect(act.second.map((l) => l.id)).toEqual(['bc']);
     expect(act.capped).toBe(false);
+    expect(act.backward.size).toBe(0); // every link here runs away from a
+  });
+  it('marks the links it travels against, so the marks can run outward along an incoming link too', () => {
+    // c -> a -> b, tapped at b: both links point toward b, and the activation runs the other way along each.
+    const ab = link('ab', 'a', 'b');
+    const ca = link('ca', 'c', 'a');
+    const act = activate('b', [ab, ca]);
+    expect(act.first).toEqual([ab]);
+    expect(act.second).toEqual([ca]);
+    expect([...act.backward]).toEqual([ab, ca]);
+    // Tapped at c, the same two links are followed as they point.
+    expect(activate('c', [ab, ca]).backward.size).toBe(0);
   });
   it('follows a link in either direction, and reads ends the library has swapped for node objects', () => {
     const swapped: BrainLink[] = [{ id: 'ab', source: { id: 'a' } as any, target: { id: 'b' } as any, relation: 'related_to' }];
