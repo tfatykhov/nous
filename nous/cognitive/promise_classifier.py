@@ -157,7 +157,8 @@ class ClassifierScheduler:
             # None: the helper failed and logged it once already.
             if result is not None:
                 label = result.get("verdict")
-                if label in VERDICTS:
+                # The helper checks the keys, not their types: an unhashable label ([], {}) would raise here.
+                if isinstance(label, str) and label in VERDICTS:
                     verdict = label
                     reason = clean_text(str(result.get("reason") or ""))[:REASON_MAX]
                 else:

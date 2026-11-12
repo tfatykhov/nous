@@ -137,6 +137,31 @@ async def test_an_unknown_or_missing_label_is_an_error(answer, caplog):
     assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
 
 
+# Codex on 391e7849: a label of the wrong type made `label in VERDICTS` raise TypeError outside the guarded block,
+# so no `error` was stored and a watcher retry aborted the run.
+WRONG_TYPES = [[], {"x": 1}, 1, None]
+
+
+@pytest.mark.parametrize("label", WRONG_TYPES, ids=["list", "dict", "int", "none"])
+async def test_a_label_of_the_wrong_type_is_an_error_in_the_watcher_retry(label, caplog):
+    sched, store = _sched(StubClient({"verdict": label, "reason": "x"}))
+    row = _row()
+    with caplog.at_level(logging.WARNING):
+        doc = await sched.classify_now(row)
+    assert doc["verdict"] == "error" and store.docs[row.id][0]["verdict"] == "error"
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
+@pytest.mark.parametrize("label", WRONG_TYPES, ids=["list", "dict", "int", "none"])
+async def test_a_label_of_the_wrong_type_is_an_error_after_the_turn(label):
+    sched, store = _sched(StubClient({"verdict": label, "reason": "x"}))
+    row = _row()
+    task = sched.submit(row)
+    assert task is not None
+    doc = await task  # the task does not fail
+    assert doc["verdict"] == "error" and store.docs[row.id] == [doc]
+
+
 async def test_a_second_attempt_counts_two():
     sched, _ = _sched(StubClient({"verdict": "promise", "reason": "r"}))
     doc = await sched.classify_now(_row(evidence={"stage2": {"verdict": "error", "attempts": 1}}))

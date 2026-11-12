@@ -714,6 +714,36 @@ async def test_a_retry_that_says_not_promise_is_never_pinged_and_stays_open(stor
     assert send.messages == [] and classifier.calls == [row.short_id]  # left out of the read from now on
 
 
+class _WrongTypeClient:
+    """An LLM client whose tool call carries a label of the wrong type (Codex on 391e7849)."""
+
+    supports_call_context = True
+
+    async def call(self, payload: dict, *, call_context: Any = None) -> Any:
+        return SimpleNamespace(
+            stop_reason="tool_use", content=[{"type": "tool_use", "input": {"verdict": [], "reason": "x"}}]
+        )
+
+
+@pytest.mark.postgres_only
+async def test_a_retry_whose_label_has_the_wrong_type_stores_error_and_the_run_goes_on(store, t0):
+    from nous.cognitive.promise_classifier import ClassifierScheduler
+
+    row = await _row(store, t0, "wrong-type")
+    settings = _settings(
+        promise_gate_classifier_enabled=True,
+        promise_gate_classifier_model="claude-haiku-5-5",
+        promise_gate_classifier_timeout_seconds=10,
+        promise_gate_classifier_max_concurrency=2,
+    )
+    classifier = ClassifierScheduler(store, settings, _WrongTypeClient())
+    send = Send()
+    await _watcher(store, t0, send, classifier=classifier, promise_gate_classifier_enabled=True).run_once(_past(t0))
+    assert (await _evidence(store, row.short_id))["stage2"]["verdict"] == "error"
+    [message] = send.messages
+    assert "(not checked)" in next(ln for ln in message.split("\n") if row.label in ln)
+
+
 @pytest.mark.postgres_only
 async def test_the_retries_of_one_run_are_bounded(store, t0):
     rows = [await _row(store, t0, f"bound{i}", due_in=60 + i) for i in range(6)]
