@@ -2113,7 +2113,20 @@ class Settings(BaseSettings):
     promise_gate_max_reentries: int = Field(default=2, ge=0, le=2)  # PR B (enforce); read by nothing in PR A
     promise_gate_default_due_minutes: int = Field(default=60, ge=1)  # due_at when a promise names no time
     promise_gate_grace_seconds: int = Field(default=900, ge=0)  # stored on each row; the PR B watcher reads it
-    promise_gate_classifier_enabled: bool = False  # stage 2 (a model call on stage-1 hits): not built in PR A
+    promise_gate_classifier_enabled: bool = False  # stage 2 (nous/cognitive/promise_classifier.py), PR B1
+    # F111 PR B1: stage 2 classifies each gate row's one stored sentence (Anthropic only, through
+    # call_background_llm_structured). An empty value is the default model; a non-Claude model is refused at start.
+    promise_gate_classifier_model: str = "claude-haiku-5-5"
+    promise_gate_classifier_timeout_seconds: int = Field(default=10, ge=1)  # asyncio.wait_for around each call
+    promise_gate_classifier_max_concurrency: int = Field(default=2, ge=1)  # classifier calls in flight at once
+    promise_gate_log_retention_days: int = Field(default=30, ge=1)  # nous_system.promise_gate_log rows kept
+    # F111 PR B1: the overdue watcher (nous/heartbeat/commitment_watcher.py). It pings the owner once, on Telegram,
+    # about open rows past due + grace created at or after NOUS_PROMISE_WATCHER_SINCE (ISO 8601 with an offset;
+    # required: unset, empty or unparsable, the watcher logs a WARNING and does not run). Off by default.
+    promise_watcher_enabled: bool = False
+    promise_watcher_interval_seconds: int = Field(default=300, ge=60)
+    promise_watcher_since: str | None = None
+    promise_watcher_max_items: int = Field(default=10, ge=1)  # rows listed and claimed in one ping
     # F111: the hex SHA-256 of the secret the Telegram bot sends to the owner's /drop and /done routes
     # (NOUS_OWNER_ROUTE_SECRET, set on the bot only). Only the digest lives in this process: the agent's run_python
     # runs here and could read anything else. Unset, those routes refuse every call.
@@ -3146,6 +3159,24 @@ class Settings(BaseSettings):
                 raise ValueError(f"recall_deep_type_min: {name.strip()!r} is listed twice")
             out[name.strip()] = count.strip()
         return out
+
+    @field_validator("promise_watcher_since", mode="before")
+    @classmethod
+    def _empty_promise_watcher_since(cls, v: object) -> object:
+        """F111: an empty value (compose's empty passthrough) is unset. Parsing is the watcher's: an unparsable value
+        must not stop the process, only the watcher."""
+        return None if isinstance(v, str) and not v.strip() else v
+
+    @field_validator("promise_gate_classifier_model", mode="before")
+    @classmethod
+    def _validate_promise_gate_classifier_model(cls, v: object) -> object:
+        """F111: an empty value is the default model; anything that is not a Claude model is refused (stage 2 sends
+        the owner's redacted sentences to Anthropic only)."""
+        if isinstance(v, str) and not v.strip():
+            return "claude-haiku-5-5"
+        if not isinstance(v, str) or not v.strip().startswith("claude-"):
+            raise ValueError(f"promise_gate_classifier_model must be a Claude model (claude-...), got {v!r}")
+        return v.strip()
 
     @field_validator("recall_deep_max_items", mode="before")
     @classmethod
