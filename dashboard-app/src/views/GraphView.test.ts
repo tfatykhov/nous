@@ -53,6 +53,8 @@ const lib = vi.hoisted(() => ({
   calls: {} as Record<string, any[][]>,
   data: { nodes: [] as any[], links: [] as any[] },
   controls: { autoRotate: false, autoRotateSpeed: 0, addEventListener: () => {} } as Record<string, any>,
+  listeners: {} as Record<string, () => void>,
+  contextLost: 0,
   scene: { fog: null as any },
 }));
 
@@ -67,7 +69,7 @@ vi.mock('3d-force-graph', () => ({
       const force = { strength: () => force, distance: () => force };
       const special: Record<string, (...a: any[]) => any> = {
         d3Force: (_name: string, fn?: unknown) => (fn === undefined ? force : proxy),
-        renderer: () => ({ setPixelRatio: () => {} }),
+        renderer: () => ({ setPixelRatio: () => {}, forceContextLoss: () => { lib.contextLost += 1; } }),
         scene: () => lib.scene,
         controls: () => lib.controls,
         camera: () => ({ fov: 50, aspect: 1, position: { length: () => 1000 } }),
@@ -119,8 +121,9 @@ function paperMain(): HTMLElement {
 
 beforeEach(() => {
   currentRoute.set('graph');
-  Object.assign(lib, { made: 0, fail: false, calls: {}, data: { nodes: [], links: [] }, scene: { fog: null } });
+  Object.assign(lib, { made: 0, fail: false, calls: {}, data: { nodes: [], links: [] }, scene: { fog: null }, listeners: {}, contextLost: 0 });
   lib.controls.autoRotate = false;
+  lib.controls.addEventListener = (name: string, fn: () => void) => { lib.listeners[name] = fn; };
 });
 afterEach(() => {
   cleanup();
@@ -166,7 +169,11 @@ describe('Graph on the paper look', () => {
     const widths = lib.calls.linkWidth.length;
     await fireEvent.input(screen.getByLabelText('Search graph nodes'), { target: { value: 'a fact' } });
     await tick();
-    expect(lib.calls.linkWidth).toHaveLength(widths);
+    await fireEvent.input(screen.getByLabelText(/Min edges/), { target: { value: '1' } });
+    await tick();
+    expect(lib.calls.linkWidth).toHaveLength(widths); // nor does a filter, with no memory active
+    await fireEvent.input(screen.getByLabelText(/Min edges/), { target: { value: '0' } });
+    await tick();
     expect(last('nodeColor')(node('n-fact'))).toBe(PAPER['--gv-fact']); // the match keeps its colour
     expect(last('nodeColor')(node('n-episode'))).not.toBe(PAPER['--gv-episode']); // the rest fade
 
@@ -195,7 +202,33 @@ describe('Graph on the paper look', () => {
     const { unmount } = render(GraphView);
     await waitFor(() => expect(loads()).toBe(1));
     unmount();
+    expect(lib.contextLost).toBe(1);
     expect(lib.calls._destructor).toHaveLength(1);
+  });
+
+  it('the first settle frames the mass, unless the owner has already turned it or tapped a memory', async () => {
+    install();
+    render(GraphView);
+    await waitFor(() => expect(loads()).toBe(1));
+    last('onEngineStop')();
+    expect(lib.calls.cameraPosition).toHaveLength(1); // framed once
+    // A new layout frames again; a turn of the owner's own before it settles keeps their view.
+    await fireEvent.click(screen.getByRole('button', { name: '600' }));
+    await waitFor(() => expect(loads()).toBe(2));
+    lib.listeners.start();
+    last('onEngineStop')();
+    expect(lib.calls.cameraPosition).toHaveLength(1);
+  });
+
+  it('a sheet closed at once: the activation is sent once, not again by the tap\'s own timer', async () => {
+    install();
+    render(GraphView);
+    await waitFor(() => expect(loads()).toBe(1));
+    last('onNodeClick')(node('n-episode'));
+    await screen.findByLabelText('Episode detail');
+    await fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' }); // well inside the timer's 900 ms
+    await new Promise((r) => setTimeout(r, 2300));
+    expect((lib.calls.emitParticle ?? []).map((a) => a[0].id)).toEqual(['e1', 'e2']);
   });
 
   it('a tapped memory lights the links its activation crosses in their relation colours, and opens its sheet', async () => {
@@ -222,8 +255,6 @@ describe('Graph on the paper look', () => {
     await fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
     await waitFor(() => expect((lib.calls.emitParticle ?? []).map((a) => a[0].id)).toEqual(['e1']));
     await waitFor(() => expect((lib.calls.emitParticle ?? []).map((a) => a[0].id)).toEqual(['e1', 'e2']), { timeout: 2000 });
-    await new Promise((r) => setTimeout(r, 300));
-    expect(lib.calls.emitParticle).toHaveLength(2); // sent once, not again by the tap's own timer
     expect(last('linkDirectionalParticleColor')()).toBe(PAPER['--text']); // ink, not the link blue
 
     last('onBackgroundClick')();

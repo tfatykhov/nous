@@ -149,6 +149,7 @@
 
   function tap(node: BrainNode) {
     const origin = node.id;
+    framed = true; // a tap before the layout has settled: the camera is the owner's from here
     setActive(activate(origin, graph.graphData().links.filter(linkShown)));
     // Close enough to see the neighbourhood the activation crosses.
     const far = Math.hypot(node.x ?? 0, node.y ?? 0, node.z ?? 0) || 1;
@@ -233,6 +234,7 @@
         graph.renderer().setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 2));
         graph.scene().fog = new three.Fog(ground, 600, 3000);
         graph.controls().addEventListener('change', updateFog);
+        graph.controls().addEventListener('start', () => { framed = true; }); // so is a turn or a zoom of their own
         graph.controls().autoRotateSpeed = 0.45;
         repaint();
         if (typeof ResizeObserver === 'function') {
@@ -266,7 +268,8 @@
     if (!ready) return;
     untrack(() => {
       graph.nodeVisibility(shown).linkVisibility(linkShown);
-      setActive(null);
+      if (active) setActive(null); // only then: a new link width rebuilds every link
+      else repaint();
     });
   });
 

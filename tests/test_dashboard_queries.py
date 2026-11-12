@@ -380,18 +380,22 @@ class TestGetGraphData:
         assert {n["id"] for n in data["nodes"]} == {str(hub), str(seed), str(twice), str(n1)}
 
     @pytest.mark.asyncio
-    async def test_another_agents_links_are_never_followed_or_drawn(self, session):
-        mine, other = await _insert_fact(session), await _insert_fact(session)
-        await _insert_edge(session, mine, other, source_type="fact")
+    async def test_another_agents_links_are_never_followed_or_drawn(self, session, monkeypatch):
+        """Another agent's link from one of this agent's memories to a third: growth must not cross it."""
+        monkeypatch.setattr("nous.api.dashboard_queries.GRAPH_SEED_MEMORIES", 2)
+        mine, other, third, fourth = [await _insert_fact(session) for _ in range(4)]
+        await _insert_edge(session, third, fourth, source_type="fact", days_ago=3)
+        await _insert_edge(session, mine, other, source_type="fact")  # the newest of this agent's links: the seeds
         await session.execute(
             text("""
                 INSERT INTO brain.graph_edges (id, agent_id, source_id, target_id, source_type, target_type, relation)
                 VALUES (:id, 'someone-else', :src, :tgt, 'fact', 'fact', 'related_to')
             """),
-            {"id": uuid.uuid4(), "src": mine, "tgt": uuid.uuid4()},
+            {"id": uuid.uuid4(), "src": mine, "tgt": third},
         )
         data = await get_graph_data(session, AGENT_ID)
-        assert data["stats"]["total_edges"] == 1 and data["stats"]["displayed_edges"] == 1
+        assert {n["id"] for n in data["nodes"]} == {str(mine), str(other)}
+        assert data["stats"]["total_edges"] == 2 and data["stats"]["displayed_edges"] == 1
 
     @pytest.mark.asyncio
     async def test_every_link_among_the_chosen_memories_is_drawn(self, session, monkeypatch):
