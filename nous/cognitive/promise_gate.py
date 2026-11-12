@@ -70,17 +70,24 @@ _STRONG_RES = [
     re.compile(r"\bwithin\s+(?:the|an?|\d+)\s*(?:minute|min|hour|hr|day)s?\b", re.I),
     re.compile(r"\bnext\s+step\b", re.I),
 ]
-# What may follow a future form and make it no promise of the agent's: a negation ("I will not restart it"), filler
-# ("I'll be honest", "we'll see"), and for the passive form a third party ("will be sent by the vendor").
-_NEGATED_RE = re.compile(r"\s+(?:not|never|no\s+longer)\b", re.I)
+# Whole month names or their abbreviations ("2 decision PRs" names no December).
+_MONTH = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?"
+    r"|nov(?:ember)?|dec(?:ember)?)\b"
+)
+# What may follow a future form and make it no promise of the agent's: a negation ("I will not restart it", but not
+# "I'll not only fix it"), filler ("I'll be honest", "we'll see"), and for the passive form a third party ("will be
+# sent by the vendor"; "by then", "by morning" and "by November 20" are times).
+_NEGATED_RE = re.compile(r"\s+(?:not(?!\s+only\b)|never|no\s+longer)\b", re.I)
 _FILLER_RE = re.compile(
     r"\s+(?:be\s+(?:honest|frank|candid|clear|brief|upfront)|bet)\b"
     r"|\s+see\b(?=\s*(?:[,.;:!]|$|(?:tomorrow|later|then|how|what|if|whether)\b))",  # not "see that it ships"
     re.I,
 )
 _THIRD_PARTY_RE = re.compile(
-    r"\s+by\s+(?!(?:the\s+)?(?:end|close|start)\b|eod\b|eow\b|tomorrow|tonight|today|noon|midnight|next\b|this\b"
-    r"|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d"
+    r"\s+by\s+(?!(?:the\s+)?(?:end|close|start|weekend)\b|eod\b|eow\b|tomorrow|tonight|today|noon|midnight|next\b"
+    r"|this\b|then\b|morning|afternoon|evening|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d"
+    rf"|{_MONTH}"
     r"|(?:me|us|e-?mail|mail|slack|telegram|ci|cron|the\s+pipeline)\b)\w",  # a means, or the agent itself
     re.I,
 )
@@ -164,11 +171,6 @@ _UNREAD_TIME_RE = re.compile(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)|\b
 _ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 # A date this parser cannot bind to a clock time: with one in the sentence the deadline is the unparsed default,
 # never a parsed "today" (a weekday, "next week", a month-day date, "the day after tomorrow").
-# Whole month names or their abbreviations ("2 decision PRs" names no December).
-_MONTH = (
-    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?"
-    r"|nov(?:ember)?|dec(?:ember)?)\b"
-)
 _UNBOUND_DATE_RE = re.compile(
     r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|next\s+(?:week|month|year)"
     r"|end\s+of\s+(?:the\s+)?(?:week|month)|eow|day\s+after\s+tomorrow"

@@ -157,11 +157,43 @@
     },
     {
       "text": "I'll relaunch the chain at 18:15.",
-      "origin": "re-review r2 A-B: a clock time without a zone is still a time"
+      "origin": "re-review r2 B: a clock time without a zone is still a time"
     },
     {
       "text": "I'll send the report by 18:15.",
-      "origin": "re-review r2 A-B: a clock time without a zone is still a time"
+      "origin": "re-review r2 B: a clock time without a zone is still a time"
+    },
+    {
+      "text": "The PR will be merged by then.",
+      "origin": "re-review r2 C: a time word, a month date or 'not only' after a future form is still a promise"
+    },
+    {
+      "text": "The fix will be deployed by morning, once CI passes.",
+      "origin": "re-review r2 C: a time word, a month date or 'not only' after a future form is still a promise"
+    },
+    {
+      "text": "The fix will be deployed by the weekend, once CI passes.",
+      "origin": "re-review r2 C: a time word, a month date or 'not only' after a future form is still a promise"
+    },
+    {
+      "text": "The report will be sent by evening, once the run finishes.",
+      "origin": "re-review r2 C: a time word, a month date or 'not only' after a future form is still a promise"
+    },
+    {
+      "text": "The release will be merged by November 20, once the review is done.",
+      "origin": "re-review r2 C: a time word, a month date or 'not only' after a future form is still a promise"
+    },
+    {
+      "text": "The patch will be deployed by Dec 3, after the freeze ends.",
+      "origin": "re-review r2 C: a time word, a month date or 'not only' after a future form is still a promise"
+    },
+    {
+      "text": "The patch will be deployed on 3 Dec, after the freeze ends.",
+      "origin": "re-review r2 C: a time word, a month date or 'not only' after a future form is still a promise"
+    },
+    {
+      "text": "I'll not only fix it but also deploy it tomorrow.",
+      "origin": "re-review r2 C: a time word, a month date or 'not only' after a future form is still a promise"
     }
   ]
 }
