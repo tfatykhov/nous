@@ -548,10 +548,13 @@ def test_a_secret_straddling_a_detector_cut_is_redacted_whole(cut):
         sentence = f"The key {key} is stale and I'll rotate it tomorrow."
         cap_at = len("The key ") + 25  # the cap falls 25 characters into the key
         filler = "This paragraph explains the result. "
-        after = (filler * (SCAN_MAX_CHARS // len(filler) + 1))[: SCAN_MAX_CHARS - (len(sentence) - cap_at) - 1]
-        reply = filler * 1500 + sentence + " " + after
+        closing = "I'll check back tomorrow."  # a whole promise after the cut is still read
+        after_len = SCAN_MAX_CHARS - (len(sentence) - cap_at) - 1 - len(closing)
+        after = filler * (after_len // len(filler))
+        reply = filler * 1500 + sentence + " " + after.ljust(after_len) + closing
         assert len(reply) - SCAN_MAX_CHARS == len(filler) * 1500 + cap_at
         promises = PromiseDetector().scan(reply, now=NOW)
+        assert [p.text for p in promises] == [closing]
         for promise in promises:
             params = _params(what=promise.what, promise_text=promise.text)
             for text in (promise.what, promise.text, params["what"], params["promise_text"]):
