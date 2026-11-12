@@ -46,8 +46,10 @@ def owner_secret_matches(supplied: str | None, digest: str) -> bool:
 def build_commitment_routes(*, database: Any, settings: Any) -> list[Route]:
     """The owner's close routes, over a store for ``settings.agent_id``."""
     store = CommitmentStore(database, settings.agent_id)
-    # The first field only: ``sha256sum`` prints the digest followed by "  -".
-    fields = settings.owner_route_secret_sha256.split()
+    # The first field only: ``sha256sum`` prints the digest followed by "  -". A value that is not a str counts as
+    # unset (fail closed).
+    raw = settings.owner_route_secret_sha256
+    fields = raw.split() if isinstance(raw, str) else []
     digest = fields[0].lower() if fields else ""
     problem: str | None = None
     if not digest:

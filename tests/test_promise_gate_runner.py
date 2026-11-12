@@ -879,6 +879,26 @@ async def test_an_owner_route_digest_that_is_no_sha256_refuses_and_says_so(diges
     assert "no valid X-Nous-Owner-Secret" not in caplog.text
 
 
+async def test_create_app_with_a_digest_that_is_no_str_builds_and_refuses_every_close(caplog):
+    """A settings object whose digest is not a str (a ``MagicMock`` in older tests) builds the app; the routes fail
+    closed."""
+    from nous.api.rest import create_app
+
+    with caplog.at_level(logging.WARNING, logger="nous.api.commitment_routes"):
+        app = create_app(
+            runner=MagicMock(),
+            brain=MagicMock(),
+            heart=MagicMock(),
+            cognitive=MagicMock(),
+            database=MagicMock(),
+            settings=MagicMock(agent_id="a"),
+        )
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+            response = await client.post("/commitments/C-7/done", json={"actor": "telegram:42"}, headers=OWNER_HEADERS)
+    assert response.status_code == 403
+    assert "NOUS_OWNER_ROUTE_SECRET_SHA256 is not set" in caplog.text
+
+
 def test_the_api_settings_hold_only_the_digest():
     assert "owner_route_secret" not in Settings.model_fields
     assert Settings.model_fields["owner_route_secret_sha256"].default == ""
