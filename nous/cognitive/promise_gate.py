@@ -288,8 +288,27 @@ _ID_PATTERNS: dict[str, tuple[str, list[re.Pattern[str]]]] = {
     "commit": ("commitment", [re.compile(r"Commitment (C-\d+) recorded")]),
 }
 BACKING_TOOLS: frozenset[str] = frozenset(_ID_PATTERNS)
-# The argument whose words a backing call is matched on when the turn made more than one.
-_MATCH_ARGS = ("what", "task", "intent", "name", "description", "goal", "prompt", "title", "summary", "check_prompt")
+# The arguments whose words a backing call is matched on. propose_action's are tool, arguments (an object: its values
+# are read) and rationale (nous/handlers/continuation_runner.py PROPOSE_ACTION_SCHEMA).
+_MATCH_ARGS = (
+    "what", "task", "intent", "name", "description", "goal", "prompt", "title", "summary", "check_prompt",
+    "tool", "arguments", "rationale",
+)  # fmt: skip
+
+
+def _match_text(args: dict[str, Any]) -> str:
+    """The text of a backing call's matched arguments; a nested object (propose_action's ``arguments``) is read one
+    level down."""
+    parts: list[str] = []
+    for key in _MATCH_ARGS:
+        value = args.get(key)
+        if isinstance(value, dict):
+            parts.extend(str(v) for v in value.values())
+        elif value:
+            parts.append(str(value))
+    return " ".join(parts)
+
+
 _STOP = frozenset(
     "the and for with that this then when once after today tomorrow tonight unless you object later will ill i'll "
     "i'm going plan next step from into your our are was have has not nothing yet soon just also all any its it's "
@@ -350,7 +369,7 @@ class BackingResolver:
                 logger.debug("promise gate: no id in the %s result; it backs nothing", name)
                 continue
             args = getattr(tr, "arguments", None) or {}
-            words = _words(" ".join(str(args.get(k, "")) for k in _MATCH_ARGS))
+            words = _words(_match_text(args))
             found.append(Artifact(tool=name, kind=parsed[0], id=parsed[1], words=words))
         return found
 

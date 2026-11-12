@@ -310,6 +310,36 @@ def test_two_promises_and_two_calls_match_by_keyword_overlap():
     assert [p.text[:15] for p in unbacked] == ["I'll email the "]
 
 
+def test_two_proposals_match_their_promises_by_their_real_keys():
+    """Codex P2 on b946f69f: propose_action has only tool, arguments and rationale, none of which was read, so with
+    two artifacts no proposal could ever back a promise."""
+    reply = "I'll deploy staging tomorrow. I'll email the weekly report tomorrow."
+    promises = PromiseDetector().scan(reply, now=NOW)
+    staged = REAL_RESULTS["propose_action"][0]
+    results = [
+        ToolResult(
+            tool_name="propose_action",
+            result=staged,
+            arguments={
+                "tool": "schedule_task",
+                "arguments": {"task": "deploy staging", "when": "in 1 day"},
+                "rationale": "The owner asked for a staging deploy.",
+            },
+        ),
+        ToolResult(
+            tool_name="propose_action",
+            result=staged.replace("9f8e7d6c", "1a2b3c4d"),
+            arguments={
+                "tool": "send_email",
+                "arguments": {"subject": "Weekly report", "body": "Attached."},
+                "rationale": "Email the weekly report.",
+            },
+        ),
+    ]
+    backed, unbacked = BackingResolver().split(promises, results)
+    assert unbacked == [] and [a.id for _, a in backed] == ["9f8e7d6c", "1a2b3c4d"]
+
+
 def test_oct08_record_decision_does_not_back_but_a_dag_and_three_commits_do():
     fixture = _load("oct08_items_1_3.json")
     detector, resolver = PromiseDetector(), BackingResolver()
