@@ -69,7 +69,7 @@ describe('Companion shell — switcher', () => {
     const chips = [...container.querySelectorAll('.switcher .chip')].map((c) =>
       c.textContent?.trim(),
     );
-    expect(chips[0]).toBe('all (2)');
+    expect(chips[0]).toBe('Home');
     expect(chips).toContain('app');
     expect(chips).toContain('decisions');
   });
@@ -104,6 +104,219 @@ describe('Companion shell — switcher', () => {
       (c) => c.textContent?.trim() === 'app',
     ) as HTMLAnchorElement;
     expect(appChip.getAttribute('href')).toBe('#/s/nous%3Achat%3Amicro_app%3Aaaa001');
+  });
+});
+
+/** Svelte sets `inert` as a property, and jsdom does not reflect it to the attribute. */
+const inert = (el: Element) => (el as HTMLElement).inert === true || el.hasAttribute('inert');
+
+/** A matchMedia whose only match is the wide-screen query; `fire` flips it and tells the listeners. */
+function stubWide(matches: boolean) {
+  const listeners: (() => void)[] = [];
+  const mq = {
+    matches,
+    addEventListener: (_: string, fn: () => void) => listeners.push(fn),
+    removeEventListener: (_: string, fn: () => void) => listeners.splice(listeners.indexOf(fn), 1),
+  };
+  vi.stubGlobal('matchMedia', () => mq);
+  return {
+    listeners,
+    fire(next: boolean) {
+      mq.matches = next;
+      listeners.forEach((fn) => fn());
+    },
+  };
+}
+
+describe('Companion shell — the list is a drawer on a phone', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('is closed and inert until Menu is pressed; then it is open and focus is on its first item', async () => {
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:sweep:decision_sweep:bbb002');
+    const { container, getByRole } = render(Companion);
+    const list = container.querySelector('nav.switcher')!;
+    const menu = getByRole('button', { name: 'Menu, 1 from Nous' });
+    expect(inert(list)).toBe(true);
+    expect(list.classList.contains('open')).toBe(false);
+    expect(menu.getAttribute('aria-expanded')).toBe('false');
+    expect(menu.getAttribute('aria-controls')).toBe(list.id);
+    expect(container.querySelector('.scrim')).toBeNull();
+
+    await fireEvent.click(menu);
+    await settle();
+    expect(inert(list)).toBe(false);
+    expect(list.classList.contains('open')).toBe(true);
+    expect(menu.getAttribute('aria-expanded')).toBe('true');
+    expect(document.activeElement?.textContent?.trim()).toBe('Home');
+    expect(container.querySelector('.scrim')).not.toBeNull();
+  });
+
+  it('closes on Escape, on the scrim and on an item, and gives focus back to Menu', async () => {
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:sweep:decision_sweep:bbb002');
+    const { container, getByRole } = render(Companion);
+    const list = container.querySelector('nav.switcher')!;
+    const menu = getByRole('button', { name: /^Menu/ });
+    const closed = () => inert(list) && !list.classList.contains('open');
+
+    await fireEvent.click(menu);
+    await settle();
+    await fireEvent.keyDown(list, { key: 'Escape' });
+    expect(closed()).toBe(true);
+    expect(document.activeElement).toBe(menu);
+
+    await fireEvent.click(menu);
+    await settle();
+    await fireEvent.click(container.querySelector('.scrim')!);
+    expect(closed()).toBe(true);
+
+    // An item closes it by its own click: the surface already open fires no hashchange.
+    await fireEvent.click(menu);
+    await settle();
+    await fireEvent.click(list.querySelector('a.chip')!);
+    expect(closed()).toBe(true);
+    expect(container.querySelector('.scrim')).toBeNull();
+  });
+
+  it('Tab stays inside the open list', async () => {
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:sweep:decision_sweep:bbb002');
+    const { container, getByRole } = render(Companion);
+    const list = container.querySelector('nav.switcher')!;
+    await fireEvent.click(getByRole('button', { name: /^Menu/ }));
+    await settle();
+    const items = [...list.querySelectorAll<HTMLElement>('a.chip')];
+    items[items.length - 1].focus();
+    await fireEvent.keyDown(list, { key: 'Tab' });
+    expect(document.activeElement).toBe(items[0]);
+    await fireEvent.keyDown(list, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(items[items.length - 1]);
+  });
+
+  it('groups the items: what Nous raised, then the apps; Menu counts only what Nous raised', () => {
+    seed('nous:chat:micro_app:aaa001', 0, undefined, 'Crypto Note');
+    seed('nous:sweep:decision_sweep:bbb002');
+    seed('nous:chat:micro_app:ccc003', 0, undefined, 'Trip Plan');
+    const { container } = render(Companion);
+    const words = [...container.querySelectorAll('nav.switcher > *')].map((e) => e.textContent?.trim());
+    expect(words).toEqual(['Home', 'From Nous', 'decisions', 'Apps', 'Crypto Note', 'Trip Plan', 'close all apps (2)']);
+    expect(container.querySelector('button.menu')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Menu1');
+  });
+
+  it('Menu has no count when only apps are live', () => {
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:chat:micro_app:bbb002');
+    const { container } = render(Companion);
+    const menu = container.querySelector('button.menu')!;
+    expect(menu.getAttribute('aria-label')).toBe('Menu');
+    expect(menu.querySelector('.count')).toBeNull();
+  });
+
+  it('the bar names the open surface in place of the brand, in full', () => {
+    const title = 'Quarterly Revenue Breakdown By Region';
+    seed('nous:chat:micro_app:long001', 0, undefined, title);
+    seed('nous:sweep:decision_sweep:bbb002');
+    location.hash = '#/s/' + encodeURIComponent('nous:chat:micro_app:long001');
+    const { container } = render(Companion);
+    expect(container.querySelector('header.rail .bar-title')?.textContent).toBe(title);
+    expect(container.querySelector('header.rail .brand')).toBeNull();
+  });
+});
+
+describe('Companion shell — the list is a sidebar on a wide screen', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('is always there: not inert, no Menu button, and the bar keeps the brand over an open surface', () => {
+    stubWide(true);
+    seed('nous:chat:micro_app:aaa001', 0, undefined, 'Crypto Note');
+    seed('nous:sweep:decision_sweep:bbb002');
+    location.hash = '#/s/' + encodeURIComponent('nous:chat:micro_app:aaa001');
+    const { container } = render(Companion);
+    expect(inert(container.querySelector('nav.switcher')!)).toBe(false);
+    expect(container.querySelector('button.menu')).toBeNull();
+    expect(container.querySelector('.app')?.className).toMatch(/\bwide\b.*\bwith-list\b/);
+    expect(container.querySelector('header.rail .brand')).not.toBeNull();
+    expect(container.querySelector('nav.switcher a.chip.active')?.textContent?.trim()).toBe('Crypto Note');
+  });
+
+  it('one surface: no list, so no list column either (the card keeps the page)', () => {
+    stubWide(true);
+    seed('nous:chat:micro_app:aaa001');
+    const { container } = render(Companion);
+    expect(container.querySelector('nav.switcher')).toBeNull();
+    expect(container.querySelector('.app')?.classList.contains('with-list')).toBe(false);
+    expect(container.querySelector('header.rail .brand')).not.toBeNull();
+  });
+
+  it('follows the window: a drawer left open is closed when the screen widens, and the listener goes with the shell', async () => {
+    const media = stubWide(false);
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:sweep:decision_sweep:bbb002');
+    const { container, unmount } = render(Companion);
+    await fireEvent.click(container.querySelector('button.menu')!);
+    await settle();
+    media.fire(true);
+    await settle();
+    const list = container.querySelector('nav.switcher')!;
+    expect(list.classList.contains('open')).toBe(false);
+    expect(inert(list)).toBe(false);
+    expect(container.querySelector('.scrim')).toBeNull();
+    media.fire(false);
+    await settle();
+    expect(inert(list)).toBe(true);
+    unmount();
+    expect(media.listeners).toHaveLength(0);
+  });
+
+  it('the stylesheet reads the wide class, never a width query of its own (one source for which shell this is)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { styleBlocks } = await import('../lib/testing/css');
+    const css = styleBlocks(readFileSync(join(__dirname, 'Companion.svelte'), 'utf-8'));
+    expect(css).not.toMatch(/@media[^{]*(min|max)-width/);
+    expect(css).toMatch(/\.app\.wide \.switcher \{[^}]*position: sticky;[^}]*transform: none;[^}]*visibility: visible/);
+  });
+});
+
+describe('Companion shell — the first screen', () => {
+  it('shows what Nous raised in full and the apps as rows that open them', () => {
+    const title = 'Quarterly Revenue Breakdown By Region';
+    seed('nous:chat:micro_app:aaa001', 0, undefined, title);
+    seed('nous:sweep:decision_sweep:bbb002');
+    seed('nous:chat:micro_app:ccc003', 0, undefined, 'Trip Plan');
+    const { container } = render(Companion);
+    const full = [...container.querySelectorAll('main section.surface')].map((s) => s.getAttribute('aria-label'));
+    expect(full).toEqual(['nous:sweep:decision_sweep:bbb002']);
+    const rows = [...container.querySelectorAll('main .apps a.app-row')];
+    // the whole name, not the list's cut one
+    expect(rows.map((r) => r.querySelector('.app-name')?.textContent)).toEqual([title, 'Trip Plan']);
+    expect(rows[0].getAttribute('href')).toBe('#/s/' + encodeURIComponent('nous:chat:micro_app:aaa001'));
+    expect(container.querySelector('main .apps h2')?.textContent).toBe('Apps');
+  });
+
+  it('a kind the shell does not know is shown in full, never as a row', () => {
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:future:some_new_ask:bbb002');
+    const { container } = render(Companion);
+    const full = [...container.querySelectorAll('main section.surface')].map((s) => s.getAttribute('aria-label'));
+    expect(full).toEqual(['nous:future:some_new_ask:bbb002']);
+  });
+
+  it('a lone app is shown in full: there is no list to open it from', () => {
+    seed('nous:chat:micro_app:aaa001');
+    const { container } = render(Companion);
+    expect(container.querySelectorAll('main section.surface')).toHaveLength(1);
+    expect(container.querySelector('main .apps')).toBeNull();
+    expect(container.querySelector('button.menu')).toBeNull();
+  });
+
+  it('no apps card when nothing live is an app', () => {
+    seed('nous:sweep:decision_sweep:aaa001');
+    seed('nous:dag:dag_monitor:bbb002');
+    const { container } = render(Companion);
+    expect(container.querySelectorAll('main section.surface')).toHaveLength(2);
+    expect(container.querySelector('main .apps')).toBeNull();
   });
 });
 

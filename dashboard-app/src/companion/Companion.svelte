@@ -5,7 +5,7 @@
   // validates against a closed ROUTES union and would send arbitrary
   // surface ids to 'overview'. The `initialized` guard is copied from it —
   // it stops hashchange listeners stacking across tests and HMR.
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { resolveDynamic, toDisplayString } from './functions';
   import InstallPrompt from './InstallPrompt.svelte';
   import Renderer from './Renderer.svelte';
@@ -198,6 +198,54 @@
   }
 
   let route = $state<View>(parseHash());
+
+  // The list of live surfaces is ONE element: a drawer under the Menu button
+  // on a phone, a permanent sidebar on a wide screen. `wide` is the only
+  // source for which it is (the stylesheet reads the class it sets, never a
+  // media query of its own), so a visible sidebar can never be left inert.
+  // 900px keeps the 720px reading column whole beside the 240px list.
+  // jsdom has no matchMedia: the shell is then the phone one.
+  const mq = typeof matchMedia === 'function' ? matchMedia('(min-width: 900px)') : null;
+  let wide = $state(mq?.matches === true);
+  let drawerOpen = $state(false);
+  let menuBtn: HTMLButtonElement | null = $state(null);
+  let listEl: HTMLElement | null = $state(null);
+
+  const focusable = () =>
+    [...(listEl?.querySelectorAll<HTMLElement>('a[href], button:not([disabled])') ?? [])];
+
+  async function openDrawer() {
+    drawerOpen = true;
+    await tick(); // the list is inert until then
+    focusable()[0]?.focus();
+  }
+
+  function closeDrawer() {
+    if (!drawerOpen) return;
+    drawerOpen = false;
+    menuBtn?.focus();
+  }
+
+  /** Escape closes the drawer; Tab stays inside it while it is open. */
+  function onListKeydown(e: KeyboardEvent) {
+    if (wide || !drawerOpen) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeDrawer();
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const items = focusable();
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last?.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first?.focus();
+    }
+  }
   let initialized = false;
 
   onMount(() => {
@@ -208,8 +256,16 @@
         route = parseHash();
       });
     }
+    const onMq = () => {
+      wide = mq?.matches === true;
+      if (wide) drawerOpen = false;
+    };
+    mq?.addEventListener?.('change', onMq);
     void transport.connect();
-    return () => transport.stop();
+    return () => {
+      mq?.removeEventListener?.('change', onMq);
+      transport.stop();
+    };
   });
 
   const feed = $derived(store.ordered());
@@ -219,6 +275,18 @@
   // switcher gives one-tap focus per surface, and close-all sweeps the
   // disposable micro-apps (they are rebuilt, not restored, by design).
   const microApps = $derived(feed.filter((s) => kindOf(s.surfaceId) === 'micro_app'));
+  // Everything that is not a composed app: approvals, reviews, findings,
+  // questions, monitors, and any kind this shell does not know. These always
+  // render in full on the first screen, so an ask is never behind a row.
+  const raised = $derived(feed.filter((s) => kindOf(s.surfaceId) !== 'micro_app'));
+  // One surface needs no list: the first screen already shows it in full.
+  const hasList = $derived(feed.length > 1);
+  const barTitle = $derived(
+    !wide && hasList && focused ? chipName(focused) || chipLabel(focused) : '',
+  );
+  $effect(() => {
+    if (!hasList) drawerOpen = false;
+  });
   let closingAll = $state(false);
   // Two-tap confirmation, same pattern as the per-app close: this sweeps EVERY
   // live micro-app in one press, and apps are rebuilt, not restored. First tap
@@ -267,34 +335,79 @@
   }
 </script>
 
-<!-- The Atlantic-blue bar runs edge to edge and up under the status bar of an
-     installed app; the shell below keeps the reading width. The fixed strip
-     keeps navy under the (white) status-bar text once the page scrolls the bar
-     away; it is the top safe-area inset tall, so 0 in a browser tab. -->
+<!-- The Atlantic-blue bar runs edge to edge, up under the status bar of an
+     installed app, and stays put while the page scrolls. The fixed strip keeps
+     navy under the (white) status-bar text; it is the top safe-area inset
+     tall, so 0 in a browser tab. -->
 <div class="status-fill" aria-hidden="true"></div>
-<header class="rail">
-  <div class="rail-inner">
-    <a class="brand" href="#/">Nous <span>Companion</span></a>
-    <span class="conn {store.connection}">{store.connection}</span>
-  </div>
-</header>
-
-<div class="shell">
-  <InstallPrompt />
-
-  {#if feed.length > 1}
-    <nav class="switcher" aria-label="live surfaces">
-      <a class="chip" class:active={route.view === 'feed'} href="#/">all ({feed.length})</a>
-      {#each feed as surface (surface.surfaceId)}
-        <a
-          class="chip"
-          class:active={route.view === 'surface' && route.id === surface.surfaceId}
-          href={'#/s/' + encodeURIComponent(surface.surfaceId)}
-          title={chipTooltip(surface)}
+<div class="app" class:wide class:with-list={wide && hasList}>
+  <header class="rail">
+    <div class="rail-inner">
+      {#if hasList && !wide}
+        <button
+          class="menu"
+          bind:this={menuBtn}
+          aria-label={raised.length > 0 ? `Menu, ${raised.length} from Nous` : 'Menu'}
+          aria-expanded={drawerOpen}
+          aria-controls="surface-list"
+          onclick={openDrawer}
         >
-          {chipLabel(surface)}
-        </a>
-      {/each}
+          Menu{#if raised.length > 0}<span class="count" aria-hidden="true">{raised.length}</span>{/if}
+        </button>
+      {/if}
+      {#if barTitle}
+        <span class="bar-title">{barTitle}</span>
+      {:else}
+        <a class="brand" href="#/">Nous <span>Companion</span></a>
+      {/if}
+      <span class="conn {store.connection}">{store.connection}</span>
+    </div>
+  </header>
+
+  {#if hasList}
+    {#if drawerOpen && !wide}
+      <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+      <div class="scrim" aria-hidden="true" onclick={closeDrawer}></div>
+    {/if}
+    <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+    <nav
+      id="surface-list"
+      class="switcher"
+      class:open={drawerOpen}
+      aria-label="live surfaces"
+      inert={!wide && !drawerOpen ? true : undefined}
+      bind:this={listEl}
+      onkeydown={onListKeydown}
+    >
+      <a class="chip" class:active={route.view === 'feed'} href="#/" onclick={closeDrawer}>Home</a>
+      {#if raised.length > 0}
+        <p class="group">From Nous</p>
+        {#each raised as surface (surface.surfaceId)}
+          <a
+            class="chip"
+            class:active={route.view === 'surface' && route.id === surface.surfaceId}
+            href={'#/s/' + encodeURIComponent(surface.surfaceId)}
+            title={chipTooltip(surface)}
+            onclick={closeDrawer}
+          >
+            {chipLabel(surface)}
+          </a>
+        {/each}
+      {/if}
+      {#if microApps.length > 0}
+        <p class="group">Apps</p>
+        {#each microApps as surface (surface.surfaceId)}
+          <a
+            class="chip"
+            class:active={route.view === 'surface' && route.id === surface.surfaceId}
+            href={'#/s/' + encodeURIComponent(surface.surfaceId)}
+            title={chipTooltip(surface)}
+            onclick={closeDrawer}
+          >
+            {chipLabel(surface)}
+          </a>
+        {/each}
+      {/if}
       {#if microApps.length >= 2}
         <button
           class="chip close-all"
@@ -312,36 +425,57 @@
     </nav>
   {/if}
 
-  <main>
-    {#if route.view === 'surface'}
-      {#if focused}
-        <section class="surface" data-theme={focused.theme || null} aria-label={focused.surfaceId}>
-          <Renderer surfaceId={focused.surfaceId} componentId="root" />
-        </section>
-      {:else}
+  <div class="shell">
+    <InstallPrompt />
+
+    <main>
+      {#if route.view === 'surface'}
+        {#if focused}
+          <section class="surface" data-theme={focused.theme || null} aria-label={focused.surfaceId}>
+            <Renderer surfaceId={focused.surfaceId} componentId="root" />
+          </section>
+        {:else}
+          <p class="empty">
+            Surface not found — it may have resolved or expired.
+            <a href="#/">Back to feed</a>
+          </p>
+        {/if}
+      {:else if feed.length === 0}
         <p class="empty">
-          Surface not found — it may have resolved or expired.
-          <a href="#/">Back to feed</a>
+          Nothing needs you right now. Surfaces Nous pushes — escalations,
+          action reviews, triage — appear here.
         </p>
+      {:else}
+        <!-- With a list, the composed apps are rows below; a lone surface is
+             shown in full whatever it is. -->
+        {#each hasList ? raised : feed as surface (surface.surfaceId)}
+          <section class="surface linked" data-theme={surface.theme || null} aria-label={surface.surfaceId}>
+            <a
+              class="permalink"
+              href={'#/s/' + encodeURIComponent(surface.surfaceId)}
+              aria-label={'Open ' + (chipName(surface) || chipLabel(surface)) + ' on its own'}
+            >Open</a>
+            <Renderer surfaceId={surface.surfaceId} componentId="root" />
+          </section>
+        {/each}
+        {#if hasList && microApps.length > 0}
+          <section class="apps" aria-labelledby="apps-heading">
+            <h2 id="apps-heading">Apps</h2>
+            <ul>
+              {#each microApps as surface (surface.surfaceId)}
+                <li>
+                  <a class="app-row" href={'#/s/' + encodeURIComponent(surface.surfaceId)}>
+                    <span class="app-name">{chipName(surface) || chipLabel(surface)}</span>
+                    <span class="app-open">Open</span>
+                  </a>
+                </li>
+              {/each}
+            </ul>
+          </section>
+        {/if}
       {/if}
-    {:else if feed.length === 0}
-      <p class="empty">
-        Nothing needs you right now. Surfaces Nous pushes — escalations,
-        action reviews, triage — appear here.
-      </p>
-    {:else}
-      {#each feed as surface (surface.surfaceId)}
-        <section class="surface linked" data-theme={surface.theme || null} aria-label={surface.surfaceId}>
-          <a
-            class="permalink"
-            href={'#/s/' + encodeURIComponent(surface.surfaceId)}
-            aria-label={'Open ' + (chipName(surface) || chipLabel(surface)) + ' on its own'}
-          >Open</a>
-          <Renderer surfaceId={surface.surfaceId} componentId="root" />
-        </section>
-      {/each}
-    {/if}
-  </main>
+    </main>
+  </div>
 </div>
 
 <style>
@@ -351,10 +485,20 @@
      bar / notch / Dynamic Island, so the bar takes the top inset (env() is 0
      in a browser tab) and its navy fills the space behind the status text.
      Left/right insets cover landscape notches. */
+  .app {
+    --bar-h: calc(3.5rem + env(safe-area-inset-top));
+  }
   .rail {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    box-sizing: border-box;
+    min-height: var(--bar-h);
+    display: flex;
+    align-items: center;
     background: var(--rail);
     color: var(--rail-ink);
-    padding: calc(0.9rem + env(safe-area-inset-top)) calc(1rem + env(safe-area-inset-right)) 0.9rem
+    padding: env(safe-area-inset-top) calc(1rem + env(safe-area-inset-right)) 0
       calc(1rem + env(safe-area-inset-left));
   }
   .status-fill {
@@ -368,12 +512,17 @@
     pointer-events: none;
   }
   .rail-inner {
+    flex: 1;
+    min-width: 0;
     max-width: 688px; /* the shell's 720px less its padding: the brand lines up with the cards */
     margin: 0 auto;
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: 0.75rem;
+  }
+  /* On a wide screen the brand sits over the list, not over the cards. */
+  .app.wide .rail-inner {
+    max-width: none;
   }
   .shell {
     max-width: 720px;
@@ -383,6 +532,19 @@
     display: flex;
     flex-direction: column;
     gap: 1rem;
+  }
+  /* Wide, with a list: the bar across the top, the list down the left. */
+  .app.with-list {
+    display: grid;
+    grid-template-columns: 240px minmax(0, 1fr);
+    align-items: start;
+  }
+  .app.with-list .rail {
+    grid-column: 1 / -1;
+  }
+  .app.with-list .shell {
+    width: 100%;
+    box-sizing: border-box;
   }
   .brand {
     color: var(--rail-ink);
@@ -395,8 +557,19 @@
     color: var(--rail-mute);
     font-weight: 500;
   }
+  /* The open surface's name, where the brand was: the phone bar says where you are. */
+  .bar-title {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 700;
+    font-size: 1.05rem;
+    letter-spacing: -0.01em;
+  }
   .brand:focus-visible,
-  .conn:focus-visible {
+  .conn:focus-visible,
+  .menu:focus-visible {
     outline: 2px solid var(--rail-focus);
     outline-offset: 2px;
     border-radius: 6px;
@@ -404,6 +577,8 @@
   /* The connection state: a word on a light pill, in a status ink when it
      matters (never colour alone: the word is the state). */
   .conn {
+    margin-left: auto;
+    flex: none;
     font-size: 0.75rem;
     font-weight: 600;
     padding: 0.15rem 0.65rem;
@@ -418,31 +593,128 @@
   .conn.resyncing {
     color: var(--warn);
   }
-  /* The live surfaces: pill segments on the paper ground. */
-  .switcher {
-    display: flex;
-    gap: 0.4rem;
-    flex-wrap: wrap;
-    align-items: center;
-  }
-  .chip {
+  /* Menu: a word, with the number of surfaces Nous raised beside it. */
+  .menu {
     font: inherit;
-    font-size: 0.8rem;
-    color: var(--muted);
-    background: transparent;
-    border: 1px solid var(--border);
-    border-radius: var(--ctl-radius);
-    padding: 0.25rem 0.8rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--rail-ink);
+    background: var(--rail-lift);
+    border: 0;
+    border-radius: 999px;
     min-height: 44px;
+    padding: 0 0.9rem;
     display: inline-flex;
     align-items: center;
-    text-decoration: none;
+    gap: 0.4rem;
     cursor: pointer;
-    transition: var(--transition);
+    flex: none;
+  }
+  .menu:focus-visible {
+    border-radius: 999px;
+  }
+  .count {
+    min-width: 1.25rem;
+    height: 1.25rem;
+    padding: 0 0.3rem;
+    box-sizing: border-box;
+    border-radius: 999px;
+    background: var(--rail-ink);
+    color: var(--rail);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .scrim {
+    position: fixed;
+    inset: 0;
+    background: var(--rail-scrim);
+    z-index: 30;
+  }
+  /* The live surfaces. On a phone: a drawer from the left, over the bar. */
+  .switcher {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 40;
+    box-sizing: border-box;
+    width: min(280px, 85vw);
+    padding: calc(1rem + env(safe-area-inset-top)) 0.75rem calc(1rem + env(safe-area-inset-bottom))
+      calc(0.75rem + env(safe-area-inset-left));
+    background: var(--rail);
+    color: var(--rail-ink);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    transform: translateX(-100%);
+    visibility: hidden;
+    transition:
+      transform var(--transition),
+      visibility var(--transition);
+  }
+  .switcher.open {
+    transform: none;
+    visibility: visible;
+  }
+  /* Wide: the same list, always there, under the bar. */
+  .app.wide .switcher {
+    position: sticky;
+    top: var(--bar-h);
+    z-index: auto;
+    width: auto;
+    height: calc(100dvh - var(--bar-h));
+    padding-top: 1rem;
+    transform: none;
+    visibility: visible;
+    transition: none;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .switcher {
+      transition: none;
+    }
+  }
+  .group {
+    margin: 0;
+    padding: 0.9rem 0.75rem 0.25rem;
+    color: var(--rail-mute);
+    font-size: 0.6875rem;
+    font-weight: 600;
+  }
+  /* A list item. A block, so the label's first letter can be capitalised and
+     a long name is cut with an ellipsis. */
+  .chip {
+    display: block;
+    box-sizing: border-box;
+    flex: none;
+    width: 100%;
+    min-height: 44px;
+    padding: 0.75rem;
+    font: inherit;
+    font-size: 0.875rem;
+    font-weight: 500;
+    line-height: 1.25rem;
+    text-align: left;
+    color: var(--rail-ink);
+    background: transparent;
+    border: 0;
+    border-radius: 10px;
+    text-decoration: none;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    cursor: pointer;
+    transition: background var(--transition);
+  }
+  .chip::first-letter {
+    text-transform: uppercase;
   }
   .chip:hover {
-    border-color: var(--accent);
-    color: var(--text);
+    background: var(--rail-lift);
   }
   /* The selected surface is the white raised pill, as every switch in the dashboard (finish review fix 2). */
   .chip.active {
@@ -450,24 +722,24 @@
     color: var(--text);
     font-weight: 600;
     box-shadow: var(--tab-active-shadow);
-    border-color: transparent;
   }
   .chip:focus-visible {
-    outline: 2px solid var(--accent);
+    outline: 2px solid var(--rail-focus);
     outline-offset: 2px;
   }
-  .chip.close-all.armed {
-    color: var(--crit);
-    border-color: var(--crit);
-  }
+  /* Close all sits at the foot of the list, apart from the surfaces. */
   .chip.close-all {
-    margin-left: auto;
-    color: var(--muted);
-    background: none;
+    margin-top: auto;
+    color: var(--rail-mute);
   }
   .chip.close-all:hover:not(:disabled) {
-    color: var(--crit);
-    border-color: var(--crit);
+    color: var(--rail-ink);
+  }
+  /* Armed: the light pill, and the words change (never colour alone). */
+  .chip.close-all.armed {
+    background: var(--rail-ink);
+    color: var(--rail);
+    font-weight: 600;
   }
   .chip.close-all:disabled {
     opacity: 0.5;
@@ -513,6 +785,59 @@
   .permalink:hover {
     color: var(--accent);
     text-decoration: underline;
+  }
+  /* The composed apps on the first screen: one card of rows, split by rules. */
+  .apps {
+    background: var(--surface);
+    border: var(--card-border);
+    border-radius: var(--radius);
+    box-shadow: var(--card-shadow);
+    padding: 0.9rem 1.1rem 0.35rem;
+  }
+  .apps h2 {
+    margin: 0 0 0.35rem;
+    font-size: 0.9375rem;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .apps ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .apps li + li {
+    border-top: 1px solid var(--border);
+  }
+  .app-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    min-height: 48px;
+    color: var(--text);
+    text-decoration: none;
+  }
+  .app-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 500;
+  }
+  .app-open {
+    flex: none;
+    color: var(--muted);
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+  .app-row:hover .app-open {
+    color: var(--accent);
+    text-decoration: underline;
+  }
+  .app-row:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 6px;
   }
   .empty {
     color: var(--muted);

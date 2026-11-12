@@ -159,6 +159,8 @@
   --rail-ink: #dbe6ef; /* the brand, and the light pill the state word sits on */
   --rail-mute: #9fb6c9;
   --rail-focus: #ffffff;
+  --rail-lift: #1a3d62; /* a hovered list item, and the Menu button's ground */
+  --rail-scrim: rgba(0, 0, 0, 0.6); /* over the page while the list is open on a phone */
 }
 
 /* A themed root MUST re-assert the inherited properties it re-defines.

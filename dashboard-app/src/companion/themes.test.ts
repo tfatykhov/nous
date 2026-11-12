@@ -397,7 +397,7 @@ function newLegacy(id: string): Record<string, string> {
 }
 const JETBRAINS = "'JetBrains Mono', 'Cascadia Code', 'Fira Code', monospace";
 /** :root-only chrome tokens (the shell's bar): no theme needs them. */
-const CHROME_VALUES = { '--rail': '#12304f', '--rail-ink': '#dbe6ef', '--rail-mute': '#9fb6c9', '--rail-focus': '#ffffff' };
+const CHROME_VALUES = { '--rail': '#12304f', '--rail-ink': '#dbe6ef', '--rail-mute': '#9fb6c9', '--rail-focus': '#ffffff', '--rail-lift': '#1a3d62', '--rail-scrim': 'rgba(0, 0, 0, 0.6)' };
 const CHROME = Object.keys(CHROME_VALUES);
 
 /** The companion's source files (components, scripts, the stylesheet), without tests and test helpers. */
