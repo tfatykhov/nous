@@ -1038,6 +1038,11 @@ PASSIVE_MISSES = [
     # Not in ACTION_VERBS ("do", "ready" are not), so the rule does not reach them (reported on the PR).
     "It'll be done by tomorrow.",
     "The report is going to be ready by 5pm.",
+    # Review I4 (and Codex on 391e7849): someone else does it, or it is negated, before the deadline.
+    "It will be deployed by Tim by tomorrow.",
+    "The invoice will be sent by the vendor by tomorrow.",
+    "The cache will be deleted by the vendor by 09:00 UTC.",
+    "The app will be deployed by Tim, not by tomorrow.",
 ]
 
 
@@ -1056,13 +1061,17 @@ def test_a_passive_that_is_not_the_agents_deadline_is_no_promise(sentence):
 @pytest.mark.parametrize("unit", ["will be sent ", "will be run by "])
 def test_a_200_kb_reply_ending_in_a_long_passive_sentence_scans_in_milliseconds(unit):
     """Review I1: one regex spanning the passive head, a lazy gap and the deadline rescanned the clause from every head
-    (a 31.9 KB sentence of "will be sent " took 0.8 s, of "will be run by " 1.4 s, on the event loop)."""
+    (a 31.9 KB sentence of "will be sent " took 0.8 s, of "will be run by " 1.4 s, on the event loop). Best of 3: the
+    linear scan takes tens of ms on a loaded host, the quadratic one about 1 s on every run."""
     filler = "This paragraph explains the result. " * (170_000 // 36)
     reply = filler + unit * (31_900 // len(unit)) + "."
     assert len(reply) > 200_000
-    start = time.perf_counter()
-    PromiseDetector().scan(reply, now=NOW)
-    assert time.perf_counter() - start < 0.1
+    timings = []
+    for _ in range(3):
+        start = time.perf_counter()
+        PromiseDetector().scan(reply, now=NOW)
+        timings.append(time.perf_counter() - start)
+    assert min(timings) < 0.1, timings
 
 
 def test_the_pr_merged_by_then_stays_a_stage1_positive():

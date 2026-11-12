@@ -154,7 +154,8 @@ def _participle(verb: str) -> str:
 # ACTION_VERBS and the "by" must name a time, never someone ("will be reviewed by Tim"); a past passive ("was merged by
 # Tim") has no future form. Two patterns, never one spanning both (a lazy gap between them rescanned the clause from
 # every head: quadratic, on the event loop): _passive_deadline matches the head, then looks for the deadline once after
-# it, in the same clause.
+# it, in the same clause. A head followed by someone or a negation ("will be deployed by Tim by tomorrow", "by Tim,
+# not by tomorrow") is no promise of the agent's, as in _agent_future_form.
 _PASSIVE_HEAD_RE = re.compile(
     rf"\b(?:will|{_APOS}ll|(?:is|are|{_APOS}s|{_APOS}re)\s+going\s+to)\s+be\s+"
     r"(?:"
@@ -175,11 +176,14 @@ _CLAUSE_END_RE = re.compile(r"[.!?;]")
 
 
 def _passive_deadline(sentence: str) -> bool:
-    """True when a clause of the sentence has a future passive of an action verb followed by a ``by <time>``. Per
-    clause only the first head is tried (a later one sees a subset of the same "by"s), and each "by" is matched in
-    place: linear in the sentence."""
+    """True when a clause of the sentence has a future passive of an action verb, done by no one else and not negated,
+    followed by a ``by <time>``. Per clause only the first such head is tried (a later one sees a subset of the same
+    "by"s), and every check is a match in place: linear in the sentence."""
     pos = 0
     while (head := _PASSIVE_HEAD_RE.search(sentence, pos)) is not None:
+        if _THIRD_PARTY_RE.match(sentence, head.end()) or _NEGATED_RE.match(sentence, head.end()):
+            pos = head.end()
+            continue
         end = _CLAUSE_END_RE.search(sentence, head.end())
         clause_end = end.start() if end else len(sentence)
         # The deadline starts in the clause; it may run past a clause mark of its own ("by Nov. 20").
