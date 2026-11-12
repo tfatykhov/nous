@@ -48,7 +48,9 @@ _FUTURE_RE = re.compile(
 
 # Strong deferral markers: any one suffices.
 _STRONG_RES = [
-    # A number is a time only with am/pm or a zone: "by 10 percent" and "at 3:1" are not deadlines.
+    # A preposition and HH:MM is a time with or without a zone ("at 18:15"); a bare number is one only with am/pm or
+    # a zone: "by 10 percent", "at 3:1" and "at 9" are not deadlines.
+    re.compile(r"\b(?:at|by|around|before|until)\s+\d{1,2}:\d{2}\b", re.I),
     re.compile(r"\b(?:at|by|around|before)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|z|utc|gmt)\b", re.I),
     re.compile(r"\b\d{1,2}:\d{2}\s*(?:z|utc|gmt|am|pm)\b", re.I),
     re.compile(r"\b(?:tomorrow|tonight|this\s+(?:evening|afternoon|weekend)|next\s+(?:week|month))\b", re.I),

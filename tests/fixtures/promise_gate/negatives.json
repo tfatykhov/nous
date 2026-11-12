@@ -129,6 +129,10 @@
     {
       "text": "Next step, you'll approve the PR.",
       "origin": "pre-push review of the r1 fixes"
+    },
+    {
+      "text": "I'll switch the slides to a 16:10 layout.",
+      "origin": "re-review r2 B: a colon ratio without a preposition is no time"
     }
   ]
 }

@@ -122,6 +122,8 @@ DEADLINES = [
     # A time of day the parser does not read (am/pm, no zone) next to "tomorrow": not "now + 1 day", parsed.
     ("I'll deploy it tomorrow at 6 pm UTC.", NOV11_0900 + timedelta(minutes=60), False),
     ("I'll relaunch it tomorrow at 18:15.", NOV11_0900 + timedelta(minutes=60), False),
+    # Re-review B: a preposition and HH:MM is a time without a zone too; with no zone it is not read.
+    ("I'll relaunch the chain at 18:15.", NOV11_0900 + timedelta(minutes=60), False),
     # A number before a word is no month-day date: "tomorrow" still binds.
     ("I'll merge the 2 decision PRs tomorrow.", datetime(2026, 11, 12, 9, 0, tzinfo=UTC), True),
     ("I'll restart the 2 decoders at 18:15 UTC.", datetime(2026, 11, 11, 18, 15, tzinfo=UTC), True),

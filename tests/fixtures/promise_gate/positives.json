@@ -154,6 +154,14 @@
     {
       "text": "I'll grant you access tomorrow.",
       "origin": "pre-push review of the r1 fixes (the narrowed rules keep these)"
+    },
+    {
+      "text": "I'll relaunch the chain at 18:15.",
+      "origin": "re-review r2 A-B: a clock time without a zone is still a time"
+    },
+    {
+      "text": "I'll send the report by 18:15.",
+      "origin": "re-review r2 A-B: a clock time without a zone is still a time"
     }
   ]
 }
