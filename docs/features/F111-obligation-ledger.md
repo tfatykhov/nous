@@ -36,7 +36,7 @@ Migration 107 creates both tables in `brain` and `nous_system` (qualified names,
 
 ## PR B1: the overdue watcher and stage 2
 
-Everything in B1 is off at merge. The dead-man line and the overdue ping are the only things in B1 that reach the owner unasked.
+The watcher and the classifier are off at merge. Three things in B1 run with the gate on (it is on by default, in `shadow`) whatever the two new flags say: the passive rule in stage 1 (below), the `promise_gate_log` retention loop (`main.py`, at startup and daily), and the `source_kind` of a `commit` row written in a streamed chat turn, now `chat_stream` (it was `chat_turn`). The dead-man line and the overdue ping are the only things in B1 that reach the owner unasked.
 
 - **Stage 2** (`nous/cognitive/promise_classifier.py`, `NOUS_PROMISE_GATE_CLASSIFIER_ENABLED`): after `PromiseGate.run` has written its rows it hands each to `ClassifierScheduler.submit` and returns; the turn never waits. One call per gate row (never a `commit` row, and never an `awaiting_user` row, which the watcher does not read) through `call_background_llm_structured` on the client the other background classifiers use: Anthropic only (`NOUS_PROMISE_GATE_CLASSIFIER_MODEL`, default `claude-haiku-5-5`; start-up refuses a model that does not start with `claude-`), purpose `promise_gate_classifier` in `model_call_log` (not a main-loop purpose), tool `classify_promise`, 300 max tokens, no temperature. The input is the row's stored `promise_text` only: the one sentence, already cleaned and redacted, at most 500 characters; never the reply, the conversation or a tool result. The verdict goes to `evidence.stage2` = `{verdict: promise|not_promise|error, model, prompt_version (s2-v2), latency_ms, at, attempts, reason}`; the reason is cleaned (`clean_text`) and cut to 200 characters, and is not shown to the owner. At most `NOUS_PROMISE_GATE_CLASSIFIER_MAX_CONCURRENCY` (2) calls at once, each bounded by `NOUS_PROMISE_GATE_CLASSIFIER_TIMEOUT_SECONDS` (10); a row in flight or with a verdict is not classified again. Fail-open: a timeout, an exception or a missing or unknown label stores `error` (best effort) with one WARNING. The root runner's `close()` waits 5 s for the calls in flight, then cancels them (a cancelled call stores nothing).
 - **The overdue watcher** (`nous/heartbeat/commitment_watcher.py`, `NOUS_PROMISE_WATCHER_ENABLED`): a task of the heartbeat runner of its own (never routed through findings), one run every `NOUS_PROMISE_WATCHER_INTERVAL_SECONDS` (300). A run:
@@ -61,6 +61,8 @@ Everything in B1 is off at merge. The dead-man line and the overdue ping are the
 2. `NOUS_PROMISE_GATE_CLASSIFIER_ENABLED=true`. New gate rows get `evidence.stage2`.
 3. Shadow check: read the verdicts against the rows (the query below), and the `promise_gate_classifier` rows in the Model calls view.
 4. `NOUS_PROMISE_WATCHER_SINCE=<now, ISO 8601 with an offset>` and `NOUS_PROMISE_WATCHER_ENABLED=true` (the heartbeat on, Telegram configured). Rows created before the cutoff (the shadow era) are never watched; `/drop` and `/done` still work on them.
+
+In the prod compose file, write each new line with its default (`${NOUS_PROMISE_WATCHER_INTERVAL_SECONDS:-300}`): eleven of the fifteen F111 settings are ints or bools, which refuse an empty string, so a line without `:-default` whose variable is unset stops the process at start.
 
 Rollback: `NOUS_PROMISE_WATCHER_ENABLED=false` and `NOUS_PROMISE_GATE_CLASSIFIER_ENABLED=false`. Nothing else changes.
 
@@ -95,8 +97,10 @@ Shadow 2 to 3 days (log populated, no errors, p95 stage 1 < 5 ms, recall gate on
 - B1: a send Telegram refuses the same way every time (a wrong token: 401, 403 or 400) is retried every run and nothing reaches the owner; the watcher's WARNING is logged once, then at most once an hour (with the count left out), but the heartbeat's own `Heartbeat Telegram notification rejected: HTTP <status>` line, shared with every heartbeat notification, is still logged on each send. The rows behind the first `NOUS_PROMISE_WATCHER_MAX_ITEMS` never get their turn while it lasts.
 - B1: a send that was in flight when the process stopped leaves its rows claimed; they are marked `orphaned` and not re-sent.
 - B1: the dead-man line cannot report a dead process (no process, no reply to carry it).
+- B1: any interactive `/chat` caller uses up the once-per-stall dead-man line: a script or tool posting to `/chat` in a session that is not a job's gets it, and the owner's next reply does not.
 - B1: rows created before `NOUS_PROMISE_WATCHER_SINCE` (the shadow era) are never watched.
 - B1: no owner time zone is known to the code: the ping and the dead-man line show UTC.
+- B1: the passive rule checks that the sentence has a deadline the parser reads, not that the matched `by` phrase is that deadline: "The report will be drafted by Friday, the rest in 2 days." gives a row due in 2 days.
 - B1: the passive rule only knows the verbs in `ACTION_VERBS`: "It'll be done by tomorrow." and "The report is going to be ready by 5pm." are not flagged ("do" and "ready" are not in the list).
 
 ## Appendix: the DDL of migration 107
