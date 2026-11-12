@@ -326,6 +326,49 @@ def test_the_dedupe_key_is_per_turn_and_ignores_spacing_and_case():
     assert normalise_what("a\n b ") == "a b"
 
 
+def _params(**over) -> dict:
+    """The real store's bind values (no database needed: ``_params`` runs before any SQL)."""
+    spec = {
+        "source_kind": "chat_turn",
+        "detected_by": "gate",
+        "promise_text": "I'll relaunch it tomorrow.",
+        "what": "I'll relaunch it tomorrow.",
+        "due_at": datetime.now(UTC) + timedelta(hours=1),
+        "turn_id": "t1",
+        **over,
+    }
+    return CommitmentStore(None, "a")._params(**spec)
+
+
+def test_a_key_in_a_promise_is_redacted_in_both_columns_and_the_key():
+    """Review finding 3: the ledger stored ``sk-ant-…`` verbatim in ``what`` and ``promise_text``."""
+    key = "sk-ant-api03-" + "A" * 40
+    text = f"I'll retry with token {key} tomorrow."
+    params = _params(what=text, promise_text=text)
+    assert key not in params["what"] and key not in params["promise_text"]
+    assert "[REDACTED_KEY]" in params["what"] and "[REDACTED_KEY]" in params["promise_text"]
+    assert params["dedupe_key"] == dedupe_key("t1", params["what"])  # keyed on the redacted text
+
+
+def test_a_secret_straddling_the_cut_is_redacted_before_the_cut():
+    """Cut first, the key's first characters ("sk-ant-api03-AAAA") would match no pattern and be stored."""
+    from nous.brain.commitments import PROMISE_TEXT_MAX, WHAT_MAX
+
+    key = "sk-ant-api03-" + "A" * 40
+    what = "I'll rotate the key tomorrow, " + "x" * (WHAT_MAX - 30 - 18) + " " + key
+    promise_text = "I'll rotate the key tomorrow, " + "x" * (PROMISE_TEXT_MAX - 30 - 18) + " " + key
+    params = _params(what=what, promise_text=promise_text)
+    assert "sk-ant" not in params["what"] and "sk-ant" not in params["promise_text"]
+
+
+def test_control_characters_are_stripped_and_whitespace_kept():
+    text = "I'll relaunch\x00 it ‮tomorrow\x1b[31m.\tthen\nreport"
+    params = _params(what=text, promise_text=text)
+    for column in ("what", "promise_text"):
+        assert not any(ord(c) < 32 or c == "‮" for c in params[column]), params[column]
+    assert params["what"] == "I'll relaunch it tomorrow[31m. then report"
+
+
 class FakeStore:
     """In memory, with the real validation: the same contract as CommitmentStore for the tool and the gate."""
 
@@ -552,6 +595,18 @@ async def test_store_insert_is_idempotent_on_the_dedupe_key(store):
     third = await store.create_idempotent(**_new(turn_id="t2"))
     assert third.id != first.id and third.short_id > first.short_id
     assert first.status == "open" and first.consent == "silence" and first.label.startswith("C-")
+
+
+@pytest.mark.postgres_only
+async def test_store_writes_a_promise_with_a_nul_in_it(store):
+    """Postgres text cannot hold a NUL: before review finding 3 this insert, and the turn's whole gate transaction,
+    failed."""
+    text = "I'll relaunch\x00 it \u202etomorrow\x1b[31m."
+    rows = await store.record_gate_turn(
+        [_new(turn_id="nul", what=text, promise_text=text)],
+        {"path": "stream", "mode": "shadow", "detected": 1, "backed": 0, "unbacked": 1, "outcome": "clean"},
+    )
+    assert rows[0] is not None and "\x00" not in rows[0].what and "\u202e" not in rows[0].promise_text
 
 
 @pytest.mark.postgres_only

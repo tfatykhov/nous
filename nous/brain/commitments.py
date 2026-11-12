@@ -13,12 +13,15 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import text
+
+from nous.cognitive.ledger_store import redact_output
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +145,16 @@ def normalise_what(what: str) -> str:
     return " ".join(what.split())[:WHAT_MAX]
 
 
+def clean_text(text: str) -> str:
+    """Text fit to store and later show: control and other category-C characters (NUL, a bidi override, the ESC of
+    an escape sequence) removed, whitespace kept as a space, then the WHOLE text redacted (``redact_output``), before
+    any cut: a secret straddling a cut would leave a fragment that no pattern matches."""
+    kept = "".join(
+        " " if c.isspace() else c for c in text if c.isspace() or not unicodedata.category(c).startswith("C")
+    )
+    return redact_output(kept)
+
+
 def dedupe_key(turn_key: str | None, what: str) -> str:
     """md5(turn key || normalised what): the same promise written twice in one turn is one row."""
     return hashlib.md5(f"{turn_key or ''}{normalise_what(what).lower()}".encode()).hexdigest()
@@ -211,8 +224,10 @@ class CommitmentStore:
         artifact_id: str | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
-        """The insert's bind values, validated: raises ``CommitmentRefused`` before any SQL runs."""
-        what = normalise_what(what)
+        """The insert's bind values, validated: raises ``CommitmentRefused`` before any SQL runs. ``what`` and
+        ``promise_text`` are cleaned (``clean_text``) before they are cut, and the dedupe key is the cleaned ``what``'s:
+        one place for the gate and the ``commit`` tool."""
+        what = normalise_what(clean_text(what))
         if len(what) < MIN_WHAT_CHARS:
             raise CommitmentRefused(f"what must say what will be done (at least {MIN_WHAT_CHARS} characters)")
         return {
@@ -222,7 +237,7 @@ class CommitmentStore:
             "turn_id": turn_id,
             "detected_by": detected_by,
             "detector_version": detector_version,
-            "promise_text": " ".join(promise_text.split())[:PROMISE_TEXT_MAX] or what,
+            "promise_text": " ".join(clean_text(promise_text).split())[:PROMISE_TEXT_MAX] or what,
             "what": what,
             "kind": kind,
             "consent": consent,
