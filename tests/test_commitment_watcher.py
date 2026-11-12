@@ -355,6 +355,35 @@ async def test_send_telegram_not_configured_is_not_sent():
     assert client.posts == 0
 
 
+async def test_a_send_refused_every_run_warns_once_then_once_an_hour(caplog):
+    """Review M4: a send refused the same way for ever (a wrong token answers 401 every interval) logged a WARNING
+    every run. Now: the first, then at most one per hour with the count left out, and again at once after a ping
+    went out."""
+
+    class Settles:
+        async def release_ping(self, counts, run_id, reason):
+            return None
+
+        async def finalize_ping(self, ids, run_id, now):
+            return None
+
+    t0 = datetime(2026, 11, 12, 9, 0, tzinfo=UTC)
+    w = CommitmentWatcher(Settles(), _settings(), Send())
+    row = SimpleNamespace(id=uuid.uuid4(), label="C-0001", evidence={})
+
+    def released() -> list[str]:
+        return [r.getMessage() for r in caplog.records if "released" in r.getMessage()]
+
+    with caplog.at_level(logging.WARNING):
+        for run in range(13):  # one hour of 5-minute runs, and the first run of the next
+            await w._settle([row], f"run{run}", SendResult.NOT_SENT, t0 + timedelta(seconds=300 * run))
+        assert len(released()) == 2
+        assert "(11 more like it since the last line)" in released()[1]
+        await w._settle([row], "ok", SendResult.SENT, t0 + timedelta(seconds=300 * 13))
+        await w._settle([row], "again", SendResult.NOT_SENT, t0 + timedelta(seconds=300 * 14))
+    assert len(released()) == 3 and "more like it" not in released()[2]
+
+
 # ---- 9. a crash between claim and send -------------------------------------------------------------------------
 
 

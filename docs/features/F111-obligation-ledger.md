@@ -92,6 +92,7 @@ Shadow 2 to 3 days (log populated, no errors, p95 stage 1 < 5 ms, recall gate on
 - B1: the watcher on with the classifier off pings every gate row with no stored `not_promise` verdict, false positives included.
 - B1: one ping per row, no repeat reminders. A crash between claim and send can lose a ping (a lost ping is preferred over a repeated one). A row is sent at most 3 times, and only when every send's outcome was unknown.
 - B1: "+N more will follow" counts the eligible rows not listed, unclassified ones included; stage 2 may still drop some of them.
+- B1: a send Telegram refuses the same way every time (a wrong token: 401, 403 or 400) is retried every run and nothing reaches the owner; the watcher's WARNING is logged once, then at most once an hour (with the count left out), but the heartbeat's own `Heartbeat Telegram notification rejected: HTTP <status>` line, shared with every heartbeat notification, is still logged on each send. The rows behind the first `NOUS_PROMISE_WATCHER_MAX_ITEMS` never get their turn while it lasts.
 - B1: a send that was in flight when the process stopped leaves its rows claimed; they are marked `orphaned` and not re-sent.
 - B1: the dead-man line cannot report a dead process (no process, no reply to carry it).
 - B1: rows created before `NOUS_PROMISE_WATCHER_SINCE` (the shadow era) are never watched.

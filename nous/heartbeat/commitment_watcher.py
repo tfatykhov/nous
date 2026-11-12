@@ -45,6 +45,9 @@ MAX_STAGE2_ATTEMPTS = 2
 # Stage-2 retries per run, per row listed: a backlog of unclassified rows is worked off over several runs, so one run
 # never takes longer than the dead-man line allows.
 RETRIES_PER_ITEM = 2
+# A send refused the same way every run (a wrong token: 401 every interval) logs its WARNING once, then at most once
+# per this period, until a ping goes out (review M4 on PR #906).
+RELEASE_WARNING_EVERY = timedelta(hours=1)
 
 
 def parse_since(value: str | None) -> datetime | None:
@@ -84,6 +87,9 @@ class CommitmentWatcher:
         self.active = False  # passed its start-up checks: it runs, and a stall is reported
         self.last_tick_at = started_at or datetime.now(UTC)
         self._stall_shown_for: datetime | None = None  # the last_tick_at of the stall the line already reported
+        # Per send outcome: when its "released" WARNING was last logged, and how many were left out since.
+        self._release_warned_at: dict[SendResult, datetime] = {}
+        self._release_unlogged: dict[SendResult, int] = {}
 
     @property
     def interval_seconds(self) -> int:
@@ -247,15 +253,33 @@ class CommitmentWatcher:
             logger.warning("F111 promise watcher: the send raised; its outcome is unknown", exc_info=True)
             return SendResult.UNKNOWN
 
+    def _warn_released(self, labels: str, result: SendResult, now: datetime) -> None:
+        """The WARNING for a ping that did not go out: the first of an outcome, then at most one per
+        ``RELEASE_WARNING_EVERY``, counting the ones left out, until a ping is sent."""
+        last = self._release_warned_at.get(result)
+        if last is not None and now - last < RELEASE_WARNING_EVERY:
+            self._release_unlogged[result] = self._release_unlogged.get(result, 0) + 1
+            return
+        self._release_warned_at[result] = now
+        left_out = self._release_unlogged.pop(result, 0)
+        logger.warning(
+            "F111 promise watcher: the ping for %s was %s; released%s",
+            labels,
+            result.value,
+            f" ({left_out} more like it since the last line)" if left_out else "",
+        )
+
     async def _settle(self, claimed: list[Commitment], run_id: str, result: SendResult, now: datetime) -> None:
         """Finalize, release or fail the claimed rows by the send's result. Never raises: a write that fails is one
         WARNING naming the rows (they keep their claim, and are marked orphaned after 2 intervals)."""
         labels = ", ".join(r.label for r in claimed)
         try:
             if result is SendResult.SENT:
+                self._release_warned_at.clear()
+                self._release_unlogged.clear()
                 await self._store.finalize_ping([r.id for r in claimed], run_id, now)
                 return
-            logger.warning("F111 promise watcher: the ping for %s was %s; released", labels, result.value)
+            self._warn_released(labels, result, now)
             if result is SendResult.NOT_SENT:
                 await self._store.release_ping({r.id: _unknown_sends(r) for r in claimed}, run_id, "not_sent")
                 return
