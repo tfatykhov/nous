@@ -17,7 +17,7 @@ import time
 import unicodedata
 import weakref
 from collections import OrderedDict
-from collections.abc import AsyncGenerator, Callable, Iterator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Iterator
 from contextlib import AbstractContextManager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -143,6 +143,8 @@ _SUBTASK_EXCLUDED_TOOLS = frozenset({"spawn_task", "schedule_task", "spawn_sync"
 # F111: the promise gate's whole run (detection, the ledger rows, the gate log row) is bounded by this; a slower
 # database fails it open rather than hold the stream's "done" event.
 PROMISE_GATE_TIMEOUT_SECONDS = 2.0
+# F111: at most this many gate writes at once, across the runner and its forks (the pool has 15 connections).
+PROMISE_GATE_MAX_CONCURRENT = 4
 
 # F099: only these extra_tools end the loop on success. submit_final_report (F061) and
 # resolve_intention (a continuation's decision) mean "I am done"; every other extra tool
@@ -515,7 +517,9 @@ class AgentRunner:
         self._tool_call_recorder: ToolCallRecorder | None = None
         # F111: the turn-close promise gate (set_promise_gate); None: no gate, no rows.
         self._promise_gate: PromiseGate | None = None
-        self._promise_gate_tasks: set[asyncio.Future] = set()  # F111: gate work still running after its timeout
+        self._promise_gate_tasks: set[asyncio.Task] = set()  # F111: gate work in flight (drained by close)
+        # F111: the gate's concurrent database writes, shared with the forks (each write holds a pooled connection).
+        self._promise_gate_slots = asyncio.Semaphore(PROMISE_GATE_MAX_CONCURRENT)
 
         # F026: Execution Integrity
         self._ledgers: dict[str, ExecutionLedger] = {}
@@ -1752,6 +1756,7 @@ class AgentRunner:
         forked._root_cancelled = self._root_cancelled  # F099 2e: and set_cancelled_roots propagates a later view
         forked._tool_call_recorder = self._tool_call_recorder  # F108: and set_tool_call_recorder propagates a later one
         forked._promise_gate = self._promise_gate  # F111: and set_promise_gate propagates a later one
+        forked._promise_gate_slots = self._promise_gate_slots  # F111: one cap for the process's gate writes
         # F035.4: the heartbeat's checks, triage and callbacks run on a fork; sharing
         # the logger gives their model calls context_log rows. It was withheld after the
         # April 2026 triage hang (0d1d45e3), when the logger's fire-and-forget writes held
@@ -1769,7 +1774,14 @@ class AgentRunner:
         return forked
 
     async def close(self) -> None:
-        """Clean up API client (skip if shared — caller manages lifecycle)."""
+        """Clean up API client (skip if shared — caller manages lifecycle), after the promise gate's work in flight:
+        each run is bounded by ``PROMISE_GATE_TIMEOUT_SECONDS``, so wait that long, then cancel what is left."""
+        pending = set(self._promise_gate_tasks)
+        if pending:
+            _done, left = await asyncio.wait(pending, timeout=PROMISE_GATE_TIMEOUT_SECONDS)
+            for task in left:
+                task.cancel()
+            await asyncio.gather(*left, return_exceptions=True)
         if self._api and not self._api_shared:
             await self._api.close()
         self._api = None
@@ -5122,51 +5134,92 @@ Rules:
     ) -> str | None:
         """F111: run the promise gate on a turn's final text. Returns the footer to show (warn), else None.
 
+        The gate runs as a task of its own, bounded like the F108 recorder's writes (``_bounded_gate_write``). In
+        ``shadow`` there is no footer to wait for, so this returns at once: no added latency and no new cancellation
+        point after the reply is complete. In ``warn``/``enforce`` it awaits the footer through a shield, so a
+        cancel of the turn never lands inside the gate's transaction (the task's own bound still applies).
+
         Fails open: any exception, and a gate that takes longer than ``PROMISE_GATE_TIMEOUT_SECONDS``, is logged at
         WARNING (with a best-effort ``outcome='error'`` row) and the reply goes out unchanged. Never raises, never
         sends, never creates a schedule, DAG or spawn. A cancellation of the turn still propagates."""
         gate = self._promise_gate
         if gate is None:
             return None
-        # A task of its own, awaited through a shield: a timeout (or the turn's cancellation) never cancels the gate
-        # inside a database transaction; it finishes in the background and _promise_gate_done logs a failure.
-        task = asyncio.ensure_future(
-            gate.run(
-                response_text, tool_results, path=path, session_id=session_id, turn_id=turn_id, context_kind=ctx.kind
-            )
+        mode = gate.mode
+        if mode == "off":
+            return None
+        task = self._track_promise_gate_task(
+            self._run_promise_gate(gate, response_text, tool_results, path, session_id, turn_id, ctx.kind)
         )
-        self._track_promise_gate_task(task)
+        if mode == "shadow":
+            return None
+        return await asyncio.shield(task)
+
+    async def _run_promise_gate(
+        self,
+        gate: PromiseGate,
+        response_text: str,
+        tool_results: list[ToolResult],
+        path: Literal["stream", "run_turn"],
+        session_id: str | None,
+        turn_id: str,
+        context_kind: str | None,
+    ) -> str | None:
+        """One bounded gate run: the footer, or None. Never raises (cancellation still propagates)."""
         try:
-            outcome = await asyncio.wait_for(asyncio.shield(task), timeout=PROMISE_GATE_TIMEOUT_SECONDS)
+            outcome = await self._bounded_gate_write(
+                lambda: gate.run(
+                    response_text,
+                    tool_results,
+                    path=path,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    context_kind=context_kind,
+                )
+            )
         except TimeoutError:
             logger.warning(
-                "F111 promise gate took longer than %.1f s on a %s turn; the reply is unchanged (it finishes in the "
-                "background, without a footer)",
+                "F111 promise gate took longer than %.1f s on a %s turn and was stopped; the reply is unchanged",
                 PROMISE_GATE_TIMEOUT_SECONDS,
                 path,
             )
             return None
         except Exception:
             logger.warning("F111 promise gate failed on a %s turn; the reply is unchanged", path, exc_info=True)
-            self._track_promise_gate_task(
-                asyncio.ensure_future(
-                    gate.log_error(path=path, session_id=session_id, turn_id=turn_id, context_kind=ctx.kind)
-                )
-            )
+            self._track_promise_gate_task(self._log_promise_gate_error(gate, path, session_id, turn_id, context_kind))
             return None
         return outcome.footer
 
-    def _track_promise_gate_task(self, task: asyncio.Future) -> None:
-        """Hold a strong reference until the task ends (asyncio keeps only weak ones), then log a failure no one
-        awaited: a gate run that outlived its timeout, or the error row."""
-        self._promise_gate_tasks.add(task)
-        task.add_done_callback(self._promise_gate_done)
+    async def _log_promise_gate_error(
+        self, gate: PromiseGate, path: str, session_id: str | None, turn_id: str, context_kind: str | None
+    ) -> None:
+        """The gate's ``outcome='error'`` row, bounded like the run. Never raises (``log_error`` logs its own
+        failure)."""
+        try:
+            await self._bounded_gate_write(
+                lambda: gate.log_error(path=path, session_id=session_id, turn_id=turn_id, context_kind=context_kind)
+            )
+        except TimeoutError:
+            logger.warning("F111 promise gate error row took longer than %.1f s", PROMISE_GATE_TIMEOUT_SECONDS)
 
-    def _promise_gate_done(self, task: asyncio.Future) -> None:
-        self._promise_gate_tasks.discard(task)
-        if not task.cancelled() and task.exception() is not None:
-            # Retrieved here, so asyncio does not report it again as "never retrieved".
-            logger.warning("F111 promise gate background work failed", exc_info=task.exception())
+    async def _bounded_gate_write(self, make_write: Callable[[], Awaitable[Any]]) -> Any:
+        """``make_write()`` within one of the shared slots, the wait for the slot and the write under ONE timeout
+        (``PROMISE_GATE_TIMEOUT_SECONDS``): the F108 recorder's pattern (``nous/observability/recording.py``),
+        so a hung statement holds a pooled connection for the bound at most. Raises ``TimeoutError`` past it."""
+
+        async def in_slot() -> Any:
+            async with self._promise_gate_slots:
+                return await make_write()
+
+        return await asyncio.wait_for(in_slot(), timeout=PROMISE_GATE_TIMEOUT_SECONDS)
+
+    def _track_promise_gate_task(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
+        """Start the gate work as a task and hold a strong reference until it ends (asyncio keeps only weak ones).
+        The work logs its own failures, so nothing is logged here."""
+        task = asyncio.ensure_future(coro)
+        self._promise_gate_tasks.add(task)
+        task.add_done_callback(self._promise_gate_tasks.discard)
+        return task
 
     def _check_safety_net(
         self,
