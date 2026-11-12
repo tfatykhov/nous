@@ -3,7 +3,7 @@
 
 The runner runs with a fake model (``_call_api_stream`` for stream_chat, ``_tool_loop`` for run_turn), the real
 dispatcher, authorization and claim verifier, and an in-memory ledger store with the real store's validation
-(``test_promise_gate.FakeStore``). The /drop route runs against Postgres and skips until migration 107 is applied.
+(``test_promise_gate.FakeStore``). The /drop route test runs against Postgres (migration 107).
 """
 
 from __future__ import annotations
@@ -43,8 +43,8 @@ def _route_settings(agent: str, secret: str | None = OWNER_SECRET) -> SimpleName
     return SimpleNamespace(agent_id=agent, owner_route_secret_sha256=digest)
 
 
-NOV10 = json.loads((FIXTURES / "nov10_hero.json").read_text())
-OCT08 = json.loads((FIXTURES / "oct08_items_1_3.json").read_text())
+NOV10 = json.loads((FIXTURES / "nov10_hero.json").read_text(encoding="utf-8"))
+OCT08 = json.loads((FIXTURES / "oct08_items_1_3.json").read_text(encoding="utf-8"))
 
 
 def _turn_context() -> TurnContext:
@@ -724,10 +724,6 @@ async def _ledger_tables_exist(db) -> bool:
 
 @pytest.mark.postgres_only
 async def test_the_drop_route_cancels_the_row_and_the_watcher_never_sees_it(db):
-    from test_promise_gate import MIGRATION_107, NO_MIGRATION_YET
-
-    if not MIGRATION_107.exists():
-        pytest.skip(NO_MIGRATION_YET)
     assert await _ledger_tables_exist(db)
     from datetime import UTC, datetime, timedelta
 

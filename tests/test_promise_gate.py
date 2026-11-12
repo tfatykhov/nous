@@ -1,6 +1,6 @@
 """F111 PR A: the promise detector, the backing resolver, the commit tool, the store and the settings (spec D.7 1-5).
 
-The store tests that need ``brain.commitments`` run on Postgres only and skip until migration 107 is applied.
+The store tests that need ``brain.commitments`` (migration 107) run on Postgres only.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ NOW = datetime(2026, 11, 10, 17, 45, tzinfo=UTC)
 
 
 def _load(name: str) -> dict:
-    return json.loads((FIXTURES / name).read_text())
+    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 
 def _tr(tool: str, result: str | None = None, error: str | None = None, **args) -> ToolResult:
@@ -723,7 +723,7 @@ async def test_commit_tool_takes_its_source_kind_from_the_turn_kind():
     assert [c["source_kind"] for c in store.calls] == ["subtask", "heartbeat", "chat_turn"]
 
 
-# Store against Postgres: skipped until brain.commitments exists (migration 107).
+# Store against Postgres (brain.commitments, migration 107).
 
 
 async def _ledger_tables_exist(db) -> bool:
@@ -735,13 +735,10 @@ async def _ledger_tables_exist(db) -> bool:
 
 
 MIGRATION_107 = Path(__file__).resolve().parents[1] / "sql" / "migrations" / "107_commitments.sql"
-NO_MIGRATION_YET = "sql/migrations/107_commitments.sql is not in the tree yet (its DDL: docs/features/F111)"
 
 
 @pytest.fixture
 async def store(db):
-    if not MIGRATION_107.exists():
-        pytest.skip(NO_MIGRATION_YET)
     assert await _ledger_tables_exist(db), "migration 107 is in the tree but brain.commitments does not exist"
     agent = f"pg-test-{uuid.uuid4().hex[:8]}"
     yield CommitmentStore(db, agent)
@@ -768,11 +765,11 @@ def _new(**over) -> dict:
 
 
 def test_the_migration_file_is_the_ddl_the_feature_doc_records():
-    if not MIGRATION_107.exists():
-        pytest.skip(NO_MIGRATION_YET)
-    doc = (Path(__file__).resolve().parents[1] / "docs" / "features" / "F111-obligation-ledger.md").read_text()
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "features" / "F111-obligation-ledger.md").read_text(
+        encoding="utf-8"
+    )
     ddl = doc.split("```sql\n", 1)[1].split("```", 1)[0]
-    assert MIGRATION_107.read_text() == ddl
+    assert MIGRATION_107.read_text(encoding="utf-8") == ddl
 
 
 @pytest.mark.postgres_only
