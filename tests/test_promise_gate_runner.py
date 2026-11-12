@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import sys
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -904,6 +905,7 @@ async def test_a_refused_bot_is_told_closing_is_not_set_up():
     assert _sent(bot) == ["Could not close C-0042: closing commitments is not set up."]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="bash tool runs cmd.exe on Windows; ${VAR:-absent} is not expanded")
 async def test_the_agents_bash_never_inherits_the_owner_secret(monkeypatch, tmp_path):
     """The secret belongs to the bot's process; should it be set in the API's by mistake, bash still does not see
     it (run_python runs in this process, which is why the API holds only the digest)."""
