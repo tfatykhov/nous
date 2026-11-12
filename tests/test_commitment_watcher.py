@@ -379,9 +379,11 @@ async def test_a_send_refused_every_run_warns_once_then_once_an_hour(caplog):
             await w._settle([row], f"run{run}", SendResult.NOT_SENT, t0 + timedelta(seconds=300 * run))
         assert len(released()) == 2
         assert "(11 more like it since the last line)" in released()[1]
+        await w._settle([row], "unknown", SendResult.UNKNOWN, t0 + timedelta(seconds=300 * 12 + 1))
+        assert len(released()) == 3 and "was unknown" in released()[2]  # each outcome has its own hour
         await w._settle([row], "ok", SendResult.SENT, t0 + timedelta(seconds=300 * 13))
         await w._settle([row], "again", SendResult.NOT_SENT, t0 + timedelta(seconds=300 * 14))
-    assert len(released()) == 3 and "more like it" not in released()[2]
+    assert len(released()) == 4 and "more like it" not in released()[3]
 
 
 # ---- 9. a crash between claim and send -------------------------------------------------------------------------
@@ -630,10 +632,10 @@ async def test_not_promise_rows_do_not_fill_the_selection(store, t0):
 def test_the_dead_man_line_shows_once_per_stall():
     t0 = datetime(2026, 11, 12, 9, 0, tzinfo=UTC)
     w = CommitmentWatcher(object(), _settings(promise_watcher_since=t0.isoformat()), Send(), started_at=t0)
-    assert w.dead_man_line(t0 + timedelta(seconds=900)) is None  # 3 intervals is not yet a stall
     line = w.dead_man_line(t0 + timedelta(seconds=901))
     assert line is None  # start-up checks not passed: the watcher is not running
     assert w.start_checks()
+    assert w.dead_man_line(t0 + timedelta(seconds=900)) is None  # 3 intervals is not yet a stall
     line = w.dead_man_line(t0 + timedelta(seconds=901))
     assert line == ("⚠ Commitment watcher has not run since 09:00 UTC; overdue promises are not being checked.")
     assert w.dead_man_line(t0 + timedelta(seconds=1200)) is None  # once per stall

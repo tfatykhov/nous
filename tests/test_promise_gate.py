@@ -1043,6 +1043,7 @@ PASSIVE_MISSES = [
     "The invoice will be sent by the vendor by tomorrow.",
     "The cache will be deleted by the vendor by 09:00 UTC.",
     "The app will be deployed by Tim, not by tomorrow.",
+    "It will be deployed not by tomorrow.",  # the negation alone (no third party to catch it first)
 ]
 
 

@@ -118,8 +118,8 @@ class CommitmentWatcher:
             ok = False
         if ok and not self._classifier_on:
             logger.warning(
-                "promise watcher enabled without stage-2 classifier: every gate-detected row past due+grace will "
-                "be pinged, false positives included"
+                "promise watcher enabled without stage-2 classifier: every gate-detected row past due+grace with no "
+                "stored not_promise verdict will be pinged, false positives included"
             )
         self.active = ok
         return ok
@@ -249,9 +249,9 @@ class CommitmentWatcher:
     async def _deliver(self, message: str) -> SendResult:
         try:
             return await self._send(message)
-        except Exception:
-            # No traceback: an httpx one can carry the request URL, which holds the bot token.
-            logger.warning("F111 promise watcher: the send raised; its outcome is unknown")
+        except Exception as exc:
+            # The class only, no traceback or text: an httpx one can carry the request URL, which holds the bot token.
+            logger.warning("F111 promise watcher: the send raised %s; its outcome is unknown", type(exc).__name__)
             return SendResult.UNKNOWN
 
     def _warn_released(self, labels: str, result: SendResult, now: datetime) -> None:
