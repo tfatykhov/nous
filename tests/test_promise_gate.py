@@ -611,6 +611,31 @@ async def test_commit_tool_reads_an_offset_time_and_a_relative_one():
     assert before + timedelta(hours=3) <= store.calls[1]["due_at"] <= datetime.now(UTC) + timedelta(hours=3)
 
 
+@pytest.mark.parametrize("value", ["false", "true", 1, "yes"])
+async def test_commit_tool_reads_awaiting_owner_only_as_a_real_true(value):
+    """Review Minor 11: the string "false" made the row awaiting_user, which the watcher never reports."""
+    from nous.api.tools import create_commit_tool
+
+    store = FakeStore()
+    await create_commit_tool(store)(what="send the summary", due="in 1 hour", awaiting_owner=value, _turn_number=1)
+    assert store.calls[0]["kind"] == "action"
+    await create_commit_tool(store)(what="merge the PR once approved", due="in 1 hour", awaiting_owner=True)
+    assert store.calls[1]["kind"] == "awaiting_user"
+
+
+async def test_commit_tool_stores_the_configured_grace_and_survives_a_huge_amount():
+    """Review Minor 11: the row got the store's 900 s, not NOUS_PROMISE_GATE_GRACE_SECONDS; and "in 99999999999
+    days" raised OverflowError out of the tool."""
+    from nous.api.tools import create_commit_tool
+
+    store = FakeStore()
+    tool = create_commit_tool(store, grace_seconds=120)
+    await tool(what="send the summary", due="in 1 hour", _turn_number=1)
+    assert store.calls[0]["grace_seconds"] == 120
+    out = await tool(what="send the summary", due="in 99999999999 days", _turn_number=2)
+    assert out["is_error"] is True and len(store.calls) == 1
+
+
 async def test_commit_tool_rejects_a_what_too_short_to_check():
     from nous.api.tools import create_commit_tool
 

@@ -1193,7 +1193,7 @@ async def create_components(settings: Settings) -> dict:
     from nous.brain.commitments import CommitmentStore
 
     commitment_store = CommitmentStore(database, settings.agent_id)
-    register_commit_tool(dispatcher, commitment_store)
+    register_commit_tool(dispatcher, commitment_store, grace_seconds=settings.promise_gate_grace_seconds)
     register_builtin_tools(dispatcher, settings)
 
     # Web tools httpx client (separate from runner — no API auth headers)

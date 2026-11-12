@@ -3123,8 +3123,9 @@ _COMMIT_SCHEMA = {
 }
 
 
-def create_commit_tool(store: Any) -> Callable[..., Any]:
-    """The ``commit`` handler over a ``CommitmentStore``. Idempotent within a turn (same ``what``, one row)."""
+def create_commit_tool(store: Any, *, grace_seconds: int = 900) -> Callable[..., Any]:
+    """The ``commit`` handler over a ``CommitmentStore``. Idempotent within a turn (same ``what``, one row).
+    ``grace_seconds`` is stored on each row (``NOUS_PROMISE_GATE_GRACE_SECONDS``, as the gate's rows)."""
     from nous.brain.commitments import LIVE_STATUSES, MAX_DUE_DAYS, SOURCE_KIND_BY_CONTEXT, CommitmentRefused
     from nous.handlers.time_parser import _RELATIVE_RE, _UNIT_SECONDS
 
@@ -3173,7 +3174,9 @@ def create_commit_tool(store: Any) -> Callable[..., Any]:
             "what": str(what),
             "due_at": due_at,
             "session_id": _session_id,
-            "kind": "awaiting_user" if awaiting_owner else "action",
+            # Only a real true: the string "false" is truthy, and awaiting_user is a row the watcher never reports.
+            "kind": "awaiting_user" if awaiting_owner is True else "action",
+            "grace_seconds": grace_seconds,
             "consent": consent,
             "evidence": {"due_parsed": True},
         }
@@ -3216,9 +3219,9 @@ def create_commit_tool(store: Any) -> Callable[..., Any]:
     return commit
 
 
-def register_commit_tool(dispatcher: ToolDispatcher, store: Any) -> None:
+def register_commit_tool(dispatcher: ToolDispatcher, store: Any, *, grace_seconds: int = 900) -> None:
     """F111: register ``commit`` (classified ``_WRITE`` in tool_classes, so every context may call it)."""
-    dispatcher.register("commit", create_commit_tool(store), _COMMIT_SCHEMA)
+    dispatcher.register("commit", create_commit_tool(store, grace_seconds=grace_seconds), _COMMIT_SCHEMA)
 
 
 # ---------------------------------------------------------------------------
