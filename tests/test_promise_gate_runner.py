@@ -997,6 +997,18 @@ async def test_the_gate_hands_its_written_rows_to_the_scheduler_and_close_drains
     assert [r.id for r in sched.submitted] == [row.id] and sched.closed == 1
 
 
+async def test_an_awaiting_user_row_is_not_sent_to_stage_2():
+    """Review M6: the watcher never reads awaiting_user rows, so stage 2 has nothing to decide for them."""
+    store, sched = FakeStore(), _Scheduler()
+    reply = "Done with the review. I'll merge it once you confirm. I'll relaunch the chain at 18:15 UTC."
+    runner, _ = _runner("shadow", store, [_reply_segment(reply)], gate=False)
+    runner.set_promise_gate(PromiseGate(store, runner._settings, classifier=sched))
+    await _stream(runner, "s-await-stage2")
+    kinds = sorted(r.kind for r in store.rows.values())
+    assert kinds == ["action", "awaiting_user"]
+    assert [r.kind for r in sched.submitted] == ["action"]
+
+
 async def test_a_forks_close_does_not_drain_the_scheduler():
     store, sched = FakeStore(), _Scheduler()
     runner, _ = _runner("shadow", store)

@@ -664,9 +664,10 @@ class PromiseGate:
         )
         result.labels = [r.label for r in rows if r is not None]
         if self._classifier is not None:
-            # After the write returned: the turn never waits for stage 2 (submit only starts a task).
+            # After the write returned: the turn never waits for stage 2 (submit only starts a task). Not an
+            # awaiting_user row: the watcher never reads one, so its verdict would decide nothing.
             for row in rows:
-                if row is not None:
+                if row is not None and row.kind != "awaiting_user":
                     self._classifier.submit(row)
         shown = [(p, r) for p, r in zip(unbacked, rows, strict=True) if r is not None and p.kind == "action"]
         if footer_wanted and shown:
