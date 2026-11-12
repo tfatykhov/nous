@@ -65,16 +65,8 @@ OUTPUT_SCHEMA: dict[str, Any] = {
 
 
 def _previous_attempts(row: Commitment) -> int:
-    stage2 = (row.evidence or {}).get("stage2")
-    attempts = stage2.get("attempts") if isinstance(stage2, dict) else None
+    attempts = row.stage2.get("attempts")
     return attempts if isinstance(attempts, int) and attempts > 0 else 0
-
-
-def stage2_verdict(row: Commitment) -> str | None:
-    """The row's stored stage-2 verdict (``promise``, ``not_promise``, ``error``), or None when it has none."""
-    stage2 = (row.evidence or {}).get("stage2")
-    verdict = stage2.get("verdict") if isinstance(stage2, dict) else None
-    return verdict if isinstance(verdict, str) else None
 
 
 class ClassifierScheduler:
@@ -106,13 +98,17 @@ class ClassifierScheduler:
         Never raises and never waits."""
         if not self.enabled or self._closed or row.detected_by != "gate":
             return None
-        if row.id in self._in_flight or stage2_verdict(row) in VERDICTS:
+        if row.id in self._in_flight or row.stage2.get("verdict") in VERDICTS:
             return None
         self._in_flight.add(row.id)  # now, not when the task first runs: a second submit right after is skipped
         task = asyncio.ensure_future(self._classify_and_store(row))
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
-        task.add_done_callback(lambda _: self._in_flight.discard(row.id))
+
+        def _done(done: asyncio.Task) -> None:
+            self._tasks.discard(done)
+            self._in_flight.discard(row.id)
+
+        task.add_done_callback(_done)
         return task
 
     async def classify_now(self, row: Commitment) -> dict[str, Any]:

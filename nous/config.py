@@ -2126,7 +2126,9 @@ class Settings(BaseSettings):
     promise_watcher_enabled: bool = False
     promise_watcher_interval_seconds: int = Field(default=300, ge=60)
     promise_watcher_since: str | None = None
-    promise_watcher_max_items: int = Field(default=10, ge=1)  # rows listed and claimed in one ping
+    # Rows listed and claimed in one ping. At most 15: a row's line is under 200 characters, so the message stays under
+    # Telegram's limit (a longer one is refused on every run, and the rows would never go out).
+    promise_watcher_max_items: int = Field(default=10, ge=1, le=15)
     # F111: the hex SHA-256 of the secret the Telegram bot sends to the owner's /drop and /done routes
     # (NOUS_OWNER_ROUTE_SECRET, set on the bot only). Only the digest lives in this process: the agent's run_python
     # runs here and could read anything else. Unset, those routes refuse every call.

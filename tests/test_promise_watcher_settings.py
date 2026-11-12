@@ -110,6 +110,7 @@ def test_the_classifier_model_setting_is_read(clean_env):
     [
         ("promise_watcher_interval_seconds", 59),
         ("promise_watcher_max_items", 0),
+        ("promise_watcher_max_items", 16),
         ("promise_gate_classifier_max_concurrency", 0),
         ("promise_gate_classifier_timeout_seconds", 0),
         ("promise_gate_log_retention_days", 0),

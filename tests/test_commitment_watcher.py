@@ -333,6 +333,9 @@ _REQ = httpx.Request("POST", "https://api.telegram.org/x")
         (_Client(exc=httpx.ConnectError("refused", request=_REQ)), SendResult.NOT_SENT),
         (_Client(exc=httpx.ConnectTimeout("slow", request=_REQ)), SendResult.NOT_SENT),
         (_Client(exc=httpx.PoolTimeout("pool", request=_REQ)), SendResult.NOT_SENT),
+        (_Client(exc=httpx.InvalidURL("bad token character")), SendResult.NOT_SENT),
+        (_Client(exc=httpx.UnsupportedProtocol("ftp", request=_REQ)), SendResult.NOT_SENT),
+        (_Client(exc=httpx.ProxyError("proxy refused", request=_REQ)), SendResult.NOT_SENT),
         (_Client(exc=httpx.ReadTimeout("read", request=_REQ)), SendResult.UNKNOWN),
         (_Client(exc=httpx.WriteTimeout("write", request=_REQ)), SendResult.UNKNOWN),
         (_Client(exc=httpx.ReadError("reset", request=_REQ)), SendResult.UNKNOWN),
@@ -395,7 +398,7 @@ async def test_nothing_is_claimed_in_quiet_hours_and_rows_go_out_after(store, t0
 @pytest.mark.postgres_only
 async def test_the_message_wording(store, t0):
     long_text = "I'll relaunch the chain " + "and check every shard " * 12 + "at 18:15 UTC."
-    parsed = await _row(store, t0, "parsed")
+    parsed = await _row(store, t0, "parsed", due_in=59)  # first in the message (rows go by due_at, then id)
     default = await _row(store, t0, "default", evidence={"due_parsed": False}, promise_text=long_text)
     send = Send()
     w = _watcher(store, t0, send)
@@ -646,3 +649,132 @@ async def test_the_heartbeat_watcher_loop_survives_a_raising_run(monkeypatch):
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
     assert len(runs) >= 3
+
+
+# ---- review round: start-up gate, retry limits, quiet-hours work, message size, a failing settle ---------------------
+
+
+async def test_the_heartbeat_starts_the_watcher_only_when_its_checks_pass(monkeypatch):
+    from unittest.mock import MagicMock
+
+    from nous.heartbeat.runner import HeartbeatRunner
+
+    async def idle(self):
+        await asyncio.sleep(3600)
+
+    async def nothing(self):
+        return None
+
+    monkeypatch.setattr(HeartbeatRunner, "_loop", idle)
+    monkeypatch.setattr(HeartbeatRunner, "_dag_loop", idle)
+    monkeypatch.setattr(HeartbeatRunner, "_detect_missed_checks", nothing)
+    hb_settings = SimpleNamespace(
+        heartbeat_tick_interval=60,
+        heartbeat_quiet_start=0,
+        heartbeat_quiet_end=0,
+        heartbeat_daily_token_budget=1,
+        dag_tick_interval=60,
+        dag_tick_timeout=1,
+    )
+    for since, started in ((None, False), ("2026-11-20T00:00:00+00:00", True)):
+        watcher = CommitmentWatcher(object(), _settings(promise_watcher_since=since), Send())
+        hb = HeartbeatRunner(
+            hb_settings, MagicMock(), MagicMock(), MagicMock(), MagicMock(), None, None, commitment_watcher=watcher
+        )
+        await hb.start()
+        try:
+            assert (hb._watcher_task is not None) is started and watcher.active is started
+        finally:
+            await hb.stop()
+        assert hb._watcher_task is None
+
+
+@pytest.mark.postgres_only
+async def test_a_row_that_used_its_stage2_attempts_is_not_retried_and_is_not_checked(store, t0):
+    row = await _row(store, t0, "spent")
+    await store.set_stage2(row.id, {"verdict": "error", "attempts": 2})
+    classifier = Classifier(store)
+    send = Send()
+    await _watcher(store, t0, send, classifier=classifier, promise_gate_classifier_enabled=True).run_once(_past(t0))
+    assert classifier.calls == []
+    [message] = send.messages
+    assert "(not checked)" in next(ln for ln in message.split("\n") if row.label in ln)
+
+
+@pytest.mark.postgres_only
+async def test_a_retry_that_says_not_promise_is_never_pinged_and_stays_open(store, t0, db):
+    row = await _row(store, t0, "retry-np")
+    classifier = Classifier(store, {row.what: "not_promise"})
+    send = Send()
+    w = _watcher(store, t0, send, classifier=classifier, promise_gate_classifier_enabled=True)
+    await w.run_once(_past(t0))
+    assert send.messages == [] and classifier.calls == [row.short_id]
+    assert await _notify_count(db, row.id) == 0 and (await store.get(row.short_id)).status == "open"
+    await w.run_once(_past(t0, 400))
+    assert send.messages == [] and classifier.calls == [row.short_id]  # left out of the read from now on
+
+
+@pytest.mark.postgres_only
+async def test_the_retries_of_one_run_are_bounded(store, t0):
+    rows = [await _row(store, t0, f"bound{i}", due_in=60 + i) for i in range(6)]
+    classifier = Classifier(store, {r.what: "not_promise" for r in rows})
+    w = _watcher(
+        store, t0, Send(), classifier=classifier, promise_gate_classifier_enabled=True, promise_watcher_max_items=2
+    )
+    await w.run_once(_past(t0, 70))
+    assert len(classifier.calls) == 4  # 2 per listed row; the other two wait for the next run
+    await w.run_once(_past(t0, 370))
+    assert len(classifier.calls) == 6
+
+
+@pytest.mark.postgres_only
+async def test_quiet_hours_still_expire_stale_claims_and_retry_stage2(store, t0):
+    stale = await _row(store, t0, "q-stale")
+    fresh = await _row(store, t0, "q-fresh")
+    run_at = _past(t0) + timedelta(seconds=601)
+    await store.claim_for_ping([stale.id], "dead-run", _past(t0) - timedelta(seconds=1))
+    quiet = {"heartbeat_quiet_start": run_at.hour, "heartbeat_quiet_end": (run_at.hour + 1) % 24}
+    classifier = Classifier(store, {fresh.what: "promise"})
+    send = Send()
+    w = _watcher(store, t0, send, classifier=classifier, promise_gate_classifier_enabled=True, **quiet)
+    await w.run_once(run_at)
+    assert send.messages == []
+    assert (await _evidence(store, stale.short_id))["ping"]["state"] == "orphaned"
+    assert classifier.calls == [fresh.short_id]
+    assert (await _evidence(store, fresh.short_id))["stage2"]["verdict"] == "promise"
+
+
+def test_the_longest_message_fits_telegram():
+    from nous.config import Settings
+    from nous.heartbeat.runner import _TELEGRAM_MAX_CHARS
+
+    cap = Settings.model_fields["promise_watcher_max_items"].metadata
+    assert any(getattr(m, "le", None) == 15 for m in cap)
+    t0 = datetime(2026, 11, 12, 9, 0, tzinfo=UTC)
+    rows = [
+        SimpleNamespace(
+            label=f"C-{100000 + i}",
+            promise_text="x" * 500,
+            due_at=t0,
+            evidence={"due_parsed": False},
+            detected_by="gate",
+            stage2={},
+        )
+        for i in range(15)
+    ]
+    w = CommitmentWatcher(object(), _settings(promise_watcher_since=t0.isoformat()), Send())
+    assert len(w.render(rows, 999)) < _TELEGRAM_MAX_CHARS
+
+
+async def test_a_failing_release_is_logged_with_the_rows_and_does_not_raise(caplog):
+    class Store:
+        async def release_ping(self, *a, **k):
+            raise RuntimeError("database went away")
+
+    t0 = datetime.now(UTC)
+    w = CommitmentWatcher(Store(), _settings(promise_watcher_since=t0.isoformat()), Send(), started_at=t0)
+    row = SimpleNamespace(id=uuid.uuid4(), label="C-0077", evidence={})
+    with caplog.at_level(logging.WARNING):
+        await w._settle([row], "run-x", SendResult.NOT_SENT, t0)
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("C-0077" in m and "not recorded" in m and "run-x" in m for m in messages)

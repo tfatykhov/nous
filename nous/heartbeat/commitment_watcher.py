@@ -39,6 +39,9 @@ TEXT_MAX = 120  # characters of the promise shown in the ping
 CANDIDATE_LIMIT = 500
 STALL_INTERVALS = 2  # the dead-man line and the stale-claim expiry both wait this many intervals
 MAX_STAGE2_ATTEMPTS = 2
+# Stage-2 retries per run, per row listed: a backlog of unclassified rows is worked off over several runs, so one run
+# never takes longer than the dead-man line allows.
+RETRIES_PER_ITEM = 2
 
 
 def parse_since(value: str | None) -> datetime | None:
@@ -50,11 +53,6 @@ def parse_since(value: str | None) -> datetime | None:
     except ValueError:
         return None
     return since if since.tzinfo is not None else None
-
-
-def _stage2(row: Commitment) -> dict[str, Any]:
-    doc = (row.evidence or {}).get("stage2")
-    return doc if isinstance(doc, dict) else {}
 
 
 def _unknown_sends(row: Commitment) -> int:
@@ -138,15 +136,15 @@ class CommitmentWatcher:
         )
 
     async def run_once(self, now: datetime | None = None) -> None:
-        """One run. Never raises (a cancellation still propagates): a failure is one WARNING, and the run does not
-        count as a tick."""
-        now = now or datetime.now(UTC)
+        """One run at ``now`` (default: the current time). Never raises (a cancellation still propagates): a failure
+        is one WARNING, and the run does not count as a tick. A completed run ticks at its end."""
+        clock = now or datetime.now(UTC)
         try:
-            await self._run(now)
+            await self._run(clock)
         except Exception:
             logger.warning("F111 promise watcher run failed", exc_info=True)
             return
-        self.note_tick(now)
+        self.note_tick(now or datetime.now(UTC))
 
     async def _run(self, now: datetime) -> None:
         stale_before = now - timedelta(seconds=STALL_INTERVALS * self.interval_seconds)
@@ -185,19 +183,28 @@ class CommitmentWatcher:
             logger.warning("F111 promise watcher: the suppression check failed; the rows are pinged", exc_info=True)
             return rows
         for row_id, call_id in suppressors.items():
-            await self._store.mark_suppressed(row_id, call_id, now)
+            try:
+                await self._store.mark_suppressed(row_id, call_id, now)
+            except Exception:
+                # Still covered, so still not pinged; the mark is tried again next run.
+                logger.warning("F111 promise watcher: a suppression was not recorded", exc_info=True)
         return [r for r in rows if r.id not in suppressors]
 
     async def _pick(self, rows: list[Commitment]) -> tuple[list[Commitment], int]:
         """The first ``MAX_ITEMS`` rows to ping, in order, and how many eligible rows are left for later runs. A gate
         row stage 2 has not settled is classified once more here (with the classifier on); one it then calls
-        ``not_promise`` is skipped."""
+        ``not_promise`` is skipped. At most ``RETRIES_PER_ITEM`` x ``MAX_ITEMS`` retries per run; the rows past them
+        wait for the next run."""
         limit = self._settings.promise_watcher_max_items
+        retries_left = RETRIES_PER_ITEM * limit
         picked: list[Commitment] = []
         for index, row in enumerate(rows):
             if len(picked) >= limit:
                 return picked, len(rows) - index
             if self._classifier_on and row.detected_by == "gate" and self._needs_retry(row):
+                if retries_left <= 0:
+                    return picked, len(rows) - index
+                retries_left -= 1
                 doc = await self._classifier.classify_now(row)
                 row = replace(row, evidence={**(row.evidence or {}), "stage2": doc})
                 if doc.get("verdict") == "not_promise":
@@ -207,7 +214,7 @@ class CommitmentWatcher:
 
     @staticmethod
     def _needs_retry(row: Commitment) -> bool:
-        stage2 = _stage2(row)
+        stage2 = row.stage2
         verdict = stage2.get("verdict")
         if verdict is None:
             return True
@@ -224,7 +231,7 @@ class CommitmentWatcher:
             line = f"{row.label} '{text}' (due {row.due_at.astimezone(UTC):%a %d %b %H:%M} UTC)"
             if (row.evidence or {}).get("due_parsed") is False:
                 line += " (no time stated)"
-            if row.detected_by == "gate" and not (self._classifier_on and _stage2(row).get("verdict") == "promise"):
+            if row.detected_by == "gate" and not (self._classifier_on and row.stage2.get("verdict") == "promise"):
                 line += " (not checked)"
             lines.append(line)
         lines.append(f"Reply /done {rows[0].label} or /drop {rows[0].label}.")
@@ -240,24 +247,35 @@ class CommitmentWatcher:
             return SendResult.UNKNOWN
 
     async def _settle(self, claimed: list[Commitment], run_id: str, result: SendResult, now: datetime) -> None:
-        if result is SendResult.SENT:
-            try:
+        """Finalize, release or fail the claimed rows by the send's result. Never raises: a write that fails is one
+        WARNING naming the rows (they keep their claim, and are marked orphaned after 2 intervals)."""
+        labels = ", ".join(r.label for r in claimed)
+        try:
+            if result is SendResult.SENT:
                 await self._store.finalize_ping([r.id for r in claimed], run_id, now)
-            except Exception:
-                # The rows keep notify_count = 1: a sent ping is never repeated, only its record is incomplete.
-                logger.warning("F111 promise watcher: the ping went out but was not recorded as sent", exc_info=True)
-            return
-        if result is SendResult.NOT_SENT:
-            await self._store.release_ping({r.id: _unknown_sends(r) for r in claimed}, run_id, "not_sent")
-            return
-        counts = {r.id: _unknown_sends(r) + 1 for r in claimed}
-        failed = {i: n for i, n in counts.items() if n >= UNKNOWN_SEND_CAP}
-        released = {i: n for i, n in counts.items() if n < UNKNOWN_SEND_CAP}
-        await self._store.release_ping(released, run_id, "unknown")
-        if failed:
-            await self._store.fail_ping(failed, run_id)
+                return
+            logger.warning("F111 promise watcher: the ping for %s was %s; released", labels, result.value)
+            if result is SendResult.NOT_SENT:
+                await self._store.release_ping({r.id: _unknown_sends(r) for r in claimed}, run_id, "not_sent")
+                return
+            counts = {r.id: _unknown_sends(r) + 1 for r in claimed}
+            failed = {i: n for i, n in counts.items() if n >= UNKNOWN_SEND_CAP}
+            released = {i: n for i, n in counts.items() if n < UNKNOWN_SEND_CAP}
+            await self._store.release_ping(released, run_id, "unknown")
+            if failed:
+                await self._store.fail_ping(failed, run_id)
+                logger.warning(
+                    "F111 promise watcher: %s marked failed after %d sends with an unknown outcome; not sent again",
+                    ", ".join(r.label for r in claimed if r.id in failed),
+                    UNKNOWN_SEND_CAP,
+                )
+        except Exception:
+            # A SENT ping keeps notify_count = 1, so it is never repeated; only its record is incomplete.
             logger.warning(
-                "F111 promise watcher: %s marked failed after %d sends with an unknown outcome; not sent again",
-                ", ".join(r.label for r in claimed if r.id in failed),
-                UNKNOWN_SEND_CAP,
+                "F111 promise watcher: run %s, ping %s for %s not recorded; the rows keep their claim and will be "
+                "marked orphaned",
+                run_id,
+                result.value,
+                labels,
+                exc_info=True,
             )

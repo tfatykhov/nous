@@ -1289,7 +1289,8 @@ async def create_components(settings: Settings) -> dict:
         promise_classifier = ClassifierScheduler(commitment_store, settings, api_client)
         runner.set_promise_classifier(promise_classifier)
         logger.info("F111: stage-2 promise classifier on (model %s)", settings.promise_gate_classifier_model)
-    if settings.promise_gate_enabled and settings.promise_gate_mode != "off":
+    promise_gate_on = settings.promise_gate_enabled and settings.promise_gate_mode != "off"
+    if promise_gate_on:
         from nous.cognitive.promise_gate import PromiseGate
 
         runner.set_promise_gate(PromiseGate(commitment_store, settings, classifier=promise_classifier))
@@ -1478,7 +1479,7 @@ async def create_components(settings: Settings) -> dict:
     # model-call text whatever its flag says. With every log off it starts only while this agent still has text.
     # F111 PR B1: the promise gate's per-turn log, while the gate writes it.
     promise_gate_log_retention_task = None
-    if settings.promise_gate_enabled and settings.promise_gate_mode != "off":
+    if promise_gate_on:
         promise_gate_log_retention_task = asyncio.create_task(
             _promise_gate_log_retention_loop(settings, database), name="promise-gate-log-retention"
         )
@@ -1674,8 +1675,9 @@ async def create_components(settings: Settings) -> dict:
             commitment_watcher = None
             if settings.promise_watcher_enabled:
                 from nous.heartbeat.commitment_watcher import CommitmentWatcher
+                from nous.heartbeat.send_result import SendResult
 
-                async def _watcher_send(message: str):
+                async def _watcher_send(message: str) -> SendResult:
                     return await heartbeat_runner._send_telegram(message)
 
                 commitment_watcher = CommitmentWatcher(

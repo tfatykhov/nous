@@ -3,8 +3,9 @@
 The overdue watcher pings a row at most once, so it needs to tell "not sent" from "maybe sent":
 
 - ``SENT``: Telegram answered with a status below 400.
-- ``NOT_SENT``: certainly not delivered: Telegram is not configured, the connection failed before the request was
-  written (refused, DNS, connect or pool timeout), or Telegram answered with an HTTP error (429 and 5xx included).
+- ``NOT_SENT``: certainly not delivered: Telegram is not configured, the request could not be built or the connection
+  failed before it was written (a bad URL, refused, DNS, connect or pool timeout, a proxy that refused it), or Telegram
+  answered with an HTTP error (429 and 5xx included).
 - ``UNKNOWN``: the request may have been delivered: a timeout or a dropped connection after it was written, or any
   other exception. The watcher counts these and stops after a few.
 """
@@ -22,8 +23,16 @@ class SendResult(enum.Enum):
     UNKNOWN = "unknown"
 
 
-# httpx raises these before the request is on the wire (ConnectError covers a refused connection and a DNS failure).
-_BEFORE_THE_REQUEST: tuple[type[BaseException], ...] = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+# httpx raises these before the request is on the wire (ConnectError covers a refused connection and a DNS failure; a
+# bad character in the bot token is an InvalidURL; a ProxyError is the proxy refusing to connect to Telegram).
+_BEFORE_THE_REQUEST: tuple[type[BaseException], ...] = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+    httpx.InvalidURL,
+    httpx.UnsupportedProtocol,
+    httpx.ProxyError,
+)
 
 
 def result_for_status(status: object) -> SendResult:

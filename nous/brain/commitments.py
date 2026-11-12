@@ -127,6 +127,12 @@ class Commitment:
         """The owner-facing id, ``C-0042``."""
         return format_short_id(self.short_id)
 
+    @property
+    def stage2(self) -> dict[str, Any]:
+        """The stage-2 classifier's stored verdict document (``evidence.stage2``), or ``{}``."""
+        doc = (self.evidence or {}).get("stage2")
+        return doc if isinstance(doc, dict) else {}
+
 
 def format_short_id(short_id: int) -> str:
     """``C-0042``: the form the owner reads in a footer and types after /drop."""
@@ -332,12 +338,13 @@ class CommitmentStore:
         ``goal`` or ``awaiting_user`` row, and never a backed, closed, deferred or superseded one. Ordered by
         ``due_at``, then ``id``. ``due_at < :now`` lets migration 108's index apply. ``skip_not_promise`` leaves out
         rows stage 2 called ``not_promise`` (they stay open and are never pinged, so they must not fill ``limit``)."""
-        cutoff = "AND created_at >= :since " if since is not None else ""
-        if skip_not_promise:
-            cutoff += "AND (evidence -> 'stage2' ->> 'verdict') IS DISTINCT FROM 'not_promise' "
         params: dict[str, Any] = {"agent_id": self._agent_id, "now": now or datetime.now(UTC), "limit": limit}
+        extra_where = ""
         if since is not None:
+            extra_where += "AND created_at >= :since "
             params["since"] = since
+        if skip_not_promise:
+            extra_where += "AND (evidence -> 'stage2' ->> 'verdict') IS DISTINCT FROM 'not_promise' "
         async with self._db.session() as session:
             result = await session.execute(
                 text(
@@ -346,7 +353,7 @@ class CommitmentStore:
                     "AND kind NOT IN ('goal', 'awaiting_user') AND notify_count = 0 "
                     "AND (evidence -> 'watch' -> 'suppressed_by') IS NULL "
                     "AND due_at < :now AND due_at + make_interval(secs => grace_seconds) < :now "
-                    f"{cutoff}ORDER BY due_at, id LIMIT :limit"
+                    f"{extra_where}ORDER BY due_at, id LIMIT :limit"
                 ),
                 params,
             )

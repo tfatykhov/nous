@@ -1017,14 +1017,12 @@ def test_settings_object_reads_the_gate_mode():
 
 # ---- F111 PR B1: the passive with a deadline, and the C-1 class (plan §6) ------------------------------------------
 
-# A future passive of an action verb with a `by <time>` deadline is the agent's own promise. The due time is what the
-# existing _due_at parser makes of the sentence: only "by tomorrow" is parsed; "by morning" and "by November 20" get
-# the default (due_parsed False).
+# A future passive of an action verb with a `by <time>` deadline is the agent's own promise, when the existing _due_at
+# parser reads the deadline (plan §6: "a deadline phrase the existing _due_at parser resolves", due_parsed true).
 PASSIVE_HITS = [
-    ("The fix will be deployed by morning.", False),
-    ("The summary will be sent by November 20.", False),
     ("It'll be deployed by tomorrow.", True),
-    ("The new index is going to be built by tonight.", False),
+    ("The fix will be deployed by tomorrow at 09:00 UTC.", True),
+    ("The new index is going to be built by tomorrow.", True),
     ("The chain will be relaunched by 18:15 UTC.", True),
 ]
 PASSIVE_MISSES = [
@@ -1032,7 +1030,11 @@ PASSIVE_MISSES = [
     "The PR was merged by Tim.",
     "It will be reviewed by Tim.",
     "This was sent by morning courier.",
-    "The fix will not be deployed by morning.",
+    "The fix will not be deployed by tomorrow.",
+    # Deadlines _due_at does not read: a hit would get the default due, and the watcher would ping 75 minutes later
+    # about something due days away (reported on the PR).
+    "The fix will be deployed by morning.",
+    "The summary will be sent by November 20.",
     # Not in ACTION_VERBS ("do", "ready" are not), so the rule does not reach them (reported on the PR).
     "It'll be done by tomorrow.",
     "The report is going to be ready by 5pm.",

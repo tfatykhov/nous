@@ -149,8 +149,10 @@ def _participle(verb: str) -> str:
 
 
 # F111 PR B1: a future passive of an action verb with a "by <time>" deadline is the agent's own promise ("The fix will
-# be deployed by morning."). The verb must be in ACTION_VERBS and the "by" must name a time, never someone ("will be
-# reviewed by Tim"); a past passive ("was merged by Tim") has no future form.
+# be deployed by tomorrow."), when _due_at reads that deadline (scan checks): an unread one ("by morning", "by November
+# 20") would get the default due, and the watcher would ping long before the stated date. The verb must be in
+# ACTION_VERBS and the "by" must name a time, never someone ("will be reviewed by Tim"); a past passive ("was merged by
+# Tim") has no future form.
 _PASSIVE_DEADLINE_RE = re.compile(
     rf"\b(?:will|{_APOS}ll|(?:is|are|{_APOS}s|{_APOS}re)\s+going\s+to)\s+be\s+"
     r"(?:"
@@ -313,7 +315,10 @@ class PromiseDetector:
             if not sentence or sentence.endswith("?"):
                 continue
             probe = _NEXT_STEP_YOURS_RE.sub("", sentence)  # the owner's next step is no future form or marker
-            passive = _PASSIVE_DEADLINE_RE.search(probe) is not None  # a future form and a deadline in one
+            # A future form and a deadline in one, counted only when the deadline is one _due_at reads.
+            passive = (
+                _PASSIVE_DEADLINE_RE.search(probe) is not None and _due_at(sentence, now, self._default_due_minutes)[1]
+            )
             if not (passive or _agent_future_form(probe)) or _OFFER_RE.search(sentence):
                 continue
             silence = _SILENCE_RE.search(sentence) is not None

@@ -1407,9 +1407,10 @@ class HeartbeatRunner:
             # nor an httpx error text may reach a log line. (The isinstance:
             # a mocked client answers with no integer status.)
             status = getattr(response, "status_code", None)
-            if isinstance(status, int) and status >= 400:
+            result = result_for_status(status)
+            if result is SendResult.NOT_SENT:
                 logger.warning("Heartbeat Telegram notification rejected: HTTP %s", status)
-            return result_for_status(status)
+            return result
         except Exception as exc:
             logger.warning("Heartbeat Telegram notification failed")
             return result_for_exception(exc)
