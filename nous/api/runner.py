@@ -17,12 +17,12 @@ import time
 import unicodedata
 import weakref
 from collections import OrderedDict
-from collections.abc import AsyncGenerator, Callable, Iterator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Iterator
 from contextlib import AbstractContextManager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, NamedTuple
+from typing import Any, Literal, NamedTuple
 from uuid import UUID, uuid4
 
 from nous.api import attachment_store, tool_policy
@@ -79,6 +79,7 @@ from nous.cognitive.ledger_store import (
     redact_output,
     redact_structure,
 )
+from nous.cognitive.promise_gate import PromiseGate
 from nous.cognitive.schemas import ToolResult, TurnContext, TurnResult
 from nous.config import Settings
 from nous.heart.heart import Heart
@@ -138,6 +139,12 @@ def _command_head(command: object) -> str:
 # worker pool; without exclusion a hardened subtask could call it recursively and
 # starve the pool or create a circular wait between subtask sessions.
 _SUBTASK_EXCLUDED_TOOLS = frozenset({"spawn_task", "schedule_task", "spawn_sync"})
+
+# F111: the promise gate's whole run (detection, the ledger rows, the gate log row) is bounded by this; a slower
+# database fails it open rather than hold the stream's "done" event.
+PROMISE_GATE_TIMEOUT_SECONDS = 2.0
+# F111: at most this many gate writes at once, across the runner and its forks (the pool has 15 connections).
+PROMISE_GATE_MAX_CONCURRENT = 4
 
 # F099: only these extra_tools end the loop on success. submit_final_report (F061) and
 # resolve_intention (a continuation's decision) mean "I am done"; every other extra tool
@@ -309,6 +316,7 @@ def _build_exclude_ids(
 FRAME_TOOLS: dict[str, list[str]] = {
     "conversation": [
         "record_decision",
+        "commit",  # F111: every frame may record an obligation
         "resolve_decisions",
         "list_decisions",
         "learn_fact",
@@ -347,6 +355,7 @@ FRAME_TOOLS: dict[str, list[str]] = {
         "read_file",
         "write_file",
         "record_decision",
+        "commit",  # F111: every frame may record an obligation
         "resolve_decisions",
         "list_decisions",
         "learn_fact",
@@ -364,6 +373,7 @@ FRAME_TOOLS: dict[str, list[str]] = {
     ],
     "decision": [
         "record_decision",
+        "commit",  # F111: every frame may record an obligation
         "resolve_decisions",
         "list_decisions",
         "recall_deep",
@@ -383,6 +393,7 @@ FRAME_TOOLS: dict[str, list[str]] = {
     ],
     "creative": [
         "learn_fact",
+        "commit",  # F111
         "recall_deep",
         "get_procedure",
         "write_file",
@@ -392,6 +403,7 @@ FRAME_TOOLS: dict[str, list[str]] = {
     "task": ["*"],  # All tools
     "debug": [
         "record_decision",
+        "commit",  # F111: every frame may record an obligation
         "recall_deep",
         "get_procedure",
         "bash",
@@ -503,6 +515,11 @@ class AgentRunner:
         self._last_context_entry_id: str | None = None
         # F108: one record per tool call the model asked for (set_tool_call_recorder); None records nothing.
         self._tool_call_recorder: ToolCallRecorder | None = None
+        # F111: the turn-close promise gate (set_promise_gate); None: no gate, no rows.
+        self._promise_gate: PromiseGate | None = None
+        self._promise_gate_tasks: set[asyncio.Task] = set()  # F111: gate work in flight (drained by close)
+        # F111: the gate's concurrent database writes, shared with the forks (each write holds a pooled connection).
+        self._promise_gate_slots = asyncio.Semaphore(PROMISE_GATE_MAX_CONCURRENT)
 
         # F026: Execution Integrity
         self._ledgers: dict[str, ExecutionLedger] = {}
@@ -979,6 +996,12 @@ class AgentRunner:
     def set_ledger_store(self, store: LedgerStore | None) -> None:
         """Harness Phase 1b: durable ledger for side-effecting tool calls."""
         self._ledger_store = store
+
+    def set_promise_gate(self, gate: PromiseGate | None) -> None:
+        """F111: the turn-close promise gate, shared with the forks (the heartbeat's turns run on one)."""
+        self._promise_gate = gate
+        for fork in self._forks:
+            fork.set_promise_gate(gate)
 
     def set_cancelled_roots(self, view: Callable[[UUID], bool]) -> None:
         """F099 2e: install the in-process view of cancelled roots (``ContinuationRunner.root_is_cancelled``).
@@ -1732,6 +1755,9 @@ class AgentRunner:
         forked._action_review_pusher = self._action_review_pusher
         forked._root_cancelled = self._root_cancelled  # F099 2e: and set_cancelled_roots propagates a later view
         forked._tool_call_recorder = self._tool_call_recorder  # F108: and set_tool_call_recorder propagates a later one
+        forked._promise_gate = self._promise_gate  # F111: and set_promise_gate propagates a later one
+        forked._promise_gate_slots = self._promise_gate_slots  # F111: one cap for the process's gate writes
+        forked._promise_gate_tasks = self._promise_gate_tasks  # F111: and one set, so close() drains the forks' too
         # F035.4: the heartbeat's checks, triage and callbacks run on a fork; sharing
         # the logger gives their model calls context_log rows. It was withheld after the
         # April 2026 triage hang (0d1d45e3), when the logger's fire-and-forget writes held
@@ -1749,7 +1775,20 @@ class AgentRunner:
         return forked
 
     async def close(self) -> None:
-        """Clean up API client (skip if shared — caller manages lifecycle)."""
+        """Clean up API client (skip if shared — caller manages lifecycle), after the promise gate's work in flight:
+        a run and then its error row are each bounded by ``PROMISE_GATE_TIMEOUT_SECONDS``, so wait up to twice that
+        (an error row started during the wait included), then cancel what is left."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 2 * PROMISE_GATE_TIMEOUT_SECONDS
+        while self._promise_gate_tasks:
+            pending = set(self._promise_gate_tasks)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                break
+            await asyncio.wait(pending, timeout=remaining)
         if self._api and not self._api_shared:
             await self._api.close()
         self._api = None
@@ -2152,8 +2191,30 @@ class AgentRunner:
 
             # F026: Post-response claim verification + ghost planning detection
             _claim_check: dict | None = None  # F108: the claim check's result, for the turn row
+            _gate_footer: str | None = None  # F111: shown to a foreground caller, never stored
             if _caught_exc is None:
                 _claim_check = self._verify_claims(session_id, response_text, tool_results, ledger)
+                try:
+                    _gate_footer = await self._promise_gate_step(
+                        _ctx, response_text, tool_results, path="run_turn", session_id=session_id, turn_id=str(_turn_id)
+                    )
+                except asyncio.CancelledError:
+                    # F108: a cancel in the gate skips the turn row below, as one in the model call would.
+                    if self._tool_call_recorder:
+                        self._note_turn(
+                            _ctx,
+                            turn_id=_turn_id,
+                            session_id=session_id,
+                            turn_number=_turn_number_local,
+                            turn_context=turn_context,
+                            trigger=user_message,
+                            reply=response_text,
+                            error="cancelled",
+                            claim_check=_claim_check,
+                            call_indexes=_call_indexes,
+                            started_at=_turn_started,
+                        )
+                    raise
 
             # F108: the turn row, before post_turn so a post_turn that raises cannot skip it.
             if self._tool_call_recorder:
@@ -2197,6 +2258,10 @@ class AgentRunner:
             if _caught_exc is not None:
                 raise _caught_exc
 
+            if _gate_footer and not _ctx.is_background:
+                # F111: appended to what the caller is handed only; the conversation, the turn row, post_turn and
+                # the channel's last reply above all got response_text without it.
+                return f"{response_text}\n\n{_gate_footer}", turn_context, usage
             return response_text, turn_context, usage
 
     def discard_conversation(self, session_id: str) -> None:
@@ -2913,6 +2978,8 @@ class AgentRunner:
             error = None
             _claim_check: dict | None = None  # F108: the claim check's result, for the turn row
             _consumer_closed = False  # F108: the consumer closed this generator mid-turn, for the turn row
+            _gate_due = False  # F111: the loop reached its terminal point (not the max_turns fallback)
+            _gate_footer: str | None = None  # F111: yielded just before "done", never stored
 
             # F071: scope the per-turn exclusion set to the streaming tool
             # loop — recall_deep can be dispatched inside the for-turn
@@ -3099,6 +3166,7 @@ class AgentRunner:
                     # are no tool calls to dispatch.
                     if not tool_calls:
                         response_text = "".join(text_parts)
+                        _gate_due = True  # F111: the gate runs below, once the reply is stored and checked
                         break
 
                     # Build assistant message preserving ALL blocks in index order
@@ -3420,6 +3488,7 @@ class AgentRunner:
                                             turn_number=_stream_turn_number,  # F091
                                             context=_ctx,  # harness Phase 1a
                                             outcome=outcome,  # harness Phase 2b
+                                            turn_id=_stream_turn_id,  # F111
                                         ):
                                             if isinstance(item, StreamEvent):
                                                 yield item
@@ -3595,6 +3664,24 @@ class AgentRunner:
 
                 # F026: Post-response claim verification (streaming: warn+inject only)
                 _claim_check = self._verify_claims(session_id, response_text, all_tool_results, ledger)
+                # F111: the promise gate, after the reply is stored and claim-checked, so a consumer that goes away
+                # here or at the footer below loses nothing. The footer never joins response_text.
+                if _gate_due:
+                    try:
+                        _gate_footer = await self._promise_gate_step(
+                            _ctx,
+                            response_text,
+                            all_tool_results,
+                            path="stream",
+                            session_id=session_id,
+                            turn_id=str(_stream_turn_id),
+                        )
+                    except asyncio.CancelledError:
+                        # The except clauses above do not see a cancel raised in this else: without this the
+                        # finally's turn row would say the turn succeeded. Handled as GeneratorExit is: the row
+                        # says "cancelled", post_turn gets what it got before, and the cancel propagates.
+                        _consumer_closed = True
+                        raise
 
                 # F024 F4/F5: record memory on the SUCCESS path only (needs
                 # response_text). Fix A: link the fact to the active episode so
@@ -3665,6 +3752,9 @@ class AgentRunner:
             # path calibrates per-call which is more accurate. Streaming-only turns
             # (no tools) are typically short Telegram messages where chars/4 is fine.
 
+            if _gate_footer:
+                # F111: the text is already on the wire; the footer follows as one more delta.
+                yield StreamEvent(type="text_delta", text=f"\n\n{_gate_footer}")
             yield StreamEvent(type="done", stop_reason="end_turn", usage=total_usage)
 
     # ------------------------------------------------------------------
@@ -3683,6 +3773,7 @@ class AgentRunner:
         dag_node_id: UUID | None,
         turn_number: int | None,
         is_background: bool,
+        turn_id: UUID | None = None,
     ) -> Dispatched:
         """Everything between "this call may run" and "its text": the F064.1 ping and activity heartbeat, the
         durable ledger row (a keyed send claimed first, or suppressed), the write-path lock and compensation
@@ -3765,6 +3856,7 @@ class AgentRunner:
                         turn_number=turn_number,  # F091 (caller-captured)
                         context=ctx,  # harness Phase 1a
                         outcome=outcome,  # harness Phase 2b
+                        turn_id=turn_id,  # F111: commit's idempotency key
                     )
                 except asyncio.CancelledError:
                     # Subtask timeout / shutdown: the side effect may
@@ -4419,6 +4511,7 @@ class AgentRunner:
                                 dag_node_id=dag_node_id,
                                 turn_number=turn_number,
                                 is_background=is_background,
+                                turn_id=turn_id,
                             )
                             result_text, is_error = dispatched.text, dispatched.is_error
                             suppressed = dispatched.suppressed
@@ -5036,6 +5129,111 @@ Rules:
             # by design; the stall scan's NULL-fallback policy covers us.
             pass
 
+    async def _promise_gate_step(
+        self,
+        ctx: ExecutionContext,
+        response_text: str,
+        tool_results: list[ToolResult],
+        *,
+        path: Literal["stream", "run_turn"],
+        session_id: str | None,
+        turn_id: str,
+    ) -> str | None:
+        """F111: run the promise gate on a turn's final text. Returns the footer to show (warn), else None.
+
+        The gate runs as a task of its own, bounded like the F108 recorder's writes (``_bounded_gate_write``). In
+        ``shadow`` there is no footer to wait for, so this returns at once: no added latency and no new cancellation
+        point after the reply is complete. In ``warn``/``enforce`` it awaits the footer through a shield, so a
+        cancel of the turn never lands inside the gate's transaction (the task's own bound still applies).
+
+        Fails open: any exception, and a gate that takes longer than ``PROMISE_GATE_TIMEOUT_SECONDS``, is logged at
+        WARNING (with a best-effort ``outcome='error'`` row) and the reply goes out unchanged. Never raises, never
+        sends, never creates a schedule, DAG or spawn. A cancellation of the turn still propagates."""
+        gate = self._promise_gate
+        if gate is None:
+            return None
+        mode = gate.mode
+        if mode == "off":
+            return None
+        task = self._track_promise_gate_task(
+            self._run_promise_gate(gate, response_text, tool_results, path, session_id, turn_id, ctx.kind)
+        )
+        if mode == "shadow":
+            return None
+        return await asyncio.shield(task)
+
+    async def _run_promise_gate(
+        self,
+        gate: PromiseGate,
+        response_text: str,
+        tool_results: list[ToolResult],
+        path: Literal["stream", "run_turn"],
+        session_id: str | None,
+        turn_id: str,
+        context_kind: str | None,
+    ) -> str | None:
+        """One bounded gate run: the footer, or None. Never raises (cancellation still propagates)."""
+        try:
+            outcome = await self._bounded_gate_write(
+                lambda: gate.run(
+                    response_text,
+                    tool_results,
+                    path=path,
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    context_kind=context_kind,
+                )
+            )
+        except TimeoutError:
+            logger.warning(
+                "F111 promise gate took longer than %.1f s on a %s turn and was stopped; the reply is unchanged",
+                PROMISE_GATE_TIMEOUT_SECONDS,
+                path,
+            )
+        except Exception:
+            logger.warning("F111 promise gate failed on a %s turn; the reply is unchanged", path, exc_info=True)
+        else:
+            return outcome.footer
+        # The turn still counts in the gate's log: its rows and log row were rolled back with the failed run.
+        self._track_promise_gate_task(self._log_promise_gate_error(gate, path, session_id, turn_id, context_kind))
+        return None
+
+    async def _log_promise_gate_error(
+        self,
+        gate: PromiseGate,
+        path: Literal["stream", "run_turn"],
+        session_id: str | None,
+        turn_id: str,
+        context_kind: str | None,
+    ) -> None:
+        """The gate's ``outcome='error'`` row, bounded like the run. Never raises (``log_error`` logs its own
+        failure)."""
+        try:
+            await self._bounded_gate_write(
+                lambda: gate.log_error(path=path, session_id=session_id, turn_id=turn_id, context_kind=context_kind)
+            )
+        except TimeoutError:
+            logger.warning("F111 promise gate error row took longer than %.1f s", PROMISE_GATE_TIMEOUT_SECONDS)
+
+    async def _bounded_gate_write(self, make_write: Callable[[], Awaitable[Any]]) -> Any:
+        """``make_write()`` within one of the shared slots, the wait for the slot and the write under ONE timeout
+        (``PROMISE_GATE_TIMEOUT_SECONDS``): the F108 recorder's pattern (``nous/observability/recording.py``),
+        so a hung statement holds a pooled connection for the bound at most. Raises ``TimeoutError`` past it."""
+
+        async def in_slot() -> Any:
+            async with self._promise_gate_slots:
+                return await make_write()
+
+        return await asyncio.wait_for(in_slot(), timeout=PROMISE_GATE_TIMEOUT_SECONDS)
+
+    def _track_promise_gate_task(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
+        """Start the gate work as a task and hold a strong reference until it ends (asyncio keeps only weak ones).
+        The work logs its own failures, so nothing is logged here."""
+        task = asyncio.ensure_future(coro)
+        self._promise_gate_tasks.add(task)
+        task.add_done_callback(self._promise_gate_tasks.discard)
+        return task
+
     def _check_safety_net(
         self,
         turn_context: TurnContext,
@@ -5300,6 +5498,7 @@ Rules:
         turn_number: int | None = None,  # F091: caller-captured, see _tool_loop
         context: ExecutionContext | None = None,  # harness Phase 1a
         outcome: CallOutcome | None = None,  # harness Phase 2b
+        turn_id: UUID | None = None,  # F111: commit's idempotency key
     ) -> AsyncGenerator[StreamEvent | DispatchOutcome, None]:
         """Execute a tool, yielding keepalive events during long execution.
 
@@ -5321,6 +5520,7 @@ Rules:
                     turn_number=turn_number,  # F091 (caller-captured)
                     context=context,  # harness Phase 1a
                     outcome=outcome,  # harness Phase 2b
+                    turn_id=turn_id,
                 ),
                 timeout=timeout,
             )

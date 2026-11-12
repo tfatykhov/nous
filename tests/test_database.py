@@ -78,6 +78,8 @@ async def test_all_tables_exist(db):
         # F108 agent work view: one row per model call, one row per HTTP attempt of a call (migration 101)
         ("nous_system", "model_call_log"),
         ("nous_system", "model_call_attempt"),
+        # F111 obligation ledger: one row per turn the promise gate ran on (migration 107)
+        ("nous_system", "promise_gate_log"),
         # F108 agent work view: model-call text blocks by hash, and each call's blocks in order (migration 102)
         ("nous_system", "model_text_block"),
         ("nous_system", "model_call_block_ref"),
@@ -102,6 +104,8 @@ async def test_all_tables_exist(db):
         # F099 Phase 2b: arrivals and proposals (migration 084)
         ("brain", "intention_arrivals"),
         ("brain", "intention_proposals"),
+        # F111 obligation ledger (migration 107)
+        ("brain", "commitments"),
         # heart (20)
         ("heart", "episodes"),
         # heart.episode_decisions dropped by migration 068 (no runtime writer;

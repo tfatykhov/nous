@@ -25,6 +25,7 @@ from typing import Any
 from nous import undo_journal
 from nous.api import tool_policy
 from nous.api.call_outcome import current_outcome
+from nous.api.commitment_routes import OWNER_SECRET_ENV
 from nous.api.execution_context import BACKGROUND_BASH_TIMEOUT
 from nous.api.tools import ToolDispatcher, _tool_error
 from nous.cancel_provenance import describe_job_cancellation, parse_runner_call, write_job_cancelled_by
@@ -110,6 +111,12 @@ def _lineage_env(build: bool, gh_repo: str = "") -> dict[str, str]:
     if build:
         return {**env, **_LINEAGE_BUILD_FIXED_ENV}
     return {**env, "GH_REPO": gh_repo} if gh_repo else env
+
+
+def _agent_env() -> dict[str, str]:
+    """The environment of an ordinary (non-lineage) bash: this process's, without the variables the agent must
+    never read (F111: the owner's secret for the commitment close routes, should it be set here by mistake)."""
+    return {k: v for k, v in os.environ.items() if k != OWNER_SECRET_ENV}
 
 
 def _mcp_response(text: str) -> dict[str, Any]:
@@ -215,7 +222,7 @@ async def bash_tool(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(workspace),
-            env=_lineage_env(_lineage_build, "" if _lineage_runner else _gh_repo) if _lineage else None,
+            env=_lineage_env(_lineage_build, "" if _lineage_runner else _gh_repo) if _lineage else _agent_env(),
             # Own process group, so a timeout or a cancelled turn can stop the
             # whole command (``a; b``, pipelines), not only the /bin/sh parent.
             start_new_session=True,

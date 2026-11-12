@@ -1,0 +1,199 @@
+{
+  "note": "Sentences the stage-1 detector must flag. 'spec' rows are quoted in ledger spec D.7; 'incident' rows carry incident wording the spec quotes (#4, #8, #12; reconstructed around the quoted phrase); 'constructed' rows are written for coverage and are not transcripts.",
+  "cases": [
+    {
+      "text": "I'll relaunch the chain at 18:15 UTC unless you object.",
+      "origin": "spec",
+      "consent": "silence"
+    },
+    {
+      "text": "Doing option A at 20:15Z unless you object.",
+      "origin": "spec",
+      "consent": "silence"
+    },
+    {
+      "text": "I'll start items 1–3 today, unless you object.",
+      "origin": "spec",
+      "consent": "silence"
+    },
+    {
+      "text": "Next step: fix the Codex findings on #712; I'll queue it after the review finishes.",
+      "origin": "spec"
+    },
+    {
+      "text": "I'll check back tomorrow.",
+      "origin": "spec"
+    },
+    {
+      "text": "I'll re-run the gate once the quota resets.",
+      "origin": "spec"
+    },
+    {
+      "text": "I'll relaunch it at 20:15Z unless you prefer otherwise.",
+      "origin": "incident #12",
+      "reconstructed": true,
+      "consent": "silence"
+    },
+    {
+      "text": "I'll launch a finish job within the hour.",
+      "origin": "incident #4",
+      "reconstructed": true
+    },
+    {
+      "text": "The next step is fixing the Codex findings on #712; nothing is queued.",
+      "origin": "incident #8",
+      "reconstructed": true
+    },
+    {
+      "text": "I'll remove it (option A) unless you object.",
+      "origin": "incident Nov 10",
+      "reconstructed": true,
+      "consent": "silence"
+    },
+    {
+      "text": "I'll run the tests once the build finishes.",
+      "origin": "spec"
+    },
+    {
+      "text": "I will send the summary by Friday.",
+      "origin": "constructed"
+    },
+    {
+      "text": "I'm going to merge the PR tonight.",
+      "origin": "constructed"
+    },
+    {
+      "text": "I plan to deploy the fix in 2 hours.",
+      "origin": "constructed"
+    },
+    {
+      "text": "I'll kick off the backfill later.",
+      "origin": "constructed"
+    },
+    {
+      "text": "I'll follow up on the failed DAG after lunch.",
+      "origin": "constructed"
+    },
+    {
+      "text": "I'll draft the release notes this evening.",
+      "origin": "constructed"
+    },
+    {
+      "text": "I'll retry the upload in 30 minutes.",
+      "origin": "constructed"
+    },
+    {
+      "text": "I'll apply the sweep tomorrow morning.",
+      "origin": "constructed"
+    },
+    {
+      "text": "I'll schedule the review for next week.",
+      "origin": "constructed"
+    },
+    {
+      "text": "I'll delete the stale branches when the merge lands.",
+      "origin": "constructed"
+    },
+    {
+      "text": "I'll look into the timeout once the logs rotate.",
+      "origin": "constructed"
+    },
+    {
+      "text": "We'll resume the migration at 09:00 UTC.",
+      "origin": "constructed"
+    },
+    {
+      "text": "The report will be sent by end of day.",
+      "origin": "constructed"
+    },
+    {
+      "text": "I'll create the dashboard tile next.",
+      "origin": "constructed"
+    },
+    {
+      "text": "I'll spawn the audit subtask in an hour, if I don't hear back.",
+      "origin": "constructed",
+      "consent": "silence"
+    },
+    {
+      "text": "I’ll restart the worker on 2026-11-12.",
+      "origin": "constructed"
+    },
+    {
+      "text": "I'll be honest: I'll redeploy the service tomorrow.",
+      "origin": "review r1 finding 6 (the narrowed rules keep these)"
+    },
+    {
+      "text": "I'll see to the rollback tomorrow.",
+      "origin": "review r1 finding 6 (the narrowed rules keep these)"
+    },
+    {
+      "text": "The fix will be deployed by 18:00 UTC.",
+      "origin": "review r1 finding 6 (the narrowed rules keep these)"
+    },
+    {
+      "text": "I'll see that it ships tomorrow.",
+      "origin": "pre-push review of the r1 fixes (the narrowed rules keep these)"
+    },
+    {
+      "text": "I'll ping Prof. Smith tomorrow.",
+      "origin": "pre-push review of the r1 fixes (the narrowed rules keep these)"
+    },
+    {
+      "text": "I'll merge the 2 decision PRs tomorrow.",
+      "origin": "pre-push review of the r1 fixes (the narrowed rules keep these)"
+    },
+    {
+      "text": "The report will be sent by email tomorrow.",
+      "origin": "pre-push review of the r1 fixes (the narrowed rules keep these)"
+    },
+    {
+      "text": "The fix will be deployed by me tomorrow.",
+      "origin": "pre-push review of the r1 fixes (the narrowed rules keep these)"
+    },
+    {
+      "text": "I'll grant you access tomorrow.",
+      "origin": "pre-push review of the r1 fixes (the narrowed rules keep these)"
+    },
+    {
+      "text": "I'll relaunch the chain at 18:15.",
+      "origin": "re-review r2 B: a clock time without a zone is still a time"
+    },
+    {
+      "text": "I'll send the report by 18:15.",
+      "origin": "re-review r2 B: a clock time without a zone is still a time"
+    },
+    {
+      "text": "The PR will be merged by then.",
+      "origin": "re-review r2 C: a time word, a month date or 'not only' after a future form is still a promise"
+    },
+    {
+      "text": "The fix will be deployed by morning, once CI passes.",
+      "origin": "re-review r2 C: a time word, a month date or 'not only' after a future form is still a promise"
+    },
+    {
+      "text": "The fix will be deployed by the weekend, once CI passes.",
+      "origin": "re-review r2 C: a time word, a month date or 'not only' after a future form is still a promise"
+    },
+    {
+      "text": "The report will be sent by evening, once the run finishes.",
+      "origin": "re-review r2 C: a time word, a month date or 'not only' after a future form is still a promise"
+    },
+    {
+      "text": "The release will be merged by November 20, once the review is done.",
+      "origin": "re-review r2 C: a time word, a month date or 'not only' after a future form is still a promise"
+    },
+    {
+      "text": "The patch will be deployed by Dec 3, after the freeze ends.",
+      "origin": "re-review r2 C: a time word, a month date or 'not only' after a future form is still a promise"
+    },
+    {
+      "text": "The patch will be deployed on 3 Dec, after the freeze ends.",
+      "origin": "re-review r2 C: a time word, a month date or 'not only' after a future form is still a promise"
+    },
+    {
+      "text": "I'll not only fix it but also deploy it tomorrow.",
+      "origin": "re-review r2 C: a time word, a month date or 'not only' after a future form is still a promise"
+    }
+  ]
+}

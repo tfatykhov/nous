@@ -44,6 +44,8 @@ TOOL_CLASSES: Mapping[str, ToolClass] = MappingProxyType({
     "cancel_task": _WRITE, "heartbeat_check_manage": _WRITE_C, "ingest_document": _WRITE,
     "resolve_decisions": _WRITE_C, "push_surface": _WRITE,
     "compose_surface": _WRITE, "dag_manage": _WRITE,
+    # F111: a ledger row with a deadline. _WRITE, not _SPAWN: it starts no work, so every context may call it.
+    "commit": _WRITE,
     # F099: a continuation's decision and its staged proposals, injected per turn via extra_tools (never
     # registered); classified so the ledger and the internal_only rules read one table.
     "resolve_intention": _WRITE,

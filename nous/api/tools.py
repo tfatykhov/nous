@@ -31,7 +31,7 @@ from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from nous import cancel_provenance
 from nous.api.call_outcome import CallOutcome
@@ -524,6 +524,7 @@ class ToolDispatcher:
         turn_number: int | None = None,
         context: ExecutionContext | None = None,
         outcome: CallOutcome | None = None,
+        turn_id: UUID | None = None,
     ) -> tuple[str, bool]:
         """Dispatch a tool call and return (result_text, is_error).
 
@@ -540,6 +541,9 @@ class ToolDispatcher:
         outcome: the call's CallOutcome (harness Phase 2b). The handler reads
         it through ``current_outcome()``; it is set and reset around the
         handler call here, inside this one task.
+
+        turn_id: the runner's F108 id of the turn making the call (F111:
+        ``commit`` keys its idempotency on it). None outside a turn.
         """
         ctx = resolve_context(context, is_background=is_background, session_id=session_id)
         is_background = ctx.is_background
@@ -700,6 +704,16 @@ class ToolDispatcher:
                 # silently accepts the kwarg (added by F051.4) and ignores
                 # it — fail-open contract.
                 args = {**args, "_session_id": session_id}
+            if name == "commit":
+                # F111: the turn key (idempotency within a turn) and the ledger's source_kind come from the
+                # harness, never from the model.
+                args = {
+                    **args,
+                    "_session_id": session_id,
+                    "_turn_number": turn_number,
+                    "_turn_id": str(turn_id) if turn_id is not None else None,
+                    "_context_kind": ctx.kind,
+                }
             if session_id is not None and name in ("push_surface", "compose_surface"):
                 # F092: surfaces record the chat session that pushed them so
                 # a companion card can be traced back to its conversation.
@@ -3064,6 +3078,150 @@ def register_nous_tools(
             dispatcher.retire(old_name, change.note)
         elif dispatcher.is_registered(change.target):
             dispatcher.register_alias(old_name, change.target, change.translate, change.note)
+
+
+# ---------------------------------------------------------------------------
+# F111: commit tool (the obligation ledger, brain.commitments)
+# ---------------------------------------------------------------------------
+
+_COMMIT_SCHEMA = {
+    "description": (
+        "Record an obligation you are taking on: work you say you will do after this reply ends (\"I'll check back "
+        'tomorrow", "I\'ll relaunch it at 18:15 UTC unless you object"). Call it in the same turn as the promise '
+        "whenever no schedule_task, dag_create or spawn_task call in this turn already does the work. It writes a "
+        "ledger row with a deadline that the owner sees and can /drop; it does not do the work, schedule it or "
+        "remind anyone by itself. Available in every context, background turns included."
+    ),
+    "type": "object",
+    "properties": {
+        "what": {
+            "type": "string",
+            "description": "What will be done, one line a reader can check later (at least 8 characters).",
+        },
+        "due": {
+            "type": "string",
+            "description": (
+                'When it is due, in exactly one of two forms: "in N minutes|hours|days|weeks" ("in 2 hours") or an '
+                'ISO 8601 time with an offset ("2026-11-20T18:15:00+00:00"). Anything else is refused. Must be in '
+                "the future and at most 90 days away."
+            ),
+        },
+        "consent": {
+            "type": "string",
+            "enum": ["none", "explicit", "silence"],
+            "description": (
+                "silence: you said you will do it unless the owner objects; explicit: the owner asked for it or "
+                "agreed; none (default): neither."
+            ),
+        },
+        "awaiting_owner": {
+            "type": "boolean",
+            "description": 'True when the next move is the owner\'s ("once you confirm"): never reported as overdue.',
+        },
+    },
+    "required": ["what", "due"],
+}
+
+
+def create_commit_tool(store: Any, *, grace_seconds: int = 900) -> Callable[..., Any]:
+    """The ``commit`` handler over a ``CommitmentStore``. Idempotent within a turn (same ``what``, one row).
+    ``grace_seconds`` is stored on each row (``NOUS_PROMISE_GATE_GRACE_SECONDS``, as the gate's rows)."""
+    from nous.brain.commitments import LIVE_STATUSES, MAX_DUE_DAYS, SOURCE_KIND_BY_CONTEXT, CommitmentRefused
+    from nous.handlers.time_parser import _RELATIVE_RE, _UNIT_SECONDS
+
+    def parse_due(due: str) -> datetime:
+        """Exactly the two documented forms: ``in N units`` or ISO 8601 with an offset. Anything else is a
+        ``ValueError`` (no fuzzy parse: it drops an unknown zone and ignores "tomorrow", moving a deadline by hours
+        or a day)."""
+        due = due.strip()
+        m = _RELATIVE_RE.fullmatch(due)
+        if m:
+            seconds = int(m.group(1)) * _UNIT_SECONDS[m.group(2).lower()]
+            if seconds > (MAX_DUE_DAYS + 1) * 86400:
+                raise ValueError(f"more than {MAX_DUE_DAYS} days away")
+            return datetime.now(UTC) + timedelta(seconds=seconds)
+        try:
+            at = datetime.fromisoformat(due)
+        except ValueError:
+            raise ValueError(f"{due!r} is neither 'in N minutes|hours|days|weeks' nor an ISO 8601 time") from None
+        if at.tzinfo is None:
+            raise ValueError(f"{due!r} has no UTC offset (add e.g. +00:00)")
+        return at
+
+    async def commit(
+        what: str,
+        due: str,
+        consent: str = "none",
+        awaiting_owner: bool = False,
+        _session_id: str | None = None,
+        _turn_number: int | None = None,
+        _turn_id: str | None = None,
+        _context_kind: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            due_at = parse_due(str(due))
+        except ValueError as exc:
+            return _tool_error(
+                f"commit: could not read due ({exc}). Use 'in 2 hours' or an ISO 8601 time with an offset, e.g. "
+                "2026-11-20T18:15:00+00:00."
+            )
+        if consent not in ("none", "explicit", "silence"):
+            return _tool_error("commit: consent must be one of none, explicit, silence.")
+        row_args = {
+            "source_kind": SOURCE_KIND_BY_CONTEXT.get(_context_kind or "", "chat_turn"),
+            "detected_by": "tool",
+            "promise_text": str(what),
+            "what": str(what),
+            "due_at": due_at,
+            "session_id": _session_id,
+            # Only a real true: the string "false" is truthy, and awaiting_user is a row the watcher never reports.
+            "kind": "awaiting_user" if awaiting_owner is True else "action",
+            "grace_seconds": grace_seconds,
+            "consent": consent,
+            "evidence": {"due_parsed": True},
+        }
+        # A retry of the same call in the same turn is the same row. The key is the runner's id for the turn; a call
+        # outside a turn falls back to the turn number, and without either there is no dedupe at all.
+        if _turn_id is not None:
+            turn_key = _turn_id
+        elif _turn_number is not None:
+            turn_key = f"{_session_id}:{_turn_number}"
+        else:
+            turn_key = f"{_session_id}:{uuid4().hex}"
+        try:
+            row = await store.create_idempotent(turn_id=turn_key, **row_args)
+            while not row.inserted and row.status not in LIVE_STATUSES:
+                # The key names a row the owner has since closed (a session's turn numbers restart: a continuation
+                # thread is discarded before each step), so this is a new obligation. Its key follows from the closed
+                # row's, so every retry in this turn lands on the same new row.
+                turn_key = f"{turn_key}:after:{row.id}"
+                row = await store.create_idempotent(turn_id=turn_key, **row_args)
+        except CommitmentRefused as exc:
+            return _tool_error(f"commit: {exc}")
+        except Exception:
+            logger.warning("commit: the ledger write failed", exc_info=True)
+            return _tool_error("commit: the ledger write failed; the obligation may not have been recorded.")
+        # Wording: no "committed" (the claim verifier reads that word as a git claim).
+        return {
+            "is_error": False,
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        f"Commitment {row.label} recorded: {row.what} (due {row.due_at:%Y-%m-%d %H:%M} UTC). "
+                        f"The owner can /drop {row.label}. This is a record, not the work: do it, or create the "
+                        "schedule, DAG or spawn that does it."
+                    ),
+                }
+            ],
+        }
+
+    return commit
+
+
+def register_commit_tool(dispatcher: ToolDispatcher, store: Any, *, grace_seconds: int = 900) -> None:
+    """F111: register ``commit`` (classified ``_WRITE`` in tool_classes, so every context may call it)."""
+    dispatcher.register("commit", create_commit_tool(store, grace_seconds=grace_seconds), _COMMIT_SCHEMA)
 
 
 # ---------------------------------------------------------------------------

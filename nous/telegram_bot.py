@@ -28,6 +28,7 @@ import httpx
 
 from nous.api.attachments import classify_attachment, sanitize_filename
 from nous.api.models import Attachment
+from nous.brain.commitments import format_short_id, parse_short_id
 from nous.log_redaction import configure_logging
 from nous.owner_actions import ANSWER_REFUSALS, CANCEL_REFUSALS, DECISION_REFUSALS, parse_callback
 
@@ -221,6 +222,24 @@ def describe_intentions(body: dict) -> str:
         lines.append(more.format(len(listed) - shown))
     lines.append(footer)
     return "\n".join(lines)
+
+
+def describe_commitment_close(status: int, body: dict, drop: bool, short_id: int) -> str:
+    """F111: the answer to /drop or /done, fixed vocabulary and the id only (the row's text is never echoed)."""
+    label = format_short_id(short_id)
+    if status == 200:
+        if body.get("changed") is True:
+            return f"Dropped {label}; it will not be followed up." if drop else f"Marked {label} as done."
+        return f"{label} was already closed; nothing changed."
+    if status == 404:
+        return f"No commitment {label}."
+    if status == 400:
+        return "That is not a commitment id (use the form C-42)."
+    if status == 403:
+        logger.warning("F111: the commitment route refused the bot; set NOUS_OWNER_ROUTE_SECRET to match the API")
+        return f"Could not close {label}: closing commitments is not set up."
+    logger.warning("F111: /%s %s answered %s", "drop" if drop else "done", label, status)
+    return f"Could not close {label} right now; try again."
 
 
 def describe_cancel(status: int, body: dict, short_id: str) -> str:
@@ -677,8 +696,11 @@ class NousTelegramBot:
         attachments_enabled: bool = False,
         attachments_default_prompt: str = "What can you tell me about this?",
         owner_chat_id: int | None = None,
+        owner_route_secret: str | None = None,
     ):
         self.bot_token = bot_token
+        # F111: sent to the owner's commitment routes only (X-Nous-Owner-Secret); the API holds just its SHA-256.
+        self.owner_route_secret = owner_route_secret or None
         self.nous_url = nous_url.rstrip("/")
         self.allowed_users = allowed_users
         self.attachments_enabled = attachments_enabled
@@ -878,13 +900,16 @@ class NousTelegramBot:
             return user_id in self.allowed_users
         return user_id == self.owner_chat_id
 
-    async def _owner_post(self, path: str, payload: dict[str, Any]) -> tuple[int, dict]:
+    async def _owner_post(
+        self, path: str, payload: dict[str, Any], headers: dict[str, str] | None = None
+    ) -> tuple[int, dict]:
         """POST to a REST owner route: ``(status, body)``; status 0 when the server could not be reached."""
         try:
             response = await self._http.post(
                 f"{self.nous_url}{path}",
                 json=payload,
                 timeout=httpx.Timeout(connect=10, read=OWNER_REQUEST_TIMEOUT, write=10, pool=10),
+                **({"headers": headers} if headers else {}),
             )
         except Exception as exc:
             logger.warning("owner action request failed (%s)", type(exc).__name__)
@@ -960,8 +985,8 @@ class NousTelegramBot:
             logger.warning("could not send the follow-up of an owner action (%s)", type(exc).__name__)
 
     async def _handle_owner_text(self, message: dict[str, Any], chat_id: Any, user_id: Any, text: str) -> bool:
-        """``/approve``, ``/reject``, ``/answer``, ``/intentions``, ``/cancel_intention`` and a reply to one of our
-        messages, in the owner chat. True when
+        """``/approve``, ``/reject``, ``/answer``, ``/intentions``, ``/cancel_intention``, ``/drop`` and ``/done``
+        (F111) and a reply to one of our messages, in the owner chat. True when
         the message was consumed; anything else (another chat, another command, a malformed or missing id, an id
         the server answers 404 for, a reply the answer route does not confirm with a 200 or a 409) is left for the
         ordinary path, unchanged: under
@@ -1011,6 +1036,20 @@ class NousTelegramBot:
             if status == 404:
                 return False  # no such root: ordinary chat, as before 2e
             await self._send_owner(chat_id, describe_cancel(status, body, hex_id[:8]))
+            return True
+        if command in ("/drop", "/done"):
+            args = rest.split()
+            short_id = parse_short_id(args[0]) if len(args) == 1 else None
+            if short_id is None:
+                return False  # not a commitment id: it was never ours (and no argument reaches a URL)
+            status, body = await self._owner_post(
+                f"/commitments/{short_id}/{command[1:]}",
+                {"actor": f"telegram:{user_id}"},
+                headers={"X-Nous-Owner-Secret": self.owner_route_secret} if self.owner_route_secret else None,
+            )
+            # A 404 is answered too (unlike /cancel_intention): the id came from a footer, and passed on to chat the
+            # model could claim it dropped something.
+            await self._send_owner(chat_id, describe_commitment_close(status, body, command == "/drop", short_id))
             return True
         reply_to = message.get("reply_to_message")
         if (
@@ -1388,7 +1427,16 @@ async def main() -> None:
         attachments_enabled=_settings.attachments_enabled,
         attachments_default_prompt=_settings.attachments_default_prompt,
         owner_chat_id=parse_chat_id(_settings.telegram_chat_id),
+        owner_route_secret=os.environ.get("NOUS_OWNER_ROUTE_SECRET"),
     )
+    if not bot.owner_route_secret:
+        logger.warning("F111: NOUS_OWNER_ROUTE_SECRET is not set, so /drop and /done will be refused by the API")
+    elif len(bot.owner_route_secret) < 32:
+        # The API keeps only an unsalted SHA-256 of it, which code in that process can read: a short value can be
+        # guessed offline.
+        logger.warning(
+            "F111: NOUS_OWNER_ROUTE_SECRET is shorter than 32 characters; use a random value (openssl rand -hex 32)"
+        )
     try:
         await bot.start()
     finally:
