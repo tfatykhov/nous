@@ -145,7 +145,7 @@ class ClassifierScheduler:
                     "Record whether the sentence is a promise of later work.",
                     OUTPUT_SCHEMA,
                     max_tokens=MAX_TOKENS,
-                    purpose=PURPOSE,
+                    purpose="promise_gate_classifier",  # PURPOSE, as a literal for the purpose-site check
                 ),
                 timeout=timeout,
             )
