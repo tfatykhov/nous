@@ -1,0 +1,56 @@
+# F111 PR B1: labelled sentences for the stage-2 classifier (nous/cognitive/promise_classifier.py).
+# Each is a sentence stage 1 may flag. label: promise (the speaker commits to specific work after the reply ends)
+# or not_promise. Read by tests/test_promise_classifier.py; the opt-in live test (-m live_llm) runs the model on them.
+cases:
+  # The C-1 class (plan §6 A): stage 1 flags both the conditional deploy and the whole sentence prod stored for C-1
+  # (its short form alone is not flagged); stage 2 tells the promise from the policy.
+  - text: "I'll close each row myself when the work is done or dropped."
+    label: not_promise
+    reason: A standing policy for how rows are handled, not one task to do later.
+  - text: "Nothing follows up on these yet, so I'll close each row myself when the work is done or dropped; I also updated my memory, which still said #897 wasn't deployed, and PR B is untouched."
+    label: not_promise
+    reason: The C-1 sentence as prod stored it; a standing policy and a report of work done, not a task to do later.
+  - text: "I'll deploy it when CI is green."
+    label: promise
+    reason: One specific deploy, deferred until a condition is met.
+  - text: "I'll reply to every alert when it fires."
+    label: not_promise
+    reason: A habit that describes behaviour, not a task committed to.
+  - text: "I'll send you the summary once the job finishes."
+    label: promise
+    reason: A specific send after an event, owed by the speaker.
+  # Plan §6 K: same shape as the stage-1 positive below, so it is stage 2's to reject.
+  - text: "The market will be closed by then."
+    label: not_promise
+    reason: A state of the world, not work the speaker will do.
+  - text: "The PR will be merged by then."
+    label: promise
+    reason: The speaker's own pending merge, with a deadline.
+  # More of each class.
+  - text: "I'll relaunch the chain at 18:15 UTC unless you object."
+    label: promise
+    reason: A specific relaunch at a stated time.
+  - text: "I'll check back on the deploy tomorrow morning."
+    label: promise
+    reason: A specific follow-up after this reply.
+  - text: "The fix will be deployed by morning."
+    label: promise
+    reason: A deploy the speaker owes, with a deadline.
+  - text: "I'll always run the tests before I merge anything."
+    label: not_promise
+    reason: A standing policy, not one task.
+  - text: "The heartbeat will retry the check later if it fails."
+    label: not_promise
+    reason: Describes how the system behaves.
+  - text: "I'll restart the worker now and then report back below."
+    label: not_promise
+    reason: Work done in this turn.
+  - text: "If the build fails, I'll usually rerun it once."
+    label: not_promise
+    reason: A conditional describing behaviour, not a commitment.
+  - text: "Your order will be delivered by Friday."
+    label: not_promise
+    reason: Someone else's work.
+  - text: "If we had more time, I'd rebuild the index tonight."
+    label: not_promise
+    reason: A hypothetical.

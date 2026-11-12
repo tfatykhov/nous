@@ -69,6 +69,7 @@ nous/
 │   │   ├── monitor.py          # Post-turn self-assessment
 │   │   ├── usage_tracker.py    # Context usage feedback loop
 │   │   ├── promise_gate.py     # F111: turn-close promise gate — PromiseDetector (stage 1), BackingResolver (artifact ids), PromiseGate
+│   │   ├── promise_classifier.py # F111 PR B1: stage 2 — one Anthropic call per gate row's sentence, ClassifierScheduler (background, capped, drained)
 │   │   └── schemas.py          # TurnContext, TurnResult, CarriedFrame (F110 carried frame), etc.
 │   ├── handlers/               # Event bus handlers
 │   │   ├── episode_summarizer.py  # Episode summary generation
@@ -103,6 +104,8 @@ nous/
 │   │   ├── finding_store.py    # F034.1 finding lifecycle persistence
 │   │   ├── tuner.py            # F034.3 self-tuning pass
 │   │   ├── quiet_hours.py      # F099: in_quiet_hours / quiet_hours_end, shared by the heartbeat and the owner pushes
+│   │   ├── commitment_watcher.py # F111 PR B1: the overdue watcher — one Telegram ping per overdue commitment, claim/finalize/release, dead-man line
+│   │   ├── send_result.py      # F111 PR B1: SendResult (SENT / NOT_SENT / UNKNOWN) of a Telegram send
 │   │   └── schemas.py          # Finding, CheckResult, HeartbeatResult
 │   ├── identity/               # Agent identity system (F018)
 │   │   ├── manager.py          # Identity section CRUD

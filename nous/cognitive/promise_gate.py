@@ -31,7 +31,7 @@ from nous.brain.commitments import (
 
 logger = logging.getLogger(__name__)
 
-DETECTOR_VERSION = "stage1-v1"
+DETECTOR_VERSION = "stage1-v2"  # v2: F111 PR B1 added the passive rule
 SENTENCE_MAX = 500
 # The detector reads the end of a reply's prose only (where a promise is made): it runs on the event loop, where the
 # gate's timeout cannot stop it, so its cost must not grow with NOUS_MAX_TOKENS. The code, quotes and quote blocks are
@@ -131,6 +131,69 @@ _VERB_RE = re.compile(
     + r")(?:s|es|ed|d|ing|ning)?\b",
     re.IGNORECASE,
 )
+
+
+def _participle(verb: str) -> str:
+    """The past participle of an ``ACTION_VERBS`` entry ("send" -> "sent", "kick off" -> "kicked off")."""
+    head, _, rest = verb.partition(" ")
+    irregular = {"run": "run", "rerun": "rerun", "re-run": "re-run", "send": "sent", "build": "built"}
+    if head in irregular:
+        done = irregular[head]
+    elif head.endswith("y") and head[-2:-1] not in "aeiou":
+        done = head[:-1] + "ied"
+    elif head.endswith("e"):
+        done = head + "d"
+    else:
+        done = head + "ed"
+    return f"{done} {rest}" if rest else done
+
+
+# F111 PR B1: a future passive of an action verb with a "by <time>" deadline is the agent's own promise ("The fix will
+# be deployed by tomorrow."), when _due_at reads that deadline (scan checks): an unread one ("by morning", "by November
+# 20") would get the default due, and the watcher would ping long before the stated date. The verb must be in
+# ACTION_VERBS and the "by" must name a time, never someone ("will be reviewed by Tim"); a past passive ("was merged by
+# Tim") has no future form. Two patterns, never one spanning both (a lazy gap between them rescanned the clause from
+# every head: quadratic, on the event loop): _passive_deadline matches the head, then looks for the deadline once after
+# it, in the same clause. A head followed by someone or a negation ("will be deployed by Tim by tomorrow", "by Tim,
+# not by tomorrow") is no promise of the agent's, as in _agent_future_form.
+_PASSIVE_HEAD_RE = re.compile(
+    rf"\b(?:will|{_APOS}ll|(?:is|are|{_APOS}s|{_APOS}re)\s+going\s+to)\s+be\s+"
+    r"(?:"
+    + "|".join(re.escape(_participle(v)).replace(r"\ ", r"\s+") for v in sorted(ACTION_VERBS, key=len, reverse=True))
+    + r")\b",
+    re.IGNORECASE,
+)
+_PASSIVE_TAIL_RE = re.compile(
+    r"by\s+(?:"
+    r"(?:the\s+)?(?:morning|tonight|tomorrow|noon|midnight|eod|eow|end\s+of\s+(?:the\s+)?(?:day|week))\b"
+    r"|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
+    rf"|{_MONTH}\.?\s+\d{{1,2}}(?:st|nd|rd|th)?\b|\d{{1,2}}(?:st|nd|rd|th)?\s+(?:of\s+)?{_MONTH}"
+    r"|\d{4}-\d{2}-\d{2}\b|\d{1,2}(?::\d{2})?\s*(?:am|pm|z|utc|gmt)\b|\d{1,2}:\d{2}\b)",
+    re.IGNORECASE,
+)
+_BY_RE = re.compile(r"\bby\b", re.IGNORECASE)
+_CLAUSE_END_RE = re.compile(r"[.!?;]")
+
+
+def _passive_deadline(sentence: str) -> bool:
+    """True when a clause of the sentence has a future passive of an action verb, done by no one else and not negated,
+    followed by a ``by <time>``. Per clause only the first such head is tried (a later one sees a subset of the same
+    "by"s), and every check is a match in place: linear in the sentence."""
+    pos = 0
+    while (head := _PASSIVE_HEAD_RE.search(sentence, pos)) is not None:
+        if _THIRD_PARTY_RE.match(sentence, head.end()) or _NEGATED_RE.match(sentence, head.end()):
+            pos = head.end()
+            continue
+        end = _CLAUSE_END_RE.search(sentence, head.end())
+        clause_end = end.start() if end else len(sentence)
+        # The deadline starts in the clause; it may run past a clause mark of its own ("by Nov. 20").
+        for by in _BY_RE.finditer(sentence, head.end(), clause_end):
+            if _PASSIVE_TAIL_RE.match(sentence, by.start()):
+                return True
+        pos = clause_end + 1
+    return False
+
+
 # An offer to the owner is not a promise ("if you want, I can launch it").
 _OFFER_RE = re.compile(
     rf"\b(?:if\s+you(?:{_APOS}d)?\s+(?:want|like|prefer|wish)|want\s+me\s+to|should\s+I|shall\s+I|would\s+you\s+like"
@@ -282,10 +345,12 @@ class PromiseDetector:
             if not sentence or sentence.endswith("?"):
                 continue
             probe = _NEXT_STEP_YOURS_RE.sub("", sentence)  # the owner's next step is no future form or marker
-            if not _agent_future_form(probe) or _OFFER_RE.search(sentence):
+            # A future form and a deadline in one, counted only when the deadline is one _due_at reads.
+            passive = _passive_deadline(probe) and _due_at(sentence, now, self._default_due_minutes)[1]
+            if not (passive or _agent_future_form(probe)) or _OFFER_RE.search(sentence):
                 continue
             silence = _SILENCE_RE.search(sentence) is not None
-            strong = silence or any(r.search(probe) for r in _STRONG_RES)
+            strong = silence or passive or any(r.search(probe) for r in _STRONG_RES)
             awaiting = _AWAITING_USER_RE.search(sentence) is not None
             weak = _WEAK_RE.search(sentence) is not None or awaiting
             if not (strong or (weak and _VERB_RE.search(sentence))):
@@ -511,9 +576,11 @@ def turn_text(response_text: str, tool_results: list[Any]) -> str:
 class PromiseGate:
     """Detect, resolve, record. Async because it writes; the caller bounds and guards it."""
 
-    def __init__(self, store: CommitmentStore, settings: Any) -> None:
+    def __init__(self, store: CommitmentStore, settings: Any, classifier: Any = None) -> None:
         self._store = store
         self._settings = settings
+        # F111 PR B1: stage 2 (a ``ClassifierScheduler``); each written row is handed to it after the write.
+        self._classifier = classifier
         self.detector = PromiseDetector(default_due_minutes=settings.promise_gate_default_due_minutes)
         self.resolver = BackingResolver()
 
@@ -596,6 +663,12 @@ class PromiseGate:
             },
         )
         result.labels = [r.label for r in rows if r is not None]
+        if self._classifier is not None:
+            # After the write returned: the turn never waits for stage 2 (submit only starts a task). Not an
+            # awaiting_user row: the watcher never reads one, so its verdict would decide nothing.
+            for row in rows:
+                if row is not None and row.kind != "awaiting_user":
+                    self._classifier.submit(row)
         shown = [(p, r) for p, r in zip(unbacked, rows, strict=True) if r is not None and p.kind == "action"]
         if footer_wanted and shown:
             result.footer = render_footer([(r.label, r.due_at) for _, r in shown], now)

@@ -49,7 +49,7 @@ _SHORT_ID_RE = re.compile(r"^(?:c-?)?0*(\d{1,12})$", re.IGNORECASE)
 
 _COLUMNS = (
     "id, short_id, status, kind, what, promise_text, due_at, grace_seconds, consent, source_kind, detected_by, "
-    "session_id, turn_id, artifact_kind, artifact_id, close_reason, created_at"
+    "session_id, turn_id, artifact_kind, artifact_id, close_reason, created_at, evidence"
 )
 
 
@@ -120,11 +120,18 @@ class Commitment:
     close_reason: str | None
     created_at: datetime
     inserted: bool = True  # False when create_idempotent found the row an earlier write made
+    evidence: dict[str, Any] | None = None  # e.g. {"due_parsed": true, "stage2": {...}, "ping": {...}}
 
     @property
     def label(self) -> str:
         """The owner-facing id, ``C-0042``."""
         return format_short_id(self.short_id)
+
+    @property
+    def stage2(self) -> dict[str, Any]:
+        """The stage-2 classifier's stored verdict document (``evidence.stage2``), or ``{}``."""
+        doc = (self.evidence or {}).get("stage2")
+        return doc if isinstance(doc, dict) else {}
 
 
 def format_short_id(short_id: int) -> str:
@@ -196,6 +203,7 @@ def _row(row: Any, inserted: bool = True) -> Commitment:
         close_reason=m["close_reason"],
         created_at=m["created_at"],
         inserted=inserted,
+        evidence=m["evidence"],
     )
 
 
@@ -316,22 +324,194 @@ class CommitmentStore:
             await session.commit()
         return _row(row) if row is not None else None
 
-    async def list_watchable(self, now: datetime | None = None, limit: int = 100) -> list[Commitment]:
-        """Live rows past ``due_at + grace`` with no artifact: what the PR B watcher will report. Never a
-        ``goal`` or ``awaiting_user`` row, and never a cancelled, deferred or superseded one."""
+    async def list_watchable(
+        self,
+        now: datetime | None = None,
+        since: datetime | None = None,
+        limit: int = 100,
+    ) -> list[Commitment]:
+        """What the overdue watcher may ping: open or proposed rows with no artifact, never pinged or claimed
+        (``notify_count = 0``), not suppressed by a later backing call (``evidence.watch.suppressed_by``), past
+        ``due_at + grace``, and created at or after ``since`` (the watcher's cutoff; None reads every row). Never a
+        ``goal`` or ``awaiting_user`` row, and never a backed, closed, deferred or superseded one. Ordered by
+        ``due_at``, then ``id``. ``due_at < :now`` lets migration 108's index apply. Never a row stage 2 called
+        ``not_promise``, whatever the classifier flag says now (they stay open and are never pinged, so they must not
+        fill ``limit``; owner ruling I3 on PR #906)."""
+        params: dict[str, Any] = {"agent_id": self._agent_id, "now": now or datetime.now(UTC), "limit": limit}
+        extra_where = ""
+        if since is not None:
+            extra_where += "AND created_at >= :since "
+            params["since"] = since
         async with self._db.session() as session:
             result = await session.execute(
                 text(
                     f"SELECT {_COLUMNS} FROM brain.commitments "
                     "WHERE agent_id = :agent_id AND status IN ('open', 'proposed') AND artifact_id IS NULL "
-                    "AND kind NOT IN ('goal', 'awaiting_user') "
-                    "AND due_at + make_interval(secs => grace_seconds) < :now "
-                    "ORDER BY due_at LIMIT :limit"
+                    "AND kind NOT IN ('goal', 'awaiting_user') AND notify_count = 0 "
+                    "AND (evidence -> 'watch' -> 'suppressed_by') IS NULL "
+                    "AND due_at < :now AND due_at + make_interval(secs => grace_seconds) < :now "
+                    "AND (evidence -> 'stage2' ->> 'verdict') IS DISTINCT FROM 'not_promise' "
+                    f"{extra_where}ORDER BY due_at, id LIMIT :limit"
                 ),
-                {"agent_id": self._agent_id, "now": now or datetime.now(UTC), "limit": limit},
+                params,
             )
             rows = result.all()
         return [_row(r) for r in rows]
+
+    async def _merge_evidence(self, row_id: UUID, key: str, doc: dict[str, Any]) -> bool:
+        """``evidence[key] = doc`` on one row of this agent (a jsonb merge, as ``mark`` does). True when a row
+        changed."""
+        async with self._db.session() as session:
+            result = await session.execute(
+                text(
+                    "UPDATE brain.commitments SET updated_at = now(), "
+                    "evidence = coalesce(evidence, '{}'::jsonb) || jsonb_build_object(CAST(:key AS TEXT), "
+                    "CAST(:doc AS JSONB)) WHERE agent_id = :agent_id AND id = :id"
+                ),
+                {"agent_id": self._agent_id, "id": row_id, "key": key, "doc": json.dumps(doc)},
+            )
+            await session.commit()
+        return bool(result.rowcount)
+
+    async def set_stage2(self, row_id: UUID, verdict_doc: dict[str, Any]) -> bool:
+        """Store the stage-2 classifier's verdict in ``evidence.stage2`` (replacing an earlier one)."""
+        return await self._merge_evidence(row_id, "stage2", verdict_doc)
+
+    async def mark_suppressed(self, row_id: UUID, tool_call_id: str, now: datetime) -> bool:
+        """``evidence.watch = {suppressed_by, at}``: a later backing call in the same session; the row stays open and
+        ``list_watchable`` no longer returns it."""
+        return await self._merge_evidence(row_id, "watch", {"suppressed_by": tool_call_id, "at": now.isoformat()})
+
+    async def find_suppressors(self, rows: list[Commitment]) -> dict[UUID, str]:
+        """For each row with a session, the first successful ``schedule_task``, ``spawn_task``, ``dag_create`` or
+        ``heartbeat_check_create`` call recorded in ``nous_system.tool_call_log`` in the same session, on a later
+        turn (another turn id, started after the row was written): ``{row id: tool_call_log id}``. Raises whatever
+        the database raises."""
+        rows = [r for r in rows if r.session_id]
+        if not rows:
+            return {}
+        found: dict[UUID, str] = {}
+        async with self._db.session() as session:
+            for row in rows:
+                result = await session.execute(
+                    text(
+                        "SELECT id FROM nous_system.tool_call_log WHERE agent_id = :agent_id "
+                        "AND session_id = :session_id AND tool_name IN ('schedule_task', 'spawn_task', 'dag_create', "
+                        "'heartbeat_check_create') AND outcome = 'ran' AND NOT is_error AND started_at > :created_at "
+                        "AND (turn_id IS NULL OR CAST(turn_id AS TEXT) <> :turn_id) ORDER BY started_at, id LIMIT 1"
+                    ),
+                    {
+                        "agent_id": self._agent_id,
+                        "session_id": row.session_id,
+                        "created_at": row.created_at,
+                        "turn_id": row.turn_id or "",
+                    },
+                )
+                hit = result.first()
+                if hit is not None:
+                    found[row.id] = str(hit[0])
+        return found
+
+    async def claim_for_ping(self, row_ids: list[UUID], run_id: str, now: datetime) -> list[Commitment]:
+        """Claim rows for one ping: ``notify_count = 1`` and ``evidence.ping = {state: claimed, run_id, claimed_at,
+        unknown_sends}``, only where ``notify_count = 0`` and the row is still open or proposed. Returns the rows this
+        call claimed: a concurrent run, or a second process, claims none of them again. ``unknown_sends`` is carried
+        over from the row as it is at the claim (a set, never an increment)."""
+        if not row_ids:
+            return []
+        async with self._db.session() as session:
+            result = await session.execute(
+                text(
+                    "UPDATE brain.commitments SET notify_count = 1, notified_at = :now, updated_at = now(), "
+                    "evidence = coalesce(evidence, '{}'::jsonb) || jsonb_build_object('ping', jsonb_build_object("
+                    "'state', 'claimed', 'run_id', CAST(:run_id AS TEXT), 'claimed_at', CAST(:now AS TIMESTAMPTZ), "
+                    "'unknown_sends', coalesce(CAST(evidence -> 'ping' ->> 'unknown_sends' AS INT), 0))) "
+                    "WHERE agent_id = :agent_id AND id = ANY(:ids) AND notify_count = 0 "
+                    f"AND status IN ('open', 'proposed') RETURNING {_COLUMNS}"
+                ),
+                {"agent_id": self._agent_id, "ids": list(row_ids), "run_id": run_id, "now": now},
+            )
+            rows = result.all()
+            await session.commit()
+        by_id = {r._mapping["id"]: _row(r) for r in rows}
+        return [by_id[i] for i in row_ids if i in by_id]
+
+    async def finalize_ping(self, row_ids: list[UUID], run_id: str, now: datetime) -> int:
+        """The send went out: ``ping.state = 'sent'`` and ``ping.sent_at`` on this run's claimed rows. The rows keep
+        ``notify_count = 1``. Returns the rows changed."""
+        if not row_ids:
+            return 0
+        async with self._db.session() as session:
+            result = await session.execute(
+                text(
+                    "UPDATE brain.commitments SET updated_at = now(), evidence = evidence || jsonb_build_object("
+                    "'ping', (evidence -> 'ping') || jsonb_build_object('state', 'sent', 'sent_at', "
+                    "CAST(:now AS TIMESTAMPTZ))) "
+                    "WHERE agent_id = :agent_id AND id = ANY(:ids) AND evidence -> 'ping' ->> 'run_id' = :run_id"
+                ),
+                {"agent_id": self._agent_id, "ids": list(row_ids), "run_id": run_id, "now": now},
+            )
+            await session.commit()
+        return int(result.rowcount)
+
+    async def release_ping(self, unknown_sends: dict[UUID, int], run_id: str, last_result: str) -> int:
+        """The send did not go out for certain (``not_sent``) or its outcome is unknown (``unknown``): this run's
+        claimed rows go back to ``notify_count = 0`` with ``ping = {state: released, unknown_sends, run_id,
+        last_result}``, each with the ``unknown_sends`` value given for it (computed by the caller: a set, never an
+        increment). Returns the rows changed."""
+        return await self._end_claim(unknown_sends, run_id, last_result, state="released")
+
+    async def fail_ping(self, unknown_sends: dict[UUID, int], run_id: str) -> int:
+        """The row's unknown sends reached the cap: ``ping.state = 'failed'``; it keeps ``notify_count = 1`` and is
+        never selected again. Returns the rows changed."""
+        return await self._end_claim(unknown_sends, run_id, "unknown", state="failed")
+
+    async def _end_claim(self, unknown_sends: dict[UUID, int], run_id: str, last_result: str, *, state: str) -> int:
+        if not unknown_sends:
+            return 0
+        release = state == "released"
+        reset = "notify_count = 0, notified_at = NULL, " if release else ""
+        async with self._db.session() as session:
+            result = await session.execute(
+                text(
+                    f"UPDATE brain.commitments AS c SET {reset}updated_at = now(), "
+                    "evidence = c.evidence || jsonb_build_object('ping', jsonb_build_object('state', "
+                    "CAST(:state AS TEXT), 'unknown_sends', p.u, 'run_id', CAST(:run_id AS TEXT), 'last_result', "
+                    "CAST(:last_result AS TEXT))) "
+                    "FROM unnest(CAST(:ids AS UUID[]), CAST(:us AS INT[])) AS p(id, u) "
+                    "WHERE c.agent_id = :agent_id AND c.id = p.id AND c.notify_count = 1 "
+                    "AND c.evidence -> 'ping' ->> 'run_id' = :run_id"
+                ),
+                {
+                    "agent_id": self._agent_id,
+                    "ids": list(unknown_sends),
+                    "us": list(unknown_sends.values()),
+                    "run_id": run_id,
+                    "state": state,
+                    "last_result": last_result,
+                },
+            )
+            await session.commit()
+        return int(result.rowcount)
+
+    async def expire_stale_claims(self, older_than: datetime) -> list[int]:
+        """A claim a crash left behind (claimed before ``older_than`` and never sent, released or failed):
+        ``ping.state = 'orphaned'``. The row keeps ``notify_count = 1`` and is never re-sent automatically. Returns
+        the short ids changed."""
+        async with self._db.session() as session:
+            result = await session.execute(
+                text(
+                    "UPDATE brain.commitments SET updated_at = now(), evidence = evidence || jsonb_build_object("
+                    "'ping', (evidence -> 'ping') || jsonb_build_object('state', 'orphaned')) "
+                    "WHERE agent_id = :agent_id AND notify_count = 1 AND evidence -> 'ping' ->> 'state' = 'claimed' "
+                    "AND CAST(evidence -> 'ping' ->> 'claimed_at' AS TIMESTAMPTZ) < :older_than "
+                    "RETURNING short_id"
+                ),
+                {"agent_id": self._agent_id, "older_than": older_than},
+            )
+            short_ids = sorted(int(r[0]) for r in result.all())
+            await session.commit()
+        return short_ids
 
     async def mark(
         self,

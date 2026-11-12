@@ -938,3 +938,188 @@ async def test_the_agents_bash_never_inherits_the_owner_secret(monkeypatch, tmp_
     )
     text = out["content"][0]["text"]
     assert "[absent] [kept]" in text and OWNER_SECRET not in text
+
+
+# ---- F111 PR B1: Minor 11, the stage-2 scheduler and the dead-man line --------------------------------------------
+
+
+async def test_commit_in_a_stream_turn_is_stamped_chat_stream():
+    store = FakeStore()
+    commit = ("commit", {"what": "relaunch the chain", "due": "in 2 hours"})
+    runner, _ = _runner("shadow", store, [_tool_segment(commit), _reply_segment("Recorded.")])
+    await _stream(runner, "s-commit-stream")
+    assert [c["source_kind"] for c in store.calls] == ["chat_stream"]
+
+
+async def test_commit_in_a_run_turn_is_stamped_chat_turn():
+    store = FakeStore()
+    runner, _ = _runner("shadow", store)
+    try:
+        await runner._dispatch_with_ledger(
+            ExecutionContext(kind="interactive"),
+            "commit",
+            {"what": "relaunch the chain", "due": "in 2 hours"},
+            session_id="s-commit-rt",
+            ledger=None,
+            keys_this_turn=set(),
+            dag_node_id=None,
+            turn_number=1,
+            is_background=False,
+            turn_id=uuid.uuid4(),
+        )
+    finally:
+        await runner.close()
+    assert [c["source_kind"] for c in store.calls] == ["chat_turn"]
+
+
+class _Scheduler:
+    """A ClassifierScheduler stand-in: records submits and the drain."""
+
+    def __init__(self) -> None:
+        self.submitted: list = []
+        self.closed = 0
+
+    def submit(self, row):
+        self.submitted.append(row)
+        return None
+
+    async def close(self, timeout: float = 5.0) -> None:
+        self.closed += 1
+
+
+async def test_the_gate_hands_its_written_rows_to_the_scheduler_and_close_drains_it():
+    store, sched = FakeStore(), _Scheduler()
+    runner, _ = _runner("shadow", store, [NOV10_READS, _reply_segment(NOV10["reply"])], gate=False)
+    runner.set_promise_gate(PromiseGate(store, runner._settings, classifier=sched))
+    runner.set_promise_classifier(sched)
+    await _stream(runner, "s-sched")  # closes the runner
+    [row] = store.rows.values()
+    assert [r.id for r in sched.submitted] == [row.id] and sched.closed == 1
+
+
+async def test_an_awaiting_user_row_is_not_sent_to_stage_2():
+    """Review M6: the watcher never reads awaiting_user rows, so stage 2 has nothing to decide for them."""
+    store, sched = FakeStore(), _Scheduler()
+    reply = "Done with the review. I'll merge it once you confirm. I'll relaunch the chain at 18:15 UTC."
+    runner, _ = _runner("shadow", store, [_reply_segment(reply)], gate=False)
+    runner.set_promise_gate(PromiseGate(store, runner._settings, classifier=sched))
+    await _stream(runner, "s-await-stage2")
+    kinds = sorted(r.kind for r in store.rows.values())
+    assert kinds == ["action", "awaiting_user"]
+    assert [r.kind for r in sched.submitted] == ["action"]
+
+
+async def test_a_forks_close_does_not_drain_the_scheduler():
+    store, sched = FakeStore(), _Scheduler()
+    runner, _ = _runner("shadow", store)
+    runner.set_promise_classifier(sched)
+    fork = runner.fork(MagicMock())
+    await fork.close()
+    assert sched.closed == 0
+    await runner.close()
+    assert sched.closed == 1
+
+
+class _Watcher:
+    """A stalled watcher: a line once per stall, like CommitmentWatcher.dead_man_line."""
+
+    LINE = "⚠ Commitment watcher has not run since 09:00 UTC; overdue promises are not being checked."
+
+    def __init__(self, stalled: bool = True) -> None:
+        self.stalled, self.calls = stalled, 0
+
+    def dead_man_line(self, now=None):
+        self.calls += 1
+        if not self.stalled or self.calls > 1:
+            return None
+        return self.LINE
+
+
+@pytest.mark.parametrize("mode", ["shadow", "warn"])
+async def test_the_dead_man_line_follows_a_stream_chat_reply_once_and_is_never_stored(mode):
+    store, watcher = FakeStore(), _Watcher()
+    reply = "All good, nothing pending."
+    runner, cognitive = _runner(mode, store, [_reply_segment(reply), _reply_segment(reply)])
+    runner.set_commitment_watcher(watcher)
+    shown = await _stream(runner, "s-deadman")
+    assert shown == f"{reply}\n\n{_Watcher.LINE}"
+    assert _stored_reply(runner, "s-deadman") == reply and cognitive.post_turn_texts == [reply]
+    again = await _stream(runner, "s-deadman")
+    assert again == reply  # once per stall
+
+
+async def test_the_dead_man_line_follows_a_run_turn_reply_and_is_never_stored():
+    store, watcher = FakeStore(), _Watcher()
+    runner, cognitive = _runner("shadow", store)
+    runner.set_commitment_watcher(watcher)
+    runner._tool_loop = AsyncMock(return_value=("Done.", [], {"input_tokens": 1, "output_tokens": 1}, []))
+    try:
+        text, _ctx, _usage = await runner.run_turn("s-deadman-rt", "go")
+    finally:
+        await runner.close()
+    assert text == f"Done.\n\n{_Watcher.LINE}"
+    assert _stored_reply(runner, "s-deadman-rt") == "Done." and cognitive.post_turn_texts == ["Done."]
+
+
+async def test_no_dead_man_line_on_an_errored_run_turn():
+    """Review M10: an errored turn carries no dead-man line and does not use up the stall. In run_turn every path that
+    sets ``error`` also re-raises before the line is built, so this pins the order (the line after the re-raise), not
+    the ``not error`` guard beside it, which no input reaches."""
+    store, watcher = FakeStore(), _Watcher()
+    runner, _ = _runner("shadow", store)
+    runner.set_commitment_watcher(watcher)
+    runner._tool_loop = AsyncMock(side_effect=RuntimeError("model down"))
+    try:
+        with pytest.raises(RuntimeError, match="model down"):
+            await runner.run_turn("s-deadman-err", "go")
+    finally:
+        await runner.close()
+    assert watcher.calls == 0
+
+
+async def test_no_dead_man_line_on_an_errored_stream_turn():
+    """Review M10, the stream path: an error mid-reply re-raises before the line, and the stall is kept."""
+    store, watcher = FakeStore(), _Watcher()
+    runner, _ = _runner("shadow", store)
+    runner.set_commitment_watcher(watcher)
+
+    async def broken_stream(*args, **kwargs):
+        yield StreamEvent(type="text_delta", text="Half a repl")
+        raise RuntimeError("stream dropped")
+
+    runner._call_api_stream = MagicMock(side_effect=broken_stream)
+    with pytest.raises(RuntimeError, match="stream dropped"):
+        await _stream(runner, "s-deadman-stream-err")
+    assert watcher.calls == 0
+
+
+async def test_no_dead_man_line_without_a_stall_or_a_watcher():
+    for watcher in (_Watcher(stalled=False), None):
+        store = FakeStore()
+        runner, _ = _runner("shadow", store, [_reply_segment("Fine.")])
+        runner.set_commitment_watcher(watcher)
+        assert await _stream(runner, "s-nostall") == "Fine."
+
+
+@pytest.mark.parametrize(
+    ("kind", "session"),
+    [("subtask", "s-bg"), ("dag_node", "s-bg"), ("dag_summary", "s-bg"), ("heartbeat_triage", "s-bg"),
+     ("mcp", "s-mcp"), ("interactive", "claude-job-1234")],
+)  # fmt: skip
+async def test_no_dead_man_line_outside_a_live_chat_turn(kind, session):
+    store, watcher = FakeStore(), _Watcher()
+    runner, _ = _runner("shadow", store)
+    runner.set_commitment_watcher(watcher)
+    assert runner._dead_man_line(ExecutionContext(kind=kind), session) is None
+    assert watcher.calls == 0  # the stall is not used up on a reply nobody reads
+    await runner.close()
+
+
+async def test_the_forks_share_the_watcher():
+    runner, _ = _runner("shadow", FakeStore())
+    fork = runner.fork(MagicMock())
+    watcher = _Watcher()
+    runner.set_commitment_watcher(watcher)
+    assert fork._commitment_watcher is watcher
+    await fork.close()
+    await runner.close()

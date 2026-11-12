@@ -10,7 +10,8 @@ started more than ``NOUS_TOOL_CALL_RETENTION_DAYS`` days ago; ``sweep_model_call
 older than ``NOUS_MODEL_CALL_TEXT_RETENTION_DAYS`` days and keeps the rows. main.py runs each
 once a day (``_work_view_retention_loop``): the first two while their log is on, the text one whatever its flag says,
 so text turned off still goes on time (``has_model_call_text`` decides whether the loop starts with every log off).
-All raise on failure; the loop logs it at WARNING.
+All raise on failure; the loop logs it at WARNING. ``sweep_promise_gate_log`` (F111 PR B1) deletes the promise gate's
+per-turn log past ``NOUS_PROMISE_GATE_LOG_RETENTION_DAYS``, in batches, on a loop of its own in main.py.
 """
 
 from __future__ import annotations
@@ -61,6 +62,13 @@ _DELETE_UNREFERENCED_BLOCKS = text(
     ' ORDER BY b.hash COLLATE "C" FOR UPDATE'
     ") "
     "DELETE FROM nous_system.model_text_block t USING unused u WHERE t.agent_id = u.agent_id AND t.hash = u.hash"
+)
+# F111 PR B1: the promise gate's per-turn log (migration 107), in batches so one sweep never holds a long lock. Indexed
+# on (agent_id, created_at DESC). brain.commitments is never touched: the ledger is kept.
+_DELETE_GATE_LOG_BATCH = text(
+    "DELETE FROM nous_system.promise_gate_log WHERE id IN ("
+    "SELECT id FROM nous_system.promise_gate_log "
+    "WHERE agent_id = :agent_id AND created_at < now() - make_interval(days => :d) LIMIT :batch)"
 )
 # Whether the agent has any text: a ref names a block (foreign key), so the blocks alone answer (primary key prefix).
 _TEXT_EXISTS = text("SELECT EXISTS (SELECT 1 FROM nous_system.model_text_block WHERE agent_id = :agent_id)")
@@ -130,3 +138,22 @@ async def has_model_call_text(database: Any, agent_id: str) -> bool:
     """Whether ``agent_id`` has any model-call text stored (one EXISTS query). Raises whatever the database raises."""
     async with database.session() as session:
         return bool((await session.execute(_TEXT_EXISTS, {"agent_id": agent_id})).scalar())
+
+
+async def sweep_promise_gate_log(database: Any, agent_id: str, days: int, batch: int = 5000) -> dict[str, int]:
+    """F111 PR B1: delete ``agent_id``'s ``nous_system.promise_gate_log`` rows older than ``days`` days, ``batch`` rows
+    per transaction until none is left. ``brain.commitments`` is never read or changed.
+
+    Returns the rows deleted. Raises ``ValueError`` for ``days`` below 1 (a zero-day interval would delete every row),
+    and whatever the database raises (the batches committed before it stay deleted).
+    """
+    if days < 1:
+        raise ValueError(f"promise gate log retention must be at least 1 day, got {days}")
+    total = 0
+    while True:
+        async with database.session() as session:
+            result = await session.execute(_DELETE_GATE_LOG_BATCH, {"agent_id": agent_id, "d": days, "batch": batch})
+            await session.commit()
+        total += result.rowcount
+        if result.rowcount < batch:
+            return {"promise_gate_log": total}

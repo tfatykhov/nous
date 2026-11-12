@@ -203,6 +203,24 @@ services:
       # Weekly spot-check card (Mondays from 09:00 UTC): a sample of finished subtasks whose own check passed.
       - NOUS_CHECK_AUDIT_ENABLED=${NOUS_CHECK_AUDIT_ENABLED:-false}
       - NOUS_CHECK_AUDIT_SIZE=${NOUS_CHECK_AUDIT_SIZE:-5}
+      # F111 obligation ledger: the promise gate (PR A), the stage-2 classifier and the overdue watcher (PR B1).
+      # An int or bool has its code default here; an empty value is unset. The watcher needs SINCE (ISO 8601 with an
+      # offset). Only the digest of the owner's route secret goes here; the secret itself is the telegram service's.
+      - NOUS_PROMISE_GATE_ENABLED=${NOUS_PROMISE_GATE_ENABLED:-true}
+      - NOUS_PROMISE_GATE_MODE=${NOUS_PROMISE_GATE_MODE:-shadow}
+      - NOUS_PROMISE_GATE_MAX_REENTRIES=${NOUS_PROMISE_GATE_MAX_REENTRIES:-2}
+      - NOUS_PROMISE_GATE_DEFAULT_DUE_MINUTES=${NOUS_PROMISE_GATE_DEFAULT_DUE_MINUTES:-60}
+      - NOUS_PROMISE_GATE_GRACE_SECONDS=${NOUS_PROMISE_GATE_GRACE_SECONDS:-900}
+      - NOUS_PROMISE_GATE_CLASSIFIER_ENABLED=${NOUS_PROMISE_GATE_CLASSIFIER_ENABLED:-false}
+      - NOUS_PROMISE_GATE_CLASSIFIER_MODEL=${NOUS_PROMISE_GATE_CLASSIFIER_MODEL:-claude-haiku-5-5}
+      - NOUS_PROMISE_GATE_CLASSIFIER_TIMEOUT_SECONDS=${NOUS_PROMISE_GATE_CLASSIFIER_TIMEOUT_SECONDS:-10}
+      - NOUS_PROMISE_GATE_CLASSIFIER_MAX_CONCURRENCY=${NOUS_PROMISE_GATE_CLASSIFIER_MAX_CONCURRENCY:-2}
+      - NOUS_PROMISE_GATE_LOG_RETENTION_DAYS=${NOUS_PROMISE_GATE_LOG_RETENTION_DAYS:-30}
+      - NOUS_PROMISE_WATCHER_ENABLED=${NOUS_PROMISE_WATCHER_ENABLED:-false}
+      - NOUS_PROMISE_WATCHER_INTERVAL_SECONDS=${NOUS_PROMISE_WATCHER_INTERVAL_SECONDS:-300}
+      - NOUS_PROMISE_WATCHER_SINCE=${NOUS_PROMISE_WATCHER_SINCE:-}
+      - NOUS_PROMISE_WATCHER_MAX_ITEMS=${NOUS_PROMISE_WATCHER_MAX_ITEMS:-10}
+      - NOUS_OWNER_ROUTE_SECRET_SHA256=${NOUS_OWNER_ROUTE_SECRET_SHA256:-}
     volumes:
       # F042: persist downloaded cross-encoder models across container restarts
       - huggingface_cache:/root/.cache/huggingface
@@ -269,6 +287,9 @@ services:
       NOUS_API_URL: http://nous:8000
       NOUS_ALLOWED_USERS: ${NOUS_ALLOWED_USERS:-}
       NOUS_TELEGRAM_CHAT_ID: ${NOUS_TELEGRAM_CHAT_ID:-}
+      # F111: the secret the bot sends to the owner's /drop and /done routes (openssl rand -hex 32). This service
+      # only: the nous service gets its SHA-256 (NOUS_OWNER_ROUTE_SECRET_SHA256).
+      NOUS_OWNER_ROUTE_SECRET: ${NOUS_OWNER_ROUTE_SECRET:-}
     depends_on:
       - nous
     restart: unless-stopped

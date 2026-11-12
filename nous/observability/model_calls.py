@@ -79,6 +79,7 @@ PURPOSES: frozenset[str] = frozenset(
         "dag_fix",
         "pdf_transcription",
         "email_classify",
+        "promise_gate_classifier",  # F111 stage 2: is one flagged sentence a promise (promise_classifier.py)
         "browser_task",
         "embedding",
         "rerank",

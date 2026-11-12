@@ -382,6 +382,30 @@ async def _work_view_retention_loop(settings: Settings, database: Database) -> N
             logger.exception("F108: work-view retention sweep was cancelled from within — the loop continues")
 
 
+async def _promise_gate_log_retention_loop(settings: Settings, database: Database) -> None:
+    """F111 PR B1: delete this agent's ``promise_gate_log`` rows past ``NOUS_PROMISE_GATE_LOG_RETENTION_DAYS``, at
+    startup and then daily. The ledger (``brain.commitments``) is never touched."""
+    from nous.observability.work_view_retention import sweep_promise_gate_log
+
+    first = True
+    while True:
+        try:
+            if first:
+                first = False
+            else:
+                await asyncio.sleep(_RETENTION_SWEEP_INTERVAL_SECONDS)
+            days = settings.promise_gate_log_retention_days
+            deleted = await sweep_promise_gate_log(database, settings.agent_id, days)
+            logger.info("F111: promise_gate_log retention sweep (>%dd) deleted %s", days, deleted)
+        except asyncio.CancelledError:
+            if cancel_requested():
+                break
+            logger.exception("F111: promise_gate_log retention sweep was cancelled from within; the loop continues")
+        except Exception:
+            # WARNING, not DEBUG: a sweep that keeps failing lets the log grow without bound.
+            logger.warning("F111: promise_gate_log retention sweep failed", exc_info=True)
+
+
 async def _a2ui_sweep_loop(settings: Settings, surface_service: SurfaceService) -> None:
     """Expire companion surfaces: once at startup, then every sweep interval."""
     # Sweep once at startup, then periodically. The sweep must run
@@ -1256,10 +1280,20 @@ async def create_components(settings: Settings) -> dict:
 
     runner = AgentRunner(cognitive, brain, heart, settings)
     runner.set_dispatcher(dispatcher)
-    if settings.promise_gate_enabled and settings.promise_gate_mode != "off":
+    # F111 PR B1: stage 2 runs in the background on the rows the gate writes, through the client the other
+    # background classifiers use (Anthropic only). Off: no scheduler, no call.
+    promise_classifier = None
+    if settings.promise_gate_classifier_enabled:
+        from nous.cognitive.promise_classifier import ClassifierScheduler
+
+        promise_classifier = ClassifierScheduler(commitment_store, settings, api_client)
+        runner.set_promise_classifier(promise_classifier)
+        logger.info("F111: stage-2 promise classifier on (model %s)", settings.promise_gate_classifier_model)
+    promise_gate_on = settings.promise_gate_enabled and settings.promise_gate_mode != "off"
+    if promise_gate_on:
         from nous.cognitive.promise_gate import PromiseGate
 
-        runner.set_promise_gate(PromiseGate(commitment_store, settings))
+        runner.set_promise_gate(PromiseGate(commitment_store, settings, classifier=promise_classifier))
     runner.set_api_client(api_client)
     await runner.start()
 
@@ -1443,6 +1477,12 @@ async def create_components(settings: Settings) -> dict:
 
     # One retention loop sweeps each work-view log that is on, by its own retention (0 days means no sweep), and the
     # model-call text whatever its flag says. With every log off it starts only while this agent still has text.
+    # F111 PR B1: the promise gate's per-turn log, while the gate writes it.
+    promise_gate_log_retention_task = None
+    if promise_gate_on:
+        promise_gate_log_retention_task = asyncio.create_task(
+            _promise_gate_log_retention_loop(settings, database), name="promise-gate-log-retention"
+        )
     work_view_retention_task = None
     if await _work_view_retention_needed(settings, database):
         work_view_retention_task = asyncio.create_task(
@@ -1630,6 +1670,21 @@ async def create_components(settings: Settings) -> dict:
                     )
                     return resp or ""
 
+            # F111 PR B1: the overdue watcher runs as a task of the heartbeat runner and pings through its Telegram
+            # send (the closure reads heartbeat_runner, bound just below, before start()).
+            commitment_watcher = None
+            if settings.promise_watcher_enabled:
+                from nous.heartbeat.commitment_watcher import CommitmentWatcher
+                from nous.heartbeat.send_result import SendResult
+
+                async def _watcher_send(message: str) -> SendResult:
+                    return await heartbeat_runner._send_telegram(message)
+
+                commitment_watcher = CommitmentWatcher(
+                    commitment_store, settings, _watcher_send, classifier=promise_classifier
+                )
+                runner.set_commitment_watcher(commitment_watcher)  # the dead-man line on chat replies
+
             heartbeat_runner = HeartbeatRunner(
                 settings=settings,
                 registry=registry,
@@ -1641,6 +1696,7 @@ async def create_components(settings: Settings) -> dict:
                 finding_store=finding_store,
                 api_client=heartbeat_api_client,
                 dynamic_loader=dynamic_loader,
+                commitment_watcher=commitment_watcher,
             )
 
             # Audit HB-4 (review P2): register EmailCheck AFTER the runner exists
@@ -1695,6 +1751,9 @@ async def create_components(settings: Settings) -> dict:
             await heartbeat_runner.start()
         except ImportError:
             logger.debug("Heartbeat not available yet")
+
+    if settings.promise_watcher_enabled and heartbeat_runner is None:
+        logger.warning("F111 promise watcher enabled but the heartbeat is off (NOUS_HEARTBEAT_ENABLED); not run")
 
     # F034.5: Register heartbeat check management tools
     if heartbeat_runner and heartbeat_runner.dynamic_loader:
@@ -1987,6 +2046,7 @@ async def create_components(settings: Settings) -> dict:
         "model_call_recorder": model_call_recorder,
         "model_call_text_store": text_store,
         "work_view_retention_task": work_view_retention_task,
+        "promise_gate_log_retention_task": promise_gate_log_retention_task,
         "result_reconciler_task": result_reconciler_task,
         "retrieval_log_retention_task": retrieval_log_retention_task,
         "retrieval_logger": retrieval_logger,
@@ -2068,14 +2128,15 @@ async def shutdown_components(components: dict) -> None:
         except (asyncio.CancelledError, Exception):
             pass
 
-    # F108: stop the work-view retention sweep
-    work_view_retention_task = components.get("work_view_retention_task")
-    if work_view_retention_task:
-        work_view_retention_task.cancel()
-        try:
-            await work_view_retention_task
-        except (asyncio.CancelledError, Exception):
-            pass
+    # F108: stop the work-view retention sweep (and F111's promise_gate_log sweep)
+    for name in ("work_view_retention_task", "promise_gate_log_retention_task"):
+        sweep_task = components.get(name)
+        if sweep_task:
+            sweep_task.cancel()
+            try:
+                await sweep_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
     # Harness Phase 1b: stop the ledger maintenance loop, then give in-flight
     # shielded ledger closes a bounded chance to land before the pool closes

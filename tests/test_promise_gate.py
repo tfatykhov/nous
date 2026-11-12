@@ -1013,3 +1013,94 @@ def test_settings_object_reads_the_gate_mode():
     from nous.cognitive.promise_gate import PromiseGate
 
     assert PromiseGate(FakeStore(), s).mode == "off"
+
+
+# ---- F111 PR B1: the passive with a deadline, and the C-1 class (plan §6) ------------------------------------------
+
+# A future passive of an action verb with a `by <time>` deadline is the agent's own promise, when the existing _due_at
+# parser reads the deadline (plan §6: "a deadline phrase the existing _due_at parser resolves", due_parsed true).
+PASSIVE_HITS = [
+    ("It'll be deployed by tomorrow.", True),
+    ("The fix will be deployed by tomorrow at 09:00 UTC.", True),
+    ("The new index is going to be built by tomorrow.", True),
+    ("The chain will be relaunched by 18:15 UTC.", True),
+]
+PASSIVE_MISSES = [
+    "Your order will be delivered by Friday.",
+    "The PR was merged by Tim.",
+    "It will be reviewed by Tim.",
+    "This was sent by morning courier.",
+    "The fix will not be deployed by tomorrow.",
+    # Deadlines _due_at does not read: a hit would get the default due, and the watcher would ping 75 minutes later
+    # about something due days away (reported on the PR).
+    "The fix will be deployed by morning.",
+    "The summary will be sent by November 20.",
+    # Not in ACTION_VERBS ("do", "ready" are not), so the rule does not reach them (reported on the PR).
+    "It'll be done by tomorrow.",
+    "The report is going to be ready by 5pm.",
+    # Review I4 (and Codex on 391e7849): someone else does it, or it is negated, before the deadline.
+    "It will be deployed by Tim by tomorrow.",
+    "The invoice will be sent by the vendor by tomorrow.",
+    "The cache will be deleted by the vendor by 09:00 UTC.",
+    "The app will be deployed by Tim, not by tomorrow.",
+    "It will be deployed not by tomorrow.",  # the negation alone (no third party to catch it first)
+]
+
+
+@pytest.mark.parametrize(("sentence", "parsed"), PASSIVE_HITS)
+def test_a_future_passive_with_a_deadline_is_one_promise(sentence, parsed):
+    [promise] = PromiseDetector(default_due_minutes=60).scan(sentence, now=NOW)
+    assert promise.kind == "action" and promise.due_parsed is parsed
+    assert promise.due_at > NOW
+
+
+@pytest.mark.parametrize("sentence", PASSIVE_MISSES)
+def test_a_passive_that_is_not_the_agents_deadline_is_no_promise(sentence):
+    assert PromiseDetector().scan(sentence, now=NOW) == []
+
+
+@pytest.mark.parametrize("unit", ["will be sent ", "will be run by "])
+def test_a_200_kb_reply_ending_in_a_long_passive_sentence_scans_in_milliseconds(unit):
+    """Review I1: one regex spanning the passive head, a lazy gap and the deadline rescanned the clause from every head
+    (a 31.9 KB sentence of "will be sent " took 0.8 s, of "will be run by " 1.4 s, on the event loop). Best of 3: the
+    linear scan takes tens of ms on a loaded host, the quadratic one about 1 s on every run."""
+    filler = "This paragraph explains the result. " * (170_000 // 36)
+    reply = filler + unit * (31_900 // len(unit)) + "."
+    assert len(reply) > 200_000
+    timings = []
+    for _ in range(3):
+        start = time.perf_counter()
+        PromiseDetector().scan(reply, now=NOW)
+        timings.append(time.perf_counter() - start)
+    assert min(timings) < 0.1, timings
+
+
+def test_the_detector_version_names_the_passive_rule():
+    """Review M8: the passive rule changed the detector, so its shadow rows must be told apart from PR A's."""
+    from nous.cognitive.promise_gate import DETECTOR_VERSION
+
+    assert DETECTOR_VERSION == "stage1-v2"
+
+
+def test_the_pr_merged_by_then_stays_a_stage1_positive():
+    """Plan K: 'The market will be closed by then.' has the same shape, so it is stage 2's to reject, not stage 1's."""
+    assert len(PromiseDetector().scan("The PR will be merged by then.", now=NOW)) == 1
+
+
+C1_PROD_SENTENCE = (
+    "Nothing follows up on these yet, so I'll close each row myself when the work is done or dropped; I also updated"
+    " my memory, which still said #897 wasn't deployed, and PR B is untouched."
+)
+
+
+def test_the_c1_class_is_left_to_stage_2():
+    """Plan A: no stage-1 change for the C-1 class. Stage 1 as it stands at e09791f4: the conditional deploy is
+    flagged; the short policy form is not ("close" is not an action verb). The sentence prod stored for C-1 IS
+    flagged (review I2): "I'll" is the future form and "when" the weak marker, and _VERB_RE searches the whole
+    sentence, where it finds "follows up" and "deployed" in the other clauses (the splitter does not split on ";").
+    Stage 2 labels it not_promise (tests/fixtures/promise_stage2.yaml)."""
+    detector = PromiseDetector()
+    assert len(detector.scan("I'll deploy it when CI is green.", now=NOW)) == 1
+    assert len(detector.scan("I'll send you the summary once the job finishes.", now=NOW)) == 1
+    assert detector.scan("I'll close each row myself when the work is done or dropped.", now=NOW) == []
+    assert len(detector.scan(C1_PROD_SENTENCE, now=NOW)) == 1
