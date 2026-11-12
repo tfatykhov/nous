@@ -31,7 +31,7 @@ from nous.brain.commitments import (
 
 logger = logging.getLogger(__name__)
 
-DETECTOR_VERSION = "stage1-v1"
+DETECTOR_VERSION = "stage1-v2"  # v2: F111 PR B1 added the passive rule
 SENTENCE_MAX = 500
 # The detector reads the end of a reply's prose only (where a promise is made): it runs on the event loop, where the
 # gate's timeout cannot stop it, so its cost must not grow with NOUS_MAX_TOKENS. The code, quotes and quote blocks are

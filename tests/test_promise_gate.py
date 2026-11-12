@@ -1074,6 +1074,13 @@ def test_a_200_kb_reply_ending_in_a_long_passive_sentence_scans_in_milliseconds(
     assert min(timings) < 0.1, timings
 
 
+def test_the_detector_version_names_the_passive_rule():
+    """Review M8: the passive rule changed the detector, so its shadow rows must be told apart from PR A's."""
+    from nous.cognitive.promise_gate import DETECTOR_VERSION
+
+    assert DETECTOR_VERSION == "stage1-v2"
+
+
 def test_the_pr_merged_by_then_stays_a_stage1_positive():
     """Plan K: 'The market will be closed by then.' has the same shape, so it is stage 2's to reject, not stage 1's."""
     assert len(PromiseDetector().scan("The PR will be merged by then.", now=NOW)) == 1
