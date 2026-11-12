@@ -264,14 +264,20 @@ class PromiseDetector:
         self._default_due_minutes = default_due_minutes
 
     def scan(self, response_text: str, now: datetime | None = None) -> list[Promise]:
-        """The promises in the last ``SCAN_MAX_CHARS`` of a reply's prose, one per sentence, in order (empty for
-        none)."""
+        """The promises in the whole sentences of the last ``SCAN_MAX_CHARS`` of a reply's prose, one per sentence,
+        in order (empty for none)."""
         if not response_text:
             return []
         now = now or datetime.now(UTC)
         promises: list[Promise] = []
         cleaned_by_sentence: dict[str, str] = {}  # a sentence repeated in the reply is cleaned once
-        for raw in _SENTENCE_SPLIT_RE.split(_strip_non_prose(response_text)[-SCAN_MAX_CHARS:]):
+        prose = _strip_non_prose(response_text)
+        if len(prose) > SCAN_MAX_CHARS:
+            # The cap can fall inside a sentence, even inside a key no pattern matches without its start: scan from
+            # the first sentence end after the cap, and nothing if the tail has none.
+            boundary = _SENTENCE_SPLIT_RE.search(prose, len(prose) - SCAN_MAX_CHARS)
+            prose = prose[boundary.end() :] if boundary else ""
+        for raw in _SENTENCE_SPLIT_RE.split(prose):
             sentence = raw.strip(" \t-*•")
             if not sentence or sentence.endswith("?"):
                 continue

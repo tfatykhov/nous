@@ -535,13 +535,28 @@ def test_a_secret_straddling_the_cut_is_redacted_before_the_cut():
     assert "sk-ant" not in params["what"] and "sk-ant" not in params["promise_text"]
 
 
-@pytest.mark.parametrize("cut", ["what", "sentence"])
+@pytest.mark.parametrize("cut", ["what", "sentence", "cap"])
 def test_a_secret_straddling_a_detector_cut_is_redacted_whole(cut):
     """Re-review 3 and Codex on 793faa6a: the detector cut the sentence to 500 and ``what`` to 300 before anything
-    was redacted, so a key across either cut reached the store as a fragment no pattern matches."""
+    was redacted, so a key across either cut reached the store as a fragment no pattern matches. Re-review G: the
+    32 KB prose cap is a third cut; the partial sentence it leaves at the tail's start is not scanned."""
     from nous.brain.commitments import PROMISE_TEXT_MAX, WHAT_MAX
+    from nous.cognitive.promise_gate import SCAN_MAX_CHARS
 
     key = "sk-ant-api03-" + "A" * 40
+    if cut == "cap":
+        sentence = f"The key {key} is stale and I'll rotate it tomorrow."
+        cap_at = len("The key ") + 25  # the cap falls 25 characters into the key
+        filler = "This paragraph explains the result. "
+        after = (filler * (SCAN_MAX_CHARS // len(filler) + 1))[: SCAN_MAX_CHARS - (len(sentence) - cap_at) - 1]
+        reply = filler * 1500 + sentence + " " + after
+        assert len(reply) - SCAN_MAX_CHARS == len(filler) * 1500 + cap_at
+        promises = PromiseDetector().scan(reply, now=NOW)
+        for promise in promises:
+            params = _params(what=promise.what, promise_text=promise.text)
+            for text in (promise.what, promise.text, params["what"], params["promise_text"]):
+                assert "sk-ant" not in text and "AAAA" not in text, text
+        return
     head = "I'll rotate the key tomorrow, "
     boundary = WHAT_MAX if cut == "what" else PROMISE_TEXT_MAX
     sentence = head + "x" * (boundary - len(head) - 10) + " " + key + " now."
