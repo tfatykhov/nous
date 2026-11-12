@@ -28,7 +28,9 @@ from nous.handlers import call_background_llm_structured
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "s2-v1"
+# s2-v2: the examples are no longer fixture sentences or close paraphrases of them (review M5 on PR #906), so the
+# labelled fixtures measure the model, not whether it can read its own prompt.
+PROMPT_VERSION = "s2-v2"
 PURPOSE = "promise_gate_classifier"
 TOOL_NAME = "classify_promise"
 MAX_TOKENS = 300
@@ -39,17 +41,18 @@ CLOSE_TIMEOUT_SECONDS = 5.0
 SYSTEM_PROMPT = """You classify ONE sentence an AI assistant wrote at the end of a reply to its owner.
 
 Answer "promise" only when the speaker commits to do specific work AFTER this reply ends: one task it will carry
-out later ("I'll deploy it when CI is green", "I'll send you the summary once the job finishes", "The PR will be
-merged by then" said of its own PR).
+out later ("I'll rebase the migration branch after lunch and post the diff", "I'll email the supplier as soon as
+their ticket number arrives", "The backup script will be patched by Thursday" said of its own work).
 
 Answer "not_promise" for:
-- a standing policy or habit ("I close each row when the work is done", "I'll reply to every alert when it fires");
-- a description of how the system behaves ("the heartbeat will retry the check later");
-- work done in this turn ("I'll restart it now and report below");
-- a conditional that describes behaviour rather than commits to a task ("if the build fails, I usually rerun it");
-- something someone else will do, or a state of the world ("The market will be closed by then.", "Your order will be
-  delivered by Friday.");
-- a hypothetical ("if we had time, I'd rebuild the index");
+- a standing policy or habit ("I archive stale tickets every Monday", "whenever a disk fills up I prune old logs");
+- a description of how the system behaves ("the scheduler pages whoever is on call if the queue backs up");
+- work done in this turn ("let me paste the stack trace right here");
+- a conditional that describes behaviour rather than commits to a task ("when a token expires I generally refresh
+  it");
+- something someone else will do, or a state of the world ("The office will be shut on the holiday.", "The finance
+  team will finish the audit next quarter.");
+- a hypothetical ("with a bigger budget I'd move the cache to faster disks");
 - a question.
 
 You see only the sentence. Give the verdict and a reason of at most one short sentence."""

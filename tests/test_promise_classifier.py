@@ -120,7 +120,7 @@ async def test_each_label_is_stored_with_its_metadata(label):
     doc = await sched.classify_now(row)
     assert store.docs[row.id] == [doc]
     assert doc["verdict"] == label
-    assert doc["model"] == "claude-haiku-5-5" and doc["prompt_version"] == PROMPT_VERSION == "s2-v1"
+    assert doc["model"] == "claude-haiku-5-5" and doc["prompt_version"] == PROMPT_VERSION == "s2-v2"
     assert isinstance(doc["latency_ms"], int) and doc["latency_ms"] >= 0
     assert doc["attempts"] == 1 and doc["reason"] == "because"
     datetime.fromisoformat(doc["at"])
