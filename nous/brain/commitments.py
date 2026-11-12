@@ -329,22 +329,19 @@ class CommitmentStore:
         now: datetime | None = None,
         since: datetime | None = None,
         limit: int = 100,
-        *,
-        skip_not_promise: bool = False,
     ) -> list[Commitment]:
         """What the overdue watcher may ping: open or proposed rows with no artifact, never pinged or claimed
         (``notify_count = 0``), not suppressed by a later backing call (``evidence.watch.suppressed_by``), past
         ``due_at + grace``, and created at or after ``since`` (the watcher's cutoff; None reads every row). Never a
         ``goal`` or ``awaiting_user`` row, and never a backed, closed, deferred or superseded one. Ordered by
-        ``due_at``, then ``id``. ``due_at < :now`` lets migration 108's index apply. ``skip_not_promise`` leaves out
-        rows stage 2 called ``not_promise`` (they stay open and are never pinged, so they must not fill ``limit``)."""
+        ``due_at``, then ``id``. ``due_at < :now`` lets migration 108's index apply. Never a row stage 2 called
+        ``not_promise``, whatever the classifier flag says now (they stay open and are never pinged, so they must not
+        fill ``limit``; owner ruling I3 on PR #906)."""
         params: dict[str, Any] = {"agent_id": self._agent_id, "now": now or datetime.now(UTC), "limit": limit}
         extra_where = ""
         if since is not None:
             extra_where += "AND created_at >= :since "
             params["since"] = since
-        if skip_not_promise:
-            extra_where += "AND (evidence -> 'stage2' ->> 'verdict') IS DISTINCT FROM 'not_promise' "
         async with self._db.session() as session:
             result = await session.execute(
                 text(
@@ -353,6 +350,7 @@ class CommitmentStore:
                     "AND kind NOT IN ('goal', 'awaiting_user') AND notify_count = 0 "
                     "AND (evidence -> 'watch' -> 'suppressed_by') IS NULL "
                     "AND due_at < :now AND due_at + make_interval(secs => grace_seconds) < :now "
+                    "AND (evidence -> 'stage2' ->> 'verdict') IS DISTINCT FROM 'not_promise' "
                     f"{extra_where}ORDER BY due_at, id LIMIT :limit"
                 ),
                 params,

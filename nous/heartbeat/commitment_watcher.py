@@ -154,9 +154,7 @@ class CommitmentWatcher:
                 "F111 promise watcher: claims left by a crash marked orphaned, never re-sent: %s",
                 ", ".join(format_short_id(s) for s in orphaned),
             )
-        candidates = await self._store.list_watchable(
-            now=now, since=self._since, limit=CANDIDATE_LIMIT, skip_not_promise=self._classifier_on
-        )
+        candidates = await self._store.list_watchable(now=now, since=self._since, limit=CANDIDATE_LIMIT)
         if not candidates:
             return
         eligible = await self._unsuppressed(candidates, now)

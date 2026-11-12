@@ -571,12 +571,17 @@ async def test_stage2_rules(store, t0):
 
 
 @pytest.mark.postgres_only
-async def test_with_the_classifier_off_every_gate_row_is_pinged(store, t0):
+async def test_with_the_classifier_off_every_gate_row_without_a_not_promise_verdict_is_pinged(store, t0):
+    """Owner ruling I3 on PR #906 (a change to plan D): a stored not_promise verdict keeps a row out of the ping
+    whatever the classifier flag says; the flag decides only what happens to rows with no verdict."""
     row = await _row(store, t0, "off")
-    await store.set_stage2(row.id, {"verdict": "not_promise", "attempts": 1})
+    rejected = await _row(store, t0, "off-np")
+    await store.set_stage2(rejected.id, {"verdict": "not_promise", "attempts": 1})
     send = Send()
     await _watcher(store, t0, send).run_once(_past(t0))
-    assert len(send.messages) == 1 and row.label in send.messages[0]
+    [message] = send.messages
+    assert row.label in message and rejected.label not in message
+    assert (await store.get(rejected.short_id)).status == "open"
 
 
 @pytest.mark.postgres_only
@@ -586,7 +591,7 @@ async def test_not_promise_rows_do_not_fill_the_selection(store, t0):
         await store.set_stage2(r.id, {"verdict": "not_promise", "attempts": 1})
     real = await _row(store, t0, "real", due_in=90)
     await store.set_stage2(real.id, {"verdict": "promise", "attempts": 1})
-    watchable = await store.list_watchable(now=_past(t0, 100), limit=1, skip_not_promise=True)
+    watchable = await store.list_watchable(now=_past(t0, 100), limit=1)
     assert [r.id for r in watchable] == [real.id]
 
 
