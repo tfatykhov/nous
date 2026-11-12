@@ -525,6 +525,7 @@ class ToolDispatcher:
         context: ExecutionContext | None = None,
         outcome: CallOutcome | None = None,
         turn_id: UUID | None = None,
+        stream: bool = False,
     ) -> tuple[str, bool]:
         """Dispatch a tool call and return (result_text, is_error).
 
@@ -544,6 +545,9 @@ class ToolDispatcher:
 
         turn_id: the runner's F108 id of the turn making the call (F111:
         ``commit`` keys its idempotency on it). None outside a turn.
+
+        stream: True when ``stream_chat`` dispatches the call (F111 PR B1:
+        ``commit`` stamps a streamed chat turn's row ``chat_stream``).
         """
         ctx = resolve_context(context, is_background=is_background, session_id=session_id)
         is_background = ctx.is_background
@@ -713,6 +717,7 @@ class ToolDispatcher:
                     "_turn_number": turn_number,
                     "_turn_id": str(turn_id) if turn_id is not None else None,
                     "_context_kind": ctx.kind,
+                    "_stream": stream,  # F111 PR B1: a streamed chat turn's row is chat_stream, as the gate's
                 }
             if session_id is not None and name in ("push_surface", "compose_surface"):
                 # F092: surfaces record the chat session that pushed them so
@@ -3126,7 +3131,8 @@ _COMMIT_SCHEMA = {
 def create_commit_tool(store: Any, *, grace_seconds: int = 900) -> Callable[..., Any]:
     """The ``commit`` handler over a ``CommitmentStore``. Idempotent within a turn (same ``what``, one row).
     ``grace_seconds`` is stored on each row (``NOUS_PROMISE_GATE_GRACE_SECONDS``, as the gate's rows)."""
-    from nous.brain.commitments import LIVE_STATUSES, MAX_DUE_DAYS, SOURCE_KIND_BY_CONTEXT, CommitmentRefused
+    from nous.brain.commitments import LIVE_STATUSES, MAX_DUE_DAYS, CommitmentRefused
+    from nous.cognitive.promise_gate import source_kind_for
     from nous.handlers.time_parser import _RELATIVE_RE, _UNIT_SECONDS
 
     def parse_due(due: str) -> datetime:
@@ -3157,6 +3163,7 @@ def create_commit_tool(store: Any, *, grace_seconds: int = 900) -> Callable[...,
         _turn_number: int | None = None,
         _turn_id: str | None = None,
         _context_kind: str | None = None,
+        _stream: bool = False,
     ) -> dict[str, Any]:
         try:
             due_at = parse_due(str(due))
@@ -3168,7 +3175,7 @@ def create_commit_tool(store: Any, *, grace_seconds: int = 900) -> Callable[...,
         if consent not in ("none", "explicit", "silence"):
             return _tool_error("commit: consent must be one of none, explicit, silence.")
         row_args = {
-            "source_kind": SOURCE_KIND_BY_CONTEXT.get(_context_kind or "", "chat_turn"),
+            "source_kind": source_kind_for("stream" if _stream else "run_turn", _context_kind),
             "detected_by": "tool",
             "promise_text": str(what),
             "what": str(what),

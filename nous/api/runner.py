@@ -45,7 +45,7 @@ from nous.api.cache_optimizer import _hash as cache_hash
 from nous.api.call_outcome import CallOutcome
 from nous.api.compaction import ConversationCompactor
 from nous.api.compensation import release_write_path_lock_after, write_path_lock, write_path_lock_is
-from nous.api.execution_context import ExecutionContext, resolve_context
+from nous.api.execution_context import ExecutionContext, is_background_session, resolve_context
 from nous.api.idempotency import idempotency_key
 from nous.api.model_caps import is_legacy_haiku
 from nous.api.models import (  # noqa: F401 — re-exported for backward compat
@@ -518,6 +518,10 @@ class AgentRunner:
         # F111: the turn-close promise gate (set_promise_gate); None: no gate, no rows.
         self._promise_gate: PromiseGate | None = None
         self._promise_gate_tasks: set[asyncio.Task] = set()  # F111: gate work in flight (drained by close)
+        # F111 PR B1: the stage-2 scheduler (drained by the root runner's close) and the overdue watcher (its
+        # dead-man line on live chat replies). None: not enabled.
+        self._promise_classifier: Any = None
+        self._commitment_watcher: Any = None
         # F111: the gate's concurrent database writes, shared with the forks (each write holds a pooled connection).
         self._promise_gate_slots = asyncio.Semaphore(PROMISE_GATE_MAX_CONCURRENT)
 
@@ -1002,6 +1006,16 @@ class AgentRunner:
         self._promise_gate = gate
         for fork in self._forks:
             fork.set_promise_gate(gate)
+
+    def set_promise_classifier(self, scheduler: Any) -> None:
+        """F111 PR B1: the stage-2 ``ClassifierScheduler``; this (root) runner's ``close`` drains it."""
+        self._promise_classifier = scheduler
+
+    def set_commitment_watcher(self, watcher: Any) -> None:
+        """F111 PR B1: the overdue watcher whose dead-man line live chat replies carry; shared with the forks."""
+        self._commitment_watcher = watcher
+        for fork in self._forks:
+            fork.set_commitment_watcher(watcher)
 
     def set_cancelled_roots(self, view: Callable[[UUID], bool]) -> None:
         """F099 2e: install the in-process view of cancelled roots (``ContinuationRunner.root_is_cancelled``).
@@ -1758,6 +1772,7 @@ class AgentRunner:
         forked._promise_gate = self._promise_gate  # F111: and set_promise_gate propagates a later one
         forked._promise_gate_slots = self._promise_gate_slots  # F111: one cap for the process's gate writes
         forked._promise_gate_tasks = self._promise_gate_tasks  # F111: and one set, so close() drains the forks' too
+        forked._commitment_watcher = self._commitment_watcher  # F111 PR B1: and set_commitment_watcher propagates
         # F035.4: the heartbeat's checks, triage and callbacks run on a fork; sharing
         # the logger gives their model calls context_log rows. It was withheld after the
         # April 2026 triage hang (0d1d45e3), when the logger's fire-and-forget writes held
@@ -1789,6 +1804,10 @@ class AgentRunner:
                 await asyncio.gather(*pending, return_exceptions=True)
                 break
             await asyncio.wait(pending, timeout=remaining)
+        if self._promise_classifier is not None and not self._is_fork:
+            # F111 PR B1: after the gate (which submits to it), and only from the root: a fork's close must not
+            # cancel the process's stage-2 calls. Bounded (5 s, then cancelled; a cancelled call stores nothing).
+            await self._promise_classifier.close()
         if self._api and not self._api_shared:
             await self._api.close()
         self._api = None
@@ -2258,10 +2277,13 @@ class AgentRunner:
             if _caught_exc is not None:
                 raise _caught_exc
 
-            if _gate_footer and not _ctx.is_background:
-                # F111: appended to what the caller is handed only; the conversation, the turn row, post_turn and
-                # the channel's last reply above all got response_text without it.
-                return f"{response_text}\n\n{_gate_footer}", turn_context, usage
+            # F111: appended to what the caller is handed only; the conversation, the turn row, post_turn and the
+            # channel's last reply above all got response_text without them.
+            shown = [_gate_footer] if _gate_footer and not _ctx.is_background else []
+            if not error and (dead_man := self._dead_man_line(_ctx, session_id)):
+                shown.append(dead_man)  # F111 PR B1: the watcher has stalled
+            if shown:
+                return "\n\n".join([response_text, *shown]), turn_context, usage
             return response_text, turn_context, usage
 
     def discard_conversation(self, session_id: str) -> None:
@@ -3755,6 +3777,9 @@ class AgentRunner:
             if _gate_footer:
                 # F111: the text is already on the wire; the footer follows as one more delta.
                 yield StreamEvent(type="text_delta", text=f"\n\n{_gate_footer}")
+            if _gate_due and not error and (dead_man := self._dead_man_line(_ctx, session_id)):
+                # F111 PR B1: as the footer, after the reply is stored; never part of the conversation.
+                yield StreamEvent(type="text_delta", text=f"\n\n{dead_man}")
             yield StreamEvent(type="done", stop_reason="end_turn", usage=total_usage)
 
     # ------------------------------------------------------------------
@@ -5129,6 +5154,19 @@ Rules:
             # by design; the stall scan's NULL-fallback policy covers us.
             pass
 
+    def _dead_man_line(self, ctx: ExecutionContext, session_id: str | None) -> str | None:
+        """F111 PR B1: the watcher's stall warning for a live chat reply (an ``interactive`` turn in a session a
+        person converses in: never a subtask, DAG node, continuation, heartbeat turn, MCP call or a job's session),
+        whatever the gate's mode. None otherwise, or when there is no stall to report. Never raises."""
+        watcher = self._commitment_watcher
+        if watcher is None or ctx.kind != "interactive" or is_background_session(session_id):
+            return None
+        try:
+            return watcher.dead_man_line()
+        except Exception:
+            logger.warning("F111: the promise watcher's dead-man line failed", exc_info=True)
+            return None
+
     async def _promise_gate_step(
         self,
         ctx: ExecutionContext,
@@ -5521,6 +5559,7 @@ Rules:
                     context=context,  # harness Phase 1a
                     outcome=outcome,  # harness Phase 2b
                     turn_id=turn_id,
+                    stream=True,  # F111 PR B1: only stream_chat dispatches through here
                 ),
                 timeout=timeout,
             )

@@ -43,6 +43,7 @@ class _RecordingDispatcher:
         context=None,
         outcome=None,
         turn_id=None,
+        stream=False,
     ):
         if self.store is not None:
             self.store.events.append(("dispatch", name))
