@@ -130,7 +130,13 @@ _FENCE_RE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
 # Neither quote class may contain an opening mark: "“[^”]*”" rescanned the line from every unclosed “ (quadratic).
 _QUOTED_RE = re.compile(r"\"[^\"\n]*\"|“[^“”\n]*”")
-_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+# A sentence ends at . ! ? and a space, but not after an abbreviation ("Dr. Smith", "e.g. bash", "No. 3"): split
+# there and neither half of the promise has both its future form and its marker.
+_SENTENCE_SPLIT_RE = re.compile(
+    r"(?<=[.!?])(?<!\bdr\.)(?<!\bmr\.)(?<!\bms\.)(?<!\bmrs\.)(?<!\bvs\.)(?<!\be\.g\.)(?<!\bi\.e\.)"
+    r"(?<!\bno\.(?=\s\d))\s+|\n+",
+    re.IGNORECASE,
+)
 
 # Due-time extraction for the cases the detector can resolve without guessing; anything else gets the default.
 _REL_RE = re.compile(r"\bin\s+(\d+|an?|one|two|half\s+an)\s+(minute|min|hour|hr|day|week)s?\b", re.I)

@@ -153,6 +153,22 @@ def test_each_negative_is_no_promise(case):
     assert PromiseDetector().scan(case["text"], now=NOW) == []
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I'll send it to Dr. Smith tomorrow.",
+        "I'll rerun the slow suites, e.g. the DAG one, tomorrow.",
+        "I'll rerun the slowest one, i.e. the DAG suite, tomorrow.",
+        "I'll compare A vs. B tomorrow.",
+        "I'll fix ticket No. 3 tomorrow.",
+    ],
+)
+def test_an_abbreviation_does_not_split_a_promise(text):
+    """Review Minor 8: the split after "Dr." left neither half with a future form and a marker."""
+    [promise] = PromiseDetector().scan(text, now=NOW)
+    assert promise.text == text
+
+
 def test_an_empty_reply_is_no_promise():
     assert PromiseDetector().scan("", now=NOW) == []
 
