@@ -1559,15 +1559,18 @@ def create_app(
     async def dashboard_graph(request: Request) -> JSONResponse:
         """GET /dashboard/graph - Graph visualization data."""
         try:
-            limit = max(1, min(int(request.query_params.get("limit", "200")), 2000))
+            limit = max(1, min(int(request.query_params.get("limit", "200")), 3000))
         except ValueError:
             return JSONResponse({"error": "limit must be an integer"}, status_code=400)
+        include_chunks = request.query_params.get("chunks", "") in ("1", "true")
 
         try:
             from nous.api.dashboard_queries import get_graph_data
 
             async with database.session() as session:
-                data = await get_graph_data(session, settings.agent_id, limit=limit)
+                data = await get_graph_data(
+                    session, settings.agent_id, limit=limit, include_chunks=include_chunks
+                )
             return JSONResponse(data)
         except Exception as e:
             logger.error("Dashboard graph error: %s", e)

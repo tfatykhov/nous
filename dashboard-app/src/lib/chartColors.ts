@@ -1,7 +1,7 @@
-// Chart colours by token. Chart.js draws on a canvas and cytoscape on its own canvas: neither can read var(). A chart's
+// Chart colours by token. Chart.js draws on a canvas and the memory graph on a WebGL one: neither can read var(). A chart's
 // colours are therefore written as tokens, `var(--x)` or the `tint(--x, a)` sentinel, and resolved here against the
 // element the chart draws into. Every other value (a literal colour, a number, a function) passes through untouched.
-// Chart.svelte resolves its data and options here; lib/viz/Graph.svelte does the same for its nodes and edges. DOM and
+// Chart.svelte resolves its data and options here; lib/viz/BrainGraph.svelte does the same for its nodes and links. DOM and
 // SVG colours use var() and color-mix() directly and never come here.
 import { readToken, withAlpha } from './overviewCharts';
 
@@ -38,9 +38,6 @@ export const TOKEN_FALLBACK: Record<string, string> = {
   '--gv-procedure': '#d0620d',
   '--gv-chunk': '#8b5cf6',
   '--gv-other': '#4f5f6f',
-  '--gv-outline': '#ffffff',
-  '--gv-node-border': 'rgba(20, 32, 43, 0.35)',
-  '--gv-select': '#14202b',
   '--rel-related-to': '#4f5f6f',
   '--rel-extracted-from': '#1f5fa8',
   '--rel-supports': '#159a7a',
@@ -76,7 +73,7 @@ export const TOKEN_FALLBACK: Record<string, string> = {
 };
 
 /** `#rgba` / `#rrggbbaa` as `rgba(r, g, b, a)`; anything else unchanged. The production build minifies an rgba() token
- * to the 8-digit hex form, which cytoscape does not parse (it falls back to black) and withAlpha cannot tint. */
+ * to the 8-digit hex form, which a canvas library may not parse and withAlpha cannot tint. */
 function alphaHexToRgba(c: string): string {
   const m = /^#([0-9a-f]{4}|[0-9a-f]{8})$/i.exec(c);
   if (!m) return c;

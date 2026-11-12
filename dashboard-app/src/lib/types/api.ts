@@ -1070,6 +1070,8 @@ export interface GraphNodeData {
   type: string;
   label: string;
   category: string | null;
+  /** When the memory's row was created; the graph fades a memory with its age. */
+  created_at: string | null;
 }
 
 /** One edge from get_graph_data(). */
@@ -1088,24 +1090,22 @@ export interface GraphEdgeData {
 
 /** Stats block from get_graph_data(). */
 export interface GraphStats {
+  /** Links and linked memories of the whole graph, under the same chunks setting as the drawing. */
   total_edges: number;
+  total_nodes: number;
   displayed_edges: number;
   node_count: number;
+  /** How many of the drawn memories sit in the largest connected piece. */
+  largest_piece: number;
   /** key = 'decisions' | 'facts' | 'episodes' | 'procedures' | 'chunks' */
   orphan_counts: Record<string, number>;
-  /** Every link fit in the budget, so every link whose memories still exist is drawn. */
-  all_links: boolean;
-  /** Drawn edges among the newest links (all of them when every link fits). */
-  recent_edges: number;
-  /** Drawn edges added as links from those memories to their best-linked neighbours. */
-  linked_edges: number;
-  links_per_memory: number;
-  /** created_at range of the newest links drawn; null when none is drawn. */
-  recent_from: string | null;
-  recent_to: string | null;
+  /** Chunks and their links were part of the selection (`?chunks=1`). */
+  chunks_included: boolean;
+  /** More links run among the drawn memories than the cap allows; the strongest are drawn. */
+  edges_truncated: boolean;
 }
 
-/** Full response from GET /dashboard/graph?limit=500. */
+/** Full response from GET /dashboard/graph?limit=1500. */
 export interface GraphData {
   nodes: GraphNodeData[];
   edges: GraphEdgeData[];

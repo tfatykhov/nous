@@ -1,30 +1,17 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { fmtUtc } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
   import { graphSliceText } from '../lib/graphSlice';
-  import type {
-    GraphData,
-    GraphEdgeData,
-    GraphNodeData,
-    GraphConnection,
-    GraphNodeDetail,
-  } from '../lib/types/api';
+  import type { GraphData, GraphConnection, GraphNodeDetail } from '../lib/types/api';
   import StatGrid from '../lib/ui/StatGrid.svelte';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import BottomSheet from '../lib/ui/BottomSheet.svelte';
   import { Button } from '../lib/ui/button';
-  import GraphViz, { type GraphNode } from '../lib/viz/Graph.svelte';
-  import { cssColor } from '../lib/chartColors';
-  import { readToken } from '../lib/overviewCharts';
-
-  const store = usePoll(
-    makePollStore<GraphData>(
-      (signal) => apiGet<GraphData>('/dashboard/graph?limit=500', { signal }),
-      0, // fetch-once; user-triggered refresh only
-    ),
-  );
+  import BrainGraph from '../lib/viz/BrainGraph.svelte';
+  import { buildBrain, type BrainNode } from '../lib/brainGraph';
 
   // ── Filter state (component-local) ──────────────────────────────────────
   const ALL_TYPES = ['fact', 'episode', 'decision', 'procedure', 'chunk'] as const;
@@ -35,15 +22,36 @@
     episode: true,
     decision: true,
     procedure: true,
-    chunk: true,
+    chunk: false, // transcript pieces: their links are structure, and pull the drawing apart
   });
   let minEdges = $state(0);
   let searchQuery = $state('');
 
+  // How many memories the drawing holds. A phone starts smaller: it lays out and turns the same mass more slowly.
+  const SIZES = [600, 1500, 3000] as const;
+  const narrow = typeof matchMedia === 'function' && matchMedia('(max-width: 768px)').matches;
+  let size = $state<number>(narrow ? SIZES[0] : SIZES[1]);
+  let turn = $state(true);
+
+  // The endpoint chooses the memories, so the size and the chunks box are its parameters; the other boxes only hide.
+  const store = usePoll(
+    makePollStore<GraphData>(
+      (signal) => apiGet<GraphData>(`/dashboard/graph?limit=${size}${checkedTypes.chunk ? '&chunks=1' : ''}`, { signal }),
+      0, // fetch-once; user-triggered refresh only
+    ),
+  );
+  let fetched = untrack(() => `${size}:${checkedTypes.chunk}`);
+  $effect(() => {
+    const key = `${size}:${checkedTypes.chunk}`;
+    if (key === fetched) return;
+    fetched = key;
+    void store.refresh();
+  });
+
   // ── Node detail (BottomSheet) ────────────────────────────────────────────
   // The sheet shows full content + ALL connections, fetched lazily from
   // /dashboard/graph/node/{id}. selectedHead holds the lightweight {id,type,label}
-  // picked from either a Cytoscape tap or a connection drill-through, so the
+  // picked from either a tap on the graph or a connection drill-through, so the
   // header renders instantly while the detail loads.
   type NodeHead = { id: string; type: string; label: string };
   let selectedHead = $state<NodeHead | null>(null);
@@ -83,7 +91,7 @@
     }
   }
 
-  function onNodeClick(node: GraphNode) {
+  function onNodeClick(node: BrainNode) {
     loadDetail({ id: node.id, type: node.type, label: node.label });
   }
 
@@ -113,153 +121,35 @@
     ),
   );
 
-  // ── Derived: build Cytoscape elements from backend data ─────────────────
-  //
-  // graph.js computes edge_count per node from the edge list, then embeds it
-  // in the Cytoscape node data so style selectors (degree-based sizing,
-  // label threshold, min-edges filter) can read it via node.data('edge_count').
-  // We replicate that mapping here.
-
-  let elements = $derived(() => {
-    const data = $store.data;
-    if (!data) return [];
-
-    // edge_count per node id
-    const edgeCounts: Record<string, number> = {};
-    for (const e of data.edges) {
-      edgeCounts[e.source] = (edgeCounts[e.source] ?? 0) + 1;
-      edgeCounts[e.target] = (edgeCounts[e.target] ?? 0) + 1;
-    }
-
-    const nodes = data.nodes.map((n: GraphNodeData) => ({
-      data: {
-        id: n.id,
-        label: n.label ?? '',
-        type: n.type,
-        category: n.category ?? '',
-        edge_count: edgeCounts[n.id] ?? 0,
-        created_at: null, // not in backend response; kept for BottomSheet compat
-      },
-    }));
-
-    const edges = data.edges.map((e: GraphEdgeData) => ({
-      data: {
-        id: e.id,
-        source: e.source,
-        target: e.target,
-        relation: e.relation,
-        weight: e.weight ?? 0.5,
-        extraction_method: e.extraction_method ?? 'heuristic',
-      },
-    }));
-
-    return [...nodes, ...edges];
-  });
+  // ── Derived: what the graph draws ────────────────────────────────────────
+  // Built once per fetched response: the store also emits while a refresh is in flight, and a new pair of arrays
+  // would make the graph lay itself out again.
+  let built: { data: GraphData | null; brain: ReturnType<typeof buildBrain> } = { data: null, brain: { nodes: [], links: [] } };
+  function brainOf(data: GraphData | null) {
+    if (data !== built.data) built = { data, brain: data ? buildBrain(data) : { nodes: [], links: [] } };
+    return built.brain;
+  }
+  let brain = $derived(brainOf($store.data));
 
   // ── Derived: stat cards ──────────────────────────────────────────────────
   let statCards = $derived(() => {
     const s = $store.data?.stats;
     if (!s) return [];
     const orphanTotal = Object.values(s.orphan_counts).reduce((a, b) => a + b, 0);
+    const fmt = (n: number) => n.toLocaleString('en-US');
     return [
-      { label: 'Nodes', value: String(s.node_count) },
-      { label: 'Total edges', value: String(s.total_edges) },
-      { label: 'Shown edges', value: String(s.displayed_edges) },
-      { label: 'Orphans', value: String(orphanTotal) },
+      { label: 'Memories shown', value: fmt(s.node_count) },
+      { label: 'Links shown', value: fmt(s.displayed_edges) },
+      // The share of the drawn memories that sit in the largest connected piece.
+      { label: 'In one piece', value: s.node_count ? `${Math.round((100 * s.largest_piece) / s.node_count)}%` : '--' },
+      { label: 'Orphans', value: fmt(orphanTotal) },
     ];
   });
-
-  // ── Cytoscape style (mirrors graph.js) ──────────────────────────────────
-  // Cytoscape draws on a canvas and cannot read var(): the stylesheet's colours are read off the graph's own element.
-  // Node and edge fills come from each element's `color` data.
-  function cytoscapeStyle(el: Element) {
-    const c = (token: string) => cssColor(el, token);
-    /** A number token on the graph's element (the edge opacities); `fallback`, the :root value, when unset (jsdom). */
-    const n = (token: string, fallback: number) => {
-      const v = parseFloat(el.isConnected ? readToken(el, token) : '');
-      return Number.isFinite(v) ? v : fallback;
-    };
-    return [
-    {
-      selector: 'node',
-      style: {
-        'background-color': 'data(color)',
-        'border-width': 1,
-        'border-color': c('--gv-node-border'),
-        width: 'mapData(edge_count, 0, 30, 14, 44)',
-        height: 'mapData(edge_count, 0, 30, 14, 44)',
-        label: '',
-        'font-size': '9px',
-        color: c('--muted'),
-        'text-valign': 'bottom',
-        'text-margin-y': 4,
-        'text-outline-color': c('--gv-outline'),
-        'text-outline-width': 2,
-      },
-    },
-    {
-      selector: 'node[edge_count >= 3]',
-      style: {
-        label: (ele: any) => (ele.data('label') ?? '').slice(0, 30),
-      },
-    },
-    {
-      selector: 'node:selected',
-      style: { 'border-width': 3, 'border-color': c('--gv-select') },
-    },
-    {
-      selector: 'node.faded',
-      style: { opacity: 0.15 },
-    },
-    {
-      selector: 'node.searchHit',
-      style: { 'border-width': 2, 'border-color': c('--gv-select') },
-    },
-    {
-      selector: 'edge',
-      style: {
-        'curve-style': 'bezier',
-        'line-color': 'data(color)',
-        opacity: n('--gv-edge-opacity', 0.75),
-        width: 'mapData(weight, 0, 1, 1, 4)',
-        'target-arrow-color': 'data(color)',
-        'target-arrow-shape': 'triangle',
-        'arrow-scale': 0.7,
-      },
-    },
-    {
-      selector: 'edge[extraction_method = "inferred"]',
-      style: { opacity: n('--gv-edge-opacity-inferred', 0.5), 'line-style': 'dashed' },
-    },
-    {
-      selector: 'edge.faded',
-      style: { opacity: 0.05 },
-    },
-    ];
-  }
-
-  // Cytoscape layout (cose — bundled, no plugin needed)
-  const cytoscapeLayout = {
-    name: 'cose',
-    animate: false,
-    randomize: true,
-    componentSpacing: 80,
-    nodeRepulsion: () => 80000,
-    nodeOverlap: 12,
-    idealEdgeLength: () => 80,
-    edgeElasticity: () => 100,
-    nestingFactor: 1.2,
-    gravity: 80,
-    numIter: 1500,
-    initialTemp: 200,
-    coolingFactor: 0.95,
-    minTemp: 1.0,
-  };
 
   // ── Helpers ──────────────────────────────────────────────────────────────
 
   // A node type's and a relation's colour, as a token: var() works as is in the legend, the badge and the dots, and
-  // Graph.svelte resolves it for the canvas. Graph's own tokens (--gv-*), not the legacy --*-color ones, whose fact
+  // BrainGraph.svelte resolves it for the canvas. Graph's own tokens (--gv-*), not the legacy --*-color ones, whose fact
   // and episode are the other way round.
   const RELATIONS = new Set([
     'related_to', 'extracted_from', 'supports', 'informed_by', 'evidence_for', 'contradicts',
@@ -304,7 +194,7 @@
   <div>
     <h1 class="view-title">Graph</h1>
     <p class="view-subtitle">
-      {$store.data ? graphSliceText($store.data.stats) : 'Memory nodes and the links between them.'}
+      {$store.data ? graphSliceText($store.data.stats) : 'Memories and the links between them.'}
     </p>
   </div>
   <div class="head-actions">
@@ -361,6 +251,21 @@
           class="range-slider"
         />
       </label>
+
+      <!-- How many memories -->
+      <div class="size-pick" role="group" aria-label="How many memories to draw">
+        <span class="slider-label">Memories</span>
+        {#each SIZES as n}
+          <button type="button" class="size-btn" aria-pressed={size === n} onclick={() => (size = n)}>
+            {n.toLocaleString('en-US')}
+          </button>
+        {/each}
+      </div>
+
+      <label class="type-check">
+        <input type="checkbox" bind:checked={turn} />
+        Turn slowly
+      </label>
     </div>
 
     {#if data.nodes.length === 0}
@@ -368,17 +273,20 @@
         No graph edges yet. As Nous learns facts and makes decisions, connections will appear here.
       </p>
     {:else}
-      <GraphViz
-        elements={elements()}
-        layout={cytoscapeLayout}
-        style={cytoscapeStyle}
+      <BrainGraph
+        nodes={brain.nodes}
+        links={brain.links}
         {colorFor}
         {onNodeClick}
         {searchQuery}
         {hiddenTypes}
         {minEdges}
+        {turn}
+        covered={sheetOpen}
       />
-      <p class="graph-hint">Tap a node for details · Scroll to zoom · Drag to pan</p>
+      <p class="graph-hint">
+        Tap a memory for its detail and to see activation spread · Drag to turn · Pinch or scroll to zoom
+      </p>
     {/if}
   </section>
 {/if}
@@ -622,6 +530,58 @@
   .range-slider {
     width: 100px;
     accent-color: var(--action);
+  }
+
+  .size-pick {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .size-pick .slider-label {
+    font-size: 0.75rem;
+    color: var(--muted);
+    margin-right: 0.25rem;
+  }
+
+  .size-btn {
+    font: inherit;
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.1875rem 0.625rem;
+    cursor: pointer;
+    transition: background var(--transition), border-color var(--transition);
+  }
+
+  .size-btn:hover {
+    background: var(--surface-hover);
+  }
+
+  .size-btn:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 1px;
+  }
+
+  .size-btn[aria-pressed='true'] {
+    border-color: var(--action);
+    font-weight: 600;
+  }
+
+  @media (max-width: 768px) {
+    .size-btn {
+      min-height: 2.25rem;
+      padding-inline: 0.875rem;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .size-btn {
+      transition: none;
+    }
   }
 
   .empty-state {

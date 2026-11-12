@@ -169,116 +169,150 @@ async def get_dashboard_stats(session: AsyncSession, agent_id: str) -> dict:
 # ── Task 6: Graph data (GET /dashboard/graph) ───────────────────────────
 
 
-# When the graph has more links than the view draws (limit * 4), the view shows the newest third of that budget
-# ("recent" links) and then, for each memory those links touch, up to GRAPH_LINKS_PER_MEMORY of its other links,
-# preferring neighbours that have the most links overall. New memories then appear attached to the established
-# web through the memories they share, instead of as many small islands.
-GRAPH_LINKS_PER_MEMORY = 3
+# The view draws memories, not links: it starts from the memories of the newest links and grows outward, each round
+# adding the memories at the far end of every frontier memory's strongest links, until it holds ``limit`` memories
+# (or fewer: a memory is on the frontier once, so one with more new neighbours than ``GRAPH_FANOUT`` leaves the rest).
+# Then it draws every link among them. Every memory after the seeds is added through a link to one already chosen,
+# so the drawing is as connected as the memory itself (on the 2026-11 production graph: 1,500 memories, 98% in one
+# piece, where the newest-links-first selection before it drew 15 pieces).
+GRAPH_SEED_MEMORIES = 40  # the memories the growth starts from: the ends of the newest links
+GRAPH_FANOUT = 8  # a frontier memory's strongest links followed per round
+GRAPH_MAX_ROUNDS = 12  # 40 seeds reach 3,000 memories in 5 rounds on production; a bound, not a tuning knob
+GRAPH_EDGES_PER_MEMORY = 8  # the drawn links are capped at limit * this, strongest first
 
 _GRAPH_EDGE_COLUMNS = (
     "e.id, e.source_id, e.target_id, e.source_type, e.target_type, "
     "e.relation, e.weight, e.auto_linked, e.extraction_method, e.created_at"
 )
 
-_RECENT_EDGES_SQL = f"""
-    SELECT {_GRAPH_EDGE_COLUMNS}
-    FROM brain.graph_edges e
-    WHERE e.agent_id = :agent_id
-    ORDER BY e.created_at DESC, e.id DESC
-    LIMIT :recent_n
-"""
+# Chunks are transcript pieces; their links (chunk to chunk, chunk to episode) are structure, not association, and
+# are left out unless asked for.
+_NO_CHUNKS = " AND e.source_type <> 'chunk' AND e.target_type <> 'chunk'"
 
-# The recent links are passed in as the ids the first query returned, not recomputed: a link written between the
-# two statements would otherwise shift the window and return one link twice.
-_LINKED_EDGES_SQL = f"""
-    WITH recent AS (
-        SELECT id, source_id, target_id
-        FROM brain.graph_edges
-        WHERE agent_id = :agent_id AND id = ANY(:recent_ids)
-    ),
-    anchors AS (
-        SELECT source_id AS node_id FROM recent
-        UNION
-        SELECT target_id FROM recent
-    ),
-    degree AS (
-        SELECT node_id, COUNT(*) AS links
-        FROM (
-            SELECT source_id AS node_id FROM brain.graph_edges WHERE agent_id = :agent_id
-            UNION ALL
-            SELECT target_id FROM brain.graph_edges WHERE agent_id = :agent_id
-        ) ends
-        GROUP BY node_id
-    ),
-    ranked AS (
-        SELECT e.id,
-               COALESCE(d.links, 0) AS other_links,
-               ROW_NUMBER() OVER (
-                   PARTITION BY a.node_id
-                   ORDER BY COALESCE(d.links, 0) DESC, COALESCE(e.weight, 0) DESC, e.id
-               ) AS pick
-        FROM anchors a
-        JOIN brain.graph_edges e
-          ON e.agent_id = :agent_id AND (e.source_id = a.node_id OR e.target_id = a.node_id)
-        LEFT JOIN degree d
-          ON d.node_id = CASE WHEN e.source_id = a.node_id THEN e.target_id ELSE e.source_id END
-        WHERE e.id NOT IN (SELECT id FROM recent)
-    ),
-    linked AS (
-        SELECT id, MAX(other_links) AS other_links
-        FROM ranked
-        WHERE pick <= :per_memory
-        GROUP BY id
-        ORDER BY MAX(other_links) DESC, id
-        LIMIT :linked_n
-    )
-    SELECT {_GRAPH_EDGE_COLUMNS}
-    FROM brain.graph_edges e
-    JOIN linked l ON l.id = e.id
-    ORDER BY l.other_links DESC, e.id
-"""
+
+def _graph_sql(include_chunks: bool) -> dict[str, str]:
+    """The graph view's statements, with or without chunk links."""
+    scope = "e.agent_id = :agent_id" + ("" if include_chunks else _NO_CHUNKS)
+    return {
+        "totals": f"""
+            SELECT (SELECT COUNT(*) FROM brain.graph_edges e WHERE {scope}) AS edges,
+                   (SELECT COUNT(*) FROM (
+                        SELECT e.source_id FROM brain.graph_edges e WHERE {scope}
+                        UNION
+                        SELECT e.target_id FROM brain.graph_edges e WHERE {scope}
+                    ) ends) AS nodes
+        """,
+        "seeds": f"""
+            SELECT e.source_id, e.target_id
+            FROM brain.graph_edges e
+            WHERE {scope}
+            ORDER BY e.created_at DESC, e.id DESC
+            LIMIT :seed_n
+        """,
+        # Each frontier memory's strongest links to memories not held yet. The held ones are excluded before the
+        # ranking: a link back into the drawing, or a second link to one neighbour, must not use up a slot.
+        "grow": f"""
+            SELECT other_id, MAX(weight) AS weight
+            FROM (
+                SELECT other_id, weight,
+                       ROW_NUMBER() OVER (PARTITION BY node_id ORDER BY weight DESC, other_id) AS pick
+                FROM (
+                    SELECT node_id, other_id, MAX(weight) AS weight
+                    FROM (
+                        SELECT e.source_id AS node_id, e.target_id AS other_id, COALESCE(e.weight, 0) AS weight
+                        FROM brain.graph_edges e
+                        WHERE {scope} AND e.source_id = ANY(:frontier) AND NOT (e.target_id = ANY(:held))
+                        UNION ALL
+                        SELECT e.target_id, e.source_id, COALESCE(e.weight, 0)
+                        FROM brain.graph_edges e
+                        WHERE {scope} AND e.target_id = ANY(:frontier) AND NOT (e.source_id = ANY(:held))
+                    ) ends
+                    GROUP BY node_id, other_id
+                ) neighbours
+            ) ranked
+            WHERE pick <= :fanout
+            GROUP BY other_id
+            ORDER BY MAX(weight) DESC, other_id
+        """,
+        "among": f"""
+            SELECT {_GRAPH_EDGE_COLUMNS}
+            FROM brain.graph_edges e
+            WHERE {scope}
+              AND e.source_id = ANY(:ids) AND e.target_id = ANY(:ids)
+              AND e.source_id <> e.target_id
+            ORDER BY COALESCE(e.weight, 0) DESC, e.id
+            LIMIT :max_edges
+        """,
+    }
+
+
+def _largest_piece(node_ids: list[str], edges: list[dict]) -> int:
+    """How many of the drawn memories sit in the largest connected piece."""
+    parent = {n: n for n in node_ids}
+
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for e in edges:
+        parent[find(e["source"])] = find(e["target"])
+    sizes: dict[str, int] = {}
+    for n in node_ids:
+        root = find(n)
+        sizes[root] = sizes.get(root, 0) + 1
+    return max(sizes.values(), default=0)
 
 
 async def get_graph_data(
-    session: AsyncSession, agent_id: str, *, limit: int = 200
+    session: AsyncSession, agent_id: str, *, limit: int = 200, include_chunks: bool = False
 ) -> dict:
-    """Return nodes + edges for the graph view: every link when they fit in ``limit * 4``, else the newest third
-    of that budget plus each of their memories' links to its best-linked neighbours (``GRAPH_LINKS_PER_MEMORY``
-    each). An edge whose endpoint row no longer exists is left out, and so is a node left with no edge."""
-    max_edges = max(0, limit * 4)
+    """Return nodes + edges for the graph view: up to ``limit`` memories grown outward from the newest along their
+    strongest links (see ``GRAPH_FANOUT``), and every link among them (strongest first, at most
+    ``limit * GRAPH_EDGES_PER_MEMORY``). Chunks and their links are left out unless ``include_chunks``. An edge whose
+    endpoint row no longer exists is left out, and so is a node left with no edge."""
+    sql = _graph_sql(include_chunks)
+    limit = max(0, limit)
 
-    result = await session.execute(
-        text("SELECT COUNT(*) FROM brain.graph_edges WHERE agent_id = :agent_id"),
-        {"agent_id": agent_id},
-    )
-    total_edges = result.scalar() or 0
-    all_links = total_edges <= max_edges
+    totals = (await session.execute(text(sql["totals"]), {"agent_id": agent_id})).one()
+    total_edges = totals.edges or 0
+    total_nodes = totals.nodes or 0
 
-    recent_n = max_edges if all_links else max_edges // 3  # max_edges is 0 or at least 4
-    result = await session.execute(text(_RECENT_EDGES_SQL), {"agent_id": agent_id, "recent_n": recent_n})
-    recent_raw = result.fetchall()
-    linked_raw = []
-    linked_n = max_edges - len(recent_raw)
-    if not all_links and recent_raw and linked_n > 0:
-        result = await session.execute(
-            text(_LINKED_EDGES_SQL),
-            {
-                "agent_id": agent_id,
-                "recent_ids": [e.id for e in recent_raw],
-                "per_memory": GRAPH_LINKS_PER_MEMORY,
-                "linked_n": linked_n,
-            },
+    chosen: list = []
+    held: set = set()
+    if limit:
+        seeds = await session.execute(text(sql["seeds"]), {"agent_id": agent_id, "seed_n": GRAPH_SEED_MEMORIES})
+        for row in seeds:
+            for node_id in (row.source_id, row.target_id):
+                if node_id not in held and len(chosen) < min(limit, GRAPH_SEED_MEMORIES):
+                    held.add(node_id)
+                    chosen.append(node_id)
+    frontier = list(chosen)
+    for _ in range(GRAPH_MAX_ROUNDS):
+        if not frontier or len(chosen) >= limit:
+            break
+        grown = await session.execute(
+            text(sql["grow"]),
+            {"agent_id": agent_id, "frontier": frontier, "held": chosen, "fanout": GRAPH_FANOUT},
         )
-        linked_raw = result.fetchall()
-    recent_times = {str(e.id): e.created_at for e in recent_raw}
+        frontier = [r.other_id for r in grown][: limit - len(chosen)]
+        held.update(frontier)
+        chosen.extend(frontier)
+
+    max_edges = limit * GRAPH_EDGES_PER_MEMORY
+    edge_rows = []
+    if chosen:
+        result = await session.execute(
+            text(sql["among"]), {"agent_id": agent_id, "ids": chosen, "max_edges": max_edges + 1}
+        )
+        edge_rows = result.fetchall()
+    edges_truncated = len(edge_rows) > max_edges
+    edge_rows = edge_rows[:max_edges]
 
     edges = []
     node_ids: set[str] = set()
-    seen_edges: set[str] = set()
-    for e in [*recent_raw, *linked_raw]:
-        if str(e.id) in seen_edges:
-            continue
-        seen_edges.add(str(e.id))
+    for e in edge_rows:
         src = str(e.source_id)
         tgt = str(e.target_id)
         node_ids.add(src)
@@ -347,6 +381,7 @@ async def get_graph_data(
                     "type": node_type,
                     "label": row.label or "",
                     "category": row.category,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
                 })
 
     # An edge whose endpoint row is gone cannot be drawn; a node then left without an edge is not shown either.
@@ -354,9 +389,6 @@ async def get_graph_data(
     edges = [e for e in edges if e["source"] in found and e["target"] in found]
     drawn = {e["source"] for e in edges} | {e["target"] for e in edges}
     nodes = [n for n in nodes if n["id"] in drawn]
-    shown_times = [recent_times[e["id"]] for e in edges if e["id"] in recent_times]
-    recent_shown = len(shown_times)
-    shown_times = [t for t in shown_times if t is not None]
 
     # Orphan counts (nodes with no edges at all — query source tables)
     orphan_counts: dict[str, int] = {}
@@ -393,12 +425,10 @@ async def get_graph_data(
             "displayed_edges": len(edges),
             "node_count": len(nodes),
             "orphan_counts": orphan_counts,
-            "all_links": all_links,
-            "recent_edges": recent_shown,
-            "linked_edges": len(edges) - recent_shown,
-            "links_per_memory": GRAPH_LINKS_PER_MEMORY,
-            "recent_from": min(shown_times).isoformat() if shown_times else None,
-            "recent_to": max(shown_times).isoformat() if shown_times else None,
+            "total_nodes": total_nodes,
+            "largest_piece": _largest_piece([n["id"] for n in nodes], edges),
+            "chunks_included": include_chunks,
+            "edges_truncated": edges_truncated,
         },
     }
 
