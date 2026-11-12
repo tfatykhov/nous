@@ -75,9 +75,11 @@ def build_commitment_routes(*, database: Any, settings: Any) -> list[Route]:
         status, reason = _CLOSES[verb]
         try:
             body = await request.json()
-        except Exception:
+        except ValueError:
             body = None
         actor = body.get("actor") if isinstance(body, dict) else None
+        if not actor:
+            logger.warning("F111: the close of %s names no actor; none is recorded", format_short_id(short_id))
         evidence = {"actor": clean_text(str(actor))[:_ACTOR_MAX]} if actor else None
         try:
             row, changed = await store.mark(short_id, status, close_reason=reason, evidence=evidence)

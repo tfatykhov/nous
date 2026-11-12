@@ -1429,6 +1429,8 @@ async def main() -> None:
         owner_chat_id=parse_chat_id(_settings.telegram_chat_id),
         owner_route_secret=os.environ.get("NOUS_OWNER_ROUTE_SECRET"),
     )
+    if not bot.owner_route_secret:
+        logger.warning("F111: NOUS_OWNER_ROUTE_SECRET is not set, so /drop and /done will be refused by the API")
     try:
         await bot.start()
     finally:

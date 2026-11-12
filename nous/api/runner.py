@@ -1775,13 +1775,19 @@ class AgentRunner:
 
     async def close(self) -> None:
         """Clean up API client (skip if shared — caller manages lifecycle), after the promise gate's work in flight:
-        each run is bounded by ``PROMISE_GATE_TIMEOUT_SECONDS``, so wait that long, then cancel what is left."""
-        pending = set(self._promise_gate_tasks)
-        if pending:
-            _done, left = await asyncio.wait(pending, timeout=PROMISE_GATE_TIMEOUT_SECONDS)
-            for task in left:
-                task.cancel()
-            await asyncio.gather(*left, return_exceptions=True)
+        a run and then its error row are each bounded by ``PROMISE_GATE_TIMEOUT_SECONDS``, so wait up to twice that
+        (an error row started during the wait included), then cancel what is left."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 2 * PROMISE_GATE_TIMEOUT_SECONDS
+        while self._promise_gate_tasks:
+            pending = set(self._promise_gate_tasks)
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                break
+            await asyncio.wait(pending, timeout=remaining)
         if self._api and not self._api_shared:
             await self._api.close()
         self._api = None
@@ -5183,15 +5189,21 @@ Rules:
                 PROMISE_GATE_TIMEOUT_SECONDS,
                 path,
             )
-            return None
         except Exception:
             logger.warning("F111 promise gate failed on a %s turn; the reply is unchanged", path, exc_info=True)
-            self._track_promise_gate_task(self._log_promise_gate_error(gate, path, session_id, turn_id, context_kind))
-            return None
-        return outcome.footer
+        else:
+            return outcome.footer
+        # The turn still counts in the gate's log: its rows and log row were rolled back with the failed run.
+        self._track_promise_gate_task(self._log_promise_gate_error(gate, path, session_id, turn_id, context_kind))
+        return None
 
     async def _log_promise_gate_error(
-        self, gate: PromiseGate, path: str, session_id: str | None, turn_id: str, context_kind: str | None
+        self,
+        gate: PromiseGate,
+        path: Literal["stream", "run_turn"],
+        session_id: str | None,
+        turn_id: str,
+        context_kind: str | None,
     ) -> None:
         """The gate's ``outcome='error'`` row, bounded like the run. Never raises (``log_error`` logs its own
         failure)."""

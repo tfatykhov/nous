@@ -198,7 +198,7 @@ def _due_at(sentence: str, now: datetime, default_minutes: int) -> tuple[datetim
             return now + timedelta(minutes=min(amount * unit_minutes, _REL_MAX_MINUTES)), True
     if _WITHIN_HOUR_RE.search(sentence):
         return now + timedelta(hours=1), True
-    default = now + timedelta(minutes=default_minutes), False
+    default = (now + timedelta(minutes=default_minutes), False)
     if _UNBOUND_DATE_RE.search(sentence):
         return default
     iso = _ISO_DATE_RE.search(sentence)

@@ -389,6 +389,7 @@ async def test_a_slow_gate_times_out_the_reply_goes_out_and_the_gate_is_stopped_
     assert shown == NOV10["reply"] and "took longer than" in caplog.text
     await asyncio.sleep(0.4)  # past the store's 0.3 s write
     assert not store.finished.is_set() and store.rows == {} and not runner._promise_gate_tasks
+    assert [log["outcome"] for log in store.logs] == ["error"]  # the turn still counts in the gate's log
 
 
 class _HungStore(FakeStore):
@@ -455,6 +456,7 @@ async def test_a_hung_shadow_gate_write_does_not_outlive_its_bound(monkeypatch, 
         await runner.run_turn("s-hung", "go")
         await asyncio.sleep(0.3)
     assert store.running == 0 and not runner._promise_gate_tasks and "was stopped" in caplog.text
+    assert [log["outcome"] for log in store.logs] == ["error"]
 
 
 async def test_gate_writes_share_a_bounded_number_of_slots(monkeypatch):
@@ -482,7 +484,9 @@ async def test_close_drains_the_gate_work_in_flight(monkeypatch):
     await runner.run_turn("s-close-drain", "go")
     assert runner._promise_gate_tasks
     await runner.close()
+    # The run was stopped at its bound and the error row it then started was waited for too.
     assert not runner._promise_gate_tasks and store.running == 0
+    assert [log["outcome"] for log in store.logs] == ["error"]
 
 
 async def test_a_cancelled_turn_is_still_cancelled_while_the_gate_runs():
