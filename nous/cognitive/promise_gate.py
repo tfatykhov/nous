@@ -47,19 +47,50 @@ _FUTURE_RE = re.compile(
 
 # Strong deferral markers: any one suffices.
 _STRONG_RES = [
-    re.compile(r"\b(?:at|by|around|before)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|z|utc|gmt)?\b", re.I),
-    re.compile(r"\b\d{1,2}:\d{2}\s*(?:z|utc|gmt|am|pm)?\b", re.I),
+    # A number is a time only with am/pm or a zone: "by 10 percent" and "at 3:1" are not deadlines.
+    re.compile(r"\b(?:at|by|around|before)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|z|utc|gmt)\b", re.I),
+    re.compile(r"\b\d{1,2}:\d{2}\s*(?:z|utc|gmt|am|pm)\b", re.I),
     re.compile(r"\b(?:tomorrow|tonight|this\s+(?:evening|afternoon|weekend)|next\s+(?:week|month))\b", re.I),
     re.compile(
         r"\b(?:by|on|this|next|until)\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday"
         r"|end\s+of\s+(?:day|week)|eod|eow)\b",
         re.I,
     ),
-    re.compile(r"\b\d{4}-\d{2}-\d{2}\b"),
+    re.compile(r"\b(?:on|by|before|until)\s+\d{4}-\d{2}-\d{2}\b", re.I),  # not "the 2026-11-10 snapshot"
     re.compile(r"\bin\s+(?:\d+|an?|one|two|a\s+few|half\s+an)\s+(?:minute|min|hour|hr|day|week)s?\b", re.I),
     re.compile(r"\bwithin\s+(?:the|an?|\d+)\s*(?:minute|min|hour|hr|day)s?\b", re.I),
     re.compile(r"\bnext\s+step\b", re.I),
 ]
+# What may follow a future form and make it no promise of the agent's: a negation ("I will not restart it"), filler
+# ("I'll be honest", "we'll see"), and for the passive form a third party ("will be sent by the vendor").
+_NEGATED_RE = re.compile(r"\s+(?:not|never)\b", re.I)
+_FILLER_RE = re.compile(
+    r"\s+(?:be\s+(?:honest|frank|candid|clear|brief|upfront)|see\b(?!\s+to\b)|admit|bet|grant)\b", re.I
+)
+_THIRD_PARTY_RE = re.compile(
+    r"\s+by\s+(?!(?:the\s+)?(?:end|close|start)\b|eod\b|eow\b|tomorrow|tonight|today|noon|midnight|next\b|this\b"
+    r"|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d)\w",
+    re.I,
+)
+# "Next step" whose subject is the owner ("Next step: you approve the PR", "Next step is yours"): not a promise.
+_NEXT_STEP_YOURS_RE = re.compile(
+    r"^\s*(?:the\s+)?next\s+step\s*(?:is\b|:)?\s*(?:(?:for|on)\s+)?(?:you|yours|your)\b", re.I
+)
+
+
+def _agent_future_form(sentence: str) -> bool:
+    """True when some future form in the sentence is the agent's own: not negated, not filler, and (passive) not
+    done by someone else."""
+    for m in _FUTURE_RE.finditer(sentence):
+        rest = sentence[m.end() :]
+        if _NEGATED_RE.match(rest) or _FILLER_RE.match(rest):
+            continue
+        if m.group(0).lower().startswith("will") and _THIRD_PARTY_RE.match(rest):
+            continue
+        return True
+    return False
+
+
 # Consent by silence: strong, and recorded as consent='silence'.
 _SILENCE_RE = re.compile(
     r"\b(?:unless\s+you\s+(?:object|say\s+otherwise|prefer\s+otherwise|tell\s+me(?:\s+otherwise)?|stop\s+me"
@@ -214,10 +245,11 @@ class PromiseDetector:
             sentence = raw.strip(" \t-*•")
             if not sentence or sentence.endswith("?"):
                 continue
-            if not _FUTURE_RE.search(sentence) or _OFFER_RE.search(sentence):
+            probe = _NEXT_STEP_YOURS_RE.sub("", sentence)  # the owner's next step is no future form or marker
+            if not _agent_future_form(probe) or _OFFER_RE.search(sentence):
                 continue
             silence = _SILENCE_RE.search(sentence) is not None
-            strong = silence or any(r.search(sentence) for r in _STRONG_RES)
+            strong = silence or any(r.search(probe) for r in _STRONG_RES)
             awaiting = _AWAITING_USER_RE.search(sentence) is not None
             weak = _WEAK_RE.search(sentence) is not None or awaiting
             if not (strong or (weak and _VERB_RE.search(sentence))):

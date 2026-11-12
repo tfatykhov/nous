@@ -81,6 +81,46 @@
     },
     {
       "text": "I'll answer your question first."
+    },
+    {
+      "text": "I will not restart the service today.",
+      "origin": "review r1 finding 6"
+    },
+    {
+      "text": "I'll never send that email later.",
+      "origin": "review r1 finding 6"
+    },
+    {
+      "text": "I'll reduce the batch size by 10 percent.",
+      "origin": "review r1 finding 6"
+    },
+    {
+      "text": "I'll keep the ratio at 3:1.",
+      "origin": "review r1 finding 6"
+    },
+    {
+      "text": "I'll use the 2026-11-10 snapshot for the comparison.",
+      "origin": "review r1 finding 6"
+    },
+    {
+      "text": "The report will be sent by the vendor tomorrow.",
+      "origin": "review r1 finding 6"
+    },
+    {
+      "text": "Next step: you approve the PR and run the migration.",
+      "origin": "review r1 finding 6"
+    },
+    {
+      "text": "Next step is yours.",
+      "origin": "review r1 finding 6"
+    },
+    {
+      "text": "I'll be honest, tomorrow is a holiday.",
+      "origin": "review r1 finding 6"
+    },
+    {
+      "text": "We'll see tomorrow.",
+      "origin": "review r1 finding 6"
     }
   ]
 }

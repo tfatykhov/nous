@@ -118,6 +118,18 @@
     {
       "text": "I’ll restart the worker on 2026-11-12.",
       "origin": "constructed"
+    },
+    {
+      "text": "I'll be honest: I'll redeploy the service tomorrow.",
+      "origin": "review r1 finding 6 (the narrowed rules keep these)"
+    },
+    {
+      "text": "I'll see to the rollback tomorrow.",
+      "origin": "review r1 finding 6 (the narrowed rules keep these)"
+    },
+    {
+      "text": "The fix will be deployed by 18:00 UTC.",
+      "origin": "review r1 finding 6 (the narrowed rules keep these)"
     }
   ]
 }
