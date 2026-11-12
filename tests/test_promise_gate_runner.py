@@ -511,6 +511,22 @@ async def test_close_drains_the_gate_work_in_flight(monkeypatch):
     assert [log["outcome"] for log in store.logs] == ["error"]
 
 
+async def test_close_drains_the_gate_work_of_the_forks_too(monkeypatch):
+    """Re-review F: each fork kept its own task set, so the heartbeat's gate writes (they run on a fork) in flight at
+    shutdown were not awaited by the main runner's close()."""
+    monkeypatch.setattr(runner_module, "PROMISE_GATE_TIMEOUT_SECONDS", 0.2)
+    store = _HungStore()
+    runner, _ = _runner("shadow", store)
+    fork = runner.fork(MagicMock())
+    fork._tool_loop = AsyncMock(return_value=(NOV10["reply"], [], {"input_tokens": 1, "output_tokens": 1}, []))
+    await fork.run_turn("s-fork-drain", "go")
+    assert runner._promise_gate_tasks  # the fork's work is the runner's to drain
+    await runner.close()
+    assert not runner._promise_gate_tasks and store.running == 0
+    assert [log["outcome"] for log in store.logs] == ["error"]
+    await fork.close()
+
+
 async def test_a_cancelled_turn_is_still_cancelled_while_the_gate_runs():
     store = _SlowStore()
     runner, _ = _runner("warn", store)

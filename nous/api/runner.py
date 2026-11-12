@@ -1757,6 +1757,7 @@ class AgentRunner:
         forked._tool_call_recorder = self._tool_call_recorder  # F108: and set_tool_call_recorder propagates a later one
         forked._promise_gate = self._promise_gate  # F111: and set_promise_gate propagates a later one
         forked._promise_gate_slots = self._promise_gate_slots  # F111: one cap for the process's gate writes
+        forked._promise_gate_tasks = self._promise_gate_tasks  # F111: and one set, so close() drains the forks' too
         # F035.4: the heartbeat's checks, triage and callbacks run on a fork; sharing
         # the logger gives their model calls context_log rows. It was withheld after the
         # April 2026 triage hang (0d1d45e3), when the logger's fire-and-forget writes held
