@@ -356,6 +356,8 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_PROMISE_GATE_DEFAULT_DUE_MINUTES` | `60` | F111: the `due_at` of a promise that names no time the detector can resolve |
 | `NOUS_PROMISE_GATE_GRACE_SECONDS` | `900` | F111: stored on each gate row (`grace_seconds`); the PR B watcher reports a row only after `due_at` plus this |
 | `NOUS_PROMISE_GATE_CLASSIFIER_ENABLED` | `false` | F111: stage 2 (a model call on stage-1 hits). Not built; read by nothing yet |
+| `NOUS_OWNER_ROUTE_SECRET_SHA256` | (empty) | F111, API process: the hex SHA-256 of the owner's secret for `POST /commitments/{id}/drop\|done`. Unset, those routes refuse every call, so Telegram `/drop` and `/done` answer "closing commitments is not set up". Only the digest goes here: the agent's `run_python` runs in this process and could read a plaintext value. Make it with `printf %s "$SECRET" \| sha256sum` |
+| `NOUS_OWNER_ROUTE_SECRET` | (empty) | F111, Telegram bot process only (`python -m nous.telegram_bot`, not a `Settings` field): the secret the bot sends as `X-Nous-Owner-Secret` on `/drop` and `/done`. Never set it on the API service; if it is set there anyway, the API logs a warning and `bash` does not pass it to its commands. Both lines must be added to the deployment's compose file (`telegram` and `nous` services) |
 | `NOUS_ACTION_GATING_ENABLED` | `true` | Enable action gating (F026) |
 | `NOUS_ACTION_GATING_MODE` | `enforce` | Action gating mode (shadow/warn/enforce) |
 | `NOUS_ACTION_GATING_MODEL` | `claude-haiku-5-5` | Model for Tier 3 LLM gate |

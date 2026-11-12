@@ -2114,6 +2114,10 @@ class Settings(BaseSettings):
     promise_gate_default_due_minutes: int = Field(default=60, ge=1)  # due_at when a promise names no time
     promise_gate_grace_seconds: int = Field(default=900, ge=0)  # stored on each row; the PR B watcher reads it
     promise_gate_classifier_enabled: bool = False  # stage 2 (a model call on stage-1 hits): not built in PR A
+    # F111: the hex SHA-256 of the secret the Telegram bot sends to the owner's /drop and /done routes
+    # (NOUS_OWNER_ROUTE_SECRET, set on the bot only). Only the digest lives in this process: the agent's run_python
+    # runs here and could read anything else. Unset, those routes refuse every call.
+    owner_route_secret_sha256: str = ""
 
     action_gating_enabled: bool = True
     action_gating_mode: Literal["shadow", "warn", "enforce"] = "enforce"

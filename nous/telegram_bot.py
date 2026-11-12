@@ -235,6 +235,9 @@ def describe_commitment_close(status: int, body: dict, drop: bool, short_id: int
         return f"No commitment {label}."
     if status == 400:
         return "That is not a commitment id (use the form C-42)."
+    if status == 403:
+        logger.warning("F111: the commitment route refused the bot; set NOUS_OWNER_ROUTE_SECRET to match the API")
+        return f"Could not close {label}: closing commitments is not set up."
     logger.warning("F111: /%s %s answered %s", "drop" if drop else "done", label, status)
     return f"Could not close {label} right now; try again."
 
@@ -693,8 +696,11 @@ class NousTelegramBot:
         attachments_enabled: bool = False,
         attachments_default_prompt: str = "What can you tell me about this?",
         owner_chat_id: int | None = None,
+        owner_route_secret: str | None = None,
     ):
         self.bot_token = bot_token
+        # F111: sent to the owner's commitment routes only (X-Nous-Owner-Secret); the API holds just its SHA-256.
+        self.owner_route_secret = owner_route_secret or None
         self.nous_url = nous_url.rstrip("/")
         self.allowed_users = allowed_users
         self.attachments_enabled = attachments_enabled
@@ -894,13 +900,16 @@ class NousTelegramBot:
             return user_id in self.allowed_users
         return user_id == self.owner_chat_id
 
-    async def _owner_post(self, path: str, payload: dict[str, Any]) -> tuple[int, dict]:
+    async def _owner_post(
+        self, path: str, payload: dict[str, Any], headers: dict[str, str] | None = None
+    ) -> tuple[int, dict]:
         """POST to a REST owner route: ``(status, body)``; status 0 when the server could not be reached."""
         try:
             response = await self._http.post(
                 f"{self.nous_url}{path}",
                 json=payload,
                 timeout=httpx.Timeout(connect=10, read=OWNER_REQUEST_TIMEOUT, write=10, pool=10),
+                **({"headers": headers} if headers else {}),
             )
         except Exception as exc:
             logger.warning("owner action request failed (%s)", type(exc).__name__)
@@ -1034,7 +1043,9 @@ class NousTelegramBot:
             if short_id is None:
                 return False  # not a commitment id: it was never ours (and no argument reaches a URL)
             status, body = await self._owner_post(
-                f"/commitments/{short_id}/{command[1:]}", {"actor": f"telegram:{user_id}"}
+                f"/commitments/{short_id}/{command[1:]}",
+                {"actor": f"telegram:{user_id}"},
+                headers={"X-Nous-Owner-Secret": self.owner_route_secret} if self.owner_route_secret else None,
             )
             # A 404 is answered too (unlike /cancel_intention): the id came from a footer, and passed on to chat the
             # model could claim it dropped something.
@@ -1416,6 +1427,7 @@ async def main() -> None:
         attachments_enabled=_settings.attachments_enabled,
         attachments_default_prompt=_settings.attachments_default_prompt,
         owner_chat_id=parse_chat_id(_settings.telegram_chat_id),
+        owner_route_secret=os.environ.get("NOUS_OWNER_ROUTE_SECRET"),
     )
     try:
         await bot.start()

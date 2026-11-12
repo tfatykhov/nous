@@ -334,21 +334,34 @@ class CommitmentStore:
         return [_row(r) for r in rows]
 
     async def mark(
-        self, short_id: int, status: str, *, close_reason: str | None = None
+        self,
+        short_id: int,
+        status: str,
+        *,
+        close_reason: str | None = None,
+        evidence: dict[str, Any] | None = None,
     ) -> tuple[Commitment | None, bool]:
         """Move a live row to a closing status: ``(row, changed)``. ``(row, False)`` when the row exists but is no
-        longer live (a repeat /drop changes nothing), ``(None, False)`` when no row has that id."""
+        longer live (a repeat /drop changes nothing), ``(None, False)`` when no row has that id. ``evidence`` (e.g.
+        who closed it) is merged into the row's ``evidence``."""
         if status not in CLOSING_STATUSES:
             raise ValueError(f"status {status!r} is not a closing status")
         async with self._db.session() as session:
             result = await session.execute(
                 text(
                     "UPDATE brain.commitments SET status = :status, close_reason = :reason, closed_at = now(), "
-                    "updated_at = now() "
+                    "updated_at = now(), "
+                    "evidence = coalesce(evidence, '{}'::jsonb) || coalesce(CAST(:evidence AS JSONB), '{}'::jsonb) "
                     "WHERE agent_id = :agent_id AND short_id = :short_id AND status IN ('open', 'backed', 'proposed') "
                     f"RETURNING {_COLUMNS}"
                 ),
-                {"agent_id": self._agent_id, "short_id": short_id, "status": status, "reason": close_reason},
+                {
+                    "agent_id": self._agent_id,
+                    "short_id": short_id,
+                    "status": status,
+                    "reason": close_reason,
+                    "evidence": json.dumps(evidence) if evidence is not None else None,
+                },
             )
             row = result.first()
             await session.commit()

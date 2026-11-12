@@ -9,10 +9,12 @@ dispatcher, authorization and claim verifier, and an in-memory ledger store with
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -32,6 +34,15 @@ from nous.cognitive.schemas import Assessment, FrameSelection, ToolResult, TurnC
 from nous.config import Settings
 
 FIXTURES = Path(__file__).parent / "fixtures" / "promise_gate"
+OWNER_SECRET = "owner-only-test-value"
+OWNER_HEADERS = {"X-Nous-Owner-Secret": OWNER_SECRET}
+
+
+def _route_settings(agent: str, secret: str | None = OWNER_SECRET) -> SimpleNamespace:
+    digest = hashlib.sha256(secret.encode()).hexdigest() if secret else ""
+    return SimpleNamespace(agent_id=agent, owner_route_secret_sha256=digest)
+
+
 NOV10 = json.loads((FIXTURES / "nov10_hero.json").read_text())
 OCT08 = json.loads((FIXTURES / "oct08_items_1_3.json").read_text())
 
@@ -666,12 +677,14 @@ async def test_drop_of_an_unknown_id_is_answered_not_passed_to_chat():
 async def test_the_route_answers_400_404_and_500_without_a_database(monkeypatch):
     from nous.api import commitment_routes
 
-    async def boom(self, short_id, status, *, close_reason=None):
+    async def boom(self, short_id, status, *, close_reason=None, evidence=None):
         raise RuntimeError("database is down")
 
     monkeypatch.setattr(commitment_routes.CommitmentStore, "mark", boom)
-    app = Starlette(routes=build_commitment_routes(database=None, settings=MagicMock(agent_id="a")))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+    app = Starlette(routes=build_commitment_routes(database=None, settings=_route_settings("a")))
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://t", headers=OWNER_HEADERS
+    ) as client:
         bad = await client.post("/commitments/nope/drop")
         verb = await client.post("/commitments/C-1/explode")
         down = await client.post("/commitments/C-1/done")
@@ -700,8 +713,7 @@ async def test_the_drop_route_cancels_the_row_and_the_watcher_never_sees_it(db):
 
     agent = f"pg-drop-{uuid.uuid4().hex[:8]}"
     store = CommitmentStore(db, agent)
-    settings = MagicMock(agent_id=agent)
-    app = Starlette(routes=build_commitment_routes(database=db, settings=settings))
+    app = Starlette(routes=build_commitment_routes(database=db, settings=_route_settings(agent)))
     try:
         row = await store.create_idempotent(
             source_kind="chat_stream",
@@ -712,7 +724,9 @@ async def test_the_drop_route_cancels_the_row_and_the_watcher_never_sees_it(db):
             turn_id="t1",
             consent="silence",
         )
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://t", headers=OWNER_HEADERS
+        ) as client:
             first = await client.post(f"/commitments/{row.label}/drop", json={"actor": "telegram:42"})
             again = await client.post(f"/commitments/{row.short_id}/drop", json={})
             missing = await client.post("/commitments/C-999999999/drop", json={})
@@ -727,7 +741,99 @@ async def test_the_drop_route_cancels_the_row_and_the_watcher_never_sees_it(db):
         assert (missing.status_code, bad.status_code, verb.status_code) == (404, 400, 404)
         later = datetime.now(UTC) + timedelta(hours=2)
         assert await store.list_watchable(now=later) == []  # a dropped row is never pinged
+        async with db.session() as s:
+            evidence = (
+                await s.execute(text("SELECT evidence->>'actor' FROM brain.commitments WHERE id = :id"), {"id": row.id})
+            ).scalar()
+        assert evidence == "telegram:42"  # review finding 5: who closed it is recorded
     finally:
         async with db.session() as s:
             await s.execute(text("DELETE FROM brain.commitments WHERE agent_id = :a"), {"a": agent})
             await s.commit()
+
+
+# ---- review finding 5: the owner routes need the owner's secret; the agent's shell never sees it -------------------
+
+
+async def _close(settings, headers=None):
+    """POST /commitments/C-7/done with a store whose mark records its arguments."""
+    from nous.api import commitment_routes
+
+    seen: list = []
+
+    class Store(commitment_routes.CommitmentStore):
+        async def mark(self, short_id, status, *, close_reason=None, evidence=None):
+            seen.append((short_id, status, close_reason, evidence))
+            return SimpleNamespace(label="C-0007", status=status), True
+
+    original = commitment_routes.CommitmentStore
+    commitment_routes.CommitmentStore = Store
+    try:
+        app = Starlette(routes=build_commitment_routes(database=None, settings=settings))
+    finally:
+        commitment_routes.CommitmentStore = original
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+        response = await client.post("/commitments/C-7/done", json={"actor": "telegram:42"}, headers=headers or {})
+    return response, seen
+
+
+@pytest.mark.parametrize(
+    "headers", [None, {"X-Nous-Owner-Secret": "wrong"}, {"X-Nous-Owner-Secret": ""}], ids=["none", "wrong", "empty"]
+)
+async def test_the_owner_route_refuses_a_call_without_the_secret(headers, caplog):
+    with caplog.at_level(logging.WARNING, logger="nous.api.commitment_routes"):
+        response, seen = await _close(_route_settings("a"), headers)
+    assert response.status_code == 403 and seen == [] and "refused a commitment close" in caplog.text
+
+
+async def test_the_owner_route_with_the_secret_closes_and_records_the_actor():
+    response, seen = await _close(_route_settings("a"), OWNER_HEADERS)
+    assert response.status_code == 200 and response.json()["status"] == "done"
+    assert seen == [(7, "done", "owner_done", {"actor": "telegram:42"})]
+
+
+async def test_the_owner_route_refuses_everything_when_no_secret_is_set(caplog):
+    with caplog.at_level(logging.WARNING, logger="nous.api.commitment_routes"):
+        response, seen = await _close(_route_settings("a", secret=None), OWNER_HEADERS)
+    assert response.status_code == 403 and seen == []
+    assert "NOUS_OWNER_ROUTE_SECRET_SHA256 is not set" in caplog.text
+
+
+def test_the_api_settings_hold_only_the_digest():
+    assert "owner_route_secret" not in Settings.model_fields
+    assert Settings.model_fields["owner_route_secret_sha256"].default == ""
+
+
+async def test_the_bot_sends_the_secret_to_the_commitment_route_only():
+    bot = _bot({"/commitments/42/drop": (200, {"short_id": "C-0042", "status": "cancelled", "changed": True})})
+    bot.owner_route_secret = OWNER_SECRET
+    sent_headers: list = []
+    post = bot._http.post
+
+    async def recording_post(url, json=None, timeout=None, headers=None):  # noqa: A002 - httpx's keyword
+        sent_headers.append(headers)
+        return await post(url, json=json, timeout=timeout)
+
+    bot._http.post = recording_post
+    await bot._handle_update(_message("/drop C-0042"))
+    assert sent_headers == [OWNER_HEADERS] and _sent(bot) == ["Dropped C-0042; it will not be followed up."]
+
+
+async def test_a_refused_bot_is_told_closing_is_not_set_up():
+    bot = _bot({"/commitments/42/drop": (403, {"error": "forbidden"})})
+    await bot._handle_update(_message("/drop C-0042"))
+    assert _sent(bot) == ["Could not close C-0042: closing commitments is not set up."]
+
+
+async def test_the_agents_bash_never_inherits_the_owner_secret(monkeypatch, tmp_path):
+    """The secret belongs to the bot's process; should it be set in the API's by mistake, bash still does not see
+    it (run_python runs in this process, which is why the API holds only the digest)."""
+    from nous.api.builtin_tools import bash_tool
+
+    monkeypatch.setenv("NOUS_OWNER_ROUTE_SECRET", OWNER_SECRET)
+    monkeypatch.setenv("NOUS_OTHER_VALUE_FOR_TEST", "kept")
+    out = await bash_tool(
+        'echo "[${NOUS_OWNER_ROUTE_SECRET:-absent}] [$NOUS_OTHER_VALUE_FOR_TEST]"', _workspace_dir=str(tmp_path)
+    )
+    text = out["content"][0]["text"]
+    assert "[absent] [kept]" in text and OWNER_SECRET not in text
