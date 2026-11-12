@@ -270,6 +270,7 @@ class PromiseDetector:
             return []
         now = now or datetime.now(UTC)
         promises: list[Promise] = []
+        cleaned_by_sentence: dict[str, str] = {}  # a sentence repeated in the reply is cleaned once
         for raw in _SENTENCE_SPLIT_RE.split(_strip_non_prose(response_text)[-SCAN_MAX_CHARS:]):
             sentence = raw.strip(" \t-*•")
             if not sentence or sentence.endswith("?"):
@@ -286,7 +287,9 @@ class PromiseDetector:
             due_at, parsed = _due_at(sentence, now, self._default_due_minutes)
             # Cleaned and redacted whole before either cut: a key across a cut would leave a fragment that no
             # pattern matches.
-            cleaned = clean_text(sentence)
+            cleaned = cleaned_by_sentence.get(sentence)
+            if cleaned is None:
+                cleaned = cleaned_by_sentence[sentence] = clean_text(sentence)
             promises.append(
                 Promise(
                     text=cleaned[:SENTENCE_MAX],
