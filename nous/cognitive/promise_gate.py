@@ -152,18 +152,44 @@ def _participle(verb: str) -> str:
 # be deployed by tomorrow."), when _due_at reads that deadline (scan checks): an unread one ("by morning", "by November
 # 20") would get the default due, and the watcher would ping long before the stated date. The verb must be in
 # ACTION_VERBS and the "by" must name a time, never someone ("will be reviewed by Tim"); a past passive ("was merged by
-# Tim") has no future form.
-_PASSIVE_DEADLINE_RE = re.compile(
+# Tim") has no future form. Two patterns, never one spanning both (a lazy gap between them rescanned the clause from
+# every head: quadratic, on the event loop): _passive_deadline matches the head, then looks for the deadline once after
+# it, in the same clause.
+_PASSIVE_HEAD_RE = re.compile(
     rf"\b(?:will|{_APOS}ll|(?:is|are|{_APOS}s|{_APOS}re)\s+going\s+to)\s+be\s+"
     r"(?:"
     + "|".join(re.escape(_participle(v)).replace(r"\ ", r"\s+") for v in sorted(ACTION_VERBS, key=len, reverse=True))
-    + r")\b[^.!?;]*?\bby\s+(?:"
+    + r")\b",
+    re.IGNORECASE,
+)
+_PASSIVE_TAIL_RE = re.compile(
+    r"by\s+(?:"
     r"(?:the\s+)?(?:morning|tonight|tomorrow|noon|midnight|eod|eow|end\s+of\s+(?:the\s+)?(?:day|week))\b"
     r"|(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b"
     rf"|{_MONTH}\.?\s+\d{{1,2}}(?:st|nd|rd|th)?\b|\d{{1,2}}(?:st|nd|rd|th)?\s+(?:of\s+)?{_MONTH}"
     r"|\d{4}-\d{2}-\d{2}\b|\d{1,2}(?::\d{2})?\s*(?:am|pm|z|utc|gmt)\b|\d{1,2}:\d{2}\b)",
     re.IGNORECASE,
 )
+_BY_RE = re.compile(r"\bby\b", re.IGNORECASE)
+_CLAUSE_END_RE = re.compile(r"[.!?;]")
+
+
+def _passive_deadline(sentence: str) -> bool:
+    """True when a clause of the sentence has a future passive of an action verb followed by a ``by <time>``. Per
+    clause only the first head is tried (a later one sees a subset of the same "by"s), and each "by" is matched in
+    place: linear in the sentence."""
+    pos = 0
+    while (head := _PASSIVE_HEAD_RE.search(sentence, pos)) is not None:
+        end = _CLAUSE_END_RE.search(sentence, head.end())
+        clause_end = end.start() if end else len(sentence)
+        # The deadline starts in the clause; it may run past a clause mark of its own ("by Nov. 20").
+        for by in _BY_RE.finditer(sentence, head.end(), clause_end):
+            if _PASSIVE_TAIL_RE.match(sentence, by.start()):
+                return True
+        pos = clause_end + 1
+    return False
+
+
 # An offer to the owner is not a promise ("if you want, I can launch it").
 _OFFER_RE = re.compile(
     rf"\b(?:if\s+you(?:{_APOS}d)?\s+(?:want|like|prefer|wish)|want\s+me\s+to|should\s+I|shall\s+I|would\s+you\s+like"
@@ -316,9 +342,7 @@ class PromiseDetector:
                 continue
             probe = _NEXT_STEP_YOURS_RE.sub("", sentence)  # the owner's next step is no future form or marker
             # A future form and a deadline in one, counted only when the deadline is one _due_at reads.
-            passive = (
-                _PASSIVE_DEADLINE_RE.search(probe) is not None and _due_at(sentence, now, self._default_due_minutes)[1]
-            )
+            passive = _passive_deadline(probe) and _due_at(sentence, now, self._default_due_minutes)[1]
             if not (passive or _agent_future_form(probe)) or _OFFER_RE.search(sentence):
                 continue
             silence = _SILENCE_RE.search(sentence) is not None
