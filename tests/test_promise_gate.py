@@ -241,6 +241,19 @@ def test_the_detector_reads_the_last_32_kb_only():
     assert early == [] and len(late) == 1
 
 
+def test_a_long_reply_whose_cut_lands_in_a_code_block_keeps_its_closing_promise():
+    """Re-review A: the raw reply was cut to 32 KB before the code was stripped, so the tail began inside a fence,
+    its closing marker read as an opening one, and the promise after it was dropped as code. Strip first, cap the
+    prose."""
+    from nous.cognitive.promise_gate import SCAN_MAX_CHARS
+
+    code = "print('step')\n" * (42_000 // 14)
+    reply = f"Intro.\n```python\n{code}```\nSummary. I'll check back tomorrow."
+    assert len(reply) > SCAN_MAX_CHARS and reply.rfind("```python") < len(reply) - SCAN_MAX_CHARS
+    [promise] = PromiseDetector().scan(reply, now=NOW)
+    assert promise.text == "I'll check back tomorrow."
+
+
 # ---- 3. resolver -------------------------------------------------------------------------------------------------
 
 # The success text of each backing tool, as its handler writes it (nous/api/tools.py,

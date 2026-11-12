@@ -27,8 +27,9 @@ logger = logging.getLogger(__name__)
 
 DETECTOR_VERSION = "stage1-v1"
 SENTENCE_MAX = 500
-# The detector reads the end of a reply only (where a promise is made): it runs on the event loop, where the gate's
-# timeout cannot stop it, so its cost must not grow with NOUS_MAX_TOKENS.
+# The detector reads the end of a reply's prose only (where a promise is made): it runs on the event loop, where the
+# gate's timeout cannot stop it, so its cost must not grow with NOUS_MAX_TOKENS. The code, quotes and quote blocks are
+# stripped from the whole reply first (linear patterns), so a cut never lands inside a fence.
 SCAN_MAX_CHARS = 32_000
 
 # ---------------------------------------------------------------------------
@@ -253,12 +254,13 @@ class PromiseDetector:
         self._default_due_minutes = default_due_minutes
 
     def scan(self, response_text: str, now: datetime | None = None) -> list[Promise]:
-        """The promises in the last ``SCAN_MAX_CHARS`` of a reply, one per sentence, in order (empty for none)."""
+        """The promises in the last ``SCAN_MAX_CHARS`` of a reply's prose, one per sentence, in order (empty for
+        none)."""
         if not response_text:
             return []
         now = now or datetime.now(UTC)
         promises: list[Promise] = []
-        for raw in _SENTENCE_SPLIT_RE.split(_strip_non_prose(response_text[-SCAN_MAX_CHARS:])):
+        for raw in _SENTENCE_SPLIT_RE.split(_strip_non_prose(response_text)[-SCAN_MAX_CHARS:]):
             sentence = raw.strip(" \t-*•")
             if not sentence or sentence.endswith("?"):
                 continue
