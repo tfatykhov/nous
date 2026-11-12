@@ -130,6 +130,30 @@
     {
       "text": "The fix will be deployed by 18:00 UTC.",
       "origin": "review r1 finding 6 (the narrowed rules keep these)"
+    },
+    {
+      "text": "I'll see that it ships tomorrow.",
+      "origin": "pre-push review of the r1 fixes (the narrowed rules keep these)"
+    },
+    {
+      "text": "I'll ping Prof. Smith tomorrow.",
+      "origin": "pre-push review of the r1 fixes (the narrowed rules keep these)"
+    },
+    {
+      "text": "I'll merge the 2 decision PRs tomorrow.",
+      "origin": "pre-push review of the r1 fixes (the narrowed rules keep these)"
+    },
+    {
+      "text": "The report will be sent by email tomorrow.",
+      "origin": "pre-push review of the r1 fixes (the narrowed rules keep these)"
+    },
+    {
+      "text": "The fix will be deployed by me tomorrow.",
+      "origin": "pre-push review of the r1 fixes (the narrowed rules keep these)"
+    },
+    {
+      "text": "I'll grant you access tomorrow.",
+      "origin": "pre-push review of the r1 fixes (the narrowed rules keep these)"
     }
   ]
 }

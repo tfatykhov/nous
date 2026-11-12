@@ -121,6 +121,14 @@
     {
       "text": "We'll see tomorrow.",
       "origin": "review r1 finding 6"
+    },
+    {
+      "text": "I will no longer send it tomorrow.",
+      "origin": "pre-push review of the r1 fixes"
+    },
+    {
+      "text": "Next step, you'll approve the PR.",
+      "origin": "pre-push review of the r1 fixes"
     }
   ]
 }

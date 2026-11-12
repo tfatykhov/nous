@@ -63,18 +63,21 @@ _STRONG_RES = [
 ]
 # What may follow a future form and make it no promise of the agent's: a negation ("I will not restart it"), filler
 # ("I'll be honest", "we'll see"), and for the passive form a third party ("will be sent by the vendor").
-_NEGATED_RE = re.compile(r"\s+(?:not|never)\b", re.I)
+_NEGATED_RE = re.compile(r"\s+(?:not|never|no\s+longer)\b", re.I)
 _FILLER_RE = re.compile(
-    r"\s+(?:be\s+(?:honest|frank|candid|clear|brief|upfront)|see\b(?!\s+to\b)|admit|bet|grant)\b", re.I
+    r"\s+(?:be\s+(?:honest|frank|candid|clear|brief|upfront)|bet)\b"
+    r"|\s+see\b(?=\s*(?:[,.;:!]|$|(?:tomorrow|later|then|how|what|if|whether)\b))",  # not "see that it ships"
+    re.I,
 )
 _THIRD_PARTY_RE = re.compile(
     r"\s+by\s+(?!(?:the\s+)?(?:end|close|start)\b|eod\b|eow\b|tomorrow|tonight|today|noon|midnight|next\b|this\b"
-    r"|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d)\w",
+    r"|monday|tuesday|wednesday|thursday|friday|saturday|sunday|\d"
+    r"|(?:me|us|e-?mail|mail|slack|telegram|ci|cron|the\s+pipeline)\b)\w",  # a means, or the agent itself
     re.I,
 )
 # "Next step" whose subject is the owner ("Next step: you approve the PR", "Next step is yours"): not a promise.
 _NEXT_STEP_YOURS_RE = re.compile(
-    r"^\s*(?:the\s+)?next\s+step\s*(?:is\b|:)?\s*(?:(?:for|on)\s+)?(?:you|yours|your)\b", re.I
+    r"^\s*(?:the\s+)?next\s+step\s*(?:is\b|[:,])?\s*(?:(?:for|on)\s+)?(?:you|yours|your)\b", re.I
 )
 
 
@@ -133,7 +136,8 @@ _QUOTED_RE = re.compile(r"\"[^\"\n]*\"|“[^“”\n]*”")
 # A sentence ends at . ! ? and a space, but not after an abbreviation ("Dr. Smith", "e.g. bash", "No. 3"): split
 # there and neither half of the promise has both its future form and its marker.
 _SENTENCE_SPLIT_RE = re.compile(
-    r"(?<=[.!?])(?<!\bdr\.)(?<!\bmr\.)(?<!\bms\.)(?<!\bmrs\.)(?<!\bvs\.)(?<!\be\.g\.)(?<!\bi\.e\.)"
+    r"(?<=[.!?])(?<!\bdr\.)(?<!\bmr\.)(?<!\bms\.)(?<!\bmrs\.)(?<!\bprof\.)(?<!\bst\.)(?<!\bvs\.)(?<!\be\.g\.)"
+    r"(?<!\bi\.e\.)"
     r"(?<!\bno\.(?=\s\d))\s+|\n+",
     re.IGNORECASE,
 )
@@ -145,14 +149,21 @@ _CLOCK_RE = re.compile(r"\b(\d{1,2}):(\d{2})\s*(z|utc|gmt)?\b", re.I)
 # A day word binds to a clock time anywhere in its sentence ("Tomorrow I'll relaunch at 18:15 UTC"); a possessive
 # ("tomorrow's run") names a thing, not the day of the deadline.
 _DAY_RE = re.compile(r"\b(today|tonight|tomorrow)\b(?!['’]s)", re.I)
+# A time of day the parser does not read (am/pm, or a colon time without a zone): with one in the sentence, a day
+# word alone does not make a parsed deadline ("at 6 PM UTC tomorrow" is not "now + 1 day").
+_UNREAD_TIME_RE = re.compile(r"\b\d{1,2}(?::\d{2})?\s*(?:am|pm|a\.m\.|p\.m\.)|\b\d{1,2}:\d{2}\b", re.I)
 _ISO_DATE_RE = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 # A date this parser cannot bind to a clock time: with one in the sentence the deadline is the unparsed default,
 # never a parsed "today" (a weekday, "next week", a month-day date, "the day after tomorrow").
+# Whole month names or their abbreviations ("2 decision PRs" names no December).
+_MONTH = (
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|june?|july?|aug(?:ust)?|sept?(?:ember)?|oct(?:ober)?"
+    r"|nov(?:ember)?|dec(?:ember)?)\b"
+)
 _UNBOUND_DATE_RE = re.compile(
     r"\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|weekend|next\s+(?:week|month|year)"
     r"|end\s+of\s+(?:the\s+)?(?:week|month)|eow|day\s+after\s+tomorrow"
-    r"|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?\b"
-    r"|\d{1,2}(?:st|nd|rd|th)?\s+(?:of\s+)?(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b"
+    rf"|{_MONTH}\.?\s+\d{{1,2}}(?:st|nd|rd|th)?\b|\d{{1,2}}(?:st|nd|rd|th)?\s+(?:of\s+)?{_MONTH}\b"
     r"|\d{1,2}/\d{1,2})",
     re.I,
 )
@@ -227,8 +238,8 @@ def _due_at(sentence: str, now: datetime, default_minutes: int) -> tuple[datetim
             # hide the miss).
             return default
         return at + timedelta(days=1), True  # a bare clock time is its next occurrence
-    if iso:
-        return default  # a date without a time it binds to: the deadline within that day is a guess
+    if iso or _UNREAD_TIME_RE.search(sentence):
+        return default  # a date without a time it binds to, or a time it cannot read: either is a guess
     if days == {"tomorrow"}:
         return now + timedelta(days=1), True
     return default

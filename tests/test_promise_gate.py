@@ -119,6 +119,12 @@ DEADLINES = [
     ("I'll send the summary next week at 18:15 UTC.", NOV11_0900 + timedelta(minutes=60), False),
     ("I'll send the summary on Nov 20 at 18:15 UTC.", NOV11_0900 + timedelta(minutes=60), False),
     ("I'll deploy it the day after tomorrow at 18:15 UTC.", NOV11_0900 + timedelta(minutes=60), False),
+    # A time of day the parser does not read (am/pm, no zone) next to "tomorrow": not "now + 1 day", parsed.
+    ("I'll deploy it tomorrow at 6 pm UTC.", NOV11_0900 + timedelta(minutes=60), False),
+    ("I'll relaunch it tomorrow at 18:15.", NOV11_0900 + timedelta(minutes=60), False),
+    # A number before a word is no month-day date: "tomorrow" still binds.
+    ("I'll merge the 2 decision PRs tomorrow.", datetime(2026, 11, 12, 9, 0, tzinfo=UTC), True),
+    ("I'll restart the 2 decoders at 18:15 UTC.", datetime(2026, 11, 11, 18, 15, tzinfo=UTC), True),
     # An explicit date with no time it binds to, or a past one: the default too.
     ("I'll deploy the fix on 2026-11-20.", NOV11_0900 + timedelta(minutes=60), False),
     ("I'll deploy the fix on 2026-11-02 at 18:15 UTC.", NOV11_0900 + timedelta(minutes=60), False),
@@ -362,7 +368,7 @@ def test_two_proposals_match_their_promises_by_their_real_keys():
             arguments={
                 "tool": "schedule_task",
                 "arguments": {"task": "deploy staging", "when": "in 1 day"},
-                "rationale": "The owner asked for a staging deploy.",
+                "rationale": "Needs approval.",
             },
         ),
         ToolResult(
@@ -371,7 +377,7 @@ def test_two_proposals_match_their_promises_by_their_real_keys():
             arguments={
                 "tool": "send_email",
                 "arguments": {"subject": "Weekly report", "body": "Attached."},
-                "rationale": "Email the weekly report.",
+                "rationale": "Needs approval.",
             },
         ),
     ]

@@ -345,9 +345,11 @@ class _BrokenStore(FakeStore):
 class _SlowStore(FakeStore):
     def __init__(self) -> None:
         super().__init__()
+        self.started = asyncio.Event()
         self.finished = asyncio.Event()
 
     async def record_gate_turn(self, rows, log):
+        self.started.set()
         await asyncio.sleep(0.3)
         written = await super().record_gate_turn(rows, log)
         self.finished.set()
@@ -361,7 +363,8 @@ async def test_a_gate_that_raises_leaves_the_stream_reply_unchanged(caplog):
         shown = await _stream(runner, "s-broken")
         await asyncio.sleep(0)  # the error row is written in the background
     assert shown == NOV10["reply"] and cognitive.post_turn_texts == [NOV10["reply"]]
-    assert "promise gate failed" in caplog.text
+    assert caplog.text.count("promise gate failed") == 1  # review Minor 12: logged once
+    assert "background work failed" not in caplog.text
     assert [log["outcome"] for log in store.logs] == ["error"]
 
 
@@ -409,22 +412,37 @@ class _HungStore(FakeStore):
             self.running -= 1
 
 
+class _GatedStore(FakeStore):
+    """A gate write that waits until the test opens the gate."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def record_gate_turn(self, rows, log):
+        self.started.set()
+        await self.release.wait()
+        return await super().record_gate_turn(rows, log)
+
+
 async def test_shadow_returns_without_waiting_for_the_gate():
-    store = _SlowStore()
+    store = _GatedStore()
     runner, _ = _runner("shadow", store)
     runner._tool_loop = AsyncMock(return_value=(NOV10["reply"], [], {"input_tokens": 1, "output_tokens": 1}, []))
-    started = asyncio.get_running_loop().time()
-    text, _ctx, _usage = await runner.run_turn("s-shadow-fast", "go")
-    elapsed = asyncio.get_running_loop().time() - started
-    assert text == NOV10["reply"] and elapsed < 0.2 and not store.finished.is_set()  # the 0.3 s write is still running
+    # Before the fix run_turn waited for the gate (up to its 2 s bound); the write here does not end on its own.
+    text, _ctx, _usage = await asyncio.wait_for(runner.run_turn("s-shadow-fast", "go"), timeout=1.5)
+    assert text == NOV10["reply"] and store.rows == {}  # returned while the write was still pending
+    store.release.set()
     await runner.close()  # drains it
-    assert store.finished.is_set() and len(store.rows) == 1
+    assert len(store.rows) == 1
 
 
-async def test_a_stream_consumer_gone_during_a_slow_shadow_gate_write_keeps_a_successful_turn():
-    """Review finding 1: in shadow the stream no longer waits on the gate, so a consumer that disconnects while the
-    gate writes cannot turn a delivered, stored reply into a cancelled turn (row error, F110 last reply)."""
-    store, rows = _SlowStore(), _TurnRows()
+async def test_a_stream_turn_in_shadow_completes_while_the_gate_still_writes():
+    """Review finding 1: the stream waited on the gate's write, so a consumer gone during it turned a delivered,
+    stored reply into a cancelled turn (row error, F110 last reply). In shadow the stream no longer waits: it ends,
+    recorded as a success, while the write is still in flight."""
+    store, rows = _GatedStore(), _TurnRows()
     runner, cognitive = _runner("shadow", store, [_reply_segment(NOV10["reply"])])
     runner.set_tool_call_recorder(rows)
     remembered: list = []
@@ -435,16 +453,20 @@ async def test_a_stream_consumer_gone_during_a_slow_shadow_gate_write_keeps_a_su
         real_remember(ctx, session_id, reply, error=error)
 
     runner._remember_reply = remember
-    task = asyncio.ensure_future(_stream(runner, "s-gone-shadow"))
-    await asyncio.sleep(0.1)  # inside the gate's 0.3 s write
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    await asyncio.wait_for(store.finished.wait(), timeout=3)
-    assert [t.error for t in rows.turns] == [None] and remembered == [None]
-    assert cognitive.post_turn_errors == [None] and len(store.rows) == 1
+    out: list[str] = []
+
+    async def consume() -> None:
+        async for event in runner.stream_chat("s-gone-shadow", "go"):
+            if event.type == "text_delta":
+                out.append(event.text)
+
+    await asyncio.wait_for(consume(), timeout=1.5)
+    assert not store.release.is_set() and store.rows == {}  # the gate's write is still pending
+    assert "".join(out) == NOV10["reply"]
+    assert [t.error for t in rows.turns] == [None] and remembered == [None] and cognitive.post_turn_errors == [None]
+    store.release.set()
+    await runner.close()
+    assert len(store.rows) == 1
 
 
 async def test_a_hung_shadow_gate_write_does_not_outlive_its_bound(monkeypatch, caplog):
@@ -494,7 +516,7 @@ async def test_a_cancelled_turn_is_still_cancelled_while_the_gate_runs():
     runner, _ = _runner("warn", store)
     runner._tool_loop = AsyncMock(return_value=(NOV10["reply"], [], {"input_tokens": 1, "output_tokens": 1}, []))
     task = asyncio.ensure_future(runner.run_turn("s-cancel", "go"))
-    await asyncio.sleep(0.1)  # inside the gate's 0.3 s write
+    await asyncio.wait_for(store.started.wait(), timeout=3)  # the gate's 0.3 s write is under way
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -522,7 +544,7 @@ async def test_a_run_turn_cancelled_in_the_gate_still_writes_one_cancelled_turn_
     runner.set_tool_call_recorder(rows)
     runner._tool_loop = AsyncMock(return_value=(NOV10["reply"], [], {"input_tokens": 1, "output_tokens": 1}, []))
     task = asyncio.ensure_future(runner.run_turn("s-cancel-row", "go"))
-    await asyncio.sleep(0.1)  # inside the gate's 0.3 s write
+    await asyncio.wait_for(store.started.wait(), timeout=3)  # the gate's 0.3 s write is under way
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -536,7 +558,7 @@ async def test_a_stream_cancelled_in_the_gate_writes_one_cancelled_turn_row():
     runner, cognitive = _runner("warn", store, [_reply_segment(NOV10["reply"])])
     runner.set_tool_call_recorder(rows)
     task = asyncio.ensure_future(_stream(runner, "s-cancel-stream"))
-    await asyncio.sleep(0.1)  # inside the gate's 0.3 s write
+    await asyncio.wait_for(store.started.wait(), timeout=3)  # the gate's 0.3 s write is under way
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
