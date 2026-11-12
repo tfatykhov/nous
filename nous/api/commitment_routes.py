@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import logging
 import os
+import re
 from typing import Any
 
 from starlette.requests import Request
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 OWNER_SECRET_HEADER = "X-Nous-Owner-Secret"
 OWNER_SECRET_ENV = "NOUS_OWNER_ROUTE_SECRET"
 _ACTOR_MAX = 100
+_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
 
 # The owner's verb -> the status it sets and the close_reason it records.
 _CLOSES: dict[str, tuple[str, str]] = {"drop": ("cancelled", "owner_drop"), "done": ("done", "owner_done")}
@@ -44,11 +46,19 @@ def owner_secret_matches(supplied: str | None, digest: str) -> bool:
 def build_commitment_routes(*, database: Any, settings: Any) -> list[Route]:
     """The owner's close routes, over a store for ``settings.agent_id``."""
     store = CommitmentStore(database, settings.agent_id)
-    digest = settings.owner_route_secret_sha256.strip().lower()
+    # The first field only: ``sha256sum`` prints the digest followed by "  -".
+    fields = settings.owner_route_secret_sha256.split()
+    digest = fields[0].lower() if fields else ""
+    problem = None
     if not digest:
+        problem = "NOUS_OWNER_ROUTE_SECRET_SHA256 is not set"
+    elif not _SHA256_HEX_RE.fullmatch(digest):
+        problem = "NOUS_OWNER_ROUTE_SECRET_SHA256 is not a SHA-256 digest (64 hex characters)"
+        digest = ""  # fail closed, and never a non-ASCII value in compare_digest (it raises)
+    if problem:
         logger.warning(
-            "F111: NOUS_OWNER_ROUTE_SECRET_SHA256 is not set, so POST /commitments/{id}/drop|done refuses every call "
-            "(Telegram /drop and /done will not work)"
+            "F111: %s, so POST /commitments/{id}/drop|done refuses every call (Telegram /drop and /done will not work)",
+            problem,
         )
     if os.environ.get(OWNER_SECRET_ENV):
         logger.warning(
@@ -63,7 +73,7 @@ def build_commitment_routes(*, database: Any, settings: Any) -> list[Route]:
         if not owner_secret_matches(request.headers.get(OWNER_SECRET_HEADER), digest):
             logger.warning(
                 "F111: refused a commitment close: %s",
-                "NOUS_OWNER_ROUTE_SECRET_SHA256 is not set" if not digest else f"no valid {OWNER_SECRET_HEADER}",
+                problem or f"no valid {OWNER_SECRET_HEADER}",
             )
             return JSONResponse({"error": "forbidden"}, status_code=403)
         short_id = parse_short_id(str(request.path_params["short_id"]))

@@ -845,6 +845,23 @@ async def test_the_owner_route_refuses_everything_when_no_secret_is_set(caplog):
     assert "NOUS_OWNER_ROUTE_SECRET_SHA256 is not set" in caplog.text
 
 
+async def test_the_owner_route_takes_the_digest_sha256sum_prints():
+    """Re-review D: ``printf %s "$SECRET" | sha256sum`` prints the digest and "  -"; the first field is the digest."""
+    digest = hashlib.sha256(OWNER_SECRET.encode()).hexdigest()
+    settings = SimpleNamespace(agent_id="a", owner_route_secret_sha256=f"{digest.upper()}  -\n")
+    response, seen = await _close(settings, OWNER_HEADERS)
+    assert response.status_code == 200 and len(seen) == 1
+
+
+@pytest.mark.parametrize("digest", ["not-a-digest", "é" * 64, "ab" * 31], ids=["words", "non-ascii", "short"])
+async def test_an_owner_route_digest_that_is_no_sha256_refuses_and_says_so(digest, caplog):
+    with caplog.at_level(logging.WARNING, logger="nous.api.commitment_routes"):
+        response, seen = await _close(SimpleNamespace(agent_id="a", owner_route_secret_sha256=digest), OWNER_HEADERS)
+    assert response.status_code == 403 and seen == []
+    assert caplog.text.count("is not a SHA-256 digest (64 hex characters)") == 2  # once at start, once per call
+    assert "no valid X-Nous-Owner-Secret" not in caplog.text
+
+
 def test_the_api_settings_hold_only_the_digest():
     assert "owner_route_secret" not in Settings.model_fields
     assert Settings.model_fields["owner_route_secret_sha256"].default == ""

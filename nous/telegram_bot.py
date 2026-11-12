@@ -1431,6 +1431,12 @@ async def main() -> None:
     )
     if not bot.owner_route_secret:
         logger.warning("F111: NOUS_OWNER_ROUTE_SECRET is not set, so /drop and /done will be refused by the API")
+    elif len(bot.owner_route_secret) < 32:
+        # The API keeps only an unsalted SHA-256 of it, which code in that process can read: a short value can be
+        # guessed offline.
+        logger.warning(
+            "F111: NOUS_OWNER_ROUTE_SECRET is shorter than 32 characters; use a random value (openssl rand -hex 32)"
+        )
     try:
         await bot.start()
     finally:
