@@ -26,6 +26,7 @@ from nous.cancellation import cancel_requested as _cancel_requested
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.heart import Heart
+from nous.heartbeat.commitment_watcher import CommitmentWatcher
 from nous.heartbeat.dynamic import (
     CALLBACK_RETRY_DELAY_SECONDS,
     RUN_OUTCOME,
@@ -39,6 +40,7 @@ from nous.heartbeat.finding_store import FindingStore
 from nous.heartbeat.quiet_hours import in_quiet_hours
 from nous.heartbeat.registry import BaseCheck, CheckRegistry
 from nous.heartbeat.schemas import CheckResult, Finding, FindingAction, HeartbeatResult
+from nous.heartbeat.send_result import SendResult, result_for_exception, result_for_status
 from nous.heartbeat.tuner import HeartbeatTuner
 
 logger = logging.getLogger(__name__)
@@ -112,6 +114,7 @@ class HeartbeatRunner:
         finding_store: FindingStore | None = None,
         api_client: AnthropicClient | None = None,
         dynamic_loader: DynamicCheckLoader | None = None,
+        commitment_watcher: CommitmentWatcher | None = None,
     ) -> None:
         self._settings = settings
         self._registry = registry
@@ -124,6 +127,10 @@ class HeartbeatRunner:
         self._api_client = api_client
         self._dynamic_loader = dynamic_loader
         self._dedicated_runner: AgentRunner | None = None
+        # F111 PR B1: the overdue watcher, run as a task of its own on its own interval (never through findings,
+        # which triage can swallow). None: not enabled.
+        self._commitment_watcher = commitment_watcher
+        self._watcher_task: asyncio.Task | None = None
 
         self.dag_orchestrator: object | None = None  # F038: injected by main.py
 
@@ -188,6 +195,9 @@ class HeartbeatRunner:
         await self._detect_missed_checks()
         self._task = asyncio.create_task(self._loop(), name="heartbeat-runner")
         self._dag_task = asyncio.create_task(self._dag_loop(), name="dag-tick-loop")
+        if self._commitment_watcher is not None and self._commitment_watcher.start_checks():
+            self._watcher_task = asyncio.create_task(self._watcher_loop(), name="commitment-watcher")
+            logger.info("F111: promise watcher started (interval=%ds)", self._commitment_watcher.interval_seconds)
         logger.info(
             "F034: Heartbeat started (tick=%ds, quiet=%d-%d, budget=%d tokens/day)",
             self._settings.heartbeat_tick_interval,
@@ -214,6 +224,13 @@ class HeartbeatRunner:
             except asyncio.CancelledError:
                 pass
             self._task = None
+        if self._watcher_task:
+            self._watcher_task.cancel()
+            try:
+                await self._watcher_task
+            except asyncio.CancelledError:
+                pass
+            self._watcher_task = None
         if self._dag_task:
             self._dag_task.cancel()
             try:
@@ -343,6 +360,21 @@ class HeartbeatRunner:
                 logger.exception("Heartbeat tick was cancelled from within — the loop continues")
             except Exception:
                 logger.exception("Heartbeat tick failed")
+
+    async def _watcher_loop(self) -> None:
+        """F111 PR B1: the overdue watcher, one run per interval, until cancelled. A run logs its own failures
+        (``CommitmentWatcher.run_once`` never raises); this loop also survives one that does."""
+        watcher = self._commitment_watcher
+        while self._running and watcher is not None:
+            await asyncio.sleep(watcher.interval_seconds)
+            try:
+                await watcher.run_once()
+            except asyncio.CancelledError:
+                if _cancel_requested():
+                    raise
+                logger.warning("F111 promise watcher run was cancelled from within; the loop continues")
+            except Exception:
+                logger.warning("F111 promise watcher run failed", exc_info=True)
 
     async def _dag_loop(self) -> None:
         """Independent DAG orchestrator tick loop — runs until cancelled.
@@ -1349,12 +1381,13 @@ class HeartbeatRunner:
     # Telegram notifications
     # ------------------------------------------------------------------
 
-    async def _send_telegram(self, text: str) -> None:
-        """Send Telegram notification if configured (direct httpx POST)."""
+    async def _send_telegram(self, text: str) -> SendResult:
+        """Send Telegram notification if configured (direct httpx POST). Returns what is known about the send
+        (F111 PR B1, ``SendResult``): the overdue watcher needs it; other callers ignore it."""
         token = self._settings.telegram_bot_token
         chat_id = self._settings.telegram_chat_id
         if not token or not chat_id:
-            return
+            return SendResult.NOT_SENT
 
         url = f"https://api.telegram.org/bot{token}/sendMessage"
         try:
@@ -1376,8 +1409,10 @@ class HeartbeatRunner:
             status = getattr(response, "status_code", None)
             if isinstance(status, int) and status >= 400:
                 logger.warning("Heartbeat Telegram notification rejected: HTTP %s", status)
-        except Exception:
+            return result_for_status(status)
+        except Exception as exc:
             logger.warning("Heartbeat Telegram notification failed")
+            return result_for_exception(exc)
 
     # ------------------------------------------------------------------
     # Budget + quiet hours

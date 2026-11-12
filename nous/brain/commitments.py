@@ -319,14 +319,22 @@ class CommitmentStore:
         return _row(row) if row is not None else None
 
     async def list_watchable(
-        self, now: datetime | None = None, since: datetime | None = None, limit: int = 100
+        self,
+        now: datetime | None = None,
+        since: datetime | None = None,
+        limit: int = 100,
+        *,
+        skip_not_promise: bool = False,
     ) -> list[Commitment]:
         """What the overdue watcher may ping: open or proposed rows with no artifact, never pinged or claimed
         (``notify_count = 0``), not suppressed by a later backing call (``evidence.watch.suppressed_by``), past
         ``due_at + grace``, and created at or after ``since`` (the watcher's cutoff; None reads every row). Never a
         ``goal`` or ``awaiting_user`` row, and never a backed, closed, deferred or superseded one. Ordered by
-        ``due_at``, then ``id``. ``due_at < :now`` lets migration 108's index apply."""
+        ``due_at``, then ``id``. ``due_at < :now`` lets migration 108's index apply. ``skip_not_promise`` leaves out
+        rows stage 2 called ``not_promise`` (they stay open and are never pinged, so they must not fill ``limit``)."""
         cutoff = "AND created_at >= :since " if since is not None else ""
+        if skip_not_promise:
+            cutoff += "AND (evidence -> 'stage2' ->> 'verdict') IS DISTINCT FROM 'not_promise' "
         params: dict[str, Any] = {"agent_id": self._agent_id, "now": now or datetime.now(UTC), "limit": limit}
         if since is not None:
             params["since"] = since
