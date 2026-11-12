@@ -587,6 +587,30 @@ async def test_a_background_run_turn_records_but_never_shows_a_footer():
     assert store.logs[0]["context_kind"] == "subtask"
 
 
+async def test_a_subtask_ended_by_its_report_tool_is_gated_on_the_report():
+    """Codex P2 on b946f69f: the loop returns "Report submitted." for such a turn; the gate reads the report."""
+    store = FakeStore()
+    runner, _ = _runner("shadow", store)
+    report = ToolResult(
+        tool_name="submit_final_report",
+        arguments={"summary": "The hero copy is fixed. I'll redeploy the site tomorrow."},
+        result="Report accepted.",
+    )
+    runner._tool_loop = AsyncMock(
+        return_value=("Report submitted.", [report], {"input_tokens": 1, "output_tokens": 1}, [])
+    )
+    try:
+        text, _ctx, _usage = await runner.run_turn(
+            "subtask-rep", "fix the hero", context=ExecutionContext(kind="subtask", session_id="subtask-rep")
+        )
+    finally:
+        await runner.close()
+    [row] = store.rows.values()
+    assert (
+        text == "Report submitted." and row.what == "I'll redeploy the site tomorrow." and row.source_kind == "subtask"
+    )
+
+
 # ---- 11. commit in every context --------------------------------------------------------------------------------
 
 

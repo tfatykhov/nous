@@ -433,6 +433,24 @@ def render_footer(labels: list[str], due_at: datetime, now: datetime) -> str:
     )
 
 
+# The report argument of each terminal tool (TERMINAL_EXTRA_TOOLS in nous/api/runner.py). A turn that ends with one
+# returns a fixed marker ("Report submitted.") as its text, so the gate reads the report the call carried.
+_REPORT_ARGS: dict[str, str] = {"submit_final_report": "summary", "resolve_intention": "note"}
+
+
+def turn_text(response_text: str, tool_results: list[Any]) -> str:
+    """What the gate scans for a turn: the report of the turn's last successful terminal-tool call (a subtask's
+    ``submit_final_report`` summary, a continuation's ``resolve_intention`` note), else the reply text."""
+    for tr in reversed(tool_results):
+        key = _REPORT_ARGS.get(getattr(tr, "tool_name", None) or "")
+        if key is None or getattr(tr, "error", None):
+            continue
+        report = (getattr(tr, "arguments", None) or {}).get(key)
+        if isinstance(report, str) and report.strip():
+            return report
+    return response_text
+
+
 class PromiseGate:
     """Detect, resolve, record. Async because it writes; the caller bounds and guards it."""
 
@@ -466,7 +484,7 @@ class PromiseGate:
             return GateOutcome(outcome="off")
         now = now or datetime.now(UTC)
         started = time.perf_counter()
-        promises = self.detector.scan(response_text, now=now)
+        promises = self.detector.scan(turn_text(response_text, tool_results), now=now)
         backed, unbacked = self.resolver.split(promises, tool_results)
         result = GateOutcome(
             detected=len(promises),

@@ -349,6 +349,22 @@ async def test_the_footer_shows_the_deadline_the_row_stores():
     assert f"due {row.due_at:%Y-%m-%d %H:%M} UTC" in outcome.footer
 
 
+@pytest.mark.parametrize(("tool", "key"), [("submit_final_report", "summary"), ("resolve_intention", "note")])
+async def test_a_terminal_tool_turn_is_scanned_on_its_report(tool, key):
+    """Codex P2 on b946f69f: such a turn returns "Report submitted.", so the report's promise was never seen."""
+    store = FakeStore()
+    report = _tr(tool, "accepted", **{key: "Checked the hero section. I'll redeploy the site tomorrow."})
+    outcome = await _gate(store=store).run(
+        "Report submitted.", [report], path="run_turn", session_id="s", turn_id="t", context_kind="subtask", now=NOW
+    )
+    assert outcome.detected == 1 and [r.what for r in store.rows.values()] == ["I'll redeploy the site tomorrow."]
+    failed = _tr(tool, error="bad payload", **{key: "I'll redeploy the site tomorrow."})
+    outcome = await _gate(store=FakeStore()).run(
+        "Report submitted.", [failed], path="run_turn", session_id="s", turn_id="t2", context_kind="subtask", now=NOW
+    )
+    assert outcome.detected == 0  # a refused call carried no report
+
+
 # ---- 4. store helpers, the commit tool's validation and the store itself -----------------------------------------
 
 
