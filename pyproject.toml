@@ -76,6 +76,7 @@ markers = [
     "eval: F051 retrieval-eval-harness unit tests (no DB required)",
     "postgres_only: requires real PostgreSQL (skipped unless NOUS_TEST_DB=postgres)",
     "scoring_writer: writes the scoring schema or creates roles as the connected role (deselected in the DB roles CI job, where that role is nous_app)",
+    "live_llm: makes a real model call (opt-in: NOUS_LIVE_LLM=1 and an Anthropic key; skipped in CI)",
 ]
 
 [tool.ruff]

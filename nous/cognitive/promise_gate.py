@@ -511,9 +511,11 @@ def turn_text(response_text: str, tool_results: list[Any]) -> str:
 class PromiseGate:
     """Detect, resolve, record. Async because it writes; the caller bounds and guards it."""
 
-    def __init__(self, store: CommitmentStore, settings: Any) -> None:
+    def __init__(self, store: CommitmentStore, settings: Any, classifier: Any = None) -> None:
         self._store = store
         self._settings = settings
+        # F111 PR B1: stage 2 (a ``ClassifierScheduler``); each written row is handed to it after the write.
+        self._classifier = classifier
         self.detector = PromiseDetector(default_due_minutes=settings.promise_gate_default_due_minutes)
         self.resolver = BackingResolver()
 
@@ -596,6 +598,11 @@ class PromiseGate:
             },
         )
         result.labels = [r.label for r in rows if r is not None]
+        if self._classifier is not None:
+            # After the write returned: the turn never waits for stage 2 (submit only starts a task).
+            for row in rows:
+                if row is not None:
+                    self._classifier.submit(row)
         shown = [(p, r) for p, r in zip(unbacked, rows, strict=True) if r is not None and p.kind == "action"]
         if footer_wanted and shown:
             result.footer = render_footer([(r.label, r.due_at) for _, r in shown], now)
