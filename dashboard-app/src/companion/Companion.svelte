@@ -3,8 +3,8 @@
   //
   // Routing is ~25 own lines, NOT a reuse of src/lib/router.ts: that router
   // validates against a closed ROUTES union and would send arbitrary
-  // surface ids to 'overview'. The `initialized` guard is copied from it —
-  // it stops hashchange listeners stacking across tests and HMR.
+  // surface ids to 'overview'. The hashchange listener is removed with the
+  // shell, so mounts (tests, HMR) never stack listeners.
   import { onMount, tick } from 'svelte';
   import { resolveDynamic, toDisplayString } from './functions';
   import InstallPrompt from './InstallPrompt.svelte';
@@ -238,17 +238,14 @@
     e.preventDefault();
     void closeDrawer();
   }
-  let initialized = false;
 
   onMount(() => {
     route = parseHash();
-    if (!initialized) {
-      initialized = true;
-      window.addEventListener('hashchange', () => {
-        route = parseHash();
-        drawerOpen = false; // Back, or a link in a card: never leave the list over the new view
-      });
-    }
+    const onHash = () => {
+      route = parseHash();
+      void closeDrawer(); // Back, or a link in a card: never leave the list over the new view
+    };
+    window.addEventListener('hashchange', onHash);
     const onMq = () => {
       wide = mq?.matches === true;
       if (wide) drawerOpen = false;
@@ -258,6 +255,7 @@
     mq?.addEventListener?.('change', onMq);
     void transport.connect();
     return () => {
+      window.removeEventListener('hashchange', onHash);
       mq?.removeEventListener?.('change', onMq);
       transport.stop();
     };
@@ -393,6 +391,7 @@
         {#each microApps as surface (surface.surfaceId)}
           <a
             class="chip"
+            class:kind={!chipName(surface)}
             class:active={route.view === 'surface' && route.id === surface.surfaceId}
             href={'#/s/' + encodeURIComponent(surface.surfaceId)}
             title={chipTooltip(surface)}
@@ -404,7 +403,7 @@
       {/if}
       {#if microApps.length >= 2}
         <button
-          class="chip close-all"
+          class="chip close-all kind"
           class:armed={closeAllArmed}
           disabled={closingAll}
           onclick={requestCloseAll}

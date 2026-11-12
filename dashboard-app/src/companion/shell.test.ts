@@ -185,6 +185,7 @@ describe('Companion shell — the list is a drawer on a phone', () => {
     await fireEvent.click(list.querySelector('a.chip')!);
     await settle();
     expect(closed()).toBe(true);
+    expect(document.activeElement).toBe(menu);
     expect(container.querySelector('.scrim')).toBeNull();
   });
 
@@ -245,6 +246,14 @@ describe('Companion shell — the list is a drawer on a phone', () => {
     await fireEvent.click(menu);
     await settle();
     getByText('close all apps (2)'); // not one tap from sweeping
+    // Nor after Back: armed again, then a hash change closes the list.
+    await fireEvent.click(getByText('close all apps (2)'));
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    await settle();
+    expect(document.activeElement).toBe(menu);
+    await fireEvent.click(menu);
+    await settle();
+    getByText('close all apps (2)');
     expect(spy).not.toHaveBeenCalled();
   });
 
@@ -254,6 +263,13 @@ describe('Companion shell — the list is a drawer on a phone', () => {
     const { container } = render(Companion);
     const kinds = [...container.querySelectorAll('nav.switcher a.chip')].map((c) => [c.textContent?.trim(), c.classList.contains('kind')]);
     expect(kinds).toEqual([['Home', false], ['decisions', true], ['iPhone budget', false]]);
+    // An app with no name of its own falls back to the kind word, and "close all apps" is the shell's too.
+    cleanup();
+    store.reset();
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:chat:micro_app:bbb002');
+    const again = render(Companion).container;
+    expect([...again.querySelectorAll('nav.switcher .chip.kind')].map((c) => c.textContent?.trim())).toEqual(['app', 'app', 'close all apps (2)']);
   });
 
   it('groups the items: what Nous raised, then the apps; Menu counts only what Nous raised', () => {
