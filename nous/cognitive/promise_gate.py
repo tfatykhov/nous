@@ -22,7 +22,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from nous.brain.commitments import MAX_DUE_DAYS, SOURCE_KIND_BY_CONTEXT, CommitmentStore, normalise_what
-from nous.handlers.time_parser import parse_when
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +110,10 @@ _TOMORROW_RE = re.compile(r"\btomorrow\b", re.I)
 # tomorrow"), not anywhere in the sentence ("at 10:00 UTC, whether tomorrow's run is queued").
 _DAY_BEFORE_RE = re.compile(r"\b(today|tomorrow)(?:\s+(?:morning|afternoon|evening|night))?\s*,?\s*$", re.I)
 _DAY_AFTER_RE = re.compile(r"^\s*,?\s*(today|tomorrow)\b", re.I)
-_UNIT_NAMES = {"minute": "minute", "min": "minute", "hour": "hour", "hr": "hour", "day": "day", "week": "week"}
+_UNIT_MINUTES = {"minute": 1, "min": 1, "hour": 60, "hr": 60, "day": 1440, "week": 10080}
+# A relative time is capped here (the gate clamps the row to MAX_DUE_DAYS anyway): "in 3000000 days" is no
+# OverflowError, which would lose every promise of the reply.
+_REL_MAX_MINUTES = (MAX_DUE_DAYS + 1) * 1440
 _WORD_NUM = {"a": 1, "an": 1, "one": 1, "two": 2}
 
 
@@ -137,17 +139,17 @@ def _strip_non_prose(text: str) -> str:
 
 
 def _due_at(sentence: str, now: datetime, default_minutes: int) -> tuple[datetime, bool]:
-    """The deadline a sentence names, else ``now + default_minutes``. Relative times go through ``parse_when``, the
-    resolver ``schedule_task`` uses; a clock time is read only with an explicit UTC marker (no owner zone is known
-    to the code, and a guessed zone would move the deadline by hours)."""
+    """The deadline a sentence names, else ``now + default_minutes``. Relative times count from ``now`` (so a replay
+    of a stored reply reads as it did then); a clock time is read only with an explicit UTC marker (no owner zone is
+    known to the code, and a guessed zone would move the deadline by hours)."""
     m = _REL_RE.search(sentence)
     if m:
-        raw, unit = m.group(1).lower(), _UNIT_NAMES[m.group(2).lower()]
+        raw, unit_minutes = m.group(1).lower(), _UNIT_MINUTES[m.group(2).lower()]
         if raw.startswith("half"):
             return now + timedelta(minutes=30), True
         amount = int(raw) if raw.isdigit() else _WORD_NUM.get(raw, 1)
         if amount > 0:
-            return parse_when(f"in {amount} {unit}s"), True
+            return now + timedelta(minutes=min(amount * unit_minutes, _REL_MAX_MINUTES)), True
     if _WITHIN_HOUR_RE.search(sentence):
         return now + timedelta(hours=1), True
     m = _CLOCK_RE.search(sentence)

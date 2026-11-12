@@ -105,11 +105,18 @@ def test_a_clock_time_with_tomorrow_or_today_is_read_on_that_day():
     assert elsewhere.due_parsed and elsewhere.due_at == nine.replace(hour=10)
 
 
-def test_a_relative_time_goes_through_schedule_tasks_resolver():
-    before = datetime.now(UTC)
-    [promise] = PromiseDetector().scan("I plan to deploy the fix in 2 hours.")
-    assert promise.due_parsed
-    assert before + timedelta(hours=2) <= promise.due_at <= datetime.now(UTC) + timedelta(hours=2)
+def test_a_relative_time_counts_from_the_given_now():
+    """Review Minor 7: parse_when used the wall clock, so a replay at a stored reply's time was hours off."""
+    [promise] = PromiseDetector().scan("I plan to deploy the fix in 2 hours.", now=NOW)
+    assert promise.due_parsed and promise.due_at == NOW + timedelta(hours=2)
+    [minutes] = PromiseDetector().scan("I'll check in 5 minutes.", now=NOW)
+    assert minutes.due_at == NOW + timedelta(minutes=5)
+
+
+def test_a_huge_relative_time_is_capped_not_an_overflow():
+    """Review Minor 7: "in 3000000 days" raised OverflowError out of scan and lost every promise of the reply."""
+    promises = PromiseDetector().scan("I'll retry in 3000000 days. I'll check back tomorrow.", now=NOW)
+    assert len(promises) == 2 and NOW < promises[0].due_at <= NOW + timedelta(days=92)
 
 
 # ---- 2. negatives ------------------------------------------------------------------------------------------------
