@@ -357,7 +357,8 @@ def parse_artifact(tool_name: str, result: str | None) -> tuple[str, str] | None
 class BackingResolver:
     """Splits promises into backed and unbacked by the artifacts this turn created.
 
-    One backing call in the turn backs every promise; with more, a promise is backed by a call whose argument words
+    One backing call in the turn backs every promise (a schedule, a DAG or a spawn may well do all of it), except a
+    ``commit``, whose ``what`` names one obligation; otherwise a promise is backed by a call whose argument words
     overlap the promise's by at least ``MIN_OVERLAP``. ``record_decision``, ``learn_fact``, ``create_censor``, reads,
     error results and results without a parseable id never back anything."""
 
@@ -397,7 +398,7 @@ class BackingResolver:
     def _match(self, promise: Promise, artifacts: list[Artifact]) -> Artifact | None:
         if not artifacts:
             return None
-        if len(artifacts) == 1:
+        if len(artifacts) == 1 and artifacts[0].tool != "commit":
             return artifacts[0]
         pw = _words(promise.what)
         if not pw:
@@ -510,6 +511,12 @@ class PromiseGate:
         now = now or datetime.now(UTC)
         started = time.perf_counter()
         promises = self.detector.scan(turn_text(response_text, tool_results), now=now)
+        # The same sentence twice is one promise: the store would write one row for it (one dedupe key), and the log
+        # and the footer must not count or name it twice.
+        unique: dict[str, Promise] = {}
+        for promise in promises:
+            unique.setdefault(promise.what.lower(), promise)
+        promises = list(unique.values())
         backed, unbacked = self.resolver.split(promises, tool_results)
         result = GateOutcome(
             detected=len(promises),

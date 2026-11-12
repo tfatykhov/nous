@@ -285,7 +285,7 @@ def test_each_backing_tool_result_yields_its_id_and_backs(tool):
     text, expected = REAL_RESULTS[tool]
     assert parse_artifact(tool, text) == expected
     [promise] = PromiseDetector().scan("I'll relaunch the chain at 18:15 UTC unless you object.", now=NOW)
-    backed, unbacked = BackingResolver().split([promise], [_tr(tool, text)])
+    backed, unbacked = BackingResolver().split([promise], [_tr(tool, text, what="relaunch the chain")])
     assert unbacked == [] and backed[0][1].id == expected[1]
 
 
@@ -324,6 +324,29 @@ def test_two_promises_and_two_calls_match_by_keyword_overlap():
     backed, unbacked = BackingResolver().split(promises, results)
     assert [(p.text[:20], a.tool) for p, a in backed] == [("I'll relaunch the in", "schedule_task")]
     assert [p.text[:15] for p in unbacked] == ["I'll email the "]
+
+
+def test_a_lone_commit_backs_only_the_promise_it_names():
+    """Review Minor 10: one commit(what="deploy staging") backed the email promise too, which left no row."""
+    promises = PromiseDetector().scan("I'll deploy staging tomorrow. I'll email the report tomorrow.", now=NOW)
+    commit = _tr("commit", REAL_RESULTS["commit"][0], what="deploy staging", due="in 1 day")
+    backed, unbacked = BackingResolver().split(promises, [commit])
+    assert [p.text for p, _ in backed] == ["I'll deploy staging tomorrow."]
+    assert [p.text for p in unbacked] == ["I'll email the report tomorrow."]
+    schedule = _tr("schedule_task", REAL_RESULTS["schedule_task"][0], task="nightly jobs")
+    assert BackingResolver().split(promises, [schedule])[1] == []  # any other lone artifact still backs them all
+
+
+async def test_the_same_promise_twice_is_counted_and_named_once():
+    """Review Minor 9: two identical sentences gave one row but unbacked=2 and a footer naming C-0001 twice."""
+    store = FakeStore()
+    reply = "I'll relaunch it tomorrow. I'll relaunch it tomorrow."
+    outcome = await _gate("warn", store).run(
+        reply, [], path="stream", session_id="s", turn_id="t", context_kind=None, now=NOW
+    )
+    assert (outcome.detected, outcome.unbacked, store.logs[0]["unbacked"]) == (1, 1, 1)
+    assert outcome.footer.count("C-0001") == 2  # once in the ids, once in "/drop C-0001"
+    assert "C-0001, C-0001" not in outcome.footer and len(store.rows) == 1
 
 
 def test_two_proposals_match_their_promises_by_their_real_keys():
