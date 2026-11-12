@@ -151,3 +151,29 @@ def test_the_docs_have_the_rows():
     for env, default in F111_DEFAULTS.items():
         shown = f"`{default}`" if default else "(empty)"
         assert f"| `{env}` | {shown} |" in doc, env
+
+
+@pytest.mark.postgres_only
+def test_main_wires_no_watcher_and_no_classifier_with_the_flags_off(monkeypatch):
+    """Review M10: create_components with the B1 flags at their defaults (watcher and classifier off, the gate in
+    shadow): no scheduler and no watcher anywhere, the gate without a classifier, and what runs with the gate on
+    whatever the new flags say (review M2): the gate itself and the promise_gate_log retention loop."""
+    from tests.test_model_call_retention import _boot, main
+
+    seen: dict = {}
+
+    async def checks(components: dict, settings) -> None:
+        try:
+            runner = components["runner"]
+            seen["classifier"] = runner._promise_classifier
+            seen["watcher"] = runner._commitment_watcher
+            seen["heartbeat_watcher"] = components["heartbeat_runner"]._commitment_watcher
+            seen["gate_classifier"] = runner._promise_gate._classifier
+            seen["retention_task"] = components["promise_gate_log_retention_task"]
+        finally:
+            await main.shutdown_components(components)
+
+    _boot(monkeypatch, checks)
+    assert seen["classifier"] is None and seen["watcher"] is None and seen["heartbeat_watcher"] is None
+    assert seen["gate_classifier"] is None
+    assert seen["retention_task"] is not None

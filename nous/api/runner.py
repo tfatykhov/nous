@@ -1804,9 +1804,10 @@ class AgentRunner:
                 await asyncio.gather(*pending, return_exceptions=True)
                 break
             await asyncio.wait(pending, timeout=remaining)
-        if self._promise_classifier is not None and not self._is_fork:
-            # F111 PR B1: after the gate (which submits to it), and only from the root: a fork's close must not
-            # cancel the process's stage-2 calls. Bounded (5 s, then cancelled; a cancelled call stores nothing).
+        if self._promise_classifier is not None:
+            # F111 PR B1: after the gate (which submits to it). Only the root holds the scheduler (fork() does not
+            # copy it), so a fork's close never cancels the process's stage-2 calls. Bounded (5 s, then cancelled; a
+            # cancelled call stores nothing).
             await self._promise_classifier.close()
         if self._api and not self._api_shared:
             await self._api.close()

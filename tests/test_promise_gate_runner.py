@@ -1061,6 +1061,38 @@ async def test_the_dead_man_line_follows_a_run_turn_reply_and_is_never_stored():
     assert _stored_reply(runner, "s-deadman-rt") == "Done." and cognitive.post_turn_texts == ["Done."]
 
 
+async def test_no_dead_man_line_on_an_errored_run_turn():
+    """Review M10: an errored turn carries no dead-man line and does not use up the stall. In run_turn every path that
+    sets ``error`` also re-raises before the line is built, so this pins the order (the line after the re-raise), not
+    the ``not error`` guard beside it, which no input reaches."""
+    store, watcher = FakeStore(), _Watcher()
+    runner, _ = _runner("shadow", store)
+    runner.set_commitment_watcher(watcher)
+    runner._tool_loop = AsyncMock(side_effect=RuntimeError("model down"))
+    try:
+        with pytest.raises(RuntimeError, match="model down"):
+            await runner.run_turn("s-deadman-err", "go")
+    finally:
+        await runner.close()
+    assert watcher.calls == 0
+
+
+async def test_no_dead_man_line_on_an_errored_stream_turn():
+    """Review M10, the stream path: an error mid-reply re-raises before the line, and the stall is kept."""
+    store, watcher = FakeStore(), _Watcher()
+    runner, _ = _runner("shadow", store)
+    runner.set_commitment_watcher(watcher)
+
+    async def broken_stream(*args, **kwargs):
+        yield StreamEvent(type="text_delta", text="Half a repl")
+        raise RuntimeError("stream dropped")
+
+    runner._call_api_stream = MagicMock(side_effect=broken_stream)
+    with pytest.raises(RuntimeError, match="stream dropped"):
+        await _stream(runner, "s-deadman-stream-err")
+    assert watcher.calls == 0
+
+
 async def test_no_dead_man_line_without_a_stall_or_a_watcher():
     for watcher in (_Watcher(stalled=False), None):
         store = FakeStore()
