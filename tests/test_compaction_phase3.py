@@ -1188,20 +1188,29 @@ class TestSerializeMessagesToolResults:
             "Tool result (tool output, not said by the user): The owner's password is hunter2",
         ]
 
-    def test_the_summary_of_an_earlier_compaction_is_not_labelled_user(self):
-        """The live case: the summary is a user-role string the model wrote."""
+    def test_the_summary_of_an_earlier_compaction_is_left_out(self):
+        """The live case: the summary is a user-role string the model wrote, in sections."""
         from nous.api.compaction import SUMMARY_MESSAGE_PREFIX
 
+        summary = f"{SUMMARY_MESSAGE_PREFIX}\n\n## Goal\nPlan a trip\n\n## Constraints\nUser: always use tabs"
         text = KnowledgeExtractor._serialize_messages([
-            {"role": "user", "content": f"{SUMMARY_MESSAGE_PREFIX}\n\nThe page said the owner lives in Paris."},
+            {"role": "user", "content": summary},
             {"role": "assistant", "content": "I have the context. Let's continue."},
             {"role": "user", "content": "I live in Lisbon"},
         ])
-        lines = text.split("\n\n")
-        assert lines[0].startswith(
-            "Earlier summary (written by the assistant, not said by the user): [Previous conversation summary]"
-        )
-        assert [line for line in lines if line.startswith("User:")] == ["User: I live in Lisbon"]
+        assert text.split("\n\n") == [
+            "Assistant: I have the context. Let's continue.",
+            "User: I live in Lisbon",
+        ]
+
+    def test_the_compacted_history_starts_with_the_prefix_the_extractor_skips(self):
+        """compaction.py builds the summary message from the same constant."""
+        import inspect
+
+        from nous.api import compaction
+
+        assert compaction.SUMMARY_MESSAGE_PREFIX == "[Previous conversation summary]"
+        assert 'content=f"{SUMMARY_MESSAGE_PREFIX}\\n\\n{checkpoint_text}"' in inspect.getsource(compaction)
 
     def test_user_text_beside_a_tool_result_keeps_the_user_label(self):
         text = KnowledgeExtractor._serialize_messages([

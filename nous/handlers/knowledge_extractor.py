@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 # The label of a tool result in the serialized conversation. It says what the
 # line is, so the extractor does not attribute a fetched page to the user.
 _TOOL_RESULT_LABEL = "Tool result (tool output, not said by the user)"
-_SUMMARY_LABEL = "Earlier summary (written by the assistant, not said by the user)"
 
 _EXTRACT_PROMPT = """\
 Review the following conversation messages (about to be compacted) and extract facts worth remembering long-term.
@@ -213,9 +212,11 @@ class KnowledgeExtractor:
             content = msg.get("content", "")
             if isinstance(content, str):
                 # The summary of an earlier compaction is a user-role message
-                # the model wrote: it is not something the user said either.
+                # the model wrote, not something the user said. Its facts were
+                # extracted from the original messages at that compaction, and
+                # its sections would read as unlabelled paragraphs here: skip it.
                 if content.startswith(SUMMARY_MESSAGE_PREFIX):
-                    role = _SUMMARY_LABEL
+                    continue
                 # Truncate individual messages to avoid huge prompts
                 lines.append(f"{role}: {content[:2000]}")
             elif isinstance(content, list):
