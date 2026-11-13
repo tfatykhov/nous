@@ -251,6 +251,18 @@ async def test_a_missing_or_wrong_header_is_403_and_the_right_one_is_200(make_en
         assert SECRET not in text and WRONG not in text
     assert all(SECRET not in repr(e.data) for e in env.bus.events)
 
+    # PR 2d: an exception that escapes a handler is logged by its class only, never with a traceback: its text can
+    # repeat a credential a server or a provider was sent.
+    def leaky() -> dict[str, Any]:
+        raise RuntimeError("upstream said Bearer test-token-0000000000")
+
+    env.manager.status = leaky  # type: ignore[method-assign]
+    failed = await _req(env, "GET", "/integrations/mcp/servers")
+    assert (failed.status_code, failed.json()) == (500, {"error": "the request could not be processed"})
+    assert any("list_servers failed (RuntimeError)" in r.getMessage() for r in caplog.records)
+    assert all(r.exc_info is None for r in caplog.records)
+    assert all("test-token" not in logging.Formatter().format(r) for r in caplog.records)
+
 
 @pytest.mark.parametrize("method,path", [
     ("POST", "/integrations/mcp/servers"),

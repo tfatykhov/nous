@@ -346,9 +346,10 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
                 return await handler(request)
             except _Refused as exc:
                 return JSONResponse({"error": str(exc), **exc.extra}, status_code=exc.status)
-            except Exception as exc:  # a database error's text can carry the URL: the class only
+            except Exception as exc:
+                # The class only, never a traceback: a database error's text can carry the URL, and an error raised
+                # from what a server or a provider sent can repeat a credential it was sent.
                 logger.warning("F112: %s failed (%s)", handler.__name__, type(exc).__name__)
-                logger.debug("F112: %s error", handler.__name__, exc_info=True)
                 return JSONResponse({"error": "the request could not be processed"}, status_code=500)
 
         return run
