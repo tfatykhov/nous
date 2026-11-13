@@ -62,7 +62,13 @@ from nous.brain.brain import Brain
 from nous.brain.continuation import INTENT_SESSION_PREFIX
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.cognitive.action_gate import ActionGate
-from nous.cognitive.claim_verifier import ClaimVerifier, Evidence, IntentTracker, ledger_evidence
+from nous.cognitive.claim_verifier import (
+    ClaimVerifier,
+    Evidence,
+    IntentTracker,
+    VerificationResult,
+    ledger_evidence,
+)
 from nous.cognitive.execution_ledger import (
     ExecutionLedger,
     bash_exit_code,
@@ -107,6 +113,10 @@ from nous.observability.tool_calls import (
 from nous.tool_names import CHANGED_TOOLS, canonical_tool_names
 
 logger = logging.getLogger(__name__)
+
+# F113 Phase A (shadow): the regex check of a validated subtask report (``log_report_claim_check``). The task
+# scorer does not read this type; ``f026_claim_verification`` is the per-turn check it counts.
+REPORT_CLAIM_CHECK_EVENT = "subtask_report_claim_check"
 
 
 @dataclass(frozen=True)
@@ -584,6 +594,35 @@ class AgentRunner:
         self._log_f026_decision(
             "tool_alias_used",
             {"alias": alias, "target": target, "context_kind": ctx.kind},
+            session_id=session_id,
+        )
+
+    def log_report_claim_check(
+        self, session_id: str, result: VerificationResult, *, subtask_id: str | None
+    ) -> None:
+        """One ``subtask_report_claim_check`` event (the F026 event path, so ``NOUS_F026_PERSISTENCE_ENABLED`` off
+        writes none) for F113 Phase A: a validated subtask report checked against its session's calls.
+
+        Emitted whenever the check ran, a report with no claim too, so the share of flagged reports has its
+        denominator. Labels and counts only: ``claims_by_kind`` is ``{kind: {evidence level: count}}`` with the
+        verifier's kind and level labels. No claim or report text and no tool arguments, because
+        ``nous_system.events`` is readable by the agent's own reader. The task scorer does not read this type, so
+        it changes no score.
+        """
+        claims_by_kind: dict[str, dict[str, int]] = {}
+        for check in result.claims:
+            levels = claims_by_kind.setdefault(check.kind, {})
+            levels[check.evidence] = levels.get(check.evidence, 0) + 1
+        self._log_f026_decision(
+            REPORT_CLAIM_CHECK_EVENT,
+            {
+                "subtask_id": subtask_id,
+                "mode": self._settings.claim_verification_mode,
+                "verified": result.verified,
+                "claim_count": len(result.claims),
+                "unverified_count": len(result.violations),
+                "claims_by_kind": claims_by_kind,
+            },
             session_id=session_id,
         )
 
