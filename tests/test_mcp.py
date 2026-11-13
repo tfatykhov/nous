@@ -243,3 +243,22 @@ def test_teach_source_never_equals_a_source_admission_trusts():
     assert teach_source("mcp") == "mcp"
     assert teach_source("  a paper\non  memory ") == "mcp:a paper on memory"
     assert len(teach_source("x" * 500)) == len("mcp:") + 60
+
+
+async def test_nous_teach_stores_the_callers_source_behind_the_prefix(mcp_tools, heart, monkeypatch):
+    """The handler itself, not only the helper: a claimed trusted source reaches heart.learn prefixed."""
+    from nous.heart.schemas import FactRejected
+
+    seen = []
+
+    async def fake_learn(fact_input, **_):
+        seen.append(fact_input.source)
+        return FactRejected(content=fact_input.content, composite_score=0.41, threshold=0.6, scores={}, explanation="")
+
+    monkeypatch.setattr(heart, "learn", fake_learn)
+    result = await mcp_tools(
+        "nous_teach", {"type": "fact", "content": "The owner lives in Paris", "source": "user_stated"}
+    )
+    assert seen == ["mcp:user_stated"]
+    # a rejection is reported as such, not as an attribute error
+    assert "Fact not stored (admission score 0.41 < 0.6 threshold)" in str(result)

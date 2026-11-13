@@ -28,7 +28,7 @@ from nous.api.runner import AgentRunner
 from nous.brain import Brain
 from nous.config import Settings
 from nous.heart import Heart
-from nous.heart.schemas import FactInput, ProcedureInput
+from nous.heart.schemas import FactInput, FactRejected, ProcedureInput
 from nous.tool_markup import clean_model_text
 
 logger = logging.getLogger(__name__)
@@ -340,6 +340,12 @@ def create_mcp_server(
                 source=source,
             )
             fact = await heart.learn(fact_input)
+            if isinstance(fact, FactRejected):
+                # Nothing was written. A taught fact is scored like any other.
+                return [TextContent(type="text", text=(
+                    f"Fact not stored (admission score {fact.composite_score:.2f} "
+                    f"< {fact.threshold} threshold)."
+                ))]
             return [TextContent(type="text", text=f"Learned fact: {fact.id}")]
 
         elif teach_type == "procedure":
