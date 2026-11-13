@@ -237,9 +237,9 @@ def guarded_client(
     allow_private_hosts: frozenset[str], max_response_bytes: int, *, auth: httpx.Auth | None = None
 ) -> httpx.AsyncClient:
     """An HTTP client whose every connection goes through ``_GuardedBackend``, whose every response body is bounded
-    (``_LimitedTransport``), that follows no redirect, reads no proxy from the environment and runs ``auth`` on every
-    request it sends. Fails closed (RuntimeError) when the installed httpx no longer exposes the pool's network
-    backend."""
+    (``_LimitedTransport``), that follows no redirect itself (the SDK follows a same-origin one on its own, through
+    this client), reads no proxy from the environment and runs ``auth`` on every request it sends. Fails closed
+    (RuntimeError) when the installed httpx no longer exposes the pool's network backend."""
     transport = httpx.AsyncHTTPTransport(retries=0)
     pool = getattr(transport, "_pool", None)
     if pool is None or not hasattr(pool, "_network_backend"):
