@@ -242,13 +242,26 @@ async def test_a_missing_or_wrong_header_is_403_and_the_right_one_is_200(make_en
     assert probe.status_code == 403 and env.remotes.connects == []
     ok = await _req(env, "GET", "/integrations/mcp/servers")
     assert ok.status_code == 200 and ok.json() == {
-        "ceilings": {"pinned_servers": False, "background_servers": False}, "secrets_available": False, "servers": []
+        "ceilings": {"pinned_servers": False, "background_servers": False}, "secrets_available": False,
+        "oauth_available": False, "servers": [],
     }
     created = await _add(env, tools={"search": "allow"})
     assert created.status_code == 201
     for text in [r.getMessage() for r in caplog.records] + [wrong.text, ok.text, created.text]:
         assert SECRET not in text and WRONG not in text
     assert all(SECRET not in repr(e.data) for e in env.bus.events)
+
+    # PR 2d: an exception that escapes a handler is logged by its class only, never with a traceback: its text can
+    # repeat a credential a server or a provider was sent.
+    def leaky() -> dict[str, Any]:
+        raise RuntimeError("upstream said Bearer test-token-0000000000")
+
+    env.manager.status = leaky  # type: ignore[method-assign]
+    failed = await _req(env, "GET", "/integrations/mcp/servers")
+    assert (failed.status_code, failed.json()) == (500, {"error": "the request could not be processed"})
+    assert any("list_servers failed (RuntimeError)" in r.getMessage() for r in caplog.records)
+    assert all(r.exc_info is None for r in caplog.records)
+    assert all("test-token" not in logging.Formatter().format(r) for r in caplog.records)
 
 
 @pytest.mark.parametrize("method,path", [
@@ -257,6 +270,9 @@ async def test_a_missing_or_wrong_header_is_403_and_the_right_one_is_200(make_en
     ("PATCH", "/integrations/mcp/servers/alpha"),
     ("POST", "/integrations/mcp/servers/alpha/refresh"),
     ("DELETE", "/integrations/mcp/servers/alpha"),
+    ("POST", "/integrations/mcp/servers/alpha/sign-out"),
+    ("POST", "/integrations/mcp/oauth/start"),
+    ("POST", "/integrations/mcp/oauth/complete"),
 ])
 @pytest.mark.parametrize(
     "content_type",

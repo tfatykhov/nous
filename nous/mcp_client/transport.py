@@ -1,4 +1,5 @@
-"""F112 MCP client: the one module that imports the MCP SDK's client.
+"""F112 MCP client: the one module that opens sessions with the MCP SDK's client (``oauth.py`` imports only the
+SDK's auth models and helpers).
 
 ``open_session`` opens a streamable-HTTP ``ClientSession`` over an HTTP client that:
 
@@ -33,8 +34,9 @@ import ipaddress
 import logging
 import os
 import socket
-from collections.abc import AsyncIterator, Iterable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterable, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from typing import Any, cast
 from urllib.parse import urlsplit
 
@@ -58,6 +60,8 @@ DEFAULT_MAX_RESPONSE_BYTES = 2_000_000  # NOUS_MCP_CLIENT_MAX_RESPONSE_BYTES's d
 _SESSION_TERMINATED = 32600
 # Hosts this client opened a session with: their request lines are dropped from the httpx logger.
 _QUIET_HOSTS: set[str] = set()
+# PR 2d: set while an OAuth request is sent (``quiet_requests``): its request line is dropped too, whatever its host.
+_QUIET_SCOPE: ContextVar[bool] = ContextVar("mcp_client_quiet_requests", default=False)
 
 
 class _QuietMcpRequests(logging.Filter):
@@ -68,6 +72,8 @@ class _QuietMcpRequests(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         args = record.args
         if isinstance(args, tuple) and len(args) > 1 and isinstance(args[1], httpx.URL):
+            if _QUIET_SCOPE.get():
+                return False
             url = args[1]
             hosts = {url.host.lower(), url.raw_host.decode("ascii", "replace").lower()}
             return not hosts & _QUIET_HOSTS
@@ -233,13 +239,29 @@ class _LimitedTransport(httpx.AsyncBaseTransport):
         await self._inner.aclose()
 
 
+@contextmanager
+def quiet_requests() -> Iterator[None]:
+    """The HTTP client's request lines of the requests sent inside are dropped (PR 2d: the OAuth requests, whose hosts
+    come from a server's or a provider's documents and are not added to the process-wide host set)."""
+    token = _QUIET_SCOPE.set(True)
+    try:
+        yield
+    finally:
+        _QUIET_SCOPE.reset(token)
+
+
 def guarded_client(
-    allow_private_hosts: frozenset[str], max_response_bytes: int, *, auth: httpx.Auth | None = None
+    allow_private_hosts: frozenset[str],
+    max_response_bytes: int,
+    *,
+    auth: httpx.Auth | None = None,
+    timeout: httpx.Timeout | float = _HTTP_TIMEOUT,
 ) -> httpx.AsyncClient:
     """An HTTP client whose every connection goes through ``_GuardedBackend``, whose every response body is bounded
     (``_LimitedTransport``), that follows no redirect itself (the SDK follows a same-origin one on its own, through
     this client), reads no proxy from the environment and runs ``auth`` on every request it sends. Fails closed
-    (RuntimeError) when the installed httpx no longer exposes the pool's network backend."""
+    (RuntimeError) when the installed httpx no longer exposes the pool's network backend. The OAuth client (PR 2d) is
+    one of these with no ``auth`` and a 10 s ``timeout``."""
     transport = httpx.AsyncHTTPTransport(retries=0)
     pool = getattr(transport, "_pool", None)
     if pool is None or not hasattr(pool, "_network_backend"):
@@ -249,7 +271,7 @@ def guarded_client(
         transport=_LimitedTransport(transport, max_response_bytes),
         follow_redirects=False,
         trust_env=False,
-        timeout=_HTTP_TIMEOUT,
+        timeout=timeout,
         headers={"Accept-Encoding": "identity"},
         auth=auth,
     )

@@ -1,8 +1,9 @@
 """F112 MCP client: the agent uses tools of external MCP servers, as ``mcp__<server>__<tool>``.
 
 Imported only when ``NOUS_MCP_CLIENT_ENABLED`` is on (``nous/main.py``, and ``nous/api/rest.py`` for the routes).
-``transport.py`` is the one module that imports the MCP SDK's client, and the manager imports it only when it is built
-without a test connector.
+``transport.py`` is the one module that opens sessions with the MCP SDK's client; ``oauth.py`` (PR 2d) imports only the
+SDK's auth models and helpers, and imports ``transport.py``. The manager imports ``oauth.py``, so importing this
+package loads the SDK: it is imported only with the flag on.
 
 Who adds a server: the owner, with a request to the ``/integrations/mcp`` routes (``nous/api/mcp_client_routes.py``,
 behind the proxy's secret header) or with the seed command on the host. That request is the approval: the change

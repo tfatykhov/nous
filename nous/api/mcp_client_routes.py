@@ -36,11 +36,25 @@ address: ``/probe`` uses only the headers in its own request (never stored), a c
 stored credential opened as bound to the request's URL (so another URL cannot open it) and, at another URL, deletes
 it, and ``/refresh`` uses the stored URL and credential. A probe the server answers 401 or 403, or whose listing
 repeats a credential it was sent or the server's stored one, is 502 with a fixed sentence and stores nothing.
+
+OAuth sign-in (PR 2d, ``nous/mcp_client/oauth.py``): ``POST /oauth/start`` discovers the server's provider, registers
+a client (or takes the owner's client id, or reuses the stored one while the issuer is unchanged) and answers with the
+address the owner's browser opens and the authorization and token hosts. The provider sends the browser back to
+``<NOUS_A2UI_PUBLIC_BASE_URL>/integrations/mcp/oauth/callback`` (a GET through the same proxy, so it carries the proxy
+secret too), which exchanges the code and answers with one of two fixed pages that reflect nothing of the request
+(``default-src 'none'``, no script); ``POST /oauth/complete`` takes the address pasted from the browser's address bar
+instead. ``GET /oauth/flows/{id}`` says how a sign-in stands. For a stored server at the same address the tokens are
+stored at once (a new credential row: the connection is dropped); for a new one the finished sign-in is held in memory
+until ``POST /servers`` with its ``oauth_flow_id`` stores it with the server (``POST /probe`` takes it too). A sign-in
+is bound to its server name and address. ``POST /servers/{name}/sign-out`` deletes the stored tokens (the provider's
+grant is not revoked). No answer, log line or event carries a code, a state, a verifier or a token; the uvicorn access
+line of the callback (its query string holds the code and the state) is dropped.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -50,7 +64,7 @@ from typing import Any
 
 from pydantic import ValidationError
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from nous.api.commitment_routes import owner_secret_matches
@@ -65,8 +79,25 @@ from nous.mcp_client.manager import (
     ServerVerdict,
     ToolVerdict,
 )
+from nous.mcp_client.oauth import (
+    CALLBACK_PATH,
+    FLOW_SECONDS,
+    Client,
+    Flow,
+    OAuthProblem,
+    callback_params,
+    discover,
+    exchange_code,
+    host_of,
+    owner_client,
+    owner_scope,
+    redirect_uri,
+    refresh_due,
+    refresh_tokens,
+    register,
+)
 from nous.mcp_client.registry import McpRegistry
-from nous.mcp_client.secrets import StoredSecret
+from nous.mcp_client.secrets import OAuthRecord, StoredSecret
 
 logger = logging.getLogger(__name__)
 
@@ -80,8 +111,45 @@ _EVENT_TOOL_CHARS = 80
 _EVENT_TOOLS_MAX = 60
 _SERVER_FIELDS = ("url", "enabled", "background", "call_timeout_seconds")
 NO_KEY_TEXT = "no key file is configured on the host (NOUS_MCP_CLIENT_KEY_FILE)"
+OAUTH_UNAVAILABLE_TEXT = "sign-in is not available: NOUS_A2UI_PUBLIC_BASE_URL is not an https address"
 
-Handler = Callable[[Request], Awaitable[JSONResponse]]
+Handler = Callable[[Request], Awaitable[Response]]
+
+# The callback's two pages: fixed bytes, nothing of the request in them, no script, nothing loaded.
+_PAGE = (
+    '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width, initial-scale=1"><title>Nous sign-in</title></head>'
+    "<body><p>{}</p></body></html>"
+)
+SIGNED_IN_PAGE = _PAGE.format("Signed in. You can close this tab.").encode("utf-8")
+NOT_SIGNED_IN_PAGE = _PAGE.format("Sign-in did not complete. Go back to Nous and try again.").encode("utf-8")
+_PAGE_HEADERS = {
+    "Content-Security-Policy": "default-src 'none'",
+    "Cache-Control": "no-store",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+}
+
+
+class _Superseded(Exception):
+    """A sign-in whose code exchange returned after it stopped being the current one (a newer sign-in replaced it, or
+    it expired): it stores nothing and stays as it is."""
+
+
+class _QuietOAuthCallback(logging.Filter):
+    """Drops uvicorn's access line for the OAuth callback: it prints the request's query string, which holds the
+    authorization code and the state. Other lines pass."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            return CALLBACK_PATH not in record.getMessage()
+        except Exception:  # a record whose arguments do not format: not this one
+            return True
+
+
+_ACCESS_LOG = logging.getLogger("uvicorn.access")
+if not any(isinstance(f, _QuietOAuthCallback) for f in _ACCESS_LOG.filters):
+    _ACCESS_LOG.addFilter(_QuietOAuthCallback())
 
 
 class _Refused(Exception):
@@ -262,6 +330,12 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
     """The ``/integrations/mcp`` routes over the MCP client ``manager`` and a registry for ``settings.agent_id``.
     ``manager`` and ``bus`` may be lazy components: a falsy ``manager`` answers 503."""
     registry = McpRegistry(database, settings.agent_id)
+
+    def redirect_address() -> str | None:
+        """The OAuth redirect address, read when a request needs it (never at build: a settings object that is not
+        text there must not fail the app); None: OAuth is unavailable here."""
+        return redirect_uri(getattr(settings, "a2ui_public_base_url", ""))
+
     digest = _digest(settings.mcp_client_ui_secret_sha256)
     if not digest:
         logger.warning(
@@ -271,7 +345,7 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
     changes = asyncio.Lock()  # one change at a time: read the old row, write, emit, reload
 
     def endpoint(handler: Handler, *, mutating: bool) -> Handler:
-        async def run(request: Request) -> JSONResponse:
+        async def run(request: Request) -> Response:
             if not digest:
                 return JSONResponse({"error": "the MCP client routes are not configured"}, status_code=503)
             if not owner_secret_matches(request.headers.get(PROXY_SECRET_HEADER), digest):
@@ -285,9 +359,10 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
                 return await handler(request)
             except _Refused as exc:
                 return JSONResponse({"error": str(exc), **exc.extra}, status_code=exc.status)
-            except Exception as exc:  # a database error's text can carry the URL: the class only
+            except Exception as exc:
+                # The class only, never a traceback: a database error's text can carry the URL, and an error raised
+                # from what a server or a provider sent can repeat a credential it was sent.
                 logger.warning("F112: %s failed (%s)", handler.__name__, type(exc).__name__)
-                logger.debug("F112: %s error", handler.__name__, exc_info=True)
                 return JSONResponse({"error": "the request could not be processed"}, status_code=500)
 
         return run
@@ -302,17 +377,25 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         return (await registry.list_secrets()).get(name)
 
     async def stored_values(name: str) -> list[str]:
-        """The values of the server's stored credential, opened with its stored URL (none when it cannot be opened):
-        a listing that repeats one is refused even when other headers, or none, were sent."""
+        """The values of the server's stored credential (header values, or an OAuth record's tokens and client
+        secret), opened with its stored URL (none when it cannot be opened): a listing that repeats one is refused
+        even when other headers, or none, were sent."""
         secret, current = await secret_of(name), await stored(name)
         if secret is None or current is None:
             return []
-        opened, _problem = manager.open_credentials(name, current[0].url, secret)
-        return list(opened.values()) if opened else []
+        return manager.credential_values(name, current[0].url, secret)
 
-    async def probe_tools(name: str, url: str, headers: dict[str, str] | None = None) -> list[ProbedTool]:
+    async def probe_tools(
+        name: str, url: str, headers: dict[str, str] | None = None, record: OAuthRecord | None = None
+    ) -> list[ProbedTool]:
+        """The probe, with ``headers`` sent, or a finished sign-in's access token (``record``); a listing that repeats
+        the server's stored credential or the sign-in's tokens is refused."""
+        withheld = await stored_values(name)
+        if record is not None:
+            headers = {"Authorization": f"Bearer {record.access_token}"}
+            withheld += record.values()
         try:
-            return await manager.probe(name, url, headers, withheld=await stored_values(name))
+            return await manager.probe(name, url, headers, withheld=withheld)
         except ProbeRefused as exc:
             raise _Refused(400, f"the address guard refused the URL: {exc}") from None
         except ProbeCredentials as exc:
@@ -377,12 +460,17 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
 
     def auth_view(verdict: ServerVerdict, secret: StoredSecret | None, refused: int | None) -> dict[str, Any]:
         """The server's stored credential, without its values: the kind, the header names, when it was stored, and
-        whether it works (``unavailable``: it cannot be opened here, ``reason`` says why; ``credentials_refused``: the
-        server refused a request with a 401, or with a 403 while a credential is stored, ``reason`` saying so for a
-        403)."""
+        whether it works (``unavailable``: it cannot be opened here, ``reason`` says why; ``needs_sign_in``: its OAuth
+        tokens can no longer be refreshed; ``provider_unreachable``: a refresh found the sign-in provider unreachable
+        less than 30 s ago; ``credentials_refused``: the server refused a request with a 401, or with a 403
+        while a credential is stored, ``reason`` saying so for a 403)."""
         reason = verdict.credentials
         if verdict.credentials is not None:
             status = "unavailable"
+        elif secret is not None and manager.needs_sign_in(verdict.config.name, secret.id):
+            status = "needs_sign_in"
+        elif secret is not None and manager.provider_unreachable(verdict.config.name, secret.id):
+            status = "provider_unreachable"
         elif refused is not None:
             status = "credentials_refused"
             reason = "the server answered 403 (forbidden)" if refused == 403 else None
@@ -434,73 +522,140 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         """GET /integrations/mcp/servers: every stored server with its tools, what registers and why not, and
         whether a credential can be stored on this host (``secrets_available``)."""
         return JSONResponse(
-            {"ceilings": manager.ceilings(), "secrets_available": manager.secrets_available(), "servers": await views()}
+            {
+                "ceilings": manager.ceilings(),
+                "secrets_available": manager.secrets_available(),
+                "oauth_available": redirect_address() is not None,
+                "servers": await views(),
+            }
         )
 
+    def finished_flow(body: dict[str, Any], config: ServerConfig) -> Flow | None:
+        """The finished sign-in ``oauth_flow_id`` names, bound to the request's name and URL (409 otherwise); None when
+        the request names none. ``headers`` and ``oauth_flow_id`` together are refused."""
+        if "oauth_flow_id" not in body:
+            return None
+        if "headers" in body:
+            raise _Refused(400, "give headers or oauth_flow_id, not both")
+        try:
+            return manager.flows.completed_for(body["oauth_flow_id"], config.name, config.url)
+        except OAuthProblem as exc:
+            raise _Refused(exc.status, str(exc)) from None
+
+    async def held_record(flow: Flow | None) -> OAuthRecord | None:
+        """The finished sign-in's record (renewed first when about to expire), read ONCE: the request uses this copy
+        for its probe and its write, whatever happens to the flow meanwhile (its expiry clears the held record).
+        None without a flow; 409 when a flow was named and holds no record any more."""
+        if flow is None:
+            return None
+        await renew(flow)
+        record = flow.record
+        if record is None:
+            raise _Refused(409, "that sign-in is not complete, has expired or was already used: sign in again")
+        return record
+
+    async def renew(flow: Flow | None) -> None:
+        """A finished sign-in's tokens, refreshed first when they are about to expire (a sign-in waits up to 10 minutes
+        for its create; a token can live less): the refreshed record replaces the held one, so the probe sends it and
+        the create stores it."""
+        if flow is None:
+            return
+        async with flow.renewing:  # a concurrent probe and create make one token request
+            # Without a refresh token the record is used as it is until it has expired.
+            if flow.record is None or not refresh_due(flow.record):
+                return
+            try:
+                flow.record = await refresh_tokens(flow.record, manager.oauth_http, manager.allow_private_hosts)
+            except OAuthProblem as exc:
+                if exc.transient:
+                    raise _Refused(502, "the sign-in provider could not be reached: try again in a moment") from None
+                raise _Refused(409, "the sign-in's tokens expired and could not be renewed: sign in again") from None
+
     async def probe(request: Request) -> JSONResponse:
-        """POST /integrations/mcp/probe ``{name, url, headers?}``: the server's tools as they would be registered,
-        with ``headers`` sent on its requests (never stored; a stored credential is never attached). No write."""
+        """POST /integrations/mcp/probe ``{name, url, headers? | oauth_flow_id?}``: the server's tools as they would be
+        registered, with ``headers`` sent on its requests, or a finished sign-in's token (never stored; a stored
+        credential is never attached). No write."""
         body = await _body(request)
-        _only(body, {"name", "url", "headers"})
+        _only(body, {"name", "url", "headers", "oauth_flow_id"})
         config = _server_config(body.get("name"), body.get("url"), False)
+        flow = finished_flow(body, config)
         headers = _headers(body["headers"]) if "headers" in body else None
-        probed = await probe_tools(config.name, config.url, headers)
+        record = await held_record(flow)
+        probed = await probe_tools(config.name, config.url, headers, record)
         return JSONResponse(
             {"tools": [_probe_view(tool) for tool in probed], "definitions_sha256": definitions_sha256(probed)}
         )
 
     async def create_server(request: Request) -> JSONResponse:
         """POST /integrations/mcp/servers ``{name, url, background?, tools?, expected_definitions_sha256?,
-        headers?}``: add or replace a server, its tools stored from a probe made here, with the request's permissions
-        (a tool not named is ``deny``). Replacing enables the server and sets its call timeout to 30 s, as the seed
-        does. ``headers`` become its credential (409 without a key on the host). Without them, the probe uses the
-        stored credential opened as bound to the request's URL, and a replace at another URL removes it
+        headers? | oauth_flow_id?}``: add or replace a server, its tools stored from a probe made here, with the
+        request's permissions (a tool not named is ``deny``). Replacing enables the server and sets its call timeout to
+        30 s, as the seed does. ``headers``, or the tokens of the finished sign-in ``oauth_flow_id`` (bound to this
+        name and URL, and consumed here), become its credential (409 without a key on the host). Without either, the
+        probe uses the stored credential opened as bound to the request's URL, and a replace at another URL removes it
         (``credentials: "removed"``)."""
         body = await _body(request)
-        _only(body, {"name", "url", "background", "tools", "expected_definitions_sha256", "headers"})
+        _only(body, {"name", "url", "background", "tools", "expected_definitions_sha256", "headers", "oauth_flow_id"})
         config = _server_config(body.get("name"), body.get("url"), bool(_flag(body, "background")))
         wanted = _permissions(body.get("tools", {}))
+        flow = finished_flow(body, config)
         headers = _headers(body["headers"]) if "headers" in body else None
-        if headers is not None and not manager.secrets_available():
+        if (headers is not None or flow is not None) and not manager.secrets_available():
             raise _Refused(409, NO_KEY_TEXT)
+        record = await held_record(flow)  # this copy is probed with and stored, whatever the flow becomes meanwhile
         sent = headers
         stored_secret = await secret_of(config.name)
-        if sent is None and stored_secret is not None:
+        if sent is None and flow is None and stored_secret is not None:
             # Opened as bound to the request's URL: at another URL it does not open, and nothing is sent.
-            sent, _problem = manager.open_credentials(config.name, config.url, stored_secret)
-        probed = await probe_tools(config.name, config.url, sent)
+            sent, _problem = await manager.credential_headers(config.name, config.url, stored_secret)
+        probed = await probe_tools(config.name, config.url, sent, record)
         digest_stored = expect(body, probed)
         unknown = sorted(set(wanted) - {tool.tool for tool in probed})
         if unknown:
             raise _Refused(400, f"the server does not list these tools: {', '.join(unknown)}")
         rows = _rows_from_probe(config.name, probed, wanted)
         sealed = sealed_for(config.name, config.url, headers) if headers is not None else None
-        async with changes:
-            old = await stored(config.name)
-            old_secret = await secret_of(config.name)
-            created, secret_deleted = await registry.replace_server(config, rows, secret=sealed)
-            if headers is not None:
-                credentials: str | None = "replaced" if old_secret is not None else "set"
-            else:
-                # What the registry did with the URL change: a row that no longer validates is not read by stored().
-                credentials = "removed" if secret_deleted else None
-            old_permissions = {tool.tool: tool.permission for tool in old[1]} if old else {}
-            # A stored tool the server no longer lists is set to deny (its row is kept).
-            new_permissions = {**{tool: "deny" for tool in old_permissions}, **{r.tool: r.permission for r in rows}}
-            action = "create" if created else "replace"
-            data = _change(
-                action,
-                config.name,
-                old[0] if old else None,
-                config,
-                old_permissions,
-                new_permissions,
-                credentials=credentials,
-                header_count=_count(credentials, headers),
-            )
-            await audit(data)
-            await apply()
-            server = await view(config.name)
+        # Lock order: a flow's renewing lock, then changes (no path takes them the other way round). Held from the read
+        # of the sign-in's record to its consume, so no renewal can rotate the tokens in between.
+        async with flow.renewing if flow is not None else contextlib.nullcontext():
+            if flow is not None:
+                # The newest record: one a concurrent probe renewed (its refresh token rotated) wins over the copy this
+                # request captured, which is used only when the flow's record was cleared (expired and purged). A
+                # request that names a sign-in never creates the server without its tokens.
+                latest = flow.record if flow.record is not None else record
+                sealed = manager.seal_oauth_record(config.name, config.url, latest) if latest is not None else None
+                if sealed is None:
+                    raise _Refused(
+                        409, NO_KEY_TEXT if latest is not None else "that sign-in holds no tokens: sign in again"
+                    )
+            async with changes:
+                old = await stored(config.name)
+                old_secret = await secret_of(config.name)
+                created, secret_deleted = await registry.replace_server(config, rows, secret=sealed)
+                if flow is not None:
+                    manager.flows.consume(flow)  # a finished sign-in is stored once
+                if sealed is not None:
+                    credentials: str | None = "replaced" if old_secret is not None else "set"
+                else:
+                    # What the registry did with the URL change: a row that no longer validates is not read by stored().
+                    credentials = "removed" if secret_deleted else None
+                old_permissions = {tool.tool: tool.permission for tool in old[1]} if old else {}
+                # A stored tool the server no longer lists is set to deny (its row is kept).
+                new_permissions = {**{tool: "deny" for tool in old_permissions}, **{r.tool: r.permission for r in rows}}
+                action = "create" if created else "replace"
+                data = _change(
+                    action,
+                    config.name,
+                    old[0] if old else None,
+                    config,
+                    old_permissions,
+                    new_permissions,
+                    credentials=credentials,
+                    header_count=_count(credentials, headers),
+                )
+                await audit(data)
+                await apply()
+                server = await view(config.name)
         return JSONResponse(
             {"created": created, "definitions_sha256": digest_stored, "credentials": credentials, "server": server},
             status_code=201 if created else 200,
@@ -579,7 +734,7 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         stored_secret = await secret_of(name)
         headers: dict[str, str] | None = None
         if stored_secret is not None:  # the stored URL and the stored credential, nothing from the request
-            headers, problem = manager.open_credentials(name, before[0].url, stored_secret)
+            headers, problem = await manager.credential_headers(name, before[0].url, stored_secret)
             if problem is not None:
                 raise _Refused(409, f"the stored credentials cannot be used here: {problem}")
         probed = await probe_tools(name, before[0].url, headers)
@@ -652,6 +807,235 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             await apply()
         return JSONResponse({"deleted": name})
 
+    # --- OAuth sign-in (PR 2d) ---------------------------------------------------------------------------------------
+
+    def oauth_problem(exc: OAuthProblem) -> _Refused:
+        return _Refused(exc.status, str(exc))
+
+    async def oauth_start(request: Request) -> JSONResponse:
+        """POST /integrations/mcp/oauth/start ``{name, url, client_id?, client_secret?, scope?}``: discover the
+        server's provider, register a client (or take the owner's ``client_id``, or reuse the stored client while the
+        issuer is unchanged) and start a sign-in: ``{flow_id, authorization_url, authorization_host, token_host,
+        registration, scope, expires_in}``. For a stored server the URL must be its stored one. A sign-in pending for
+        the same name and URL is replaced (its client reused while the issuer is unchanged). Nothing is stored."""
+        body = await _body(request)
+        _only(body, {"name", "url", "client_id", "client_secret", "scope"})
+        redirect = redirect_address()
+        if redirect is None:
+            raise _Refused(409, OAUTH_UNAVAILABLE_TEXT)
+        if not manager.secrets_available():
+            raise _Refused(409, NO_KEY_TEXT)
+        config = _server_config(body.get("name"), body.get("url"), False)
+        client_id, client_secret = body.get("client_id") or None, body.get("client_secret") or None
+        if client_secret is not None and client_id is None:
+            raise _Refused(400, "a client secret goes with a client id")
+        current = await stored(config.name)
+        # "Start again": the pending sign-in is replaced and its client reused. Held now: a flow that ends meanwhile
+        # drops its client's secret.
+        pending = manager.flows.pending_for(config.name, config.url)
+        pending_client, pending_issuer = (pending.client, pending.discovery.issuer) if pending else (None, None)
+        reuse = None
+        if current is not None:
+            if current[0].url != config.url:
+                raise _Refused(409, "a server of that name is stored at another address: sign in at its stored address")
+            secret = await secret_of(config.name)
+            if secret is not None and secret.kind == "oauth":
+                reuse = manager.stored_oauth(config.name, config.url, secret)
+        try:
+            scope = owner_scope(body.get("scope"))
+            http, allow = manager.oauth_http, manager.allow_private_hosts
+            discovery = await discover(config.url, http, allow, scope)
+            # The owner's client id again with no secret ("Start again" clears the typed secret): the pending or
+            # stored client of that id keeps its secret, so a confidential client does not turn public.
+            known = [(pending_client, pending_issuer)]
+            if reuse is not None:
+                known.append(
+                    (Client(reuse.client_id, reuse.client_secret, reuse.token_auth_method, "provided"), reuse.issuer)
+                )
+            same = next(
+                (c for c, issuer in known if c is not None and c.client_id == client_id and issuer == discovery.issuer),
+                None,
+            )
+            if client_id is not None and client_secret is None and same is not None:
+                client = Client(same.client_id, same.client_secret, same.token_auth_method, "provided")
+            elif client_id is not None:
+                client = owner_client(discovery, client_id, client_secret)
+            elif pending_client is not None and pending_issuer == discovery.issuer:
+                client = Client(
+                    pending_client.client_id,
+                    pending_client.client_secret,
+                    pending_client.token_auth_method,
+                    "reused",
+                )
+            elif reuse is not None and reuse.issuer == discovery.issuer:
+                client = Client(reuse.client_id, reuse.client_secret, reuse.token_auth_method, "reused")
+            else:
+                client = await register(discovery, redirect, http, allow)
+            flow = manager.flows.start(config.name, config.url, discovery, client, redirect)
+        except OAuthProblem as exc:
+            raise oauth_problem(exc) from None
+        logger.info("F112: an OAuth sign-in started for server %r (client %s)", config.name, client.registration)
+        return JSONResponse(
+            {
+                "flow_id": flow.flow_id,
+                "authorization_url": flow.authorization_url(),
+                "authorization_host": host_of(discovery.authorization_endpoint),
+                "token_host": host_of(discovery.token_endpoint),
+                "registration": client.registration,
+                "scope": discovery.scope,
+                "expires_in": FLOW_SECONDS,
+            }
+        )
+
+    async def store_sign_in(flow: Flow, record: Any) -> bool:
+        """A finished sign-in's tokens for a server stored at the flow's URL: stored at once (a new credential row,
+        replacing any stored one), audited and applied. False when no server has the flow's name (a new server: the
+        create stores them). 409 when the server moved meanwhile. ``_Superseded`` when the sign-in is no longer the
+        current pending one (a newer sign-in replaced it, or it expired, while its code was exchanged): checked under
+        the lock every store holds, so a slower old exchange never overwrites a newer sign-in's credential."""
+        async with changes:
+            if manager.flows.status(flow) != "pending":
+                raise _Superseded()
+            current = await stored(flow.server)
+            if current is None:
+                return False
+            config, tools = current
+            if config.url != flow.url:
+                raise _Refused(409, "the server's address changed during the sign-in: sign in again")
+            sealed = manager.seal_oauth_record(flow.server, config.url, record)
+            if sealed is None:
+                raise _Refused(409, NO_KEY_TEXT)
+            old_secret = await secret_of(flow.server)
+            await registry.update_server(flow.server, secret=sealed)
+            credentials = "replaced" if old_secret is not None else "set"
+            permissions = {tool.tool: tool.permission for tool in tools}
+            await audit(
+                _change(
+                    "sign_in",
+                    flow.server,
+                    config,
+                    config,
+                    permissions,
+                    permissions,
+                    credentials=credentials,
+                    header_count=0,
+                )
+            )
+            await apply()
+        return True
+
+    async def finish(flow: Flow, params: dict[str, Any]) -> bool:
+        """Exchange the provider's answer for tokens and store or hold them; the flow is then complete, or failed with
+        a fixed reason."""
+        try:
+            record = await exchange_code(flow, params, manager.oauth_http, manager.allow_private_hosts)
+            stored_now = await store_sign_in(flow, record)
+        except _Superseded:  # it stays as it is (failed: replaced, or expired), and nothing is stored
+            logger.warning(
+                "F112: the OAuth sign-in for server %r was replaced while it finished; nothing stored", flow.server
+            )
+            return False
+        except (OAuthProblem, _Refused) as exc:
+            manager.flows.fail(flow, str(exc))
+            logger.warning("F112: the OAuth sign-in for server %r did not complete (%s)", flow.server, exc)
+            return False
+        except Exception as exc:  # the class only, never a traceback: its text can repeat what the provider was sent
+            manager.flows.fail(flow, "the sign-in could not be completed")
+            logger.warning("F112: the OAuth sign-in for server %r failed (%s)", flow.server, type(exc).__name__)
+            return False
+        manager.flows.complete(flow, None if stored_now else record)
+        logger.info("F112: the OAuth sign-in for server %r completed", flow.server)
+        return True
+
+    def flow_view(flow: Flow) -> dict[str, Any]:
+        """How a sign-in stands, never a token: ``status``, the reason it failed, and ``stored`` (its tokens were
+        stored with the server at once; else a create stores them)."""
+        status = manager.flows.status(flow)
+        return {
+            "status": status,
+            "reason": flow.reason if status == "failed" else None,
+            "stored": status == "complete" and flow.record is None,
+        }
+
+    async def oauth_callback(request: Request) -> Response:
+        """GET /integrations/mcp/oauth/callback ``?code=&state=&iss=`` (or ``?error=``): the provider's answer, in the
+        owner's browser. One of two fixed pages whatever the request holds; the state is single use."""
+        params = {key: request.query_params.getlist(key)[0] for key in request.query_params.keys()}
+        flow = manager.flows.take_by_state(params.get("state"))
+        ok = flow is not None and await finish(flow, params)
+        return Response(
+            SIGNED_IN_PAGE if ok else NOT_SIGNED_IN_PAGE,
+            status_code=200 if ok else 400,
+            media_type="text/html; charset=utf-8",
+            headers=_PAGE_HEADERS,
+        )
+
+    async def oauth_complete(request: Request) -> JSONResponse:
+        """POST /integrations/mcp/oauth/complete ``{flow_id, callback_url}`` or ``{flow_id, code, state, iss?}``: the
+        paste fallback, handled as the callback is (``iss`` is checked as there). ``{status, reason, stored}``; 400 when
+        the sign-in failed."""
+        body = await _body(request)
+        _only(body, {"flow_id", "callback_url", "code", "state", "iss"})
+        redirect = redirect_address()
+        if redirect is None:
+            raise _Refused(409, OAUTH_UNAVAILABLE_TEXT)
+        if "callback_url" in body:
+            if "code" in body or "state" in body or "iss" in body:
+                raise _Refused(400, "give callback_url, or code and state (and iss)")
+            try:
+                params = callback_params(body["callback_url"], redirect)
+            except OAuthProblem as exc:
+                raise oauth_problem(exc) from None
+        else:
+            params = {key: body[key] for key in ("code", "state", "iss") if isinstance(body.get(key), str)}
+        flow = manager.flows.take(body.get("flow_id"), params.get("state"))
+        if flow is None:
+            raise _Refused(
+                409,
+                "that sign-in is not waiting for an answer, or the answer belongs to another sign-in: sign in again",
+            )
+        if not await finish(flow, params):
+            raise _Refused(400, flow.reason or "the sign-in did not complete")
+        return JSONResponse(flow_view(flow))
+
+    async def oauth_flow(request: Request) -> JSONResponse:
+        """GET /integrations/mcp/oauth/flows/{flow_id}: ``{status: pending|complete|failed|expired, reason, stored}``
+        (the screen asks every 2 s while the owner signs in). 404 for a sign-in that is unknown or long expired."""
+        flow = manager.flows.get(request.path_params["flow_id"])
+        if flow is None:
+            raise _Refused(404, "no such sign-in: it may have expired")
+        return JSONResponse(flow_view(flow))
+
+    async def sign_out(request: Request) -> JSONResponse:
+        """POST /integrations/mcp/servers/{name}/sign-out: delete the server's stored OAuth tokens. The provider's
+        grant is not revoked (many providers have no endpoint for it)."""
+        name = request.path_params["name"]
+        async with changes:
+            current = await stored(name)
+            if current is None:
+                raise _Refused(404, "no such server")
+            secret = await secret_of(name)
+            if secret is None or secret.kind != "oauth":
+                raise _Refused(409, "this server is not signed in with OAuth")
+            config, tools = current
+            await registry.update_server(name, remove_secret=True)
+            permissions = {tool.tool: tool.permission for tool in tools}
+            await audit(
+                _change(
+                    "sign_out",
+                    name,
+                    config,
+                    config,
+                    permissions,
+                    permissions,
+                    credentials="removed",
+                    header_count=0,
+                )
+            )
+            await apply()
+            server = await view(name)
+        return JSONResponse({"credentials": "removed", "server": server})
+
     return [
         Route("/integrations/mcp/servers", endpoint(list_servers, mutating=False), methods=["GET"]),
         Route("/integrations/mcp/servers", endpoint(create_server, mutating=True), methods=["POST"]),
@@ -659,4 +1043,9 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         Route("/integrations/mcp/servers/{name}/refresh", endpoint(refresh_server, mutating=True), methods=["POST"]),
         Route("/integrations/mcp/servers/{name}", endpoint(update_server, mutating=True), methods=["PATCH"]),
         Route("/integrations/mcp/servers/{name}", endpoint(delete_server, mutating=True), methods=["DELETE"]),
+        Route("/integrations/mcp/servers/{name}/sign-out", endpoint(sign_out, mutating=True), methods=["POST"]),
+        Route("/integrations/mcp/oauth/start", endpoint(oauth_start, mutating=True), methods=["POST"]),
+        Route(CALLBACK_PATH, endpoint(oauth_callback, mutating=False), methods=["GET"]),
+        Route("/integrations/mcp/oauth/complete", endpoint(oauth_complete, mutating=True), methods=["POST"]),
+        Route("/integrations/mcp/oauth/flows/{flow_id}", endpoint(oauth_flow, mutating=False), methods=["GET"]),
     ]

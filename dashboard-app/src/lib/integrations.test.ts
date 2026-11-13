@@ -1,8 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   CHANGED_TEXT, FORBIDDEN_TEXT, ceilingLines, clampText, createPayload, headersBody, headersProblem, isConflict, isNoKey,
   keyLine, listGate, nameProblem, prettySchema, problemText, refreshLineText, refreshLines, serverPath, serverStatus,
-  shortName, toolChange, toolStatus, toolStatusText, urlProblem, type McpAuth, type McpServer, type McpTool,
+  shortName, signInHosts, signInHref, signInText, startSignIn, toolChange, toolStatus, toolStatusText, urlProblem,
+  type McpAuth, type McpServer, type McpTool,
 } from './integrations';
 
 const err = (status: number | undefined, body?: unknown, message = `HTTP ${status}`) =>
@@ -296,5 +297,67 @@ describe('a stored key', () => {
   it("the card's line names the headers, never a value", () => {
     expect(keyLine(auth({ kind: 'headers', header_names: ['Authorization', 'X-API-Key'] }))).toBe('Key set: Authorization, X-API-Key');
     expect(keyLine(auth())).toBe('No key stored.');
+  });
+});
+
+describe('OAuth sign-in (F112 PR 2d)', () => {
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  it('the sign-in address is a link only when it is an https address', () => {
+    expect(signInHref('https://auth.example.com/authorize?client_id=c&state=s')).toBe('https://auth.example.com/authorize?client_id=c&state=s');
+    for (const url of ['http://auth.example.com/authorize', 'data:text/plain,hello', 'not an address', '']) {
+      expect(signInHref(url)).toBeNull();
+    }
+  });
+
+  it('says where the owner signs in and where the tokens come from, and warns when the two differ', () => {
+    expect(signInHosts({ authorization_host: 'auth.example.com', token_host: 'auth.example.com' })).toEqual({
+      line: 'You will sign in at auth.example.com. Tokens are fetched from auth.example.com.', warning: null,
+    });
+    expect(signInHosts({ authorization_host: 'auth.example.com', token_host: 'tokens.example.net' }).warning).toBe(
+      'The token host is not the sign-in host: continue only if you trust tokens.example.net.',
+    );
+  });
+
+  it('a finished, failed or expired sign-in in words', () => {
+    expect(signInText({ status: 'complete', reason: null, stored: false })).toBe('Signed in.');
+    expect(signInText({ status: 'expired', reason: null, stored: false })).toBe('The sign-in expired: sign in again.');
+    expect(signInText({ status: 'failed', reason: 'the provider said the request was denied', stored: false })).toBe(
+      'The sign-in did not complete: the provider said the request was denied. Sign in again.',
+    );
+  });
+
+  it('Sign in sends only the advanced fields that were typed, and a secret only with its client id', async () => {
+    const bodies: unknown[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit = {}) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return new Response('{}', { status: 200 });
+    }));
+    await startSignIn('alpha', 'https://alpha.example.com/mcp');
+    await startSignIn('alpha', 'https://alpha.example.com/mcp', { client_id: '  ', client_secret: 'test-secret-0000', scope: '' });
+    await startSignIn('alpha', 'https://alpha.example.com/mcp', { client_id: ' my-app ', client_secret: 'test-secret-0000', scope: ' read ' });
+    expect(bodies).toEqual([
+      { name: 'alpha', url: 'https://alpha.example.com/mcp' },
+      { name: 'alpha', url: 'https://alpha.example.com/mcp' },
+      { name: 'alpha', url: 'https://alpha.example.com/mcp', client_id: 'my-app', client_secret: 'test-secret-0000', scope: 'read' },
+    ]);
+  });
+
+  it('the add request names the finished sign-in, and never with headers', () => {
+    const probe = { tools: [{ tool: 't', name: null, description: null, schema: null, skip_reason: null }], definitions_sha256: 'h' };
+    expect(createPayload('a', 'https://a.example.com/mcp', probe, new Map(), undefined, 'flow-1').oauth_flow_id).toBe('flow-1');
+    const both = createPayload('a', 'https://a.example.com/mcp', probe, new Map(), { 'X-Api-Key': 'test-key-00000000' }, 'flow-1');
+    expect(both.oauth_flow_id).toBeUndefined();
+  });
+
+  it('a server that needs a new sign-in, or whose sign-in was refused, says so', () => {
+    const needs = server({ auth: auth({ kind: 'oauth', status: 'needs_sign_in' }) });
+    expect(serverStatus(needs)).toEqual({ word: 'needs sign-in', detail: 'the sign-in could not be renewed', tone: 'warn' });
+    expect(keyLine(needs.auth)).toBe('Needs sign-in: sign in again.');
+    expect(serverStatus(server({ auth: auth({ kind: 'oauth', status: 'credentials_refused' }) })).word).toBe('the server refused the sign-in');
+    expect(keyLine(auth({ kind: 'oauth' }))).toBe('Signed in with OAuth.');
+    const held = server({ auth: auth({ kind: 'oauth', status: 'provider_unreachable' }) });
+    expect(serverStatus(held)).toEqual({ word: 'sign-in provider unreachable', detail: 'Nous tries again within a minute', tone: 'warn' });
+    expect(keyLine(held.auth)).toBe('Signed in with OAuth.'); // the sign-in still stands
   });
 });

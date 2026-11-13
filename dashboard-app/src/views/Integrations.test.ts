@@ -856,7 +856,8 @@ describe('Integrations: a key for a new server', () => {
     await fill('wiki2', 'https://mcp.deepwiki.com/mcp');
     expect(within(addCard()).getByRole('radio', { name: 'None' })).toHaveProperty('checked', true);
     expect((within(addCard()).getByRole('radio', { name: 'Sign in (OAuth)' }) as HTMLInputElement).disabled).toBe(true);
-    expect(within(addCard()).getByText('Sign in (OAuth) arrives in the next update.')).toBeTruthy();
+    // PR 2d: without the public https address (oauth_available absent here), the choice says what it needs.
+    expect(within(addCard()).getByText('Sign-in needs NOUS_A2UI_PUBLIC_BASE_URL set to the https address of this Nous.')).toBeTruthy();
     await typeKey();
     expect((within(addCard()).getByLabelText('Header 1 name') as HTMLInputElement).value).toBe('Authorization');
     expect(valueField().type).toBe('password');

@@ -23,6 +23,20 @@ SERVER_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,23}")
 Permission = Literal["allow", "deny", "ask"]
 
 
+# Whitespace, a backslash or a control character anywhere in a URL: parsers disagree on them (a browser reads a
+# backslash as a slash), so the host one shows could differ from the host one opens.
+_UNSAFE_URL_CHARS = re.compile(r"[\s\\\x00-\x1f\x7f]")
+
+
+def url_chars_problem(url: str) -> str | None:
+    """Why ``url``'s characters cannot be used (whitespace, a backslash or a control character anywhere in it), or
+    None. Part of ``url_problem``; also applied whole to a provider's authorization endpoint, whose query
+    ``url_problem`` does not see."""
+    if _UNSAFE_URL_CHARS.search(url):
+        return "the URL may not carry whitespace, backslashes or control characters"
+    return None
+
+
 class BlockedAddress(Exception):
     """A URL or host the client's address guard refuses (raised by ``transport``; defined here, with no SDK import,
     so the manager can tell a refusal from a failed connection)."""
@@ -32,8 +46,12 @@ def url_problem(url: str) -> str | None:
     """Why ``url`` cannot be an MCP server's address, or None when it can.
 
     https only, with a host, and with no user, password, query string or fragment: those are where a credential
-    would sit, and the HTTP client logs every request URL at INFO. The answer never repeats the URL.
+    would sit, and the HTTP client logs every request URL at INFO. No whitespace, backslash or control character
+    anywhere (``url_chars_problem``). The answer never repeats the URL.
     """
+    chars = url_chars_problem(url) if isinstance(url, str) else None
+    if chars is not None:
+        return chars
     try:
         parts = urlsplit(url)
         _ = parts.port  # raises ValueError for a port that is not a number in range
@@ -179,6 +197,24 @@ def validate_headers(value: Any) -> dict[str, str]:
         if sum(ch.isascii() and ch.isalnum() for ch in item) < HEADER_VALUE_MIN_ALNUM:
             raise ValueError(f"header {name}: a value holds at least {HEADER_VALUE_MIN_ALNUM} letters or digits")
     return dict(value)
+
+
+TOKEN_MAX_CHARS = 8192
+# An OAuth token or client secret (PR 2d) becomes a header value or sits beside one: the header value rule without the
+# space (a bearer token has none, and the result scrub would look for a two-word value's second word alone).
+_TOKEN = re.compile(r"[\x21\x23-\x5b\x5d-\x7e]+")
+
+
+def token_ok(value: Any) -> bool:
+    """Whether ``value`` may be used as an access token, a refresh token or a client secret: ``HEADER_VALUE_MIN_CHARS``
+    to ``TOKEN_MAX_CHARS`` printable ASCII characters with no space, ``"`` or ``\\``, at least
+    ``HEADER_VALUE_MIN_ALNUM`` of them letters or digits (a shorter one could not be withheld from a result)."""
+    return (
+        isinstance(value, str)
+        and HEADER_VALUE_MIN_CHARS <= len(value) <= TOKEN_MAX_CHARS
+        and _TOKEN.fullmatch(value) is not None
+        and sum(ch.isalnum() for ch in value) >= HEADER_VALUE_MIN_ALNUM
+    )
 
 
 class ServerConfig(BaseModel):

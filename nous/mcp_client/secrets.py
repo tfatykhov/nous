@@ -5,7 +5,8 @@ on one line, kept on the host outside the repository and away from the database'
 the database, its dumps and its backups, not the running process: code running in this process (the agent's own
 included) can read the key file.
 
-A row's plaintext is canonical JSON, ``{"v":1,"headers":{name: value}}``. Its associated data is recomputed at every
+A row's plaintext is canonical JSON: ``{"v":1,"headers":{name: value}}`` for a ``headers`` row, or the token record of
+``OAuthRecord`` for an ``oauth`` row (PR 2d). Its associated data is recomputed at every
 open and never stored: it names the agent, the server's name, the URL the row was sealed for and the row's kind, so a
 row whose server was renamed or moved, or whose kind changed, cannot be opened. That is a backstop: the registry
 deletes a server's secret when its URL changes (``McpRegistry._upsert_server``).
@@ -24,9 +25,11 @@ import logging
 import os
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from dataclasses import fields as dataclass_fields
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -177,12 +180,83 @@ def open_headers(
     box: SecretBox | None, fields: AadFields, secret: StoredSecret
 ) -> tuple[dict[str, str] | None, str | None]:
     """``(headers, None)``, or ``(None, reason)``: ``NO_KEY``, ``OTHER_KEY`` or ``UNREADABLE`` (a row whose name, URL
-    or kind is not the one it was sealed for, a damaged row, or a kind this version cannot use)."""
+    or kind is not the one it was sealed for, a damaged row, or a row that does not hold headers)."""
+    opened, problem = open_credential(box, fields, secret)
+    return (opened, None) if isinstance(opened, dict) else (None, problem or UNREADABLE)
+
+
+@dataclass(frozen=True)
+class OAuthRecord:
+    """The plaintext of an ``oauth`` row (PR 2d): the provider's issuer and token endpoint, the client Nous uses there
+    and how it authenticates at the token endpoint (``none``, ``client_secret_post`` or ``client_secret_basic``), the
+    resource and scope the tokens are for, and the tokens. ``expires_at``: unix seconds, None when the provider gave no
+    lifetime; ``lifetime``: the seconds the provider gave it (the refresh margin is at most half of it). The secret
+    fields stay out of ``repr``."""
+
+    issuer: str
+    token_endpoint: str
+    client_id: str
+    client_secret: str | None = field(repr=False)
+    token_auth_method: str
+    resource: str
+    scope: str | None
+    access_token: str = field(repr=False)
+    refresh_token: str | None = field(repr=False)
+    expires_at: int | None
+    lifetime: int | None = None
+
+    def values(self) -> list[str]:
+        """The record's secret values: what a result or a listing must not repeat."""
+        return [value for value in (self.access_token, self.refresh_token, self.client_secret) if value]
+
+
+_OAUTH_TEXT = ("issuer", "token_endpoint", "client_id", "token_auth_method", "resource", "access_token")
+_OAUTH_OPTIONAL_TEXT = ("client_secret", "scope", "refresh_token")
+
+
+def oauth_plaintext(record: OAuthRecord) -> bytes:
+    """The canonical plaintext of a token record."""
+    return json.dumps({"v": 1, **asdict(record)}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _oauth_of(plaintext: bytes) -> OAuthRecord:
+    try:
+        record: Any = json.loads(plaintext)
+    except ValueError:
+        raise SecretUnavailable() from None
+    names = {f.name for f in dataclass_fields(OAuthRecord)}
+    if isinstance(record, dict):
+        record.setdefault("lifetime", None)  # a record sealed before the field existed
+    if not isinstance(record, dict) or record.pop("v", None) != 1 or set(record) != names:
+        raise SecretUnavailable()
+    if (
+        not all(isinstance(record[key], str) for key in _OAUTH_TEXT)
+        or not all(record[key] is None or isinstance(record[key], str) for key in _OAUTH_OPTIONAL_TEXT)
+        or not all(
+            record[key] is None or (isinstance(record[key], int) and not isinstance(record[key], bool))
+            for key in ("expires_at", "lifetime")
+        )
+    ):
+        raise SecretUnavailable()
+    return OAuthRecord(**record)
+
+
+def seal_oauth(box: SecretBox, fields: AadFields, record: OAuthRecord) -> SealedSecret:
+    """``record`` sealed for the row ``fields`` describe (its kind must be ``oauth``); no header names."""
+    key_id, nonce, ciphertext = box.seal(fields, oauth_plaintext(record))
+    return SealedSecret(fields[3], key_id, nonce, ciphertext, ())
+
+
+def open_credential(
+    box: SecretBox | None, fields: AadFields, secret: StoredSecret
+) -> tuple[dict[str, str] | OAuthRecord | None, str | None]:
+    """``(headers or token record, None)`` by the row's kind, or ``(None, reason)`` as ``open_headers`` gives it."""
     if box is None:
         return None, NO_KEY
     if secret.key_id != box.key_id:
         return None, OTHER_KEY
     try:
-        return _headers_of(box.open(fields, secret.key_id, secret.nonce, secret.ciphertext)), None
+        plaintext = box.open(fields, secret.key_id, secret.nonce, secret.ciphertext)
+        return (_oauth_of(plaintext) if secret.kind == "oauth" else _headers_of(plaintext)), None
     except SecretUnavailable:
         return None, UNREADABLE

@@ -75,7 +75,7 @@ def test_main_imports_and_builds_the_client_only_under_the_flag():
     assert len(builds) == 1 and _gated_by_the_flag(tree, builds[0])
 
 
-def test_nothing_else_imports_the_client_and_only_transport_imports_the_sdk():
+def test_nothing_else_imports_the_client_and_only_transport_and_oauth_import_the_sdk():
     # nous/api/mcp_client_routes.py is the routes' module: only rest.py imports it, under the flag (next test).
     allowed = ("nous/main.py", "nous/api/mcp_client_routes.py")
     for path in (ROOT / "nous").rglob("*.py"):
@@ -86,7 +86,9 @@ def test_nothing_else_imports_the_client_and_only_transport_imports_the_sdk():
             if module == "nous.api.mcp_client_routes":
                 assert rel == "nous/api/rest.py", rel
             if rel.startswith("nous/mcp_client/") and (module == "mcp" or module.startswith("mcp.")):
-                assert rel == "nous/mcp_client/transport.py", rel
+                # PR 2d: oauth.py imports the SDK's auth models and helpers (never its auth provider).
+                assert rel in ("nous/mcp_client/transport.py", "nous/mcp_client/oauth.py"), rel
+                assert not module.startswith("mcp.client.auth.oauth2"), rel
 
 
 def test_rest_imports_the_routes_only_under_the_flag():
