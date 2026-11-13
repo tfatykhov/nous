@@ -339,6 +339,7 @@ class McpClientManager:
         self._connect = connect
         self._servers: dict[str, _Server] = {}
         self._registered: dict[str, str] = {}  # tool name -> server name
+        self._sources: dict[str, str] = {}  # tool name -> the server's own name of the tool its handler calls
         self._closed = False
         self._lock = asyncio.Lock()  # one start or reload at a time
 
@@ -346,9 +347,17 @@ class McpClientManager:
         """The names of the tools this manager has registered, in registration order."""
         return list(self._registered)
 
-    def registered_server(self, name: str) -> str | None:
-        """The server whose tool this manager registered as ``name``, or None."""
-        return self._registered.get(name)
+    @property
+    def closed(self) -> bool:
+        """True once ``close`` ran: a ``reload`` does nothing from then on."""
+        return self._closed
+
+    def registered_source(self, name: str) -> tuple[str, str] | None:
+        """``(server, tool)``: the server, and its own name of the tool, whose handler this manager registered as
+        ``name``; None when it registered no tool of that name. Two of a server's tools can map to one name
+        (``a.b`` and ``a_b``): only the one that registered is its source."""
+        server = self._registered.get(name)
+        return None if server is None else (server, self._sources[name])
 
     def ceilings(self) -> dict[str, bool]:
         """Which of the host's two optional ceilings is set."""
@@ -486,6 +495,7 @@ class McpClientManager:
                 self._registrar.unregister(name)
                 forget_mcp_tool(name)
             self._registered.clear()
+            self._sources.clear()
             entries = sorted(
                 ((verdict.config.name, tool) for verdict in plan for tool in verdict.tools if tool.reason is None),
                 key=lambda entry: (entry[0], entry[1].tool),
@@ -499,6 +509,7 @@ class McpClientManager:
                     self._registrar.register(name, self._handler(server, tool.tool, name), schema)
                     note_mcp_tool(name, background=server.background)
                     self._registered[name] = server_name
+                    self._sources[name] = tool.tool
             except Exception:
                 logger.warning(
                     "MCP client: %s stopped after registering %d tool(s): %s",
@@ -555,7 +566,8 @@ class McpClientManager:
         ``transport.open_session``), list its tools and return each, by name, with what ``prepare_tool`` makes of it
         for a server named ``server``. Writes nothing and registers nothing. The connect and the listing together are
         bounded by ``HANDSHAKE_MAX_SECONDS``. Raises ``ProbeRefused`` when the guard refuses the URL, ``ProbeFailed``
-        (``safe_error`` text) for any other failure."""
+        (``safe_error`` text) for any other failure, and ``ProbeFailed`` for a listing that no set of tool rows can
+        hold: a tool with no name, or a name listed twice."""
         try:
             async with asyncio.timeout(HANDSHAKE_MAX_SECONDS):
                 async with self._connect(url, self._allow) as session:
@@ -566,6 +578,11 @@ class McpClientManager:
             logger.warning("MCP client: the probe for server %r failed (%s)", server, error_class(exc))
             logger.debug("MCP client: probe error", exc_info=True)
             raise ProbeFailed(safe_error(exc)) from None
+        names = [tool.name for tool in listed]
+        if any(not name for name in names):
+            raise ProbeFailed("the server lists a tool with no name")
+        if len(set(names)) < len(names):
+            raise ProbeFailed("the server lists a tool name twice")
         out: list[ProbedTool] = []
         for tool in sorted(listed, key=lambda t: t.name):
             description = tool.description or ""
@@ -581,6 +598,7 @@ class McpClientManager:
             self._registrar.unregister(name)
             forget_mcp_tool(name)
         self._registered.clear()
+        self._sources.clear()
         tasks: set[asyncio.Task[None]] = set()
         for server in self._servers.values():
             server.close()

@@ -6,8 +6,9 @@ client's ``reload``. There is no other approval step.
 
 Authentication: the owner's proxy adds ``X-Nous-Proxy-Secret`` to the requests it has authenticated, and this process
 holds only the secret's SHA-256 (``NOUS_MCP_CLIENT_UI_SECRET_SHA256``), compared in constant time. Without a valid
-digest every route answers 503; without a matching header, 403. Every POST, PATCH and DELETE must be sent as
-``application/json`` (415 otherwise), the CSRF control of the other mutating routes. The header is never logged.
+digest, or with no client running, every route answers 503; without a matching header, 403. Every POST, PATCH and
+DELETE must be sent with the media type exactly ``application/json`` (415 otherwise; ``text/plain; application/json``
+is a type a cross-site page sends with no preflight, and the proxy would add the secret). The header is never logged.
 
 What this protects against: a request from the LAN that did not come through the proxy. Not code running in the Nous
 process: the agent's ``bash`` and ``run_python`` run here, so they can call these routes on loopback (every proxied
@@ -17,16 +18,22 @@ wants one.
 
 A tool's description and schema are stored as the server gave them, from a probe this process makes itself (never
 from the request), and shown as ``prepare_tool`` makes them, which is what the model is offered. Only ``allow`` and
-``deny`` are accepted: ``ask`` is not offered yet.
+``deny`` are accepted: ``ask`` is not offered yet. A create or refresh probes again, so the server could answer
+differently from what the owner was shown: ``definitions_sha256`` (``/probe``'s answer) passed back as
+``expected_definitions_sha256`` makes a different listing a 409 with nothing stored.
 
 Every mutating route emits one ``mcp_client_server_changed`` event: the action, the server's name, the names of the
 fields that changed, the old and new ``enabled`` and ``background``, and the tools whose permission changed with the
-old and new permission. Never a URL or a description: the agent's reader can read the events table.
+old and new permission. Never a URL or a description: the agent's reader can read the events table. A tool's name is
+the server's text, so in an event it keeps ``[A-Za-z0-9_.-]`` only (anything else becomes ``?``), is cut to 80
+characters, and a list names at most 60 tools (``more`` counts the rest).
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -49,18 +56,42 @@ logger = logging.getLogger(__name__)
 PROXY_SECRET_HEADER = "X-Nous-Proxy-Secret"
 CHANGE_EVENT = "mcp_client_server_changed"
 _SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
-_EVENT_TOOL_CHARS = 80  # a tool's name is the server's text: cut in an event, as in a log line
+# A tool's name is the server's text, and the agent's reader can read the events table: in an event it keeps these
+# characters only (any other becomes "?"), is cut to 80, and one list names at most 60 tools (the rest are counted).
+_EVENT_TOOL_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]")
+_EVENT_TOOL_CHARS = 80
+_EVENT_TOOLS_MAX = 60
 _SERVER_FIELDS = ("url", "enabled", "background", "call_timeout_seconds")
 
 Handler = Callable[[Request], Awaitable[JSONResponse]]
 
 
 class _Refused(Exception):
-    """A request the route answers with ``status`` and ``message`` (fixed text, or what the caller sent)."""
+    """A request the route answers with ``status`` and ``message`` (fixed text, or what the caller sent), plus
+    ``extra`` fields in the answer."""
 
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(self, status: int, message: str, **extra: Any) -> None:
         super().__init__(message)
         self.status = status
+        self.extra = extra
+
+
+def _is_json(request: Request) -> bool:
+    """Whether the request's media type is exactly ``application/json`` (parameters such as a charset aside). A
+    substring match would pass ``text/plain; application/json``, a type a cross-site page sends with no preflight."""
+    media_type = (request.headers.get("content-type", "") or "").split(";")[0]
+    return media_type.strip().lower() == "application/json"
+
+
+def definitions_sha256(probed: list[ProbedTool]) -> str:
+    """The SHA-256 of what a listing stores: canonical JSON (sorted keys, compact separators, UTF-8, non-ASCII kept)
+    of ``[{tool, description, input_schema}]`` as the server gave them, sorted by tool name."""
+    items = [
+        {"tool": tool.tool, "description": tool.description, "input_schema": tool.input_schema}
+        for tool in sorted(probed, key=lambda tool: tool.tool)
+    ]
+    canonical = json.dumps(items, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _digest(raw: Any) -> str:
@@ -120,7 +151,12 @@ def _server_config(name: Any, url: Any, background: bool) -> ServerConfig:
 
 
 def _event_tool(tool: str) -> str:
-    return tool[:_EVENT_TOOL_CHARS]
+    return _EVENT_TOOL_UNSAFE.sub("?", tool[:_EVENT_TOOL_CHARS])
+
+
+def _capped(items: list[Any]) -> tuple[list[Any], int]:
+    """At most ``_EVENT_TOOLS_MAX`` items of an event's tool list, and how many were left out."""
+    return items[:_EVENT_TOOLS_MAX], max(0, len(items) - _EVENT_TOOLS_MAX)
 
 
 def _change(
@@ -131,7 +167,8 @@ def _change(
     old_permissions: dict[str, str],
     new_permissions: dict[str, str],
 ) -> dict[str, Any]:
-    """The ``mcp_client_server_changed`` event's data: names, switches and permissions only."""
+    """The ``mcp_client_server_changed`` event's data: names, switches and permissions only. ``more`` counts the
+    tools each list left out past its cap."""
     changed = [field for field in _SERVER_FIELDS if getattr(old, field, None) != getattr(new, field, None)]
     tools = [
         {"tool": _event_tool(tool), "old": old_permissions.get(tool), "new": new_permissions.get(tool)}
@@ -140,13 +177,15 @@ def _change(
     ]
     if tools:
         changed.append("tools")
+    shown, more = _capped(tools)
     return {
         "action": action,
         "server": server,
         "changed": changed,
         "enabled": {"old": old.enabled if old else None, "new": new.enabled if new else None},
         "background": {"old": old.background if old else None, "new": new.background if new else None},
-        "tools": tools,
+        "tools": shown,
+        "more": {"tools": more},
     }
 
 
@@ -195,14 +234,14 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             if not owner_secret_matches(request.headers.get(PROXY_SECRET_HEADER), digest):
                 logger.warning("F112: refused an /integrations/mcp request: no valid %s", PROXY_SECRET_HEADER)
                 return JSONResponse({"error": "forbidden"}, status_code=403)
-            if mutating and "application/json" not in (request.headers.get("content-type", "") or ""):
+            if mutating and not _is_json(request):
                 return JSONResponse({"error": "Content-Type must be application/json"}, status_code=415)
-            if not manager:
-                return JSONResponse({"error": "the MCP client is not running"}, status_code=503)
+            if not manager or manager.closed:
+                return JSONResponse({"error": "no MCP client is running"}, status_code=503)
             try:
                 return await handler(request)
             except _Refused as exc:
-                return JSONResponse({"error": str(exc)}, status_code=exc.status)
+                return JSONResponse({"error": str(exc), **exc.extra}, status_code=exc.status)
             except Exception as exc:  # a database error's text can carry the URL: the class only
                 logger.warning("F112: %s failed (%s)", handler.__name__, type(exc).__name__)
                 logger.debug("F112: %s error", handler.__name__, exc_info=True)
@@ -240,6 +279,22 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
                 "F112: a change to the MCP servers was stored, but the reload failed (%s)", type(exc).__name__
             )
             raise _Refused(500, "the change was stored, but applying it failed: see the log") from None
+        if manager.closed:  # closed while the change was written: the reload did nothing
+            raise _Refused(503, "the change was stored, but no MCP client is running to apply it")
+
+    def expect(body: dict[str, Any], probed: list[ProbedTool]) -> str:
+        """The listing's ``definitions_sha256``; 409 (nothing stored) when the request's
+        ``expected_definitions_sha256`` names another: the server answered differently from what the owner saw."""
+        expected = body.get("expected_definitions_sha256")
+        if expected is not None and not isinstance(expected, str):
+            raise _Refused(400, "expected_definitions_sha256 must be a string")
+        actual = definitions_sha256(probed)
+        if expected is not None and expected.lower() != actual:
+            raise _Refused(
+                409, "the server's tool definitions changed since they were shown: review them again",
+                definitions_sha256=actual,
+            )
+        return actual
 
     def tool_view(verdict: ToolVerdict, server: str) -> dict[str, Any]:
         prepared = verdict.prepared
@@ -247,7 +302,9 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             "tool": verdict.tool,
             "name": prepared.name,
             "permission": verdict.permission,
-            "registered": prepared.name is not None and manager.registered_server(prepared.name) == server,
+            # This row's own tool is the one registered under the name, not another that maps to it (a.b and a_b).
+            "registered": prepared.name is not None
+            and manager.registered_source(prepared.name) == (server, verdict.tool),
             "skip_reason": verdict.reason,
             "blocked_by_ceiling": verdict.ceiling,
             "description": prepared.schema["description"] if prepared.schema else None,
@@ -286,17 +343,21 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         body = await _body(request)
         _only(body, {"name", "url"})
         config = _server_config(body.get("name"), body.get("url"), False)
-        return JSONResponse({"tools": [_probe_view(tool) for tool in await probe_tools(config.name, config.url)]})
+        probed = await probe_tools(config.name, config.url)
+        return JSONResponse(
+            {"tools": [_probe_view(tool) for tool in probed], "definitions_sha256": definitions_sha256(probed)}
+        )
 
     async def create_server(request: Request) -> JSONResponse:
-        """POST /integrations/mcp/servers ``{name, url, background?, tools?}``: add or replace a server, its tools
-        stored from a probe made here, with the request's permissions (a tool not named is ``deny``). Replacing
-        enables the server and sets its call timeout to 30 s, as the seed does."""
+        """POST /integrations/mcp/servers ``{name, url, background?, tools?, expected_definitions_sha256?}``: add or
+        replace a server, its tools stored from a probe made here, with the request's permissions (a tool not named
+        is ``deny``). Replacing enables the server and sets its call timeout to 30 s, as the seed does."""
         body = await _body(request)
-        _only(body, {"name", "url", "background", "tools"})
+        _only(body, {"name", "url", "background", "tools", "expected_definitions_sha256"})
         config = _server_config(body.get("name"), body.get("url"), bool(_flag(body, "background")))
         wanted = _permissions(body.get("tools", {}))
         probed = await probe_tools(config.name, config.url)
+        digest_stored = expect(body, probed)
         unknown = sorted(set(wanted) - {tool.tool for tool in probed})
         if unknown:
             raise _Refused(400, f"the server does not list these tools: {', '.join(unknown)}")
@@ -311,7 +372,10 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             await audit(_change(action, config.name, old[0] if old else None, config, old_permissions, new_permissions))
             await apply()
             server = await view(config.name)
-        return JSONResponse({"created": created, "server": server}, status_code=201 if created else 200)
+        return JSONResponse(
+            {"created": created, "definitions_sha256": digest_stored, "server": server},
+            status_code=201 if created else 200,
+        )
 
     async def update_server(request: Request) -> JSONResponse:
         """PATCH /integrations/mcp/servers/{name} ``{enabled?, background?, call_timeout_seconds?, tools?}``: change
@@ -350,14 +414,17 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         return JSONResponse({"server": server})
 
     async def refresh_server(request: Request) -> JSONResponse:
-        """POST /integrations/mcp/servers/{name}/refresh: list the server's tools again. A new tool is stored as
-        ``deny``; a tool it no longer lists is set to ``deny``; a tool whose description or schema changed keeps its
-        permission and is reported in ``changed``."""
+        """POST /integrations/mcp/servers/{name}/refresh ``{expected_definitions_sha256?}`` (the body may be empty):
+        list the server's tools again. A new tool is stored as ``deny``; a tool it no longer lists is set to ``deny``;
+        a tool whose description or schema changed keeps its permission and is reported in ``changed``."""
         name = request.path_params["name"]
+        body = await _body(request) if await request.body() else {}
+        _only(body, {"expected_definitions_sha256"})
         before = await stored(name)
         if before is None:
             raise _Refused(404, "no such server")
         probed = await probe_tools(name, before[0].url)
+        digest_stored = expect(body, probed)
         async with changes:
             current = await stored(name)
             if current is None:
@@ -387,15 +454,20 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             data = _change("refresh", name, config, config, old_permissions, new_permissions)
             if (added or removed or redefined) and "tools" not in data["changed"]:
                 data["changed"].append("tools")
-            data.update(
-                added=[_event_tool(t) for t in added],
-                removed=[_event_tool(t) for t in removed],
-                redefined=[_event_tool(t) for t in redefined],
-            )
+            for key, names in (("added", added), ("removed", removed), ("redefined", redefined)):
+                data[key], data["more"][key] = _capped([_event_tool(tool) for tool in names])
             await audit(data)
             await apply()
             server = await view(name)
-        return JSONResponse({"added": added, "removed": removed, "changed": redefined, "server": server})
+        return JSONResponse(
+            {
+                "added": added,
+                "removed": removed,
+                "changed": redefined,
+                "definitions_sha256": digest_stored,
+                "server": server,
+            }
+        )
 
     async def delete_server(request: Request) -> JSONResponse:
         """DELETE /integrations/mcp/servers/{name}: remove the server and its tools."""

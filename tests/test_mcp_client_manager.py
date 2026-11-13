@@ -673,10 +673,21 @@ async def test_without_a_background_list_the_row_alone_decides():
     await manager.close()
 
 
-async def test_a_background_list_that_names_nothing_still_is_a_ceiling():
+@pytest.mark.parametrize("listed", [",", " , ", ",,"])
+async def test_a_background_list_that_names_nothing_still_is_a_ceiling(listed):
+    # "," is the documented spelling of "no background use at all" (environment-variables.md).
     rows = [(ServerConfig(name="alpha", url="https://alpha.example.com/mcp", background=True), [_tool("alpha", "x")])]
-    manager, _d, _fake = await _manager(rows, mcp_client_background_servers=" , ")
+    manager, _d, _fake = await _manager(rows, mcp_client_background_servers=listed)
     assert mcp_tool_background("mcp__alpha__x") is False
+    assert manager.ceilings()["background_servers"] is True
+    await manager.close()
+
+
+async def test_a_whitespace_only_background_list_is_no_ceiling():
+    rows = [(ServerConfig(name="alpha", url="https://alpha.example.com/mcp", background=True), [_tool("alpha", "x")])]
+    manager, _d, _fake = await _manager(rows, mcp_client_background_servers="   ")
+    assert mcp_tool_background("mcp__alpha__x") is True
+    assert manager.ceilings()["background_servers"] is False
     await manager.close()
 
 
