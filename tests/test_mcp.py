@@ -227,3 +227,19 @@ async def test_nous_decide(mcp_tools, mock_runner):
     # The message should contain the question, possibly prefixed with stakes
     assert "Redis" in msg or "caching" in msg
     assert result is not None
+
+
+def test_teach_source_never_equals_a_source_admission_trusts():
+    """A caller's description of where a fact came from cannot name a bypass source."""
+    from nous.api.mcp import teach_source
+    from nous.heart.admission import SOURCE_PENALTIES, AdmissionConfig
+
+    trusted = set(AdmissionConfig().bypass_sources) | set(SOURCE_PENALTIES)
+    for claimed in sorted(trusted):
+        assert teach_source(claimed) == f"mcp:{claimed}"
+        assert teach_source(claimed) not in trusted
+    assert teach_source(None) == "mcp"
+    assert teach_source("") == "mcp"
+    assert teach_source("mcp") == "mcp"
+    assert teach_source("  a paper\non  memory ") == "mcp:a paper on memory"
+    assert len(teach_source("x" * 500)) == len("mcp:") + 60
