@@ -1116,6 +1116,14 @@ class Settings(BaseSettings):
 
     # MCP
     mcp_enabled: bool = True
+    # F112 MCP client: the agent uses tools of external MCP servers (mcp__<server>__<tool>). Off: nothing of
+    # nous.mcp_client is imported and no such tool is registered. Servers and tools are rows of
+    # nous_system.mcp_servers / mcp_server_tools, written on the host by `python -m nous.mcp_client.seed`.
+    mcp_client_enabled: bool = False
+    # One MCP tool result, flattened to text, is cut to this many characters (with a note saying so).
+    mcp_client_max_result_chars: int = Field(default=20000, ge=1)
+    # Comma list of host names the client's address guard lets reach a private, loopback or link-local address.
+    mcp_client_allow_private_hosts: str = ""
 
     # LLM
     model: str = "claude-sonnet-4-6"

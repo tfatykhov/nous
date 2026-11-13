@@ -452,6 +452,20 @@ class ToolDispatcher:
             self._origin_aware.discard(name)
         self._tool_schema_cache.clear()  # F036: invalidate on registration
 
+    def unregister(self, name: str) -> bool:
+        """Remove a registered tool: its handler, its schema, its origin-aware mark and the per-frame schema
+        cache that holds it. True when it was registered. Raises ValueError for an alias or retired name: those
+        are not tools and are never removed this way."""
+        if name in self._aliases:
+            raise ValueError(f"cannot unregister {name!r}: it is an alias or a retired name, not a tool")
+        if name not in self._handlers:
+            return False
+        del self._handlers[name]
+        self._schemas.pop(name, None)
+        self._origin_aware.discard(name)
+        self._tool_schema_cache.clear()  # F036: the cached arrays still list it
+        return True
+
     def _repair(self, name: str, args: dict[str, Any]) -> tuple[dict[str, Any], list[str], list[str]]:
         """``(args, still missing, salvaged keys)``: the schema-required keys
         a call is missing, with any value the model leaked as an XML

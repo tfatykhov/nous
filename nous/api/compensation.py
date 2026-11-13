@@ -29,7 +29,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
 
-from nous.api.tool_classes import TOOL_CLASSES
+from nous.api.tool_classes import tool_class
 from nous.storage.models import CompensationSnapshot
 from nous.tool_names import canonical_tool_name
 
@@ -127,7 +127,7 @@ class CompensationRegistry:
 
     def register(self, tool_name: str, fn: Compensator) -> None:
         # A snapshot stored under an old tool name (nous/tool_names.py) is judged by the tool it became.
-        tc = TOOL_CLASSES.get(canonical_tool_name(tool_name) or tool_name)
+        tc = tool_class(canonical_tool_name(tool_name) or tool_name)
         if tc is None or not tc.compensable:
             raise ValueError(
                 f"cannot register a compensator for {tool_name!r}: it must be declared compensable in TOOL_CLASSES"

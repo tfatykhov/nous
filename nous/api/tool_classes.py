@@ -35,6 +35,10 @@ _SPAWN = ToolClass("write", spawns=True)
 # A parent that spawned work receives what it found, web-derived results included.
 _SPAWN_OUT = ToolClass("write", spawns=True, ingress="outside")
 _EXTERNAL = ToolClass("external")
+# A tool of an external MCP server (``mcp__<server>__<tool>``): it reaches another host, and its result is that
+# server's text. Every such name has this class, registered or not; the server's own annotations never change it.
+MCP_TOOL_PREFIX = "mcp__"
+_MCP = ToolClass("external", ingress="outside")
 
 TOOL_CLASSES: Mapping[str, ToolClass] = MappingProxyType({
     # reads
@@ -85,9 +89,35 @@ _NETWORK_CODE = re.compile(
     re.MULTILINE)
 
 
+# The MCP client's tools that are registered now, each with its server's "available to background work" switch.
+# Filled by nous.mcp_client's manager through note_mcp_tool / forget_mcp_tool; read by refuse_denylist and the
+# runner's MCP floor. A dict, not the frozen table above: the set changes when the manager starts and closes.
+_MCP_TOOLS: dict[str, bool] = {}
+
+
 def tool_class(name: str) -> ToolClass | None:
-    """The declared class, or None for a tool nobody classified."""
+    """The declared class, or None for a tool nobody classified. Any ``mcp__`` name is external with outside
+    ingress."""
+    if isinstance(name, str) and name.startswith(MCP_TOOL_PREFIX):
+        return _MCP
     return TOOL_CLASSES.get(name)
+
+
+def note_mcp_tool(name: str, *, background: bool) -> None:
+    """Record that the MCP client registered ``name``; ``background`` is its server's background switch."""
+    if not name.startswith(MCP_TOOL_PREFIX):
+        raise ValueError(f"{name!r} is not an MCP client tool name")
+    _MCP_TOOLS[name] = background
+
+
+def forget_mcp_tool(name: str) -> None:
+    """Record that the MCP client no longer has ``name`` registered (no error when it never had)."""
+    _MCP_TOOLS.pop(name, None)
+
+
+def mcp_tool_background(name: str) -> bool | None:
+    """The background switch of a registered MCP client tool, or None when ``name`` is not one."""
+    return _MCP_TOOLS.get(name)
 
 
 def is_compensable_call(name: str, tool_input: Mapping[str, object]) -> bool:
@@ -115,5 +145,5 @@ def code_reaches_network(code: str) -> bool:
 
 
 def refuse_denylist() -> frozenset[str]:
-    """Tools an F078 refuse-tier censor strips: everything that is not a read."""
-    return frozenset(name for name, cls in TOOL_CLASSES.items() if cls.side_effect != "none")
+    """Tools an F078 refuse-tier censor strips: everything that is not a read, the registered MCP tools included."""
+    return frozenset(name for name, cls in TOOL_CLASSES.items() if cls.side_effect != "none") | frozenset(_MCP_TOOLS)

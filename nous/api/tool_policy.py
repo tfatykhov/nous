@@ -20,7 +20,7 @@ from types import MappingProxyType
 from typing import Any
 
 from nous.api.execution_context import FOREGROUND_KINDS, ExecutionContext
-from nous.api.tool_classes import is_compensable_call, tool_class
+from nous.api.tool_classes import MCP_TOOL_PREFIX, is_compensable_call, mcp_tool_background, tool_class
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.cognitive.bash_side_effect import (
     GlobWord,
@@ -1531,6 +1531,63 @@ HEARTBEAT_RESOLVE_TEXT = (
 def heartbeat_resolve_violation(tool_name: str) -> bool:
     """Whether a heartbeat_triage call resolves a decision (``HEARTBEAT_RESOLVE_TOOLS``)."""
     return tool_name in HEARTBEAT_RESOLVE_TOOLS
+
+
+# F112 MCP client: which execution kinds may use a tool of an external MCP server (``mcp__<server>__<tool>``). A
+# floor the runner enforces whatever tool_context_policy_mode and tool_offered_set_enforcement_mode say (production
+# runs both in `warn`). "always": a chat with the owner, and one call the owner already approved. "never": an inbound
+# MCP caller (another agent, with the owner's authority but nobody watching). "background": every turn nobody
+# watches, and only for a tool whose server the owner marked available to background work. A kind not listed here
+# is refused. The other floors still apply first: a heartbeat_triage turn may not act outward and an internal_only
+# turn may not call an external tool, so neither ever reaches an MCP tool.
+MCP_CLIENT_KIND_RULES: Mapping[str, str] = MappingProxyType(
+    {
+        "interactive": "always",
+        "approved_action": "always",
+        "mcp": "never",
+        "subtask": "background",
+        "dag_node": "background",
+        "scheduled": "background",
+        "agent_action": "background",
+        "heartbeat_triage": "background",
+        "heartbeat_check": "background",
+        "heartbeat_callback": "background",
+        "dag_summary": "background",
+        "background": "background",
+        "continuation": "background",
+    }
+)
+MCP_CLIENT_CONTEXT_TEXT = (
+    "Tool error: '{tool}' is a tool of an external MCP server and this turn may not use it: only a chat with the "
+    "owner may, and background work only when the owner made that server available to it. Do not retry it in "
+    "another form."
+)
+MCP_CLIENT_UNREGISTERED_TEXT = "Tool error: '{tool}' is not a tool of any connected MCP server."
+
+
+def mcp_client_tool_allowed(kind: str, server_background: bool) -> bool:
+    """Whether a turn of this ``ExecutionContext.kind`` may use an MCP client tool whose server's background switch
+    is ``server_background`` (``MCP_CLIENT_KIND_RULES``). An unknown kind is refused."""
+    rule = MCP_CLIENT_KIND_RULES.get(kind)
+    if rule == "always":
+        return True
+    if rule == "background":
+        return server_background
+    return False
+
+
+def mcp_client_violation(kind: str, tool_name: str) -> str | None:
+    """For an ``mcp__`` name: ``"mcp_unregistered"`` when the MCP client has no such tool registered,
+    ``"mcp_context"`` when ``mcp_client_tool_allowed`` refuses it in this kind of turn, else None. None for every
+    other name."""
+    if not tool_name.startswith(MCP_TOOL_PREFIX):
+        return None
+    background = mcp_tool_background(tool_name)
+    if background is None:
+        return "mcp_unregistered"
+    if not mcp_client_tool_allowed(kind, background):
+        return "mcp_context"
+    return None
 
 
 def undoable_violation(ctx: ExecutionContext, tool_name: str, tool_input: Mapping[str, Any]) -> str | None:

@@ -29,7 +29,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.api.execution_context import FOREGROUND_KINDS
-from nous.api.tool_classes import TOOL_CLASSES
+from nous.api.tool_classes import tool_class
 from nous.storage.models import Censor, ExecutionLedgerEntry
 
 INVENTORY_DAYS = 30
@@ -88,7 +88,7 @@ async def get_autonomy_inventory(
             tool["side_effects"][row.side_effect_type] += row.n
     out = []
     for tool in tools.values():
-        declared = TOOL_CLASSES.get(tool["tool_name"])
+        declared = tool_class(tool["tool_name"])
         tool["side_effects"] = dict(tool["side_effects"])
         tool["compensable"] = bool(declared and declared.compensable)
         tool["de_facto_level"] = de_facto_level(tool["by_context"]["autonomous"])

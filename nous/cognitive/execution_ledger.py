@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from nous.api.tool_classes import TOOL_CLASSES, code_reaches_network
+from nous.api.tool_classes import MCP_TOOL_PREFIX, TOOL_CLASSES, code_reaches_network
 from nous.cognitive.bash_side_effect import classify_bash_command as _classify_bash_command
 from nous.cognitive.bash_side_effect import command_runs as _command_runs
 from nous.cognitive.bash_side_effect import command_string as _command_string
@@ -500,6 +500,8 @@ def classify_side_effect(tool_name: str, tool_input: dict[str, Any] | None = Non
         return "external"
     if tool_name in READ_TOOLS:
         return "none"
+    if tool_name.startswith(MCP_TOOL_PREFIX):
+        return "external"  # an external MCP server's tool, registered or not
     return "write"  # WRITE_TOOLS and anything unclassified
 
 

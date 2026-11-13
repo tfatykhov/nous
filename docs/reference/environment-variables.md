@@ -35,6 +35,9 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_MODEL` | `claude-sonnet-4-6` | LLM model for chat |
 | `NOUS_MAX_TURNS` | `10` | Max tool loop iterations |
 | `NOUS_MCP_ENABLED` | `true` | Enable MCP server |
+| `NOUS_MCP_CLIENT_ENABLED` | `false` | F112 MCP client, not the inbound MCP server above: the agent uses tools of external MCP servers as `mcp__<server>__<tool>`. At startup, after every other tool, it registers the `allow` tools of the enabled servers in `nous_system.mcp_servers` and `nous_system.mcp_server_tools` (written on the host by `python -m nous.mcp_client.seed`), in sorted order and without connecting; a server is connected by its first call. Where the tools may run is a floor in code (`tool_policy.MCP_CLIENT_KIND_RULES`) that neither policy mode loosens: background work only for a server marked available to it, never an inbound MCP caller. Off: nothing of `nous.mcp_client` is imported and no such tool exists. Production needs a compose line and a `.env` line to turn it on. Rollback: `false` and restart. |
+| `NOUS_MCP_CLIENT_MAX_RESULT_CHARS` | `20000` | F112: one MCP tool result, flattened to text, is cut to this many characters with a note saying so, before the runner's own trimming. |
+| `NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS` | `""` | F112: comma list of host names (case ignored) that the MCP client connects to without its address check. Every other host must resolve only to public addresses: private, loopback, link-local (cloud metadata included), shared, multicast, reserved and unspecified addresses are refused, also inside IPv6 (mapped, 6to4, NAT64), and the address checked is the one dialed. A listed host is not checked at all. Set it on the host only. |
 | `NOUS_LOG_LEVEL` | `info` | Log level |
 | `BRAVE_SEARCH_API_KEY` | — | Brave Search API key (tertiary fallback) |
 | `TAVILY_API_KEY` | — | Tavily Search API key (primary search provider) |
