@@ -229,6 +229,13 @@ const HEADER_VALUE = /^[\x20\x21\x23-\x5b\x5d-\x7e]{1,4096}$/;
 export const HEADER_VALUE_MIN = 8;
 /** Letters and digits a value needs in all (config.HEADER_VALUE_MIN_ALNUM): the scrub matches them literally. */
 export const HEADER_VALUE_MIN_ALNUM = 8;
+/** Characters that are not letters or digits allowed before the first one, in the value and in the key after its
+ * scheme (config.HEADER_VALUE_MAX_LEADING_PUNCTUATION). */
+export const HEADER_VALUE_MAX_LEADING_PUNCTUATION = 8;
+const leadingPunctuation = (text: string) => {
+  const at = text.search(/[A-Za-z0-9]/);
+  return at < 0 ? text.length : at;
+};
 const RESERVED_HEADERS = new Set([
   'host', 'content-length', 'content-type', 'content-encoding', 'transfer-encoding', 'trailer', 'connection',
   'keep-alive', 'proxy-connection', 'expect', 'accept', 'accept-encoding', 'cookie', 'origin', 'user-agent',
@@ -254,6 +261,11 @@ export function headersProblem(rows: readonly HeaderRow[]): string | null {
     if (row.value !== row.value.trim()) return `${at}: a value may not start or end with a space.`;
     if ((row.value.match(/[A-Za-z0-9]/g) ?? []).length < HEADER_VALUE_MIN_ALNUM) {
       return `${at}: a value needs at least ${HEADER_VALUE_MIN_ALNUM} letters or digits.`;
+    }
+    const parts = row.value.split(/\s+/);
+    const starts = parts.length === 2 ? [row.value, parts[1]] : [row.value];
+    if (starts.some((s) => leadingPunctuation(s) > HEADER_VALUE_MAX_LEADING_PUNCTUATION)) {
+      return `${at}: a value, and the key after its scheme, may start with at most ${HEADER_VALUE_MAX_LEADING_PUNCTUATION} characters that are not letters or digits.`;
     }
   }
   return null;

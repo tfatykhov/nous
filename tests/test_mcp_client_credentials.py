@@ -734,18 +734,28 @@ async def test_a_value_of_three_words_is_withheld_whole_and_its_words_are_not(tm
     assert [t.tool for t in await manager.probe("alpha", ALPHA, {"X-Workspace": value})] == ["deploy"]  # not refused
 
 
-def test_the_worst_accepted_value_scans_a_two_megabyte_reflection_within_two_seconds():
-    """A value of 4,096 characters, 8 letters or digits then punctuation (the least a value may hold), against 2 MB
-    of that punctuation: the regex finds its literal letters fast, so the scan does not stall the event loop."""
+@pytest.mark.parametrize(
+    "value,unit",
+    [
+        ("abcd1234" + "-" * 4088, "-"),  # the fewest letters or digits a value may hold, then punctuation
+        ("--------abcd1234" + "-" * 4080, "-"),  # the most leading punctuation accepted
+        ("Bearer --------abcd1234" + "-" * 4073, "-"),  # the same in the key after a scheme
+        ("a" * 4000 + "b", "a"),  # one letter repeated, then another
+        ("a" * 4095 + "b", "a"),
+    ],
+)
+def test_an_accepted_worst_case_scans_a_two_megabyte_reflection_within_two_seconds(value, unit):
+    """4,096-character values the rules accept, against 2 MB of what they repeat: the regex finds their literal
+    letters fast, so the scan does not stall the event loop. (A value with punctuation all through it still scans in
+    time proportional to that punctuation: see credential_needles.)"""
     import time
 
     from nous.mcp_client.bridge import credential_needles, withhold
     from nous.mcp_client.config import validate_headers
 
-    value = "abcd1234" + "-" * 4088
     assert validate_headers({"X-Api-Key": value}) == {"X-Api-Key": value}
     needles = credential_needles([value])
-    reflection = "-" * 2_000_000
+    reflection = unit * 2_000_000
     started = time.perf_counter()
     assert withhold(reflection, needles) == reflection
     assert time.perf_counter() - started < 2.0

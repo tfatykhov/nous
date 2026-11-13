@@ -112,6 +112,16 @@ HEADER_VALUE_MIN_CHARS = 8
 # Letters and digits a value must hold in all: the scrub's regex matches them literally, which keeps its scan fast; a
 # value of punctuation alone would make it match almost anywhere.
 HEADER_VALUE_MIN_ALNUM = 8
+# Characters other than letters and digits allowed before the first letter or digit, of the value and of the key of a
+# scheme-and-key value (the scrub's needles): the regex then reaches a literal within a few characters at any start.
+HEADER_VALUE_MAX_LEADING_PUNCTUATION = 8
+
+
+def _leading_punctuation(text: str) -> int:
+    """How many characters of ``text`` come before its first ASCII letter or digit."""
+    return next((i for i, ch in enumerate(text) if ch.isascii() and ch.isalnum()), len(text))
+
+
 HEADER_VALUE_MAX_CHARS = 4096
 _HEADER_NAME = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}")
 # Headers the transport, the SDK or HTTP itself owns: a stored credential may not replace them.
@@ -178,6 +188,13 @@ def validate_headers(value: Any) -> dict[str, str]:
             raise ValueError(f"header {name}: a value may not start or end with a space")
         if sum(ch.isascii() and ch.isalnum() for ch in item) < HEADER_VALUE_MIN_ALNUM:
             raise ValueError(f"header {name}: a value holds at least {HEADER_VALUE_MIN_ALNUM} letters or digits")
+        parts = item.split()
+        starts = [item, parts[1]] if len(parts) == 2 else [item]  # the scrub's needles (bridge.credential_needles)
+        if any(_leading_punctuation(start) > HEADER_VALUE_MAX_LEADING_PUNCTUATION for start in starts):
+            raise ValueError(
+                f"header {name}: a value, and the key after its scheme, start with at most "
+                f"{HEADER_VALUE_MAX_LEADING_PUNCTUATION} characters that are not letters or digits"
+            )
     return dict(value)
 
 

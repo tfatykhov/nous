@@ -309,7 +309,9 @@ def credential_needles(values: Iterable[str]) -> tuple[re.Pattern[str], ...]:
     exactly two space-separated parts (a scheme and a key), its key alone too, each when it has at least
     ``WITHHELD_MIN_CHARS`` characters; a value of more words is matched only whole. Each needle is one regex: its
     letters and digits match themselves, and every other character also matches as an encoder may write it
-    (``\\uXXXX``, a backslash before it, ``%XX`` or an HTML entity, in either hex case), in any mix."""
+    (``\\uXXXX``, a backslash before it, ``%XX`` or an HTML entity, in either hex case), in any mix. A scan takes time
+    in proportion to the text's length times the needle's characters other than letters and digits (letters and
+    digits are found as literals; validation allows at most 8 such characters before the first of them)."""
     texts: set[str] = set()
     for value in values:
         parts = value.split()
