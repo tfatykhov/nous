@@ -842,6 +842,34 @@ async def test_a_token_the_provider_reflects_in_an_error_reaches_no_log_record(t
         assert REFRESH not in text and OLD not in text, text
 
 
+async def test_without_a_refresh_token_a_token_inside_its_margin_is_still_sent(tmp_path):
+    rows, provider = Rows(_record(refresh=None, expires_in=30)), Provider()  # inside the 60 s margin, not expired
+    manager = await _manager(tmp_path, rows, provider)
+    seen: list[str | None] = []
+    auth = manager._servers["alpha"].auth_for(None)
+    async with httpx.AsyncClient(transport=_mcp(seen), auth=auth) as client:
+        for _ in range(3):
+            assert (await client.post(ALPHA)).status_code == 200
+    assert seen == [f"Bearer {OLD}"] * 3 and provider.hits == []  # nothing to refresh early, nothing asked
+    secret_id = rows.secrets["alpha"].id
+    assert not manager.needs_sign_in("alpha", secret_id) and not manager.provider_unreachable("alpha", secret_id)
+    assert (await manager.credential_headers("alpha", ALPHA, rows.secrets["alpha"])) == (
+        {"Authorization": f"Bearer {OLD}"},
+        None,
+    )
+    await manager.close()
+
+
+async def test_without_a_refresh_token_a_401_needs_a_new_sign_in(tmp_path):
+    rows, provider = Rows(_record(refresh=None, expires_in=30)), Provider()
+    manager = await _manager(tmp_path, rows, provider)
+    auth = manager._servers["alpha"].auth_for(None)
+    async with httpx.AsyncClient(transport=_mcp([], refuse={OLD}), auth=auth) as client:
+        assert (await client.post(ALPHA)).status_code == 401
+    assert manager.needs_sign_in("alpha", rows.secrets["alpha"].id) and provider.hits == []
+    await manager.close()
+
+
 async def test_no_refresh_token_needs_a_new_sign_in_at_once(tmp_path):
     rows, provider = Rows(_record(refresh=None, expires_in=-10)), Provider()
     manager = await _manager(tmp_path, rows, provider)

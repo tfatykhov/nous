@@ -1196,6 +1196,38 @@ async def test_the_registration_asks_only_for_the_grants_the_provider_lists(make
     assert (record.refresh_token is not None) == ("refresh_token" in asked)  # none: it lasts until its expiry
 
 
+async def test_a_held_sign_in_without_a_refresh_token_is_checked_and_added_inside_its_margin(make_env, monkeypatch):
+    from types import SimpleNamespace
+
+    env = await make_env()
+    env.world.as_meta["grant_types_supported"] = ["authorization_code"]
+    env.world.give_refresh = False
+    env.world.expires_in = 30  # its margin is the last 15 s
+    flow_id = await _signed_in(env)
+    real = time.time
+    monkeypatch.setattr(oauth_module, "time", SimpleNamespace(time=lambda: real() + 20, monotonic=time.monotonic))
+    body = {"name": "alpha", "url": ALPHA, "oauth_flow_id": flow_id}
+    assert (await _req(env, "POST", "/integrations/mcp/probe", body)).status_code == 200  # inside the margin, valid
+    assert (await _add(env, flow_id)).status_code == 201
+    assert env.world.refreshes == 0
+    record = env.manager.stored_oauth("alpha", ALPHA, (await env.registry.list_secrets())["alpha"])
+    assert record.refresh_token is None and env.remotes.sent[-1] == f"Bearer {record.access_token}"
+
+
+async def test_a_held_sign_in_without_a_refresh_token_past_its_expiry_asks_for_a_new_one(make_env, monkeypatch):
+    from types import SimpleNamespace
+
+    env = await make_env()
+    env.world.give_refresh = False
+    env.world.expires_in = 30
+    flow_id = await _signed_in(env)
+    real = time.time
+    monkeypatch.setattr(oauth_module, "time", SimpleNamespace(time=lambda: real() + 40, monotonic=time.monotonic))
+    added = await _add(env, flow_id)
+    assert added.status_code == 409 and "sign in again" in added.json()["error"]
+    assert await env.registry.list_secrets() == {}
+
+
 # --- settings that are not text (older tests build the app from a MagicMock) -----------------------------------------
 
 

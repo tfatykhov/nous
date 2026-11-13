@@ -103,8 +103,8 @@ from nous.mcp_client.oauth import (
     OAuthFlows,
     OAuthProblem,
     expired,
-    expiring,
     oauth_client,
+    refresh_due,
     refresh_tokens,
 )
 from nous.mcp_client.secrets import (
@@ -244,7 +244,7 @@ class _OAuthSource:
         ``ProviderUnreachable``."""
         if self._dead():
             raise SignInNeeded()
-        if expiring(self.record):
+        if refresh_due(self.record):
             try:
                 fresh = await self._refresh(None)
             except ProviderUnreachable:
@@ -1034,7 +1034,7 @@ class McpClientManager:
             return opened, problem
         if self.needs_sign_in(name, secret.id):
             return None, SIGN_IN_NEEDED
-        if expiring(opened):
+        if refresh_due(opened):
             try:
                 fresh = await self._refresh(name, url, secret.id, None)
             except ProviderUnreachable:
@@ -1138,7 +1138,7 @@ class McpClientManager:
                     if recent:  # a 401 to a token the provider gave moments ago: a refusal, not a reason to refresh
                         self._refused_fresh(name, secret_id, record)
                         return None
-                elif recent or not expiring(record):
+                elif recent or not refresh_due(record):
                     return record
                 if self.provider_unreachable(name, secret_id):
                     raise ProviderUnreachable()

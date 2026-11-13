@@ -127,6 +127,13 @@ def expired(record: OAuthRecord) -> bool:
     return record.expires_at is not None and record.expires_at <= time.time()
 
 
+def refresh_due(record: OAuthRecord) -> bool:
+    """Whether to refresh before using ``record``: its token is inside its margin (``expiring``) and there is a refresh
+    token to refresh it early with, or it has expired. Without a refresh token there is nothing to refresh early: the
+    token is used until its expiry has passed (or the server answers 401), and only then does the sign-in end."""
+    return expiring(record) and (record.refresh_token is not None or expired(record))
+
+
 @dataclass(frozen=True)
 class Discovery:
     """What discovery found. ``issuer`` and ``resource`` are the provider's and the server's own strings (not the SDK

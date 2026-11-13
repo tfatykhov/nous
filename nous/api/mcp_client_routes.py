@@ -87,11 +87,11 @@ from nous.mcp_client.oauth import (
     callback_params,
     discover,
     exchange_code,
-    expiring,
     host_of,
     owner_client,
     owner_scope,
     redirect_uri,
+    refresh_due,
     refresh_tokens,
     register,
 )
@@ -560,7 +560,8 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         if flow is None:
             return
         async with flow.renewing:  # a concurrent probe and create make one token request
-            if flow.record is None or not expiring(flow.record):
+            # Without a refresh token the record is used as it is until it has expired.
+            if flow.record is None or not refresh_due(flow.record):
                 return
             try:
                 flow.record = await refresh_tokens(flow.record, manager.oauth_http, manager.allow_private_hosts)
