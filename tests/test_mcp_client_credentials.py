@@ -737,17 +737,27 @@ async def test_a_value_of_three_words_is_withheld_whole_and_its_words_are_not(tm
 @pytest.mark.parametrize(
     "value,unit",
     [
-        ("abcd1234" + "-" * 4088, "-"),  # the fewest letters or digits a value may hold, then punctuation
-        ("--------abcd1234" + "-" * 4080, "-"),  # the most leading punctuation accepted
-        ("Bearer --------abcd1234" + "-" * 4073, "-"),  # the same in the key after a scheme
+        ("-" * 4088 + "abcd1234", "-"),  # punctuation, then the fewest letters or digits a value may hold
+        ("abcd1234" + "-" * 4088, "-"),
+        ("a-" * 2047 + "ab", "a-"),  # periodic, against its own period
+        ("a-" * 2047 + "ab", "a%2D"),  # the same, every dash escaped: one decoded token every 4 characters
+        ("a+" * 2047 + "ab", "a\\u002B"),
         ("a" * 4000 + "b", "a"),  # one letter repeated, then another
-        ("a" * 4095 + "b", "a"),
+        ("Bearer " + "+/=" * 1360 + "abcd1234", "+/="),  # a scheme and a key of punctuation
+    ],
+    ids=[
+        "punctuation-then-letters",
+        "letters-then-punctuation",
+        "periodic",
+        "periodic-percent",
+        "periodic-u-escape",
+        "repeated-letter",
+        "scheme-and-punctuation-key",
     ],
 )
 def test_an_accepted_worst_case_scans_a_two_megabyte_reflection_within_two_seconds(value, unit):
-    """4,096-character values the rules accept, against 2 MB of what they repeat: the regex finds their literal
-    letters fast, so the scan does not stall the event loop. (A value with punctuation all through it still scans in
-    time proportional to that punctuation: see credential_needles.)"""
+    """Values the rules accept, shaped against the finder, against 2 MB of what they repeat: one decoding pass and
+    ``str.find``, so the time does not depend on a value's shape."""
     import time
 
     from nous.mcp_client.bridge import credential_needles, withhold
@@ -755,10 +765,31 @@ def test_an_accepted_worst_case_scans_a_two_megabyte_reflection_within_two_secon
 
     assert validate_headers({"X-Api-Key": value}) == {"X-Api-Key": value}
     needles = credential_needles([value])
-    reflection = unit * 2_000_000
+    reflection = (unit * (2_000_000 // len(unit) + 1))[:2_000_000]
     started = time.perf_counter()
     assert withhold(reflection, needles) == reflection
     assert time.perf_counter() - started < 2.0
+
+
+def test_the_cut_is_exact_and_neighbouring_escapes_stay_as_they_were():
+    from nous.mcp_client.bridge import credential_needles, withhold
+
+    needles = credential_needles([MIXED_VALUE])  # Bearer test+key/0000+1111==
+    before = 'pre \\u0041%2F&amp;\\"x&#47;'  # escapes that decode, but to characters the key does not begin with
+    after = "&#43;%2B\\u002B=\\n post"  # the characters the key could go on with, escaped
+    for echo in MIXED.values():
+        assert withhold(before + echo + after, needles) == before + "[withheld]" + after, echo
+    malformed = "test%2Gkey test\\u12 &#x; &#99999999; %"  # not well formed: kept literal, nothing withheld
+    assert withhold(malformed, needles) == malformed
+
+
+def test_overlapping_hits_of_two_needles_are_cut_once():
+    from nous.mcp_client.bridge import credential_needles, withhold
+
+    needles = credential_needles(["Bearer abcdefgh1234", "Token 1234ijklmnop"])
+    assert withhold("<abcdefgh1234ijklmnop>", needles) == "<[withheld]>"  # one span, the two hits merged
+    assert withhold("<abcdefgh1234%69jklmnop>", needles) == "<[withheld]>"  # one hit raw, one decoded
+    assert withhold("<abcdefgh1234> <1234ijklmnop>", needles) == "<[withheld]> <[withheld]>"
 
 
 async def test_a_scheme_and_key_still_withholds_the_bare_key(tmp_path):

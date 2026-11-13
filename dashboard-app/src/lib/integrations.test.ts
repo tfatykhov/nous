@@ -254,8 +254,8 @@ describe('a stored key', () => {
   it('accepts the usual shapes', () => {
     expect(headersProblem([row('Authorization', VALUE)])).toBeNull();
     expect(headersProblem([row('X-API-Key', 'test-key-1111'), row("x!#$%&'*+.^_`|~-y", 'ab cd ef gh')])).toBeNull();
-    // At most 8 characters that are not letters or digits before the first one, in the value and in the key.
-    expect(headersProblem([row('X-Key', '--------abcd1234'), row('Authorization', 'Bearer --------abcd1234')])).toBeNull();
+    // Punctuation anywhere, as much as a long base64 key holds, once the value has 8 letters or digits.
+    expect(headersProblem([row('X-Key', `${'-'.repeat(4088)}abcd1234`), row('Authorization', `Bearer ${'+/='.repeat(1000)}abcd1234`)])).toBeNull();
   });
   it.each([
     [[], 'Give 1 to 8 headers.'],
@@ -278,8 +278,6 @@ describe('a stored key', () => {
     [[row('X-Key', ' test-key')], 'Header 1: a value may not start or end with a space.'],
     [[row('X-Key', '-_.~+/=!-_.~+/=!')], 'Header 1: a value needs at least 8 letters or digits.'],
     [[row('X-Key', '--ab--cd--ef--g--')], 'Header 1: a value needs at least 8 letters or digits.'], // 7 in all
-    [[row('X-Key', '---------abcd1234')], 'Header 1: a value, and the key after its scheme, may start with at most 8'],
-    [[row('X-Key', 'Bearer ---------abcd1234')], 'Header 1: a value, and the key after its scheme, may start with at most 8'],
   ] as [{ name: string; value: string }[], string][])('refuses %j, naming the header by its place, never the value', (rows, why) => {
     const problem = headersProblem(rows) ?? '';
     expect(problem.startsWith(why), problem).toBe(true);

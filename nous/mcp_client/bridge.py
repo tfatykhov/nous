@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from bisect import bisect_right
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -274,60 +275,149 @@ WITHHELD = "[withheld]"
 # A shorter credential value is not looked for (it would match ordinary text); config.validate_headers refuses a value
 # this short, so every stored value is looked for at least whole.
 WITHHELD_MIN_CHARS = 8
-# Named HTML entities an encoder may write for a value's characters (a value holds no '"').
-_NAMED_ENTITIES = {"&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&apos;"}
+# The escapes an encoder may write one character as, each recognised only when well formed: \uXXXX, a backslash
+# before a character, %XX, &#NN; or &#xXX; (hex in either case), and a few named entities. Every alternative has a
+# fixed bound, so finding them is linear.
+_ESCAPE = re.compile(
+    r"\\u[0-9A-Fa-f]{4}|\\[\s\S]|%[0-9A-Fa-f]{2}|&#[0-9]{1,7};|&#[xX][0-9A-Fa-f]{1,6};|&(?:amp|lt|gt|apos|quot);"
+)
+_ENTITIES = {"&amp;": "&", "&lt;": "<", "&gt;": ">", "&apos;": "'", "&quot;": '"'}
 
 
-def _any_case(hex_digits: str) -> str:
-    return "".join(f"[{d.lower()}{d.upper()}]" if d.isalpha() else d for d in hex_digits)
+def _decoded(token: str) -> str | None:
+    """The one character an escape token stands for, or None when it names no character (it then stays literal)."""
+    if token in _ENTITIES:
+        return _ENTITIES[token]
+    if token.startswith("\\u") and len(token) == 6:
+        code = int(token[2:], 16)
+    elif token.startswith("\\"):
+        return token[1]
+    elif token.startswith("%"):
+        code = int(token[1:], 16)
+    elif token[2] in "xX":
+        code = int(token[3:-1], 16)
+    else:
+        code = int(token[2:-1])
+    return chr(code) if code <= 0x10FFFF else None
 
 
-def _char_pattern(ch: str) -> str:
-    """One character of a needle as a fixed alternation: a letter or digit matches itself; any other character
-    matches itself, ``\\uXXXX``, itself after a backslash (``\\/``), ``%XX``, ``&#NN;`` or ``&#xXX;`` (hex in either
-    case), its named entity when it has one, and ``+`` for a space."""
-    if ch.isascii() and ch.isalnum():
-        return re.escape(ch)
-    code = ord(ch)
-    forms = [
-        re.escape(ch),
-        r"\\u" + _any_case(f"{code:04x}"),
-        r"\\" + re.escape(ch),
-        "%" + _any_case(f"{code:02x}"),
-        f"&#0*{code};",
-        "&#[xX]0*" + _any_case(f"{code:x}") + ";",
-    ]
-    if ch in _NAMED_ENTITIES:
-        forms.append(re.escape(_NAMED_ENTITIES[ch]))
-    if ch == " ":
-        forms.append(r"\+")
-    return "(?:" + "|".join(forms) + ")"
+class _Canonical:
+    """``text`` with every escape decoded once, and where each of its characters came from: ``starts`` holds the
+    canonical offset of each segment, ``origins`` its offset in ``text``, and ``ends`` the end in ``text`` of a
+    decoded token (None for a run copied as it is)."""
+
+    def __init__(self, text: str) -> None:
+        parts: list[str] = []
+        self.starts: list[int] = []
+        self.origins: list[int] = []
+        self.ends: list[int | None] = []
+        at = last = 0
+        for match in _ESCAPE.finditer(text):
+            char = _decoded(match.group())
+            if char is None:
+                continue
+            if match.start() > last:
+                self._segment(at, last, None)
+                parts.append(text[last : match.start()])
+                at += match.start() - last
+            self._segment(at, match.start(), match.end())
+            parts.append(char)
+            at += 1
+            last = match.end()
+        if last < len(text):
+            self._segment(at, last, None)
+            parts.append(text[last:])
+        self.text = "".join(parts) if self.ends and any(end is not None for end in self.ends) else text
+
+    def _segment(self, start: int, origin: int, end: int | None) -> None:
+        self.starts.append(start)
+        self.origins.append(origin)
+        self.ends.append(end)
+
+    def span(self, start: int, length: int) -> tuple[int, int]:
+        """The span in the original text of the canonical characters ``[start, start + length)``."""
+        return self._at(start)[0], self._at(start + length - 1)[1]
+
+    def _at(self, offset: int) -> tuple[int, int]:
+        index = bisect_right(self.starts, offset) - 1
+        end = self.ends[index]
+        if end is not None:
+            return self.origins[index], end
+        origin = self.origins[index] + offset - self.starts[index]
+        return origin, origin + 1
 
 
-def credential_needles(values: Iterable[str]) -> tuple[re.Pattern[str], ...]:
-    """What the result scrub and the listing check look for, longest first. A value is matched whole and, when it is
-    exactly two space-separated parts (a scheme and a key), its key alone too, each when it has at least
-    ``WITHHELD_MIN_CHARS`` characters; a value of more words is matched only whole. Each needle is one regex: its
-    letters and digits match themselves, and every other character also matches as an encoder may write it
-    (``\\uXXXX``, a backslash before it, ``%XX`` or an HTML entity, in either hex case), in any mix. A scan takes time
-    in proportion to the text's length times the needle's characters other than letters and digits (letters and
-    digits are found as literals; validation allows at most 8 such characters before the first of them)."""
+def _occurrences(text: str, needle: str) -> Iterator[int]:
+    """Where ``needle`` occurs in ``text``, each search starting after the last hit (``str.find``: linear). An
+    occurrence it skips overlaps one it found."""
+    at = text.find(needle)
+    while at >= 0:
+        yield at
+        at = text.find(needle, at + len(needle))
+
+
+def _spans(text: str, needles: Sequence[str]) -> list[tuple[int, int]]:
+    """The spans of ``text`` that hold a needle, as it is or with one level of escapes decoded, a space also as
+    ``+`` (any mix: for a needle with a space, ``+`` is read as a space on both sides, character for character, so
+    the offsets hold); sorted, overlapping ones merged."""
+    if not needles:
+        return []
+    canonical = _Canonical(text)
+    plus_as_space: str | None = None
+    found: list[tuple[int, int]] = []
+    for needle in needles:
+        found += [(at, at + len(needle)) for at in _occurrences(text, needle)]
+        if canonical.text is not text:
+            found += [canonical.span(at, len(needle)) for at in _occurrences(canonical.text, needle)]
+        if " " in needle:
+            if plus_as_space is None:
+                plus_as_space = canonical.text.replace("+", " ")
+            spaced = needle.replace("+", " ")
+            found += [canonical.span(at, len(spaced)) for at in _occurrences(plus_as_space, spaced)]
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(found):
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def credential_needles(values: Iterable[str]) -> tuple[str, ...]:
+    """What the result scrub and the listing check look for, longest first. A value is looked for whole and, when it
+    is exactly two space-separated parts (a scheme and a key), its key alone too, each when it has at least
+    ``WITHHELD_MIN_CHARS`` characters; a value of more words is looked for only whole. A needle is found as it is, a
+    space also as ``+``, and in the text with one level of escapes decoded (``\\uXXXX``, a backslash before a
+    character, ``%XX``, ``&#NN;``, ``&#xXX;``, named entities), in any mix; a text escaped twice is not decoded twice.
+    Finding takes one pass to decode and ``str.find``, so its time does not depend on a value's shape."""
     texts: set[str] = set()
     for value in values:
         parts = value.split()
         candidates = [value, parts[1]] if len(parts) == 2 else [value]
         texts.update(candidate for candidate in candidates if len(candidate) >= WITHHELD_MIN_CHARS)
-    return tuple(re.compile("".join(_char_pattern(ch) for ch in text)) for text in sorted(texts, key=len, reverse=True))
+    return tuple(sorted(texts, key=len, reverse=True))
 
 
-def withhold(text: str, needles: Sequence[re.Pattern[str]]) -> str:
-    """``text`` with every match of a needle replaced by ``WITHHELD``, longest needle first."""
-    for needle in needles:
-        text = needle.sub(WITHHELD, text)
-    return text
+def holds_credential(text: str, needles: Sequence[str]) -> bool:
+    """Whether ``text`` holds a needle (the listing check)."""
+    return bool(_spans(text, needles))
 
 
-def _withhold_leaves(value: Any, needles: Sequence[re.Pattern[str]]) -> Any:
+def withhold(text: str, needles: Sequence[str]) -> str:
+    """``text`` with every span that holds a needle cut out for ``WITHHELD``; the rest of it is kept as it was."""
+    spans = _spans(text, needles)
+    if not spans:
+        return text
+    out: list[str] = []
+    last = 0
+    for start, end in spans:
+        out += [text[last:start], WITHHELD]
+        last = end
+    out.append(text[last:])
+    return "".join(out)
+
+
+def _withhold_leaves(value: Any, needles: Sequence[str]) -> Any:
     if isinstance(value, str):
         return withhold(value, needles)
     if isinstance(value, dict):
@@ -337,7 +427,7 @@ def _withhold_leaves(value: Any, needles: Sequence[re.Pattern[str]]) -> Any:
     return value
 
 
-def flatten_result(raw: Any, max_chars: int, withheld: Sequence[re.Pattern[str]] = ()) -> tuple[str, bool]:
+def flatten_result(raw: Any, max_chars: int, withheld: Sequence[str] = ()) -> tuple[str, bool]:
     """One MCP ``CallToolResult`` as ``(text, is_error)``.
 
     Text items are joined with newlines; an embedded text resource gives its text; an image, audio or resource

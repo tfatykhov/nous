@@ -133,8 +133,10 @@ def test_an_unreadable_key_file_is_no_key(tmp_path, caplog):
 # --- what may be stored ----------------------------------------------------------------------------------------------
 
 
-def test_eight_leading_characters_that_are_not_letters_or_digits_are_the_most_accepted():
-    for value in ("--------abcd1234", "Bearer --------abcd1234", "Bot +/+/+/+/abcd1234"):
+def test_a_value_of_much_punctuation_is_accepted_when_it_holds_8_letters_or_digits():
+    # The scrub's time does not depend on a value's shape (bridge.credential_needles), so no rule on where its
+    # punctuation sits: a long base64 key has many + / and =.
+    for value in ("-" * 4088 + "abcd1234", "Bearer " + "+/=" * 1000 + "abcd1234", "a-" * 2047 + "ab"):
         assert validate_headers({"X-Key": value}) == {"X-Key": value}
 
 
@@ -176,8 +178,6 @@ RESERVED_NEW = ("Content-Encoding", "expect", "TRAILER", "Keep-Alive", "Proxy-Co
         ({"X-Key": "test-key "}, "header X-Key: a value may not start or end with a space"),
         ({"X-Key": "-_.~+/=!-_.~+/=!"}, "header X-Key: a value holds at least 8 letters or digits"),
         ({"X-Key": "--ab--cd--ef--g--"}, "header X-Key: a value holds at least 8 letters or digits"),  # 7 in all
-        ({"X-Key": "---------abcd1234"}, "header X-Key: a value, and the key after its scheme, start with at most 8"),
-        ({"X-Key": "Bearer ---------abcd1234"}, "header X-Key: a value, and the key after its scheme, start with"),
     ],
 )
 def test_headers_the_rules_refuse_name_the_header_and_the_rule_never_the_value(headers, message):
