@@ -87,10 +87,12 @@ from nous.mcp_client.oauth import (
     callback_params,
     discover,
     exchange_code,
+    expiring,
     host_of,
     owner_client,
     owner_scope,
     redirect_uri,
+    refresh_tokens,
     register,
 )
 from nous.mcp_client.registry import McpRegistry
@@ -533,6 +535,19 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         except OAuthProblem as exc:
             raise _Refused(exc.status, str(exc)) from None
 
+    async def renew(flow: Flow | None) -> None:
+        """A finished sign-in's tokens, refreshed first when they are about to expire (a sign-in waits up to 10 minutes
+        for its create; a token can live less): the refreshed record replaces the held one, so the probe sends it and
+        the create stores it."""
+        if flow is None or flow.record is None or not expiring(flow.record):
+            return
+        try:
+            flow.record = await refresh_tokens(flow.record, manager.oauth_http, manager.allow_private_hosts)
+        except OAuthProblem as exc:
+            if exc.transient:
+                raise _Refused(502, "the sign-in provider could not be reached: try again in a moment") from None
+            raise _Refused(409, "the sign-in's tokens expired and could not be renewed: sign in again") from None
+
     async def probe(request: Request) -> JSONResponse:
         """POST /integrations/mcp/probe ``{name, url, headers? | oauth_flow_id?}``: the server's tools as they would be
         registered, with ``headers`` sent on its requests, or a finished sign-in's token (never stored; a stored
@@ -542,6 +557,7 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         config = _server_config(body.get("name"), body.get("url"), False)
         flow = finished_flow(body, config)
         headers = _headers(body["headers"]) if "headers" in body else None
+        await renew(flow)
         probed = await probe_tools(config.name, config.url, headers, flow)
         return JSONResponse(
             {"tools": [_probe_view(tool) for tool in probed], "definitions_sha256": definitions_sha256(probed)}
@@ -563,6 +579,7 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         headers = _headers(body["headers"]) if "headers" in body else None
         if (headers is not None or flow is not None) and not manager.secrets_available():
             raise _Refused(409, NO_KEY_TEXT)
+        await renew(flow)
         sent = headers
         stored_secret = await secret_of(config.name)
         if sent is None and flow is None and stored_secret is not None:

@@ -421,6 +421,64 @@ def test_the_refresh_margin_is_at_most_half_the_tokens_lifetime():
     assert not expiring(_record(expires_in=None))
 
 
+# --- a call's own token stays in its scrub; a refresh in flight at close is stored (Codex) --------------------------
+
+
+async def test_a_call_held_open_across_two_refreshes_still_withholds_the_token_it_was_sent(tmp_path):
+    from mcp.types import CallToolResult, TextContent
+
+    called, release = asyncio.Event(), asyncio.Event()
+
+    class Held:
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+            called.set()
+            await release.wait()
+            return CallToolResult(content=[TextContent(type="text", text=f"echo {OLD} and {REFRESH}")])
+
+        async def list_tools(self) -> list[Any]:
+            return []
+
+    @asynccontextmanager
+    async def connect(url: str, allow: frozenset[str], *, auth: Any = None):
+        yield Held()
+
+    rows, provider = Rows(_record()), Provider()
+    manager = await _manager(tmp_path, rows, provider, connect)
+    server = manager._servers["alpha"]
+    call = asyncio.create_task(manager._registrar.dispatch("mcp__alpha__echo", {"text": "x"}))
+    await called.wait()
+    third = "test-token-third-5555555555"
+    server.oauth.adopt(_record(access=NEW, refresh=ROTATED))
+    server.oauth.adopt(_record(access=third, refresh="test-token-refresh-6666666666"))
+    assert OLD not in server.oauth.values()  # the server no longer holds the call's token
+    release.set()
+    text, is_error = await call
+    assert not is_error and OLD not in text and REFRESH not in text and text.endswith("echo [withheld] and [withheld]")
+    await manager.close()
+
+
+async def test_a_refresh_in_flight_at_close_still_stores_the_rotated_tokens(tmp_path, monkeypatch):
+    from nous.mcp_client import manager as manager_module
+
+    monkeypatch.setattr(manager_module, "_CLOSE_WAIT_SECONDS", 0.05)  # the connections' deadline, made short
+    rows, provider = Rows(_record(expires_in=-10)), Provider()
+    provider.hold = asyncio.Event()
+    manager = await _manager(tmp_path, rows, provider)
+    seen: list[str | None] = []
+    auth = manager._servers["alpha"].auth_for(None)
+    async with httpx.AsyncClient(transport=_mcp(seen), auth=auth) as client:
+        request = asyncio.create_task(client.post(ALPHA))
+        await _until(lambda: provider.refreshes == 1)
+        closing = asyncio.create_task(manager.close())
+        await asyncio.sleep(0.3)  # past the connections' deadline: the refresh is still waited for
+        assert not closing.done()
+        provider.hold.set()  # the provider rotated the refresh token: its answer must be stored
+        await closing
+        assert (await request).status_code == 200
+    stored = _opened(rows.secrets["alpha"])
+    assert (stored.access_token, stored.refresh_token, rows.updates) == (NEW, ROTATED, 1)
+
+
 # --- a 401 ------------------------------------------------------------------------------------------------------------
 
 

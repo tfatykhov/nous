@@ -116,6 +116,9 @@ CALLS_PER_SERVER = 4  # calls in flight to one server at a time
 _BACKOFF_FIRST_SECONDS = 1.0
 _BACKOFF_MAX_SECONDS = 60.0
 _CLOSE_WAIT_SECONDS = 5.0
+# PR 2d: at close, a refresh in flight gets the OAuth request's own bound and time to store its result: a provider that
+# already rotated the refresh token would otherwise leave a dead one stored.
+REFRESH_DRAIN_SECONDS = 20.0
 HANDSHAKE_MAX_SECONDS = 30  # the handshake's bound is the server's call timeout, but never more than this
 # A result this long (characters) is flattened, cleaned and scrubbed in a worker thread: a hostile 2 MB result costs
 # about half a second, which must not be the event loop's.
@@ -1161,11 +1164,13 @@ class McpClientManager:
             forget_mcp_tool(name)
         self._registered.clear()
         self._sources.clear()
-        tasks: set[asyncio.Task[Any]] = set(self._refresh_tasks)  # a refresh in flight stores what it rotated
+        tasks: set[asyncio.Task[Any]] = set()
         for server in self._servers.values():
             server.close()
             tasks |= server.tasks()
-        await _wait_ended(tasks)
+        # A refresh in flight stores what the provider rotated: it gets its own deadline, the OAuth request's bound
+        # and the write (REFRESH_DRAIN_SECONDS), not the connections' five seconds.
+        await asyncio.gather(_wait_ended(tasks), _wait_ended(set(self._refresh_tasks), REFRESH_DRAIN_SECONDS))
 
     def status(self) -> dict[str, Any]:
         """Each server's name, whether it is connected, its background switch and its registered tool count. No
@@ -1235,6 +1240,9 @@ class McpClientManager:
         failed with an exception (None for a result the server returned, or a call never sent). Never raises but
         ``CancelledError``, which it re-raises: the runner's tool timeout, or a shutdown."""
         server_name = server.config.name
+        # The credential values as the call is sent: a refresh (or two) during the call must not drop them from the
+        # scrub of its own result (a server can echo the token the call carried).
+        sent_values = server.withheld
         closed = _error(f'the MCP client is closed: the server "{server_name}" is not called.')
         if self._closed:
             return closed, None
@@ -1297,10 +1305,12 @@ class McpClientManager:
             return _error(f'the call to the MCP server "{server_name}" failed: {safe_error(exc)}.'), refusal()
         if conn.refused is None:  # answered on a connection that was refused nothing: the listing's status clears
             server.refusal = None
+        # What the call was sent with, and what is held now.
+        withheld = tuple(sorted(set(sent_values) | set(server.withheld), key=len, reverse=True))
         if result_chars(raw) > OFF_LOOP_RESULT_CHARS:
-            text, is_error = await asyncio.to_thread(flatten_result, raw, self._max_chars, server.withheld)
+            text, is_error = await asyncio.to_thread(flatten_result, raw, self._max_chars, withheld)
         else:
-            text, is_error = flatten_result(raw, self._max_chars, server.withheld)
+            text, is_error = flatten_result(raw, self._max_chars, withheld)
         return {"content": [{"type": "text", "text": wrap_result(server_name, text)}], "is_error": is_error}, None
 
     async def _emit_error(self, server_name: str, exc: BaseException) -> None:
@@ -1325,11 +1335,12 @@ def _sign_in_error(server_name: str) -> dict[str, Any]:
     return _error(f'the MCP server "{server_name}" needs the owner to sign in again on the Integrations screen.')
 
 
-async def _wait_ended(tasks: set[asyncio.Task[Any]]) -> None:
-    """Wait for closing supervisor tasks, at most ``_CLOSE_WAIT_SECONDS``, then cancel those still running."""
+async def _wait_ended(tasks: set[asyncio.Task[Any]], timeout: float | None = None) -> None:
+    """Wait for closing tasks, at most ``timeout`` (``_CLOSE_WAIT_SECONDS`` by default), then cancel those still
+    running."""
     if not tasks:
         return
-    _done, pending = await asyncio.wait(tasks, timeout=_CLOSE_WAIT_SECONDS)
+    _done, pending = await asyncio.wait(tasks, timeout=_CLOSE_WAIT_SECONDS if timeout is None else timeout)
     for task in pending:
         task.cancel()
     await asyncio.gather(*pending, return_exceptions=True)

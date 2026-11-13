@@ -112,6 +112,7 @@ class World:
         self.valid: set[str] = set()
         self.refresh_tokens: set[str] = set()
         self.refreshes = 0
+        self.expires_in = 3600  # the lifetime of the tokens it gives
         self.reflect: str | None = None  # the code exchange repeats the code and the verifier it was sent (see below)
         self.n = 0
 
@@ -159,7 +160,12 @@ class World:
                 self.refresh_tokens.add(refresh)
                 return httpx.Response(
                     200,
-                    json={"access_token": access, "token_type": "bearer", "expires_in": 3600, "refresh_token": refresh},
+                    json={
+                        "access_token": access,
+                        "token_type": "bearer",
+                        "expires_in": self.expires_in,
+                        "refresh_token": refresh,
+                    },
                 )
             if form.get("grant_type") != "authorization_code":
                 return httpx.Response(400, json={"error": "unsupported_grant_type"})
@@ -184,7 +190,12 @@ class World:
             self.refresh_tokens.add(refresh)
             return httpx.Response(
                 200,
-                json={"access_token": access, "token_type": "Bearer", "expires_in": 3600, "refresh_token": refresh},
+                json={
+                    "access_token": access,
+                    "token_type": "Bearer",
+                    "expires_in": self.expires_in,
+                    "refresh_token": refresh,
+                },
             )
         return httpx.Response(404)
 
@@ -991,6 +1002,39 @@ def test_a_url_with_whitespace_a_backslash_or_a_control_character_is_refused():
     ):
         assert url_problem(url) == "the URL may not carry whitespace, backslashes or control characters", url
     assert url_problem("https://a.example.com/mcp") is None
+
+
+async def test_a_short_lived_sign_in_is_refreshed_between_check_and_add(make_env, monkeypatch):
+    from types import SimpleNamespace
+
+    env = await make_env()
+    env.world.expires_in = 1  # a token that lives one second
+    flow_id = await _signed_in(env)
+    body = {"name": "alpha", "url": ALPHA, "oauth_flow_id": flow_id}
+    assert (await _req(env, "POST", "/integrations/mcp/probe", body)).status_code == 200
+    assert env.world.refreshes == 0
+    real = time.time
+    monkeypatch.setattr(oauth_module, "time", SimpleNamespace(time=lambda: real() + 5, monotonic=time.monotonic))
+    created = await _add(env, flow_id)  # five seconds later: the sign-in's token has expired
+    assert created.status_code == 201, created.text
+    assert env.world.refreshes == 1
+    stored = env.manager.stored_oauth("alpha", ALPHA, (await env.registry.list_secrets())["alpha"])
+    assert stored.access_token == env.world.issued[-2]  # the refresh's access token, not the sign-in's
+    assert env.remotes.sent[-1] == f"Bearer {stored.access_token}"  # the create's probe sent it
+
+
+async def test_a_short_lived_sign_in_whose_refresh_is_refused_asks_for_a_new_sign_in(make_env, monkeypatch):
+    from types import SimpleNamespace
+
+    env = await make_env()
+    env.world.expires_in = 1
+    flow_id = await _signed_in(env)
+    env.world.refresh_tokens.clear()  # the provider no longer knows the refresh token
+    real = time.time
+    monkeypatch.setattr(oauth_module, "time", SimpleNamespace(time=lambda: real() + 5, monotonic=time.monotonic))
+    created = await _add(env, flow_id)
+    assert created.status_code == 409 and "sign in again" in created.json()["error"]
+    assert await env.registry.list_secrets() == {}
 
 
 # --- settings that are not text (older tests build the app from a MagicMock) -----------------------------------------

@@ -38,6 +38,8 @@
   let pasting = $state(false);
   let timer: ReturnType<typeof setTimeout> | null = null;
   let asking: AbortController | null = null;
+  /** The panel is gone (closed mid-request): nothing more is asked and nothing is reported, whatever answers late. */
+  let stopped = false;
 
   function stopPolling() {
     if (timer) clearTimeout(timer);
@@ -45,13 +47,16 @@
     asking?.abort();
     asking = null;
   }
-  onDestroy(stopPolling);
+  onDestroy(() => {
+    stopped = true;
+    stopPolling();
+  });
 
   const pending = $derived(started !== null && flowState?.status === 'pending');
 
   /** A new state of the sign-in `flowId` (ignored once another sign-in started). */
   function settle(flowId: string, state: OAuthFlowState) {
-    if (started?.flow_id !== flowId) return;
+    if (stopped || started?.flow_id !== flowId) return;
     flowState = state;
     if (state.status === 'pending') return;
     stopPolling();
@@ -59,17 +64,20 @@
   }
 
   function poll(flowId: string) {
+    if (stopped) return;
     timer = setTimeout(async () => {
+      if (stopped) return;
       asking = new AbortController();
       try {
         settle(flowId, await signInState(flowId, asking.signal));
       } catch (err) {
+        if (stopped) return; // aborted by the close: nothing more
         // Unknown to Nous (a restart, or long expired): over. Any other miss: ask again at the next tick.
         if ((err as { status?: number } | null)?.status === 404) {
           settle(flowId, { status: 'expired', reason: null, stored: false });
         }
       }
-      if (started?.flow_id === flowId && flowState?.status === 'pending') poll(flowId);
+      if (!stopped && started?.flow_id === flowId && flowState?.status === 'pending') poll(flowId);
     }, POLL_MS);
   }
 
@@ -83,13 +91,14 @@
     try {
       const target = { name, url };
       const answer = await startSignIn(target.name, target.url, advanced);
+      if (stopped) return; // closed while the start was in flight: no polling for it
       startedFor = target;
       started = answer;
       flowState = { status: 'pending', reason: null, stored: false };
       advanced.client_secret = '';
       poll(answer.flow_id);
     } catch (err) {
-      error = problemText(err);
+      if (!stopped) error = problemText(err);
     } finally {
       starting = false;
     }
@@ -104,7 +113,7 @@
       settle(flowId, await completeSignIn(flowId, pasted.trim()));
       pasted = '';
     } catch (err) {
-      error = problemText(err);
+      if (!stopped) error = problemText(err);
     } finally {
       pasting = false;
     }
