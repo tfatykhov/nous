@@ -12,7 +12,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from nous.api.tool_classes import TOOL_CLASSES, code_reaches_network
 from nous.cognitive.bash_side_effect import classify_bash_command as _classify_bash_command
@@ -501,6 +501,36 @@ def classify_side_effect(tool_name: str, tool_input: dict[str, Any] | None = Non
     if tool_name in READ_TOOLS:
         return "none"
     return "write"  # WRITE_TOOLS and anything unclassified
+
+
+def classify_ingress(tool_name: str, tool_input: dict[str, Any] | None = None) -> Literal["none", "outside"]:
+    """Whether THIS call can bring text from outside into the session: ``"outside"`` or ``"none"``.
+
+    Order: any ``mcp__`` name is outside (a remote server's result); ``bash`` by its command;
+    ``run_python`` when its code reaches the network (``code_reaches_network``); otherwise the
+    table's ``ToolClass.ingress``. A name nobody classified is ``"none"``.
+
+    ``bash`` limits, by design (no parser of its own): a command the side-effect classifier calls
+    ``external`` is outside, which covers curl, wget, gh, ssh, ``git clone``/``fetch``/``pull``
+    and Python run with network code, and over-classifies what only sends (``curl -d``, ``git
+    push``, mail). Not seen: a script file that fetches (``python fetch.py``), package installs,
+    and reading a file an earlier call downloaded.
+
+    Never raises on a malformed call: a name that is not a string or an input that is not a
+    dict is ``"none"``.
+    """
+    if not isinstance(tool_name, str):
+        return "none"
+    if not isinstance(tool_input, dict):
+        tool_input = {}
+    if tool_name.startswith("mcp__"):
+        return "outside"
+    if tool_name == "bash":
+        return "outside" if _classify_bash_command(_extract_bash_command(tool_input)) == "external" else "none"
+    if tool_name == "run_python":
+        return "outside" if code_reaches_network(str(tool_input.get("code") or "")) else "none"
+    cls = TOOL_CLASSES.get(tool_name)
+    return cls.ingress if cls is not None else "none"
 
 
 _REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [

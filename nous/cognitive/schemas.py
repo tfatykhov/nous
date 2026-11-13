@@ -77,6 +77,9 @@ class SessionMetadata:
     total_assistant_chars: int = 0
     has_explicit_remember: bool = False
     transcript: list[str] = field(default_factory=list)
+    # Tools that brought in outside content, in first-dispatch order, each once. Filled at dispatch
+    # time (CognitiveLayer.note_tool_dispatch), only with NOUS_OUTSIDE_CONTENT_TAGGING_MODE not off.
+    outside_tools: list[str] = field(default_factory=list)
 
 
 class FrameType(StrEnum):

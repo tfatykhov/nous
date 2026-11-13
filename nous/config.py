@@ -1180,6 +1180,11 @@ class Settings(BaseSettings):
     # browser_task summary (nous/api/injection_screen.py). off = no screen; flag = log a
     # WARNING and emit an injection_screen_flagged event; the content is never changed.
     injection_screen_mode: Literal["off", "flag"] = "flag"
+    # Outside-content tagging (PR 2, shadow): off = nothing recorded, events unchanged; shadow = record
+    # per session which tools brought in outside content (at dispatch), carry the list on the
+    # session_ended / conversation_compacting / episode_summarized events, and log what the fact
+    # extractors would tag. Nothing stored or shown changes. "on" behaves like shadow until PR 3.
+    outside_content_tagging_mode: Literal["off", "shadow", "on"] = "off"
     tavily_api_key: str = Field("", validation_alias="TAVILY_API_KEY")
     exa_api_key: str = Field("", validation_alias="EXA_API_KEY")
     search_provider: str = "auto"  # auto, tavily, exa, brave

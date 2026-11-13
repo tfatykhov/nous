@@ -15,6 +15,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.config import Settings
+from nous.events import Event, EventBus
 from nous.observability.model_calls import CallContext, context_kwargs
 
 logger = logging.getLogger(__name__)
@@ -411,6 +412,39 @@ def cap_candidate_facts(candidates: list, settings: Any) -> list:
     broadened = getattr(settings, "extraction_coverage_broadened", False)
     stable_limit = getattr(settings, "candidate_facts_stable_limit", 15) if broadened else 5
     return dated[:event_limit] + stable[:stable_limit]
+
+
+OUTSIDE_CONTENT_SHADOW_EVENT = "outside_content_shadow"
+
+
+async def log_outside_content_shadow(
+    settings: Any, bus: EventBus | None, event: Event, *, extractor: str, facts: int, episode_id: str | None = None
+) -> None:
+    """Outside-content shadow: for a triggering ``event`` whose session read outside content (a
+    non-empty ``outside_tools`` in its data), log one INFO line and emit one ``outside_content_shadow``
+    event with ``facts``, the count that would be tagged. Only with NOUS_OUTSIDE_CONTENT_TAGGING_MODE
+    shadow or on (a membership test, so a mock setting reads as off). Changes nothing stored. Never
+    raises: a failed emit is logged."""
+    tools = event.data.get("outside_tools")
+    if not tools or getattr(settings, "outside_content_tagging_mode", "off") not in ("shadow", "on"):
+        return
+    logger.info(
+        "outside-content shadow: %d facts would be tagged (%s, session %s, episode %s, tools %s)",
+        facts, extractor, event.session_id or "?", episode_id or "-", ",".join(map(str, tools)),
+    )
+    if bus is None:
+        return
+    try:
+        await bus.emit(Event(
+            type=OUTSIDE_CONTENT_SHADOW_EVENT,
+            agent_id=event.agent_id,
+            session_id=event.session_id,
+            data={"extractor": extractor, "episode_id": episode_id, "outside_tools": list(tools), "facts": facts},
+            trace_id=event.trace_id,
+            caused_by=event.event_id,
+        ))
+    except Exception:  # noqa: BLE001 -- a shadow record must not fail extraction
+        logger.warning("outside-content shadow: event not emitted for session %s", event.session_id or "?")
 
 
 def parse_llm_json(text: str) -> Any:

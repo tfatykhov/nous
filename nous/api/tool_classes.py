@@ -15,6 +15,7 @@ from types import MappingProxyType
 from typing import Literal
 
 SideEffect = Literal["none", "write", "external", "irreversible"]
+Ingress = Literal["none", "outside"]
 
 
 @dataclass(frozen=True)
@@ -22,26 +23,31 @@ class ToolClass:
     side_effect: SideEffect   # a level: none < write < external < irreversible
     spawns: bool = False      # starts other agent work: a subtask, schedule, check or DAG
     compensable: bool = False  # P2.8: a compensator can undo a successful call
+    ingress: Ingress = "none"  # "outside": its result can carry text from outside (the web, a document)
 
 
 _READ = ToolClass("none")
+_READ_OUT = ToolClass("none", ingress="outside")
 _WRITE = ToolClass("write")
+_WRITE_OUT = ToolClass("write", ingress="outside")
 _WRITE_C = ToolClass("write", compensable=True)
 _SPAWN = ToolClass("write", spawns=True)
+# A parent that spawned work receives what it found, web-derived results included.
+_SPAWN_OUT = ToolClass("write", spawns=True, ingress="outside")
 _EXTERNAL = ToolClass("external")
 
 TOOL_CLASSES: Mapping[str, ToolClass] = MappingProxyType({
     # reads
     "recall_deep": _READ, "read_file": _READ, "get_procedure": _READ,
-    "web_search": _READ, "web_fetch": _READ, "list_tasks": _READ, "cache_retrieve": _READ,
+    "web_search": _READ_OUT, "web_fetch": _READ_OUT, "list_tasks": _READ, "cache_retrieve": _READ_OUT,
     "list_decisions": _READ,
     "db_query": _READ,  # read-only SQL as its own login, which PostgreSQL holds to SELECT on a fixed list
     "submit_final_report": _READ,  # injected via extra_tools in hardened subtasks
     # local writes — compensable where a compensator exists. heartbeat_check_manage
     # is compensable for action="disable" with no active run ONLY: see is_compensable_call.
     "write_file": _WRITE_C, "learn_fact": _WRITE, "record_decision": _WRITE, "create_censor": _WRITE,
-    "store_identity": _WRITE, "learn_skill": _WRITE, "complete_initiation": _WRITE,
-    "cancel_task": _WRITE, "heartbeat_check_manage": _WRITE_C, "ingest_document": _WRITE,
+    "store_identity": _WRITE, "learn_skill": _WRITE_OUT, "complete_initiation": _WRITE,
+    "cancel_task": _WRITE, "heartbeat_check_manage": _WRITE_C, "ingest_document": _WRITE_OUT,
     "resolve_decisions": _WRITE_C, "push_surface": _WRITE,
     "compose_surface": _WRITE, "dag_manage": _WRITE,
     # F111: a ledger row with a deadline. _WRITE, not _SPAWN: it starts no work, so every context may call it.
@@ -54,11 +60,11 @@ TOOL_CLASSES: Mapping[str, ToolClass] = MappingProxyType({
     "bash": _WRITE,        # the floor; classify_side_effect reads the command itself
     # start other agent work — NOT compensable: cancelling a schedule or check
     # after it fired does not undo the work it already spawned
-    "spawn_task": _SPAWN, "spawn_sync": _SPAWN, "schedule_task": _SPAWN,
-    "heartbeat_check_create": _SPAWN, "dag_create": _SPAWN,
+    "spawn_task": _SPAWN_OUT, "spawn_sync": _SPAWN_OUT, "schedule_task": _SPAWN,
+    "heartbeat_check_create": _SPAWN, "dag_create": _SPAWN_OUT,
     # leave the host — NOT compensable (cannot unsend)
     "send_file": _EXTERNAL, "send_email": _EXTERNAL,
-    "browser_task": _EXTERNAL,  # F100: acts on live websites
+    "browser_task": ToolClass("external", ingress="outside"),  # F100: acts on live websites
 })
 
 # Python that opens a connection to another host: a network module imported

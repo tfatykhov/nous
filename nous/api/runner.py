@@ -3869,6 +3869,7 @@ class AgentRunner:
                 result_text, is_error = suppressed.text, suppressed.is_error
             else:
                 keyed = send_key is not None
+                self._note_ingress(session_id, tool_name, tool_input)
                 # @codex P1 on e8841b2: in-flight heartbeat
                 # for tool calls that may exceed stall_timeout.
                 # Cancels in the finally regardless of success.
@@ -5529,6 +5530,15 @@ Rules:
             return tool_input
         return {**tool_input, "source_episode_id": active_ep}
 
+    def _note_ingress(self, session_id: str | None, tool_name: str, tool_input: dict[str, Any]) -> None:
+        """Outside-content shadow: tell the cognitive layer, before a call runs, which tool this session
+        dispatches; it keeps the ones that bring in outside content, so a write later in the same turn
+        sees them. Not called with NOUS_OUTSIDE_CONTENT_TAGGING_MODE off (a membership test, so a mock
+        setting reads as off), so a turn is unchanged and a layer stand-in without the method is never
+        asked. The layer's method never raises."""
+        if session_id and getattr(self._settings, "outside_content_tagging_mode", "off") in ("shadow", "on"):
+            self._cognitive.note_tool_dispatch(session_id, tool_name, tool_input)
+
     async def _dispatch_with_keepalive(
         self,
         name: str,
@@ -5549,6 +5559,7 @@ Rules:
         """
         interval = self._settings.keepalive_interval
         timeout = self._settings.tool_timeout
+        self._note_ingress(session_id, name, args)
 
         task = asyncio.create_task(
             asyncio.wait_for(
