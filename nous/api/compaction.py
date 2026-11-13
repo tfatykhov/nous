@@ -26,6 +26,10 @@ from nous.config import Settings
 
 logger = logging.getLogger(__name__)
 
+# How the summary message that replaces compacted history begins. The compaction
+# fact extractor reads it to tell this model-written message from the user's own.
+SUMMARY_MESSAGE_PREFIX = "[Previous conversation summary]"
+
 # ------------------------------------------------------------------
 # Summarization Prompts (co-located with compaction logic)
 # ------------------------------------------------------------------
@@ -1078,7 +1082,7 @@ class ConversationCompactor:
         compacted_prefix = [
             Message(
                 role="user",
-                content=f"[Previous conversation summary]\n\n{checkpoint_text}",
+                content=f"{SUMMARY_MESSAGE_PREFIX}\n\n{checkpoint_text}",
             ),
             Message(
                 role="assistant",
