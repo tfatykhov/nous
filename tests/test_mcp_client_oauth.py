@@ -993,6 +993,50 @@ def test_a_url_with_whitespace_a_backslash_or_a_control_character_is_refused():
     assert url_problem("https://a.example.com/mcp") is None
 
 
+# --- settings that are not text (older tests build the app from a MagicMock) -----------------------------------------
+
+
+async def test_the_app_builds_with_settings_that_are_not_text_and_oauth_start_is_refused():
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from nous.api.rest import create_app
+
+    app = create_app(
+        runner=MagicMock(),
+        brain=MagicMock(),
+        heart=MagicMock(),
+        cognitive=MagicMock(),
+        database=MagicMock(),
+        settings=MagicMock(agent_id="a"),
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+        start = await client.post("/integrations/mcp/oauth/start", json={"name": "alpha", "url": ALPHA})
+    assert start.status_code == 503  # its digest is not text either: every route is refused, nothing fails at build
+    assert oauth_module.redirect_uri(MagicMock()) is None
+
+    # With a valid digest and a base address that is not text: OAuth is simply unavailable.
+    settings = SimpleNamespace(
+        agent_id="a",
+        mcp_client_ui_secret_sha256=hashlib.sha256(PROXY.encode()).hexdigest(),
+        a2ui_public_base_url=MagicMock(),
+    )
+    manager = MagicMock(closed=False)
+    manager.ceilings.return_value = {}
+    manager.secrets_available.return_value = True
+    manager.status.return_value = {"servers": []}
+    manager.credentials_refused.return_value = {}
+    manager.plan.return_value = []
+    database = MagicMock()
+    app = Starlette(routes=build_mcp_client_routes(database=database, settings=settings, manager=manager, bus=None))
+    headers = {PROXY_SECRET_HEADER: PROXY}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as client:
+        start = await client.post(
+            "/integrations/mcp/oauth/start", json={"name": "alpha", "url": ALPHA}, headers=headers
+        )
+    assert start.status_code == 409 and "NOUS_A2UI_PUBLIC_BASE_URL" in start.json()["error"]
+
+
 # --- the OAuth client -------------------------------------------------------------------------------------------------
 
 

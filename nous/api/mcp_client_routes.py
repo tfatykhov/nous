@@ -322,7 +322,11 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
     """The ``/integrations/mcp`` routes over the MCP client ``manager`` and a registry for ``settings.agent_id``.
     ``manager`` and ``bus`` may be lazy components: a falsy ``manager`` answers 503."""
     registry = McpRegistry(database, settings.agent_id)
-    redirect = redirect_uri(settings.a2ui_public_base_url)  # None: OAuth is unavailable
+
+    def redirect_address() -> str | None:
+        """The OAuth redirect address, read when a request needs it (never at build: a settings object that is not
+        text there must not fail the app); None: OAuth is unavailable here."""
+        return redirect_uri(getattr(settings, "a2ui_public_base_url", ""))
     digest = _digest(settings.mcp_client_ui_secret_sha256)
     if not digest:
         logger.warning(
@@ -512,7 +516,7 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             {
                 "ceilings": manager.ceilings(),
                 "secrets_available": manager.secrets_available(),
-                "oauth_available": redirect is not None,
+                "oauth_available": redirect_address() is not None,
                 "servers": await views(),
             }
         )
@@ -767,6 +771,7 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         the same name and URL is replaced (its client reused while the issuer is unchanged). Nothing is stored."""
         body = await _body(request)
         _only(body, {"name", "url", "client_id", "client_secret", "scope"})
+        redirect = redirect_address()
         if redirect is None:
             raise _Refused(409, OAUTH_UNAVAILABLE_TEXT)
         if not manager.secrets_available():
@@ -900,6 +905,7 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         the sign-in failed."""
         body = await _body(request)
         _only(body, {"flow_id", "callback_url", "code", "state", "iss"})
+        redirect = redirect_address()
         if redirect is None:
             raise _Refused(409, OAUTH_UNAVAILABLE_TEXT)
         if "callback_url" in body:

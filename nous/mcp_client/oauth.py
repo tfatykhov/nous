@@ -82,10 +82,13 @@ class OAuthProblem(Exception):
         self.transient = transient
 
 
-def redirect_uri(base: str) -> str | None:
+def redirect_uri(base: Any) -> str | None:
     """``<base>/integrations/mcp/oauth/callback`` for the public base URL (``NOUS_A2UI_PUBLIC_BASE_URL``), or None
-    when it is not an https address with a host (then OAuth is unavailable)."""
-    base = (base or "").strip().rstrip("/")
+    when it is not a non-empty https address with a host, or not text at all (then OAuth is unavailable; never an
+    exception)."""
+    if not isinstance(base, str):
+        return None
+    base = base.strip().rstrip("/")
     try:
         parts = urlsplit(base)
     except ValueError:

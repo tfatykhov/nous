@@ -359,6 +359,11 @@ _NO_PURPOSE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         1,
         "not a model client: a plain httpx client posting to Nous's own REST endpoint /chat/stream",
     ),
+    ("nous/mcp_client/oauth.py", "_request", "client.stream"): (
+        1,
+        "not a model client: the MCP client's guarded httpx client sending one OAuth request to an external MCP "
+        "server or its sign-in provider (F112 PR 2d)",
+    ),
 }
 
 _Site = tuple[str, str, str]
