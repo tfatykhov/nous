@@ -7,7 +7,7 @@ export const ROUTES = [
   'work','model-calls','dag','subtasks','heartbeat',
   'decisions','rubric',
   'autonomy','intentions','harness',
-  'observability','identity',
+  'observability','identity','integrations',
 ] as const;
 export type RouteName = typeof ROUTES[number];
 

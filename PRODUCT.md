@@ -50,7 +50,7 @@ Two surfaces, with different owners and lifecycles (F092):
 
 - **Dashboard** at `/dashboard/v2/`:
   - fixed, human-designed and read-mostly; a Svelte 5 SPA in `dashboard-app/` with hash routes;
-  - 18 nav screens on main: Overview, Graph, Browse, Decisions, Heartbeat, Observability, Retrieval, Health, Scoring, Work, Model calls, Guards, Intentions, Autonomy, Consolidation, Workflows, Subtasks, Identity;
+  - 19 nav screens on main: Overview, Graph, Browse, Decisions, Heartbeat, Observability, Retrieval, Health, Scoring, Work, Model calls, Guards, Intentions, Autonomy, Consolidation, Workflows, Subtasks, Identity, Integrations;
   - retired route names redirect to the screens that absorbed them (activity, admission, density, cache, execution).
 - **Companion** at `/companion`, an installable PWA:
   - agent-composed, ephemeral and action-oriented;

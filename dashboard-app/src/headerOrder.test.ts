@@ -14,7 +14,7 @@ const REFRESH = /<(?:Button|button)\b(?:=>|[^>])*>\s*(?:\{[^}]*'Refresh'[^}]*\}|
 /** Every screen (or tab) with a page header that fetches through a poll store. */
 const PAGES = ['views/Admission.svelte', 'views/Autonomy.svelte', 'views/Cache.svelte', 'views/Consolidation.svelte',
   'views/DagView.svelte', 'views/Decisions.svelte', 'views/GraphView.svelte', 'views/Harness.svelte', 'views/Heartbeat.svelte',
-  'views/Intentions.svelte', 'views/Ledger.svelte', 'views/MemoryWriteHealth.svelte', 'views/Observability.svelte',
+  'views/Integrations.svelte', 'views/Intentions.svelte', 'views/Ledger.svelte', 'views/MemoryWriteHealth.svelte', 'views/Observability.svelte',
   'views/Overview.svelte', 'views/Retrieval.svelte', 'views/Rubric.svelte', 'views/Subtasks.svelte', 'views/health/GraphTab.svelte',
   'views/health/GrowthTab.svelte', 'views/modelcalls/CallList.svelte', 'views/work/Patterns.svelte', 'views/work/SessionList.svelte',
   'views/work/Trace.svelte'];

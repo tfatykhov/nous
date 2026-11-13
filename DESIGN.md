@@ -279,7 +279,7 @@ components:
 
 **Creative North Star: "The Agent's Mind, Visible"**
 
-Two surfaces share one world. The dashboard is an eighteen-screen reading room for one expert reader; the companion is a phone-first column of cards the agent composes. Both sit on a cool chart-paper ground with white rounded cards, deep Atlantic-blue navigation, and dark ink. There is one look and no look switch.
+Two surfaces share one world. The dashboard is a nineteen-screen reading room for one expert reader; the companion is a phone-first column of cards the agent composes. Both sit on a cool chart-paper ground with white rounded cards, deep Atlantic-blue navigation, and dark ink. There is one look and no look switch.
 
 Meaning is carried by plain words and colour. A turn is tinted with the colour of the frame the agent was in, the frame is named in a word, and a frame change is said in one sentence with its reason. A status is a word in a tinted pill. Nothing is encoded in an invented symbol.
 
