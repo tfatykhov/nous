@@ -85,6 +85,9 @@ async def test_all_tables_exist(db):
         ("nous_system", "model_call_block_ref"),
         # F108 Phase 3: tool notes and the patterns closed to re-review (migration 103)
         ("nous_system", "tool_note"),
+        # F112 MCP client: external MCP servers and their tools (migration 109)
+        ("nous_system", "mcp_servers"),
+        ("nous_system", "mcp_server_tools"),
         # Task scores, in a schema of their own (migration 087)
         ("scoring", "task_scores"),
         # The scoring command's heartbeat, one row per agent (migration 088)

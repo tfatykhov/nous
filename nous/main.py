@@ -2010,6 +2010,24 @@ async def create_components(settings: Settings) -> dict:
         a2ui_sweep_task = asyncio.create_task(_a2ui_sweep_loop(settings, surface_service))
         logger.info("F092: A2UI companion enabled (push_surface + /a2ui routes + sweep)")
 
+    # F112: the MCP client, after the last register_* call. start() registers the approved tools of the pinned
+    # servers from the stored rows and connects to no server. Off: nothing of nous.mcp_client is imported. A failed
+    # start keeps what it registered before the failure (it logs which); Nous starts all the same.
+    mcp_client = None
+    if settings.mcp_client_enabled:
+        from nous.mcp_client import McpClientManager
+        from nous.mcp_client.registry import McpRegistry
+
+        mcp_client = McpClientManager(dispatcher, McpRegistry(database, settings.agent_id), settings, bus)
+        try:
+            await mcp_client.start()
+        except Exception as exc:
+            logger.warning(
+                "F112: MCP client start failed (%s); %d MCP tool(s) registered before it",
+                type(exc).__name__,
+                len(mcp_client.registered()),
+            )
+
     # F099 Phase 2c: started last, once every tool and component a continuation turn may use exists.
     if continuation_runner is not None:
         await continuation_runner.start()
@@ -2057,6 +2075,7 @@ async def create_components(settings: Settings) -> dict:
         "action_router": action_router,
         "a2ui_sweep_task": a2ui_sweep_task,
         "check_audit_task": check_audit_task,
+        "mcp_client": mcp_client,
     }
 
 
@@ -2219,6 +2238,14 @@ async def shutdown_components(components: dict) -> None:
     runner = components.get("runner")
     if runner:
         await runner.close()
+
+    # F112: no turn runs any more: close the MCP client's connections (bounded) and unregister its tools.
+    mcp_client = components.get("mcp_client")
+    if mcp_client is not None:
+        try:
+            await mcp_client.close()
+        except Exception as exc:
+            logger.warning("F112: MCP client close failed (%s)", type(exc).__name__)
 
     api_client = components.get("api_client")
     if api_client:

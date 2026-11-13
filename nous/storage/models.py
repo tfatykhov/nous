@@ -2395,3 +2395,65 @@ class ToolNote(Base):
     judged: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     retired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class McpServer(Base):
+    """Migration 109 (F112): one external MCP server the agent may use.
+
+    ``name`` is the middle part of its tools' names (``mcp__<name>__<tool>``); the migration's CHECK holds its shape.
+    ``url`` is https with no credential in it. ``background``: the owner's "available to background work" switch.
+    Written by ``python -m nous.mcp_client.seed`` (``McpRegistry``), read by the MCP client at startup. No secret
+    column. Not read by the ``db_query`` reader.
+    """
+
+    __tablename__ = "mcp_servers"
+    __table_args__ = (
+        UniqueConstraint("agent_id", "name", name="mcp_servers_agent_id_name_key"),
+        CheckConstraint("transport IN ('streamable_http')", name="mcp_servers_transport_check"),
+        {"schema": "nous_system"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    transport: Mapped[str] = mapped_column(
+        Text, nullable=False, default="streamable_http", server_default="streamable_http"
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    background: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    call_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=30, server_default="30")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class McpServerTool(Base):
+    """Migration 109 (F112): one tool an MCP server listed, with the owner's permission for it.
+
+    ``tool`` is the server's own name (sent back to it unchanged); ``description`` and ``input_schema`` are as the
+    server listed them. ``permission``: ``allow`` is registered at startup; ``deny`` and ``ask`` are not (PR 1 has no
+    approval path). Written by the seed command, read by the MCP client at startup.
+    """
+
+    __tablename__ = "mcp_server_tools"
+    __table_args__ = (
+        UniqueConstraint("agent_id", "server_id", "tool", name="mcp_server_tools_agent_id_server_id_tool_key"),
+        CheckConstraint("permission IN ('allow', 'deny', 'ask')", name="mcp_server_tools_permission_check"),
+        {"schema": "nous_system"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    server_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("nous_system.mcp_servers.id"), nullable=False
+    )
+    tool: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    input_schema: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    permission: Mapped[str] = mapped_column(Text, nullable=False, default="deny", server_default="deny")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

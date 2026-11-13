@@ -15,9 +15,9 @@ from ._shared import _validated_trace_id
 
 
 def _is_compensable_tool(name: str) -> bool:
-    from nous.api.tool_classes import TOOL_CLASSES
+    from nous.api.tool_classes import tool_class
 
-    tc = TOOL_CLASSES.get(name)
+    tc = tool_class(name)
     return tc is not None and tc.compensable
 
 

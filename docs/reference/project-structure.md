@@ -164,6 +164,13 @@ nous/
 │   │   └── catalogs/           # A2UI v1.0 vendored @ pinned commit d9086fb
 │   ├── security/
 │   │   └── secrets.py          # scan_secrets: shared by send_email (refuse) and the F098 result memory writer (skip)
+│   ├── mcp_client/             # F112 MCP client (NOUS_MCP_CLIENT_ENABLED, imported only when on): the agent uses tools of external MCP servers as mcp__<server>__<tool>
+│   │   ├── config.py           # ServerConfig / ToolConfig (a row each), url_problem (https, no user, password or query)
+│   │   ├── bridge.py           # Pure functions: prepare_tool (name, cleaned description and schema, caps), result flattening, cleaning and its wrapper line, safe_error
+│   │   ├── transport.py        # The one module importing the MCP SDK client: open_session over the guarded HTTP client (public addresses only, checked at connect; no redirects, no env proxy; response bodies capped, uncompressed), McpSession (tools/call as a plain request, no output validation; paged tools/list), is_server_error; drops its request lines from the httpx log
+│   │   ├── registry.py         # McpRegistry: nous_system.mcp_servers and mcp_server_tools (migration 109)
+│   │   ├── manager.py          # McpClientManager: registers the allowed tools of pinned servers at boot without connecting, one supervisor task per connection, call timeout, no retry
+│   │   └── seed.py             # `python -m nous.mcp_client.seed --name --url --allow [--background] [--write]`: lists a server's tools, prints each as the model would get it and the pin entry, stores the server and its permissions (unlisted tools set to deny)
 │   └── api/                    # External interfaces
 │       ├── rest.py             # Starlette REST API (the route list in `create_app`; see `docs/reference/rest-api.md`)
 │       ├── commitment_routes.py # F111: POST /commitments/{id}/drop|done, the owner's /drop and /done

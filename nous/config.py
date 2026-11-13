@@ -1116,6 +1116,25 @@ class Settings(BaseSettings):
 
     # MCP
     mcp_enabled: bool = True
+    # F112 MCP client: the agent uses tools of external MCP servers (mcp__<server>__<tool>). Off: nothing of
+    # nous.mcp_client is imported and no such tool is registered. Servers and tools are rows of
+    # nous_system.mcp_servers / mcp_server_tools, written on the host by `python -m nous.mcp_client.seed`.
+    mcp_client_enabled: bool = False
+    # One MCP tool result, flattened to text, is cut to this many characters (with a note saying so).
+    mcp_client_max_result_chars: int = Field(default=20000, ge=1)
+    # Comma list of host names the client's address guard lets reach a private, loopback or link-local address.
+    mcp_client_allow_private_hosts: str = ""
+    # Set on the host: entries name=host[:port];tool|tool separated by commas. A stored tool registers only when its
+    # server's name is pinned here, the stored URL's host (and port, when it names one) is the pinned one, the tool's
+    # own name is in the pin's list, and its stored permission is allow. Empty: nothing registers. The pin does not
+    # cover the URL's path, the descriptions and schemas stored for pinned tools, or code the agent runs in this
+    # process.
+    mcp_client_pinned_servers: str = ""
+    # Set on the host: comma list of pinned server names whose tools background work may use, together with the
+    # server row's background switch (the row alone does not enable it).
+    mcp_client_background_servers: str = ""
+    # One HTTP response body from an MCP server is read up to this many bytes; past it the call fails.
+    mcp_client_max_response_bytes: int = Field(default=2_000_000, ge=1)
 
     # LLM
     model: str = "claude-sonnet-4-6"
