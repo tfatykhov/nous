@@ -1008,7 +1008,7 @@ async def test_a_short_lived_sign_in_is_refreshed_between_check_and_add(make_env
     from types import SimpleNamespace
 
     env = await make_env()
-    env.world.expires_in = 1  # a token that lives one second
+    env.world.expires_in = 3  # a token that lives three seconds (not yet within its margin at the check)
     flow_id = await _signed_in(env)
     body = {"name": "alpha", "url": ALPHA, "oauth_flow_id": flow_id}
     assert (await _req(env, "POST", "/integrations/mcp/probe", body)).status_code == 200
@@ -1035,6 +1035,46 @@ async def test_a_short_lived_sign_in_whose_refresh_is_refused_asks_for_a_new_sig
     created = await _add(env, flow_id)
     assert created.status_code == 409 and "sign in again" in created.json()["error"]
     assert await env.registry.list_secrets() == {}
+
+
+async def test_start_again_with_the_client_id_alone_keeps_the_owners_client_secret(make_env):
+    env = await make_env()
+    owner = {"client_id": "test-client-owner-0001", "client_secret": CLIENT_SECRET}
+    assert (await _start(env, **owner)).json()["registration"] == "provided"
+    again = await _start(env, client_id="test-client-owner-0001")  # the screen cleared the typed secret
+    assert again.status_code == 200 and again.json()["registration"] == "provided"
+    params = env.world.authorize(again.json()["authorization_url"])
+    assert (await _callback(env, params)).content == SIGNED_IN_PAGE
+    assert env.world.forms[-1]["client_secret"] == CLIENT_SECRET  # still the confidential client
+    # Signed in and stored: signing in again with the id alone takes the stored client's secret.
+    assert (await _add(env, env.manager.flows.get(again.json()["flow_id"]).flow_id)).status_code == 201
+    third = await _start(env, client_id="test-client-owner-0001")
+    assert (await _callback(env, env.world.authorize(third.json()["authorization_url"]))).content == SIGNED_IN_PAGE
+    assert env.world.forms[-1]["client_secret"] == CLIENT_SECRET
+
+
+async def test_two_concurrent_uses_of_a_short_lived_sign_in_make_one_token_request(make_env, monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    env = await make_env()
+    env.world.expires_in = 1
+    flow_id = await _signed_in(env)
+    env.world.expires_in = 3600  # the refreshed token lives on: a second refresh would be the race, not its margin
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(0.05)  # the provider takes a moment: both requests are in flight together
+        return env.world.handle(request)
+
+    env.manager._oauth_http = lambda: httpx.AsyncClient(transport=httpx.MockTransport(slow))
+    real = time.time
+    monkeypatch.setattr(oauth_module, "time", SimpleNamespace(time=lambda: real() + 5, monotonic=time.monotonic))
+    body = {"name": "alpha", "url": ALPHA, "oauth_flow_id": flow_id}
+    first, second = await asyncio.gather(
+        _req(env, "POST", "/integrations/mcp/probe", body), _req(env, "POST", "/integrations/mcp/probe", body)
+    )
+    assert (first.status_code, second.status_code) == (200, 200), (first.text, second.text)
+    assert env.world.refreshes == 1
 
 
 # --- settings that are not text (older tests build the app from a MagicMock) -----------------------------------------

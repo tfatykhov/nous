@@ -225,6 +225,8 @@ def _oauth_of(plaintext: bytes) -> OAuthRecord:
     except ValueError:
         raise SecretUnavailable() from None
     names = {f.name for f in dataclass_fields(OAuthRecord)}
+    if isinstance(record, dict):
+        record.setdefault("lifetime", None)  # a record sealed before the field existed
     if not isinstance(record, dict) or record.pop("v", None) != 1 or set(record) != names:
         raise SecretUnavailable()
     if (

@@ -119,6 +119,11 @@ def expiring(record: OAuthRecord) -> bool:
     return record.expires_at - time.time() <= margin
 
 
+def expired(record: OAuthRecord) -> bool:
+    """Whether the access token's expiry has passed (never, without an expiry)."""
+    return record.expires_at is not None and record.expires_at <= time.time()
+
+
 @dataclass(frozen=True)
 class Discovery:
     """What discovery found. ``issuer`` and ``resource`` are the provider's and the server's own strings (not the SDK
@@ -445,6 +450,8 @@ class Flow:
     reason: str | None = None
     record: OAuthRecord | None = field(default=None, repr=False)
     state_used: bool = False
+    # Held while the record is renewed before a probe or a create: two at once make one token request.
+    renewing: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     def authorization_url(self) -> str:
         """The address the owner's browser opens: the code flow with PKCE (S256), the resource and the scope."""

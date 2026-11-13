@@ -393,7 +393,9 @@ async def test_a_server_that_refuses_every_token_gets_one_refresh_then_needs_a_n
         await manager.close()
 
 
-@pytest.mark.parametrize("lifetime", [30, 0])
+# A token that expires on arrival (expires_in 0) is refreshed by every request that needs it: no window holds for an
+# expired token. Short lifetimes above that make one refresh for requests that arrive together.
+@pytest.mark.parametrize("lifetime", [30, 10, 2])
 async def test_six_concurrent_requests_with_a_short_lived_token_make_one_refresh(tmp_path, lifetime):
     rows, provider = Rows(_record(expires_in=-10, lifetime=lifetime)), Provider()
     provider.expires_in = lifetime
@@ -477,6 +479,155 @@ async def test_a_refresh_in_flight_at_close_still_stores_the_rotated_tokens(tmp_
         assert (await request).status_code == 200
     stored = _opened(rows.secrets["alpha"])
     assert (stored.access_token, stored.refresh_token, rows.updates) == (NEW, ROTATED, 1)
+
+
+# --- round 2: short-lived tokens, a valid token while the provider is down, after close, repeated failures --------
+
+
+class Numbered:
+    """A token endpoint that gives a new access token and rotates the refresh token on every refresh, each living
+    ``lifetime`` seconds."""
+
+    def __init__(self, lifetime: int | None = None) -> None:
+        self.lifetime = lifetime
+        self.refresh_token = REFRESH
+        self.refreshes = 0
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
+        if form.get("refresh_token") != self.refresh_token:
+            return httpx.Response(400, json={"error": "invalid_grant"})
+        self.refreshes += 1
+        self.refresh_token = f"test-token-refresh-{self.refreshes:010d}"
+        answer = {
+            "access_token": self.access(self.refreshes),
+            "token_type": "bearer",
+            "refresh_token": self.refresh_token,
+        }
+        if self.lifetime is not None:
+            answer["expires_in"] = self.lifetime
+        return httpx.Response(200, json=answer)
+
+    @staticmethod
+    def access(n: int) -> str:
+        return f"test-token-access-{n:010d}"
+
+    def client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(self.handle))
+
+
+@pytest.mark.parametrize("lifetime", [10, 20])
+async def test_a_short_lived_token_past_its_window_is_refreshed_not_counted_as_refused(tmp_path, monkeypatch, lifetime):
+    from types import SimpleNamespace
+
+    from nous.mcp_client import oauth as oauth_module
+
+    rows, provider = Rows(_record(expires_in=-10, lifetime=lifetime)), Numbered(lifetime)
+    now = [0.0]
+    wall = time.time()
+    monkeypatch.setattr(oauth_module, "time", SimpleNamespace(time=lambda: wall + now[0], monotonic=time.monotonic))
+    manager = McpClientManager(
+        ToolDispatcher(), rows, _settings(tmp_path), connect=NoConnect().connect, oauth_http=provider.client
+    )
+    manager._clock = lambda: 1000.0 + now[0]
+    await manager.start()
+    refused: set[str] = set()
+    seen: list[str | None] = []
+    auth = manager._servers["alpha"].auth_for(None)
+    async with httpx.AsyncClient(transport=_mcp(seen, refuse=refused), auth=auth) as client:
+        assert (await client.post(ALPHA)).status_code == 200  # t=0: the first refresh
+        refused.add(Numbered.access(1))  # the server refuses it from t=12 (expired, or about to)
+        for t in (12, 14):
+            now[0] = t
+            assert (await client.post(ALPHA)).status_code == 200
+    assert not manager.needs_sign_in("alpha", rows.secrets["alpha"].id)
+    assert provider.refreshes == 2 and seen[-1] == f"Bearer {Numbered.access(2)}"
+    await manager.close()
+
+
+async def test_a_still_valid_token_is_sent_while_the_provider_cannot_be_reached(tmp_path):
+    rows, provider = Rows(_record(expires_in=30)), Provider()  # inside the 60 s margin, not expired
+    provider.script = ["503"]
+    manager = await _manager(tmp_path, rows, provider)
+    seen: list[str | None] = []
+    auth = manager._servers["alpha"].auth_for(None)
+    async with httpx.AsyncClient(transport=_mcp(seen), auth=auth) as client:
+        for _ in range(2):  # the second is inside the hold: no request to the provider, the token still sent
+            assert (await client.post(ALPHA)).status_code == 200
+    assert seen == [f"Bearer {OLD}", f"Bearer {OLD}"] and provider.refreshes == 1
+    assert manager.provider_unreachable("alpha", rows.secrets["alpha"].id)
+    await manager.close()
+
+
+async def test_no_refresh_is_asked_after_close(tmp_path):
+    rows, provider = Rows(_record(expires_in=-10)), Provider()
+    manager = await _manager(tmp_path, rows, provider)
+    await manager.close()
+    assert await manager._refresh("alpha", ALPHA, rows.secrets["alpha"].id, None) is None
+    assert provider.hits == []
+
+
+async def test_five_failed_refreshes_in_a_row_that_might_pass_need_a_new_sign_in(tmp_path):
+    rows, provider = Rows(_record(expires_in=-10)), Provider()
+    provider.script = ["404"] * 5  # a provider that answers 404 for good
+    manager = await _manager(tmp_path, rows, provider)
+    clock = [0.0]
+    manager._clock = lambda: clock[0]
+    secret_id = rows.secrets["alpha"].id
+    auth = manager._servers["alpha"].auth_for(None)
+    kinds = []
+    async with httpx.AsyncClient(transport=_mcp([]), auth=auth) as client:
+        for _ in range(5):
+            with pytest.raises(Exception) as caught:
+                await client.post(ALPHA)
+            kinds.append(type(caught.value).__name__)
+            clock[0] += 31  # past the hold
+    assert kinds == ["ProviderUnreachable"] * 4 + ["SignInNeeded"]
+    assert provider.refreshes == 5 and manager.needs_sign_in("alpha", secret_id)
+    await manager.close()
+
+
+async def test_a_successful_refresh_resets_the_count_of_failures(tmp_path):
+    rows, provider = Rows(_record(expires_in=-10)), Provider()
+    provider.script = ["503"] * 4
+    manager = await _manager(tmp_path, rows, provider)
+    clock = [0.0]
+    manager._clock = lambda: clock[0]
+    auth = manager._servers["alpha"].auth_for(None)
+    async with httpx.AsyncClient(transport=_mcp([]), auth=auth) as client:
+        for _ in range(4):
+            with pytest.raises(Exception):
+                await client.post(ALPHA)
+            clock[0] += 31
+        assert (await client.post(ALPHA)).status_code == 200  # the fifth works
+    assert manager._transient_failures == {} and not manager.needs_sign_in("alpha", rows.secrets["alpha"].id)
+    await manager.close()
+
+
+def test_a_record_sealed_without_its_lifetime_opens():
+    import json as _json
+
+    box = SecretBox(KEY)
+    fields = aad_fields(AGENT, "alpha", ALPHA, "oauth")
+    record = {
+        "v": 1,
+        "issuer": "https://auth.example.com",
+        "token_endpoint": TOKEN_URL,
+        "client_id": "test-client-0000",
+        "client_secret": None,
+        "token_auth_method": "none",
+        "resource": ALPHA,
+        "scope": None,
+        "access_token": OLD,
+        "refresh_token": REFRESH,
+        "expires_at": None,
+    }
+    key_id, nonce, ciphertext = box.seal(fields, _json.dumps(record).encode())
+    opened, problem = open_credential(
+        box, fields, StoredSecret(uuid.uuid4(), "oauth", key_id, nonce, ciphertext, (), None)
+    )
+    assert problem is None and isinstance(opened, OAuthRecord)
+    assert (opened.access_token, opened.lifetime) == (OLD, None)
 
 
 # --- a 401 ------------------------------------------------------------------------------------------------------------

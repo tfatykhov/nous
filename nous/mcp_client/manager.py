@@ -98,7 +98,15 @@ from nous.mcp_client.config import (
     parse_pins,
     pin_host,
 )
-from nous.mcp_client.oauth import HttpFactory, OAuthFlows, OAuthProblem, expiring, oauth_client, refresh_tokens
+from nous.mcp_client.oauth import (
+    HttpFactory,
+    OAuthFlows,
+    OAuthProblem,
+    expired,
+    expiring,
+    oauth_client,
+    refresh_tokens,
+)
 from nous.mcp_client.secrets import (
     KeyFile,
     OAuthRecord,
@@ -135,6 +143,9 @@ PROVIDER_UNREACHABLE = "the sign-in provider could not be reached: try again in 
 REFRESH_WINDOW_SECONDS = 30
 # PR 2d: after the provider could not be reached (no answer, a timeout, a 429, a 5xx), no refresh is asked this long.
 PROVIDER_HOLD_SECONDS = 30
+# PR 2d: this many failed refreshes in a row that might have passed (a provider that answers 403 or 404 for good, say)
+# make the server need a new sign-in, so the owner is told.
+TRANSIENT_FAILURES_MAX = 5
 _UNREACHABLE = -1  # what _send reports for a call that failed because the sign-in provider could not be reached
 PROBE_REFUSED = "the server refused the credentials"
 PROBE_ASKS = "the server asks for credentials"
@@ -212,7 +223,7 @@ class _OAuthSource:
         record: OAuthRecord,
         refresh: Callable[[str | None], Awaitable[OAuthRecord | None]],
         dead: Callable[[], bool],
-        refused: Callable[[], None],
+        refused: Callable[[OAuthRecord], None],
     ) -> None:
         self.record = record
         self._previous: OAuthRecord | None = None
@@ -231,7 +242,12 @@ class _OAuthSource:
         if self._dead():
             raise SignInNeeded()
         if expiring(self.record):
-            fresh = await self._refresh(None)
+            try:
+                fresh = await self._refresh(None)
+            except ProviderUnreachable:
+                if expired(self.record):
+                    raise
+                return self.record.access_token  # still valid: sent, the refresh is tried again after the hold
             if fresh is None:
                 raise SignInNeeded()
             self.adopt(fresh)
@@ -249,7 +265,7 @@ class _OAuthSource:
 
     def refused_again(self) -> None:
         """The retry, with the token ``after_401`` gave, was answered 401 too."""
-        self._refused()
+        self._refused(self.record)
 
     def values(self) -> list[str]:
         """The secret values a result must not repeat: the current record's and the one before it."""
@@ -653,6 +669,7 @@ class McpClientManager:
         # token got since, and until when no refresh is asked after the provider could not be reached.
         self._refreshed: dict[str, tuple[uuid.UUID, float]] = {}
         self._fresh_refusals: dict[str, tuple[uuid.UUID, int]] = {}
+        self._transient_failures: dict[str, tuple[uuid.UUID, int]] = {}
         self._held: dict[str, tuple[uuid.UUID, float]] = {}
         self._clock: Callable[[], float] = time.monotonic  # the windows' clock (a test sets its own)
 
@@ -1053,14 +1070,22 @@ class McpClientManager:
         held = self._held.get(name)
         return secret_id is not None and held is not None and held[0] == secret_id and self._clock() < held[1]
 
-    def _recently_refreshed(self, name: str, secret_id: uuid.UUID) -> bool:
+    def _recently_refreshed(self, name: str, secret_id: uuid.UUID, record: OAuthRecord) -> bool:
+        """Whether the row was refreshed within the window (``REFRESH_WINDOW_SECONDS``, or half the token's lifetime
+        when that is shorter) and its token has not expired: an expired token is refreshed whatever the window."""
+        if expired(record):
+            return False
+        window: float = REFRESH_WINDOW_SECONDS
+        if record.lifetime is not None:
+            window = min(window, record.lifetime / 2)
         last = self._refreshed.get(name)
-        return last is not None and last[0] == secret_id and self._clock() - last[1] < REFRESH_WINDOW_SECONDS
+        return last is not None and last[0] == secret_id and self._clock() - last[1] < window
 
-    def _refused_fresh(self, name: str, secret_id: uuid.UUID) -> None:
-        """A 401 to the token of the credential row ``secret_id``: counted when the row was refreshed less than
-        ``REFRESH_WINDOW_SECONDS`` ago; the second such refusal makes the server need a new sign-in."""
-        if not self._recently_refreshed(name, secret_id):
+    def _refused_fresh(self, name: str, secret_id: uuid.UUID, record: OAuthRecord) -> None:
+        """A 401 to ``record``'s token, of the credential row ``secret_id``: counted when the row was refreshed within
+        the window and the token has not expired (``_recently_refreshed``); the second such refusal makes the server
+        need a new sign-in."""
+        if not self._recently_refreshed(name, secret_id, record):
             return
         previous = self._fresh_refusals.get(name)
         count = previous[1] + 1 if previous is not None and previous[0] == secret_id else 1
@@ -1080,6 +1105,8 @@ class McpClientManager:
         task this manager owns, which the caller only waits for (shielded): a caller that is cancelled leaves the
         refresh to finish and store what the provider rotated. A successful refresh is handed to the live server of
         that row too, so its next request and its result scrub use it."""
+        if self._closed:  # nothing new is asked of a provider once the client is closed
+            return None
         task = asyncio.create_task(self._refresh_locked(name, url, secret_id, sent), name=f"mcp-client-refresh-{name}")
         self._refresh_tasks.add(task)
         task.add_done_callback(self._refresh_tasks.discard)
@@ -1101,12 +1128,12 @@ class McpClientManager:
                 box = self._keys.box()
                 if not isinstance(record, OAuthRecord) or box is None:
                     return None
-                recent = self._recently_refreshed(name, secret_id)
+                recent = self._recently_refreshed(name, secret_id, record)
                 if sent is not None:
                     if record.access_token != sent:
                         return record  # refreshed meanwhile: retry with the stored token
                     if recent:  # a 401 to a token the provider gave moments ago: a refusal, not a reason to refresh
-                        self._refused_fresh(name, secret_id)
+                        self._refused_fresh(name, secret_id, record)
                         return None
                 elif recent or not expiring(record):
                     return record
@@ -1115,7 +1142,10 @@ class McpClientManager:
                 try:
                     fresh = await refresh_tokens(record, self._oauth_http, self._allow)
                 except OAuthProblem as exc:
-                    if exc.transient:
+                    failures = self._transient_failures.get(name)
+                    count = failures[1] + 1 if failures is not None and failures[0] == secret_id else 1
+                    self._transient_failures[name] = (secret_id, count)
+                    if exc.transient and count < TRANSIENT_FAILURES_MAX:
                         self._held[name] = (secret_id, self._clock() + PROVIDER_HOLD_SECONDS)
                         logger.warning(
                             "MCP client: server %r: the token refresh failed (%s): tried again in %d s",
@@ -1136,6 +1166,7 @@ class McpClientManager:
                 self._refreshed[name] = (secret_id, self._clock())
                 self._fresh_refusals.pop(name, None)
                 self._held.pop(name, None)
+                self._transient_failures.pop(name, None)
                 live = self._servers.get(name)
                 if live is not None and live.oauth is not None and live.secret_id == secret_id and live.url == url:
                     live.oauth.adopt(fresh)  # a route's refresh too: the server sends it, and its scrub knows it

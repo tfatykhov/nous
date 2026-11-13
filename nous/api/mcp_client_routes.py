@@ -539,14 +539,17 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         """A finished sign-in's tokens, refreshed first when they are about to expire (a sign-in waits up to 10 minutes
         for its create; a token can live less): the refreshed record replaces the held one, so the probe sends it and
         the create stores it."""
-        if flow is None or flow.record is None or not expiring(flow.record):
+        if flow is None:
             return
-        try:
-            flow.record = await refresh_tokens(flow.record, manager.oauth_http, manager.allow_private_hosts)
-        except OAuthProblem as exc:
-            if exc.transient:
-                raise _Refused(502, "the sign-in provider could not be reached: try again in a moment") from None
-            raise _Refused(409, "the sign-in's tokens expired and could not be renewed: sign in again") from None
+        async with flow.renewing:  # a concurrent probe and create make one token request
+            if flow.record is None or not expiring(flow.record):
+                return
+            try:
+                flow.record = await refresh_tokens(flow.record, manager.oauth_http, manager.allow_private_hosts)
+            except OAuthProblem as exc:
+                if exc.transient:
+                    raise _Refused(502, "the sign-in provider could not be reached: try again in a moment") from None
+                raise _Refused(409, "the sign-in's tokens expired and could not be renewed: sign in again") from None
 
     async def probe(request: Request) -> JSONResponse:
         """POST /integrations/mcp/probe ``{name, url, headers? | oauth_flow_id?}``: the server's tools as they would be
@@ -813,7 +816,24 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             scope = owner_scope(body.get("scope"))
             http, allow = manager.oauth_http, manager.allow_private_hosts
             discovery = await discover(config.url, http, allow, scope)
-            if client_id is not None:
+            # The owner's client id again with no secret ("Start again" clears the typed secret): the pending or
+            # stored client of that id keeps its secret, so a confidential client does not turn public.
+            known = [(pending_client, pending_issuer)]
+            if reuse is not None:
+                known.append(
+                    (Client(reuse.client_id, reuse.client_secret, reuse.token_auth_method, "provided"), reuse.issuer)
+                )
+            same = next(
+                (
+                    c
+                    for c, issuer in known
+                    if c is not None and c.client_id == client_id and issuer == discovery.issuer
+                ),
+                None,
+            )
+            if client_id is not None and client_secret is None and same is not None:
+                client = Client(same.client_id, same.client_secret, same.token_auth_method, "provided")
+            elif client_id is not None:
                 client = owner_client(discovery, client_id, client_secret)
             elif pending_client is not None and pending_issuer == discovery.issuer:
                 client = Client(
