@@ -8,7 +8,7 @@ related_targets: ["dashboard-app/companion.html"]
 # Surface brief: Nous dashboard and companion
 
 ## Scope and mode
-The dashboard (`dashboard-app/`, 18 screens at `/dashboard/v2/`) and the companion's default theme (`/companion`). Mode: Operate. The companion's other themes (alpine-dusk, harbor, paper, signal, report) and the theme mechanism stay.
+The dashboard (`dashboard-app/`, 19 screens at `/dashboard/v2/`) and the companion's default theme (`/companion`). Mode: Operate. The companion's other themes (alpine-dusk, harbor, paper, signal, report) and the theme mechanism stay.
 
 ## Audience, jobs, constraints
 - The owner only.

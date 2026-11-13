@@ -71,7 +71,8 @@ export interface ServerChange {
 }
 
 const BASE = '/integrations/mcp';
-const serverPath = (name: string) => `${BASE}/servers/${encodeURIComponent(name)}`;
+/** A server's route. A name is encoded as a path segment whatever it holds (the name rule leaves nothing to encode). */
+export const serverPath = (name: string) => `${BASE}/servers/${encodeURIComponent(name)}`;
 
 export const listServers = (signal?: AbortSignal) => apiRequest<McpServerList>(`${BASE}/servers`, 'GET', undefined, signal);
 export const probeServer = (name: string, url: string) => apiRequest<ProbeResult>(`${BASE}/probe`, 'POST', { name, url });
@@ -133,6 +134,7 @@ export function problemText(err: unknown): string {
   if (status === undefined) return `No answer from Nous (${e?.message || 'no message'}).`;
   if (status === 403) return FORBIDDEN_TEXT;
   if (status === 415) return 'The request was not sent as JSON, so it was refused.';
+  if (status >= 200 && status < 300) return `The answer could not be read: it is not JSON (HTTP ${status}).`;
   const api = (e?.body as { error?: unknown } | undefined)?.error;
   if (typeof api === 'string' && api.trim()) {
     const text = api.trim();
@@ -149,20 +151,23 @@ export const isConflict = (err: unknown) => (err as ApiAnswerError | null)?.stat
 export type Tone = 'ok' | 'warn' | 'neutral';
 export interface Status { word: string; detail: string | null; tone: Tone }
 
+/** The reason a switched-off server's tools are skipped, in the screen's words (the server says "disabled"). */
+export const SWITCHED_OFF_REASON = 'the server is switched off';
+
 /** A stored tool's status in words, from its fields (never from the reason's text): in use, not allowed (the owner's
  * permission; a stored "ask" is not allowed either), or skipped with the server's reason. A tool not allowed that could
- * not be offered anyway (no schema) carries the reason too, so allowing it is not a surprise. */
-export function toolStatus(t: McpTool): Status {
+ * not be offered anyway (no schema) carries the reason too, so allowing it is not a surprise. Every tool of a server
+ * that is switched off is skipped for that first, so its reason is said in the screen's words. */
+export function toolStatus(t: McpTool, serverEnabled = true): Status {
+  const reason = serverEnabled ? t.skip_reason : SWITCHED_OFF_REASON;
   if (t.registered) return { word: 'in use', detail: null, tone: 'ok' };
-  if (t.permission !== 'allow') {
-    return { word: 'not allowed', detail: t.schema === null ? t.skip_reason : null, tone: 'neutral' };
-  }
-  return { word: 'skipped', detail: t.skip_reason ?? 'it is not registered', tone: 'warn' };
+  if (t.permission !== 'allow') return { word: 'not allowed', detail: t.schema === null ? reason : null, tone: 'neutral' };
+  return { word: 'skipped', detail: reason ?? 'it is not registered', tone: 'warn' };
 }
 
 /** `toolStatus` as one line of text: "in use", "not allowed" or "skipped: <reason>". */
-export function toolStatusText(t: McpTool): string {
-  const s = toolStatus(t);
+export function toolStatusText(t: McpTool, serverEnabled = true): string {
+  const s = toolStatus(t, serverEnabled);
   return s.detail ? `${s.word}: ${s.detail}` : s.word;
 }
 
@@ -185,28 +190,43 @@ export function ceilingLines(c: McpServerList['ceilings']): string[] {
   return lines;
 }
 
-/** The add request: every probed tool named, allowed only when the owner ticked it, and the probe's hash, so a
- * server that answers differently at the add is refused (409) with nothing stored. */
-export function createPayload(name: string, url: string, probe: ProbeResult, allowed: Record<string, boolean>): CreatePayload {
+/** The add request: every probed tool named, allowed only when the owner ticked it (`true`, nothing else), and the
+ * probe's hash, so a server that answers differently at the add is refused (409) with nothing stored. A tool's name is
+ * the server's text: `allowed` is a Map and `tools` is built by Object.fromEntries, so a name such as `constructor` is
+ * never read from a prototype and `__proto__` is an own key of the body, not the object's prototype. */
+export function createPayload(name: string, url: string, probe: ProbeResult, allowed: ReadonlyMap<string, boolean>): CreatePayload {
   return {
     name,
     url,
-    tools: Object.fromEntries(probe.tools.map((t) => [t.tool, allowed[t.tool] ? 'allow' : 'deny'])),
+    tools: Object.fromEntries(probe.tools.map((t) => [t.tool, allowed.get(t.tool) === true ? 'allow' : 'deny'])),
     expected_definitions_sha256: probe.definitions_sha256,
   };
 }
 
-/** What a refresh changed, in words. A changed definition keeps its permission, so it is named for review. */
-export function refreshLines(r: Pick<RefreshResult, 'added' | 'removed' | 'changed'>): string[] {
-  const lines: string[] = [];
-  if (r.added.length) lines.push(`New, not allowed until you allow them: ${r.added.join(', ')}.`);
-  if (r.removed.length) lines.push(`No longer listed by the server, now not allowed: ${r.removed.join(', ')}.`);
-  if (r.changed.length) {
-    lines.push(`Definition changed, permission kept: ${r.changed.join(', ')}. Read them again below.`);
-  }
-  if (!lines.length) lines.push('No change: the server lists the same tools.');
+/** The change that allows or stops allowing one stored tool, its name an own key of the body whatever it is. */
+export function toolChange(tool: string, allow: boolean): ServerChange {
+  return { tools: Object.fromEntries([[tool, allow ? 'allow' : 'deny']]) };
+}
+
+/** One line of a refresh's result: the screen's words, then the server's tool names (shown as data), then more words. */
+export interface RefreshLine { lead: string; tools: string[]; tail: string }
+
+/** What a refresh changed. A changed definition keeps its permission, so it is named for review. */
+export function refreshLines(r: Pick<RefreshResult, 'added' | 'removed' | 'changed'>): RefreshLine[] {
+  const lines: RefreshLine[] = [];
+  if (r.added.length) lines.push({ lead: 'New, not allowed until you allow them:', tools: r.added, tail: '' });
+  if (r.removed.length) lines.push({ lead: 'No longer listed by the server, now not allowed:', tools: r.removed, tail: '' });
+  if (r.changed.length) lines.push({ lead: 'Definition changed, permission kept:', tools: r.changed, tail: 'Read them again below.' });
+  if (!lines.length) lines.push({ lead: 'No change: the server lists the same tools.', tools: [], tail: '' });
   return lines;
 }
+
+/** A refresh line as one sentence (what the screen shows, the names in their own elements). */
+export const refreshLineText = (l: RefreshLine) =>
+  `${l.lead}${l.tools.length ? ` ${l.tools.join(', ')}.` : ''}${l.tail ? ` ${l.tail}` : ''}`;
+
+/** A raw name cut to `max` characters with an ellipsis (the full name goes in a title). */
+export const shortName = (name: string, max = 80) => (name.length > max ? `${name.slice(0, max - 1)}…` : name);
 
 /** A long text cut at a word near `max` characters, with an ellipsis; `cut` says whether anything was left out. */
 export function clampText(text: string, max = 180): { text: string; cut: boolean } {

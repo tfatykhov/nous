@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   CHANGED_TEXT, FORBIDDEN_TEXT, ceilingLines, clampText, createPayload, isConflict, listGate, nameProblem, prettySchema,
-  problemText, refreshLines, serverStatus, toolStatus, toolStatusText, urlProblem, type McpServer, type McpTool,
+  problemText, refreshLineText, refreshLines, serverPath, serverStatus, shortName, toolChange, toolStatus, toolStatusText,
+  urlProblem, type McpServer, type McpTool,
 } from './integrations';
 
 const err = (status: number | undefined, body?: unknown, message = `HTTP ${status}`) =>
@@ -80,6 +81,7 @@ describe('a refused request in words', () => {
     expect(problemText(err(404))).toBe('Not found: the MCP client may be switched off.');
     expect(problemText(err(500, 'not json'))).toBe('The request failed (HTTP 500).');
     expect(problemText(err(undefined, undefined, 'Failed to fetch'))).toBe('No answer from Nous (Failed to fetch).');
+    expect(problemText(err(200))).toBe('The answer could not be read: it is not JSON (HTTP 200).');
   });
   it('409 is a conflict', () => {
     expect(isConflict(err(409, { error: 'changed', definitions_sha256: 'b'.repeat(64) }))).toBe(true);
@@ -108,6 +110,10 @@ describe('status words', () => {
       expect(toolStatusText(tool({ permission: 'allow', skip_reason: reason }))).toBe(`skipped: ${reason}`);
     }
     expect(toolStatus(tool({ permission: 'allow', skip_reason: null })).detail).toBe('it is not registered');
+    // A switched-off server's tools: the server's "disabled" is said in the screen's words (from the field, not the text).
+    expect(toolStatusText(tool({ permission: 'allow', skip_reason: 'the server is disabled' }), false)).toBe('skipped: the server is switched off');
+    expect(toolStatusText(tool({ permission: 'allow', registered: false, skip_reason: 'the server is disabled' }), true))
+      .toBe('skipped: the server is disabled');
     expect(toolStatus(tool({ permission: 'allow', skip_reason: 'x' })).tone).toBe('warn');
   });
   it('a server is switched off, connected or not connected yet', () => {
@@ -134,7 +140,8 @@ describe('the add request', () => {
     definitions_sha256: 'a'.repeat(64),
   };
   it('names every probed tool by its own name, allowed only when ticked, with the probe\'s hash', () => {
-    expect(createPayload('deepwiki', 'https://mcp.deepwiki.com/mcp', probe, { read_wiki: true, ask_question: false })).toEqual({
+    const allowed = new Map([['read_wiki', true], ['ask_question', false]]);
+    expect(createPayload('deepwiki', 'https://mcp.deepwiki.com/mcp', probe, allowed)).toEqual({
       name: 'deepwiki',
       url: 'https://mcp.deepwiki.com/mcp',
       tools: { ask_question: 'deny', read_wiki: 'allow', bad: 'deny' },
@@ -142,20 +149,56 @@ describe('the add request', () => {
     });
   });
   it('nothing ticked is nothing allowed', () => {
-    expect(Object.values(createPayload('d', 'https://h/', probe, {}).tools)).toEqual(['deny', 'deny', 'deny']);
+    expect(Object.values(createPayload('d', 'https://h/', probe, new Map()).tools)).toEqual(['deny', 'deny', 'deny']);
+  });
+
+  // Review B1: a tool named like a member of Object.prototype was read from the prototype (truthy) and sent as allow.
+  const HOSTILE = ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__', 'plain'];
+  const hostile = {
+    tools: HOSTILE.map((tool) => ({ tool, name: `mcp__x__${tool}`, description: 'd', schema: '{}', skip_reason: null })),
+    definitions_sha256: 'a'.repeat(64),
+  };
+  it('a tool named like a prototype member is not allowed unless ticked, and every name is an own key of the body', () => {
+    const body = JSON.stringify(createPayload('x', 'https://h/', hostile, new Map()).tools);
+    expect(body).toBe('{"constructor":"deny","toString":"deny","valueOf":"deny","hasOwnProperty":"deny","__proto__":"deny","plain":"deny"}');
+  });
+  it('only true ticks a tool, and a ticked __proto__ is sent as a key, not set as a prototype', () => {
+    const allowed = new Map<string, boolean>([['__proto__', true], ['constructor', true], ['plain', 'yes' as unknown as boolean]]);
+    const tools = createPayload('x', 'https://h/', hostile, allowed).tools;
+    expect(Object.getPrototypeOf(tools)).toBe(Object.prototype);
+    expect(JSON.stringify(tools)).toBe('{"constructor":"allow","toString":"deny","valueOf":"deny","hasOwnProperty":"deny","__proto__":"allow","plain":"deny"}');
+  });
+  it('a tool change names the tool as an own key, whatever its name', () => {
+    expect(JSON.stringify(toolChange('__proto__', true))).toBe('{"tools":{"__proto__":"allow"}}');
+    expect(JSON.stringify(toolChange('constructor', false))).toBe('{"tools":{"constructor":"deny"}}');
+    expect(toolChange('read_wiki', true)).toEqual({ tools: { read_wiki: 'allow' } });
+  });
+});
+
+describe('a server\'s route', () => {
+  it('encodes the name as one path segment; a valid name passes unchanged', () => {
+    expect(serverPath('my_srv-1')).toBe('/integrations/mcp/servers/my_srv-1');
+    expect(serverPath('a/b?c#d %')).toBe('/integrations/mcp/servers/a%2Fb%3Fc%23d%20%25');
+    expect(serverPath('..')).toBe('/integrations/mcp/servers/..'); // the name rule refuses it; the path builder is not the guard
   });
 });
 
 describe('what a refresh changed', () => {
-  it('names the new, removed and redefined tools; a redefined one keeps its permission and is read again', () => {
-    expect(refreshLines({ added: ['a', 'b'], removed: ['c'], changed: ['d'] })).toEqual([
+  it('names the new, removed and redefined tools apart from the words; a redefined one keeps its permission', () => {
+    const lines = refreshLines({ added: ['a', 'b'], removed: ['c'], changed: ['d'] });
+    expect(lines).toEqual([
+      { lead: 'New, not allowed until you allow them:', tools: ['a', 'b'], tail: '' },
+      { lead: 'No longer listed by the server, now not allowed:', tools: ['c'], tail: '' },
+      { lead: 'Definition changed, permission kept:', tools: ['d'], tail: 'Read them again below.' },
+    ]);
+    expect(lines.map(refreshLineText)).toEqual([
       'New, not allowed until you allow them: a, b.',
       'No longer listed by the server, now not allowed: c.',
       'Definition changed, permission kept: d. Read them again below.',
     ]);
   });
   it('says when nothing changed', () => {
-    expect(refreshLines({ added: [], removed: [], changed: [] })).toEqual(['No change: the server lists the same tools.']);
+    expect(refreshLines({ added: [], removed: [], changed: [] }).map(refreshLineText)).toEqual(['No change: the server lists the same tools.']);
   });
 });
 
@@ -167,6 +210,11 @@ describe('text helpers', () => {
     expect(c.cut).toBe(true);
     expect(c.text.endsWith('word…')).toBe(true);
     expect(c.text.length).toBeLessThanOrEqual(51);
+  });
+  it('cuts a very long raw name at 80 characters', () => {
+    expect(shortName('read_wiki')).toBe('read_wiki');
+    expect(shortName('x'.repeat(80))).toBe('x'.repeat(80));
+    expect(shortName('x'.repeat(200))).toBe(`${'x'.repeat(79)}…`);
   });
   it('indents a schema, and shows a non-JSON one as given', () => {
     expect(prettySchema('{"type":"object"}')).toBe('{\n  "type": "object"\n}');

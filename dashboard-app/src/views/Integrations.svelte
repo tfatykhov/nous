@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { tick, untrack } from 'svelte';
+  import { SvelteMap } from 'svelte/reactivity';
   import { Button } from '../lib/ui/button';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -6,7 +8,7 @@
   import {
     CHANGED_TEXT, NAME_RULE, URL_RULE, ceilingLines, clampText, createPayload, createServer, isConflict, listGate,
     listServers, nameProblem, prettySchema, probeServer, problemText, refreshLines, refreshServer, removeServer,
-    serverStatus, toolStatus, updateServer, urlProblem,
+    serverStatus, shortName, toolChange, toolStatus, updateServer, urlProblem,
     type McpServer, type McpServerList, type McpTool, type ProbeResult, type RefreshResult, type Tone,
   } from '../lib/integrations';
 
@@ -20,86 +22,144 @@
   let gate = $derived(listGate($store.error));
 
   const PILL: Record<Tone, string> = { ok: 'status-pill--ok', warn: 'status-pill--warn', neutral: '' };
-  type Note = { text: string; ok: boolean };
+  /** A result in words. `expect` is the state it speaks of (a server's `enabled background`, a tool's permission):
+   * when the list shows another, the note is dropped, so it never contradicts the status beside it. */
+  type Note = { text: string; ok: boolean; expect?: string };
 
-  // Per server, by name: the action in flight, the last result, an open confirmation, the last refresh's changes.
-  // Element ids of a server are `mcp-s.<name>` and `mcp-b.<name>`: a name has no ".", so no server name can take the
-  // id of the form's own elements (`mcp-name`, `mcp-url`, `mcp-add`).
-  let busy = $state<Record<string, string>>({});
-  let notes = $state<Record<string, Note>>({}); // a server's name, or `${server} ${tool}` for one tool's control
-  let confirming = $state<Record<string, 'background' | 'remove'>>({});
-  let refreshed = $state<Record<string, RefreshResult>>({});
-  let expanded = $state<Record<string, boolean>>({});
+  // Per server, keyed by name in Maps: a server's or a tool's name is never read as a property of a plain object
+  // (a server named "constructor", a tool named "__proto__"). A tool's key is `<server> <tool>`: a server name has no
+  // space. Element ids of a server are `mcp-<letter>.<name>`: a name has no ".", so no server name can take the id of
+  // the form's own elements (`mcp-name`, `mcp-url`, `mcp-add`).
+  const busy = new SvelteMap<string, string>(); // the action in flight
+  const notes = new SvelteMap<string, Note>(); // the last result, of a server or of one tool's control
+  const confirming = new SvelteMap<string, 'background' | 'remove'>();
+  const refreshed = new SvelteMap<string, RefreshResult>(); // the last refresh's changes
+  const expanded = new SvelteMap<string, boolean>(); // descriptions shown whole
   let pageNote = $state<Note | null>(null);
 
-  /** Run one change: its server's controls are disabled until it and the reload that follows have landed. */
-  async function act(server: string, action: string, key: string, run: () => Promise<string | null>) {
-    busy[server] = action;
-    delete notes[key];
-    pageNote = null;
-    try {
-      const text = await run();
-      if (text !== null) notes[key] = { text, ok: true };
-    } catch (err) {
-      notes[key] = { text: problemText(err), ok: false };
-    } finally {
-      await store.refresh();
-      delete busy[server];
+  const toolKey = (server: string, tool: string) => `${server} ${tool}`;
+  const serverState = (s: Pick<McpServer, 'enabled' | 'background'>) => `${s.enabled} ${s.background}`;
+  const byId = (id: string) => document.getElementById(id);
+
+  /** Drop a server's notes: its own and every tool's. */
+  function clearNotes(server: string) {
+    for (const key of [...notes.keys()]) if (key === server || key.startsWith(`${server} `)) notes.delete(key);
+  }
+
+  /** When the list reloads: drop the notes of a server or tool that is gone, or whose state is not the one the note
+   * spoke of, and the refresh result of a server that is gone. */
+  function prune(d: McpServerList | null) {
+    if (!d) return;
+    const servers = new Map(d.servers.map((s) => [s.name, s]));
+    for (const [key, n] of [...notes]) {
+      const at = key.indexOf(' ');
+      const s = servers.get(at < 0 ? key : key.slice(0, at));
+      const t = s && at >= 0 ? s.tools.find((x) => x.tool === key.slice(at + 1)) : undefined;
+      const now = !s ? undefined : at < 0 ? serverState(s) : t?.permission;
+      if (now === undefined || (n.expect !== undefined && n.expect !== now)) notes.delete(key);
     }
+    for (const name of [...refreshed.keys()]) if (!servers.has(name)) refreshed.delete(name);
+  }
+  $effect(() => {
+    const d = $store.data;
+    untrack(() => prune(d));
+  });
+
+  /** Focus `target` when the focus was lost (its control was removed, or disabled while the change ran). */
+  function restoreFocus(target: HTMLElement | null) {
+    const active = document.activeElement;
+    if (target?.isConnected && (!active || active === document.body || !active.isConnected)) target.focus();
+  }
+
+  /** Run one change: its server's controls are disabled until it and the reload that follows have landed; its note is
+   * shown after the reload. The focus goes back to `focus()`, else to the control that started it. */
+  async function act(
+    server: string, action: string, key: string, run: () => Promise<Note | null>, focus?: () => HTMLElement | null,
+  ) {
+    const opener = document.activeElement as HTMLElement | null;
+    busy.set(server, action);
+    notes.delete(key);
+    pageNote = null;
+    let note: Note | null;
+    try {
+      note = await run();
+    } catch (err) {
+      note = { text: problemText(err), ok: false };
+    }
+    await store.refresh();
+    busy.delete(server);
+    if (note) notes.set(key, note);
+    await tick();
+    restoreFocus(focus?.() ?? opener);
   }
 
   const setEnabled = (s: McpServer) =>
     act(s.name, 'enabled', s.name, async () => {
       await updateServer(s.name, { enabled: !s.enabled });
-      return s.enabled ? 'Switched off: its tools are no longer offered to the agent.' : 'Switched on.';
+      const text = s.enabled ? 'Switched off: its tools are no longer offered to the agent.' : 'Switched on.';
+      return { text, ok: true, expect: serverState({ enabled: !s.enabled, background: s.background }) };
     });
 
-  const cancelConfirm = (server: string) => {
-    delete confirming[server];
-  };
+  /** Open a confirmation and put the focus on its first button. */
+  async function openConfirm(server: string, kind: 'background' | 'remove') {
+    confirming.set(server, kind);
+    await tick();
+    byId(`mcp-c.${server}`)?.querySelector('button')?.focus();
+  }
+
+  /** Close a confirmation and give the focus back to the control that opened it. */
+  async function cancelConfirm(server: string) {
+    const kind = confirming.get(server);
+    confirming.delete(server);
+    await tick();
+    byId(kind === 'remove' ? `mcp-r.${server}` : `mcp-k.${server}`)?.focus();
+  }
 
   /** Turning background work on asks first; turning it off does not. The box shows what is stored until then. */
   function onBackground(s: McpServer, e: Event) {
     const box = e.currentTarget as HTMLInputElement;
     const want = box.checked;
     box.checked = s.background;
-    if (want) confirming[s.name] = 'background';
+    if (want) void openConfirm(s.name, 'background');
     else void setBackground(s, false);
   }
 
   function setBackground(s: McpServer, on: boolean) {
-    delete confirming[s.name];
+    confirming.delete(s.name);
     return act(s.name, 'background', s.name, async () => {
       await updateServer(s.name, { background: on });
-      return on ? 'Background work may now call its tools.' : 'Background work can no longer call its tools.';
-    });
+      const text = on ? 'Background work may now call its tools.' : 'Background work can no longer call its tools.';
+      return { text, ok: true, expect: serverState({ enabled: s.enabled, background: on }) };
+    }, () => byId(`mcp-k.${s.name}`));
   }
 
   /** The word on a tool's control: what pressing it does. */
   const allowWord = (t: McpTool) => (t.permission === 'allow' ? "Don't allow" : 'Allow');
 
   const setTool = (s: McpServer, t: McpTool, allow: boolean) =>
-    act(s.name, `tool ${t.tool}`, `${s.name} ${t.tool}`, async () => {
-      await updateServer(s.name, { tools: { [t.tool]: allow ? 'allow' : 'deny' } });
-      return allow ? 'Allowed.' : 'Not allowed now.';
+    act(s.name, `tool ${t.tool}`, toolKey(s.name, t.tool), async () => {
+      await updateServer(s.name, toolChange(t.tool, allow));
+      return { text: allow ? 'Allowed.' : 'Not allowed now.', ok: true, expect: allow ? 'allow' : 'deny' };
     });
 
   const refreshTools = (s: McpServer) => {
-    delete refreshed[s.name];
+    refreshed.delete(s.name);
+    clearNotes(s.name);
     return act(s.name, 'refresh', s.name, async () => {
-      refreshed[s.name] = await refreshServer(s.name);
-      return 'Read the tool list again.';
+      refreshed.set(s.name, await refreshServer(s.name));
+      return { text: 'Read the tool list again.', ok: true };
     });
   };
 
   function remove(s: McpServer) {
-    delete confirming[s.name];
+    confirming.delete(s.name);
     return act(s.name, 'remove', s.name, async () => {
       await removeServer(s.name);
-      delete refreshed[s.name];
+      clearNotes(s.name);
+      refreshed.delete(s.name);
       pageNote = { text: `Removed ${s.name}.`, ok: true };
       return null;
-    });
+    }, () => byId(`mcp-r.${s.name}`) ?? byId('mcp-top')); // the Remove button while the server is listed, else the title
   }
 
   // ── Add a server ───────────────────────────────────────────────────────────
@@ -111,7 +171,8 @@
   /** The probe the tools below come from, and the name and address it was made for. */
   let probe = $state<{ name: string; url: string; result: ProbeResult } | null>(null);
   let probeFresh = $derived(probe !== null && probe.name === newName && probe.url === newUrl.trim());
-  let allowed = $state<Record<string, boolean>>({});
+  /** The ticked tools, by the server's own name (a Map: a name such as "constructor" is never ticked by a prototype). */
+  const allowed = new SvelteMap<string, boolean>();
   let checking = $state(false);
   let adding = $state(false);
   let formNote = $state<Note | null>(null);
@@ -122,18 +183,16 @@
     tried = true;
     if (nameProblem(newName) || urlProblem(newUrl.trim())) return;
     formNote = null;
-    await runProbe();
+    await runProbe(newName, newUrl.trim());
   }
 
-  /** Probe the name and address in the form. Every choice starts at not allowed. */
-  async function runProbe() {
+  /** Probe a name and address. Every choice starts at not allowed. */
+  async function runProbe(name: string, url: string) {
     checking = true;
-    const name = newName;
-    const url = newUrl.trim();
     try {
       const result = await probeServer(name, url);
       probe = { name, url, result };
-      allowed = {};
+      allowed.clear();
     } catch (err) {
       probe = null;
       formNote = { text: problemText(err), ok: false };
@@ -150,18 +209,24 @@
     pageNote = null;
     try {
       const answer = await createServer(createPayload(name, url, result, allowed));
-      formNote = { text: answer.created ? `Added ${name}. It is listed above.` : `Replaced ${name}.`, ok: true };
+      clearNotes(name);
+      refreshed.delete(name);
+      formNote = {
+        text: answer.created ? `Added ${name}. It is listed above.` : `Replaced ${name}. It is switched on, and background work is off.`,
+        ok: true,
+      };
       newName = '';
       newUrl = '';
       tried = false;
       probe = null;
-      allowed = {};
+      allowed.clear();
     } catch (err) {
       if (isConflict(err)) {
-        // The server answered differently from what was shown: show the new list, every choice back at not allowed.
+        // The server answered differently from what was shown: the new list for the same name and address, every
+        // choice back at not allowed.
         formNote = { text: CHANGED_TEXT, ok: false };
         adding = false;
-        await runProbe();
+        await runProbe(name, url);
       } else {
         formNote = { text: problemText(err), ok: false };
       }
@@ -175,10 +240,11 @@
 {#snippet description(key: string, text: string | null)}
   {#if text}
     {@const c = clampText(text)}
-    <p class="desc">{expanded[key] || !c.cut ? text : c.text}</p>
+    {@const open = expanded.get(key) === true}
+    <p class="desc">{open || !c.cut ? text : c.text}</p>
     {#if c.cut}
-      <button type="button" class="more" aria-expanded={!!expanded[key]} onclick={() => (expanded[key] = !expanded[key])}>
-        {expanded[key] ? 'Show less' : 'Show all'}
+      <button type="button" class="more" aria-expanded={open} onclick={() => expanded.set(key, !open)}>
+        {open ? 'Show less' : 'Show all'}
       </button>
     {/if}
   {/if}
@@ -193,6 +259,10 @@
   {/if}
 {/snippet}
 
+{#snippet toolName(name: string)}
+  <code class="tool-name" title={name.length > 80 ? name : undefined}>{shortName(name)}</code>
+{/snippet}
+
 {#snippet note(n: Note | undefined | null)}
   {#if n}
     <p class="note" class:note-err={!n.ok} role={n.ok ? 'status' : 'alert'}>{n.text}</p>
@@ -201,7 +271,7 @@
 
 <header class="view-head">
   <div>
-    <h1 class="page-h1">Integrations</h1>
+    <h1 class="page-h1" id="mcp-top" tabindex="-1">Integrations</h1>
     <p class="subtitle">The external MCP servers the agent may use, and which of their tools it may call. Every change here applies at once.</p>
   </div>
   <div class="head-right">
@@ -246,7 +316,9 @@
 
   {#each d.servers as s (s.name)}
     {@const st = serverStatus(s)}
-    {@const inFlight = busy[s.name]}
+    {@const inFlight = busy.get(s.name)}
+    {@const asking = confirming.get(s.name)}
+    {@const changes = refreshed.get(s.name)}
     <section class="card server" aria-labelledby="mcp-s.{s.name}">
       <div class="server-head">
         <h2 id="mcp-s.{s.name}">{s.name}</h2>
@@ -259,7 +331,7 @@
 
       <div class="background">
         <label class="check">
-          <input type="checkbox" checked={s.background} disabled={!!inFlight} aria-describedby="mcp-b.{s.name}"
+          <input id="mcp-k.{s.name}" type="checkbox" checked={s.background} disabled={!!inFlight} aria-describedby="mcp-b.{s.name}"
             onchange={(e) => onBackground(s, e)} />
           Allow in background work
         </label>
@@ -267,12 +339,12 @@
         {#if s.background_blocked_by_ceiling}
           <p class="limit">Background work is blocked by the server's host settings: it is not listed in NOUS_MCP_CLIENT_BACKGROUND_SERVERS.</p>
         {/if}
-        {#if confirming[s.name] === 'background'}
-          <div class="confirm" role="group" aria-label="Confirm background work for {s.name}">
+        {#if asking === 'background'}
+          <div class="confirm" id="mcp-c.{s.name}" role="group" aria-label="Confirm background work for {s.name}">
             <p>Let background work call {s.name}'s tools? They would then run with no one watching.</p>
             <div class="actions">
               <Button size="sm" class="max-md:min-h-11 max-md:px-4" disabled={!!inFlight} onclick={() => void setBackground(s, true)}>Yes, allow in background work</Button>
-              <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" onclick={() => cancelConfirm(s.name)}>Cancel</Button>
+              <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" onclick={() => void cancelConfirm(s.name)}>Cancel</Button>
             </div>
           </div>
         {/if}
@@ -286,23 +358,25 @@
           {inFlight === 'refresh' ? 'Refreshing…' : 'Refresh tools'}
         </Button>
         <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4 hover:border-[var(--err-text)] hover:text-[var(--err-text)]"
-          disabled={!!inFlight} onclick={() => (confirming[s.name] = 'remove')}>
+          id="mcp-r.{s.name}" disabled={!!inFlight} onclick={() => void openConfirm(s.name, 'remove')}>
           {inFlight === 'remove' ? 'Removing…' : 'Remove'}
         </Button>
       </div>
-      {#if confirming[s.name] === 'remove'}
-        <div class="confirm" role="group" aria-label="Confirm removing {s.name}">
+      {#if asking === 'remove'}
+        <div class="confirm" id="mcp-c.{s.name}" role="group" aria-label="Confirm removing {s.name}">
           <p>Remove {s.name} and its {s.tools.length} tool{s.tools.length === 1 ? '' : 's'}? The agent loses them at once; adding it again means choosing its tools again.</p>
           <div class="actions">
             <Button variant="destructive" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={!!inFlight} onclick={() => void remove(s)}>Yes, remove</Button>
-            <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" onclick={() => cancelConfirm(s.name)}>Cancel</Button>
+            <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" onclick={() => void cancelConfirm(s.name)}>Cancel</Button>
           </div>
         </div>
       {/if}
-      {@render note(notes[s.name])}
-      {#if refreshed[s.name]}
+      {@render note(notes.get(s.name))}
+      {#if changes}
         <ul class="changes" aria-label="What the refresh changed">
-          {#each refreshLines(refreshed[s.name]) as line (line)}<li>{line}</li>{/each}
+          {#each refreshLines(changes) as line (line.lead)}
+            <li>{line.lead}{#each line.tools as name, i (i)}{i ? ', ' : ' '}{@render toolName(name)}{/each}{line.tools.length ? '.' : ''}{line.tail ? ` ${line.tail}` : ''}</li>
+          {/each}
         </ul>
       {/if}
 
@@ -312,14 +386,14 @@
       {/if}
       <ul class="tools">
         {#each s.tools as t (t.tool)}
-          {@const ts = toolStatus(t)}
-          {@const key = `${s.name} ${t.tool}`}
+          {@const ts = toolStatus(t, s.enabled)}
+          {@const key = toolKey(s.name, t.tool)}
           <li class="tool">
             <div class="tool-head">
-              <code class="tool-name">{t.tool}</code>
+              {@render toolName(t.tool)}
               <span class="status-pill {PILL[ts.tone]}">{ts.word}</span>
               {#if ts.detail}<span class="reason">{ts.detail}</span>{/if}
-              {#if refreshed[s.name]?.changed.includes(t.tool)}<span class="status-pill status-pill--warn">definition changed</span>{/if}
+              {#if changes?.changed.includes(t.tool)}<span class="status-pill status-pill--warn">definition changed</span>{/if}
               <span class="tool-act">
                 <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={!!inFlight}
                   aria-label={`${allowWord(t)} ${t.tool}`} onclick={() => void setTool(s, t, t.permission !== 'allow')}>
@@ -328,7 +402,7 @@
               </span>
             </div>
             {#if t.blocked_by_ceiling}<p class="limit">Blocked by the server's host settings.</p>{/if}
-            {@render note(notes[key])}
+            {@render note(notes.get(key))}
             {#if t.name}<p class="hint">Offered as <code>{t.name}</code></p>{/if}
             {@render description(key, t.description)}
             {@render schemaBlock(t.schema)}
@@ -344,17 +418,17 @@
       <div class="field">
         <label for="mcp-name">Name</label>
         <input id="mcp-name" bind:value={newName} autocomplete="off" spellcheck="false" aria-describedby="mcp-name-hint"
-          aria-invalid={nameErr ? 'true' : undefined} />
+          aria-invalid={nameErr ? 'true' : undefined} disabled={checking || adding} />
         <p id="mcp-name-hint" class="hint" class:hint-err={nameErr}>{nameErr ?? `${NAME_RULE} It becomes part of each tool's name.`}</p>
       </div>
       <div class="field">
         <label for="mcp-url">Address</label>
         <input id="mcp-url" type="url" inputmode="url" bind:value={newUrl} autocomplete="off" spellcheck="false"
-          placeholder="https://" aria-describedby="mcp-url-hint" aria-invalid={urlErr ? 'true' : undefined} />
+          placeholder="https://" aria-describedby="mcp-url-hint" aria-invalid={urlErr ? 'true' : undefined} disabled={checking || adding} />
         <p id="mcp-url-hint" class="hint" class:hint-err={urlErr}>{urlErr ?? URL_RULE}</p>
       </div>
       {#if replaces}
-        <p class="hint">A server named {newName} exists: adding replaces its address and tools, switches it on and sets its call timeout to 30 s.</p>
+        <p class="hint">A server named {newName} exists. Adding it again replaces the server: its tools are checked again, it is switched on, and background work is turned off. Its call timeout goes back to 30 s.</p>
       {/if}
       <div class="actions">
         <Button type="submit" variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={checking || adding}>
@@ -374,22 +448,23 @@
           <li class="tool">
             <div class="tool-head">
               <label class="check">
-                <input type="checkbox" bind:checked={allowed[t.tool]} disabled={adding} />
-                Allow <code class="tool-name">{t.tool}</code>
+                <input type="checkbox" checked={allowed.get(t.tool) === true} disabled={adding}
+                  onchange={(e) => allowed.set(t.tool, e.currentTarget.checked)} />
+                Allow {@render toolName(t.tool)}
               </label>
               {#if t.skip_reason}
                 <span class="status-pill status-pill--warn">would be skipped</span><span class="reason">{t.skip_reason}</span>
               {/if}
             </div>
             {#if t.name}<p class="hint">Offered as <code>{t.name}</code></p>{/if}
-            {@render description(`probe ${t.tool}`, t.description)}
+            {@render description(`probe:${t.tool}`, t.description)}
             {@render schemaBlock(t.schema)}
           </li>
         {/each}
       </ul>
       <div class="actions">
         <Button size="sm" class="max-md:min-h-11 max-md:px-4" disabled={adding || checking} onclick={() => void add()}>
-          {adding ? 'Adding…' : 'Add server'}
+          {adding ? (replaces ? 'Replacing…' : 'Adding…') : replaces ? 'Replace server' : 'Add server'}
         </Button>
       </div>
     {/if}
@@ -456,6 +531,7 @@
   .field input { height: 2.75rem; padding: 0 0.625rem; background: var(--surface); border: 1px solid var(--field-border);
     border-radius: var(--radius-sm); color: var(--text); font: inherit; font-size: 0.875rem; min-width: 0; }
   .field input:focus-visible, .check input:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+  .field input:disabled { opacity: 0.6; }
   .field .hint { margin: 0; }
   form .actions { margin-top: 0; }
   @media (max-width: 768px) {

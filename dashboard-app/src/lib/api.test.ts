@@ -72,4 +72,14 @@ describe('apiRequest', () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('Not Found', { status: 404 })));
     await expect(apiRequest('/x')).rejects.toMatchObject({ status: 404, body: undefined });
   });
+
+  // Review S5: a 2xx that is not JSON (a proxy's login page) returned undefined, which the screen read as data.
+  it('a 2xx that is not JSON throws with its status, an empty one too; a 204 is undefined', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>Sign in</html>', { status: 200 })));
+    await expect(apiRequest('/x')).rejects.toMatchObject({ status: 200, body: undefined, message: 'HTTP 200 for /x: the answer is not JSON' });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 200 })));
+    await expect(apiRequest('/x', 'POST')).rejects.toMatchObject({ status: 200 });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 204 })));
+    expect(await apiRequest('/x', 'DELETE')).toBeUndefined();
+  });
 });
