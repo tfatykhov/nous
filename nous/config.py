@@ -1118,23 +1118,28 @@ class Settings(BaseSettings):
     mcp_enabled: bool = True
     # F112 MCP client: the agent uses tools of external MCP servers (mcp__<server>__<tool>). Off: nothing of
     # nous.mcp_client is imported and no such tool is registered. Servers and tools are rows of
-    # nous_system.mcp_servers / mcp_server_tools, written on the host by `python -m nous.mcp_client.seed`.
+    # nous_system.mcp_servers / mcp_server_tools, written by the owner's /integrations/mcp routes or on the host by
+    # `python -m nous.mcp_client.seed`.
     mcp_client_enabled: bool = False
     # One MCP tool result, flattened to text, is cut to this many characters (with a note saying so).
     mcp_client_max_result_chars: int = Field(default=20000, ge=1)
     # Comma list of host names the client's address guard lets reach a private, loopback or link-local address.
     mcp_client_allow_private_hosts: str = ""
-    # Set on the host: entries name=host[:port];tool|tool separated by commas. A stored tool registers only when its
-    # server's name is pinned here, the stored URL's host (and port, when it names one) is the pinned one, the tool's
-    # own name is in the pin's list, and its stored permission is allow. Empty: nothing registers. The pin does not
-    # cover the URL's path, the descriptions and schemas stored for pinned tools, or code the agent runs in this
-    # process.
+    # Optional ceiling, set on the host: entries name=host[:port];tool|tool separated by commas. Empty: no ceiling,
+    # every allowed tool of an enabled server registers. Set: a stored tool registers only when its server's name is
+    # pinned here, the stored URL's host (and port, when it names one) is the pinned one and the tool's own name is in
+    # the pin's list (a value that pins nothing valid registers nothing). The pin does not cover the URL's path, the
+    # descriptions and schemas stored for pinned tools, or code the agent runs in this process.
     mcp_client_pinned_servers: str = ""
-    # Set on the host: comma list of pinned server names whose tools background work may use, together with the
-    # server row's background switch (the row alone does not enable it).
+    # Optional ceiling, set on the host: comma list of server names. Empty: a server row's background switch alone
+    # decides whether background work may use its tools. Set: background use also needs the server listed here.
     mcp_client_background_servers: str = ""
     # One HTTP response body from an MCP server is read up to this many bytes; past it the call fails.
     mcp_client_max_response_bytes: int = Field(default=2_000_000, ge=1)
+    # F112 PR 2a: the hex SHA-256 of the secret the owner's proxy adds as X-Nous-Proxy-Secret to the requests it has
+    # authenticated. The /integrations/mcp routes require that header; unset (or not a SHA-256 digest), they answer
+    # 503. A LAN control only: code running in this process can call the routes or write the rows itself.
+    mcp_client_ui_secret_sha256: str = ""
 
     # LLM
     model: str = "claude-sonnet-4-6"

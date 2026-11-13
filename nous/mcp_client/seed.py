@@ -6,17 +6,17 @@
 Connects once, through the client's address guard (``NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS`` applies), lists the
 server's tools and prints, for each, its permission, its registered name, why it would be skipped at startup if it
 would, and its description and input schema exactly as the model would be offered them (``bridge.prepare_tool``).
-It also prints the pin entry the owner adds to ``NOUS_MCP_CLIENT_PINNED_SERVERS`` on the host
-(``name=host[:port];tool|tool``, the tools that would register): without it, no tool of the server registers. With
-``--background`` it prints the name to add to ``NOUS_MCP_CLIENT_BACKGROUND_SERVERS`` as well: the stored switch alone
-does not let background work use the server. A tool name that carries ``,``, ``;``, ``|``, ``=`` or whitespace cannot
-be pinned, so it cannot be allowed.
+It also prints the entry for ``NOUS_MCP_CLIENT_PINNED_SERVERS`` (``name=host[:port];tool|tool``, the tools that would
+register), which the owner adds on the host when that optional ceiling is used: with a pin set, a server it does not
+name registers nothing. With ``--background`` it prints the name for ``NOUS_MCP_CLIENT_BACKGROUND_SERVERS``, needed
+only when that optional list is set. A tool name that carries ``,``, ``;``, ``|``, ``=`` or whitespace cannot be
+pinned, so the seed does not allow it (the owner's ``/integrations/mcp`` routes can).
 
 With ``--write`` it stores the server row and one row per listed tool: ``allow`` for the tools named in ``--allow``,
 ``deny`` for every other. Running it again for a server replaces the row's URL and background switch, enables it and
 sets its call timeout to 30 s, and makes the new listing the permissions: a stored tool the server no longer lists
-is set to ``deny`` (its row is kept). Without ``--write`` nothing is written. Nous reads the rows at startup, with
-``NOUS_MCP_CLIENT_ENABLED`` on.
+is set to ``deny`` (its row is kept). Without ``--write`` nothing is written. Nous applies the rows at its next start,
+or at the next change made through the ``/integrations/mcp`` routes, with ``NOUS_MCP_CLIENT_ENABLED`` on.
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--background",
         action="store_true",
-        help="set the row's background switch (background use also needs NOUS_MCP_CLIENT_BACKGROUND_SERVERS)",
+        help="set the row's background switch (and list the server in NOUS_MCP_CLIENT_BACKGROUND_SERVERS if it is set)",
     )
     parser.add_argument("--write", action="store_true", help="store the server and the permissions")
     return parser.parse_args(argv)
@@ -114,9 +114,15 @@ async def seed(args: argparse.Namespace, settings: Settings) -> int:
         print(f"error: --allow names tools the server does not list: {', '.join(unknown)}", file=sys.stderr)
         return 2
     pin = f"{server.name}={pin_host(server.url)};{'|'.join(pinned)}"
-    print(f"Pin entry, for NOUS_MCP_CLIENT_PINNED_SERVERS on the host (entries separated by commas): {pin}")
+    print(
+        "Pin entry, for NOUS_MCP_CLIENT_PINNED_SERVERS on the host when that optional ceiling is used (entries "
+        f"separated by commas): {pin}"
+    )
     if server.background:
-        print(f"Background entry, for NOUS_MCP_CLIENT_BACKGROUND_SERVERS on the host (a comma list): {server.name}")
+        print(
+            "Background entry, for NOUS_MCP_CLIENT_BACKGROUND_SERVERS on the host when that optional list is used "
+            f"(a comma list): {server.name}"
+        )
     if not args.write:
         print("Nothing written: pass --write to store the server and these permissions.")
         return 0
@@ -130,8 +136,9 @@ async def seed(args: argparse.Namespace, settings: Settings) -> int:
         await database.disconnect()
     print(
         f"Stored server {server.name!r}: {len(registered)} tool(s) will register, "
-        f"{sum(1 for row in rows if row.permission == 'deny')} denied. Nous reads them at its next start, with "
-        f"NOUS_MCP_CLIENT_ENABLED=true and the pin entry {pin}."
+        f"{sum(1 for row in rows if row.permission == 'deny')} denied. Nous applies them at its next start, or at "
+        "the next change made through /integrations/mcp, with NOUS_MCP_CLIENT_ENABLED=true (and, when "
+        f"NOUS_MCP_CLIENT_PINNED_SERVERS is set, the pin entry {pin})."
     )
     return 0
 

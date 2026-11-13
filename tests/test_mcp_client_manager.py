@@ -662,6 +662,35 @@ async def test_only_pinned_tools_of_servers_on_their_pinned_host_and_port_regist
     await manager.close()
 
 
+async def test_without_a_background_list_the_row_alone_decides():
+    rows = [
+        (ServerConfig(name="alpha", url="https://alpha.example.com/mcp", background=True), [_tool("alpha", "x")]),
+        (ServerConfig(name="beta", url="https://beta.example.com/mcp", background=False), [_tool("beta", "x")]),
+    ]
+    manager, _d, _fake = await _manager(rows, mcp_client_background_servers="")
+    assert mcp_tool_background("mcp__alpha__x") is True
+    assert mcp_tool_background("mcp__beta__x") is False
+    await manager.close()
+
+
+@pytest.mark.parametrize("listed", [",", " , ", ",,"])
+async def test_a_background_list_that_names_nothing_still_is_a_ceiling(listed):
+    # "," is the documented spelling of "no background use at all" (environment-variables.md).
+    rows = [(ServerConfig(name="alpha", url="https://alpha.example.com/mcp", background=True), [_tool("alpha", "x")])]
+    manager, _d, _fake = await _manager(rows, mcp_client_background_servers=listed)
+    assert mcp_tool_background("mcp__alpha__x") is False
+    assert manager.ceilings()["background_servers"] is True
+    await manager.close()
+
+
+async def test_a_whitespace_only_background_list_is_no_ceiling():
+    rows = [(ServerConfig(name="alpha", url="https://alpha.example.com/mcp", background=True), [_tool("alpha", "x")])]
+    manager, _d, _fake = await _manager(rows, mcp_client_background_servers="   ")
+    assert mcp_tool_background("mcp__alpha__x") is True
+    assert manager.ceilings()["background_servers"] is False
+    await manager.close()
+
+
 async def test_background_use_needs_the_row_and_the_host_setting(caplog):
     rows = [
         (ServerConfig(name="alpha", url="https://alpha.example.com/mcp", background=True), [_tool("alpha", "x")]),
@@ -684,9 +713,19 @@ async def test_background_use_needs_the_row_and_the_host_setting(caplog):
     await manager.close()
 
 
-async def test_an_empty_pin_setting_registers_nothing():
-    manager, d, _fake = await _manager([_alpha(_tool("alpha", "x"))], mcp_client_pinned_servers="")
+async def test_an_empty_pin_setting_is_no_ceiling():
+    rows = [_alpha(_tool("alpha", "x"), _tool("alpha", "denied", "deny"), _tool("alpha", "asked", "ask"))]
+    manager, d, _fake = await _manager(rows, mcp_client_pinned_servers="")
+    assert [t["name"] for t in d.tool_definitions()] == ["mcp__alpha__x"]  # allow only, as with a pin
+    assert manager.ceilings() == {"pinned_servers": False, "background_servers": False}
+    await manager.close()
+
+
+@pytest.mark.parametrize("pins", ["typo", " , ", "alpha"])
+async def test_a_pin_setting_that_pins_nothing_valid_is_still_a_ceiling(pins):
+    manager, d, _fake = await _manager([_alpha(_tool("alpha", "x"))], mcp_client_pinned_servers=pins)
     assert d.tool_definitions() == [] and manager.registered() == []
+    assert manager.ceilings()["pinned_servers"] is True
     await manager.close()
 
 

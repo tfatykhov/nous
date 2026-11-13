@@ -146,7 +146,10 @@ async def test_the_pin_entry_names_the_port_and_the_background_entry_is_printed(
     assert await seed.seed(args, _settings()) == 0
     out = capsys.readouterr().out
     assert ": alpha=alpha.example.com:8443;fetch|search\n" in out
-    assert "Background entry, for NOUS_MCP_CLIENT_BACKGROUND_SERVERS on the host (a comma list): alpha\n" in out
+    assert (
+        "Background entry, for NOUS_MCP_CLIENT_BACKGROUND_SERVERS on the host when that optional list is used "
+        "(a comma list): alpha\n"
+    ) in out
 
 
 async def test_a_tool_name_that_cannot_be_pinned_cannot_be_allowed(listing, capsys):
