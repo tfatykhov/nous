@@ -16,12 +16,16 @@ const tool = (name: string, over: Record<string, unknown> = {}) => ({
   blocked_by_ceiling: false, description: `${name} description`, schema: '{"type":"object","properties":{}}', ...over,
 });
 
+const NO_AUTH = () => ({ kind: 'none', header_names: [] as string[], updated_at: null, status: 'ok', reason: null as string | null });
+
 const LIST = () => ({
   ceilings: { pinned_servers: true, background_servers: false },
+  secrets_available: true,
   servers: [
     {
       name: 'deepwiki', url: 'https://mcp.deepwiki.com/mcp', enabled: true, background: false, background_in_effect: false,
       background_blocked_by_ceiling: false, call_timeout_seconds: 30, connected: true, blocked_by_ceiling: false, skip_reason: null,
+      auth: NO_AUTH(),
       tools: [
         tool('ask_question', { permission: 'allow', registered: true, skip_reason: null }),
         tool('read_wiki'),
@@ -32,7 +36,7 @@ const LIST = () => ({
     {
       name: 'files', url: 'https://files.example.com/mcp', enabled: false, background: true, background_in_effect: false,
       background_blocked_by_ceiling: true, call_timeout_seconds: 30, connected: false, blocked_by_ceiling: false,
-      skip_reason: 'the server is disabled',
+      skip_reason: 'the server is disabled', auth: NO_AUTH(),
       tools: [tool('list', { name: 'mcp__files__list', permission: 'allow', skip_reason: 'the server is disabled' })],
     },
   ],
@@ -819,5 +823,211 @@ describe('Integrations: style', () => {
     expect(css).toMatch(/\.field input \{ height: 2\.75rem;/);
     const markup = markupOf(readFileSync(join(__dirname, 'Integrations.svelte'), 'utf-8'));
     for (const tag of markup.match(/<Button\b[^>]*>/g) ?? []) expect(tag).toContain('max-md:min-h-11');
+  });
+});
+
+// F112 PR 2c: stored keys. The value is made up; it must never be shown back, kept or sent anywhere but the routes.
+const KEY = 'Bearer test-key-0000000000000000';
+const NO_KEY_FILE = 'A key cannot be stored here: no key file is configured on the host (NOUS_MCP_CLIENT_KEY_FILE).';
+const keyed = (over: Record<string, unknown> = {}) => {
+  const d = LIST();
+  Object.assign(d.servers[0].auth, { kind: 'headers', header_names: ['Authorization', 'X-API-Key'], ...over });
+  return d;
+};
+
+describe('Integrations: a key for a new server', () => {
+  async function fill(name: string, url: string) {
+    await fireEvent.input(screen.getByLabelText('Name'), { target: { value: name } });
+    await fireEvent.input(screen.getByLabelText('Address'), { target: { value: url } });
+  }
+  const addCard = () => screen.getByRole('region', { name: 'Add a server' });
+  const valueField = () => within(addCard()).getByLabelText('Header 1 value') as HTMLInputElement;
+
+  async function typeKey(value = KEY) {
+    await fireEvent.click(within(addCard()).getByRole('radio', { name: 'API key or header' }));
+    await fireEvent.input(valueField(), { target: { value } });
+  }
+
+  it('the value is dots until Show, and Check and Add send the typed headers; a success drops them', async () => {
+    handlers['POST /integrations/mcp/probe'] = () => [200, PROBE()];
+    handlers['POST /integrations/mcp/servers'] = () => [201, { created: true, definitions_sha256: 'a'.repeat(64), credentials: 'set', server: null }];
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fill('wiki2', 'https://mcp.deepwiki.com/mcp');
+    expect(within(addCard()).getByRole('radio', { name: 'None' })).toHaveProperty('checked', true);
+    expect((within(addCard()).getByRole('radio', { name: 'Sign in (OAuth)' }) as HTMLInputElement).disabled).toBe(true);
+    expect(within(addCard()).getByText('Sign in (OAuth) arrives in the next update.')).toBeTruthy();
+    await typeKey();
+    expect((within(addCard()).getByLabelText('Header 1 name') as HTMLInputElement).value).toBe('Authorization');
+    expect(valueField().type).toBe('password');
+    expect(valueField().getAttribute('autocomplete')).toBe('off');
+    expect(within(addCard()).getByText('Most servers want Authorization with the value "Bearer <your key>".')).toBeTruthy();
+    await fireEvent.click(within(addCard()).getByRole('button', { name: 'Show the value of header 1' }));
+    expect(valueField().type).toBe('text');
+    expect(valueField().value).toBe(KEY); // only what was just typed
+    await fireEvent.click(within(addCard()).getByRole('button', { name: 'Hide the value of header 1' }));
+    expect(valueField().type).toBe('password');
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await within(addCard()).findByText('3 tools listed');
+    expect(sent(changes()[0]).body).toEqual({ name: 'wiki2', url: 'https://mcp.deepwiki.com/mcp', headers: { Authorization: KEY } });
+    await fireEvent.click(within(addCard()).getByRole('button', { name: 'Add server' }));
+    await within(addCard()).findByText('Added wiki2. It is listed above.');
+    expect((changes()[1].body as Record<string, unknown>).headers).toEqual({ Authorization: KEY });
+    expect(within(addCard()).getByRole('radio', { name: 'None' })).toHaveProperty('checked', true);
+    expect(within(addCard()).queryByLabelText('Header 1 value')).toBeNull();
+    await fireEvent.click(within(addCard()).getByRole('radio', { name: 'API key or header' }));
+    expect(valueField().value).toBe(''); // nothing typed comes back
+  });
+
+  it('rows are added and dropped, at most eight', async () => {
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await typeKey();
+    for (let i = 0; i < 7; i += 1) await fireEvent.click(within(addCard()).getByRole('button', { name: 'Add another header' }));
+    expect(within(addCard()).getByLabelText('Header 8 value')).toBeTruthy();
+    expect(within(addCard()).queryByRole('button', { name: 'Add another header' })).toBeNull();
+    await fireEvent.click(within(addCard()).getByRole('button', { name: 'Drop header 8' }));
+    expect(within(addCard()).queryByLabelText('Header 8 value')).toBeNull();
+    expect(valueField().value).toBe(KEY);
+  });
+
+  it('a header the rules refuse is said beside the rows, without its value, and nothing is sent', async () => {
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fill('wiki2', 'https://mcp.deepwiki.com/mcp');
+    await typeKey(` ${KEY}`);
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    const alert = within(addCard()).getByRole('alert');
+    expect(alert.textContent).toBe('Header 1: a value may not start or end with a space.');
+    expect(changes()).toEqual([]);
+  });
+
+  it('a 409 for a missing key file drops what was typed, says so, and checks nothing again', async () => {
+    handlers['POST /integrations/mcp/probe'] = () => [200, PROBE()];
+    handlers['POST /integrations/mcp/servers'] = () => [409, { error: 'no key file is configured on the host (NOUS_MCP_CLIENT_KEY_FILE)' }];
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fill('wiki2', 'https://mcp.deepwiki.com/mcp');
+    await typeKey();
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await fireEvent.click(await within(addCard()).findByRole('button', { name: 'Add server' }));
+    expect((await within(addCard()).findByRole('alert')).textContent).toBe('No key file is configured on the host (NOUS_MCP_CLIENT_KEY_FILE).');
+    expect(within(addCard()).getByRole('radio', { name: 'None' })).toHaveProperty('checked', true);
+    expect(within(addCard()).queryByLabelText('Header 1 value')).toBeNull();
+    expect(changes().filter((c) => c.url === '/integrations/mcp/probe')).toHaveLength(1);
+  });
+
+  it('a changed listing (409 with the new hash) is checked again with the same headers', async () => {
+    let probes = 0;
+    handlers['POST /integrations/mcp/probe'] = () => [200, PROBE(probes++ ? 'b'.repeat(64) : 'a'.repeat(64))];
+    handlers['POST /integrations/mcp/servers'] = () =>
+      [409, { error: "the server's tool definitions changed since they were shown: review them again", definitions_sha256: 'b'.repeat(64) }];
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fill('wiki2', 'https://mcp.deepwiki.com/mcp');
+    await typeKey();
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await fireEvent.click(await within(addCard()).findByRole('button', { name: 'Add server' }));
+    await waitFor(() => expect(probes).toBe(2));
+    const checks = changes().filter((c) => c.url === '/integrations/mcp/probe').map((c) => (c.body as Record<string, unknown>).headers);
+    expect(checks).toEqual([{ Authorization: KEY }, { Authorization: KEY }]);
+    expect(valueField().value).toBe(KEY);
+  });
+
+  it('a key edited after the check needs a new check before adding', async () => {
+    handlers['POST /integrations/mcp/probe'] = () => [200, PROBE()];
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fill('wiki2', 'https://mcp.deepwiki.com/mcp');
+    await typeKey();
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await within(addCard()).findByText('3 tools listed');
+    await fireEvent.input(valueField(), { target: { value: 'Bearer test-key-1111111111111111' } });
+    expect(within(addCard()).queryByRole('button', { name: 'Add server' })).toBeNull();
+  });
+
+  it('without a key file on the host the choice is disabled, with one sentence naming the setting', async () => {
+    listAnswer = () => [200, { ...LIST(), secrets_available: false }];
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    expect((within(addCard()).getByRole('radio', { name: 'API key or header' }) as HTMLInputElement).disabled).toBe(true);
+    expect(within(addCard()).getByText(NO_KEY_FILE)).toBeTruthy();
+    expect((within(card('deepwiki')).getByRole('button', { name: 'Add key' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(within(card('deepwiki')).getByText(NO_KEY_FILE)).toBeTruthy();
+  });
+
+  it('a typed value is never written to the browser storage', async () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    handlers['POST /integrations/mcp/probe'] = () => [200, PROBE()];
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fill('wiki2', 'https://mcp.deepwiki.com/mcp');
+    await typeKey();
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await within(addCard()).findByText('3 tools listed');
+    expect(setItem.mock.calls.filter((args) => args.join(' ').includes('test-key'))).toEqual([]);
+    setItem.mockRestore();
+  });
+});
+
+describe('Integrations: a stored key on a card', () => {
+  it('names the headers, never a value; Replace key sends the new headers, Cancel drops them', async () => {
+    listAnswer = () => [200, keyed()];
+    handlers['PATCH /integrations/mcp/servers/deepwiki'] = () => [200, { credentials: 'replaced', server: null }];
+    render(Integrations);
+    const deepwiki = await screen.findByRole('region', { name: 'deepwiki' });
+    expect(within(deepwiki).getByText('Key set: Authorization, X-API-Key')).toBeTruthy();
+    expect(within(card('files')).getByText('No key stored.')).toBeTruthy();
+    await fireEvent.click(within(deepwiki).getByRole('button', { name: 'Replace key' }));
+    const value = within(card('deepwiki')).getByLabelText('Header 1 value') as HTMLInputElement;
+    expect(value.value).toBe(''); // the rows open empty: nothing stored comes back
+    await fireEvent.input(value, { target: { value: KEY } });
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Cancel' }));
+    expect(within(card('deepwiki')).queryByLabelText('Header 1 value')).toBeNull();
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Replace key' }));
+    expect((within(card('deepwiki')).getByLabelText('Header 1 value') as HTMLInputElement).value).toBe('');
+    expect(changes()).toEqual([]);
+
+    await fireEvent.input(within(card('deepwiki')).getByLabelText('Header 1 value'), { target: { value: KEY } });
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Save key' }));
+    expect((await within(card('deepwiki')).findByRole('status')).textContent).toBe('Key saved: the next call to this server sends it.');
+    expect(changes().map(sent)).toEqual([{ method: 'PATCH', url: '/integrations/mcp/servers/deepwiki', body: { headers: { Authorization: KEY } } }]);
+    expect(within(card('deepwiki')).queryByLabelText('Header 1 value')).toBeNull();
+  });
+
+  it('Remove key asks first, then sends headers null', async () => {
+    listAnswer = () => [200, keyed()];
+    handlers['PATCH /integrations/mcp/servers/deepwiki'] = () => [200, { credentials: 'removed', server: null }];
+    render(Integrations);
+    const deepwiki = await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(deepwiki).getByRole('button', { name: 'Remove key' }));
+    const ask = within(card('deepwiki')).getByRole('group', { name: 'Confirm removing the key of deepwiki' });
+    await fireEvent.click(within(ask).getByRole('button', { name: 'Cancel' }));
+    expect(changes()).toEqual([]);
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Remove key' }));
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Yes, remove the key' }));
+    expect((await within(card('deepwiki')).findByRole('status')).textContent).toBe('Key removed: calls to this server go without it.');
+    expect(changes().map(sent)).toEqual([{ method: 'PATCH', url: '/integrations/mcp/servers/deepwiki', body: { headers: null } }]);
+  });
+
+  it('a refused or unreadable key is said in words, with the reason', async () => {
+    listAnswer = () => [200, keyed({ status: 'credentials_refused' })];
+    render(Integrations);
+    expect(within(await screen.findByRole('region', { name: 'deepwiki' })).getByText('the server refused the key', { selector: '.status-pill' })).toBeTruthy();
+    cleanup();
+    listAnswer = () => [200, keyed({ status: 'unavailable', reason: 'stored with another key' })];
+    render(Integrations);
+    const deepwiki = await screen.findByRole('region', { name: 'deepwiki' });
+    expect(within(deepwiki).getByText('key cannot be read on this host', { selector: '.status-pill' })).toBeTruthy();
+    expect(within(deepwiki).getByText('stored with another key')).toBeTruthy();
+    cleanup();
+    listAnswer = () => {
+      const d = LIST();
+      d.servers[0].connected = false;
+      return [200, d];
+    };
+    render(Integrations);
+    expect(within(await screen.findByRole('region', { name: 'deepwiki' })).getByText('connects on first use', { selector: '.status-pill' })).toBeTruthy();
   });
 });

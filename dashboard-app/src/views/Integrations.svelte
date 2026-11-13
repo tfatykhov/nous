@@ -1,15 +1,16 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
-  import { SvelteMap } from 'svelte/reactivity';
+  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import { Button } from '../lib/ui/button';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import {
-    CHANGED_TEXT, NAME_RULE, URL_RULE, ceilingLines, clampText, createPayload, createServer, isConflict, listGate,
-    listServers, nameProblem, prettySchema, probeServer, problemText, refreshLines, refreshServer, removeServer,
-    serverStatus, shortName, toolChange, toolStatus, updateServer, urlProblem,
-    type McpServer, type McpServerList, type McpTool, type ProbeResult, type RefreshResult, type Tone,
+    CHANGED_TEXT, HEADERS_MAX, KEY_HINT, NAME_RULE, NO_KEY_FILE_TEXT, URL_RULE, blankHeaderRow, ceilingLines, clampText,
+    createPayload, createServer, headersBody, headersProblem, isConflict, isNoKey, keyLine, listGate, listServers,
+    nameProblem, prettySchema, probeServer, problemText, refreshLines, refreshServer, removeServer, serverStatus,
+    shortName, toolChange, toolStatus, updateServer, urlProblem,
+    type HeaderRow, type McpServer, type McpServerList, type McpTool, type ProbeResult, type RefreshResult, type Tone,
   } from '../lib/integrations';
 
   // F112 PR 2b: the owner's MCP servers (GET /integrations/mcp/servers) and every change to them. A request to these
@@ -32,7 +33,7 @@
   // the form's own elements (`mcp-name`, `mcp-url`, `mcp-add`).
   const busy = new SvelteMap<string, string>(); // the action in flight
   const notes = new SvelteMap<string, Note>(); // the last result, of a server or of one tool's control
-  const confirming = new SvelteMap<string, 'background' | 'remove'>();
+  const confirming = new SvelteMap<string, 'background' | 'remove' | 'key'>();
   const refreshed = new SvelteMap<string, RefreshResult>(); // the last refresh's changes
   const expanded = new SvelteMap<string, boolean>(); // descriptions shown whole
   let pageNote = $state<Note | null>(null);
@@ -60,6 +61,7 @@
     }
     for (const name of [...refreshed.keys()]) if (!servers.has(name)) refreshed.delete(name);
     for (const name of [...confirming.keys()]) if (!servers.has(name)) confirming.delete(name);
+    if (keyEdit && !servers.has(keyEdit.server)) keyEdit = null; // its typed values go with it
   }
   $effect(() => {
     const d = $store.data;
@@ -102,7 +104,7 @@
     });
 
   /** Open a confirmation and put the focus on its first button. */
-  async function openConfirm(server: string, kind: 'background' | 'remove') {
+  async function openConfirm(server: string, kind: 'background' | 'remove' | 'key') {
     confirming.set(server, kind);
     await tick();
     byId(`mcp-c.${server}`)?.querySelector('button')?.focus();
@@ -113,7 +115,7 @@
     const kind = confirming.get(server);
     confirming.delete(server);
     await tick();
-    byId(kind === 'remove' ? `mcp-r.${server}` : `mcp-k.${server}`)?.focus();
+    byId(kind === 'remove' ? `mcp-r.${server}` : kind === 'key' ? `mcp-z.${server}` : `mcp-k.${server}`)?.focus();
   }
 
   /** Turning background work on asks first; turning it off does not. The box shows what is stored until then. */
@@ -163,15 +165,77 @@
     }, () => byId(`mcp-r.${s.name}`) ?? byId('mcp-top')); // the Remove button while the server is listed, else the title
   }
 
+  // ── Stored keys (F112 PR 2c) ───────────────────────────────────────────────
+  // Typed values live only here, in memory: never in localStorage, cleared on success, on Cancel and on a 409. The
+  // server never sends a value back, so Show reveals only what was just typed.
+  let secretsAvailable = $derived($store.data?.secrets_available === true);
+  /** Values shown as text instead of dots, by input id. */
+  const revealed = new SvelteSet<string>();
+  /** The key form open on one server's card (one at a time). */
+  let keyEdit = $state<{ server: string; rows: HeaderRow[] } | null>(null);
+  let keyError = $state<string | null>(null);
+
+  function toggleShown(id: string) {
+    if (revealed.has(id)) revealed.delete(id);
+    else revealed.add(id);
+  }
+
+  async function openKeyEdit(server: string) {
+    keyEdit = { server, rows: [blankHeaderRow('Authorization')] };
+    keyError = null;
+    await tick();
+    byId(`mcp-h.${server}.0`)?.focus();
+  }
+
+  async function cancelKeyEdit(server: string) {
+    keyEdit = null;
+    keyError = null;
+    await tick();
+    byId(`mcp-y.${server}`)?.focus();
+  }
+
+  function saveKey(s: McpServer) {
+    if (keyEdit?.server !== s.name) return;
+    keyError = headersProblem(keyEdit.rows);
+    if (keyError) return;
+    const headers = headersBody(keyEdit.rows);
+    return act(s.name, 'key', s.name, async () => {
+      try {
+        await updateServer(s.name, { headers });
+      } catch (err) {
+        if (isNoKey(err)) keyEdit = null;
+        throw err;
+      }
+      keyEdit = null;
+      return { text: 'Key saved: the next call to this server sends it.', ok: true };
+    }, () => byId(`mcp-y.${s.name}`));
+  }
+
+  function removeKey(s: McpServer) {
+    confirming.delete(s.name);
+    return act(s.name, 'key', s.name, async () => {
+      await updateServer(s.name, { headers: null });
+      return { text: 'Key removed: calls to this server go without it.', ok: true };
+    }, () => byId(`mcp-y.${s.name}`));
+  }
+
   // ── Add a server ───────────────────────────────────────────────────────────
   let newName = $state('');
   let newUrl = $state('');
   let tried = $state(false);
   let nameErr = $derived(newName || tried ? nameProblem(newName) : null);
   let urlErr = $derived(newUrl.trim() || tried ? urlProblem(newUrl.trim()) : null);
-  /** The probe the tools below come from, and the name and address it was made for. */
-  let probe = $state<{ name: string; url: string; result: ProbeResult } | null>(null);
-  let probeFresh = $derived(probe !== null && probe.name === newName && probe.url === newUrl.trim());
+  /** "API key or header": the rows typed for the new server ("None": no credential). */
+  let authKind = $state<'none' | 'headers'>('none');
+  let newHeaders = $state<HeaderRow[]>([blankHeaderRow('Authorization')]);
+  let headersErr = $state<string | null>(null);
+  /** The typed rows as JSON, '' for "None": what a check was made with (compared, never shown or stored). */
+  let headersSent = $derived(authKind === 'headers' ? JSON.stringify(newHeaders) : '');
+  /** The probe the tools below come from, and the name, address and headers it was made with. */
+  let probe = $state<{ name: string; url: string; sent: string; result: ProbeResult } | null>(null);
+  let probeFresh = $derived(
+    probe !== null && probe.name === newName && probe.url === newUrl.trim() && probe.sent === headersSent,
+  );
   /** The ticked tools, by the server's own name (a Map: a name such as "constructor" is never ticked by a prototype). */
   const allowed = new SvelteMap<string, boolean>();
   let checking = $state(false);
@@ -179,20 +243,42 @@
   let formNote = $state<Note | null>(null);
   let replaces = $derived(($store.data?.servers ?? []).some((s) => s.name === newName));
 
+  /** Drop every typed value: "None" again, one empty row, nothing shown. */
+  function clearHeaders() {
+    authKind = 'none';
+    newHeaders = [blankHeaderRow('Authorization')];
+    headersErr = null;
+    for (const id of [...revealed]) if (id.startsWith('mcp-new-')) revealed.delete(id);
+  }
+
+  /** Choosing "None" is the form's Cancel for a key: what was typed is dropped. */
+  function chooseAuth(kind: 'none' | 'headers') {
+    if (kind === 'none') clearHeaders();
+    else authKind = 'headers';
+  }
+
+  /** The headers to send, or undefined for "None"; null when they break a rule (said beside the rows). */
+  function typedHeaders(): Record<string, string> | undefined | null {
+    if (authKind !== 'headers') return undefined;
+    headersErr = headersProblem(newHeaders);
+    return headersErr ? null : headersBody(newHeaders);
+  }
+
   async function check(e: SubmitEvent) {
     e.preventDefault();
     tried = true;
-    if (nameProblem(newName) || urlProblem(newUrl.trim())) return;
+    const headers = typedHeaders();
+    if (nameProblem(newName) || urlProblem(newUrl.trim()) || headers === null) return;
     formNote = null;
-    await runProbe(newName, newUrl.trim());
+    await runProbe(newName, newUrl.trim(), headers);
   }
 
-  /** Probe a name and address. Every choice starts at not allowed. */
-  async function runProbe(name: string, url: string) {
+  /** Probe a name and address, with the typed headers. Every choice starts at not allowed. */
+  async function runProbe(name: string, url: string, headers: Record<string, string> | undefined) {
     checking = true;
     try {
-      const result = await probeServer(name, url);
-      probe = { name, url, result };
+      const result = await probeServer(name, url, headers);
+      probe = { name, url, sent: headersSent, result };
       allowed.clear();
     } catch (err) {
       probe = null;
@@ -205,11 +291,12 @@
   async function add() {
     if (!probe || !probeFresh) return;
     const { name, url, result } = probe;
+    const headers = authKind === 'headers' ? headersBody(newHeaders) : undefined;
     adding = true;
     formNote = null;
     pageNote = null;
     try {
-      const answer = await createServer(createPayload(name, url, result, allowed));
+      const answer = await createServer(createPayload(name, url, result, allowed, headers));
       clearNotes(name);
       refreshed.delete(name);
       // A confirmation opened before the replace asked about the old server: it must not grant the new one.
@@ -223,14 +310,19 @@
       tried = false;
       probe = null;
       allowed.clear();
+      clearHeaders();
     } catch (err) {
       if (isConflict(err)) {
-        // The server answered differently from what was shown: the new list for the same name and address, every
-        // choice back at not allowed.
+        // The server answered differently from what was shown: the new list for the same name, address and headers,
+        // every choice back at not allowed. The typed headers stay: the check needs them.
         formNote = { text: CHANGED_TEXT, ok: false };
         adding = false;
-        await runProbe(name, url);
+        await runProbe(name, url, headers);
       } else {
+        if (isNoKey(err)) {
+          clearHeaders(); // nothing typed can be stored here
+          probe = null;
+        }
         formNote = { text: problemText(err), ok: false };
       }
     } finally {
@@ -270,6 +362,48 @@
   {#if n}
     <p class="note" class:note-err={!n.ok} role={n.ok ? 'status' : 'alert'}>{n.text}</p>
   {/if}
+{/snippet}
+
+<!-- A key's rows: a header name, its value (dots until Show), and the controls to add or drop a row. `nameId` and
+     `valueId` give each input's id: `mcp-new-h-<i>` in the add form, `mcp-h.<server>.<i>` on a card (a server name
+     has no "." and no "-new-", so neither can take the other's id). -->
+{#snippet headerRows(rows: HeaderRow[], nameId: (i: number) => string, valueId: (i: number) => string, disabled: boolean, err: string | null)}
+  {#each rows as row, i (i)}
+    {@const vid = valueId(i)}
+    {@const shown = revealed.has(vid)}
+    <div class="header-row">
+      <div class="field">
+        <label for={nameId(i)}>Header {i + 1} name</label>
+        <input id={nameId(i)} bind:value={row.name} autocomplete="off" spellcheck="false" {disabled} />
+      </div>
+      <div class="field">
+        <label for={vid}>Header {i + 1} value</label>
+        {#if shown}
+          <input id={vid} type="text" bind:value={row.value} autocomplete="off" spellcheck="false" {disabled} />
+        {:else}
+          <input id={vid} type="password" bind:value={row.value} autocomplete="off" spellcheck="false" {disabled} />
+        {/if}
+      </div>
+      <div class="actions row-actions">
+        <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" {disabled} aria-pressed={shown}
+          aria-label={`${shown ? 'Hide' : 'Show'} the value of header ${i + 1}`} onclick={() => toggleShown(vid)}>
+          {shown ? 'Hide' : 'Show'}
+        </Button>
+        {#if rows.length > 1}
+          <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" {disabled}
+            aria-label={`Drop header ${i + 1}`} onclick={() => rows.splice(i, 1)}>Drop</Button>
+        {/if}
+      </div>
+    </div>
+  {/each}
+  {#if err}<p class="hint hint-err" role="alert">{err}</p>{/if}
+  <div class="actions">
+    {#if rows.length < HEADERS_MAX}
+      <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" {disabled}
+        onclick={() => rows.push(blankHeaderRow())}>Add another header</Button>
+    {/if}
+  </div>
+  <p class="hint">{KEY_HINT}</p>
 {/snippet}
 
 <header class="view-head">
@@ -326,6 +460,7 @@
       <div class="server-head">
         <h2 id="mcp-s.{s.name}">{s.name}</h2>
         <span class="status-pill {PILL[st.tone]}">{st.word}</span>
+        {#if st.detail}<span class="reason">{st.detail}</span>{/if}
       </div>
       <p class="url">{s.url}</p>
       {#if s.blocked_by_ceiling}
@@ -347,6 +482,46 @@
             <p>Let background work call {s.name}'s tools? They would then run with no one watching.</p>
             <div class="actions">
               <Button size="sm" class="max-md:min-h-11 max-md:px-4" disabled={!!inFlight} onclick={() => void setBackground(s, true)}>Yes, allow in background work</Button>
+              <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" onclick={() => void cancelConfirm(s.name)}>Cancel</Button>
+            </div>
+          </div>
+        {/if}
+      </div>
+
+      <div class="key">
+        <p class="key-line">{keyLine(s.auth)}</p>
+        {#if keyEdit?.server === s.name}
+          <div class="confirm" role="group" aria-label="New key for {s.name}">
+            {@render headerRows(keyEdit.rows, (i) => `mcp-h.${s.name}.${i}`, (i) => `mcp-v.${s.name}.${i}`, !!inFlight, keyError)}
+            <div class="actions">
+              <Button size="sm" class="max-md:min-h-11 max-md:px-4" disabled={!!inFlight} onclick={() => void saveKey(s)}>
+                {inFlight === 'key' ? 'Saving…' : 'Save key'}
+              </Button>
+              <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={!!inFlight} onclick={() => void cancelKeyEdit(s.name)}>Cancel</Button>
+            </div>
+          </div>
+        {:else}
+          <div class="actions">
+            {#if s.auth.kind !== 'oauth'}
+              <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" id="mcp-y.{s.name}"
+                disabled={!!inFlight || !secretsAvailable} onclick={() => void openKeyEdit(s.name)}>
+                {s.auth.kind === 'headers' ? 'Replace key' : 'Add key'}
+              </Button>
+            {/if}
+            {#if s.auth.kind === 'headers'}
+              <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4 hover:border-[var(--err-text)] hover:text-[var(--err-text)]"
+                id="mcp-z.{s.name}" disabled={!!inFlight} onclick={() => void openConfirm(s.name, 'key')}>
+                {inFlight === 'key' ? 'Removing…' : 'Remove key'}
+              </Button>
+            {/if}
+          </div>
+          {#if !secretsAvailable && s.auth.kind !== 'oauth'}<p class="hint">{NO_KEY_FILE_TEXT}</p>{/if}
+        {/if}
+        {#if asking === 'key'}
+          <div class="confirm" id="mcp-c.{s.name}" role="group" aria-label="Confirm removing the key of {s.name}">
+            <p>Remove the key stored for {s.name}? Its calls then go without it.</p>
+            <div class="actions">
+              <Button variant="destructive" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={!!inFlight} onclick={() => void removeKey(s)}>Yes, remove the key</Button>
               <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" onclick={() => void cancelConfirm(s.name)}>Cancel</Button>
             </div>
           </div>
@@ -430,8 +605,34 @@
           placeholder="https://" aria-describedby="mcp-url-hint" aria-invalid={urlErr ? 'true' : undefined} disabled={checking || adding} />
         <p id="mcp-url-hint" class="hint" class:hint-err={urlErr}>{urlErr ?? URL_RULE}</p>
       </div>
+      <fieldset class="field auth" aria-describedby="mcp-auth-hint">
+        <legend>Authentication</legend>
+        <label class="check">
+          <input type="radio" name="mcp-auth" value="none" checked={authKind === 'none'} disabled={checking || adding}
+            onchange={() => chooseAuth('none')} />
+          None
+        </label>
+        <label class="check">
+          <input type="radio" name="mcp-auth" value="headers" checked={authKind === 'headers'}
+            disabled={checking || adding || !secretsAvailable} onchange={() => chooseAuth('headers')} />
+          API key or header
+        </label>
+        <label class="check">
+          <input type="radio" name="mcp-auth" value="oauth" disabled />
+          Sign in (OAuth)
+        </label>
+        <p id="mcp-auth-hint" class="hint">
+          {secretsAvailable ? 'Sign in (OAuth) arrives in the next update.' : NO_KEY_FILE_TEXT}
+        </p>
+      </fieldset>
+      {#if authKind === 'headers'}
+        <div class="key-rows">
+          {@render headerRows(newHeaders, (i) => `mcp-new-h-${i}`, (i) => `mcp-new-v-${i}`, checking || adding, headersErr)}
+        </div>
+      {/if}
       {#if replaces}
         <p class="hint">A server named {newName} exists. Adding it again replaces the server: its tools are checked again, it is switched on, and background work is turned off. Its call timeout goes back to 30 s.</p>
+        <p class="hint">{authKind === 'headers' ? 'The key typed here replaces its stored key.' : 'A stored key is kept at the same address, and removed at another.'}</p>
       {/if}
       <div class="actions">
         <Button type="submit" variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={checking || adding}>
@@ -537,6 +738,14 @@
   .field input:disabled { opacity: 0.6; }
   .field .hint { margin: 0; }
   form .actions { margin-top: 0; }
+  .auth { border: 0; padding: 0; margin: 0; min-width: 0; }
+  .auth legend { font-size: 0.75rem; font-weight: 600; color: var(--muted); padding: 0; margin-bottom: 0.25rem; }
+  .key { margin-top: 0.875rem; }
+  .key-line { font-size: 0.8125rem; margin: 0; overflow-wrap: anywhere; }
+  .key-rows { display: flex; flex-direction: column; gap: 0.5rem; }
+  .header-row { display: flex; align-items: flex-end; gap: 0.5rem 0.75rem; flex-wrap: wrap; margin-top: 0.5rem; }
+  .header-row .field { flex: 1 1 14rem; }
+  .header-row .row-actions { margin-top: 0; }
   @media (max-width: 768px) {
     /* 44px targets on a phone: the checkbox rows, the show-all control and the schema's disclosure (a summary stays a
        list item, so the browser keeps drawing its marker). */
