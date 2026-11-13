@@ -39,4 +39,38 @@ export async function apiSend<T>(path: string, body: unknown, method = 'PUT'): P
   return (await res.json()) as T;
 }
 
+/** A refused answer: its status and its parsed JSON body (undefined when it had none), so the route's message shows. */
+export interface ApiAnswerError extends ApiError { body?: unknown; }
+
+/**
+ * One JSON request, no retry. Any method but GET sends `Content-Type: application/json`, with or without a body: a
+ * route that refuses another type answers 415. A non-2xx answer throws an ApiAnswerError with `status` and `body`. A
+ * 2xx answer must be JSON (204 aside, which returns undefined): one that is not, such as a proxy's HTML page, throws an
+ * ApiAnswerError with its status and no body, never a value the caller would read as data.
+ */
+export async function apiRequest<T>(path: string, method = 'GET', body?: unknown, signal?: AbortSignal): Promise<T> {
+  const init: RequestInit = { method, signal };
+  if (method !== 'GET') {
+    init.headers = { 'Content-Type': 'application/json' };
+    if (body !== undefined) init.body = JSON.stringify(body);
+  }
+  const res = await fetch(API_BASE + path, init);
+  if (res.status === 204) return undefined as T;
+  let parsed: unknown;
+  let isJson = true;
+  try {
+    parsed = JSON.parse(await res.text());
+  } catch {
+    parsed = undefined; // an empty or non-JSON body (a plain-text 404, a proxy's page)
+    isJson = false;
+  }
+  if (!res.ok || !isJson) {
+    const err: ApiAnswerError = new Error(`HTTP ${res.status} for ${path}${res.ok ? ': the answer is not JSON' : ''}`);
+    err.status = res.status;
+    err.body = parsed;
+    throw err;
+  }
+  return parsed as T;
+}
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

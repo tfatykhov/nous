@@ -8,6 +8,7 @@ const TITLES: [string, string][] = [
   ['views/DagView.svelte', 'Workflows'],
   ['views/Rubric.svelte', 'Scoring'],
   ['views/Harness.svelte', 'Guards'],
+  ['views/Integrations.svelte', 'Integrations'],
 ];
 
 describe('page titles match the menu', () => {

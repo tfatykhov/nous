@@ -7,7 +7,7 @@ const SRC = resolve(__dirname, '..');
 const RULE = /font-size:\s*30px;\s*font-weight:\s*650;\s*letter-spacing:\s*-0\.022em;\s*margin:\s*0\.25rem 0;?/;
 const SCREENS = [
   'views/Work.svelte', 'views/work/SessionList.svelte', 'views/work/Patterns.svelte',
-  'views/ModelCalls.svelte', 'views/Health.svelte',
+  'views/ModelCalls.svelte', 'views/Health.svelte', 'views/Integrations.svelte',
 ];
 
 function svelteFiles(dir: string): string[] {
@@ -28,7 +28,7 @@ describe('page title style', () => {
     expect(copies).toEqual([]);
   });
 
-  it('every page title of the F108 screens uses the shared class', () => {
+  it('every page title of the F108 screens and Integrations uses the shared class', () => {
     for (const f of SCREENS) {
       const src = readFileSync(join(SRC, f), 'utf-8');
       const h1s = src.match(/<h1\b[^>]*>/g) ?? [];

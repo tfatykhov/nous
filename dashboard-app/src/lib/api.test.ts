@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { apiGet } from './api';
+import { apiGet, apiRequest } from './api';
 
 describe('apiGet', () => {
   beforeEach(() => vi.restoreAllMocks());
@@ -35,5 +35,51 @@ describe('apiGet', () => {
       return new Response('{}', { status: 200 });
     }));
     await expect(apiGet('/status', { signal: ac.signal })).rejects.toThrow();
+  });
+});
+
+describe('apiRequest', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  it('a GET sends no content type and returns the parsed JSON', async () => {
+    const f = vi.fn(async () => new Response(JSON.stringify({ ok: 1 }), { status: 200 }));
+    vi.stubGlobal('fetch', f);
+    expect(await apiRequest('/x')).toEqual({ ok: 1 });
+    const init = (f.mock.calls[0] as unknown[])[1] as RequestInit;
+    expect(init.method).toBe('GET');
+    expect(init.headers).toBeUndefined();
+  });
+
+  it('every other method sends the JSON content type, with a body or without one', async () => {
+    const f = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', f);
+    await apiRequest('/x', 'PATCH', { a: 1 });
+    await apiRequest('/x', 'DELETE');
+    await apiRequest('/x/refresh', 'POST');
+    const inits = f.mock.calls.map((c) => (c as unknown[])[1] as RequestInit);
+    expect(inits.map((i) => i.headers)).toEqual(Array(3).fill({ 'Content-Type': 'application/json' }));
+    expect(inits.map((i) => i.body)).toEqual(['{"a":1}', undefined, undefined]);
+  });
+
+  it('a refused answer throws with its status and parsed body, once (no retry)', async () => {
+    const f = vi.fn(async () => new Response(JSON.stringify({ error: 'no such server' }), { status: 404 }));
+    vi.stubGlobal('fetch', f);
+    await expect(apiRequest('/x', 'DELETE')).rejects.toMatchObject({ status: 404, body: { error: 'no such server' } });
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
+  it('a refused answer that is not JSON has no body', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('Not Found', { status: 404 })));
+    await expect(apiRequest('/x')).rejects.toMatchObject({ status: 404, body: undefined });
+  });
+
+  // Review S5: a 2xx that is not JSON (a proxy's login page) returned undefined, which the screen read as data.
+  it('a 2xx that is not JSON throws with its status, an empty one too; a 204 is undefined', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('<html>Sign in</html>', { status: 200 })));
+    await expect(apiRequest('/x')).rejects.toMatchObject({ status: 200, body: undefined, message: 'HTTP 200 for /x: the answer is not JSON' });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 200 })));
+    await expect(apiRequest('/x', 'POST')).rejects.toMatchObject({ status: 200 });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 204 })));
+    expect(await apiRequest('/x', 'DELETE')).toBeUndefined();
   });
 });
