@@ -100,7 +100,7 @@ class Remotes:
         return self.by_url[url]
 
     @asynccontextmanager
-    async def connect(self, url: str, allow: frozenset[str]):
+    async def connect(self, url: str, allow: frozenset[str], *, auth: Any = None):
         self.connects.append(url)
         remote = self.by_url.get(url)
         if remote is None:
@@ -545,7 +545,9 @@ async def test_concurrent_reloads_run_one_at_a_time_and_end_as_a_fresh_start(mak
         finally:
             active -= 1
 
-    env.manager._registry = type("R", (), {"list_enabled": staticmethod(slow_list)})()
+    env.manager._registry = type(
+        "R", (), {"list_enabled": staticmethod(slow_list), "list_secrets": staticmethod(env.registry.list_secrets)}
+    )()
     await asyncio.gather(*(env.manager.reload() for _ in range(5)))
     assert peak == 1
     assert _names(env.dispatcher) == ["recall_deep", "mcp__alpha__fetch", "mcp__alpha__search"]

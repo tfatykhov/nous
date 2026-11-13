@@ -301,7 +301,7 @@ class FakeServer:
         self.result: Any = CallToolResult(content=[TextContent(type="text", text="hello")])
 
     @asynccontextmanager
-    async def connect(self, url: str, allow: frozenset[str]):
+    async def connect(self, url: str, allow: frozenset[str], *, auth: Any = None):
         self.opened += 1
         self.urls.append(url)
         if self.connect_error is not None:
@@ -318,6 +318,9 @@ class FakeRegistry:
 
     async def list_enabled(self) -> list[tuple[ServerConfig, list[ToolConfig]]]:
         return self.rows
+
+    async def list_secrets(self) -> dict[str, Any]:
+        return {}
 
 
 class FakeBus:
@@ -586,9 +589,9 @@ async def test_the_connection_uses_the_stored_url_and_the_allowed_hosts():
     fake = FakeServer()
 
     @asynccontextmanager
-    async def connect(url: str, allow: frozenset[str]):
+    async def connect(url: str, allow: frozenset[str], *, auth: Any = None):
         seen.append(allow)
-        async with fake.connect(url, allow) as session:
+        async with fake.connect(url, allow, auth=auth) as session:
             yield session
 
     d = ToolDispatcher()
@@ -923,11 +926,11 @@ async def test_a_handshake_that_never_finishes_ends_and_a_later_call_reconnects(
     fake = FakeServer()
 
     @asynccontextmanager
-    async def connect(url: str, allow: frozenset[str]):
+    async def connect(url: str, allow: frozenset[str], *, auth: Any = None):
         attempts.append(1)
         if len(attempts) == 1:
             await hang.wait()  # an initialize reply that never comes
-        async with fake.connect(url, allow) as session:
+        async with fake.connect(url, allow, auth=auth) as session:
             yield session
 
     rows = [_alpha(_tool("alpha", "x"), timeout=1)]
@@ -949,9 +952,9 @@ async def test_a_connect_that_completes_after_close_sends_nothing():
     fake = FakeServer()
 
     @asynccontextmanager
-    async def connect(url: str, allow: frozenset[str]):
+    async def connect(url: str, allow: frozenset[str], *, auth: Any = None):
         await release.wait()
-        async with fake.connect(url, allow) as session:
+        async with fake.connect(url, allow, auth=auth) as session:
             yield session
 
     rows = [_alpha(_tool("alpha", "x"))]

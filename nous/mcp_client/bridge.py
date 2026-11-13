@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -270,29 +270,65 @@ def _clean_result_text(text: str) -> str:
     )
 
 
-def flatten_result(raw: Any, max_chars: int) -> tuple[str, bool]:
+WITHHELD = "[withheld]"
+WITHHELD_MIN_CHARS = 8  # a shorter credential value is not looked for: it would match ordinary text
+_AUTH_SCHEMES = ("bearer ", "basic ", "token ")
+
+
+def credential_needles(values: Iterable[str]) -> tuple[str, ...]:
+    """What the result scrub and the listing check look for, longest first: each credential value, and the part after
+    the scheme of one that starts with ``Bearer``, ``Basic`` or ``Token`` (any case), each when it has at least
+    ``WITHHELD_MIN_CHARS`` characters."""
+    needles: set[str] = set()
+    for value in values:
+        candidates = [value]
+        candidates += [value[len(scheme) :].lstrip() for scheme in _AUTH_SCHEMES if value.lower().startswith(scheme)]
+        needles.update(candidate for candidate in candidates if len(candidate) >= WITHHELD_MIN_CHARS)
+    return tuple(sorted(needles, key=len, reverse=True))
+
+
+def withhold(text: str, needles: Sequence[str]) -> str:
+    """``text`` with every exact occurrence of a needle replaced by ``WITHHELD``."""
+    for needle in needles:
+        text = text.replace(needle, WITHHELD)
+    return text
+
+
+def _withhold_leaves(value: Any, needles: Sequence[str]) -> Any:
+    if isinstance(value, str):
+        return withhold(value, needles)
+    if isinstance(value, dict):
+        return {withhold(str(k), needles): _withhold_leaves(v, needles) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_withhold_leaves(item, needles) for item in value]
+    return value
+
+
+def flatten_result(raw: Any, max_chars: int, withheld: Sequence[str] = ()) -> tuple[str, bool]:
     """One MCP ``CallToolResult`` as ``(text, is_error)``.
 
     Text items are joined with newlines; an embedded text resource gives its text; an image, audio or resource
     link becomes a short placeholder. A result with no content but structured content gives that as JSON. The text
     is cleaned (``_clean_result_text``), then cut to ``max_chars`` with a note saying so. ``is_error`` is the
-    result's ``isError``.
+    result's ``isError``. ``withheld`` (``credential_needles`` of the server's stored credential) is replaced by
+    ``WITHHELD`` in every text item and structured string before they are joined, and again in the cleaned text
+    before the cut (a server that reflects request headers, or splits a value with characters the cleaning drops).
     """
     is_error = bool(getattr(raw, "isError", False))
     parts: list[str] = []
     for item in getattr(raw, "content", None) or []:
         kind = getattr(item, "type", None)
         if kind == "text":
-            parts.append(str(getattr(item, "text", "")))
+            parts.append(withhold(str(getattr(item, "text", "")), withheld))
         elif kind == "resource":
             text = getattr(getattr(item, "resource", None), "text", None)
-            parts.append(text if isinstance(text, str) else "[resource omitted]")
+            parts.append(withhold(text, withheld) if isinstance(text, str) else "[resource omitted]")
         else:
             parts.append(f"[{_OMITTED.get(kind, 'content')} omitted]")
     structured = getattr(raw, "structuredContent", None)
     if not parts and structured is not None:
-        parts.append(json.dumps(structured, ensure_ascii=False, default=str))
-    text = _clean_result_text("\n".join(parts)) or "(the server returned no content)"
+        parts.append(json.dumps(_withhold_leaves(structured, withheld), ensure_ascii=False, default=str))
+    text = withhold(_clean_result_text("\n".join(parts)), withheld) or "(the server returned no content)"
     if len(text) > max_chars:
         note = f"{_TRUNCATION_PREFIX} the result was {len(text)} characters; the first {max_chars} are shown]"
         text = f"{text[:max_chars]}\n{note}"
