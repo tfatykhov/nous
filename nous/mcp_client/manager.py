@@ -101,7 +101,14 @@ async def _unless_ended(ended: asyncio.Event, make_call: Callable[[], Awaitable[
     connection that has already ended (closed or dropped while the call waited for it) gets no request at all."""
     if ended.is_set():
         raise ConnectionEnded()
-    call_task = asyncio.ensure_future(make_call())
+
+    async def _call() -> Any:
+        # The task starts a loop step later: a close or drop queued before it must still stop the request.
+        if ended.is_set():
+            raise ConnectionEnded()
+        return await make_call()
+
+    call_task = asyncio.ensure_future(_call())
     call_task.add_done_callback(lambda task: task.cancelled() or task.exception())
     end_task = asyncio.ensure_future(ended.wait())
     try:

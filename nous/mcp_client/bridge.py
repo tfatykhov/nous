@@ -36,6 +36,7 @@ _OMITTED = {"image": "image", "audio": "audio", "resource_link": "resource link"
 # the top level", "Property keys should match pattern ..."), not from its documentation: confirm them with one real
 # call when the flag is first turned on.
 _TOP_LEVEL_COMBINATORS = frozenset({"anyOf", "oneOf", "allOf"})
+_ROOT_REFERENCES = frozenset({"$ref", "$dynamicRef", "$recursiveRef"})
 _PROPERTY_KEY = re.compile(r"[a-zA-Z0-9_.-]{1,64}")
 # Values the server compares or validates with: kept exactly as they are, or the tool is skipped. Cleaning a pattern,
 # a required name or a $ref would change what the schema means.
@@ -203,6 +204,10 @@ def input_schema_ok(schema: Any) -> bool:
     if not isinstance(schema, dict) or schema.get("type") != "object":
         return False
     if _TOP_LEVEL_COMBINATORS & schema.keys():
+        return False
+    # A root reference puts the arguments in another schema, which the top-level checks here and in
+    # ``has_reserved_property`` never read.
+    if _ROOT_REFERENCES & schema.keys():
         return False
     properties = schema.get("properties", {})
     if not isinstance(properties, dict) or not all(isinstance(value, dict) for value in properties.values()):

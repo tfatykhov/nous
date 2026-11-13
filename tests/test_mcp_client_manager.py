@@ -944,3 +944,37 @@ async def test_a_connection_that_already_ended_gets_no_request():
     with pytest.raises(ConnectionEnded):
         await _unless_ended(ended, lambda: call())
     assert made == []
+
+
+def test_a_root_reference_is_refused_so_its_arguments_cannot_hide_from_the_checks():
+    """Codex on #913: a root ``$ref`` moved ``_id`` out of the top-level reserved-argument check."""
+    hidden = {
+        "type": "object",
+        "$ref": "#/$defs/args",
+        "$defs": {"args": {"type": "object", "properties": {"_id": {"type": "string"}}, "required": ["_id"]}},
+    }
+    assert not input_schema_ok(hidden)
+    assert prepare_tool("docs", "get", "d", hidden).schema is None
+    # a reference below the root is still fine
+    assert input_schema_ok({
+        "type": "object",
+        "properties": {"q": {"$ref": "#/$defs/s"}},
+        "$defs": {"s": {"type": "string"}},
+    })
+
+
+async def test_a_close_queued_before_the_call_task_starts_sends_nothing():
+    """Codex on #913: ``ended`` set after the first check but before the scheduled task runs."""
+    from nous.mcp_client.manager import ConnectionEnded, _unless_ended
+
+    ended = asyncio.Event()
+    sent: list[str] = []
+
+    async def call() -> str:
+        sent.append("sent")
+        return "ok"
+
+    asyncio.get_running_loop().call_soon(ended.set)  # runs before the task that _unless_ended schedules
+    with pytest.raises(ConnectionEnded):
+        await _unless_ended(ended, call)
+    assert sent == []
