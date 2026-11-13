@@ -96,7 +96,7 @@ from nous.mcp_client.oauth import (
     register,
 )
 from nous.mcp_client.registry import McpRegistry
-from nous.mcp_client.secrets import StoredSecret
+from nous.mcp_client.secrets import OAuthRecord, StoredSecret
 
 logger = logging.getLogger(__name__)
 
@@ -128,6 +128,11 @@ _PAGE_HEADERS = {
     "Referrer-Policy": "no-referrer",
     "X-Content-Type-Options": "nosniff",
 }
+
+
+class _Superseded(Exception):
+    """A sign-in whose code exchange returned after it stopped being the current one (a newer sign-in replaced it, or
+    it expired): it stores nothing and stays as it is."""
 
 
 class _QuietOAuthCallback(logging.Filter):
@@ -329,6 +334,7 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         """The OAuth redirect address, read when a request needs it (never at build: a settings object that is not
         text there must not fail the app); None: OAuth is unavailable here."""
         return redirect_uri(getattr(settings, "a2ui_public_base_url", ""))
+
     digest = _digest(settings.mcp_client_ui_secret_sha256)
     if not digest:
         logger.warning(
@@ -379,14 +385,14 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         return manager.credential_values(name, current[0].url, secret)
 
     async def probe_tools(
-        name: str, url: str, headers: dict[str, str] | None = None, flow: Flow | None = None
+        name: str, url: str, headers: dict[str, str] | None = None, record: OAuthRecord | None = None
     ) -> list[ProbedTool]:
-        """The probe, with ``headers`` sent, or a finished sign-in's access token (``flow``); a listing that repeats
+        """The probe, with ``headers`` sent, or a finished sign-in's access token (``record``); a listing that repeats
         the server's stored credential or the sign-in's tokens is refused."""
         withheld = await stored_values(name)
-        if flow is not None and flow.record is not None:
-            headers = {"Authorization": f"Bearer {flow.record.access_token}"}
-            withheld += flow.record.values()
+        if record is not None:
+            headers = {"Authorization": f"Bearer {record.access_token}"}
+            withheld += record.values()
         try:
             return await manager.probe(name, url, headers, withheld=withheld)
         except ProbeRefused as exc:
@@ -535,6 +541,18 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         except OAuthProblem as exc:
             raise _Refused(exc.status, str(exc)) from None
 
+    async def held_record(flow: Flow | None) -> OAuthRecord | None:
+        """The finished sign-in's record (renewed first when about to expire), read ONCE: the request uses this copy
+        for its probe and its write, whatever happens to the flow meanwhile (its expiry clears the held record).
+        None without a flow; 409 when a flow was named and holds no record any more."""
+        if flow is None:
+            return None
+        await renew(flow)
+        record = flow.record
+        if record is None:
+            raise _Refused(409, "that sign-in is not complete, has expired or was already used: sign in again")
+        return record
+
     async def renew(flow: Flow | None) -> None:
         """A finished sign-in's tokens, refreshed first when they are about to expire (a sign-in waits up to 10 minutes
         for its create; a token can live less): the refreshed record replaces the held one, so the probe sends it and
@@ -560,8 +578,8 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         config = _server_config(body.get("name"), body.get("url"), False)
         flow = finished_flow(body, config)
         headers = _headers(body["headers"]) if "headers" in body else None
-        await renew(flow)
-        probed = await probe_tools(config.name, config.url, headers, flow)
+        record = await held_record(flow)
+        probed = await probe_tools(config.name, config.url, headers, record)
         return JSONResponse(
             {"tools": [_probe_view(tool) for tool in probed], "definitions_sha256": definitions_sha256(probed)}
         )
@@ -582,23 +600,26 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         headers = _headers(body["headers"]) if "headers" in body else None
         if (headers is not None or flow is not None) and not manager.secrets_available():
             raise _Refused(409, NO_KEY_TEXT)
-        await renew(flow)
+        record = await held_record(flow)  # this copy is probed with and stored, whatever the flow becomes meanwhile
         sent = headers
         stored_secret = await secret_of(config.name)
         if sent is None and flow is None and stored_secret is not None:
             # Opened as bound to the request's URL: at another URL it does not open, and nothing is sent.
             sent, _problem = await manager.credential_headers(config.name, config.url, stored_secret)
-        probed = await probe_tools(config.name, config.url, sent, flow)
+        probed = await probe_tools(config.name, config.url, sent, record)
         digest_stored = expect(body, probed)
         unknown = sorted(set(wanted) - {tool.tool for tool in probed})
         if unknown:
             raise _Refused(400, f"the server does not list these tools: {', '.join(unknown)}")
         rows = _rows_from_probe(config.name, probed, wanted)
         sealed = sealed_for(config.name, config.url, headers) if headers is not None else None
-        if flow is not None and flow.record is not None:
-            sealed = manager.seal_oauth_record(config.name, config.url, flow.record)
+        if flow is not None:
+            # A request that names a sign-in never creates the server without its tokens.
+            sealed = manager.seal_oauth_record(config.name, config.url, record) if record is not None else None
             if sealed is None:
-                raise _Refused(409, NO_KEY_TEXT)
+                raise _Refused(
+                    409, NO_KEY_TEXT if record is not None else "that sign-in holds no tokens: sign in again"
+                )
         async with changes:
             old = await stored(config.name)
             old_secret = await secret_of(config.name)
@@ -824,11 +845,7 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
                     (Client(reuse.client_id, reuse.client_secret, reuse.token_auth_method, "provided"), reuse.issuer)
                 )
             same = next(
-                (
-                    c
-                    for c, issuer in known
-                    if c is not None and c.client_id == client_id and issuer == discovery.issuer
-                ),
+                (c for c, issuer in known if c is not None and c.client_id == client_id and issuer == discovery.issuer),
                 None,
             )
             if client_id is not None and client_secret is None and same is not None:
@@ -865,8 +882,12 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
     async def store_sign_in(flow: Flow, record: Any) -> bool:
         """A finished sign-in's tokens for a server stored at the flow's URL: stored at once (a new credential row,
         replacing any stored one), audited and applied. False when no server has the flow's name (a new server: the
-        create stores them). 409 when the server moved meanwhile."""
+        create stores them). 409 when the server moved meanwhile. ``_Superseded`` when the sign-in is no longer the
+        current pending one (a newer sign-in replaced it, or it expired, while its code was exchanged): checked under
+        the lock every store holds, so a slower old exchange never overwrites a newer sign-in's credential."""
         async with changes:
+            if manager.flows.status(flow) != "pending":
+                raise _Superseded()
             current = await stored(flow.server)
             if current is None:
                 return False
@@ -901,6 +922,11 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         try:
             record = await exchange_code(flow, params, manager.oauth_http, manager.allow_private_hosts)
             stored_now = await store_sign_in(flow, record)
+        except _Superseded:  # it stays as it is (failed: replaced, or expired), and nothing is stored
+            logger.warning(
+                "F112: the OAuth sign-in for server %r was replaced while it finished; nothing stored", flow.server
+            )
+            return False
         except (OAuthProblem, _Refused) as exc:
             manager.flows.fail(flow, str(exc))
             logger.warning("F112: the OAuth sign-in for server %r did not complete (%s)", flow.server, exc)

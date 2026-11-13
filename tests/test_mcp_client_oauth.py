@@ -9,6 +9,7 @@ made up."""
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import dataclasses
 import hashlib
@@ -230,9 +231,13 @@ class Remotes:
         self.tools = [Tool(name="search", description="searches", inputSchema=OBJ)]
         self.sent: list[str | None] = []
         self.result_text = "found"
+        self.during_connect: Any = None  # run as a connection opens (a probe's): a test's way in between two steps
 
     @asynccontextmanager
     async def connect(self, url: str, allow: frozenset[str], *, auth: Any = None):
+        if self.during_connect is not None:
+            self.during_connect()
+
         def answer(request: httpx.Request) -> httpx.Response:
             sent = request.headers.get("authorization")
             self.sent.append(sent)
@@ -1075,6 +1080,97 @@ async def test_two_concurrent_uses_of_a_short_lived_sign_in_make_one_token_reque
     )
     assert (first.status_code, second.status_code) == (200, 200), (first.text, second.text)
     assert env.world.refreshes == 1
+
+
+# --- races: a flow that expires during the create, an old exchange that returns late -----------------------------
+
+
+async def test_a_sign_in_that_expires_while_its_create_probes_is_still_stored_with_its_tokens(make_env, monkeypatch):
+    env = await make_env()
+    flow_id = await _signed_in(env)
+    access = env.world.issued[1]
+
+    def expire() -> None:  # between the create's probe and its write, another request purges the expired flow
+        later = time.monotonic() + 601
+        monkeypatch.setattr(env.manager.flows, "_clock", lambda: later)
+        env.manager.flows.get("another-request")
+        assert env.manager.flows.get(flow_id).record is None
+
+    env.remotes.during_connect = expire
+    created = await _add(env, flow_id)
+    assert created.status_code == 201, created.text
+    secret = (await env.registry.list_secrets())["alpha"]
+    assert secret.kind == "oauth" and env.manager.stored_oauth("alpha", ALPHA, secret).access_token == access
+
+
+def _held_exchanges(env: Env) -> tuple[asyncio.Event, asyncio.Event, set[str]]:
+    """The provider holds back the code exchange of the codes in the returned set until the first event is set; the
+    second is set when such an exchange has arrived."""
+    release, arrived, codes = asyncio.Event(), asyncio.Event(), set()
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/token"):
+            form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
+            if form.get("code") in codes:
+                arrived.set()
+                await release.wait()
+        return env.world.handle(request)
+
+    env.manager._oauth_http = lambda: httpx.AsyncClient(transport=httpx.MockTransport(handle))
+    return release, arrived, codes
+
+
+async def test_an_old_exchange_that_returns_after_start_again_stores_nothing_and_stays_failed(make_env):
+    env = await make_env()
+    release, arrived, codes = _held_exchanges(env)
+    old = (await _start(env)).json()
+    params = env.world.authorize(old["authorization_url"])
+    codes.add(params["code"])
+    late = asyncio.create_task(_callback(env, params))
+    await arrived.wait()  # the old code is being exchanged
+    assert (await _start(env)).status_code == 200  # Start again: the old sign-in is replaced
+    release.set()
+    assert (await late).content == NOT_SIGNED_IN_PAGE
+    status = (await _req(env, "GET", f"/integrations/mcp/oauth/flows/{old['flow_id']}")).json()
+    assert status == {"status": "failed", "reason": "a newer sign-in for this server replaced it", "stored": False}
+    assert env.manager.flows.get(old["flow_id"]).record is None and await env.registry.list_secrets() == {}
+
+
+async def test_an_old_exchange_that_returns_after_the_newer_sign_in_stored_leaves_its_credential(make_env):
+    env = await make_env()
+    assert (await _add(env, await _signed_in(env))).status_code == 201  # a stored server
+    release, arrived, codes = _held_exchanges(env)
+    old = (await _start(env)).json()
+    old_params = env.world.authorize(old["authorization_url"])
+    codes.add(old_params["code"])
+    late = asyncio.create_task(_callback(env, old_params))
+    await arrived.wait()
+    new = (await _start(env)).json()
+    assert (await _callback(env, env.world.authorize(new["authorization_url"]))).content == SIGNED_IN_PAGE
+    newer = (await env.registry.list_secrets())["alpha"]
+    newer_token = env.manager.stored_oauth("alpha", ALPHA, newer).access_token
+    release.set()
+    assert (await late).content == NOT_SIGNED_IN_PAGE  # its exchange did happen, and is dropped
+    after = (await env.registry.list_secrets())["alpha"]
+    assert after.id == newer.id and env.manager.stored_oauth("alpha", ALPHA, after).access_token == newer_token
+    assert [c["action"] for c in _changes(env)].count("sign_in") == 1  # only the newer one was stored
+
+
+async def test_an_old_pasted_answer_that_returns_after_start_again_stores_nothing(make_env):
+    env = await make_env()
+    release, arrived, codes = _held_exchanges(env)
+    old = (await _start(env)).json()
+    params = env.world.authorize(old["authorization_url"])
+    codes.add(params["code"])
+    late = asyncio.create_task(
+        _req(env, "POST", "/integrations/mcp/oauth/complete", {"flow_id": old["flow_id"], **params})
+    )
+    await arrived.wait()
+    assert (await _start(env)).status_code == 200
+    release.set()
+    answer = await late
+    assert answer.status_code == 400 and answer.json()["error"] == "a newer sign-in for this server replaced it"
+    assert await env.registry.list_secrets() == {}
 
 
 # --- settings that are not text (older tests build the app from a MagicMock) -----------------------------------------
