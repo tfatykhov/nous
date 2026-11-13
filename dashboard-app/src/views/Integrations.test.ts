@@ -521,6 +521,21 @@ describe('Integrations: adding a server', () => {
     expect(within(addCard()).queryByRole('button', { name: 'Add server' })).toBeNull();
   });
 
+  it('a background confirmation left open is dropped when its server is replaced', async () => {
+    handlers['POST /integrations/mcp/probe'] = () => [200, PROBE()];
+    handlers['POST /integrations/mcp/servers'] = () => [200, { created: false, definitions_sha256: 'a'.repeat(64), server: null }];
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByLabelText('Allow in background work'));
+    expect(within(card('deepwiki')).getByRole('button', { name: 'Yes, allow in background work' })).toBeTruthy();
+    await fill('deepwiki', 'https://mcp.deepwiki.com/mcp');
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await fireEvent.click(await within(addCard()).findByRole('button', { name: 'Replace server' }));
+    await within(addCard()).findByText('Replaced deepwiki. It is switched on, and background work is off.');
+    // the question was about the server that was replaced: it must not be answerable for the new one
+    expect(within(card('deepwiki')).queryByRole('button', { name: 'Yes, allow in background work' })).toBeNull();
+  });
+
   it('the buttons are disabled while the check and the add are in flight', async () => {
     const probe = held();
     const add = held();

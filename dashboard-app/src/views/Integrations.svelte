@@ -59,6 +59,7 @@
       if (now === undefined || (n.expect !== undefined && n.expect !== now)) notes.delete(key);
     }
     for (const name of [...refreshed.keys()]) if (!servers.has(name)) refreshed.delete(name);
+    for (const name of [...confirming.keys()]) if (!servers.has(name)) confirming.delete(name);
   }
   $effect(() => {
     const d = $store.data;
@@ -211,6 +212,8 @@
       const answer = await createServer(createPayload(name, url, result, allowed));
       clearNotes(name);
       refreshed.delete(name);
+      // A confirmation opened before the replace asked about the old server: it must not grant the new one.
+      confirming.delete(name);
       formNote = {
         text: answer.created ? `Added ${name}. It is listed above.` : `Replaced ${name}. It is switched on, and background work is off.`,
         ok: true,
