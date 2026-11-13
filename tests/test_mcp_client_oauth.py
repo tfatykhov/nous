@@ -234,7 +234,9 @@ class Remotes:
     @asynccontextmanager
     async def connect(self, url: str, allow: frozenset[str], *, auth: Any = None):
         if self.during_connect is not None:
-            self.during_connect()
+            done = self.during_connect()
+            if inspect.isawaitable(done):
+                await done
 
         def answer(request: httpx.Request) -> httpx.Response:
             sent = request.headers.get("authorization")
@@ -1226,6 +1228,31 @@ async def test_a_held_sign_in_without_a_refresh_token_past_its_expiry_asks_for_a
     added = await _add(env, flow_id)
     assert added.status_code == 409 and "sign in again" in added.json()["error"]
     assert await env.registry.list_secrets() == {}
+
+
+async def test_a_create_stores_the_record_a_concurrent_probe_renewed_meanwhile(make_env, monkeypatch):
+    from types import SimpleNamespace
+
+    env = await make_env()
+    env.world.expires_in = 30  # its margin is the last 15 s
+    flow_id = await _signed_in(env)
+    first_access = env.world.issued[1]
+    body = {"name": "alpha", "url": ALPHA, "oauth_flow_id": flow_id}
+
+    async def renew_meanwhile() -> None:  # while the create probes with its copy, another request renews the sign-in
+        env.remotes.during_connect = None
+        real = time.time
+        monkeypatch.setattr(oauth_module, "time", SimpleNamespace(time=lambda: real() + 20, monotonic=time.monotonic))
+        assert (await _req(env, "POST", "/integrations/mcp/probe", body)).status_code == 200
+
+    env.remotes.during_connect = renew_meanwhile
+    created = await _add(env, flow_id)
+    assert created.status_code == 201, created.text
+    assert env.world.refreshes == 1  # the provider rotated the refresh token: only the renewed record works now
+    record = env.manager.stored_oauth("alpha", ALPHA, (await env.registry.list_secrets())["alpha"])
+    assert record.access_token != first_access
+    assert (record.access_token, record.refresh_token) == (env.world.issued[-2], env.world.issued[-1])
+    assert record.refresh_token in env.world.refresh_tokens  # the stored one is the live one
 
 
 # --- settings that are not text (older tests build the app from a MagicMock) -----------------------------------------

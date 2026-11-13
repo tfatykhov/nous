@@ -54,6 +54,7 @@ line of the callback (its query string holds the code and the state) is dropped.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -614,41 +615,47 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             raise _Refused(400, f"the server does not list these tools: {', '.join(unknown)}")
         rows = _rows_from_probe(config.name, probed, wanted)
         sealed = sealed_for(config.name, config.url, headers) if headers is not None else None
-        if flow is not None:
-            # A request that names a sign-in never creates the server without its tokens.
-            sealed = manager.seal_oauth_record(config.name, config.url, record) if record is not None else None
-            if sealed is None:
-                raise _Refused(
-                    409, NO_KEY_TEXT if record is not None else "that sign-in holds no tokens: sign in again"
-                )
-        async with changes:
-            old = await stored(config.name)
-            old_secret = await secret_of(config.name)
-            created, secret_deleted = await registry.replace_server(config, rows, secret=sealed)
+        # Lock order: a flow's renewing lock, then changes (no path takes them the other way round). Held from the read
+        # of the sign-in's record to its consume, so no renewal can rotate the tokens in between.
+        async with flow.renewing if flow is not None else contextlib.nullcontext():
             if flow is not None:
-                manager.flows.consume(flow)  # a finished sign-in is stored once
-            if sealed is not None:
-                credentials: str | None = "replaced" if old_secret is not None else "set"
-            else:
-                # What the registry did with the URL change: a row that no longer validates is not read by stored().
-                credentials = "removed" if secret_deleted else None
-            old_permissions = {tool.tool: tool.permission for tool in old[1]} if old else {}
-            # A stored tool the server no longer lists is set to deny (its row is kept).
-            new_permissions = {**{tool: "deny" for tool in old_permissions}, **{r.tool: r.permission for r in rows}}
-            action = "create" if created else "replace"
-            data = _change(
-                action,
-                config.name,
-                old[0] if old else None,
-                config,
-                old_permissions,
-                new_permissions,
-                credentials=credentials,
-                header_count=_count(credentials, headers),
-            )
-            await audit(data)
-            await apply()
-            server = await view(config.name)
+                # The newest record: one a concurrent probe renewed (its refresh token rotated) wins over the copy this
+                # request captured, which is used only when the flow's record was cleared (expired and purged). A
+                # request that names a sign-in never creates the server without its tokens.
+                latest = flow.record if flow.record is not None else record
+                sealed = manager.seal_oauth_record(config.name, config.url, latest) if latest is not None else None
+                if sealed is None:
+                    raise _Refused(
+                        409, NO_KEY_TEXT if latest is not None else "that sign-in holds no tokens: sign in again"
+                    )
+            async with changes:
+                old = await stored(config.name)
+                old_secret = await secret_of(config.name)
+                created, secret_deleted = await registry.replace_server(config, rows, secret=sealed)
+                if flow is not None:
+                    manager.flows.consume(flow)  # a finished sign-in is stored once
+                if sealed is not None:
+                    credentials: str | None = "replaced" if old_secret is not None else "set"
+                else:
+                    # What the registry did with the URL change: a row that no longer validates is not read by stored().
+                    credentials = "removed" if secret_deleted else None
+                old_permissions = {tool.tool: tool.permission for tool in old[1]} if old else {}
+                # A stored tool the server no longer lists is set to deny (its row is kept).
+                new_permissions = {**{tool: "deny" for tool in old_permissions}, **{r.tool: r.permission for r in rows}}
+                action = "create" if created else "replace"
+                data = _change(
+                    action,
+                    config.name,
+                    old[0] if old else None,
+                    config,
+                    old_permissions,
+                    new_permissions,
+                    credentials=credentials,
+                    header_count=_count(credentials, headers),
+                )
+                await audit(data)
+                await apply()
+                server = await view(config.name)
         return JSONResponse(
             {"created": created, "definitions_sha256": digest_stored, "credentials": credentials, "server": server},
             status_code=201 if created else 200,
