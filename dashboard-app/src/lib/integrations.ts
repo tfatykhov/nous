@@ -2,6 +2,7 @@
 // the pure rules it shows: the name and address checks the server makes, the status words, the create payload and
 // the words for a refused request. Every string a server wrote is shown as text by the view, never as markup.
 // PR 2c: a server's stored key (header names only ever come back) and the header rules checked before sending.
+// PR 2d: OAuth sign-in (start, the flow's state, the paste fallback, sign-out); no token ever comes back.
 import { apiRequest, type ApiAnswerError } from './api';
 
 /** One stored tool as the listing shows it. `tool` is the server's own name (permissions are keyed by it); `name` is
@@ -18,12 +19,13 @@ export interface McpTool {
 }
 
 /** F112 PR 2c: a server's stored credential, never its values. `status`: `unavailable` when it cannot be opened on
- * this host (`reason` says why), `credentials_refused` when the server's last answer was a 401. */
+ * this host (`reason` says why), `credentials_refused` when the server's last answer was a 401, `needs_sign_in` (PR 2d)
+ * when its OAuth tokens could not be refreshed. */
 export interface McpAuth {
   kind: 'none' | 'headers' | 'oauth';
   header_names: string[];
   updated_at: string | null;
-  status: 'ok' | 'credentials_refused' | 'unavailable';
+  status: 'ok' | 'credentials_refused' | 'unavailable' | 'needs_sign_in';
   reason: string | null;
 }
 
@@ -46,6 +48,8 @@ export interface McpServerList {
   ceilings: { pinned_servers: boolean; background_servers: boolean };
   /** Whether the host has a key, so a credential can be stored. */
   secrets_available: boolean;
+  /** Whether OAuth sign-in can be used (the public https address of this Nous is set). */
+  oauth_available: boolean;
   servers: McpServer[];
 }
 
@@ -69,6 +73,8 @@ export interface CreatePayload {
   tools: Record<string, 'allow' | 'deny'>;
   expected_definitions_sha256: string;
   headers?: Record<string, string>;
+  /** A finished sign-in for this name and address (PR 2d): its tokens become the server's credential. */
+  oauth_flow_id?: string;
 }
 
 export interface RefreshResult {
@@ -92,15 +98,87 @@ const BASE = '/integrations/mcp';
 export const serverPath = (name: string) => `${BASE}/servers/${encodeURIComponent(name)}`;
 
 export const listServers = (signal?: AbortSignal) => apiRequest<McpServerList>(`${BASE}/servers`, 'GET', undefined, signal);
-/** A probe; `headers` are sent on its requests and never stored. The body names them only when there are some. */
-export const probeServer = (name: string, url: string, headers?: Record<string, string>) =>
-  apiRequest<ProbeResult>(`${BASE}/probe`, 'POST', headers ? { name, url, headers } : { name, url });
+/** A probe; `headers` are sent on its requests and never stored, or a finished sign-in's token (`oauthFlowId`). The
+ * body names them only when there are some. */
+export const probeServer = (name: string, url: string, headers?: Record<string, string>, oauthFlowId?: string) =>
+  apiRequest<ProbeResult>(
+    `${BASE}/probe`,
+    'POST',
+    headers ? { name, url, headers } : oauthFlowId ? { name, url, oauth_flow_id: oauthFlowId } : { name, url },
+  );
 export const createServer = (payload: CreatePayload) =>
   apiRequest<{ created: boolean; definitions_sha256: string; server: McpServer | null }>(`${BASE}/servers`, 'POST', payload);
 export const updateServer = (name: string, change: ServerChange) =>
   apiRequest<{ server: McpServer | null }>(serverPath(name), 'PATCH', change);
 export const refreshServer = (name: string) => apiRequest<RefreshResult>(`${serverPath(name)}/refresh`, 'POST');
 export const removeServer = (name: string) => apiRequest<{ deleted: string }>(serverPath(name), 'DELETE');
+
+// ── OAuth sign-in (F112 PR 2d) ──────────────────────────────────────────────
+
+/** A started sign-in: the address the owner opens, and the hosts it signs in at and fetches tokens from. */
+export interface OAuthStart {
+  flow_id: string;
+  authorization_url: string;
+  authorization_host: string;
+  token_host: string;
+  registration: 'dynamic' | 'provided' | 'reused';
+  scope: string | null;
+  expires_in: number;
+}
+
+/** How a sign-in stands. `stored`: its tokens were stored with an existing server at once. */
+export interface OAuthFlowState {
+  status: 'pending' | 'complete' | 'failed' | 'expired';
+  reason: string | null;
+  stored: boolean;
+}
+
+/** The owner's own client (optional, under "Advanced"): only the fields typed are sent. */
+export interface OAuthAdvanced { client_id: string; client_secret: string; scope: string }
+
+export function startSignIn(name: string, url: string, advanced?: OAuthAdvanced) {
+  const body: Record<string, string> = { name, url };
+  if (advanced?.client_id.trim()) body.client_id = advanced.client_id.trim();
+  if (advanced?.client_id.trim() && advanced.client_secret) body.client_secret = advanced.client_secret;
+  if (advanced?.scope.trim()) body.scope = advanced.scope.trim();
+  return apiRequest<OAuthStart>(`${BASE}/oauth/start`, 'POST', body);
+}
+export const signInState = (flowId: string, signal?: AbortSignal) =>
+  apiRequest<OAuthFlowState>(`${BASE}/oauth/flows/${encodeURIComponent(flowId)}`, 'GET', undefined, signal);
+/** The paste fallback: the address the provider sent the browser back to. */
+export const completeSignIn = (flowId: string, callbackUrl: string) =>
+  apiRequest<OAuthFlowState>(`${BASE}/oauth/complete`, 'POST', { flow_id: flowId, callback_url: callbackUrl });
+export const signOut = (name: string) =>
+  apiRequest<{ credentials: string; server: McpServer | null }>(`${serverPath(name)}/sign-out`, 'POST');
+
+export const OAUTH_UNAVAILABLE_TEXT = 'Sign-in needs NOUS_A2UI_PUBLIC_BASE_URL set to the https address of this Nous.';
+export const SIGN_OUT_NOTE = 'Nous deletes its tokens; the access you granted at the provider stays until you revoke it there.';
+
+/** The sign-in address as a link target: only an https address (it is the server's text). */
+export function signInHref(url: string): string | null {
+  try {
+    return new URL(url).protocol === 'https:' ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+/** What the owner is told before continuing: where they sign in and where the tokens come from, and a warning when the
+ * two hosts differ. */
+export function signInHosts(start: Pick<OAuthStart, 'authorization_host' | 'token_host'>): { line: string; warning: string | null } {
+  const { authorization_host: at, token_host: from } = start;
+  return {
+    line: `You will sign in at ${at}. Tokens are fetched from ${from}.`,
+    warning: at === from ? null : `The token host is not the sign-in host: continue only if you trust ${from}.`,
+  };
+}
+
+/** A sign-in that is not pending any more, in words. */
+export function signInText(state: OAuthFlowState): string {
+  if (state.status === 'complete') return 'Signed in.';
+  if (state.status === 'expired') return 'The sign-in expired: sign in again.';
+  return `The sign-in did not complete${state.reason ? `: ${state.reason}` : ''}. Sign in again.`;
+}
 
 /** The server's rule for a name (config.SERVER_NAME, and no "__"), in words. */
 export const NAME_RULE = '1 to 24 lower-case letters, digits, - and _, starting with a letter or digit, with no __.';
@@ -204,6 +282,10 @@ export function toolStatusText(t: McpTool, serverEnabled = true): string {
 export function serverStatus(s: McpServer): Status {
   if (!s.enabled) return { word: 'switched off', detail: null, tone: 'neutral' };
   if (s.auth.status === 'unavailable') return { word: 'key cannot be read on this host', detail: s.auth.reason, tone: 'warn' };
+  if (s.auth.status === 'needs_sign_in') return { word: 'needs sign-in', detail: 'the sign-in could not be renewed', tone: 'warn' };
+  if (s.auth.status === 'credentials_refused' && s.auth.kind === 'oauth') {
+    return { word: 'the server refused the sign-in', detail: s.auth.reason, tone: 'warn' };
+  }
   if (s.auth.status === 'credentials_refused') {
     // The reason says a 403 ("forbidden"): the key may be wrong or lack access.
     return { word: s.auth.kind === 'none' ? 'the server asks for a key' : 'the server refused the key', detail: s.auth.reason, tone: 'warn' };
@@ -268,7 +350,7 @@ export const headersBody = (rows: readonly HeaderRow[]): Record<string, string> 
 /** The card's line about the stored key: the header names only, never a value. */
 export function keyLine(auth: McpAuth): string {
   if (auth.kind === 'headers') return `Key set: ${auth.header_names.join(', ')}`;
-  if (auth.kind === 'oauth') return 'Signed in with OAuth.';
+  if (auth.kind === 'oauth') return auth.status === 'needs_sign_in' ? 'Needs sign-in: sign in again.' : 'Signed in with OAuth.';
   return 'No key stored.';
 }
 
@@ -290,6 +372,7 @@ export function ceilingLines(c: McpServerList['ceilings']): string[] {
  * never read from a prototype and `__proto__` is an own key of the body, not the object's prototype. */
 export function createPayload(
   name: string, url: string, probe: ProbeResult, allowed: ReadonlyMap<string, boolean>, headers?: Record<string, string>,
+  oauthFlowId?: string,
 ): CreatePayload {
   const payload: CreatePayload = {
     name,
@@ -298,6 +381,7 @@ export function createPayload(
     expected_definitions_sha256: probe.definitions_sha256,
   };
   if (headers) payload.headers = headers; // named only when the owner typed some
+  else if (oauthFlowId) payload.oauth_flow_id = oauthFlowId;
   return payload;
 }
 

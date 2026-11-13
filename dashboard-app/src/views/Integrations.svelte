@@ -5,12 +5,14 @@
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
+  import OAuthSignIn from './integrations/OAuthSignIn.svelte';
   import {
-    CHANGED_TEXT, HEADERS_MAX, KEY_HINT, NAME_RULE, NO_KEY_FILE_TEXT, URL_RULE, VALUE_HINT, blankHeaderRow, ceilingLines, clampText,
-    createPayload, createServer, headersBody, headersProblem, isConflict, isNoKey, keyLine, listGate, listServers,
-    nameProblem, prettySchema, probeServer, problemText, refreshLines, refreshServer, removeServer, serverStatus,
-    shortName, toolChange, toolStatus, updateServer, urlProblem,
-    type HeaderRow, type McpServer, type McpServerList, type McpTool, type ProbeResult, type RefreshResult, type Tone,
+    CHANGED_TEXT, HEADERS_MAX, KEY_HINT, NAME_RULE, NO_KEY_FILE_TEXT, OAUTH_UNAVAILABLE_TEXT, SIGN_OUT_NOTE, URL_RULE, VALUE_HINT,
+    blankHeaderRow, ceilingLines, clampText, createPayload, createServer, headersBody, headersProblem, isConflict, isNoKey, keyLine,
+    listGate, listServers, nameProblem, prettySchema, probeServer, problemText, refreshLines, refreshServer, removeServer,
+    serverStatus, shortName, signOut, toolChange, toolStatus, updateServer, urlProblem,
+    type HeaderRow, type McpServer, type McpServerList, type McpTool, type OAuthFlowState, type ProbeResult, type RefreshResult,
+    type Tone,
   } from '../lib/integrations';
 
   // F112 PR 2b: the owner's MCP servers (GET /integrations/mcp/servers) and every change to them. A request to these
@@ -33,7 +35,7 @@
   // the form's own elements (`mcp-name`, `mcp-url`, `mcp-add`).
   const busy = new SvelteMap<string, string>(); // the action in flight
   const notes = new SvelteMap<string, Note>(); // the last result, of a server or of one tool's control
-  const confirming = new SvelteMap<string, 'background' | 'remove' | 'key'>();
+  const confirming = new SvelteMap<string, 'background' | 'remove' | 'key' | 'signout'>();
   const refreshed = new SvelteMap<string, RefreshResult>(); // the last refresh's changes
   const expanded = new SvelteMap<string, boolean>(); // descriptions shown whole
   let pageNote = $state<Note | null>(null);
@@ -104,7 +106,7 @@
     });
 
   /** Open a confirmation and put the focus on its first button. */
-  async function openConfirm(server: string, kind: 'background' | 'remove' | 'key') {
+  async function openConfirm(server: string, kind: 'background' | 'remove' | 'key' | 'signout') {
     confirming.set(server, kind);
     await tick();
     byId(`mcp-c.${server}`)?.querySelector('button')?.focus();
@@ -115,7 +117,8 @@
     const kind = confirming.get(server);
     confirming.delete(server);
     await tick();
-    byId(kind === 'remove' ? `mcp-r.${server}` : kind === 'key' ? `mcp-z.${server}` : `mcp-k.${server}`)?.focus();
+    const ids = { remove: 'mcp-r', key: 'mcp-z', signout: 'mcp-o', background: 'mcp-k' } as const;
+    byId(`${ids[kind ?? 'background']}.${server}`)?.focus();
   }
 
   /** Turning background work on asks first; turning it off does not. The box shows what is stored until then. */
@@ -237,14 +240,58 @@
     }, () => byId(`mcp-y.${s.name}`));
   }
 
+  // ── OAuth sign-in on a card (F112 PR 2d) ───────────────────────────────────
+  let oauthAvailable = $derived($store.data?.oauth_available === true);
+  /** The server whose card shows the sign-in panel (one at a time). */
+  let signingIn = $state<string | null>(null);
+
+  async function toggleSignIn(server: string) {
+    signingIn = signingIn === server ? null : server;
+    await tick();
+    if (signingIn === server) byId(`mcp-sign.${server}`)?.querySelector<HTMLElement>('summary, button')?.focus();
+  }
+
+  /** A card's sign-in finished: its tokens were stored with the server at once (a stored server's sign-in is). */
+  function signedInAgain(s: McpServer, state: OAuthFlowState) {
+    signingIn = null;
+    return act(s.name, 'signin', s.name, async () =>
+      state.stored
+        ? { text: 'Signed in: the next call to this server uses the new sign-in.', ok: true }
+        : { text: 'The sign-in finished, but the server was gone or had moved, so nothing was stored.', ok: false },
+    () => byId(`mcp-i.${s.name}`));
+  }
+
+  function signOutOf(s: McpServer) {
+    confirming.delete(s.name);
+    return act(s.name, 'signout', s.name, async () => {
+      await signOut(s.name);
+      return { text: 'Signed out: calls to this server now go without the sign-in.', ok: true };
+    }, () => byId(`mcp-i.${s.name}`));
+  }
+
   // ── Add a server ───────────────────────────────────────────────────────────
   let newName = $state('');
   let newUrl = $state('');
   let tried = $state(false);
   let nameErr = $derived(newName || tried ? nameProblem(newName) : null);
   let urlErr = $derived(newUrl.trim() || tried ? urlProblem(newUrl.trim()) : null);
-  /** "API key or header": the rows typed for the new server ("None": no credential). */
-  let authKind = $state<'none' | 'headers'>('none');
+  /** "API key or header": the rows typed for the new server ("None": no credential; "Sign in (OAuth)": a sign-in). */
+  let authKind = $state<'none' | 'headers' | 'oauth'>('none');
+  /** The finished sign-in for the new server: bound to the name and address it was made for. */
+  let signedIn = $state<{ flowId: string; name: string; url: string } | null>(null);
+  /** Bumped to start the form's sign-in panel afresh (its state goes with it). */
+  let oauthPanel = $state(0);
+  // A sign-in is bound to its name and address: when either changes, it no longer applies.
+  $effect(() => {
+    const name = newName;
+    const url = newUrl.trim();
+    untrack(() => {
+      if (signedIn && (signedIn.name !== name || signedIn.url !== url)) {
+        signedIn = null;
+        oauthPanel += 1;
+      }
+    });
+  });
   let newHeaders = $state<HeaderRow[]>([blankHeaderRow('Authorization')]);
   let headersErr = $state<string | null>(null);
   /** How many times the key (the choice or a row) changed. A check records the count, never the values, so a key
@@ -265,22 +312,46 @@
   let formNote = $state<Note | null>(null);
   let replaces = $derived(($store.data?.servers ?? []).some((s) => s.name === newName));
 
-  /** Drop every typed value: "None" again, one empty row, nothing shown. */
+  /** Drop every typed value and any sign-in: "None" again, one empty row, nothing shown. */
   function clearHeaders() {
     authKind = 'none';
     newHeaders = [blankHeaderRow('Authorization')];
     headersErr = null;
     hideValues('mcp-new-');
+    signedIn = null;
+    oauthPanel += 1;
     headersEdited();
   }
 
-  /** Choosing "None" is the form's Cancel for a key: what was typed is dropped. */
-  function chooseAuth(kind: 'none' | 'headers') {
+  /** Choosing "None" is the form's Cancel for a key: what was typed is dropped. Leaving "Sign in" drops the sign-in. */
+  function chooseAuth(kind: 'none' | 'headers' | 'oauth') {
     if (kind === 'none') clearHeaders();
     else {
-      authKind = 'headers';
+      if (authKind === 'oauth') {
+        signedIn = null;
+        oauthPanel += 1;
+      }
+      authKind = kind;
       headersEdited();
     }
+  }
+
+  /** The form's sign-in finished. For a server that already exists its tokens are stored with it at once: the card
+   * shows it, and the form starts over. */
+  function formSignedIn(name: string, url: string, flowId: string, state: OAuthFlowState) {
+    if (state.stored) {
+      clearHeaders();
+      formNote = { text: `Signed in: the sign-in is stored with ${name}, which already exists. Its card above shows it.`, ok: true };
+      void store.refresh();
+      return;
+    }
+    if (name !== newName || url !== newUrl.trim()) {
+      oauthPanel += 1;
+      formNote = { text: 'The name or address changed during the sign-in: sign in again for the new ones.', ok: false };
+      return;
+    }
+    signedIn = { flowId, name, url };
+    headersEdited(); // a check made before this sign-in is not one made with it
   }
 
   /** The headers to send, or undefined for "None"; null when they break a rule (said beside the rows). */
@@ -295,16 +366,20 @@
     tried = true;
     const headers = typedHeaders();
     if (nameProblem(newName) || urlProblem(newUrl.trim()) || headers === null) return;
+    if (authKind === 'oauth' && !signedIn) {
+      formNote = { text: 'Sign in first: the server is checked with the sign-in.', ok: false };
+      return;
+    }
     formNote = null;
-    await runProbe(newName, newUrl.trim(), headers);
+    await runProbe(newName, newUrl.trim(), headers, authKind === 'oauth' ? signedIn?.flowId : undefined);
   }
 
-  /** Probe a name and address, with the typed headers. Every choice starts at not allowed. */
-  async function runProbe(name: string, url: string, headers: Record<string, string> | undefined) {
+  /** Probe a name and address, with the typed headers or the finished sign-in. Every choice starts at not allowed. */
+  async function runProbe(name: string, url: string, headers: Record<string, string> | undefined, flowId?: string) {
     checking = true;
     const edits = headersEdits; // the key as it is sent (the fields are disabled while the check runs)
     try {
-      const result = await probeServer(name, url, headers);
+      const result = await probeServer(name, url, headers, flowId);
       probe = { name, url, edits, result };
       allowed.clear();
     } catch (err) {
@@ -319,11 +394,12 @@
     if (!probe || !probeFresh) return;
     const { name, url, result } = probe;
     const headers = authKind === 'headers' ? headersBody(newHeaders) : undefined;
+    const flowId = authKind === 'oauth' ? signedIn?.flowId : undefined;
     adding = true;
     formNote = null;
     pageNote = null;
     try {
-      const answer = await createServer(createPayload(name, url, result, allowed, headers));
+      const answer = await createServer(createPayload(name, url, result, allowed, headers, flowId));
       clearNotes(name);
       refreshed.delete(name);
       // A confirmation opened before the replace asked about the old server: it must not grant the new one.
@@ -344,10 +420,10 @@
         // every choice back at not allowed. The typed headers stay: the check needs them.
         formNote = { text: CHANGED_TEXT, ok: false };
         adding = false;
-        await runProbe(name, url, headers);
+        await runProbe(name, url, headers, flowId);
       } else {
         if (isNoKey(err)) {
-          clearHeaders(); // nothing typed can be stored here
+          clearHeaders(); // nothing typed can be stored here; a sign-in that expired or was used is over too
           probe = null;
         }
         formNote = { text: problemText(err), ok: false };
@@ -542,8 +618,39 @@
                 {inFlight === 'key' ? 'Removing…' : 'Remove key'}
               </Button>
             {/if}
+            {#if oauthAvailable && secretsAvailable}
+              <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" id="mcp-i.{s.name}" disabled={!!inFlight}
+                aria-expanded={signingIn === s.name} onclick={() => void toggleSignIn(s.name)}>
+                {s.auth.kind === 'oauth' ? 'Sign in again' : 'Sign in (OAuth)'}
+              </Button>
+            {/if}
+            {#if s.auth.kind === 'oauth'}
+              <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4 hover:border-[var(--err-text)] hover:text-[var(--err-text)]"
+                id="mcp-o.{s.name}" disabled={!!inFlight} onclick={() => void openConfirm(s.name, 'signout')}>
+                {inFlight === 'signout' ? 'Signing out…' : 'Sign out'}
+              </Button>
+            {/if}
           </div>
           {#if !secretsAvailable && s.auth.kind !== 'oauth'}<p class="hint">{NO_KEY_FILE_TEXT}</p>{/if}
+          {#if signingIn === s.name}
+            <div class="confirm" id="mcp-sign.{s.name}" role="group" aria-label="Sign in for {s.name}">
+              <p>{s.auth.kind === 'oauth' ? 'Sign in again' : 'Sign in'} at the provider of {s.name}. The new sign-in replaces what is stored for it.</p>
+              <OAuthSignIn name={s.name} url={s.url} idPrefix="mcp-sign.{s.name}" disabled={!!inFlight}
+                onDone={(_flowId, state) => void signedInAgain(s, state)} />
+              <div class="actions">
+                <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" onclick={() => void toggleSignIn(s.name)}>Cancel</Button>
+              </div>
+            </div>
+          {/if}
+        {/if}
+        {#if asking === 'signout'}
+          <div class="confirm" id="mcp-c.{s.name}" role="group" aria-label="Confirm signing out of {s.name}">
+            <p>Sign out of {s.name}? {SIGN_OUT_NOTE}</p>
+            <div class="actions">
+              <Button variant="destructive" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={!!inFlight} onclick={() => void signOutOf(s)}>Yes, sign out</Button>
+              <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" onclick={() => void cancelConfirm(s.name)}>Cancel</Button>
+            </div>
+          </div>
         {/if}
         {#if asking === 'key'}
           <div class="confirm" id="mcp-c.{s.name}" role="group" aria-label="Confirm removing the key of {s.name}">
@@ -646,11 +753,12 @@
           API key or header
         </label>
         <label class="check">
-          <input type="radio" name="mcp-auth" value="oauth" disabled />
+          <input type="radio" name="mcp-auth" value="oauth" checked={authKind === 'oauth'}
+            disabled={checking || adding || !secretsAvailable || !oauthAvailable} onchange={() => chooseAuth('oauth')} />
           Sign in (OAuth)
         </label>
         <p id="mcp-auth-hint" class="hint">
-          {secretsAvailable ? 'Sign in (OAuth) arrives in the next update.' : NO_KEY_FILE_TEXT}
+          {!secretsAvailable ? NO_KEY_FILE_TEXT : !oauthAvailable ? OAUTH_UNAVAILABLE_TEXT : 'Sign in when the server asks you to log in at its provider.'}
         </p>
       </fieldset>
       {#if authKind === 'headers'}
@@ -658,9 +766,22 @@
           {@render headerRows(newHeaders, (i) => `mcp-new-h-${i}`, (i) => `mcp-new-v-${i}`, checking || adding, headersErr, headersEdited)}
         </div>
       {/if}
+      {#if authKind === 'oauth'}
+        <div class="key-rows" role="group" aria-label="Sign in for the new server">
+          {#if nameProblem(newName) || urlProblem(newUrl.trim())}
+            <p class="hint">Enter the name and the address first: the sign-in is made for them.</p>
+          {/if}
+          {#key oauthPanel}
+            <OAuthSignIn name={newName} url={newUrl.trim()} idPrefix="mcp-new-oauth"
+              disabled={checking || adding || !!nameProblem(newName) || !!urlProblem(newUrl.trim())}
+              onDone={(flowId, state, name, url) => formSignedIn(name, url, flowId, state)} />
+          {/key}
+          {#if signedIn}<p class="hint">Signed in for {signedIn.name}. Check the server next: it is checked with this sign-in.</p>{/if}
+        </div>
+      {/if}
       {#if replaces}
         <p class="hint">A server named {newName} exists. Adding it again replaces the server: its tools are checked again, it is switched on, and background work is turned off. Its call timeout goes back to 30 s.</p>
-        <p class="hint">{authKind === 'headers' ? 'The key typed here replaces its stored key.' : 'A stored key is kept at the same address, and removed at another.'}</p>
+        <p class="hint">{authKind === 'headers' ? 'The key typed here replaces its stored key.' : authKind === 'oauth' ? 'Signing in for it stores the new sign-in with it at once; use Sign in again on its card for that.' : 'A stored key is kept at the same address, and removed at another.'}</p>
       {/if}
       <div class="actions">
         <Button type="submit" variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={checking || adding}>
