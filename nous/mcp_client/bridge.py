@@ -13,6 +13,7 @@ import unicodedata
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote, quote_plus
 
 from jsonschema import SchemaError
 from jsonschema.validators import Draft202012Validator
@@ -271,19 +272,45 @@ def _clean_result_text(text: str) -> str:
 
 
 WITHHELD = "[withheld]"
-WITHHELD_MIN_CHARS = 8  # a shorter credential value is not looked for: it would match ordinary text
-_AUTH_SCHEMES = ("bearer ", "basic ", "token ")
+# A shorter credential value is not looked for (it would match ordinary text); config.validate_headers refuses a value
+# this short, so every stored value is looked for at least whole.
+WITHHELD_MIN_CHARS = 8
+# The characters a JSON encoder escapes as \uXXXX by default: .NET's System.Text.Json (HTML-sensitive ones, upper-case
+# hex) and Go's encoding/json (lower-case hex).
+_DOTNET_ESCAPED = frozenset("+=<>&'`")
+_GO_ESCAPED = frozenset("<>&")
+_PERCENT_ESCAPE = re.compile(r"%[0-9A-F]{2}")
+
+
+def _u_escaped(text: str, chars: frozenset[str], upper: bool) -> str:
+    form = "\\u{:04X}" if upper else "\\u{:04x}"
+    return "".join(form.format(ord(ch)) if ch in chars else ch for ch in text)
+
+
+def _encodings(text: str) -> set[str]:
+    """``text`` and the forms a server that reflects it may give it: ``/`` as ``\\/`` (a JSON encoder); as
+    ``\\uXXXX`` in either hex case every character but letters and digits, or only those .NET's or Go's JSON encoder
+    escapes; percent-encoded, ``/`` kept or not, a space as ``%20`` or ``+``, in either hex case."""
+    out = {text, text.replace("/", "\\/")}
+    others = frozenset(ch for ch in text if not ch.isalnum())
+    for upper in (False, True):
+        for chars in (others, _DOTNET_ESCAPED, _GO_ESCAPED):
+            out.add(_u_escaped(text, chars, upper))
+    for encoded in (quote(text, safe=""), quote(text, safe="/"), quote_plus(text, safe=""), quote_plus(text, safe="/")):
+        out.add(encoded)
+        out.add(_PERCENT_ESCAPE.sub(lambda match: match.group(0).lower(), encoded))
+    return out
 
 
 def credential_needles(values: Iterable[str]) -> tuple[str, ...]:
-    """What the result scrub and the listing check look for, longest first: each credential value, and the part after
-    the scheme of one that starts with ``Bearer``, ``Basic`` or ``Token`` (any case), each when it has at least
-    ``WITHHELD_MIN_CHARS`` characters."""
+    """What the result scrub and the listing check look for, longest first: each credential value and each of its
+    whitespace-separated parts (the key after a scheme such as ``Bearer``, ``ApiKey`` or ``Bot``), each when it has
+    at least ``WITHHELD_MIN_CHARS`` characters, in every form of ``_encodings``."""
     needles: set[str] = set()
     for value in values:
-        candidates = [value]
-        candidates += [value[len(scheme) :].lstrip() for scheme in _AUTH_SCHEMES if value.lower().startswith(scheme)]
-        needles.update(candidate for candidate in candidates if len(candidate) >= WITHHELD_MIN_CHARS)
+        for candidate in {value, *value.split()}:
+            if len(candidate) >= WITHHELD_MIN_CHARS:
+                needles |= _encodings(candidate)
     return tuple(sorted(needles, key=len, reverse=True))
 
 

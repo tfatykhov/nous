@@ -107,19 +107,28 @@ def pin_host(url: str) -> str:
 
 
 HEADERS_MAX = 8
+# At least the result scrub's shortest needle (bridge.WITHHELD_MIN_CHARS): a shorter value could never be withheld.
+HEADER_VALUE_MIN_CHARS = 8
 HEADER_VALUE_MAX_CHARS = 4096
 _HEADER_NAME = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}")
-# Headers the transport or the SDK sets: a stored credential may not replace them.
+# Headers the transport, the SDK or HTTP itself owns: a stored credential may not replace them.
 _RESERVED_HEADERS = frozenset(
     {
         "host",
         "content-length",
         "content-type",
+        "content-encoding",
         "transfer-encoding",
+        "trailer",
         "connection",
+        "keep-alive",
+        "proxy-connection",
+        "expect",
         "accept",
         "accept-encoding",
         "cookie",
+        "origin",
+        "user-agent",
         "mcp-session-id",
         "mcp-protocol-version",
         "last-event-id",
@@ -136,8 +145,9 @@ _HEADER_VALUE = re.compile(r"[\x20\x21\x23-\x5b\x5d-\x7e]+")
 
 def validate_headers(value: Any) -> dict[str, str]:
     """``value`` as the headers a server's credential may hold: 1 to ``HEADERS_MAX`` names (a token of at most 64
-    characters, none the transport or the SDK owns, none twice whatever the case) with values of 1 to
-    ``HEADER_VALUE_MAX_CHARS`` printable ASCII characters (no ``"``, no ``\\``, no space at either end). Raises
+    characters, none the transport, the SDK or HTTP owns, none twice whatever the case) with values of
+    ``HEADER_VALUE_MIN_CHARS`` to ``HEADER_VALUE_MAX_CHARS`` printable ASCII characters (no ``"``, no ``\\``, no
+    space at either end; a shorter value could never be withheld from a result). Raises
     ``ValueError`` naming the header (by position when its name is not a valid one) and the rule, never a value."""
     if not isinstance(value, dict):
         raise ValueError("headers must be an object of header name to value")
@@ -155,8 +165,10 @@ def validate_headers(value: Any) -> dict[str, str]:
         if lowered in seen:
             raise ValueError(f"header {name}: named twice (names are compared without case)")
         seen.add(lowered)
-        if not isinstance(item, str) or not 1 <= len(item) <= HEADER_VALUE_MAX_CHARS:
-            raise ValueError(f"header {name}: a value is 1 to {HEADER_VALUE_MAX_CHARS} characters")
+        if not isinstance(item, str) or not HEADER_VALUE_MIN_CHARS <= len(item) <= HEADER_VALUE_MAX_CHARS:
+            raise ValueError(
+                f"header {name}: a value is {HEADER_VALUE_MIN_CHARS} to {HEADER_VALUE_MAX_CHARS} characters"
+            )
         if not _HEADER_VALUE.fullmatch(item):
             raise ValueError(f'header {name}: a value holds printable ASCII characters only, and no " or \\')
         if item != item.strip(" "):

@@ -138,6 +138,10 @@ describe('status words', () => {
     expect(unreadable).toEqual({ word: 'key cannot be read on this host', detail: 'no key file', tone: 'warn' });
     const refused = serverStatus(server({ connected: true, auth: auth({ kind: 'headers', status: 'credentials_refused' }) }));
     expect(refused).toEqual({ word: 'the server refused the key', detail: null, tone: 'warn' });
+    const forbidden = serverStatus(server({
+      auth: auth({ kind: 'headers', status: 'credentials_refused', reason: 'the server answered 403 (forbidden)' }),
+    }));
+    expect(forbidden).toEqual({ word: 'the server refused the key', detail: 'the server answered 403 (forbidden)', tone: 'warn' });
     expect(serverStatus(server({ auth: auth({ status: 'credentials_refused' }) })).word).toBe('the server asks for a key');
     expect(serverStatus(server({ enabled: false, auth: auth({ status: 'unavailable', reason: 'x' }) })).word).toBe('switched off');
   });
@@ -249,18 +253,22 @@ describe('a stored key', () => {
 
   it('accepts the usual shapes', () => {
     expect(headersProblem([row('Authorization', VALUE)])).toBeNull();
-    expect(headersProblem([row('X-API-Key', 'test-key-1111'), row("x!#$%&'*+.^_`|~-y", 'a b')])).toBeNull();
+    expect(headersProblem([row('X-API-Key', 'test-key-1111'), row("x!#$%&'*+.^_`|~-y", 'a b c de')])).toBeNull();
   });
   it.each([
     [[], 'Give 1 to 8 headers.'],
     [Array.from({ length: 9 }, (_, i) => row(`X-H${i}`, 'v')), 'Give 1 to 8 headers.'],
     [[row('', 'v')], 'Header 1: a name is 1 to 64 letters'],
     [[row('Bad Name', 'v')], 'Header 1: a name is 1 to 64 letters'],
-    [[row('X-Ok', 'v'), row('x'.repeat(65), 'v')], 'Header 2: a name is 1 to 64 letters'],
+    [[row('X-Ok', 'test-key-aaaa'), row('x'.repeat(65), 'v')], 'Header 2: a name is 1 to 64 letters'],
     [[row('Host', 'v')], 'Header 1: Nous sets this header itself'],
     [[row('X-Nous-Proxy-Secret', 'v')], 'Header 1: Nous sets this header itself'],
-    [[row('X-Key', 'a'), row('x-key', 'b')], 'Header 2: this name is used twice'],
+    ...['Content-Encoding', 'expect', 'TRAILER', 'Keep-Alive', 'Proxy-Connection', 'Origin', 'User-Agent'].map(
+      (name) => [[row(name, 'test-key-cccc')], 'Header 1: Nous sets this header itself'] as [{ name: string; value: string }[], string],
+    ),
+    [[row('X-Key', 'test-key-aaaa'), row('x-key', 'test-key-bbbb')], 'Header 2: this name is used twice'],
     [[row('X-Key', '')], 'Header 1: enter its value.'],
+    [[row('X-Key', 'abc1234')], 'Header 1: a value is 8 to 4096 characters'], // it could never be withheld
     [[row('X-Key', 'v'.repeat(4097))], 'Header 1: a value is at most 4096 printable ASCII characters'],
     [[row('X-Key', 'test\nkey')], 'Header 1: a value is at most 4096 printable ASCII characters'],
     [[row('X-Key', 'test-"key"')], 'Header 1: a value is at most 4096 printable ASCII characters'],

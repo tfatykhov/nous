@@ -375,27 +375,32 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             "schema": serialize_schema(prepared.schema) if prepared.schema else None,
         }
 
-    def auth_view(verdict: ServerVerdict, secret: StoredSecret | None, refused: bool) -> dict[str, Any]:
+    def auth_view(verdict: ServerVerdict, secret: StoredSecret | None, refused: int | None) -> dict[str, Any]:
         """The server's stored credential, without its values: the kind, the header names, when it was stored, and
         whether it works (``unavailable``: it cannot be opened here, ``reason`` says why; ``credentials_refused``: the
-        server's last answer was a 401)."""
+        server refused a request with a 401, or with a 403 while a credential is stored, ``reason`` saying so for a
+        403)."""
+        reason = verdict.credentials
         if verdict.credentials is not None:
             status = "unavailable"
+        elif refused is not None:
+            status = "credentials_refused"
+            reason = "the server answered 403 (forbidden)" if refused == 403 else None
         else:
-            status = "credentials_refused" if refused else "ok"
+            status = "ok"
         return {
             "kind": secret.kind if secret is not None else "none",
             "header_names": list(secret.header_names) if secret is not None else [],
             "updated_at": secret.updated_at.isoformat() if secret is not None and secret.updated_at else None,
             "status": status,
-            "reason": verdict.credentials,
+            "reason": reason,
         }
 
     def server_view(
         verdict: ServerVerdict,
         connected: dict[str, bool],
         secret: StoredSecret | None = None,
-        refused: bool = False,
+        refused: int | None = None,
     ) -> dict[str, Any]:
         config = verdict.config
         return {
@@ -418,7 +423,7 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         refused = manager.credentials_refused()
         secrets = await registry.list_secrets()
         return [
-            server_view(verdict, connected, secrets.get(verdict.config.name), verdict.config.name in refused)
+            server_view(verdict, connected, secrets.get(verdict.config.name), refused.get(verdict.config.name))
             for verdict in manager.plan(await registry.list_all(), secrets)
         ]
 
@@ -473,13 +478,12 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         async with changes:
             old = await stored(config.name)
             old_secret = await secret_of(config.name)
-            created = await registry.replace_server(config, rows, secret=sealed)
+            created, secret_deleted = await registry.replace_server(config, rows, secret=sealed)
             if headers is not None:
                 credentials: str | None = "replaced" if old_secret is not None else "set"
-            elif old_secret is not None and old is not None and old[0].url != config.url:
-                credentials = "removed"  # deleted by the registry with the URL change
             else:
-                credentials = None
+                # What the registry did with the URL change: a row that no longer validates is not read by stored().
+                credentials = "removed" if secret_deleted else None
             old_permissions = {tool.tool: tool.permission for tool in old[1]} if old else {}
             # A stored tool the server no longer lists is set to deny (its row is kept).
             new_permissions = {**{tool: "deny" for tool in old_permissions}, **{r.tool: r.permission for r in rows}}

@@ -945,6 +945,27 @@ describe('Integrations: a key for a new server', () => {
     await within(addCard()).findByText('3 tools listed');
     await fireEvent.input(valueField(), { target: { value: 'Bearer test-key-1111111111111111' } });
     expect(within(addCard()).queryByRole('button', { name: 'Add server' })).toBeNull();
+    expect(within(addCard()).getByText('The key changed since the check: check the server again.')).toBeTruthy();
+  });
+
+  it('after Check then None, no typed value is kept anywhere: not in the fields, the page or the check', async () => {
+    handlers['POST /integrations/mcp/probe'] = () => [200, PROBE()];
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fill('wiki2', 'https://mcp.deepwiki.com/mcp');
+    await typeKey();
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await within(addCard()).findByText('3 tools listed');
+    await fireEvent.click(within(addCard()).getByRole('radio', { name: 'None' }));
+    expect(within(addCard()).queryByRole('button', { name: 'Add server' })).toBeNull(); // the check had a key: stale
+    expect(document.body.innerHTML).not.toContain('test-key');
+    for (const input of Array.from(document.querySelectorAll('input'))) expect(input.value).not.toContain('test-key');
+    await fireEvent.click(within(addCard()).getByRole('radio', { name: 'API key or header' }));
+    expect(valueField().value).toBe('');
+    // Review of #917: the check keeps a count of edits, never the values (it once kept them as JSON).
+    const src = readFileSync(join(__dirname, 'Integrations.svelte'), 'utf-8');
+    expect(src).not.toMatch(/JSON\.stringify\(newHeaders\)/);
+    expect(src).toMatch(/probe = \{ name, url, edits, result \}/);
   });
 
   it('without a key file on the host the choice is disabled, with one sentence naming the setting', async () => {

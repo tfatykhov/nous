@@ -247,12 +247,16 @@
   let authKind = $state<'none' | 'headers'>('none');
   let newHeaders = $state<HeaderRow[]>([blankHeaderRow('Authorization')]);
   let headersErr = $state<string | null>(null);
-  /** The typed rows as JSON, '' for "None": what a check was made with (compared, never shown or stored). */
-  let headersSent = $derived(authKind === 'headers' ? JSON.stringify(newHeaders) : '');
-  /** The probe the tools below come from, and the name, address and headers it was made with. */
-  let probe = $state<{ name: string; url: string; sent: string; result: ProbeResult } | null>(null);
+  /** How many times the key (the choice or a row) changed. A check records the count, never the values, so a key
+   * edited after the check needs a new one. */
+  let headersEdits = $state(0);
+  const headersEdited = () => {
+    headersEdits += 1;
+  };
+  /** The probe the tools below come from: the name and address it was made for, and the key's edit count then. */
+  let probe = $state<{ name: string; url: string; edits: number; result: ProbeResult } | null>(null);
   let probeFresh = $derived(
-    probe !== null && probe.name === newName && probe.url === newUrl.trim() && probe.sent === headersSent,
+    probe !== null && probe.name === newName && probe.url === newUrl.trim() && probe.edits === headersEdits,
   );
   /** The ticked tools, by the server's own name (a Map: a name such as "constructor" is never ticked by a prototype). */
   const allowed = new SvelteMap<string, boolean>();
@@ -267,12 +271,16 @@
     newHeaders = [blankHeaderRow('Authorization')];
     headersErr = null;
     hideValues('mcp-new-');
+    headersEdited();
   }
 
   /** Choosing "None" is the form's Cancel for a key: what was typed is dropped. */
   function chooseAuth(kind: 'none' | 'headers') {
     if (kind === 'none') clearHeaders();
-    else authKind = 'headers';
+    else {
+      authKind = 'headers';
+      headersEdited();
+    }
   }
 
   /** The headers to send, or undefined for "None"; null when they break a rule (said beside the rows). */
@@ -294,9 +302,10 @@
   /** Probe a name and address, with the typed headers. Every choice starts at not allowed. */
   async function runProbe(name: string, url: string, headers: Record<string, string> | undefined) {
     checking = true;
+    const edits = headersEdits; // the key as it is sent (the fields are disabled while the check runs)
     try {
       const result = await probeServer(name, url, headers);
-      probe = { name, url, sent: headersSent, result };
+      probe = { name, url, edits, result };
       allowed.clear();
     } catch (err) {
       probe = null;
@@ -385,21 +394,21 @@
 <!-- A key's rows: a header name, its value (dots until Show), and the controls to add or drop a row. `nameId` and
      `valueId` give each input's id: `mcp-new-h-<i>` in the add form, `mcp-h.<server>.<i>` on a card (a server name
      has no "." and no "-new-", so neither can take the other's id). -->
-{#snippet headerRows(rows: HeaderRow[], nameId: (i: number) => string, valueId: (i: number) => string, disabled: boolean, err: string | null)}
+{#snippet headerRows(rows: HeaderRow[], nameId: (i: number) => string, valueId: (i: number) => string, disabled: boolean, err: string | null, edited: () => void)}
   {#each rows as row, i (i)}
     {@const vid = valueId(i)}
     {@const shown = revealed.has(vid)}
     <div class="header-row">
       <div class="field">
         <label for={nameId(i)}>Header {i + 1} name</label>
-        <input id={nameId(i)} bind:value={row.name} autocomplete="off" spellcheck="false" {disabled} />
+        <input id={nameId(i)} bind:value={row.name} autocomplete="off" spellcheck="false" {disabled} oninput={edited} />
       </div>
       <div class="field">
         <label for={vid}>Header {i + 1} value</label>
         {#if shown}
-          <input id={vid} type="text" bind:value={row.value} autocomplete="off" spellcheck="false" {disabled} />
+          <input id={vid} type="text" bind:value={row.value} autocomplete="off" spellcheck="false" {disabled} oninput={edited} />
         {:else}
-          <input id={vid} type="password" bind:value={row.value} autocomplete="off" spellcheck="false" {disabled} />
+          <input id={vid} type="password" bind:value={row.value} autocomplete="off" spellcheck="false" {disabled} oninput={edited} />
         {/if}
       </div>
       <div class="actions row-actions">
@@ -409,7 +418,7 @@
         </Button>
         {#if rows.length > 1}
           <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" {disabled}
-            aria-label={`Drop header ${i + 1}`} onclick={() => dropRow(rows, i, valueId)}>Drop</Button>
+            aria-label={`Drop header ${i + 1}`} onclick={() => { dropRow(rows, i, valueId); edited(); }}>Drop</Button>
         {/if}
       </div>
     </div>
@@ -418,7 +427,7 @@
   <div class="actions">
     {#if rows.length < HEADERS_MAX}
       <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" {disabled}
-        onclick={() => rows.push(blankHeaderRow())}>Add another header</Button>
+        onclick={() => { rows.push(blankHeaderRow()); edited(); }}>Add another header</Button>
     {/if}
   </div>
   <p class="hint">{KEY_HINT}</p>
@@ -510,7 +519,7 @@
         <p class="key-line">{keyLine(s.auth)}</p>
         {#if keyEdit?.server === s.name}
           <div class="confirm" role="group" aria-label="New key for {s.name}">
-            {@render headerRows(keyEdit.rows, (i) => `mcp-h.${s.name}.${i}`, (i) => `mcp-v.${s.name}.${i}`, !!inFlight, keyError)}
+            {@render headerRows(keyEdit.rows, (i) => `mcp-h.${s.name}.${i}`, (i) => `mcp-v.${s.name}.${i}`, !!inFlight, keyError, () => {})}
             <div class="actions">
               <Button size="sm" class="max-md:min-h-11 max-md:px-4" disabled={!!inFlight} onclick={() => void saveKey(s)}>
                 {inFlight === 'key' ? 'Saving…' : 'Save key'}
@@ -645,7 +654,7 @@
       </fieldset>
       {#if authKind === 'headers'}
         <div class="key-rows">
-          {@render headerRows(newHeaders, (i) => `mcp-new-h-${i}`, (i) => `mcp-new-v-${i}`, checking || adding, headersErr)}
+          {@render headerRows(newHeaders, (i) => `mcp-new-h-${i}`, (i) => `mcp-new-v-${i}`, checking || adding, headersErr, headersEdited)}
         </div>
       {/if}
       {#if replaces}
@@ -660,7 +669,7 @@
     </form>
 
     {#if probe && !probeFresh}
-      <p class="hint">The name or address changed since the check: check the server again.</p>
+      <p class="hint">{probe.name !== newName || probe.url !== newUrl.trim() ? 'The name or address changed since the check: check the server again.' : 'The key changed since the check: check the server again.'}</p>
     {:else if probe}
       {@const tools = probe.result.tools}
       <h3>{tools.length} tool{tools.length === 1 ? '' : 's'} listed</h3>

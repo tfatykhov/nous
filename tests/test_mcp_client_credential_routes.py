@@ -59,6 +59,7 @@ class Remote:
         self.opened = 0
         self.closed = 0
         self.result_text = "hello"
+        self.refuse_with: int | None = None  # every request answered with this status
 
 
 class _Session:
@@ -94,7 +95,7 @@ class Remotes:
             headers = {k: v for k, v in request.headers.items() if k in ("authorization", "x-api-key")}
             seen.append(headers)
             ok = all(headers.get(k.lower()) == v for k, v in remote.requires.items())
-            return httpx.Response(200 if ok else 401)
+            return httpx.Response(remote.refuse_with or (200 if ok else 401))
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(answer), auth=auth) as client:
             response = await client.post(url)
@@ -409,6 +410,60 @@ async def test_a_listing_that_repeats_the_stored_key_is_refused_though_another_w
     assert response.status_code == 502 and response.json() == {"error": LISTING_REPEATS}
     assert await env.registry.list_secrets() == before
     assert "leaky" not in {t.tool for _c, tools in await env.registry.list_all() for t in tools}
+
+
+async def test_a_403_with_a_stored_key_is_said_in_the_call_and_the_listing(make_env):
+    env = await make_env()
+    await _add(env, headers={"Authorization": VALUE}, tools={"search": "allow"})
+    env.remotes.by_url[ALPHA].refuse_with = 403
+    text, is_error = await env.dispatcher.dispatch("mcp__alpha__search", {"q": "x"})
+    assert is_error and text == (
+        'Tool error: the MCP server "alpha" answered 403 (forbidden). The stored credentials may be wrong or lack '
+        "access. The owner can replace them on the Integrations screen."
+    )
+    (server,) = (await _req(env, "GET", "/integrations/mcp/servers")).json()["servers"]
+    assert (server["auth"]["status"], server["auth"]["reason"]) == (
+        "credentials_refused",
+        "the server answered 403 (forbidden)",
+    )
+
+
+async def test_a_moved_server_whose_old_row_no_longer_validates_reports_the_key_removed(make_env, db):
+    """Review of #917: the old row is not read back (its URL breaks a rule), but the registry still deletes its key
+    with the URL change; the answer and the event say so."""
+    from sqlalchemy import update
+
+    from nous.storage.models import McpServer
+
+    env = await make_env()
+    await _add(env, headers={"Authorization": VALUE}, tools={"search": "allow"})
+    async with db.session() as session:
+        await session.execute(
+            update(McpServer)
+            .where(McpServer.agent_id == env.registry._agent_id, McpServer.name == "alpha")
+            .values(url="https://alpha.example.com/mcp?stale=1")
+        )
+        await session.commit()
+    assert [c.name for c, _t in await env.registry.list_all()] == []  # it no longer validates
+    moved = await _add(env, url=MOVED, tools={"search": "allow"})
+    assert moved.status_code == 200 and moved.json()["credentials"] == "removed"
+    assert _changes(env)[-1]["credentials"] == "removed" and _changes(env)[-1]["header_count"] == 0
+    assert await env.registry.list_secrets() == {}
+
+
+@pytest.mark.parametrize(
+    "headers,start",
+    [
+        ({"Authorization": "abc1234"}, "header Authorization: a value is 8 to 4096 characters"),
+        ({"User-Agent": "test-key-7777"}, "header User-Agent: the client sets this header itself"),
+        ({"content-encoding": "test-key-7777"}, "header content-encoding: the client sets this header itself"),
+    ],
+)
+async def test_the_review_header_rules_through_the_route(make_env, headers, start):
+    env = await make_env()
+    response = await _add(env, headers=headers)
+    assert response.status_code == 400 and response.json()["error"].startswith(start)
+    assert "7777" not in response.text and "abc1234" not in response.text
 
 
 async def test_a_body_that_is_not_json_is_refused_without_repeating_it(make_env):

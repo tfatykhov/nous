@@ -205,7 +205,8 @@ export function serverStatus(s: McpServer): Status {
   if (!s.enabled) return { word: 'switched off', detail: null, tone: 'neutral' };
   if (s.auth.status === 'unavailable') return { word: 'key cannot be read on this host', detail: s.auth.reason, tone: 'warn' };
   if (s.auth.status === 'credentials_refused') {
-    return { word: s.auth.kind === 'none' ? 'the server asks for a key' : 'the server refused the key', detail: null, tone: 'warn' };
+    // The reason says a 403 ("forbidden"): the key may be wrong or lack access.
+    return { word: s.auth.kind === 'none' ? 'the server asks for a key' : 'the server refused the key', detail: s.auth.reason, tone: 'warn' };
   }
   if (s.connected) return { word: 'connected', detail: null, tone: 'ok' };
   return { word: 'connects on first use', detail: null, tone: 'neutral' };
@@ -224,8 +225,11 @@ export const blankHeaderRow = (name = ''): HeaderRow => ({ name, value: '' });
 // The server's rules (config.validate_headers), checked here too so a typo is said before anything is sent.
 const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/;
 const HEADER_VALUE = /^[\x20\x21\x23-\x5b\x5d-\x7e]{1,4096}$/;
+/** A shorter value could never be withheld from a result (bridge.WITHHELD_MIN_CHARS), so the server refuses it. */
+export const HEADER_VALUE_MIN = 8;
 const RESERVED_HEADERS = new Set([
-  'host', 'content-length', 'content-type', 'transfer-encoding', 'connection', 'accept', 'accept-encoding', 'cookie',
+  'host', 'content-length', 'content-type', 'content-encoding', 'transfer-encoding', 'trailer', 'connection',
+  'keep-alive', 'proxy-connection', 'expect', 'accept', 'accept-encoding', 'cookie', 'origin', 'user-agent',
   'mcp-session-id', 'mcp-protocol-version', 'last-event-id', 'te', 'upgrade', 'proxy-authorization',
 ]);
 
@@ -241,6 +245,9 @@ export function headersProblem(rows: readonly HeaderRow[]): string | null {
     if (seen.has(lower)) return `${at}: this name is used twice (names are compared without case).`;
     seen.add(lower);
     if (row.value === '') return `${at}: enter its value.`;
+    if (row.value.length < HEADER_VALUE_MIN) {
+      return `${at}: a value is ${HEADER_VALUE_MIN} to 4096 characters (a shorter one could not be kept out of the tools' results).`;
+    }
     if (!HEADER_VALUE.test(row.value)) return `${at}: a value is at most 4096 printable ASCII characters, with no " or \\.`;
     if (row.value !== row.value.trim()) return `${at}: a value may not start or end with a space.`;
   }

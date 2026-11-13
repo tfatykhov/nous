@@ -134,8 +134,12 @@ def test_an_unreadable_key_file_is_no_key(tmp_path, caplog):
 
 
 def test_valid_headers_are_kept_as_given():
-    headers = {"Authorization": VALUE, "X-API-Key": "test-key-2222", "x!#$%&'*+.^_`|~-y": "a b"}
+    headers = {"Authorization": VALUE, "X-API-Key": "test-key-2222", "x!#$%&'*+.^_`|~-y": "a b c de"}
     assert validate_headers(headers) == headers
+
+
+# Review fix 8: HTTP's own headers, in any case.
+RESERVED_NEW = ("Content-Encoding", "expect", "TRAILER", "Keep-Alive", "Proxy-Connection", "Origin", "User-Agent")
 
 
 @pytest.mark.parametrize(
@@ -145,7 +149,7 @@ def test_valid_headers_are_kept_as_given():
         ({}, "give 1 to 8 headers"),
         ({f"X-H{i}": "v" for i in range(9)}, "give 1 to 8 headers"),
         ({"Bad Name": "v"}, "header 1: a name is 1 to 64 letters"),
-        ({"X-Ok": "v", "": "v"}, "header 2: a name is 1 to 64 letters"),
+        ({"X-Ok": "test-key-dddd", "": "v"}, "header 2: a name is 1 to 64 letters"),
         ({"x" * 65: "v"}, "header 1: a name is 1 to 64 letters"),
         ({"Héader": "v"}, "header 1: a name is 1 to 64 letters"),
         ({"Host": "v"}, "header Host: the client sets this header itself"),
@@ -153,10 +157,12 @@ def test_valid_headers_are_kept_as_given():
         ({"X-Nous-Proxy-Secret": "v"}, "header X-Nous-Proxy-Secret: the client sets this header itself"),
         ({"x-nous-anything": "v"}, "header x-nous-anything: the client sets this header itself"),
         ({"Proxy-Authorization": "v"}, "header Proxy-Authorization: the client sets this header itself"),
-        ({"X-Key": "a", "x-key": "b"}, "header x-key: named twice"),
-        ({"X-Key": ""}, "header X-Key: a value is 1 to 4096 characters"),
-        ({"X-Key": "v" * 4097}, "header X-Key: a value is 1 to 4096 characters"),
-        ({"X-Key": 5}, "header X-Key: a value is 1 to 4096 characters"),
+        ({"X-Key": "test-key-aaaa", "x-key": "test-key-bbbb"}, "header x-key: named twice"),
+        *(({name: "test-key-cccc"}, f"header {name}: the client sets this header itself") for name in RESERVED_NEW),
+        ({"X-Key": ""}, "header X-Key: a value is 8 to 4096 characters"),
+        ({"X-Key": "abc1234"}, "header X-Key: a value is 8 to 4096 characters"),  # 7: it could never be withheld
+        ({"X-Key": "v" * 4097}, "header X-Key: a value is 8 to 4096 characters"),
+        ({"X-Key": 5}, "header X-Key: a value is 8 to 4096 characters"),
         ({"X-Key": "test\nkey"}, "header X-Key: a value holds printable ASCII characters only"),
         ({"X-Key": "test-kéy"}, "header X-Key: a value holds printable ASCII characters only"),
         ({"X-Key": 'test-"key"'}, "header X-Key: a value holds printable ASCII characters only"),

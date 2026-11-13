@@ -139,7 +139,7 @@ class McpRegistry:
         """Insert the server's row, or update the row with its name (a new URL deletes its stored credential).
         Returns the row's id."""
         async with self._db.session() as session:
-            server_id, _created = await self._upsert_server(session, server)
+            server_id, _created, _deleted = await self._upsert_server(session, server)
             await session.commit()
         return server_id
 
@@ -153,17 +153,18 @@ class McpRegistry:
 
     async def replace_server(
         self, server: ServerConfig, tools: Sequence[ToolConfig], *, secret: SealedSecret | None = None
-    ) -> bool:
+    ) -> tuple[bool, bool]:
         """``upsert_server`` and ``upsert_tools`` in one transaction: a new URL is never stored with the old
         listing's permissions, nor with the old credential. With ``secret``, it becomes the server's credential in
-        the same transaction. True when the server's row was created."""
+        the same transaction. Returns ``(created, credential_deleted)``: whether the server's row was created, and
+        whether the URL change deleted a stored credential (the row is read whether or not it still validates)."""
         async with self._db.session() as session:
-            server_id, created = await self._upsert_server(session, server)
+            server_id, created, deleted = await self._upsert_server(session, server)
             await self._upsert_tools(session, server_id, tools)
             if secret is not None:
                 await self._set_secret(session, server_id, secret)
             await session.commit()
-        return created
+        return created, deleted
 
     async def update_server(
         self,
@@ -243,15 +244,18 @@ class McpRegistry:
             await session.commit()
         return True
 
-    async def _upsert_server(self, session: AsyncSession, server: ServerConfig) -> tuple[uuid.UUID, bool]:
+    async def _upsert_server(self, session: AsyncSession, server: ServerConfig) -> tuple[uuid.UUID, bool, bool]:
+        """``(row id, created, credential deleted)``."""
         row = await self._server_row(session, server.name)
         created = row is None
+        deleted = False
         if row is None:
             row = McpServer(agent_id=self._agent_id, name=server.name)
             session.add(row)
         elif row.url != server.url:
             # A credential never follows a server to another address, whoever stores it (the routes, the seed).
-            await session.execute(delete(McpServerSecret).where(McpServerSecret.server_id == row.id))
+            result = await session.execute(delete(McpServerSecret).where(McpServerSecret.server_id == row.id))
+            deleted = bool(getattr(result, "rowcount", 0))
         row.url = server.url
         row.transport = server.transport
         row.enabled = server.enabled
@@ -259,7 +263,7 @@ class McpRegistry:
         row.call_timeout_seconds = server.call_timeout_seconds
         row.updated_at = func.now()
         await session.flush()
-        return row.id, created
+        return row.id, created, deleted
 
     async def _set_secret(self, session: AsyncSession, server_id: uuid.UUID, secret: SealedSecret) -> None:
         """Make ``secret`` the server's credential: the old row is deleted and a new one inserted, so the new
