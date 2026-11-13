@@ -1,4 +1,5 @@
-"""F112 MCP client: the one module that imports the MCP SDK's client.
+"""F112 MCP client: the one module that opens sessions with the MCP SDK's client (``oauth.py`` imports only the
+SDK's auth models and helpers).
 
 ``open_session`` opens a streamable-HTTP ``ClientSession`` over an HTTP client that:
 

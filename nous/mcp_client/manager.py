@@ -42,6 +42,15 @@ connection: a call that then fails on it answers with a fixed sentence asking th
 (for a 403, only when one is stored); a call the server answered is never rewritten. The listing's status keeps the
 refusal until a call is answered on a connection that was refused nothing, or the credential changes. Every result's
 text is scrubbed of the server's credential values, in the forms a server may encode them (``bridge.withhold``).
+
+OAuth (PR 2d): a credential row of kind ``oauth`` holds a token record; its server sends ``Authorization: Bearer``
+per request (``_OAuthSource``), refreshed when the token expires within a minute and once after a 401 (retried once,
+and only when the stored token is still the one sent). Every refresh goes through ``_refresh``: a task this manager
+owns and callers only wait for, under a per-server lock that survives ``reload``, which reads the row again, requires
+the same row id, refreshes only if still stale, and stores the result with ``UPDATE ... WHERE id`` before anything
+uses it. A failed refresh marks the row as needing a new sign-in: calls then answer at once with a fixed sentence and
+contact neither the server nor the provider. Nothing here ever starts a login: sign-ins are the owner's routes'
+(``oauth.OAuthFlows``, held in ``flows``).
 """
 
 from __future__ import annotations
