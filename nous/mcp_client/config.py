@@ -181,6 +181,24 @@ def validate_headers(value: Any) -> dict[str, str]:
     return dict(value)
 
 
+TOKEN_MAX_CHARS = 8192
+# An OAuth token or client secret (PR 2d) becomes a header value or sits beside one: the header value rule without the
+# space (a bearer token has none, and the result scrub would look for a two-word value's second word alone).
+_TOKEN = re.compile(r"[\x21\x23-\x5b\x5d-\x7e]+")
+
+
+def token_ok(value: Any) -> bool:
+    """Whether ``value`` may be used as an access token, a refresh token or a client secret: ``HEADER_VALUE_MIN_CHARS``
+    to ``TOKEN_MAX_CHARS`` printable ASCII characters with no space, ``"`` or ``\\``, at least
+    ``HEADER_VALUE_MIN_ALNUM`` of them letters or digits (a shorter one could not be withheld from a result)."""
+    return (
+        isinstance(value, str)
+        and HEADER_VALUE_MIN_CHARS <= len(value) <= TOKEN_MAX_CHARS
+        and _TOKEN.fullmatch(value) is not None
+        and sum(ch.isalnum() for ch in value) >= HEADER_VALUE_MIN_ALNUM
+    )
+
+
 class ServerConfig(BaseModel):
     """One external MCP server (a ``nous_system.mcp_servers`` row)."""
 

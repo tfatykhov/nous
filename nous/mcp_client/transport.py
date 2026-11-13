@@ -233,13 +233,23 @@ class _LimitedTransport(httpx.AsyncBaseTransport):
         await self._inner.aclose()
 
 
+def quiet_host(url: str) -> None:
+    """Drop the HTTP client's request lines for ``url``'s host from now on (an OAuth endpoint's host, PR 2d)."""
+    _QUIET_HOSTS.add((urlsplit(url).hostname or "").lower())
+
+
 def guarded_client(
-    allow_private_hosts: frozenset[str], max_response_bytes: int, *, auth: httpx.Auth | None = None
+    allow_private_hosts: frozenset[str],
+    max_response_bytes: int,
+    *,
+    auth: httpx.Auth | None = None,
+    timeout: httpx.Timeout | float = _HTTP_TIMEOUT,
 ) -> httpx.AsyncClient:
     """An HTTP client whose every connection goes through ``_GuardedBackend``, whose every response body is bounded
     (``_LimitedTransport``), that follows no redirect itself (the SDK follows a same-origin one on its own, through
     this client), reads no proxy from the environment and runs ``auth`` on every request it sends. Fails closed
-    (RuntimeError) when the installed httpx no longer exposes the pool's network backend."""
+    (RuntimeError) when the installed httpx no longer exposes the pool's network backend. The OAuth client (PR 2d) is
+    one of these with no ``auth`` and a 10 s ``timeout``."""
     transport = httpx.AsyncHTTPTransport(retries=0)
     pool = getattr(transport, "_pool", None)
     if pool is None or not hasattr(pool, "_network_backend"):
@@ -249,7 +259,7 @@ def guarded_client(
         transport=_LimitedTransport(transport, max_response_bytes),
         follow_redirects=False,
         trust_env=False,
-        timeout=_HTTP_TIMEOUT,
+        timeout=timeout,
         headers={"Accept-Encoding": "identity"},
         auth=auth,
     )

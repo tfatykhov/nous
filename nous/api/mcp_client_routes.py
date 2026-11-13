@@ -302,13 +302,13 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         return (await registry.list_secrets()).get(name)
 
     async def stored_values(name: str) -> list[str]:
-        """The values of the server's stored credential, opened with its stored URL (none when it cannot be opened):
-        a listing that repeats one is refused even when other headers, or none, were sent."""
+        """The values of the server's stored credential (header values, or an OAuth record's tokens and client
+        secret), opened with its stored URL (none when it cannot be opened): a listing that repeats one is refused
+        even when other headers, or none, were sent."""
         secret, current = await secret_of(name), await stored(name)
         if secret is None or current is None:
             return []
-        opened, _problem = manager.open_credentials(name, current[0].url, secret)
-        return list(opened.values()) if opened else []
+        return manager.credential_values(name, current[0].url, secret)
 
     async def probe_tools(name: str, url: str, headers: dict[str, str] | None = None) -> list[ProbedTool]:
         try:
@@ -467,7 +467,7 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         stored_secret = await secret_of(config.name)
         if sent is None and stored_secret is not None:
             # Opened as bound to the request's URL: at another URL it does not open, and nothing is sent.
-            sent, _problem = manager.open_credentials(config.name, config.url, stored_secret)
+            sent, _problem = await manager.credential_headers(config.name, config.url, stored_secret)
         probed = await probe_tools(config.name, config.url, sent)
         digest_stored = expect(body, probed)
         unknown = sorted(set(wanted) - {tool.tool for tool in probed})
@@ -579,7 +579,7 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         stored_secret = await secret_of(name)
         headers: dict[str, str] | None = None
         if stored_secret is not None:  # the stored URL and the stored credential, nothing from the request
-            headers, problem = manager.open_credentials(name, before[0].url, stored_secret)
+            headers, problem = await manager.credential_headers(name, before[0].url, stored_secret)
             if problem is not None:
                 raise _Refused(409, f"the stored credentials cannot be used here: {problem}")
         probed = await probe_tools(name, before[0].url, headers)

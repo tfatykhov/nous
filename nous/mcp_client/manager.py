@@ -85,7 +85,17 @@ from nous.mcp_client.config import (
     parse_pins,
     pin_host,
 )
-from nous.mcp_client.secrets import KeyFile, SealedSecret, StoredSecret, aad_fields, open_headers, seal_headers
+from nous.mcp_client.oauth import HttpFactory, OAuthFlows, OAuthProblem, expiring, oauth_client, refresh_tokens
+from nous.mcp_client.secrets import (
+    KeyFile,
+    OAuthRecord,
+    SealedSecret,
+    StoredSecret,
+    aad_fields,
+    open_credential,
+    seal_headers,
+    seal_oauth,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +112,7 @@ OFF_LOOP_RESULT_CHARS = 64_000
 # (transport.open_session); auth is the server's _ServerAuth, run on every request of the session.
 Connector = Callable[..., AbstractAsyncContextManager[Any]]
 
+SIGN_IN_NEEDED = "the sign-in has expired: the owner must sign in again"
 PROBE_REFUSED = "the server refused the credentials"
 PROBE_ASKS = "the server asks for credentials"
 LISTING_REPEATS = "the server's tool list repeats the credentials it was sent"
@@ -123,6 +134,8 @@ class Registry(Protocol):
     async def list_enabled(self) -> list[tuple[ServerConfig, list[ToolConfig]]]: ...
 
     async def list_secrets(self) -> dict[str, StoredSecret]: ...
+
+    async def update_secret_in_place(self, secret_id: uuid.UUID, secret: SealedSecret) -> bool: ...
 
 
 class ServerUnavailable(Exception):
@@ -154,6 +167,56 @@ class ProbeCredentials(Exception):
     when none were), or whose listing repeats a credential value it was sent (``LISTING_REPEATS``). Fixed text."""
 
 
+class SignInNeeded(Exception):
+    """PR 2d: a server's OAuth tokens are expired and could not be refreshed (or the owner must sign in again): the
+    request is not sent."""
+
+
+class _OAuthSource:
+    """PR 2d: a server's OAuth credential. It holds the token record in memory (the one its server was built with,
+    then each refresh's) and refreshes it through the manager's one entry point (``refresh``: the record to use now, or
+    None when there is none). ``dead``: whether the owner must sign in again (a refresh failed), so nothing is sent."""
+
+    def __init__(
+        self,
+        record: OAuthRecord,
+        refresh: Callable[[str | None], Awaitable[OAuthRecord | None]],
+        dead: Callable[[], bool],
+    ) -> None:
+        self.record = record
+        self._previous: OAuthRecord | None = None
+        self._refresh = refresh
+        self._dead = dead
+
+    def _adopt(self, record: OAuthRecord) -> None:
+        if record.access_token != self.record.access_token:
+            self._previous, self.record = self.record, record
+
+    async def before(self) -> str:
+        """The access token to send, refreshed first when it expires within a minute. Raises ``SignInNeeded``."""
+        if self._dead():
+            raise SignInNeeded()
+        if expiring(self.record):
+            fresh = await self._refresh(None)
+            if fresh is None:
+                raise SignInNeeded()
+            self._adopt(fresh)
+        return self.record.access_token
+
+    async def after_401(self, sent: str) -> str | None:
+        """The token to retry with once after a 401 to a request that carried ``sent`` (refreshed only when the stored
+        token is still ``sent``), or None when there is none."""
+        fresh = await self._refresh(sent)
+        if fresh is None:
+            return None
+        self._adopt(fresh)
+        return fresh.access_token
+
+    def values(self) -> list[str]:
+        """The secret values a result must not repeat: the current record's and the one before it."""
+        return self.record.values() + (self._previous.values() if self._previous is not None else [])
+
+
 def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
     """What ``_ServerAuth`` compares: the scheme, the host as sent (an ``xn--`` host stays encoded) and the port
     (None for the scheme's default, as httpx gives it)."""
@@ -166,21 +229,49 @@ class _ServerAuth(httpx.Auth):
     ``source`` gives the headers to set; nothing is set on a request to another origin than the URL's (scheme, host
     and port; the SDK follows a redirect only within that origin, so this is a second guard). A 401 or 403 answer to
     a POST (an MCP request; the SDK swallows the GET event stream's errors) is kept in ``refused`` (never cleared: a
-    later answer on the same session does not unsay it) and passed to ``on_refused``."""
+    later answer on the same session does not unsay it) and passed to ``on_refused``.
+
+    With ``oauth`` (PR 2d) the header is ``Authorization: Bearer`` with the source's token, refreshed before a request
+    when it is about to expire; a 401 to it is retried once with the token the source gives after it (a refresh only
+    when the stored token is the one that was sent), and only the last answer counts as a refusal. When the source
+    has no token to send (``SignInNeeded``), nothing is sent and ``on_sign_in`` ends the connection."""
 
     def __init__(
-        self, url: str, source: Callable[[], Mapping[str, str]], on_refused: Callable[[int], None] | None = None
+        self,
+        url: str,
+        source: Callable[[], Mapping[str, str]],
+        on_refused: Callable[[int], None] | None = None,
+        *,
+        oauth: _OAuthSource | None = None,
+        on_sign_in: Callable[[], None] | None = None,
     ) -> None:
         self._origin = _origin(httpx.URL(url))
         self._source = source
         self._on_refused = on_refused
+        self._oauth = oauth
+        self._on_sign_in = on_sign_in
         self.refused: int | None = None
 
     async def async_auth_flow(self, request: httpx.Request) -> AsyncGenerator[httpx.Request, httpx.Response]:
-        if _origin(request.url) == self._origin:
+        own = _origin(request.url) == self._origin
+        sent: str | None = None
+        if own and self._oauth is not None:
+            try:
+                sent = await self._oauth.before()
+            except SignInNeeded:
+                if self._on_sign_in is not None:
+                    self._on_sign_in()
+                raise
+            request.headers["Authorization"] = f"Bearer {sent}"
+        elif own:
             for name, value in self._source().items():
                 request.headers[name] = value
         response = yield request
+        if sent is not None and self._oauth is not None and response.status_code == 401:
+            again = await self._oauth.after_401(sent)
+            if again is not None:
+                request.headers["Authorization"] = f"Bearer {again}"
+                response = yield request
         if request.method == "POST" and response.status_code in (401, 403):
             self.refused = response.status_code
             if self._on_refused is not None:
@@ -298,6 +389,7 @@ class _Connection:
     task: asyncio.Task[None] | None = None
     session: Any = None
     refused: int | None = None
+    sign_in: bool = False  # PR 2d: a request of it was not sent because the owner must sign in again
 
     @property
     def closed(self) -> bool:
@@ -317,16 +409,19 @@ class _Server:
         *,
         secret_id: uuid.UUID | None = None,
         headers: Mapping[str, str] | None = None,
+        oauth: _OAuthSource | None = None,
     ) -> None:
         self.config = config  # replaced by a reload that keeps the server (same URL, same credential)
         # What it was built for: a reload keeps it only while both are unchanged.
         self.url = config.url
         self.secret_id = secret_id
-        # The opened credential, held in memory: a retiring server keeps using it and never re-reads by name.
+        # The opened credential, held in memory: a retiring server keeps using it and never re-reads by name (an
+        # OAuth source re-reads only its own row, by id, to refresh).
         held = dict(headers or {})
         self._source: Callable[[], Mapping[str, str]] = lambda: held
-        self.has_credentials = bool(held)
-        self.withheld = credential_needles(held.values())
+        self.oauth = oauth
+        self.has_credentials = bool(held) or oauth is not None
+        self._withheld = credential_needles(held.values())
         # The last 401 or 403 any of its connections was answered with: the listing's status. Cleared when a call is
         # answered on a connection that was refused nothing.
         self.refusal: int | None = None
@@ -390,10 +485,22 @@ class _Server:
         """The current connection attempt (a failed one included, until the next attempt replaces it)."""
         return self._conn
 
+    @property
+    def withheld(self) -> tuple[str, ...]:
+        """What a result's text is scrubbed of: the stored header values, or the OAuth tokens held now."""
+        return credential_needles(self.oauth.values()) if self.oauth is not None else self._withheld
+
     def auth_for(self, conn: _Connection | None) -> _ServerAuth:
-        """The credential, per request, of the session ``conn`` opens: its refusals are recorded on ``conn``."""
+        """The credential, per request, of the session ``conn`` opens: its refusals are recorded on ``conn``, and a
+        request not sent for want of a sign-in ends it."""
         on_refused = None if conn is None else functools.partial(self._refused, conn)
-        return _ServerAuth(self.url, self._source, on_refused=on_refused)
+        on_sign_in = None if conn is None else functools.partial(self._sign_in_needed, conn)
+        return _ServerAuth(self.url, self._source, on_refused=on_refused, oauth=self.oauth, on_sign_in=on_sign_in)
+
+    @staticmethod
+    def _sign_in_needed(conn: _Connection) -> None:
+        conn.sign_in = True
+        conn.stop.set()
 
     def _refused(self, conn: _Connection, status: int) -> None:
         """A POST of ``conn`` was answered 401 or 403. A 401 ends that connection (the one it came on, never a newer
@@ -456,6 +563,7 @@ class McpClientManager:
         bus: EventBus | None = None,
         *,
         connect: Connector | None = None,
+        oauth_http: HttpFactory | None = None,
     ) -> None:
         if connect is None:
             from nous.mcp_client.transport import open_session  # the SDK is imported only when the client runs
@@ -481,6 +589,24 @@ class McpClientManager:
         self._sources: dict[str, str] = {}  # tool name -> the server's own name of the tool its handler calls
         self._closed = False
         self._lock = asyncio.Lock()  # one start or reload at a time
+        # PR 2d: OAuth. The sign-ins in progress; the client every OAuth request goes through (its own, with no
+        # credential: never a session's); one refresh lock per server name (a reload replaces _Server objects, not
+        # these); the refresh tasks, owned here so a caller that goes away cannot cancel a refresh after the provider
+        # rotated the token; and, by server name, the credential row whose refresh failed (the owner must sign in).
+        self.flows = OAuthFlows()
+        self._oauth_http: HttpFactory = oauth_http or functools.partial(oauth_client, self._allow)
+        self._refresh_locks: dict[str, asyncio.Lock] = {}
+        self._refresh_tasks: set[asyncio.Task[OAuthRecord | None]] = set()
+        self._needs_sign_in: dict[str, uuid.UUID] = {}
+
+    @property
+    def oauth_http(self) -> HttpFactory:
+        """The client factory for OAuth requests (discovery, registration, the code exchange, refreshes)."""
+        return self._oauth_http
+
+    @property
+    def allow_private_hosts(self) -> frozenset[str]:
+        return self._allow
 
     def registered(self) -> list[str]:
         """The names of the tools this manager has registered, in registration order."""
@@ -513,9 +639,14 @@ class McpClientManager:
             return "its stored host or port is not its pinned one"
         return None
 
-    def _open(self, config: ServerConfig, secret: StoredSecret) -> tuple[dict[str, str] | None, str | None]:
-        """``secret`` opened for ``config``'s name and stored URL: ``(headers, None)`` or ``(None, reason)``."""
-        return open_headers(self._keys.box(), aad_fields(self._agent_id, config.name, config.url, secret.kind), secret)
+    def _open(
+        self, config: ServerConfig, secret: StoredSecret
+    ) -> tuple[dict[str, str] | OAuthRecord | None, str | None]:
+        """``secret`` opened for ``config``'s name and stored URL: ``(headers or token record, None)`` or
+        ``(None, reason)``."""
+        return open_credential(
+            self._keys.box(), aad_fields(self._agent_id, config.name, config.url, secret.kind), secret
+        )
 
     def plan(
         self,
@@ -652,7 +783,14 @@ class McpClientManager:
                     server.config = config  # the same connection; a new call timeout applies to the next call
                     server.background = verdict.background
                 else:
-                    headers = self._open(config, secret)[0] if secret is not None else None
+                    opened = self._open(config, secret)[0] if secret is not None else None
+                    source = None
+                    if isinstance(opened, OAuthRecord) and secret_id is not None:
+                        source = _OAuthSource(
+                            opened,
+                            functools.partial(self._refresh, config.name, config.url, secret_id),
+                            functools.partial(self.needs_sign_in, config.name, secret_id),
+                        )
                     server = _Server(
                         config,
                         self._connect,
@@ -660,7 +798,8 @@ class McpClientManager:
                         self._emit_error,
                         verdict.background,
                         secret_id=secret_id,
-                        headers=headers,
+                        headers=opened if isinstance(opened, dict) else None,
+                        oauth=source,
                     )
                 servers[config.name] = server
             retiring = [server for name, server in self._servers.items() if servers.get(name) is not server]
@@ -792,15 +931,101 @@ class McpClientManager:
         """Whether a key is loaded (``NOUS_MCP_CLIENT_KEY_FILE``), so a credential can be stored and opened."""
         return self._keys.box() is not None
 
-    def open_credentials(self, name: str, url: str, secret: StoredSecret) -> tuple[dict[str, str] | None, str | None]:
-        """The stored credential ``secret`` of the server ``name``, opened as bound to ``url``: ``(headers, None)``,
-        or ``(None, reason)`` (``url`` is not the one it was sealed for, no key, another key...)."""
-        return open_headers(self._keys.box(), aad_fields(self._agent_id, name, url, secret.kind), secret)
+    def _opened(
+        self, name: str, url: str, secret: StoredSecret
+    ) -> tuple[dict[str, str] | OAuthRecord | None, str | None]:
+        return open_credential(self._keys.box(), aad_fields(self._agent_id, name, url, secret.kind), secret)
+
+    def credential_values(self, name: str, url: str, secret: StoredSecret) -> list[str]:
+        """The secret values of the stored credential ``secret`` of the server ``name``, opened as bound to ``url``
+        (header values, or an OAuth record's tokens and client secret); none when it cannot be opened."""
+        opened, _problem = self._opened(name, url, secret)
+        if isinstance(opened, OAuthRecord):
+            return opened.values()
+        return list(opened.values()) if opened else []
+
+    async def credential_headers(
+        self, name: str, url: str, secret: StoredSecret
+    ) -> tuple[dict[str, str] | None, str | None]:
+        """The headers the stored credential ``secret`` of the server ``name`` sends, opened as bound to ``url``:
+        ``(headers, None)`` or ``(None, reason)`` (``url`` is not the one it was sealed for, no key, another key...).
+        An OAuth record about to expire is refreshed first, through the one refresh entry point; one that cannot be
+        is ``SIGN_IN_NEEDED``."""
+        opened, problem = self._opened(name, url, secret)
+        if not isinstance(opened, OAuthRecord):
+            return opened, problem
+        if self.needs_sign_in(name, secret.id):
+            return None, SIGN_IN_NEEDED
+        if expiring(opened):
+            fresh = await self._refresh(name, url, secret.id, None)
+            if fresh is None:
+                return None, SIGN_IN_NEEDED
+            opened = fresh
+        return {"Authorization": f"Bearer {opened.access_token}"}, None
 
     def seal_credentials(self, name: str, url: str, headers: Mapping[str, str]) -> SealedSecret | None:
         """``headers`` sealed for the server ``name`` bound to ``url``; None when no key is loaded."""
         box = self._keys.box()
         return None if box is None else seal_headers(box, aad_fields(self._agent_id, name, url, "headers"), headers)
+
+    def seal_oauth_record(self, name: str, url: str, record: OAuthRecord) -> SealedSecret | None:
+        """PR 2d: a token record sealed for the server ``name`` bound to ``url``; None when no key is loaded."""
+        box = self._keys.box()
+        return None if box is None else seal_oauth(box, aad_fields(self._agent_id, name, url, "oauth"), record)
+
+    def needs_sign_in(self, name: str, secret_id: uuid.UUID | None) -> bool:
+        """Whether the OAuth credential row ``secret_id`` of the server ``name`` failed to refresh, so the owner must
+        sign in again (a new sign-in is a new row; a restart forgets it, and the next use tries one refresh)."""
+        return secret_id is not None and self._needs_sign_in.get(name) == secret_id
+
+    async def _refresh(self, name: str, url: str, secret_id: uuid.UUID, sent: str | None) -> OAuthRecord | None:
+        """The OAuth record to use now for the server ``name``'s credential row ``secret_id`` bound to ``url``,
+        refreshed when stale: about to expire (``sent`` None), or still the token ``sent`` with a request that was
+        answered 401. None when there is no record to use: the row was replaced, removed or cannot be opened, or the
+        refresh failed (then the owner must sign in again: ``needs_sign_in``). It runs in a task this manager owns,
+        which the caller only waits for (shielded): a caller that is cancelled leaves the refresh to finish and store
+        what the provider rotated."""
+        task = asyncio.create_task(self._refresh_locked(name, url, secret_id, sent), name=f"mcp-client-refresh-{name}")
+        self._refresh_tasks.add(task)
+        task.add_done_callback(self._refresh_tasks.discard)
+        return await asyncio.shield(task)
+
+    async def _refresh_locked(self, name: str, url: str, secret_id: uuid.UUID, sent: str | None) -> OAuthRecord | None:
+        """``_refresh``'s work, under the server's lock: the row is read again (another caller may have refreshed it),
+        must still be ``secret_id``, and is refreshed only if still stale; the new record is stored, in place and only
+        while the row is still ``secret_id`` (``UPDATE ... WHERE id``), before anything uses it."""
+        lock = self._refresh_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            if self.needs_sign_in(name, secret_id):
+                return None
+            try:
+                secret = (await self._registry.list_secrets()).get(name)
+                if secret is None or secret.id != secret_id or secret.kind != "oauth":
+                    return None  # replaced, removed or signed out meanwhile: what it held is gone
+                record, _problem = self._opened(name, url, secret)
+                box = self._keys.box()
+                if not isinstance(record, OAuthRecord) or box is None:
+                    return None
+                stale = record.access_token == sent if sent is not None else expiring(record)
+                if not stale:
+                    return record
+                try:
+                    fresh = await refresh_tokens(record, self._oauth_http, self._allow)
+                except OAuthProblem as exc:
+                    self._needs_sign_in[name] = secret_id
+                    logger.warning(
+                        "MCP client: server %r: the token refresh failed (%s): it needs a new sign-in", name, exc
+                    )
+                    return None
+                sealed = seal_oauth(box, aad_fields(self._agent_id, name, url, "oauth"), fresh)
+                if not await self._registry.update_secret_in_place(secret_id, sealed):
+                    logger.warning("MCP client: server %r: its credential changed during a refresh; discarded", name)
+                    return None
+                return fresh
+            except Exception as exc:  # a database error's text can carry the URL: the class only
+                logger.warning("MCP client: server %r: the token refresh failed (%s)", name, error_class(exc))
+                logger.debug("MCP client: refresh error", exc_info=True)
+                return None
 
     def credentials_refused(self) -> dict[str, int]:
         """The servers whose last refusal was a 401, or a 403 with a stored credential, with that status (cleared
@@ -820,7 +1045,7 @@ class McpClientManager:
             forget_mcp_tool(name)
         self._registered.clear()
         self._sources.clear()
-        tasks: set[asyncio.Task[None]] = set()
+        tasks: set[asyncio.Task[Any]] = set(self._refresh_tasks)  # a refresh in flight stores what it rotated
         for server in self._servers.values():
             server.close()
             tasks |= server.tasks()
@@ -861,7 +1086,9 @@ class McpClientManager:
             return result
         server_name = server.config.name
         if refused == 401:
-            logger.warning("MCP client: %s failed: the server answered 401", name)
+            logger.warning("MCP client: %s failed: the server answered 401, or it needs a new sign-in", name)
+            if server.oauth is not None:
+                return _sign_in_error(server_name)
             if server.has_credentials:
                 return _error(
                     f'the MCP server "{server_name}" refused the stored credentials. The owner can replace them on '
@@ -889,14 +1116,19 @@ class McpClientManager:
         closed = _error(f'the MCP client is closed: the server "{server_name}" is not called.')
         if self._closed:
             return closed, None
+        if server.oauth is not None and self.needs_sign_in(server_name, server.secret_id):
+            return _sign_in_error(server_name), None  # fail fast: the provider is not contacted again
         timeout = server.config.call_timeout_seconds
         session: Any = None
         conn: _Connection | None = None
 
         def refusal() -> int | None:
-            # The connection the call used, else the attempt it waited on (a failed connect, or one backing off).
+            # The connection the call used, else the attempt it waited on (a failed connect, or one backing off). A
+            # request not sent for want of a sign-in counts as a 401.
             used = conn if conn is not None else server.current()
-            return None if used is None else used.refused
+            if used is None:
+                return None
+            return 401 if used.sign_in else used.refused
 
         try:
             # One budget for the wait for a call slot, the connect and the call.
@@ -964,7 +1196,11 @@ def _error(message: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": f"Tool error: {message}"}], "is_error": True}
 
 
-async def _wait_ended(tasks: set[asyncio.Task[None]]) -> None:
+def _sign_in_error(server_name: str) -> dict[str, Any]:
+    return _error(f'the MCP server "{server_name}" needs the owner to sign in again on the Integrations screen.')
+
+
+async def _wait_ended(tasks: set[asyncio.Task[Any]]) -> None:
     """Wait for closing supervisor tasks, at most ``_CLOSE_WAIT_SECONDS``, then cancel those still running."""
     if not tasks:
         return
