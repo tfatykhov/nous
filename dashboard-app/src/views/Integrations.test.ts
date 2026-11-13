@@ -996,6 +996,41 @@ describe('Integrations: a stored key on a card', () => {
     expect(within(card('deepwiki')).queryByLabelText('Header 1 value')).toBeNull();
   });
 
+  it('a value shown before Cancel or Save is dots again when the rows open next', async () => {
+    listAnswer = () => [200, keyed()];
+    handlers['PATCH /integrations/mcp/servers/deepwiki'] = () => [200, { credentials: 'replaced', server: null }];
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    const field = () => within(card('deepwiki')).getByLabelText('Header 1 value') as HTMLInputElement;
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Replace key' }));
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Show the value of header 1' }));
+    expect(field().type).toBe('text');
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Cancel' }));
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Replace key' }));
+    expect(field().type).toBe('password');
+    await fireEvent.input(field(), { target: { value: KEY } });
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Show the value of header 1' }));
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Save key' }));
+    await within(card('deepwiki')).findByRole('status');
+    await waitFor(() => expect((within(card('deepwiki')).getByRole('button', { name: 'Replace key' }) as HTMLButtonElement).disabled).toBe(false));
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Replace key' }));
+    expect(field().type).toBe('password');
+  });
+
+  it('dropping a row puts every value back to dots, so no shown flag moves onto another row', async () => {
+    listAnswer = () => [200, keyed()];
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Replace key' }));
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Add another header' }));
+    await fireEvent.input(within(card('deepwiki')).getByLabelText('Header 2 value'), { target: { value: 'test-key-2222' } });
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Show the value of header 1' }));
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Drop header 1' }));
+    const left = within(card('deepwiki')).getByLabelText('Header 1 value') as HTMLInputElement;
+    expect(left.value).toBe('test-key-2222');
+    expect(left.type).toBe('password');
+  });
+
   it('Remove key asks first, then sends headers null', async () => {
     listAnswer = () => [200, keyed()];
     handlers['PATCH /integrations/mcp/servers/deepwiki'] = () => [200, { credentials: 'removed', server: null }];

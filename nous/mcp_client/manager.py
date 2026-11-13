@@ -50,7 +50,7 @@ import functools
 import json
 import logging
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -699,13 +699,21 @@ class McpClientManager:
                     TOOLS_PER_SERVER,
                 )
 
-    async def probe(self, server: str, url: str, headers: Mapping[str, str] | None = None) -> list[ProbedTool]:
+    async def probe(
+        self,
+        server: str,
+        url: str,
+        headers: Mapping[str, str] | None = None,
+        *,
+        withheld: Iterable[str] = (),
+    ) -> list[ProbedTool]:
         """Connect once to ``url`` through the client's connector (the address guard and the response cap of
         ``transport.open_session``), with ``headers`` on every request (and nothing else: a stored credential is
         never attached here), list its tools and return each, by name, with what ``prepare_tool`` makes of it for a
         server named ``server``. Writes nothing and registers nothing. The connect and the listing together are
         bounded by ``HANDSHAKE_MAX_SECONDS``. Raises ``ProbeRefused`` when the guard refuses the URL,
-        ``ProbeCredentials`` when the server answers 401 or 403 or its listing repeats a value of ``headers``,
+        ``ProbeCredentials`` when the server answers 401 or 403 or its listing repeats a value of ``headers`` or of
+        ``withheld`` (the server's stored credential, which the caller passes even when it sends other headers),
         ``ProbeFailed`` (``safe_error`` text) for any other failure, and ``ProbeFailed`` for a listing that no set of
         tool rows can hold: a tool with no name, or a name listed twice."""
         sent = dict(headers or {})
@@ -732,8 +740,8 @@ class McpClientManager:
             description = tool.description or ""
             prepared = prepare_tool(server, tool.name, description, tool.inputSchema)
             out.append(ProbedTool(tool.name, description, dict(tool.inputSchema), prepared))
-        if _repeats(out, credential_needles(sent.values())):
-            logger.warning("MCP client: the probe for server %r: its tool list repeats the credentials sent", server)
+        if _repeats(out, credential_needles([*sent.values(), *withheld])):
+            logger.warning("MCP client: the probe for server %r: its tool list repeats a credential", server)
             raise ProbeCredentials(LISTING_REPEATS)
         return out
 

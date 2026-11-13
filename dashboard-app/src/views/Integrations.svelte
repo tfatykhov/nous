@@ -61,7 +61,7 @@
     }
     for (const name of [...refreshed.keys()]) if (!servers.has(name)) refreshed.delete(name);
     for (const name of [...confirming.keys()]) if (!servers.has(name)) confirming.delete(name);
-    if (keyEdit && !servers.has(keyEdit.server)) keyEdit = null; // its typed values go with it
+    if (keyEdit && !servers.has(keyEdit.server)) closeKeyEdit(); // its typed values go with it
   }
   $effect(() => {
     const d = $store.data;
@@ -180,16 +180,34 @@
     else revealed.add(id);
   }
 
-  async function openKeyEdit(server: string) {
-    keyEdit = { server, rows: [blankHeaderRow('Authorization')] };
+  /** Back to dots for every value field whose id starts with `prefix` (a form's rows are opened, closed or saved). */
+  function hideValues(prefix: string) {
+    for (const id of [...revealed]) if (id.startsWith(prefix)) revealed.delete(id);
+  }
+
+  /** Drop row `i`. The shown flags are by place, so every row of the form goes back to dots: none moves onto the
+   * next row's value. */
+  function dropRow(rows: HeaderRow[], i: number, valueId: (i: number) => string) {
+    for (let k = 0; k < rows.length; k += 1) revealed.delete(valueId(k));
+    rows.splice(i, 1);
+  }
+
+  /** Close the card's key form: its typed values and their shown flags go with it. */
+  function closeKeyEdit() {
+    keyEdit = null;
     keyError = null;
+    hideValues('mcp-v.');
+  }
+
+  async function openKeyEdit(server: string) {
+    closeKeyEdit();
+    keyEdit = { server, rows: [blankHeaderRow('Authorization')] };
     await tick();
     byId(`mcp-h.${server}.0`)?.focus();
   }
 
   async function cancelKeyEdit(server: string) {
-    keyEdit = null;
-    keyError = null;
+    closeKeyEdit();
     await tick();
     byId(`mcp-y.${server}`)?.focus();
   }
@@ -203,10 +221,10 @@
       try {
         await updateServer(s.name, { headers });
       } catch (err) {
-        if (isNoKey(err)) keyEdit = null;
+        if (isNoKey(err)) closeKeyEdit();
         throw err;
       }
-      keyEdit = null;
+      closeKeyEdit();
       return { text: 'Key saved: the next call to this server sends it.', ok: true };
     }, () => byId(`mcp-y.${s.name}`));
   }
@@ -248,7 +266,7 @@
     authKind = 'none';
     newHeaders = [blankHeaderRow('Authorization')];
     headersErr = null;
-    for (const id of [...revealed]) if (id.startsWith('mcp-new-')) revealed.delete(id);
+    hideValues('mcp-new-');
   }
 
   /** Choosing "None" is the form's Cancel for a key: what was typed is dropped. */
@@ -391,7 +409,7 @@
         </Button>
         {#if rows.length > 1}
           <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" {disabled}
-            aria-label={`Drop header ${i + 1}`} onclick={() => rows.splice(i, 1)}>Drop</Button>
+            aria-label={`Drop header ${i + 1}`} onclick={() => dropRow(rows, i, valueId)}>Drop</Button>
         {/if}
       </div>
     </div>

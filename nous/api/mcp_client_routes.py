@@ -35,7 +35,7 @@ No route ever returns a value: the listing names the headers only. A credential 
 address: ``/probe`` uses only the headers in its own request (never stored), a create without headers probes with the
 stored credential opened as bound to the request's URL (so another URL cannot open it) and, at another URL, deletes
 it, and ``/refresh`` uses the stored URL and credential. A probe the server answers 401 or 403, or whose listing
-repeats a credential it was sent, is 502 with a fixed sentence and stores nothing.
+repeats a credential it was sent or the server's stored one, is 502 with a fixed sentence and stores nothing.
 """
 
 from __future__ import annotations
@@ -301,9 +301,18 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
     async def secret_of(name: str) -> StoredSecret | None:
         return (await registry.list_secrets()).get(name)
 
+    async def stored_values(name: str) -> list[str]:
+        """The values of the server's stored credential, opened with its stored URL (none when it cannot be opened):
+        a listing that repeats one is refused even when other headers, or none, were sent."""
+        secret, current = await secret_of(name), await stored(name)
+        if secret is None or current is None:
+            return []
+        opened, _problem = manager.open_credentials(name, current[0].url, secret)
+        return list(opened.values()) if opened else []
+
     async def probe_tools(name: str, url: str, headers: dict[str, str] | None = None) -> list[ProbedTool]:
         try:
-            return await manager.probe(name, url, headers)
+            return await manager.probe(name, url, headers, withheld=await stored_values(name))
         except ProbeRefused as exc:
             raise _Refused(400, f"the address guard refused the URL: {exc}") from None
         except ProbeCredentials as exc:

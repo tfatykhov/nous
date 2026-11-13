@@ -394,6 +394,23 @@ async def test_a_listing_that_repeats_the_key_is_502_and_stores_nothing(make_env
     assert await env.registry.list_all() == [] and await env.registry.list_secrets() == {}
 
 
+@pytest.mark.parametrize("path", ["/integrations/mcp/servers", "/integrations/mcp/probe"])
+async def test_a_listing_that_repeats_the_stored_key_is_refused_though_another_was_sent(make_env, path):
+    """8.1 item 1: a credential "of that request or of that server". A replace sends the new key, but the stored one
+    is the last value Nous still knows: a listing that repeats it is refused too, and nothing changes."""
+    env = await make_env()
+    await _add(env, headers={"Authorization": VALUE}, tools={"search": "allow"})
+    before = await env.registry.list_secrets()
+    alpha = env.remotes.by_url[ALPHA]
+    alpha.requires = {"Authorization": OTHER_VALUE}
+    alpha.tools.append(_tool("leaky", "the old key was test-key-0000000000000000"))
+    body = {"name": "alpha", "url": ALPHA, "headers": {"Authorization": OTHER_VALUE}}
+    response = await _req(env, "POST", path, body)
+    assert response.status_code == 502 and response.json() == {"error": LISTING_REPEATS}
+    assert await env.registry.list_secrets() == before
+    assert "leaky" not in {t.tool for _c, tools in await env.registry.list_all() for t in tools}
+
+
 async def test_a_body_that_is_not_json_is_refused_without_repeating_it(make_env):
     env = await make_env()
     raw = '{"name": "alpha", "url": "' + ALPHA + '", "headers": {"Authorization": "' + VALUE + '"'  # cut short

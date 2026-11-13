@@ -790,8 +790,8 @@ async def test_a_refresh_whose_url_changed_meanwhile_is_409(make_env):
     env.remotes.by_url[ALPHA].tools.append(_tool("later"))
     real_probe = env.manager.probe
 
-    async def probe_then_move(name: str, url: str, headers: Any = None):
-        listed = await real_probe(name, url, headers)
+    async def probe_then_move(name: str, url: str, headers: Any = None, **kwargs: Any):
+        listed = await real_probe(name, url, headers, **kwargs)
         await env.registry.upsert_server(ServerConfig(name="alpha", url="https://alpha2.example.com/mcp"))
         return listed
 
