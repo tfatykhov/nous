@@ -141,7 +141,7 @@ class Provider:
         self.hold: asyncio.Event | None = None
         self.fail = False
         self.refresh_token = REFRESH
-        self.script: list[str] = []  # the next refreshes' answers: "503", "429", "timeout" (else a normal answer)
+        self.script: list[str] = []  # the next refreshes' answers: a status, "timeout" or "ok" (a normal answer)
         self.expires_in = 3600
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
@@ -158,7 +158,7 @@ class Provider:
         scripted = self.script.pop(0) if self.script else None
         if scripted == "timeout":
             raise httpx.ConnectTimeout("timed out")
-        if scripted is not None:
+        if scripted not in (None, "ok"):  # "ok": a normal answer
             return httpx.Response(int(scripted))
         if self.fail or form.get("refresh_token") != self.refresh_token:
             return httpx.Response(400, json={"error": "invalid_grant", "error_description": "secret detail"})
@@ -393,8 +393,7 @@ async def test_a_server_that_refuses_every_token_gets_one_refresh_then_needs_a_n
         await manager.close()
 
 
-# A token that expires on arrival (expires_in 0) is refreshed by every request that needs it: no window holds for an
-# expired token. Short lifetimes above that make one refresh for requests that arrive together.
+# Short lifetimes make one refresh for requests that arrive together (an expires_in of 0 or less is "no expiry given").
 @pytest.mark.parametrize("lifetime", [30, 10, 2])
 async def test_six_concurrent_requests_with_a_short_lived_token_make_one_refresh(tmp_path, lifetime):
     rows, provider = Rows(_record(expires_in=-10, lifetime=lifetime)), Provider()
@@ -587,9 +586,70 @@ async def test_five_failed_refreshes_in_a_row_that_might_pass_need_a_new_sign_in
     await manager.close()
 
 
+async def _failing(tmp_path, answers: list[str]) -> tuple[McpClientManager, Rows, Provider, list[str]]:
+    """A manager whose provider answers ``answers`` to the next refreshes; one request each, past the hold every time.
+    Returns what each request raised (its class name), or "ok"."""
+    rows, provider = Rows(_record(expires_in=-10)), Provider()
+    provider.script = list(answers)
+    manager = await _manager(tmp_path, rows, provider)
+    clock = [0.0]
+    manager._clock = lambda: clock[0]
+    auth = manager._servers["alpha"].auth_for(None)
+    kinds = []
+    async with httpx.AsyncClient(transport=_mcp([]), auth=auth) as client:
+        for _ in answers:
+            try:
+                await client.post(ALPHA)
+                kinds.append("ok")
+            except Exception as exc:
+                kinds.append(type(exc).__name__)
+            clock[0] += 31
+    return manager, rows, provider, kinds
+
+
+async def test_ten_failures_with_no_answer_never_need_a_sign_in_and_the_server_recovers(tmp_path):
+    answers = ["timeout", "503", "429", "timeout", "500", "timeout", "429", "timeout", "502", "timeout", "ok"]
+    manager, rows, provider, kinds = await _failing(tmp_path, answers)
+    assert kinds == ["ProviderUnreachable"] * 10 + ["ok"]  # the network is back: the stored refresh token works
+    assert not manager.needs_sign_in("alpha", rows.secrets["alpha"].id) and provider.refreshes == 11
+    await manager.close()
+
+
+async def test_five_403s_in_a_row_need_a_new_sign_in(tmp_path):
+    manager, rows, provider, kinds = await _failing(tmp_path, ["403"] * 5)
+    assert kinds == ["ProviderUnreachable"] * 4 + ["SignInNeeded"]
+    assert manager.needs_sign_in("alpha", rows.secrets["alpha"].id)
+    await manager.close()
+
+
+async def test_only_the_answered_4xx_count_toward_the_five(tmp_path):
+    answers = ["403", "timeout", "403", "503", "404", "timeout", "429", "403", "timeout", "403"]
+    manager, rows, provider, kinds = await _failing(tmp_path, answers)
+    assert kinds == ["ProviderUnreachable"] * 9 + ["SignInNeeded"]  # the fifth answered 4xx, at the tenth try
+    assert manager.needs_sign_in("alpha", rows.secrets["alpha"].id)
+    await manager.close()
+
+
+async def test_a_lifetime_of_zero_or_less_is_no_expiry_given(tmp_path):
+    for expires_in in (0, -5):
+        rows, provider = Rows(_record(expires_in=-10)), Provider()
+        provider.expires_in = expires_in
+        manager = await _manager(tmp_path, rows, provider)
+        seen: list[str | None] = []
+        auth = manager._servers["alpha"].auth_for(None)
+        async with httpx.AsyncClient(transport=_mcp(seen), auth=auth) as client:
+            for _ in range(20):
+                assert (await client.post(ALPHA)).status_code == 200
+        stored = _opened(rows.secrets["alpha"])
+        assert (stored.expires_at, stored.lifetime) == (None, None)
+        assert provider.refreshes == 1 and seen == [f"Bearer {NEW}"] * 20
+        assert not manager.needs_sign_in("alpha", rows.secrets["alpha"].id)
+        await manager.close()
+
+
 async def test_a_successful_refresh_resets_the_count_of_failures(tmp_path):
     rows, provider = Rows(_record(expires_in=-10)), Provider()
-    provider.script = ["503"] * 4
+    provider.script = ["403"] * 4
     manager = await _manager(tmp_path, rows, provider)
     clock = [0.0]
     manager._clock = lambda: clock[0]

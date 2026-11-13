@@ -143,8 +143,9 @@ PROVIDER_UNREACHABLE = "the sign-in provider could not be reached: try again in 
 REFRESH_WINDOW_SECONDS = 30
 # PR 2d: after the provider could not be reached (no answer, a timeout, a 429, a 5xx), no refresh is asked this long.
 PROVIDER_HOLD_SECONDS = 30
-# PR 2d: this many failed refreshes in a row that might have passed (a provider that answers 403 or 404 for good, say)
-# make the server need a new sign-in, so the owner is told.
+# PR 2d: this many refreshes in a row that the provider answered with a 4xx other than 400, 401 and 429 (a 403 or 404
+# for good, say) make the server need a new sign-in, so the owner is told. No answer at all (a connect error, a DNS
+# failure, a timeout), a 429 or a 5xx is never counted: an outage on Nous's side must not sign servers out.
 TRANSIENT_FAILURES_MAX = 5
 _UNREACHABLE = -1  # what _send reports for a call that failed because the sign-in provider could not be reached
 PROBE_REFUSED = "the server refused the credentials"
@@ -1143,8 +1144,10 @@ class McpClientManager:
                     fresh = await refresh_tokens(record, self._oauth_http, self._allow)
                 except OAuthProblem as exc:
                     failures = self._transient_failures.get(name)
-                    count = failures[1] + 1 if failures is not None and failures[0] == secret_id else 1
-                    self._transient_failures[name] = (secret_id, count)
+                    count = failures[1] if failures is not None and failures[0] == secret_id else 0
+                    if exc.answered is not None and 400 <= exc.answered < 500 and exc.answered not in (400, 401, 429):
+                        count += 1
+                        self._transient_failures[name] = (secret_id, count)
                     if exc.transient and count < TRANSIENT_FAILURES_MAX:
                         self._held[name] = (secret_id, self._clock() + PROVIDER_HOLD_SECONDS)
                         logger.warning(

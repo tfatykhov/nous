@@ -74,12 +74,15 @@ HttpFactory = Callable[[], httpx.AsyncClient]
 class OAuthProblem(Exception):
     """A sign-in or refresh step that failed. ``status`` is the route's answer; the message is a fixed sentence (a
     host name at most). ``transient``: the provider could not be reached or did not answer for good (no answer, a
-    timeout, a 429 or a 5xx...), so trying again later may work; otherwise its answer was definitive."""
+    timeout, a 429 or a 5xx...), so trying again later may work; otherwise its answer was definitive.
+    ``answered``: the HTTP status the provider answered a token request with, when it answered one (None for no
+    answer at all)."""
 
-    def __init__(self, status: int, message: str, *, transient: bool = False) -> None:
+    def __init__(self, status: int, message: str, *, transient: bool = False, answered: int | None = None) -> None:
         super().__init__(message)
         self.status = status
         self.transient = transient
+        self.answered = answered
 
 
 def redirect_uri(base: Any) -> str | None:
@@ -638,7 +641,9 @@ async def _token(
     async with http() as client:
         status, body, _headers = await _request(client, allow, "POST", token_endpoint, what, data=data, headers=headers)
     if status != 200:  # 400 and 401 are the provider's answer (invalid_grant...); anything else may pass
-        raise OAuthProblem(502, f"the provider refused {what} (HTTP {status})", transient=status not in (400, 401))
+        raise OAuthProblem(
+            502, f"the provider refused {what} (HTTP {status})", transient=status not in (400, 401), answered=status
+        )
     try:
         token = OAuthToken.model_validate_json(body)  # token_type must be bearer (any case)
     except ValidationError:
@@ -648,8 +653,15 @@ async def _token(
     return token
 
 
+def _lifetime(token: OAuthToken) -> int | None:
+    """The token's lifetime in seconds; None when the provider gave none, or 0 or less (taken as "no expiry given":
+    the token is used until a 401)."""
+    return token.expires_in if token.expires_in is not None and token.expires_in > 0 else None
+
+
 def _expires_at(token: OAuthToken) -> int | None:
-    return None if token.expires_in is None else int(time.time()) + max(0, token.expires_in)
+    lifetime = _lifetime(token)
+    return None if lifetime is None else int(time.time()) + lifetime
 
 
 async def exchange_code(flow: Flow, params: Mapping[str, Any], http: HttpFactory, allow: frozenset[str]) -> OAuthRecord:
@@ -685,7 +697,7 @@ async def exchange_code(flow: Flow, params: Mapping[str, Any], http: HttpFactory
         access_token=token.access_token,
         refresh_token=token.refresh_token,
         expires_at=_expires_at(token),
-        lifetime=token.expires_in,
+        lifetime=_lifetime(token),
     )
 
 
@@ -712,6 +724,6 @@ async def refresh_tokens(record: OAuthRecord, http: HttpFactory, allow: frozense
         access_token=token.access_token,
         refresh_token=token.refresh_token or record.refresh_token,
         expires_at=_expires_at(token),
-        lifetime=token.expires_in,
+        lifetime=_lifetime(token),
         scope=token.scope or record.scope,
     )
