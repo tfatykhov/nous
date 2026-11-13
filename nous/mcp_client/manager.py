@@ -5,17 +5,22 @@
 the prompt-cache prefix, so it must not depend on which server answered at boot, and a server that is down must not
 delay the boot. A tool stays registered while its server is down; its calls answer with an error.
 
-The pin (``NOUS_MCP_CLIENT_PINNED_SERVERS``, set on the host): a server's tools register only when its name is
-pinned and its stored URL's host is the pinned host. The rows can be written by anything that reaches the database,
-the agent's own shell included; the pin, outside the database, is what keeps such a row from taking effect at the
-next boot. It does not stop code the agent runs inside this process.
+The pin (``NOUS_MCP_CLIENT_PINNED_SERVERS``, set on the host, ``name=host[:port];tool|tool``): a stored tool
+registers only when its server's name is pinned, the stored URL's host (and its port, when the URL names one) is the
+pinned one, the tool's own name is in the pin's list and its stored permission is ``allow``. Background work may use
+a server's tools only when ``NOUS_MCP_CLIENT_BACKGROUND_SERVERS`` (also on the host) names it AND its row's
+background switch is on. The rows can be written by anything that reaches the database, the agent's own shell
+included; the pin, outside the database, keeps such a row from adding a server, a tool or background use at the next
+boot. It does not cover the URL's path, the descriptions and schemas stored for a pinned tool (a changed row is
+registered as stored, cleaned and checked by ``prepare_tool``), or code the agent runs inside this process.
 
 A server's connection is opened by the first call that needs it. One supervisor task per connection owns the SDK's
 context managers (their task groups must be entered and left in one task); a call only waits for the session and
-uses it, so a call cancelled by the runner's tool timeout leaves the connection as it was. A failed connect is not
-tried again for a while (1 s, doubling, at most 60 s). A JSON-RPC error from the server fails the call and keeps the
-session; any other failure but the timeout drops the connection, and the next call opens a new one. A call is never
-retried.
+uses it, so a call cancelled by the runner's tool timeout leaves the connection as it was. A call also ends as soon
+as its connection does (``_unless_ended``): when the transport fails mid-session (a 502, a reset), the SDK can leave
+the call waiting until its timeout. A failed connect is not tried again for a while (1 s, doubling, at most 60 s). A
+JSON-RPC error from the server fails the call and keeps the session; any other failure but the timeout drops the
+connection, and the next call opens a new one. A call is never retried.
 """
 
 from __future__ import annotations
@@ -40,7 +45,7 @@ from nous.mcp_client.bridge import (
     safe_error,
     wrap_result,
 )
-from nous.mcp_client.config import ServerConfig, ToolConfig, parse_host_list, parse_pins, url_host
+from nous.mcp_client.config import ServerConfig, ToolConfig, parse_host_list, parse_pins, pin_host
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +78,30 @@ class ServerUnavailable(Exception):
     """A server whose last connect failed is not tried again yet, or its connection closed before it was ready."""
 
 
+class ClientClosed(Exception):
+    """The manager was closed: no connection is opened any more."""
+
+
+class ConnectionEnded(Exception):
+    """The connection a call was using ended before the call had its answer."""
+
+
+async def _unless_ended(ended: asyncio.Event, call: Awaitable[Any]) -> Any:
+    """``call``'s result, or ``ConnectionEnded`` as soon as ``ended`` is set. When the transport fails mid-session
+    the SDK can end the session without answering the calls waiting on it; this ends them with it."""
+    call_task = asyncio.ensure_future(call)
+    call_task.add_done_callback(lambda task: task.cancelled() or task.exception())
+    end_task = asyncio.ensure_future(ended.wait())
+    try:
+        await asyncio.wait({call_task, end_task}, return_when=asyncio.FIRST_COMPLETED)
+        if call_task.done():
+            return call_task.result()
+        raise ConnectionEnded()
+    finally:
+        call_task.cancel()  # nothing when it is done
+        end_task.cancel()
+
+
 @dataclass
 class _Connection:
     """One attempt at a session: its supervisor task, the session once ready, and the signal that ends it."""
@@ -96,8 +125,11 @@ class _Server:
         connect: Connector,
         allow: frozenset[str],
         on_error: Callable[[str, BaseException], Awaitable[None]],
+        background: bool,
     ) -> None:
         self.config = config
+        self.background = background  # the row's switch AND the host's NOUS_MCP_CLIENT_BACKGROUND_SERVERS
+        self.closed = False
         self.semaphore = asyncio.Semaphore(CALLS_PER_SERVER)
         self._connect = connect
         self._allow = allow
@@ -118,16 +150,25 @@ class _Server:
             and conn.ready.exception() is None
         )
 
-    async def session(self) -> Any:
-        """The open session, connecting first when there is none. Raises ``ServerUnavailable`` while a failed
-        connect is backing off, and the connect's own error when it fails now."""
+    async def connection(self) -> _Connection:
+        """The open connection (its ``session`` set), connecting first when there is none. Raises ``ClientClosed``
+        once the server is closed, ``ServerUnavailable`` while a failed connect is backing off, and the connect's own
+        error when it fails now."""
+        if self.closed:
+            raise ClientClosed()
         conn = self._conn
         if conn is None or conn.closed:
             if asyncio.get_running_loop().time() < self._retry_at:
                 raise ServerUnavailable()
             conn = self._conn = self._open()
         # Shielded: a caller that is cancelled or times out leaves the connect running for the next call.
-        return await asyncio.shield(conn.ready)
+        await asyncio.shield(conn.ready)
+        return conn
+
+    def close(self) -> None:
+        """No new connection from now on, and the current one ends."""
+        self.closed = True
+        self.drop()
 
     def drop(self, session: Any = None) -> None:
         """End the current connection (its supervisor leaves the session's context); the next call opens one. With
@@ -199,6 +240,7 @@ class McpClientManager:
         self._max_chars = settings.mcp_client_max_result_chars
         self._allow = parse_host_list(settings.mcp_client_allow_private_hosts)
         self._pins = parse_pins(settings.mcp_client_pinned_servers)
+        self._background_servers = parse_host_list(settings.mcp_client_background_servers)
         self._connect = connect
         self._servers: dict[str, _Server] = {}
         self._registered: dict[str, str] = {}  # tool name -> server name
@@ -208,29 +250,41 @@ class McpClientManager:
         """The names of the tools this manager has registered, in registration order."""
         return list(self._registered)
 
-    def _pinned(self, config: ServerConfig) -> bool:
-        """Whether the host's pin names this server with its stored URL's host; logs why not (the name only)."""
-        pinned = self._pins.get(config.name)
-        if pinned is None:
+    def _pinned_tools(self, config: ServerConfig, tools: list[ToolConfig]) -> list[ToolConfig] | None:
+        """The server's tools the host's pin lets register (stored ``allow`` and named in the pin), or None when the
+        server itself is not pinned with its stored host and port. Logs why, by the server's name only."""
+        pin = self._pins.get(config.name)
+        if pin is None:
             logger.warning("MCP client: server %r is not pinned (NOUS_MCP_CLIENT_PINNED_SERVERS); skipped", config.name)
-            return False
-        if url_host(config.url) != pinned:
-            logger.warning("MCP client: server %r: its stored host is not its pinned host; skipped", config.name)
-            return False
-        return True
+            return None
+        if pin_host(config.url) != pin.host:
+            logger.warning("MCP client: server %r: its stored host or port is not its pinned one; skipped", config.name)
+            return None
+        allowed = [tool for tool in tools if tool.permission == "allow"]
+        pinned = [tool for tool in allowed if tool.tool in pin.tools]
+        if len(pinned) < len(allowed):
+            logger.warning(
+                "MCP client: server %r: %d allowed tool(s) are not in its pin; skipped",
+                config.name,
+                len(allowed) - len(pinned),
+            )
+        return pinned
 
     async def start(self) -> None:
-        """Register every allowed tool of every enabled, pinned server, from the stored rows, in sorted (server,
-        tool) order, as ``prepare_tool`` builds it. Connects to no server. A tool that ``prepare_tool`` refuses,
-        that collides with a registered tool, or past a server's first ``TOOLS_PER_SERVER`` is skipped and logged by
-        name. Ends with one ``mcp_client_started`` event and an INFO line naming the servers and tools registered.
-        A failure part way logs what was registered before it and is raised."""
+        """Register every pinned, allowed tool of every enabled, pinned server (``_pinned_tools``), from the stored
+        rows, in sorted (server, tool) order, as ``prepare_tool`` builds it. Connects to no server. A tool that
+        ``prepare_tool`` refuses, that collides with a registered tool, or past a server's first ``TOOLS_PER_SERVER``
+        is skipped and logged by name. Ends with one ``mcp_client_started`` event and an INFO line naming the servers
+        (with their background use) and tools registered, never a URL. A failure part way logs what was registered
+        before it and is raised."""
         entries: list[tuple[str, str, ToolConfig]] = []
         for config, tools in await self._registry.list_enabled():
-            if not self._pinned(config):
+            pinned = self._pinned_tools(config, tools)
+            if pinned is None:
                 continue
-            self._servers[config.name] = _Server(config, self._connect, self._allow, self._emit_error)
-            entries += [(config.name, tool.tool, tool) for tool in tools if tool.permission == "allow"]
+            background = config.background and config.name in self._background_servers
+            self._servers[config.name] = _Server(config, self._connect, self._allow, self._emit_error, background)
+            entries += [(config.name, tool.tool, tool) for tool in pinned]
         over_cap: dict[str, int] = {}
         try:
             for server_name, raw_name, tool in sorted(entries, key=lambda entry: (entry[0], entry[1])):
@@ -248,7 +302,7 @@ class McpClientManager:
                     over_cap[server_name] = over_cap.get(server_name, 0) + 1
                     continue
                 self._registrar.register(prepared.name, self._handler(server, raw_name, prepared.name), prepared.schema)
-                note_mcp_tool(prepared.name, background=server.config.background)
+                note_mcp_tool(prepared.name, background=server.background)
                 self._registered[prepared.name] = server_name
         except Exception:
             logger.warning(
@@ -264,11 +318,14 @@ class McpClientManager:
                 server_name,
                 TOOLS_PER_SERVER,
             )
-        servers = sorted(set(self._registered.values()))
+        servers = [
+            {"name": name, "background": self._servers[name].background}
+            for name in sorted(set(self._registered.values()))
+        ]
         logger.info(
             "MCP client: %d tool(s) registered from server(s) %s: %s",
             len(self._registered),
-            ", ".join(servers) or "none",
+            ", ".join(f"{s['name']} (background {'on' if s['background'] else 'off'})" for s in servers) or "none",
             ", ".join(self._registered) or "none",
         )
         await self._emit("mcp_client_started", {"servers": servers, "tools": list(self._registered)})
@@ -283,7 +340,7 @@ class McpClientManager:
         self._registered.clear()
         tasks: set[asyncio.Task[None]] = set()
         for server in self._servers.values():
-            server.drop()
+            server.close()
             tasks |= server.tasks()
         if tasks:
             _done, pending = await asyncio.wait(tasks, timeout=_CLOSE_WAIT_SECONDS)
@@ -302,7 +359,7 @@ class McpClientManager:
                 {
                     "name": name,
                     "connected": server.connected,
-                    "background": server.config.background,
+                    "background": server.background,
                     "tools": counts.get(name, 0),
                 }
                 for name, server in sorted(self._servers.items())
@@ -319,16 +376,26 @@ class McpClientManager:
         """One call, as the dispatcher's result. Never raises but ``CancelledError``, which it re-raises: the
         runner's tool timeout, or a shutdown."""
         server_name = server.config.name
+        closed = _error(f'the MCP client is closed: the server "{server_name}" is not called.')
         if self._closed:
-            return _error(f'the MCP client is closed: the server "{server_name}" is not called.')
+            return closed
         timeout = server.config.call_timeout_seconds
         session: Any = None
         try:
             # One budget for the wait for a call slot, the connect and the call.
             async with asyncio.timeout(timeout):
                 async with server.semaphore:
-                    session = await server.session()
-                    raw = await session.call_tool(raw_name, arguments)  # the server's own name for the tool
+                    if self._closed:  # closed while this call waited for a slot: open nothing
+                        return closed
+                    conn = await server.connection()  # raises ClientClosed when closed meanwhile
+                    session = conn.session
+                    # The server's own name for the tool; the call ends with its connection.
+                    raw = await _unless_ended(conn.stop, session.call_tool(raw_name, arguments))
+        except ClientClosed:
+            return closed
+        except ConnectionEnded:
+            logger.warning("MCP client: %s failed: its connection ended during the call", name)
+            return _error(f'the connection to the MCP server "{server_name}" ended during the call.')
         except TimeoutError:
             logger.warning("MCP client: %s timed out after %d s", name, timeout)
             return _error(f'the call to the MCP server "{server_name}" timed out after {timeout} s.')

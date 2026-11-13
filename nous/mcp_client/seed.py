@@ -6,8 +6,11 @@
 Connects once, through the client's address guard (``NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS`` applies), lists the
 server's tools and prints, for each, its permission, its registered name, why it would be skipped at startup if it
 would, and its description and input schema exactly as the model would be offered them (``bridge.prepare_tool``).
-It also prints the pin entry the owner adds to ``NOUS_MCP_CLIENT_PINNED_SERVERS`` on the host: without it, no tool of
-the server registers.
+It also prints the pin entry the owner adds to ``NOUS_MCP_CLIENT_PINNED_SERVERS`` on the host
+(``name=host[:port];tool|tool``, the tools that would register): without it, no tool of the server registers. With
+``--background`` it prints the name to add to ``NOUS_MCP_CLIENT_BACKGROUND_SERVERS`` as well: the stored switch alone
+does not let background work use the server. A tool name that carries ``,``, ``;``, ``|``, ``=`` or whitespace cannot
+be pinned, so it cannot be allowed.
 
 With ``--write`` it stores the server row and one row per listed tool: ``allow`` for the tools named in ``--allow``,
 ``deny`` for every other. Running it again for a server replaces the row's URL and background switch, enables it and
@@ -27,7 +30,7 @@ from pydantic import ValidationError
 
 from nous.config import Settings
 from nous.mcp_client.bridge import TOOLS_PER_SERVER, prepare_tool, safe_error, serialize_schema
-from nous.mcp_client.config import ServerConfig, ToolConfig, parse_host_list, url_host
+from nous.mcp_client.config import PIN_SEPARATORS, ServerConfig, ToolConfig, parse_host_list, pin_host
 from nous.mcp_client.registry import McpRegistry
 from nous.storage.database import Database
 
@@ -39,7 +42,11 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser.add_argument("--name", required=True, help="the server's name in its tools' names (mcp__<name>__<tool>)")
     parser.add_argument("--url", required=True, help="the server's streamable-HTTP endpoint (https, no credentials)")
     parser.add_argument("--allow", default="", help="comma list of the server's tool names to allow; others are denied")
-    parser.add_argument("--background", action="store_true", help="make the server available to background work")
+    parser.add_argument(
+        "--background",
+        action="store_true",
+        help="set the row's background switch (background use also needs NOUS_MCP_CLIENT_BACKGROUND_SERVERS)",
+    )
     parser.add_argument("--write", action="store_true", help="store the server and the permissions")
     return parser.parse_args(argv)
 
@@ -55,6 +62,10 @@ async def seed(args: argparse.Namespace, settings: Settings) -> int:
             print(f"error: {error['loc'][0]}: {error['msg']}", file=sys.stderr)
         return 2
     allowed = {tool.strip() for tool in args.allow.split(",") if tool.strip()}
+    unpinnable = sorted(tool for tool in allowed if PIN_SEPARATORS & set(tool) or any(ch.isspace() for ch in tool))
+    if unpinnable:
+        print(f"error: these tool names cannot be pinned: {', '.join(unpinnable)}", file=sys.stderr)
+        return 2
     try:
         async with asyncio.timeout(_LIST_TIMEOUT_SECONDS):
             async with open_session(
@@ -71,6 +82,7 @@ async def seed(args: argparse.Namespace, settings: Settings) -> int:
         return 1
     rows: list[ToolConfig] = []
     registered: set[str] = set()  # what start() would register, in the same order
+    pinned: list[str] = []  # the server's own names of those tools, for the pin entry
     for tool in sorted(tools, key=lambda t: t.name):
         permission = "allow" if tool.name in allowed else "deny"
         description = tool.description or ""
@@ -83,6 +95,7 @@ async def seed(args: argparse.Namespace, settings: Settings) -> int:
                 note = f"skipped at startup: over the {TOOLS_PER_SERVER}-tool cap"
             else:
                 registered.add(prepared.name)
+                pinned.append(tool.name)
         print(f"{permission:<5}  {prepared.name or repr(tool.name[:80])}{f'  ({note})' if note else ''}")
         if prepared.schema is not None:
             print(f"       description: {prepared.schema['description']}")
@@ -100,8 +113,10 @@ async def seed(args: argparse.Namespace, settings: Settings) -> int:
     if unknown:
         print(f"error: --allow names tools the server does not list: {', '.join(unknown)}", file=sys.stderr)
         return 2
-    pin = f"{server.name}={url_host(server.url)}"
-    print(f"Pin entry, for NOUS_MCP_CLIENT_PINNED_SERVERS on the host (a comma list; no pin, no tools): {pin}")
+    pin = f"{server.name}={pin_host(server.url)};{'|'.join(pinned)}"
+    print(f"Pin entry, for NOUS_MCP_CLIENT_PINNED_SERVERS on the host (entries separated by commas): {pin}")
+    if server.background:
+        print(f"Background entry, for NOUS_MCP_CLIENT_BACKGROUND_SERVERS on the host (a comma list): {server.name}")
     if not args.write:
         print("Nothing written: pass --write to store the server and these permissions.")
         return 0

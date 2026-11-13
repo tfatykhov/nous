@@ -6,7 +6,9 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -347,7 +349,7 @@ def test_no_proxy_from_the_environment(monkeypatch):
 
 
 @asynccontextmanager
-async def _in_process_server(limit: int, *, json_response: bool = True):
+async def _in_process_server(limit: int, *, json_response: bool = True, gate: Any = None):
     """A connector like transport.open_session (its session part, ``_session_over``), to the SDK's FastMCP server in
     this process, through the response limit. The address guard is not in the path (there is no socket)."""
     from mcp.server.fastmcp import FastMCP
@@ -367,7 +369,8 @@ async def _in_process_server(limit: int, *, json_response: bool = True):
 
     @asynccontextmanager
     async def connect(url: str, allow: frozenset[str]):
-        client = httpx.AsyncClient(transport=_LimitedTransport(httpx.ASGITransport(app=app), limit))
+        served = app if gate is None else gate(app)
+        client = httpx.AsyncClient(transport=_LimitedTransport(httpx.ASGITransport(app=served), limit))
         async with client, transport._session_over(client, url) as session:
             yield session
 
@@ -385,7 +388,7 @@ async def test_a_real_server_lists_and_answers_through_the_session():
 
 
 @asynccontextmanager
-async def _in_process_manager(limit: int, *, timeout: int = 30, json_response: bool = True):
+async def _in_process_manager(limit: int, *, timeout: int = 30, json_response: bool = True, gate: Any = None):
     """A started manager whose one pinned server, inproc, is the in-process FastMCP server. Yields the dispatcher
     and a list that gets one entry per connection opened."""
     from nous.api.tools import ToolDispatcher
@@ -410,7 +413,7 @@ async def _in_process_manager(limit: int, *, timeout: int = 30, json_response: b
             ]
 
     connects: list[int] = []
-    async with _in_process_server(limit, json_response=json_response) as connect:
+    async with _in_process_server(limit, json_response=json_response, gate=gate) as connect:
 
         @asynccontextmanager
         async def plain(url: str, allow: frozenset[str]):  # the stored URL is https; the in-process app is http
@@ -418,7 +421,9 @@ async def _in_process_manager(limit: int, *, timeout: int = 30, json_response: b
             async with connect(url.replace("https://", "http://"), allow) as session:
                 yield session
 
-        settings = Settings(_env_file=None, ANTHROPIC_API_KEY="k", mcp_client_pinned_servers="inproc=127.0.0.1")
+        settings = Settings(
+            _env_file=None, ANTHROPIC_API_KEY="k", mcp_client_pinned_servers="inproc=127.0.0.1:8000;echo|slow"
+        )
         d = ToolDispatcher()
         manager = McpClientManager(d, Rows(), settings, connect=plain)
         await manager.start()
@@ -458,3 +463,87 @@ async def test_an_event_stream_past_the_limit_fails_the_call_at_its_timeout():
         text, is_error = await d.dispatch("mcp__inproc__echo", {"text": "small"})
         assert not is_error and text.endswith("\nsmall")
         assert len(connects) == 1
+
+
+def _quiet_filter() -> logging.Filter:
+    (quiet,) = [f for f in logging.getLogger("httpx").filters if isinstance(f, transport._QuietMcpRequests)]
+    return quiet
+
+
+def _request_line(url: str) -> logging.LogRecord:
+    return logging.LogRecord(
+        "httpx", logging.INFO, __file__, 1, 'HTTP Request: %s %s "%s %d %s"',
+        ("POST", httpx.URL(url), "HTTP/1.1", 200, "OK"), None,
+    )
+
+
+def test_a_punycode_host_is_quiet_whichever_form_the_url_was_stored_in(monkeypatch):
+    monkeypatch.setattr(transport, "_QUIET_HOSTS", {"xn--bcher-kva.example"})
+    assert not _quiet_filter().filter(_request_line("https://xn--bcher-kva.example/mcp"))
+    monkeypatch.setattr(transport, "_QUIET_HOSTS", {"bücher.example"})
+    assert not _quiet_filter().filter(_request_line("https://xn--bcher-kva.example/mcp"))
+
+
+@pytest.mark.parametrize(
+    ("logger_name", "module_file", "message"),
+    [
+        ("", "shared/session.py", "Failed to validate notification: bad. Message was: %s"),  # the root logger
+        ("mcp.client.streamable_http", "client/streamable_http.py", "Unknown SSE event: %s"),
+        ("client", "client/session.py", "Tool %s not listed by server, cannot validate any structured content"),
+    ],
+)
+def test_the_sdks_warning_lines_lose_what_the_server_sent(caplog, logger_name, module_file, message):
+    import mcp as mcp_package
+
+    path = str(Path(mcp_package.__file__).parent / module_file)
+    try:
+        raise ValueError("SERVER-TEXT-91f0 in a traceback")
+    except ValueError:
+        exc_info = sys.exc_info()
+    name = logger_name or "root"
+    record = logging.LogRecord(name, logging.WARNING, path, 7, message, ("SERVER-TEXT-91f0",), exc_info)
+    with caplog.at_level(logging.WARNING):
+        logging.getLogger(logger_name).handle(record)
+    (seen,) = [r for r in caplog.records if r is record]
+    assert "SERVER-TEXT-91f0" not in seen.getMessage() and "withheld" in seen.getMessage()
+    assert seen.exc_info is None
+
+
+def test_other_warning_lines_pass_unchanged(caplog):
+    record = logging.LogRecord("root", logging.WARNING, __file__, 7, "nous says %s", ("hello",), None)
+    with caplog.at_level(logging.WARNING):
+        logging.getLogger().handle(record)
+    assert record.getMessage() == "nous says hello"
+
+
+class _BadGateway:
+    """Wraps the in-process app: once ``failing`` is set, every new request is answered 502."""
+
+    def __init__(self) -> None:
+        self.failing = False
+
+    def __call__(self, app: Any) -> Any:
+        async def served(scope: Any, receive: Any, send: Any) -> None:
+            if self.failing and scope["type"] == "http":
+                await send({"type": "http.response.start", "status": 502, "headers": []})
+                await send({"type": "http.response.body", "body": b""})
+                return
+            await app(scope, receive, send)
+
+        return served
+
+
+async def test_a_mid_session_502_ends_the_waiting_calls_well_inside_their_timeout():
+    gateway = _BadGateway()
+    async with _in_process_manager(LIMIT, timeout=20, gate=gateway) as (d, _connects):
+        assert (await d.dispatch("mcp__inproc__echo", {"text": "warm"}))[1] is False
+        slow = asyncio.create_task(d.dispatch("mcp__inproc__slow", {"seconds": 15}))
+        await asyncio.sleep(0.3)
+        gateway.failing = True
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        text, is_error = await asyncio.wait_for(d.dispatch("mcp__inproc__echo", {"text": "x"}), 10)
+        assert is_error
+        text, is_error = await asyncio.wait_for(slow, 10)
+        assert is_error
+        assert loop.time() - started < 10  # the 502 ended both calls, not their 20 s timeout

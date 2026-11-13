@@ -7,6 +7,7 @@ opened either.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
@@ -46,20 +47,42 @@ def parse_host_list(value: str) -> frozenset[str]:
     return frozenset(host.strip().lower() for host in value.split(",") if host.strip())
 
 
-def parse_pins(value: str) -> dict[str, str]:
-    """``NOUS_MCP_CLIENT_PINNED_SERVERS`` (a comma list of ``name=host``) as ``{name: lowercase host}``. An entry
-    without ``=`` or with an empty side is ignored."""
-    pins: dict[str, str] = {}
+# Characters a tool name may not carry to be pinned: the pin syntax uses them.
+PIN_SEPARATORS = frozenset(",;|=")
+
+
+@dataclass(frozen=True)
+class Pin:
+    """One entry of ``NOUS_MCP_CLIENT_PINNED_SERVERS``: the server's host (with ``:port`` when its URL names one)
+    and the server's own names of the tools that may register."""
+
+    host: str
+    tools: frozenset[str]
+
+
+def parse_pins(value: str) -> dict[str, Pin]:
+    """``NOUS_MCP_CLIENT_PINNED_SERVERS`` as ``{name: Pin}``. The syntax: entries separated by ``,``, each
+    ``name=host[:port];tool|tool`` (``deepwiki=mcp.deepwiki.com;read_wiki_structure|ask_question``). The host is
+    compared lowercase; an IPv6 host is written in brackets. An entry without ``=`` or with an empty name or host is
+    ignored; an entry with no tool list pins the server with no tool, so nothing of it registers."""
+    pins: dict[str, Pin] = {}
     for entry in value.split(","):
-        name, sep, host = entry.partition("=")
+        name, sep, rest = entry.partition("=")
+        host, _semicolon, tools = rest.partition(";")
         if sep and name.strip() and host.strip():
-            pins[name.strip()] = host.strip().lower()
+            names = frozenset(tool.strip() for tool in tools.split("|") if tool.strip())
+            pins[name.strip()] = Pin(host.strip().lower(), names)
     return pins
 
 
-def url_host(url: str) -> str:
-    """The lowercase host of ``url`` (empty when it has none): what a pin is compared with."""
-    return (urlsplit(url).hostname or "").lower()
+def pin_host(url: str) -> str:
+    """What a pin's host part must be for ``url``: its lowercase host (an IPv6 one in brackets), with ``:port`` only
+    when the URL names a port, so a stored URL with a port matches only a pin that names the same port."""
+    parts = urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if ":" in host:
+        host = f"[{host}]"
+    return host if parts.port is None else f"{host}:{parts.port}"
 
 
 class ServerConfig(BaseModel):
@@ -69,7 +92,7 @@ class ServerConfig(BaseModel):
     url: str = Field(repr=False)
     transport: Literal["streamable_http"] = "streamable_http"
     enabled: bool = True
-    background: bool = False  # the owner's "available to background work" switch
+    background: bool = False  # the row's background switch: background use also needs the host's setting
     call_timeout_seconds: int = Field(default=30, ge=1, le=600)
 
     @field_validator("name")

@@ -11,8 +11,9 @@
 - stops reading a response body past ``NOUS_MCP_CLIENT_MAX_RESPONSE_BYTES`` (``_LimitedTransport``).
 
 Logging: the HTTP client's INFO line names every request URL, so it is dropped for the hosts this client opened
-(``_QuietMcpRequests`` on the ``httpx`` logger; httpcore logs only at DEBUG), and the SDK's streamable-HTTP logger,
-which logs the session id at INFO, is raised to WARNING. A secret in a URL's path is not supported all the same.
+(``_QuietMcpRequests`` on the ``httpx`` logger; httpcore logs only at DEBUG); the SDK's streamable-HTTP logger, which
+logs the session id at INFO, is raised to WARNING; and the SDK's WARNING-and-above lines are rewritten to a fixed
+text (``_WithholdServerText``), since they quote what a server sent. A secret in a URL's path is not supported.
 
 SDK symbols used (``mcp`` 1.26): ``mcp.client.session.ClientSession`` (``initialize``, ``send_request``,
 ``list_tools(params=)``), ``mcp.client.streamable_http.streamable_http_client(url, http_client=)``,
@@ -25,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import os
 import socket
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
@@ -33,6 +35,7 @@ from urllib.parse import urlsplit
 
 import httpcore
 import httpx
+import mcp
 from mcp import types
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -54,17 +57,42 @@ _QUIET_HOSTS: set[str] = set()
 
 class _QuietMcpRequests(logging.Filter):
     """Drops the HTTP client's INFO request line (``HTTP Request: <method> <url> ...``) for a host in
-    ``_QUIET_HOSTS``. Other hosts' lines, which the rest of Nous keeps, pass."""
+    ``_QUIET_HOSTS``, in either form (``URL.host`` decodes an ``xn--`` host to Unicode; ``raw_host`` keeps it as
+    sent). Other hosts' lines, which the rest of Nous keeps, pass."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         args = record.args
         if isinstance(args, tuple) and len(args) > 1 and isinstance(args[1], httpx.URL):
-            return args[1].host.lower() not in _QUIET_HOSTS
+            url = args[1]
+            hosts = {url.host.lower(), url.raw_host.decode("ascii", "replace").lower()}
+            return not hosts & _QUIET_HOSTS
+        return True
+
+
+_MCP_PACKAGE_DIR = os.path.normcase(os.path.dirname(os.path.abspath(mcp.__file__))) + os.sep
+
+
+class _WithholdServerText(logging.Filter):
+    """Rewrites a WARNING-or-above line the MCP SDK writes to a fixed text: such lines quote what a server sent
+    ("Failed to validate notification: ... Message was: ...", "Unknown SSE event: ..."), and a traceback can carry
+    the URL. Records from other code pass unchanged. Attached to the SDK's client loggers (``mcp.client.
+    streamable_http`` and ``client``, the SDK's name for ``mcp.client.session``) and to the root logger, which
+    ``mcp.shared.session`` writes to directly; a filter on a logger sees only the records made on that logger."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.WARNING and os.path.normcase(record.pathname).startswith(_MCP_PACKAGE_DIR):
+            record.msg = "MCP SDK %s at %s:%d (its text is withheld: it can quote what a server sent)"
+            record.args = (record.levelname, record.module, record.lineno)
+            record.exc_info = None
+            record.exc_text = None
+            record.stack_info = None
         return True
 
 
 logging.getLogger("httpx").addFilter(_QuietMcpRequests())
-logging.getLogger("mcp.client.streamable_http").setLevel(logging.WARNING)
+logging.getLogger("mcp.client.streamable_http").setLevel(logging.WARNING)  # it logs the session id at INFO
+for _logger_name in ("mcp.client.streamable_http", "client", ""):
+    logging.getLogger(_logger_name).addFilter(_WithholdServerText())
 
 
 class BlockedAddress(Exception):

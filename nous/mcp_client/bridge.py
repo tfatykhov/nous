@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,6 +37,10 @@ _OMITTED = {"image": "image", "audio": "audio", "resource_link": "resource link"
 # call when the flag is first turned on.
 _TOP_LEVEL_COMBINATORS = frozenset({"anyOf", "oneOf", "allOf"})
 _PROPERTY_KEY = re.compile(r"[a-zA-Z0-9_.-]{1,64}")
+_EXACT_KEYWORDS = frozenset({"enum", "const"})  # the server compares these values: never cleaned
+_VALUE_KEYWORDS = frozenset({"enum", "const", "default", "examples"})  # data, not schemas
+# Keywords whose value maps names to schemas: their keys are names, never keywords.
+_SCHEMA_MAPS = frozenset({"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"})
 
 
 class ServerErrorReply(Exception):
@@ -84,25 +89,73 @@ def clean_description(server: str, text: str) -> str:
     return f"[{server}] {clean_text(text, DESCRIPTION_MAX_CHARS)}"
 
 
+class SchemaRefused(Exception):
+    """A schema whose key or ``enum`` / ``const`` value cleaning would change: the tool is skipped, never altered."""
+
+
+def _exact(value: Any) -> None:
+    """Raise ``SchemaRefused`` when cleaning would change a string inside an ``enum`` or ``const`` value (an object's
+    keys included): the server compares those values, so they are kept as they are or the tool is skipped."""
+    if isinstance(value, str):
+        if clean_text(value, SCHEMA_STRING_MAX_CHARS) != value:
+            raise SchemaRefused("an enum or const value contains characters that are not allowed")
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _exact(key)
+            _exact(item)
+    elif isinstance(value, list):
+        for item in value:
+            _exact(item)
+
+
+def _check_key(key: Any) -> None:
+    if not isinstance(key, str) or clean_text(key, SCHEMA_STRING_MAX_CHARS) != key:
+        raise SchemaRefused("a key contains characters that are not allowed")
+
+
 def clean_schema(value: Any) -> Any:
-    """A copy of an input schema with every ``description`` and ``title`` string and every ``enum`` string cleaned
-    like a description and cut to ``SCHEMA_STRING_MAX_CHARS``."""
+    """A copy of an input schema with every string leaf (a description, a title, a default, an example, an ``x-``
+    value...) cleaned like a description and cut to ``SCHEMA_STRING_MAX_CHARS``. Raises ``SchemaRefused`` when
+    cleaning would change a key anywhere, or a string of an ``enum`` or ``const`` value."""
     if isinstance(value, dict):
         out: dict[str, Any] = {}
         for key, item in value.items():
-            if key in ("description", "title") and isinstance(item, str):
-                out[key] = clean_text(item, SCHEMA_STRING_MAX_CHARS)
-            elif key == "enum" and isinstance(item, list):
-                out[key] = [
-                    clean_text(entry, SCHEMA_STRING_MAX_CHARS) if isinstance(entry, str) else clean_schema(entry)
-                    for entry in item
-                ]
+            _check_key(key)
+            if key in _EXACT_KEYWORDS:
+                _exact(item)
+                out[key] = item
+            elif key in _SCHEMA_MAPS and isinstance(item, dict):
+                # Its keys are names (a property called "const" is not the keyword), its values schemas.
+                for name in item:
+                    _check_key(name)
+                out[key] = {name: clean_schema(sub) for name, sub in item.items()}
             else:
                 out[key] = clean_schema(item)
         return out
     if isinstance(value, list):
         return [clean_schema(item) for item in value]
+    if isinstance(value, str):
+        return clean_text(value, SCHEMA_STRING_MAX_CHARS)
     return value
+
+
+def _property_maps(node: Any) -> Iterator[dict[str, Any]]:
+    """Every ``properties`` map in a schema, nested ones included (under ``items``, ``$defs``, a combinator...), but
+    not inside a value keyword (``enum``, ``const``, ``default``, ``examples``)."""
+    if isinstance(node, dict):
+        for key, item in node.items():
+            if key in _VALUE_KEYWORDS:
+                continue
+            if key in _SCHEMA_MAPS and isinstance(item, dict):  # names to schemas: a name is never a keyword
+                if key == "properties":
+                    yield item
+                for sub in item.values():
+                    yield from _property_maps(sub)
+            else:
+                yield from _property_maps(item)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _property_maps(item)
 
 
 def serialize_schema(schema: dict[str, Any]) -> str:
@@ -124,9 +177,11 @@ def has_reserved_property(schema: dict[str, Any]) -> bool:
 def input_schema_ok(schema: Any) -> bool:
     """Whether ``schema`` can be offered as a tool's input schema: a JSON object schema (``type`` is ``object``)
     that is itself valid JSON Schema, each property described by an object (the dispatcher's argument check reads
-    them as such) under a key the model API accepts, with no ``anyOf``, ``oneOf`` or ``allOf`` at the top level. A
-    stored schema the model API rejects would fail every model call that offers the tool, so such a tool is not
-    registered."""
+    them as such), every ``properties`` key, nested ones included, one the model API accepts, and no ``anyOf``,
+    ``oneOf`` or ``allOf`` at the top level. A stored schema the model API rejects would fail every model call that
+    offers the tool, so such a tool is not registered. ``check_schema`` is that last guard (an invalid keyword value
+    is what the API rejects); it compiles the server's patterns and can raise more than ``SchemaError`` on hostile
+    input, which ``prepare_tool`` catches."""
     if not isinstance(schema, dict) or schema.get("type") != "object":
         return False
     if _TOP_LEVEL_COMBINATORS & schema.keys():
@@ -134,7 +189,7 @@ def input_schema_ok(schema: Any) -> bool:
     properties = schema.get("properties", {})
     if not isinstance(properties, dict) or not all(isinstance(value, dict) for value in properties.values()):
         return False
-    if not all(isinstance(key, str) and _PROPERTY_KEY.fullmatch(key) for key in properties):
+    if not all(isinstance(key, str) and _PROPERTY_KEY.fullmatch(key) for m in _property_maps(schema) for key in m):
         return False
     try:
         validator_for(schema, default=Draft202012Validator).check_schema(schema)
@@ -145,10 +200,10 @@ def input_schema_ok(schema: Any) -> bool:
 
 def prepare_tool(server: str, tool: str, description: str, input_schema: Any) -> PreparedTool:
     """A stored tool as the model would be offered it: the name (``tool_name``) and the schema (``clean_schema`` of
-    the server's, with the ``clean_description`` description), or the reason it is not registered: a name that
-    cannot be built, a schema over ``SCHEMA_MAX_CHARS`` serialized, one that still carries a removed character
-    (``_removed``) where cleaning does not reach (a ``default``, an ``example``, a nested key), one
-    ``input_schema_ok`` refuses, one nested too deeply to read, or an argument starting with ``_``."""
+    the server's, with the ``clean_description`` description), or the reason it is not registered (the seed prints
+    it): a name that cannot be built, a key or an ``enum`` / ``const`` value that cleaning would change, a schema
+    over ``SCHEMA_MAX_CHARS`` serialized, one ``input_schema_ok`` refuses or cannot check, one nested too deeply to
+    read, or an argument starting with ``_``. Never raises for a hostile schema."""
     name = tool_name(server, tool)
     if name is None:
         return PreparedTool(None, None, "its name is empty or too long")
@@ -156,15 +211,16 @@ def prepare_tool(server: str, tool: str, description: str, input_schema: Any) ->
         return PreparedTool(name, None, "its input schema is not a JSON object")
     try:
         schema = {**clean_schema(input_schema), "description": clean_description(server, description)}
-        serialized = serialize_schema(schema)
-        if len(serialized) > SCHEMA_MAX_CHARS:
+        if len(serialize_schema(schema)) > SCHEMA_MAX_CHARS:
             return PreparedTool(name, None, f"its input schema is over {SCHEMA_MAX_CHARS} characters")
-        if any(_removed(ch) for ch in serialized):  # in a string clean_schema does not touch: a default, a key...
-            return PreparedTool(name, None, "its input schema carries control or format characters")
         if not input_schema_ok(schema):
             return PreparedTool(name, None, "its input schema is not one the model API accepts")
+    except SchemaRefused as exc:
+        return PreparedTool(name, None, str(exc))
     except RecursionError:
         return PreparedTool(name, None, "its input schema is nested too deeply")
+    except Exception:  # check_schema on a hostile schema: an OverflowError pattern, a "$schema" that is not text...
+        return PreparedTool(name, None, "its input schema cannot be checked")
     if has_reserved_property(schema):
         return PreparedTool(name, None, "it declares an argument starting with '_'")
     return PreparedTool(name, schema, None)
@@ -173,7 +229,8 @@ def prepare_tool(server: str, tool: str, description: str, input_schema: Any) ->
 def _clean_result_text(text: str) -> str:
     """Server result text with the removed characters dropped (newlines and tabs kept; a line or paragraph separator
     becomes a newline), and every line that starts like the wrapper line or the truncation note quoted with ``> ``,
-    so the server cannot forge either."""
+    so the server cannot forge either. It is a prefix match: a look-alike line (other wording, other brackets) is
+    left as it is, and only the real wrapper line comes first."""
     kept = "".join(
         "\n" if unicodedata.category(ch) in ("Zl", "Zp") else ch
         for ch in text

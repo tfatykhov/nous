@@ -88,7 +88,7 @@ async def test_a_dry_run_prints_what_the_model_gets_and_writes_nothing(listing, 
     assert "Pin entry, for NOUS_MCP_CLIENT_PINNED_SERVERS on the host" in out and out.rstrip().endswith(
         "Nothing written: pass --write to store the server and these permissions."
     )
-    assert ": alpha=alpha.example.com\n" in out
+    assert ": alpha=alpha.example.com;search\n" in out  # the host and the tools that would register
     assert await McpRegistry(db, settings.agent_id).list_enabled() == []
 
 
@@ -132,3 +132,34 @@ async def test_a_refused_url_is_reported_without_its_query_string(capsys):
     args = seed._parse_args(["--name", "alpha", "--url", "https://alpha.example.com/mcp?key=SECRET-77"])
     assert await seed.seed(args, _settings()) == 2
     assert "SECRET-77" not in capsys.readouterr().err
+
+
+async def test_the_pin_entry_names_the_port_and_the_background_entry_is_printed(listing, monkeypatch, capsys):
+    @asynccontextmanager
+    async def open_session(url: str, allow: frozenset[str], *, max_response_bytes: int):
+        yield _Session([_tool("search"), _tool("fetch")])
+
+    monkeypatch.setattr(transport, "open_session", open_session)
+    args = seed._parse_args(
+        ["--name", "alpha", "--url", "https://alpha.example.com:8443/mcp", "--allow", "search,fetch", "--background"]
+    )
+    assert await seed.seed(args, _settings()) == 0
+    out = capsys.readouterr().out
+    assert ": alpha=alpha.example.com:8443;fetch|search\n" in out
+    assert "Background entry, for NOUS_MCP_CLIENT_BACKGROUND_SERVERS on the host (a comma list): alpha\n" in out
+
+
+async def test_a_tool_name_that_cannot_be_pinned_cannot_be_allowed(listing, capsys):
+    listing(_tool("a|b"), _tool("c"))
+    assert await seed.seed(_args("--allow", "a|b,c"), _settings()) == 2
+    assert "these tool names cannot be pinned: a|b" in capsys.readouterr().err
+
+
+async def test_a_hostile_schema_is_reported_not_raised(listing, capsys):
+    hostile = {"type": "object", "properties": {"q": {"type": "string", "pattern": "a{4294967296}"}}}
+    listing(_tool("search", schema=hostile), _tool("fetch", schema={"type": "object", "$schema": 5}), _tool("ok"))
+    assert await seed.seed(_args("--allow", "search,fetch,ok"), _settings()) == 0
+    out = capsys.readouterr().out
+    assert "mcp__alpha__search  (skipped at startup: its input schema cannot be checked)" in out
+    assert "mcp__alpha__fetch  (skipped at startup: its input schema cannot be checked)" in out
+    assert ": alpha=alpha.example.com;ok\n" in out
