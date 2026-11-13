@@ -28,10 +28,22 @@ from nous.api.runner import AgentRunner
 from nous.brain import Brain
 from nous.config import Settings
 from nous.heart import Heart
-from nous.heart.schemas import FactInput, ProcedureInput
+from nous.heart.schemas import FactInput, FactRejected, ProcedureInput
 from nous.tool_markup import clean_model_text
 
 logger = logging.getLogger(__name__)
+
+
+def teach_source(caller_source: object) -> str:
+    """The stored ``source`` of a fact taught through ``nous_teach``.
+
+    A fact's source decides how admission treats it: ``user_stated``,
+    ``identity`` and the other bypass sources are stored without scoring. The
+    caller's text is a description, not a claim Nous can check, so it is kept
+    behind an ``mcp:`` prefix and can never equal one of those sources.
+    """
+    described = " ".join(str(caller_source).split())[:60] if caller_source else ""
+    return f"mcp:{described}" if described and described != "mcp" else "mcp"
 
 
 class MCPTransportManager:
@@ -319,7 +331,7 @@ def create_mcp_server(
             args["content"], tool="nous_teach", field="content", params=("type", "content", "domain", "source")
         )
         domain = args.get("domain")
-        source = args.get("source", "mcp")
+        source = teach_source(args.get("source"))
 
         if teach_type == "fact":
             fact_input = FactInput(
@@ -328,6 +340,12 @@ def create_mcp_server(
                 source=source,
             )
             fact = await heart.learn(fact_input)
+            if isinstance(fact, FactRejected):
+                # Nothing was written. A taught fact is scored like any other.
+                return [TextContent(type="text", text=(
+                    f"Fact not stored (admission score {fact.composite_score:.2f} "
+                    f"< {fact.threshold} threshold)."
+                ))]
             return [TextContent(type="text", text=f"Learned fact: {fact.id}")]
 
         elif teach_type == "procedure":
