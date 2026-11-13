@@ -52,7 +52,7 @@ def _startup_note(name: str | None, schema: Any) -> str:
 
 async def seed(args: argparse.Namespace, settings: Settings) -> int:
     """List the server's tools, print them and, with ``--write``, store them. Returns the exit status."""
-    from nous.mcp_client.transport import list_all_tools, open_session
+    from nous.mcp_client.transport import BlockedAddress, list_all_tools, open_session
 
     try:
         server = ServerConfig(name=args.name, url=args.url, background=args.background)
@@ -65,6 +65,9 @@ async def seed(args: argparse.Namespace, settings: Settings) -> int:
         async with asyncio.timeout(_LIST_TIMEOUT_SECONDS):
             async with open_session(server.url, parse_host_list(settings.mcp_client_allow_private_hosts)) as session:
                 tools = await list_all_tools(session)
+    except BlockedAddress as exc:  # the guard's own words: a host name at most, never a query string
+        print(f"error: the address guard refused the server: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:
         print(f"error: could not list the server's tools: {safe_error(exc)}", file=sys.stderr)
         return 1

@@ -73,6 +73,7 @@ class _Connection:
     ready: asyncio.Future[Any]
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task[None] | None = None
+    session: Any = None
 
     @property
     def closed(self) -> bool:
@@ -121,10 +122,13 @@ class _Server:
         # Shielded: a caller that is cancelled or times out leaves the connect running for the next call.
         return await asyncio.shield(conn.ready)
 
-    def drop(self) -> None:
-        """End the current connection (its supervisor leaves the session's context); the next call opens one."""
-        if self._conn is not None:
-            self._conn.stop.set()
+    def drop(self, session: Any = None) -> None:
+        """End the current connection (its supervisor leaves the session's context); the next call opens one. With
+        ``session``, only while the current connection is the one holding it: a call that failed on an older session
+        does not end a newer one."""
+        conn = self._conn
+        if conn is not None and (session is None or conn.session is session):
+            conn.stop.set()
 
     def tasks(self) -> set[asyncio.Task[None]]:
         """The supervisor tasks still running, the closing ones included."""
@@ -144,6 +148,7 @@ class _Server:
         try:
             async with self._connect(self.config.url, self._allow) as session:
                 self._failures = 0
+                conn.session = session
                 conn.ready.set_result(session)
                 await conn.stop.wait()
         except Exception as exc:  # an ExceptionGroup from the SDK's task groups included; CancelledError passes
@@ -267,6 +272,7 @@ class McpClientManager:
         runner's tool timeout, or a shutdown."""
         server_name = server.config.name
         timeout = server.config.call_timeout_seconds
+        session: Any = None
         try:
             # One budget for the wait for a call slot, the connect and the call (which can list the server's tools
             # first: the SDK does that to check a result's structured content).
@@ -280,8 +286,10 @@ class McpClientManager:
         except ServerUnavailable:
             return _error(f'the MCP server "{server_name}" is not reachable now: try again later.')
         except Exception as exc:
-            # The session is in an unknown state (the server may have dropped it): the next call connects again.
-            server.drop()
+            # The session is in an unknown state (the server may have dropped it): the next call connects again. A
+            # failed connect left no session to end.
+            if session is not None:
+                server.drop(session)
             logger.warning("MCP client: %s failed (%s)", name, type(exc).__name__)
             logger.debug("MCP client: %s error", name, exc_info=True)
             return _error(f'the call to the MCP server "{server_name}" failed: {safe_error(exc)}.')

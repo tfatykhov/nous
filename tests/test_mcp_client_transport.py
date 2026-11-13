@@ -3,6 +3,7 @@ where a host name is resolved, and IP literals resolve locally."""
 
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any
 
@@ -150,6 +151,18 @@ async def test_a_url_with_a_query_string_is_never_requested(caplog):
             pass
     assert "SECRET-91c2" not in str(refused.value)
     assert all("SECRET-91c2" not in record.getMessage() for record in caplog.records)
+
+
+def test_the_sdk_still_has_what_the_transport_uses():
+    # CI installs the newest mcp 1.x the range allows, not the locked 1.26: pin the signatures the transport calls.
+    from mcp.client.session import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+    from mcp.types import PaginatedRequestParams
+
+    assert "http_client" in inspect.signature(streamable_http_client).parameters
+    assert "params" in inspect.signature(ClientSession.list_tools).parameters
+    assert list(inspect.signature(ClientSession.call_tool).parameters)[1:3] == ["name", "arguments"]
+    assert PaginatedRequestParams(cursor="c").cursor == "c"
 
 
 def test_no_proxy_from_the_environment(monkeypatch):

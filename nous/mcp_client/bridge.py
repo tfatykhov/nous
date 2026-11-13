@@ -21,6 +21,7 @@ _UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_-]")
 # Kept as they are in a description; every other control (Cc) and format (Cf: zero-width, bidi, tag) character goes.
 _KEPT_CONTROLS = frozenset("\n\t")
 _OMITTED = {"image": "image", "audio": "audio", "resource_link": "resource link"}
+_TOP_LEVEL_COMBINATORS = frozenset({"anyOf", "oneOf", "allOf"})
 
 
 def tool_name(server: str, tool: str) -> str | None:
@@ -54,9 +55,12 @@ def has_reserved_property(schema: dict[str, Any]) -> bool:
 def input_schema_ok(schema: Any) -> bool:
     """Whether ``schema`` can be offered as a tool's input schema: a JSON object schema (``type`` is ``object``)
     that is itself valid JSON Schema, each property described by an object (the dispatcher's argument check reads
-    them as such). A stored schema the model API rejects would fail every model call that offers the tool, so such
-    a tool is not registered."""
+    them as such), with no ``anyOf``, ``oneOf`` or ``allOf`` at the top level (the model API refuses those there). A
+    stored schema the model API rejects would fail every model call that offers the tool, so such a tool is not
+    registered."""
     if not isinstance(schema, dict) or schema.get("type") != "object":
+        return False
+    if _TOP_LEVEL_COMBINATORS & schema.keys():
         return False
     properties = schema.get("properties", {})
     if not isinstance(properties, dict) or not all(isinstance(value, dict) for value in properties.values()):

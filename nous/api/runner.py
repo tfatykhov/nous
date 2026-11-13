@@ -776,8 +776,9 @@ class AgentRunner:
             tools = [
                 t for t in tools if tool_policy.internal_only_allowed(t["name"], ctx=ctx, lineage_shell=lineage_shell)
             ]
-        # F112: a tool of an external MCP server is offered only where _authorize_tool_call would let it run.
-        tools = [t for t in tools if tool_policy.mcp_client_violation(ctx.kind, t["name"]) is None]
+        # F112: the MCP client floor drops a tool of an external MCP server where _authorize_tool_call refuses it on
+        # that floor. An earlier floor may still refuse one that stays (a heartbeat_triage turn may not act outward).
+        tools =[t for t in tools if tool_policy.mcp_client_violation(ctx.kind, t["name"]) is None]
         if extra_tools:
             tools = [*tools, *(schema for schema, _executor in extra_tools.values())]
         if self._settings.tool_reason_enabled:

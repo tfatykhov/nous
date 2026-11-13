@@ -69,6 +69,9 @@ def test_reserved_properties_and_schema_shapes():
     assert not input_schema_ok({"type": "object", "properties": {"q": True}})
     assert not input_schema_ok({"type": "object", "properties": {"q": {"type": 5}}})  # not valid JSON Schema
     assert not input_schema_ok("nope")
+    for combinator in ("anyOf", "oneOf", "allOf"):  # the model API refuses them at the top level
+        assert not input_schema_ok({"type": "object", combinator: [{"required": ["a"]}, {"required": ["b"]}]})
+    assert input_schema_ok({"type": "object", "properties": {"q": {"anyOf": [{"type": "string"}, {"type": "null"}]}}})
 
 
 def test_flatten_joins_items_marks_errors_and_cuts():
@@ -291,6 +294,26 @@ async def test_the_tool_array_is_the_same_after_a_disconnect_and_a_reconnect():
     assert fake.closed == 2
 
 
+async def test_a_failure_on_an_older_session_does_not_end_a_newer_one():
+    from nous.mcp_client.manager import _Server
+
+    async def no_event(_name: str, _exc: BaseException) -> None:
+        return None
+
+    fake = FakeServer()
+    server = _Server(_alpha()[0], fake.connect, frozenset(), no_event)
+    first = await server.session()
+    server.drop(first)
+    await asyncio.sleep(0)
+    second = await server.session()
+    assert second is not first and fake.opened == 2
+    server.drop(first)  # a late failure of a call that still held the first session
+    assert server.connected
+    server.drop(second)
+    await asyncio.gather(*server.tasks())
+    assert not server.connected and fake.closed == 2
+
+
 async def test_a_timeout_leaves_the_connection_usable():
     manager, d, fake = await _manager([_alpha(_tool("alpha", "slow"), timeout=1)])
     assert (await d.dispatch("mcp__alpha__slow", {"q": "warm"}))[1] is False
@@ -364,6 +387,39 @@ async def test_close_unregisters_and_forgets_every_tool():
     assert mcp_tool_background("mcp__alpha__x") is None and "mcp__alpha__x" not in refuse_denylist()
     assert fake.closed == 1
     assert "https" not in repr(manager.status())
+
+
+async def test_an_allowed_call_through_the_real_tool_loop():
+    from test_runner_authorization import _run_loop
+    from test_runner_authorization import _settings as _runner_settings
+    from test_runner_background import _MockBrain, _MockCognitive, _MockHeart
+
+    from nous.api.execution_context import ExecutionContext
+    from nous.api.models import ApiResponse
+    from nous.api.runner import AgentRunner
+
+    manager, d, fake = await _manager([_alpha(_tool("alpha", "search"))])
+    runner = AgentRunner(_MockCognitive(), _MockBrain(), _MockHeart(), _runner_settings(tool_reason_enabled=True))
+    runner.set_dispatcher(d)
+    offered: list[dict[str, Any]] = []
+
+    async def call_api(system_prompt, messages, tools=None, **_kwargs):
+        if not offered:
+            offered.extend(tools or [])
+            use = {"type": "tool_use", "id": "t1", "name": "mcp__alpha__search", "input": {"q": "hi", "reason": "why"}}
+            return ApiResponse(content=[use], stop_reason="tool_use")
+        return ApiResponse(content=[{"type": "text", "text": "done"}], stop_reason="end_turn")
+
+    runner._call_api = call_api
+    _text, results, _usage, _thinking = await _run_loop(
+        runner, context=ExecutionContext(kind="interactive", session_id="s1")
+    )
+    assert results[0].error is None and (results[0].result or "").startswith(WRAPPER + "hello")
+    assert fake.calls == [("search", {"q": "hi"})]  # the reason went to the recorder, not to the server
+    offered_tool = next(t for t in offered if t["name"] == "mcp__alpha__search")
+    assert "reason" in offered_tool["input_schema"]["properties"]
+    assert "reason" not in d._schemas["mcp__alpha__search"]["properties"]  # F108 adds it to the offered copy only
+    await manager.close()
 
 
 async def test_the_connection_uses_the_stored_url_and_the_allowed_hosts():
