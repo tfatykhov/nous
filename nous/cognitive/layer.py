@@ -2075,35 +2075,15 @@ class CognitiveLayer:
         if self._bus:
             data: dict[str, Any] = {"message_snapshot": message_snapshot}
             if self._outside_tagging_on():
-                data["outside_tools"] = self._compaction_outside_tools(session_id, message_snapshot)
+                # The whole session's list, on purpose: what the model read earlier is still in
+                # its context (and in the summary) when a later stretch is compacted.
+                data["outside_tools"] = self.outside_tools(session_id)
             await self._bus.emit(Event(
                 type="conversation_compacting",
                 agent_id=agent_id,
                 session_id=session_id,
                 data=data,
             ))
-
-    def _compaction_outside_tools(self, session_id: str, message_snapshot: list[dict[str, Any]]) -> list[str]:
-        """Outside-content shadow: the session's list, then any ``tool_use`` block in the snapshot that
-        ``classify_ingress`` calls outside (the snapshot survives a restart; the session list does not)."""
-        names = self.outside_tools(session_id)
-        try:
-            for msg in message_snapshot:
-                content = msg.get("content") if isinstance(msg, dict) else None
-                if not isinstance(content, list):
-                    continue
-                for block in content:
-                    if not isinstance(block, dict) or block.get("type") != "tool_use":
-                        continue
-                    name = str(block.get("name") or "")
-                    tool_input = block.get("input")
-                    if name and name not in names and classify_ingress(
-                        name, tool_input if isinstance(tool_input, dict) else None
-                    ) == "outside":
-                        names.append(name)
-        except Exception:  # noqa: BLE001 -- the event goes out with what was read
-            logger.warning("outside-content: compaction snapshot not fully read for session %s", session_id)
-        return names
 
     async def end_session(
         self,

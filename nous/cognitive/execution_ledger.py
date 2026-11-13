@@ -503,10 +503,6 @@ def classify_side_effect(tool_name: str, tool_input: dict[str, Any] | None = Non
     return "write"  # WRITE_TOOLS and anything unclassified
 
 
-# Programs whose install subcommand downloads packages: not "external" to the side-effect classifier.
-_INSTALLERS = frozenset({"pip", "pip3", "npm"})
-
-
 def classify_ingress(tool_name: str, tool_input: dict[str, Any] | None = None) -> Literal["none", "outside"]:
     """Whether THIS call can bring text from outside into the session: ``"outside"`` or ``"none"``.
 
@@ -517,21 +513,20 @@ def classify_ingress(tool_name: str, tool_input: dict[str, Any] | None = None) -
     ``bash`` limits, by design (no parser of its own): a command the side-effect classifier calls
     ``external`` is outside, which covers curl, wget, gh, ssh, ``git clone``/``fetch``/``pull``
     and Python run with network code, and over-classifies what only sends (``curl -d``, ``git
-    push``, mail); ``pip``/``pip3``/``npm install`` are added from the invocations the existing
-    lexer reads. Not seen: a script file that fetches (``python fetch.py``), ``uv``/``python -m pip``,
+    push``, mail). Not seen: a script file that fetches (``python fetch.py``), package installs,
     and reading a file an earlier call downloaded.
+
+    Never raises on a malformed call: a name that is not a string or an input that is not a
+    dict is ``"none"``.
     """
-    tool_input = tool_input or {}
+    if not isinstance(tool_name, str):
+        return "none"
+    if not isinstance(tool_input, dict):
+        tool_input = {}
     if tool_name.startswith("mcp__"):
         return "outside"
     if tool_name == "bash":
-        command = _extract_bash_command(tool_input)
-        if _classify_bash_command(command) == "external":
-            return "outside"
-        runs = _command_runs(command, None) or []
-        if any(prog in _INSTALLERS and "install" in args for prog, args, _ in runs):
-            return "outside"
-        return "none"
+        return "outside" if _classify_bash_command(_extract_bash_command(tool_input)) == "external" else "none"
     if tool_name == "run_python":
         return "outside" if code_reaches_network(str(tool_input.get("code") or "")) else "none"
     cls = TOOL_CLASSES.get(tool_name)

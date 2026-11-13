@@ -68,8 +68,11 @@ def _layer(mode: str | None, bus: _Bus | None = None) -> CognitiveLayer:
     ("bash", {"command": "git clone https://github.com/x/y"}, "outside"),
     ("bash", {"command": "cd repo && git pull"}, "outside"),
     ("bash", {"command": "gh api repos/x/y/issues"}, "outside"),
-    ("bash", {"command": "pip install requests"}, "outside"),
-    ("bash", {"command": "sudo npm install left-pad"}, "outside"),
+    ("bash", {"command": "pip install requests"}, "none"),
+    ("bash", {"command": "npm run install"}, "none"),
+    ("bash", "not a dict", "none"),
+    ("run_python", "not a dict", "none"),
+    (None, {}, "none"),
     ("bash", {"command": "ls -la"}, "none"),
     ("bash", {"command": "cat notes.txt | grep install"}, "none"),
     ("bash", {"command": "pip list"}, "none"),
@@ -149,7 +152,8 @@ async def test_session_ended_carries_an_empty_list_for_a_clean_session():
     assert event.data["outside_tools"] == []
 
 
-async def test_compaction_event_unions_the_session_list_and_the_snapshot():
+async def test_compaction_event_carries_the_session_list_not_what_the_snapshot_names():
+    """Only a call that was dispatched counts: a tool_use block may name a call that was refused."""
     bus = _Bus()
     layer = _layer("shadow", bus)
     layer._session_metadata["s1"] = SessionMetadata()
@@ -157,16 +161,13 @@ async def test_compaction_event_unions_the_session_list_and_the_snapshot():
     snapshot = [
         {"role": "user", "content": "find it"},
         {"role": "assistant", "content": [
-            {"type": "text", "text": "looking"},
-            {"type": "tool_use", "id": "t1", "name": "web_search", "input": {"query": "q"}},
-            {"type": "tool_use", "id": "t2", "name": "bash", "input": {"command": "ls"}},
             {"type": "tool_use", "id": "t3", "name": "mcp__docs__read", "input": {}},
         ]},
     ]
     await layer.pre_compaction("agent", "s1", snapshot)
     (event,) = bus.events
     assert event.type == "conversation_compacting"
-    assert event.data["outside_tools"] == ["web_search", "mcp__docs__read"]
+    assert event.data["outside_tools"] == ["web_search"]
     assert event.data["message_snapshot"] is snapshot
 
 
