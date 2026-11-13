@@ -1140,6 +1140,10 @@ class Settings(BaseSettings):
     # authenticated. The /integrations/mcp routes require that header; unset (or not a SHA-256 digest), they answer
     # 503. A LAN control only: code running in this process can call the routes or write the rows itself.
     mcp_client_ui_secret_sha256: str = ""
+    # F112 PR 2c: the path of the file holding the key that encrypts the MCP servers' stored credentials (32 random
+    # bytes, base64 on one line), kept on the host outside the repository and away from the database's backups.
+    # Empty or unusable: no credential can be stored, and a server with a stored one is skipped.
+    mcp_client_key_file: str = ""
 
     # LLM
     model: str = "claude-sonnet-4-6"

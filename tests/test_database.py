@@ -88,6 +88,8 @@ async def test_all_tables_exist(db):
         # F112 MCP client: external MCP servers and their tools (migration 109)
         ("nous_system", "mcp_servers"),
         ("nous_system", "mcp_server_tools"),
+        # F112 MCP client PR 2c: a server's stored credential, sealed (migration 110)
+        ("nous_system", "mcp_server_secrets"),
         # Task scores, in a schema of their own (migration 087)
         ("scoring", "task_scores"),
         # The scoring command's heartbeat, one row per agent (migration 088)

@@ -1,4 +1,4 @@
-"""F112 MCP client: a server row and a tool row, validated.
+"""F112 MCP client: a server row, a tool row and the headers of a stored credential, validated.
 
 No SDK import. ``url_problem`` is also the transport's first check, so a URL that a row could not hold is never
 opened either.
@@ -104,6 +104,64 @@ def pin_host(url: str) -> str:
     if ":" in host:
         host = f"[{host}]"
     return host if parts.port is None else f"{host}:{parts.port}"
+
+
+HEADERS_MAX = 8
+HEADER_VALUE_MAX_CHARS = 4096
+_HEADER_NAME = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}")
+# Headers the transport or the SDK sets: a stored credential may not replace them.
+_RESERVED_HEADERS = frozenset(
+    {
+        "host",
+        "content-length",
+        "content-type",
+        "transfer-encoding",
+        "connection",
+        "accept",
+        "accept-encoding",
+        "cookie",
+        "mcp-session-id",
+        "mcp-protocol-version",
+        "last-event-id",
+        "te",
+        "upgrade",
+        "proxy-authorization",
+    }
+)
+_RESERVED_HEADER_PREFIX = "x-nous-"
+# A value is printable ASCII without '"' and '\': the result scrub runs on text json.dumps may have escaped, and these
+# two are the characters it changes.
+_HEADER_VALUE = re.compile(r"[\x20\x21\x23-\x5b\x5d-\x7e]+")
+
+
+def validate_headers(value: Any) -> dict[str, str]:
+    """``value`` as the headers a server's credential may hold: 1 to ``HEADERS_MAX`` names (a token of at most 64
+    characters, none the transport or the SDK owns, none twice whatever the case) with values of 1 to
+    ``HEADER_VALUE_MAX_CHARS`` printable ASCII characters (no ``"``, no ``\\``, no space at either end). Raises
+    ``ValueError`` naming the header (by position when its name is not a valid one) and the rule, never a value."""
+    if not isinstance(value, dict):
+        raise ValueError("headers must be an object of header name to value")
+    if not 1 <= len(value) <= HEADERS_MAX:
+        raise ValueError(f"give 1 to {HEADERS_MAX} headers")
+    seen: set[str] = set()
+    for position, (name, item) in enumerate(value.items(), start=1):
+        if not isinstance(name, str) or not _HEADER_NAME.fullmatch(name):
+            raise ValueError(
+                f"header {position}: a name is 1 to 64 letters, digits or any of !#$%&'*+.^_`|~- (no space)"
+            )
+        lowered = name.lower()
+        if lowered in _RESERVED_HEADERS or lowered.startswith(_RESERVED_HEADER_PREFIX):
+            raise ValueError(f"header {name}: the client sets this header itself, so it cannot be stored")
+        if lowered in seen:
+            raise ValueError(f"header {name}: named twice (names are compared without case)")
+        seen.add(lowered)
+        if not isinstance(item, str) or not 1 <= len(item) <= HEADER_VALUE_MAX_CHARS:
+            raise ValueError(f"header {name}: a value is 1 to {HEADER_VALUE_MAX_CHARS} characters")
+        if not _HEADER_VALUE.fullmatch(item):
+            raise ValueError(f'header {name}: a value holds printable ASCII characters only, and no " or \\')
+        if item != item.strip(" "):
+            raise ValueError(f"header {name}: a value may not start or end with a space")
+    return dict(value)
 
 
 class ServerConfig(BaseModel):

@@ -17,6 +17,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     SmallInteger,
     String,
     Text,
@@ -2402,8 +2403,9 @@ class McpServer(Base):
 
     ``name`` is the middle part of its tools' names (``mcp__<name>__<tool>``); the migration's CHECK holds its shape.
     ``url`` is https with no credential in it. ``background``: the owner's "available to background work" switch.
-    Written by ``python -m nous.mcp_client.seed`` (``McpRegistry``), read by the MCP client at startup. No secret
-    column. Not read by the ``db_query`` reader.
+    Written by ``python -m nous.mcp_client.seed`` (``McpRegistry``), read by the MCP client at startup. Its stored
+    credential, if any, is a row of ``nous_system.mcp_server_secrets`` (``McpServerSecret``). Not read by the
+    ``db_query`` reader.
     """
 
     __tablename__ = "mcp_servers"
@@ -2455,5 +2457,38 @@ class McpServerTool(Base):
     description: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     input_schema: Mapped[dict] = mapped_column(JSONB, nullable=False)
     permission: Mapped[str] = mapped_column(Text, nullable=False, default="deny", server_default="deny")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class McpServerSecret(Base):
+    """Migration 110 (F112 PR 2c): an MCP server's stored credential, sealed (``nous/mcp_client/secrets.py``).
+
+    At most one per server (headers, or from PR 2d an OAuth record). ``nonce`` and ``ciphertext`` (AES-256-GCM, the
+    tag included) open only with the key in ``NOUS_MCP_CLIENT_KEY_FILE`` and associated data naming the agent, the
+    server's name, its URL and ``kind``; ``key_id`` names the key. ``header_names`` is plain, for display. ``id`` is
+    the credential's version: the owner's set or replace deletes the row and inserts a new one. Goes with its server
+    (ON DELETE CASCADE). Written by the owner's routes, read by the MCP client. Not read by the ``db_query`` reader.
+    """
+
+    __tablename__ = "mcp_server_secrets"
+    __table_args__ = (
+        UniqueConstraint("server_id", name="mcp_server_secrets_server_id_key"),
+        CheckConstraint("kind IN ('headers', 'oauth')", name="mcp_server_secrets_kind_check"),
+        {"schema": "nous_system"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    server_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("nous_system.mcp_servers.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    key_id: Mapped[str] = mapped_column(Text, nullable=False)
+    nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    header_names: Mapped[list] = mapped_column(ARRAY(Text), nullable=False, default=list, server_default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
