@@ -374,7 +374,7 @@ A cool, low-chroma paper and ink, one deep navy for structure and action, and sm
 
 **Phone width.** At 768px and below the rail becomes a 52px Atlantic top bar with a drawer (at most 280px or 85% of the width), and sub-navigation links and filter pills grow to 44px tall. At 640px and below: list tables stack into bordered rows of label and value; wide numeric tables scroll in their own box with the first column fixed and a fade on the right edge; tiles go two up and an odd last tile spans the row; the frame column lies flat above its rows. `phoneTables.test.ts` pins the table and tile behaviour.
 
-**Companion.** One column at most 720px wide, 16px between cards, under an Atlantic top bar. Every control is at least 44px tall.
+**Companion.** One column at most 720px wide, 16px between cards, under an Atlantic top bar that stays in place while the page scrolls. With more than one live surface there is a list of them: under 900px a drawer (at most 280px or 85% of the width) opened by the word Menu in the bar (the page behind it is inert until it closes), and from 900px a permanent 240px Atlantic sidebar under the bar (900px, not the dashboard's 768px, so the reading column beside it is never under 660px). The first screen shows what Nous raised in full and the composed apps as one card of rows; a lone surface is shown in full. Every control is at least 44px tall.
 
 ### Named Rules
 **The Dense Stays Dense Rule.** The shared table is 13px text in rows of about 32px. Rounding the cards does not loosen the data inside them.
@@ -449,7 +449,8 @@ Chart text is 12px Archivo in muted ink on a rule-coloured grid. Legends are 8px
 The Graph screen draws memory as one mass in three dimensions (`lib/viz/BrainGraph.svelte`, on 3d-force-graph, loaded only on that screen): memories are bodies in their `--gv-*` type colour, sized by their links and paler with age; links are thin curved fibres in `--gv-other` that fade with distance into the card's surface. A tapped memory sends activation along its links, one step and then a second: small ink (`--text`) marks travel them, and those links take their `--rel-*` relation colour. Memory text appears as a hover label and in the detail sheet, never drawn on the canvas.
 
 ### Companion
-- **Top bar:** Atlantic, with the product name and the connection state as a word on a light pill.
+- **Top bar:** Atlantic, with the product name and the connection state as a word on a light pill. On a phone with a list, Menu sits first, with the number of surfaces Nous raised as a round badge, and an open surface's name takes the product name's place.
+- **Surface list:** the rail's treatment: Home, then "From Nous" and "Apps" under 11px headings, 14px medium items on a 10px radius, hover lifts the ground, and the current one is the white raised pill. "Close all apps" sits at the foot; armed, it turns to the light pill and its words change.
 - **Surface:** a white 18px card with the card shadow and about 18px padding; nested cards and evidence tiles are a wash at 12px with no shadow.
 - **Tabs:** pill segments on a wash track, the active one raised.
 - **Legacy themes:** the companion also carries six legacy themes kept unchanged (`nous-dark`, `alpine-dusk`, `harbor`, `paper`, `signal`, `report`). They are not part of this world, and nothing in this document describes them.

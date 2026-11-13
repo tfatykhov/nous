@@ -265,7 +265,10 @@ describe('every control is a 44px tap target on paper through --tap-min (source 
 
   it('the shell (always paper) sizes its pills and the install buttons at 44px', () => {
     const shell = styleBlocks(readFileSync(join(SHELL, 'Companion.svelte'), 'utf-8'));
-    expect(shell.split('.chip {')[1].split('}')[0]).toMatch(/min-height: 44px;[^}]*display: inline-flex;[^}]*align-items: center/);
+    // A list item is a block (its first letter is capitalised, a long name is cut): 44px by min-height and its padding.
+    expect(shell.split('.chip {')[1].split('}')[0]).toMatch(/display: block;[^}]*min-height: 44px;/);
+    expect(shell.split('.menu {')[1].split('}')[0]).toMatch(/min-height: 44px;[^}]*display: inline-flex;[^}]*align-items: center/);
+    expect(shell.split('.app-row {')[1].split('}')[0]).toMatch(/display: flex;[^}]*align-items: center;[^}]*min-height: 48px/);
     const install = styleBlocks(readFileSync(join(SHELL, 'InstallPrompt.svelte'), 'utf-8'));
     for (const sel of ['.go', '.x']) {
       expect(install.split(`${sel} {`)[1].split('}')[0], sel).toMatch(/min-height: 44px;[^}]*display: inline-flex;[^}]*align-items: center/);

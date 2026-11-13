@@ -46,10 +46,13 @@ async function settle(): Promise<void> {
   await tick();
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   store.reset();
   store.connection = 'live';
   location.hash = '';
+  // jsdom delivers the hashchange of a test that left a hash LATER, and a hash change closes the drawer:
+  // let it land before this test's shell exists.
+  await new Promise((r) => setTimeout(r, 0));
   vi.spyOn(transport, 'connect').mockResolvedValue(undefined);
   vi.spyOn(transport, 'stop').mockImplementation(() => {});
 });
@@ -69,7 +72,7 @@ describe('Companion shell — switcher', () => {
     const chips = [...container.querySelectorAll('.switcher .chip')].map((c) =>
       c.textContent?.trim(),
     );
-    expect(chips[0]).toBe('all (2)');
+    expect(chips[0]).toBe('Home');
     expect(chips).toContain('app');
     expect(chips).toContain('decisions');
   });
@@ -104,6 +107,295 @@ describe('Companion shell — switcher', () => {
       (c) => c.textContent?.trim() === 'app',
     ) as HTMLAnchorElement;
     expect(appChip.getAttribute('href')).toBe('#/s/nous%3Achat%3Amicro_app%3Aaaa001');
+  });
+});
+
+/** Svelte sets `inert` as a property, and jsdom does not reflect it to the attribute. */
+const inert = (el: Element) => (el as HTMLElement).inert === true || el.hasAttribute('inert');
+
+/** A matchMedia whose only match is the wide-screen query; `fire` flips it and tells the listeners. */
+function stubWide(matches: boolean) {
+  const listeners: (() => void)[] = [];
+  const mq = {
+    matches,
+    addEventListener: (_: string, fn: () => void) => listeners.push(fn),
+    removeEventListener: (_: string, fn: () => void) => listeners.splice(listeners.indexOf(fn), 1),
+  };
+  vi.stubGlobal('matchMedia', () => mq);
+  return {
+    listeners,
+    fire(next: boolean) {
+      mq.matches = next;
+      listeners.forEach((fn) => fn());
+    },
+  };
+}
+
+describe('Companion shell — the list is a drawer on a phone', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('is closed and inert until Menu is pressed; then it is open and focus is on its first item', async () => {
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:sweep:decision_sweep:bbb002');
+    const { container, getByRole } = render(Companion);
+    const list = container.querySelector('nav.switcher')!;
+    const menu = getByRole('button', { name: 'Menu, 1 from Nous' });
+    expect(inert(list)).toBe(true);
+    expect(list.classList.contains('open')).toBe(false);
+    expect(menu.getAttribute('aria-expanded')).toBe('false');
+    expect(menu.getAttribute('aria-controls')).toBe(list.id);
+    expect(container.querySelector('.scrim')).toBeNull();
+
+    await fireEvent.click(menu);
+    await settle();
+    expect(inert(list)).toBe(false);
+    expect(list.classList.contains('open')).toBe(true);
+    expect(menu.getAttribute('aria-expanded')).toBe('true');
+    expect(document.activeElement?.textContent?.trim()).toBe('Home');
+    expect(container.querySelector('.scrim')).not.toBeNull();
+  });
+
+  it('closes on Escape, on the scrim and on an item, and gives focus back to Menu', async () => {
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:sweep:decision_sweep:bbb002');
+    const { container, getByRole } = render(Companion);
+    const list = container.querySelector('nav.switcher')!;
+    const menu = getByRole('button', { name: /^Menu/ });
+    const closed = () => inert(list) && !list.classList.contains('open');
+
+    await fireEvent.click(menu);
+    await settle();
+    // Escape is heard on the window: focus may be nowhere (the focused item's surface resolved).
+    (document.activeElement as HTMLElement).blur();
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    await settle();
+    expect(closed()).toBe(true);
+    expect(document.activeElement).toBe(menu);
+
+    await fireEvent.click(menu);
+    await settle();
+    await fireEvent.click(container.querySelector('.scrim')!);
+    await settle();
+    expect(closed()).toBe(true);
+    expect(document.activeElement).toBe(menu);
+
+    // An item closes it by its own click: the surface already open fires no hashchange.
+    await fireEvent.click(menu);
+    await settle();
+    await fireEvent.click(list.querySelector('a.chip')!);
+    await settle();
+    expect(closed()).toBe(true);
+    expect(document.activeElement).toBe(menu);
+    expect(container.querySelector('.scrim')).toBeNull();
+  });
+
+  it('while it is open the bar and the page are inert, so Tab and a screen reader stay in the list', async () => {
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:sweep:decision_sweep:bbb002');
+    const { container, getByRole } = render(Companion);
+    const rest = () => [container.querySelector('header.rail')!, container.querySelector('.shell')!].map(inert);
+    expect(rest()).toEqual([false, false]);
+    await fireEvent.click(getByRole('button', { name: /^Menu/ }));
+    await settle();
+    expect(rest()).toEqual([true, true]);
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    await settle();
+    expect(rest()).toEqual([false, false]);
+  });
+
+  it('Back (a hash change) closes it', async () => {
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:sweep:decision_sweep:bbb002');
+    const { container, getByRole } = render(Companion);
+    await fireEvent.click(getByRole('button', { name: /^Menu/ }));
+    await settle();
+    location.hash = '#/s/' + encodeURIComponent('nous:chat:micro_app:aaa001');
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    await settle();
+    expect(container.querySelector('nav.switcher')!.classList.contains('open')).toBe(false);
+    expect(inert(container.querySelector('.shell')!)).toBe(false);
+  });
+
+  it('the last-but-one surface leaving while it is open takes the list, the scrim and the inert page with it', async () => {
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:sweep:decision_sweep:bbb002');
+    const { container, getByRole } = render(Companion);
+    await fireEvent.click(getByRole('button', { name: /^Menu/ }));
+    await settle();
+    store.apply(null, { version: 'v1.0', deleteSurface: { surfaceId: 'nous:sweep:decision_sweep:bbb002' } } as never);
+    await settle();
+    expect(container.querySelector('nav.switcher')).toBeNull();
+    expect(container.querySelector('.scrim')).toBeNull();
+    expect(inert(container.querySelector('.shell')!)).toBe(false);
+    expect(inert(container.querySelector('header.rail')!)).toBe(false);
+  });
+
+  it('close-all in the open list: armed by one tap, and closing the list disarms it', async () => {
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:chat:micro_app:bbb002');
+    const spy = vi.spyOn(transport, 'postAction').mockResolvedValue({ ok: true, message: '', resolved: true });
+    const { container, getByRole, getByText } = render(Companion);
+    const menu = getByRole('button', { name: /^Menu/ });
+    await fireEvent.click(menu);
+    await settle();
+    await fireEvent.click(getByText('close all apps (2)'));
+    expect(container.querySelector('nav.switcher')!.classList.contains('open')).toBe(true); // arming keeps the list
+    getByText('sure? close 2 apps');
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    await settle();
+    await fireEvent.click(menu);
+    await settle();
+    getByText('close all apps (2)'); // not one tap from sweeping
+    // Nor after Back: armed again, then a hash change closes the list.
+    await fireEvent.click(getByText('close all apps (2)'));
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    await settle();
+    expect(document.activeElement).toBe(menu);
+    await fireEvent.click(menu);
+    await settle();
+    getByText('close all apps (2)');
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("only the shell's own kind words are capitalised by the stylesheet, never an app's name", () => {
+    seed('nous:chat:micro_app:aaa001', 0, undefined, 'iPhone budget');
+    seed('nous:sweep:decision_sweep:bbb002');
+    const { container } = render(Companion);
+    const kinds = [...container.querySelectorAll('nav.switcher a.chip')].map((c) => [c.textContent?.trim(), c.classList.contains('kind')]);
+    expect(kinds).toEqual([['Home', false], ['decisions', true], ['iPhone budget', false]]);
+    // An app with no name of its own falls back to the kind word, and "close all apps" is the shell's too.
+    cleanup();
+    store.reset();
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:chat:micro_app:bbb002');
+    const again = render(Companion).container;
+    expect([...again.querySelectorAll('nav.switcher .chip.kind')].map((c) => c.textContent?.trim())).toEqual(['app', 'app', 'close all apps (2)']);
+  });
+
+  it('groups the items: what Nous raised, then the apps; Menu counts only what Nous raised', () => {
+    seed('nous:chat:micro_app:aaa001', 0, undefined, 'Crypto Note');
+    seed('nous:sweep:decision_sweep:bbb002');
+    seed('nous:chat:micro_app:ccc003', 0, undefined, 'Trip Plan');
+    const { container } = render(Companion);
+    const words = [...container.querySelectorAll('nav.switcher > *')].map((e) => e.textContent?.trim());
+    expect(words).toEqual(['Home', 'From Nous', 'decisions', 'Apps', 'Crypto Note', 'Trip Plan', 'close all apps (2)']);
+    expect(container.querySelector('button.menu')?.textContent?.replace(/\s+/g, ' ').trim()).toBe('Menu1');
+  });
+
+  it('Menu has no count when only apps are live', () => {
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:chat:micro_app:bbb002');
+    const { container } = render(Companion);
+    const menu = container.querySelector('button.menu')!;
+    expect(menu.getAttribute('aria-label')).toBe('Menu');
+    expect(menu.querySelector('.count')).toBeNull();
+  });
+
+  it('the bar names the open surface in place of the brand, in full', () => {
+    const title = 'Quarterly Revenue Breakdown By Region';
+    seed('nous:chat:micro_app:long001', 0, undefined, title);
+    seed('nous:sweep:decision_sweep:bbb002');
+    location.hash = '#/s/' + encodeURIComponent('nous:chat:micro_app:long001');
+    const { container } = render(Companion);
+    expect(container.querySelector('header.rail .bar-title')?.textContent).toBe(title);
+    expect(container.querySelector('header.rail .brand')).toBeNull();
+  });
+});
+
+describe('Companion shell — the list is a sidebar on a wide screen', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('is always there: not inert, no Menu button, and the bar keeps the brand over an open surface', () => {
+    stubWide(true);
+    seed('nous:chat:micro_app:aaa001', 0, undefined, 'Crypto Note');
+    seed('nous:sweep:decision_sweep:bbb002');
+    location.hash = '#/s/' + encodeURIComponent('nous:chat:micro_app:aaa001');
+    const { container } = render(Companion);
+    expect(inert(container.querySelector('nav.switcher')!)).toBe(false);
+    expect(container.querySelector('button.menu')).toBeNull();
+    expect(container.querySelector('.app')?.className).toMatch(/\bwide\b.*\bwith-list\b/);
+    expect(inert(container.querySelector('.shell')!)).toBe(false);
+    expect(container.querySelector('header.rail .brand')).not.toBeNull();
+    expect(container.querySelector('nav.switcher a.chip.active')?.textContent?.trim()).toBe('Crypto Note');
+  });
+
+  it('one surface: no list, so no list column either (the card keeps the page)', () => {
+    stubWide(true);
+    seed('nous:chat:micro_app:aaa001');
+    const { container } = render(Companion);
+    expect(container.querySelector('nav.switcher')).toBeNull();
+    expect(container.querySelector('.app')?.classList.contains('with-list')).toBe(false);
+    expect(container.querySelector('header.rail .brand')).not.toBeNull();
+  });
+
+  it('follows the window: a drawer left open is closed when the screen widens, and the listener goes with the shell', async () => {
+    const media = stubWide(false);
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:sweep:decision_sweep:bbb002');
+    const { container, unmount } = render(Companion);
+    await fireEvent.click(container.querySelector('button.menu')!);
+    await settle();
+    media.fire(true);
+    await settle();
+    const list = container.querySelector('nav.switcher')!;
+    expect(list.classList.contains('open')).toBe(false);
+    expect(inert(list)).toBe(false);
+    expect(container.querySelector('.scrim')).toBeNull();
+    media.fire(false);
+    await settle();
+    expect(inert(list)).toBe(true);
+    unmount();
+    expect(media.listeners).toHaveLength(0);
+  });
+
+  it('the stylesheet reads the wide class, never a width query of its own (one source for which shell this is)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { styleBlocks } = await import('../lib/testing/css');
+    const css = styleBlocks(readFileSync(join(__dirname, 'Companion.svelte'), 'utf-8'));
+    expect(css).not.toMatch(/@media[^{]*(min|max)-width/);
+    expect(css).toMatch(/\.app\.wide \.switcher \{[^}]*position: sticky;[^}]*transform: none;[^}]*visibility: visible/);
+  });
+});
+
+describe('Companion shell — the first screen', () => {
+  it('shows what Nous raised in full and the apps as rows that open them', () => {
+    const title = 'Quarterly Revenue Breakdown By Region';
+    seed('nous:chat:micro_app:aaa001', 0, undefined, title);
+    seed('nous:sweep:decision_sweep:bbb002');
+    seed('nous:chat:micro_app:ccc003', 0, undefined, 'Trip Plan');
+    const { container } = render(Companion);
+    const full = [...container.querySelectorAll('main section.surface')].map((s) => s.getAttribute('aria-label'));
+    expect(full).toEqual(['nous:sweep:decision_sweep:bbb002']);
+    const rows = [...container.querySelectorAll('main .apps a.app-row')];
+    // the whole name, not the list's cut one
+    expect(rows.map((r) => r.querySelector('.app-name')?.textContent)).toEqual([title, 'Trip Plan']);
+    expect(rows[0].getAttribute('href')).toBe('#/s/' + encodeURIComponent('nous:chat:micro_app:aaa001'));
+    expect(container.querySelector('main .apps h2')?.textContent).toBe('Apps');
+  });
+
+  it('a kind the shell does not know is shown in full, never as a row', () => {
+    seed('nous:chat:micro_app:aaa001');
+    seed('nous:future:some_new_ask:bbb002');
+    const { container } = render(Companion);
+    const full = [...container.querySelectorAll('main section.surface')].map((s) => s.getAttribute('aria-label'));
+    expect(full).toEqual(['nous:future:some_new_ask:bbb002']);
+  });
+
+  it('a lone app is shown in full: there is no list to open it from', () => {
+    seed('nous:chat:micro_app:aaa001');
+    const { container } = render(Companion);
+    expect(container.querySelectorAll('main section.surface')).toHaveLength(1);
+    expect(container.querySelector('main .apps')).toBeNull();
+    expect(container.querySelector('button.menu')).toBeNull();
+  });
+
+  it('no apps card when nothing live is an app', () => {
+    seed('nous:sweep:decision_sweep:aaa001');
+    seed('nous:dag:dag_monitor:bbb002');
+    const { container } = render(Companion);
+    expect(container.querySelectorAll('main section.surface')).toHaveLength(2);
+    expect(container.querySelector('main .apps')).toBeNull();
   });
 });
 
@@ -758,8 +1050,13 @@ describe('Companion shell — the Atlantic-blue bar on chart paper (PR 6)', () =
     seed('nous:chat:micro_app:bbb002');
     const { container } = render(Companion);
     const shellText = [
-      ...container.querySelectorAll('header.rail, .switcher, a.permalink'),
+      ...container.querySelectorAll('header.rail, .switcher, .apps'),
     ].map((e) => e.textContent ?? '');
+    expect(shellText).toHaveLength(3);
+    cleanup();
+    store.reset();
+    seed('nous:chat:micro_app:aaa001');
+    shellText.push(render(Companion).container.querySelector('a.permalink')?.textContent ?? '');
     cleanup();
     store.reset();
     const empty = render(Companion).container.querySelector('p.empty')?.textContent ?? '';
@@ -771,7 +1068,8 @@ describe('Companion shell — the Atlantic-blue bar on chart paper (PR 6)', () =
 describe('Companion shell — the status bar of an installed app stays on navy (PR 6)', () => {
   it('a fixed navy strip the height of the top safe-area inset sits under the status bar (source contract)', async () => {
     // black-translucent draws the page under an installed iPhone's status bar, whose text is white: once the page
-    // scrolls, the bar scrolls away and light paper would sit under the clock. env() is 0 in a browser tab.
+    // scrolls, light paper must never sit under the clock (the bar is sticky now; the strip stays as the floor
+    // under it). env() is 0 in a browser tab.
     const { readFileSync } = await import('node:fs');
     const { styleBlocks } = await import('../lib/testing/css');
     const { join } = await import('node:path');

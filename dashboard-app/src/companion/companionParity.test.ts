@@ -28,6 +28,7 @@ const ROOT = parseThemes(readFileSync(join(__dirname, 'companion.css'), 'utf-8')
 
 /** companion :root token -> the dashboard paper token it must equal. */
 const PARITY: Record<string, string> = {
+  '--rail-scrim': '--overlay-bg',
   '--bg': '--bg',
   '--surface': '--surface',
   '--surface-hover': '--surface-hover',
@@ -88,6 +89,7 @@ const RAIL_PARITY: Record<string, string> = {
   '--rail-ink': '--text',
   '--rail-mute': '--muted',
   '--rail-focus': '--focus-ring',
+  '--rail-lift': '--surface-hover',
 };
 
 /** companion :root tokens with no dashboard counterpart, each with the reason. */
