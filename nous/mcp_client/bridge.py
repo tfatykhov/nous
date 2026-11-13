@@ -397,8 +397,9 @@ def credential_needles(values: Iterable[str]) -> tuple[str, ...]:
     character, ``%XX``, ``&#NN;``, ``&#xXX;``, named entities, each only when well formed), in any mix; a needle that
     holds such an escape of its own is also found decoded. Finding takes one pass to decode and ``str.find``, so its
     time does not depend on a value's shape. Out of scope: a text escaped twice (it is decoded once), the value in
-    base64 or with its letters' case changed, an entity without its semicolon, and an incomplete escape a server glues
-    in front of the value on purpose."""
+    base64 or with its letters' case changed, an entity without its semicolon, an incomplete escape a server glues
+    in front of the value on purpose, and a value holding two or more escapes of its own of which an echo re-escapes
+    only some (the text then holds the value partly decoded, and only the raw and the fully decoded forms are found)."""
     texts: set[str] = set()
     for value in values:
         parts = value.split()
