@@ -551,6 +551,10 @@ def _report_check_mode(settings) -> str | None:
     return settings.claim_verification_mode
 
 
+# How much of a report the shadow claim check reads (summary first).
+_REPORT_CHECK_MAX_CHARS = 6000
+
+
 def _check_report_claims(
     subtask,
     session_id: str,
@@ -576,7 +580,9 @@ def _check_report_claims(
         meta = getattr(subtask, "metadata_", None)
         if isinstance(meta, dict) and meta.get("session_id"):
             return
-        text = "\n".join([report.summary, *report.findings])
+        # Capped: the check runs on the event loop, and a long report dense
+        # with claims costs it over a second (1.7 s measured at 50 KB).
+        text = "\n".join([report.summary, *report.findings])[:_REPORT_CHECK_MAX_CHARS]
         verifier = ClaimVerifier(runner_path=runner_path(settings.workspace_dir))
         # False: this executor saw no cancel (an asyncio cancel never reaches
         # the check, and an owner's cancel of the running row is not visible here).

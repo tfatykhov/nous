@@ -143,6 +143,21 @@ async def test_an_unbacked_claim_writes_one_unverified_event_with_labels_only():
         assert words not in flat  # no claim, report or command text
 
 
+async def test_only_the_start_of_a_long_report_is_checked():
+    """The check runs on the event loop: a claim past the cap is not read."""
+    from nous.handlers.subtask_executor import _REPORT_CHECK_MAX_CHARS
+
+    settings = _settings()
+    filler = "Nothing to report. " * (_REPORT_CHECK_MAX_CHARS // 19 + 1)
+    padded = {**MERGE_CLAIM, "summary": filler + MERGE_CLAIM["summary"]}
+    runner, brain = _runner(settings, [padded])
+
+    await _run(_subtask(), runner, settings)
+
+    [(data, _)] = await _check_events(brain)
+    assert data["claim_count"] == 0 and data["verified"] is True
+
+
 async def test_a_backed_claim_writes_one_verified_event():
     settings = _settings()
     runner, brain = _runner(settings, [MERGE_CLAIM])
