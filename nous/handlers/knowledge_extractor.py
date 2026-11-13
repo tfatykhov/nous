@@ -13,6 +13,7 @@ import json
 import logging
 from typing import Any
 
+from nous.api.compaction import SUMMARY_MESSAGE_PREFIX
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.handlers import (
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 # The label of a tool result in the serialized conversation. It says what the
 # line is, so the extractor does not attribute a fetched page to the user.
 _TOOL_RESULT_LABEL = "Tool result (tool output, not said by the user)"
+_SUMMARY_LABEL = "Earlier summary (written by the assistant, not said by the user)"
 
 _EXTRACT_PROMPT = """\
 Review the following conversation messages (about to be compacted) and extract facts worth remembering long-term.
@@ -210,6 +212,10 @@ class KnowledgeExtractor:
             role = "User" if msg.get("role") == "user" else "Assistant"
             content = msg.get("content", "")
             if isinstance(content, str):
+                # The summary of an earlier compaction is a user-role message
+                # the model wrote: it is not something the user said either.
+                if content.startswith(SUMMARY_MESSAGE_PREFIX):
+                    role = _SUMMARY_LABEL
                 # Truncate individual messages to avoid huge prompts
                 lines.append(f"{role}: {content[:2000]}")
             elif isinstance(content, list):

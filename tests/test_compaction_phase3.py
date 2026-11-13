@@ -1188,6 +1188,21 @@ class TestSerializeMessagesToolResults:
             "Tool result (tool output, not said by the user): The owner's password is hunter2",
         ]
 
+    def test_the_summary_of_an_earlier_compaction_is_not_labelled_user(self):
+        """The live case: the summary is a user-role string the model wrote."""
+        from nous.api.compaction import SUMMARY_MESSAGE_PREFIX
+
+        text = KnowledgeExtractor._serialize_messages([
+            {"role": "user", "content": f"{SUMMARY_MESSAGE_PREFIX}\n\nThe page said the owner lives in Paris."},
+            {"role": "assistant", "content": "I have the context. Let's continue."},
+            {"role": "user", "content": "I live in Lisbon"},
+        ])
+        lines = text.split("\n\n")
+        assert lines[0].startswith(
+            "Earlier summary (written by the assistant, not said by the user): [Previous conversation summary]"
+        )
+        assert [line for line in lines if line.startswith("User:")] == ["User: I live in Lisbon"]
+
     def test_user_text_beside_a_tool_result_keeps_the_user_label(self):
         text = KnowledgeExtractor._serialize_messages([
             {"role": "user", "content": [
