@@ -114,6 +114,8 @@ class World:
         self.refresh_tokens: set[str] = set()
         self.refreshes = 0
         self.expires_in = 3600  # the lifetime of the tokens it gives
+        self.give_refresh = True  # whether the code exchange gives a refresh token
+        self.registrations: list[dict[str, Any]] = []  # the bodies of the registration requests
         self.reflect: str | None = None  # the code exchange repeats the code and the verifier it was sent (see below)
         self.n = 0
 
@@ -147,6 +149,7 @@ class World:
         if request.method == "POST" and where.endswith("/register"):
             body = json.loads(request.content)
             assert body["redirect_uris"] == [REDIRECT] and body["token_endpoint_auth_method"] == "none"
+            self.registrations.append(body)
             return httpx.Response(201, json={**body, "client_id": "test-client-dynamic-0001"})
         if request.method == "POST" and where.endswith("/token"):
             form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
@@ -188,16 +191,11 @@ class World:
                 return httpx.Response(400, json={"error": "invalid_grant"})
             access, refresh = self._next("access"), self._next("refresh")
             self.valid.add(access)
-            self.refresh_tokens.add(refresh)
-            return httpx.Response(
-                200,
-                json={
-                    "access_token": access,
-                    "token_type": "Bearer",
-                    "expires_in": self.expires_in,
-                    "refresh_token": refresh,
-                },
-            )
+            answer = {"access_token": access, "token_type": "Bearer", "expires_in": self.expires_in}
+            if self.give_refresh:
+                self.refresh_tokens.add(refresh)
+                answer["refresh_token"] = refresh
+            return httpx.Response(200, json=answer)
         return httpx.Response(404)
 
     def client(self) -> httpx.AsyncClient:
@@ -1171,6 +1169,31 @@ async def test_an_old_pasted_answer_that_returns_after_start_again_stores_nothin
     answer = await late
     assert answer.status_code == 400 and answer.json()["error"] == "a newer sign-in for this server replaced it"
     assert await env.registry.list_secrets() == {}
+
+
+# --- the registration asks only for the grants the provider lists --------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "listed,asked",
+    [
+        (["authorization_code"], ["authorization_code"]),
+        (None, ["authorization_code", "refresh_token"]),
+        (["authorization_code", "refresh_token"], ["authorization_code", "refresh_token"]),
+    ],
+)
+async def test_the_registration_asks_only_for_the_grants_the_provider_lists(make_env, listed, asked):
+    env = await make_env()
+    if listed is None:
+        del env.world.as_meta["grant_types_supported"]
+    else:
+        env.world.as_meta["grant_types_supported"] = listed
+    env.world.give_refresh = "refresh_token" in asked
+    flow_id = await _signed_in(env)
+    assert env.world.registrations[-1]["grant_types"] == asked
+    assert (await _add(env, flow_id)).status_code == 201  # the sign-in completes either way
+    record = env.manager.stored_oauth("alpha", ALPHA, (await env.registry.list_secrets())["alpha"])
+    assert (record.refresh_token is not None) == ("refresh_token" in asked)  # none: it lasts until its expiry
 
 
 # --- settings that are not text (older tests build the app from a MagicMock) -----------------------------------------

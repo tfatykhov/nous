@@ -125,7 +125,9 @@ _BACKOFF_FIRST_SECONDS = 1.0
 _BACKOFF_MAX_SECONDS = 60.0
 _CLOSE_WAIT_SECONDS = 5.0
 # PR 2d: at close, a refresh in flight gets the OAuth request's own bound and time to store its result: a provider that
-# already rotated the refresh token would otherwise leave a dead one stored.
+# already rotated the refresh token would otherwise leave a dead one stored. The worst case is one provider request per
+# server (oauth.HTTP_SECONDS, 10 s, its DNS lookup included) and the write: a refresh queued behind it finds the row
+# fresh or held and asks nothing, and none starts after close.
 REFRESH_DRAIN_SECONDS = 20.0
 HANDSHAKE_MAX_SECONDS = 30  # the handshake's bound is the server's call timeout, but never more than this
 # A result this long (characters) is flattened, cleaned and scrubbed in a worker thread: a hostile 2 MB result costs

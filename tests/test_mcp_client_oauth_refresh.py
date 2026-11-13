@@ -690,6 +690,39 @@ def test_a_record_sealed_without_its_lifetime_opens():
     assert (opened.access_token, opened.lifetime) == (OLD, None)
 
 
+async def test_a_dns_lookup_that_never_returns_fails_as_transient_within_the_bound(tmp_path, monkeypatch):
+    from nous.mcp_client import oauth as oauth_module
+
+    monkeypatch.setattr(oauth_module, "HTTP_SECONDS", 0.2)  # the bound, made short
+    answers = asyncio.Event()
+
+    async def resolve(host: str, port: int) -> list[str]:
+        if host == "auth.example.com":
+            await answers.wait()  # a stalled lookup: it never returns until the test lets it
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr(transport, "_resolve", resolve)
+    rows, provider = Rows(_record(expires_in=-10)), Provider()
+    manager = await _manager(tmp_path, rows, provider)
+    clock = [0.0]
+    manager._clock = lambda: clock[0]
+    auth = manager._servers["alpha"].auth_for(None)
+    async with httpx.AsyncClient(transport=_mcp([]), auth=auth) as client:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        with pytest.raises(Exception) as caught:
+            async with asyncio.timeout(5):  # a regression fails here instead of hanging
+                await client.post(ALPHA)
+        assert type(caught.value).__name__ == "ProviderUnreachable" and loop.time() - started < 2
+        assert not manager._refresh_locks["alpha"].locked()  # the lock is not held by the stalled lookup
+        assert provider.refreshes == 0 and not manager.needs_sign_in("alpha", rows.secrets["alpha"].id)
+        answers.set()  # the resolver answers again
+        clock[0] += 31  # past the hold
+        assert (await client.post(ALPHA)).status_code == 200
+    assert provider.refreshes == 1
+    await manager.close()
+
+
 # --- a 401 ------------------------------------------------------------------------------------------------------------
 
 

@@ -130,7 +130,8 @@ def expired(record: OAuthRecord) -> bool:
 @dataclass(frozen=True)
 class Discovery:
     """What discovery found. ``issuer`` and ``resource`` are the provider's and the server's own strings (not the SDK
-    models' normalised URLs). ``iss_supported``: the provider says its answer carries ``iss`` (RFC 9207)."""
+    models' normalised URLs). ``iss_supported``: the provider says its answer carries ``iss`` (RFC 9207).
+    ``grant_types``: the grants the provider lists, or None when it lists none."""
 
     issuer: str
     authorization_endpoint: str
@@ -140,6 +141,7 @@ class Discovery:
     scope: str | None
     token_auth_methods: tuple[str, ...] | None
     iss_supported: bool
+    grant_types: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -164,29 +166,34 @@ async def _request(
     **kwargs: Any,
 ) -> tuple[int, bytes, httpx.Headers]:
     """One request through ``client`` after the address checks: ``(status, body, headers)``, the body read only with
-    ``read`` and cut at ``BODY_MAX_BYTES`` (refused past it)."""
+    ``read`` and cut at ``BODY_MAX_BYTES`` (refused past it). The address check (a DNS lookup) and the request share
+    one bound, ``HTTP_SECONDS``: a lookup that stalls is a transient failure within it, never a refresh that holds the
+    server's lock without end."""
     if not isinstance(url, str):
         raise OAuthProblem(502, f"{what}: its address is not text")
     try:
-        await check_url(url, allow)
-    except BlockedAddress as exc:
-        raise OAuthProblem(502, f"{what}: the address guard refused it ({exc})") from None
-    except Exception as exc:  # a name that does not resolve
-        raise OAuthProblem(502, f"{what} could not be reached ({error_class(exc)})", transient=True) from None
-    try:
-        with quiet_requests():
-            async with asyncio.timeout(HTTP_SECONDS), client.stream(method, url, **kwargs) as response:
-                body = b""
-                if read:
-                    chunks: list[bytes] = []
-                    size = 0
-                    async for chunk in response.aiter_bytes():
-                        size += len(chunk)
-                        if size > BODY_MAX_BYTES:
-                            raise ResponseTooLarge(f"a response passed {BODY_MAX_BYTES} bytes")
-                        chunks.append(chunk)
-                    body = b"".join(chunks)
-                return response.status_code, body, response.headers
+        async with asyncio.timeout(HTTP_SECONDS):
+            try:
+                await check_url(url, allow)
+            except BlockedAddress as exc:
+                raise OAuthProblem(502, f"{what}: the address guard refused it ({exc})") from None
+            except Exception as exc:  # a name that does not resolve
+                raise OAuthProblem(502, f"{what} could not be reached ({error_class(exc)})", transient=True) from None
+            with quiet_requests():
+                async with client.stream(method, url, **kwargs) as response:
+                    body = b""
+                    if read:
+                        chunks: list[bytes] = []
+                        size = 0
+                        async for chunk in response.aiter_bytes():
+                            size += len(chunk)
+                            if size > BODY_MAX_BYTES:
+                                raise ResponseTooLarge(f"a response passed {BODY_MAX_BYTES} bytes")
+                            chunks.append(chunk)
+                        body = b"".join(chunks)
+                    return response.status_code, body, response.headers
+    except OAuthProblem:
+        raise
     except ResponseTooLarge:  # an answer, and not a usable one
         logger.warning("MCP client: OAuth: %s answered past %d bytes", what, BODY_MAX_BYTES)
         raise OAuthProblem(502, f"{what} answered past {BODY_MAX_BYTES} bytes") from None
@@ -347,7 +354,8 @@ async def discover(url: str, http: HttpFactory, allow: frozenset[str], scope: st
     for endpoint, what in ((token_endpoint, "token endpoint"), (registration_endpoint, "registration endpoint")):
         if endpoint is not None:  # refused now rather than at the exchange: Nous posts to both
             try:
-                await check_url(endpoint, allow)
+                async with asyncio.timeout(HTTP_SECONDS):  # a lookup that stalls is bounded too
+                    await check_url(endpoint, allow)
             except BlockedAddress as exc:
                 raise OAuthProblem(502, f"the provider's {what}: the address guard refused it ({exc})") from None
             except Exception as exc:
@@ -365,6 +373,7 @@ async def discover(url: str, http: HttpFactory, allow: frozenset[str], scope: st
         scope=chosen,
         token_auth_methods=tuple(methods) if methods is not None else None,
         iss_supported=raw.get("authorization_response_iss_parameter_supported") is True,
+        grant_types=tuple(metadata.grant_types_supported) if metadata.grant_types_supported is not None else None,
     )
 
 
@@ -406,10 +415,15 @@ async def register(discovery: Discovery, redirect: str, http: HttpFactory, allow
             "this server needs a client id: register an OAuth app with the provider using the redirect address "
             f"{redirect} and enter its client id",
         )
+    # The refresh grant is asked for unless the provider lists its grants without it (RFC 7591 lets it refuse
+    # metadata it does not support). Without a refresh token, the sign-in lasts until the token expires.
+    grants = ["authorization_code", "refresh_token"]
+    if discovery.grant_types is not None and "refresh_token" not in discovery.grant_types:
+        grants = ["authorization_code"]
     body = {
         "client_name": CLIENT_NAME,
         "redirect_uris": [redirect],
-        "grant_types": ["authorization_code", "refresh_token"],
+        "grant_types": grants,
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",
     }
