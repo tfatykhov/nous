@@ -107,7 +107,9 @@ class McpRegistry:
         return server_id
 
     async def upsert_tools(self, server_name: str, tools: Sequence[ToolConfig]) -> None:
-        """Insert or update one row per tool of the server named ``server_name`` (which must exist)."""
+        """Make ``tools`` the server's listing: insert or update one row per tool of the server named ``server_name``
+        (which must exist), and set every stored tool of it that ``tools`` does not name to ``deny`` (the row stays:
+        nothing is deleted)."""
         async with self._db.session() as session:
             server_id = await self._server_id(session, server_name)
             existing = {
@@ -129,6 +131,11 @@ class McpRegistry:
                 row.input_schema = tool.input_schema
                 row.permission = tool.permission
                 row.updated_at = func.now()
+            listed = {tool.tool for tool in tools}
+            for name, row in existing.items():
+                if name not in listed and row.permission != "deny":
+                    row.permission = "deny"
+                    row.updated_at = func.now()
             await session.commit()
 
     async def set_permission(self, server_name: str, tool: str, permission: Permission) -> bool:

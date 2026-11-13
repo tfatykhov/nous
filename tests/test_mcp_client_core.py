@@ -290,3 +290,42 @@ def test_unregister_refuses_an_alias_and_a_retired_name():
         with pytest.raises(ValueError):
             d.unregister(name)
     assert d.is_registered("target")
+
+
+# --- the floor also needs the tool in the turn's offered set --------------------------------------------------------
+
+
+@pytest.mark.parametrize("kind", ["interactive", "subtask"])
+def test_an_mcp_tool_the_turn_was_not_offered_is_refused_with_both_modes_at_warn(kind):
+    r, _d = _runner([BG_TOOL], **BOTH_WARN)
+    ctx = ExecutionContext(kind=kind, session_id="s1")
+    refusal = r._authorize_tool_call(ctx, BG_TOOL, frozenset({"recall_deep"}), "s1", {})
+    assert refusal is not None and refusal.code == "context_policy"
+    assert refusal.text == tool_policy.MCP_CLIENT_NOT_OFFERED_TEXT.format(tool=BG_TOOL)
+    # Under `warn` the ordinary offered-set rule lets an unoffered non-MCP tool through: the floor is what refuses.
+    assert r._authorize_tool_call(ctx, "recall_deep", frozenset(), "s1", {}) is None
+
+
+def test_a_refuse_censor_strips_a_registered_mcp_tool_and_the_call_is_then_refused():
+    r, _d = _runner(["recall_deep", BG_TOOL], **BOTH_WARN)
+    ctx = ExecutionContext(kind="interactive", session_id="s1")
+    offered = r._offered_tools(ctx, "task", is_subtask=False, tool_filter=None, refuse_active=True)
+    names = frozenset(t["name"] for t in offered)
+    assert names == {"recall_deep"}
+    refusal = r._authorize_tool_call(ctx, BG_TOOL, names, "s1", {})
+    assert refusal is not None and refusal.text == tool_policy.MCP_CLIENT_NOT_OFFERED_TEXT.format(tool=BG_TOOL)
+
+
+# --- small guards ---------------------------------------------------------------------------------------------------
+
+
+async def test_an_array_whose_items_schema_is_true_does_not_break_the_type_check():
+    d = ToolDispatcher()
+    d.register("tags_tool", _handler, {"type": "object", "properties": {"tags": {"type": "array", "items": True}}})
+    text, is_error = await d.dispatch("tags_tool", {"tags": "a,b"})
+    assert is_error and "tags must be array, got string" in text and "JSON array of strings" in text
+    assert await d.dispatch("tags_tool", {"tags": ["a", "b"]}) == ("ok", False)
+
+
+def test_classify_side_effect_takes_a_name_that_is_not_a_string():
+    assert classify_side_effect(42) == "write"  # type: ignore[arg-type]

@@ -500,7 +500,7 @@ def classify_side_effect(tool_name: str, tool_input: dict[str, Any] | None = Non
         return "external"
     if tool_name in READ_TOOLS:
         return "none"
-    if tool_name.startswith(MCP_TOOL_PREFIX):
+    if isinstance(tool_name, str) and tool_name.startswith(MCP_TOOL_PREFIX):
         return "external"  # an external MCP server's tool, registered or not
     return "write"  # WRITE_TOOLS and anything unclassified
 

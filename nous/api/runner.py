@@ -778,7 +778,7 @@ class AgentRunner:
             ]
         # F112: the MCP client floor drops a tool of an external MCP server where _authorize_tool_call refuses it on
         # that floor. An earlier floor may still refuse one that stays (a heartbeat_triage turn may not act outward).
-        tools =[t for t in tools if tool_policy.mcp_client_violation(ctx.kind, t["name"]) is None]
+        tools = [t for t in tools if tool_policy.mcp_client_violation(ctx.kind, t["name"]) is None]
         if extra_tools:
             tools = [*tools, *(schema for schema, _executor in extra_tools.values())]
         if self._settings.tool_reason_enabled:
@@ -934,8 +934,10 @@ class AgentRunner:
             return Refusal(tool_policy.HEARTBEAT_RESOLVE_TEXT, "context_policy")
         # F112: a tool of an external MCP server, whatever the modes say: refused in a kind of turn the table refuses
         # (tool_policy.mcp_client_tool_allowed: background work only for a server marked available to it, never for an
-        # inbound MCP caller), and refused when the MCP client has no such tool registered.
-        mcp_violation = tool_policy.mcp_client_violation(ctx.kind, tool_name)
+        # inbound MCP caller), refused when the MCP client has no such tool registered, and refused when this turn
+        # was not offered it (unlike the offered-set rule below, which `warn` lets through). An approved action's
+        # offered names are its one declared tool (execute_single_call), so it passes.
+        mcp_violation = tool_policy.mcp_client_violation(ctx.kind, tool_name, offered_names)
         if mcp_violation is not None:
             logger.warning(
                 "Harness: refused MCP tool %r in a %s turn (%s, session=%s)",
@@ -954,11 +956,10 @@ class AgentRunner:
                 },
                 session_id=session_id,
             )
-            text = (
-                tool_policy.MCP_CLIENT_UNREGISTERED_TEXT
-                if mcp_violation == "mcp_unregistered"
-                else tool_policy.MCP_CLIENT_CONTEXT_TEXT
-            )
+            text = {
+                "mcp_unregistered": tool_policy.MCP_CLIENT_UNREGISTERED_TEXT,
+                "mcp_not_offered": tool_policy.MCP_CLIENT_NOT_OFFERED_TEXT,
+            }.get(mcp_violation, tool_policy.MCP_CLIENT_CONTEXT_TEXT)
             return Refusal(text.format(tool=tool_name), "context_policy")
 
         offered_mode = self._settings.tool_offered_set_enforcement_mode

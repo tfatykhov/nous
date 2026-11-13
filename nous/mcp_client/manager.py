@@ -1,20 +1,27 @@
 """F112 MCP client: registers the approved tools of external MCP servers, and runs their calls.
 
 ``start`` registers, from the stored rows and in sorted ``(server, tool)`` order, every tool whose permission is
-``allow``, and connects to no server: the tool array sits at the front of the prompt-cache prefix, so it must not
-depend on which server answered at boot, and a server that is down must not delay the boot. A tool stays registered
-while its server is down; its calls answer with an error.
+``allow`` (at most ``TOOLS_PER_SERVER`` per server), and connects to no server: the tool array sits at the front of
+the prompt-cache prefix, so it must not depend on which server answered at boot, and a server that is down must not
+delay the boot. A tool stays registered while its server is down; its calls answer with an error.
+
+The pin (``NOUS_MCP_CLIENT_PINNED_SERVERS``, set on the host): a server's tools register only when its name is
+pinned and its stored URL's host is the pinned host. The rows can be written by anything that reaches the database,
+the agent's own shell included; the pin, outside the database, is what keeps such a row from taking effect at the
+next boot. It does not stop code the agent runs inside this process.
 
 A server's connection is opened by the first call that needs it. One supervisor task per connection owns the SDK's
 context managers (their task groups must be entered and left in one task); a call only waits for the session and
 uses it, so a call cancelled by the runner's tool timeout leaves the connection as it was. A failed connect is not
-tried again for a while (1 s, doubling, at most 60 s); a call that fails for another reason than its timeout drops
-the connection, and the next call opens a new one. A call is never retried.
+tried again for a while (1 s, doubling, at most 60 s). A JSON-RPC error from the server fails the call and keeps the
+session; any other failure but the timeout drops the connection, and the next call opens a new one. A call is never
+retried.
 """
 
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
@@ -25,15 +32,15 @@ from nous.api.tool_classes import forget_mcp_tool, note_mcp_tool
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.mcp_client.bridge import (
-    clean_description,
+    TOOLS_PER_SERVER,
+    ServerErrorReply,
+    error_class,
     flatten_result,
-    has_reserved_property,
-    input_schema_ok,
+    prepare_tool,
     safe_error,
-    tool_name,
     wrap_result,
 )
-from nous.mcp_client.config import ServerConfig, ToolConfig, parse_host_list
+from nous.mcp_client.config import ServerConfig, ToolConfig, parse_host_list, parse_pins, url_host
 
 logger = logging.getLogger(__name__)
 
@@ -158,9 +165,9 @@ class _Server:
                 backoff = min(_BACKOFF_MAX_SECONDS, _BACKOFF_FIRST_SECONDS * 2 ** (self._failures - 1))
                 self._retry_at = asyncio.get_running_loop().time() + backoff
                 conn.ready.set_exception(exc)
-                logger.warning("MCP client: could not connect to server %r (%s)", name, type(exc).__name__)
+                logger.warning("MCP client: could not connect to server %r (%s)", name, error_class(exc))
             else:
-                logger.warning("MCP client: the connection to server %r ended (%s)", name, type(exc).__name__)
+                logger.warning("MCP client: the connection to server %r ended (%s)", name, error_class(exc))
             logger.debug("MCP client: server %r error", name, exc_info=True)
             await self._on_error(name, exc)
         finally:
@@ -184,51 +191,92 @@ class McpClientManager:
         if connect is None:
             from nous.mcp_client.transport import open_session  # the SDK is imported only when the client runs
 
-            connect = open_session
+            connect = functools.partial(open_session, max_response_bytes=settings.mcp_client_max_response_bytes)
         self._registrar = registrar
         self._registry = registry
         self._bus = bus
         self._agent_id = settings.agent_id
         self._max_chars = settings.mcp_client_max_result_chars
         self._allow = parse_host_list(settings.mcp_client_allow_private_hosts)
+        self._pins = parse_pins(settings.mcp_client_pinned_servers)
         self._connect = connect
         self._servers: dict[str, _Server] = {}
         self._registered: dict[str, str] = {}  # tool name -> server name
+        self._closed = False
+
+    def registered(self) -> list[str]:
+        """The names of the tools this manager has registered, in registration order."""
+        return list(self._registered)
+
+    def _pinned(self, config: ServerConfig) -> bool:
+        """Whether the host's pin names this server with its stored URL's host; logs why not (the name only)."""
+        pinned = self._pins.get(config.name)
+        if pinned is None:
+            logger.warning("MCP client: server %r is not pinned (NOUS_MCP_CLIENT_PINNED_SERVERS); skipped", config.name)
+            return False
+        if url_host(config.url) != pinned:
+            logger.warning("MCP client: server %r: its stored host is not its pinned host; skipped", config.name)
+            return False
+        return True
 
     async def start(self) -> None:
-        """Register every allowed tool of every enabled server, from the stored rows, in sorted (server, tool)
-        order. Connects to no server. A tool whose name cannot be built, that collides with a registered tool, whose
-        input schema is not an object schema, or that declares an argument starting with ``_`` is skipped and
-        logged by name."""
+        """Register every allowed tool of every enabled, pinned server, from the stored rows, in sorted (server,
+        tool) order, as ``prepare_tool`` builds it. Connects to no server. A tool that ``prepare_tool`` refuses,
+        that collides with a registered tool, or past a server's first ``TOOLS_PER_SERVER`` is skipped and logged by
+        name. Ends with one ``mcp_client_started`` event and an INFO line naming the servers and tools registered.
+        A failure part way logs what was registered before it and is raised."""
         entries: list[tuple[str, str, ToolConfig]] = []
         for config, tools in await self._registry.list_enabled():
+            if not self._pinned(config):
+                continue
             self._servers[config.name] = _Server(config, self._connect, self._allow, self._emit_error)
             entries += [(config.name, tool.tool, tool) for tool in tools if tool.permission == "allow"]
-        for server_name, raw_name, tool in sorted(entries, key=lambda entry: (entry[0], entry[1])):
-            server = self._servers[server_name]
-            name = tool_name(server_name, raw_name)
-            if name is None:
-                logger.warning(
-                    "MCP client: skipped %r of server %r: its name is empty or too long", raw_name[:80], server_name
-                )
-                continue
-            if self._registrar.is_registered(name):
-                logger.warning("MCP client: skipped %s: a tool of that name is already registered", name)
-                continue
-            if not input_schema_ok(tool.input_schema):
-                logger.warning("MCP client: skipped %s: its input schema is not a valid object schema", name)
-                continue
-            if has_reserved_property(tool.input_schema):
-                logger.warning("MCP client: skipped %s: it declares an argument starting with '_'", name)
-                continue
-            schema = {**tool.input_schema, "description": clean_description(server_name, tool.description)}
-            self._registrar.register(name, self._handler(server, raw_name, name), schema)
-            note_mcp_tool(name, background=server.config.background)
-            self._registered[name] = server_name
-        logger.info("MCP client: %d tool(s) registered from %d server(s)", len(self._registered), len(self._servers))
+        over_cap: dict[str, int] = {}
+        try:
+            for server_name, raw_name, tool in sorted(entries, key=lambda entry: (entry[0], entry[1])):
+                server = self._servers[server_name]
+                prepared = prepare_tool(server_name, raw_name, tool.description, tool.input_schema)
+                if prepared.problem is not None or prepared.name is None or prepared.schema is None:
+                    logger.warning(
+                        "MCP client: skipped %r of server %r: %s", raw_name[:80], server_name, prepared.problem
+                    )
+                    continue
+                if self._registrar.is_registered(prepared.name):
+                    logger.warning("MCP client: skipped %s: a tool of that name is already registered", prepared.name)
+                    continue
+                if sum(1 for owner in self._registered.values() if owner == server_name) >= TOOLS_PER_SERVER:
+                    over_cap[server_name] = over_cap.get(server_name, 0) + 1
+                    continue
+                self._registrar.register(prepared.name, self._handler(server, raw_name, prepared.name), prepared.schema)
+                note_mcp_tool(prepared.name, background=server.config.background)
+                self._registered[prepared.name] = server_name
+        except Exception:
+            logger.warning(
+                "MCP client: start stopped after registering %d tool(s): %s",
+                len(self._registered),
+                ", ".join(self._registered) or "none",
+            )
+            raise
+        for server_name, skipped in sorted(over_cap.items()):
+            logger.warning(
+                "MCP client: skipped %d tool(s) of server %r: over the %d-tool cap",
+                skipped,
+                server_name,
+                TOOLS_PER_SERVER,
+            )
+        servers = sorted(set(self._registered.values()))
+        logger.info(
+            "MCP client: %d tool(s) registered from server(s) %s: %s",
+            len(self._registered),
+            ", ".join(servers) or "none",
+            ", ".join(self._registered) or "none",
+        )
+        await self._emit("mcp_client_started", {"servers": servers, "tools": list(self._registered)})
 
     async def close(self) -> None:
-        """Unregister every tool this manager registered and close every connection (bounded wait, then cancel)."""
+        """Unregister every tool this manager registered and close every connection (bounded wait, then cancel). A
+        handler called after this answers with an error and opens no connection."""
+        self._closed = True
         for name in self._registered:
             self._registrar.unregister(name)
             forget_mcp_tool(name)
@@ -271,11 +319,12 @@ class McpClientManager:
         """One call, as the dispatcher's result. Never raises but ``CancelledError``, which it re-raises: the
         runner's tool timeout, or a shutdown."""
         server_name = server.config.name
+        if self._closed:
+            return _error(f'the MCP client is closed: the server "{server_name}" is not called.')
         timeout = server.config.call_timeout_seconds
         session: Any = None
         try:
-            # One budget for the wait for a call slot, the connect and the call (which can list the server's tools
-            # first: the SDK does that to check a result's structured content).
+            # One budget for the wait for a call slot, the connect and the call.
             async with asyncio.timeout(timeout):
                 async with server.semaphore:
                     session = await server.session()
@@ -285,12 +334,16 @@ class McpClientManager:
             return _error(f'the call to the MCP server "{server_name}" timed out after {timeout} s.')
         except ServerUnavailable:
             return _error(f'the MCP server "{server_name}" is not reachable now: try again later.')
+        except ServerErrorReply as exc:
+            # The server answered: the session is still good, and the calls sharing it go on.
+            logger.warning("MCP client: %s failed: the server answered with error code %d", name, exc.code)
+            return _error(f'the MCP server "{server_name}" answered the call with an error (code {exc.code}).')
         except Exception as exc:
             # The session is in an unknown state (the server may have dropped it): the next call connects again. A
             # failed connect left no session to end.
             if session is not None:
                 server.drop(session)
-            logger.warning("MCP client: %s failed (%s)", name, type(exc).__name__)
+            logger.warning("MCP client: %s failed (%s)", name, error_class(exc))
             logger.debug("MCP client: %s error", name, exc_info=True)
             return _error(f'the call to the MCP server "{server_name}" failed: {safe_error(exc)}.')
         text, is_error = flatten_result(raw, self._max_chars)
@@ -298,16 +351,14 @@ class McpClientManager:
 
     async def _emit_error(self, server_name: str, exc: BaseException) -> None:
         """An ``mcp_client_server_error`` event: the server's name and the error's class, never its text."""
+        await self._emit("mcp_client_server_error", {"server": server_name, "error": error_class(exc)})
+
+    async def _emit(self, event_type: str, data: dict[str, Any]) -> None:
+        """One event on the bus, when there is one. Never a URL: the agent's reader can read the events table."""
         if self._bus is None:
             return
         try:
-            await self._bus.emit(
-                Event(
-                    type="mcp_client_server_error",
-                    agent_id=self._agent_id,
-                    data={"server": server_name, "error": type(exc).__name__},
-                )
-            )
+            await self._bus.emit(Event(type=event_type, agent_id=self._agent_id, data=data))
         except Exception:
             logger.debug("MCP client: event not emitted", exc_info=True)
 

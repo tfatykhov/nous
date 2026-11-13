@@ -7,21 +7,28 @@
   and dials the address it checked, so a DNS answer that changes between the check and the connect cannot steer it
   (TLS still verifies the certificate against the host name). A host in ``allow_private_hosts`` is not checked;
 - follows no redirect: a redirect fails the request;
-- ignores proxy settings from the environment: through a proxy, the address checked would be the proxy's.
+- ignores proxy settings from the environment: through a proxy, the address checked would be the proxy's;
+- stops reading a response body past ``NOUS_MCP_CLIENT_MAX_RESPONSE_BYTES`` (``_LimitedTransport``).
 
-SDK symbols used (``mcp`` 1.26): ``mcp.client.session.ClientSession`` (``initialize``, ``list_tools(params=)``,
-``call_tool``), ``mcp.client.streamable_http.streamable_http_client(url, http_client=)`` and
-``mcp.types.PaginatedRequestParams``.
+Logging: the HTTP client's INFO line names every request URL, so it is dropped for the hosts this client opened
+(``_QuietMcpRequests`` on the ``httpx`` logger; httpcore logs only at DEBUG), and the SDK's streamable-HTTP logger,
+which logs the session id at INFO, is raised to WARNING. A secret in a URL's path is not supported all the same.
+
+SDK symbols used (``mcp`` 1.26): ``mcp.client.session.ClientSession`` (``initialize``, ``send_request``,
+``list_tools(params=)``), ``mcp.client.streamable_http.streamable_http_client(url, http_client=)``,
+``mcp.shared.exceptions.McpError`` and ``mcp.types`` (``ClientRequest``, ``CallToolRequest``,
+``CallToolRequestParams``, ``CallToolResult``, ``PaginatedRequestParams``, ``Tool``, ``CONNECTION_CLOSED``).
 """
 
 from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import socket
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlsplit
 
 import httpcore
@@ -29,13 +36,35 @@ import httpx
 from mcp import types
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.exceptions import McpError
 
+from nous.mcp_client.bridge import ServerErrorReply
 from nous.mcp_client.config import url_problem
 
 _METADATA_ADDRESSES = frozenset({ipaddress.ip_address("169.254.169.254"), ipaddress.ip_address("fd00:ec2::254")})
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
 # The SDK's own defaults: 30 s for a request, 5 minutes between events of a server-sent stream.
 _HTTP_TIMEOUT = httpx.Timeout(30.0, read=300.0)
+DEFAULT_MAX_RESPONSE_BYTES = 2_000_000  # NOUS_MCP_CLIENT_MAX_RESPONSE_BYTES's default
+# The code the SDK (1.26) gives the error it makes when the server answers 404 to a session ("Session terminated").
+_SESSION_TERMINATED = 32600
+# Hosts this client opened a session with: their request lines are dropped from the httpx logger.
+_QUIET_HOSTS: set[str] = set()
+
+
+class _QuietMcpRequests(logging.Filter):
+    """Drops the HTTP client's INFO request line (``HTTP Request: <method> <url> ...``) for a host in
+    ``_QUIET_HOSTS``. Other hosts' lines, which the rest of Nous keeps, pass."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) > 1 and isinstance(args[1], httpx.URL):
+            return args[1].host.lower() not in _QUIET_HOSTS
+        return True
+
+
+logging.getLogger("httpx").addFilter(_QuietMcpRequests())
+logging.getLogger("mcp.client.streamable_http").setLevel(logging.WARNING)
 
 
 class BlockedAddress(Exception):
@@ -127,38 +156,144 @@ class _GuardedBackend(httpcore.AsyncNetworkBackend):
         await self._inner.sleep(seconds)
 
 
-def guarded_client(allow_private_hosts: frozenset[str]) -> httpx.AsyncClient:
-    """An HTTP client whose every connection goes through ``_GuardedBackend``, that follows no redirect and reads
-    no proxy from the environment. Fails closed (RuntimeError) when the installed httpx no longer exposes the pool's
-    network backend."""
+class ResponseTooLarge(Exception):
+    """A response body passed the client's limit (``NOUS_MCP_CLIENT_MAX_RESPONSE_BYTES``), or came compressed."""
+
+
+class _LimitedStream(httpx.AsyncByteStream):
+    """A response body that raises ``ResponseTooLarge`` once more than ``limit`` bytes have arrived."""
+
+    def __init__(self, inner: httpx.AsyncByteStream, limit: int) -> None:
+        self._inner = inner
+        self._limit = limit
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        seen = 0
+        async for chunk in self._inner:
+            seen += len(chunk)
+            if seen > self._limit:
+                raise ResponseTooLarge(f"a response passed {self._limit} bytes")
+            yield chunk
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+class _LimitedTransport(httpx.AsyncBaseTransport):
+    """Bounds every response body before anything parses it, for a JSON response and for an event stream alike
+    (an event stream counts all its events). The client asks for uncompressed bodies, and a compressed one is
+    refused, so the bytes counted are the bytes parsed."""
+
+    def __init__(self, inner: httpx.AsyncBaseTransport, limit: int) -> None:
+        self._inner = inner
+        self._limit = limit
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        response = await self._inner.handle_async_request(request)
+        if response.headers.get("content-encoding", "identity").strip().lower() not in ("", "identity"):
+            await response.aclose()
+            raise ResponseTooLarge("the server compressed a response the client asked for uncompressed")
+        return httpx.Response(
+            status_code=response.status_code,
+            headers=response.headers,
+            stream=_LimitedStream(cast(httpx.AsyncByteStream, response.stream), self._limit),
+            extensions=response.extensions,
+        )
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+def guarded_client(allow_private_hosts: frozenset[str], max_response_bytes: int) -> httpx.AsyncClient:
+    """An HTTP client whose every connection goes through ``_GuardedBackend``, whose every response body is bounded
+    (``_LimitedTransport``), that follows no redirect and reads no proxy from the environment. Fails closed
+    (RuntimeError) when the installed httpx no longer exposes the pool's network backend."""
     transport = httpx.AsyncHTTPTransport(retries=0)
     pool = getattr(transport, "_pool", None)
     if pool is None or not hasattr(pool, "_network_backend"):
         raise RuntimeError("the MCP client's address guard cannot be installed on this httpx version")
     pool._network_backend = _GuardedBackend(pool._network_backend, allow_private_hosts)
-    return httpx.AsyncClient(transport=transport, follow_redirects=False, trust_env=False, timeout=_HTTP_TIMEOUT)
+    return httpx.AsyncClient(
+        transport=_LimitedTransport(transport, max_response_bytes),
+        follow_redirects=False,
+        trust_env=False,
+        timeout=_HTTP_TIMEOUT,
+        headers={"Accept-Encoding": "identity"},
+    )
+
+
+def is_server_error(exc: BaseException) -> bool:
+    """True when ``exc`` is a JSON-RPC error the server answered with: the call failed and the session is still
+    good. False for a closed connection or a terminated session (the SDK reports both as ``McpError`` too) and for
+    every other exception."""
+    if not isinstance(exc, McpError):
+        return False
+    error = exc.error
+    return error.code not in (types.CONNECTION_CLOSED, _SESSION_TERMINATED) and error.message != "Session terminated"
+
+
+class McpSession:
+    """An open session, reduced to the two requests the client makes."""
+
+    def __init__(self, session: ClientSession) -> None:
+        self._session = session
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> types.CallToolResult:
+        """``tools/call`` sent as a plain request. Not ``ClientSession.call_tool``: that checks a result's structured
+        content against the server's output schema with jsonschema (listing the tools first when it has not), and a
+        server's schema can name a ``$ref`` URL that would be fetched outside the address guard or a pattern that
+        stalls the event loop. A JSON-RPC error from the server raises ``ServerErrorReply`` with its code."""
+        request = types.ClientRequest(
+            types.CallToolRequest(params=types.CallToolRequestParams(name=name, arguments=arguments))
+        )
+        try:
+            return await self._session.send_request(request, types.CallToolResult)
+        except McpError as exc:
+            if is_server_error(exc):
+                raise ServerErrorReply(exc.error.code) from None  # the server's message stays out
+            raise
+
+    async def list_tools(self) -> list[types.Tool]:
+        """Every tool the server lists, across pages."""
+        tools: list[types.Tool] = []
+        cursor: str | None = None
+        while True:
+            params = types.PaginatedRequestParams(cursor=cursor) if cursor else None
+            result = await self._session.list_tools(params=params)
+            tools.extend(result.tools)
+            cursor = result.nextCursor
+            if not cursor:
+                return tools
+
+
+async def _end_on_transport_error(message: Any) -> None:
+    """The session's message handler. A JSON response past the limit reaches it as ``ResponseTooLarge`` (the SDK
+    cannot tie it to its request): raising it ends the session, so the calls waiting on it fail at once
+    (``CONNECTION_CLOSED``) instead of at their timeout. Every other message is ignored, as by default: a late reply
+    to a call that timed out also arrives here (an unknown request id), and must not end the session the other calls
+    share. An event-stream response past the limit never reaches here (the SDK ends that stream quietly): its call
+    fails at its timeout."""
+    if isinstance(message, ResponseTooLarge):
+        raise message
 
 
 @asynccontextmanager
-async def open_session(url: str, allow_private_hosts: frozenset[str]) -> AsyncIterator[ClientSession]:
-    """An initialized ``ClientSession`` with the server at ``url``, closed on exit. Enter and leave it in ONE task:
-    the SDK's task groups require it."""
+async def open_session(
+    url: str, allow_private_hosts: frozenset[str], *, max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
+) -> AsyncIterator[McpSession]:
+    """An initialized session with the server at ``url``, closed on exit. Enter and leave it in ONE task: the SDK's
+    task groups require it."""
     await check_url(url, allow_private_hosts)
-    async with guarded_client(allow_private_hosts) as client:
-        async with streamable_http_client(url, http_client=client) as (read_stream, write_stream, _session_id):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                yield session
+    _QUIET_HOSTS.add((urlsplit(url).hostname or "").lower())
+    async with guarded_client(allow_private_hosts, max_response_bytes) as client:
+        async with _session_over(client, url) as session:
+            yield session
 
 
-async def list_all_tools(session: ClientSession) -> list[types.Tool]:
-    """Every tool the server lists, across pages."""
-    tools: list[types.Tool] = []
-    cursor: str | None = None
-    while True:
-        params = types.PaginatedRequestParams(cursor=cursor) if cursor else None
-        result = await session.list_tools(params=params)
-        tools.extend(result.tools)
-        cursor = result.nextCursor
-        if not cursor:
-            return tools
+@asynccontextmanager
+async def _session_over(client: httpx.AsyncClient, url: str) -> AsyncIterator[McpSession]:
+    """An initialized session with the server at ``url`` over ``client`` (``open_session`` passes the guarded one)."""
+    async with streamable_http_client(url, http_client=client) as (read_stream, write_stream, _session_id):
+        async with ClientSession(read_stream, write_stream, message_handler=_end_on_transport_error) as session:
+            await session.initialize()
+            yield McpSession(session)

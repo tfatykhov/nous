@@ -46,6 +46,22 @@ def parse_host_list(value: str) -> frozenset[str]:
     return frozenset(host.strip().lower() for host in value.split(",") if host.strip())
 
 
+def parse_pins(value: str) -> dict[str, str]:
+    """``NOUS_MCP_CLIENT_PINNED_SERVERS`` (a comma list of ``name=host``) as ``{name: lowercase host}``. An entry
+    without ``=`` or with an empty side is ignored."""
+    pins: dict[str, str] = {}
+    for entry in value.split(","):
+        name, sep, host = entry.partition("=")
+        if sep and name.strip() and host.strip():
+            pins[name.strip()] = host.strip().lower()
+    return pins
+
+
+def url_host(url: str) -> str:
+    """The lowercase host of ``url`` (empty when it has none): what a pin is compared with."""
+    return (urlsplit(url).hostname or "").lower()
+
+
 class ServerConfig(BaseModel):
     """One external MCP server (a ``nous_system.mcp_servers`` row)."""
 

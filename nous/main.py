@@ -2010,9 +2010,9 @@ async def create_components(settings: Settings) -> dict:
         a2ui_sweep_task = asyncio.create_task(_a2ui_sweep_loop(settings, surface_service))
         logger.info("F092: A2UI companion enabled (push_surface + /a2ui routes + sweep)")
 
-    # F112: the MCP client, after the last register_* call. start() registers the approved tools from the stored
-    # rows and connects to no server. Off: nothing of nous.mcp_client is imported. A failed start leaves the client
-    # without tools for this run; Nous starts all the same.
+    # F112: the MCP client, after the last register_* call. start() registers the approved tools of the pinned
+    # servers from the stored rows and connects to no server. Off: nothing of nous.mcp_client is imported. A failed
+    # start keeps what it registered before the failure (it logs which); Nous starts all the same.
     mcp_client = None
     if settings.mcp_client_enabled:
         from nous.mcp_client import McpClientManager
@@ -2022,7 +2022,11 @@ async def create_components(settings: Settings) -> dict:
         try:
             await mcp_client.start()
         except Exception as exc:
-            logger.warning("F112: MCP client start failed (%s); no MCP tool is registered", type(exc).__name__)
+            logger.warning(
+                "F112: MCP client start failed (%s); %d MCP tool(s) registered before it",
+                type(exc).__name__,
+                len(mcp_client.registered()),
+            )
 
     # F099 Phase 2c: started last, once every tool and component a continuation turn may use exists.
     if continuation_runner is not None:

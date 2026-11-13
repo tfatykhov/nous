@@ -291,7 +291,8 @@ def _schema_type_errors(args: dict[str, Any], schema: dict[str, Any]) -> list[st
             if not isinstance(value, expected_container):
                 hint = ""
                 if declared == "array" and isinstance(value, str):
-                    items = (properties[key].get("items") or {}).get("type", "string")
+                    items_schema = properties[key].get("items")  # a schema object, or true / false
+                    items = items_schema.get("type", "string") if isinstance(items_schema, dict) else "string"
                     hint = f' Send a JSON array of {items}s -- ["a", "b"] -- not one delimited string.'
                 errors.append(f"{key} must be {declared}, got {_describe_json_type(value)}.{hint}")
             continue

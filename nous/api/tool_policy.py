@@ -1563,6 +1563,9 @@ MCP_CLIENT_CONTEXT_TEXT = (
     "another form."
 )
 MCP_CLIENT_UNREGISTERED_TEXT = "Tool error: '{tool}' is not a tool of any connected MCP server."
+MCP_CLIENT_NOT_OFFERED_TEXT = (
+    "Tool error: '{tool}' is not available in this turn. Use only the tools offered to you."
+)
 
 
 def mcp_client_tool_allowed(kind: str, server_background: bool) -> bool:
@@ -1576,10 +1579,11 @@ def mcp_client_tool_allowed(kind: str, server_background: bool) -> bool:
     return False
 
 
-def mcp_client_violation(kind: str, tool_name: str) -> str | None:
+def mcp_client_violation(kind: str, tool_name: str, offered: frozenset[str] | None = None) -> str | None:
     """For an ``mcp__`` name: ``"mcp_unregistered"`` when the MCP client has no such tool registered,
-    ``"mcp_context"`` when ``mcp_client_tool_allowed`` refuses it in this kind of turn, else None. None for every
-    other name."""
+    ``"mcp_context"`` when ``mcp_client_tool_allowed`` refuses it in this kind of turn, and, with ``offered`` (the
+    turn's offered names, at call time), ``"mcp_not_offered"`` when the turn was not offered it (a refuse censor, a
+    ``tool_filter``, a subtask exclusion took it out). Else None, and None for every other name."""
     if not tool_name.startswith(MCP_TOOL_PREFIX):
         return None
     background = mcp_tool_background(tool_name)
@@ -1587,6 +1591,8 @@ def mcp_client_violation(kind: str, tool_name: str) -> str | None:
         return "mcp_unregistered"
     if not mcp_client_tool_allowed(kind, background):
         return "mcp_context"
+    if offered is not None and tool_name not in offered:
+        return "mcp_not_offered"
     return None
 
 
