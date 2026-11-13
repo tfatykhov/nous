@@ -18,14 +18,18 @@ A server's connection is opened by the first call that needs it. One supervisor 
 context managers (their task groups must be entered and left in one task); a call only waits for the session and
 uses it, so a call cancelled by the runner's tool timeout leaves the connection as it was. A call also ends as soon
 as its connection does (``_unless_ended``): when the transport fails mid-session (a 502, a reset), the SDK can leave
-the call waiting until its timeout. A failed connect is not tried again for a while (1 s, doubling, at most 60 s). A
-JSON-RPC error from the server fails the call and keeps the session; any other failure but the timeout drops the
-connection, and the next call opens a new one. A call is never retried.
+the call waiting until its timeout. The handshake (opening the session and ``initialize``) has its own bound, the
+server's call timeout but at most ``HANDSHAKE_MAX_SECONDS``: the SDK can wait forever for an initialize reply that
+never comes (an event stream that ends without it, or one past the response limit), and a handshake past the bound
+ends that connection attempt, so a later call makes a new one. A failed connect is not tried again for a while (1 s,
+doubling, at most 60 s). A JSON-RPC error from the server fails the call and keeps the session; any other failure
+but the timeout drops the connection, and the next call opens a new one. A call is never retried.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import logging
 from collections.abc import Awaitable, Callable
@@ -53,6 +57,7 @@ CALLS_PER_SERVER = 4  # calls in flight to one server at a time
 _BACKOFF_FIRST_SECONDS = 1.0
 _BACKOFF_MAX_SECONDS = 60.0
 _CLOSE_WAIT_SECONDS = 5.0
+HANDSHAKE_MAX_SECONDS = 30  # the handshake's bound is the server's call timeout, but never more than this
 
 # (url, allow_private_hosts) -> an async context manager yielding an initialized session (transport.open_session).
 Connector = Callable[[str, frozenset[str]], AbstractAsyncContextManager[Any]]
@@ -86,10 +91,17 @@ class ConnectionEnded(Exception):
     """The connection a call was using ended before the call had its answer."""
 
 
-async def _unless_ended(ended: asyncio.Event, call: Awaitable[Any]) -> Any:
-    """``call``'s result, or ``ConnectionEnded`` as soon as ``ended`` is set. When the transport fails mid-session
-    the SDK can end the session without answering the calls waiting on it; this ends them with it."""
-    call_task = asyncio.ensure_future(call)
+class HandshakeTimedOut(Exception):
+    """Opening the session and ``initialize`` did not finish within the handshake's bound."""
+
+
+async def _unless_ended(ended: asyncio.Event, make_call: Callable[[], Awaitable[Any]]) -> Any:
+    """``make_call()``'s result, or ``ConnectionEnded`` as soon as ``ended`` is set. When the transport fails
+    mid-session the SDK can end the session without answering the calls waiting on it; this ends them with it. A
+    connection that has already ended (closed or dropped while the call waited for it) gets no request at all."""
+    if ended.is_set():
+        raise ConnectionEnded()
+    call_task = asyncio.ensure_future(make_call())
     call_task.add_done_callback(lambda task: task.cancelled() or task.exception())
     end_task = asyncio.ensure_future(ended.wait())
     try:
@@ -163,6 +175,8 @@ class _Server:
             conn = self._conn = self._open()
         # Shielded: a caller that is cancelled or times out leaves the connect running for the next call.
         await asyncio.shield(conn.ready)
+        if self.closed:  # closed while the connect was in flight: nothing is sent on it
+            raise ClientClosed()
         return conn
 
     def close(self) -> None:
@@ -193,8 +207,14 @@ class _Server:
 
     async def _run(self, conn: _Connection) -> None:
         name = self.config.name
+        handshake = min(self.config.call_timeout_seconds, HANDSHAKE_MAX_SECONDS)
         try:
-            async with self._connect(self.config.url, self._allow) as session:
+            async with contextlib.AsyncExitStack() as stack:
+                try:
+                    async with asyncio.timeout(handshake):
+                        session = await stack.enter_async_context(self._connect(self.config.url, self._allow))
+                except TimeoutError:
+                    raise HandshakeTimedOut() from None
                 self._failures = 0
                 conn.session = session
                 conn.ready.set_result(session)
@@ -390,9 +410,12 @@ class McpClientManager:
                     conn = await server.connection()  # raises ClientClosed when closed meanwhile
                     session = conn.session
                     # The server's own name for the tool; the call ends with its connection.
-                    raw = await _unless_ended(conn.stop, session.call_tool(raw_name, arguments))
+                    raw = await _unless_ended(conn.stop, lambda: session.call_tool(raw_name, arguments))
         except ClientClosed:
             return closed
+        except HandshakeTimedOut:
+            bound = min(timeout, HANDSHAKE_MAX_SECONDS)
+            return _error(f'the MCP server "{server_name}" did not finish its handshake within {bound} s: try again.')
         except ConnectionEnded:
             logger.warning("MCP client: %s failed: its connection ended during the call", name)
             return _error(f'the connection to the MCP server "{server_name}" ended during the call.')

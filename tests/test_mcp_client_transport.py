@@ -547,3 +547,36 @@ async def test_a_mid_session_502_ends_the_waiting_calls_well_inside_their_timeou
         text, is_error = await asyncio.wait_for(slow, 10)
         assert is_error
         assert loop.time() - started < 10  # the 502 ended both calls, not their 20 s timeout
+
+
+class _NoInitializeReply:
+    """Wraps the in-process app: the first request (initialize) gets an event stream that ends with no reply."""
+
+    def __init__(self) -> None:
+        self.seen = 0
+
+    def __call__(self, app: Any) -> Any:
+        async def served(scope: Any, receive: Any, send: Any) -> None:
+            if scope["type"] == "http":
+                self.seen += 1
+                if self.seen == 1:
+                    headers = [(b"content-type", b"text/event-stream")]
+                    await send({"type": "http.response.start", "status": 200, "headers": headers})
+                    await send({"type": "http.response.body", "body": b""})
+                    return
+            await app(scope, receive, send)
+
+        return served
+
+
+async def test_a_handshake_without_an_initialize_reply_ends_and_the_next_call_reconnects():
+    gate = _NoInitializeReply()
+    async with _in_process_manager(LIMIT, timeout=1, gate=gate) as (d, connects):
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        text, is_error = await d.dispatch("mcp__inproc__echo", {"text": "first"})
+        assert is_error and loop.time() - started < 3
+        await asyncio.sleep(1.5)  # the handshake's bound and the connect backoff have passed
+        text, is_error = await d.dispatch("mcp__inproc__echo", {"text": "second"})
+        assert not is_error and text.endswith("\nsecond")
+        assert len(connects) == 2

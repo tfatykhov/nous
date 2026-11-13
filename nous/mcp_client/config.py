@@ -6,12 +6,15 @@ opened either.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator
+
+logger = logging.getLogger(__name__)
 
 # The middle part of a tool's name (mcp__<server>__<tool>): short, lowercase, and no "__", which would make the name
 # ambiguous. The migration's CHECK holds the same shape.
@@ -64,14 +67,26 @@ def parse_pins(value: str) -> dict[str, Pin]:
     """``NOUS_MCP_CLIENT_PINNED_SERVERS`` as ``{name: Pin}``. The syntax: entries separated by ``,``, each
     ``name=host[:port];tool|tool`` (``deepwiki=mcp.deepwiki.com;read_wiki_structure|ask_question``). The host is
     compared lowercase; an IPv6 host is written in brackets. An entry without ``=`` or with an empty name or host is
-    ignored; an entry with no tool list pins the server with no tool, so nothing of it registers."""
+    ignored; an entry with no tool list pins the server with no tool, so nothing of it registers. A WARNING (names
+    only) for an entry that is ignored (``a=h;t,u`` leaves ``u`` as an entry of its own: tools are separated by
+    ``|``), for a tool list that carries ``;`` or ``=``, and for a server pinned twice (the last entry counts)."""
     pins: dict[str, Pin] = {}
     for entry in value.split(","):
+        if not entry.strip():
+            continue
         name, sep, rest = entry.partition("=")
         host, _semicolon, tools = rest.partition(";")
-        if sep and name.strip() and host.strip():
-            names = frozenset(tool.strip() for tool in tools.split("|") if tool.strip())
-            pins[name.strip()] = Pin(host.strip().lower(), names)
+        if not (sep and name.strip() and host.strip()):
+            logger.warning("MCP client: pin entry %r is not name=host[:port];tool|tool; ignored", entry.strip()[:80])
+            continue
+        if any(ch in tools for ch in ";="):
+            logger.warning(
+                "MCP client: the pin of server %r has a malformed tool list (tools are separated by '|')", name.strip()
+            )
+        if name.strip() in pins:
+            logger.warning("MCP client: server %r is pinned twice; the last entry counts", name.strip())
+        names = frozenset(tool.strip() for tool in tools.split("|") if tool.strip())
+        pins[name.strip()] = Pin(host.strip().lower(), names)
     return pins
 
 
