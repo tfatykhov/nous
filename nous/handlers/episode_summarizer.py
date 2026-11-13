@@ -522,6 +522,8 @@ class EpisodeSummarizer:
                     "summary": summary,
                     "candidate_facts": summary.get("candidate_facts", []),
                     "transcript": transcript,  # F025 P2-E: pass for fact grounding
+                    # Outside-content shadow: forwarded only when session_ended carried it (mode not off).
+                    **({"outside_tools": event.data["outside_tools"]} if "outside_tools" in event.data else {}),
                 },
                 trace_id=event.trace_id,       # F035.2: inherit from parent
                 caused_by=event.event_id,      # F035.2: point to parent

@@ -85,6 +85,31 @@ def test_spawn_flags():
         "spawn_task", "spawn_sync", "schedule_task", "heartbeat_check_create", "dag_create"}
 
 
+# --- outside-content tagging: which tools bring in outside content ---------------
+
+
+def test_every_tool_has_an_ingress_value():
+    for name, cls in TOOL_CLASSES.items():
+        assert cls.ingress in ("none", "outside"), name
+
+
+def test_the_outside_tools_are_exactly_these():
+    # A parent that spawned work receives what it found, web-derived results included.
+    assert {n for n, c in TOOL_CLASSES.items() if c.ingress == "outside"} == {
+        "web_fetch", "web_search", "browser_task", "ingest_document", "cache_retrieve", "learn_skill",
+        "spawn_task", "spawn_sync", "dag_create"}
+    for name in ("recall_deep", "read_file", "db_query"):
+        assert tool_class(name).ingress == "none", name
+
+
+def test_ingress_changes_no_other_field():
+    assert tool_class("web_fetch").side_effect == "none"
+    assert tool_class("browser_task").side_effect == "external"
+    assert tool_class("ingest_document").side_effect == "write"
+    assert tool_class("learn_skill").side_effect == "write"
+    assert tool_class("spawn_task").spawns and not tool_class("spawn_task").compensable
+
+
 # --- Task 2: the refuse denylist ------------------------------------------------
 
 

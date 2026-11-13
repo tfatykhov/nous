@@ -12,7 +12,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from nous.api.tool_classes import TOOL_CLASSES, code_reaches_network
 from nous.cognitive.bash_side_effect import classify_bash_command as _classify_bash_command
@@ -501,6 +501,41 @@ def classify_side_effect(tool_name: str, tool_input: dict[str, Any] | None = Non
     if tool_name in READ_TOOLS:
         return "none"
     return "write"  # WRITE_TOOLS and anything unclassified
+
+
+# Programs whose install subcommand downloads packages: not "external" to the side-effect classifier.
+_INSTALLERS = frozenset({"pip", "pip3", "npm"})
+
+
+def classify_ingress(tool_name: str, tool_input: dict[str, Any] | None = None) -> Literal["none", "outside"]:
+    """Whether THIS call can bring text from outside into the session: ``"outside"`` or ``"none"``.
+
+    Order: any ``mcp__`` name is outside (a remote server's result); ``bash`` by its command;
+    ``run_python`` when its code reaches the network (``code_reaches_network``); otherwise the
+    table's ``ToolClass.ingress``. A name nobody classified is ``"none"``.
+
+    ``bash`` limits, by design (no parser of its own): a command the side-effect classifier calls
+    ``external`` is outside, which covers curl, wget, gh, ssh, ``git clone``/``fetch``/``pull``
+    and Python run with network code, and over-classifies what only sends (``curl -d``, ``git
+    push``, mail); ``pip``/``pip3``/``npm install`` are added from the invocations the existing
+    lexer reads. Not seen: a script file that fetches (``python fetch.py``), ``uv``/``python -m pip``,
+    and reading a file an earlier call downloaded.
+    """
+    tool_input = tool_input or {}
+    if tool_name.startswith("mcp__"):
+        return "outside"
+    if tool_name == "bash":
+        command = _extract_bash_command(tool_input)
+        if _classify_bash_command(command) == "external":
+            return "outside"
+        runs = _command_runs(command, None) or []
+        if any(prog in _INSTALLERS and "install" in args for prog, args, _ in runs):
+            return "outside"
+        return "none"
+    if tool_name == "run_python":
+        return "outside" if code_reaches_network(str(tool_input.get("code") or "")) else "none"
+    cls = TOOL_CLASSES.get(tool_name)
+    return cls.ingress if cls is not None else "none"
 
 
 _REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [

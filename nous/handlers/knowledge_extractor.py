@@ -20,6 +20,7 @@ from nous.handlers import (
     LLMClient,
     call_background_llm,
     drop_prompt_echo_facts,
+    log_outside_content_shadow,
     parse_llm_json,
 )
 from nous.heart.category_prompts import TIER1_CATEGORY_GUIDANCE
@@ -195,6 +196,11 @@ class KnowledgeExtractor:
                     "Extracted %d facts from compaction snapshot (session %s)",
                     stored,
                     event.session_id or "?",
+                )
+            # Outside-content shadow: what this snapshot stored would be tagged. Nothing stored changes.
+            if event.data.get("outside_tools"):  # absent with the mode off: nothing else is read
+                await log_outside_content_shadow(
+                    self._settings, self._bus, event, extractor="knowledge_extractor", facts=stored,
                 )
 
         except Exception:

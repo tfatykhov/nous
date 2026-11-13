@@ -26,6 +26,7 @@ from nous.brain.continuation import INTENT_SESSION_PREFIX
 from nous.cognitive.context import ContextEngine
 from nous.cognitive.dedup import ConversationDeduplicator
 from nous.cognitive.deliberation import DESCRIPTION_CAPTURE_CHARS, DeliberationEngine
+from nous.cognitive.execution_ledger import classify_ingress
 from nous.cognitive.frames import FrameEngine
 from nous.cognitive.intent import IntentClassifier, IntentSignals
 from nous.cognitive.monitor import MonitorEngine
@@ -440,6 +441,34 @@ class CognitiveLayer:
                 session_id,
             )
         return episode_id
+
+    def _outside_tagging_on(self) -> bool:
+        """NOUS_OUTSIDE_CONTENT_TAGGING_MODE is shadow or on (membership, so a mock setting reads as off)."""
+        return getattr(self._settings, "outside_content_tagging_mode", "off") in ("shadow", "on")
+
+    def note_tool_dispatch(self, session_id: str, tool_name: str, tool_input: dict[str, Any] | None) -> None:
+        """Outside-content shadow: record, when a tool is dispatched, that it brought outside content into
+        the session (``classify_ingress``), so a write later in the SAME turn already sees it.
+
+        Only a session ``pre_turn`` has started is recorded: no metadata is created here (an approved
+        action's ``proposal-*`` session never gets one, and F110 reads its presence as a turn already
+        seen in this process). Nothing with the mode off. Never raises: recording must not change a turn.
+        """
+        if not self._outside_tagging_on():
+            return
+        try:
+            meta = self._session_metadata.get(session_id)
+            if meta is None or tool_name in meta.outside_tools:
+                return
+            if classify_ingress(tool_name, tool_input) == "outside":
+                meta.outside_tools.append(tool_name)
+        except Exception:  # noqa: BLE001 -- recording must not change a turn
+            logger.warning("outside-content: dispatch of %s not recorded", tool_name)
+
+    def outside_tools(self, session_id: str) -> list[str]:
+        """The tools that brought outside content into this session so far (a copy; empty if none)."""
+        meta = self._session_metadata.get(session_id)
+        return list(meta.outside_tools) if meta is not None else []
 
     async def warm_active_episode(self, session_id: str) -> str | None:
         """Populate the in-memory map from DB if it's empty for this session.
@@ -2044,12 +2073,37 @@ class CognitiveLayer:
 
         # 2. Emit event — handlers get the snapshot, not live state
         if self._bus:
+            data: dict[str, Any] = {"message_snapshot": message_snapshot}
+            if self._outside_tagging_on():
+                data["outside_tools"] = self._compaction_outside_tools(session_id, message_snapshot)
             await self._bus.emit(Event(
                 type="conversation_compacting",
                 agent_id=agent_id,
                 session_id=session_id,
-                data={"message_snapshot": message_snapshot},
+                data=data,
             ))
+
+    def _compaction_outside_tools(self, session_id: str, message_snapshot: list[dict[str, Any]]) -> list[str]:
+        """Outside-content shadow: the session's list, then any ``tool_use`` block in the snapshot that
+        ``classify_ingress`` calls outside (the snapshot survives a restart; the session list does not)."""
+        names = self.outside_tools(session_id)
+        try:
+            for msg in message_snapshot:
+                content = msg.get("content") if isinstance(msg, dict) else None
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, dict) or block.get("type") != "tool_use":
+                        continue
+                    name = str(block.get("name") or "")
+                    tool_input = block.get("input")
+                    if name and name not in names and classify_ingress(
+                        name, tool_input if isinstance(tool_input, dict) else None
+                    ) == "outside":
+                        names.append(name)
+        except Exception:  # noqa: BLE001 -- the event goes out with what was read
+            logger.warning("outside-content: compaction snapshot not fully read for session %s", session_id)
+        return names
 
     async def end_session(
         self,
@@ -2189,6 +2243,8 @@ class CognitiveLayer:
                 "facts_extracted": facts_extracted,
             },
         }
+        if self._outside_tagging_on():
+            event_data["outside_tools"] = list(meta.outside_tools) if meta is not None else []
         try:
             if self._bus:
                 _session_event = Event(

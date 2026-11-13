@@ -34,7 +34,13 @@ from nous.api.execution_context import is_background_session
 from nous.cognitive.context import TIER1_FACT_CATEGORIES
 from nous.config import Settings
 from nous.events import Event, EventBus
-from nous.handlers import LLMClient, call_background_llm, cap_candidate_facts, parse_llm_json
+from nous.handlers import (
+    LLMClient,
+    call_background_llm,
+    cap_candidate_facts,
+    log_outside_content_shadow,
+    parse_llm_json,
+)
 from nous.handlers.exemplar_ingest import ingest_exemplars
 from nous.heart.category_prompts import TIER1_CATEGORY_GUIDANCE
 from nous.heart.exemplars import is_exemplar_stream
@@ -521,8 +527,8 @@ class FactExtractor:
             # F051.5: delegate to the directly-invocable core. Pass
             # event.data.candidate_facts explicitly because production paths
             # carry them at the event-data level, NOT inside summary.
-            # Return value discarded — production path doesn't need the UUIDs.
-            await self.extract_and_store(
+            # The UUIDs are read only by the outside-content shadow count below.
+            fact_ids = await self.extract_and_store(
                 summary=summary,
                 episode_id=event.data.get("episode_id", "?"),
                 transcript=transcript,
@@ -531,6 +537,14 @@ class FactExtractor:
             )
         except Exception:
             logger.exception("Fact extraction failed for episode %s", event.data.get("episode_id"))
+            return
+        # Outside-content shadow: the count is the ids extraction returned (new facts, and existing
+        # facts a candidate was deduplicated to; the exemplar leg returns none). Nothing stored changes.
+        if event.data.get("outside_tools"):  # absent with the mode off: nothing else is read
+            await log_outside_content_shadow(
+                self._settings, self._bus, event,
+                extractor="fact_extractor", facts=len(fact_ids), episode_id=event.data.get("episode_id"),
+            )
 
     async def _store_candidate_facts(
         self,
