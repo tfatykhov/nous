@@ -223,6 +223,42 @@ describe('Integrations: changing a server', () => {
     await waitFor(() => expect((within(card('deepwiki')).getByRole('button', { name: 'Switch off' }) as HTMLButtonElement).disabled).toBe(false));
   });
 
+  it('an open confirmation cannot be sent while another change of its server is in flight', async () => {
+    const answers = [held(), held()];
+    let n = 0;
+    handlers['PATCH /integrations/mcp/servers/deepwiki'] = () => answers[n++].promise;
+    render(Integrations);
+    const deepwiki = await screen.findByRole('region', { name: 'deepwiki' });
+    const enabledOf = (name: string) => !(within(card('deepwiki')).getByRole('button', { name }) as HTMLButtonElement).disabled;
+    // One confirmation is open at a time: Remove's, then background work's.
+    await fireEvent.click(within(deepwiki).getByRole('button', { name: 'Remove' }));
+    await fireEvent.click(within(deepwiki).getByRole('button', { name: 'Switch off' }));
+    expect(enabledOf('Yes, remove')).toBe(false);
+    answers[0].resolve([200, { server: null }]);
+    await waitFor(() => expect(enabledOf('Yes, remove')).toBe(true));
+    await fireEvent.click(within(card('deepwiki')).getByRole('checkbox', { name: 'Allow in background work' }));
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Switch off' }));
+    expect(enabledOf('Yes, allow in background work')).toBe(false);
+    answers[1].resolve([200, { server: null }]);
+    await waitFor(() => expect(enabledOf('Yes, allow in background work')).toBe(true));
+    expect(changes().map((c) => c.body)).toEqual([{ enabled: false }, { enabled: false }]);
+  });
+
+  it("a server's name never takes the id of the form's own elements", async () => {
+    listAnswer = () => {
+      const d = LIST();
+      return [200, { ...d, servers: ['add', 'name', 'url', 'limits'].map((name) => ({ ...d.servers[0], name })) }];
+    };
+    render(Integrations);
+    await screen.findByRole('region', { name: 'name' });
+    expect(screen.getByLabelText('Name').tagName).toBe('INPUT');
+    expect(screen.getByLabelText('Address').tagName).toBe('INPUT');
+    expect(screen.getByRole('region', { name: 'Add a server' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Limits set on the host are in effect' })).toBeTruthy();
+    const ids = Array.from(document.querySelectorAll('[id]')).map((e) => e.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
   it("a refused change shows the route's message in words next to the server", async () => {
     handlers['PATCH /integrations/mcp/servers/deepwiki'] = () => [500, { error: 'the change was stored, but applying it failed: see the log' }];
     render(Integrations);

@@ -23,6 +23,8 @@
   type Note = { text: string; ok: boolean };
 
   // Per server, by name: the action in flight, the last result, an open confirmation, the last refresh's changes.
+  // Element ids of a server are `mcp-s.<name>` and `mcp-b.<name>`: a name has no ".", so no server name can take the
+  // id of the form's own elements (`mcp-name`, `mcp-url`, `mcp-add`).
   let busy = $state<Record<string, string>>({});
   let notes = $state<Record<string, Note>>({}); // a server's name, or `${server} ${tool}` for one tool's control
   let confirming = $state<Record<string, 'background' | 'remove'>>({});
@@ -245,9 +247,9 @@
   {#each d.servers as s (s.name)}
     {@const st = serverStatus(s)}
     {@const inFlight = busy[s.name]}
-    <section class="card server" aria-labelledby="mcp-{s.name}">
+    <section class="card server" aria-labelledby="mcp-s.{s.name}">
       <div class="server-head">
-        <h2 id="mcp-{s.name}">{s.name}</h2>
+        <h2 id="mcp-s.{s.name}">{s.name}</h2>
         <span class="status-pill {PILL[st.tone]}">{st.word}</span>
       </div>
       <p class="url">{s.url}</p>
@@ -257,11 +259,11 @@
 
       <div class="background">
         <label class="check">
-          <input type="checkbox" checked={s.background} disabled={!!inFlight} aria-describedby="mcp-bg-{s.name}"
+          <input type="checkbox" checked={s.background} disabled={!!inFlight} aria-describedby="mcp-b.{s.name}"
             onchange={(e) => onBackground(s, e)} />
           Allow in background work
         </label>
-        <p id="mcp-bg-{s.name}" class="hint">Scheduled jobs, subtasks and other unattended work may call this server's tools.</p>
+        <p id="mcp-b.{s.name}" class="hint">Scheduled jobs, subtasks and other unattended work may call this server's tools.</p>
         {#if s.background_blocked_by_ceiling}
           <p class="limit">Background work is blocked by the server's host settings: it is not listed in NOUS_MCP_CLIENT_BACKGROUND_SERVERS.</p>
         {/if}
@@ -269,7 +271,7 @@
           <div class="confirm" role="group" aria-label="Confirm background work for {s.name}">
             <p>Let background work call {s.name}'s tools? They would then run with no one watching.</p>
             <div class="actions">
-              <Button size="sm" class="max-md:min-h-11 max-md:px-4" onclick={() => void setBackground(s, true)}>Yes, allow in background work</Button>
+              <Button size="sm" class="max-md:min-h-11 max-md:px-4" disabled={!!inFlight} onclick={() => void setBackground(s, true)}>Yes, allow in background work</Button>
               <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" onclick={() => cancelConfirm(s.name)}>Cancel</Button>
             </div>
           </div>
@@ -292,7 +294,7 @@
         <div class="confirm" role="group" aria-label="Confirm removing {s.name}">
           <p>Remove {s.name} and its {s.tools.length} tool{s.tools.length === 1 ? '' : 's'}? The agent loses them at once; adding it again means choosing its tools again.</p>
           <div class="actions">
-            <Button variant="destructive" size="sm" class="max-md:min-h-11 max-md:px-4" onclick={() => void remove(s)}>Yes, remove</Button>
+            <Button variant="destructive" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={!!inFlight} onclick={() => void remove(s)}>Yes, remove</Button>
             <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" onclick={() => cancelConfirm(s.name)}>Cancel</Button>
           </div>
         </div>
