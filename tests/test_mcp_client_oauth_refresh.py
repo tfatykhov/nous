@@ -281,6 +281,18 @@ async def test_a_cancelled_caller_leaves_the_refresh_to_finish_and_store_the_rot
     await manager.close()
 
 
+@pytest.mark.parametrize("seconds_left,refreshes", [(30, 1), (120, 0)])
+async def test_a_token_is_refreshed_within_a_minute_of_its_expiry_and_not_before(tmp_path, seconds_left, refreshes):
+    rows, provider = Rows(_record(expires_in=seconds_left)), Provider()
+    manager = await _manager(tmp_path, rows, provider)
+    seen: list[str | None] = []
+    auth = manager._servers["alpha"].auth_for(None)
+    async with httpx.AsyncClient(transport=_mcp(seen), auth=auth) as client:
+        assert (await client.post(ALPHA)).status_code == 200
+    assert provider.refreshes == refreshes and seen == [f"Bearer {NEW if refreshes else OLD}"]
+    await manager.close()
+
+
 # --- a 401 ------------------------------------------------------------------------------------------------------------
 
 
@@ -519,4 +531,17 @@ async def test_a_result_that_repeats_a_token_is_scrubbed(tmp_path):
         d = manager._registrar
         text, is_error = await d.dispatch("mcp__alpha__echo", {"text": f"a {OLD} b {REFRESH} c"})
         assert not is_error and OLD not in text and REFRESH not in text and "a [withheld] b [withheld] c" in text
+        await manager.close()
+
+
+async def test_a_result_that_repeats_the_rotated_tokens_after_a_refresh_is_scrubbed(tmp_path):
+    gate, rows, provider = TokenGate(), Rows(_record(), INPROC), Provider()
+    gate.refused = {OLD}  # the first request is answered 401: the tokens are refreshed and rotated
+    async with _in_process(gate) as (connect, connects):
+        manager = await _manager(tmp_path, rows, provider, connect)
+        d = manager._registrar
+        text, is_error = await d.dispatch("mcp__alpha__echo", {"text": f"{NEW} {ROTATED} {OLD}"})
+        assert not is_error and provider.refreshes == 1
+        assert NEW not in text and ROTATED not in text and OLD not in text
+        assert text.endswith("\n[withheld] [withheld] [withheld]")
         await manager.close()

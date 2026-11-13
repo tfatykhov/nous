@@ -10,13 +10,16 @@ made up."""
 from __future__ import annotations
 
 import base64
+import dataclasses
 import hashlib
+import inspect
 import json
 import logging
 import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from importlib.metadata import version
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlsplit
 
@@ -40,9 +43,11 @@ from nous.mcp_client import oauth as oauth_module
 from nous.mcp_client.manager import LISTING_REPEATS
 from nous.mcp_client.registry import McpRegistry
 
+# Skipped only below the SDK floor pyproject.toml requires (CI installs it): on 1.30 or later every test runs, so an SDK
+# that moved or changed what oauth.py imports fails here (test_the_sdk_still_has_what_oauth_uses) instead of skipping.
 pytestmark = pytest.mark.skipif(
-    not hasattr(__import__("mcp.client.auth.utils", fromlist=["x"]), "validate_metadata_issuer"),
-    reason="the issuer check needs mcp 1.30, the floor pyproject.toml requires (CI installs it)",
+    tuple(int(part) for part in version("mcp").split(".")[:2]) < (1, 30),
+    reason="the OAuth steps need mcp 1.30, the floor pyproject.toml requires (CI installs it)",
 )
 
 PROXY = "proxy-secret-7c1d"
@@ -103,6 +108,8 @@ class World:
         self.forms: list[dict[str, str]] = []
         self.issued: list[str] = []
         self.valid: set[str] = set()
+        self.refresh_tokens: set[str] = set()
+        self.refreshes = 0
         self.n = 0
 
     def _next(self, kind: str) -> str:
@@ -142,6 +149,18 @@ class World:
         if request.method == "POST" and where.endswith("/token"):
             form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
             self.forms.append(form)
+            if form.get("grant_type") == "refresh_token":
+                if form.get("refresh_token") not in self.refresh_tokens:
+                    return httpx.Response(400, json={"error": "invalid_grant"})
+                self.refreshes += 1
+                self.refresh_tokens.discard(form["refresh_token"])
+                access, refresh = self._next("access"), self._next("refresh")
+                self.valid.add(access)
+                self.refresh_tokens.add(refresh)
+                return httpx.Response(
+                    200,
+                    json={"access_token": access, "token_type": "bearer", "expires_in": 3600, "refresh_token": refresh},
+                )
             if form.get("grant_type") != "authorization_code":
                 return httpx.Response(400, json={"error": "unsupported_grant_type"})
             grant = self.codes.pop(form.get("code", ""), None)
@@ -155,6 +174,7 @@ class World:
                 return httpx.Response(400, json={"error": "invalid_grant"})
             access, refresh = self._next("access"), self._next("refresh")
             self.valid.add(access)
+            self.refresh_tokens.add(refresh)
             return httpx.Response(
                 200,
                 json={"access_token": access, "token_type": "Bearer", "expires_in": 3600, "refresh_token": refresh},
@@ -728,6 +748,39 @@ def test_the_access_log_line_of_the_callback_is_dropped(caplog):
     assert lines == ['1.2.3.4:5 - "GET /integrations/mcp/servers HTTP/1.1" 200']
 
 
+# --- a refresh through the database --------------------------------------------------------------------------------
+
+
+async def test_a_refresh_rotates_the_stored_tokens_in_place_and_the_refresh_route_goes_through_it(make_env):
+    env = await make_env()
+    assert (await _add(env, await _signed_in(env))).status_code == 201
+    secret = (await env.registry.list_secrets())["alpha"]
+    record = env.manager.stored_oauth("alpha", ALPHA, secret)
+    # The provider revoked the access token: the call is answered 401, refreshes once and is retried with the new one.
+    env.world.valid.discard(record.access_token)
+    assert (await env.dispatcher.dispatch("mcp__alpha__search", {"q": "x"}))[1] is False
+    after = (await env.registry.list_secrets())["alpha"]
+    fresh = env.manager.stored_oauth("alpha", ALPHA, after)
+    assert after.id == secret.id and env.world.refreshes == 1  # updated in place: the same credential version
+    assert fresh.access_token != record.access_token and fresh.refresh_token != record.refresh_token
+    assert env.remotes.sent[-2:] == [f"Bearer {record.access_token}", f"Bearer {fresh.access_token}"]
+    sealed = env.manager.seal_oauth_record("alpha", ALPHA, fresh)
+    assert not await env.registry.update_secret_in_place(uuid.uuid4(), sealed)  # another id: nothing written
+
+    # A stored record about to expire: /refresh refreshes it first, through the same entry point, then probes with it.
+    expired = dataclasses.replace(fresh, expires_at=int(time.time()) - 10)
+    assert await env.registry.update_secret_in_place(after.id, env.manager.seal_oauth_record("alpha", ALPHA, expired))
+    refreshed = await _req(env, "POST", "/integrations/mcp/servers/alpha/refresh")
+    assert refreshed.status_code == 200, refreshed.text
+    newest = env.manager.stored_oauth("alpha", ALPHA, (await env.registry.list_secrets())["alpha"])
+    assert env.world.refreshes == 2 and env.remotes.sent[-1] == f"Bearer {newest.access_token}"
+
+    env.manager._needs_sign_in["alpha"] = after.id
+    blocked = await _req(env, "POST", "/integrations/mcp/servers/alpha/refresh")
+    assert blocked.status_code == 409 and "sign in again" in blocked.json()["error"]
+    assert env.world.refreshes == 2
+
+
 # --- the OAuth client -------------------------------------------------------------------------------------------------
 
 
@@ -759,6 +812,79 @@ async def test_the_default_oauth_client_has_no_credential_follows_no_redirect_an
     except oauth_module.OAuthProblem as exc:
         record_problem = str(exc)
     assert record_problem is not None and "address guard refused" in record_problem
+
+
+def test_the_sdk_still_has_what_oauth_uses():
+    # oauth.py calls these SDK helpers and reads these model fields (on 1.30, the floor); check_resource_allowed is
+    # called positionally, so its parameter order is pinned.
+    from mcp.client.auth.utils import (
+        build_oauth_authorization_server_metadata_discovery_urls,
+        build_protected_resource_metadata_discovery_urls,
+        extract_resource_metadata_from_www_auth,
+        extract_scope_from_www_auth,
+        validate_metadata_issuer,
+    )
+    from mcp.shared.auth import OAuthClientInformationFull, OAuthMetadata, OAuthToken, ProtectedResourceMetadata
+    from mcp.shared.auth_utils import check_resource_allowed, resource_url_from_server_url
+
+    assert list(inspect.signature(check_resource_allowed).parameters) == ["requested_resource", "configured_resource"]
+    assert list(inspect.signature(validate_metadata_issuer).parameters)[:2] == ["oauth_metadata", "expected_issuer"]
+    assert list(inspect.signature(build_protected_resource_metadata_discovery_urls).parameters) == [
+        "www_auth_url",
+        "server_url",
+    ]
+    assert list(inspect.signature(build_oauth_authorization_server_metadata_discovery_urls).parameters) == [
+        "auth_server_url",
+        "server_url",
+    ]
+    answer = httpx.Response(
+        401, headers={"WWW-Authenticate": 'Bearer resource_metadata="https://a.example.com/m", scope="r"'}
+    )
+    assert extract_resource_metadata_from_www_auth(answer) == "https://a.example.com/m"
+    assert extract_scope_from_www_auth(answer) == "r"
+    assert resource_url_from_server_url("https://A.example.com/mcp") == "https://a.example.com/mcp"
+    for model, fields in (
+        (
+            OAuthMetadata,
+            {
+                "code_challenge_methods_supported",
+                "response_types_supported",
+                "grant_types_supported",
+                "scopes_supported",
+                "token_endpoint_auth_methods_supported",
+            },
+        ),
+        (ProtectedResourceMetadata, {"resource", "authorization_servers", "scopes_supported"}),
+        (OAuthToken, {"access_token", "token_type", "expires_in", "scope", "refresh_token"}),
+        (OAuthClientInformationFull, {"client_id", "client_secret", "token_endpoint_auth_method"}),
+    ):
+        assert fields <= set(model.model_fields), model
+    assert OAuthToken.model_validate({"access_token": "t", "token_type": "bearer"}).token_type == "Bearer"
+
+
+def test_the_callback_line_is_still_dropped_after_uvicorn_sets_its_logging_up():
+    import uvicorn
+
+    names = ("uvicorn", "uvicorn.error", "uvicorn.access")
+    saved = {
+        n: (logging.getLogger(n).handlers[:], logging.getLogger(n).propagate, logging.getLogger(n).level) for n in names
+    }
+    try:
+        uvicorn.Config(app=lambda scope, receive, send: None)  # runs uvicorn's dictConfig, as uvicorn.run does
+        access = logging.getLogger("uvicorn.access")
+
+        def line(path: str) -> logging.LogRecord:
+            args = ("1.2.3.4:5", "GET", path, "1.1", 200)
+            return access.makeRecord(access.name, logging.INFO, __file__, 1, '%s - "%s %s HTTP/%s" %d', args, None)
+
+        assert not access.filter(line("/integrations/mcp/oauth/callback?code=c&state=s"))
+        assert access.filter(line("/integrations/mcp/servers"))
+    finally:
+        for name, (handlers, propagate, level) in saved.items():
+            logger = logging.getLogger(name)
+            logger.handlers[:] = handlers
+            logger.propagate = propagate
+            logger.setLevel(level)
 
 
 def test_the_redirect_address_needs_an_https_base():
