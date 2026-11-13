@@ -436,11 +436,11 @@ async def test_a_result_that_repeats_the_credential_is_scrubbed(tmp_path):
 def test_the_needles_and_the_scrub_before_the_cut():
     from mcp.types import CallToolResult, TextContent
 
-    from nous.mcp_client.bridge import credential_needles, flatten_result
+    from nous.mcp_client.bridge import credential_needles, flatten_result, withhold
 
     values = ["Bearer test-key-0000000000000000", "short", "Token  test-key-1111", "basic dGVzdDp0ZXN0", "ApiKey abc"]
     needles = credential_needles(values)
-    for expected in (
+    for found in (
         "Bearer test-key-0000000000000000",
         "test-key-0000000000000000",
         "Token  test-key-1111",
@@ -449,9 +449,10 @@ def test_the_needles_and_the_scrub_before_the_cut():
         "dGVzdDp0ZXN0",
         "ApiKey abc",  # every part under 8 characters: the whole value is the needle
     ):
-        assert expected in needles, expected
-    assert not {"short", "Bearer", "Token", "basic", "abc"} & set(needles)  # under 8 characters: not looked for
-    assert [len(n) for n in needles] == sorted((len(n) for n in needles), reverse=True)  # longest first
+        assert withhold(f"<{found}>", needles) == "<[withheld]>", found
+    for kept in ("short", "Bearer", "Token", "basic", "abc"):  # under 8 characters: not looked for
+        assert withhold(f"<{kept}>", needles) == f"<{kept}>", kept
+    assert withhold("Bearer test-key-0000000000000000", needles) == "[withheld]"  # the whole value before its key
     raw = CallToolResult(content=[TextContent(type="text", text="x" * 5 + VALUE)])
     text, _ = flatten_result(raw, 12, credential_needles([VALUE]))
     assert text.startswith("xxxxx[withhe") and "test-key" not in text  # scrubbed before the cut, not after
@@ -642,7 +643,7 @@ async def test_a_listing_that_repeats_the_key_encoded_is_refused(encoding):
     assert str(refused.value) == LISTING_REPEATS
 
 
-@pytest.mark.parametrize("value", ["Bot test-key-4444444444", "ApiKey test-key-5555555555", "Custom x test-key-66666"])
+@pytest.mark.parametrize("value", ["Bot test-key-4444444444", "ApiKey test-key-5555555555", "Token test-key-66666"])
 async def test_the_key_behind_any_scheme_is_scrubbed_and_refused_in_a_listing(tmp_path, value):
     from mcp.types import CallToolResult, TextContent, Tool
 
@@ -661,6 +662,80 @@ async def test_the_key_behind_any_scheme_is_scrubbed_and_refused_in_a_listing(tm
         await manager.probe("alpha", ALPHA, {"Authorization": value})
     assert str(refused.value) == LISTING_REPEATS
     await manager.close()
+
+
+# --- round two of #917: any mix of encodings, one regex per needle; a value of three words is matched whole ----------
+
+MIXED_KEY = "test+key/0000+1111=="  # a base64-looking made-up key
+MIXED_VALUE = f"Bearer {MIXED_KEY}"
+MIXED = {
+    "only + escaped, = literal": "test\\u002Bkey/0000\\u002B1111==",
+    "a slash escaped beside a literal and an escaped +": "test\\u002bkey\\/0000+1111==",
+    "percent-encoded in part, either case": "test%2Bkey/0000%2b1111%3D=",
+    "HTML entities, decimal and hex": "test&#43;key&#x2F;0000&#X2b;1111&#61;=",
+    "every character but letters and digits escaped": "test\\u002Bkey\\u002F0000\\u002b1111\\u003D\\u003d",
+}
+
+
+async def _scrubbed(tmp_path, value: str, echo: str) -> str:
+    """``echo`` as a tool result of a server whose stored key is ``value``, through the manager's real call path."""
+    from mcp.types import CallToolResult, TextContent
+
+    rows = Rows([_row("alpha", ALPHA)], {"alpha": _secret("alpha", ALPHA, {"Authorization": value})})
+    d, fake = ToolDispatcher(), Fake()
+    manager = McpClientManager(d, rows, _settings(_key_file(tmp_path)), connect=fake.connect)
+    await manager.start()
+    fake.result = CallToolResult(content=[TextContent(type="text", text=echo)])
+    text, is_error = await d.dispatch("mcp__alpha__echo", {"text": "x"})
+    await manager.close()
+    assert not is_error and text.startswith(WRAPPER_ALPHA)
+    return text[len(WRAPPER_ALPHA) :]
+
+
+@pytest.mark.parametrize("mix", list(MIXED))
+async def test_a_key_echoed_in_any_mix_of_encodings_is_scrubbed(tmp_path, mix):
+    assert await _scrubbed(tmp_path, MIXED_VALUE, f'{{"seen": "{MIXED[mix]}"}}') == '{"seen": "[withheld]"}'
+
+
+async def test_a_listing_that_repeats_the_key_in_a_mix_of_encodings_is_refused():
+    from mcp.types import Tool
+
+    from nous.mcp_client.manager import LISTING_REPEATS, ProbeCredentials
+
+    fake = Fake()
+    fake.tools = [Tool(name="lookup", description=f"use {MIXED['only + escaped, = literal']}", inputSchema=ECHO)]
+    manager = McpClientManager(ToolDispatcher(), Rows([], {}), _settings(), connect=fake.connect)
+    with pytest.raises(ProbeCredentials) as refused:
+        await manager.probe("alpha", ALPHA, {"Authorization": MIXED_VALUE})
+    assert str(refused.value) == LISTING_REPEATS
+
+
+async def test_ordinary_text_without_the_key_is_left_as_it_is(tmp_path):
+    ordinary = (
+        "test+key/0000 is half of something, test key 0000 1111 is not it, nor test%2Bkey alone; "
+        "Bearer tokens & keys < 100% of the time &amp; \\u002B are just words here."
+    )
+    assert await _scrubbed(tmp_path, MIXED_VALUE, ordinary) == ordinary
+
+
+async def test_a_value_of_three_words_is_withheld_whole_and_its_words_are_not(tmp_path):
+    from mcp.types import Tool
+
+    value = "Acme Production Workspace"
+    echo = f"workspace: {value}; the Production run of Acme's Workspace finished"
+    assert (
+        await _scrubbed(tmp_path, value, echo)
+        == "workspace: [withheld]; the Production run of Acme's Workspace finished"
+    )
+    assert await _scrubbed(tmp_path, value, "workspace: Acme%20Production+Workspace") == "workspace: [withheld]"
+    fake = Fake()
+    fake.tools = [Tool(name="deploy", description="Deploys to the Production Workspace", inputSchema=ECHO)]
+    manager = McpClientManager(ToolDispatcher(), Rows([], {}), _settings(), connect=fake.connect)
+    assert [t.tool for t in await manager.probe("alpha", ALPHA, {"X-Workspace": value})] == ["deploy"]  # not refused
+
+
+async def test_a_scheme_and_key_still_withholds_the_bare_key(tmp_path):
+    assert await _scrubbed(tmp_path, "ApiKey test-key-8888888888", "key=test-key-8888888888") == "key=[withheld]"
 
 
 # --- review of #917: a 403 with a stored key -------------------------------------------------------------------------

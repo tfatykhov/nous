@@ -51,6 +51,7 @@ import contextlib
 import functools
 import json
 import logging
+import re
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Iterator, Mapping
 from contextlib import AbstractAsyncContextManager
@@ -195,9 +196,9 @@ def _strings(value: Any) -> Iterator[str]:
             yield from _strings(item)
 
 
-def _repeats(tools: list[ProbedTool], needles: tuple[str, ...]) -> bool:
-    """Whether a listing (the server's text, and what ``prepare_tool`` makes of it) contains a needle: in a name, a
-    description, a string of a schema, or a serialized schema."""
+def _repeats(tools: list[ProbedTool], needles: tuple[re.Pattern[str], ...]) -> bool:
+    """Whether a listing (the server's text, and what ``prepare_tool`` makes of it) holds a match of a needle
+    (``bridge.credential_needles``): in a name, a description, a string of a schema, or a serialized schema."""
     for tool in tools:
         texts = [tool.tool, tool.description, json.dumps(tool.input_schema, ensure_ascii=False, default=str)]
         texts += _strings(tool.input_schema)
@@ -206,7 +207,7 @@ def _repeats(tools: list[ProbedTool], needles: tuple[str, ...]) -> bool:
         if tool.prepared.schema is not None:
             texts.append(serialize_schema(tool.prepared.schema))
             texts += _strings(tool.prepared.schema)
-        if any(needle in text for text in texts for needle in needles):
+        if any(needle.search(text) for text in texts for needle in needles):
             return True
     return False
 
