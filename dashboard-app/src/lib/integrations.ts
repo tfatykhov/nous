@@ -227,6 +227,8 @@ const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/;
 const HEADER_VALUE = /^[\x20\x21\x23-\x5b\x5d-\x7e]{1,4096}$/;
 /** A shorter value could never be withheld from a result (bridge.WITHHELD_MIN_CHARS), so the server refuses it. */
 export const HEADER_VALUE_MIN = 8;
+/** Letters and digits a value needs in all (config.HEADER_VALUE_MIN_ALNUM): the scrub matches them literally. */
+export const HEADER_VALUE_MIN_ALNUM = 8;
 const RESERVED_HEADERS = new Set([
   'host', 'content-length', 'content-type', 'content-encoding', 'transfer-encoding', 'trailer', 'connection',
   'keep-alive', 'proxy-connection', 'expect', 'accept', 'accept-encoding', 'cookie', 'origin', 'user-agent',
@@ -250,6 +252,9 @@ export function headersProblem(rows: readonly HeaderRow[]): string | null {
     }
     if (!HEADER_VALUE.test(row.value)) return `${at}: a value is at most 4096 printable ASCII characters, with no " or \\.`;
     if (row.value !== row.value.trim()) return `${at}: a value may not start or end with a space.`;
+    if ((row.value.match(/[A-Za-z0-9]/g) ?? []).length < HEADER_VALUE_MIN_ALNUM) {
+      return `${at}: a value needs at least ${HEADER_VALUE_MIN_ALNUM} letters or digits.`;
+    }
   }
   return null;
 }

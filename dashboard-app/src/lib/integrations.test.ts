@@ -253,7 +253,7 @@ describe('a stored key', () => {
 
   it('accepts the usual shapes', () => {
     expect(headersProblem([row('Authorization', VALUE)])).toBeNull();
-    expect(headersProblem([row('X-API-Key', 'test-key-1111'), row("x!#$%&'*+.^_`|~-y", 'a b c de')])).toBeNull();
+    expect(headersProblem([row('X-API-Key', 'test-key-1111'), row("x!#$%&'*+.^_`|~-y", 'ab cd ef gh')])).toBeNull();
   });
   it.each([
     [[], 'Give 1 to 8 headers.'],
@@ -274,6 +274,8 @@ describe('a stored key', () => {
     [[row('X-Key', 'test-"key"')], 'Header 1: a value is at most 4096 printable ASCII characters'],
     [[row('X-Key', 'test\\key')], 'Header 1: a value is at most 4096 printable ASCII characters'],
     [[row('X-Key', ' test-key')], 'Header 1: a value may not start or end with a space.'],
+    [[row('X-Key', '-_.~+/=!-_.~+/=!')], 'Header 1: a value needs at least 8 letters or digits.'],
+    [[row('X-Key', '--ab--cd--ef--g--')], 'Header 1: a value needs at least 8 letters or digits.'], // 7 in all
   ] as [{ name: string; value: string }[], string][])('refuses %j, naming the header by its place, never the value', (rows, why) => {
     const problem = headersProblem(rows) ?? '';
     expect(problem.startsWith(why), problem).toBe(true);

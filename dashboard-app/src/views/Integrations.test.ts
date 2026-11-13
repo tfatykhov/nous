@@ -903,6 +903,16 @@ describe('Integrations: a key for a new server', () => {
     expect(changes()).toEqual([]);
   });
 
+  it('a value of mostly punctuation is refused before anything is sent', async () => {
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fill('wiki2', 'https://mcp.deepwiki.com/mcp');
+    await typeKey('Bearer ----++++////====');
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    expect(within(addCard()).getByRole('alert').textContent).toBe('Header 1: a value needs at least 8 letters or digits.');
+    expect(changes()).toEqual([]);
+  });
+
   it('a 409 for a missing key file drops what was typed, says so, and checks nothing again', async () => {
     handlers['POST /integrations/mcp/probe'] = () => [200, PROBE()];
     handlers['POST /integrations/mcp/servers'] = () => [409, { error: 'no key file is configured on the host (NOUS_MCP_CLIENT_KEY_FILE)' }];

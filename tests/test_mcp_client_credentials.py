@@ -734,6 +734,23 @@ async def test_a_value_of_three_words_is_withheld_whole_and_its_words_are_not(tm
     assert [t.tool for t in await manager.probe("alpha", ALPHA, {"X-Workspace": value})] == ["deploy"]  # not refused
 
 
+def test_the_worst_accepted_value_scans_a_two_megabyte_reflection_within_two_seconds():
+    """A value of 4,096 characters, 8 letters or digits then punctuation (the least a value may hold), against 2 MB
+    of that punctuation: the regex finds its literal letters fast, so the scan does not stall the event loop."""
+    import time
+
+    from nous.mcp_client.bridge import credential_needles, withhold
+    from nous.mcp_client.config import validate_headers
+
+    value = "abcd1234" + "-" * 4088
+    assert validate_headers({"X-Api-Key": value}) == {"X-Api-Key": value}
+    needles = credential_needles([value])
+    reflection = "-" * 2_000_000
+    started = time.perf_counter()
+    assert withhold(reflection, needles) == reflection
+    assert time.perf_counter() - started < 2.0
+
+
 async def test_a_scheme_and_key_still_withholds_the_bare_key(tmp_path):
     assert await _scrubbed(tmp_path, "ApiKey test-key-8888888888", "key=test-key-8888888888") == "key=[withheld]"
 

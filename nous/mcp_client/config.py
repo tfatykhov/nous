@@ -109,6 +109,9 @@ def pin_host(url: str) -> str:
 HEADERS_MAX = 8
 # At least the result scrub's shortest needle (bridge.WITHHELD_MIN_CHARS): a shorter value could never be withheld.
 HEADER_VALUE_MIN_CHARS = 8
+# Letters and digits a value must hold in all: the scrub's regex matches them literally, which keeps its scan fast; a
+# value of punctuation alone would make it match almost anywhere.
+HEADER_VALUE_MIN_ALNUM = 8
 HEADER_VALUE_MAX_CHARS = 4096
 _HEADER_NAME = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}")
 # Headers the transport, the SDK or HTTP itself owns: a stored credential may not replace them.
@@ -173,6 +176,8 @@ def validate_headers(value: Any) -> dict[str, str]:
             raise ValueError(f'header {name}: a value holds printable ASCII characters only, and no " or \\')
         if item != item.strip(" "):
             raise ValueError(f"header {name}: a value may not start or end with a space")
+        if sum(ch.isascii() and ch.isalnum() for ch in item) < HEADER_VALUE_MIN_ALNUM:
+            raise ValueError(f"header {name}: a value holds at least {HEADER_VALUE_MIN_ALNUM} letters or digits")
     return dict(value)
 
 
