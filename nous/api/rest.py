@@ -107,6 +107,7 @@ def create_app(
     model_call_recorder: Any | None = None,
     model_call_text_store: Any | None = None,
     context_view: Any | None = None,
+    mcp_client: Any | None = None,
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
 
@@ -4087,6 +4088,11 @@ def create_app(
     )
     # F111: the owner's /drop and /done of a commitment.
     routes.extend(build_commitment_routes(database=database, settings=settings))
+    # F112 PR 2a: the owner's MCP server routes, only with the MCP client on (off, nothing of it is imported).
+    if settings.mcp_client_enabled:
+        from nous.api.mcp_client_routes import build_mcp_client_routes
+
+        routes.extend(build_mcp_client_routes(database=database, settings=settings, manager=mcp_client, bus=bus))
 
     # Dashboard v2 (Svelte) — appended after the exact-match Route entries above.
     dashboard_v2_dir = os.path.join(

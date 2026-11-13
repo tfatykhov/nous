@@ -165,15 +165,16 @@ nous/
 │   ├── security/
 │   │   └── secrets.py          # scan_secrets: shared by send_email (refuse) and the F098 result memory writer (skip)
 │   ├── mcp_client/             # F112 MCP client (NOUS_MCP_CLIENT_ENABLED, imported only when on): the agent uses tools of external MCP servers as mcp__<server>__<tool>
-│   │   ├── config.py           # ServerConfig / ToolConfig (a row each), url_problem (https, no user, password or query)
+│   │   ├── config.py           # ServerConfig / ToolConfig (a row each), url_problem (https, no user, password or query), BlockedAddress, the pin's syntax
 │   │   ├── bridge.py           # Pure functions: prepare_tool (name, cleaned description and schema, caps), result flattening, cleaning and its wrapper line, safe_error
 │   │   ├── transport.py        # The one module importing the MCP SDK client: open_session over the guarded HTTP client (public addresses only, checked at connect; no redirects, no env proxy; response bodies capped, uncompressed), McpSession (tools/call as a plain request, no output validation; paged tools/list), is_server_error; drops its request lines from the httpx log
-│   │   ├── registry.py         # McpRegistry: nous_system.mcp_servers and mcp_server_tools (migration 109)
-│   │   ├── manager.py          # McpClientManager: registers the allowed tools of pinned servers at boot without connecting, one supervisor task per connection, call timeout, no retry
+│   │   ├── registry.py         # McpRegistry: nous_system.mcp_servers and mcp_server_tools (migration 109); list, replace in one transaction, update, delete
+│   │   ├── manager.py          # McpClientManager: plan (what registers and why not, within the optional ceilings), start and reload (all MCP tools registered again in sorted order, without connecting), probe (one listing through the guarded transport), one supervisor task per connection, call timeout, no retry
 │   │   └── seed.py             # `python -m nous.mcp_client.seed --name --url --allow [--background] [--write]`: lists a server's tools, prints each as the model would get it and the pin entry, stores the server and its permissions (unlisted tools set to deny)
 │   └── api/                    # External interfaces
 │       ├── rest.py             # Starlette REST API (the route list in `create_app`; see `docs/reference/rest-api.md`)
 │       ├── commitment_routes.py # F111: POST /commitments/{id}/drop|done, the owner's /drop and /done
+│       ├── mcp_client_routes.py # F112 PR 2a: the owner's /integrations/mcp routes (list, probe, add, change, refresh, remove MCP servers), behind the proxy's X-Nous-Proxy-Secret; mounted only with NOUS_MCP_CLIENT_ENABLED
 │       ├── intention_routes.py # F099 Phase 2d: the four owner-action routes (decide, answer, list), thin over ContinuationRunner
 │       ├── intention_dashboard.py # F099 Phase 3c: GET /dashboard/intentions queries (the tree and the metrics), read-only, Postgres-only
 │       ├── autonomy_dashboard.py # Autonomy scoreboard: GET /dashboard/autonomy data (taps, approval cards, grades, task scores, inventory, warn classes), read-only

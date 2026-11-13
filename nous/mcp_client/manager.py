@@ -3,16 +3,22 @@
 ``start`` registers, from the stored rows and in sorted ``(server, tool)`` order, every tool whose permission is
 ``allow`` (at most ``TOOLS_PER_SERVER`` per server), and connects to no server: the tool array sits at the front of
 the prompt-cache prefix, so it must not depend on which server answered at boot, and a server that is down must not
-delay the boot. A tool stays registered while its server is down; its calls answer with an error.
+delay the boot. A tool stays registered while its server is down; its calls answer with an error. ``reload`` does the
+same again without a restart (the owner's routes call it after every change): it unregisters every MCP tool and
+registers the current set, so the tool array is what a fresh start would build. ``plan`` is the one place that decides
+what registers; ``start``, ``reload`` and the routes' listing all read it.
 
-The pin (``NOUS_MCP_CLIENT_PINNED_SERVERS``, set on the host, ``name=host[:port];tool|tool``): a stored tool
-registers only when its server's name is pinned, the stored URL's host (and its port, when the URL names one) is the
-pinned one, the tool's own name is in the pin's list and its stored permission is ``allow``. Background work may use
-a server's tools only when ``NOUS_MCP_CLIENT_BACKGROUND_SERVERS`` (also on the host) names it AND its row's
-background switch is on. The rows can be written by anything that reaches the database, the agent's own shell
-included; the pin, outside the database, keeps such a row from adding a server, a tool or background use at the next
-boot. It does not cover the URL's path, the descriptions and schemas stored for a pinned tool (a changed row is
-registered as stored, cleaned and checked by ``prepare_tool``), or code the agent runs inside this process.
+Two optional ceilings, set on the host only (outside the database). ``NOUS_MCP_CLIENT_PINNED_SERVERS``
+(``name=host[:port];tool|tool``): empty, every ``allow`` tool of an enabled server registers (subject to the checks of
+``plan``); set, a tool registers only when its server's name is pinned, the stored URL's host (and its port, when the
+URL names one) is the pinned one and the tool's own name is in the pin's list. A set value that pins nothing valid is
+still a ceiling: nothing registers. ``NOUS_MCP_CLIENT_BACKGROUND_SERVERS``: empty, the row's background switch alone
+decides whether background work may use a server; set, the server must also be listed there. The rows are written by
+the owner's routes (``nous/api/mcp_client_routes.py``) and the seed command, but anything that reaches the database
+can write them, the agent's own shell included, and code running in this process can call the routes: the ceilings
+are the hard limit for an owner who wants one. They do not cover the URL's path, the descriptions and schemas stored
+for an allowed tool (a changed row is registered as stored, cleaned and checked by ``prepare_tool``), or code the
+agent runs inside this process.
 
 A server's connection is opened by the first call that needs it. One supervisor task per connection owns the SDK's
 context managers (their task groups must be entered and left in one task); a call only waits for the session and
@@ -42,6 +48,7 @@ from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.mcp_client.bridge import (
     TOOLS_PER_SERVER,
+    PreparedTool,
     ServerErrorReply,
     error_class,
     flatten_result,
@@ -49,7 +56,15 @@ from nous.mcp_client.bridge import (
     safe_error,
     wrap_result,
 )
-from nous.mcp_client.config import ServerConfig, ToolConfig, parse_host_list, parse_pins, pin_host
+from nous.mcp_client.config import (
+    BlockedAddress,
+    Pin,
+    ServerConfig,
+    ToolConfig,
+    parse_host_list,
+    parse_pins,
+    pin_host,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +108,55 @@ class ConnectionEnded(Exception):
 
 class HandshakeTimedOut(Exception):
     """Opening the session and ``initialize`` did not finish within the handshake's bound."""
+
+
+class ProbeRefused(Exception):
+    """The address guard refused the URL a probe was given. The message is the guard's: a host name at most."""
+
+
+class ProbeFailed(Exception):
+    """A probe could not list the server's tools. The message is ``safe_error``'s: never the error's own text."""
+
+
+@dataclass(frozen=True)
+class ToolVerdict:
+    """What the client does with one stored tool: registers it as ``prepared.name`` with ``prepared.schema`` when
+    ``reason`` is None, else skips it for ``reason`` (``skip`` is its kind: ``disabled``, ``server_ceiling``,
+    ``schema``, ``permission``, ``ceiling``, ``collision`` or ``cap``). ``ceiling``: the host's pin keeps it out,
+    whatever its permission."""
+
+    tool: str  # the server's own name
+    permission: str
+    prepared: PreparedTool
+    reason: str | None
+    skip: str | None
+    ceiling: bool
+
+
+@dataclass(frozen=True)
+class ServerVerdict:
+    """One stored server as the client applies it. ``reason``: why none of its tools registers (disabled, or kept out
+    by the pin), else None. ``background``: background work may use it (the row's switch, and the host's list when one
+    is set); ``background_ceiling``: the row's switch is on but the host's list leaves it out. ``tools``: by tool
+    name."""
+
+    config: ServerConfig
+    reason: str | None
+    ceiling: bool
+    background: bool
+    background_ceiling: bool
+    tools: list[ToolVerdict]
+
+
+@dataclass(frozen=True)
+class ProbedTool:
+    """One tool a server listed: its description and input schema as the server gave them (what a row stores), and
+    ``prepared``, what ``prepare_tool`` makes of them (what the model would be offered, or why it would not be)."""
+
+    tool: str
+    description: str
+    input_schema: dict[str, Any]
+    prepared: PreparedTool
 
 
 async def _unless_ended(ended: asyncio.Event, make_call: Callable[[], Awaitable[Any]]) -> Any:
@@ -146,8 +210,8 @@ class _Server:
         on_error: Callable[[str, BaseException], Awaitable[None]],
         background: bool,
     ) -> None:
-        self.config = config
-        self.background = background  # the row's switch AND the host's NOUS_MCP_CLIENT_BACKGROUND_SERVERS
+        self.config = config  # replaced by a reload that keeps the server (same URL)
+        self.background = background  # the row's switch, AND the host's NOUS_MCP_CLIENT_BACKGROUND_SERVERS when set
         self.closed = False
         self.semaphore = asyncio.Semaphore(CALLS_PER_SERVER)
         self._connect = connect
@@ -266,100 +330,252 @@ class McpClientManager:
         self._agent_id = settings.agent_id
         self._max_chars = settings.mcp_client_max_result_chars
         self._allow = parse_host_list(settings.mcp_client_allow_private_hosts)
-        self._pins = parse_pins(settings.mcp_client_pinned_servers)
-        self._background_servers = parse_host_list(settings.mcp_client_background_servers)
+        # A ceiling is in effect whenever its setting is not blank, even when nothing in it parses: a malformed pin
+        # must not open every server (fail closed).
+        pinned = settings.mcp_client_pinned_servers
+        self._pins: dict[str, Pin] | None = parse_pins(pinned) if pinned.strip() else None
+        listed = settings.mcp_client_background_servers
+        self._background_servers: frozenset[str] | None = parse_host_list(listed) if listed.strip() else None
         self._connect = connect
         self._servers: dict[str, _Server] = {}
         self._registered: dict[str, str] = {}  # tool name -> server name
         self._closed = False
+        self._lock = asyncio.Lock()  # one start or reload at a time
 
     def registered(self) -> list[str]:
         """The names of the tools this manager has registered, in registration order."""
         return list(self._registered)
 
-    def _pinned_tools(self, config: ServerConfig, tools: list[ToolConfig]) -> list[ToolConfig] | None:
-        """The server's tools the host's pin lets register (stored ``allow`` and named in the pin), or None when the
-        server itself is not pinned with its stored host and port. Logs why, by the server's name only."""
+    def registered_server(self, name: str) -> str | None:
+        """The server whose tool this manager registered as ``name``, or None."""
+        return self._registered.get(name)
+
+    def ceilings(self) -> dict[str, bool]:
+        """Which of the host's two optional ceilings is set."""
+        return {"pinned_servers": self._pins is not None, "background_servers": self._background_servers is not None}
+
+    def _server_ceiling(self, config: ServerConfig) -> str | None:
+        """Why the host's pin keeps the whole server out, or None when there is no pin or it lets the server in."""
+        if self._pins is None:
+            return None
         pin = self._pins.get(config.name)
         if pin is None:
-            logger.warning("MCP client: server %r is not pinned (NOUS_MCP_CLIENT_PINNED_SERVERS); skipped", config.name)
-            return None
+            return "it is not pinned (NOUS_MCP_CLIENT_PINNED_SERVERS)"
         if pin_host(config.url) != pin.host:
-            logger.warning("MCP client: server %r: its stored host or port is not its pinned one; skipped", config.name)
-            return None
-        allowed = [tool for tool in tools if tool.permission == "allow"]
-        pinned = [tool for tool in allowed if tool.tool in pin.tools]
-        if len(pinned) < len(allowed):
-            logger.warning(
-                "MCP client: server %r: %d allowed tool(s) are not in its pin; skipped",
-                config.name,
-                len(allowed) - len(pinned),
+            return "its stored host or port is not its pinned one"
+        return None
+
+    def plan(self, rows: list[tuple[ServerConfig, list[ToolConfig]]]) -> list[ServerVerdict]:
+        """What ``start`` and ``reload`` do with ``rows`` (servers enabled or not), changing and logging nothing.
+
+        A tool registers when its server is enabled and inside the pin (when one is set), ``prepare_tool`` accepts it,
+        its permission is ``allow``, the pin (when set) lists it, no other tool holds its name (one registered by
+        anything but this manager, or one before it in sorted ``(server, tool)`` order), and its server has fewer
+        than ``TOOLS_PER_SERVER`` tools before it. The reasons are checked in that order; the first one that applies
+        is the tool's ``reason``. ``prepare_tool`` runs for every tool, so a denied tool also shows what the model
+        would be offered."""
+        first: dict[tuple[str, str], tuple[str, str] | None] = {}  # (server, tool) -> (skip, reason), None: a candidate
+        prepared_of: dict[tuple[str, str], PreparedTool] = {}
+        candidates: list[tuple[str, str, str]] = []  # (server, tool, registered name)
+        for config, tools in rows:
+            server_reason = self._server_ceiling(config)
+            pin = self._pins.get(config.name) if self._pins is not None else None
+            for tool in tools:
+                key = (config.name, tool.tool)
+                prepared = prepare_tool(config.name, tool.tool, tool.description, tool.input_schema)
+                prepared_of[key] = prepared
+                outside_pin = server_reason is not None or (pin is not None and tool.tool not in pin.tools)
+                if not config.enabled:
+                    first[key] = ("disabled", "the server is disabled")
+                elif server_reason is not None:
+                    first[key] = ("server_ceiling", server_reason)
+                elif prepared.problem is not None or prepared.name is None:
+                    first[key] = ("schema", prepared.problem or "it cannot be registered")
+                elif tool.permission != "allow":
+                    note = ", which is not offered yet" if tool.permission == "ask" else ""
+                    first[key] = ("permission", f"its permission is {tool.permission}{note}")
+                elif outside_pin:
+                    first[key] = ("ceiling", "it is not in its server's pin (NOUS_MCP_CLIENT_PINNED_SERVERS)")
+                else:
+                    first[key] = None
+                    candidates.append((config.name, tool.tool, prepared.name))
+        taken: set[str] = set()
+        counts: dict[str, int] = {}
+        for server, tool, name in sorted(candidates, key=lambda c: (c[0], c[1])):
+            if name in taken or (self._registrar.is_registered(name) and name not in self._registered):
+                first[(server, tool)] = ("collision", "a tool of that name is already registered")
+            elif counts.get(server, 0) >= TOOLS_PER_SERVER:
+                first[(server, tool)] = ("cap", f"over the {TOOLS_PER_SERVER}-tool cap")
+            else:
+                taken.add(name)
+                counts[server] = counts.get(server, 0) + 1
+        out: list[ServerVerdict] = []
+        for config, tools in sorted(rows, key=lambda row: row[0].name):
+            server_reason = self._server_ceiling(config)
+            pin = self._pins.get(config.name) if self._pins is not None else None
+            verdicts = []
+            for tool in sorted(tools, key=lambda t: t.tool):
+                skip_reason = first[(config.name, tool.tool)]
+                verdicts.append(
+                    ToolVerdict(
+                        tool=tool.tool,
+                        permission=tool.permission,
+                        prepared=prepared_of[(config.name, tool.tool)],
+                        reason=skip_reason[1] if skip_reason else None,
+                        skip=skip_reason[0] if skip_reason else None,
+                        ceiling=server_reason is not None or (pin is not None and tool.tool not in pin.tools),
+                    )
+                )
+            listed = self._background_servers is None or config.name in self._background_servers
+            out.append(
+                ServerVerdict(
+                    config=config,
+                    reason="the server is disabled" if not config.enabled else server_reason,
+                    ceiling=server_reason is not None,
+                    background=config.background and listed,
+                    background_ceiling=config.background and not listed,
+                    tools=verdicts,
+                )
             )
-        return pinned
+        return out
 
     async def start(self) -> None:
-        """Register every pinned, allowed tool of every enabled, pinned server (``_pinned_tools``), from the stored
-        rows, in sorted (server, tool) order, as ``prepare_tool`` builds it. Connects to no server. A tool that
-        ``prepare_tool`` refuses, that collides with a registered tool, or past a server's first ``TOOLS_PER_SERVER``
-        is skipped and logged by name. Ends with one ``mcp_client_started`` event and an INFO line naming the servers
-        (with their background use) and tools registered, never a URL. A failure part way logs what was registered
-        before it and is raised."""
-        entries: list[tuple[str, str, ToolConfig]] = []
-        for config, tools in await self._registry.list_enabled():
-            pinned = self._pinned_tools(config, tools)
-            if pinned is None:
-                continue
-            background = config.background and config.name in self._background_servers
-            self._servers[config.name] = _Server(config, self._connect, self._allow, self._emit_error, background)
-            entries += [(config.name, tool.tool, tool) for tool in pinned]
-        over_cap: dict[str, int] = {}
-        try:
-            for server_name, raw_name, tool in sorted(entries, key=lambda entry: (entry[0], entry[1])):
-                server = self._servers[server_name]
-                prepared = prepare_tool(server_name, raw_name, tool.description, tool.input_schema)
-                if prepared.problem is not None or prepared.name is None or prepared.schema is None:
-                    logger.warning(
-                        "MCP client: skipped %r of server %r: %s", raw_name[:80], server_name, prepared.problem
-                    )
+        """Register, from the stored rows of the enabled servers and in sorted (server, tool) order, every tool
+        ``plan`` lets register, as ``prepare_tool`` builds it. Connects to no server. A skipped allowed tool is logged
+        by name, never a URL. Ends with one ``mcp_client_started`` event and an INFO line naming the servers (with
+        their background use) and tools registered. A failure part way logs what was registered before it and is
+        raised."""
+        await self._apply("start", "mcp_client_started")
+
+    async def reload(self) -> None:
+        """Apply the stored rows again, without a restart: what ``start`` does, after unregistering every MCP tool
+        this manager registered, so the MCP tools are registered in the order a fresh start would give them (one
+        prompt-cache miss). A server whose URL is unchanged keeps its connection, and its calls in flight finish; a
+        server that is gone, disabled, outside the pin or at another URL is closed, and its calls in flight end with
+        an error. Reloads run one at a time; nothing is done once the manager is closed. Ends with one
+        ``mcp_client_reloaded`` event and the same INFO line as ``start``."""
+        await self._apply("reload", "mcp_client_reloaded")
+
+    async def _apply(self, what: str, event_type: str) -> None:
+        async with self._lock:
+            if self._closed:
+                return
+            rows = await self._registry.list_enabled()
+            if self._closed:  # closed while the rows were read
+                return
+            plan = self.plan(rows)
+            servers: dict[str, _Server] = {}
+            for verdict in plan:
+                if verdict.reason is not None:
                     continue
-                if self._registrar.is_registered(prepared.name):
-                    logger.warning("MCP client: skipped %s: a tool of that name is already registered", prepared.name)
-                    continue
-                if sum(1 for owner in self._registered.values() if owner == server_name) >= TOOLS_PER_SERVER:
-                    over_cap[server_name] = over_cap.get(server_name, 0) + 1
-                    continue
-                self._registrar.register(prepared.name, self._handler(server, raw_name, prepared.name), prepared.schema)
-                note_mcp_tool(prepared.name, background=server.background)
-                self._registered[prepared.name] = server_name
-        except Exception:
-            logger.warning(
-                "MCP client: start stopped after registering %d tool(s): %s",
+                config = verdict.config
+                server = self._servers.get(config.name)
+                if server is not None and server.config.url == config.url:
+                    server.config = config  # the same connection; a new call timeout applies to the next call
+                    server.background = verdict.background
+                else:
+                    server = _Server(config, self._connect, self._allow, self._emit_error, verdict.background)
+                servers[config.name] = server
+            retiring = [server for name, server in self._servers.items() if servers.get(name) is not server]
+            for server in retiring:
+                server.close()
+            self._servers = servers
+            self._log_skips(plan)
+            # From here to the end of the loop nothing awaits: no turn sees a part of the MCP tools.
+            for name in self._registered:
+                self._registrar.unregister(name)
+                forget_mcp_tool(name)
+            self._registered.clear()
+            entries = sorted(
+                ((verdict.config.name, tool) for verdict in plan for tool in verdict.tools if tool.reason is None),
+                key=lambda entry: (entry[0], entry[1].tool),
+            )
+            try:
+                for server_name, tool in entries:
+                    name, schema = tool.prepared.name, tool.prepared.schema
+                    if name is None or schema is None:  # plan never lets such a tool register
+                        continue
+                    server = servers[server_name]
+                    self._registrar.register(name, self._handler(server, tool.tool, name), schema)
+                    note_mcp_tool(name, background=server.background)
+                    self._registered[name] = server_name
+            except Exception:
+                logger.warning(
+                    "MCP client: %s stopped after registering %d tool(s): %s",
+                    what,
+                    len(self._registered),
+                    ", ".join(self._registered) or "none",
+                )
+                raise
+            registered_servers = [
+                {"name": name, "background": servers[name].background}
+                for name in sorted(set(self._registered.values()))
+            ]
+            logger.info(
+                "MCP client: %d tool(s) registered from server(s) %s: %s",
                 len(self._registered),
+                ", ".join(f"{s['name']} (background {'on' if s['background'] else 'off'})" for s in registered_servers)
+                or "none",
                 ", ".join(self._registered) or "none",
             )
-            raise
-        for server_name, skipped in sorted(over_cap.items()):
-            logger.warning(
-                "MCP client: skipped %d tool(s) of server %r: over the %d-tool cap",
-                skipped,
-                server_name,
-                TOOLS_PER_SERVER,
-            )
-        servers = [
-            {"name": name, "background": self._servers[name].background}
-            for name in sorted(set(self._registered.values()))
-        ]
-        logger.info(
-            "MCP client: %d tool(s) registered from server(s) %s: %s",
-            len(self._registered),
-            ", ".join(f"{s['name']} (background {'on' if s['background'] else 'off'})" for s in servers) or "none",
-            ", ".join(self._registered) or "none",
-        )
-        await self._emit("mcp_client_started", {"servers": servers, "tools": list(self._registered)})
+            await self._emit(event_type, {"servers": registered_servers, "tools": list(self._registered)})
+            await _wait_ended(set().union(*(server.tasks() for server in retiring)))
+
+    def _log_skips(self, plan: list[ServerVerdict]) -> None:
+        """One WARNING per server the pin keeps out, and per allowed tool that does not register, by name only."""
+        for verdict in plan:
+            name = verdict.config.name
+            if verdict.ceiling:
+                logger.warning("MCP client: server %r: %s; skipped", name, verdict.reason)
+                continue
+            allowed = [tool for tool in verdict.tools if tool.permission == "allow"]
+            outside_pin = sum(1 for tool in allowed if tool.skip == "ceiling")
+            if outside_pin:
+                logger.warning(
+                    "MCP client: server %r: %d allowed tool(s) are not in its pin; skipped", name, outside_pin
+                )
+            for tool in allowed:
+                if tool.skip == "schema":
+                    logger.warning("MCP client: skipped %r of server %r: %s", tool.tool[:80], name, tool.reason)
+                elif tool.skip == "collision":
+                    logger.warning(
+                        "MCP client: skipped %s: a tool of that name is already registered", tool.prepared.name
+                    )
+            over_cap = sum(1 for tool in allowed if tool.skip == "cap")
+            if over_cap:
+                logger.warning(
+                    "MCP client: skipped %d tool(s) of server %r: over the %d-tool cap",
+                    over_cap,
+                    name,
+                    TOOLS_PER_SERVER,
+                )
+
+    async def probe(self, server: str, url: str) -> list[ProbedTool]:
+        """Connect once to ``url`` through the client's connector (the address guard and the response cap of
+        ``transport.open_session``), list its tools and return each, by name, with what ``prepare_tool`` makes of it
+        for a server named ``server``. Writes nothing and registers nothing. The connect and the listing together are
+        bounded by ``HANDSHAKE_MAX_SECONDS``. Raises ``ProbeRefused`` when the guard refuses the URL, ``ProbeFailed``
+        (``safe_error`` text) for any other failure."""
+        try:
+            async with asyncio.timeout(HANDSHAKE_MAX_SECONDS):
+                async with self._connect(url, self._allow) as session:
+                    listed = await session.list_tools()
+        except BlockedAddress as exc:
+            raise ProbeRefused(str(exc)) from None
+        except Exception as exc:  # an ExceptionGroup from the SDK's task groups included; CancelledError passes
+            logger.warning("MCP client: the probe for server %r failed (%s)", server, error_class(exc))
+            logger.debug("MCP client: probe error", exc_info=True)
+            raise ProbeFailed(safe_error(exc)) from None
+        out: list[ProbedTool] = []
+        for tool in sorted(listed, key=lambda t: t.name):
+            description = tool.description or ""
+            prepared = prepare_tool(server, tool.name, description, tool.inputSchema)
+            out.append(ProbedTool(tool.name, description, dict(tool.inputSchema), prepared))
+        return out
 
     async def close(self) -> None:
         """Unregister every tool this manager registered and close every connection (bounded wait, then cancel). A
-        handler called after this answers with an error and opens no connection."""
+        handler called after this answers with an error and opens no connection; a later ``reload`` does nothing."""
         self._closed = True
         for name in self._registered:
             self._registrar.unregister(name)
@@ -369,11 +585,7 @@ class McpClientManager:
         for server in self._servers.values():
             server.close()
             tasks |= server.tasks()
-        if tasks:
-            _done, pending = await asyncio.wait(tasks, timeout=_CLOSE_WAIT_SECONDS)
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+        await _wait_ended(tasks)
 
     def status(self) -> dict[str, Any]:
         """Each server's name, whether it is connected, its background switch and its registered tool count. No
@@ -419,7 +631,10 @@ class McpClientManager:
                     # The server's own name for the tool; the call ends with its connection.
                     raw = await _unless_ended(conn.stop, lambda: session.call_tool(raw_name, arguments))
         except ClientClosed:
-            return closed
+            if self._closed:
+                return closed
+            # A reload closed this server (removed, disabled, or moved to another URL) while the call waited.
+            return _error(f'the MCP server "{server_name}" was removed or changed: the call was not sent.')
         except HandshakeTimedOut:
             bound = min(timeout, HANDSHAKE_MAX_SECONDS)
             return _error(f'the MCP server "{server_name}" did not finish its handshake within {bound} s: try again.')
@@ -462,3 +677,13 @@ class McpClientManager:
 
 def _error(message: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": f"Tool error: {message}"}], "is_error": True}
+
+
+async def _wait_ended(tasks: set[asyncio.Task[None]]) -> None:
+    """Wait for closing supervisor tasks, at most ``_CLOSE_WAIT_SECONDS``, then cancel those still running."""
+    if not tasks:
+        return
+    _done, pending = await asyncio.wait(tasks, timeout=_CLOSE_WAIT_SECONDS)
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)

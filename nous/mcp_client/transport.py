@@ -42,7 +42,7 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import McpError
 
 from nous.mcp_client.bridge import ServerErrorReply
-from nous.mcp_client.config import url_problem
+from nous.mcp_client.config import BlockedAddress, url_problem
 
 _METADATA_ADDRESSES = frozenset({ipaddress.ip_address("169.254.169.254"), ipaddress.ip_address("fd00:ec2::254")})
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
@@ -93,10 +93,6 @@ logging.getLogger("httpx").addFilter(_QuietMcpRequests())
 logging.getLogger("mcp.client.streamable_http").setLevel(logging.WARNING)  # it logs the session id at INFO
 for _logger_name in ("mcp.client.streamable_http", "client", ""):
     logging.getLogger(_logger_name).addFilter(_WithholdServerText())
-
-
-class BlockedAddress(Exception):
-    """A URL or host the client's address guard refuses."""
 
 
 def is_public_address(ip: str) -> bool:

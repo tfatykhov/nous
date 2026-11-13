@@ -76,19 +76,30 @@ def test_main_imports_and_builds_the_client_only_under_the_flag():
 
 
 def test_nothing_else_imports_the_client_and_only_transport_imports_the_sdk():
+    # nous/api/mcp_client_routes.py is the routes' module: only rest.py imports it, under the flag (next test).
+    allowed = ("nous/main.py", "nous/api/mcp_client_routes.py")
     for path in (ROOT / "nous").rglob("*.py"):
         rel = path.relative_to(ROOT).as_posix()
         for _node, module in _imports_of(ast.parse(path.read_text(encoding="utf-8"))):
             if module.startswith("nous.mcp_client"):
-                assert rel == "nous/main.py" or rel.startswith("nous/mcp_client/"), rel
+                assert rel in allowed or rel.startswith("nous/mcp_client/"), rel
+            if module == "nous.api.mcp_client_routes":
+                assert rel == "nous/api/rest.py", rel
             if rel.startswith("nous/mcp_client/") and (module == "mcp" or module.startswith("mcp.")):
                 assert rel == "nous/mcp_client/transport.py", rel
 
 
-def test_importing_main_imports_nothing_of_the_client():
+def test_rest_imports_the_routes_only_under_the_flag():
+    tree = ast.parse((ROOT / "nous" / "api" / "rest.py").read_text(encoding="utf-8"))
+    imports = [node for node, module in _imports_of(tree) if module == "nous.api.mcp_client_routes"]
+    assert len(imports) == 1 and _gated_by_the_flag(tree, imports[0])
+
+
+@pytest.mark.parametrize("module", ["nous.main", "nous.api.rest"])
+def test_importing_main_or_rest_imports_nothing_of_the_client(module):
     code = (
-        "import sys, nous.main\n"
-        "print(sorted(m for m in sys.modules if m == 'nous.mcp_client' or m.startswith('nous.mcp_client.')))"
+        f"import sys, {module}\n"
+        "print(sorted(m for m in sys.modules if m.startswith(('nous.mcp_client', 'nous.api.mcp_client_routes'))))"
     )
     out = subprocess.run([sys.executable, "-c", code], cwd=ROOT, capture_output=True, text=True, timeout=120)
     assert out.returncode == 0, out.stderr[-2000:]

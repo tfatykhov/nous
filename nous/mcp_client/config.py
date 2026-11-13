@@ -23,6 +23,11 @@ SERVER_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,23}")
 Permission = Literal["allow", "deny", "ask"]
 
 
+class BlockedAddress(Exception):
+    """A URL or host the client's address guard refuses (raised by ``transport``; defined here, with no SDK import,
+    so the manager can tell a refusal from a failed connection)."""
+
+
 def url_problem(url: str) -> str | None:
     """Why ``url`` cannot be an MCP server's address, or None when it can.
 
@@ -67,7 +72,8 @@ def parse_pins(value: str) -> dict[str, Pin]:
     """``NOUS_MCP_CLIENT_PINNED_SERVERS`` as ``{name: Pin}``. The syntax: entries separated by ``,``, each
     ``name=host[:port];tool|tool`` (``deepwiki=mcp.deepwiki.com;read_wiki_structure|ask_question``). The host is
     compared lowercase; an IPv6 host is written in brackets. An entry without ``=`` or with an empty name or host is
-    ignored; an entry with no tool list pins the server with no tool, so nothing of it registers. A WARNING (names
+    ignored (the setting is still a ceiling: a server it does not pin registers nothing); an entry with no tool list
+    pins the server with no tool, so nothing of it registers. A WARNING (names
     only) for an entry that is ignored (``a=h;t,u`` leaves ``u`` as an entry of its own: tools are separated by
     ``|``), for a tool list that carries ``;`` or ``=``, and for a server pinned twice (the last entry counts)."""
     pins: dict[str, Pin] = {}
@@ -107,7 +113,7 @@ class ServerConfig(BaseModel):
     url: str = Field(repr=False)
     transport: Literal["streamable_http"] = "streamable_http"
     enabled: bool = True
-    background: bool = False  # the row's background switch: background use also needs the host's setting
+    background: bool = False  # the row's background switch (and the host's list, when one is set)
     call_timeout_seconds: int = Field(default=30, ge=1, le=600)
 
     @field_validator("name")
