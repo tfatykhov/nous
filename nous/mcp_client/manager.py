@@ -968,6 +968,12 @@ class McpClientManager:
         box = self._keys.box()
         return None if box is None else seal_headers(box, aad_fields(self._agent_id, name, url, "headers"), headers)
 
+    def stored_oauth(self, name: str, url: str, secret: StoredSecret) -> OAuthRecord | None:
+        """The token record of the stored credential ``secret`` opened as bound to ``url``, or None (another kind, or
+        it cannot be opened): a new sign-in reuses its client when the issuer is unchanged."""
+        opened, _problem = self._opened(name, url, secret)
+        return opened if isinstance(opened, OAuthRecord) else None
+
     def seal_oauth_record(self, name: str, url: str, record: OAuthRecord) -> SealedSecret | None:
         """PR 2d: a token record sealed for the server ``name`` bound to ``url``; None when no key is loaded."""
         box = self._keys.box()

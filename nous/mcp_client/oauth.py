@@ -318,6 +318,14 @@ async def discover(url: str, http: HttpFactory, allow: frozenset[str], scope: st
     token_endpoint = _endpoint(raw.get("token_endpoint"), "token endpoint")
     registration = raw.get("registration_endpoint")
     registration_endpoint = None if registration is None else _endpoint(registration, "registration endpoint")
+    for endpoint, what in ((token_endpoint, "token endpoint"), (registration_endpoint, "registration endpoint")):
+        if endpoint is not None:  # refused now rather than at the exchange: Nous posts to both
+            try:
+                await check_url(endpoint, allow)
+            except BlockedAddress as exc:
+                raise OAuthProblem(502, f"the provider's {what}: the address guard refused it ({exc})") from None
+            except Exception as exc:
+                raise OAuthProblem(502, f"the provider's {what} could not be resolved ({error_class(exc)})") from None
     for endpoint in (authorization_endpoint, token_endpoint, registration_endpoint):
         if endpoint is not None:
             quiet_host(endpoint)

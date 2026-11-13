@@ -242,7 +242,8 @@ async def test_a_missing_or_wrong_header_is_403_and_the_right_one_is_200(make_en
     assert probe.status_code == 403 and env.remotes.connects == []
     ok = await _req(env, "GET", "/integrations/mcp/servers")
     assert ok.status_code == 200 and ok.json() == {
-        "ceilings": {"pinned_servers": False, "background_servers": False}, "secrets_available": False, "servers": []
+        "ceilings": {"pinned_servers": False, "background_servers": False}, "secrets_available": False,
+        "oauth_available": False, "servers": [],
     }
     created = await _add(env, tools={"search": "allow"})
     assert created.status_code == 201
@@ -257,6 +258,9 @@ async def test_a_missing_or_wrong_header_is_403_and_the_right_one_is_200(make_en
     ("PATCH", "/integrations/mcp/servers/alpha"),
     ("POST", "/integrations/mcp/servers/alpha/refresh"),
     ("DELETE", "/integrations/mcp/servers/alpha"),
+    ("POST", "/integrations/mcp/servers/alpha/sign-out"),
+    ("POST", "/integrations/mcp/oauth/start"),
+    ("POST", "/integrations/mcp/oauth/complete"),
 ])
 @pytest.mark.parametrize(
     "content_type",
