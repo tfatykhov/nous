@@ -1,6 +1,7 @@
 // F112 PR 2b: the Integrations screen's client for the owner's MCP server routes (nous/api/mcp_client_routes.py) and
 // the pure rules it shows: the name and address checks the server makes, the status words, the create payload and
 // the words for a refused request. Every string a server wrote is shown as text by the view, never as markup.
+// PR 2c: a server's stored key (header names only ever come back) and the header rules checked before sending.
 import { apiRequest, type ApiAnswerError } from './api';
 
 /** One stored tool as the listing shows it. `tool` is the server's own name (permissions are keyed by it); `name` is
@@ -16,6 +17,16 @@ export interface McpTool {
   schema: string | null;
 }
 
+/** F112 PR 2c: a server's stored credential, never its values. `status`: `unavailable` when it cannot be opened on
+ * this host (`reason` says why), `credentials_refused` when the server's last answer was a 401. */
+export interface McpAuth {
+  kind: 'none' | 'headers' | 'oauth';
+  header_names: string[];
+  updated_at: string | null;
+  status: 'ok' | 'credentials_refused' | 'unavailable';
+  reason: string | null;
+}
+
 export interface McpServer {
   name: string;
   url: string;
@@ -28,10 +39,13 @@ export interface McpServer {
   blocked_by_ceiling: boolean;
   skip_reason: string | null;
   tools: McpTool[];
+  auth: McpAuth;
 }
 
 export interface McpServerList {
   ceilings: { pinned_servers: boolean; background_servers: boolean };
+  /** Whether the host has a key, so a credential can be stored. */
+  secrets_available: boolean;
   servers: McpServer[];
 }
 
@@ -54,6 +68,7 @@ export interface CreatePayload {
   url: string;
   tools: Record<string, 'allow' | 'deny'>;
   expected_definitions_sha256: string;
+  headers?: Record<string, string>;
 }
 
 export interface RefreshResult {
@@ -68,6 +83,8 @@ export interface ServerChange {
   enabled?: boolean;
   background?: boolean;
   tools?: Record<string, 'allow' | 'deny'>;
+  /** Replace the stored credential, or remove it with null. */
+  headers?: Record<string, string> | null;
 }
 
 const BASE = '/integrations/mcp';
@@ -75,7 +92,9 @@ const BASE = '/integrations/mcp';
 export const serverPath = (name: string) => `${BASE}/servers/${encodeURIComponent(name)}`;
 
 export const listServers = (signal?: AbortSignal) => apiRequest<McpServerList>(`${BASE}/servers`, 'GET', undefined, signal);
-export const probeServer = (name: string, url: string) => apiRequest<ProbeResult>(`${BASE}/probe`, 'POST', { name, url });
+/** A probe; `headers` are sent on its requests and never stored. The body names them only when there are some. */
+export const probeServer = (name: string, url: string, headers?: Record<string, string>) =>
+  apiRequest<ProbeResult>(`${BASE}/probe`, 'POST', headers ? { name, url, headers } : { name, url });
 export const createServer = (payload: CreatePayload) =>
   apiRequest<{ created: boolean; definitions_sha256: string; server: McpServer | null }>(`${BASE}/servers`, 'POST', payload);
 export const updateServer = (name: string, change: ServerChange) =>
@@ -145,8 +164,16 @@ export function problemText(err: unknown): string {
   return `The request failed (HTTP ${status}).`;
 }
 
-/** 409: the server's listing differs from what the owner was shown. */
-export const isConflict = (err: unknown) => (err as ApiAnswerError | null)?.status === 409;
+/** 409 with the new hash: the server's listing differs from what the owner was shown. Another 409 (no key file on
+ * the host) is not this one. */
+export function isConflict(err: unknown): boolean {
+  const e = err as ApiAnswerError | null;
+  const body = e?.body as { definitions_sha256?: unknown } | undefined;
+  return e?.status === 409 && typeof body?.definitions_sha256 === 'string';
+}
+
+/** A 409 that is not a changed listing: the host has no key file, so nothing typed can be stored. */
+export const isNoKey = (err: unknown) => (err as ApiAnswerError | null)?.status === 409 && !isConflict(err);
 
 export type Tone = 'ok' | 'warn' | 'neutral';
 export interface Status { word: string; detail: string | null; tone: Tone }
@@ -171,11 +198,78 @@ export function toolStatusText(t: McpTool, serverEnabled = true): string {
   return s.detail ? `${s.word}: ${s.detail}` : s.word;
 }
 
-/** A server's status in words. A server connects at its first call, so "not connected yet" is the usual state. */
+/** A server's status in words. A server connects at its first call, so "connects on first use" is the usual state
+ * (the owner read "not connected yet" as a fault). A stored key that cannot be read here, or that the server refused,
+ * comes before the connection. */
 export function serverStatus(s: McpServer): Status {
   if (!s.enabled) return { word: 'switched off', detail: null, tone: 'neutral' };
+  if (s.auth.status === 'unavailable') return { word: 'key cannot be read on this host', detail: s.auth.reason, tone: 'warn' };
+  if (s.auth.status === 'credentials_refused') {
+    // The reason says a 403 ("forbidden"): the key may be wrong or lack access.
+    return { word: s.auth.kind === 'none' ? 'the server asks for a key' : 'the server refused the key', detail: s.auth.reason, tone: 'warn' };
+  }
   if (s.connected) return { word: 'connected', detail: null, tone: 'ok' };
-  return { word: 'not connected yet', detail: null, tone: 'neutral' };
+  return { word: 'connects on first use', detail: null, tone: 'neutral' };
+}
+
+// ── Stored keys (F112 PR 2c) ────────────────────────────────────────────────
+
+/** One row of the key form: a header's name and the value typed for it. Values live only in the form's state. */
+export interface HeaderRow { name: string; value: string }
+
+export const HEADERS_MAX = 8;
+export const KEY_HINT = 'Most servers want Authorization with the value "Bearer <your key>".';
+/** What the result scrub hides (bridge.credential_needles), in a few plain words. */
+export const VALUE_HINT = 'Tool results never show a stored value; for a value of two words, not its second word either.';
+export const NO_KEY_FILE_TEXT = 'A key cannot be stored here: no key file is configured on the host (NOUS_MCP_CLIENT_KEY_FILE).';
+export const blankHeaderRow = (name = ''): HeaderRow => ({ name, value: '' });
+
+// The server's rules (config.validate_headers), checked here too so a typo is said before anything is sent.
+const HEADER_NAME = /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/;
+const HEADER_VALUE = /^[\x20\x21\x23-\x5b\x5d-\x7e]{1,4096}$/;
+/** A shorter value could never be withheld from a result (bridge.WITHHELD_MIN_CHARS), so the server refuses it. */
+export const HEADER_VALUE_MIN = 8;
+/** Letters and digits a value needs in all (config.HEADER_VALUE_MIN_ALNUM): punctuation alone is found in ordinary text. */
+export const HEADER_VALUE_MIN_ALNUM = 8;
+const RESERVED_HEADERS = new Set([
+  'host', 'content-length', 'content-type', 'content-encoding', 'transfer-encoding', 'trailer', 'connection',
+  'keep-alive', 'proxy-connection', 'expect', 'accept', 'accept-encoding', 'cookie', 'origin', 'user-agent',
+  'mcp-session-id', 'mcp-protocol-version', 'last-event-id', 'te', 'upgrade', 'proxy-authorization',
+]);
+
+/** Why `rows` cannot be stored, or null when they can. A refusal names the header by its place, never its value. */
+export function headersProblem(rows: readonly HeaderRow[]): string | null {
+  if (rows.length < 1 || rows.length > HEADERS_MAX) return `Give 1 to ${HEADERS_MAX} headers.`;
+  const seen = new Set<string>();
+  for (const [i, row] of rows.entries()) {
+    const at = `Header ${i + 1}`;
+    if (!HEADER_NAME.test(row.name)) return `${at}: a name is 1 to 64 letters, digits or any of !#$%&'*+.^_\`|~- (no space).`;
+    const lower = row.name.toLowerCase();
+    if (RESERVED_HEADERS.has(lower) || lower.startsWith('x-nous-')) return `${at}: Nous sets this header itself, so it cannot be stored.`;
+    if (seen.has(lower)) return `${at}: this name is used twice (names are compared without case).`;
+    seen.add(lower);
+    if (row.value === '') return `${at}: enter its value.`;
+    if (row.value.length < HEADER_VALUE_MIN) {
+      return `${at}: a value is ${HEADER_VALUE_MIN} to 4096 characters (a shorter one could not be kept out of the tools' results).`;
+    }
+    if (!HEADER_VALUE.test(row.value)) return `${at}: a value is at most 4096 printable ASCII characters, with no " or \\.`;
+    if (row.value !== row.value.trim()) return `${at}: a value may not start or end with a space.`;
+    if ((row.value.match(/[A-Za-z0-9]/g) ?? []).length < HEADER_VALUE_MIN_ALNUM) {
+      return `${at}: a value needs at least ${HEADER_VALUE_MIN_ALNUM} letters or digits.`;
+    }
+  }
+  return null;
+}
+
+/** The rows as the request's `headers`, every name an own key whatever it is. */
+export const headersBody = (rows: readonly HeaderRow[]): Record<string, string> =>
+  Object.fromEntries(rows.map((r) => [r.name, r.value]));
+
+/** The card's line about the stored key: the header names only, never a value. */
+export function keyLine(auth: McpAuth): string {
+  if (auth.kind === 'headers') return `Key set: ${auth.header_names.join(', ')}`;
+  if (auth.kind === 'oauth') return 'Signed in with OAuth.';
+  return 'No key stored.';
 }
 
 /** The host's limits in effect, in words; empty when neither is set. */
@@ -194,13 +288,17 @@ export function ceilingLines(c: McpServerList['ceilings']): string[] {
  * probe's hash, so a server that answers differently at the add is refused (409) with nothing stored. A tool's name is
  * the server's text: `allowed` is a Map and `tools` is built by Object.fromEntries, so a name such as `constructor` is
  * never read from a prototype and `__proto__` is an own key of the body, not the object's prototype. */
-export function createPayload(name: string, url: string, probe: ProbeResult, allowed: ReadonlyMap<string, boolean>): CreatePayload {
-  return {
+export function createPayload(
+  name: string, url: string, probe: ProbeResult, allowed: ReadonlyMap<string, boolean>, headers?: Record<string, string>,
+): CreatePayload {
+  const payload: CreatePayload = {
     name,
     url,
     tools: Object.fromEntries(probe.tools.map((t) => [t.tool, allowed.get(t.tool) === true ? 'allow' : 'deny'])),
     expected_definitions_sha256: probe.definitions_sha256,
   };
+  if (headers) payload.headers = headers; // named only when the owner typed some
+  return payload;
 }
 
 /** The change that allows or stops allowing one stored tool, its name an own key of the body whatever it is. */

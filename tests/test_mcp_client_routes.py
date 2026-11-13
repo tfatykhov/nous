@@ -100,7 +100,7 @@ class Remotes:
         return self.by_url[url]
 
     @asynccontextmanager
-    async def connect(self, url: str, allow: frozenset[str]):
+    async def connect(self, url: str, allow: frozenset[str], *, auth: Any = None):
         self.connects.append(url)
         remote = self.by_url.get(url)
         if remote is None:
@@ -242,7 +242,7 @@ async def test_a_missing_or_wrong_header_is_403_and_the_right_one_is_200(make_en
     assert probe.status_code == 403 and env.remotes.connects == []
     ok = await _req(env, "GET", "/integrations/mcp/servers")
     assert ok.status_code == 200 and ok.json() == {
-        "ceilings": {"pinned_servers": False, "background_servers": False}, "servers": []
+        "ceilings": {"pinned_servers": False, "background_servers": False}, "secrets_available": False, "servers": []
     }
     created = await _add(env, tools={"search": "allow"})
     assert created.status_code == 201
@@ -512,7 +512,7 @@ async def test_the_change_events_carry_no_url_and_no_description(make_env):
     await _req(env, "DELETE", "/integrations/mcp/servers/alpha")
     changes = [e for e in env.bus.events if e.type == CHANGE_EVENT]
     assert [e.data["action"] for e in changes] == ["create", "update", "refresh", "delete"]
-    base = {"action", "server", "changed", "enabled", "background", "tools", "more"}
+    base = {"action", "server", "changed", "enabled", "background", "tools", "more", "credentials", "header_count"}
     for event in changes:
         extra = {"added", "removed", "redefined"} if event.data["action"] == "refresh" else set()
         assert set(event.data) == base | extra
@@ -545,7 +545,9 @@ async def test_concurrent_reloads_run_one_at_a_time_and_end_as_a_fresh_start(mak
         finally:
             active -= 1
 
-    env.manager._registry = type("R", (), {"list_enabled": staticmethod(slow_list)})()
+    env.manager._registry = type(
+        "R", (), {"list_enabled": staticmethod(slow_list), "list_secrets": staticmethod(env.registry.list_secrets)}
+    )()
     await asyncio.gather(*(env.manager.reload() for _ in range(5)))
     assert peak == 1
     assert _names(env.dispatcher) == ["recall_deep", "mcp__alpha__fetch", "mcp__alpha__search"]
@@ -788,8 +790,8 @@ async def test_a_refresh_whose_url_changed_meanwhile_is_409(make_env):
     env.remotes.by_url[ALPHA].tools.append(_tool("later"))
     real_probe = env.manager.probe
 
-    async def probe_then_move(name: str, url: str):
-        listed = await real_probe(name, url)
+    async def probe_then_move(name: str, url: str, headers: Any = None, **kwargs: Any):
+        listed = await real_probe(name, url, headers, **kwargs)
         await env.registry.upsert_server(ServerConfig(name="alpha", url="https://alpha2.example.com/mcp"))
         return listed
 

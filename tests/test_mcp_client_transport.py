@@ -176,6 +176,10 @@ def test_the_sdk_still_has_what_the_transport_uses():
     from mcp.client.streamable_http import streamable_http_client
 
     assert "http_client" in inspect.signature(streamable_http_client).parameters
+    # PR 2c: a session's credentials are the given client's auth (open_session); the SDK takes no auth of its own
+    # here, so nothing replaces it.
+    assert "auth" not in inspect.signature(streamable_http_client).parameters
+    assert "auth" in inspect.signature(httpx.AsyncClient.__init__).parameters
     assert "params" in inspect.signature(ClientSession.list_tools).parameters
     assert "message_handler" in inspect.signature(ClientSession.__init__).parameters
     assert list(inspect.signature(ClientSession.send_request).parameters)[1:3] == ["request", "result_type"]
@@ -368,7 +372,7 @@ async def _in_process_server(limit: int, *, json_response: bool = True, gate: An
         return "late"
 
     @asynccontextmanager
-    async def connect(url: str, allow: frozenset[str]):
+    async def connect(url: str, allow: frozenset[str], *, auth: Any = None):
         served = app if gate is None else gate(app)
         client = httpx.AsyncClient(transport=_LimitedTransport(httpx.ASGITransport(app=served), limit))
         async with client, transport._session_over(client, url) as session:
@@ -400,6 +404,9 @@ async def _in_process_manager(limit: int, *, timeout: int = 30, json_response: b
     slow = {"type": "object", "properties": {"seconds": {"type": "number"}}}
 
     class Rows:
+        async def list_secrets(self):
+            return {}
+
         async def list_enabled(self):
             config = ServerConfig(name="inproc", url="https://127.0.0.1:8000/mcp", call_timeout_seconds=timeout)
             return [
@@ -416,7 +423,7 @@ async def _in_process_manager(limit: int, *, timeout: int = 30, json_response: b
     async with _in_process_server(limit, json_response=json_response, gate=gate) as connect:
 
         @asynccontextmanager
-        async def plain(url: str, allow: frozenset[str]):  # the stored URL is https; the in-process app is http
+        async def plain(url: str, allow: frozenset[str], *, auth: Any = None):  # stored https, the app is http
             connects.append(1)
             async with connect(url.replace("https://", "http://"), allow) as session:
                 yield session

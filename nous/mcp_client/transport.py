@@ -1,21 +1,26 @@
 """F112 MCP client: the one module that imports the MCP SDK's client.
 
-``open_session`` opens a streamable-HTTP ``ClientSession`` with no authentication, over an HTTP client that:
+``open_session`` opens a streamable-HTTP ``ClientSession`` over an HTTP client that:
 
 - connects only to public addresses: ``_GuardedBackend`` resolves the host when a connection is opened, refuses it
   when any address is private, loopback, link-local, multicast, unspecified, reserved or a cloud metadata address,
   and dials the address it checked, so a DNS answer that changes between the check and the connect cannot steer it
   (TLS still verifies the certificate against the host name). A host in ``allow_private_hosts`` is not checked;
-- follows no redirect: a redirect fails the request;
+- follows no redirect itself (``follow_redirects`` is off). The SDK (1.30) follows a redirect on its own only when it
+  stays on the server URL's origin (same scheme, host and port) and keeps the method (307 or 308 for a POST); any
+  other redirect fails the request. Each request it sends, a followed one included, opens its connection through
+  the guard above;
 - ignores proxy settings from the environment: through a proxy, the address checked would be the proxy's;
-- stops reading a response body past ``NOUS_MCP_CLIENT_MAX_RESPONSE_BYTES`` (``_LimitedTransport``).
+- stops reading a response body past ``NOUS_MCP_CLIENT_MAX_RESPONSE_BYTES`` (``_LimitedTransport``);
+- with ``auth`` (the manager's ``_ServerAuth``), sets the server's stored credentials on each request it sends to
+  the server URL's own origin, and on no other. Without it, the session has no authentication.
 
 Logging: the HTTP client's INFO line names every request URL, so it is dropped for the hosts this client opened
 (``_QuietMcpRequests`` on the ``httpx`` logger; httpcore logs only at DEBUG); the SDK's streamable-HTTP logger, which
 logs the session id at INFO, is raised to WARNING; and the SDK's WARNING-and-above lines are rewritten to a fixed
 text (``_WithholdServerText``), since they quote what a server sent. A secret in a URL's path is not supported.
 
-SDK symbols used (``mcp`` 1.26): ``mcp.client.session.ClientSession`` (``initialize``, ``send_request``,
+SDK symbols used (``mcp`` 1.30): ``mcp.client.session.ClientSession`` (``initialize``, ``send_request``,
 ``list_tools(params=)``), ``mcp.client.streamable_http.streamable_http_client(url, http_client=)``,
 ``mcp.shared.exceptions.McpError`` and ``mcp.types`` (``ClientRequest``, ``CallToolRequest``,
 ``CallToolRequestParams``, ``CallToolResult``, ``PaginatedRequestParams``, ``Tool``, ``CONNECTION_CLOSED``).
@@ -228,9 +233,12 @@ class _LimitedTransport(httpx.AsyncBaseTransport):
         await self._inner.aclose()
 
 
-def guarded_client(allow_private_hosts: frozenset[str], max_response_bytes: int) -> httpx.AsyncClient:
+def guarded_client(
+    allow_private_hosts: frozenset[str], max_response_bytes: int, *, auth: httpx.Auth | None = None
+) -> httpx.AsyncClient:
     """An HTTP client whose every connection goes through ``_GuardedBackend``, whose every response body is bounded
-    (``_LimitedTransport``), that follows no redirect and reads no proxy from the environment. Fails closed
+    (``_LimitedTransport``), that follows no redirect itself (the SDK follows a same-origin one on its own, through
+    this client), reads no proxy from the environment and runs ``auth`` on every request it sends. Fails closed
     (RuntimeError) when the installed httpx no longer exposes the pool's network backend."""
     transport = httpx.AsyncHTTPTransport(retries=0)
     pool = getattr(transport, "_pool", None)
@@ -243,6 +251,7 @@ def guarded_client(allow_private_hosts: frozenset[str], max_response_bytes: int)
         trust_env=False,
         timeout=_HTTP_TIMEOUT,
         headers={"Accept-Encoding": "identity"},
+        auth=auth,
     )
 
 
@@ -303,13 +312,17 @@ async def _end_on_transport_error(message: Any) -> None:
 
 @asynccontextmanager
 async def open_session(
-    url: str, allow_private_hosts: frozenset[str], *, max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES
+    url: str,
+    allow_private_hosts: frozenset[str],
+    *,
+    max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+    auth: httpx.Auth | None = None,
 ) -> AsyncIterator[McpSession]:
-    """An initialized session with the server at ``url``, closed on exit. Enter and leave it in ONE task: the SDK's
-    task groups require it."""
+    """An initialized session with the server at ``url``, closed on exit, every request of it run through ``auth``
+    (per request, not fixed at connect). Enter and leave it in ONE task: the SDK's task groups require it."""
     await check_url(url, allow_private_hosts)
     _QUIET_HOSTS.add((urlsplit(url).hostname or "").lower())
-    async with guarded_client(allow_private_hosts, max_response_bytes) as client:
+    async with guarded_client(allow_private_hosts, max_response_bytes, auth=auth) as client:
         async with _session_over(client, url) as session:
             yield session
 

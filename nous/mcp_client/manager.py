@@ -30,6 +30,18 @@ never comes (an event stream that ends without it, or one past the response limi
 ends that connection attempt, so a later call makes a new one. A failed connect is not tried again for a while (1 s,
 doubling, at most 60 s). A JSON-RPC error from the server fails the call and keeps the session; any other failure
 but the timeout drops the connection, and the next call opens a new one. A call is never retried.
+
+Stored credentials (PR 2c): a server's credential row (``registry.list_secrets``, sealed) is opened with the key in
+``NOUS_MCP_CLIENT_KEY_FILE`` and the server's stored URL. A server whose credential cannot be opened (no key, another
+key, a row that does not open) registers no tool, with the reason in ``plan``; a server without one is unaffected.
+Each ``_Server`` is built with ``(credential row id, URL)`` and holds the opened headers in memory; ``_ServerAuth``
+sets them on every request to that URL's origin. A reload keeps a server's connection only while both are unchanged,
+and a retiring server keeps using what it was built with. A 401 or 403 answer to a POST is recorded on the
+connection it came on (the SDK ends the session on it and the call sees only the end), and a 401 ends that
+connection: a call that then fails on it answers with a fixed sentence asking the owner to replace the credential
+(for a 403, only when one is stored); a call the server answered is never rewritten. The listing's status keeps the
+refusal until a call is answered on a connection that was refused nothing, or the credential changes. Every result's
+text is scrubbed of the server's credential values, in the forms a server may encode them (``bridge.withhold``).
 """
 
 from __future__ import annotations
@@ -37,11 +49,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import json
 import logging
-from collections.abc import Awaitable, Callable
+import uuid
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Iterator, Mapping
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+import httpx
 
 from nous.api.tool_classes import forget_mcp_tool, note_mcp_tool
 from nous.config import Settings
@@ -50,10 +66,14 @@ from nous.mcp_client.bridge import (
     TOOLS_PER_SERVER,
     PreparedTool,
     ServerErrorReply,
+    credential_needles,
     error_class,
     flatten_result,
+    holds_credential,
     prepare_tool,
+    result_chars,
     safe_error,
+    serialize_schema,
     wrap_result,
 )
 from nous.mcp_client.config import (
@@ -65,6 +85,7 @@ from nous.mcp_client.config import (
     parse_pins,
     pin_host,
 )
+from nous.mcp_client.secrets import KeyFile, SealedSecret, StoredSecret, aad_fields, open_headers, seal_headers
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +94,17 @@ _BACKOFF_FIRST_SECONDS = 1.0
 _BACKOFF_MAX_SECONDS = 60.0
 _CLOSE_WAIT_SECONDS = 5.0
 HANDSHAKE_MAX_SECONDS = 30  # the handshake's bound is the server's call timeout, but never more than this
+# A result this long (characters) is flattened, cleaned and scrubbed in a worker thread: a hostile 2 MB result costs
+# about half a second, which must not be the event loop's.
+OFF_LOOP_RESULT_CHARS = 64_000
 
-# (url, allow_private_hosts) -> an async context manager yielding an initialized session (transport.open_session).
-Connector = Callable[[str, frozenset[str]], AbstractAsyncContextManager[Any]]
+# (url, allow_private_hosts, *, auth) -> an async context manager yielding an initialized session
+# (transport.open_session); auth is the server's _ServerAuth, run on every request of the session.
+Connector = Callable[..., AbstractAsyncContextManager[Any]]
+
+PROBE_REFUSED = "the server refused the credentials"
+PROBE_ASKS = "the server asks for credentials"
+LISTING_REPEATS = "the server's tool list repeats the credentials it was sent"
 
 
 class Registrar(Protocol):
@@ -92,6 +121,8 @@ class Registry(Protocol):
     """The part of ``McpRegistry`` the manager uses."""
 
     async def list_enabled(self) -> list[tuple[ServerConfig, list[ToolConfig]]]: ...
+
+    async def list_secrets(self) -> dict[str, StoredSecret]: ...
 
 
 class ServerUnavailable(Exception):
@@ -118,12 +149,80 @@ class ProbeFailed(Exception):
     """A probe could not list the server's tools. The message is ``safe_error``'s: never the error's own text."""
 
 
+class ProbeCredentials(Exception):
+    """A probe the server answered with 401 or 403 (``PROBE_REFUSED`` when credentials were sent, ``PROBE_ASKS``
+    when none were), or whose listing repeats a credential value it was sent (``LISTING_REPEATS``). Fixed text."""
+
+
+def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
+    """What ``_ServerAuth`` compares: the scheme, the host as sent (an ``xn--`` host stays encoded) and the port
+    (None for the scheme's default, as httpx gives it)."""
+    port = None if url.port == {"https": 443, "http": 80}.get(url.scheme) else url.port
+    return url.scheme, url.raw_host.decode("ascii", "replace").lower(), port
+
+
+class _ServerAuth(httpx.Auth):
+    """A server's credential on the requests of one session (``httpx.Auth``: run per request, not fixed at connect).
+    ``source`` gives the headers to set; nothing is set on a request to another origin than the URL's (scheme, host
+    and port; the SDK follows a redirect only within that origin, so this is a second guard). A 401 or 403 answer to
+    a POST (an MCP request; the SDK swallows the GET event stream's errors) is kept in ``refused`` (never cleared: a
+    later answer on the same session does not unsay it) and passed to ``on_refused``."""
+
+    def __init__(
+        self, url: str, source: Callable[[], Mapping[str, str]], on_refused: Callable[[int], None] | None = None
+    ) -> None:
+        self._origin = _origin(httpx.URL(url))
+        self._source = source
+        self._on_refused = on_refused
+        self.refused: int | None = None
+
+    async def async_auth_flow(self, request: httpx.Request) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        if _origin(request.url) == self._origin:
+            for name, value in self._source().items():
+                request.headers[name] = value
+        response = yield request
+        if request.method == "POST" and response.status_code in (401, 403):
+            self.refused = response.status_code
+            if self._on_refused is not None:
+                self._on_refused(response.status_code)
+
+
+def _strings(value: Any) -> Iterator[str]:
+    """Every string of a JSON value, its keys included."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            yield str(key)
+            yield from _strings(item)
+    elif isinstance(value, list):
+        for item in value:
+            yield from _strings(item)
+
+
+def _repeats(tools: list[ProbedTool], needles: tuple[str, ...]) -> bool:
+    """Whether a listing (the server's text, and what ``prepare_tool`` makes of it) holds a needle
+    (``bridge.holds_credential``, the result scrub's finder): in a name, a description, a string of a schema, or a
+    serialized schema."""
+    for tool in tools:
+        texts = [tool.tool, tool.description, json.dumps(tool.input_schema, ensure_ascii=False, default=str)]
+        texts += _strings(tool.input_schema)
+        if tool.prepared.name is not None:
+            texts.append(tool.prepared.name)
+        if tool.prepared.schema is not None:
+            texts.append(serialize_schema(tool.prepared.schema))
+            texts += _strings(tool.prepared.schema)
+        if any(holds_credential(text, needles) for text in texts):
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class ToolVerdict:
     """What the client does with one stored tool: registers it as ``prepared.name`` with ``prepared.schema`` when
     ``reason`` is None, else skips it for ``reason`` (``skip`` is its kind: ``disabled``, ``server_ceiling``,
-    ``schema``, ``permission``, ``ceiling``, ``collision`` or ``cap``). ``ceiling``: the host's pin keeps it out,
-    whatever its permission."""
+    ``credentials``, ``schema``, ``permission``, ``ceiling``, ``collision`` or ``cap``). ``ceiling``: the host's pin
+    keeps it out, whatever its permission."""
 
     tool: str  # the server's own name
     permission: str
@@ -135,10 +234,12 @@ class ToolVerdict:
 
 @dataclass(frozen=True)
 class ServerVerdict:
-    """One stored server as the client applies it. ``reason``: why none of its tools registers (disabled, or kept out
-    by the pin), else None. ``background``: background work may use it (the row's switch, and the host's list when one
-    is set); ``background_ceiling``: the row's switch is on but the host's list leaves it out. ``tools``: by tool
-    name."""
+    """One stored server as the client applies it. ``reason``: why none of its tools registers (disabled, kept out
+    by the pin, or a stored credential that cannot be opened), else None. ``background``: background work may use it
+    (the row's switch, and the host's list when one is set); ``background_ceiling``: the row's switch is on but the
+    host's list leaves it out. ``tools``: by tool name. ``credentials``: why its stored credential cannot be opened
+    (``secrets.NO_KEY``, ``OTHER_KEY`` or ``UNREADABLE``), whether or not it is enabled; None without one, or when it
+    opens."""
 
     config: ServerConfig
     reason: str | None
@@ -146,6 +247,7 @@ class ServerVerdict:
     background: bool
     background_ceiling: bool
     tools: list[ToolVerdict]
+    credentials: str | None = None
 
 
 @dataclass(frozen=True)
@@ -187,12 +289,15 @@ async def _unless_ended(ended: asyncio.Event, make_call: Callable[[], Awaitable[
 
 @dataclass
 class _Connection:
-    """One attempt at a session: its supervisor task, the session once ready, and the signal that ends it."""
+    """One attempt at a session: its supervisor task, the session once ready, the signal that ends it, and the 401
+    or 403 a POST of it was answered with (``refused``: kept for the life of the attempt, so a call that failed on it
+    finds its own refusal whatever another call's answer said)."""
 
     ready: asyncio.Future[Any]
     stop: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task[None] | None = None
     session: Any = None
+    refused: int | None = None
 
     @property
     def closed(self) -> bool:
@@ -200,7 +305,7 @@ class _Connection:
 
 
 class _Server:
-    """One configured server: its call limit and its current connection."""
+    """One configured server: its call limit, its current connection, and the credential it was built with."""
 
     def __init__(
         self,
@@ -209,8 +314,22 @@ class _Server:
         allow: frozenset[str],
         on_error: Callable[[str, BaseException], Awaitable[None]],
         background: bool,
+        *,
+        secret_id: uuid.UUID | None = None,
+        headers: Mapping[str, str] | None = None,
     ) -> None:
-        self.config = config  # replaced by a reload that keeps the server (same URL)
+        self.config = config  # replaced by a reload that keeps the server (same URL, same credential)
+        # What it was built for: a reload keeps it only while both are unchanged.
+        self.url = config.url
+        self.secret_id = secret_id
+        # The opened credential, held in memory: a retiring server keeps using it and never re-reads by name.
+        held = dict(headers or {})
+        self._source: Callable[[], Mapping[str, str]] = lambda: held
+        self.has_credentials = bool(held)
+        self.withheld = credential_needles(held.values())
+        # The last 401 or 403 any of its connections was answered with: the listing's status. Cleared when a call is
+        # answered on a connection that was refused nothing.
+        self.refusal: int | None = None
         self.background = background  # the row's switch, AND the host's NOUS_MCP_CLIENT_BACKGROUND_SERVERS when set
         self.closed = False
         self.semaphore = asyncio.Semaphore(CALLS_PER_SERVER)
@@ -267,6 +386,24 @@ class _Server:
         """The supervisor tasks still running, the closing ones included."""
         return set(self._tasks)
 
+    def current(self) -> _Connection | None:
+        """The current connection attempt (a failed one included, until the next attempt replaces it)."""
+        return self._conn
+
+    def auth_for(self, conn: _Connection | None) -> _ServerAuth:
+        """The credential, per request, of the session ``conn`` opens: its refusals are recorded on ``conn``."""
+        on_refused = None if conn is None else functools.partial(self._refused, conn)
+        return _ServerAuth(self.url, self._source, on_refused=on_refused)
+
+    def _refused(self, conn: _Connection, status: int) -> None:
+        """A POST of ``conn`` was answered 401 or 403. A 401 ends that connection (the one it came on, never a newer
+        one), so the calls waiting on it end at once, whatever the SDK does with the answer; a 403 does not (it can be
+        one tool's permission)."""
+        conn.refused = status
+        self.refusal = status
+        if status == 401:
+            conn.stop.set()
+
     def _open(self) -> _Connection:
         conn = _Connection(ready=asyncio.get_running_loop().create_future())
         # Mark an error retrieved even when every waiter was cancelled, so asyncio logs nothing about it.
@@ -283,7 +420,8 @@ class _Server:
             async with contextlib.AsyncExitStack() as stack:
                 try:
                     async with asyncio.timeout(handshake):
-                        session = await stack.enter_async_context(self._connect(self.config.url, self._allow))
+                        connected = self._connect(self.url, self._allow, auth=self.auth_for(conn))
+                        session = await stack.enter_async_context(connected)
                 except TimeoutError:
                     raise HandshakeTimedOut() from None
                 self._failures = 0
@@ -300,7 +438,6 @@ class _Server:
                 logger.warning("MCP client: could not connect to server %r (%s)", name, error_class(exc))
             else:
                 logger.warning("MCP client: the connection to server %r ended (%s)", name, error_class(exc))
-            logger.debug("MCP client: server %r error", name, exc_info=True)
             await self._on_error(name, exc)
         finally:
             conn.stop.set()
@@ -336,6 +473,8 @@ class McpClientManager:
         self._pins: dict[str, Pin] | None = parse_pins(pinned) if pinned.strip() else None
         listed = settings.mcp_client_background_servers
         self._background_servers: frozenset[str] | None = parse_host_list(listed) if listed.strip() else None
+        self._keys = KeyFile(settings.mcp_client_key_file)
+        self._keys.box()  # read once at startup (and again at a later use while no key is loaded)
         self._connect = connect
         self._servers: dict[str, _Server] = {}
         self._registered: dict[str, str] = {}  # tool name -> server name
@@ -374,15 +513,31 @@ class McpClientManager:
             return "its stored host or port is not its pinned one"
         return None
 
-    def plan(self, rows: list[tuple[ServerConfig, list[ToolConfig]]]) -> list[ServerVerdict]:
-        """What ``start`` and ``reload`` do with ``rows`` (servers enabled or not), changing and logging nothing.
+    def _open(self, config: ServerConfig, secret: StoredSecret) -> tuple[dict[str, str] | None, str | None]:
+        """``secret`` opened for ``config``'s name and stored URL: ``(headers, None)`` or ``(None, reason)``."""
+        return open_headers(self._keys.box(), aad_fields(self._agent_id, config.name, config.url, secret.kind), secret)
 
-        A tool registers when its server is enabled and inside the pin (when one is set), ``prepare_tool`` accepts it,
-        its permission is ``allow``, the pin (when set) lists it, no other tool holds its name (one registered by
-        anything but this manager, or one before it in sorted ``(server, tool)`` order), and its server has fewer
-        than ``TOOLS_PER_SERVER`` tools before it. The reasons are checked in that order; the first one that applies
-        is the tool's ``reason``. ``prepare_tool`` runs for every tool, so a denied tool also shows what the model
-        would be offered."""
+    def plan(
+        self,
+        rows: list[tuple[ServerConfig, list[ToolConfig]]],
+        secrets: Mapping[str, StoredSecret] | None = None,
+    ) -> list[ServerVerdict]:
+        """What ``start`` and ``reload`` do with ``rows`` (servers enabled or not) and the servers' stored
+        credentials ``secrets`` (by server name), changing and logging nothing (but the key file is read while no key
+        is loaded).
+
+        A tool registers when its server is enabled and inside the pin (when one is set), its server's stored
+        credential (when it has one) opens, ``prepare_tool`` accepts it, its permission is ``allow``, the pin (when
+        set) lists it, no other tool holds its name (one registered by anything but this manager, or one before it in
+        sorted ``(server, tool)`` order), and its server has fewer than ``TOOLS_PER_SERVER`` tools before it. The
+        reasons are checked in that order; the first one that applies is the tool's ``reason``. ``prepare_tool`` runs
+        for every tool, so a denied tool also shows what the model would be offered."""
+        secrets = secrets or {}
+        unusable = {
+            config.name: problem
+            for config, _tools in rows
+            if config.name in secrets and (problem := self._open(config, secrets[config.name])[1]) is not None
+        }
         first: dict[tuple[str, str], tuple[str, str] | None] = {}  # (server, tool) -> (skip, reason), None: a candidate
         prepared_of: dict[tuple[str, str], PreparedTool] = {}
         candidates: list[tuple[str, str, str]] = []  # (server, tool, registered name)
@@ -398,6 +553,8 @@ class McpClientManager:
                     first[key] = ("disabled", "the server is disabled")
                 elif server_reason is not None:
                     first[key] = ("server_ceiling", server_reason)
+                elif config.name in unusable:
+                    first[key] = ("credentials", f"credentials unavailable: {unusable[config.name]}")
                 elif prepared.problem is not None or prepared.name is None:
                     first[key] = ("schema", prepared.problem or "it cannot be registered")
                 elif tool.permission != "allow":
@@ -436,14 +593,22 @@ class McpClientManager:
                     )
                 )
             listed = self._background_servers is None or config.name in self._background_servers
+            problem = unusable.get(config.name)
+            if not config.enabled:
+                reason: str | None = "the server is disabled"
+            elif server_reason is not None:
+                reason = server_reason
+            else:
+                reason = f"credentials unavailable: {problem}" if problem is not None else None
             out.append(
                 ServerVerdict(
                     config=config,
-                    reason="the server is disabled" if not config.enabled else server_reason,
+                    reason=reason,
                     ceiling=server_reason is not None,
                     background=config.background and listed,
                     background_ceiling=config.background and not listed,
                     tools=verdicts,
+                    credentials=problem,
                 )
             )
         return out
@@ -459,10 +624,11 @@ class McpClientManager:
     async def reload(self) -> None:
         """Apply the stored rows again, without a restart: what ``start`` does, after unregistering every MCP tool
         this manager registered, so the MCP tools are registered in the order a fresh start would give them (one
-        prompt-cache miss). A server whose URL is unchanged keeps its connection, and its calls in flight finish; a
-        server that is gone, disabled, outside the pin or at another URL is closed, and its calls in flight end with
-        an error. Reloads run one at a time; nothing is done once the manager is closed. Ends with one
-        ``mcp_client_reloaded`` event and the same INFO line as ``start``."""
+        prompt-cache miss). A server whose URL and stored credential (its row's id) are unchanged keeps its
+        connection, and its calls in flight finish; a server that is gone, disabled, outside the pin, at another URL
+        or with another credential (set, replaced or removed) is closed, and its calls in flight end with an error.
+        Reloads run one at a time; nothing is done once the manager is closed. Ends with one ``mcp_client_reloaded``
+        event and the same INFO line as ``start``."""
         await self._apply("reload", "mcp_client_reloaded")
 
     async def _apply(self, what: str, event_type: str) -> None:
@@ -470,20 +636,32 @@ class McpClientManager:
             if self._closed:
                 return
             rows = await self._registry.list_enabled()
+            secrets = await self._registry.list_secrets()
             if self._closed:  # closed while the rows were read
                 return
-            plan = self.plan(rows)
+            plan = self.plan(rows, secrets)
             servers: dict[str, _Server] = {}
             for verdict in plan:
                 if verdict.reason is not None:
                     continue
                 config = verdict.config
+                secret = secrets.get(config.name)
+                secret_id = secret.id if secret is not None else None
                 server = self._servers.get(config.name)
-                if server is not None and server.config.url == config.url:
+                if server is not None and server.url == config.url and server.secret_id == secret_id:
                     server.config = config  # the same connection; a new call timeout applies to the next call
                     server.background = verdict.background
                 else:
-                    server = _Server(config, self._connect, self._allow, self._emit_error, verdict.background)
+                    headers = self._open(config, secret)[0] if secret is not None else None
+                    server = _Server(
+                        config,
+                        self._connect,
+                        self._allow,
+                        self._emit_error,
+                        verdict.background,
+                        secret_id=secret_id,
+                        headers=headers,
+                    )
                 servers[config.name] = server
             retiring = [server for name, server in self._servers.items() if servers.get(name) is not server]
             for server in retiring:
@@ -533,10 +711,14 @@ class McpClientManager:
             await _wait_ended(set().union(*(server.tasks() for server in retiring)))
 
     def _log_skips(self, plan: list[ServerVerdict]) -> None:
-        """One WARNING per server the pin keeps out, and per allowed tool that does not register, by name only."""
+        """One WARNING per server the pin keeps out or whose credential cannot be opened, and per allowed tool that
+        does not register, by name only."""
         for verdict in plan:
             name = verdict.config.name
             if verdict.ceiling:
+                logger.warning("MCP client: server %r: %s; skipped", name, verdict.reason)
+                continue
+            if verdict.config.enabled and verdict.credentials is not None:
                 logger.warning("MCP client: server %r: %s; skipped", name, verdict.reason)
                 continue
             allowed = [tool for tool in verdict.tools if tool.permission == "allow"]
@@ -561,22 +743,35 @@ class McpClientManager:
                     TOOLS_PER_SERVER,
                 )
 
-    async def probe(self, server: str, url: str) -> list[ProbedTool]:
+    async def probe(
+        self,
+        server: str,
+        url: str,
+        headers: Mapping[str, str] | None = None,
+        *,
+        withheld: Iterable[str] = (),
+    ) -> list[ProbedTool]:
         """Connect once to ``url`` through the client's connector (the address guard and the response cap of
-        ``transport.open_session``), list its tools and return each, by name, with what ``prepare_tool`` makes of it
-        for a server named ``server``. Writes nothing and registers nothing. The connect and the listing together are
-        bounded by ``HANDSHAKE_MAX_SECONDS``. Raises ``ProbeRefused`` when the guard refuses the URL, ``ProbeFailed``
-        (``safe_error`` text) for any other failure, and ``ProbeFailed`` for a listing that no set of tool rows can
-        hold: a tool with no name, or a name listed twice."""
+        ``transport.open_session``), with ``headers`` on every request (and nothing else: a stored credential is
+        never attached here), list its tools and return each, by name, with what ``prepare_tool`` makes of it for a
+        server named ``server``. Writes nothing and registers nothing. The connect and the listing together are
+        bounded by ``HANDSHAKE_MAX_SECONDS``. Raises ``ProbeRefused`` when the guard refuses the URL,
+        ``ProbeCredentials`` when the server answers 401 or 403 or its listing repeats a value of ``headers`` or of
+        ``withheld`` (the server's stored credential, which the caller passes even when it sends other headers),
+        ``ProbeFailed`` (``safe_error`` text) for any other failure, and ``ProbeFailed`` for a listing that no set of
+        tool rows can hold: a tool with no name, or a name listed twice."""
+        sent = dict(headers or {})
+        auth = _ServerAuth(url, lambda: sent)
         try:
             async with asyncio.timeout(HANDSHAKE_MAX_SECONDS):
-                async with self._connect(url, self._allow) as session:
+                async with self._connect(url, self._allow, auth=auth) as session:
                     listed = await session.list_tools()
         except BlockedAddress as exc:
             raise ProbeRefused(str(exc)) from None
         except Exception as exc:  # an ExceptionGroup from the SDK's task groups included; CancelledError passes
             logger.warning("MCP client: the probe for server %r failed (%s)", server, error_class(exc))
-            logger.debug("MCP client: probe error", exc_info=True)
+            if auth.refused is not None:
+                raise ProbeCredentials(PROBE_REFUSED if sent else PROBE_ASKS) from None
             raise ProbeFailed(safe_error(exc)) from None
         names = [tool.name for tool in listed]
         if any(not name for name in names):
@@ -588,7 +783,33 @@ class McpClientManager:
             description = tool.description or ""
             prepared = prepare_tool(server, tool.name, description, tool.inputSchema)
             out.append(ProbedTool(tool.name, description, dict(tool.inputSchema), prepared))
+        if _repeats(out, credential_needles([*sent.values(), *withheld])):
+            logger.warning("MCP client: the probe for server %r: its tool list repeats a credential", server)
+            raise ProbeCredentials(LISTING_REPEATS)
         return out
+
+    def secrets_available(self) -> bool:
+        """Whether a key is loaded (``NOUS_MCP_CLIENT_KEY_FILE``), so a credential can be stored and opened."""
+        return self._keys.box() is not None
+
+    def open_credentials(self, name: str, url: str, secret: StoredSecret) -> tuple[dict[str, str] | None, str | None]:
+        """The stored credential ``secret`` of the server ``name``, opened as bound to ``url``: ``(headers, None)``,
+        or ``(None, reason)`` (``url`` is not the one it was sealed for, no key, another key...)."""
+        return open_headers(self._keys.box(), aad_fields(self._agent_id, name, url, secret.kind), secret)
+
+    def seal_credentials(self, name: str, url: str, headers: Mapping[str, str]) -> SealedSecret | None:
+        """``headers`` sealed for the server ``name`` bound to ``url``; None when no key is loaded."""
+        box = self._keys.box()
+        return None if box is None else seal_headers(box, aad_fields(self._agent_id, name, url, "headers"), headers)
+
+    def credentials_refused(self) -> dict[str, int]:
+        """The servers whose last refusal was a 401, or a 403 with a stored credential, with that status (cleared
+        when a call is answered on a connection that was refused nothing, or by a credential change)."""
+        return {
+            name: server.refusal
+            for name, server in self._servers.items()
+            if server.refusal == 401 or (server.refusal == 403 and server.has_credentials)
+        }
 
     async def close(self) -> None:
         """Unregister every tool this manager registered and close every connection (bounded wait, then cancel). A
@@ -630,54 +851,100 @@ class McpClientManager:
         return call
 
     async def _call(self, server: _Server, raw_name: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """One call, as the dispatcher's result. Never raises but ``CancelledError``, which it re-raises: the
-        runner's tool timeout, or a shutdown."""
+        """One call, as the dispatcher's result (``_send``). A call that failed (never one the server answered) on a
+        connection refused with a 401 (in the middle of the session, at the connect, or while that failed connect
+        backs off) is the fixed sentence that asks the owner for the credential; one refused with a 403 while a
+        credential is stored is the sentence that it may be wrong or lack access. A 403 without a stored credential
+        keeps its plain error."""
+        result, refused = await self._send(server, raw_name, name, arguments)
+        if refused is None or self._closed or server.closed:
+            return result
+        server_name = server.config.name
+        if refused == 401:
+            logger.warning("MCP client: %s failed: the server answered 401", name)
+            if server.has_credentials:
+                return _error(
+                    f'the MCP server "{server_name}" refused the stored credentials. The owner can replace them on '
+                    "the Integrations screen."
+                )
+            return _error(
+                f'the MCP server "{server_name}" asks for credentials. The owner can add them on the Integrations '
+                "screen."
+            )
+        if refused == 403 and server.has_credentials:
+            logger.warning("MCP client: %s failed: the server answered 403", name)
+            return _error(
+                f'the MCP server "{server_name}" answered 403 (forbidden). The stored credentials may be wrong or '
+                "lack access. The owner can replace them on the Integrations screen."
+            )
+        return result
+
+    async def _send(
+        self, server: _Server, raw_name: str, name: str, arguments: dict[str, Any]
+    ) -> tuple[dict[str, Any], int | None]:
+        """One call, as the dispatcher's result, and the 401 or 403 its connection was refused with when the call
+        failed with an exception (None for a result the server returned, or a call never sent). Never raises but
+        ``CancelledError``, which it re-raises: the runner's tool timeout, or a shutdown."""
         server_name = server.config.name
         closed = _error(f'the MCP client is closed: the server "{server_name}" is not called.')
         if self._closed:
-            return closed
+            return closed, None
         timeout = server.config.call_timeout_seconds
         session: Any = None
+        conn: _Connection | None = None
+
+        def refusal() -> int | None:
+            # The connection the call used, else the attempt it waited on (a failed connect, or one backing off).
+            used = conn if conn is not None else server.current()
+            return None if used is None else used.refused
+
         try:
             # One budget for the wait for a call slot, the connect and the call.
             async with asyncio.timeout(timeout):
                 async with server.semaphore:
                     if self._closed:  # closed while this call waited for a slot: open nothing
-                        return closed
+                        return closed, None
                     conn = await server.connection()  # raises ClientClosed when closed meanwhile
                     session = conn.session
                     # The server's own name for the tool; the call ends with its connection.
                     raw = await _unless_ended(conn.stop, lambda: session.call_tool(raw_name, arguments))
         except ClientClosed:
             if self._closed:
-                return closed
+                return closed, None
             # A reload closed this server (removed, disabled, or moved to another URL) while the call waited.
-            return _error(f'the MCP server "{server_name}" was removed or changed: the call was not sent.')
+            return _error(f'the MCP server "{server_name}" was removed or changed: the call was not sent.'), None
         except HandshakeTimedOut:
             bound = min(timeout, HANDSHAKE_MAX_SECONDS)
-            return _error(f'the MCP server "{server_name}" did not finish its handshake within {bound} s: try again.')
+            message = f'the MCP server "{server_name}" did not finish its handshake within {bound} s: try again.'
+            return _error(message), refusal()
         except ConnectionEnded:
             logger.warning("MCP client: %s failed: its connection ended during the call", name)
-            return _error(f'the connection to the MCP server "{server_name}" ended during the call.')
+            return _error(f'the connection to the MCP server "{server_name}" ended during the call.'), refusal()
         except TimeoutError:
             logger.warning("MCP client: %s timed out after %d s", name, timeout)
-            return _error(f'the call to the MCP server "{server_name}" timed out after {timeout} s.')
+            return _error(f'the call to the MCP server "{server_name}" timed out after {timeout} s.'), refusal()
         except ServerUnavailable:
-            return _error(f'the MCP server "{server_name}" is not reachable now: try again later.')
+            return _error(f'the MCP server "{server_name}" is not reachable now: try again later.'), refusal()
         except ServerErrorReply as exc:
             # The server answered: the session is still good, and the calls sharing it go on.
+            if conn is not None and conn.refused is None:
+                server.refusal = None
             logger.warning("MCP client: %s failed: the server answered with error code %d", name, exc.code)
-            return _error(f'the MCP server "{server_name}" answered the call with an error (code {exc.code}).')
+            return _error(f'the MCP server "{server_name}" answered the call with an error (code {exc.code}).'), None
         except Exception as exc:
             # The session is in an unknown state (the server may have dropped it): the next call connects again. A
             # failed connect left no session to end.
             if session is not None:
                 server.drop(session)
             logger.warning("MCP client: %s failed (%s)", name, error_class(exc))
-            logger.debug("MCP client: %s error", name, exc_info=True)
-            return _error(f'the call to the MCP server "{server_name}" failed: {safe_error(exc)}.')
-        text, is_error = flatten_result(raw, self._max_chars)
-        return {"content": [{"type": "text", "text": wrap_result(server_name, text)}], "is_error": is_error}
+            return _error(f'the call to the MCP server "{server_name}" failed: {safe_error(exc)}.'), refusal()
+        if conn.refused is None:  # answered on a connection that was refused nothing: the listing's status clears
+            server.refusal = None
+        if result_chars(raw) > OFF_LOOP_RESULT_CHARS:
+            text, is_error = await asyncio.to_thread(flatten_result, raw, self._max_chars, server.withheld)
+        else:
+            text, is_error = flatten_result(raw, self._max_chars, server.withheld)
+        return {"content": [{"type": "text", "text": wrap_result(server_name, text)}], "is_error": is_error}, None
 
     async def _emit_error(self, server_name: str, exc: BaseException) -> None:
         """An ``mcp_client_server_error`` event: the server's name and the error's class, never its text."""

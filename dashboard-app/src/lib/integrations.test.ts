@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
-  CHANGED_TEXT, FORBIDDEN_TEXT, ceilingLines, clampText, createPayload, isConflict, listGate, nameProblem, prettySchema,
-  problemText, refreshLineText, refreshLines, serverPath, serverStatus, shortName, toolChange, toolStatus, toolStatusText,
-  urlProblem, type McpServer, type McpTool,
+  CHANGED_TEXT, FORBIDDEN_TEXT, ceilingLines, clampText, createPayload, headersBody, headersProblem, isConflict, isNoKey,
+  keyLine, listGate, nameProblem, prettySchema, problemText, refreshLineText, refreshLines, serverPath, serverStatus,
+  shortName, toolChange, toolStatus, toolStatusText, urlProblem, type McpAuth, type McpServer, type McpTool,
 } from './integrations';
 
 const err = (status: number | undefined, body?: unknown, message = `HTTP ${status}`) =>
@@ -16,7 +16,11 @@ const tool = (over: Partial<McpTool> = {}): McpTool => ({
 const server = (over: Partial<McpServer> = {}): McpServer => ({
   name: 'deepwiki', url: 'https://mcp.deepwiki.com/mcp', enabled: true, background: false, background_in_effect: false,
   background_blocked_by_ceiling: false, call_timeout_seconds: 30, connected: false, blocked_by_ceiling: false,
-  skip_reason: null, tools: [], ...over,
+  skip_reason: null, tools: [], auth: auth(), ...over,
+});
+
+const auth = (over: Partial<McpAuth> = {}): McpAuth => ({
+  kind: 'none', header_names: [], updated_at: null, status: 'ok', reason: null, ...over,
 });
 
 describe('the name rule (config.SERVER_NAME and no "__")', () => {
@@ -88,6 +92,14 @@ describe('a refused request in words', () => {
     expect(isConflict(err(400))).toBe(false);
     expect(CHANGED_TEXT).toMatch(/^The server's tools changed since you checked it\./);
   });
+  it('a 409 with no new hash is the missing key file, not a changed listing', () => {
+    const noKey = err(409, { error: 'no key file is configured on the host (NOUS_MCP_CLIENT_KEY_FILE)' });
+    expect(isConflict(noKey)).toBe(false);
+    expect(isNoKey(noKey)).toBe(true);
+    expect(isNoKey(err(409, { error: 'changed', definitions_sha256: 'b'.repeat(64) }))).toBe(false);
+    expect(isNoKey(err(400))).toBe(false);
+    expect(problemText(noKey)).toBe('No key file is configured on the host (NOUS_MCP_CLIENT_KEY_FILE).');
+  });
 });
 
 describe('status words', () => {
@@ -116,10 +128,22 @@ describe('status words', () => {
       .toBe('skipped: the server is disabled');
     expect(toolStatus(tool({ permission: 'allow', skip_reason: 'x' })).tone).toBe('warn');
   });
-  it('a server is switched off, connected or not connected yet', () => {
+  it('a server is switched off, connected or connects on first use (the owner read "not connected yet" as a fault)', () => {
     expect(serverStatus(server({ enabled: false, connected: true })).word).toBe('switched off');
     expect(serverStatus(server({ connected: true })).word).toBe('connected');
-    expect(serverStatus(server()).word).toBe('not connected yet');
+    expect(serverStatus(server()).word).toBe('connects on first use');
+  });
+  it('a key that cannot be read here, or that the server refused, is said before the connection, in words', () => {
+    const unreadable = serverStatus(server({ connected: true, auth: auth({ kind: 'headers', status: 'unavailable', reason: 'no key file' }) }));
+    expect(unreadable).toEqual({ word: 'key cannot be read on this host', detail: 'no key file', tone: 'warn' });
+    const refused = serverStatus(server({ connected: true, auth: auth({ kind: 'headers', status: 'credentials_refused' }) }));
+    expect(refused).toEqual({ word: 'the server refused the key', detail: null, tone: 'warn' });
+    const forbidden = serverStatus(server({
+      auth: auth({ kind: 'headers', status: 'credentials_refused', reason: 'the server answered 403 (forbidden)' }),
+    }));
+    expect(forbidden).toEqual({ word: 'the server refused the key', detail: 'the server answered 403 (forbidden)', tone: 'warn' });
+    expect(serverStatus(server({ auth: auth({ status: 'credentials_refused' }) })).word).toBe('the server asks for a key');
+    expect(serverStatus(server({ enabled: false, auth: auth({ status: 'unavailable', reason: 'x' }) })).word).toBe('switched off');
   });
   it('the host limits in effect, in words, and none when neither is set', () => {
     expect(ceilingLines({ pinned_servers: false, background_servers: false })).toEqual([]);
@@ -219,5 +243,58 @@ describe('text helpers', () => {
   it('indents a schema, and shows a non-JSON one as given', () => {
     expect(prettySchema('{"type":"object"}')).toBe('{\n  "type": "object"\n}');
     expect(prettySchema('not json')).toBe('not json');
+  });
+});
+
+// F112 PR 2c: the rules the server holds for a key's headers (config.validate_headers), checked before sending.
+describe('a stored key', () => {
+  const VALUE = 'Bearer test-key-0000000000000000';
+  const row = (name: string, value: string) => ({ name, value });
+
+  it('accepts the usual shapes', () => {
+    expect(headersProblem([row('Authorization', VALUE)])).toBeNull();
+    expect(headersProblem([row('X-API-Key', 'test-key-1111'), row("x!#$%&'*+.^_`|~-y", 'ab cd ef gh')])).toBeNull();
+    // Punctuation anywhere, as much as a long base64 key holds, once the value has 8 letters or digits.
+    expect(headersProblem([row('X-Key', `${'-'.repeat(4088)}abcd1234`), row('Authorization', `Bearer ${'+/='.repeat(1000)}abcd1234`)])).toBeNull();
+  });
+  it.each([
+    [[], 'Give 1 to 8 headers.'],
+    [Array.from({ length: 9 }, (_, i) => row(`X-H${i}`, 'v')), 'Give 1 to 8 headers.'],
+    [[row('', 'v')], 'Header 1: a name is 1 to 64 letters'],
+    [[row('Bad Name', 'v')], 'Header 1: a name is 1 to 64 letters'],
+    [[row('X-Ok', 'test-key-aaaa'), row('x'.repeat(65), 'v')], 'Header 2: a name is 1 to 64 letters'],
+    [[row('Host', 'v')], 'Header 1: Nous sets this header itself'],
+    [[row('X-Nous-Proxy-Secret', 'v')], 'Header 1: Nous sets this header itself'],
+    ...['Content-Encoding', 'expect', 'TRAILER', 'Keep-Alive', 'Proxy-Connection', 'Origin', 'User-Agent'].map(
+      (name) => [[row(name, 'test-key-cccc')], 'Header 1: Nous sets this header itself'] as [{ name: string; value: string }[], string],
+    ),
+    [[row('X-Key', 'test-key-aaaa'), row('x-key', 'test-key-bbbb')], 'Header 2: this name is used twice'],
+    [[row('X-Key', '')], 'Header 1: enter its value.'],
+    [[row('X-Key', 'abc1234')], 'Header 1: a value is 8 to 4096 characters'], // it could never be withheld
+    [[row('X-Key', 'v'.repeat(4097))], 'Header 1: a value is at most 4096 printable ASCII characters'],
+    [[row('X-Key', 'test\nkey')], 'Header 1: a value is at most 4096 printable ASCII characters'],
+    [[row('X-Key', 'test-"key"')], 'Header 1: a value is at most 4096 printable ASCII characters'],
+    [[row('X-Key', 'test\\key')], 'Header 1: a value is at most 4096 printable ASCII characters'],
+    [[row('X-Key', ' test-key')], 'Header 1: a value may not start or end with a space.'],
+    [[row('X-Key', '-_.~+/=!-_.~+/=!')], 'Header 1: a value needs at least 8 letters or digits.'],
+    [[row('X-Key', '--ab--cd--ef--g--')], 'Header 1: a value needs at least 8 letters or digits.'], // 7 in all
+  ] as [{ name: string; value: string }[], string][])('refuses %j, naming the header by its place, never the value', (rows, why) => {
+    const problem = headersProblem(rows) ?? '';
+    expect(problem.startsWith(why), problem).toBe(true);
+    for (const r of rows) if (r.value.length > 2) expect(problem).not.toContain(r.value.trim());
+  });
+  it('the body names every header as an own key, whatever it is called', () => {
+    const body = headersBody([row('__proto__', 'test-key-2222'), row('constructor', 'test-key-3333')]);
+    expect(Object.getPrototypeOf(body)).toBe(Object.prototype);
+    expect(JSON.stringify(body)).toBe('{"__proto__":"test-key-2222","constructor":"test-key-3333"}');
+  });
+  it('the add request names headers only when some were typed', () => {
+    const probe = { tools: [], definitions_sha256: 'a'.repeat(64) };
+    expect('headers' in createPayload('x', 'https://h/', probe, new Map())).toBe(false);
+    expect(createPayload('x', 'https://h/', probe, new Map(), { Authorization: VALUE }).headers).toEqual({ Authorization: VALUE });
+  });
+  it("the card's line names the headers, never a value", () => {
+    expect(keyLine(auth({ kind: 'headers', header_names: ['Authorization', 'X-API-Key'] }))).toBe('Key set: Authorization, X-API-Key');
+    expect(keyLine(auth())).toBe('No key stored.');
   });
 });

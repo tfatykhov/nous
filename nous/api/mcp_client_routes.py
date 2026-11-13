@@ -23,10 +23,19 @@ differently from what the owner was shown: ``definitions_sha256`` (``/probe``'s 
 ``expected_definitions_sha256`` makes a different listing a 409 with nothing stored.
 
 Every mutating route emits one ``mcp_client_server_changed`` event: the action, the server's name, the names of the
-fields that changed, the old and new ``enabled`` and ``background``, and the tools whose permission changed with the
-old and new permission. Never a URL or a description: the agent's reader can read the events table. A tool's name is
-the server's text, so in an event it keeps ``[A-Za-z0-9_.-]`` only (anything else becomes ``?``), is cut to 80
-characters, and a list names at most 60 tools (``more`` counts the rest).
+fields that changed, the old and new ``enabled`` and ``background``, the tools whose permission changed with the
+old and new permission, and what happened to the stored credential (``credentials``: ``set``, ``replaced``,
+``removed`` or null, and ``header_count``). Never a URL, a description, a header name or a value: the agent's reader
+can read the events table. A tool's name is the server's text, so in an event it keeps ``[A-Za-z0-9_.-]`` only
+(anything else becomes ``?``), is cut to 80 characters, and a list names at most 60 tools (``more`` counts the rest).
+
+Stored credentials (PR 2c): ``headers`` (``{name: value}``, the rules of ``config.validate_headers``) on a create or a
+``PATCH`` become the server's credential, sealed with the host's key (``NOUS_MCP_CLIENT_KEY_FILE``; without one, 409).
+No route ever returns a value: the listing names the headers only. A credential never follows a server to another
+address: ``/probe`` uses only the headers in its own request (never stored), a create without headers probes with the
+stored credential opened as bound to the request's URL (so another URL cannot open it) and, at another URL, deletes
+it, and ``/refresh`` uses the stored URL and credential. A probe the server answers 401 or 403, or whose listing
+repeats a credential it was sent or the server's stored one, is 502 with a fixed sentence and stores nothing.
 """
 
 from __future__ import annotations
@@ -47,9 +56,17 @@ from starlette.routing import Route
 from nous.api.commitment_routes import owner_secret_matches
 from nous.events import Event
 from nous.mcp_client.bridge import serialize_schema
-from nous.mcp_client.config import ServerConfig, ToolConfig
-from nous.mcp_client.manager import ProbedTool, ProbeFailed, ProbeRefused, ServerVerdict, ToolVerdict
+from nous.mcp_client.config import ServerConfig, ToolConfig, validate_headers
+from nous.mcp_client.manager import (
+    ProbeCredentials,
+    ProbedTool,
+    ProbeFailed,
+    ProbeRefused,
+    ServerVerdict,
+    ToolVerdict,
+)
 from nous.mcp_client.registry import McpRegistry
+from nous.mcp_client.secrets import StoredSecret
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +79,7 @@ _EVENT_TOOL_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]")
 _EVENT_TOOL_CHARS = 80
 _EVENT_TOOLS_MAX = 60
 _SERVER_FIELDS = ("url", "enabled", "background", "call_timeout_seconds")
+NO_KEY_TEXT = "no key file is configured on the host (NOUS_MCP_CLIENT_KEY_FILE)"
 
 Handler = Callable[[Request], Awaitable[JSONResponse]]
 
@@ -139,6 +157,15 @@ def _permissions(value: Any) -> dict[str, str]:
     return dict(value)
 
 
+def _headers(value: Any) -> dict[str, str]:
+    """A credential's headers (``config.validate_headers``); the refusal names the header and the rule, never a
+    value."""
+    try:
+        return validate_headers(value)
+    except ValueError as exc:
+        raise _Refused(400, str(exc)) from None
+
+
 def _server_config(name: Any, url: Any, background: bool) -> ServerConfig:
     """The server's name and URL, validated as a row holds them (``url_problem``). The error names the field and the
     rule, never the value."""
@@ -148,6 +175,13 @@ def _server_config(name: Any, url: Any, background: bool) -> ServerConfig:
         return ServerConfig(name=name, url=url, background=background)
     except ValidationError as exc:
         raise _Refused(400, "; ".join(f"{error['loc'][0]}: {error['msg']}" for error in exc.errors())) from None
+
+
+def _count(credentials: str | None, headers: dict[str, str] | None) -> int | None:
+    """The event's ``header_count``: the headers stored now when the credential changed (0 once removed)."""
+    if credentials is None:
+        return None
+    return len(headers) if headers is not None else 0
 
 
 def _event_tool(tool: str) -> str:
@@ -166,9 +200,14 @@ def _change(
     new: ServerConfig | None,
     old_permissions: dict[str, str],
     new_permissions: dict[str, str],
+    *,
+    credentials: str | None = None,
+    header_count: int | None = None,
 ) -> dict[str, Any]:
     """The ``mcp_client_server_changed`` event's data: names, switches and permissions only. ``more`` counts the
-    tools each list left out past its cap."""
+    tools each list left out past its cap. ``credentials``: ``set``, ``replaced`` or ``removed`` when the stored
+    credential changed, with ``header_count`` its number of headers now (never the names: a key pasted into a name
+    would land here)."""
     changed = [field for field in _SERVER_FIELDS if getattr(old, field, None) != getattr(new, field, None)]
     tools = [
         {"tool": _event_tool(tool), "old": old_permissions.get(tool), "new": new_permissions.get(tool)}
@@ -177,6 +216,8 @@ def _change(
     ]
     if tools:
         changed.append("tools")
+    if credentials is not None:
+        changed.append("credentials")
     shown, more = _capped(tools)
     return {
         "action": action,
@@ -186,6 +227,8 @@ def _change(
         "background": {"old": old.background if old else None, "new": new.background if new else None},
         "tools": shown,
         "more": {"tools": more},
+        "credentials": credentials,
+        "header_count": header_count,
     }
 
 
@@ -255,13 +298,34 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
                 return config, tools
         return None
 
-    async def probe_tools(name: str, url: str) -> list[ProbedTool]:
+    async def secret_of(name: str) -> StoredSecret | None:
+        return (await registry.list_secrets()).get(name)
+
+    async def stored_values(name: str) -> list[str]:
+        """The values of the server's stored credential, opened with its stored URL (none when it cannot be opened):
+        a listing that repeats one is refused even when other headers, or none, were sent."""
+        secret, current = await secret_of(name), await stored(name)
+        if secret is None or current is None:
+            return []
+        opened, _problem = manager.open_credentials(name, current[0].url, secret)
+        return list(opened.values()) if opened else []
+
+    async def probe_tools(name: str, url: str, headers: dict[str, str] | None = None) -> list[ProbedTool]:
         try:
-            return await manager.probe(name, url)
+            return await manager.probe(name, url, headers, withheld=await stored_values(name))
         except ProbeRefused as exc:
             raise _Refused(400, f"the address guard refused the URL: {exc}") from None
+        except ProbeCredentials as exc:
+            raise _Refused(502, str(exc)) from None
         except ProbeFailed as exc:
             raise _Refused(502, f"could not list the server's tools: {exc}") from None
+
+    def sealed_for(name: str, url: str, headers: dict[str, str]) -> Any:
+        """``headers`` sealed for the server ``name`` at ``url``; 409 when the host has no key."""
+        sealed = manager.seal_credentials(name, url, headers)
+        if sealed is None:
+            raise _Refused(409, NO_KEY_TEXT)
+        return sealed
 
     async def audit(data: dict[str, Any]) -> None:
         if not bus:
@@ -311,7 +375,33 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             "schema": serialize_schema(prepared.schema) if prepared.schema else None,
         }
 
-    def server_view(verdict: ServerVerdict, connected: dict[str, bool]) -> dict[str, Any]:
+    def auth_view(verdict: ServerVerdict, secret: StoredSecret | None, refused: int | None) -> dict[str, Any]:
+        """The server's stored credential, without its values: the kind, the header names, when it was stored, and
+        whether it works (``unavailable``: it cannot be opened here, ``reason`` says why; ``credentials_refused``: the
+        server refused a request with a 401, or with a 403 while a credential is stored, ``reason`` saying so for a
+        403)."""
+        reason = verdict.credentials
+        if verdict.credentials is not None:
+            status = "unavailable"
+        elif refused is not None:
+            status = "credentials_refused"
+            reason = "the server answered 403 (forbidden)" if refused == 403 else None
+        else:
+            status = "ok"
+        return {
+            "kind": secret.kind if secret is not None else "none",
+            "header_names": list(secret.header_names) if secret is not None else [],
+            "updated_at": secret.updated_at.isoformat() if secret is not None and secret.updated_at else None,
+            "status": status,
+            "reason": reason,
+        }
+
+    def server_view(
+        verdict: ServerVerdict,
+        connected: dict[str, bool],
+        secret: StoredSecret | None = None,
+        refused: int | None = None,
+    ) -> dict[str, Any]:
         config = verdict.config
         return {
             "name": config.name,
@@ -325,64 +415,105 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             "blocked_by_ceiling": verdict.ceiling,
             "skip_reason": verdict.reason,
             "tools": [tool_view(tool, config.name) for tool in verdict.tools],
+            "auth": auth_view(verdict, secret, refused),
         }
 
     async def views() -> list[dict[str, Any]]:
         connected = {server["name"]: server["connected"] for server in manager.status()["servers"]}
-        return [server_view(verdict, connected) for verdict in manager.plan(await registry.list_all())]
+        refused = manager.credentials_refused()
+        secrets = await registry.list_secrets()
+        return [
+            server_view(verdict, connected, secrets.get(verdict.config.name), refused.get(verdict.config.name))
+            for verdict in manager.plan(await registry.list_all(), secrets)
+        ]
 
     async def view(name: str) -> dict[str, Any] | None:
         return next((server for server in await views() if server["name"] == name), None)
 
     async def list_servers(request: Request) -> JSONResponse:
-        """GET /integrations/mcp/servers: every stored server with its tools, what registers and why not."""
-        return JSONResponse({"ceilings": manager.ceilings(), "servers": await views()})
+        """GET /integrations/mcp/servers: every stored server with its tools, what registers and why not, and
+        whether a credential can be stored on this host (``secrets_available``)."""
+        return JSONResponse(
+            {"ceilings": manager.ceilings(), "secrets_available": manager.secrets_available(), "servers": await views()}
+        )
 
     async def probe(request: Request) -> JSONResponse:
-        """POST /integrations/mcp/probe ``{name, url}``: the server's tools as they would be registered. No write."""
+        """POST /integrations/mcp/probe ``{name, url, headers?}``: the server's tools as they would be registered,
+        with ``headers`` sent on its requests (never stored; a stored credential is never attached). No write."""
         body = await _body(request)
-        _only(body, {"name", "url"})
+        _only(body, {"name", "url", "headers"})
         config = _server_config(body.get("name"), body.get("url"), False)
-        probed = await probe_tools(config.name, config.url)
+        headers = _headers(body["headers"]) if "headers" in body else None
+        probed = await probe_tools(config.name, config.url, headers)
         return JSONResponse(
             {"tools": [_probe_view(tool) for tool in probed], "definitions_sha256": definitions_sha256(probed)}
         )
 
     async def create_server(request: Request) -> JSONResponse:
-        """POST /integrations/mcp/servers ``{name, url, background?, tools?, expected_definitions_sha256?}``: add or
-        replace a server, its tools stored from a probe made here, with the request's permissions (a tool not named
-        is ``deny``). Replacing enables the server and sets its call timeout to 30 s, as the seed does."""
+        """POST /integrations/mcp/servers ``{name, url, background?, tools?, expected_definitions_sha256?,
+        headers?}``: add or replace a server, its tools stored from a probe made here, with the request's permissions
+        (a tool not named is ``deny``). Replacing enables the server and sets its call timeout to 30 s, as the seed
+        does. ``headers`` become its credential (409 without a key on the host). Without them, the probe uses the
+        stored credential opened as bound to the request's URL, and a replace at another URL removes it
+        (``credentials: "removed"``)."""
         body = await _body(request)
-        _only(body, {"name", "url", "background", "tools", "expected_definitions_sha256"})
+        _only(body, {"name", "url", "background", "tools", "expected_definitions_sha256", "headers"})
         config = _server_config(body.get("name"), body.get("url"), bool(_flag(body, "background")))
         wanted = _permissions(body.get("tools", {}))
-        probed = await probe_tools(config.name, config.url)
+        headers = _headers(body["headers"]) if "headers" in body else None
+        if headers is not None and not manager.secrets_available():
+            raise _Refused(409, NO_KEY_TEXT)
+        sent = headers
+        stored_secret = await secret_of(config.name)
+        if sent is None and stored_secret is not None:
+            # Opened as bound to the request's URL: at another URL it does not open, and nothing is sent.
+            sent, _problem = manager.open_credentials(config.name, config.url, stored_secret)
+        probed = await probe_tools(config.name, config.url, sent)
         digest_stored = expect(body, probed)
         unknown = sorted(set(wanted) - {tool.tool for tool in probed})
         if unknown:
             raise _Refused(400, f"the server does not list these tools: {', '.join(unknown)}")
         rows = _rows_from_probe(config.name, probed, wanted)
+        sealed = sealed_for(config.name, config.url, headers) if headers is not None else None
         async with changes:
             old = await stored(config.name)
-            created = await registry.replace_server(config, rows)
+            old_secret = await secret_of(config.name)
+            created, secret_deleted = await registry.replace_server(config, rows, secret=sealed)
+            if headers is not None:
+                credentials: str | None = "replaced" if old_secret is not None else "set"
+            else:
+                # What the registry did with the URL change: a row that no longer validates is not read by stored().
+                credentials = "removed" if secret_deleted else None
             old_permissions = {tool.tool: tool.permission for tool in old[1]} if old else {}
             # A stored tool the server no longer lists is set to deny (its row is kept).
             new_permissions = {**{tool: "deny" for tool in old_permissions}, **{r.tool: r.permission for r in rows}}
             action = "create" if created else "replace"
-            await audit(_change(action, config.name, old[0] if old else None, config, old_permissions, new_permissions))
+            data = _change(
+                action,
+                config.name,
+                old[0] if old else None,
+                config,
+                old_permissions,
+                new_permissions,
+                credentials=credentials,
+                header_count=_count(credentials, headers),
+            )
+            await audit(data)
             await apply()
             server = await view(config.name)
         return JSONResponse(
-            {"created": created, "definitions_sha256": digest_stored, "server": server},
+            {"created": created, "definitions_sha256": digest_stored, "credentials": credentials, "server": server},
             status_code=201 if created else 200,
         )
 
     async def update_server(request: Request) -> JSONResponse:
-        """PATCH /integrations/mcp/servers/{name} ``{enabled?, background?, call_timeout_seconds?, tools?}``: change
-        the server's switches, its call timeout and the permissions of tools it already has stored."""
+        """PATCH /integrations/mcp/servers/{name} ``{enabled?, background?, call_timeout_seconds?, tools?,
+        headers?}``: change the server's switches, its call timeout, the permissions of tools it already has stored,
+        and its credential (``headers``: replace it, 409 without a key on the host; ``headers: null``: remove it).
+        The URL cannot be changed here."""
         name = request.path_params["name"]
         body = await _body(request)
-        _only(body, {"enabled", "background", "call_timeout_seconds", "tools"})
+        _only(body, {"enabled", "background", "call_timeout_seconds", "tools", "headers"})
         if not body:
             raise _Refused(400, "nothing to change")
         enabled, background = _flag(body, "enabled"), _flag(body, "background")
@@ -390,6 +521,10 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         if "call_timeout_seconds" in body and (type(timeout) is not int or not 1 <= timeout <= 600):
             raise _Refused(400, "call_timeout_seconds must be a whole number from 1 to 600")
         wanted = _permissions(body["tools"]) if "tools" in body else {}
+        headers = _headers(body["headers"]) if body.get("headers") is not None else None
+        remove = "headers" in body and body["headers"] is None
+        if headers is not None and not manager.secrets_available():
+            raise _Refused(409, NO_KEY_TEXT)
         async with changes:
             current = await stored(name)
             if current is None:
@@ -399,19 +534,37 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             unknown = sorted(set(wanted) - set(old_permissions))
             if unknown:
                 raise _Refused(400, f"the server has no stored tools named: {', '.join(unknown)}")
+            old_secret = await secret_of(name)
+            sealed = sealed_for(name, old.url, headers) if headers is not None else None
             await registry.update_server(
                 name,
                 enabled=enabled,
                 background=background,
                 call_timeout_seconds=timeout,
                 permissions=wanted,  # type: ignore[arg-type]
+                secret=sealed,
+                remove_secret=remove,
             )
+            if headers is not None:
+                credentials: str | None = "replaced" if old_secret is not None else "set"
+            else:
+                credentials = "removed" if remove and old_secret is not None else None
             fields = {"enabled": enabled, "background": background, "call_timeout_seconds": timeout}
             new = old.model_copy(update={key: value for key, value in fields.items() if value is not None})
-            await audit(_change("update", name, old, new, old_permissions, {**old_permissions, **wanted}))
+            data = _change(
+                "update",
+                name,
+                old,
+                new,
+                old_permissions,
+                {**old_permissions, **wanted},
+                credentials=credentials,
+                header_count=_count(credentials, headers),
+            )
+            await audit(data)
             await apply()
             server = await view(name)
-        return JSONResponse({"server": server})
+        return JSONResponse({"credentials": credentials, "server": server})
 
     async def refresh_server(request: Request) -> JSONResponse:
         """POST /integrations/mcp/servers/{name}/refresh ``{expected_definitions_sha256?}`` (the body may be empty):
@@ -423,7 +576,13 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         before = await stored(name)
         if before is None:
             raise _Refused(404, "no such server")
-        probed = await probe_tools(name, before[0].url)
+        stored_secret = await secret_of(name)
+        headers: dict[str, str] | None = None
+        if stored_secret is not None:  # the stored URL and the stored credential, nothing from the request
+            headers, problem = manager.open_credentials(name, before[0].url, stored_secret)
+            if problem is not None:
+                raise _Refused(409, f"the stored credentials cannot be used here: {problem}")
+        probed = await probe_tools(name, before[0].url, headers)
         digest_stored = expect(body, probed)
         async with changes:
             current = await stored(name)
@@ -470,14 +629,26 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         )
 
     async def delete_server(request: Request) -> JSONResponse:
-        """DELETE /integrations/mcp/servers/{name}: remove the server and its tools."""
+        """DELETE /integrations/mcp/servers/{name}: remove the server, its tools and its stored credential."""
         name = request.path_params["name"]
         async with changes:
             current = await stored(name)  # None for a row that no longer validates: it is still deleted
+            old_secret = await secret_of(name)
             if not await registry.delete_server(name):
                 raise _Refused(404, "no such server")
             old, tools = current if current else (None, [])
-            await audit(_change("delete", name, old, None, {tool.tool: tool.permission for tool in tools}, {}))
+            credentials = "removed" if old_secret is not None else None
+            data = _change(
+                "delete",
+                name,
+                old,
+                None,
+                {tool.tool: tool.permission for tool in tools},
+                {},
+                credentials=credentials,
+                header_count=_count(credentials, None),
+            )
+            await audit(data)
             await apply()
         return JSONResponse({"deleted": name})
 
