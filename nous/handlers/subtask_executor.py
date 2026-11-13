@@ -34,6 +34,8 @@ from nous.api.subtask_tools import (
     make_submit_final_report_executor,
 )
 from nous.api.tools import build_subtask_prefix
+from nous.cognitive.claim_verifier import ClaimVerifier, runner_path
+from nous.heart.subtask_report import SubtaskReport
 from nous.heart.subtask_validator import ValidationResult, validate_report
 
 logger = logging.getLogger(__name__)
@@ -466,6 +468,15 @@ async def execute_hardened(
                     "Subtask %s _persist_outcome failed in finally",
                     subtask.id.hex[:8],
                 )
+            else:
+                # F113 Phase A (shadow): only once the row is written, and
+                # synchronous, so it adds no await (no cancellation point)
+                # anywhere in this finally.
+                if last_result.ok and last_result.report is not None:
+                    _check_report_claims(
+                        subtask, session_id, last_result.report,
+                        runner=runner, settings=settings,
+                    )
 
             duration_ms = int((time.monotonic() - started_monotonic) * 1000)
             if emit_event:
@@ -520,6 +531,74 @@ async def execute_hardened(
         final_text = (last_payload or {}).get("summary", "") or last_result.reason
 
     return final_text, last_result
+
+
+def _report_check_mode(settings) -> str | None:
+    """The claim-verification mode a validated report is checked in (F113), or None when the check is off.
+
+    Mirrors ``ContinuationRunner._reports_mode`` (nous/handlers/continuation_runner.py),
+    the continuation's report check, condition for condition; a test holds the
+    two equal. ``getattr`` with False keeps settings namespaces without these
+    fields (test fixtures) off.
+    """
+    if not (
+        getattr(settings, "claim_verification_enabled", False)
+        and getattr(settings, "claim_verification_reports_enabled", False)
+        and getattr(settings, "execution_ledger_enabled", False)
+        and getattr(settings, "execution_ledger_persist_enabled", False)
+    ):
+        return None
+    return settings.claim_verification_mode
+
+
+# How much of a report the shadow claim check reads (summary first). The check
+# runs on the event loop and its cost is claims x recorded calls, so this cap
+# bounds the claims, not the time: an ordinary report takes under 0.1 s, one
+# packed with claims after hundreds of calls can still take over a second.
+_REPORT_CHECK_MAX_CHARS = 2000
+
+
+def _check_report_claims(
+    subtask,
+    session_id: str,
+    report: SubtaskReport,
+    *,
+    runner,
+    settings,
+) -> None:
+    """F113 Phase A (shadow): check a validated report's claims against its session's calls.
+
+    Runs the regex ``verify_report`` over the summary and findings with the
+    session's ledger as evidence, and has the runner write one
+    ``subtask_report_claim_check`` event. Changes nothing else: no outcome,
+    score, prompt or text. Synchronous, so the caller adds no await by
+    calling it. Skipped when the check is off (``_report_check_mode``) and for
+    a subtask in a shared session (``metadata.session_id``, e.g. a scheduled
+    one), whose event nothing would attribute to this task. Any error is
+    logged at WARNING by name only and swallowed.
+    """
+    try:
+        if _report_check_mode(settings) is None:
+            return
+        meta = getattr(subtask, "metadata_", None)
+        if isinstance(meta, dict) and meta.get("session_id"):
+            return
+        # The scorer's own rule for whose session this is: any other id is shared.
+        if session_id != f"subtask-{subtask.id.hex[:8]}":
+            return
+        text = "\n".join([report.summary, *report.findings])[:_REPORT_CHECK_MAX_CHARS]
+        verifier = ClaimVerifier(runner_path=runner_path(settings.workspace_dir))
+        # False: this executor saw no cancel (an asyncio cancel never reaches
+        # the check, and an owner's cancel of the running row is not visible here).
+        result = verifier.verify_report(
+            text, runner.session_evidence(session_id), cancelled=False,
+        )
+        runner.log_report_claim_check(session_id, result, subtask_id=str(subtask.id))
+    except Exception as exc:
+        logger.warning(
+            "F113: the report claim check of subtask %s failed (%s)",
+            subtask.id.hex[:8], type(exc).__name__,
+        )
 
 
 def _build_retry_message(
