@@ -341,8 +341,9 @@ async def test_a_cancel_during_the_check_leaves_the_persisted_outcome_alone():
     heart = _heart()
     emit = AsyncMock()
 
+    subtask = _subtask()
     task = asyncio.create_task(execute_hardened(
-        _subtask(), "subtask-y", runner=runner, heart=heart, settings=settings, emit_event=emit,
+        subtask, f"subtask-{subtask.id.hex[:8]}", runner=runner, heart=heart, settings=settings, emit_event=emit,
     ))
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -397,3 +398,14 @@ async def test_the_scorer_does_not_count_the_report_check_event(db):
                     data={"verified": False}))
         await s.commit()
     assert await _unverified() == 1
+
+
+async def test_a_session_that_is_not_the_subtasks_own_is_not_checked():
+    """The scorer attributes only ``subtask-<hex8>``: any other session id is a shared one."""
+    settings = _settings()
+    runner, brain = _runner(settings, [MERGE_CLAIM])
+
+    (_, result), _heart_ = await _run(_subtask(), runner, settings, session_id="schedule-nightly")
+
+    assert result.ok
+    assert await _check_events(brain) == []

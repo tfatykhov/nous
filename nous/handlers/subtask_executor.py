@@ -551,8 +551,11 @@ def _report_check_mode(settings) -> str | None:
     return settings.claim_verification_mode
 
 
-# How much of a report the shadow claim check reads (summary first).
-_REPORT_CHECK_MAX_CHARS = 6000
+# How much of a report the shadow claim check reads (summary first). The check
+# runs on the event loop and its cost is claims x recorded calls, so this cap
+# bounds the claims, not the time: an ordinary report takes under 0.1 s, one
+# packed with claims after hundreds of calls can still take over a second.
+_REPORT_CHECK_MAX_CHARS = 2000
 
 
 def _check_report_claims(
@@ -580,8 +583,9 @@ def _check_report_claims(
         meta = getattr(subtask, "metadata_", None)
         if isinstance(meta, dict) and meta.get("session_id"):
             return
-        # Capped: the check runs on the event loop, and a long report dense
-        # with claims costs it over a second (1.7 s measured at 50 KB).
+        # The scorer's own rule for whose session this is: any other id is shared.
+        if session_id != f"subtask-{subtask.id.hex[:8]}":
+            return
         text = "\n".join([report.summary, *report.findings])[:_REPORT_CHECK_MAX_CHARS]
         verifier = ClaimVerifier(runner_path=runner_path(settings.workspace_dir))
         # False: this executor saw no cancel (an asyncio cancel never reaches
