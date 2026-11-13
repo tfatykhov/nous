@@ -438,7 +438,6 @@ class _Server:
                 logger.warning("MCP client: could not connect to server %r (%s)", name, error_class(exc))
             else:
                 logger.warning("MCP client: the connection to server %r ended (%s)", name, error_class(exc))
-            logger.debug("MCP client: server %r error", name, exc_info=True)
             await self._on_error(name, exc)
         finally:
             conn.stop.set()
@@ -771,7 +770,6 @@ class McpClientManager:
             raise ProbeRefused(str(exc)) from None
         except Exception as exc:  # an ExceptionGroup from the SDK's task groups included; CancelledError passes
             logger.warning("MCP client: the probe for server %r failed (%s)", server, error_class(exc))
-            logger.debug("MCP client: probe error", exc_info=True)
             if auth.refused is not None:
                 raise ProbeCredentials(PROBE_REFUSED if sent else PROBE_ASKS) from None
             raise ProbeFailed(safe_error(exc)) from None
@@ -939,7 +937,6 @@ class McpClientManager:
             if session is not None:
                 server.drop(session)
             logger.warning("MCP client: %s failed (%s)", name, error_class(exc))
-            logger.debug("MCP client: %s error", name, exc_info=True)
             return _error(f'the call to the MCP server "{server_name}" failed: {safe_error(exc)}.'), refusal()
         if conn.refused is None:  # answered on a connection that was refused nothing: the listing's status clears
             server.refusal = None

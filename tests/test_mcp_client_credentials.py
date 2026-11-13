@@ -535,6 +535,43 @@ async def test_no_credential_value_reaches_a_log_record_or_an_event(tmp_path, ca
             assert "test-key" not in logging.Formatter().formatException(record.exc_info)
 
 
+async def test_an_error_text_that_reflects_the_credential_reaches_no_log_record(tmp_path, caplog):
+    """A server may answer a listing or a call with an error whose text repeats the key it was sent: the manager
+    logs the error's class and never the traceback, at any level."""
+    caplog.set_level(logging.DEBUG)
+
+    class Reflecting(_FakeSession):
+        async def list_tools(self) -> list[Any]:
+            raise RuntimeError(f"bad request, saw {VALUE}")
+
+        async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
+            raise RuntimeError(f"bad request, saw {VALUE}")
+
+    class ReflectingFake(Fake):
+        @asynccontextmanager
+        async def connect(self, url: str, allow: frozenset[str], *, auth: Any = None):
+            yield Reflecting(self)
+
+    from nous.mcp_client.manager import ProbeFailed
+
+    rows = Rows([_row("alpha", ALPHA)], {"alpha": _secret("alpha", ALPHA, {"Authorization": VALUE})})
+    dispatcher = ToolDispatcher()
+    manager = McpClientManager(dispatcher, rows, _settings(_key_file(tmp_path)), connect=ReflectingFake().connect)
+    await manager.start()
+    try:
+        with pytest.raises(ProbeFailed) as failed:
+            await manager.probe("alpha", ALPHA, {"Authorization": VALUE})
+        assert "test-key" not in str(failed.value)
+        text, failed_call = await dispatcher.dispatch("mcp__alpha__echo", {"text": "hi"})
+        assert failed_call is True and "test-key" not in text
+    finally:
+        await manager.close()
+    assert any("probe" in record.getMessage() for record in caplog.records)
+    for record in caplog.records:
+        assert "test-key" not in record.getMessage()
+        assert record.exc_info is None or "test-key" not in logging.Formatter().formatException(record.exc_info)
+
+
 # --- 8.1 item 10: what the tool-call log and the execution ledger receive --------------------------------------------
 
 
