@@ -862,6 +862,8 @@ describe('Integrations: a key for a new server', () => {
     expect(valueField().type).toBe('password');
     expect(valueField().getAttribute('autocomplete')).toBe('off');
     expect(within(addCard()).getByText('Most servers want Authorization with the value "Bearer <your key>".')).toBeTruthy();
+    // What the scrub hides, in plain words: the value, and the second word of a two-word value on its own.
+    expect(within(addCard()).getByText('Tool results never show a stored value; for a value of two words, not its second word either.')).toBeTruthy();
     await fireEvent.click(within(addCard()).getByRole('button', { name: 'Show the value of header 1' }));
     expect(valueField().type).toBe('text');
     expect(valueField().value).toBe(KEY); // only what was just typed

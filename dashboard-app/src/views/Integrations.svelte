@@ -6,7 +6,7 @@
   import { usePoll } from '../lib/poll';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import {
-    CHANGED_TEXT, HEADERS_MAX, KEY_HINT, NAME_RULE, NO_KEY_FILE_TEXT, URL_RULE, blankHeaderRow, ceilingLines, clampText,
+    CHANGED_TEXT, HEADERS_MAX, KEY_HINT, NAME_RULE, NO_KEY_FILE_TEXT, URL_RULE, VALUE_HINT, blankHeaderRow, ceilingLines, clampText,
     createPayload, createServer, headersBody, headersProblem, isConflict, isNoKey, keyLine, listGate, listServers,
     nameProblem, prettySchema, probeServer, problemText, refreshLines, refreshServer, removeServer, serverStatus,
     shortName, toolChange, toolStatus, updateServer, urlProblem,
@@ -431,6 +431,7 @@
     {/if}
   </div>
   <p class="hint">{KEY_HINT}</p>
+  <p class="hint">{VALUE_HINT}</p>
 {/snippet}
 
 <header class="view-head">

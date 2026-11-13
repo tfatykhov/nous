@@ -71,6 +71,7 @@ from nous.mcp_client.bridge import (
     flatten_result,
     holds_credential,
     prepare_tool,
+    result_chars,
     safe_error,
     serialize_schema,
     wrap_result,
@@ -93,6 +94,9 @@ _BACKOFF_FIRST_SECONDS = 1.0
 _BACKOFF_MAX_SECONDS = 60.0
 _CLOSE_WAIT_SECONDS = 5.0
 HANDSHAKE_MAX_SECONDS = 30  # the handshake's bound is the server's call timeout, but never more than this
+# A result this long (characters) is flattened, cleaned and scrubbed in a worker thread: a hostile 2 MB result costs
+# about half a second, which must not be the event loop's.
+OFF_LOOP_RESULT_CHARS = 64_000
 
 # (url, allow_private_hosts, *, auth) -> an async context manager yielding an initialized session
 # (transport.open_session); auth is the server's _ServerAuth, run on every request of the session.
@@ -939,7 +943,10 @@ class McpClientManager:
             return _error(f'the call to the MCP server "{server_name}" failed: {safe_error(exc)}.'), refusal()
         if conn.refused is None:  # answered on a connection that was refused nothing: the listing's status clears
             server.refusal = None
-        text, is_error = flatten_result(raw, self._max_chars, server.withheld)
+        if result_chars(raw) > OFF_LOOP_RESULT_CHARS:
+            text, is_error = await asyncio.to_thread(flatten_result, raw, self._max_chars, server.withheld)
+        else:
+            text, is_error = flatten_result(raw, self._max_chars, server.withheld)
         return {"content": [{"type": "text", "text": wrap_result(server_name, text)}], "is_error": is_error}, None
 
     async def _emit_error(self, server_name: str, exc: BaseException) -> None:

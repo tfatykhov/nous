@@ -219,6 +219,8 @@ export interface HeaderRow { name: string; value: string }
 
 export const HEADERS_MAX = 8;
 export const KEY_HINT = 'Most servers want Authorization with the value "Bearer <your key>".';
+/** What the result scrub hides (bridge.credential_needles), in a few plain words. */
+export const VALUE_HINT = 'Tool results never show a stored value; for a value of two words, not its second word either.';
 export const NO_KEY_FILE_TEXT = 'A key cannot be stored here: no key file is configured on the host (NOUS_MCP_CLIENT_KEY_FILE).';
 export const blankHeaderRow = (name = ''): HeaderRow => ({ name, value: '' });
 

@@ -796,6 +796,112 @@ async def test_a_scheme_and_key_still_withholds_the_bare_key(tmp_path):
     assert await _scrubbed(tmp_path, "ApiKey test-key-8888888888", "key=test-key-8888888888") == "key=[withheld]"
 
 
+# --- round three of #917: a value holding escapes of its own; one scrub; a large result off the event loop ----------
+
+OWN_ESCAPES = "sig=ab%2Bcd%3Dtest-fake&se=2026"  # a made-up signed-URL fragment that holds %2B and %3D itself
+
+
+@pytest.mark.parametrize(
+    "echo",
+    [
+        OWN_ESCAPES,  # as it is
+        OWN_ESCAPES.replace("&", "&amp;"),  # its & escaped: its own %2B is then decoded in the canonical text
+        OWN_ESCAPES.replace("&", "&#38;"),
+        OWN_ESCAPES.replace("&", "\\u0026"),
+        "sig=ab+cd=test-fake&se=2026",  # the server decoded the value's own escapes
+        "sig=ab%2Bcd=test-fake&amp;se=2026",  # in part, and escaped its &
+    ],
+    ids=["plain", "amp-entity", "amp-numeric", "amp-u-escape", "own-escapes-decoded", "mixed"],
+)
+async def test_a_value_holding_escapes_of_its_own_is_scrubbed_however_the_rest_is_escaped(tmp_path, echo):
+    from nous.mcp_client.config import validate_headers
+
+    assert validate_headers({"X-Sig": OWN_ESCAPES}) == {"X-Sig": OWN_ESCAPES}
+    assert await _scrubbed(tmp_path, OWN_ESCAPES, f"[{echo}]") == "[[withheld]]"
+
+
+@pytest.mark.parametrize(
+    "value,echo",
+    [
+        ("key&#43;abcd1234xyz", "key&#43;abcd1234xyz"),  # an entity of its own, as it is
+        ("key&#43;abcd1234xyz", "key&amp;#43;abcd1234xyz"),  # its & escaped once more
+        ("key&#43;abcd1234xyz", "key+abcd1234xyz"),  # the server decoded it
+        ("tok&lt;abcd1234&gt;x", "tok<abcd1234>x"),
+    ],
+)
+async def test_a_value_holding_an_entity_of_its_own_is_scrubbed(tmp_path, value, echo):
+    # A backslash cannot be in a value (config.validate_headers refuses it), so a value has no backslash escape.
+    assert await _scrubbed(tmp_path, value, f"({echo})") == "([withheld])"
+
+
+async def test_a_listing_that_repeats_a_value_holding_escapes_of_its_own_is_refused():
+    from mcp.types import Tool
+
+    from nous.mcp_client.manager import LISTING_REPEATS, ProbeCredentials
+
+    fake = Fake()
+    fake.tools = [Tool(name="sign", description=f"use {OWN_ESCAPES.replace('&', '&amp;')}", inputSchema=ECHO)]
+    manager = McpClientManager(ToolDispatcher(), Rows([], {}), _settings(), connect=fake.connect)
+    with pytest.raises(ProbeCredentials) as refused:
+        await manager.probe("alpha", ALPHA, {"X-Sig": OWN_ESCAPES})
+    assert str(refused.value) == LISTING_REPEATS
+
+
+def test_text_items_are_scrubbed_once_and_structured_strings_before_serializing(monkeypatch):
+    from mcp.types import CallToolResult, TextContent
+
+    from nous.mcp_client import bridge
+
+    calls: list[int] = []
+    real = bridge.withhold
+
+    def counted(text: str, needles: Any) -> str:
+        calls.append(len(text))
+        return real(text, needles)
+
+    monkeypatch.setattr(bridge, "withhold", counted)
+    needles = bridge.credential_needles([VALUE])
+    items = [
+        TextContent(type="text", text=f"one {VALUE}"),
+        TextContent(type="text", text="two"),
+        TextContent(type="text", text="3"),
+    ]
+    text, _ = bridge.flatten_result(CallToolResult(content=items), 1000, needles)
+    assert text == "one [withheld]\ntwo\n3" and len(calls) == 1  # the joined, cleaned text: once
+    calls.clear()
+    escaped_key = "test-key-0000\\u0030" + "0" * 11  # the key's fifth zero as 0
+    structured = CallToolResult(content=[], structuredContent={"echo": escaped_key})
+    text, _ = bridge.flatten_result(structured, 1000, needles)
+    assert text == '{"echo": "[withheld]"}'  # one escape in the string, two in the serialized text
+    assert len(calls) == 3  # the key, the value, then the cleaned text (a value split by a dropped character)
+
+
+async def test_a_large_result_is_flattened_off_the_event_loop(tmp_path, monkeypatch):
+    from mcp.types import CallToolResult, TextContent
+
+    from nous.mcp_client import manager as manager_module
+
+    threaded: list[Any] = []
+    real = asyncio.to_thread
+
+    async def recording(func: Any, *args: Any, **kwargs: Any) -> Any:
+        threaded.append(func)
+        return await real(func, *args, **kwargs)
+
+    monkeypatch.setattr(manager_module.asyncio, "to_thread", recording)
+    rows = Rows([_row("alpha", ALPHA)], {"alpha": _secret("alpha", ALPHA, {"Authorization": VALUE})})
+    d, fake = ToolDispatcher(), Fake()
+    manager = McpClientManager(d, rows, _settings(_key_file(tmp_path)), connect=fake.connect)
+    await manager.start()
+    fake.result = CallToolResult(content=[TextContent(type="text", text="%41" * 30_000 + VALUE)])
+    text, _ = await d.dispatch("mcp__alpha__echo", {"text": "x"})
+    assert threaded == [manager_module.flatten_result] and "test-key" not in text
+    fake.result = CallToolResult(content=[TextContent(type="text", text=f"short {VALUE}")])
+    text, _ = await d.dispatch("mcp__alpha__echo", {"text": "x"})
+    assert len(threaded) == 1 and text.endswith("short [withheld]")  # a small one stays on the loop
+    await manager.close()
+
+
 # --- review of #917: a 403 with a stored key -------------------------------------------------------------------------
 
 FORBIDDEN = (

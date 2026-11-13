@@ -357,23 +357,29 @@ def _occurrences(text: str, needle: str) -> Iterator[int]:
 
 
 def _spans(text: str, needles: Sequence[str]) -> list[tuple[int, int]]:
-    """The spans of ``text`` that hold a needle, as it is or with one level of escapes decoded, a space also as
-    ``+`` (any mix: for a needle with a space, ``+`` is read as a space on both sides, character for character, so
-    the offsets hold); sorted, overlapping ones merged."""
+    """The spans of ``text`` that hold a needle: the needle as it is in the raw text; the needle, and the needle
+    with its own escapes decoded by the same rule, in the text with one level of escapes decoded; and, for a form
+    with a space, that form with ``+`` read as a space on both sides (character for character, so the offsets hold).
+    Sorted, overlapping ones merged."""
     if not needles:
         return []
     canonical = _Canonical(text)
     plus_as_space: str | None = None
     found: list[tuple[int, int]] = []
     for needle in needles:
-        found += [(at, at + len(needle)) for at in _occurrences(text, needle)]
         if canonical.text is not text:
-            found += [canonical.span(at, len(needle)) for at in _occurrences(canonical.text, needle)]
-        if " " in needle:
-            if plus_as_space is None:
-                plus_as_space = canonical.text.replace("+", " ")
-            spaced = needle.replace("+", " ")
-            found += [canonical.span(at, len(spaced)) for at in _occurrences(plus_as_space, spaced)]
+            found += [(at, at + len(needle)) for at in _occurrences(text, needle)]
+        forms = {needle}
+        decoded = _Canonical(needle).text  # a value holding an escape of its own, such as %2B or &#43;
+        if len(decoded) >= WITHHELD_MIN_CHARS:
+            forms.add(decoded)
+        for form in forms:
+            found += [canonical.span(at, len(form)) for at in _occurrences(canonical.text, form)]
+            if " " in form:
+                if plus_as_space is None:
+                    plus_as_space = canonical.text.replace("+", " ")
+                spaced = form.replace("+", " ")
+                found += [canonical.span(at, len(spaced)) for at in _occurrences(plus_as_space, spaced)]
     merged: list[tuple[int, int]] = []
     for start, end in sorted(found):
         if merged and start < merged[-1][1]:
@@ -388,8 +394,11 @@ def credential_needles(values: Iterable[str]) -> tuple[str, ...]:
     is exactly two space-separated parts (a scheme and a key), its key alone too, each when it has at least
     ``WITHHELD_MIN_CHARS`` characters; a value of more words is looked for only whole. A needle is found as it is, a
     space also as ``+``, and in the text with one level of escapes decoded (``\\uXXXX``, a backslash before a
-    character, ``%XX``, ``&#NN;``, ``&#xXX;``, named entities), in any mix; a text escaped twice is not decoded twice.
-    Finding takes one pass to decode and ``str.find``, so its time does not depend on a value's shape."""
+    character, ``%XX``, ``&#NN;``, ``&#xXX;``, named entities, each only when well formed), in any mix; a needle that
+    holds such an escape of its own is also found decoded. Finding takes one pass to decode and ``str.find``, so its
+    time does not depend on a value's shape. Out of scope: a text escaped twice (it is decoded once), the value in
+    base64 or with its letters' case changed, an entity without its semicolon, and an incomplete escape a server glues
+    in front of the value on purpose."""
     texts: set[str] = set()
     for value in values:
         parts = value.split()
@@ -433,19 +442,20 @@ def flatten_result(raw: Any, max_chars: int, withheld: Sequence[str] = ()) -> tu
     Text items are joined with newlines; an embedded text resource gives its text; an image, audio or resource
     link becomes a short placeholder. A result with no content but structured content gives that as JSON. The text
     is cleaned (``_clean_result_text``), then cut to ``max_chars`` with a note saying so. ``is_error`` is the
-    result's ``isError``. ``withheld`` (``credential_needles`` of the server's stored credential) is replaced by
-    ``WITHHELD`` in every text item and structured string before they are joined, and again in the cleaned text
-    before the cut (a server that reflects request headers, or splits a value with characters the cleaning drops).
+    result's ``isError``. ``withheld`` (``credential_needles`` of the server's stored credential) is cut out of the
+    cleaned text once, before the cut (a server that reflects request headers, or splits a value with characters
+    the cleaning drops). Structured content is also scrubbed string by string before it is serialized: the
+    serializer doubles a backslash, so an escaped echo inside a string would no longer be one escape in the text.
     """
     is_error = bool(getattr(raw, "isError", False))
     parts: list[str] = []
     for item in getattr(raw, "content", None) or []:
         kind = getattr(item, "type", None)
         if kind == "text":
-            parts.append(withhold(str(getattr(item, "text", "")), withheld))
+            parts.append(str(getattr(item, "text", "")))
         elif kind == "resource":
             text = getattr(getattr(item, "resource", None), "text", None)
-            parts.append(withhold(text, withheld) if isinstance(text, str) else "[resource omitted]")
+            parts.append(text if isinstance(text, str) else "[resource omitted]")
         else:
             parts.append(f"[{_OMITTED.get(kind, 'content')} omitted]")
     structured = getattr(raw, "structuredContent", None)
@@ -456,6 +466,21 @@ def flatten_result(raw: Any, max_chars: int, withheld: Sequence[str] = ()) -> tu
         note = f"{_TRUNCATION_PREFIX} the result was {len(text)} characters; the first {max_chars} are shown]"
         text = f"{text[:max_chars]}\n{note}"
     return text, is_error
+
+
+def result_chars(raw: Any) -> int:
+    """About how many characters ``flatten_result`` will read from ``raw``: its text items, or its structured
+    content serialized when it has no content (the manager flattens a large result off the event loop)."""
+    chars = 0
+    for item in getattr(raw, "content", None) or []:
+        text = getattr(item, "text", None)
+        if not isinstance(text, str):
+            text = getattr(getattr(item, "resource", None), "text", None)
+        chars += len(text) if isinstance(text, str) else 0
+    structured = getattr(raw, "structuredContent", None)
+    if not chars and structured is not None:
+        chars = len(json.dumps(structured, ensure_ascii=False, default=str))
+    return chars
 
 
 def wrap_result(server: str, text: str) -> str:
