@@ -543,6 +543,7 @@ _CALL_COLUMNS: tuple[str, ...] = (
     "cache_break",
     "cache_break_components",
     "cache_break_tokens_lost",
+    "ttft_ms",
 )
 _CTX_COLUMNS = (
     "session_id",
@@ -655,6 +656,7 @@ class ModelCallScope:
         self._error_text: str | None = None
         self._attempts: list[dict[str, Any]] = []
         self._written = False
+        self._first_token_t: float | None = None  # perf_counter at the first text_delta or tool_start
         # The call's text, when the recorder stores it: references only (the payload as handed over, the response's
         # content, a stream's content events). Exit snapshots them; the text write does all the work.
         keep_text = recorder._text is not None and isinstance(payload, dict)
@@ -761,6 +763,27 @@ class ModelCallScope:
         except Exception as exc:
             self._lost("stream event", exc)
 
+    def mark_first_token(self) -> None:
+        """A streamed call's first ``text_delta`` or ``tool_start`` arrived: keep the time of the first, ignore the
+        rest. ``ttft_ms`` is that time minus the call's start. Never raises."""
+        if self._first_token_t is None:
+            try:
+                self._first_token_t = time.perf_counter()
+            except Exception as exc:
+                self._lost("first token", exc)
+
+    def reset_first_token(self) -> None:
+        """A new HTTP attempt begins: a token of the failed one is not this attempt's first."""
+        self._first_token_t = None
+
+    def _ttft_ms(self) -> int | None:
+        """Time to first token, for a ``stream`` call that ended ``ok``; None for any other call (an aggregated call
+        is a background call whose caller never sees a token), and for a stream that failed or was cut off (its first
+        token may be real, but the number would describe a broken call)."""
+        if self._first_token_t is None or self._call_kind != "stream" or self._status != "ok":
+            return None
+        return max(0, round((self._first_token_t - self._t0) * 1000))
+
     def finish(self, response: Any) -> None:
         """The call returned ``response`` (an ``ApiResponse`` or the raw response dict): take its usage and stop
         reason; the status is ``ok``. Never raises."""
@@ -811,6 +834,7 @@ class ModelCallScope:
             "stop_reason": self._stop_reason,
             "duration_ms": round((time.perf_counter() - self._t0) * 1000),
             "attempts": max(1, len(self._attempts)),
+            "ttft_ms": self._ttft_ms(),
         }
         for key, column in _USAGE_COLUMNS.items():
             params[column] = self._usage.get(key)

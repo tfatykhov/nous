@@ -232,6 +232,10 @@ class TurnContext(BaseModel):
     # F108: the turn's F035 trace id, minted by pre_turn with the bus's id generator. post_turn makes it the root
     # turn_completed event's event_id and trace_id, and the runner puts it on each of the turn's model-call rows.
     trace_id: str | None = None
+    # Voice POC: how long pre_turn took in all, and by phase (frame_select_ms, critic_ms, context_build_ms,
+    # other_ms, total_ms), from monotonic clocks. The runner writes both to agent_turn_log.
+    pre_turn_ms: int | None = None
+    pre_turn_phases: dict[str, int] | None = None
 
 
 class ToolResult(BaseModel):
