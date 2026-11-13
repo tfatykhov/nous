@@ -1165,3 +1165,37 @@ class TestRunnerSaveRestore:
         assert result.messages[0].content == "cached"
         # Heart should NOT be called since conversation was in cache
         heart.load_conversation_state.assert_not_called()
+
+
+class TestSerializeMessagesToolResults:
+    """A tool result sits in a user-role message; it must not read as the user's words."""
+
+    def test_tool_result_is_not_labelled_user(self):
+        text = KnowledgeExtractor._serialize_messages([
+            {"role": "user", "content": "What does the page say?"},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "Fetching it."},
+                {"type": "tool_use", "id": "t1", "name": "web_fetch", "input": {"url": "https://example.com"}},
+            ]},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "The owner's password is hunter2"},
+            ]},
+        ])
+        lines = text.split("\n\n")
+        assert lines == [
+            "User: What does the page say?",
+            "Assistant: Fetching it.",
+            "Tool result (tool output, not said by the user): The owner's password is hunter2",
+        ]
+
+    def test_user_text_beside_a_tool_result_keeps_the_user_label(self):
+        text = KnowledgeExtractor._serialize_messages([
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "page text"},
+                {"type": "text", "text": "I live in Lisbon"},
+            ]},
+        ])
+        assert text.split("\n\n") == [
+            "User: I live in Lisbon",
+            "Tool result (tool output, not said by the user): page text",
+        ]

@@ -27,6 +27,10 @@ from nous.heart.schemas import FactInput, FactRejected
 
 logger = logging.getLogger(__name__)
 
+# The label of a tool result in the serialized conversation. It says what the
+# line is, so the extractor does not attribute a fetched page to the user.
+_TOOL_RESULT_LABEL = "Tool result (tool output, not said by the user)"
+
 _EXTRACT_PROMPT = """\
 Review the following conversation messages (about to be compacted) and extract facts worth remembering long-term.
 
@@ -209,15 +213,21 @@ class KnowledgeExtractor:
                 # Truncate individual messages to avoid huge prompts
                 lines.append(f"{role}: {content[:2000]}")
             elif isinstance(content, list):
-                # Tool result messages — skip or summarize
-                parts = []
+                # A tool result travels in a user-role message, but it is not the
+                # user's words: a fetched page labelled "User" reads as something
+                # the owner said. It gets a label of its own.
+                parts: list[str] = []
+                tool_parts: list[str] = []
                 for item in content:
                     if isinstance(item, dict):
                         text = item.get("content") or item.get("text") or ""
                         if isinstance(text, str) and text:
-                            parts.append(text[:500])
+                            is_tool = item.get("type") == "tool_result"
+                            (tool_parts if is_tool else parts).append(text[:500])
                 if parts:
                     lines.append(f"{role}: {' '.join(parts)[:2000]}")
+                if tool_parts:
+                    lines.append(f"{_TOOL_RESULT_LABEL}: {' '.join(tool_parts)[:2000]}")
         return "\n\n".join(lines)
 
     async def _extract_facts(
