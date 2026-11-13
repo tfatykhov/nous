@@ -110,6 +110,7 @@ class World:
         self.valid: set[str] = set()
         self.refresh_tokens: set[str] = set()
         self.refreshes = 0
+        self.reflect: str | None = None  # the code exchange repeats the code and the verifier it was sent (see below)
         self.n = 0
 
     def _next(self, kind: str) -> str:
@@ -163,6 +164,13 @@ class World:
                 )
             if form.get("grant_type") != "authorization_code":
                 return httpx.Response(400, json={"error": "unsupported_grant_type"})
+            echo = f"bad {form.get('code')} for {form.get('code_verifier')}"
+            if self.reflect == "error answer":
+                return httpx.Response(400, json={"error": "invalid_grant", "error_description": echo})
+            if self.reflect == "unreadable answer":
+                return httpx.Response(200, json={"access_token": {"echo": echo}, "token_type": "bearer"})
+            if self.reflect == "transport error":
+                raise httpx.ConnectError(echo)
             grant = self.codes.pop(form.get("code", ""), None)
             if (
                 grant is None
@@ -735,6 +743,27 @@ async def test_no_code_state_verifier_or_token_in_any_answer_event_or_log(make_e
     for text in answers + events + logs:
         for value in secrets:
             assert value not in text, value
+
+
+@pytest.mark.parametrize("reflect", ["error answer", "unreadable answer", "transport error"])
+async def test_a_code_or_verifier_the_provider_reflects_reaches_no_log_record(make_env, caplog, reflect):
+    caplog.set_level(logging.DEBUG)
+    env = await make_env()
+    env.world.reflect = reflect
+    started = (await _start(env)).json()
+    flow = env.manager.flows.get(started["flow_id"])
+    secrets = [flow.state, flow.verifier]
+    params = env.world.authorize(started["authorization_url"])
+    secrets.append(params["code"])
+    assert (await _callback(env, params)).content == NOT_SIGNED_IN_PAGE
+    assert env.manager.flows.status(flow) == "failed"
+    # The test's own HTTP client logs the callback address it requested (host "nous"): that line is the test's.
+    records = [r for r in caplog.records if not r.getMessage().startswith("HTTP Request: GET http://nous/")]
+    assert any("did not complete" in r.getMessage() for r in records)
+    for record in records:
+        text = logging.Formatter().format(record)  # the message, its arguments and any traceback
+        for value in secrets:
+            assert value not in text, text
 
 
 def test_the_access_log_line_of_the_callback_is_dropped(caplog):

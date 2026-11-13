@@ -367,6 +367,47 @@ async def test_a_failed_refresh_needs_a_new_sign_in_and_later_requests_do_not_as
     await manager.close()
 
 
+def _reflecting(kind: str):
+    """A token endpoint that repeats the refresh and access tokens it was sent: in an error answer, in a body that does
+    not parse as a token answer (a parser's error text quotes its input), or in the text of a transport error."""
+
+    async def handle(request: httpx.Request) -> httpx.Response:
+        echo = f"unknown {REFRESH} after {OLD}"
+        if kind == "error answer":
+            return httpx.Response(400, json={"error": "invalid_grant", "error_description": echo})
+        if kind == "unreadable answer":
+            return httpx.Response(200, json={"access_token": {"echo": echo}, "token_type": "bearer"})
+        if kind == "not json":
+            return httpx.Response(200, text=echo)
+        raise httpx.ConnectError(echo)
+
+    return handle
+
+
+@pytest.mark.parametrize("kind", ["error answer", "unreadable answer", "not json", "transport error"])
+async def test_a_token_the_provider_reflects_in_an_error_reaches_no_log_record(tmp_path, caplog, kind):
+    rows = Rows(_record(expires_in=-10))
+    caplog.set_level(logging.DEBUG)
+    manager = McpClientManager(
+        ToolDispatcher(),
+        rows,
+        _settings(tmp_path),
+        connect=NoConnect().connect,
+        oauth_http=lambda: httpx.AsyncClient(transport=httpx.MockTransport(_reflecting(kind))),
+    )
+    await manager.start()
+    auth = manager._servers["alpha"].auth_for(None)
+    async with httpx.AsyncClient(transport=_mcp([]), auth=auth) as client:
+        with pytest.raises(Exception):
+            await client.post(ALPHA)
+    assert manager.needs_sign_in("alpha", rows.secrets["alpha"].id)
+    await manager.close()
+    assert caplog.records  # the failure is logged, by its class
+    for record in caplog.records:
+        text = logging.Formatter().format(record)  # the message, its arguments and any traceback
+        assert REFRESH not in text and OLD not in text, text
+
+
 async def test_no_refresh_token_needs_a_new_sign_in_at_once(tmp_path):
     rows, provider = Rows(_record(refresh=None, expires_in=-10)), Provider()
     manager = await _manager(tmp_path, rows, provider)

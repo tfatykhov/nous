@@ -847,10 +847,9 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             manager.flows.fail(flow, str(exc))
             logger.warning("F112: the OAuth sign-in for server %r did not complete (%s)", flow.server, exc)
             return False
-        except Exception as exc:  # the class only
+        except Exception as exc:  # the class only, never a traceback: its text can repeat what the provider was sent
             manager.flows.fail(flow, "the sign-in could not be completed")
             logger.warning("F112: the OAuth sign-in for server %r failed (%s)", flow.server, type(exc).__name__)
-            logger.debug("F112: sign-in error", exc_info=True)
             return False
         manager.flows.complete(flow, None if stored_now else record)
         logger.info("F112: the OAuth sign-in for server %r completed", flow.server)

@@ -1037,9 +1037,8 @@ class McpClientManager:
                     logger.warning("MCP client: server %r: its credential changed during a refresh; discarded", name)
                     return None
                 return fresh
-            except Exception as exc:  # a database error's text can carry the URL: the class only
+            except Exception as exc:  # the class only, never a traceback: its text can repeat what a server was sent
                 logger.warning("MCP client: server %r: the token refresh failed (%s)", name, error_class(exc))
-                logger.debug("MCP client: refresh error", exc_info=True)
                 return None
 
     def credentials_refused(self) -> dict[str, int]:
