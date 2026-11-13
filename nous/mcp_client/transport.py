@@ -34,8 +34,9 @@ import ipaddress
 import logging
 import os
 import socket
-from collections.abc import AsyncIterator, Iterable
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterable, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
 from typing import Any, cast
 from urllib.parse import urlsplit
 
@@ -59,6 +60,8 @@ DEFAULT_MAX_RESPONSE_BYTES = 2_000_000  # NOUS_MCP_CLIENT_MAX_RESPONSE_BYTES's d
 _SESSION_TERMINATED = 32600
 # Hosts this client opened a session with: their request lines are dropped from the httpx logger.
 _QUIET_HOSTS: set[str] = set()
+# PR 2d: set while an OAuth request is sent (``quiet_requests``): its request line is dropped too, whatever its host.
+_QUIET_SCOPE: ContextVar[bool] = ContextVar("mcp_client_quiet_requests", default=False)
 
 
 class _QuietMcpRequests(logging.Filter):
@@ -69,6 +72,8 @@ class _QuietMcpRequests(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         args = record.args
         if isinstance(args, tuple) and len(args) > 1 and isinstance(args[1], httpx.URL):
+            if _QUIET_SCOPE.get():
+                return False
             url = args[1]
             hosts = {url.host.lower(), url.raw_host.decode("ascii", "replace").lower()}
             return not hosts & _QUIET_HOSTS
@@ -234,9 +239,15 @@ class _LimitedTransport(httpx.AsyncBaseTransport):
         await self._inner.aclose()
 
 
-def quiet_host(url: str) -> None:
-    """Drop the HTTP client's request lines for ``url``'s host from now on (an OAuth endpoint's host, PR 2d)."""
-    _QUIET_HOSTS.add((urlsplit(url).hostname or "").lower())
+@contextmanager
+def quiet_requests() -> Iterator[None]:
+    """The HTTP client's request lines of the requests sent inside are dropped (PR 2d: the OAuth requests, whose hosts
+    come from a server's or a provider's documents and are not added to the process-wide host set)."""
+    token = _QUIET_SCOPE.set(True)
+    try:
+        yield
+    finally:
+        _QUIET_SCOPE.reset(token)
 
 
 def guarded_client(

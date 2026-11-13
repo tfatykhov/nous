@@ -67,7 +67,9 @@ def _public_dns(monkeypatch):
     monkeypatch.setattr(transport, "_resolve", resolve)
 
 
-def _record(access: str = OLD, refresh: str | None = REFRESH, expires_in: int | None = 3600) -> OAuthRecord:
+def _record(
+    access: str = OLD, refresh: str | None = REFRESH, expires_in: int | None = 3600, lifetime: int | None = None
+) -> OAuthRecord:
     return OAuthRecord(
         issuer="https://auth.example.com",
         token_endpoint=TOKEN_URL,
@@ -79,6 +81,7 @@ def _record(access: str = OLD, refresh: str | None = REFRESH, expires_in: int | 
         access_token=access,
         refresh_token=refresh,
         expires_at=None if expires_in is None else int(time.time()) + expires_in,
+        lifetime=lifetime,
     )
 
 
@@ -138,6 +141,8 @@ class Provider:
         self.hold: asyncio.Event | None = None
         self.fail = False
         self.refresh_token = REFRESH
+        self.script: list[str] = []  # the next refreshes' answers: "503", "429", "timeout" (else a normal answer)
+        self.expires_in = 3600
 
     async def handle(self, request: httpx.Request) -> httpx.Response:
         self.hits.append(request.url.path)
@@ -150,12 +155,17 @@ class Provider:
         self.refreshes += 1
         if self.hold is not None:
             await self.hold.wait()
+        scripted = self.script.pop(0) if self.script else None
+        if scripted == "timeout":
+            raise httpx.ConnectTimeout("timed out")
+        if scripted is not None:
+            return httpx.Response(int(scripted))
         if self.fail or form.get("refresh_token") != self.refresh_token:
             return httpx.Response(400, json={"error": "invalid_grant", "error_description": "secret detail"})
         self.refresh_token = ROTATED
         return httpx.Response(
             200,
-            json={"access_token": NEW, "token_type": "bearer", "expires_in": 3600, "refresh_token": ROTATED},
+            json={"access_token": NEW, "token_type": "bearer", "expires_in": self.expires_in, "refresh_token": ROTATED},
         )
 
     def client(self) -> httpx.AsyncClient:
@@ -293,6 +303,124 @@ async def test_a_token_is_refreshed_within_a_minute_of_its_expiry_and_not_before
     await manager.close()
 
 
+# --- a provider that cannot be reached: held, never a new sign-in (review P2 1) -------------------------------------
+
+
+@pytest.mark.parametrize("answer", ["503", "429", "timeout"])
+async def test_a_provider_that_cannot_be_reached_is_held_30_s_then_one_request_recovers(tmp_path, answer):
+    rows, provider = Rows(_record(expires_in=-10)), Provider()
+    provider.script = [answer]
+    manager = await _manager(tmp_path, rows, provider)
+    clock = [1000.0]
+    manager._clock = lambda: clock[0]
+    secret_id = rows.secrets["alpha"].id
+    seen: list[str | None] = []
+    auth = manager._servers["alpha"].auth_for(None)
+    async with httpx.AsyncClient(transport=_mcp(seen), auth=auth) as client:
+        for _ in range(3):  # the first asks the provider; the next two are inside the hold and ask nothing
+            with pytest.raises(Exception) as caught:
+                await client.post(ALPHA)
+            assert type(caught.value).__name__ == "ProviderUnreachable"
+        assert provider.refreshes == 1 and seen == []
+        assert manager.provider_unreachable("alpha", secret_id) and not manager.needs_sign_in("alpha", secret_id)
+        clock[0] += 29
+        with pytest.raises(Exception):
+            await client.post(ALPHA)
+        assert provider.refreshes == 1  # still held
+        clock[0] += 2
+        assert (await client.post(ALPHA)).status_code == 200  # the provider is back: one request, and it works
+    assert provider.refreshes == 2 and seen == [f"Bearer {NEW}"]
+    assert not manager.provider_unreachable("alpha", secret_id) and not manager.needs_sign_in("alpha", secret_id)
+    await manager.close()
+
+
+async def test_an_invalid_grant_is_definitive_and_is_not_held(tmp_path):
+    rows, provider = Rows(_record(expires_in=-10)), Provider()
+    provider.fail = True
+    manager = await _manager(tmp_path, rows, provider)
+    secret_id = rows.secrets["alpha"].id
+    auth = manager._servers["alpha"].auth_for(None)
+    async with httpx.AsyncClient(transport=_mcp([]), auth=auth) as client:
+        with pytest.raises(Exception) as caught:
+            await client.post(ALPHA)
+    assert type(caught.value).__name__ == "SignInNeeded"
+    assert manager.needs_sign_in("alpha", secret_id) and not manager.provider_unreachable("alpha", secret_id)
+    await manager.close()
+
+
+UNREACHABLE = (
+    'Tool error: the sign-in provider of the MCP server "alpha" could not be reached: the call can be tried again in '
+    "a moment."
+)
+
+
+async def test_a_call_while_the_provider_is_unreachable_says_so_and_asks_nothing_during_the_hold(tmp_path):
+    gate, rows, provider = TokenGate(), Rows(_record(expires_in=-10), INPROC), Provider()
+    provider.script = ["503"]
+    async with _in_process(gate) as (connect, connects):
+        manager = await _manager(tmp_path, rows, provider, connect)
+        d = manager._registrar
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        assert await d.dispatch("mcp__alpha__echo", {"text": "x"}) == (UNREACHABLE, True)
+        assert await d.dispatch("mcp__alpha__echo", {"text": "x"}) == (UNREACHABLE, True)
+        assert loop.time() - started < 2
+        assert gate.seen == [] and provider.refreshes == 1
+        assert not manager.needs_sign_in("alpha", rows.secrets["alpha"].id)
+        await manager.close()
+
+
+# --- refreshes are bounded (review P2 2) ----------------------------------------------------------------------------
+
+
+async def test_a_server_that_refuses_every_token_gets_one_refresh_then_needs_a_new_sign_in(tmp_path):
+    gate, rows, provider = TokenGate(), Rows(_record(), INPROC), Provider()
+    async with _in_process(gate) as (connect, connects):
+        manager = await _manager(tmp_path, rows, provider, connect)
+        gate.refused = {OLD, NEW}  # every token is refused
+        d = manager._registrar
+        for _ in range(5):
+            assert await d.dispatch("mcp__alpha__echo", {"text": "x"}) == (SIGN_IN, True)
+        assert provider.refreshes == 1  # never a second rotation
+        secret_id = rows.secrets["alpha"].id
+        assert not manager.needs_sign_in("alpha", secret_id)  # one refusal of the fresh token so far (then backoff)
+        await asyncio.sleep(1.2)  # past the connect backoff: the next call's first request is refused too
+        assert await d.dispatch("mcp__alpha__echo", {"text": "x"}) == (SIGN_IN, True)
+        assert provider.refreshes == 1 and manager.needs_sign_in("alpha", secret_id)  # the second refusal: sign in
+        seen = len(gate.seen)
+        assert await d.dispatch("mcp__alpha__echo", {"text": "x"}) == (SIGN_IN, True)
+        assert len(gate.seen) == seen  # fails fast
+        await manager.close()
+
+
+@pytest.mark.parametrize("lifetime", [30, 0])
+async def test_six_concurrent_requests_with_a_short_lived_token_make_one_refresh(tmp_path, lifetime):
+    rows, provider = Rows(_record(expires_in=-10, lifetime=lifetime)), Provider()
+    provider.expires_in = lifetime
+    provider.hold = asyncio.Event()
+    manager = await _manager(tmp_path, rows, provider)
+    seen: list[str | None] = []
+    auth = manager._servers["alpha"].auth_for(None)
+    async with httpx.AsyncClient(transport=_mcp(seen), auth=auth) as client:
+        requests = [asyncio.create_task(client.post(ALPHA)) for _ in range(6)]
+        await _until(lambda: provider.refreshes == 1)
+        await asyncio.sleep(0.05)
+        provider.hold.set()
+        answers = await asyncio.gather(*requests)
+        assert [a.status_code for a in answers] == [200] * 6
+        assert (await client.post(ALPHA)).status_code == 200  # and the next one does not refresh either
+    assert provider.refreshes == 1 and seen == [f"Bearer {NEW}"] * 7
+    await manager.close()
+
+
+def test_the_refresh_margin_is_at_most_half_the_tokens_lifetime():
+    from nous.mcp_client.oauth import expiring
+
+    assert expiring(_record(expires_in=50)) and not expiring(_record(expires_in=70))  # no lifetime: 60 s
+    assert not expiring(_record(expires_in=20, lifetime=30)) and expiring(_record(expires_in=14, lifetime=30))
+    assert not expiring(_record(expires_in=None))
+
+
 # --- a 401 ------------------------------------------------------------------------------------------------------------
 
 
@@ -400,7 +528,11 @@ async def test_a_token_the_provider_reflects_in_an_error_reaches_no_log_record(t
     async with httpx.AsyncClient(transport=_mcp([]), auth=auth) as client:
         with pytest.raises(Exception):
             await client.post(ALPHA)
-    assert manager.needs_sign_in("alpha", rows.secrets["alpha"].id)
+    secret_id = rows.secrets["alpha"].id
+    if kind == "transport error":  # no answer: the provider is held, the sign-in stands
+        assert manager.provider_unreachable("alpha", secret_id) and not manager.needs_sign_in("alpha", secret_id)
+    else:  # an answer, and not a usable one: definitive
+        assert manager.needs_sign_in("alpha", secret_id) and not manager.provider_unreachable("alpha", secret_id)
     await manager.close()
     assert caplog.records  # the failure is logged, by its class
     for record in caplog.records:

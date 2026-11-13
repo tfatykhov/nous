@@ -48,8 +48,11 @@ per request (``_OAuthSource``), refreshed when the token expires within a minute
 and only when the stored token is still the one sent). Every refresh goes through ``_refresh``: a task this manager
 owns and callers only wait for, under a per-server lock that survives ``reload``, which reads the row again, requires
 the same row id, refreshes only if still stale, and stores the result with ``UPDATE ... WHERE id`` before anything
-uses it. A failed refresh marks the row as needing a new sign-in: calls then answer at once with a fixed sentence and
-contact neither the server nor the provider. Nothing here ever starts a login: sign-ins are the owner's routes'
+uses it (and hands it to the live server). A row refreshed less than 30 s ago is not refreshed again, and a 401 to its
+fresh token is a refusal (the second one needs a new sign-in). A refresh the provider refuses for good marks the row as
+needing a new sign-in: calls then answer at once with a fixed sentence and contact neither the server nor the
+provider. One that could not reach the provider holds refreshes for 30 s (the sign-in stands; calls that need a refresh
+say the provider could not be reached). Nothing here ever starts a login: sign-ins are the owner's routes'
 (``oauth.OAuthFlows``, held in ``flows``).
 """
 
@@ -60,6 +63,7 @@ import contextlib
 import functools
 import json
 import logging
+import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Iterator, Mapping
 from contextlib import AbstractAsyncContextManager
@@ -122,6 +126,13 @@ OFF_LOOP_RESULT_CHARS = 64_000
 Connector = Callable[..., AbstractAsyncContextManager[Any]]
 
 SIGN_IN_NEEDED = "the sign-in has expired: the owner must sign in again"
+PROVIDER_UNREACHABLE = "the sign-in provider could not be reached: try again in a moment"
+# PR 2d: a refresh within this many seconds is not repeated, and a 401 to its token is a refusal, not a reason to
+# refresh again (the second such refusal makes the server need a new sign-in).
+REFRESH_WINDOW_SECONDS = 30
+# PR 2d: after the provider could not be reached (no answer, a timeout, a 429, a 5xx), no refresh is asked this long.
+PROVIDER_HOLD_SECONDS = 30
+_UNREACHABLE = -1  # what _send reports for a call that failed because the sign-in provider could not be reached
 PROBE_REFUSED = "the server refused the credentials"
 PROBE_ASKS = "the server asks for credentials"
 LISTING_REPEATS = "the server's tool list repeats the credentials it was sent"
@@ -181,45 +192,61 @@ class SignInNeeded(Exception):
     request is not sent."""
 
 
+class ProviderUnreachable(Exception):
+    """PR 2d: a refresh was needed and the sign-in provider could not be reached now (or was, less than
+    ``PROVIDER_HOLD_SECONDS`` ago): the request is not sent, and the stored sign-in stays as it was."""
+
+
 class _OAuthSource:
     """PR 2d: a server's OAuth credential. It holds the token record in memory (the one its server was built with,
-    then each refresh's) and refreshes it through the manager's one entry point (``refresh``: the record to use now, or
-    None when there is none). ``dead``: whether the owner must sign in again (a refresh failed), so nothing is sent."""
+    then each refresh's, its own or one a route made) and refreshes it through the manager's one entry point
+    (``refresh``: the record to use now, or None when there is none; it raises ``ProviderUnreachable``). ``dead``:
+    whether the owner must sign in again, so nothing is sent. ``refused``: a 401 to a token the provider gave moments
+    ago (the manager counts it)."""
 
     def __init__(
         self,
         record: OAuthRecord,
         refresh: Callable[[str | None], Awaitable[OAuthRecord | None]],
         dead: Callable[[], bool],
+        refused: Callable[[], None],
     ) -> None:
         self.record = record
         self._previous: OAuthRecord | None = None
         self._refresh = refresh
         self._dead = dead
+        self._refused = refused
 
-    def _adopt(self, record: OAuthRecord) -> None:
+    def adopt(self, record: OAuthRecord) -> None:
+        """Use ``record`` from now on (the one before stays known to the result scrub)."""
         if record.access_token != self.record.access_token:
             self._previous, self.record = self.record, record
 
     async def before(self) -> str:
-        """The access token to send, refreshed first when it expires within a minute. Raises ``SignInNeeded``."""
+        """The access token to send, refreshed first when it is about to expire. Raises ``SignInNeeded`` or
+        ``ProviderUnreachable``."""
         if self._dead():
             raise SignInNeeded()
         if expiring(self.record):
             fresh = await self._refresh(None)
             if fresh is None:
                 raise SignInNeeded()
-            self._adopt(fresh)
+            self.adopt(fresh)
         return self.record.access_token
 
     async def after_401(self, sent: str) -> str | None:
         """The token to retry with once after a 401 to a request that carried ``sent`` (refreshed only when the stored
-        token is still ``sent``), or None when there is none."""
+        token is still ``sent`` and was not refreshed moments ago), or None when there is none. Raises
+        ``ProviderUnreachable``."""
         fresh = await self._refresh(sent)
         if fresh is None:
             return None
-        self._adopt(fresh)
+        self.adopt(fresh)
         return fresh.access_token
+
+    def refused_again(self) -> None:
+        """The retry, with the token ``after_401`` gave, was answered 401 too."""
+        self._refused()
 
     def values(self) -> list[str]:
         """The secret values a result must not repeat: the current record's and the one before it."""
@@ -242,8 +269,9 @@ class _ServerAuth(httpx.Auth):
 
     With ``oauth`` (PR 2d) the header is ``Authorization: Bearer`` with the source's token, refreshed before a request
     when it is about to expire; a 401 to it is retried once with the token the source gives after it (a refresh only
-    when the stored token is the one that was sent), and only the last answer counts as a refusal. When the source
-    has no token to send (``SignInNeeded``), nothing is sent and ``on_sign_in`` ends the connection."""
+    when the stored token is the one that was sent), and only the last answer counts as a refusal (a 401 to the retry
+    is also told to the source). When the source has no token to send (``SignInNeeded``, ``ProviderUnreachable``),
+    nothing is sent and ``on_oauth_failure`` ends the connection, saying which."""
 
     def __init__(
         self,
@@ -252,14 +280,18 @@ class _ServerAuth(httpx.Auth):
         on_refused: Callable[[int], None] | None = None,
         *,
         oauth: _OAuthSource | None = None,
-        on_sign_in: Callable[[], None] | None = None,
+        on_oauth_failure: Callable[[str], None] | None = None,
     ) -> None:
         self._origin = _origin(httpx.URL(url))
         self._source = source
         self._on_refused = on_refused
         self._oauth = oauth
-        self._on_sign_in = on_sign_in
+        self._on_oauth_failure = on_oauth_failure
         self.refused: int | None = None
+
+    def _oauth_failed(self, exc: Exception) -> None:
+        if self._on_oauth_failure is not None:
+            self._on_oauth_failure("unreachable" if isinstance(exc, ProviderUnreachable) else "sign_in")
 
     async def async_auth_flow(self, request: httpx.Request) -> AsyncGenerator[httpx.Request, httpx.Response]:
         own = _origin(request.url) == self._origin
@@ -267,9 +299,8 @@ class _ServerAuth(httpx.Auth):
         if own and self._oauth is not None:
             try:
                 sent = await self._oauth.before()
-            except SignInNeeded:
-                if self._on_sign_in is not None:
-                    self._on_sign_in()
+            except (SignInNeeded, ProviderUnreachable) as exc:
+                self._oauth_failed(exc)
                 raise
             request.headers["Authorization"] = f"Bearer {sent}"
         elif own:
@@ -277,10 +308,16 @@ class _ServerAuth(httpx.Auth):
                 request.headers[name] = value
         response = yield request
         if sent is not None and self._oauth is not None and response.status_code == 401:
-            again = await self._oauth.after_401(sent)
+            try:
+                again = await self._oauth.after_401(sent)
+            except ProviderUnreachable as exc:
+                self._oauth_failed(exc)
+                raise
             if again is not None:
                 request.headers["Authorization"] = f"Bearer {again}"
                 response = yield request
+                if response.status_code == 401:
+                    self._oauth.refused_again()
         if request.method == "POST" and response.status_code in (401, 403):
             self.refused = response.status_code
             if self._on_refused is not None:
@@ -398,7 +435,9 @@ class _Connection:
     task: asyncio.Task[None] | None = None
     session: Any = None
     refused: int | None = None
-    sign_in: bool = False  # PR 2d: a request of it was not sent because the owner must sign in again
+    # PR 2d: a request of it was not sent because the owner must sign in again ("sign_in") or the sign-in provider
+    # could not be reached ("unreachable").
+    oauth_failure: str | None = None
 
     @property
     def closed(self) -> bool:
@@ -503,12 +542,12 @@ class _Server:
         """The credential, per request, of the session ``conn`` opens: its refusals are recorded on ``conn``, and a
         request not sent for want of a sign-in ends it."""
         on_refused = None if conn is None else functools.partial(self._refused, conn)
-        on_sign_in = None if conn is None else functools.partial(self._sign_in_needed, conn)
-        return _ServerAuth(self.url, self._source, on_refused=on_refused, oauth=self.oauth, on_sign_in=on_sign_in)
+        on_failure = None if conn is None else functools.partial(self._oauth_failed, conn)
+        return _ServerAuth(self.url, self._source, on_refused=on_refused, oauth=self.oauth, on_oauth_failure=on_failure)
 
     @staticmethod
-    def _sign_in_needed(conn: _Connection) -> None:
-        conn.sign_in = True
+    def _oauth_failed(conn: _Connection, kind: str) -> None:
+        conn.oauth_failure = kind
         conn.stop.set()
 
     def _refused(self, conn: _Connection, status: int) -> None:
@@ -607,6 +646,12 @@ class McpClientManager:
         self._refresh_locks: dict[str, asyncio.Lock] = {}
         self._refresh_tasks: set[asyncio.Task[OAuthRecord | None]] = set()
         self._needs_sign_in: dict[str, uuid.UUID] = {}
+        # By server name, for one credential row: when it was last refreshed (monotonic), how many 401s its fresh
+        # token got since, and until when no refresh is asked after the provider could not be reached.
+        self._refreshed: dict[str, tuple[uuid.UUID, float]] = {}
+        self._fresh_refusals: dict[str, tuple[uuid.UUID, int]] = {}
+        self._held: dict[str, tuple[uuid.UUID, float]] = {}
+        self._clock: Callable[[], float] = time.monotonic  # the windows' clock (a test sets its own)
 
     @property
     def oauth_http(self) -> HttpFactory:
@@ -799,6 +844,7 @@ class McpClientManager:
                             opened,
                             functools.partial(self._refresh, config.name, config.url, secret_id),
                             functools.partial(self.needs_sign_in, config.name, secret_id),
+                            functools.partial(self._refused_fresh, config.name, secret_id),
                         )
                     server = _Server(
                         config,
@@ -966,7 +1012,10 @@ class McpClientManager:
         if self.needs_sign_in(name, secret.id):
             return None, SIGN_IN_NEEDED
         if expiring(opened):
-            fresh = await self._refresh(name, url, secret.id, None)
+            try:
+                fresh = await self._refresh(name, url, secret.id, None)
+            except ProviderUnreachable:
+                return None, PROVIDER_UNREACHABLE
             if fresh is None:
                 return None, SIGN_IN_NEEDED
             opened = fresh
@@ -989,17 +1038,45 @@ class McpClientManager:
         return None if box is None else seal_oauth(box, aad_fields(self._agent_id, name, url, "oauth"), record)
 
     def needs_sign_in(self, name: str, secret_id: uuid.UUID | None) -> bool:
-        """Whether the OAuth credential row ``secret_id`` of the server ``name`` failed to refresh, so the owner must
-        sign in again (a new sign-in is a new row; a restart forgets it, and the next use tries one refresh)."""
+        """Whether the OAuth credential row ``secret_id`` of the server ``name`` can no longer be used, so the owner
+        must sign in again: the provider refused its refresh (400 or 401), it has no refresh token or the provider's
+        tokens were unusable, or the server refused two freshly refreshed tokens. A new sign-in is a new row; a restart
+        forgets it, and the next use tries one refresh."""
         return secret_id is not None and self._needs_sign_in.get(name) == secret_id
+
+    def provider_unreachable(self, name: str, secret_id: uuid.UUID | None) -> bool:
+        """Whether a refresh for the credential row ``secret_id`` of the server ``name`` found the provider unreachable
+        less than ``PROVIDER_HOLD_SECONDS`` ago (no refresh is asked until then; the sign-in itself still stands)."""
+        held = self._held.get(name)
+        return secret_id is not None and held is not None and held[0] == secret_id and self._clock() < held[1]
+
+    def _recently_refreshed(self, name: str, secret_id: uuid.UUID) -> bool:
+        last = self._refreshed.get(name)
+        return last is not None and last[0] == secret_id and self._clock() - last[1] < REFRESH_WINDOW_SECONDS
+
+    def _refused_fresh(self, name: str, secret_id: uuid.UUID) -> None:
+        """A 401 to the token of the credential row ``secret_id``: counted when the row was refreshed less than
+        ``REFRESH_WINDOW_SECONDS`` ago; the second such refusal makes the server need a new sign-in."""
+        if not self._recently_refreshed(name, secret_id):
+            return
+        previous = self._fresh_refusals.get(name)
+        count = previous[1] + 1 if previous is not None and previous[0] == secret_id else 1
+        self._fresh_refusals[name] = (secret_id, count)
+        if count >= 2:
+            self._needs_sign_in[name] = secret_id
+            logger.warning("MCP client: server %r refused freshly refreshed tokens twice: it needs a new sign-in", name)
 
     async def _refresh(self, name: str, url: str, secret_id: uuid.UUID, sent: str | None) -> OAuthRecord | None:
         """The OAuth record to use now for the server ``name``'s credential row ``secret_id`` bound to ``url``,
         refreshed when stale: about to expire (``sent`` None), or still the token ``sent`` with a request that was
-        answered 401. None when there is no record to use: the row was replaced, removed or cannot be opened, or the
-        refresh failed (then the owner must sign in again: ``needs_sign_in``). It runs in a task this manager owns,
-        which the caller only waits for (shielded): a caller that is cancelled leaves the refresh to finish and store
-        what the provider rotated."""
+        answered 401. A row refreshed less than ``REFRESH_WINDOW_SECONDS`` ago is not refreshed again: its record is
+        returned, and a 401 to its token is a refusal (counted by ``_refused_fresh``; None). None when there is no
+        record to use: the row was replaced, removed or cannot be opened, or the owner must sign in again
+        (``needs_sign_in``: a definitive refusal from the provider). Raises ``ProviderUnreachable`` when the provider
+        could not be reached, now or less than ``PROVIDER_HOLD_SECONDS`` ago (then no request is made). It runs in a
+        task this manager owns, which the caller only waits for (shielded): a caller that is cancelled leaves the
+        refresh to finish and store what the provider rotated. A successful refresh is handed to the live server of
+        that row too, so its next request and its result scrub use it."""
         task = asyncio.create_task(self._refresh_locked(name, url, secret_id, sent), name=f"mcp-client-refresh-{name}")
         self._refresh_tasks.add(task)
         task.add_done_callback(self._refresh_tasks.discard)
@@ -1021,12 +1098,29 @@ class McpClientManager:
                 box = self._keys.box()
                 if not isinstance(record, OAuthRecord) or box is None:
                     return None
-                stale = record.access_token == sent if sent is not None else expiring(record)
-                if not stale:
+                recent = self._recently_refreshed(name, secret_id)
+                if sent is not None:
+                    if record.access_token != sent:
+                        return record  # refreshed meanwhile: retry with the stored token
+                    if recent:  # a 401 to a token the provider gave moments ago: a refusal, not a reason to refresh
+                        self._refused_fresh(name, secret_id)
+                        return None
+                elif recent or not expiring(record):
                     return record
+                if self.provider_unreachable(name, secret_id):
+                    raise ProviderUnreachable()
                 try:
                     fresh = await refresh_tokens(record, self._oauth_http, self._allow)
                 except OAuthProblem as exc:
+                    if exc.transient:
+                        self._held[name] = (secret_id, self._clock() + PROVIDER_HOLD_SECONDS)
+                        logger.warning(
+                            "MCP client: server %r: the token refresh failed (%s): tried again in %d s",
+                            name,
+                            exc,
+                            PROVIDER_HOLD_SECONDS,
+                        )
+                        raise ProviderUnreachable() from None
                     self._needs_sign_in[name] = secret_id
                     logger.warning(
                         "MCP client: server %r: the token refresh failed (%s): it needs a new sign-in", name, exc
@@ -1036,7 +1130,15 @@ class McpClientManager:
                 if not await self._registry.update_secret_in_place(secret_id, sealed):
                     logger.warning("MCP client: server %r: its credential changed during a refresh; discarded", name)
                     return None
+                self._refreshed[name] = (secret_id, self._clock())
+                self._fresh_refusals.pop(name, None)
+                self._held.pop(name, None)
+                live = self._servers.get(name)
+                if live is not None and live.oauth is not None and live.secret_id == secret_id and live.url == url:
+                    live.oauth.adopt(fresh)  # a route's refresh too: the server sends it, and its scrub knows it
                 return fresh
+            except ProviderUnreachable:
+                raise
             except Exception as exc:  # the class only, never a traceback: its text can repeat what a server was sent
                 logger.warning("MCP client: server %r: the token refresh failed (%s)", name, error_class(exc))
                 return None
@@ -1099,6 +1201,12 @@ class McpClientManager:
         if refused is None or self._closed or server.closed:
             return result
         server_name = server.config.name
+        if refused == _UNREACHABLE:
+            logger.warning("MCP client: %s failed: the sign-in provider could not be reached", name)
+            return _error(
+                f'the sign-in provider of the MCP server "{server_name}" could not be reached: the call can be tried '
+                "again in a moment."
+            )
         if refused == 401:
             logger.warning("MCP client: %s failed: the server answered 401, or it needs a new sign-in", name)
             if server.oauth is not None:
@@ -1138,11 +1246,14 @@ class McpClientManager:
 
         def refusal() -> int | None:
             # The connection the call used, else the attempt it waited on (a failed connect, or one backing off). A
-            # request not sent for want of a sign-in counts as a 401.
+            # request not sent for want of a sign-in counts as a 401; one not sent because the sign-in provider could
+            # not be reached has its own answer.
             used = conn if conn is not None else server.current()
             if used is None:
                 return None
-            return 401 if used.sign_in else used.refused
+            if used.oauth_failure == "unreachable":
+                return _UNREACHABLE
+            return 401 if used.oauth_failure == "sign_in" else used.refused
 
         try:
             # One budget for the wait for a call slot, the connect and the call.

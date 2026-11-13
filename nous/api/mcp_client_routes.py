@@ -448,13 +448,16 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
     def auth_view(verdict: ServerVerdict, secret: StoredSecret | None, refused: int | None) -> dict[str, Any]:
         """The server's stored credential, without its values: the kind, the header names, when it was stored, and
         whether it works (``unavailable``: it cannot be opened here, ``reason`` says why; ``needs_sign_in``: its OAuth
-        tokens could not be refreshed; ``credentials_refused``: the server refused a request with a 401, or with a 403
+        tokens can no longer be refreshed; ``provider_unreachable``: a refresh found the sign-in provider unreachable
+        less than 30 s ago; ``credentials_refused``: the server refused a request with a 401, or with a 403
         while a credential is stored, ``reason`` saying so for a 403)."""
         reason = verdict.credentials
         if verdict.credentials is not None:
             status = "unavailable"
         elif secret is not None and manager.needs_sign_in(verdict.config.name, secret.id):
             status = "needs_sign_in"
+        elif secret is not None and manager.provider_unreachable(verdict.config.name, secret.id):
+            status = "provider_unreachable"
         elif refused is not None:
             status = "credentials_refused"
             reason = "the server answered 403 (forbidden)" if refused == 403 else None
@@ -760,7 +763,8 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         """POST /integrations/mcp/oauth/start ``{name, url, client_id?, client_secret?, scope?}``: discover the
         server's provider, register a client (or take the owner's ``client_id``, or reuse the stored client while the
         issuer is unchanged) and start a sign-in: ``{flow_id, authorization_url, authorization_host, token_host,
-        registration, scope, expires_in}``. For a stored server the URL must be its stored one. Nothing is stored."""
+        registration, scope, expires_in}``. For a stored server the URL must be its stored one. A sign-in pending for
+        the same name and URL is replaced (its client reused while the issuer is unchanged). Nothing is stored."""
         body = await _body(request)
         _only(body, {"name", "url", "client_id", "client_secret", "scope"})
         if redirect is None:
@@ -772,6 +776,10 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         if client_secret is not None and client_id is None:
             raise _Refused(400, "a client secret goes with a client id")
         current = await stored(config.name)
+        # "Start again": the pending sign-in is replaced and its client reused. Held now: a flow that ends meanwhile
+        # drops its client's secret.
+        pending = manager.flows.pending_for(config.name, config.url)
+        pending_client, pending_issuer = (pending.client, pending.discovery.issuer) if pending else (None, None)
         reuse = None
         if current is not None:
             if current[0].url != config.url:
@@ -785,6 +793,13 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             discovery = await discover(config.url, http, allow, scope)
             if client_id is not None:
                 client = owner_client(discovery, client_id, client_secret)
+            elif pending_client is not None and pending_issuer == discovery.issuer:
+                client = Client(
+                    pending_client.client_id,
+                    pending_client.client_secret,
+                    pending_client.token_auth_method,
+                    "reused",
+                )
             elif reuse is not None and reuse.issuer == discovery.issuer:
                 client = Client(reuse.client_id, reuse.client_secret, reuse.token_auth_method, "reused")
             else:
@@ -880,21 +895,22 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         )
 
     async def oauth_complete(request: Request) -> JSONResponse:
-        """POST /integrations/mcp/oauth/complete ``{flow_id, callback_url}`` or ``{flow_id, code, state}``: the paste
-        fallback, handled as the callback is. ``{status, reason, stored}``; 400 when the sign-in failed."""
+        """POST /integrations/mcp/oauth/complete ``{flow_id, callback_url}`` or ``{flow_id, code, state, iss?}``: the
+        paste fallback, handled as the callback is (``iss`` is checked as there). ``{status, reason, stored}``; 400 when
+        the sign-in failed."""
         body = await _body(request)
-        _only(body, {"flow_id", "callback_url", "code", "state"})
+        _only(body, {"flow_id", "callback_url", "code", "state", "iss"})
         if redirect is None:
             raise _Refused(409, OAUTH_UNAVAILABLE_TEXT)
         if "callback_url" in body:
-            if "code" in body or "state" in body:
-                raise _Refused(400, "give callback_url, or code and state")
+            if "code" in body or "state" in body or "iss" in body:
+                raise _Refused(400, "give callback_url, or code and state (and iss)")
             try:
                 params = callback_params(body["callback_url"], redirect)
             except OAuthProblem as exc:
                 raise oauth_problem(exc) from None
         else:
-            params = {key: body[key] for key in ("code", "state") if isinstance(body.get(key), str)}
+            params = {key: body[key] for key in ("code", "state", "iss") if isinstance(body.get(key), str)}
         flow = manager.flows.take(body.get("flow_id"), params.get("state"))
         if flow is None:
             raise _Refused(
@@ -902,7 +918,7 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
                 "that sign-in is not waiting for an answer, or the answer belongs to another sign-in: sign in again",
             )
         if not await finish(flow, params):
-            raise _Refused(400, flow.reason or "the sign-in did not complete", status="failed")
+            raise _Refused(400, flow.reason or "the sign-in did not complete")
         return JSONResponse(flow_view(flow))
 
     async def oauth_flow(request: Request) -> JSONResponse:

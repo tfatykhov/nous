@@ -10,8 +10,10 @@ by default ``transport.guarded_client`` with no ``auth``: public addresses only,
 cap of ``BODY_MAX_BYTES``), never through a session's client, which carries the server's credential. Every URL a server
 or a provider supplies passes ``config.url_problem`` and the address guard (``transport.check_url``) before it is
 fetched; the authorization endpoint, which the owner's browser opens and Nous never fetches, may carry a query string.
-Their hosts are added to the quiet-log set (``transport.quiet_host``). A failure is an ``OAuthProblem`` with a fixed
-sentence: never a provider's text, a URL, a code, a state, a verifier or a token.
+The HTTP client's request lines of these requests are dropped (``transport.quiet_requests``). A failure is an
+``OAuthProblem`` with a fixed sentence: never a provider's text, a URL, a code, a state, a verifier or a token; one that
+may pass (no answer, a timeout, a 429 or a 5xx, another status than 400 or 401 from the token endpoint) is
+``transient``.
 
 Login state lives in memory (``OAuthFlows``, owned by the manager): ten minutes, at most ``FLOWS_PENDING_MAX``
 pending, single-use state compared in constant time; a restart loses it and the owner presses Sign in again.
@@ -46,9 +48,9 @@ from mcp.types import LATEST_PROTOCOL_VERSION
 from pydantic import BaseModel, ValidationError
 
 from nous.mcp_client.bridge import error_class
-from nous.mcp_client.config import BlockedAddress, token_ok, url_problem
+from nous.mcp_client.config import BlockedAddress, token_ok, url_chars_problem, url_problem
 from nous.mcp_client.secrets import OAuthRecord
-from nous.mcp_client.transport import ResponseTooLarge, check_url, guarded_client, quiet_host
+from nous.mcp_client.transport import ResponseTooLarge, check_url, guarded_client, quiet_requests
 
 logger = logging.getLogger(__name__)
 
@@ -71,11 +73,13 @@ HttpFactory = Callable[[], httpx.AsyncClient]
 
 class OAuthProblem(Exception):
     """A sign-in or refresh step that failed. ``status`` is the route's answer; the message is a fixed sentence (a
-    host name at most)."""
+    host name at most). ``transient``: the provider could not be reached or did not answer for good (no answer, a
+    timeout, a 429 or a 5xx...), so trying again later may work; otherwise its answer was definitive."""
 
-    def __init__(self, status: int, message: str) -> None:
+    def __init__(self, status: int, message: str, *, transient: bool = False) -> None:
         super().__init__(message)
         self.status = status
+        self.transient = transient
 
 
 def redirect_uri(base: str) -> str | None:
@@ -102,8 +106,14 @@ def host_of(url: str) -> str:
 
 
 def expiring(record: OAuthRecord) -> bool:
-    """Whether the access token expires within ``REFRESH_MARGIN_SECONDS`` (never, without a lifetime)."""
-    return record.expires_at is not None and record.expires_at - time.time() <= REFRESH_MARGIN_SECONDS
+    """Whether the access token expires within its margin: ``REFRESH_MARGIN_SECONDS``, or half its lifetime when that
+    is shorter (a token that lives a minute is not stale the moment it arrives). Never, without an expiry."""
+    if record.expires_at is None:
+        return False
+    margin: float = REFRESH_MARGIN_SECONDS
+    if record.lifetime is not None:
+        margin = min(margin, record.lifetime / 2)
+    return record.expires_at - time.time() <= margin
 
 
 @dataclass(frozen=True)
@@ -151,11 +161,10 @@ async def _request(
     except BlockedAddress as exc:
         raise OAuthProblem(502, f"{what}: the address guard refused it ({exc})") from None
     except Exception as exc:  # a name that does not resolve
-        raise OAuthProblem(502, f"{what} could not be reached ({error_class(exc)})") from None
-    quiet_host(url)
+        raise OAuthProblem(502, f"{what} could not be reached ({error_class(exc)})", transient=True) from None
     try:
-        async with asyncio.timeout(HTTP_SECONDS):
-            async with client.stream(method, url, **kwargs) as response:
+        with quiet_requests():
+            async with asyncio.timeout(HTTP_SECONDS), client.stream(method, url, **kwargs) as response:
                 body = b""
                 if read:
                     chunks: list[bytes] = []
@@ -167,9 +176,12 @@ async def _request(
                         chunks.append(chunk)
                     body = b"".join(chunks)
                 return response.status_code, body, response.headers
+    except ResponseTooLarge:  # an answer, and not a usable one
+        logger.warning("MCP client: OAuth: %s answered past %d bytes", what, BODY_MAX_BYTES)
+        raise OAuthProblem(502, f"{what} answered past {BODY_MAX_BYTES} bytes") from None
     except Exception as exc:  # the class only: an HTTP error's text carries the URL
         logger.warning("MCP client: OAuth: %s failed (%s)", what, error_class(exc))
-        raise OAuthProblem(502, f"{what} could not be reached ({error_class(exc)})") from None
+        raise OAuthProblem(502, f"{what} could not be reached ({error_class(exc)})", transient=True) from None
 
 
 async def _metadata(
@@ -200,6 +212,9 @@ def _endpoint(value: Any, what: str, *, query_ok: bool = False) -> str:
     query string (the owner's browser opens it, Nous never fetches it)."""
     if not isinstance(value, str):
         raise OAuthProblem(502, f"the provider's {what} is missing")
+    chars = url_chars_problem(value)  # the whole value, its query included
+    if chars is not None:
+        raise OAuthProblem(502, f"the provider's {what} cannot be used: {chars}")
     try:
         checked = urlsplit(value)._replace(query="").geturl() if query_ok else value
     except ValueError:
@@ -326,9 +341,6 @@ async def discover(url: str, http: HttpFactory, allow: frozenset[str], scope: st
                 raise OAuthProblem(502, f"the provider's {what}: the address guard refused it ({exc})") from None
             except Exception as exc:
                 raise OAuthProblem(502, f"the provider's {what} could not be resolved ({error_class(exc)})") from None
-    for endpoint in (authorization_endpoint, token_endpoint, registration_endpoint):
-        if endpoint is not None:
-            quiet_host(endpoint)
     hint = extract_scope_from_www_auth(answer)
     listed = prm_scopes if prm_scopes is not None else metadata.scopes_supported
     chosen = scope or _scope(hint) or (_scope(" ".join(listed)) if listed else None)
@@ -451,6 +463,8 @@ class Flow:
 class OAuthFlows:
     """The sign-ins in progress, in memory: each lives ``FLOW_SECONDS`` (a completed one gets a fresh
     ``FLOW_SECONDS``: the owner still has to check and approve tools), at most ``FLOWS_PENDING_MAX`` pending at once.
+    A new sign-in for a name and address replaces the one pending for them. A finished, failed or expired flow keeps
+    no state, verifier or client secret (a completed one keeps its record until a create consumes it, or it expires).
     A flow is forgotten ``FLOW_SECONDS`` after it expired."""
 
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
@@ -459,6 +473,9 @@ class OAuthFlows:
 
     def start(self, server: str, url: str, discovery: Discovery, client: Client, redirect: str) -> Flow:
         self._purge()
+        replaced = self.pending_for(server, url)
+        if replaced is not None:
+            self.fail(replaced, "a newer sign-in for this server replaced it")
         if sum(1 for flow in self._flows.values() if self.status(flow) == "pending") >= FLOWS_PENDING_MAX:
             raise OAuthProblem(429, f"{FLOWS_PENDING_MAX} sign-ins are already in progress: finish one or wait")
         flow = Flow(
@@ -474,6 +491,13 @@ class OAuthFlows:
         )
         self._flows[flow.flow_id] = flow
         return flow
+
+    def pending_for(self, server: str, url: str) -> Flow | None:
+        """The sign-in pending for ``server`` at ``url``, if there is one (a new one replaces it)."""
+        return next(
+            (f for f in self._flows.values() if f.server == server and f.url == url and self.status(f) == "pending"),
+            None,
+        )
 
     def status(self, flow: Flow) -> str:
         if flow.status in ("pending", "complete") and self._clock() > flow.expires_at:
@@ -492,14 +516,14 @@ class OAuthFlows:
         given = state.encode("utf-8")
         found = None
         for flow in self._flows.values():
-            if hmac.compare_digest(flow.state.encode("ascii"), given):
+            if flow.state and hmac.compare_digest(flow.state.encode("ascii"), given):
                 found = flow
         return self._use(found)
 
     def take(self, flow_id: Any, state: Any) -> Flow | None:
         """The pending flow ``flow_id`` when ``state`` is its state (constant time), marked used; else None."""
         flow = self.get(flow_id)
-        if flow is None or not isinstance(state, str):
+        if flow is None or not isinstance(state, str) or not flow.state:
             return None
         return self._use(flow if hmac.compare_digest(flow.state.encode("ascii"), state.encode("utf-8")) else None)
 
@@ -511,10 +535,12 @@ class OAuthFlows:
 
     def complete(self, flow: Flow, record: OAuthRecord | None) -> None:
         """The sign-in finished: ``record`` is held until a create consumes it (None when it was stored at once)."""
+        _forget(flow)
         flow.status, flow.record, flow.reason = "complete", record, None
         flow.expires_at = self._clock() + FLOW_SECONDS
 
     def fail(self, flow: Flow, reason: str) -> None:
+        _forget(flow)
         flow.status, flow.record, flow.reason = "failed", None, reason
 
     def completed_for(self, flow_id: Any, server: str, url: str) -> Flow:
@@ -534,6 +560,18 @@ class OAuthFlows:
         now = self._clock()
         for flow_id in [key for key, flow in self._flows.items() if now > flow.expires_at + FLOW_SECONDS]:
             del self._flows[flow_id]
+        for flow in self._flows.values():
+            if now > flow.expires_at:  # expired: nothing secret is kept for it any more
+                _forget(flow)
+                flow.record = None
+
+
+def _forget(flow: Flow) -> None:
+    """Drop what a flow no longer needs and must not keep: its state, its verifier and its client's secret."""
+    flow.state = ""
+    flow.verifier = ""
+    if flow.client.client_secret is not None:
+        flow.client = replace(flow.client, client_secret=None)
 
 
 def callback_params(callback_url: Any, redirect: str) -> dict[str, str]:
@@ -589,8 +627,8 @@ async def _token(
             data["client_secret"] = client_secret
     async with http() as client:
         status, body, _headers = await _request(client, allow, "POST", token_endpoint, what, data=data, headers=headers)
-    if status != 200:
-        raise OAuthProblem(502, f"the provider refused {what} (HTTP {status})")
+    if status != 200:  # 400 and 401 are the provider's answer (invalid_grant...); anything else may pass
+        raise OAuthProblem(502, f"the provider refused {what} (HTTP {status})", transient=status not in (400, 401))
     try:
         token = OAuthToken.model_validate_json(body)  # token_type must be bearer (any case)
     except ValidationError:
@@ -637,6 +675,7 @@ async def exchange_code(flow: Flow, params: Mapping[str, Any], http: HttpFactory
         access_token=token.access_token,
         refresh_token=token.refresh_token,
         expires_at=_expires_at(token),
+        lifetime=token.expires_in,
     )
 
 
@@ -663,5 +702,6 @@ async def refresh_tokens(record: OAuthRecord, http: HttpFactory, allow: frozense
         access_token=token.access_token,
         refresh_token=token.refresh_token or record.refresh_token,
         expires_at=_expires_at(token),
+        lifetime=token.expires_in,
         scope=token.scope or record.scope,
     )

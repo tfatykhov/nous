@@ -356,5 +356,8 @@ describe('OAuth sign-in (F112 PR 2d)', () => {
     expect(keyLine(needs.auth)).toBe('Needs sign-in: sign in again.');
     expect(serverStatus(server({ auth: auth({ kind: 'oauth', status: 'credentials_refused' }) })).word).toBe('the server refused the sign-in');
     expect(keyLine(auth({ kind: 'oauth' }))).toBe('Signed in with OAuth.');
+    const held = server({ auth: auth({ kind: 'oauth', status: 'provider_unreachable' }) });
+    expect(serverStatus(held)).toEqual({ word: 'sign-in provider unreachable', detail: 'Nous tries again within a minute', tone: 'warn' });
+    expect(keyLine(held.auth)).toBe('Signed in with OAuth.'); // the sign-in still stands
   });
 });

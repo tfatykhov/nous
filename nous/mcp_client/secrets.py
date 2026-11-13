@@ -190,7 +190,8 @@ class OAuthRecord:
     """The plaintext of an ``oauth`` row (PR 2d): the provider's issuer and token endpoint, the client Nous uses there
     and how it authenticates at the token endpoint (``none``, ``client_secret_post`` or ``client_secret_basic``), the
     resource and scope the tokens are for, and the tokens. ``expires_at``: unix seconds, None when the provider gave no
-    lifetime. The secret fields stay out of ``repr``."""
+    lifetime; ``lifetime``: the seconds the provider gave it (the refresh margin is at most half of it). The secret
+    fields stay out of ``repr``."""
 
     issuer: str
     token_endpoint: str
@@ -202,6 +203,7 @@ class OAuthRecord:
     access_token: str = field(repr=False)
     refresh_token: str | None = field(repr=False)
     expires_at: int | None
+    lifetime: int | None = None
 
     def values(self) -> list[str]:
         """The record's secret values: what a result or a listing must not repeat."""
@@ -225,11 +227,13 @@ def _oauth_of(plaintext: bytes) -> OAuthRecord:
     names = {f.name for f in dataclass_fields(OAuthRecord)}
     if not isinstance(record, dict) or record.pop("v", None) != 1 or set(record) != names:
         raise SecretUnavailable()
-    expires_at = record["expires_at"]
     if (
         not all(isinstance(record[key], str) for key in _OAUTH_TEXT)
         or not all(record[key] is None or isinstance(record[key], str) for key in _OAUTH_OPTIONAL_TEXT)
-        or not (expires_at is None or (isinstance(expires_at, int) and not isinstance(expires_at, bool)))
+        or not all(
+            record[key] is None or (isinstance(record[key], int) and not isinstance(record[key], bool))
+            for key in ("expires_at", "lifetime")
+        )
     ):
         raise SecretUnavailable()
     return OAuthRecord(**record)

@@ -90,6 +90,8 @@ class World:
 
     def __init__(self) -> None:
         self.www_auth = True  # the 401 names its resource metadata
+        self.www_auth_url = "https://alpha.example.com/.well-known/oauth-protected-resource/mcp"
+        self.authorization_servers = [ISSUER]
         self.prm = True  # resource metadata is published
         self.prm_status = 200
         self.mcp_status = 401
@@ -126,17 +128,14 @@ class World:
         if request.method == "POST" and where == ALPHA:
             headers = {}
             if self.www_auth:
-                headers["WWW-Authenticate"] = (
-                    'Bearer resource_metadata="https://alpha.example.com/.well-known/oauth-protected-resource/mcp", '
-                    'scope="read"'
-                )
+                headers["WWW-Authenticate"] = f'Bearer resource_metadata="{self.www_auth_url}", scope="read"'
             return httpx.Response(self.mcp_status, headers=headers)
         if where == "https://alpha.example.com/.well-known/oauth-protected-resource/mcp":
             if not self.prm:
                 return httpx.Response(404)
             if self.prm_status != 200:
                 return httpx.Response(self.prm_status, headers={"Location": "https://elsewhere.example.com/"})
-            return httpx.Response(200, json={"resource": ALPHA, "authorization_servers": [ISSUER]})
+            return httpx.Response(200, json={"resource": ALPHA, "authorization_servers": self.authorization_servers})
         if where.endswith("/.well-known/oauth-authorization-server"):
             if url.host == urlsplit(self.as_meta["issuer"]).hostname or url.host == "auth.example.com":
                 return httpx.Response(200, json=self.as_meta)
@@ -219,6 +218,7 @@ class Remotes:
         self.world = world
         self.tools = [Tool(name="search", description="searches", inputSchema=OBJ)]
         self.sent: list[str | None] = []
+        self.result_text = "found"
 
     @asynccontextmanager
     async def connect(self, url: str, allow: frozenset[str], *, auth: Any = None):
@@ -243,7 +243,7 @@ class _Session:
         return list(self.remotes.tools)
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
-        return CallToolResult(content=[TextContent(type="text", text="found")])
+        return CallToolResult(content=[TextContent(type="text", text=self.remotes.result_text)])
 
 
 class FakeBus:
@@ -442,6 +442,30 @@ def _not_401(w: World) -> None:
     w.mcp_status = 403
 
 
+def _backslash_authorize(w: World) -> None:
+    w.as_meta["authorization_endpoint"] = "https://auth.example.com\\evil.example.com/authorize"
+
+
+def _space_in_authorize_query(w: World) -> None:
+    w.as_meta["authorization_endpoint"] = "https://auth.example.com/authorize?x=a b"
+
+
+def _backslash_token(w: World) -> None:
+    w.as_meta["token_endpoint"] = "https://auth.example.com\\token"
+
+
+def _private_resource_metadata(w: World) -> None:
+    w.www_auth_url = "https://meta.private.example.com/prm"
+
+
+def _http_resource_metadata(w: World) -> None:
+    w.www_auth_url = "http://alpha.example.com/.well-known/oauth-protected-resource/mcp"
+
+
+def _private_authorization_server(w: World) -> None:
+    w.authorization_servers = ["https://as.private.example.com"]
+
+
 @pytest.mark.parametrize(
     "spoil,status,words",
     [
@@ -454,6 +478,12 @@ def _not_401(w: World) -> None:
         (_metadata_unavailable, 502, "answered HTTP 503"),
         (_no_sign_in, 409, "does not ask for sign-in"),
         (_not_401, 502, "answered HTTP 403"),
+        (_backslash_authorize, 502, "whitespace, backslashes or control characters"),
+        (_space_in_authorize_query, 502, "whitespace, backslashes or control characters"),
+        (_backslash_token, 502, "whitespace, backslashes or control characters"),
+        (_private_resource_metadata, 502, "address guard refused"),
+        (_http_resource_metadata, 502, "only https URLs are accepted"),
+        (_private_authorization_server, 502, "address guard refused"),
     ],
 )
 async def test_discovery_refuses(make_env, spoil, status, words):
@@ -613,7 +643,7 @@ async def test_the_pasted_return_address_completes_the_sign_in(make_env):
 
 async def test_a_pasted_code_and_state_complete_the_sign_in_and_another_flows_state_does_not(make_env):
     env = await make_env()
-    one, two = (await _start(env)).json(), (await _start(env)).json()
+    one, two = (await _start(env)).json(), (await _start(env, "beta")).json()
     params = env.world.authorize(one["authorization_url"])
     crossed = await _req(
         env,
@@ -709,9 +739,25 @@ async def test_oauth_is_unavailable_without_an_https_public_base_address(make_en
 
 async def test_at_most_eight_sign_ins_wait_at_once(make_env):
     env = await make_env()
-    for _ in range(8):
-        assert (await _start(env)).status_code == 200
-    assert (await _start(env)).status_code == 429
+    for n in range(8):
+        assert (await _start(env, f"s{n}")).status_code == 200
+    assert (await _start(env, "s8")).status_code == 429
+    assert (await _start(env, "s0")).status_code == 200  # a new sign-in for a waiting name replaces its own
+
+
+async def test_start_again_replaces_the_pending_sign_in_and_reuses_its_client(make_env):
+    env = await make_env()
+    first = (await _start(env)).json()
+    for _ in range(9):  # never locks sign-in, never registers again
+        again = await _start(env)
+        assert again.status_code == 200 and again.json()["registration"] == "reused"
+    assert sum(1 for _m, where in env.world.hits if where.endswith("/register")) == 1
+    replaced = (await _req(env, "GET", f"/integrations/mcp/oauth/flows/{first['flow_id']}")).json()
+    assert replaced == {"status": "failed", "reason": "a newer sign-in for this server replaced it", "stored": False}
+    stale = env.world.authorize(first["authorization_url"])
+    assert (await _callback(env, stale)).content == NOT_SIGNED_IN_PAGE  # the replaced one's answer is refused
+    latest = again.json()
+    assert (await _callback(env, env.world.authorize(latest["authorization_url"]))).content == SIGNED_IN_PAGE
 
 
 # --- nothing secret anywhere ------------------------------------------------------------------------------------------
@@ -797,6 +843,7 @@ async def test_a_refresh_rotates_the_stored_tokens_in_place_and_the_refresh_rout
     assert not await env.registry.update_secret_in_place(uuid.uuid4(), sealed)  # another id: nothing written
 
     # A stored record about to expire: /refresh refreshes it first, through the same entry point, then probes with it.
+    env.manager._refreshed.clear()  # 30 s later: a row refreshed moments ago is not refreshed again
     expired = dataclasses.replace(fresh, expires_at=int(time.time()) - 10)
     assert await env.registry.update_secret_in_place(after.id, env.manager.seal_oauth_record("alpha", ALPHA, expired))
     refreshed = await _req(env, "POST", "/integrations/mcp/servers/alpha/refresh")
@@ -808,6 +855,142 @@ async def test_a_refresh_rotates_the_stored_tokens_in_place_and_the_refresh_rout
     blocked = await _req(env, "POST", "/integrations/mcp/servers/alpha/refresh")
     assert blocked.status_code == 409 and "sign in again" in blocked.json()["error"]
     assert env.world.refreshes == 2
+
+
+async def test_a_route_refresh_reaches_the_live_server_and_its_result_scrub(make_env):
+    env = await make_env()
+    assert (await _add(env, await _signed_in(env))).status_code == 201
+    secret = (await env.registry.list_secrets())["alpha"]
+    held = env.manager.stored_oauth("alpha", ALPHA, secret)  # the live server holds this, valid for an hour
+    expired = dataclasses.replace(held, expires_at=int(time.time()) - 10)
+    assert await env.registry.update_secret_in_place(secret.id, env.manager.seal_oauth_record("alpha", ALPHA, expired))
+    assert (await _req(env, "POST", "/integrations/mcp/servers/alpha/refresh")).status_code == 200
+    newest = env.manager.stored_oauth("alpha", ALPHA, (await env.registry.list_secrets())["alpha"])
+    assert newest.access_token != held.access_token and env.world.refreshes == 1
+    env.remotes.result_text = f"echo {newest.access_token} and {held.access_token}"
+    text, is_error = await env.dispatcher.dispatch("mcp__alpha__search", {"q": "x"})
+    assert not is_error and text.endswith("echo [withheld] and [withheld]")
+    assert env.remotes.sent[-1] == f"Bearer {newest.access_token}"  # the live server sends the route's refresh
+
+
+async def test_a_refresh_route_while_the_provider_is_unreachable_says_so(make_env):
+    env = await make_env()
+    assert (await _add(env, await _signed_in(env))).status_code == 201
+    secret = (await env.registry.list_secrets())["alpha"]
+    expired = dataclasses.replace(env.manager.stored_oauth("alpha", ALPHA, secret), expires_at=int(time.time()) - 10)
+    assert await env.registry.update_secret_in_place(secret.id, env.manager.seal_oauth_record("alpha", ALPHA, expired))
+    env.world.as_meta["token_endpoint"] = "unused"  # not read again: the stored token endpoint is used
+    env.world.mcp_status = 401
+
+    def down(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503)
+
+    env.manager._oauth_http = lambda: httpx.AsyncClient(transport=httpx.MockTransport(down))
+    refused = await _req(env, "POST", "/integrations/mcp/servers/alpha/refresh")
+    assert refused.status_code == 409 and "could not be reached" in refused.json()["error"]
+    listing = (await _req(env, "GET", "/integrations/mcp/servers")).json()
+    assert listing["servers"][0]["auth"]["status"] == "provider_unreachable"
+
+
+# --- the paste fallback with iss, a finished flow keeps nothing secret ----------------------------------------------
+
+
+async def test_the_pasted_code_state_and_iss_complete_a_sign_in_whose_provider_sends_iss(make_env):
+    env = await make_env()
+    env.world.as_meta["authorization_response_iss_parameter_supported"] = True
+    without, with_iss = (await _start(env)).json(), (await _start(env, "beta")).json()
+    params = env.world.authorize(without["authorization_url"])
+    failed = await _req(
+        env,
+        "POST",
+        "/integrations/mcp/oauth/complete",
+        {"flow_id": without["flow_id"], "code": params["code"], "state": params["state"]},
+    )
+    assert failed.status_code == 400 and failed.json()["error"] == "the provider's answer does not name its issuer"
+    params = env.world.authorize(with_iss["authorization_url"])
+    done = await _req(env, "POST", "/integrations/mcp/oauth/complete", {"flow_id": with_iss["flow_id"], **params})
+    assert done.status_code == 200 and done.json()["status"] == "complete"
+
+
+async def test_a_finished_failed_or_expired_flow_keeps_no_state_verifier_or_client_secret(make_env, monkeypatch):
+    env = await make_env()
+    owner = {"client_id": "test-client-owner-0001", "client_secret": CLIENT_SECRET}
+    done, failed, late = [(await _start(env, name, **owner)).json() for name in ("alpha", "beta", "gamma")]
+    assert (await _callback(env, env.world.authorize(done["authorization_url"]))).content == SIGNED_IN_PAGE
+    params = env.world.authorize(failed["authorization_url"], iss="https://other.example.com")
+    assert (await _callback(env, params)).content == NOT_SIGNED_IN_PAGE
+    flows = {key: env.manager.flows.get(answer["flow_id"]) for key, answer in (("done", done), ("failed", failed))}
+    for flow in flows.values():
+        assert (flow.state, flow.verifier, flow.client.client_secret) == ("", "", None)
+    assert flows["done"].record is not None  # held for the create, and only that
+    assert flows["failed"].record is None
+    pending = env.manager.flows.get(late["flow_id"])
+    assert pending.state and pending.client.client_secret == CLIENT_SECRET
+    now = time.monotonic()
+    monkeypatch.setattr(env.manager.flows, "_clock", lambda: now + 601)
+    for answer in (done, late):  # expired: nothing secret is kept, the held record included
+        flow = env.manager.flows.get(answer["flow_id"])
+        assert (flow.state, flow.verifier, flow.client.client_secret, flow.record) == ("", "", None, None)
+
+
+# --- every OAuth route behind the proxy secret, every POST JSON only ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("POST", "/integrations/mcp/oauth/start"),
+        ("POST", "/integrations/mcp/oauth/complete"),
+        ("GET", "/integrations/mcp/oauth/flows/some-flow"),
+        ("POST", "/integrations/mcp/servers/alpha/sign-out"),
+        ("GET", "/integrations/mcp/oauth/callback"),
+    ],
+)
+async def test_every_oauth_route_needs_the_proxy_secret_and_every_post_is_json_only(make_env, method, path):
+    env = await make_env()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=env.app), base_url="http://nous") as client:
+        missing = await client.request(method, path, content="{}", headers={"content-type": "application/json"})
+        wrong = await client.request(
+            method, path, content="{}", headers={PROXY_SECRET_HEADER: "wrong", "content-type": "application/json"}
+        )
+        plain = await client.request(
+            method, path, content="{}", headers={PROXY_SECRET_HEADER: PROXY, "content-type": "text/plain"}
+        )
+    assert missing.status_code == wrong.status_code == 403
+    if method == "POST":
+        assert plain.status_code == 415
+    assert env.world.hits == []  # nothing reached the provider
+
+
+# --- the OAuth requests are not written to the request log ----------------------------------------------------------
+
+
+async def test_the_oauth_requests_log_no_request_line_and_add_no_host_to_the_quiet_set(make_env, caplog):
+    caplog.set_level(logging.INFO, logger="httpx")
+    env = await make_env()
+    quiet = set(transport._QUIET_HOSTS)
+    assert (await _start(env)).status_code == 200
+    assert transport._QUIET_HOSTS == quiet  # nothing from the provider's documents
+    lines = [r.getMessage() for r in caplog.records if r.name == "httpx"]
+    assert not [line for line in lines if "example.com" in line], lines
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200))) as client:
+        await client.get("https://elsewhere.example.org/")  # outside an OAuth request: logged as usual
+    assert any("elsewhere.example.org" in r.getMessage() for r in caplog.records if r.name == "httpx")
+
+
+def test_a_url_with_whitespace_a_backslash_or_a_control_character_is_refused():
+    from nous.mcp_client.config import url_problem
+
+    for url in (
+        "https://a.example.com\\b/mcp",
+        "https://a.example.com/m cp",
+        "https://a.example.com/mcp\t",
+        "https://a.example.com/\x00mcp",
+        "https://a.example.com/mcp\x7f",
+        "https://a.example.com/\u2028",
+    ):
+        assert url_problem(url) == "the URL may not carry whitespace, backslashes or control characters", url
+    assert url_problem("https://a.example.com/mcp") is None
 
 
 # --- the OAuth client -------------------------------------------------------------------------------------------------

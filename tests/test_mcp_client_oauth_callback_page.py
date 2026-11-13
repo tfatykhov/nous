@@ -216,15 +216,17 @@ async def test_a_known_and_an_unknown_state_get_the_same_status_and_body_when_th
     unknown = await _get(env, _enc([("error", "access_denied"), ("state", "test-state-unknown")]))
     started = (await base._start(env)).json()
     flow = env.manager.flows.get(started["flow_id"])
-    known = await _get(env, _enc([("error", "access_denied"), ("state", flow.state)]))
-    again = await _get(env, _enc([("error", "access_denied"), ("state", flow.state)]))  # the state is single use
+    state = flow.state  # read before the answer: a failed flow keeps no state
+    known = await _get(env, _enc([("error", "access_denied"), ("state", state)]))
+    again = await _get(env, _enc([("error", "access_denied"), ("state", state)]))  # the state is single use
     assert env.manager.flows.status(flow) == "failed"  # the known state was taken: the flow did end
+    assert flow.state == ""
     for response in (unknown, known, again):
         assert response.status_code == 400
         assert response.content == NOT_SIGNED_IN_PAGE
     assert unknown.headers.multi_items() == known.headers.multi_items() == again.headers.multi_items()
-    for response, query in ((known, flow.state),):
-        assert flow.state.encode() not in response.content and query not in str(response.headers)
+    for response, query in ((known, state),):
+        assert state.encode() not in response.content and query not in str(response.headers)
 
 
 async def test_a_known_state_with_a_code_the_provider_refuses_is_the_same_page_as_an_unknown_state(make_env):

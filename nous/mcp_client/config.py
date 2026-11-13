@@ -23,6 +23,20 @@ SERVER_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,23}")
 Permission = Literal["allow", "deny", "ask"]
 
 
+# Whitespace, a backslash or a control character anywhere in a URL: parsers disagree on them (a browser reads a
+# backslash as a slash), so the host one shows could differ from the host one opens.
+_UNSAFE_URL_CHARS = re.compile(r"[\s\\\x00-\x1f\x7f]")
+
+
+def url_chars_problem(url: str) -> str | None:
+    """Why ``url``'s characters cannot be used (whitespace, a backslash or a control character anywhere in it), or
+    None. Part of ``url_problem``; also applied whole to a provider's authorization endpoint, whose query
+    ``url_problem`` does not see."""
+    if _UNSAFE_URL_CHARS.search(url):
+        return "the URL may not carry whitespace, backslashes or control characters"
+    return None
+
+
 class BlockedAddress(Exception):
     """A URL or host the client's address guard refuses (raised by ``transport``; defined here, with no SDK import,
     so the manager can tell a refusal from a failed connection)."""
@@ -32,8 +46,12 @@ def url_problem(url: str) -> str | None:
     """Why ``url`` cannot be an MCP server's address, or None when it can.
 
     https only, with a host, and with no user, password, query string or fragment: those are where a credential
-    would sit, and the HTTP client logs every request URL at INFO. The answer never repeats the URL.
+    would sit, and the HTTP client logs every request URL at INFO. No whitespace, backslash or control character
+    anywhere (``url_chars_problem``). The answer never repeats the URL.
     """
+    chars = url_chars_problem(url) if isinstance(url, str) else None
+    if chars is not None:
+        return chars
     try:
         parts = urlsplit(url)
         _ = parts.port  # raises ValueError for a port that is not a number in range

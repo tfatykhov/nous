@@ -20,12 +20,13 @@ export interface McpTool {
 
 /** F112 PR 2c: a server's stored credential, never its values. `status`: `unavailable` when it cannot be opened on
  * this host (`reason` says why), `credentials_refused` when the server's last answer was a 401, `needs_sign_in` (PR 2d)
- * when its OAuth tokens could not be refreshed. */
+ * when its OAuth tokens can no longer be refreshed, `provider_unreachable` when a refresh could not reach the sign-in
+ * provider less than 30 s ago (the sign-in still stands). */
 export interface McpAuth {
   kind: 'none' | 'headers' | 'oauth';
   header_names: string[];
   updated_at: string | null;
-  status: 'ok' | 'credentials_refused' | 'unavailable' | 'needs_sign_in';
+  status: 'ok' | 'credentials_refused' | 'unavailable' | 'needs_sign_in' | 'provider_unreachable';
   reason: string | null;
 }
 
@@ -283,6 +284,9 @@ export function serverStatus(s: McpServer): Status {
   if (!s.enabled) return { word: 'switched off', detail: null, tone: 'neutral' };
   if (s.auth.status === 'unavailable') return { word: 'key cannot be read on this host', detail: s.auth.reason, tone: 'warn' };
   if (s.auth.status === 'needs_sign_in') return { word: 'needs sign-in', detail: 'the sign-in could not be renewed', tone: 'warn' };
+  if (s.auth.status === 'provider_unreachable') {
+    return { word: 'sign-in provider unreachable', detail: 'Nous tries again within a minute', tone: 'warn' };
+  }
   if (s.auth.status === 'credentials_refused' && s.auth.kind === 'oauth') {
     return { word: 'the server refused the sign-in', detail: s.auth.reason, tone: 'warn' };
   }
