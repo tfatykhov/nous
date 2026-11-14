@@ -50,15 +50,15 @@ describe('no coloured side stripe', () => {
     expect(parseBlocks(style(file)).get(sel)?.['border-left']).toBe(RAIL_RULE);
   });
 
-  it('the four callouts are tinted blocks at the world radius', () => {
+  it('the three callouts are tinted blocks at the world radius', () => {
     const obs = parseBlocks(style('views/Observability.svelte'));
     expect(obs.get('.anomaly')).toMatchObject({ background: 'var(--wash)', 'border-radius': 'var(--card-radius-sm)' });
     expect(obs.get('.trace-detail')).toMatchObject({ background: 'var(--wash)', 'border-radius': 'var(--card-radius-sm)' });
     expect(parseBlocks(style('views/DagView.svelte')).get('.detail-postmortem')).toMatchObject({ background: 'var(--wash)',
       'border-radius': 'var(--card-radius-sm)' });
-    const con = parseBlocks(style('views/Consolidation.svelte'));
-    expect(con.get('.diff-before pre')).toMatchObject({ background: 'var(--err-bg)' });
-    expect(con.get('.diff-after pre')).toMatchObject({ background: 'var(--ok-bg)' });
+    // Consolidation's recorded before and after (a change in a shape the report does not know) are plain wash blocks.
+    expect(parseBlocks(style('views/consolidation/SleepReport.svelte')).get('pre')).toMatchObject({ background: 'var(--wash)',
+      'border-radius': 'var(--radius-sm)' });
   });
 
   it('a drift anomaly says its severity in a tinted pill', () => {

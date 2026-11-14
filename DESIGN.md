@@ -358,7 +358,7 @@ A cool, low-chroma paper and ink, one deep navy for structure and action, and sm
 
 **The Sentence Case Rule.** Labels, headers and headings are sentence case. Labels carry no letter-spacing, and there are no tracked capitals.
 
-**The One Timestamp Rule.** A timestamp reads "Nov 10 09:31 UTC": absolute, UTC, no seconds. Its day form is "Nov 10", a chart's hour is "Nov 10 15:00", and a heading's day is "10 November". Browser-locale dates and hand-cut date strings are refused by `timeFormat.test.ts`, which holds the `handMadeDates` check. A relative age ("2h ago") may follow the absolute time, and a turn in the trace shows its clock time alone ("09:31:07", UTC).
+**The One Timestamp Rule.** A timestamp reads "Nov 10 09:31 UTC": absolute, UTC, no seconds. Its day form is "Nov 10", a chart's hour is "Nov 10 15:00", and a heading's day is "10 November". Browser-locale dates and hand-cut date strings are refused by `timeFormat.test.ts`, which holds the `handMadeDates` check. A relative age ("2h ago") may follow the absolute time, and a turn in the trace shows its clock time alone ("09:31:07", UTC). A row under a heading that names its day shows its clock time ("09:31 UTC", `fmtClockUtc`).
 
 ## Layout
 
@@ -442,6 +442,9 @@ One range control per screen steps through the loaded turns or the day. The trac
 
 ### Day timeline
 A compact plot of the day's turns in labelled lanes, each turn a small rounded bar in its frame colour, with a red or amber underline for an error or a gated call and a legend that names every colour in words. Hours run along the bottom in condensed figures; the part of the day that has not happened is a wash labelled "not yet".
+
+### Sleep journal
+The Consolidation screen. A compact chart draws the newest sleeps as one bar each, oldest first: what a sleep gained above a baseline and what it removed below it (facts, graph links), or its duration, chosen by a pill group on a wash track. Each side is drawn to its own largest value, printed at its end of the scale, and a readout above the plot says the pointed bar in words. Below it, sleeps sit under their day ("13 November"), each a row of its clock time, its duration (or its state as a word in a pill) and one sentence of what it changed. A row opens in place into its report: sections divided by rules (learned, updated, merged, contradictions resolved, retired as stale), each with its count and the phase and operation names in mono, then the graph and housekeeping counters in plain words beside their real names, then the raw record behind a disclosure. A change is laid out as the trace lays out a turn: what it is about on the left, what was written on the right, with the texts it replaced under a 1px rule. Nothing recorded is hidden, and what the record does not keep is said in words.
 
 ### Charts
 Chart text is 12px Archivo in muted ink on a rule-coloured grid. Legends are 8px dots beside words. Bars are rounded and unoutlined. Day and hour labels stay level and skip rather than tilt. Canvas charts resolve their colours from the same tokens as the page.

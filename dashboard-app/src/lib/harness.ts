@@ -39,6 +39,14 @@ export function fmtDayMonth(iso: string | null | undefined): string {
   return Number.isNaN(d.getTime()) ? '—' : `${d.getUTCDate()} ${MONTHS_LONG[d.getUTCMonth()]}`;
 }
 
+/** A row's clock time under a heading that already names its day: "09:31 UTC". */
+export function fmtClockUtc(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '—';
+  return `${String(d.getUTCHours()).padStart(2, '0')}:${String(d.getUTCMinutes()).padStart(2, '0')} UTC`;
+}
+
 /** "2h ago" / "3d ago" / "just now". */
 export function fmtAgo(iso: string | null | undefined, now: number = Date.now()): string {
   if (!iso) return '';

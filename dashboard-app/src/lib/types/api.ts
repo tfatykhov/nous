@@ -1384,8 +1384,9 @@ export interface ConsolidationCycle {
   finished_at: string | null;
   status: string;
   phases_run: string[];
-  /** Per-op tallies recorded for the cycle (e.g. { merged: 1, superseded: 2 }). */
-  totals: Record<string, number>;
+  /** The sleep handler's stats dict for the cycle: counters, whole-graph snapshots (`f044_n_*`), nested objects, a
+   *  boolean and `_attempted`. Read a counter by name (lib/consolidation.ts); never sum or list the values. */
+  totals: Record<string, unknown>;
   action_count: number;
 }
 
@@ -1400,8 +1401,9 @@ export interface ConsolidationAction {
   phase: string;
   op: string;
   target_ids: string[];
-  before: Record<string, unknown> | null;
-  after: Record<string, unknown> | null;
+  /** JSON as recorded: an object, an array (a merge's source facts) or null. */
+  before: unknown;
+  after: unknown;
   rationale: string | null;
   created_at: string | null;
 }
