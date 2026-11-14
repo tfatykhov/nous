@@ -918,7 +918,7 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
                 None,
             )
             if client_id is not None and client_secret is None and same is not None:
-                client = Client(same.client_id, same.client_secret, same.token_auth_method, "provided")
+                client = replace(same, registration="provided")  # the same client: still the document if it was
             elif client_id is not None:
                 client = owner_client(discovery, client_id, client_secret)
             elif reusable is not None:  # the pending sign-in's client before the stored one

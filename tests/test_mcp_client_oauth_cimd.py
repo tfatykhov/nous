@@ -132,7 +132,12 @@ async def test_a_provider_that_takes_only_a_document_names_the_setting_when_the_
     started = await _start(env)
     assert started.status_code == 409
     assert "NOUS_MCP_CLIENT_ID_METADATA_URL" in started.json()["error"] and REDIRECT in started.json()["error"]
-    # A provider that takes none is not told about a setting that would not help.
+    # A provider that could not be given one is not told about a setting that would not help: its token endpoint
+    # takes no client without a secret, or it takes no document at all.
+    env.world.as_meta["token_endpoint_auth_methods_supported"] = ["client_secret_post"]
+    secret_only = await _start(env)
+    assert secret_only.status_code == 409 and "NOUS_MCP_CLIENT_ID_METADATA_URL" not in secret_only.json()["error"]
+    env.world.as_meta["token_endpoint_auth_methods_supported"] = ["none"]
     del env.world.as_meta[SUPPORTED]
     plain = await _start(env)
     assert plain.status_code == 409 and "NOUS_MCP_CLIENT_ID_METADATA_URL" not in plain.json()["error"]
@@ -207,14 +212,32 @@ async def test_a_client_the_owner_typed_is_never_taken_for_a_document_whatever_i
     assert again.json()["registration"] == "reused" and _client_id(again) == typed
 
 
-async def test_the_owner_typing_the_documents_address_is_the_owners_client(make_env):
-    env = await make_env()  # the host names no document: the owner typed one hosted somewhere
+@pytest.mark.parametrize("document", ["", ELSEWHERE])  # the host names none, or the very address the owner types
+async def test_the_owner_typing_the_documents_address_is_the_owners_client(make_env, document):
+    env = await make_env(document=document)
     started = await _start(env, client_id=ELSEWHERE)
     assert started.json()["registration"] == "provided"
     assert (await _callback(env, env.world.authorize(started.json()["authorization_url"]))).content == SIGNED_IN_PAGE
     assert (await _add(env, started.json()["flow_id"])).status_code == 201
+    record = env.manager.stored_oauth("alpha", ALPHA, (await env.registry.list_secrets())["alpha"])
+    assert record.client_document is False
+    env.settings.mcp_client_id_metadata_url = ""
     again = await _start(env)
     assert again.json()["registration"] == "reused" and _client_id(again) == ELSEWHERE
+
+
+async def test_retyping_a_stored_document_clients_address_keeps_it_the_document(make_env):
+    env = await make_env(document=DOCUMENT)
+    env.world.as_meta[SUPPORTED] = True
+    assert (await _add(env, await _signed_in(env))).status_code == 201
+    typed = await _start(env, client_id=DOCUMENT)  # "Sign in again" with the address typed: the same client
+    assert typed.json()["registration"] == "provided"
+    assert (await _callback(env, env.world.authorize(typed.json()["authorization_url"]))).content == SIGNED_IN_PAGE
+    record = env.manager.stored_oauth("alpha", ALPHA, (await env.registry.list_secrets())["alpha"])
+    assert record.client_document is True  # stored at once, still marked
+    env.settings.mcp_client_id_metadata_url = ""  # so once the setting is removed it is not used again
+    again = await _start(env)
+    assert again.json()["registration"] == "dynamic" and _client_id(again) == "test-client-dynamic-0001"
 
 
 # --- the stored record ------------------------------------------------------------------------------------------------
