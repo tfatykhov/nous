@@ -55,7 +55,7 @@ This launches four containers:
 |-----------|-------|------|---------|
 | `nous-postgres` | `pgvector/pgvector:pg17` | 5432 | PostgreSQL + pgvector |
 | `nous-agent` | Built from `Dockerfile` | 8000 | Nous agent (REST + MCP) |
-| `nous-scorer` | Built from `Dockerfile` | — | Deterministic task scorer (runs every 15 minutes, reads the database only) |
+| `nous-scorer` | Built from `Dockerfile` | — | Deterministic task scorer (runs every 15 minutes; reads agent records and writes only its own `scoring` tables) |
 | `nous-telegram` | Built from `Dockerfile` | — | Telegram bot (chat interface) |
 
 > The `telegram` service is optional. If `TELEGRAM_BOT_TOKEN` is not set, the container starts but the bot exits immediately. To skip it entirely, run `docker compose up -d nous postgres`. That command also skips `nous-scorer`, so task scores are not recorded until you start it.
@@ -147,6 +147,8 @@ To run only the agent without the bot:
 ```bash
 docker compose up -d nous postgres
 ```
+
+This also skips `nous-scorer`; add it to the command if you want task scores recorded.
 
 **Local development (standalone):**
 
