@@ -579,9 +579,10 @@
       if (leaves === formLeaves) adding = false; // not a later form's own add
       await store.refresh();
       // The form gives way to the server it made: once the list holds it (a reload that failed leaves the form, with
-      // the note), and only while the form is still what is shown (the owner may have gone elsewhere meanwhile).
+      // the note), and only while that form is still what is shown. The owner may have gone elsewhere during the
+      // reload, or have left and come back: the form shown then is another form, and it keeps its address.
       const listed = ($store.data?.servers ?? []).some((s) => s.name === made);
-      if (made && listed && pane.kind === 'add') location.hash = serverHref(made);
+      if (made && listed && leaves === formLeaves && pane.kind === 'add') location.hash = serverHref(made);
     }
   }
 </script>

@@ -2049,6 +2049,24 @@ describe('Integrations: after an add', () => {
     expect(location.hash).toBe('#/overview');
   });
 
+  it('the address stays on a form the owner came back to while the reload was in flight, with what is typed on it', async () => {
+    await checked();
+    const reload = holdReload();
+    await addServer();
+    await waitFor(() => expect(reload.count()).toBe(1));
+    await openServer('files');
+    await openForm(); // another form: the one that made wiki2 was left
+    await fill('wiki3', 'https://wiki3.example.com/mcp');
+    reload.release();
+    await waitFor(() => expect(link('wiki2')).toBeTruthy()); // the reload has landed
+    await settle();
+    expect(location.hash).toBe(ADD_ADDRESS);
+    expect(screen.getByRole('region', { name: 'Add a server' })).toBeTruthy();
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('wiki3');
+    expect((screen.getByLabelText('Address') as HTMLInputElement).value).toBe('https://wiki3.example.com/mcp');
+    expect(screen.getByText('Added wiki2.').getAttribute('role')).toBe('status'); // said above the pane all the same
+  });
+
   it('a reload that fails leaves the form: the address never names a server the list does not hold', async () => {
     await checked();
     const stored = listAnswer;
