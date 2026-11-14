@@ -58,7 +58,7 @@
   let narrow = $state(false);
   $effect(() => {
     if (typeof matchMedia !== 'function') return;
-    const media = matchMedia('(max-width: 900px)');
+    const media = matchMedia('(max-width: 1040px)');
     const read = () => {
       narrow = media.matches;
     };
@@ -305,6 +305,7 @@
       confirming.clear();
       opened.clear();
       kept.clear();
+      if (pageNote && !pageNote.ok) pageNote = null; // an alert about another page is read: its own page has its note
       query = '';
       show = 'all';
     });
@@ -435,9 +436,16 @@
   // the check made with them go with it, so no typed value waits out of sight and none comes back shown. The name
   // and the address stay: neither is a secret.
   let onForm = $derived(pane.kind === 'add');
+  /** How many times the form was left. A check or an add that started before the last leave belongs to a form
+   * that is gone, even when the owner is back on the form by the time it answers: it is not shown on this one,
+   * and no second check is made with a key this form no longer holds. */
+  let formLeaves = 0;
   $effect(() => {
     if (onForm) return;
     untrack(() => {
+      formLeaves += 1;
+      checking = false; // a check or an add still in flight is the left form's: this one does not wait for it
+      adding = false;
       clearHeaders();
       probe = null;
       allowed.clear();
@@ -500,16 +508,19 @@
   async function runProbe(name: string, url: string, headers: Record<string, string> | undefined, flowId?: string) {
     checking = true;
     const edits = headersEdits; // the key as it is sent (the fields are disabled while the check runs)
+    const leaves = formLeaves;
     try {
       const result = await probeServer(name, url, headers, flowId);
+      if (leaves !== formLeaves) return; // the form it was made for was left: its answer is not this form's
       probe = { name, url, edits, result };
       allowed.clear();
       opened.clear(); // a row opened on the last check's list is not one of this list's
     } catch (err) {
+      if (leaves !== formLeaves) return;
       probe = null;
       formNote = { text: problemText(err), ok: false };
     } finally {
-      checking = false;
+      if (leaves === formLeaves) checking = false; // not a later form's own check
     }
   }
 
@@ -522,6 +533,7 @@
     formNote = null;
     pageNote = null;
     let made: string | null = null;
+    const leaves = formLeaves;
     try {
       const answer = await createServer(createPayload(name, url, result, allowed, headers, flowId));
       clearNotes(name);
@@ -533,17 +545,21 @@
         text: answer.created ? `Added ${name}.` : `Replaced ${name}. It is switched on, and background work is off.`,
         ok: true,
       };
-      made = name;
-      newName = '';
-      newUrl = '';
-      tried = false;
-      probe = null;
-      allowed.clear();
-      clearHeaders();
+      if (leaves === formLeaves) {
+        // Its own form: it starts over, and gives way to the server it made. A form the owner came back to is
+        // another form: what is typed on it stays, and the address is not moved from under it.
+        made = name;
+        newName = '';
+        newUrl = '';
+        tried = false;
+        probe = null;
+        allowed.clear();
+        clearHeaders();
+      }
     } catch (err) {
-      if (!onForm) {
+      if (leaves !== formLeaves) {
         // The form was left while the add was in flight: its key and its check are gone, so there is nothing on it
-        // to say this beside. It is said above the pane.
+        // to say this beside (the owner may be back on the form: it is another form now). It is said above the pane.
         const why = isConflict(err) ? 'its tools changed since the check' : problemText(err);
         pageNote = { text: `${name} was not added: ${why}`, ok: false };
       } else if (isConflict(err)) {
@@ -560,7 +576,7 @@
         formNote = { text: problemText(err), ok: false };
       }
     } finally {
-      adding = false;
+      if (leaves === formLeaves) adding = false; // not a later form's own add
       await store.refresh();
       // The form gives way to the server it made: once the list holds it (a reload that failed leaves the form, with
       // the note), and only while the form is still what is shown (the owner may have gone elsewhere meanwhile).
@@ -596,8 +612,10 @@
   </div>
 {/snippet}
 
+<!-- A tool's name, as the server wrote it (text nodes only). A line may break after "_", "-" and "." before it
+     has to break inside a word. -->
 {#snippet toolName(name: string)}
-  <code class="tool-name" title={name.length > 80 ? name : undefined}>{shortName(name)}</code>
+  <code class="tool-name" title={name.length > 80 ? name : undefined}>{#each shortName(name).split(/(?<=[_.-])/) as part, i (i)}{#if i}<wbr />{/if}{part}{/each}</code>
 {/snippet}
 
 {#snippet note(n: Note | undefined | null)}
@@ -715,7 +733,8 @@
     </nav>
 
     {#if pane.kind !== 'list'}
-    <div class="detail" id="mcp-pane" tabindex="-1">
+    <div class="detail" id="mcp-pane" tabindex="-1" role="group"
+      aria-label={pane.kind === 'server' ? pane.server.name : pane.kind === 'add' ? 'Add a server' : 'No such server'}>
       <a class="back" href={LIST_HREF}>All servers</a>
       {#if pane.kind === 'missing'}
         <section class="card" role="status">
@@ -1134,8 +1153,9 @@
   .header-row { display: flex; align-items: flex-end; gap: 0.5rem 0.75rem; flex-wrap: wrap; margin-top: 0.5rem; }
   .header-row .field { flex: 1 1 14rem; }
   .header-row .row-actions { margin-top: 0; }
-  @media (max-width: 900px) {
-    /* One column: the list first, then (once something is picked) the pane alone, with a way back to the list. */
+  @media (max-width: 1040px) {
+    /* One column: the list first, then (once something is picked) the pane alone, with a way back to the list.
+       Beside the 220px rail, two columns under this width leave a tool's name less room than a short name needs. */
     .split { grid-template-columns: minmax(0, 1fr); }
     .list { position: static; max-height: none; }
     .split.picked .list { display: none; }

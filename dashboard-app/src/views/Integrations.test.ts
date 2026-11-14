@@ -101,6 +101,8 @@ const row = (scope: HTMLElement, toolName: string) =>
 // The screen's pane follows the address. initRouter() applies location.hash to the router's stores at once (the
 // hashchange jsdom fires later parses to the same place), so a test moves to an address deterministically.
 const go = (hash: string) => { location.hash = hash; initRouter(); };
+/** The width under which the screen is one column: the script's matchMedia query and the stylesheet's breakpoint. */
+const ONE_COLUMN = '(max-width: 1040px)';
 const LIST_ADDRESS = '#/integrations';
 const ADD_ADDRESS = '#/integrations/add';
 const serverAddress = (name: string) => `#/integrations/s/${encodeURIComponent(name)}`;
@@ -793,6 +795,65 @@ describe('Integrations: names a server chose', () => {
     expect(within(deepwiki).getByRole('button', { name: `Allow ${long}` })).toBeTruthy();
   });
 
+  describe("a tool's name may break after _, - and .", () => {
+    /** A name's code element as text runs and <wbr>s (Svelte's comment anchors left out). */
+    const parts = (code: Element) => {
+      const out: string[] = [];
+      let inText = false;
+      for (const n of Array.from(code.childNodes)) {
+        if (n.nodeType === Node.TEXT_NODE) {
+          if (inText) out[out.length - 1] += n.textContent ?? '';
+          else out.push(n.textContent ?? '');
+          inText = true;
+        } else if (n.nodeType === Node.ELEMENT_NODE) {
+          out.push(`<${(n as Element).tagName.toLowerCase()}>`);
+          inText = false;
+        }
+      }
+      return out;
+    };
+    const named = async (...names: string[]) => {
+      listAnswer = () => {
+        const d = LIST();
+        d.servers[0].tools = names.map((n) => tool(n));
+        return [200, d];
+      };
+      render(Integrations);
+      const deepwiki = await screen.findByRole('region', { name: 'deepwiki' });
+      return (name: string) => within(deepwiki).getByRole('button', { name: `Details of ${name}` }).querySelector('code.tool-name') as HTMLElement;
+    };
+
+    it('a <wbr> after each separator; the text is the whole name', async () => {
+      const code = (await named('get_file-contents.v2', 'readwiki'))('get_file-contents.v2');
+      expect(code.textContent).toBe('get_file-contents.v2');
+      expect(parts(code)).toEqual(['get_', '<wbr>', 'file-', '<wbr>', 'contents.', '<wbr>', 'v2']);
+    });
+
+    it('a name without a separator has none', async () => {
+      const code = (await named('get_file-contents.v2', 'readwiki'))('readwiki');
+      expect(code.textContent).toBe('readwiki');
+      expect(code.querySelectorAll('wbr')).toHaveLength(0);
+      expect(parts(code)).toEqual(['readwiki']);
+    });
+
+    it('a name that looks like markup is still text and <wbr> only', async () => {
+      const hostile = '<img src=x onerror=alert(1)>_x';
+      const code = (await named(hostile))(hostile);
+      expect(code.textContent).toBe(hostile);
+      expect(parts(code)).toEqual(['<img src=x onerror=alert(1)>_', '<wbr>', 'x']);
+      expect(Array.from(code.children).map((e) => e.tagName)).toEqual(['WBR']);
+      expect(document.querySelector('img')).toBeNull();
+    });
+
+    it('a long name with separators is still cut to 80 characters, the whole name in its title', async () => {
+      const long = `get_${'x'.repeat(100)}-end`;
+      const code = (await named(long))(long);
+      expect(code.textContent).toBe(`${long.slice(0, 79)}…`);
+      expect(code.getAttribute('title')).toBe(long);
+      expect(parts(code)).toEqual(['get_', '<wbr>', `${long.slice(4, 79)}…`]);
+    });
+  });
+
   it('a tool named like the screen\'s own words is shown as data in a refresh result', async () => {
     handlers['POST /integrations/mcp/servers/deepwiki/refresh'] = () =>
       [200, { added: ['in background work'], removed: [], changed: [], definitions_sha256: 'c'.repeat(64), server: null }];
@@ -944,14 +1005,15 @@ describe('Integrations: what is sent', () => {
 describe('Integrations: style', () => {
   const css = styleBlocks(readFileSync(join(__dirname, 'Integrations.svelte'), 'utf-8')).replace(/\r\n/g, '\n');
   // parseBlocks merges a selector's blocks across media queries: each part of the sheet is parsed on its own.
-  const at900 = css.indexOf('@media (max-width: 900px)');
+  const atOneColumn = css.indexOf(`@media ${ONE_COLUMN}`);
   const at768 = css.indexOf('@media (max-width: 768px)');
-  const wide = parseBlocks(css.slice(0, Math.min(at900, at768)));
-  const tablet = parseBlocks(css.slice(at900, at768));
+  const wide = parseBlocks(css.slice(0, Math.min(atOneColumn, at768)));
+  const tablet = parseBlocks(css.slice(atOneColumn, at768));
   const phone = parseBlocks(css.slice(at768));
   it('controls reach 44px on a phone, and a field is 44px tall', () => {
-    expect(at900).toBeGreaterThan(0);
-    expect(at768).toBeGreaterThan(at900);
+    expect(atOneColumn).toBeGreaterThan(0); // the stylesheet's one-column width is the script's
+    expect(at768).toBeGreaterThan(atOneColumn);
+    expect(css).not.toMatch(/@media \(max-width: 900px\)/);
     // The list's rows, the checkbox rows and a tool's line.
     expect(phone.get('.item, .check, .open')).toEqual({ 'min-height': '2.75rem' });
     expect(phone.get('.schema summary')?.['line-height']).toBe('2.75rem');
@@ -1498,6 +1560,23 @@ describe('Integrations: the pane follows the address', () => {
     expect(screen.queryByText(/There is no server named/)).toBeNull();
   });
 
+  it('the pane is a group named for what it shows: the server, "Add a server", or "No such server"', async () => {
+    render(Integrations);
+    const deepwiki = await screen.findByRole('region', { name: 'deepwiki' });
+    const pane = () => document.getElementById('mcp-pane') as HTMLElement;
+    expect(screen.getByRole('group', { name: 'deepwiki' })).toBe(pane());
+    expect(pane().contains(deepwiki)).toBe(true);
+    await openServer('files');
+    expect(screen.getByRole('group', { name: 'files' })).toBe(pane());
+    expect(screen.queryByRole('group', { name: 'deepwiki' })).toBeNull();
+    const form = await openForm();
+    expect(screen.getByRole('group', { name: 'Add a server' })).toBe(pane());
+    expect(pane().contains(form)).toBe(true);
+    go('#/integrations/s/nothere');
+    await screen.findByText(/There is no server named/);
+    expect(screen.getByRole('group', { name: 'No such server' })).toBe(pane());
+  });
+
   it('a server whose name needs encoding is linked by its encoded address, and opens there', async () => {
     const odd = 'a/b?c%d'; // not a name the server accepts: the address must still round-trip whatever the list holds
     listAnswer = () => {
@@ -1522,7 +1601,7 @@ describe('Integrations: a narrow screen', () => {
   function narrowScreen() {
     const media = { matches: true, listeners: new Set<() => void>() };
     const matchMedia = vi.fn((query: string) => ({
-      get matches() { return query === '(max-width: 900px)' && media.matches; },
+      get matches() { return query === ONE_COLUMN && media.matches; },
       media: query,
       addEventListener: (_type: string, f: () => void) => { media.listeners.add(f); },
       removeEventListener: (_type: string, f: () => void) => { media.listeners.delete(f); },
@@ -1536,7 +1615,7 @@ describe('Integrations: a narrow screen', () => {
     const { media, matchMedia } = narrowScreen();
     render(Integrations);
     await screen.findByRole('navigation', { name: 'MCP servers' });
-    expect(matchMedia).toHaveBeenCalledWith('(max-width: 900px)');
+    expect(matchMedia).toHaveBeenCalledWith(ONE_COLUMN);
     expect(link('deepwiki')).toBeTruthy();
     expect(screen.queryByRole('region', { name: 'deepwiki' })).toBeNull();
     expect(screen.queryByRole('region', { name: 'Add a server' })).toBeNull();
@@ -1937,6 +2016,7 @@ describe('Integrations: after an add', () => {
       expect(await screen.findByRole('region', { name: 'wiki2' })).toBeTruthy();
       expect(location.hash).toBe('#/integrations/s/wiki2');
       expect(link('wiki2')?.getAttribute('aria-current')).toBe('page');
+      expect(screen.getByText('Added wiki2.').getAttribute('role')).toBe('status'); // a success note outlives the move
     } finally {
       reload.release();
       watch.disconnect();
@@ -2040,6 +2120,7 @@ describe('Integrations: after an add', () => {
     await openForm();
     expect(within(addCard()).queryByRole('alert')).toBeNull();
     expect(within(addCard()).queryByText(/ReadTimeout/)).toBeNull();
+    expect(screen.queryByText(/was not added/)).toBeNull(); // read: the owner moved on
   });
 
   it('a 502 that lands while the form is shown is said on the form, not above the pane', async () => {
@@ -2049,6 +2130,234 @@ describe('Integrations: after an add', () => {
     expect(alert.textContent).toBe("Could not list the server's tools: ReadTimeout.");
     expect(screen.getAllByRole('alert')).toEqual([alert]);
     expect(screen.queryByText(/was not added/)).toBeNull();
+  });
+
+  // A check or an add belongs to the form it was made on: once that form is left, its answer is not shown on the
+  // form opened next, and no second check is made with a key the new form does not hold.
+  /** The form for wiki2 with a key typed: the key the leave must drop. */
+  async function keyedForm() {
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fill('wiki2', 'https://mcp.deepwiki.com/mcp');
+    await fireEvent.click(within(addCard()).getByRole('radio', { name: 'API key or header' }));
+    await fireEvent.input(within(addCard()).getByLabelText('Header 1 value'), { target: { value: KEY } });
+  }
+  const leaveAndReturn = async () => {
+    await openServer('deepwiki');
+    await openForm();
+  };
+  const checkEnabled = () => waitFor(() =>
+    expect((within(addCard()).getByRole('button', { name: 'Check server' }) as HTMLButtonElement).disabled).toBe(false));
+  /** The form as a leave leaves it: "None", no key, no check, no note. */
+  function freshForm() {
+    expect(within(addCard()).getByRole('radio', { name: 'None' })).toHaveProperty('checked', true);
+    expect(within(addCard()).queryByLabelText('Header 1 value')).toBeNull();
+    expect(within(addCard()).queryByText(/tools? listed/)).toBeNull();
+    expect(within(addCard()).queryByText(/changed since the check/)).toBeNull();
+    expect(within(addCard()).queryByRole('button', { name: 'Add server' })).toBeNull();
+    expect(within(addCard()).queryByRole('alert')).toBeNull();
+    for (const input of Array.from(document.querySelectorAll('input'))) expect(input.value).not.toContain('test-key');
+  }
+
+  it('a check that answers after its form was left and opened again shows nothing on the new form', async () => {
+    const answer = held();
+    handlers['POST /integrations/mcp/probe'] = () => answer.promise;
+    await keyedForm();
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await leaveAndReturn();
+    answer.resolve([200, PROBE()]);
+    await checkEnabled();
+    await settle();
+    freshForm();
+  });
+
+  it('a check that fails after its form was left and opened again says nothing on the new form', async () => {
+    const answer = held();
+    handlers['POST /integrations/mcp/probe'] = () => answer.promise;
+    await keyedForm();
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await leaveAndReturn();
+    answer.resolve(UNREACHABLE);
+    await checkEnabled();
+    await settle();
+    freshForm();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it.each([
+    ['a 409', CONFLICT, 'wiki2 was not added: its tools changed since the check'],
+    ['a 502', UNREACHABLE, "wiki2 was not added: Could not list the server's tools: ReadTimeout."],
+  ] as [string, Answer, string][])(
+    '%s for an add whose form was left and opened again: no second check, said above the pane, not on the form',
+    async (_, failure, said) => {
+      let probes = 0;
+      handlers['POST /integrations/mcp/probe'] = () => { probes += 1; return [200, PROBE()]; };
+      const answer = held();
+      handlers['POST /integrations/mcp/servers'] = () => answer.promise;
+      await keyedForm();
+      await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+      await within(addCard()).findByText('3 tools listed');
+      await addServer();
+      await leaveAndReturn(); // back on a form before the add answers: another form now
+      await land(answer, failure);
+      expect(probes).toBe(1);
+      expect(changes().filter((c) => c.url === '/integrations/mcp/probe')).toHaveLength(1);
+      const alert = screen.getByRole('alert');
+      expect(alert.textContent).toBe(said);
+      expect(alert.closest('.split')).toBeNull();
+      freshForm();
+    });
+
+  /** Every request to `route` held until the test answers it, in order. */
+  const holdEach = (route: string) => {
+    const answers: ReturnType<typeof held>[] = [];
+    handlers[route] = () => {
+      const h = held();
+      answers.push(h);
+      return h.promise;
+    };
+    return answers;
+  };
+  const field = (label: string) => screen.getByLabelText(label) as HTMLInputElement;
+  const button = (name: string) => within(addCard()).getByRole('button', { name }) as HTMLButtonElement;
+  /** The returned form is usable at once: its fields and Check server, with nothing said to be in flight. */
+  function usable() {
+    expect(field('Name').disabled).toBe(false);
+    expect(field('Address').disabled).toBe(false);
+    expect(button('Check server').disabled).toBe(false);
+    expect(within(addCard()).queryByRole('button', { name: 'Checking…' })).toBeNull();
+    expect(within(addCard()).queryByRole('button', { name: 'Adding…' })).toBeNull();
+  }
+
+  it("a check from a left form neither holds the returned form nor ends the returned form's own check", async () => {
+    const checks = holdEach('POST /integrations/mcp/probe');
+    await keyedForm();
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await waitFor(() => expect(checks).toHaveLength(1));
+    expect(button('Checking…').disabled).toBe(true);
+    await leaveAndReturn();
+    usable(); // at once: the old check has not answered
+    await fireEvent.click(button('Check server'));
+    await waitFor(() => expect(checks).toHaveLength(2));
+    const checkingNow = () => {
+      expect(button('Checking…').disabled).toBe(true);
+      expect(field('Name').disabled).toBe(true);
+      expect(field('Address').disabled).toBe(true);
+    };
+    checkingNow();
+    checks[0].resolve([200, PROBE()]); // the old check answers: not this form's
+    await settle();
+    checkingNow();
+    expect(within(addCard()).queryByText(/tools? listed/)).toBeNull();
+    checks[1].resolve([200, PROBE()]);
+    expect(await within(addCard()).findByText('3 tools listed')).toBeTruthy();
+    usable();
+    expect(changes().filter((c) => c.url === '/integrations/mcp/probe')).toHaveLength(2);
+  });
+
+  it.each([
+    ['a 409', CONFLICT],
+    ['a 502', UNREACHABLE],
+  ] as [string, Answer][])(
+    "an add from a left form neither holds the returned form nor ends the returned form's own add (old add: %s)",
+    async (_, oldAnswer) => {
+      let probes = 0;
+      handlers['POST /integrations/mcp/probe'] = () => { probes += 1; return [200, PROBE()]; };
+      const adds = holdEach('POST /integrations/mcp/servers');
+      await keyedForm();
+      await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+      await within(addCard()).findByText('3 tools listed');
+      await addServer();
+      await waitFor(() => expect(adds).toHaveLength(1));
+      expect(button('Adding…').disabled).toBe(true);
+      await leaveAndReturn();
+      usable(); // at once: the old add has not answered
+      await fireEvent.click(button('Check server'));
+      await within(addCard()).findByText('3 tools listed');
+      await addServer();
+      await waitFor(() => expect(adds).toHaveLength(2));
+      const addingNow = () => {
+        expect(button('Adding…').disabled).toBe(true);
+        expect(button('Check server').disabled).toBe(true);
+        expect(field('Name').disabled).toBe(true);
+        expect(field('Address').disabled).toBe(true);
+      };
+      addingNow();
+      await land(adds[0], oldAnswer); // the old add answers: not this form's
+      addingNow();
+      expect(probes).toBe(2); // the old add's answer checked nothing again
+      expect(screen.getByRole('alert').textContent).toMatch(/^wiki2 was not added: /);
+      await land(adds[1], [201, { created: true, definitions_sha256: 'a'.repeat(64), server: null }]);
+      expect(screen.getByText('Added wiki2.')).toBeTruthy();
+      expect(within(addCard()).queryByRole('button', { name: 'Adding…' })).toBeNull();
+    });
+
+  // An add from a left form that succeeds says so above the pane and does nothing else: the returned form is
+  // another form, so what is typed on it stays and the address is not moved from under it.
+  const CREATED: Answer = [201, { created: true, definitions_sha256: 'a'.repeat(64), server: null }];
+  /** The server an add stored, in the list `adding()` answers with. */
+  const stored = (name: string) => {
+    state.servers.push({ ...LIST().servers[0], name, url: 'https://mcp.deepwiki.com/mcp', tools: [] });
+  };
+  /** An add of wiki2 held, then the form left and opened again. */
+  async function addThenReturn() {
+    handlers['POST /integrations/mcp/probe'] = () => [200, PROBE()];
+    adding(); // the list answers with `state`
+    const adds = holdEach('POST /integrations/mcp/servers');
+    await keyedForm();
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await within(addCard()).findByText('3 tools listed');
+    await addServer();
+    await waitFor(() => expect(adds).toHaveLength(1));
+    await leaveAndReturn();
+    return adds;
+  }
+
+  it('an add from a left form that succeeds leaves what is typed on the returned form, and the address', async () => {
+    const adds = await addThenReturn();
+    const typed = 'Bearer test-key-3333333333333333';
+    await fireEvent.input(field('Name'), { target: { value: 'wiki3' } });
+    await fireEvent.click(within(addCard()).getByRole('radio', { name: 'API key or header' }));
+    await fireEvent.input(within(addCard()).getByLabelText('Header 1 value'), { target: { value: typed } });
+    stored('wiki2'); // the reload that follows holds the server the old add made
+    await land(adds[0], CREATED);
+    await waitFor(() => expect(link('wiki2')).toBeTruthy());
+    await settle();
+    expect(screen.getByText('Added wiki2.').getAttribute('role')).toBe('status');
+    expect(location.hash).toBe(ADD_ADDRESS);
+    expect(screen.getByRole('region', { name: 'Add a server' })).toBeTruthy();
+    expect(field('Name').value).toBe('wiki3');
+    expect(field('Address').value).toBe('https://mcp.deepwiki.com/mcp');
+    expect(within(addCard()).getByRole('radio', { name: 'API key or header' })).toHaveProperty('checked', true);
+    expect((within(addCard()).getByLabelText('Header 1 value') as HTMLInputElement).value).toBe(typed);
+    usable();
+  });
+
+  it("an add from a left form that succeeds leaves the returned form's own add in flight as it is", async () => {
+    const adds = await addThenReturn();
+    await fireEvent.input(field('Name'), { target: { value: 'wiki3' } });
+    await fireEvent.click(button('Check server'));
+    await within(addCard()).findByText('3 tools listed');
+    await addServer();
+    await waitFor(() => expect(adds).toHaveLength(2));
+    stored('wiki2');
+    await land(adds[0], CREATED); // the old add (wiki2) lands while the new one (wiki3) is in flight
+    await waitFor(() => expect(link('wiki2')).toBeTruthy());
+    await settle();
+    expect(screen.getByText('Added wiki2.')).toBeTruthy();
+    expect(location.hash).toBe(ADD_ADDRESS);
+    expect(button('Adding…').disabled).toBe(true);
+    expect(within(addCard()).getByText('3 tools listed')).toBeTruthy();
+    expect(field('Name').value).toBe('wiki3');
+    // The new add is the returned form's own: when it lands, that form starts over and gives way to its server.
+    stored('wiki3');
+    await land(adds[1], CREATED);
+    expect(await screen.findByRole('region', { name: 'wiki3' })).toBeTruthy();
+    expect(location.hash).toBe('#/integrations/s/wiki3');
+    expect(screen.getByText('Added wiki3.')).toBeTruthy();
+    await openForm();
+    expect(field('Name').value).toBe('');
+    expect(within(addCard()).queryByText(/tools? listed/)).toBeNull();
   });
 });
 
@@ -2072,6 +2381,7 @@ describe('Integrations: after a removal', () => {
     await waitFor(() => expect(link('files')).toBeNull());
     expect(link('deepwiki')?.getAttribute('aria-current')).toBe('page');
     expect(screen.queryByText(/There is no server named/)).toBeNull();
+    expect(screen.getByText('Removed files.').getAttribute('role')).toBe('status'); // a success note outlives the move
   });
 
   /** A list without `name` once its DELETE has landed, and that DELETE held until the test answers it. */
@@ -2189,9 +2499,25 @@ describe('Integrations: a change that fails elsewhere', () => {
     expect(alert.textContent).toBe('deepwiki: Could not reach the server: ConnectError.');
     expect(alert.closest('.split')).toBeNull(); // above the list and the pane
     expect(files.contains(alert)).toBe(false);
-    // Its own note waits on its page.
+    // Its own note waits on its page; the alert above the pane is read once the owner moves on, so it shows once.
     const deepwiki = await openServer('deepwiki');
     expect(within(deepwiki).getByRole('alert').textContent).toBe('Could not reach the server: ConnectError.');
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(screen.queryByText(/^deepwiki:/)).toBeNull();
+  });
+
+  it('is read once the form is opened: the alert above the pane goes', async () => {
+    const answer = held();
+    handlers['PATCH /integrations/mcp/servers/deepwiki'] = () => answer.promise;
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Switch off' }));
+    await openServer('files');
+    answer.resolve(FAILED);
+    expect((await screen.findByRole('alert')).textContent).toBe('deepwiki: Could not reach the server: ConnectError.');
+    await openForm();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText(/^deepwiki:/)).toBeNull();
   });
 
   it('is said only beside its server while that server is shown', async () => {
