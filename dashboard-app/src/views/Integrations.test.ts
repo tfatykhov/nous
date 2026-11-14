@@ -1446,6 +1446,94 @@ describe('Integrations: a key for a new server', () => {
   });
 });
 
+describe('Integrations: a server replaced elsewhere', () => {
+  // Another tab, another device or the seed command put another address under the same name: what was open on this
+  // page was opened for the old server, and must not be answered, stored or signed in for the new one.
+  const elsewhere = (change: (s: (typeof state.servers)[number]) => void) => {
+    change(state.servers[0]);
+    return fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+  };
+  const listedUrl = (url: string) => waitFor(() => expect(within(card('deepwiki')).getByText(url)).toBeTruthy());
+
+  it.each([
+    ['Send its images to the model', 'Yes, send its images'],
+    ['Allow in background work', 'Yes, allow in background work'],
+  ])('a question opened by "%s" is closed when the address under the name changed', async (box, yes) => {
+    patching('deepwiki');
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByRole('checkbox', { name: box }));
+    expect(within(card('deepwiki')).getByRole('button', { name: yes })).toBeTruthy();
+    // A reload that shows the same server leaves the question as it is.
+    await elsewhere((s) => { s.connected = false; });
+    await waitFor(() => expect(lists()).toBeGreaterThanOrEqual(2));
+    await settle();
+    expect(within(card('deepwiki')).getByRole('button', { name: yes })).toBeTruthy();
+    await elsewhere((s) => { s.url = 'https://other.example.com/mcp'; });
+    await listedUrl('https://other.example.com/mcp');
+    expect(within(card('deepwiki')).queryByRole('button', { name: yes })).toBeNull();
+    expect(within(card('deepwiki')).queryByRole('group', { name: /^Confirm/ })).toBeNull();
+    expect(changes()).toEqual([]);
+  });
+
+  it('a Remove question is closed when the address under the name changed', async () => {
+    patching('deepwiki');
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Remove' }));
+    expect(within(card('deepwiki')).getByRole('button', { name: 'Yes, remove' })).toBeTruthy();
+    await elsewhere((s) => { s.url = 'https://other.example.com/mcp'; });
+    await listedUrl('https://other.example.com/mcp');
+    expect(within(card('deepwiki')).queryByRole('button', { name: 'Yes, remove' })).toBeNull();
+    expect(changes()).toEqual([]);
+  });
+
+  it('a key being typed is dropped when the address under the name changed: it is not stored for another host', async () => {
+    state = keyed() as typeof state;
+    patching('deepwiki');
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Replace key' }));
+    await fireEvent.input(within(card('deepwiki')).getByLabelText('Header 1 value'), { target: { value: KEY } });
+    await elsewhere((s) => { s.url = 'https://other.example.com/mcp'; });
+    await listedUrl('https://other.example.com/mcp');
+    expect(within(card('deepwiki')).queryByLabelText('Header 1 value')).toBeNull();
+    expect(within(card('deepwiki')).queryByRole('button', { name: 'Save key' })).toBeNull();
+    for (const input of Array.from(document.querySelectorAll('input'))) expect(input.value).not.toContain('test-key');
+    expect(changes()).toEqual([]);
+  });
+
+  it('a sign-in panel is closed when the address under the name changed', async () => {
+    state = { ...LIST(), oauth_available: true } as typeof state;
+    patching('deepwiki');
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Sign in (OAuth)' }));
+    expect(within(card('deepwiki')).getByRole('group', { name: 'Sign in for deepwiki' })).toBeTruthy();
+    await elsewhere((s) => { s.connected = false; });
+    await waitFor(() => expect(lists()).toBeGreaterThanOrEqual(2));
+    await settle();
+    expect(within(card('deepwiki')).getByRole('group', { name: 'Sign in for deepwiki' })).toBeTruthy();
+    await elsewhere((s) => { s.url = 'https://other.example.com/mcp'; });
+    await listedUrl('https://other.example.com/mcp');
+    expect(within(card('deepwiki')).queryByRole('group', { name: 'Sign in for deepwiki' })).toBeNull();
+    expect(changes()).toEqual([]);
+  });
+
+  it('a key being typed stays through a reload that shows the same address', async () => {
+    state = keyed() as typeof state;
+    patching('deepwiki');
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Replace key' }));
+    await fireEvent.input(within(card('deepwiki')).getByLabelText('Header 1 value'), { target: { value: KEY } });
+    await elsewhere((s) => { s.connected = false; });
+    await waitFor(() => expect(lists()).toBeGreaterThanOrEqual(2));
+    await settle();
+    expect((within(card('deepwiki')).getByLabelText('Header 1 value') as HTMLInputElement).value).toBe(KEY);
+  });
+});
+
 describe('Integrations: a stored key on a card', () => {
   it('names the headers, never a value; Replace key sends the new headers, Cancel drops them', async () => {
     listAnswer = () => [200, keyed()];

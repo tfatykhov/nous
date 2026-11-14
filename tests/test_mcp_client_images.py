@@ -49,12 +49,14 @@ from test_mcp_client_manager import (  # noqa: F401 -- _restore_mcp_tools: autou
 
 from nous.api.call_outcome import CallOutcome
 from nous.api.runner import IMAGES_PER_TURN, _carries_image, _result_content
+from nous.api.tool_classes import note_mcp_tool
 from nous.api.tools import ToolDispatcher
 from nous.mcp_client import McpClientManager, bridge
 from nous.mcp_client.bridge import IMAGES_PER_RESULT, credential_needles, flatten_result, result_chars
 from nous.mcp_client.config import ServerConfig
 from nous.mcp_client.images import (
     IMAGE_TYPES,
+    JPEG_SCANS_MAX,
     LONG_EDGE,
     OUT_MAX_BYTES,
     PIXELS_MAX,
@@ -1326,13 +1328,19 @@ IMG_A = {"type": "image", "source": {"type": "base64", "media_type": "image/png"
 IMG_B = {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "QkJC"}}
 
 
+SHOT_TOOL = "mcp__alpha__shot"
+
+
 def _dispatcher(answer: dict[str, Any]) -> ToolDispatcher:
     d = ToolDispatcher()
 
     async def handler(**_: Any) -> dict[str, Any]:
         return answer
 
-    d.register("shot", handler, {"type": "object", "properties": {}})
+    d.register(SHOT_TOOL, handler, {"type": "object", "properties": {}})
+    note_mcp_tool(SHOT_TOOL, background=False)  # as the MCP client's manager does for a tool it registers
+    d.register("shot", handler, {"type": "object", "properties": {}})  # the same answer from a tool of Nous's own
+    d.register("mcp__beta__shot", handler, {"type": "object", "properties": {}})  # an MCP name the client has not
     return d
 
 
@@ -1342,9 +1350,18 @@ async def test_dispatch_returns_the_first_text_and_hands_the_image_blocks_to_the
         "is_error": False,
     }
     outcome = CallOutcome()
-    assert await _dispatcher(answer).dispatch("shot", {}, outcome=outcome) == ("first", False)
+    assert await _dispatcher(answer).dispatch(SHOT_TOOL, {}, outcome=outcome) == ("first", False)
     assert outcome.images == [IMG_A, IMG_B]
-    assert await _dispatcher(answer).dispatch("shot", {}) == ("first", False)  # no outcome: nothing breaks
+    assert await _dispatcher(answer).dispatch(SHOT_TOOL, {}) == ("first", False)  # no outcome: nothing breaks
+
+
+@pytest.mark.parametrize("name", ["shot", "mcp__beta__shot"], ids=["a-tool-of-nous", "an-mcp-name-not-registered"])
+async def test_only_a_tool_the_mcp_client_registered_hands_images_to_the_outcome(name):
+    # The images switch and the re-encoding live in the MCP client: no other handler's images are behind them.
+    answer = {"content": [{"type": "text", "text": "first"}, IMG_A, IMG_B], "is_error": False}
+    outcome = CallOutcome()
+    assert await _dispatcher(answer).dispatch(name, {}, outcome=outcome) == ("first", False)
+    assert outcome.images is None
 
 
 @pytest.mark.parametrize(
@@ -1358,7 +1375,7 @@ async def test_dispatch_returns_the_first_text_and_hands_the_image_blocks_to_the
 )
 async def test_dispatch_leaves_the_outcome_without_images(answer):
     outcome = CallOutcome()
-    text, is_error = await _dispatcher(answer).dispatch("shot", {}, outcome=outcome)
+    text, is_error = await _dispatcher(answer).dispatch(SHOT_TOOL, {}, outcome=outcome)
     assert text == "first" and is_error is bool(answer.get("is_error")) and outcome.images is None
 
 
@@ -1679,12 +1696,13 @@ async def test_stream_chat_sends_a_results_images_with_its_text_through_the_real
     async def shot(q: str) -> dict[str, Any]:
         return answers[q]
 
-    d.register("shot", shot, {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]})
+    d.register(SHOT_TOOL, shot, {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]})
+    note_mcp_tool(SHOT_TOOL, background=False)
     runner.set_dispatcher(d)
     recorder = _Recorder()
     runner.set_tool_call_recorder(recorder)  # type: ignore[arg-type]
     queries = ["img", "plain", "err", "four", "four", "four", "four"]
-    requests = await _stream_turn(runner, [(f"t{i}", "shot", {"q": q}) for i, q in enumerate(queries)])
+    requests = await _stream_turn(runner, [(f"t{i}", SHOT_TOOL, {"q": q}) for i, q in enumerate(queries)])
 
     results = _tool_results(requests[1])
     assert results["t0"]["content"] == [{"type": "text", "text": "caption\n[image: PNG 2x3]"}, _img(1)]
@@ -1763,3 +1781,217 @@ def test_the_extractor_reads_the_text_blocks_of_a_tool_result_with_images():
     )
     assert text == "Tool result (tool output, not said by the user): page text more"
     assert "SU1H" not in text
+
+
+# --- What a decode may cost: a JPEG's scans, the copy before the scaling, decodes at a time -------------------------
+
+SCAN = bytes((0xFF, 0xDA))
+NO_DECODER = "no image library is installed here"
+
+
+def _repeat_last_scan(raw: bytes, markers: int) -> bytes:
+    """``raw`` (a JPEG) with its last scan, and the Huffman tables right before it, repeated until the file holds
+    ``markers`` scan markers: each repeat is a few dozen bytes and one more pass over the whole image."""
+    at, segments = 2, []
+    while raw[at + 1] != 0xD9:
+        (length,) = struct.unpack(">H", raw[at + 2 : at + 4])
+        end = at + 2 + length
+        if raw[at + 1] == 0xDA:  # the scan's data runs to the next marker that is not a stuffed FF or a restart
+            while not (raw[end] == 0xFF and raw[end + 1] != 0 and not 0xD0 <= raw[end + 1] <= 0xD7):
+                end += 1
+        segments.append((raw[at + 1], raw[at:end]))
+        at = end
+    last = max(i for i, (marker, _) in enumerate(segments) if marker == 0xDA)
+    first = last
+    while first > 0 and segments[first - 1][0] == 0xC4:
+        first -= 1
+    unit = b"".join(body for _, body in segments[first : last + 1])
+    assert unit.count(SCAN) == 1
+    out = raw[:-2] + unit * (markers - raw.count(SCAN)) + raw[-2:]
+    assert out.count(SCAN) == markers
+    return out
+
+
+def test_a_jpeg_with_more_scan_markers_than_the_bound_never_reaches_a_decoder(monkeypatch):
+    monkeypatch.setitem(sys.modules, "PIL", None)  # a decoder that is reached says so
+    over = b"\xff\xd8" + SCAN * (JPEG_SCANS_MAX + 1) + b"\xff\xd9"
+    assert prepare_image(_b64(over), "image/jpeg") == "it has too many scans"
+    at_the_bound = b"\xff\xd8" + SCAN * JPEG_SCANS_MAX + b"\xff\xd9"
+    assert prepare_image(_b64(at_the_bound), "image/jpeg") == NO_DECODER
+
+
+def test_the_scan_count_is_for_a_jpeg_only(monkeypatch):
+    monkeypatch.setitem(sys.modules, "PIL", None)
+    raw = b"\x89PNG\r\n\x1a\n" + SCAN * (JPEG_SCANS_MAX + 50)
+    assert prepare_image(_b64(raw), "image/png") == NO_DECODER
+
+
+@needs_pil
+@pytest.mark.parametrize("progressive", [False, True])
+def test_an_ordinary_jpeg_is_far_under_the_scan_bound(progressive):
+    picture = Image.frombytes("RGB", (64, 48), random.Random(7).randbytes(64 * 48 * 3))
+    src = _encoded(picture, "JPEG", progressive=progressive, quality=85)
+    assert (1 if not progressive else 2) <= src.count(SCAN) <= 16
+    assert src.count(SCAN) == 1 or progressive
+    _assert_plain(_usable(_b64(src), "image/jpeg"))
+
+
+@needs_pil
+def test_a_repeated_scan_is_taken_at_the_bound_and_refused_one_over():
+    base = _encoded(Image.new("RGB", (256, 256), (120, 130, 140)), "JPEG", progressive=True, quality=30)
+    image = _usable(_b64(_repeat_last_scan(base, JPEG_SCANS_MAX)), "image/jpeg")
+    assert (image.width, image.height) == (256, 256)
+    _assert_plain(image)
+    assert prepare_image(_b64(_repeat_last_scan(base, JPEG_SCANS_MAX + 1)), "image/jpeg") == "it has too many scans"
+
+
+@needs_pil
+def test_the_largest_jpeg_at_the_scan_bound_decodes_in_seconds():
+    # Without the bound a 300 kB file of this kind (3,590 scans) decoded for 55 s, and 1.4 MB for 406 s.
+    base = _encoded(Image.new("RGB", (SIDE, SIDE), (120, 130, 140)), "JPEG", progressive=True, quality=30)
+    bomb = _b64(_repeat_last_scan(base, JPEG_SCANS_MAX))
+    started = time.perf_counter()
+    image = _usable(bomb, "image/jpeg")
+    assert time.perf_counter() - started < 20  # under a second on a desktop
+    assert (image.width, image.height) == (LONG_EDGE, LONG_EDGE)
+
+
+@needs_pil
+@pytest.mark.parametrize("mode", ["RGB", "RGBA", "L"])
+def test_a_large_image_in_a_plain_mode_is_scaled_before_anything_copies_it(mode, monkeypatch):
+    big = (3000, 2000)
+    src = _encoded(Image.new(mode, big, 128 if mode == "L" else (10, 120, 200, 255)[: len(mode)]), "PNG")
+    seen: list[tuple[tuple[int, int], str, Any]] = []
+    real = Image.Image.convert
+
+    def recording(self: Any, mode: Any = None, *args: Any, **kwargs: Any) -> Any:
+        seen.append((self.size, self.mode, mode))
+        return real(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Image.Image, "convert", recording)
+    image = _usable(_b64(src), "image/png")
+    assert (image.width, image.height) == (1568, 1045)
+    # A copy of the whole image in a mode it is sent in is the one this code used to make before scaling. (The
+    # scaling keeps a working copy of its own for an image with alpha, in a mode nothing is sent in.)
+    full_size = [(was, to) for size, was, to in seen if size == big and to in ("RGB", "RGBA", "L")]
+    assert full_size == []
+    out, _raw = _opened(image)
+    assert out.mode == ("RGBA" if mode == "RGBA" else "RGB")
+
+
+@needs_pil
+@pytest.mark.parametrize("mode", ["L", "RGBA"])
+def test_scaling_first_gives_the_picture_that_converting_first_gave(mode):
+    from PIL import ImageChops
+
+    ramp = Image.linear_gradient("L").resize((3000, 2000))
+    source = ramp if mode == "L" else Image.merge("RGBA", (ramp, ramp.rotate(180), ramp.transpose(0), ramp))
+    wanted = "RGB" if mode == "L" else "RGBA"
+    expected = source.convert(wanted)
+    expected.thumbnail((LONG_EDGE, LONG_EDGE), Image.Resampling.LANCZOS)
+    out, _raw = _opened(_usable(_b64(_encoded(source, "PNG")), "image/png"))
+    assert out.mode == wanted and out.size == expected.size
+    assert max(high for _low, high in ImageChops.difference(out, expected).getextrema()) <= 1
+
+
+@needs_pil
+def test_a_large_jpeg_is_decoded_at_a_fraction_of_its_size_and_is_the_same_picture(monkeypatch):
+    from PIL import ImageChops, ImageStat, JpegImagePlugin
+
+    ramp = Image.linear_gradient("L").resize((4000, 3000))
+    source = Image.merge("RGB", (ramp, ramp.rotate(180), ramp.transpose(0)))
+    src = _encoded(source, "JPEG", quality=90)
+    asked: list[tuple[Any, Any]] = []
+    loaded: list[tuple[int, int]] = []
+    real_draft, real_load = JpegImagePlugin.JpegImageFile.draft, JpegImagePlugin.JpegImageFile.load
+
+    def draft(self: Any, mode: Any, size: Any) -> Any:
+        asked.append((mode, size))
+        return real_draft(self, mode, size)
+
+    def load(self: Any) -> Any:
+        loaded.append(self.size)
+        return real_load(self)
+
+    monkeypatch.setattr(JpegImagePlugin.JpegImageFile, "draft", draft)
+    monkeypatch.setattr(JpegImagePlugin.JpegImageFile, "load", load)
+    image = _usable(_b64(src), "image/jpeg")
+    monkeypatch.undo()
+    assert asked[0] == (None, (1568, 1176))
+    assert loaded[0] == (2000, 1500)  # half: the largest fraction that is still at least what is sent
+    assert (image.width, image.height) == (1568, 1176)
+    out, _raw = _opened(image)
+    expected = source.copy()
+    expected.thumbnail((LONG_EDGE, LONG_EDGE), Image.Resampling.LANCZOS)
+    assert max(ImageStat.Stat(ImageChops.difference(out.convert("RGB"), expected)).mean) < 3
+
+
+@needs_pil
+def test_the_pixel_bound_is_read_from_the_header_before_a_jpeg_is_decoded_smaller():
+    # The fraction a JPEG is decoded at does not let a larger one in: the count is of the image as it declares itself.
+    side = SIDE + 8
+    src = _encoded(Image.new("L", (side, side), 90), "JPEG", quality=20)
+    assert prepare_image(_b64(src), "image/jpeg") == "it has too many pixels"
+
+
+async def test_no_more_than_two_results_are_decoded_at_a_time(monkeypatch):
+    import threading
+
+    from nous.mcp_client import manager as manager_module
+
+    lock = threading.Lock()
+    running = peak = 0
+
+    def slow(*_args: Any, **_kwargs: Any) -> tuple[str, bool]:
+        nonlocal running, peak
+        with lock:
+            running += 1
+            peak = max(peak, running)
+        time.sleep(0.05)
+        with lock:
+            running -= 1
+        return "seen", False
+
+    monkeypatch.setattr(manager_module, "flatten_result", slow)
+    assert manager_module.DECODES_AT_ONCE == 2 < manager_module.CALLS_PER_SERVER
+    manager, d, _fake = await _image_manager(SHOT)
+    calls = [d._handlers["mcp__alpha__shot"](q="one") for _ in range(manager_module.CALLS_PER_SERVER)]
+    answers = await asyncio.gather(*calls)
+    assert len(answers) == manager_module.CALLS_PER_SERVER and peak == manager_module.DECODES_AT_ONCE
+    await manager.close()
+
+
+async def test_a_result_without_an_image_does_not_wait_for_a_decode(monkeypatch, fake_prepare):
+    from nous.mcp_client import manager as manager_module
+
+    results = {"text": CallToolResult(content=[_text("z" * (manager_module.OFF_LOOP_RESULT_CHARS + 1))]), **SHOT}
+    manager, d, _fake = await _image_manager(results)
+    for _ in range(manager_module.DECODES_AT_ONCE):
+        await manager._decoding.acquire()  # every decode slot is taken
+    try:
+        answer = await asyncio.wait_for(d._handlers["mcp__alpha__shot"](q="text"), 5)
+        assert answer["is_error"] is False
+        waiting = asyncio.ensure_future(d._handlers["mcp__alpha__shot"](q="one"))
+        await asyncio.sleep(0.05)
+        assert not waiting.done() and fake_prepare == []  # a result with an image waits its turn
+    finally:
+        for _ in range(manager_module.DECODES_AT_ONCE):
+            manager._decoding.release()
+    assert await asyncio.wait_for(waiting, 5) == TAKEN
+    await manager.close()
+
+
+@needs_pil
+def test_a_large_image_with_a_colour_key_is_scaled_as_the_transparency_it_stands_for():
+    # Scaled as plain pixels, the key colour blends into its neighbours and the blend is then not the key: an opaque
+    # fringe of a colour the picture never had. The key is applied first, at full size, so the fringe is part clear.
+    key, ink = (255, 0, 255), (10, 120, 30)
+    source = Image.new("RGB", (3000, 2000), ink)
+    source.paste(key, (0, 0, 1499, 2000))  # an odd edge: it falls between two pixels of the scaled image
+    src = _encoded(source, "PNG", transparency=key)
+    out, _raw = _opened(_usable(_b64(src), "image/png"))
+    assert out.mode == "RGBA" and out.size == (1568, 1045)
+    row = [out.getpixel((x, 500)) for x in range(out.width)]
+    assert row[0][3] == 0 and row[-1] == (*ink, 255)
+    opaque = {pixel[:3] for pixel in row if pixel[3] == 255}
+    assert all(max(abs(a - b) for a, b in zip(colour, ink)) <= 24 for colour in opaque), sorted(opaque)[:5]

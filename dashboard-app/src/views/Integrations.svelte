@@ -136,11 +136,26 @@
     for (const key of [...notes.keys()]) if (key === server || key.startsWith(`${server} `)) notes.delete(key);
   }
 
+  /** Each listed server's address at the last reload. A name whose address changed is another server now (it was
+   * replaced from another tab, another device or the seed command). */
+  const addresses = new Map<string, string>();
+
   /** When the list reloads: drop the notes of a server or tool that is gone, or whose state is not the one the note
-   * spoke of, and the refresh result of a server that is gone. */
+   * spoke of, and the refresh result of a server that is gone. What is open for a server that is gone, or that is
+   * another server now, is closed: a question is not answered, a key not stored and a sign-in not made for a
+   * server the owner was not looking at when they opened it. */
   function prune(d: McpServerList | null) {
     if (!d) return;
     const servers = new Map(d.servers.map((s) => [s.name, s]));
+    for (const [name, s] of servers) {
+      const before = addresses.get(name);
+      if (before === undefined || before === s.url) continue;
+      confirming.delete(name);
+      if (keyEdit?.server === name) closeKeyEdit();
+      if (signingIn === name) signingIn = null;
+    }
+    addresses.clear();
+    for (const [name, s] of servers) addresses.set(name, s.url);
     for (const [key, n] of [...notes]) {
       const at = key.indexOf(' ');
       const s = servers.get(at < 0 ? key : key.slice(0, at));
