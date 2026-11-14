@@ -184,7 +184,18 @@ export function signInText(state: OAuthFlowState): string {
 /** The server's rule for a name (config.SERVER_NAME, and no "__"), in words. */
 export const NAME_RULE = '1 to 24 lower-case letters, digits, - and _, starting with a letter or digit, with no __.';
 /** The server's rule for an address (config.url_problem), in words. */
-export const URL_RULE = 'An https address, with no user name, password, query string or fragment.';
+export const URL_RULE = 'An https address, with no user name, password, query string or fragment. An http address is taken only for a host named in NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS.';
+/** What the owner is told while the address is an http one (the server decides whether its host is listed). */
+export const HTTP_NOTE = 'An http address is not encrypted: what is sent to it, a key included, can be read on the network. It is taken only for a host named in NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS, and sign-in (OAuth) is not available for it.';
+
+/** Whether `url` is an http address (false for one that does not parse). */
+export function isHttp(url: string): boolean {
+  try {
+    return new URL(url).protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
 
 /** Why `name` cannot name a server, or null when it can. */
 export function nameProblem(name: string): string | null {
@@ -194,7 +205,7 @@ export function nameProblem(name: string): string | null {
 }
 
 /** Why `url` cannot be a server's address, or null when it can. The address guard (private, loopback and metadata
- * addresses) is the server's check only. */
+ * addresses) and the list of hosts an http address is taken for are the server's checks only. */
 export function urlProblem(url: string): string | null {
   if (url === '') return 'Enter the server\'s address.';
   let parts: URL;
@@ -203,7 +214,7 @@ export function urlProblem(url: string): string | null {
   } catch {
     return 'This is not a valid address.';
   }
-  if (parts.protocol !== 'https:') return 'Only https addresses are accepted.';
+  if (parts.protocol !== 'https:' && parts.protocol !== 'http:') return 'Only https and http addresses are accepted.';
   if (!parts.hostname) return 'The address has no host.';
   if (parts.username || parts.password) return 'The address may not carry a user name or password.';
   if (parts.search || parts.hash) return 'The address may not carry a query string or fragment.';

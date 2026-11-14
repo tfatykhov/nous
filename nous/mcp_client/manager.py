@@ -97,6 +97,7 @@ from nous.mcp_client.config import (
     parse_host_list,
     parse_pins,
     pin_host,
+    url_problem,
 )
 from nous.mcp_client.oauth import (
     HttpFactory,
@@ -285,7 +286,9 @@ def _origin(url: httpx.URL) -> tuple[str, str, int | None]:
 class _ServerAuth(httpx.Auth):
     """A server's credential on the requests of one session (``httpx.Auth``: run per request, not fixed at connect).
     ``source`` gives the headers to set; nothing is set on a request to another origin than the URL's (scheme, host
-    and port; the SDK follows a redirect only within that origin, so this is a second guard). A 401 or 403 answer to
+    and port). It removes nothing from such a request either: the session's client refuses it before it leaves
+    (``transport._PinnedTransport``), so a header an earlier request carried cannot follow a redirect. A 401 or 403
+    answer to
     a POST (an MCP request; the SDK swallows the GET event stream's errors) is kept in ``refused`` (never cleared: a
     later answer on the same session does not unsay it) and passed to ``on_refused``.
 
@@ -380,7 +383,8 @@ def _repeats(tools: list[ProbedTool], needles: tuple[str, ...]) -> bool:
 class ToolVerdict:
     """What the client does with one stored tool: registers it as ``prepared.name`` with ``prepared.schema`` when
     ``reason`` is None, else skips it for ``reason`` (``skip`` is its kind: ``disabled``, ``server_ceiling``,
-    ``credentials``, ``schema``, ``permission``, ``ceiling``, ``collision`` or ``cap``). ``ceiling``: the host's pin
+    ``credentials``, ``schema``, ``permission``, ``ceiling``, ``collision`` or ``cap``). ``ceiling``: a setting of
+    the host (the pin, or an http address whose host is not in ``NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS``)
     keeps it out, whatever its permission."""
 
     tool: str  # the server's own name
@@ -706,7 +710,10 @@ class McpClientManager:
         return {"pinned_servers": self._pins is not None, "background_servers": self._background_servers is not None}
 
     def _server_ceiling(self, config: ServerConfig) -> str | None:
-        """Why the host's pin keeps the whole server out, or None when there is no pin or it lets the server in."""
+        """Why a setting of the host keeps the whole server out, or None: its address is an http one whose host is
+        not (or no longer) in ``NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS``, or the pin, when one is set, leaves it out."""
+        if url_problem(config.url, self._allow) is not None:  # a row holds an http address of any host
+            return "its address is http and its host is not in NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS"
         if self._pins is None:
             return None
         pin = self._pins.get(config.name)

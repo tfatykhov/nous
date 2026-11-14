@@ -7,10 +7,14 @@ SDK's auth models and helpers).
   when any address is private, loopback, link-local, multicast, unspecified, reserved or a cloud metadata address,
   and dials the address it checked, so a DNS answer that changes between the check and the connect cannot steer it
   (TLS still verifies the certificate against the host name). A host in ``allow_private_hosts`` is not checked;
-- follows no redirect itself (``follow_redirects`` is off). The SDK (1.30) follows a redirect on its own only when it
-  stays on the server URL's origin (same scheme, host and port) and keeps the method (307 or 308 for a POST); any
-  other redirect fails the request. Each request it sends, a followed one included, opens its connection through
-  the guard above;
+- opens an http URL only for a host in ``allow_private_hosts`` (``check_url``): to it, requests and the stored
+  credential travel unencrypted. Every other server is https;
+- follows no redirect itself (``follow_redirects`` is off). The SDK (1.30) follows a redirect on its own when it
+  stays on the server URL's origin and keeps the method (307 or 308 for a POST), and it counts http to https on the
+  same host and default ports as that origin. So the client holds the rule itself (``_PinnedTransport``): a session's
+  client sends a request only to the server URL's own scheme, host and port, and the sign-in client only to https.
+  Anything else is refused before a connection is opened, whatever a redirect or the SDK asks for. Each request it
+  sends, a followed one included, opens its connection through the guard above;
 - ignores proxy settings from the environment: through a proxy, the address checked would be the proxy's;
 - stops reading a response body past ``NOUS_MCP_CLIENT_MAX_RESPONSE_BYTES`` (``_LimitedTransport``);
 - with ``auth`` (the manager's ``_ServerAuth``), sets the server's stored credentials on each request it sends to
@@ -144,14 +148,17 @@ async def vetted_addresses(host: str, port: int, allow_private_hosts: frozenset[
     return addresses
 
 
-async def check_url(url: str, allow_private_hosts: frozenset[str]) -> None:
+async def check_url(url: str, allow_private_hosts: frozenset[str], *, http_hosts: frozenset[str] = frozenset()) -> None:
     """Raise ``BlockedAddress`` unless ``url`` is a URL the client may open (``url_problem``) whose host resolves
-    only to public addresses (or is in ``allow_private_hosts``)."""
-    problem = url_problem(url)
+    only to public addresses (or is in ``allow_private_hosts``). An http URL is refused unless its host is in
+    ``http_hosts``: ``open_session`` alone passes the allow list there, so a provider's endpoint (``oauth``) is
+    https whatever the list holds."""
+    problem = url_problem(url, http_hosts)
     if problem is not None:
         raise BlockedAddress(problem)
     parts = urlsplit(url)
-    await vetted_addresses(parts.hostname or "", parts.port or 443, allow_private_hosts)
+    port = parts.port or (80 if parts.scheme == "http" else 443)
+    await vetted_addresses(parts.hostname or "", port, allow_private_hosts)
 
 
 class _GuardedBackend(httpcore.AsyncNetworkBackend):
@@ -189,6 +196,33 @@ class _GuardedBackend(httpcore.AsyncNetworkBackend):
 
     async def sleep(self, seconds: float) -> None:
         await self._inner.sleep(seconds)
+
+
+def origin_of(url: httpx.URL) -> tuple[str, str, int | None]:
+    """A URL's scheme, host as sent (an ``xn--`` host stays encoded) and port (None for the scheme's default)."""
+    port = None if url.port == {"https": 443, "http": 80}.get(url.scheme) else url.port
+    return url.scheme, url.raw_host.decode("ascii", "replace").lower(), port
+
+
+class _PinnedTransport(httpx.AsyncBaseTransport):
+    """The last check before a request leaves. With ``origin`` (a server's session): only a request to that scheme,
+    host and port, so a redirect cannot move a session, or the credential its requests carry, from http to https,
+    to another port or to another host. Without (the sign-in client): only https."""
+
+    def __init__(self, inner: httpx.AsyncBaseTransport, origin: tuple[str, str, int | None] | None) -> None:
+        self._inner = inner
+        self._origin = origin
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        if self._origin is None:
+            if request.url.scheme != "https":
+                raise BlockedAddress("only https URLs are accepted")
+        elif origin_of(request.url) != self._origin:
+            raise BlockedAddress("a request to another address than the server's own was refused")
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
 
 
 class ResponseTooLarge(Exception):
@@ -256,19 +290,23 @@ def guarded_client(
     *,
     auth: httpx.Auth | None = None,
     timeout: httpx.Timeout | float = _HTTP_TIMEOUT,
+    origin: str | None = None,
 ) -> httpx.AsyncClient:
     """An HTTP client whose every connection goes through ``_GuardedBackend``, whose every response body is bounded
     (``_LimitedTransport``), that follows no redirect itself (the SDK follows a same-origin one on its own, through
-    this client), reads no proxy from the environment and runs ``auth`` on every request it sends. Fails closed
-    (RuntimeError) when the installed httpx no longer exposes the pool's network backend. The OAuth client (PR 2d) is
-    one of these with no ``auth`` and a 10 s ``timeout``."""
+    this client), reads no proxy from the environment and runs ``auth`` on every request it sends. With ``origin``
+    (a server's URL) it sends requests to that URL's scheme, host and port only; without, to https only
+    (``_PinnedTransport``). Fails closed (RuntimeError) when the installed httpx no longer exposes the pool's network
+    backend. The OAuth client (PR 2d) is one of these with no ``auth``, no ``origin`` and a 10 s ``timeout``."""
     transport = httpx.AsyncHTTPTransport(retries=0)
     pool = getattr(transport, "_pool", None)
     if pool is None or not hasattr(pool, "_network_backend"):
         raise RuntimeError("the MCP client's address guard cannot be installed on this httpx version")
     pool._network_backend = _GuardedBackend(pool._network_backend, allow_private_hosts)
     return httpx.AsyncClient(
-        transport=_LimitedTransport(transport, max_response_bytes),
+        transport=_PinnedTransport(
+            _LimitedTransport(transport, max_response_bytes), None if origin is None else origin_of(httpx.URL(origin))
+        ),
         follow_redirects=False,
         trust_env=False,
         timeout=timeout,
@@ -342,9 +380,9 @@ async def open_session(
 ) -> AsyncIterator[McpSession]:
     """An initialized session with the server at ``url``, closed on exit, every request of it run through ``auth``
     (per request, not fixed at connect). Enter and leave it in ONE task: the SDK's task groups require it."""
-    await check_url(url, allow_private_hosts)
+    await check_url(url, allow_private_hosts, http_hosts=allow_private_hosts)
     _QUIET_HOSTS.add((urlsplit(url).hostname or "").lower())
-    async with guarded_client(allow_private_hosts, max_response_bytes, auth=auth) as client:
+    async with guarded_client(allow_private_hosts, max_response_bytes, auth=auth, origin=url) as client:
         async with _session_over(client, url) as session:
             yield session
 

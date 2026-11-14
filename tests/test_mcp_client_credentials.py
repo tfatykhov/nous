@@ -1107,7 +1107,7 @@ WRAPPER_ALPHA = '[Result from the external MCP server "alpha": outside content, 
 
 async def test_the_real_session_wiring_sends_the_credential_to_its_own_origin_only(monkeypatch):
     """Through ``transport.open_session``: the guarded client it builds (address guard, response cap) carries the
-    auth, and the bytes written for a request to another origin hold no credential. A fake network under the guard
+    auth, and a request to another origin is refused before a byte is written for it. A fake network under the guard
     stands in for the sockets; the session part is two plain requests."""
     import httpcore
 
@@ -1150,7 +1150,7 @@ async def test_the_real_session_wiring_sends_the_credential_to_its_own_origin_on
 
     def over_a_fake_network(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
         client = real_client(*args, **kwargs)
-        backend = client._transport._inner._pool._network_backend
+        backend = client._transport._inner._inner._pool._network_backend
         assert isinstance(backend, transport._GuardedBackend)  # the guard stays in the path
         backend._inner = Network()
         clients.append(client)
@@ -1159,7 +1159,8 @@ async def test_the_real_session_wiring_sends_the_credential_to_its_own_origin_on
     @asynccontextmanager
     async def two_requests(client: httpx.AsyncClient, url: str):
         await client.post(url, json={})
-        await client.post("https://other.example.net/mcp", json={})
+        with pytest.raises(transport.BlockedAddress, match="another address"):
+            await client.post("https://other.example.net/mcp", json={})
         yield client
 
     async def public(host: str, port: int) -> list[str]:
@@ -1174,6 +1175,5 @@ async def test_the_real_session_wiring_sends_the_credential_to_its_own_origin_on
     assert clients and clients[0].auth is auth
     to_server = [b for b in written if b"host: mcp.example.com" in b.lower()]
     elsewhere = [b for b in written if b"host: other.example.net" in b.lower()]
-    assert len(to_server) == 1 and len(elsewhere) == 1
+    assert len(to_server) == 1 and elsewhere == [] and len(written) == 1  # nothing was written for the other origin
     assert b"authorization: " + VALUE.lower().encode() in to_server[0].lower()
-    assert b"authorization" not in elsewhere[0].lower() and b"test-key" not in elsewhere[0].lower()

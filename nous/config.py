@@ -1124,6 +1124,7 @@ class Settings(BaseSettings):
     # One MCP tool result, flattened to text, is cut to this many characters (with a note saying so).
     mcp_client_max_result_chars: int = Field(default=20000, ge=1)
     # Comma list of host names the client's address guard lets reach a private, loopback or link-local address.
+    # An http server address is taken only for a host in this list (to it nothing is encrypted).
     mcp_client_allow_private_hosts: str = ""
     # Optional ceiling, set on the host: entries name=host[:port];tool|tool separated by commas. Empty: no ceiling,
     # every allowed tool of an enabled server registers. Set: a stored tool registers only when its server's name is

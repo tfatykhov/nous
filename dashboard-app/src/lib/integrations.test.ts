@@ -2,7 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   CHANGED_TEXT, FORBIDDEN_TEXT, ceilingLines, clampText, createPayload, headersBody, headersProblem, isConflict, isNoKey,
   keyLine, listGate, nameProblem, prettySchema, problemText, refreshLineText, refreshLines, serverPath, serverStatus,
-  shortName, signInHosts, signInHref, signInText, startSignIn, toolChange, toolStatus, toolStatusText, urlProblem,
+  isHttp, shortName, signInHosts, signInHref, signInText, startSignIn, toolChange, toolStatus, toolStatusText, urlProblem,
   type McpAuth, type McpServer, type McpTool,
 } from './integrations';
 
@@ -38,21 +38,27 @@ describe('the name rule (config.SERVER_NAME and no "__")', () => {
 });
 
 describe('the address rule (config.url_problem)', () => {
-  it.each(['https://mcp.deepwiki.com/mcp', 'https://h:8443/x', 'https://[::1]/'])('accepts %s', (url) => {
+  it.each(['https://mcp.deepwiki.com/mcp', 'https://h:8443/x', 'https://[::1]/', 'http://192.168.1.127:8000/mcp', 'http://mcp.deepwiki.com/mcp'])('accepts %s', (url) => {
     expect(urlProblem(url)).toBeNull();
   });
   it.each([
     ['', "Enter the server's address."],
     ['mcp.deepwiki.com', 'This is not a valid address.'],
     ['https://h:99999/', 'This is not a valid address.'],
-    ['http://mcp.deepwiki.com/mcp', 'Only https addresses are accepted.'],
-    ['ftp://h/', 'Only https addresses are accepted.'],
+    ['ftp://h/', 'Only https and http addresses are accepted.'],
+    ['ws://192.168.1.127:8000/mcp', 'Only https and http addresses are accepted.'],
+    ['http://user:pw@192.168.1.127/', 'The address may not carry a user name or password.'],
+    ['http://192.168.1.127/?key=1', 'The address may not carry a query string or fragment.'],
     ['https://user:pw@h/', 'The address may not carry a user name or password.'],
     ['https://user@h/', 'The address may not carry a user name or password.'],
     ['https://h/?key=1', 'The address may not carry a query string or fragment.'],
     ['https://h/#x', 'The address may not carry a query string or fragment.'],
   ])('refuses %j', (url, why) => {
     expect(urlProblem(url)).toBe(why);
+  });
+  it('knows an http address from every other one', () => {
+    expect(['http://192.168.1.127:8000/mcp', 'HTTP://h/'].map(isHttp)).toEqual([true, true]);
+    expect(['https://h/', 'ftp://h/', 'httpx://h/', 'h', ''].map(isHttp)).toEqual([false, false, false, false, false]);
   });
 });
 

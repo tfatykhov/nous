@@ -2402,7 +2402,9 @@ class McpServer(Base):
     """Migration 109 (F112): one external MCP server the agent may use.
 
     ``name`` is the middle part of its tools' names (``mcp__<name>__<tool>``); the migration's CHECK holds its shape.
-    ``url`` is https with no credential in it. ``background``: the owner's "available to background work" switch.
+    ``url`` is https with no credential in it, or http (migration 111) for a host the owner named in
+    ``NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS``: the table holds the scheme, the application the list.
+    ``background``: the owner's "available to background work" switch.
     Written by ``python -m nous.mcp_client.seed`` (``McpRegistry``), read by the MCP client at startup. Its stored
     credential, if any, is a row of ``nous_system.mcp_server_secrets`` (``McpServerSecret``). Not read by the
     ``db_query`` reader.

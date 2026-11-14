@@ -65,7 +65,7 @@ async def test_the_checks_hold_on_postgres(session):
     insert = text("INSERT INTO nous_system.mcp_servers (agent_id, name, url) VALUES (:a, :n, :u)")
     await session.execute(insert, {"a": agent, "n": "alpha", "u": "https://a.example.com/mcp"})
     for name, url in (("a__b", "https://a.example.com/mcp"), ("Alpha", "https://a.example.com/mcp"),
-                      ("plain", "http://a.example.com/mcp"), ("alpha", "https://b.example.com/mcp")):
+                      ("plain", "ftp://a.example.com/mcp"), ("alpha", "https://b.example.com/mcp")):
         with pytest.raises(IntegrityError):
             async with session.begin_nested():
                 await session.execute(insert, {"a": agent, "n": name, "u": url})
