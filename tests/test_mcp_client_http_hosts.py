@@ -76,6 +76,8 @@ def test_without_the_hosts_no_http_address_is_accepted():
         assert url_problem(url) == "only https URLs are accepted"
     assert url_problem("https://alpha.example.com/mcp") is None
     assert url_problem("HTTPS://alpha.example.com/mcp") == "only https URLs are accepted"  # the table would refuse it
+    for not_text in (None, b"https://alpha.example.com/mcp", 7):
+        assert url_problem(not_text, HOSTS) == "not a valid URL" == row_url_problem(not_text)  # type: ignore[arg-type]
 
 
 def test_the_setting_gives_the_hosts_the_rule_compares():

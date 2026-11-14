@@ -45,7 +45,9 @@ class BlockedAddress(Exception):
 
 
 def _url_problem(url: str, http_host_ok: Callable[[str], bool]) -> str | None:
-    chars = url_chars_problem(url) if isinstance(url, str) else None
+    if not isinstance(url, str):  # a provider's document may give anything
+        return "not a valid URL"
+    chars = url_chars_problem(url)
     if chars is not None:
         return chars
     try:
