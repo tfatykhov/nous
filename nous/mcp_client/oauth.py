@@ -37,7 +37,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
-from urllib.parse import parse_qs, quote, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 
 import httpx
 from mcp.client.auth.utils import (
@@ -118,10 +118,23 @@ def client_metadata_url(value: Any) -> str | None:
     value = value.strip()
     if not _CLIENT_ID.fullmatch(value) or "?" in value or "#" in value or url_problem(value) is not None:
         return None
-    segments = urlsplit(value).path.split("/")
+    if not value.startswith("https://"):  # the scheme in lower case: the address is compared as plain text
+        return None
+    segments = [unquote(segment) for segment in urlsplit(value).path.split("/")]  # %2e is a dot too
     if not any(segments) or "." in segments or ".." in segments:
         return None
     return value
+
+
+def served_document(document: str | None, redirect: str | None) -> bool:
+    """Whether ``document`` is the address this process serves its client ID metadata document at: the public base
+    URL (``redirect`` is its callback address) followed by ``CLIENT_METADATA_PATH``, character for character. Any
+    other address is a document hosted elsewhere, which this process does not serve."""
+    return (
+        document is not None
+        and redirect is not None
+        and document == redirect.removesuffix(CALLBACK_PATH) + CLIENT_METADATA_PATH
+    )
 
 
 def client_metadata_document(client_id: str, redirect: str) -> dict[str, Any]:
@@ -192,12 +205,15 @@ class Discovery:
 @dataclass(frozen=True)
 class Client:
     """The client Nous uses at the provider. ``registration``: ``metadata`` (Nous's client ID metadata document),
-    ``dynamic``, ``provided`` (by the owner) or ``reused`` (the stored one, the issuer unchanged)."""
+    ``dynamic``, ``provided`` (by the owner) or ``reused`` (the stored one, the issuer unchanged). ``document``: its
+    id is the address of Nous's client ID metadata document (kept when the client is reused, and in the stored
+    record)."""
 
     client_id: str
     client_secret: str | None = field(repr=False)
     token_auth_method: str
     registration: str
+    document: bool = False
 
 
 async def _request(
@@ -455,18 +471,23 @@ def owner_client(discovery: Discovery, client_id: Any, client_secret: Any) -> Cl
 def metadata_client(document: str) -> Client:
     """The client whose id is the address of Nous's client ID metadata document: nothing is registered, the provider
     fetches the document itself. A public client."""
-    return Client(document, None, "none", "metadata")
+    return Client(document, None, "none", "metadata", document=True)
+
+
+def takes_document(discovery: Discovery) -> bool:
+    """Whether the provider can be given Nous's client ID metadata document: it says it takes one, and a client with
+    no secret may use its token endpoint (``none`` is among the methods it lists, or it lists none)."""
+    return discovery.client_id_metadata and (
+        discovery.token_auth_methods is None or "none" in discovery.token_auth_methods
+    )
 
 
 def another_document(client: Client, document: str | None) -> bool:
-    """Whether ``client`` (a pending or a stored one) is a client ID metadata document other than ``document``, the
-    one in use now (None: none, or the provider takes none): the setting changed or was removed, so it is not used
-    again. A client with a secret is never a metadata document."""
-    return (
-        client.client_secret is None
-        and client_metadata_url(client.client_id) is not None
-        and client.client_id != document
-    )
+    """Whether ``client`` (a pending or a stored one) was Nous's client ID metadata document and is not ``document``,
+    the one in use now (None: the host names none, or the provider takes none): the setting changed or was removed,
+    so its address may no longer serve a document and it is not used again. A client the owner typed or one the
+    provider registered is never one, whatever its id looks like."""
+    return client.document and client.client_id != document
 
 
 async def register(discovery: Discovery, redirect: str, http: HttpFactory, allow: frozenset[str]) -> Client:
@@ -475,7 +496,7 @@ async def register(discovery: Discovery, redirect: str, http: HttpFactory, allow
     client ID metadata document, the host must name one)."""
     if discovery.registration_endpoint is None:
         needs = "this server needs a client id: "
-        if discovery.client_id_metadata:
+        if takes_document(discovery):
             needs += (
                 "its provider takes a client ID metadata document and none is in use on this host "
                 "(NOUS_MCP_CLIENT_ID_METADATA_URL); or "
@@ -782,6 +803,7 @@ async def exchange_code(flow: Flow, params: Mapping[str, Any], http: HttpFactory
         refresh_token=token.refresh_token,
         expires_at=_expires_at(token),
         lifetime=_lifetime(token),
+        client_document=client.document,
     )
 
 

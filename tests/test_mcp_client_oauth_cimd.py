@@ -9,6 +9,7 @@ The app, the fake provider and the fixtures come from test_mcp_client_oauth.py (
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import logging
 from types import SimpleNamespace
@@ -21,7 +22,7 @@ import pytest
 from starlette.applications import Starlette
 
 from nous.api.mcp_client_routes import PROXY_SECRET_HEADER, SIGNED_IN_PAGE, build_mcp_client_routes
-from nous.mcp_client import oauth
+from nous.mcp_client import oauth, secrets
 from tests import test_mcp_client_oauth as base
 from tests.test_mcp_client_oauth import ALPHA, BASE, PROXY, REDIRECT, _add, _callback, _signed_in, _start
 
@@ -77,11 +78,12 @@ async def test_a_provider_that_takes_only_a_metadata_document_signs_in_with_its_
     assert again.json()["registration"] == "reused" and _client_id(again) == DOCUMENT
 
 
-async def test_a_document_hosted_elsewhere_is_the_client_id_as_given(make_env):
-    env = await make_env(document=ELSEWHERE)
+@pytest.mark.parametrize("document", [ELSEWHERE, f"{BASE}/static/nous-client.json"])
+async def test_a_document_hosted_elsewhere_is_the_client_id_as_given(make_env, document):
+    env = await make_env(document=document)
     env.world.as_meta[SUPPORTED] = True
     started = await _start(env)
-    assert started.json()["registration"] == "metadata" and _client_id(started) == ELSEWHERE
+    assert started.json()["registration"] == "metadata" and _client_id(started) == document
     assert _registered(env) == 0  # before dynamic registration, which this provider offers too
 
 
@@ -93,7 +95,6 @@ async def test_a_document_hosted_elsewhere_is_the_client_id_as_given(make_env):
         (DOCUMENT, False),
         (DOCUMENT, "true"),  # only the JSON true counts
         ("http://nous.example.com/client.json", True),  # not an address a document can have
-        (f"{BASE}/another/path.json", True),  # this host serves the document at one path only
     ],
 )
 async def test_without_a_usable_document_or_a_provider_that_takes_one_the_client_is_registered(
@@ -105,6 +106,16 @@ async def test_without_a_usable_document_or_a_provider_that_takes_one_the_client
     started = await _start(env)
     assert started.status_code == 200, started.text
     assert started.json()["registration"] == "dynamic" and _client_id(started) == "test-client-dynamic-0001"
+
+
+async def test_a_provider_whose_token_endpoint_takes_no_client_without_a_secret_is_not_given_the_document(make_env):
+    env = await make_env(document=DOCUMENT)
+    env.world.as_meta[SUPPORTED] = True
+    env.world.as_meta["token_endpoint_auth_methods_supported"] = ["private_key_jwt", "client_secret_post"]
+    started = await _start(env)
+    assert started.json()["registration"] == "dynamic" and _client_id(started) == "test-client-dynamic-0001"
+    del env.world.as_meta["token_endpoint_auth_methods_supported"]  # it lists none: the document is tried
+    assert (await _start(env, name="beta")).json()["registration"] == "metadata"
 
 
 async def test_the_owners_client_id_comes_before_the_document(make_env):
@@ -176,21 +187,69 @@ async def test_start_again_does_not_reuse_a_pending_client_that_is_another_docum
     assert moved.json()["registration"] == "metadata" and _client_id(moved) == ELSEWHERE
 
 
-async def test_a_client_with_a_secret_is_never_taken_for_a_document(make_env):
-    env = await make_env()
+@pytest.mark.parametrize("secret", [None, base.CLIENT_SECRET])
+@pytest.mark.parametrize("document", ["", DOCUMENT])
+async def test_a_client_the_owner_typed_is_never_taken_for_a_document_whatever_its_id_looks_like(
+    make_env, secret, document
+):
+    env = await make_env(document=document)
     typed = "https://apps.example.org/clients/nous"  # the owner's own client, whose id is an address
-    started = await _start(env, client_id=typed, client_secret=base.CLIENT_SECRET)
+    extra = {"client_id": typed} if secret is None else {"client_id": typed, "client_secret": secret}
+    started = await _start(env, **extra)
+    assert started.json()["registration"] == "provided"
+    pending = await _start(env)  # "Start again" with nothing typed: the pending client
+    assert pending.json()["registration"] == "reused" and _client_id(pending) == typed
+    assert (await _callback(env, env.world.authorize(pending.json()["authorization_url"]))).content == SIGNED_IN_PAGE
+    assert (await _add(env, pending.json()["flow_id"])).status_code == 201
+    record = env.manager.stored_oauth("alpha", ALPHA, (await env.registry.list_secrets())["alpha"])
+    assert record.client_document is False
+    again = await _start(env)  # "Sign in again" on the card: the stored client
+    assert again.json()["registration"] == "reused" and _client_id(again) == typed
+
+
+async def test_the_owner_typing_the_documents_address_is_the_owners_client(make_env):
+    env = await make_env()  # the host names no document: the owner typed one hosted somewhere
+    started = await _start(env, client_id=ELSEWHERE)
+    assert started.json()["registration"] == "provided"
     assert (await _callback(env, env.world.authorize(started.json()["authorization_url"]))).content == SIGNED_IN_PAGE
     assert (await _add(env, started.json()["flow_id"])).status_code == 201
     again = await _start(env)
-    assert again.json()["registration"] == "reused" and _client_id(again) == typed
+    assert again.json()["registration"] == "reused" and _client_id(again) == ELSEWHERE
+
+
+# --- the stored record ------------------------------------------------------------------------------------------------
+
+
+async def test_the_record_says_its_client_was_the_document_and_keeps_saying_so_across_a_refresh(make_env):
+    env = await make_env(document=DOCUMENT)
+    env.world.as_meta[SUPPORTED] = True
+    assert (await _add(env, await _signed_in(env))).status_code == 201
+    record = env.manager.stored_oauth("alpha", ALPHA, (await env.registry.list_secrets())["alpha"])
+    assert record.client_document is True
+    fresh = await oauth.refresh_tokens(record, env.manager.oauth_http, env.manager.allow_private_hosts)
+    assert fresh.client_document is True and fresh.access_token != record.access_token
+    assert env.world.forms[-1]["client_id"] == DOCUMENT  # a refresh sends the stored client id
+
+
+def test_a_record_reads_the_same_on_a_build_from_before_the_field_unless_its_client_was_the_document():
+    record = secrets._oauth_of(
+        b'{"v":1,"issuer":"i","token_endpoint":"t","client_id":"c","client_secret":null,"token_auth_method":"none",'
+        b'"resource":"r","scope":null,"access_token":"a","refresh_token":null,"expires_at":null}'
+    )
+    assert record.client_document is False and record.lifetime is None  # sealed before either field existed
+    assert b"client_document" not in secrets.oauth_plaintext(record)  # written only when true
+    document = dataclasses.replace(record, client_document=True)
+    plain = secrets.oauth_plaintext(document)
+    assert b'"client_document":true' in plain and secrets._oauth_of(plain) == document
+    with pytest.raises(secrets.SecretUnavailable):
+        secrets._oauth_of(plain.replace(b'"client_document":true', b'"client_document":"yes"'))
 
 
 # --- the setting ------------------------------------------------------------------------------------------------------
 
 
 def test_the_address_of_a_document_follows_the_client_identifier_rules():
-    for good in (DOCUMENT, ELSEWHERE, "https://nous.example.com:8443/c", f"  {DOCUMENT}\n"):
+    for good in (DOCUMENT, ELSEWHERE, "https://nous.example.com:8443/c", f"  {DOCUMENT}\n", f"{BASE}/a%2Fb.json"):
         assert oauth.client_metadata_url(good) == good.strip(), good
     for bad in (
         "",
@@ -202,6 +261,10 @@ def test_the_address_of_a_document_follows_the_client_identifier_rules():
         "https://nous.example.com//",
         "https://nous.example.com/a/../client.json",
         "https://nous.example.com/./client.json",
+        "https://nous.example.com/a/%2e%2e/client.json",  # a dot segment, percent-encoded
+        "https://nous.example.com/%2E/client.json",
+        "https://nous.example.com/.%2e/client.json",
+        "HTTPS://nous.example.com/client.json",  # compared as plain text: the scheme in lower case
         "https://user@nous.example.com/client.json",
         "https://nous.example.com/client.json?v=1",
         "https://nous.example.com/client.json?",
@@ -253,10 +316,12 @@ async def test_the_document_is_served_with_no_proxy_secret_no_client_running_and
         assert (await client.post(PATH, json={})).status_code == 405
 
 
-async def test_a_document_hosted_elsewhere_is_served_here_too_for_the_owner_to_copy():
-    served = await _get(_app(ELSEWHERE))
-    assert served.status_code == 200 and served.json()["client_id"] == ELSEWHERE
-    assert served.json()["redirect_uris"] == [REDIRECT]
+async def test_a_base_address_with_a_path_serves_the_document_under_it():
+    under = "https://example.com/nous"
+    served = await _get(_app(f"{under}{PATH}", base_url=under))
+    assert served.status_code == 200 and served.json()["client_id"] == f"{under}{PATH}"
+    assert served.json()["redirect_uris"] == [f"{under}/integrations/mcp/oauth/callback"]
+    assert (await _get(_app(f"https://example.com{PATH}", base_url=under))).status_code == 404
 
 
 @pytest.mark.parametrize(
@@ -265,28 +330,57 @@ async def test_a_document_hosted_elsewhere_is_served_here_too_for_the_owner_to_c
         ("", BASE),
         (MagicMock(), BASE),
         ("http://nous.example.com/client.json", BASE),
-        (f"{BASE}/another/path.json", BASE),  # this host, another path than the one served
-        (f"https://NOUS.example.com{PATH}/", BASE),
+        # Any other address than this route's own is a document hosted elsewhere: never served here, where its
+        # client id would not be the address it is served at.
+        (ELSEWHERE, BASE),
+        (f"{BASE}/another/path.json", BASE),
+        (f"https://NOUS.example.com{PATH}", BASE),
+        (f"https://nous.example.com:443{PATH}", BASE),
+        (f"https://nous.example.com.{PATH}", BASE),
+        (f"{DOCUMENT}/", BASE),
         (DOCUMENT, "http://nous.example.com"),  # no redirect address: sign-in is unavailable
         (DOCUMENT, MagicMock()),
     ],
 )
-async def test_no_document_is_served_when_none_is_in_use(document, base_url):
+async def test_no_document_is_served_unless_the_one_in_use_is_at_this_routes_own_address(document, base_url):
     answer = await _get(_app(document, base_url=base_url))
     assert answer.status_code == 404 and answer.json() == {"error": "not found"}
 
 
-def test_a_setting_that_cannot_be_used_is_said_once_at_startup(caplog):
-    caplog.set_level(logging.WARNING, logger="nous.api.mcp_client_routes")
+async def test_the_route_stops_serving_when_the_setting_is_emptied_or_moved(make_env):
+    env = await make_env(document=DOCUMENT)
+    assert (await _get(env.app)).json()["client_id"] == DOCUMENT
+    for now in ("", ELSEWHERE):
+        env.settings.mcp_client_id_metadata_url = now
+        assert (await _get(env.app)).status_code == 404, now
+
+
+async def test_head_answers_like_get_with_no_body_and_the_host_header_changes_nothing():
+    app = _app(DOCUMENT)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://other.example.com") as c:
+        head, got = await c.head(PATH), await c.get(PATH)
+    assert head.status_code == 200 and head.content == b""
+    assert got.json()["client_id"] == DOCUMENT
+
+
+def test_startup_says_whether_a_document_is_in_use_and_whether_it_is_served_here(caplog):
+    caplog.set_level(logging.INFO, logger="nous.api.mcp_client_routes")
     digest = hashlib.sha256(PROXY.encode()).hexdigest()
-    for document in ("", DOCUMENT, ELSEWHERE, MagicMock()):
-        _app(document, digest=digest)
-    assert caplog.records == []
-    _app(f"{BASE}/another/path.json", digest=digest)
-    assert [r.getMessage().count("NOUS_MCP_CLIENT_ID_METADATA_URL") for r in caplog.records] == [1]
-    assert PATH in caplog.records[0].getMessage() and "another/path" not in caplog.records[0].getMessage()
-    _app(DOCUMENT, base_url="http://nous.example.com", digest=digest)  # no redirect address: no document either
-    assert len(caplog.records) == 2 and "NOUS_A2UI_PUBLIC_BASE_URL" in caplog.records[1].getMessage()
+
+    def said(document: Any, base_url: Any = BASE) -> list[tuple[str, str]]:
+        caplog.clear()
+        _app(document, base_url=base_url, digest=digest)
+        return [(r.levelname, r.getMessage()) for r in caplog.records]
+
+    assert said("") == [] and said(MagicMock()) == []
+    (served,) = said(DOCUMENT)
+    assert served[0] == "INFO" and "served here" in served[1] and "not served here" not in served[1]
+    for elsewhere in (ELSEWHERE, f"{BASE}/another/path.json"):  # a mistyped address looks the same
+        ((level, text),) = said(elsewhere)
+        assert level == "INFO" and "not served here" in text and elsewhere not in text
+    for document, base_url in (("http://nous.example.com/client.json", BASE), (DOCUMENT, "http://nous.example.com")):
+        ((level, text),) = said(document, base_url)
+        assert level == "WARNING" and "NOUS_MCP_CLIENT_ID_METADATA_URL" in text and "NOUS_A2UI_PUBLIC_BASE_URL" in text
 
 
 async def test_the_document_is_the_only_route_that_needs_no_proxy_secret(make_env):
