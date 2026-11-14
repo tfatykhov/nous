@@ -49,15 +49,16 @@ NOUS_ALLOWED_USERS=12345,67890        # Comma-separated Telegram user IDs
 docker compose up -d
 ```
 
-This launches three containers:
+This launches four containers:
 
 | Container | Image | Port | Purpose |
 |-----------|-------|------|---------|
 | `nous-postgres` | `pgvector/pgvector:pg17` | 5432 | PostgreSQL + pgvector |
 | `nous-agent` | Built from `Dockerfile` | 8000 | Nous agent (REST + MCP) |
+| `nous-scorer` | Built from `Dockerfile` | — | Deterministic task scorer (runs every 15 minutes, reads the database only) |
 | `nous-telegram` | Built from `Dockerfile` | — | Telegram bot (chat interface) |
 
-> The `telegram` service is optional. If `TELEGRAM_BOT_TOKEN` is not set, the container starts but the bot exits immediately. To skip it entirely, run `docker compose up -d nous postgres`.
+> The `telegram` service is optional. If `TELEGRAM_BOT_TOKEN` is not set, the container starts but the bot exits immediately. To skip it entirely, run `docker compose up -d nous postgres`. That command also skips `nous-scorer`, so task scores are not recorded until you start it.
 
 PostgreSQL initializes automatically with:
 - `sql/init.sql` — Creates 3 schemas, 23 tables, 79 indexes, pgvector + pg_trgm extensions
