@@ -49,6 +49,13 @@ until ``POST /servers`` with its ``oauth_flow_id`` stores it with the server (``
 is bound to its server name and address. ``POST /servers/{name}/sign-out`` deletes the stored tokens (the provider's
 grant is not revoked). No answer, log line or event carries a code, a state, a verifier or a token; the uvicorn access
 line of the callback (its query string holds the code and the state) is dropped.
+
+Client ID metadata document: with ``NOUS_MCP_CLIENT_ID_METADATA_URL`` set to the document's public https address, a
+provider that says it takes one is given that address as the client id (before dynamic registration is tried), and
+fetches the document itself. ``GET /integrations/mcp/oauth/client-metadata.json`` serves it when the setting is that
+route's own public address (a document hosted elsewhere is not served here). It is the one route here
+that needs no proxy secret (a provider has none): it reads nothing of the request and carries only Nous's client name
+and the redirect address. The proxy must let that exact path through with no sign-in for a provider to reach it.
 """
 
 from __future__ import annotations
@@ -60,6 +67,7 @@ import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from typing import Any
 
 from pydantic import ValidationError
@@ -81,20 +89,27 @@ from nous.mcp_client.manager import (
 )
 from nous.mcp_client.oauth import (
     CALLBACK_PATH,
+    CLIENT_METADATA_PATH,
     FLOW_SECONDS,
     Client,
     Flow,
     OAuthProblem,
+    another_document,
     callback_params,
+    client_metadata_document,
+    client_metadata_url,
     discover,
     exchange_code,
     host_of,
+    metadata_client,
     owner_client,
     owner_scope,
     redirect_uri,
     refresh_due,
     refresh_tokens,
     register,
+    served_document,
+    takes_document,
 )
 from nous.mcp_client.registry import McpRegistry
 from nous.mcp_client.secrets import OAuthRecord, StoredSecret
@@ -336,11 +351,35 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         text there must not fail the app); None: OAuth is unavailable here."""
         return redirect_uri(getattr(settings, "a2ui_public_base_url", ""))
 
+    def metadata_address() -> str | None:
+        """The address of Nous's client ID metadata document (``NOUS_MCP_CLIENT_ID_METADATA_URL``), which is its
+        client id at a provider that takes one; None: no document is in use (the setting is empty or not such an
+        address, or OAuth is unavailable)."""
+        document = client_metadata_url(getattr(settings, "mcp_client_id_metadata_url", ""))
+        return document if redirect_address() is not None else None
+
+    configured = getattr(settings, "mcp_client_id_metadata_url", "")
+    if isinstance(configured, str) and configured.strip():
+        if metadata_address() is None:
+            logger.warning(
+                "F112: NOUS_MCP_CLIENT_ID_METADATA_URL is set and cannot be used (it must be an https address with "
+                "a path and no query or fragment, and NOUS_A2UI_PUBLIC_BASE_URL must be an https address), so no "
+                "client ID metadata document is in use"
+            )
+        elif served_document(metadata_address(), redirect_address()):
+            logger.info("F112: a client ID metadata document is in use, served here at %s", CLIENT_METADATA_PATH)
+        else:  # said at startup: a mistyped address looks the same, and fails only at a provider
+            logger.info(
+                "F112: a client ID metadata document is in use at another address than the public base URL "
+                "followed by %s: it is not served here and must be hosted at that address",
+                CLIENT_METADATA_PATH,
+            )
+
     digest = _digest(settings.mcp_client_ui_secret_sha256)
     if not digest:
         logger.warning(
             "F112: NOUS_MCP_CLIENT_UI_SECRET_SHA256 is not set to a SHA-256 digest, so every /integrations/mcp route "
-            "answers 503"
+            "that needs it answers 503"
         )
     changes = asyncio.Lock()  # one change at a time: read the old row, write, emit, reload
 
@@ -814,8 +853,9 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
 
     async def oauth_start(request: Request) -> JSONResponse:
         """POST /integrations/mcp/oauth/start ``{name, url, client_id?, client_secret?, scope?}``: discover the
-        server's provider, register a client (or take the owner's ``client_id``, or reuse the stored client while the
-        issuer is unchanged) and start a sign-in: ``{flow_id, authorization_url, authorization_host, token_host,
+        server's provider, choose a client (the owner's ``client_id``, else the stored one while the issuer is
+        unchanged, else Nous's client ID metadata document when the provider takes one and the host names it, else
+        dynamic registration) and start a sign-in: ``{flow_id, authorization_url, authorization_host, token_host,
         registration, scope, expires_in}``. For a stored server the URL must be its stored one. A sign-in pending for
         the same name and URL is replaced (its client reused while the issuer is unchanged). Nothing is stored."""
         body = await _body(request)
@@ -850,25 +890,41 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             known = [(pending_client, pending_issuer)]
             if reuse is not None:
                 known.append(
-                    (Client(reuse.client_id, reuse.client_secret, reuse.token_auth_method, "provided"), reuse.issuer)
+                    (
+                        Client(
+                            reuse.client_id,
+                            reuse.client_secret,
+                            reuse.token_auth_method,
+                            "provided",
+                            reuse.client_document,
+                        ),
+                        reuse.issuer,
+                    )
                 )
+            # The document in use at this provider: None when the provider takes none or the host names none. A
+            # pending or stored client that was another document (the setting changed or was removed) is not used
+            # again: its address may no longer serve one.
+            document = metadata_address() if takes_document(discovery) else None
+            reusable = next(
+                (
+                    c
+                    for c, issuer in known
+                    if c is not None and issuer == discovery.issuer and not another_document(c, document)
+                ),
+                None,
+            )
             same = next(
                 (c for c, issuer in known if c is not None and c.client_id == client_id and issuer == discovery.issuer),
                 None,
             )
             if client_id is not None and client_secret is None and same is not None:
-                client = Client(same.client_id, same.client_secret, same.token_auth_method, "provided")
+                client = replace(same, registration="provided")  # the same client: still the document if it was
             elif client_id is not None:
                 client = owner_client(discovery, client_id, client_secret)
-            elif pending_client is not None and pending_issuer == discovery.issuer:
-                client = Client(
-                    pending_client.client_id,
-                    pending_client.client_secret,
-                    pending_client.token_auth_method,
-                    "reused",
-                )
-            elif reuse is not None and reuse.issuer == discovery.issuer:
-                client = Client(reuse.client_id, reuse.client_secret, reuse.token_auth_method, "reused")
+            elif reusable is not None:  # the pending sign-in's client before the stored one
+                client = replace(reusable, registration="reused")
+            elif document is not None:
+                client = metadata_client(document)
             else:
                 client = await register(discovery, redirect, http, allow)
             flow = manager.flows.start(config.name, config.url, discovery, client, redirect)
@@ -1036,7 +1092,21 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             server = await view(name)
         return JSONResponse({"credentials": "removed", "server": server})
 
+    async def client_metadata(request: Request) -> Response:
+        """GET /integrations/mcp/oauth/client-metadata.json: Nous's client ID metadata document, which a provider
+        fetches with no credential, so it is outside ``endpoint`` (no proxy secret, no client needed). Nothing of
+        the request is read; the answer holds the client name and the redirect address only. 404 unless the
+        document in use is at this route's own public address: a document is never served with another client id
+        than the address it is served at (a provider that finds one may end the sign-ins made with it)."""
+        document, redirect = metadata_address(), redirect_address()
+        if document is None or redirect is None or not served_document(document, redirect):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(
+            client_metadata_document(document, redirect), headers={"Cache-Control": "public, max-age=3600"}
+        )
+
     return [
+        Route(CLIENT_METADATA_PATH, client_metadata, methods=["GET"]),
         Route("/integrations/mcp/servers", endpoint(list_servers, mutating=False), methods=["GET"]),
         Route("/integrations/mcp/servers", endpoint(create_server, mutating=True), methods=["POST"]),
         Route("/integrations/mcp/probe", endpoint(probe, mutating=True), methods=["POST"]),

@@ -15,6 +15,10 @@ The HTTP client's request lines of these requests are dropped (``transport.quiet
 may pass (no answer, a timeout, a 429 or a 5xx, another status than 400 or 401 from the token endpoint) is
 ``transient``.
 
+The client at a provider is, in order: the owner's client id, the stored one, Nous's client ID metadata document when
+the provider takes one and the host names its address (``client_metadata_url``; nothing is registered, the provider
+fetches the document), or dynamic registration (``register``).
+
 Login state lives in memory (``OAuthFlows``, owned by the manager): ten minutes, at most ``FLOWS_PENDING_MAX``
 pending, single-use state compared in constant time; a restart loses it and the owner presses Sign in again.
 """
@@ -33,7 +37,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
-from urllib.parse import parse_qs, quote, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlencode, urlsplit
 
 import httpx
 from mcp.client.auth.utils import (
@@ -55,6 +59,8 @@ from nous.mcp_client.transport import ResponseTooLarge, check_url, guarded_clien
 logger = logging.getLogger(__name__)
 
 CALLBACK_PATH = "/integrations/mcp/oauth/callback"  # registered with providers: fixed
+# Where Nous serves its client ID metadata document (a provider fetches it, with no credential): fixed.
+CLIENT_METADATA_PATH = "/integrations/mcp/oauth/client-metadata.json"
 CLIENT_NAME = "Nous"
 FLOW_SECONDS = 600
 FLOWS_PENDING_MAX = 8
@@ -101,6 +107,49 @@ def redirect_uri(base: Any) -> str | None:
     return base + CALLBACK_PATH
 
 
+def client_metadata_url(value: Any) -> str | None:
+    """The address of Nous's client ID metadata document (``NOUS_MCP_CLIENT_ID_METADATA_URL``), which is its client id
+    at a provider that takes one, or None when ``value`` is empty or cannot be one (then no document is used; never an
+    exception). The rules of a client identifier URL (draft-ietf-oauth-client-id-metadata-document): https, a host, a
+    path other than ``/`` with no ``.`` or ``..`` segment, and no user, query or fragment. A provider compares it as
+    plain text, so it is used exactly as given."""
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if not _CLIENT_ID.fullmatch(value) or "?" in value or "#" in value or url_problem(value) is not None:
+        return None
+    if not value.startswith("https://"):  # the scheme in lower case: the address is compared as plain text
+        return None
+    segments = [unquote(segment) for segment in urlsplit(value).path.split("/")]  # %2e is a dot too
+    if not any(segments) or "." in segments or ".." in segments:
+        return None
+    return value
+
+
+def served_document(document: str | None, redirect: str | None) -> bool:
+    """Whether ``document`` is the address this process serves its client ID metadata document at: the public base
+    URL (``redirect`` is its callback address) followed by ``CLIENT_METADATA_PATH``, character for character. Any
+    other address is a document hosted elsewhere, which this process does not serve."""
+    return (
+        document is not None
+        and redirect is not None
+        and document == redirect.removesuffix(CALLBACK_PATH) + CLIENT_METADATA_PATH
+    )
+
+
+def client_metadata_document(client_id: str, redirect: str) -> dict[str, Any]:
+    """The client ID metadata document served at ``client_id``: what dynamic registration sends (``register``), with
+    the document's own address as the client id. A public client: it has no secret."""
+    return {
+        "client_id": client_id,
+        "client_name": CLIENT_NAME,
+        "redirect_uris": [redirect],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+    }
+
+
 def oauth_client(allow_private_hosts: frozenset[str]) -> httpx.AsyncClient:
     """The default ``HttpFactory``: a guarded client with no ``auth``, ``HTTP_SECONDS`` per request and a body cap of
     ``BODY_MAX_BYTES``."""
@@ -138,7 +187,8 @@ def refresh_due(record: OAuthRecord) -> bool:
 class Discovery:
     """What discovery found. ``issuer`` and ``resource`` are the provider's and the server's own strings (not the SDK
     models' normalised URLs). ``iss_supported``: the provider says its answer carries ``iss`` (RFC 9207).
-    ``grant_types``: the grants the provider lists, or None when it lists none."""
+    ``grant_types``: the grants the provider lists, or None when it lists none. ``client_id_metadata``: the provider
+    says it takes a client ID metadata document's address as the client id."""
 
     issuer: str
     authorization_endpoint: str
@@ -149,17 +199,21 @@ class Discovery:
     token_auth_methods: tuple[str, ...] | None
     iss_supported: bool
     grant_types: tuple[str, ...] | None = None
+    client_id_metadata: bool = False
 
 
 @dataclass(frozen=True)
 class Client:
-    """The client Nous uses at the provider. ``registration``: ``dynamic``, ``provided`` (by the owner) or ``reused``
-    (the stored one, the issuer unchanged)."""
+    """The client Nous uses at the provider. ``registration``: ``metadata`` (Nous's client ID metadata document),
+    ``dynamic``, ``provided`` (by the owner) or ``reused`` (the stored one, the issuer unchanged). ``document``: its
+    id is the address of Nous's client ID metadata document (kept when the client is reused, and in the stored
+    record)."""
 
     client_id: str
     client_secret: str | None = field(repr=False)
     token_auth_method: str
     registration: str
+    document: bool = False
 
 
 async def _request(
@@ -381,6 +435,7 @@ async def discover(url: str, http: HttpFactory, allow: frozenset[str], scope: st
         token_auth_methods=tuple(methods) if methods is not None else None,
         iss_supported=raw.get("authorization_response_iss_parameter_supported") is True,
         grant_types=tuple(metadata.grant_types_supported) if metadata.grant_types_supported is not None else None,
+        client_id_metadata=raw.get("client_id_metadata_document_supported") is True,
     )
 
 
@@ -413,14 +468,43 @@ def owner_client(discovery: Discovery, client_id: Any, client_secret: Any) -> Cl
     return Client(client_id, secret, _auth_method(secret, discovery), "provided")
 
 
+def metadata_client(document: str) -> Client:
+    """The client whose id is the address of Nous's client ID metadata document: nothing is registered, the provider
+    fetches the document itself. A public client."""
+    return Client(document, None, "none", "metadata", document=True)
+
+
+def takes_document(discovery: Discovery) -> bool:
+    """Whether the provider can be given Nous's client ID metadata document: it says it takes one, and a client with
+    no secret may use its token endpoint (``none`` is among the methods it lists, or it lists none)."""
+    return discovery.client_id_metadata and (
+        discovery.token_auth_methods is None or "none" in discovery.token_auth_methods
+    )
+
+
+def another_document(client: Client, document: str | None) -> bool:
+    """Whether ``client`` (a pending or a stored one) was Nous's client ID metadata document and is not ``document``,
+    the one in use now (None: the host names none, or the provider takes none): the setting changed or was removed,
+    so its address may no longer serve a document and it is not used again. A client the owner typed or one the
+    provider registered is never one, whatever its id looks like."""
+    return client.document and client.client_id != document
+
+
 async def register(discovery: Discovery, redirect: str, http: HttpFactory, allow: frozenset[str]) -> Client:
     """Dynamic client registration (RFC 7591) as ``Nous`` with ``redirect`` as its one redirect address. 409 when the
-    provider offers none: the owner must register an app and give its client id."""
+    provider offers none: the owner must register an app and give its client id (or, for a provider that takes a
+    client ID metadata document, the host must name one)."""
     if discovery.registration_endpoint is None:
+        needs = "this server needs a client id: "
+        if takes_document(discovery):
+            needs += (
+                "its provider takes a client ID metadata document and none is in use on this host "
+                "(NOUS_MCP_CLIENT_ID_METADATA_URL); or "
+            )
         raise OAuthProblem(
             409,
-            "this server needs a client id: register an OAuth app with the provider using the redirect address "
-            f"{redirect} and enter its client id",
+            f"{needs}register an OAuth app with the provider using the redirect address {redirect} and enter its "
+            "client id",
         )
     # The refresh grant is asked for unless the provider lists its grants without it (RFC 7591 lets it refuse
     # metadata it does not support). Without a refresh token, the sign-in lasts until the token expires.
@@ -719,6 +803,7 @@ async def exchange_code(flow: Flow, params: Mapping[str, Any], http: HttpFactory
         refresh_token=token.refresh_token,
         expires_at=_expires_at(token),
         lifetime=_lifetime(token),
+        client_document=client.document,
     )
 
 

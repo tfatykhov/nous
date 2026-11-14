@@ -280,13 +280,14 @@ class Env:
     world: World
     remotes: Remotes
     answers: list[str]
+    settings: Settings
 
 
 @pytest.fixture
 async def make_env(db, tmp_path):
     made: list[Env] = []
 
-    async def make(*, base: str = BASE) -> Env:
+    async def make(*, base: str = BASE, document: str = "") -> Env:
         agent = f"mcp-oauth-{uuid.uuid4().hex[:8]}"
         key = tmp_path / f"{agent}.key"
         key.write_bytes(base64.b64encode(bytes(range(32))) + b"\n")
@@ -298,6 +299,7 @@ async def make_env(db, tmp_path):
             mcp_client_ui_secret_sha256=hashlib.sha256(PROXY.encode()).hexdigest(),
             mcp_client_key_file=str(key),
             a2ui_public_base_url=base,
+            mcp_client_id_metadata_url=document,
         )
         world = World()
         remotes = Remotes(world)
@@ -305,7 +307,7 @@ async def make_env(db, tmp_path):
         manager = McpClientManager(d, registry, settings, bus, connect=remotes.connect, oauth_http=world.client)
         await manager.start()
         app = Starlette(routes=build_mcp_client_routes(database=db, settings=settings, manager=manager, bus=bus))
-        env = Env(app, manager, d, registry, bus, world, remotes, [])
+        env = Env(app, manager, d, registry, bus, world, remotes, [], settings)
         made.append(env)
         return env
 

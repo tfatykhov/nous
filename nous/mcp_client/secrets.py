@@ -190,8 +190,9 @@ class OAuthRecord:
     """The plaintext of an ``oauth`` row (PR 2d): the provider's issuer and token endpoint, the client Nous uses there
     and how it authenticates at the token endpoint (``none``, ``client_secret_post`` or ``client_secret_basic``), the
     resource and scope the tokens are for, and the tokens. ``expires_at``: unix seconds, None when the provider gave no
-    lifetime; ``lifetime``: the seconds the provider gave it (the refresh margin is at most half of it). The secret
-    fields stay out of ``repr``."""
+    lifetime; ``lifetime``: the seconds the provider gave it (the refresh margin is at most half of it).
+    ``client_document``: the client id is the address of Nous's client ID metadata document (not a registered client,
+    nor one the owner typed). The secret fields stay out of ``repr``."""
 
     issuer: str
     token_endpoint: str
@@ -204,6 +205,7 @@ class OAuthRecord:
     refresh_token: str | None = field(repr=False)
     expires_at: int | None
     lifetime: int | None = None
+    client_document: bool = False
 
     def values(self) -> list[str]:
         """The record's secret values: what a result or a listing must not repeat."""
@@ -215,8 +217,12 @@ _OAUTH_OPTIONAL_TEXT = ("client_secret", "scope", "refresh_token")
 
 
 def oauth_plaintext(record: OAuthRecord) -> bytes:
-    """The canonical plaintext of a token record."""
-    return json.dumps({"v": 1, **asdict(record)}, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    """The canonical plaintext of a token record. ``client_document`` is written only when true, so a record with a
+    registered or typed client reads the same on a build from before the field existed."""
+    plain = {"v": 1, **asdict(record)}
+    if not record.client_document:
+        del plain["client_document"]
+    return json.dumps(plain, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def _oauth_of(plaintext: bytes) -> OAuthRecord:
@@ -227,10 +233,12 @@ def _oauth_of(plaintext: bytes) -> OAuthRecord:
     names = {f.name for f in dataclass_fields(OAuthRecord)}
     if isinstance(record, dict):
         record.setdefault("lifetime", None)  # a record sealed before the field existed
+        record.setdefault("client_document", False)  # written only when true
     if not isinstance(record, dict) or record.pop("v", None) != 1 or set(record) != names:
         raise SecretUnavailable()
     if (
-        not all(isinstance(record[key], str) for key in _OAUTH_TEXT)
+        not isinstance(record["client_document"], bool)
+        or not all(isinstance(record[key], str) for key in _OAUTH_TEXT)
         or not all(record[key] is None or isinstance(record[key], str) for key in _OAUTH_OPTIONAL_TEXT)
         or not all(
             record[key] is None or (isinstance(record[key], int) and not isinstance(record[key], bool))
