@@ -33,7 +33,7 @@
   let gate = $derived(listGate($store.error));
 
   const PILL: Record<Tone, string> = { ok: 'status-pill--ok', warn: 'status-pill--warn', neutral: '' };
-  /** A result in words. `expect` is the state it speaks of (a server's `enabled background`, a tool's permission):
+  /** A result in words. `expect` is the state it speaks of (a server's `enabled background images`, a tool's permission):
    * when the list shows another, the note is dropped, so it never contradicts the status beside it. */
   type Note = { text: string; ok: boolean; expect?: string; keep?: boolean };
 
@@ -43,7 +43,8 @@
   // the form's own elements (`mcp-name`, `mcp-url`, `mcp-add`).
   const busy = new SvelteMap<string, string>(); // the action in flight
   const notes = new SvelteMap<string, Note>(); // the last result, of a server or of one tool's control
-  const confirming = new SvelteMap<string, 'background' | 'remove' | 'key' | 'signout'>();
+  type Confirm = 'background' | 'images' | 'remove' | 'key' | 'signout';
+  const confirming = new SvelteMap<string, Confirm>();
   const refreshed = new SvelteMap<string, RefreshResult>(); // the last refresh's changes
   let pageNote = $state<Note | null>(null);
 
@@ -127,7 +128,7 @@
     if (!moved || !untrack(() => narrow)) return;
     void tick().then(() => (byId('mcp-pane') ?? byId('mcp-list'))?.focus());
   });
-  const serverState = (s: Pick<McpServer, 'enabled' | 'background'>) => `${s.enabled} ${s.background}`;
+  const serverState = (s: Pick<McpServer, 'enabled' | 'background' | 'images'>) => `${s.enabled} ${s.background} ${s.images}`;
   const byId = (id: string) => document.getElementById(id);
 
   /** Drop a server's notes: its own and every tool's. */
@@ -191,11 +192,11 @@
     act(s.name, 'enabled', s.name, async () => {
       await updateServer(s.name, { enabled: !s.enabled });
       const text = s.enabled ? 'Switched off: its tools are no longer offered to the agent.' : 'Switched on.';
-      return { text, ok: true, expect: serverState({ enabled: !s.enabled, background: s.background }) };
+      return { text, ok: true, expect: serverState({ ...s, enabled: !s.enabled }) };
     });
 
   /** Open a confirmation and put the focus on its first button. */
-  async function openConfirm(server: string, kind: 'background' | 'remove' | 'key' | 'signout') {
+  async function openConfirm(server: string, kind: Confirm) {
     confirming.set(server, kind);
     await tick();
     byId(`mcp-c.${server}`)?.querySelector('button')?.focus();
@@ -206,7 +207,7 @@
     const kind = confirming.get(server);
     confirming.delete(server);
     await tick();
-    const ids = { remove: 'mcp-r', key: 'mcp-z', signout: 'mcp-o', background: 'mcp-k' } as const;
+    const ids = { remove: 'mcp-r', key: 'mcp-z', signout: 'mcp-o', background: 'mcp-k', images: 'mcp-g' } as const;
     byId(`${ids[kind ?? 'background']}.${server}`)?.focus();
   }
 
@@ -224,8 +225,26 @@
     return act(s.name, 'background', s.name, async () => {
       await updateServer(s.name, { background: on });
       const text = on ? 'Background work may now call its tools.' : 'Background work can no longer call its tools.';
-      return { text, ok: true, expect: serverState({ enabled: s.enabled, background: on }) };
+      return { text, ok: true, expect: serverState({ ...s, background: on }) };
     }, () => byId(`mcp-k.${s.name}`));
+  }
+
+  /** Letting its images through asks first; stopping them does not. The box shows what is stored until then. */
+  function onImages(s: McpServer, e: Event) {
+    const box = e.currentTarget as HTMLInputElement;
+    const want = box.checked;
+    box.checked = s.images;
+    if (want) void openConfirm(s.name, 'images');
+    else void setImages(s, false);
+  }
+
+  function setImages(s: McpServer, on: boolean) {
+    confirming.delete(s.name);
+    return act(s.name, 'images', s.name, async () => {
+      await updateServer(s.name, { images: on });
+      const text = on ? 'Images in its results now go to the model.' : 'Images in its results are no longer sent to the model.';
+      return { text, ok: true, expect: serverState({ ...s, images: on }) };
+    }, () => byId(`mcp-g.${s.name}`));
   }
 
   /** The word on a tool's control: what pressing it does. */
@@ -545,7 +564,7 @@
       confirming.delete(name);
       // The form gives way to the server it made: the note goes with it, above the pane.
       pageNote = {
-        text: answer.created ? `Added ${name}.` : `Replaced ${name}. It is switched on, and background work is off.`,
+        text: answer.created ? `Added ${name}.` : `Replaced ${name}. It is switched on, and background work and images are off.`,
         ok: true,
       };
       if (leaves === formLeaves) {
@@ -792,6 +811,24 @@
               {/if}
             </div>
 
+            <div class="images">
+              <label class="check">
+                <input id="mcp-g.{s.name}" type="checkbox" checked={s.images} disabled={!!inFlight} aria-describedby="mcp-q.{s.name}"
+                  onchange={(e) => onImages(s, e)} />
+                Send its images to the model
+              </label>
+              <p id="mcp-q.{s.name}" class="hint">PNG and JPEG images in a tool's result, a screenshot for one, go to the model with the result's text. While this is off, each is a line of text.</p>
+              {#if asking === 'images'}
+                <div class="confirm" id="mcp-c.{s.name}" role="group" aria-label="Confirm images for {s.name}">
+                  <p>Send {s.name}'s images to the model? An image can hold instructions that no check of the text sees.</p>
+                  <div class="actions">
+                    <Button size="sm" class="max-md:min-h-11 max-md:px-4" disabled={!!inFlight} onclick={() => void setImages(s, true)}>Yes, send its images</Button>
+                    <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" onclick={() => void cancelConfirm(s.name)}>Cancel</Button>
+                  </div>
+                </div>
+              {/if}
+            </div>
+
             <div class="key">
               <p class="key-line">{keyLine(s.auth)}</p>
               {#if keyEdit?.server === s.name}
@@ -998,7 +1035,7 @@
               </div>
             {/if}
             {#if replaces}
-              <p class="hint">A server named {newName} exists. Adding it again replaces the server: its tools are checked again, it is switched on, and background work is turned off. Its call timeout goes back to 30 s.</p>
+              <p class="hint">A server named {newName} exists. Adding it again replaces the server: its tools are checked again, it is switched on, and background work and images are turned off. Its call timeout goes back to 30 s.</p>
               <p class="hint">{authKind === 'headers' ? 'The key typed here replaces its stored key.' : authKind === 'oauth' ? 'Signing in for it stores the new sign-in with it at once; use Sign in again on its page for that.' : 'A stored key is kept at the same address, and removed at another.'}</p>
             {/if}
             <div class="actions">
@@ -1100,7 +1137,7 @@
   .limit { font-size: 0.8125rem; color: var(--warn-text); margin: 0.375rem 0 0; }
   .hint { font-size: 0.75rem; color: var(--muted); margin: 0.25rem 0 0; }
   .hint-err { color: var(--err-text); }
-  .background { margin-top: 0.875rem; }
+  .background, .images { margin-top: 0.875rem; }
   .check { display: inline-flex; align-items: center; gap: 0.5rem; font-size: 0.875rem; cursor: pointer; }
   .check input { width: 1rem; height: 1rem; accent-color: var(--action); cursor: pointer; }
   .check input:disabled { cursor: default; }

@@ -17,7 +17,7 @@ const tool = (over: Partial<McpTool> = {}): McpTool => ({
 
 const server = (over: Partial<McpServer> = {}): McpServer => ({
   name: 'deepwiki', url: 'https://mcp.deepwiki.com/mcp', enabled: true, background: false, background_in_effect: false,
-  background_blocked_by_ceiling: false, call_timeout_seconds: 30, connected: false, blocked_by_ceiling: false,
+  background_blocked_by_ceiling: false, images: false, call_timeout_seconds: 30, connected: false, blocked_by_ceiling: false,
   skip_reason: null, tools: [], auth: auth(), ...over,
 });
 
