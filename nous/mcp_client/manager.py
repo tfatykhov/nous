@@ -125,7 +125,7 @@ logger = logging.getLogger(__name__)
 
 CALLS_PER_SERVER = 4  # calls in flight to one server at a time
 # Results whose images are being decoded at a time, over every server: one decode of the largest image taken holds
-# about 170 MB at its peak (images.PIXELS_MAX), and four calls a server could otherwise each run one.
+# up to about 190 MB at its peak (images.PIXELS_MAX), and four calls a server could otherwise each run one.
 DECODES_AT_ONCE = 2
 _BACKOFF_FIRST_SECONDS = 1.0
 _BACKOFF_MAX_SECONDS = 60.0
@@ -1359,8 +1359,9 @@ class McpClientManager:
         take = IMAGES_PER_RESULT if server.config.images else 0  # the owner's switch on this server's row
         images: list[OutsideImage] = []
         # An image is decoded off the event loop whatever its size in characters: a few kilobytes can unpack to tens
-        # of megabytes of pixels. What a decode costs is bounded by images.prepare_image (about a second and 170 MB
-        # for the largest it takes), and no more than DECODES_AT_ONCE results are being decoded at a time.
+        # of megabytes of pixels. What a decode costs is bounded by images.prepare_image (about a second and up to
+        # 190 MB for the largest picture it takes; the slowest file found within its bounds, one of empty metadata
+        # segments, took under 3 s), and no more than DECODES_AT_ONCE results are being decoded at a time.
         decodes = take > 0 and any(
             getattr(item, "type", None) == "image" for item in getattr(raw, "content", None) or []
         )

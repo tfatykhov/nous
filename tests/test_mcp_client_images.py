@@ -60,6 +60,7 @@ from nous.mcp_client.images import (
     LONG_EDGE,
     OUT_MAX_BYTES,
     PIXELS_MAX,
+    PNG_PROFILES_MAX,
     SOURCE_MAX_BYTES,
     OutsideImage,
     prepare_image,
@@ -1857,7 +1858,7 @@ def test_the_largest_jpeg_at_the_scan_bound_decodes_in_seconds():
 
 
 @needs_pil
-@pytest.mark.parametrize("mode", ["RGB", "RGBA", "L"])
+@pytest.mark.parametrize("mode", ["RGB", "RGBA", "L", "LA"])
 def test_a_large_image_in_a_plain_mode_is_scaled_before_anything_copies_it(mode, monkeypatch):
     big = (3000, 2000)
     src = _encoded(Image.new(mode, big, 128 if mode == "L" else (10, 120, 200, 255)[: len(mode)]), "PNG")
@@ -1876,16 +1877,17 @@ def test_a_large_image_in_a_plain_mode_is_scaled_before_anything_copies_it(mode,
     full_size = [(was, to) for size, was, to in seen if size == big and to in ("RGB", "RGBA", "L")]
     assert full_size == []
     out, _raw = _opened(image)
-    assert out.mode == ("RGBA" if mode == "RGBA" else "RGB")
+    assert out.mode == ("RGBA" if mode in ("RGBA", "LA") else "RGB")
 
 
 @needs_pil
-@pytest.mark.parametrize("mode", ["L", "RGBA"])
+@pytest.mark.parametrize("mode", ["L", "LA", "RGBA"])
 def test_scaling_first_gives_the_picture_that_converting_first_gave(mode):
     from PIL import ImageChops
 
     ramp = Image.linear_gradient("L").resize((3000, 2000))
-    source = ramp if mode == "L" else Image.merge("RGBA", (ramp, ramp.rotate(180), ramp.transpose(0), ramp))
+    bands = {"L": (ramp,), "LA": (ramp, ramp.rotate(180)), "RGBA": (ramp, ramp.rotate(180), ramp.transpose(0), ramp)}
+    source = ramp if mode == "L" else Image.merge(mode, bands[mode])
     wanted = "RGB" if mode == "L" else "RGBA"
     expected = source.convert(wanted)
     expected.thumbnail((LONG_EDGE, LONG_EDGE), Image.Resampling.LANCZOS)
@@ -1995,3 +1997,61 @@ def test_a_large_image_with_a_colour_key_is_scaled_as_the_transparency_it_stands
     assert row[0][3] == 0 and row[-1] == (*ink, 255)
     opaque = {pixel[:3] for pixel in row if pixel[3] == 255}
     assert all(max(abs(a - b) for a, b in zip(colour, ink)) <= 24 for colour in opaque), sorted(opaque)[:5]
+
+
+# --- A PNG's colour profiles, and grey with alpha (the review's second pass) ----------------------------------------
+
+PROFILE = b"iCCP"
+
+
+def _with_profiles(raw: bytes, count: int) -> bytes:
+    """``raw`` (a PNG) with ``count`` colour profile chunks after its header, each a few bytes that inflate to 1 MB."""
+    body = b"p\x00\x00" + zlib.compress(bytes(1_000_000), 9)
+    chunk = struct.pack(">I", len(body)) + PROFILE + body + struct.pack(">I", zlib.crc32(PROFILE + body))
+    head = 8 + 25  # the signature and IHDR
+    out = raw[:head] + chunk * count + raw[head:]
+    assert out.count(PROFILE) == count
+    return out
+
+
+def test_a_png_with_more_profile_chunks_than_the_bound_never_reaches_a_decoder(monkeypatch):
+    monkeypatch.setitem(sys.modules, "PIL", None)  # a decoder that is reached says so
+    over = b"\x89PNG\r\n\x1a\n" + PROFILE * (PNG_PROFILES_MAX + 1)
+    assert prepare_image(_b64(over), "image/png") == "it has too many colour profiles"
+    at_the_bound = b"\x89PNG\r\n\x1a\n" + PROFILE * PNG_PROFILES_MAX
+    assert prepare_image(_b64(at_the_bound), "image/png") == NO_DECODER
+    assert (
+        prepare_image(_b64(b"\xff\xd8" + PROFILE * (PNG_PROFILES_MAX + 50)), "image/jpeg") == NO_DECODER
+    )  # a PNG's rule
+
+
+@needs_pil
+def test_a_png_is_taken_with_its_profile_chunks_at_the_bound_and_refused_one_over():
+    plain = _encoded(Image.new("RGB", (4, 4), (10, 120, 200)), "PNG")
+    image = _usable(_b64(_with_profiles(plain, PNG_PROFILES_MAX)), "image/png")
+    assert (image.width, image.height) == (4, 4)
+    _assert_plain(image)
+    assert (
+        prepare_image(_b64(_with_profiles(plain, PNG_PROFILES_MAX + 1)), "image/png")
+        == "it has too many colour profiles"
+    )
+
+
+@needs_pil
+def test_five_megabytes_of_profile_chunks_are_refused_at_once():
+    # 4,960 chunks of about 1 kB took 10 s to open: the decoder inflates every one.
+    plain = _encoded(Image.new("RGB", (4, 4), (10, 120, 200)), "PNG")
+    bomb = _b64(_with_profiles(plain, 4_000))
+    started = time.perf_counter()
+    assert prepare_image(bomb, "image/png") == "it has too many colour profiles"
+    assert time.perf_counter() - started < 2
+
+
+@needs_pil
+def test_an_ordinary_png_with_a_colour_profile_is_taken_without_it():
+    from PIL import ImageCms
+
+    profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    src = _encoded(Image.new("RGB", (40, 30), (10, 120, 200)), "PNG", icc_profile=profile)
+    assert src.count(PROFILE) == 1
+    _assert_plain(_usable(_b64(src), "image/png"))

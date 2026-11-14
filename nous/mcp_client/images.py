@@ -35,10 +35,11 @@ IMAGE_TYPES = {"image/png": "PNG", "image/jpeg": "JPEG"}
 # smaller bound by default; this one holds when that limit is raised.
 SOURCE_MAX_BYTES = 5_000_000
 # Width times height, read from the header before a pixel is decoded: an image that would unpack to more is refused
-# by its header alone. 4096 by 4096 holds two 4K screens side by side. One call on a PNG of that size with an alpha
-# channel was measured at about 170 MB over what the process held before (64 MB of pixels, the copy the scaling makes
-# of them, and its buffers); a JPEG of that size is decoded at half size and adds little. The manager runs no more
-# than two decodes at a time.
+# by its header alone. 4096 by 4096 holds two 4K screens side by side. One call on an image of that size was
+# measured, over what the process held before, at 170 MB for a PNG with an alpha channel (64 MB of pixels, the copy
+# the scaling makes of them, and its buffers), 187 MB for a palette with a colour key (converted before it is
+# scaled), and 115 to 147 MB for a progressive JPEG (it is decoded at half size, but its coefficients are kept
+# whole). The manager runs no more than two decodes at a time.
 PIXELS_MAX = 4096 * 4096
 # The scans of a JPEG: a baseline one has 1, a progressive one about 10. Each scan is a pass over every block of the
 # image, so a file that repeats a 56-byte scan thousands of times decodes for minutes. The count is of the scan
@@ -46,6 +47,11 @@ PIXELS_MAX = 4096 * 4096
 # hold them); what else can hold them is metadata, a thumbnail's own scan for one.
 JPEG_SCANS_MAX = 64
 _JPEG_SCAN = bytes((0xFF, 0xDA))  # the start-of-scan marker
+# The colour profiles of a PNG: it has one at most. The decoder inflates every profile chunk it meets, up to 1 MB
+# each, so a file of thousands of 1 kB chunks takes seconds to open (10 s for 5 MB of them). Counted like the scans:
+# the chunk's name anywhere in the file.
+PNG_PROFILES_MAX = 4
+_PNG_PROFILE = b"iCCP"
 # The longer side of what is sent. The API scales a larger image down to about this itself.
 LONG_EDGE = 1568
 # The encoded size of what is sent. A PNG over it is sent as a JPEG; a JPEG over it is not sent.
@@ -89,6 +95,8 @@ def prepare_image(data: Any, media_type: Any) -> OutsideImage | str:
     kind = IMAGE_TYPES[declared]
     if kind == "JPEG" and raw.count(_JPEG_SCAN) > JPEG_SCANS_MAX:
         return "it has too many scans"
+    if kind == "PNG" and raw.count(_PNG_PROFILE) > PNG_PROFILES_MAX:
+        return "it has too many colour profiles"
     try:
         from PIL import Image
     except ImportError:
@@ -108,7 +116,7 @@ def prepare_image(data: Any, media_type: Any) -> OutsideImage | str:
             if source.mode in ("I;16", "I;16L", "I;16B"):  # 16 bits a pixel: the high byte, not a clipped value
                 high = slice(0, None, 2) if source.mode == "I;16B" else slice(1, None, 2)
                 work = Image.frombytes("L", source.size, source.tobytes()[high])
-            elif source.mode in ("RGB", "RGBA", "L") and "transparency" not in source.info:
+            elif source.mode in ("RGB", "RGBA", "L", "LA") and "transparency" not in source.info:
                 work = source  # scaled as it is: no second copy of a large image
             else:
                 work = source.convert(wanted)  # a palette, a colour key, CMYK: scaled as the colours they stand for
