@@ -555,6 +555,9 @@
     formNote = null;
     pageNote = null;
     let made: string | null = null;
+    /** What is said above the pane when the add fails after its form was left, for a name the list did not hold. */
+    let unlisted: string | null = null;
+    const existed = replaces;
     const leaves = formLeaves;
     try {
       const answer = await createServer(createPayload(name, url, result, allowed, headers, flowId));
@@ -591,6 +594,7 @@
         // and kept there across a move: nothing else says why the server is not in the list.
         const why = isConflict(err) ? 'its tools changed since the check' : problemText(err);
         pageNote = { text: `${name} was not added: ${why}`, ok: false, keep: true };
+        if (!existed) unlisted = pageNote.text;
       } else if (isConflict(err)) {
         // The server answered differently from what was shown: the new list for the same name, address and headers,
         // every choice back at not allowed. The typed headers stay: the check needs them.
@@ -612,6 +616,10 @@
       // reload, or have left and come back: the form shown then is another form, and it keeps its address.
       const listed = ($store.data?.servers ?? []).some((s) => s.name === made);
       if (made && listed && leaves === formLeaves && pane.kind === 'add') location.hash = serverHref(made);
+      // An add may be stored though its answer was lost. The list is the truth: once it holds a name it did not
+      // hold before, "was not added" is not said beside it.
+      const stored = ($store.data?.servers ?? []).some((s) => s.name === name);
+      if (unlisted !== null && stored && pageNote?.text === unlisted) pageNote = null;
     }
   }
 </script>

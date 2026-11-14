@@ -2348,6 +2348,69 @@ describe('Integrations: after an add', () => {
     expect((screen.getByLabelText('Address') as HTMLInputElement).value).toBe('https://wiki3.example.com/mcp');
   });
 
+  it.each([
+    ['only the name', 'wiki3', 'https://mcp.deepwiki.com/mcp'],
+    ['only the address', 'wiki2', 'https://wiki3.example.com/mcp'],
+  ])('an add that lands while the owner is away keeps a form on which %s was changed since', async (_, name, url) => {
+    const { answer } = await heldAdd();
+    await openServer('files');
+    await openForm();
+    await fill(name, url);
+    await openServer('files');
+    await land(answer, [201, { created: true, definitions_sha256: 'a'.repeat(64), server: null }]);
+    await openForm();
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe(name);
+    expect((screen.getByLabelText('Address') as HTMLInputElement).value).toBe(url);
+  });
+
+  /** The checked form's add, held: `store()` stores the server as the route would and loses the answer. */
+  function lostAnswer() {
+    const post = handlers['POST /integrations/mcp/servers'];
+    const gate = held();
+    handlers['POST /integrations/mcp/servers'] = async (body) => {
+      await gate.promise;
+      await post(body);
+      return [0, undefined]; // stored, and the answer never arrived
+    };
+    return () => gate.resolve([200, {}]);
+  }
+
+  it('an add that was stored though its answer was lost is not said to have failed once the list holds the server', async () => {
+    await checked();
+    const store = lostAnswer();
+    await addServer();
+    await openServer('files');
+    store();
+    await waitFor(() => expect(link('wiki2')).toBeTruthy()); // the reload shows it
+    await settle();
+    expect(screen.queryByText(/was not added/)).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('a replace that failed after its form was left stays said: the list held that name before', async () => {
+    handlers['POST /integrations/mcp/probe'] = () => [200, PROBE()];
+    const answer = held();
+    handlers['POST /integrations/mcp/servers'] = () => answer.promise;
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fill('deepwiki', 'https://mcp.deepwiki.com/mcp');
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await fireEvent.click(await within(addCard()).findByRole('button', { name: 'Replace server' }));
+    await openServer('files');
+    await land(answer, UNREACHABLE);
+    expect(screen.getByRole('alert').textContent).toBe("deepwiki was not added: Could not list the server's tools: ReadTimeout.");
+  });
+
+  it('an add that failed after its form was left stays said while the list does not hold the server', async () => {
+    await checked();
+    const answer = held();
+    handlers['POST /integrations/mcp/servers'] = () => answer.promise;
+    await addServer();
+    await openServer('files');
+    await land(answer, [0, undefined]);
+    expect(screen.getByRole('alert').textContent).toMatch(/^wiki2 was not added: /);
+  });
+
   it('a 502 that lands while the form is shown is said on the form, not above the pane', async () => {
     const { answer } = await heldAdd();
     await land(answer, UNREACHABLE);
