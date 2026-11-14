@@ -35,7 +35,7 @@
   const PILL: Record<Tone, string> = { ok: 'status-pill--ok', warn: 'status-pill--warn', neutral: '' };
   /** A result in words. `expect` is the state it speaks of (a server's `enabled background`, a tool's permission):
    * when the list shows another, the note is dropped, so it never contradicts the status beside it. */
-  type Note = { text: string; ok: boolean; expect?: string };
+  type Note = { text: string; ok: boolean; expect?: string; keep?: boolean };
 
   // Per server, keyed by name in Maps: a server's or a tool's name is never read as a property of a plain object
   // (a server named "constructor", a tool named "__proto__"). A tool's key is `<server> <tool>`: a server name has no
@@ -305,7 +305,9 @@
       confirming.clear();
       opened.clear();
       kept.clear();
-      if (pageNote && !pageNote.ok) pageNote = null; // an alert about another page is read: its own page has its note
+      // An alert about another page is read: its own page has its note. One that is said nowhere else (`keep`: an
+      // add that failed after its form was left) stays until the owner tries again or changes something.
+      if (pageNote && !pageNote.ok && !pageNote.keep) pageNote = null;
       query = '';
       show = 'all';
     });
@@ -501,6 +503,7 @@
       return;
     }
     formNote = null;
+    if (pageNote?.keep) pageNote = null; // trying again: what the last add said is read
     await runProbe(newName, newUrl.trim(), headers, authKind === 'oauth' ? signedIn?.flowId : undefined);
   }
 
@@ -555,13 +558,20 @@
         probe = null;
         allowed.clear();
         clearHeaders();
+      } else if (pane.kind !== 'add' && newName === name && newUrl.trim() === url) {
+        // Left and not come back: the name and the address still on the form are the made server's. They go, so
+        // the form opened next does not offer to replace it. Another name typed since is the owner's: it stays.
+        newName = '';
+        newUrl = '';
+        tried = false;
       }
     } catch (err) {
       if (leaves !== formLeaves) {
         // The form was left while the add was in flight: its key and its check are gone, so there is nothing on it
-        // to say this beside (the owner may be back on the form: it is another form now). It is said above the pane.
+        // to say this beside (the owner may be back on the form: it is another form now). It is said above the pane,
+        // and kept there across a move: nothing else says why the server is not in the list.
         const why = isConflict(err) ? 'its tools changed since the check' : problemText(err);
-        pageNote = { text: `${name} was not added: ${why}`, ok: false };
+        pageNote = { text: `${name} was not added: ${why}`, ok: false, keep: true };
       } else if (isConflict(err)) {
         // The server answered differently from what was shown: the new list for the same name, address and headers,
         // every choice back at not allowed. The typed headers stay: the check needs them.
@@ -616,7 +626,7 @@
 <!-- A tool's name, as the server wrote it (text nodes only). A line may break after "_", "-" and "." before it
      has to break inside a word. -->
 {#snippet toolName(name: string)}
-  <code class="tool-name" title={name.length > 80 ? name : undefined}>{#each shortName(name).split(/(?<=[_.-])/) as part, i (i)}{#if i}<wbr />{/if}{part}{/each}</code>
+  <code class="tool-name" title={name.length > 80 ? name : undefined}>{#each shortName(name).match(/[^_.-]*[_.-]|[^_.-]+/g) ?? [''] as part, i (i)}{#if i}<wbr />{/if}{part}{/each}</code>
 {/snippet}
 
 {#snippet note(n: Note | undefined | null)}

@@ -852,6 +852,17 @@ describe('Integrations: names a server chose', () => {
       expect(code.getAttribute('title')).toBe(long);
       expect(parts(code)).toEqual(['get_', '<wbr>', `${long.slice(4, 79)}…`]);
     });
+
+    it('separators in a row, first and last: a break after each, none after the last character', async () => {
+      const code = (await named('_a__b.-c_'))('_a__b.-c_');
+      expect(code.textContent).toBe('_a__b.-c_');
+      expect(parts(code)).toEqual(['_', '<wbr>', 'a_', '<wbr>', '_', '<wbr>', 'b.', '<wbr>', '-', '<wbr>', 'c_']);
+    });
+
+    it('the screen has no lookbehind in a pattern: a browser without it would not parse the bundle at all', () => {
+      const src = readFileSync(join(__dirname, 'Integrations.svelte'), 'utf-8');
+      expect(src).not.toMatch(/\(\?<[=!]/);
+    });
   });
 
   it('a tool named like the screen\'s own words is shown as data in a refresh result', async () => {
@@ -2138,7 +2149,76 @@ describe('Integrations: after an add', () => {
     await openForm();
     expect(within(addCard()).queryByRole('alert')).toBeNull();
     expect(within(addCard()).queryByText(/ReadTimeout/)).toBeNull();
-    expect(screen.queryByText(/was not added/)).toBeNull(); // read: the owner moved on
+    // Nowhere else says why wiki2 is not in the list: it stays above the pane until the owner tries again.
+    expect(screen.getByRole('alert').textContent).toBe("wiki2 was not added: Could not list the server's tools: ReadTimeout.");
+    expect(screen.getByRole('alert').closest('.split')).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await within(addCard()).findByText('3 tools listed');
+    expect(screen.queryByText(/was not added/)).toBeNull();
+    expect(counter.probes).toBe(2);
+  });
+
+  it('an add that failed after its form was left is still said when the owner moves on to another server', async () => {
+    const { answer } = await heldAdd();
+    await openServer('deepwiki');
+    await land(answer, UNREACHABLE);
+    await openServer('files');
+    await settle();
+    expect(screen.getByRole('alert').textContent).toBe("wiki2 was not added: Could not list the server's tools: ReadTimeout.");
+    // A change the owner makes next starts over: what is said above the pane is about that change.
+    handlers['PATCH /integrations/mcp/servers/files'] = () => [200, { server: null }];
+    await fireEvent.click(within(card('files')).getByRole('button', { name: 'Switch on' }));
+    await waitFor(() => expect(screen.queryByText(/was not added/)).toBeNull());
+  });
+
+  it('an add that failed after its form was left is said even when its reload takes the shown server away', async () => {
+    const { answer } = await heldAdd();
+    await openServer('files');
+    const listed = listAnswer;
+    listAnswer = () => {
+      const [status, d] = listed() as [number, ReturnType<typeof LIST>];
+      return [status, { ...d, servers: d.servers.filter((s) => s.name !== 'files') }]; // removed elsewhere meanwhile
+    };
+    await land(answer, UNREACHABLE);
+    await screen.findByText(/There is no server named/);
+    await settle();
+    expect(screen.getByRole('alert').textContent).toBe("wiki2 was not added: Could not list the server's tools: ReadTimeout.");
+  });
+
+  it('an add that lands while the owner is away leaves no name on the form to replace the server with', async () => {
+    const { answer } = await heldAdd();
+    await openServer('files');
+    await land(answer, [201, { created: true, definitions_sha256: 'a'.repeat(64), server: null }]);
+    expect(screen.getByText('Added wiki2.').getAttribute('role')).toBe('status');
+    await openForm();
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText('Address') as HTMLInputElement).value).toBe('');
+    // An emptied form is not one the owner tried: its fields are not said to be wrong.
+    expect(screen.getByLabelText('Name').getAttribute('aria-invalid')).toBeNull();
+    expect(screen.getByLabelText('Address').getAttribute('aria-invalid')).toBeNull();
+    expect(within(addCard()).queryByText('Enter a name.')).toBeNull();
+  });
+
+  it('an add that lands on a form the owner came back to leaves its name and address as they are', async () => {
+    const { answer } = await heldAdd();
+    await openServer('files');
+    await openForm(); // the name and the address stay across a leave: this form shows them
+    await land(answer, [201, { created: true, definitions_sha256: 'a'.repeat(64), server: null }]);
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('wiki2');
+    expect((screen.getByLabelText('Address') as HTMLInputElement).value).toBe('https://mcp.deepwiki.com/mcp');
+    expect(location.hash).toBe(ADD_ADDRESS);
+  });
+
+  it('an add that lands while the owner is away keeps another name typed on the form since', async () => {
+    const { answer } = await heldAdd();
+    await openServer('files');
+    await openForm();
+    await fill('wiki3', 'https://wiki3.example.com/mcp');
+    await openServer('files');
+    await land(answer, [201, { created: true, definitions_sha256: 'a'.repeat(64), server: null }]);
+    await openForm();
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('wiki3');
+    expect((screen.getByLabelText('Address') as HTMLInputElement).value).toBe('https://wiki3.example.com/mcp');
   });
 
   it('a 502 that lands while the form is shown is said on the form, not above the pane', async () => {
