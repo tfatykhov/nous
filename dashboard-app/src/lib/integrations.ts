@@ -309,6 +309,35 @@ export function serverStatus(s: McpServer): Status {
   return { word: 'connects on first use', detail: null, tone: 'neutral' };
 }
 
+/** How many of a server's tools are allowed, in words: the line under its name in the list and over its tools. */
+export function toolCountText(tools: readonly Pick<McpTool, 'permission'>[]): string {
+  if (tools.length === 0) return 'no tools';
+  return `${tools.filter((t) => t.permission === 'allow').length} of ${tools.length} allowed`;
+}
+
+/** Which tools the list shows: `show` is `all`, `allowed` or `denied`. */
+export type ToolShow = 'all' | 'allowed' | 'denied';
+export const TOOL_SHOW: { value: ToolShow; label: string }[] = [
+  { value: 'all', label: 'All' },
+  { value: 'allowed', label: 'Allowed' },
+  { value: 'denied', label: 'Not allowed' },
+];
+/** A server with at least this many tools gets the search box and the filter: fewer are read at a glance. */
+export const TOOL_FILTER_FROM = 9;
+
+/** The tools `show` and `query` leave: the query is looked for in a tool's own name and its description, without
+ * case. An unknown `show` shows all. */
+export function filterTools<T extends Pick<McpTool, 'tool' | 'permission' | 'description'>>(
+  tools: readonly T[], show: string, query: string,
+): T[] {
+  const q = query.trim().toLowerCase();
+  return tools.filter((t) => {
+    if (show === 'allowed' && t.permission !== 'allow') return false;
+    if (show === 'denied' && t.permission === 'allow') return false;
+    return !q || t.tool.toLowerCase().includes(q) || (t.description ?? '').toLowerCase().includes(q);
+  });
+}
+
 // ── Stored keys (F112 PR 2c) ────────────────────────────────────────────────
 
 /** One row of the key form: a header's name and the value typed for it. Values live only in the form's state. */
@@ -424,14 +453,6 @@ export const refreshLineText = (l: RefreshLine) =>
 
 /** A raw name cut to `max` characters with an ellipsis (the full name goes in a title). */
 export const shortName = (name: string, max = 80) => (name.length > max ? `${name.slice(0, max - 1)}…` : name);
-
-/** A long text cut at a word near `max` characters, with an ellipsis; `cut` says whether anything was left out. */
-export function clampText(text: string, max = 180): { text: string; cut: boolean } {
-  if (text.length <= max) return { text, cut: false };
-  const head = text.slice(0, max);
-  const space = head.lastIndexOf(' ');
-  return { text: `${(space > max * 0.6 ? head.slice(0, space) : head).trimEnd()}…`, cut: true };
-}
 
 /** A serialized schema indented for reading; the text as given when it is not JSON. */
 export function prettySchema(schema: string): string {

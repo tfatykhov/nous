@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
-  CHANGED_TEXT, FORBIDDEN_TEXT, ceilingLines, clampText, createPayload, headersBody, headersProblem, isConflict, isNoKey,
-  keyLine, listGate, nameProblem, prettySchema, problemText, refreshLineText, refreshLines, serverPath, serverStatus,
-  isHttp, shortName, signInHosts, signInHref, signInText, startSignIn, toolChange, toolStatus, toolStatusText, urlProblem,
+  CHANGED_TEXT, FORBIDDEN_TEXT, TOOL_FILTER_FROM, TOOL_SHOW, ceilingLines, createPayload, filterTools, headersBody,
+  headersProblem, isConflict, isNoKey, keyLine, listGate, nameProblem, prettySchema, problemText, refreshLineText,
+  refreshLines, serverPath, serverStatus, isHttp, shortName, signInHosts, signInHref, signInText, startSignIn, toolChange,
+  toolCountText, toolStatus, toolStatusText, urlProblem,
   type McpAuth, type McpServer, type McpTool,
 } from './integrations';
 
@@ -233,15 +234,55 @@ describe('what a refresh changed', () => {
   });
 });
 
-describe('text helpers', () => {
-  it('clamps a long description at a word, and leaves a short one whole', () => {
-    expect(clampText('short')).toEqual({ text: 'short', cut: false });
-    const long = `${'word '.repeat(60)}end`;
-    const c = clampText(long, 50);
-    expect(c.cut).toBe(true);
-    expect(c.text.endsWith('word…')).toBe(true);
-    expect(c.text.length).toBeLessThanOrEqual(51);
+describe("a server's tools in the list", () => {
+  const allowed = tool({ tool: 'read_wiki', permission: 'allow', registered: true, skip_reason: null, description: 'Reads the WIKI pages.' });
+  const denied = tool({ tool: 'ask_question', description: 'Ask a question.' });
+  const asked = tool({ tool: 'search', permission: 'ask', description: null }); // a stored "ask" is not allowed
+  const all = [allowed, denied, asked];
+
+  it('says how many are allowed, of how many', () => {
+    expect(toolCountText([])).toBe('no tools');
+    expect(toolCountText([denied, asked])).toBe('0 of 2 allowed');
+    expect(toolCountText(all)).toBe('1 of 3 allowed');
+    expect(toolCountText([allowed, { ...allowed, tool: 'other' }])).toBe('2 of 2 allowed');
   });
+
+  it('shows all, the allowed or the not allowed; an unknown choice shows all', () => {
+    expect(filterTools(all, 'all', '')).toEqual(all);
+    expect(filterTools(all, 'allowed', '')).toEqual([allowed]);
+    expect(filterTools(all, 'denied', '')).toEqual([denied, asked]);
+    expect(filterTools(all, 'something else', '')).toEqual(all);
+    expect(filterTools(all, '', '')).toEqual(all);
+    expect(filterTools([], 'allowed', 'x')).toEqual([]);
+  });
+
+  it("finds the query in a tool's own name or its description, without case or the spaces around it", () => {
+    expect(filterTools(all, 'all', 'read')).toEqual([allowed]); // its name
+    expect(filterTools(all, 'all', 'a question')).toEqual([denied]); // its description
+    expect(filterTools(all, 'all', 'wiki pages')).toEqual([allowed]); // a description in another case
+    expect(filterTools(all, 'all', '  SEARCH ')).toEqual([asked]); // a null description is no match, the name still is
+    expect(filterTools(all, 'all', 'null')).toEqual([]); // a missing description is not the text "null"
+    expect(filterTools(all, 'all', '   ')).toEqual(all); // only spaces: no query
+    expect(filterTools(all, 'all', 'mcp__deepwiki')).toEqual([]); // the offered name is not searched
+  });
+
+  it('applies the choice and the query together', () => {
+    expect(filterTools(all, 'allowed', 'a')).toEqual([allowed]);
+    expect(filterTools(all, 'denied', 'a')).toEqual([denied, asked]);
+    expect(filterTools(all, 'denied', 'wiki')).toEqual([]);
+  });
+
+  it('the choices, in order, and the size from which a server gets the search and the filter', () => {
+    expect(TOOL_SHOW).toEqual([
+      { value: 'all', label: 'All' },
+      { value: 'allowed', label: 'Allowed' },
+      { value: 'denied', label: 'Not allowed' },
+    ]);
+    expect(TOOL_FILTER_FROM).toBe(9);
+  });
+});
+
+describe('text helpers', () => {
   it('cuts a very long raw name at 80 characters', () => {
     expect(shortName('read_wiki')).toBe('read_wiki');
     expect(shortName('x'.repeat(80))).toBe('x'.repeat(80));
