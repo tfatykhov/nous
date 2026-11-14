@@ -36,7 +36,6 @@ describe('phone tables', () => {
   it.each([
     ['views/Autonomy.svelte', 6],
     ['views/Intentions.svelte', 6],
-    ['views/Consolidation.svelte', 1],
     ['views/DagView.svelte', 1],
     ['views/Retrieval.svelte', 3],
     ['views/Rubric.svelte', 1],
@@ -72,9 +71,11 @@ describe('phone tables', () => {
 
 // Design batch 1, from the captures at 390 and 1440: what the first look at every screen showed.
 describe('the details the captures showed', () => {
-  it('Consolidation: a cycle\'s start time and its totals stay on one line (the table scrolls instead)', () => {
-    expect(STYLE('views/Consolidation.svelte').get('.ts')).toMatchObject({ 'white-space': 'nowrap' });
-    expect(STYLE('views/Consolidation.svelte').get('.totals-cell')).toMatchObject({ 'white-space': 'nowrap' });
+  it('Consolidation: the sleep journal has no table to scroll; on a phone a sleep\'s time sits above its sentence', () => {
+    expect(markupOf(read('views/Consolidation.svelte'))).not.toMatch(/<table/);
+    expect(STYLE('views/Consolidation.svelte').get('.clock')).toMatchObject({ 'white-space': 'nowrap' });
+    expect(phoneRules('views/Consolidation.svelte').get('.sleep')).toMatchObject({ 'grid-template-columns': 'auto minmax(0, 1fr)', 'min-height': '44px' });
+    expect(phoneRules('views/Consolidation.svelte').get('.what')).toMatchObject({ 'grid-column': '2' });
   });
 
   it('Intentions: the metric tiles are two up on a phone (they were one per row), an odd last tile across', () => {

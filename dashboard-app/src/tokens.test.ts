@@ -1064,6 +1064,10 @@ describe('PR 4/5 tokens and the pairs the dense screens draw', () => {
     // Observability's handler dots: no errors, some, more than 10%. The success mark and --err-text keep every pair 9.8
     // or more apart; --red was 5.1 from the amber, --st-completed 5.5 from red.
     'observability handler dots': ['--oc-success', '--yellow', '--err-text'],
+    // Consolidation's sleep chart: what a sleep gained above the line and what it removed below it (the two also
+    // differ by their side of the line).
+    'sleep chart facts': ['--series-2', '--series-7'],
+    'sleep chart graph': ['--series-9', '--series-6'],
   };
   const OPEN_PAIRS: Record<string, number> = {
     '--series-1|--series-3': 4, // protan 4.2 (Scoring's dimensions 3 and 6)

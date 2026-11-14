@@ -1,29 +1,33 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { combinePolls } from '../lib/pollBadge';
-  import { fmtUtc } from '../lib/harness';
+  import { fmtAgo, fmtClockUtc, fmtUtc, fmtWhen } from '../lib/harness';
   import { apiGet } from '../lib/api';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
-  import type {
-    ActivityData,
-    ConsolidationData,
-    ConsolidationCycle,
-    ConsolidationCycleDetail,
-    ConsolidationAction,
-  } from '../lib/types/api';
+  import { STATE_WORD, byDay, defaultOpen, fmtMinutes, graphSentence, sleepRows, sleepSentence, type SleepState } from '../lib/consolidation';
+  import type { ActivityData, ConsolidationData, ConsolidationCycleDetail } from '../lib/types/api';
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import { Button } from '../lib/ui/button';
+  import SleepChart from './consolidation/SleepChart.svelte';
+  import SleepReport from './consolidation/SleepReport.svelte';
 
-  // ── List store (fetch-once + manual refresh; refresh-state preserved by the
-  //    shared poll registry, matching the sibling views). ────────────────────
+  // The sleep journal: a chart of the newest sleeps, then every sleep under its day as one sentence that opens in place
+  // into its report. Both stores are fetched once; Refresh reloads them and the open report.
+
+  /** Sleeps fetched per page, and the most the endpoint returns. */
+  const PAGE = 30;
+  const MOST = 200;
+  let limit = $state(PAGE);
+
   const store = usePoll(
     makePollStore<ConsolidationData>(
-      (signal) => apiGet<ConsolidationData>('/dashboard/consolidation', { signal }),
+      (signal) => apiGet<ConsolidationData>(`/dashboard/consolidation?limit=${limit}`, { signal }),
       0, // fetch-once (manual refresh only)
     ),
   );
 
-  // ── Sleep Activity, moved here from the Activity screen (F108): fetch-once like the list; Refresh reloads both.
+  // The sleep counts of /dashboard/activity (every sleep started, audited or not), moved here from Activity (F108).
   const activity = usePoll(
     makePollStore<ActivityData>(
       (signal) => apiGet<ActivityData>('/dashboard/activity?hours=168', { signal }),
@@ -31,113 +35,120 @@
     ),
   );
 
+  const rows = $derived(sleepRows($store.data?.cycles ?? []));
+  const days = $derived(byDay(rows));
+  const unfinished = $derived(rows.filter((r) => r.state === 'unfinished').length);
+
+  // ── The open sleep and its change rows (fetched when a sleep is first opened) ──
+  /** `stamp` is the sleep's status and finish in the list when its report was asked for. */
+  type Detail = { loading: boolean; error: boolean; data: ConsolidationCycleDetail | null; stamp: string | null };
+  let openId = $state<string | null>(null);
+  let details = $state<Record<string, Detail>>({});
+  let generation = 0; // a Refresh drops the answers still on their way
+
+  /** A sleep's status and finish as the list has them now; null for a sleep the list does not hold. */
+  function stampOf(id: string): string | null {
+    const c = rows.find((r) => r.cycle.cycle_id === id)?.cycle;
+    return c ? `${c.status}|${c.finished_at ?? ''}` : null;
+  }
+
+  /** A report fetched while its sleep had another status or no finish: a sleep writes its last rows as it ends, so
+   *  that report may lack them (it would read as a finished sleep whose rows were pruned). */
+  function outdated(id: string): boolean {
+    const d = details[id];
+    const now = stampOf(id);
+    return d !== undefined && !d.loading && now !== null && d.stamp !== now;
+  }
+
+  async function loadDetail(id: string) {
+    const gen = generation;
+    const stamp = stampOf(id);
+    details[id] = { loading: true, error: false, data: null, stamp };
+    try {
+      const data = await apiGet<ConsolidationCycleDetail>(`/dashboard/consolidation/${encodeURIComponent(id)}`, { retries: 1 });
+      if (gen === generation) details[id] = { loading: false, error: false, data, stamp };
+    } catch (err) {
+      if (gen !== generation) return;
+      // A 404 is a cycle with no rows left to read, not a failure.
+      const gone = (err as { status?: number }).status === 404;
+      details[id] = { loading: false, error: !gone, data: gone ? { cycle: null, actions: [] } : null, stamp };
+    }
+  }
+
+  function open(id: string) {
+    openId = id;
+    if (!details[id] || details[id].error || outdated(id)) void loadDetail(id);
+  }
+
+  // The list was reloaded (older sleeps asked for) and the open sleep has since ended: read its report again.
+  $effect(() => {
+    const id = openId;
+    if (id && outdated(id)) untrack(() => void loadDetail(id));
+  });
+
+  function toggle(id: string) {
+    if (openId === id) openId = null;
+    else open(id);
+  }
+
+  /** A bar of the chart opens its sleep and brings its row into view. */
+  function pick(id: string) {
+    open(id);
+    requestAnimationFrame(() => document.getElementById(`sleep-${id}`)?.scrollIntoView?.({ block: 'nearest' }));
+  }
+
+  // The page opens on the newest finished sleep, once: a sleep the reader closed stays closed.
+  let opened = false;
+  $effect(() => {
+    if (opened || rows.length === 0) return;
+    opened = true;
+    const id = defaultOpen(rows);
+    if (id) untrack(() => open(id));
+  });
+
   function refreshAll() {
+    generation++;
+    details = {};
     void store.refresh();
     void activity.refresh();
+    if (openId) void loadDetail(openId);
   }
 
-  function formatDateTime(dateStr: string | null): string {
-    return fmtUtc(dateStr);
+  function showMore() {
+    limit = Math.min(MOST, limit + PAGE);
+    void store.refresh();
   }
 
-  // ── Detail drill-through (per-cycle, on-demand fetch with its own state) ───
-  let selectedCycleId = $state<string | null>(null);
-  let detail = $state<ConsolidationCycleDetail | null>(null);
-  let detailLoading = $state(false);
-  let detailError = $state(false);
+  const STATE_PILL: Record<SleepState, string> = {
+    finished: '',
+    failed: 'status-pill--bad',
+    running: 'status-pill--info',
+    unfinished: 'status-pill--warn',
+  };
 
-  let detailReq = 0; // monotonic guard against out-of-order responses
-  let detailAbort: AbortController | null = null;
-
-  async function loadDetail(cycleId: string) {
-    selectedCycleId = cycleId;
-    detail = null;
-    detailError = false;
-    detailLoading = true;
-
-    detailAbort?.abort();
-    const ac = new AbortController();
-    detailAbort = ac;
-    const req = ++detailReq;
-    try {
-      const data = await apiGet<ConsolidationCycleDetail>(
-        `/dashboard/consolidation/${encodeURIComponent(cycleId)}`,
-        { signal: ac.signal, retries: 1 },
-      );
-      if (req !== detailReq) return; // a newer request superseded this one
-      detail = data;
-    } catch (err) {
-      if (req !== detailReq) return;
-      detail = { cycle: null, actions: [] };
-      detailError = (err as { status?: number }).status !== 404;
-    } finally {
-      if (req === detailReq) detailLoading = false;
-    }
-  }
-
-  function closeDetail() {
-    detailAbort?.abort();
-    detailReq++;
-    selectedCycleId = null;
-    detail = null;
-    detailError = false;
-    detailLoading = false;
-  }
-
-  // ── Helpers ────────────────────────────────────────────────────────────────
-  function statusClass(status: string): string {
-    if (status === 'completed') return 'badge-good';
-    if (status === 'failed') return 'badge-bad';
-    return 'badge-warn'; // running / unknown
-  }
-
-  function fmtTs(iso: string | null): string {
-    return fmtUtc(iso);
-  }
-
-  function shortId(id: string): string {
-    return id.length > 8 ? id.slice(0, 8) : id;
-  }
-
-  /** Render a totals dict as "merged 1 · superseded 2 · deactivated 4". */
-  function totalsSummary(totals: Record<string, number>): string {
-    const entries = Object.entries(totals ?? {}).filter(([, v]) => typeof v === 'number');
-    if (entries.length === 0) return '—';
-    return entries.map(([k, v]) => `${k} ${v}`).join(' · ');
-  }
-
-  /** Pretty-print a before/after JSON blob for diff display (a missing side is drawn by the markup, not here). */
-  function fmtJson(val: unknown): string {
-    if (typeof val === 'string') return val;
-    try {
-      return JSON.stringify(val, null, 2);
-    } catch {
-      return String(val);
-    }
-  }
-
-  // Group a cycle's actions by phase, preserving the backend's created_at-asc
-  // order within each phase.
-  let groupedActions = $derived.by(() => {
-    const actions: ConsolidationAction[] = detail?.actions ?? [];
-    const groups = new Map<string, ConsolidationAction[]>();
-    for (const a of actions) {
-      const phase = a.phase || 'unknown';
-      const arr = groups.get(phase);
-      if (arr) arr.push(a);
-      else groups.set(phase, [a]);
-    }
-    return [...groups.entries()].map(([phase, items]) => ({ phase, items }));
-  });
   /** The header badge speaks for every store this page reads (Codex round 1). */
-  const pagePoll = $derived(combinePolls({ cycles: $store, 'sleep activity': $activity }));
+  const pagePoll = $derived(combinePolls({ sleeps: $store, 'sleep counts': $activity }));
 </script>
 
-<!-- ── Header ──────────────────────────────────────────────────────────── -->
 <header class="view-head">
   <div>
     <h1>Consolidation</h1>
-    <p class="subtitle">What each sleep cycle merged, superseded and deactivated in memory.</p>
+    <p class="subtitle">What each sleep changed in memory.</p>
+    {#if $activity.data || $activity.error || unfinished > 0}
+      <p class="meta">
+        {#if $activity.data}
+          {@const sl = $activity.data.sleep_stats}
+          <span>Last sleep started {sl.last_sleep ? fmtWhen(sl.last_sleep) : 'never'}</span>
+          <span>{sl.total_sleeps.toLocaleString('en-US')} {sl.total_sleeps === 1 ? 'sleep' : 'sleeps'} in all</span>
+        {:else if $activity.error}
+          <span class="bad">
+            The sleep counts did not load.
+            <button type="button" class="retry-link" onclick={() => void activity.refresh()}>Try again</button>
+          </span>
+        {/if}
+        {#if unfinished > 0}<span class="warn">{unfinished} with no finish recorded</span>{/if}
+      </p>
+    {/if}
   </div>
   <div class="head-right">
     <StaleBadge state={pagePoll} />
@@ -148,152 +159,88 @@
 </header>
 
 {#if $store.data}
-  {@const cycles = $store.data.cycles}
-
-  <!-- ── Cycle list ──────────────────────────────────────────────────────── -->
-  <section class="chart-card">
-    <h2>Recent cycles</h2>
-    <div class="table-wrap table-scroll">
-    <table class="data-table">
-      <thead>
-        <tr>
-          <th>Started</th>
-          <th>Status</th>
-          <th>Phases</th>
-          <th>Totals</th>
-          <th>Actions</th>
-        </tr>
-      </thead>
-      <tbody>
-        {#each cycles as cycle (cycle.cycle_id)}
-          <tr
-            class="cycle-row"
-            class:selected={selectedCycleId === cycle.cycle_id}
-            onclick={() => void loadDetail(cycle.cycle_id)}
-          >
-            <td>
-              <span class="ts">{fmtTs(cycle.started_at)}</span>
-              {#if cycle.trace_id}<span class="trace">#{cycle.trace_id}</span>{/if}
-            </td>
-            <td><span class="badge {statusClass(cycle.status)}">{cycle.status}</span></td>
-            <td>
-              <span class="chips">
-                {#each cycle.phases_run as phase}
-                  <span class="chip">{phase}</span>
-                {:else}
-                  <span class="muted">—</span>
-                {/each}
-              </span>
-            </td>
-            <td class="totals-cell">{totalsSummary(cycle.totals)}</td>
-            <td>{cycle.action_count.toLocaleString()}</td>
-          </tr>
-        {:else}
-          <tr><td colspan="5" class="empty-cell">No consolidation cycles recorded yet</td></tr>
-        {/each}
-      </tbody>
-    </table>
-    </div>
-  </section>
-
-  <!-- ── Cycle detail ────────────────────────────────────────────────────── -->
-  {#if selectedCycleId}
-    <section class="chart-card mt detail-card">
-      <div class="detail-head">
-        <h2>Cycle {shortId(selectedCycleId)} — Actions</h2>
-        <button class="close-btn" onclick={closeDetail} aria-label="Close detail">Close</button>
-      </div>
-
-      {#if detailLoading}
-        <p class="status-msg">Loading actions…</p>
-      {:else if detailError}
-        <p class="status-msg error">
-          Failed to load cycle —
-          <button class="retry-link" onclick={() => selectedCycleId && void loadDetail(selectedCycleId)}>retry</button>
+  {#if rows.length === 0}
+    <section class="card empty-card">
+      <h2>No sleep is in the audit yet</h2>
+      <p>
+        A sleep is written here when <code>NOUS_CONSOLIDATION_AUDIT_ENABLED</code> is on. The next sleep after that
+        appears as one line saying what it changed.
+      </p>
+      {#if $activity.data?.sleep_stats.last_sleep}
+        {@const sl = $activity.data.sleep_stats}
+        <!-- With no audit, the last finished sleep's own event still carries these three counts. -->
+        <p class="last-finished">
+          The last sleep that finished: {sl.facts_created.toLocaleString('en-US')} facts created ·
+          {sl.procedures_created.toLocaleString('en-US')} procedures created ·
+          {sl.censors_retired.toLocaleString('en-US')} censors retired.
         </p>
-      {:else if detail?.cycle === null}
-        <p class="status-msg">Cycle not found (it may have been pruned).</p>
-      {:else if (detail?.actions ?? []).length === 0}
-        <p class="status-msg">This cycle recorded no individual actions.</p>
-      {:else}
-        {#each groupedActions as group (group.phase)}
-          <div class="phase-group">
-            <h3 class="phase-head">
-              {group.phase}
-              <span class="phase-count">{group.items.length}</span>
-            </h3>
-            {#each group.items as action (action.action_id)}
-              <div class="action-row">
-                <div class="action-meta">
-                  <span class="op">{action.op}</span>
-                  {#if action.target_ids.length}
-                    <span class="targets">
-                      {#each action.target_ids as tid}
-                        <span class="chip mono">{shortId(tid)}</span>
-                      {/each}
-                    </span>
-                  {/if}
-                </div>
-                {#if action.rationale}
-                  <p class="rationale">{action.rationale}</p>
-                {/if}
-                {#if action.before !== null || action.after !== null}
-                  <div class="diff">
-                    <!-- A missing side is a muted italic word outside the code block (no symbol, review M9), so it
-                         never reads like a recorded value "none", which stays in its <pre>. -->
-                    <div class="diff-side diff-before">
-                      <span class="diff-label">Before</span>
-                      {#if action.before == null}<em class="diff-none">none</em>{:else}<pre>{fmtJson(action.before)}</pre>{/if}
-                    </div>
-                    <div class="diff-side diff-after">
-                      <span class="diff-label">After</span>
-                      {#if action.after == null}<em class="diff-none">none</em>{:else}<pre>{fmtJson(action.after)}</pre>{/if}
-                    </div>
-                  </div>
-                {/if}
-              </div>
-            {/each}
-          </div>
-        {/each}
       {/if}
     </section>
-  {/if}
+  {:else}
+    <SleepChart rows={rows.slice(0, PAGE)} {openId} onpick={pick} />
 
+    {#each days as group (group.key)}
+      <h2 class="day">{group.day}</h2>
+      <ul class="card sleeps">
+        {#each group.rows as row (row.cycle.cycle_id)}
+          {@const id = row.cycle.cycle_id}
+          {@const isOpen = openId === id}
+          {@const detail = details[id]}
+          {@const graph = graphSentence(row.numbers)}
+          <li id="sleep-{id}" class:open={isOpen}>
+            <button type="button" class="sleep" aria-expanded={isOpen} aria-controls="report-{id}" onclick={() => toggle(id)}>
+              <svg class="chev" viewBox="0 0 20 20" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+                <path d="M7 5l6 5-6 5" />
+              </svg>
+              <span class="when">
+                <span class="clock">{fmtClockUtc(row.cycle.started_at)}</span>
+                {#if row.state === 'finished'}
+                  <span class="took">{fmtMinutes(row.minutes)}</span>
+                {:else}
+                  <span class="status-pill {STATE_PILL[row.state]}">{STATE_WORD[row.state]}</span>
+                  {#if row.state === 'running'}<span class="took">started {fmtAgo(row.cycle.started_at)}</span>{/if}
+                {/if}
+              </span>
+              <span class="what">
+                <span class="facts">{sleepSentence(row)}</span>
+                {#if graph}<span class="graph">Graph: {graph}</span>{/if}
+              </span>
+            </button>
+            {#if isOpen}
+              <div class="report" id="report-{id}">
+                {#if !detail || detail.loading}
+                  <p class="report-msg loading">Loading what this sleep changed…</p>
+                {:else if detail.error}
+                  <p class="report-msg error">
+                    The changes of the sleep of {fmtUtc(row.cycle.started_at)} did not load.
+                    <button type="button" class="retry-link" onclick={() => void loadDetail(id)}>Try again</button>
+                  </p>
+                {:else}
+                  <SleepReport {row} actions={detail.data?.actions ?? []} />
+                {/if}
+              </div>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    {/each}
+
+    {#if rows.length >= limit && limit < MOST}
+      <div class="more-row">
+        <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={showMore} disabled={$store.loading}>
+          Show {PAGE} older sleeps
+        </Button>
+      </div>
+    {/if}
+  {/if}
 {:else if $store.error}
   <p class="status-msg error">
-    Failed to load consolidation data —
-    <button class="retry-link" onclick={() => void store.refresh()}>retry</button>
+    The sleeps did not load.
+    <button type="button" class="retry-link" onclick={() => void store.refresh()}>Try again</button>
   </p>
 {:else}
-  <p class="status-msg">Loading…</p>
+  <p class="status-msg loading">Loading…</p>
 {/if}
-
-<!-- ── Sleep Activity (moved from the Activity screen, F108) ─────────────── -->
-<section class="chart-card mt">
-  <h2>Sleep activity</h2>
-  {#if $activity.data}
-    {@const sl = $activity.data.sleep_stats}
-    <dl class="detail-grid">
-      <dt>Last sleep</dt>
-      <dd>{sl.last_sleep ? formatDateTime(sl.last_sleep) : 'Never'}</dd>
-      <dt>Total sleeps</dt>
-      <dd>{sl.total_sleeps}</dd>
-      <dt>Facts created</dt>
-      <dd>{sl.facts_created}</dd>
-      <dt>Procedures</dt>
-      <dd>{sl.procedures_created}</dd>
-      <dt>Censors retired</dt>
-      <dd>{sl.censors_retired}</dd>
-    </dl>
-  {:else if $activity.error}
-    <p class="empty error">
-      Failed to load activity data —
-      <button class="retry-link" onclick={() => void activity.refresh()}>retry</button>
-    </p>
-  {:else}
-    <p class="empty">Loading…</p>
-  {/if}
-</section>
 
 <style>
   /* ── Header ──────────────────────────────────────────────── */
@@ -321,12 +268,11 @@
     margin: 0;
   }
 
-  h2 {
-    font-size: 15px;
-    font-weight: 650;
-    color: var(--text);
-    margin: 0 0 0.75rem;
-  }
+  /* The facts under the title, as pills. */
+  .meta { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.75rem 0 0; font-size: 0.8125rem; }
+  .meta > * { padding: 3px 11px; border-radius: 999px; background: var(--surface); border: var(--card-border); box-shadow: var(--card-shadow); color: var(--text); }
+  .meta .warn { color: var(--warn-text); background: var(--warn-bg); border-color: transparent; box-shadow: none; font-weight: 600; }
+  .meta .bad { color: var(--err-text); background: var(--err-bg); border-color: transparent; box-shadow: none; }
 
   .head-right {
     display: flex;
@@ -335,232 +281,71 @@
     flex-shrink: 0;
   }
 
-  /* ── Card ────────────────────────────────────────────────── */
-  .chart-card {
+  /* ── Cards ───────────────────────────────────────────────── */
+  .card {
     background: var(--surface);
     border: var(--card-border);
     border-radius: var(--card-radius);
     box-shadow: var(--card-shadow);
-    padding: 1.125rem 1.25rem;
   }
 
-  .mt { margin-top: 1rem; }
+  .empty-card { padding: 1.125rem 1.25rem; }
+  .empty-card h2 { font-size: 15px; font-weight: 650; color: var(--text); margin: 0 0 0.375rem; }
+  .empty-card p { margin: 0; font-size: 0.875rem; color: var(--muted); max-width: 72ch; }
+  .empty-card code { font-family: var(--font-mono, monospace); font-size: 0.8125rem; color: var(--text); }
+  .empty-card .last-finished { margin-top: 0.625rem; color: var(--text); }
 
-  /* ── Data table ──────────────────────────────────────────── */
-  /* A wide table scrolls in its own box instead of widening the page. */
-  .table-wrap { overflow-x: auto; }
-
-  .data-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.8125rem;
-  }
-
-  .data-table th {
-    text-align: left;
-    padding: 0.375rem 0.5rem;
-    font-size: 0.75rem;
-    font-weight: 600;
-    color: var(--muted);
-    border-bottom: 1px solid var(--border);
-  }
-
-  .data-table td {
-    padding: 0.5rem;
+  /* ── A day and its sleeps ────────────────────────────────── */
+  .day {
+    font-size: 1.0625rem;
+    font-weight: 650;
+    line-height: 1.2;
     color: var(--text);
-    border-bottom: 1px solid var(--border);
-    vertical-align: top;
+    margin: 1.5rem 0 0.625rem;
   }
 
-  .data-table tbody tr:last-child td { border-bottom: none; }
+  .sleeps { list-style: none; margin: 0; padding: 0; overflow: hidden; }
+  .sleeps li + li { border-top: 1px solid var(--border); }
+  .sleeps li { scroll-margin-top: 1rem; }
 
-  .cycle-row { cursor: pointer; }
-  .cycle-row:hover td { background: var(--surface-hover); }
-  .cycle-row.selected td { background: var(--accent-glow); }
-
-  .ts { display: block; white-space: nowrap; } /* one line: the table scrolls on a phone instead */
-  .trace {
-    font-size: 0.7rem;
-    color: var(--muted);
-    font-family: var(--font-mono, monospace);
-  }
-
-  .totals-cell { color: var(--muted); white-space: nowrap; }
-
-  .empty-cell {
-    text-align: center;
-    color: var(--muted);
-    font-style: italic;
-    padding: 1rem 0.5rem;
-  }
-
-  .muted { color: var(--muted); }
-
-  /* ── Chips ───────────────────────────────────────────────── */
-  .chips, .targets {
-    display: inline-flex;
-    flex-wrap: wrap;
-    gap: 0.25rem;
-  }
-
-  .chip {
-    display: inline-block;
-    padding: 0.1em 0.45em;
-    border-radius: 999px;
-    background: var(--surface-hover);
-    border: 1px solid var(--border);
-    color: var(--text);
-    font-size: 0.7rem;
-    font-weight: 500;
-    white-space: nowrap;
-  }
-
-  .chip.mono { font-family: var(--font-mono, monospace); }
-
-  /* ── Badge ───────────────────────────────────────────────── */
-  .badge {
-    display: inline-block;
-    padding: 0.15em 0.55em;
-    border-radius: 999px;
-    font-size: 0.75rem;
-    font-weight: 600;
-    white-space: nowrap;
-  }
-
-  .badge-good { background: var(--badge-good-bg); color: var(--ok-text); }
-  .badge-warn { background: var(--badge-warn-bg); color: var(--warn-text); }
-  .badge-bad  { background: var(--badge-bad-bg); color: var(--err-text); }
-
-  /* ── Detail card ─────────────────────────────────────────── */
-  .detail-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 1rem;
-    margin-bottom: 0.75rem;
-  }
-  .detail-head h2 { margin: 0; }
-
-  .close-btn {
-    font-size: 0.75rem;
-    padding: 0.2rem 0.6rem;
-    border: 1px solid var(--border);
-    border-radius: var(--ctl-radius);
-    background: var(--surface);
-    color: var(--muted);
-    cursor: pointer;
-  }
-  .close-btn:hover { background: var(--surface-hover); color: var(--text); }
-
-  /* ── Phase group ─────────────────────────────────────────── */
-  .phase-group { margin-bottom: 1rem; }
-  .phase-group:last-child { margin-bottom: 0; }
-
-  .phase-head {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 0.8125rem;
-    font-weight: 600;
-    color: var(--text);
-    text-transform: capitalize;
-    margin: 0 0 0.5rem;
-    padding-bottom: 0.25rem;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .phase-count {
-    font-size: 0.7rem;
-    font-weight: 600;
-    color: var(--muted);
-    background: var(--surface-hover);
-    border-radius: 999px;
-    padding: 0.05em 0.5em;
-  }
-
-  /* ── Action row ──────────────────────────────────────────── */
-  .action-row {
-    padding: 0.625rem;
-    border: 1px solid var(--border);
-    border-radius: var(--card-radius-sm);
-    margin-bottom: 0.5rem;
-    background: var(--bg, var(--surface));
-  }
-  .action-row:last-child { margin-bottom: 0; }
-
-  .action-meta {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-    margin-bottom: 0.375rem;
-  }
-
-  .op {
-    font-size: 0.75rem;
-    font-weight: 700;
-    color: var(--accent);
-    text-transform: none;
-    letter-spacing: 0.02em;
-  }
-
-  .rationale {
-    font-size: 0.8125rem;
-    color: var(--text);
-    margin: 0 0 0.5rem;
-  }
-
-  /* ── Diff ────────────────────────────────────────────────── */
-  /* Before and After side by side; their labels say which is which. */
-  .diff {
+  .sleep {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 0.5rem;
-    align-items: stretch;
+    grid-template-columns: auto 9.5rem minmax(0, 1fr);
+    gap: 0 0.75rem;
+    align-items: baseline;
+    width: 100%;
+    padding: 0.75rem 1.25rem;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background var(--transition);
   }
+  .sleep:hover { background: var(--surface-hover); }
+  .sleep:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: -2px; border-radius: var(--card-radius-sm); }
 
-  @media (max-width: 700px) {
-    .diff { grid-template-columns: minmax(0, 1fr); }
-  }
+  /* The chevron sits on the row's first line, whatever the sentence wraps to. */
+  .chev { align-self: start; margin-top: 0.25rem; color: var(--muted); transition: transform var(--transition); }
+  .sleep[aria-expanded='true'] .chev { transform: rotate(90deg); }
 
-  .diff-side {
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    min-width: 0;
-  }
+  .when { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.125rem 0.5rem; }
+  .clock { font-size: 0.9375rem; font-weight: 650; font-stretch: 82%; color: var(--text); white-space: nowrap; }
+  .took { font-size: 0.8125rem; color: var(--muted); white-space: nowrap; }
 
-  .diff-label {
-    font-size: 0.7rem;
-    font-weight: 600;
-    color: var(--muted);
-    text-transform: none;
-  }
+  .what { display: flex; flex-direction: column; gap: 0.125rem; min-width: 0; }
+  .facts { font-size: 0.875rem; color: var(--text); }
+  .open .facts { font-weight: 600; }
+  .graph { font-size: 0.8125rem; color: var(--muted); }
 
-  .diff-none {
-    font-size: 0.75rem;
-    color: var(--muted);
-    font-style: italic;
-  }
+  /* The report lines up under the sentence it expands. */
+  .report { padding: 0 1.25rem 1rem calc(1.25rem + 14px + 0.75rem); }
 
-  .diff pre {
-    margin: 0;
-    padding: 0.5rem;
-    border-radius: var(--card-radius-sm);
-    border: 1px solid var(--border);
-    background: var(--surface);
-    font-family: var(--font-mono, monospace);
-    font-size: 0.7rem;
-    color: var(--text);
-    white-space: pre-wrap;
-    word-break: break-word;
-    overflow-wrap: anywhere;
-    overflow-x: auto;
-  }
+  .report-msg { margin: 0; padding: 0.75rem 0; font-size: 0.8125rem; color: var(--muted); border-top: 1px solid var(--border); }
+  .report-msg.error, .status-msg.error { color: var(--err-text); }
 
-  /* Before and after are tinted blocks (the err and ok tints), not side stripes; the labels name them. */
-  .diff-before pre { background: var(--err-bg); }
-  .diff-after pre  { background: var(--ok-bg); }
+  .more-row { display: flex; justify-content: center; margin-top: 1.25rem; }
 
   /* ── Status messages ─────────────────────────────────────── */
   .status-msg {
@@ -571,44 +356,26 @@
     margin: 0;
   }
 
-  .status-msg.error { color: var(--err-text); }
-
-  /* ── Sleep Activity (from Activity) ──────────────────────── */
-  .detail-grid {
-    display: grid;
-    grid-template-columns: auto 1fr;
-    gap: 0.375rem 1rem;
-    font-size: 0.8125rem;
-    margin: 0;
+  /* The one loop: the waiting word breathes (off under reduced motion, app.css). */
+  .loading { animation: waiting 1.5s ease-in-out infinite; }
+  @keyframes waiting {
+    50% { opacity: 0.5; }
   }
-
-  .detail-grid dt {
-    color: var(--muted);
-    font-weight: 500;
-  }
-
-  .detail-grid dd {
-    color: var(--text);
-    margin: 0;
-  }
-
-  .empty {
-    color: var(--muted);
-    font-size: 0.875rem;
-    padding: 1rem 0;
-    text-align: center;
-    margin: 0;
-  }
-
-  .empty.error { color: var(--err-text); }
 
   .retry-link {
     background: none;
     border: none;
-    color: var(--accent);
+    color: var(--accent-text);
     cursor: pointer;
-    font-size: inherit;
+    font: inherit;
     padding: 0;
     text-decoration: underline;
+  }
+
+  @media (max-width: 640px) {
+    /* The time and the sentence stack; the report takes the card's width. */
+    .sleep { grid-template-columns: auto minmax(0, 1fr); padding: 0.75rem 1rem; min-height: 44px; }
+    .what { grid-column: 2; margin-top: 0.125rem; }
+    .report { padding: 0 1rem 1rem; }
   }
 </style>

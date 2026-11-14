@@ -15,8 +15,9 @@ import { styleBlocks } from '../lib/testing/css';
 import { attentionOverride, attentionPoll } from '../lib/stores/attention';
 
 // F108 Phase 2 T13: the execution ledger is Work's Changes tab, and the old Activity screen's sections live on the
-// screens they belong to (Event Timeline on Observability, Upcoming Schedules on Subtasks, Sleep Activity on
-// Consolidation, Most Active Censors on Guards). Each destination fetches /dashboard/activity once for its section.
+// screens they belong to (Event Timeline on Observability, Upcoming Schedules on Subtasks, Most Active Censors on
+// Guards). Each destination fetches /dashboard/activity once for its section. Consolidation reads the same endpoint
+// for its sleep counts: since the sleep journal they are pills under its title, not a section of their own.
 
 const ID = '8f2c41d0-5b7e-4a3c-9d21-6e0f3a1b7c44';
 const MODES = {
@@ -353,8 +354,6 @@ const DESTS: Dest[] = [
     host: '/dashboard/harness', hostMarker: 'Flags per day', stats: CENSOR_STATS, absentStats: [...SCHEDULE_STATS, ...SLEEP_STATS] },
   { name: 'Subtasks', view: Subtasks as unknown as Component, section: 'Upcoming schedules', content: 'weekly report digest',
     host: '/dashboard/subtasks', hostMarker: 'Outcome distribution', stats: SCHEDULE_STATS, absentStats: [...CENSOR_STATS, ...SLEEP_STATS] },
-  { name: 'Consolidation', view: Consolidation as unknown as Component, section: 'Sleep activity', content: 'Censors retired',
-    host: '/dashboard/consolidation', hostMarker: 'Recent cycles', stats: [], absentStats: [...CENSOR_STATS, ...SCHEDULE_STATS, 'Sleep Facts Created'] },
 ];
 
 describe('Activity split', () => {
@@ -410,37 +409,72 @@ describe('Activity split', () => {
     expect(screen.getByRole('combobox', { name: 'Window' })).toBeTruthy();
   });
 
-  it('Consolidation shows Sleep Activity', async () => {
-    render(Consolidation);
-    const s = await sectionOf('Sleep activity');
-    await waitFor(() => expect(within(s).getByText('Total sleeps')).toBeTruthy());
-    const dd = (term: string) => within(s).getByText(term).nextElementSibling?.textContent;
-    expect(dd('Last sleep')).toBe('Nov 8 03:00 UTC'); // one timestamp format (finish review fix 4)
-    expect(dd('Total sleeps')).toBe('23');
-    expect(dd('Facts created')).toBe('41');
-    expect(dd('Procedures')).toBe('5');
-    expect(dd('Censors retired')).toBe('8');
+  // Consolidation's sleep counts: pills under the title (when the last sleep started, how many there were), and, with
+  // no audited sleep to list, the last finished sleep's three counts in the empty card.
+  const sleepPills = (container: HTMLElement) => Array.from(container.querySelectorAll('.meta > span')).map((p) => p.textContent?.replace(/\s+/g, ' ').trim());
+
+  it('Consolidation shows the sleep counts under its title, and no other screen\'s section', async () => {
+    const { container } = render(Consolidation);
+    await waitFor(() => expect(sleepPills(container)).toHaveLength(2));
+    expect(sleepPills(container)[0]).toMatch(/^Last sleep started Nov 8 03:00 UTC · .+/); // one timestamp format (finish review fix 4)
+    expect(sleepPills(container)[1]).toBe('23 sleeps in all');
+    await waitFor(() => expect(container.querySelector('.last-finished')?.textContent?.replace(/\s+/g, ' ').trim())
+      .toBe('The last sleep that finished: 41 facts created · 5 procedures created · 8 censors retired.'));
+    for (const other of SECTIONS) expect(h2(other)).toBeNull();
+    for (const label of [...CENSOR_STATS, ...SCHEDULE_STATS, 'Sleep Facts Created']) expect(within(container).queryByText(label)).toBeNull();
+    expect(activityUrls()).toEqual(['/dashboard/activity?hours=168']);
   });
 
-  it('Consolidation says Never when no sleep has run', async () => {
+  it('Consolidation says never when no sleep has run', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url: string) => {
       const body = url.startsWith('/dashboard/activity')
-        ? { ...ACTIVITY, sleep_stats: { ...ACTIVITY.sleep_stats, last_sleep: null } } : CONSOLIDATION;
+        ? { ...ACTIVITY, sleep_stats: { ...ACTIVITY.sleep_stats, last_sleep: null, total_sleeps: 0 } } : CONSOLIDATION;
       return { ok: true, status: 200, json: async () => body } as Response;
     }));
-    render(Consolidation);
-    const s = await sectionOf('Sleep activity');
-    await waitFor(() => expect(within(s).getByText('Last sleep').nextElementSibling?.textContent).toBe('Never'));
+    const { container } = render(Consolidation);
+    await waitFor(() => expect(sleepPills(container)).toEqual(['Last sleep started never', '0 sleeps in all']));
+    expect(container.querySelector('.last-finished')).toBeNull();
   });
 
-  it('Consolidation Refresh reloads the sleep numbers too', async () => {
-    render(Consolidation);
-    const s = await sectionOf('Sleep activity');
-    await waitFor(() => expect(within(s).getByText('Total sleeps')).toBeTruthy());
+  it('Consolidation Refresh reloads the sleep counts too', async () => {
+    const { container } = render(Consolidation);
+    await waitFor(() => expect(sleepPills(container)).toHaveLength(2));
     await waitFor(() => expect((screen.getByRole('button', { name: 'Refresh' }) as HTMLButtonElement).disabled).toBe(false));
     expect(activityUrls()).toHaveLength(1);
     await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await waitFor(() => expect(activityUrls()).toHaveLength(2));
+  });
+
+  it('Consolidation fetches the activity once, as Activity did, and never polls it', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { container } = render(Consolidation);
+      await waitFor(() => expect(sleepPills(container)).toHaveLength(2));
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(activityUrls()).toEqual(['/dashboard/activity?hours=168']);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('Consolidation: a failed activity load says so under the title, offers a retry, and the rest of the screen stays', async () => {
+    failing = ['/dashboard/activity'];
+    const { container } = render(Consolidation);
+    await waitFor(() => expect(container.querySelector('.meta .bad')?.textContent).toMatch(/The sleep counts did not load\./));
+    expect(await screen.findByRole('heading', { level: 2, name: 'No sleep is in the audit yet' })).toBeTruthy();
+    failing = [];
+    await fireEvent.click(within(container.querySelector('.meta') as HTMLElement).getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(activityUrls()).toHaveLength(2));
+    await waitFor(() => expect(sleepPills(container)[1]).toBe('23 sleeps in all'));
+    expect(container.querySelector('.meta .bad')).toBeNull();
+  });
+
+  it('Consolidation: the sleep counts still show when the screen\'s own data fails', async () => {
+    failing = ['/dashboard/consolidation'];
+    const { container } = render(Consolidation);
+    await waitFor(() => expect(sleepPills(container)[1]).toBe('23 sleeps in all'));
+    expect(await screen.findByText(/The sleeps did not load\./)).toBeTruthy();
+    expect(container.querySelector('.meta .bad')).toBeNull();
   });
 
   it('the empty states read as they did on Activity', async () => {
