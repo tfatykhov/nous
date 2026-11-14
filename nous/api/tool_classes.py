@@ -36,7 +36,8 @@ _SPAWN = ToolClass("write", spawns=True)
 _SPAWN_OUT = ToolClass("write", spawns=True, ingress="outside")
 _EXTERNAL = ToolClass("external")
 # A tool of an external MCP server (``mcp__<server>__<tool>``): it reaches another host, and its result is that
-# server's text. Every such name has this class, registered or not; the server's own annotations never change it.
+# server's text (and, when the owner turned its images switch on, its images as encoded again here). Every such
+# name has this class, registered or not; the server's own annotations never change it.
 MCP_TOOL_PREFIX = "mcp__"
 _MCP = ToolClass("external", ingress="outside")
 

@@ -748,6 +748,12 @@ class ToolDispatcher:
             # returns) — absent means success, as before.
             result_text = result["content"][0]["text"]
             is_error = bool(result.get("is_error"))
+            if outcome is not None and not is_error:
+                # The call's text is what this returns, as ever. Image blocks after it (an MCP tool's) go to the
+                # runner on the call's outcome; the model API takes none with an error result.
+                outcome.images = [
+                    block for block in result["content"][1:] if isinstance(block, dict) and block.get("type") == "image"
+                ] or None
             if salvaged_keys and not is_error:
                 # Salvage recovered the call, but a silent success teaches the
                 # model nothing -- it emitted XML inside a JSON string and got

@@ -129,7 +129,7 @@ _SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
 _EVENT_TOOL_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]")
 _EVENT_TOOL_CHARS = 80
 _EVENT_TOOLS_MAX = 60
-_SERVER_FIELDS = ("url", "enabled", "background", "call_timeout_seconds")
+_SERVER_FIELDS = ("url", "enabled", "background", "images", "call_timeout_seconds")
 NO_KEY_TEXT = "no key file is configured on the host (NOUS_MCP_CLIENT_KEY_FILE)"
 OAUTH_UNAVAILABLE_TEXT = "sign-in is not available: NOUS_A2UI_PUBLIC_BASE_URL is not an https address"
 HTTP_HOST_TEXT = (
@@ -322,6 +322,7 @@ def _change(
         "changed": changed,
         "enabled": {"old": old.enabled if old else None, "new": new.enabled if new else None},
         "background": {"old": old.background if old else None, "new": new.background if new else None},
+        "images": {"old": old.images if old else None, "new": new.images if new else None},
         "tools": shown,
         "more": {"tools": more},
         "credentials": credentials,
@@ -549,6 +550,7 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             "url": config.url,
             "enabled": config.enabled,
             "background": config.background,
+            "images": config.images,
             "background_in_effect": verdict.background,
             "background_blocked_by_ceiling": verdict.background_ceiling,
             "call_timeout_seconds": config.call_timeout_seconds,
@@ -717,16 +719,17 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         )
 
     async def update_server(request: Request) -> JSONResponse:
-        """PATCH /integrations/mcp/servers/{name} ``{enabled?, background?, call_timeout_seconds?, tools?,
-        headers?}``: change the server's switches, its call timeout, the permissions of tools it already has stored,
-        and its credential (``headers``: replace it, 409 without a key on the host; ``headers: null``: remove it).
-        The URL cannot be changed here."""
+        """PATCH /integrations/mcp/servers/{name} ``{enabled?, background?, images?, call_timeout_seconds?, tools?,
+        headers?}``: change the server's switches (``images``: whether the PNG and JPEG images of its results go to
+        the model), its call timeout, the permissions of tools it already has stored, and its credential
+        (``headers``: replace it, 409 without a key on the host; ``headers: null``: remove it). The URL cannot be
+        changed here."""
         name = request.path_params["name"]
         body = await _body(request)
-        _only(body, {"enabled", "background", "call_timeout_seconds", "tools", "headers"})
+        _only(body, {"enabled", "background", "images", "call_timeout_seconds", "tools", "headers"})
         if not body:
             raise _Refused(400, "nothing to change")
-        enabled, background = _flag(body, "enabled"), _flag(body, "background")
+        enabled, background, images = _flag(body, "enabled"), _flag(body, "background"), _flag(body, "images")
         timeout = body.get("call_timeout_seconds")
         if "call_timeout_seconds" in body and (type(timeout) is not int or not 1 <= timeout <= 600):
             raise _Refused(400, "call_timeout_seconds must be a whole number from 1 to 600")
@@ -750,6 +753,7 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
                 name,
                 enabled=enabled,
                 background=background,
+                images=images,
                 call_timeout_seconds=timeout,
                 permissions=wanted,  # type: ignore[arg-type]
                 secret=sealed,
@@ -759,7 +763,7 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
                 credentials: str | None = "replaced" if old_secret is not None else "set"
             else:
                 credentials = "removed" if remove and old_secret is not None else None
-            fields = {"enabled": enabled, "background": background, "call_timeout_seconds": timeout}
+            fields = {"enabled": enabled, "background": background, "images": images, "call_timeout_seconds": timeout}
             new = old.model_copy(update={key: value for key, value in fields.items() if value is not None})
             data = _change(
                 "update",

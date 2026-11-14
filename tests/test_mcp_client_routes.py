@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 import httpx
 import pytest
-from mcp.types import CallToolResult, TextContent, Tool
+from mcp.types import CallToolResult, ImageContent, TextContent, Tool
 from starlette.applications import Starlette
 from test_runner_authorization import _runner
 
@@ -413,6 +413,97 @@ async def test_the_background_switch_changes_what_the_floor_allows_at_once(make_
     await _same_as_a_fresh_start(env)
 
 
+PNG_ITEM = ImageContent(type="image", data="aGk=", mimeType="image/png")
+
+
+async def test_the_images_switch_is_off_for_a_new_server_and_a_patch_turns_it_on_at_once(make_env, monkeypatch):
+    from nous.mcp_client import bridge
+    from nous.mcp_client.images import OutsideImage
+
+    prepared = OutsideImage("image/png", "SU1H", 2, 3)
+    monkeypatch.setattr(bridge, "prepare_image", lambda data, media_type: prepared)
+
+    async def call_tool(self: _Session, name: str, arguments: dict[str, Any]) -> Any:
+        self.remote.calls.append((name, arguments))
+        return CallToolResult(content=[TextContent(type="text", text="hello"), PNG_ITEM])
+
+    monkeypatch.setattr(_Session, "call_tool", call_tool)
+    env = await make_env()
+    created = await _add(env, tools={"search": "allow"})
+    assert created.status_code == 201 and created.json()["server"]["images"] is False
+    (server,) = (await _req(env, "GET", "/integrations/mcp/servers")).json()["servers"]
+    assert server["images"] is False
+    assert env.bus.events[-2].data["images"] == {"old": None, "new": False}
+
+    async def call() -> tuple[str, list[dict] | None]:
+        from nous.api.call_outcome import CallOutcome
+
+        outcome = CallOutcome()
+        text, is_error = await env.dispatcher.dispatch("mcp__alpha__search", {"q": "x"}, outcome=outcome)
+        assert not is_error
+        return text, outcome.images
+
+    assert await call() == (WRAPPER + "hello\n[image omitted]", None)
+    path = "/integrations/mcp/servers/alpha"
+    response = await _req(env, "PATCH", path, {"images": True})
+    assert response.status_code == 200 and response.json()["server"]["images"] is True
+    (server,) = (await _req(env, "GET", "/integrations/mcp/servers")).json()["servers"]
+    assert server["images"] is True
+    event = env.bus.events[-2]
+    assert event.type == CHANGE_EVENT and event.data["action"] == "update"
+    assert event.data["changed"] == ["images"] and event.data["images"] == {"old": False, "new": True}
+    assert await call() == (WRAPPER + "hello\n[image: PNG 2x3]", [prepared.block()])  # no restart
+    await _req(env, "PATCH", path, {"images": False})
+    assert env.bus.events[-2].data["images"] == {"old": True, "new": False}
+    assert await call() == (WRAPPER + "hello\n[image omitted]", None)
+    assert env.remotes.by_url[ALPHA].call_connections == (1, 0)  # the switch never reconnected
+    await _same_as_a_fresh_start(env)
+
+
+@pytest.mark.parametrize("value", ["true", 1, None, [True], {"on": True}])
+async def test_the_images_switch_takes_only_a_json_boolean(make_env, value):
+    env = await make_env()
+    await _add(env, tools={"search": "allow"})
+    before = len(env.bus.events)
+    response = await _req(env, "PATCH", "/integrations/mcp/servers/alpha", {"images": value})
+    assert response.status_code == 400 and response.json() == {"error": "images must be true or false"}
+    assert len(env.bus.events) == before
+    ((config, _tools),) = await env.registry.list_all()
+    assert config.images is False
+
+
+async def test_the_images_switch_needs_the_secret_and_json_like_every_change(make_env):
+    env = await make_env()
+    await _add(env, tools={"search": "allow"})
+    path = "/integrations/mcp/servers/alpha"
+    assert (await _req(env, "PATCH", path, {"images": True}, secret=None)).status_code == 403
+    assert (await _req(env, "PATCH", path, {"images": True}, secret=WRONG)).status_code == 403
+    assert (await _req(env, "PATCH", path, {"images": True}, content_type="text/plain")).status_code == 415
+    ((config, _tools),) = await env.registry.list_all()
+    assert config.images is False
+    assert (await _req(env, "PATCH", "/integrations/mcp/servers/zeta", {"images": True})).status_code == 404
+
+
+async def test_create_does_not_take_the_images_switch(make_env):
+    env = await make_env()
+    response = await _add(env, images=True, tools={"search": "allow"})
+    assert response.status_code == 400 and response.json() == {"error": "unknown field(s): images"}
+    assert await env.registry.list_all() == [] and env.remotes.connects == []
+
+
+async def test_replacing_a_server_turns_its_images_off(make_env):
+    env = await make_env()
+    await _add(env, tools={"search": "allow"})
+    await _req(env, "PATCH", "/integrations/mcp/servers/alpha", {"images": True, "background": True})
+    replaced = await _add(env, tools={"search": "allow"})  # the same name: a replace, built as a new config
+    assert replaced.status_code == 200 and replaced.json()["server"]["images"] is False
+    event = env.bus.events[-2]
+    assert event.data["action"] == "replace" and event.data["images"] == {"old": True, "new": False}
+    assert "images" in event.data["changed"] and "background" in event.data["changed"]
+    ((config, _tools),) = await env.registry.list_all()
+    assert config.images is False and env.manager._servers["alpha"].config.images is False
+
+
 async def test_a_background_list_on_the_host_is_a_ceiling_on_the_switch(make_env):
     env = await make_env(mcp_client_background_servers="other")
     await _add(env, background=True, tools={"search": "allow"})
@@ -529,13 +620,16 @@ async def test_the_change_events_carry_no_url_and_no_description(make_env):
     await _req(env, "DELETE", "/integrations/mcp/servers/alpha")
     changes = [e for e in env.bus.events if e.type == CHANGE_EVENT]
     assert [e.data["action"] for e in changes] == ["create", "update", "refresh", "delete"]
-    base = {"action", "server", "changed", "enabled", "background", "tools", "more", "credentials", "header_count"}
+    base = {"action", "server", "changed", "enabled", "background", "images", "tools", "more"}
+    base |= {"credentials", "header_count"}
     for event in changes:
         extra = {"added", "removed", "redefined"} if event.data["action"] == "refresh" else set()
         assert set(event.data) == base | extra
-    assert changes[0].data["changed"] == ["url", "enabled", "background", "call_timeout_seconds", "tools"]
+    assert changes[0].data["changed"] == ["url", "enabled", "background", "images", "call_timeout_seconds", "tools"]
+    assert changes[0].data["images"] == {"old": None, "new": False}
     assert changes[1].data["enabled"] == {"old": True, "new": False}
     assert changes[3].data["enabled"] == {"old": False, "new": None}
+    assert changes[3].data["images"] == {"old": False, "new": None}
     for event in env.bus.events:  # the reload events too
         text = json.dumps(event.data)
         assert "https://" not in text and "example.com" not in text and DESCRIPTION_MARK not in text

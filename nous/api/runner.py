@@ -172,6 +172,35 @@ def _close_status(is_error: bool, uncertain: bool) -> str:
     return "error" if is_error else "success"
 
 
+# Images one turn may carry in its tool results. Each is sent again with every later model call of the turn, so
+# the count bounds a request's size and cost; a result's images past it stay words.
+IMAGES_PER_TURN = 12
+
+
+def _result_content(text: str, images: list[dict] | None, sent: int) -> tuple[str | list[dict], int]:
+    """A tool result's ``content`` and how many images it carries: ``text`` alone (a string, as ever), or the text
+    and the images the turn still has room for (``sent`` are already in it), with a line for those left out."""
+    if not images:
+        return text, 0
+    room = max(IMAGES_PER_TURN - sent, 0)
+    if len(images) > room:
+        left = len(images) - room
+        text = f"{text}\n[{left} image{'s' if left != 1 else ''} left out: a turn carries at most {IMAGES_PER_TURN}]"
+        images = images[:room]
+    if not images:
+        return text, 0
+    return [{"type": "text", "text": text}, *images], len(images)
+
+
+def _carries_image(content: Any) -> bool:
+    """Whether a message's content holds an image block, at the top or inside a tool result."""
+    if isinstance(content, list):
+        return any(_carries_image(item) for item in content)
+    if isinstance(content, dict):
+        return content.get("type") == "image" or _carries_image(content.get("content"))
+    return False
+
+
 def _with_alias_note(note: str | None, text: str) -> str:
     """A tool result whose first line is the alias note, when the model called a tool by an old name
     (``AgentRunner._resolve_alias``). Added ahead of any ``[input repaired]`` or harness prefix."""
@@ -199,6 +228,7 @@ class Dispatched(NamedTuple):
     suppressed: Suppressed | None
     send_key: str | None
     ledger_entry_id: UUID | None
+    images: list[dict] | None = None  # the image blocks of the call's result (``CallOutcome.images``)
 
 
 class SingleCall(NamedTuple):
@@ -3067,6 +3097,7 @@ class AgentRunner:
 
             all_tool_results: list[ToolResult] = []
             keys_this_turn: set[str] = set()  # harness 2b: keys this invocation dispatched
+            _images_this_turn = 0  # the images this turn's tool results carry so far (IMAGES_PER_TURN)
             all_thinking_blocks: list[str] = []  # Accumulated across all tool loop iterations
             total_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
             response_text = ""
@@ -3305,6 +3336,7 @@ class AgentRunner:
                     # Execute tools (P1-2: all results in single user message)
                     tool_results_for_message: list[dict[str, Any]] = []
                     for tc in tool_calls:
+                        _call_images: list[dict] | None = None  # set when this call's dispatch returns
                         # F108: the call's place in the turn and its start, and its reason split out of the input
                         # before anything below reads it (the assistant message above keeps what the model emitted).
                         call_index = next(call_indexes)
@@ -3589,6 +3621,7 @@ class AgentRunner:
                                                 yield item
                                             else:
                                                 result_text, is_error, timed_out = item
+                                                _call_images = outcome.images
                                     except (asyncio.CancelledError, GeneratorExit):
                                         # Client disconnect / stream closed mid-call: the
                                         # side effect may or may not have happened.
@@ -3653,11 +3686,16 @@ class AgentRunner:
                         # After the in-memory ledger, which keeps the head of the tool's own output.
                         result_text = _with_alias_note(alias_note, result_text)
 
+                        # The call's images go with its text (none with an error: the API takes only text there).
+                        _content, _carried = _result_content(
+                            result_text, None if is_error else _call_images, _images_this_turn
+                        )
+                        _images_this_turn += _carried
                         tool_results_for_message.append(
                             {
                                 "type": "tool_result",
                                 "tool_use_id": tc["id"],
-                                "content": result_text,
+                                "content": _content,
                                 "is_error": is_error,
                             }
                         )
@@ -4032,7 +4070,7 @@ class AgentRunner:
             if _write_lock2 is not None:
                 # Held until an orphaned worker thread finishes.
                 release_write_path_lock_after(_write_lock2, outcome.write_worker)
-        return Dispatched(result_text, is_error, suppressed, send_key, entry_id)
+        return Dispatched(result_text, is_error, suppressed, send_key, entry_id, None if is_error else outcome.images)
 
     async def execute_single_call(self, ctx: ExecutionContext, tool_name: str, tool_input: dict) -> SingleCall:
         """Run ONE call the owner approved (F099 2d), with no model in between.
@@ -4215,6 +4253,7 @@ class AgentRunner:
 
         all_tool_results: list[ToolResult] = []
         keys_this_turn: set[str] = set()  # harness 2b: keys this invocation dispatched
+        images_this_turn = 0  # the images this turn's tool results carry so far (IMAGES_PER_TURN)
         # F108: the place of each call in the turn, across every iteration.
         call_indexes = call_indexes if call_indexes is not None else itertools.count()
         all_thinking_blocks: list[str] = []  # Accumulated across iterations
@@ -4340,7 +4379,9 @@ class AgentRunner:
             if api_response.usage:
                 total_usage["input_tokens"] += api_response.usage.get("input_tokens", 0)
                 total_usage["output_tokens"] += api_response.usage.get("output_tokens", 0)
-                if self._compactor:
+                # The estimator learns characters of text per token. A request that carries an image teaches it
+                # nothing true: an image's base64 is not text, and its tokens are not those of the text beside it.
+                if self._compactor and not any(_carries_image(m.get("content")) for m in messages):
                     input_chars = sum(len(str(m.get("content", ""))) for m in messages)
                     self._compactor.estimator.calibrate(input_chars, api_response.usage.get("input_tokens", 0))
 
@@ -4385,6 +4426,7 @@ class AgentRunner:
                     tool_name = block["name"]
                     tool_input = block.get("input", {})
                     tool_use_id = block["id"]
+                    call_images: list[dict] | None = None  # set when this call's dispatch returns
                     # F108: the call's place in the turn and its start, and its reason split out of the input
                     # before anything below reads it (the block itself, in the assistant message, is left as is).
                     call_index = next(call_indexes)
@@ -4613,6 +4655,7 @@ class AgentRunner:
                                 turn_id=turn_id,
                             )
                             result_text, is_error = dispatched.text, dispatched.is_error
+                            call_images = dispatched.images
                             suppressed = dispatched.suppressed
                             ledger_entry_id = dispatched.ledger_entry_id
                         duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -4665,11 +4708,16 @@ class AgentRunner:
                         except Exception:
                             logger.warning("Failed to cache %s result", tool_name, exc_info=True)
 
+                    # The call's images go with its text (none with an error: the API takes only text there).
+                    result_content, carried = _result_content(
+                        tool_text, None if is_error else call_images, images_this_turn
+                    )
+                    images_this_turn += carried
                     tool_results_for_message.append(
                         {
                             "type": "tool_result",
                             "tool_use_id": tool_use_id,
-                            "content": tool_text,
+                            "content": result_content,
                             "is_error": is_error,
                         }
                     )

@@ -258,6 +258,8 @@ def _estimate_messages_tokens(messages: list[dict]) -> int:
                             total += _estimate_tokens(result)
                         elif isinstance(result, list):
                             total += sum(_estimate_tokens(b.get("text", "")) for b in result if isinstance(b, dict))
+                            # An image in a tool's result (an MCP tool's): about what one costs at the size it is sent.
+                            total += 1600 * sum(1 for b in result if isinstance(b, dict) and b.get("type") == "image")
     return total
 
 

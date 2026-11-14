@@ -76,6 +76,7 @@ from nous.api.tool_classes import forget_mcp_tool, note_mcp_tool
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.mcp_client.bridge import (
+    IMAGES_PER_RESULT,
     TOOLS_PER_SERVER,
     PreparedTool,
     ServerErrorReply,
@@ -99,6 +100,7 @@ from nous.mcp_client.config import (
     pin_host,
     url_problem,
 )
+from nous.mcp_client.images import OutsideImage
 from nous.mcp_client.oauth import (
     HttpFactory,
     OAuthFlows,
@@ -1350,11 +1352,20 @@ class McpClientManager:
             server.refusal = None
         # What the call was sent with, and what is held now.
         withheld = tuple(sorted(set(sent_values) | set(server.withheld), key=len, reverse=True))
-        if result_chars(raw) > OFF_LOOP_RESULT_CHARS:
-            text, is_error = await asyncio.to_thread(flatten_result, raw, self._max_chars, withheld)
+        take = IMAGES_PER_RESULT if server.config.images else 0  # the owner's switch on this server's row
+        images: list[OutsideImage] = []
+        # An image is decoded off the event loop whatever its size in characters: a few kilobytes can unpack to tens
+        # of megabytes of pixels.
+        decodes = take > 0 and any(
+            getattr(item, "type", None) == "image" for item in getattr(raw, "content", None) or []
+        )
+        if decodes or result_chars(raw) > OFF_LOOP_RESULT_CHARS:
+            text, is_error = await asyncio.to_thread(flatten_result, raw, self._max_chars, withheld, take, images)
         else:
-            text, is_error = flatten_result(raw, self._max_chars, withheld)
-        return {"content": [{"type": "text", "text": wrap_result(server_name, text)}], "is_error": is_error}, None
+            text, is_error = flatten_result(raw, self._max_chars, withheld, take, images)
+        # The text first, always: the dispatcher reads it there. The images follow it, for the runner to send.
+        content = [{"type": "text", "text": wrap_result(server_name, text)}, *(image.block() for image in images)]
+        return {"content": content, "is_error": is_error}, None
 
     async def _emit_error(self, server_name: str, exc: BaseException) -> None:
         """An ``mcp_client_server_error`` event: the server's name and the error's class, never its text."""

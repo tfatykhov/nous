@@ -78,6 +78,7 @@ class McpRegistry:
                     transport=server.transport,
                     enabled=server.enabled,
                     background=server.background,
+                    images=server.images,
                     call_timeout_seconds=server.call_timeout_seconds,
                 )
             except ValidationError:
@@ -172,6 +173,7 @@ class McpRegistry:
         *,
         enabled: bool | None = None,
         background: bool | None = None,
+        images: bool | None = None,
         call_timeout_seconds: int | None = None,
         permissions: Mapping[str, Permission] | None = None,
         secret: SealedSecret | None = None,
@@ -192,6 +194,8 @@ class McpRegistry:
                 row.enabled = enabled
             if background is not None:
                 row.background = background
+            if images is not None:
+                row.images = images
             if call_timeout_seconds is not None:
                 row.call_timeout_seconds = call_timeout_seconds
             row.updated_at = func.now()
@@ -260,6 +264,7 @@ class McpRegistry:
         row.transport = server.transport
         row.enabled = server.enabled
         row.background = server.background
+        row.images = server.images
         row.call_timeout_seconds = server.call_timeout_seconds
         row.updated_at = func.now()
         await session.flush()

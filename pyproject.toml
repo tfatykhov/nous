@@ -23,6 +23,7 @@ runtime = [
     "starlette>=0.40,<1.0",
     "mcp>=1.30,<2.0",
     "cryptography>=42",
+    "Pillow>=10.0,<13.0",  # F112: an MCP tool result's image is decoded and encoded again before the model gets it
 ]
 rerank = [
     "sentence-transformers>=3.0.0",

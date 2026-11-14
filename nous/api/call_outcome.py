@@ -16,6 +16,9 @@ from typing import Any
 @dataclass
 class CallOutcome:
     external_ref: str | None = None  # provider id: SMTP Message-ID, Telegram message_id
+    # The image blocks a handler returned after its text (an MCP tool's result, made by nous.mcp_client.images), for
+    # the runner to send with the tool's result. Set by the dispatcher; never set for an error result.
+    images: list[dict] | None = None
     uncertain: bool = False  # the provider may have acted although the call failed
     # Phase 2.8: resolve_decisions' review state before/after its write, one
     # dict per item ({"index": i, "prior", "written"}), read inside that item's
