@@ -967,6 +967,18 @@ describe('Integrations: style', () => {
     expect(wide.get('.back')?.display).toBe('none'); // the way back to the list shows only in one column
     expect(tablet.get('.back')?.display).toBe('inline-flex');
   });
+  it("a long tool name gives way on a tool's line: its state and its Allow control keep their size", () => {
+    const open = wide.get('.open') ?? {};
+    const shrink = (flex: string | undefined) => (flex === 'none' ? 0 : Number(flex?.split(' ')[1] ?? 1));
+    expect(open.flex).toBeDefined();
+    expect(open.flex).not.toBe('none');
+    expect(shrink(open.flex)).toBeGreaterThan(0);
+    expect(open['min-width']).toBe('0');
+    expect(open['text-align']).toBe('left');
+    expect(wide.get('.tool-name')?.['min-width']).toBe('0');
+    expect(wide.get('.tool-act')?.flex).toBe('none');
+    expect(wide.get('.tool-head .status-pill')?.flex).toBe('none');
+  });
   it('the server shown is marked by a quiet background, not a filled accent', () => {
     const current = wide.get(".item[aria-current='page']");
     expect(current).toEqual({ background: 'var(--bg)' });
@@ -1143,6 +1155,83 @@ describe('Integrations: a key for a new server', () => {
     expect(within(addCard()).getAllByText(NO_KEY_FILE)).toHaveLength(1);
   });
 
+  it('leaving the form drops a typed key: back on it, "None" is chosen and the rows open empty and hidden', async () => {
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fill('wiki2', 'https://mcp.deepwiki.com/mcp');
+    await typeKey();
+    await fireEvent.click(within(addCard()).getByRole('button', { name: 'Show the value of header 1' }));
+    expect(valueField().type).toBe('text');
+    const nowhere = () => {
+      expect(document.body.innerHTML).not.toContain('test-key');
+      for (const input of Array.from(document.querySelectorAll('input'))) expect(input.value).not.toContain('test-key');
+    };
+    await openServer('deepwiki');
+    nowhere();
+    await openForm();
+    nowhere();
+    expect(within(addCard()).getByRole('radio', { name: 'None' })).toHaveProperty('checked', true);
+    expect(within(addCard()).queryByLabelText('Header 1 value')).toBeNull();
+    // The name and the address are no secret: they stay.
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('wiki2');
+    expect((screen.getByLabelText('Address') as HTMLInputElement).value).toBe('https://mcp.deepwiki.com/mcp');
+    await fireEvent.click(within(addCard()).getByRole('radio', { name: 'API key or header' }));
+    expect(valueField().value).toBe('');
+    expect(valueField().type).toBe('password');
+    expect(changes()).toEqual([]);
+  });
+
+  it("leaving the form drops the check made before it and the form's note; the name and the address stay", async () => {
+    handlers['POST /integrations/mcp/probe'] = () => [200, PROBE()];
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fill('wiki2', 'https://mcp.deepwiki.com/mcp');
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await within(addCard()).findByText('3 tools listed');
+    await openServer('deepwiki');
+    await openForm();
+    expect(within(addCard()).queryByText(/tools? listed/)).toBeNull();
+    expect(within(addCard()).queryByRole('checkbox', { name: 'Allow read_wiki' })).toBeNull();
+    expect(within(addCard()).queryByRole('button', { name: 'Add server' })).toBeNull();
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('wiki2');
+    expect((screen.getByLabelText('Address') as HTMLInputElement).value).toBe('https://mcp.deepwiki.com/mcp');
+    handlers['POST /integrations/mcp/probe'] = () => [502, { error: "could not list the server's tools: ConnectError" }];
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    expect((await within(addCard()).findByRole('alert')).textContent).toBe("Could not list the server's tools: ConnectError.");
+    await openServer('deepwiki');
+    await openForm();
+    expect(within(addCard()).queryByRole('alert')).toBeNull();
+  });
+
+  it('leaving the form drops a finished sign-in: back on it, "None" is chosen and the check is made without it', async () => {
+    listAnswer = () => [200, { ...LIST(), oauth_available: true }];
+    handlers['POST /integrations/mcp/oauth/start'] = () => [200, {
+      flow_id: 'flow-1', authorization_url: 'https://auth.example.com/authorize?client_id=c&state=s', authorization_host: 'auth.example.com',
+      token_host: 'auth.example.com', registration: 'dynamic', scope: 'read', expires_in: 600,
+    }];
+    handlers['GET /integrations/mcp/oauth/flows/flow-1'] = () => [200, { status: 'pending', reason: null, stored: false }];
+    handlers['POST /integrations/mcp/oauth/complete'] = () => [200, { status: 'complete', reason: null, stored: false }];
+    handlers['POST /integrations/mcp/probe'] = () => [200, PROBE()];
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fill('wiki2', 'https://wiki2.example.com/mcp');
+    await fireEvent.click(within(addCard()).getByRole('radio', { name: 'Sign in (OAuth)' }));
+    await fireEvent.click(within(addCard()).getByRole('button', { name: 'Sign in' }));
+    const pasted = await within(addCard()).findByLabelText('Paste the address instead');
+    await fireEvent.input(pasted, { target: { value: 'https://nous.example.com/integrations/mcp/oauth/callback?code=c&state=s' } });
+    await fireEvent.click(within(addCard()).getByRole('button', { name: 'Use this address' }));
+    expect(await within(addCard()).findByText('Signed in for wiki2. Check the server next: it is checked with this sign-in.')).toBeTruthy();
+    await openServer('deepwiki');
+    await openForm();
+    expect(within(addCard()).getByRole('radio', { name: 'None' })).toHaveProperty('checked', true);
+    expect(within(addCard()).getByRole('radio', { name: 'Sign in (OAuth)' })).toHaveProperty('checked', false);
+    expect(within(addCard()).queryByText(/^Signed in for/)).toBeNull();
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await within(addCard()).findByText('3 tools listed');
+    expect(changes().filter((c) => c.url === '/integrations/mcp/probe').map((c) => c.body))
+      .toEqual([{ name: 'wiki2', url: 'https://wiki2.example.com/mcp' }]); // no oauth_flow_id
+  });
+
   it('a typed value is never written to the browser storage', async () => {
     const setItem = vi.spyOn(Storage.prototype, 'setItem');
     handlers['POST /integrations/mcp/probe'] = () => [200, PROBE()];
@@ -1294,6 +1383,14 @@ describe('Integrations: the list of servers', () => {
     expect(current()).toEqual([ADD_ADDRESS]);
     expect(within(nav()).getByRole('link', { name: 'Add server' }).getAttribute('aria-current')).toBe('page');
   });
+
+  it('the Add server link, current on the form, takes the paper fill a current server takes', async () => {
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    const add = within(nav()).getByRole('link', { name: 'Add server' });
+    expect(add.className).toContain('aria-[current=page]:bg-[var(--bg)]');
+    expect(add.className).not.toContain('--wash');
+  });
 });
 
 describe('Integrations: the pane follows the address', () => {
@@ -1307,9 +1404,12 @@ describe('Integrations: the pane follows the address', () => {
     const form = await openForm();
     expect(within(form).getByText("Check the server's address, choose which of its tools the agent may use, then add it.")).toBeTruthy();
     expect(screen.queryByRole('region', { name: 'files' })).toBeNull();
+    // Back at the screen's own address: the server that was open last, not the first.
     go(LIST_ADDRESS);
-    expect(await screen.findByRole('region', { name: 'deepwiki' })).toBeTruthy();
+    expect(await screen.findByRole('region', { name: 'files' })).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'deepwiki' })).toBeNull();
     expect(screen.queryByRole('region', { name: 'Add a server' })).toBeNull();
+    expect(link('files')?.getAttribute('aria-current')).toBe('page');
   });
 
   it.each([
@@ -1343,6 +1443,60 @@ describe('Integrations: the pane follows the address', () => {
       expect(await screen.findByRole('region', { name: 'Add a server' })).toBeTruthy(); // no server: the form
       expect(document.querySelector('.split')?.classList.contains('picked')).toBe(false);
     });
+
+  it.each(['#/work/s/files', '#/work/add'])("another screen's address %s, shaped like this one's, picks nothing here", async (address) => {
+    go(address); // the screen rendered on its own while the router is at another route
+    render(Integrations);
+    expect(await screen.findByRole('region', { name: 'deepwiki' })).toBeTruthy(); // the default pane
+    expect(screen.queryByRole('region', { name: 'files' })).toBeNull();
+    expect(screen.queryByRole('region', { name: 'Add a server' })).toBeNull();
+    expect(document.querySelector('.split')?.classList.contains('picked')).toBe(false);
+  });
+
+  it('the bare address keeps its server while it exists, when a reload puts another one first', async () => {
+    let servers = (d: ReturnType<typeof LIST>) => d.servers;
+    listAnswer = () => {
+      const d = LIST();
+      return [200, { ...d, servers: servers(d) }];
+    };
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    servers = (d) => [{ ...d.servers[0], name: 'aaa' }, ...d.servers]; // a new server, first in name order
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(link('aaa')).toBeTruthy());
+    expect(screen.getByRole('region', { name: 'deepwiki' })).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'aaa' })).toBeNull();
+    expect(link('deepwiki')?.getAttribute('aria-current')).toBe('page');
+    expect(location.hash).toBe(LIST_ADDRESS);
+    servers = (d) => [{ ...d.servers[0], name: 'aaa' }, d.servers[1]]; // deepwiki is gone: the first server shows
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByRole('region', { name: 'aaa' })).toBeTruthy();
+    expect(link('aaa')?.getAttribute('aria-current')).toBe('page');
+  });
+
+  it('the bare address returns to the server shown last, whichever address showed it, while it exists', async () => {
+    let gone = false;
+    listAnswer = () => {
+      const d = LIST();
+      return [200, gone ? { ...d, servers: d.servers.filter((s) => s.name !== 'files') } : d];
+    };
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await openServer('files');
+    go(LIST_ADDRESS);
+    await waitFor(() => expect(location.hash).toBe(LIST_ADDRESS));
+    await settle();
+    expect(screen.getByRole('region', { name: 'files' })).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'deepwiki' })).toBeNull();
+    expect(link('files')?.getAttribute('aria-current')).toBe('page');
+    expect(link('deepwiki')?.getAttribute('aria-current')).toBeNull();
+    gone = true; // a reload without files: the first server shows
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByRole('region', { name: 'deepwiki' })).toBeTruthy();
+    expect(link('files')).toBeNull();
+    expect(link('deepwiki')?.getAttribute('aria-current')).toBe('page');
+    expect(screen.queryByText(/There is no server named/)).toBeNull();
+  });
 
   it('a server whose name needs encoding is linked by its encoded address, and opens there', async () => {
     const odd = 'a/b?c%d'; // not a name the server accepts: the address must still round-trip whatever the list holds
@@ -1408,6 +1562,40 @@ describe('Integrations: a narrow screen', () => {
     go(LIST_ADDRESS);
     await waitFor(() => expect(document.querySelector('.detail')).toBeNull());
     expect(split().classList.contains('picked')).toBe(false);
+  });
+
+  it('a move between the list and the pane puts the focus on what came into view; the first render moves none', async () => {
+    narrowScreen();
+    render(Integrations);
+    await screen.findByRole('navigation', { name: 'MCP servers' });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(document.activeElement).toBe(document.body);
+    await openServer('files');
+    await waitFor(() => expect(document.activeElement?.id).toBe('mcp-pane'));
+    expect(document.activeElement?.contains(card('files'))).toBe(true);
+    expect(document.activeElement?.getAttribute('tabindex')).toBe('-1');
+    go(LIST_ADDRESS);
+    await waitFor(() => expect(document.activeElement).toBe(nav()));
+    expect(nav().id).toBe('mcp-list');
+    expect(nav().getAttribute('tabindex')).toBe('-1');
+    await openForm();
+    await waitFor(() => expect(document.activeElement?.id).toBe('mcp-pane'));
+    expect(document.activeElement?.contains(addCard())).toBe(true);
+  });
+
+  it('on a wide screen a move does not take the focus', async () => {
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await openServer('files');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(document.activeElement).toBe(document.body);
+    go(LIST_ADDRESS);
+    await waitFor(() => expect(link('files')?.getAttribute('aria-current')).toBe('page')); // the last server open
+    await new Promise((r) => setTimeout(r, 20));
+    expect(document.activeElement).toBe(document.body);
+    await openForm();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(document.activeElement).toBe(document.body);
   });
 
   it.each(['#/integrations/foo', '#/integrations/s', '#/integrations/s/'])(
@@ -1500,6 +1688,92 @@ describe('Integrations: finding a tool', () => {
     await find('');
     await choose('All');
     expect(shownTools()).toHaveLength(9);
+  });
+
+  /** A list whose deepwiki tools the test changes between reloads; the page's Refresh reloads it. */
+  const reloading = () => {
+    const now = { tools: NINE() };
+    listAnswer = () => {
+      const d = LIST();
+      d.servers[0].tools = now.tools;
+      return [200, d];
+    };
+    return now;
+  };
+  const reloadTo = async (now: { tools: ReturnType<typeof NINE> }, tools: ReturnType<typeof NINE>) => {
+    now.tools = tools;
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(card('deepwiki').querySelector('.tools-head .count')?.textContent).toBe(`3 of ${tools.length} allowed`));
+  };
+  const EIGHT = () => NINE().filter((t) => t.tool !== 'status');
+
+  it('a typed query keeps the search while a reload leaves fewer than nine tools, until it is cleared', async () => {
+    const now = reloading();
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await find('uptime');
+    expect(shownTools()).toEqual(['status']);
+    await reloadTo(now, EIGHT()); // the one tool it found is gone
+    expect(search().value).toBe('uptime');
+    expect(filter()).toBeTruthy();
+    expect(shownTools()).toEqual([]);
+    expect(within(card('deepwiki')).getByText('No tool matches.')).toBeTruthy();
+    await find('');
+    expect(shownTools()).toHaveLength(8);
+    expect(within(card('deepwiki')).queryByText('No tool matches.')).toBeNull();
+    // Nothing typed and All: eight tools are read at a glance again.
+    expect(within(card('deepwiki')).queryByRole('searchbox', { name: 'Find a tool of deepwiki' })).toBeNull();
+    expect(within(card('deepwiki')).queryByRole('group', { name: 'Which tools of deepwiki to show' })).toBeNull();
+  });
+
+  it('a pressed filter stays while a reload leaves fewer than nine tools, until All is pressed', async () => {
+    const now = reloading();
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await choose('Not allowed');
+    await reloadTo(now, EIGHT());
+    expect(pressed()).toEqual(['Not allowed']);
+    expect(search().value).toBe('');
+    expect(shownTools()).toEqual(['fetch_feed', 'list_files', 'write_file', 'delete_file', 'ping']);
+    expect(within(card('deepwiki')).getByText('Showing 5 of 8.')).toBeTruthy();
+    await choose('All');
+    expect(shownTools()).toHaveLength(8);
+    expect(within(card('deepwiki')).queryByText(/^Showing/)).toBeNull();
+    expect(within(card('deepwiki')).queryByRole('group', { name: 'Which tools of deepwiki to show' })).toBeNull();
+    expect(within(card('deepwiki')).queryByRole('searchbox', { name: 'Find a tool of deepwiki' })).toBeNull();
+  });
+
+  it('a tool changed under a filter stays listed, with its note and the focus, until the filter or the query changes', async () => {
+    state.servers[0].tools = NINE();
+    patching('deepwiki');
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    const NOT_ALLOWED = ['fetch_feed', 'list_files', 'write_file', 'delete_file', 'ping', 'status'];
+    const settled = () => waitFor(() => expect((within(card('deepwiki')).getByRole('button', { name: 'Refresh tools' }) as HTMLButtonElement).disabled).toBe(false));
+    await choose('Not allowed');
+    expect(shownTools()).toEqual(NOT_ALLOWED);
+    const allowFeed = within(card('deepwiki')).getByRole('button', { name: 'Allow fetch_feed' });
+    allowFeed.focus();
+    await fireEvent.click(allowFeed);
+    expect((await within(row(card('deepwiki'), 'fetch_feed')).findByRole('status')).textContent).toBe('Allowed.');
+    await settled();
+    expect(shownTools()).toEqual(NOT_ALLOWED); // allowed now, and still where it was pressed
+    expect(within(row(card('deepwiki'), 'fetch_feed')).getByText('in use')).toBeTruthy();
+    expect(within(card('deepwiki')).getByText('Showing 6 of 9.')).toBeTruthy();
+    await waitFor(() => expect(document.activeElement)
+      .toBe(within(row(card('deepwiki'), 'fetch_feed')).getByRole('button', { name: "Don't allow fetch_feed" })));
+    // Choosing the filter again lists what it says.
+    await choose('All');
+    await choose('Not allowed');
+    expect(shownTools()).toEqual(NOT_ALLOWED.filter((t) => t !== 'fetch_feed'));
+    expect(within(card('deepwiki')).getByText('Showing 5 of 9.')).toBeTruthy();
+    // So does a change of the query.
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Allow list_files' }));
+    expect((await within(row(card('deepwiki'), 'list_files')).findByRole('status')).textContent).toBe('Allowed.');
+    await settled();
+    expect(shownTools()).toContain('list_files');
+    await find('file');
+    expect(shownTools()).toEqual(['write_file', 'delete_file']);
   });
 
   it('the search and the filter start over when another server or the form is shown', async () => {
@@ -1608,8 +1882,12 @@ describe('Integrations: opened rows', () => {
   });
 });
 
+/** Time for a hashchange (or a focus) that would follow, were one coming. */
+const settle = () => new Promise((r) => setTimeout(r, 20));
+
 describe('Integrations: after an add', () => {
-  it("the address stays the form's until the reload has landed, and no \"no server\" sentence shows meanwhile", async () => {
+  /** The form checked for wiki2, with an add that stores it (`adding`). */
+  async function checked() {
     handlers['POST /integrations/mcp/probe'] = () => [200, PROBE()];
     adding();
     render(Integrations);
@@ -1617,21 +1895,30 @@ describe('Integrations: after an add', () => {
     await fill('wiki2', 'https://mcp.deepwiki.com/mcp');
     await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
     await within(addCard()).findByText('3 tools listed');
-    // Every list request after the add waits until the test lets it through.
+  }
+  /** Every list request after the add waits until `release()`; `count()` says how many are waiting. */
+  function holdReload() {
     const inner = globalThis.fetch;
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
     let added = false;
-    let held = 0;
+    let count = 0;
     vi.stubGlobal('fetch', async (url: string, init: RequestInit = {}) => {
       if ((init.method ?? 'GET') === 'GET' && added) {
-        held += 1;
+        count += 1;
         await gate;
       }
       const answer = await inner(url, init);
       if (init.method === 'POST' && url === '/integrations/mcp/servers') added = true;
       return answer;
     });
+    return { release: () => release(), count: () => count };
+  }
+  const addServer = () => fireEvent.click(within(addCard()).getByRole('button', { name: 'Add server' }));
+
+  it("the address stays the form's until the reload has landed, and no \"no server\" sentence shows meanwhile", async () => {
+    await checked();
+    const reload = holdReload();
     // "Never in the document": every change of the page is looked at, not only the moments the test asserts.
     const seen: string[] = [];
     const watch = new MutationObserver(() => {
@@ -1639,22 +1926,129 @@ describe('Integrations: after an add', () => {
     });
     watch.observe(document.body, { childList: true, subtree: true, characterData: true });
     try {
-      await fireEvent.click(within(addCard()).getByRole('button', { name: 'Add server' }));
+      await addServer();
       await screen.findByText('Added wiki2.');
-      await waitFor(() => expect(held).toBe(1)); // the reload is in flight
-      await new Promise((r) => setTimeout(r, 20)); // time for a hashchange, were one coming
+      await waitFor(() => expect(reload.count()).toBe(1)); // the reload is in flight
+      await settle();
       expect(location.hash).toBe(ADD_ADDRESS);
       expect(screen.getByRole('region', { name: 'Add a server' })).toBeTruthy();
       expect(screen.queryByText(/There is no server named/)).toBeNull();
-      release();
+      reload.release();
       expect(await screen.findByRole('region', { name: 'wiki2' })).toBeTruthy();
       expect(location.hash).toBe('#/integrations/s/wiki2');
       expect(link('wiki2')?.getAttribute('aria-current')).toBe('page');
     } finally {
-      release();
+      reload.release();
       watch.disconnect();
     }
     expect(seen).toEqual([]);
+  });
+
+  it('the address stays on a server the owner opened while the reload was in flight', async () => {
+    await checked();
+    const reload = holdReload();
+    await addServer();
+    await waitFor(() => expect(reload.count()).toBe(1));
+    await openServer('files');
+    reload.release();
+    await waitFor(() => expect(link('wiki2')).toBeTruthy()); // the reload has landed
+    await settle();
+    expect(location.hash).toBe('#/integrations/s/files');
+    expect(screen.getByRole('region', { name: 'files' })).toBeTruthy();
+  });
+
+  it('the address is not pulled back from another screen opened while the reload was in flight', async () => {
+    await checked();
+    const reload = holdReload();
+    await addServer();
+    await waitFor(() => expect(reload.count()).toBe(1));
+    go('#/overview'); // the screen stays rendered here: the router is at another route
+    reload.release();
+    await waitFor(() => expect(link('wiki2')).toBeTruthy());
+    await settle();
+    expect(location.hash).toBe('#/overview');
+  });
+
+  it('a reload that fails leaves the form: the address never names a server the list does not hold', async () => {
+    await checked();
+    const stored = listAnswer;
+    const post = handlers['POST /integrations/mcp/servers'];
+    let added = false;
+    handlers['POST /integrations/mcp/servers'] = (body) => { added = true; return post(body); };
+    listAnswer = () => (added ? [500, { error: 'the request could not be processed' }] : stored());
+    const before = lists();
+    await addServer();
+    await screen.findByText('Added wiki2.');
+    await waitFor(() => expect(lists()).toBe(before + 1));
+    await settle();
+    expect(location.hash).toBe(ADD_ADDRESS);
+    expect(screen.queryByText(/There is no server named/)).toBeNull();
+  });
+
+  /** The form checked for wiki2 (`probes` counts the checks), its add held: `answer` lands it. */
+  async function heldAdd() {
+    const counter = { probes: 0 };
+    handlers['POST /integrations/mcp/probe'] = () => { counter.probes += 1; return [200, PROBE()]; };
+    const answer = held();
+    handlers['POST /integrations/mcp/servers'] = () => answer.promise;
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fill('wiki2', 'https://mcp.deepwiki.com/mcp');
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await within(addCard()).findByText('3 tools listed');
+    await addServer();
+    return { counter, answer };
+  }
+  /** Answer the held add and wait for the reload it ends with. */
+  async function land(answer: ReturnType<typeof held>, a: Answer) {
+    const before = lists();
+    answer.resolve(a);
+    await waitFor(() => expect(lists()).toBe(before + 1)); // the add is over: it reloads the list last
+    await settle();
+  }
+  const CONFLICT: Answer = [409, { error: "the server's tool definitions changed since they were shown: review them again", definitions_sha256: 'b'.repeat(64) }];
+  const UNREACHABLE: Answer = [502, { error: "could not list the server's tools: ReadTimeout" }];
+
+  it('a 409 that lands after the form was left is said above the pane, and checks nothing again', async () => {
+    const { counter, answer } = await heldAdd();
+    await openServer('deepwiki');
+    await land(answer, CONFLICT);
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent).toBe('wiki2 was not added: its tools changed since the check');
+    expect(alert.closest('.split')).toBeNull(); // above the list and the pane
+    expect(screen.getByRole('region', { name: 'deepwiki' })).toBeTruthy(); // still on the server the owner went to
+    expect(location.hash).toBe('#/integrations/s/deepwiki');
+    expect(counter.probes).toBe(1);
+    expect(changes().filter((c) => c.url === '/integrations/mcp/probe')).toHaveLength(1);
+    // Back on the form: no sentence about a new list, and no list.
+    await openForm();
+    expect(within(addCard()).queryByText(/The server's tools changed since you checked it/)).toBeNull();
+    expect(within(addCard()).queryByText(/tools? listed/)).toBeNull();
+    expect(within(addCard()).queryByRole('checkbox', { name: /^Allow / })).toBeNull();
+    expect(within(addCard()).queryByRole('alert')).toBeNull();
+  });
+
+  it('a 502 that lands after the form was left is said above the pane, and not on the form', async () => {
+    const { counter, answer } = await heldAdd();
+    await openServer('files');
+    await land(answer, UNREACHABLE);
+    const alert = screen.getByRole('alert');
+    expect(alert.textContent).toBe("wiki2 was not added: Could not list the server's tools: ReadTimeout.");
+    expect(alert.closest('.split')).toBeNull();
+    expect(screen.getByRole('region', { name: 'files' })).toBeTruthy();
+    expect(counter.probes).toBe(1);
+    await openForm();
+    expect(within(addCard()).queryByRole('alert')).toBeNull();
+    expect(within(addCard()).queryByText(/ReadTimeout/)).toBeNull();
+  });
+
+  it('a 502 that lands while the form is shown is said on the form, not above the pane', async () => {
+    const { answer } = await heldAdd();
+    await land(answer, UNREACHABLE);
+    const alert = within(addCard()).getByRole('alert');
+    expect(alert.textContent).toBe("Could not list the server's tools: ReadTimeout.");
+    expect(screen.getAllByRole('alert')).toEqual([alert]);
+    expect(screen.queryByText(/was not added/)).toBeNull();
   });
 });
 
@@ -1678,5 +2072,152 @@ describe('Integrations: after a removal', () => {
     await waitFor(() => expect(link('files')).toBeNull());
     expect(link('deepwiki')?.getAttribute('aria-current')).toBe('page');
     expect(screen.queryByText(/There is no server named/)).toBeNull();
+  });
+
+  /** A list without `name` once its DELETE has landed, and that DELETE held until the test answers it. */
+  function heldRemoval(name: string) {
+    const answer = held();
+    let removed = false;
+    handlers[`DELETE /integrations/mcp/servers/${name}`] = async () => {
+      const a = await answer.promise;
+      removed = true;
+      return a;
+    };
+    listAnswer = () => {
+      const d = LIST();
+      return [200, removed ? { ...d, servers: d.servers.filter((s) => s.name !== name) } : d];
+    };
+    return () => answer.resolve([200, { deleted: name }]);
+  }
+  const confirmRemove = async (name: string) => {
+    await fireEvent.click(within(card(name)).getByRole('button', { name: 'Remove' }));
+    await fireEvent.click(within(card(name)).getByRole('button', { name: 'Yes, remove' }));
+  };
+
+  it('replaces the address, so Back does not return to the removed server', async () => {
+    let removed = false;
+    handlers['DELETE /integrations/mcp/servers/files'] = () => { removed = true; return [200, { deleted: 'files' }]; };
+    listAnswer = () => {
+      const d = LIST();
+      return [200, removed ? { ...d, servers: d.servers.slice(0, 1) } : d];
+    };
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    const entries = history.length;
+    await openServer('files');
+    expect(history.length).toBe(entries + 1); // a move adds an entry: the measure can see one
+    await confirmRemove('files');
+    await waitFor(() => expect(location.hash).toBe(LIST_ADDRESS));
+    expect(history.length).toBe(entries + 1); // the removal replaced the entry it was on
+  });
+
+  it('the address stays on a server the owner opened while the removal was in flight', async () => {
+    const answer = heldRemoval('files');
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await openServer('files');
+    await confirmRemove('files');
+    await openServer('deepwiki');
+    answer();
+    await screen.findByText('Removed files.');
+    await waitFor(() => expect(link('files')).toBeNull());
+    await settle();
+    expect(location.hash).toBe('#/integrations/s/deepwiki');
+    expect(screen.getByRole('region', { name: 'deepwiki' })).toBeTruthy();
+  });
+
+  it('the address is not pulled back from another screen opened while the removal was in flight', async () => {
+    const answer = heldRemoval('deepwiki');
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' }); // at the bare address, the server it shows
+    await confirmRemove('deepwiki');
+    go('#/overview'); // the screen stays rendered, showing the same server at its own default
+    answer();
+    await screen.findByText('Removed deepwiki.');
+    await settle();
+    expect(location.hash).toBe('#/overview');
+  });
+});
+
+describe('Integrations: why a tool is skipped', () => {
+  const titled = (text: string) => Array.from(document.querySelectorAll('[title]')).filter((e) => e.getAttribute('title')?.includes(text));
+
+  it('on its own line under the tool, as text, while the row is closed; no title holds it', async () => {
+    render(Integrations);
+    const deepwiki = await screen.findByRole('region', { name: 'deepwiki' });
+    const reason = "it is not in its server's pin (NOUS_MCP_CLIENT_PINNED_SERVERS)";
+    const search = row(deepwiki, 'search');
+    expect(within(search).getByRole('button', { name: 'Details of search' }).getAttribute('aria-expanded')).toBe('false');
+    const why = within(search).getByText(reason);
+    expect(why.tagName).toBe('P');
+    expect(why.closest('.tool-head')).toBeNull();
+    expect(within(search).getByText("Blocked by the server's host settings.").closest('.tool-head')).toBeNull();
+    expect(titled(reason)).toEqual([]);
+    const list = row(await openServer('files'), 'list');
+    expect(within(list).getByText('the server is switched off').closest('.tool-head')).toBeNull();
+    expect(titled('the server is switched off')).toEqual([]);
+  });
+
+  it('in the check, under the tool that would be skipped, as text; no title holds it', async () => {
+    handlers['POST /integrations/mcp/probe'] = () => [200, PROBE()];
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fill('wiki2', 'https://mcp.deepwiki.com/mcp');
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await within(addCard()).findByText('3 tools listed');
+    const broken = within(addCard()).getByRole('checkbox', { name: 'Allow broken' }).closest('li') as HTMLElement;
+    expect(within(broken).getByText('would be skipped').closest('.tool-head')).toBeTruthy();
+    const why = within(broken).getByText('the input schema is not an object');
+    expect(why.tagName).toBe('P');
+    expect(why.closest('.tool-head')).toBeNull();
+    expect(titled('the input schema is not an object')).toEqual([]);
+  });
+});
+
+describe('Integrations: a change that fails elsewhere', () => {
+  const FAILED = [502, { error: 'could not reach the server: ConnectError' }] as Answer;
+
+  it('is said above the pane, naming its server, while another server is shown', async () => {
+    const answer = held();
+    handlers['PATCH /integrations/mcp/servers/deepwiki'] = () => answer.promise;
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Switch off' }));
+    const files = await openServer('files');
+    answer.resolve(FAILED);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe('deepwiki: Could not reach the server: ConnectError.');
+    expect(alert.closest('.split')).toBeNull(); // above the list and the pane
+    expect(files.contains(alert)).toBe(false);
+    // Its own note waits on its page.
+    const deepwiki = await openServer('deepwiki');
+    expect(within(deepwiki).getByRole('alert').textContent).toBe('Could not reach the server: ConnectError.');
+  });
+
+  it('is said only beside its server while that server is shown', async () => {
+    handlers['PATCH /integrations/mcp/servers/deepwiki'] = () => FAILED;
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Switch off' }));
+    const alert = await within(card('deepwiki')).findByRole('alert');
+    await settle();
+    expect(screen.getAllByRole('alert')).toEqual([alert]);
+  });
+
+  it('a change that succeeds elsewhere says nothing above the pane', async () => {
+    const answer = held();
+    handlers['PATCH /integrations/mcp/servers/deepwiki'] = () => answer.promise;
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Switch off' }));
+    await openServer('files');
+    const before = lists();
+    answer.resolve([200, { server: null }]);
+    await waitFor(() => expect(lists()).toBe(before + 1)); // the change has landed while files is shown
+    await settle();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByText(/^deepwiki:/)).toBeNull();
+    const deepwiki = await openServer('deepwiki'); // its note is on its own page
+    expect(within(deepwiki).getByRole('status').textContent).toBe('Switched off: its tools are no longer offered to the agent.');
   });
 });

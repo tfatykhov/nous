@@ -70,6 +70,10 @@
   const ADD_HREF = routeHref('integrations', 'add');
   const serverHref = (name: string) => routeHref('integrations', ['s', name]);
   type Pane = { kind: 'list' } | { kind: 'add' } | { kind: 'server'; server: McpServer } | { kind: 'missing'; name: string };
+  /** The server shown last. The bare address shows that one while it exists: a reload that puts another server
+   * first (the list is in name order) must not swap the pane under the owner's pointer, and coming back to the
+   * screen's own address returns to the server that was open. */
+  let stay = $state<string | null>(null);
   let pane = $derived.by((): Pane => {
     const servers = $store.data?.servers ?? [];
     if (picked && sub !== 'add') {
@@ -84,7 +88,11 @@
     }
     if (sub === 'add') return { kind: 'add' };
     if (narrow) return { kind: 'list' }; // nothing picked: the list is the screen
-    return servers.length ? { kind: 'server', server: servers[0] } : { kind: 'add' };
+    if (!servers.length) return { kind: 'add' };
+    return { kind: 'server', server: servers.find((s) => s.name === stay) ?? servers[0] };
+  });
+  $effect(() => {
+    if (pane.kind === 'server') stay = pane.server.name; // the last server shown, whichever address showed it
   });
   /** The server the pane shows, by name. */
   let shown = $derived(pane.kind === 'server' ? pane.server.name : null);
@@ -99,6 +107,26 @@
   /** What is typed in "Find a tool", and which tools are shown: both start over with each server. */
   let query = $state('');
   let show = $state('all');
+  /** Tools whose permission was changed while the list was filtered, by `toolKey`: they stay listed until the filter
+   * or the query changes, so the row, its note and the focus stay where the owner pressed (allowing a tool under
+   * "Not allowed" would otherwise take the row away with its note). */
+  const kept = new SvelteSet<string>();
+  $effect(() => {
+    void show;
+    void query;
+    untrack(() => kept.clear());
+  });
+
+  // 8. One column: the list and the pane replace each other, so a click would leave the focus on nothing. It goes
+  // to what came into view: the pane, or the list.
+  let lastSub: string | null = null;
+  $effect(() => {
+    const now = sub;
+    const moved = lastSub !== null && lastSub !== now;
+    lastSub = now;
+    if (!moved || !untrack(() => narrow)) return;
+    void tick().then(() => (byId('mcp-pane') ?? byId('mcp-list'))?.focus());
+  });
   const serverState = (s: Pick<McpServer, 'enabled' | 'background'>) => `${s.enabled} ${s.background}`;
   const byId = (id: string) => document.getElementById(id);
 
@@ -152,6 +180,9 @@
     await store.refresh();
     busy.delete(server);
     if (note) notes.set(key, note);
+    // Its own note is on a page that is not open: a change that failed while another server (or the form) is shown
+    // is said above the pane as well.
+    if (note && !note.ok && shown !== server) pageNote = { text: `${server}: ${note.text}`, ok: false };
     await tick();
     restoreFocus(focus?.() ?? opener);
   }
@@ -200,11 +231,13 @@
   /** The word on a tool's control: what pressing it does. */
   const allowWord = (t: McpTool) => (t.permission === 'allow' ? "Don't allow" : 'Allow');
 
-  const setTool = (s: McpServer, t: McpTool, allow: boolean) =>
-    act(s.name, `tool ${t.tool}`, toolKey(s.name, t.tool), async () => {
+  const setTool = (s: McpServer, t: McpTool, allow: boolean) => {
+    kept.add(toolKey(s.name, t.tool));
+    return act(s.name, `tool ${t.tool}`, toolKey(s.name, t.tool), async () => {
       await updateServer(s.name, toolChange(t.tool, allow));
       return { text: allow ? 'Allowed.' : 'Not allowed now.', ok: true, expect: allow ? 'allow' : 'deny' };
     });
+  };
 
   const refreshTools = (s: McpServer) => {
     refreshed.delete(s.name);
@@ -223,7 +256,7 @@
       refreshed.delete(s.name);
       pageNote = { text: `Removed ${s.name}.`, ok: true };
       // Its own address names no server now. Only while it is the one shown: the owner may have gone elsewhere.
-      if ($currentRoute === 'integrations' && shown === s.name) location.hash = LIST_HREF;
+      if ($currentRoute === 'integrations' && shown === s.name) location.replace(LIST_HREF);
       return null;
     }, () => byId(`mcp-r.${s.name}`) ?? byId('mcp-top')); // the Remove button while the server is listed, else the title
   }
@@ -271,6 +304,7 @@
       signingIn = null;
       confirming.clear();
       opened.clear();
+      kept.clear();
       query = '';
       show = 'all';
     });
@@ -397,6 +431,20 @@
     headersEdited();
   }
 
+  // The form is left (a server, or the list, is shown instead): what was typed for a key, a finished sign-in and
+  // the check made with them go with it, so no typed value waits out of sight and none comes back shown. The name
+  // and the address stay: neither is a secret.
+  let onForm = $derived(pane.kind === 'add');
+  $effect(() => {
+    if (onForm) return;
+    untrack(() => {
+      clearHeaders();
+      probe = null;
+      allowed.clear();
+      formNote = null;
+    });
+  });
+
   /** Choosing "None" is the form's Cancel for a key: what was typed is dropped. Leaving "Sign in" drops the sign-in. */
   function chooseAuth(kind: 'none' | 'headers' | 'oauth') {
     if (kind === 'none') clearHeaders();
@@ -493,7 +541,12 @@
       allowed.clear();
       clearHeaders();
     } catch (err) {
-      if (isConflict(err)) {
+      if (!onForm) {
+        // The form was left while the add was in flight: its key and its check are gone, so there is nothing on it
+        // to say this beside. It is said above the pane.
+        const why = isConflict(err) ? 'its tools changed since the check' : problemText(err);
+        pageNote = { text: `${name} was not added: ${why}`, ok: false };
+      } else if (isConflict(err)) {
         // The server answered differently from what was shown: the new list for the same name, address and headers,
         // every choice back at not allowed. The typed headers stay: the check needs them.
         formNote = { text: CHANGED_TEXT, ok: false };
@@ -512,7 +565,7 @@
       // The form gives way to the server it made: once the list holds it (a reload that failed leaves the form, with
       // the note), and only while the form is still what is shown (the owner may have gone elsewhere meanwhile).
       const listed = ($store.data?.servers ?? []).some((s) => s.name === made);
-      if (made && listed && $currentRoute === 'integrations' && pane.kind === 'add') location.hash = serverHref(made);
+      if (made && listed && pane.kind === 'add') location.hash = serverHref(made);
     }
   }
 </script>
@@ -636,9 +689,9 @@
   {@render note(pageNote)}
 
   <div class="split" class:picked>
-    <nav class="card list" aria-label="MCP servers">
+    <nav class="card list" id="mcp-list" tabindex="-1" aria-label="MCP servers">
       <Button href={ADD_HREF} variant="outline" size="lg"
-        class="w-full max-md:min-h-11 aria-[current=page]:border-[var(--muted)] aria-[current=page]:bg-[var(--wash)]"
+        class="w-full max-md:min-h-11 aria-[current=page]:border-[var(--muted)] aria-[current=page]:bg-[var(--bg)]"
         aria-current={pane.kind === 'add' ? 'page' : undefined}>Add server</Button>
       {#if d.servers.length === 0}
         <p class="empty">No MCP servers yet.</p>
@@ -662,7 +715,7 @@
     </nav>
 
     {#if pane.kind !== 'list'}
-    <div class="detail">
+    <div class="detail" id="mcp-pane" tabindex="-1">
       <a class="back" href={LIST_HREF}>All servers</a>
       {#if pane.kind === 'missing'}
         <section class="card" role="status">
@@ -674,7 +727,8 @@
         {@const inFlight = busy.get(s.name)}
         {@const asking = confirming.get(s.name)}
         {@const changes = refreshed.get(s.name)}
-        {@const listed = filterTools(s.tools, show, query)}
+        {@const matching = new Set(filterTools(s.tools, show, query).map((t) => t.tool))}
+        {@const listed = s.tools.filter((t) => matching.has(t.tool) || kept.has(toolKey(s.name, t.tool)))}
         <section class="server" aria-labelledby="mcp-s.{s.name}">
           <div class="card">
             <div class="server-head">
@@ -814,7 +868,7 @@
             <div class="tools-head">
               <h3 class="card-title">Tools</h3>
               <span class="count">{toolCountText(s.tools)}</span>
-              {#if s.tools.length >= TOOL_FILTER_FROM}
+              {#if s.tools.length >= TOOL_FILTER_FROM || query !== '' || show !== 'all'}
                 <div class="find">
                   <input class="search" type="search" placeholder="Find a tool" aria-label="Find a tool of {s.name}" bind:value={query} />
                   <div class="filters"><FilterBar options={TOOL_SHOW} bind:value={show} required label="Which tools of {s.name} to show" /></div>
@@ -840,7 +894,6 @@
                       {@render toolName(t.tool)}
                     </button>
                     <span class="status-pill {PILL[ts.tone]}">{ts.word}</span>
-                    {#if ts.detail}<span class="reason one-line" title={ts.detail}>{ts.detail}</span>{/if}
                     {#if changes?.changed.includes(t.tool)}<span class="status-pill status-pill--warn">definition changed</span>{/if}
                     <span class="tool-act">
                       <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={!!inFlight}
@@ -849,7 +902,8 @@
                       </Button>
                     </span>
                   </div>
-                  {#if t.blocked_by_ceiling}<p class="limit">Blocked by the server's host settings.</p>{/if}
+                  {#if ts.detail}<p class="reason why">{ts.detail}</p>{/if}
+                  {#if t.blocked_by_ceiling}<p class="limit why">Blocked by the server's host settings.</p>{/if}
                   {@render note(notes.get(key))}
                   {#if isOpen}{@render toolDetail(t.name, t.description, t.schema)}{/if}
                 </li>
@@ -945,9 +999,10 @@
                       Allow {@render toolName(t.tool)}
                     </label>
                     {#if t.skip_reason}
-                      <span class="status-pill status-pill--warn">would be skipped</span><span class="reason one-line" title={t.skip_reason}>{t.skip_reason}</span>
+                      <span class="status-pill status-pill--warn">would be skipped</span>
                     {/if}
                   </div>
+                  {#if t.skip_reason}<p class="reason why">{t.skip_reason}</p>{/if}
                   {#if isOpen}{@render toolDetail(t.name, t.description, t.schema)}{/if}
                 </li>
               {/each}
@@ -1040,15 +1095,19 @@
   .tool { padding: 0.25rem 0; border-top: 1px solid var(--border); min-width: 0; }
   .tool:first-child { border-top: 0; }
   .tool-head { display: flex; align-items: center; gap: 0.25rem 0.625rem; min-height: 2rem; min-width: 0; }
-  .open { display: inline-flex; align-items: center; gap: 0.375rem; flex: none; max-width: 100%; min-height: 1.75rem; margin-left: -0.25rem;
-    padding: 0 0.375rem 0 0.25rem; background: none; border: 0; border-radius: var(--radius-sm); color: var(--text); font: inherit;
-    cursor: pointer; transition: background var(--transition); }
+  /* The name is the part that gives way: it wraps inside its own space, so the state and the control beside it stay
+     in the pane whatever the server called its tool. */
+  .open { display: inline-flex; align-items: center; gap: 0.375rem; flex: 0 1 auto; min-width: 0; min-height: 1.75rem; margin-left: -0.25rem;
+    padding: 0.125rem 0.375rem 0.125rem 0.25rem; background: none; border: 0; border-radius: var(--radius-sm); color: var(--text); font: inherit;
+    text-align: left; cursor: pointer; transition: background var(--transition); }
   .open:hover { background: var(--wash); }
   .chev { flex: none; color: var(--muted); transition: transform var(--transition); }
   .open[aria-expanded='true'] .chev { transform: rotate(90deg); }
-  .tool-name { font-weight: 500; }
+  .tool-name { font-weight: 500; min-width: 0; }
   .reason { font-size: 0.75rem; color: var(--muted); overflow-wrap: anywhere; min-width: 0; }
-  .one-line { flex: 0 1 auto; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Why a tool is skipped or blocked: whole, on its own line under the tool's, in line with its name. */
+  .why { margin: 0 0 0.25rem 1.375rem; }
+  .list:focus, .detail:focus { outline: none; }
   .tool-head .status-pill { flex: none; }
   .tool-act { margin-left: auto; flex: none; }
   .tool-detail { padding: 0.125rem 0 0.5rem 1.375rem; min-width: 0; }
@@ -1088,7 +1147,7 @@
     .item, .check, .open { min-height: 2.75rem; }
     .schema summary { line-height: 2.75rem; padding: 0; }
     .tool-head { flex-wrap: wrap; }
-    .one-line { white-space: normal; }
+    .why { margin-left: 0; }
     .find { margin-left: 0; width: 100%; }
     .search { height: 2.75rem; width: 100%; }
     .tool-detail { padding-left: 0; }
