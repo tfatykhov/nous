@@ -97,6 +97,7 @@ from nous.mcp_client.config import (
     parse_host_list,
     parse_pins,
     pin_host,
+    url_problem,
 )
 from nous.mcp_client.oauth import (
     HttpFactory,
@@ -706,7 +707,10 @@ class McpClientManager:
         return {"pinned_servers": self._pins is not None, "background_servers": self._background_servers is not None}
 
     def _server_ceiling(self, config: ServerConfig) -> str | None:
-        """Why the host's pin keeps the whole server out, or None when there is no pin or it lets the server in."""
+        """Why a setting of the host keeps the whole server out, or None: its address is an http one whose host is
+        not (or no longer) in ``NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS``, or the pin, when one is set, leaves it out."""
+        if url_problem(config.url, self._allow) is not None:  # a row holds an http address of any host
+            return "its address is http and its host is not in NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS"
         if self._pins is None:
             return None
         pin = self._pins.get(config.name)

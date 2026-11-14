@@ -144,8 +144,9 @@ async def test_the_backend_dials_the_address_it_checked(monkeypatch):
 
 async def test_every_connection_of_the_real_client_goes_through_the_guard():
     client = guarded_client(NONE, LIMIT)
-    assert isinstance(client._transport, _LimitedTransport)
-    assert isinstance(client._transport._inner._pool._network_backend, _GuardedBackend)
+    assert isinstance(client._transport, transport._PinnedTransport)  # the last check before a request leaves
+    assert isinstance(client._transport._inner, _LimitedTransport)
+    assert isinstance(client._transport._inner._inner._pool._network_backend, _GuardedBackend)
     with pytest.raises(BlockedAddress):
         await client.get("https://127.0.0.1:9/mcp")  # refused before any socket is opened
     with pytest.raises(BlockedAddress):
@@ -346,7 +347,7 @@ def test_no_proxy_from_the_environment(monkeypatch):
     # A proxy mount would carry requests past the guarded transport; with its own transport and trust_env off, the
     # client builds none.
     assert client.trust_env is False and not client._mounts
-    assert isinstance(client._transport._inner, httpx.AsyncHTTPTransport)
+    assert isinstance(client._transport._inner._inner, httpx.AsyncHTTPTransport)
 
 
 # --- a real MCP server in process (the SDK's own server over ASGI: no port, no network) -----------------------------

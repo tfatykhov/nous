@@ -53,7 +53,9 @@ def _url_problem(url: str, http_host_ok: Callable[[str], bool]) -> str | None:
         _ = parts.port  # raises ValueError for a port that is not a number in range
     except ValueError:
         return "not a valid URL"
-    if parts.scheme != "https" and not (parts.scheme == "http" and http_host_ok(parts.hostname or "")):
+    # The scheme as written, in lower case: what the table's check compares (an upper-case one would pass here and
+    # fail there, after the server had been asked for its tools).
+    if not url.startswith("https://") and not (url.startswith("http://") and http_host_ok(parts.hostname or "")):
         return "only https URLs are accepted"
     if not parts.hostname:
         return "the URL has no host"
@@ -72,9 +74,9 @@ def url_problem(url: str, http_hosts: frozenset[str] = frozenset()) -> str | Non
     anywhere (``url_chars_problem``). The answer never repeats the URL.
 
     http is accepted only for a host in ``http_hosts`` (lowercase host names, as ``parse_host_list`` gives them).
-    None by default: only the code that opens a server's session passes the host's
-    ``NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS``, so every other URL (a provider's endpoint, a client ID metadata
-    document) stays https whatever that list holds.
+    Empty by default: only the code that opens a server's session, the routes that take a server's address and the
+    manager's plan pass the host's ``NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS``, so every other URL (a provider's
+    endpoint, a client ID metadata document) stays https whatever that list holds.
     """
     return _url_problem(url, http_hosts.__contains__)
 
@@ -88,7 +90,7 @@ def row_url_problem(url: str) -> str | None:
 
 def is_http(url: str) -> bool:
     """Whether ``url`` (one ``row_url_problem`` accepts) is a plain http address."""
-    return urlsplit(url).scheme == "http"
+    return url.startswith("http://")
 
 
 def parse_host_list(value: str) -> frozenset[str]:

@@ -14,6 +14,7 @@ import asyncio
 import uuid
 from typing import Any
 
+import httpx
 import pytest
 from starlette.applications import Starlette
 
@@ -60,6 +61,7 @@ HOSTS = frozenset({LAN_HOST, "mcp.lan"})
         ("http://user:pw@192.168.1.127/mcp", False),  # the other rules hold for http too
         ("http://192.168.1.127/mcp?key=x", False),
         ("http:///mcp", False),
+        ("HTTP://192.168.1.127:8000/mcp", False),  # the scheme as the table's check compares it: lower case
         ("ftp://192.168.1.127/mcp", False),  # http and https only
         ("ws://mcp.lan/mcp", False),
         ("//192.168.1.127/mcp", False),
@@ -73,6 +75,7 @@ def test_without_the_hosts_no_http_address_is_accepted():
     for url in (LAN, "http://mcp.lan/mcp", "http://alpha.example.com/mcp"):
         assert url_problem(url) == "only https URLs are accepted"
     assert url_problem("https://alpha.example.com/mcp") is None
+    assert url_problem("HTTPS://alpha.example.com/mcp") == "only https URLs are accepted"  # the table would refuse it
 
 
 def test_the_setting_gives_the_hosts_the_rule_compares():
@@ -83,8 +86,9 @@ def test_a_row_may_hold_an_http_address_of_any_host_and_nothing_else_new():
     for url in (LAN, "http://alpha.example.com/mcp"):
         assert row_url_problem(url) is None and is_http(url)
         assert ServerConfig(name="win", url=url).url == url
-    assert not is_http("https://alpha.example.com/mcp")
-    for url in ("ftp://192.168.1.127/mcp", "http://user:pw@192.168.1.127/mcp", "http://192.168.1.127/mcp?k=v", "x"):
+    assert not is_http("https://alpha.example.com/mcp") and not is_http("httpx://192.168.1.127/mcp")
+    bad = ("ftp://192.168.1.127/mcp", "http://user:pw@192.168.1.127/mcp", "http://192.168.1.127/mcp?k=v", "x")
+    for url in (*bad, "HTTP://192.168.1.127/mcp", "Https://alpha.example.com/mcp"):
         assert row_url_problem(url) is not None
         with pytest.raises(ValueError):
             ServerConfig(name="win", url=url)
@@ -211,6 +215,90 @@ async def test_a_real_plain_http_server_on_a_listed_host_answers_with_the_stored
         await asyncio.wait_for(task, 20)
 
 
+class _Wire:
+    """What would have gone out: stands in for the connection pool, so no socket is opened."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch, answer: Any = None) -> None:
+        self.sent: list[tuple[str, str, int | None, str, dict[str, str]]] = []
+        wire = self
+
+        async def handle(_self: Any, request: httpx.Request) -> httpx.Response:
+            url = request.url
+            wire.sent.append((url.scheme, url.host, url.port, url.path, dict(request.headers)))
+            return answer(request) if answer is not None else httpx.Response(200, request=request)
+
+        monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle)
+
+
+@pytest.mark.parametrize(
+    "server,other",
+    [
+        (LAN, "https://192.168.1.127:8000/mcp"),  # the same host and port over https
+        (LAN, "http://192.168.1.127:8001/mcp"),  # another port
+        (LAN, "http://192.168.1.127/mcp"),
+        (LAN, "http://192.168.1.128:8000/mcp"),  # another host
+        (LAN, "http://mcp.lan:8000/mcp"),  # another listed host
+        ("http://mcp.lan/mcp", "https://mcp.lan/mcp"),  # the upgrade the SDK counts as the same origin
+        ("http://mcp.lan:80/mcp", "https://mcp.lan:443/mcp"),
+        ("https://alpha.example.com/mcp", "http://alpha.example.com/mcp"),  # an https server is not moved to http
+        ("https://alpha.example.com/mcp", "https://alpha.example.com:8443/mcp"),
+    ],
+)
+async def test_a_sessions_client_sends_to_the_servers_own_scheme_host_and_port_only(monkeypatch, server, other):
+    wire = _Wire(monkeypatch)
+    async with transport.guarded_client(HOSTS, 10_000, origin=server) as client:
+        with pytest.raises(BlockedAddress, match="another address"):
+            await client.post(other, headers={"X-Api-Key": "test-key-4444444444"})
+        assert wire.sent == []
+        own = httpx.URL(server)
+        assert (await client.post(str(own.copy_with(path="/other/path")))).status_code == 200
+    assert [(scheme, host, port) for scheme, host, port, _path, _headers in wire.sent] == [
+        (own.scheme, own.host, own.port)
+    ]
+
+
+async def test_the_sign_in_client_sends_to_https_only(monkeypatch):
+    wire = _Wire(monkeypatch)
+    async with transport.guarded_client(HOSTS, 10_000) as client:
+        for url in (LAN, "http://mcp.lan/token", "http://auth.example.com/token"):
+            with pytest.raises(BlockedAddress, match="only https"):
+                await client.post(url)
+        assert wire.sent == []
+        assert (await client.get("https://auth.example.com/token")).status_code == 200
+    assert [sent[:2] for sent in wire.sent] == [("https", "auth.example.com")]
+
+
+@pytest.mark.parametrize("header", ["Authorization", "X-Api-Key"])
+@pytest.mark.parametrize(
+    "server,location",
+    [
+        ("http://mcp.lan/mcp", "https://mcp.lan/mcp"),  # port 80 to 443: the SDK follows it as the same origin
+        ("http://mcp.lan:80/mcp", "https://mcp.lan:443/other"),
+        ("http://mcp.lan:8000/mcp", "https://mcp.lan:8000/mcp"),
+        ("http://mcp.lan/mcp", "https://other.lan/mcp"),
+        ("http://mcp.lan/mcp", "http://mcp.lan:8001/mcp"),
+    ],
+)
+async def test_a_redirect_carries_the_stored_key_nowhere_but_the_servers_own_address(
+    monkeypatch, server, location, header
+):
+    """The real session, SDK and credential class; the server answers every request with a redirect."""
+    from nous.mcp_client.manager import _ServerAuth
+
+    key = "test-key-4444444444"
+    wire = _Wire(monkeypatch, lambda request: httpx.Response(307, headers={"Location": location}, request=request))
+    with pytest.raises(BaseException) as failed:  # the session cannot start: its one address only redirects
+        async with asyncio.timeout(20):
+            async with open_session(server, HOSTS, auth=_ServerAuth(server, lambda: {header: key})) as s:
+                await s.list_tools()
+    assert not isinstance(failed.value, (AssertionError, TimeoutError))
+    own = httpx.URL(server)
+    assert wire.sent, "the server's own address was asked"
+    for scheme, host, port, _path, headers in wire.sent:
+        assert (scheme, host, port) == (own.scheme, own.host, own.port)  # nothing left for the redirect's target
+        assert headers.get(header.lower()) == key
+
+
 # --- the routes ------------------------------------------------------------------------------------------------------
 
 
@@ -254,9 +342,12 @@ async def test_a_stored_http_server_whose_host_left_the_list_is_shown_refused_an
         app = Starlette(routes=build_mcp_client_routes(database=db, settings=settings, manager=manager, bus=None))
         listing = (await _req(app, "GET", "/integrations/mcp/servers")).json()["servers"]
         assert [(server["name"], server["url"]) for server in listing] == [("win", LAN)]  # the owner still sees it
-        if "mcp__win__click" in _names(dispatcher):
-            _text, is_error = await dispatcher.dispatch("mcp__win__click", {"q": "x"})
-            assert is_error
+        assert listing[0]["blocked_by_ceiling"] is True and listing[0]["connected"] is False
+        assert (
+            listing[0]["skip_reason"]
+            == "its address is http and its host is not in NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS"
+        )
+        assert "mcp__win__click" not in _names(dispatcher)  # the allowed tool is not offered to the model
         refreshed = await _req(app, "POST", "/integrations/mcp/servers/win/refresh")
         assert refreshed.status_code == 400 and refreshed.json()["error"].startswith("the address guard refused")
         assert opened == []  # nothing was sent to it
