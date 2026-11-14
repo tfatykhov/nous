@@ -7,6 +7,8 @@ SDK's auth models and helpers).
   when any address is private, loopback, link-local, multicast, unspecified, reserved or a cloud metadata address,
   and dials the address it checked, so a DNS answer that changes between the check and the connect cannot steer it
   (TLS still verifies the certificate against the host name). A host in ``allow_private_hosts`` is not checked;
+- opens an http URL only for a host in ``allow_private_hosts`` (``check_url``): to it, requests and the stored
+  credential travel unencrypted. Every other server is https;
 - follows no redirect itself (``follow_redirects`` is off). The SDK (1.30) follows a redirect on its own only when it
   stays on the server URL's origin (same scheme, host and port) and keeps the method (307 or 308 for a POST); any
   other redirect fails the request. Each request it sends, a followed one included, opens its connection through
@@ -144,14 +146,17 @@ async def vetted_addresses(host: str, port: int, allow_private_hosts: frozenset[
     return addresses
 
 
-async def check_url(url: str, allow_private_hosts: frozenset[str]) -> None:
+async def check_url(url: str, allow_private_hosts: frozenset[str], *, http_hosts: frozenset[str] = frozenset()) -> None:
     """Raise ``BlockedAddress`` unless ``url`` is a URL the client may open (``url_problem``) whose host resolves
-    only to public addresses (or is in ``allow_private_hosts``)."""
-    problem = url_problem(url)
+    only to public addresses (or is in ``allow_private_hosts``). An http URL is refused unless its host is in
+    ``http_hosts``: ``open_session`` alone passes the allow list there, so a provider's endpoint (``oauth``) is
+    https whatever the list holds."""
+    problem = url_problem(url, http_hosts)
     if problem is not None:
         raise BlockedAddress(problem)
     parts = urlsplit(url)
-    await vetted_addresses(parts.hostname or "", parts.port or 443, allow_private_hosts)
+    port = parts.port or (80 if parts.scheme == "http" else 443)
+    await vetted_addresses(parts.hostname or "", port, allow_private_hosts)
 
 
 class _GuardedBackend(httpcore.AsyncNetworkBackend):
@@ -342,7 +347,7 @@ async def open_session(
 ) -> AsyncIterator[McpSession]:
     """An initialized session with the server at ``url``, closed on exit, every request of it run through ``auth``
     (per request, not fixed at connect). Enter and leave it in ONE task: the SDK's task groups require it."""
-    await check_url(url, allow_private_hosts)
+    await check_url(url, allow_private_hosts, http_hosts=allow_private_hosts)
     _QUIET_HOSTS.add((urlsplit(url).hostname or "").lower())
     async with guarded_client(allow_private_hosts, max_response_bytes, auth=auth) as client:
         async with _session_over(client, url) as session:

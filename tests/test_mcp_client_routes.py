@@ -353,7 +353,8 @@ async def test_create_refuses_a_bad_permission_request_and_writes_nothing(make_e
 @pytest.mark.parametrize("body,fragment", [
     ({"name": "alpha", "url": "https://user:pw@alpha.example.com/mcp"}, "user name or password"),
     ({"name": "alpha", "url": "https://alpha.example.com/mcp?key=SECRET-55"}, "query string"),
-    ({"name": "alpha", "url": "http://alpha.example.com/mcp"}, "only https"),
+    ({"name": "alpha", "url": "http://alpha.example.com/mcp"}, "only for a host named in NOUS_MCP_CLIENT_ALLOW"),
+    ({"name": "alpha", "url": "ftp://alpha.example.com/mcp"}, "only https"),
     ({"name": "Al__pha", "url": ALPHA}, "server name"),
     ({"name": "alpha", "url": ALPHA, "background": "true"}, "background must be true or false"),
     ({"name": "alpha", "url": ALPHA, "extra": 1}, "unknown field(s): extra"),

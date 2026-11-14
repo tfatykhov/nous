@@ -40,7 +40,11 @@ _LIST_TIMEOUT_SECONDS = 60
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="python -m nous.mcp_client.seed", description=__doc__.splitlines()[0])
     parser.add_argument("--name", required=True, help="the server's name in its tools' names (mcp__<name>__<tool>)")
-    parser.add_argument("--url", required=True, help="the server's streamable-HTTP endpoint (https, no credentials)")
+    parser.add_argument(
+        "--url",
+        required=True,
+        help="the server's streamable-HTTP endpoint (https, or http for a listed host; no credentials)",
+    )
     parser.add_argument("--allow", default="", help="comma list of the server's tool names to allow; others are denied")
     parser.add_argument(
         "--background",

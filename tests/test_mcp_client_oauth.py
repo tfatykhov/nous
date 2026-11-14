@@ -287,7 +287,7 @@ class Env:
 async def make_env(db, tmp_path):
     made: list[Env] = []
 
-    async def make(*, base: str = BASE, document: str = "") -> Env:
+    async def make(*, base: str = BASE, document: str = "", allow: str = "") -> Env:
         agent = f"mcp-oauth-{uuid.uuid4().hex[:8]}"
         key = tmp_path / f"{agent}.key"
         key.write_bytes(base64.b64encode(bytes(range(32))) + b"\n")
@@ -300,6 +300,7 @@ async def make_env(db, tmp_path):
             mcp_client_key_file=str(key),
             a2ui_public_base_url=base,
             mcp_client_id_metadata_url=document,
+            mcp_client_allow_private_hosts=allow,
         )
         world = World()
         remotes = Remotes(world)
@@ -512,6 +513,67 @@ async def test_discovery_refuses(make_env, spoil, status, words):
     assert "/token" not in started.text and "other.example.com" not in started.text
     assert env.manager.flows._flows == {}
     assert not any(where.endswith("/token") for _m, where in env.world.hits)
+
+
+# --- http: never in a sign-in, whatever NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS holds ------------------------------------
+
+
+def _http_registration(w: World) -> None:
+    w.as_meta["registration_endpoint"] = "http://auth.example.com/register"
+
+
+def _http_authorization_server(w: World) -> None:
+    w.authorization_servers = ["http://auth.example.com"]
+
+
+def _http_authorize(w: World) -> None:
+    w.as_meta["authorization_endpoint"] = "http://auth.example.com/authorize"
+
+
+@pytest.mark.parametrize(
+    "spoil",
+    [_http_token, _http_registration, _http_resource_metadata, _http_authorization_server, _http_authorize],
+)
+async def test_a_providers_http_address_is_refused_even_on_a_listed_host(make_env, spoil):
+    env = await make_env(allow="auth.example.com,alpha.example.com")  # every host of this sign-in is listed
+    spoil(env.world)
+    started = await _start(env)
+    assert started.status_code == 502 and "only https URLs are accepted" in started.json()["error"], started.text
+    assert env.manager.flows._flows == {}
+    assert not any(where.startswith("http://") for _m, where in env.world.hits)  # nothing was asked over http
+
+
+async def test_sign_in_is_refused_for_an_http_server_on_a_listed_host_before_any_request(make_env):
+    from nous.api.mcp_client_routes import HTTP_HOST_TEXT, HTTP_SIGN_IN_TEXT
+
+    env = await make_env(allow="192.168.1.127")
+    started = await _start(env, "win", "http://192.168.1.127:8000/mcp")
+    assert (started.status_code, started.json()) == (400, {"error": HTTP_SIGN_IN_TEXT})
+    other = await _start(env, "win", "http://192.168.1.128:8000/mcp")  # a host that is not listed: the list's rule
+    assert (other.status_code, other.json()) == (400, {"error": HTTP_HOST_TEXT})
+    assert env.world.hits == [] and env.manager.flows._flows == {}
+
+
+async def test_a_token_is_never_exchanged_or_refreshed_over_http_on_a_listed_host(make_env):
+    env = await make_env(allow="auth.example.com")
+    assert (await _add(env, await _signed_in(env))).status_code == 201
+    record = env.manager.stored_oauth("alpha", ALPHA, (await env.registry.list_secrets())["alpha"])
+    spoiled = dataclasses.replace(record, token_endpoint="http://auth.example.com/token")
+    asked = len(env.world.hits)
+    with pytest.raises(oauth_module.OAuthProblem, match="only https URLs are accepted"):
+        await oauth_module.refresh_tokens(spoiled, env.manager.oauth_http, env.manager.allow_private_hosts)
+    assert len(env.world.hits) == asked  # the refresh token was not sent
+
+    started = await _start(env, "beta", "https://alpha.example.com/mcp")
+    flow = next(iter(env.manager.flows._flows.values()))
+    flow.discovery = dataclasses.replace(flow.discovery, token_endpoint="http://auth.example.com/token")
+    asked = len(env.world.hits)
+    with pytest.raises(oauth_module.OAuthProblem, match="only https URLs are accepted"):
+        await oauth_module.exchange_code(
+            flow, env.world.authorize(started.json()["authorization_url"]), env.manager.oauth_http,
+            env.manager.allow_private_hosts,
+        )
+    assert not any(where.endswith("/token") for _m, where in env.world.hits[asked:])  # the code was not sent
 
 
 # --- the client -------------------------------------------------------------------------------------------------------

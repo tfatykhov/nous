@@ -258,10 +258,14 @@ def test_server_config_validation():
     for name in ("", "Upper", "-x", "a__b", "x" * 25):
         with pytest.raises(ValueError):
             ServerConfig(name=name, url="https://mcp.example.com/mcp")
-    for url in ("http://mcp.example.com/mcp", SECRET_URL, "https://user:pw@mcp.example.com/", "https:///x"):
+    for url in (SECRET_URL, "https://user:pw@mcp.example.com/", "https:///x", "ftp://mcp.example.com/mcp"):
         assert url_problem(url) is not None
         with pytest.raises(ValueError):
             ServerConfig(name="a", url=url)
+    # An http address is a row the table may hold (the owner must be able to see and remove it); opening it is
+    # refused unless the host names its host (tests/test_mcp_client_http_hosts.py).
+    assert url_problem("http://mcp.example.com/mcp") == "only https URLs are accepted"
+    assert ServerConfig(name="a", url="http://mcp.example.com/mcp").url == "http://mcp.example.com/mcp"
     assert SECRET not in (url_problem(SECRET_URL) or "")
     assert SECRET not in repr(ServerConfig.model_construct(name="a", url=SECRET_URL))
     assert parse_host_list(" Intranet.Local, ,mcp.lan ") == frozenset({"intranet.local", "mcp.lan"})

@@ -395,12 +395,23 @@ describe('Integrations: adding a server', () => {
   it('checks the name and address as the server does, and sends nothing while they are wrong', async () => {
     render(Integrations);
     await screen.findByRole('region', { name: 'deepwiki' });
-    await fill('Deep__Wiki', 'http://mcp.deepwiki.com/mcp');
+    await fill('Deep__Wiki', 'ftp://mcp.deepwiki.com/mcp');
     expect(screen.getByLabelText('Name').getAttribute('aria-invalid')).toBe('true');
     expect(screen.getByText(/^A name is 1 to 24 lower-case letters/)).toBeTruthy();
-    expect(screen.getByText('Only https addresses are accepted.')).toBeTruthy();
+    expect(screen.getByText('Only https and http addresses are accepted.')).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
     expect(changes()).toEqual([]);
+  });
+
+  it('takes an http address and says it is not encrypted; the server decides whether its host is listed', async () => {
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fill('win', 'https://192.168.1.127:8000/mcp');
+    expect(screen.queryByText(/^An http address is not encrypted/)).toBeNull();
+    await fill('win', 'http://192.168.1.127:8000/mcp');
+    expect(screen.getByLabelText('Address').getAttribute('aria-invalid')).toBeNull();
+    expect(screen.getByText(/^An http address is not encrypted/).textContent).toContain('NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS');
+    expect((screen.getByRole('button', { name: 'Check server' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('check, choose, add: every tool as the probe returned it, none allowed until ticked; 201 reloads the list', async () => {

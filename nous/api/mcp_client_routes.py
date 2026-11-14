@@ -56,6 +56,11 @@ fetches the document itself. ``GET /integrations/mcp/oauth/client-metadata.json`
 route's own public address (a document hosted elsewhere is not served here). It is the one route here
 that needs no proxy secret (a provider has none): it reads nothing of the request and carries only Nous's client name
 and the redirect address. The proxy must let that exact path through with no sign-in for a provider to reach it.
+
+http servers: ``POST /probe`` and ``POST /servers`` take an ``http://`` address only for a host named in
+``NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS`` (400 otherwise, before any connection). What is sent to such a server, a
+stored credential included, is not encrypted. ``POST /oauth/start`` refuses an http server: a token is never sent
+unencrypted, and a provider's endpoints are https whatever that list holds.
 """
 
 from __future__ import annotations
@@ -78,7 +83,7 @@ from starlette.routing import Route
 from nous.api.commitment_routes import owner_secret_matches
 from nous.events import Event
 from nous.mcp_client.bridge import serialize_schema
-from nous.mcp_client.config import ServerConfig, ToolConfig, validate_headers
+from nous.mcp_client.config import ServerConfig, ToolConfig, is_http, url_problem, validate_headers
 from nous.mcp_client.manager import (
     ProbeCredentials,
     ProbedTool,
@@ -127,6 +132,11 @@ _EVENT_TOOLS_MAX = 60
 _SERVER_FIELDS = ("url", "enabled", "background", "call_timeout_seconds")
 NO_KEY_TEXT = "no key file is configured on the host (NOUS_MCP_CLIENT_KEY_FILE)"
 OAUTH_UNAVAILABLE_TEXT = "sign-in is not available: NOUS_A2UI_PUBLIC_BASE_URL is not an https address"
+HTTP_HOST_TEXT = (
+    "url: an http address is accepted only for a host named in NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS on the host "
+    "(what it sends, a stored credential included, is not encrypted)"
+)
+HTTP_SIGN_IN_TEXT = "url: sign-in needs an https server address"
 
 Handler = Callable[[Request], Awaitable[Response]]
 
@@ -249,15 +259,19 @@ def _headers(value: Any) -> dict[str, str]:
         raise _Refused(400, str(exc)) from None
 
 
-def _server_config(name: Any, url: Any, background: bool) -> ServerConfig:
-    """The server's name and URL, validated as a row holds them (``url_problem``). The error names the field and the
-    rule, never the value."""
+def _server_config(name: Any, url: Any, background: bool, http_hosts: frozenset[str]) -> ServerConfig:
+    """The server's name and URL, validated as a row holds them and as the client opens them (``url_problem``): an
+    http URL only for a host in ``http_hosts`` (the host's ``NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS``). The error names
+    the field and the rule, never the value."""
     if not isinstance(name, str) or not isinstance(url, str):
         raise _Refused(400, "name and url must be strings")
     try:
-        return ServerConfig(name=name, url=url, background=background)
+        config = ServerConfig(name=name, url=url, background=background)
     except ValidationError as exc:
         raise _Refused(400, "; ".join(f"{error['loc'][0]}: {error['msg']}" for error in exc.errors())) from None
+    if url_problem(config.url, http_hosts) is not None:  # the one rule a row does not hold: http for a listed host
+        raise _Refused(400, HTTP_HOST_TEXT)
+    return config
 
 
 def _count(credentials: str | None, headers: dict[str, str] | None) -> int | None:
@@ -616,7 +630,7 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         credential is never attached). No write."""
         body = await _body(request)
         _only(body, {"name", "url", "headers", "oauth_flow_id"})
-        config = _server_config(body.get("name"), body.get("url"), False)
+        config = _server_config(body.get("name"), body.get("url"), False, manager.allow_private_hosts)
         flow = finished_flow(body, config)
         headers = _headers(body["headers"]) if "headers" in body else None
         record = await held_record(flow)
@@ -635,7 +649,9 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         (``credentials: "removed"``)."""
         body = await _body(request)
         _only(body, {"name", "url", "background", "tools", "expected_definitions_sha256", "headers", "oauth_flow_id"})
-        config = _server_config(body.get("name"), body.get("url"), bool(_flag(body, "background")))
+        config = _server_config(
+            body.get("name"), body.get("url"), bool(_flag(body, "background")), manager.allow_private_hosts
+        )
         wanted = _permissions(body.get("tools", {}))
         flow = finished_flow(body, config)
         headers = _headers(body["headers"]) if "headers" in body else None
@@ -865,7 +881,9 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             raise _Refused(409, OAUTH_UNAVAILABLE_TEXT)
         if not manager.secrets_available():
             raise _Refused(409, NO_KEY_TEXT)
-        config = _server_config(body.get("name"), body.get("url"), False)
+        config = _server_config(body.get("name"), body.get("url"), False, manager.allow_private_hosts)
+        if is_http(config.url):  # a token is never sent unencrypted; discovery would refuse the address too
+            raise _Refused(400, HTTP_SIGN_IN_TEXT)
         client_id, client_secret = body.get("client_id") or None, body.get("client_secret") or None
         if client_secret is not None and client_id is None:
             raise _Refused(400, "a client secret goes with a client id")

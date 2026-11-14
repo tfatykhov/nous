@@ -7,8 +7,8 @@
   import StaleBadge from '../lib/ui/StaleBadge.svelte';
   import OAuthSignIn from './integrations/OAuthSignIn.svelte';
   import {
-    CHANGED_TEXT, HEADERS_MAX, KEY_HINT, NAME_RULE, NO_KEY_FILE_TEXT, OAUTH_UNAVAILABLE_TEXT, SIGN_OUT_NOTE, URL_RULE, VALUE_HINT,
-    blankHeaderRow, ceilingLines, clampText, createPayload, createServer, headersBody, headersProblem, isConflict, isNoKey, keyLine,
+    CHANGED_TEXT, HEADERS_MAX, HTTP_NOTE, KEY_HINT, NAME_RULE, NO_KEY_FILE_TEXT, OAUTH_UNAVAILABLE_TEXT, SIGN_OUT_NOTE, URL_RULE, VALUE_HINT,
+    blankHeaderRow, ceilingLines, clampText, createPayload, createServer, headersBody, headersProblem, isConflict, isHttp, isNoKey, keyLine,
     listGate, listServers, nameProblem, prettySchema, probeServer, problemText, refreshLines, refreshServer, removeServer,
     serverStatus, shortName, signOut, toolChange, toolStatus, updateServer, urlProblem,
     type HeaderRow, type McpServer, type McpServerList, type McpTool, type OAuthFlowState, type ProbeResult, type RefreshResult,
@@ -738,7 +738,7 @@
         <label for="mcp-url">Address</label>
         <input id="mcp-url" type="url" inputmode="url" bind:value={newUrl} autocomplete="off" spellcheck="false"
           placeholder="https://" aria-describedby="mcp-url-hint" aria-invalid={urlErr ? 'true' : undefined} disabled={checking || adding} />
-        <p id="mcp-url-hint" class="hint" class:hint-err={urlErr}>{urlErr ?? URL_RULE}</p>
+        <p id="mcp-url-hint" class="hint" class:hint-err={urlErr}>{urlErr ?? (isHttp(newUrl.trim()) ? HTTP_NOTE : URL_RULE)}</p>
       </div>
       <fieldset class="field auth" aria-describedby="mcp-auth-hint">
         <legend>Authentication</legend>

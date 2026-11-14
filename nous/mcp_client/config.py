@@ -1,13 +1,15 @@
 """F112 MCP client: a server row, a tool row and the headers of a stored credential, validated.
 
-No SDK import. ``url_problem`` is also the transport's first check, so a URL that a row could not hold is never
-opened either.
+No SDK import. ``url_problem`` is also the transport's first check, so a URL the rules refuse is never opened. A row
+may hold an http URL for any host (``row_url_problem``); opening one is refused unless the host names that host in
+``NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS``.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -42,13 +44,7 @@ class BlockedAddress(Exception):
     so the manager can tell a refusal from a failed connection)."""
 
 
-def url_problem(url: str) -> str | None:
-    """Why ``url`` cannot be an MCP server's address, or None when it can.
-
-    https only, with a host, and with no user, password, query string or fragment: those are where a credential
-    would sit, and the HTTP client logs every request URL at INFO. No whitespace, backslash or control character
-    anywhere (``url_chars_problem``). The answer never repeats the URL.
-    """
+def _url_problem(url: str, http_host_ok: Callable[[str], bool]) -> str | None:
     chars = url_chars_problem(url) if isinstance(url, str) else None
     if chars is not None:
         return chars
@@ -57,7 +53,7 @@ def url_problem(url: str) -> str | None:
         _ = parts.port  # raises ValueError for a port that is not a number in range
     except ValueError:
         return "not a valid URL"
-    if parts.scheme != "https":
+    if parts.scheme != "https" and not (parts.scheme == "http" and http_host_ok(parts.hostname or "")):
         return "only https URLs are accepted"
     if not parts.hostname:
         return "the URL has no host"
@@ -66,6 +62,33 @@ def url_problem(url: str) -> str | None:
     if parts.query or parts.fragment:
         return "the URL may not carry a query string or fragment"
     return None
+
+
+def url_problem(url: str, http_hosts: frozenset[str] = frozenset()) -> str | None:
+    """Why ``url`` cannot be an MCP server's address, or None when it can.
+
+    https, with a host, and with no user, password, query string or fragment: those are where a credential
+    would sit, and the HTTP client logs every request URL at INFO. No whitespace, backslash or control character
+    anywhere (``url_chars_problem``). The answer never repeats the URL.
+
+    http is accepted only for a host in ``http_hosts`` (lowercase host names, as ``parse_host_list`` gives them).
+    None by default: only the code that opens a server's session passes the host's
+    ``NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS``, so every other URL (a provider's endpoint, a client ID metadata
+    document) stays https whatever that list holds.
+    """
+    return _url_problem(url, http_hosts.__contains__)
+
+
+def row_url_problem(url: str) -> str | None:
+    """Why ``url`` cannot be stored as a server's address, or None when it can: ``url_problem`` with http accepted
+    for any host. A stored http server whose host has left ``NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS`` must still load,
+    so the owner can see and remove it; it is refused when a session is opened."""
+    return _url_problem(url, lambda _host: True)
+
+
+def is_http(url: str) -> bool:
+    """Whether ``url`` (one ``row_url_problem`` accepts) is a plain http address."""
+    return urlsplit(url).scheme == "http"
 
 
 def parse_host_list(value: str) -> frozenset[str]:
@@ -237,7 +260,7 @@ class ServerConfig(BaseModel):
     @field_validator("url")
     @classmethod
     def _check_url(cls, value: str) -> str:
-        problem = url_problem(value)
+        problem = row_url_problem(value)
         if problem is not None:
             raise ValueError(problem)
         return value
