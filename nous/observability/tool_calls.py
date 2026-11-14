@@ -191,10 +191,12 @@ class TurnRecord:
     tool_call_count: int | None = None
     started_at: datetime | None = None
     ended_at: datetime | None = None
+    pre_turn_ms: int | None = None
+    pre_turn_phases: dict[str, int] | None = None
 
 
 _TURN_COLUMNS: tuple[str, ...] = ("agent_id", *(f.name for f in fields(TurnRecord)))
-_TURN_JSON_COLUMNS = frozenset({"memory_context", "critic", "claim_check"})
+_TURN_JSON_COLUMNS = frozenset({"memory_context", "critic", "claim_check", "pre_turn_phases"})
 
 
 def _turn_value(column: str) -> str:
@@ -285,6 +287,7 @@ class ToolCallRecorder:
             params["memory_context"] = _json_param(memory)
             params["critic"] = _json_param(_redacted_json(rec.critic))
             params["claim_check"] = _json_param(_redacted_json(rec.claim_check))
+            params["pre_turn_phases"] = _json_param(rec.pre_turn_phases)
         except Exception as exc:
             # Never reached the writer, so only this recorder counts it. The type only: the message can echo text.
             self._stats.dropped_error += 1

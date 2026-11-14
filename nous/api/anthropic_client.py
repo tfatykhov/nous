@@ -41,6 +41,8 @@ _API_VERSION = "2023-06-01"
 
 # Retry constants (shared by httpx path)
 _MAX_RETRIES = 5
+# The stream events that count as the first token of a call (ModelCallScope.mark_first_token).
+_FIRST_TOKEN_EVENTS = frozenset({"text_delta", "tool_start"})
 _BACKOFF_DELAYS = (1.0, 2.0, 4.0, 8.0, 16.0)
 _BACKOFF_CAP = 30.0
 _HEADER_DELAY_MAX = 60.0
@@ -633,6 +635,8 @@ class HttpxAnthropicClient(_ModelCallRecording):
             for attempt in range(_MAX_RETRIES + 1):
                 t0 = time.perf_counter()
                 reported = False  # this try's attempt: one per HTTP try, even when its body then fails
+                if scope is not None:
+                    scope.reset_first_token()
                 try:
                     async with self._http.stream(
                         "POST", "/v1/messages", json=payload,
@@ -694,6 +698,8 @@ class HttpxAnthropicClient(_ModelCallRecording):
                             if event:
                                 if scope is not None:
                                     scope.observe_stream_event(event)
+                                    if event.type in _FIRST_TOKEN_EVENTS:
+                                        scope.mark_first_token()
                                 if event.type == "error":
                                     yield event
                                     return
@@ -1125,6 +1131,8 @@ class SdkAnthropicClient(_ModelCallRecording):
                     if converted is not None:
                         if scope is not None:
                             scope.observe_stream_event(converted)
+                            if converted.type in _FIRST_TOKEN_EVENTS:
+                                scope.mark_first_token()
                         if converted.type == "error":
                             yield converted
                             return

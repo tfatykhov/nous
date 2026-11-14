@@ -2219,6 +2219,8 @@ class AgentTurnLog(Base):
     tool_call_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    pre_turn_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pre_turn_phases: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
 class ModelCallLog(Base):
@@ -2287,6 +2289,7 @@ class ModelCallLog(Base):
     cache_break: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     cache_break_components = mapped_column(ARRAY(Text), nullable=True)
     cache_break_tokens_lost: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ttft_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class ModelCallAttempt(Base):

@@ -760,6 +760,8 @@ class AgentRunner:
                     tool_call_count=next(call_indexes),
                     started_at=started_at,
                     ended_at=datetime.now(UTC),
+                    pre_turn_ms=turn_context.pre_turn_ms,
+                    pre_turn_phases=turn_context.pre_turn_phases,
                 )
             )
         except Exception as exc:  # noqa: BLE001 -- recording must not change a turn
