@@ -1144,6 +1144,12 @@ class Settings(BaseSettings):
     # bytes, base64 on one line), kept on the host outside the repository and away from the database's backups.
     # Empty or unusable: no credential can be stored, and a server with a stored one is skipped.
     mcp_client_key_file: str = ""
+    # F112: the public https address of Nous's client ID metadata document (its client id at an OAuth provider that
+    # takes one, used before dynamic registration). Nous serves the document at
+    # /integrations/mcp/oauth/client-metadata.json; a provider fetches it with no credential, so that exact path
+    # must be reachable from the internet with no sign-in (or the document is hosted elsewhere and named here).
+    # Empty or not such an address: no document is used, and sign-in registers dynamically as before.
+    mcp_client_id_metadata_url: str = ""
 
     # LLM
     model: str = "claude-sonnet-4-6"

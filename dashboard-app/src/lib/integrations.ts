@@ -122,7 +122,7 @@ export interface OAuthStart {
   authorization_url: string;
   authorization_host: string;
   token_host: string;
-  registration: 'dynamic' | 'provided' | 'reused';
+  registration: 'metadata' | 'dynamic' | 'provided' | 'reused';
   scope: string | null;
   expires_in: number;
 }

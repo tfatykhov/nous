@@ -49,6 +49,12 @@ until ``POST /servers`` with its ``oauth_flow_id`` stores it with the server (``
 is bound to its server name and address. ``POST /servers/{name}/sign-out`` deletes the stored tokens (the provider's
 grant is not revoked). No answer, log line or event carries a code, a state, a verifier or a token; the uvicorn access
 line of the callback (its query string holds the code and the state) is dropped.
+
+Client ID metadata document: with ``NOUS_MCP_CLIENT_ID_METADATA_URL`` set to the document's public https address, a
+provider that says it takes one is given that address as the client id (before dynamic registration is tried), and
+fetches the document itself. ``GET /integrations/mcp/oauth/client-metadata.json`` serves it. It is the one route here
+that needs no proxy secret (a provider has none): it reads nothing of the request and carries only Nous's client name
+and the redirect address. The proxy must let that exact path through with no sign-in for a provider to reach it.
 """
 
 from __future__ import annotations
@@ -61,6 +67,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 from starlette.requests import Request
@@ -81,14 +88,19 @@ from nous.mcp_client.manager import (
 )
 from nous.mcp_client.oauth import (
     CALLBACK_PATH,
+    CLIENT_METADATA_PATH,
     FLOW_SECONDS,
     Client,
     Flow,
     OAuthProblem,
+    another_document,
     callback_params,
+    client_metadata_document,
+    client_metadata_url,
     discover,
     exchange_code,
     host_of,
+    metadata_client,
     owner_client,
     owner_scope,
     redirect_uri,
@@ -335,6 +347,29 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
         """The OAuth redirect address, read when a request needs it (never at build: a settings object that is not
         text there must not fail the app); None: OAuth is unavailable here."""
         return redirect_uri(getattr(settings, "a2ui_public_base_url", ""))
+
+    def metadata_address() -> str | None:
+        """The address of Nous's client ID metadata document (``NOUS_MCP_CLIENT_ID_METADATA_URL``), which is its
+        client id at a provider that takes one; None: no document is in use (the setting is empty or not such an
+        address, OAuth is unavailable, or it names this host at another path than the one the document is served
+        at)."""
+        document = client_metadata_url(getattr(settings, "mcp_client_id_metadata_url", ""))
+        redirect = redirect_address()
+        if document is None or redirect is None:
+            return None
+        here, there = urlsplit(redirect), urlsplit(document)
+        if there.netloc.lower() == here.netloc.lower() and there.path != CLIENT_METADATA_PATH:
+            return None
+        return document
+
+    configured = getattr(settings, "mcp_client_id_metadata_url", "")
+    if isinstance(configured, str) and configured.strip() and metadata_address() is None:
+        logger.warning(
+            "F112: NOUS_MCP_CLIENT_ID_METADATA_URL is set and cannot be used (it must be an https address with a "
+            "path and no query or fragment, on this host only at %s, and NOUS_A2UI_PUBLIC_BASE_URL must be an https "
+            "address), so no client ID metadata document is in use",
+            CLIENT_METADATA_PATH,
+        )
 
     digest = _digest(settings.mcp_client_ui_secret_sha256)
     if not digest:
@@ -814,8 +849,9 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
 
     async def oauth_start(request: Request) -> JSONResponse:
         """POST /integrations/mcp/oauth/start ``{name, url, client_id?, client_secret?, scope?}``: discover the
-        server's provider, register a client (or take the owner's ``client_id``, or reuse the stored client while the
-        issuer is unchanged) and start a sign-in: ``{flow_id, authorization_url, authorization_host, token_host,
+        server's provider, choose a client (the owner's ``client_id``, else the stored one while the issuer is
+        unchanged, else Nous's client ID metadata document when the provider takes one and the host names it, else
+        dynamic registration) and start a sign-in: ``{flow_id, authorization_url, authorization_host, token_host,
         registration, scope, expires_in}``. For a stored server the URL must be its stored one. A sign-in pending for
         the same name and URL is replaced (its client reused while the issuer is unchanged). Nothing is stored."""
         body = await _body(request)
@@ -852,6 +888,18 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
                 known.append(
                     (Client(reuse.client_id, reuse.client_secret, reuse.token_auth_method, "provided"), reuse.issuer)
                 )
+            # The document in use at this provider: None when the provider takes none or the host names none. A
+            # pending or stored client that is another document (the setting changed or was removed) is not used
+            # again: its address may no longer serve one.
+            document = metadata_address() if discovery.client_id_metadata else None
+            reusable = next(
+                (
+                    c
+                    for c, issuer in known
+                    if c is not None and issuer == discovery.issuer and not another_document(c, document)
+                ),
+                None,
+            )
             same = next(
                 (c for c, issuer in known if c is not None and c.client_id == client_id and issuer == discovery.issuer),
                 None,
@@ -860,15 +908,10 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
                 client = Client(same.client_id, same.client_secret, same.token_auth_method, "provided")
             elif client_id is not None:
                 client = owner_client(discovery, client_id, client_secret)
-            elif pending_client is not None and pending_issuer == discovery.issuer:
-                client = Client(
-                    pending_client.client_id,
-                    pending_client.client_secret,
-                    pending_client.token_auth_method,
-                    "reused",
-                )
-            elif reuse is not None and reuse.issuer == discovery.issuer:
-                client = Client(reuse.client_id, reuse.client_secret, reuse.token_auth_method, "reused")
+            elif reusable is not None:  # the pending sign-in's client before the stored one
+                client = Client(reusable.client_id, reusable.client_secret, reusable.token_auth_method, "reused")
+            elif document is not None:
+                client = metadata_client(document)
             else:
                 client = await register(discovery, redirect, http, allow)
             flow = manager.flows.start(config.name, config.url, discovery, client, redirect)
@@ -1036,7 +1079,20 @@ def build_mcp_client_routes(*, database: Any, settings: Any, manager: Any, bus: 
             server = await view(name)
         return JSONResponse({"credentials": "removed", "server": server})
 
+    async def client_metadata(request: Request) -> Response:
+        """GET /integrations/mcp/oauth/client-metadata.json: Nous's client ID metadata document, which a provider
+        fetches with no credential, so it is outside ``endpoint`` (no proxy secret, no client needed). Nothing of
+        the request is read; the answer holds the client name and the redirect address only. 404 when no document
+        is in use."""
+        document, redirect = metadata_address(), redirect_address()
+        if document is None or redirect is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        return JSONResponse(
+            client_metadata_document(document, redirect), headers={"Cache-Control": "public, max-age=3600"}
+        )
+
     return [
+        Route(CLIENT_METADATA_PATH, client_metadata, methods=["GET"]),
         Route("/integrations/mcp/servers", endpoint(list_servers, mutating=False), methods=["GET"]),
         Route("/integrations/mcp/servers", endpoint(create_server, mutating=True), methods=["POST"]),
         Route("/integrations/mcp/probe", endpoint(probe, mutating=True), methods=["POST"]),
