@@ -40,29 +40,51 @@
   const unfinished = $derived(rows.filter((r) => r.state === 'unfinished').length);
 
   // ── The open sleep and its change rows (fetched when a sleep is first opened) ──
-  type Detail = { loading: boolean; error: boolean; data: ConsolidationCycleDetail | null };
+  /** `stamp` is the sleep's status and finish in the list when its report was asked for. */
+  type Detail = { loading: boolean; error: boolean; data: ConsolidationCycleDetail | null; stamp: string | null };
   let openId = $state<string | null>(null);
   let details = $state<Record<string, Detail>>({});
   let generation = 0; // a Refresh drops the answers still on their way
 
+  /** A sleep's status and finish as the list has them now; null for a sleep the list does not hold. */
+  function stampOf(id: string): string | null {
+    const c = rows.find((r) => r.cycle.cycle_id === id)?.cycle;
+    return c ? `${c.status}|${c.finished_at ?? ''}` : null;
+  }
+
+  /** A report fetched while its sleep had another status or no finish: a sleep writes its last rows as it ends, so
+   *  that report may lack them (it would read as a finished sleep whose rows were pruned). */
+  function outdated(id: string): boolean {
+    const d = details[id];
+    const now = stampOf(id);
+    return d !== undefined && !d.loading && now !== null && d.stamp !== now;
+  }
+
   async function loadDetail(id: string) {
     const gen = generation;
-    details[id] = { loading: true, error: false, data: null };
+    const stamp = stampOf(id);
+    details[id] = { loading: true, error: false, data: null, stamp };
     try {
       const data = await apiGet<ConsolidationCycleDetail>(`/dashboard/consolidation/${encodeURIComponent(id)}`, { retries: 1 });
-      if (gen === generation) details[id] = { loading: false, error: false, data };
+      if (gen === generation) details[id] = { loading: false, error: false, data, stamp };
     } catch (err) {
       if (gen !== generation) return;
       // A 404 is a cycle with no rows left to read, not a failure.
       const gone = (err as { status?: number }).status === 404;
-      details[id] = { loading: false, error: !gone, data: gone ? { cycle: null, actions: [] } : null };
+      details[id] = { loading: false, error: !gone, data: gone ? { cycle: null, actions: [] } : null, stamp };
     }
   }
 
   function open(id: string) {
     openId = id;
-    if (!details[id] || details[id].error) void loadDetail(id);
+    if (!details[id] || details[id].error || outdated(id)) void loadDetail(id);
   }
+
+  // The list was reloaded (older sleeps asked for) and the open sleep has since ended: read its report again.
+  $effect(() => {
+    const id = openId;
+    if (id && outdated(id)) untrack(() => void loadDetail(id));
+  });
 
   function toggle(id: string) {
     if (openId === id) openId = null;

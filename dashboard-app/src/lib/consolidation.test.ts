@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  MEASURES, PREVIEW_CHARS, barReadout, byDay, defaultOpen, factSentence, fmtMinutes, graphSentence, reportSections,
+  MEASURES, PREVIEW_CHARS, barReadout, byDay, defaultOpen, factChanges, factSentence, fmtMinutes, graphSentence, reportSections,
   sleepChart, sleepMinutes, sleepNumbers, sleepRows, sleepState, upkeepCounts,
 } from './consolidation';
 import type { ConsolidationAction, ConsolidationCycle } from './types/api';
@@ -27,7 +27,7 @@ const action = (over: Partial<ConsolidationAction>): ConsolidationAction => ({
 describe('a sleep in numbers and words', () => {
   it('reads each number by name: a snapshot, a nested object and _attempted never reach a count', () => {
     expect(sleepNumbers(cycle('c'))).toEqual({
-      newFacts: 4, merges: 4, retired: 15, contradictionsResolved: 0, procedures: 0, censorsRetired: 0,
+      newFacts: 4, merges: 4, retired: 15, contradictionsResolved: 0, keySupersessions: 0, procedures: 0, censorsRetired: 0,
       linksAdded: 625, linksPruned: 200,
     });
   });
@@ -43,6 +43,17 @@ describe('a sleep in numbers and words', () => {
     expect(factSentence(sleepNumbers(cycle('c', { totals: { facts_created: 1, clusters_merged: 1, procedures_created: 1, censors_retired: 2, contradictions_resolved: 1 } }))))
       .toBe('1 new fact · 1 merge · 1 contradiction resolved · 1 new procedure · 2 censors retired');
     expect(factSentence(sleepNumbers(cycle('c', { totals: {} })))).toBe('No fact changes');
+  });
+
+  // Codex round 1 on #922: the key-conflict sweep supersedes facts and counts them only in key_supersessions_written
+  // (it writes no change row), so a sleep whose only fact change was that read "No fact changes".
+  it('a fact superseded by the key sweep is a fact change, in the sentence and in the count of changes', () => {
+    const n = sleepNumbers(cycle('c', { totals: { key_conflicts_found: 25, key_supersessions_written: 2 } }));
+    expect(n.keySupersessions).toBe(2);
+    expect(factSentence(n)).toBe('2 superseded by key');
+    expect(factChanges(n)).toBe(2);
+    expect(factChanges(sleepNumbers(cycle('c', { totals: { key_conflicts_found: 25, stale_examined: 3988, orphan_edges_created: 9 } })))).toBe(0);
+    expect(factChanges(sleepNumbers(cycle('c')))).toBe(23);
   });
 
   it('says the graph changes with thousands separators, and nothing when the graph was left alone', () => {
@@ -211,5 +222,36 @@ describe('upkeep counts', () => {
 
   it('a sleep that recorded nothing has two empty lists', () => {
     expect(upkeepCounts(cycle('c', { totals: {} }))).toEqual({ graph: [], housekeeping: [] });
+  });
+
+  // Codex round 1 on #922: the totals are written when a sleep ends (and that write can fail), while each phase writes
+  // its summary row as it ends. A sleep with no totals showed neither, and said nothing was recorded.
+  const summary = (id: string, phase: string, counts: Record<string, unknown>) =>
+    action({ action_id: id, phase, op: 'edge_add', after: { counts }, rationale: `${phase} phase summary` });
+  const SUMMARIES = [
+    summary('g1', 'graph_densify', { orphan_edges_created: 539, comention_edges: 18 }),
+    summary('g2', 'graph_densify', { comention_edges_deleted: 149, comention_edges_reweighted: 1851 }),
+    summary('g3', 'graph_densify', { comention_edges_reweighted: 149 }),
+    summary('r1', 'evolve_rubric', { rubric_evolved: true }),
+    summary('n1', 'later_phase', { later_things_done: 3, later_flag: true, later_text: 'ignored' }),
+  ];
+
+  it('with no totals, the counts come from the phase summary rows, summed by counter', () => {
+    const { graph, housekeeping } = upkeepCounts(cycle('c', { status: 'running', finished_at: null, totals: {} }), SUMMARIES);
+    expect(graph.map((r) => [r.key, r.value])).toEqual([
+      ['orphan_edges_created', '539'], ['comention_edges', '18'], ['comention_edges_deleted', '149'], ['comention_edges_reweighted', '2,000'],
+    ]);
+    // A counter no list names is shown under its own name, after the named ones; a value that is no count is left out.
+    expect(housekeeping.map((r) => [r.key, r.label, r.value])).toEqual([
+      ['rubric_evolved', 'Rubric evolved', 'yes'], ['later_things_done', 'later things done', '3'], ['later_flag', 'later flag', 'yes'],
+    ]);
+  });
+
+  it('where the totals have a counter they win over the summary rows; the rows fill in only what the totals lack', () => {
+    const { graph, housekeeping } = upkeepCounts(cycle('c', { totals: { orphan_edges_created: 7, stale_examined: 10, f044_n_edges: 144750 } }), SUMMARIES);
+    expect(graph.map((r) => [r.key, r.value])).toEqual([
+      ['orphan_edges_created', '7'], ['comention_edges', '18'], ['comention_edges_deleted', '149'], ['comention_edges_reweighted', '2,000'],
+    ]);
+    expect(housekeeping.map((r) => r.key)).toEqual(['stale_examined', 'rubric_evolved', 'later_things_done', 'later_flag']);
   });
 });

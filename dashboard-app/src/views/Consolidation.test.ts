@@ -261,7 +261,7 @@ describe('the report of a sleep', () => {
     expect(await say('15:00', 'c-quiet')).toEqual(['This sleep changed no facts.']);
     expect(await say('09:00', 'c-fail')).toEqual([
       'This sleep failed. What it recorded before the failure is below.',
-      'No change rows are kept for this sleep; its counts remain. The audit prunes change rows after its retention window.',
+      'No change rows are kept for this sleep; its counts remain. The audit prunes change rows after its retention window, and a fact superseded by key has no row of its own.',
     ]);
     expect(await say('03:00', 'c-lost')).toEqual([
       'No finish was recorded for this sleep. What it recorded before it stopped is below.', 'No change is recorded for this sleep.',
@@ -269,6 +269,90 @@ describe('the report of a sleep', () => {
     expect(await say('21:00', 'c-run')).toEqual([
       'No finish is recorded for this sleep yet. A phase records its changes when it ends, so more may follow.', 'No change is recorded for this sleep.',
     ]);
+  });
+
+  // Codex round 1 on #922. The totals are written when a sleep ends, each phase's summary row as the phase ends: a
+  // sleep with no finish showed neither and said nothing was recorded. And the key-conflict sweep counts the facts it
+  // supersedes without writing a change row: such a sleep read "This sleep changed no facts."
+  it('a sleep with no totals shows the counts its phase summary rows carry; a key supersession is a fact change', async () => {
+    list = { cycles: [
+      cycle('c-lost', '2026-11-12T05:00:00+00:00', { status: 'running', finished_at: null, totals: {}, action_count: 2 }),
+      cycle('c-keys', '2026-11-11T03:00:00+00:00', { totals: { key_conflicts_found: 25, key_supersessions_written: 2 }, action_count: 0 }),
+    ] };
+    const answers: Record<string, unknown> = {
+      'c-lost': { cycle: null, actions: [
+        { action_id: 'g-1', phase: 'graph_densify', op: 'edge_add', target_ids: [], rationale: 'graph_densify phase summary',
+          before: null, after: { counts: { orphan_edges_created: 539 } }, created_at: T },
+        { action_id: 'g-2', phase: 'prune_dead_edges', op: 'edge_prune', target_ids: [], rationale: 'prune_dead_edges phase summary',
+          before: null, after: { counts: { dead_edges_pruned: 200 } }, created_at: T },
+      ] },
+      'c-keys': { cycle: null, actions: [] },
+    };
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      const body = url.startsWith('/dashboard/consolidation/') ? answers[url.split('/').pop()!]
+        : url.startsWith('/dashboard/consolidation') ? list : ACTIVITY;
+      return { ok: true, status: 200, json: async () => body } as Response;
+    }));
+    const { container } = render(Consolidation);
+    await waitFor(() => expect(container.querySelectorAll('button.sleep')).toHaveLength(2));
+    const rows = Array.from(container.querySelectorAll('button.sleep')).map((b) => b.textContent?.replace(/\s+/g, ' ').trim());
+    expect(rows[1]).toBe('03:00 UTC 17 min 2 superseded by key');
+
+    // The finished one is open on load: its only fact change is the key sweep's, which has no row to show.
+    const keys = await waitFor(() => {
+      const r = container.querySelector('#report-c-keys .state-note');
+      expect(r).not.toBeNull();
+      return container.querySelector('#report-c-keys') as HTMLElement;
+    });
+    expect(keys.textContent).not.toContain('This sleep changed no facts.');
+    expect(keys.querySelector('.state-note')?.textContent?.replace(/\s+/g, ' ').trim())
+      .toBe('No change rows are kept for this sleep; its counts remain. The audit prunes change rows after its retention window, and a fact superseded by key has no row of its own.');
+    expect(keys.textContent).toMatch(/Key supersessions written\s+key_supersessions_written\s*2/);
+
+    await fireEvent.click(rowOf(container, '05:00'));
+    const lost = await waitFor(() => {
+      expect(container.querySelector('#report-c-lost .count-list')).not.toBeNull();
+      return container.querySelector('#report-c-lost') as HTMLElement;
+    });
+    expect(Array.from(lost.querySelectorAll('.count-list > div')).map((d) => d.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
+      'Links for memories that had none orphan_edges_created 539', 'Links to inactive memories pruned dead_edges_pruned 200',
+    ]);
+    expect(Array.from(lost.querySelectorAll('.state-note')).map((p) => p.textContent?.replace(/\s+/g, ' ').trim()))
+      .toEqual(['No finish is recorded for this sleep yet. A phase records its changes when it ends, so more may follow.']);
+  });
+
+  // Codex round 1 on #922: a report read while its sleep was running lacks the rows the sleep writes as it ends. After
+  // the list was reloaded (older sleeps asked for) the row showed the finished sleep's totals over that old report,
+  // which then read as a finished sleep whose rows were pruned.
+  it('a report read while its sleep was running is read again once the reloaded list shows the sleep has ended', async () => {
+    const older = Array.from({ length: 29 }, (_, i) => cycle(`c-${i}`, `2026-10-${String(29 - i).padStart(2, '0')}T04:00:00+00:00`));
+    const running = cycle('c-now', '2026-11-13T21:00:00+00:00', { status: 'running', finished_at: null, totals: {}, action_count: 0 });
+    list = { cycles: [running, ...older] };
+    let ended = false;
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+      urls.push(url);
+      const body = url.startsWith('/dashboard/consolidation/c-now') ? (ended ? DETAIL : { cycle: null, actions: [] })
+        : url.startsWith('/dashboard/consolidation/') ? { cycle: null, actions: [] }
+        : url.startsWith('/dashboard/consolidation') ? list : ACTIVITY;
+      return { ok: true, status: 200, json: async () => body } as Response;
+    }));
+    urls = [];
+    const { container } = render(Consolidation);
+    await waitFor(() => expect(container.querySelectorAll('button.sleep')).toHaveLength(30));
+    await fireEvent.click(rowOf(container, '21:00'));
+    await waitFor(() => expect(container.querySelector('#report-c-now .state-note')).not.toBeNull());
+    expect(urls.filter((u) => u === '/dashboard/consolidation/c-now')).toHaveLength(1);
+    expect(container.querySelector('#report-c-now h3')).toBeNull();
+
+    // The sleep ends; asking for older sleeps reloads the list, and the open report is read again.
+    ended = true;
+    list = { cycles: [cycle('c-now', '2026-11-13T21:00:00+00:00'), ...older] };
+    await fireEvent.click(screen.getByRole('button', { name: 'Show 30 older sleeps' }));
+    await waitFor(() => expect(urls.filter((u) => u === '/dashboard/consolidation/c-now')).toHaveLength(2));
+    await waitFor(() => expect(container.querySelector('#report-c-now h3')?.textContent).toMatch(/Learned/));
+    expect(container.querySelector('#report-c-now')?.textContent).not.toContain('No change rows are kept');
+    // A sleep whose row did not change is not read again: the one the page opened on was read once.
+    expect(urls.filter((u) => u.startsWith('/dashboard/consolidation/') && !u.endsWith('/c-now'))).toEqual(['/dashboard/consolidation/c-0']);
   });
 
   it('a report that did not load says which sleep, and Try again fetches it', async () => {

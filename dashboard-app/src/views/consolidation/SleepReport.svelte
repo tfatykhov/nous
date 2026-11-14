@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { PREVIEW_CHARS, reportSections, upkeepCounts, type SleepRow } from '../../lib/consolidation';
+  import { PREVIEW_CHARS, factChanges, reportSections, upkeepCounts, type SleepRow } from '../../lib/consolidation';
   import type { ConsolidationAction } from '../../lib/types/api';
 
   // One sleep's report: its change rows as sections a person can read (what was learned, updated, merged, resolved and
@@ -11,10 +11,11 @@
   const SHOWN = 5;
 
   const sections = $derived(reportSections(actions));
-  const counts = $derived(upkeepCounts(row.cycle));
-  const n = $derived(row.numbers);
-  /** The totals say facts changed, yet there is no change row to read (pruned by the audit's retention, or never written). */
-  const rowsGone = $derived(sections.length === 0 && n.newFacts + n.merges + n.retired + n.contradictionsResolved > 0);
+  const counts = $derived(upkeepCounts(row.cycle, actions));
+  const hasCounts = $derived(counts.graph.length > 0 || counts.housekeeping.length > 0);
+  /** The totals say facts changed, yet there is no change row to read: pruned by the audit's retention, or never
+   *  written (the key-conflict sweep writes none). */
+  const rowsGone = $derived(sections.length === 0 && factChanges(row.numbers) > 0);
 
   let showAll = $state<Record<string, boolean>>({});
 
@@ -85,19 +86,18 @@
   </section>
 {/each}
 
-{#if sections.length === 0}
+{#if rowsGone}
   <p class="state-note">
-    {#if rowsGone}
-      No change rows are kept for this sleep; its counts remain. The audit prunes change rows after its retention window.
-    {:else if row.state === 'finished'}
-      This sleep changed no facts.
-    {:else}
-      No change is recorded for this sleep.
-    {/if}
+    No change rows are kept for this sleep; its counts remain. The audit prunes change rows after its retention window,
+    and a fact superseded by key has no row of its own.
   </p>
+{:else if sections.length === 0 && row.state === 'finished'}
+  <p class="state-note">This sleep changed no facts.</p>
+{:else if sections.length === 0 && !hasCounts}
+  <p class="state-note">No change is recorded for this sleep.</p>
 {/if}
 
-{#if counts.graph.length || counts.housekeeping.length}
+{#if hasCounts}
   <div class="counts">
     {#each [{ title: 'Graph upkeep', rows: counts.graph }, { title: 'Housekeeping', rows: counts.housekeeping }] as list (list.title)}
       {#if list.rows.length}

@@ -32,10 +32,17 @@ export interface SleepNumbers {
   merges: number;
   retired: number;
   contradictionsResolved: number;
+  /** Facts superseded by the key-conflict sweep, which writes no change row: this counter is its only record. */
+  keySupersessions: number;
   procedures: number;
   censorsRetired: number;
   linksAdded: number;
   linksPruned: number;
+}
+
+/** How many fact changes the totals count: more than none means the sleep changed facts, whatever rows are left to read. */
+export function factChanges(n: SleepNumbers): number {
+  return n.newFacts + n.merges + n.retired + n.contradictionsResolved + n.keySupersessions;
 }
 
 export function sleepNumbers(cycle: ConsolidationCycle): SleepNumbers {
@@ -45,6 +52,7 @@ export function sleepNumbers(cycle: ConsolidationCycle): SleepNumbers {
     merges: num(t, 'clusters_merged'),
     retired: num(t, 'stale_deactivated'),
     contradictionsResolved: num(t, 'contradictions_resolved'),
+    keySupersessions: num(t, 'key_supersessions_written'),
     procedures: num(t, 'procedures_created'),
     censorsRetired: num(t, 'censors_retired'),
     linksAdded: sum(t, LINKS_ADDED),
@@ -64,6 +72,7 @@ export function factSentence(n: SleepNumbers): string {
     n.merges && count(n.merges, 'merge', 'merges'),
     n.retired && `${n.retired.toLocaleString('en-US')} retired as stale`,
     n.contradictionsResolved && count(n.contradictionsResolved, 'contradiction resolved', 'contradictions resolved'),
+    n.keySupersessions && `${n.keySupersessions.toLocaleString('en-US')} superseded by key`,
     n.procedures && count(n.procedures, 'new procedure', 'new procedures'),
     n.censorsRetired && count(n.censorsRetired, 'censor retired', 'censors retired'),
   ].filter(Boolean);
@@ -321,13 +330,14 @@ const SECTIONS: { phase: string; op: string | null; def: SectionDef }[] = [
 ];
 const ORDER = [...SECTIONS.map((s) => s.def.key), OTHER.key];
 
-/** A phase's summary row: `after` is `{ counts: {...} }`, the same numbers the cycle's totals carry. */
+/** A phase's summary row: `after` is `{ counts: {...} }`, the same numbers the cycle's totals carry once they are written. */
 const isSummary = (a: ConsolidationAction) => isObject(a.after) && isObject(a.after.counts);
 
 /**
- * A sleep's change rows as the sections of its report, in reading order. A phase summary row is left out: its counts
- * are in the cycle's totals, which `upkeepCounts` reads. A row in a shape no section knows goes to "Other changes"
- * with its recorded before and after, so nothing recorded is hidden.
+ * A sleep's change rows as the sections of its report, in reading order. A phase summary row is left out here: it is
+ * a count, not a change to read, and `upkeepCounts` shows its numbers (from the cycle's totals, or from the row
+ * itself where the totals lack them). A row in a shape no section knows goes to "Other changes" with its recorded
+ * before and after, so nothing recorded is hidden.
  */
 export function reportSections(actions: ConsolidationAction[]): ReportSection[] {
   const byKey = new Map<string, ReportSection>();
@@ -415,8 +425,30 @@ function countRows(totals: Totals, defs: [string, string][]): CountRow[] {
   return rows;
 }
 
-/** The graph and housekeeping counters a sleep recorded as non-zero, by name, with their plain words. */
-export function upkeepCounts(cycle: ConsolidationCycle): { graph: CountRow[]; housekeeping: CountRow[] } {
-  const t: Totals = cycle.totals ?? {};
-  return { graph: countRows(t, GRAPH_COUNTS), housekeeping: countRows(t, HOUSEKEEPING_COUNTS) };
+/** The counters a sleep's phase summary rows carry, each summed over its rows (a flag stays true). */
+function summaryCounts(actions: ConsolidationAction[]): Totals {
+  const out: Totals = {};
+  for (const a of actions) {
+    if (!isObject(a.after) || !isObject(a.after.counts)) continue;
+    for (const [key, v] of Object.entries(a.after.counts)) {
+      const sofar = out[key];
+      if (v === true) out[key] = true;
+      else if (typeof v === 'number' && Number.isFinite(v)) out[key] = (typeof sofar === 'number' ? sofar : 0) + v;
+    }
+  }
+  return out;
+}
+
+/**
+ * The graph and housekeeping counters a sleep recorded as non-zero, by name, with their plain words. The cycle's
+ * totals are the source. They are written when a sleep ends, so a sleep with no finish (or one whose closing write
+ * failed) has none: there the phase summary rows, which each phase writes as it ends, fill in what the totals lack.
+ * A counter a summary row carries that neither list names is shown under its own name, so no recorded count is hidden.
+ */
+export function upkeepCounts(cycle: ConsolidationCycle, actions: ConsolidationAction[] = []): { graph: CountRow[]; housekeeping: CountRow[] } {
+  const fromRows = summaryCounts(actions);
+  const t: Totals = { ...fromRows, ...(cycle.totals ?? {}) };
+  const named = new Set([...GRAPH_COUNTS, ...HOUSEKEEPING_COUNTS].map(([key]) => key));
+  const unnamed: [string, string][] = Object.keys(fromRows).filter((key) => !named.has(key)).map((key) => [key, key.replaceAll('_', ' ')]);
+  return { graph: countRows(t, GRAPH_COUNTS), housekeeping: [...countRows(t, HOUSEKEEPING_COUNTS), ...countRows(fromRows, unnamed)] };
 }
