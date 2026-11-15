@@ -22,6 +22,8 @@
   import Integrations from './views/Integrations.svelte';
   import { usePoll } from '$lib/poll';
   import { attentionPoll, attentionCounts } from '$lib/stores/attention';
+  import HaltSwitch from '$lib/ui/HaltSwitch.svelte';
+  import { haltPoll, haltState } from '$lib/stores/halt';
 
   // ── Router ────────────────────────────────────────────────────
   initRouter();
@@ -29,6 +31,8 @@
   // Harness dashboard §4.6: one attention poll feeds every nav badge and the
   // mobile menu dot (the badges sit inside a closed drawer on a phone).
   usePoll(attentionPoll);
+  // Goals PR 0c: one halt poll feeds the Halt control (the rail's foot, the mobile header) and the banner.
+  usePoll(haltPoll);
   let needsYou = $derived($attentionCounts.questions + $attentionCounts.sends);
 
   // ── Mobile drawer state ───────────────────────────────────────
@@ -104,6 +108,9 @@
     <span class="sidebar-title">Nous</span>
   </div>
   <Nav currentRoute={$currentRoute} navLabel="Site navigation" />
+  <div class="sidebar-foot">
+    <HaltSwitch />
+  </div>
 </aside>
 
 <!-- ── Mobile header ─────────────────────────────────────────── -->
@@ -122,6 +129,8 @@
     {#if needsYou > 0}<span class="hamburger-dot" aria-hidden="true"></span>{/if}
   </button>
   <span class="mobile-title">Nous</span>
+  <!-- Outside the drawer, which is inert while closed: the Halt control stays in reach on a phone. -->
+  <HaltSwitch compact />
 </header>
 
 <!-- ── Mobile off-canvas drawer ─────────────────────────────── -->
@@ -165,6 +174,20 @@
 <!-- ── Main content ───────────────────────────────────────────── -->
 <!-- The page ground (class page-ground): chart paper, on every route. -->
 <main id="main-content" class="main-content page-ground">
+  <!-- While halted, or while the control has something to say, a card above every screen says it in full. -->
+  {#if $haltState.lines.length > 0}
+    <section class="halt-banner" aria-label="Background work">
+      {#if $haltState.pill}
+        <span class="status-pill status-pill--{$haltState.pill.tone}">{$haltState.pill.text}</span>
+      {/if}
+      {#each $haltState.lines as line (line)}
+        <p>{line}</p>
+      {/each}
+      {#if $haltState.caption}
+        <p class="halt-caption">{$haltState.caption}</p>
+      {/if}
+    </section>
+  {/if}
   <!--
     Route switch: {#if} (not {#key}) so each view's component state
     (scroll, loaded data) survives tab switching.
@@ -262,6 +285,36 @@
     font-weight: 700;
     color: var(--text);
     letter-spacing: -0.01em;
+  }
+
+  /* The Halt control: pinned to the foot of the rail, and still in view when the rail scrolls. */
+  .sidebar-foot {
+    margin-top: auto;
+    position: sticky;
+    bottom: 0;
+    padding: 0.75rem;
+    border-top: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+
+  /* ── Halt banner (a card on the paper, above the routed view) ─ */
+  .halt-banner {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.375rem;
+    margin-bottom: 1rem;
+    padding: 1rem 1.25rem;
+    background: var(--surface);
+    border-radius: var(--card-radius);
+    box-shadow: var(--card-shadow);
+    font-size: 0.875rem;
+    color: var(--text);
+  }
+  .halt-caption {
+    font-size: 0.75rem;
+    color: var(--muted);
   }
 
   /* ── Mobile header (hidden on desktop) ──────────────────────── */
