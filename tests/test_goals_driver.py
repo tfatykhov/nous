@@ -1495,6 +1495,36 @@ async def test_questions_and_answers_of_a_reopened_root_reach_the_journal(env_fa
     assert (await _session(w, session.id)).outcome == "no_step"  # the close's outcome stands
 
 
+async def test_a_question_written_just_before_the_close_that_the_close_missed_is_journalled(env_factory):  # noqa: F811
+    """A question row from a transaction still open when the close read the lineage carries a time before the
+    close. The reconcile reads rows from an hour before the close, so it journals it; an older row it does not
+    read again (the close saw those)."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    await _finish(w, root)
+    assert (await w.driver.tick()).closed == 1
+    ended_at = (await _session(w, session.id)).ended_at
+    for minutes, text_ in ((30, "Merge the drafts too?"), (90, "An older question the close journalled.")):
+        async with w.db.session() as s:
+            await continuation.insert_inbox_row(
+                s,
+                w.agent,
+                source_kind=continuation.SOURCE_INTENTION_REPORT,
+                source_id=uuid.uuid4(),
+                msg_type="QUESTION",
+                title="Question",
+                body=text_,
+                channel=CHAN,
+                intention_id=root.id,
+                arrival_id=uuid.uuid4(),
+                created_at=ended_at - timedelta(minutes=minutes),
+            )
+            await s.commit()
+    await w.driver.tick()
+    assert [q.text for q in await _journal(w, goal, "question")] == ["Merge the drafts too?"]
+
+
 async def test_two_reconciles_at_once_journal_a_question_once(env_factory):  # noqa: F811
     w = await _world(env_factory)
     goal = await _active(w)
