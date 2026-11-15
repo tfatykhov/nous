@@ -1,0 +1,203 @@
+"""F114 goal routes: the reads (the list with its spend, the options, one goal in full), on Postgres."""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import asdict
+from datetime import timedelta
+
+import pytest
+from goal_routes_support import CHAN, active, add_session, db_now, draft, make_env, paused, set_values
+from sqlalchemy import func, select
+
+from nous.api.goal_routes import JOURNAL_MAX, masked_channel
+from nous.goals.envelope import _RANGES, PRESETS
+from nous.goals.seed import SPEND_NOTE
+from nous.goals.store import format_short_id
+from nous.storage.models import GoalJournal
+
+pytestmark = pytest.mark.postgres_only
+
+ROW_KEYS = {
+    "id", "ref", "title", "state", "pause_reason", "preset", "proposed_by", "total_budget", "day_budget",
+    "spent_total", "spent_today", "deadline_at", "next_wake_at", "open_session", "pending_request", "mode",
+    "updated_at",
+}
+DETAIL_KEYS = ROW_KEYS | {
+    "enabled", "objective", "done_when", "origin_channel", "deadline_days", "sessions_per_day",
+    "min_interval_seconds", "jobs_per_day", "quiet_hours_ok", "stall_limit", "mode_until", "approved_at",
+    "finished_at", "created_at", "plan", "sessions", "journal", "actions", "resume_blocked", "spend_note",
+}
+
+
+async def _bulk_journal(env, goal, count: int) -> None:
+    async with env.store._db.session() as s:
+        for i in range(count):
+            agent = env.store.agent_id
+            s.add(GoalJournal(agent_id=agent, goal_id=goal.id, kind="progress", actor="chain", text=f"row {i}"))
+        await s.commit()
+
+
+async def test_list_returns_rows_with_spend_by_the_databases_day(db) -> None:
+    env = make_env(db)
+    first, second = await active(env.store), await active(env.store, title="Second")
+    async with db.session() as s:
+        day_start = (await s.execute(select(func.date_trunc("day", func.clock_timestamp(), "UTC")))).scalar_one()
+    await add_session(env.store, first, n=1, spent=700, started_at=day_start - timedelta(hours=1))  # yesterday
+    await add_session(env.store, first, n=2, spent=50, started_at=day_start + timedelta(seconds=1))
+    await add_session(env.store, first, n=3, spent=5, open_=True)
+    await add_session(env.store, second, n=1, spent=11, started_at=day_start - timedelta(days=3))
+    response = await env.call("GET", "/goals")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["enabled"] is True
+    rows = {row["id"]: row for row in body["goals"]}
+    assert set(rows) == {str(first.id), str(second.id)}
+    assert all(set(row) == ROW_KEYS for row in rows.values())
+    one, two = rows[str(first.id)], rows[str(second.id)]
+    assert (one["spent_total"], one["spent_today"], one["open_session"]) == (755, 55, 3)
+    assert (two["spent_total"], two["spent_today"], two["open_session"]) == (11, 0, None)
+    assert one["ref"] == format_short_id(first.short_id) and one["state"] == "active" and one["mode"] == "contained"
+    assert [row["id"] for row in body["goals"]] == [str(first.id), str(second.id)]  # by short id, newest last
+
+
+async def test_list_filters_by_state_and_rejects_an_unknown_state(db) -> None:
+    env = make_env(db)
+    a_draft = await draft(env.store)
+    an_active = await active(env.store)
+    a_paused = await paused(env.store, "owner")
+    cancelled = await draft(env.store)
+    await env.store.cancel(cancelled.id, actor="owner")
+
+    async def ids(query: str) -> set[str]:
+        response = await env.call("GET", f"/goals{query}")
+        assert response.status_code == 200
+        return {row["id"] for row in response.json()["goals"]}
+
+    assert await ids("?state=open") == {str(a_draft.id), str(an_active.id), str(a_paused.id)}
+    assert await ids("?state=cancelled") == {str(cancelled.id)}
+    assert await ids("") == {str(a_draft.id), str(an_active.id), str(a_paused.id), str(cancelled.id)}
+    bogus = await env.call("GET", "/goals?state=bogus")
+    assert bogus.status_code == 400
+    assert bogus.json() == {"error": "state must be one of draft, active, paused, done, failed, cancelled or open"}
+
+
+async def test_detail_has_charter_limits_plan_sessions_journal_and_the_spend_note(db) -> None:
+    env = make_env(db)
+    goal = await active(env.store, preset="medium")
+    await add_session(env.store, goal, n=1, spent=40)
+    await add_session(env.store, goal, n=2, spent=2, open_=True)
+    await _bulk_journal(env, goal, 60)
+    response = await env.call("GET", f"/goals/{goal.id}")
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == DETAIL_KEYS
+    assert body["objective"] == goal.objective and body["done_when"] == goal.done_when
+    assert body["origin_channel"] == "telegram:****" and body["proposed_by"] == "owner"
+    assert (body["total_budget"], body["day_budget"], body["deadline_days"]) == (10_000_000, 2_000_000, 10)
+    assert (body["sessions_per_day"], body["min_interval_seconds"], body["jobs_per_day"]) == (4, 3600, 2)
+    assert body["quiet_hours_ok"] is False and body["stall_limit"] == 3
+    assert [s["n"] for s in body["sessions"]] == [1, 2]
+    assert body["sessions"][0]["outcome"] == "no_step" and body["sessions"][1]["ended_at"] is None
+    assert body["spent_total"] == 42 and body["open_session"] == 2
+    assert body["spend_note"] == SPEND_NOTE
+    journal = body["journal"]
+    assert len(journal) == 50
+    assert [row["seq"] for row in journal] == sorted((row["seq"] for row in journal), reverse=True)
+    assert journal[0]["text"] == "row 59"
+    assert set(journal[0]) == {"seq", "session_n", "kind", "actor", "text", "evidence", "created_at"}
+    five = await env.call("GET", f"/goals/{goal.id}?journal=5")
+    assert len(five.json()["journal"]) == 5
+    await _bulk_journal(env, goal, 200)
+    clamped = await env.call("GET", f"/goals/{goal.id}?journal=999")
+    assert len(clamped.json()["journal"]) == JOURNAL_MAX
+    for bad in ("0", "x", "-1", "1.5"):
+        assert (await env.call("GET", f"/goals/{goal.id}?journal={bad}")).status_code == 400, bad
+
+
+async def test_detail_accepts_the_short_id_forms_and_404s_an_unknown_goal(db) -> None:
+    env = make_env(db)
+    goal = await draft(env.store)
+    for ref in (format_short_id(goal.short_id), f"g{goal.short_id}", str(goal.short_id), str(goal.id)):
+        response = await env.call("GET", f"/goals/{ref}")
+        assert response.status_code == 200, ref
+        assert response.json()["id"] == str(goal.id)
+    for ref in (str(uuid.uuid4()), "not-a-goal", "0"):
+        response = await env.call("GET", f"/goals/{ref}")
+        assert (response.status_code, response.json()) == (404, {"error": f"no goal {ref}"})
+
+
+async def test_another_agents_goal_is_not_visible(db) -> None:
+    mine, theirs = make_env(db), make_env(db)
+    their_goal = await active(theirs.store)
+    listed = await mine.call("GET", "/goals")
+    assert listed.json()["goals"] == []
+    for ref in (format_short_id(their_goal.short_id), str(their_goal.id)):
+        assert (await mine.call("GET", f"/goals/{ref}")).status_code == 404
+        assert (await mine.call("POST", f"/goals/{ref}/pause", json={})).status_code == 404
+    assert (await theirs.store.get(their_goal.id)).state == "active"
+
+
+async def test_the_origin_channel_is_masked_in_the_detail(db) -> None:
+    env = make_env(db)
+    goal = await draft(env.store, origin_channel="telegram:-1009876543210")
+    body = (await env.call("GET", f"/goals/{goal.id}")).json()
+    assert body["origin_channel"] == "telegram:****3210"
+    assert "9876543" not in str(body)
+    assert masked_channel(None) is None and masked_channel(CHAN) == "telegram:****"
+
+
+async def test_options_lists_the_presets_and_never_the_chat_id(db) -> None:
+    with_chat = make_env(db, telegram_chat_id="5550001234567")
+    response = await with_chat.call("GET", "/goals/options")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["enabled"] is True and body["driver_running"] is False
+    assert body["presets"] == {name: asdict(limits) for name, limits in PRESETS.items()}
+    assert body["ranges"] == [{"field": f, "low": lo, "high": hi, "words": w} for f, lo, hi, w in _RANGES]
+    assert body["has_default_channel"] is True and body["channel_kinds"] == ["telegram"]
+    assert body["spend_note"] == SPEND_NOTE
+    assert "5550001234567" not in response.text and "1234567" not in response.text
+    without = await make_env(db).call("GET", "/goals/options")
+    assert without.json()["has_default_channel"] is False
+
+
+async def test_the_plan_and_journal_text_come_back_unchanged_and_unmarked(db) -> None:
+    env = make_env(db)
+    goal = await active(env.store)
+    text = "<script>x</script> & <b>bold</b> \"quoted\""
+    await env.store.append_journal(goal.id, "report", text, actor="chain", evidence=["<i>ref</i>"])
+    plan = [
+        "a string",
+        None,
+        [1, 2],
+        {"text": "<b>step</b>", "status": "open", "evidence": ["ref-1", 3, None], "closed_session": 2, "extra": "x"},
+        {"text": 5, "status": None, "evidence": "not a list", "closed_session": True},
+        {"text": "y" * 5000, "status": "done"},
+    ]
+    await set_values(env.store, goal, plan=plan)
+    body = (await env.call("GET", f"/goals/{goal.id}")).json()
+    assert body["journal"][0]["text"] == text
+    assert body["journal"][0]["evidence"] == ["<i>ref</i>"]
+    steps = body["plan"]
+    assert steps[0] == {"text": "<b>step</b>", "status": "open", "evidence": ["ref-1"], "closed_session": 2}
+    assert steps[1] == {}
+    assert len(steps[2]["text"]) == 4000 and steps[2]["status"] == "done"
+    assert len(steps) == 3
+
+
+async def test_a_paused_goals_resume_blocked_follows_its_spend_and_deadline(db) -> None:
+    env = make_env(db)
+    budget = await paused(env.store, "budget")
+    await add_session(env.store, budget, n=1, spent=budget.total_budget)
+    deadline = await paused(env.store, "deadline")
+    await set_values(env.store, deadline, deadline_at=await db_now(env.store) - timedelta(hours=1))
+    owner = await paused(env.store, "owner")
+    await add_session(env.store, owner, n=1, spent=owner.total_budget)
+    answers = {g.id: (await env.call("GET", f"/goals/{g.id}")).json() for g in (budget, deadline, owner)}
+    assert answers[budget.id]["resume_blocked"] == "budget" and "resume" not in answers[budget.id]["actions"]
+    assert answers[deadline.id]["resume_blocked"] == "deadline" and "resume" not in answers[deadline.id]["actions"]
+    assert answers[owner.id]["resume_blocked"] is None and "resume" in answers[owner.id]["actions"]
+    await env.store.raise_budget(budget.id, total=budget.total_budget * 2, actor="owner")
+    after = (await env.call("GET", f"/goals/{budget.id}")).json()
+    assert after["resume_blocked"] is None and "resume" in after["actions"]
