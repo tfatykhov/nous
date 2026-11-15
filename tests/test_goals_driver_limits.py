@@ -796,6 +796,63 @@ async def test_anything_but_interrupted_breaks_an_error_run(env_factory, breaker
     assert await w.driver.apply_stop_conditions() == 0
 
 
+async def test_a_pause_for_one_reason_never_restarts_another_reasons_run(env_factory):  # noqa: F811
+    """A run restarts only after a pause for its own reason: a deadline or budget pause in the middle of a stall,
+    or a stall pause in the middle of an error run, leaves that run counting."""
+    w = await _world(env_factory)
+    stalling = await _active(w)
+    await _closed(w, stalling, ["no_step", "no_step"])
+    deadline = (await _goal(w, stalling)).deadline_at
+    assert await w.driver.apply_stop_conditions(now=deadline) == 1  # paused for the deadline, the stall at 2
+    await w.store.extend_deadline(stalling.id, days=1, actor="host")
+    await w.store.resume(stalling.id, actor="host")
+    await _closed(w, stalling, ["no_step"])
+    assert await w.driver.apply_stop_conditions() == 1
+    assert (await _goal(w, stalling)).pause_reason == "stalled"
+
+    failing = await _active(w, title="Sort the photos")
+    await _closed(w, failing, ["error", "error"])
+    assert await w.driver._pause(  # a stall pause between two errors and a third one
+        failing.id,
+        "stalled",
+        "Paused: 3 sessions in a row took no step.",
+        evidence=["stop:stalled"],
+        newest_session=True,
+    )
+    await w.store.resume(failing.id, actor="host")
+    await _closed(w, failing, ["error"])
+    assert await w.driver.apply_stop_conditions() == 1
+    assert (await _goal(w, failing)).pause_reason == "error"
+
+
+async def test_owner_actions_and_other_rows_never_restart_or_skip_a_run(env_factory):  # noqa: F811
+    """Only the driver's own pause row moves where a run starts. The owner's pause, resume, stop request and note,
+    an owner cancel through the route (a pause of its own, no stop reason), and a row naming a stop reason under
+    any other actor leave the run as it is; the store will not write a harness row at all."""
+    w = await _cont_world(env_factory)
+    goal = await _active(w)
+    await _set_goal(w, goal, sessions_per_day=24)
+    await _closed(w, goal, ["no_step", "no_step"])
+    await w.store.pause(goal.id, actor="host")
+    await w.store.resume(goal.id, actor="host")
+    await w.store.add_note(goal.id, "Try the other folder.", actor="owner")
+    root, session = await _started(w, goal)
+    await w.runner.cancel_root(root.id, reason="not now", actor="rest")  # the owner, through the route
+    await w.driver.tick()
+    assert ((await _session(w, session.id)).outcome, (await _goal(w, goal)).pause_reason) == ("interrupted", "owner")
+    await w.store.resume(goal.id, actor="host")
+    await w.store.append_journal(goal.id, "state", "Paused.", actor="host", session_n=99, evidence=["stop:stalled"])
+    with pytest.raises(GoalRefused, match="goal driver only"):
+        await w.store.append_journal(
+            goal.id, "state", "Paused.", actor="harness", session_n=99, evidence=["stop:stalled"]
+        )
+    assert await w.driver.apply_stop_conditions() == 0  # two no_step and an interrupted
+    await _closed(w, goal, ["no_step"])
+    assert await w.driver.apply_stop_conditions() == 1
+    pause = (await _harness(w, goal))[-1]
+    assert (pause.text, pause.session_n) == ("Paused: 3 sessions in a row took no step.", 4)
+
+
 async def test_a_goal_waiting_for_the_owner_is_never_resumed_by_the_driver(env_factory):  # noqa: F811
     w = await _world(env_factory)
     goal = await _active(w)
@@ -894,6 +951,20 @@ async def test_quiet_hours_hold_a_goal_that_may_not_run_then(env_factory):  # no
     assert len((await w.driver.tick()).started) == 1
 
 
+async def test_run_now_starts_inside_quiet_hours(env_factory):  # noqa: F811
+    """Quiet hours are kept for the owner: the owner's run-now is not held by them, the timer is."""
+    probe = await _world(env_factory)
+    w = await _world(env_factory, **await _quiet_now(probe))
+    goal = await _active(w)
+    assert not goal.quiet_hours_ok
+    assert (await w.driver.tick()).started == ()  # the timer waits
+    await w.store.request_run_now(goal.id, actor="host")
+    report = await w.driver.tick()
+    assert len(report.started) == 1
+    (session,) = await _sessions(w, goal)
+    assert session.trigger == "run_now" and (await _goal(w, goal)).pending_request is None
+
+
 async def test_max_active_sessions_holds_a_second_goal(env_factory):  # noqa: F811
     w = await _world(env_factory)
     first, second = await _active(w), await _active(w, title="Sort the photos")
@@ -944,6 +1015,8 @@ async def _launch_logged(w: SimpleNamespace, *, session_id=None, subtask_id=None
 async def test_job_launches_over_the_cap_hold_the_start_when_the_call_log_is_on(env_factory):  # noqa: F811
     w = await _world(env_factory, tool_call_log_enabled=True)
     goal = await _active(w)
+    assert goal.jobs_per_day == 1
+    await _set_goal(w, goal, sessions_per_day=24)  # only the job cap can hold the third start
     root, session = await _started(w, goal)
     await _launch_logged(w, session_id=f"intent-{root.id}", outcome="refused")  # never ran
     await _launch_logged(w, session_id="intent-" + str(uuid.uuid4()))  # another chain's
@@ -957,9 +1030,10 @@ async def test_job_launches_over_the_cap_hold_the_start_when_the_call_log_is_on(
     await _finish(w, await w.env.heart.intentions.get_for_source("subtask", second.first_subtask_id))
     await w.driver.tick()
     await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
-    assert (await w.driver.tick()).started == ()
+    assert (await w.driver.tick()).started == ()  # one launch counted: the cap of one a day holds the start
+    await _launch_logged(w, session_id=f"intent-{second.root_id}")  # one by the session's decision turn
     async with w.db.session() as s:
-        assert await spend.jobs_launched_today(s, w.agent, goal.id, w.env.settings, now=await _db_now(w)) == 1
+        assert await spend.jobs_launched_today(s, w.agent, goal.id, w.env.settings, now=await _db_now(w)) == 2
 
 
 async def test_job_launches_are_not_counted_when_the_call_log_is_off(env_factory):  # noqa: F811

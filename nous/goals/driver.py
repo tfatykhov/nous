@@ -418,7 +418,8 @@ class GoalDriver:
         third in a row pauses the goal (``error``). With goals off, or while background work is halted, it does
         nothing: every caller gets that refusal here. The queue headroom is the tick's check.
 
-        A ``run_now`` start skips the wake and the count of the day's sessions; every other limit holds it. With
+        A ``run_now`` start skips the wake, the count of the day's sessions and quiet hours (the owner asked for it
+        now, and quiet hours are kept for the owner); every other limit holds it. With
         ``request_at`` it acts on the owner's pending request: only while that request is still the one read, and
         the request is cleared in transaction 1 (with the session row, or with a journal row saying what held it), so
         a request is acted on at most once. A delay never moves the wake earlier (``GoalStore.delay_wake``), so a
@@ -534,8 +535,9 @@ class GoalDriver:
         """The first limit that holds a start of ``goal`` at ``now`` (a ``HELD_WORDS`` key), else None, read in
         the start's transaction under the goal locks: the deadline, the total budget, the day's budget (spend counts
         for the UTC day its session started), the day's sessions (not for a run-now), quiet hours (unless the goal
-        may run then), the day's job launches (when the tool-call log is on; a cap of 0 holds once one launch is
-        counted), and the sessions open across all goals. The comparisons are the store's: a deadline at ``now``
+        may run then; not for a run-now), the day's job launches (when the tool-call log is on; a cap of 0 holds like
+        a cap of 1, once one launch is counted: a launch inside a session cannot be stopped, only the next start
+        held), and the sessions open across all goals. The comparisons are the store's: a deadline at ``now``
         has passed, a budget spent to the token is spent. Spend can rise after this read (a refresh writes it): a
         chain can overshoot its goal by at most its own token limit."""
         if goal.deadline_at is not None and goal.deadline_at <= now:
@@ -549,7 +551,7 @@ class GoalDriver:
             started = await spend.sessions_started_today(s, self._agent_id, goal.id, now=now)
             if started >= goal.sessions_per_day:
                 return "day_sessions"
-        if not goal.quiet_hours_ok:
+        if not goal.quiet_hours_ok and trigger != "run_now":
             from nous.heartbeat.quiet_hours import quiet_hours_end  # the heartbeat package is heavy to import
 
             if quiet_hours_end(self._settings, now) != now:

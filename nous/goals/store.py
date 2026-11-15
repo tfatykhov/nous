@@ -455,7 +455,11 @@ class GoalStore:
         evidence: Iterable[str] = (),
     ) -> GoalJournal:
         """Append one journal row in its own transaction: text clipped to ``JOURNAL_MAX_CHARS``, at most
-        ``EVIDENCE_MAX_REFS`` evidence refs of at most ``EVIDENCE_REF_MAX_CHARS`` each."""
+        ``EVIDENCE_MAX_REFS`` evidence refs of at most ``EVIDENCE_REF_MAX_CHARS`` each. Never under the
+        ``harness`` actor: the goal driver writes those rows itself, in its own transactions, and reads some of them
+        back (where a run of outcomes restarts, which session's chain it is ending)."""
+        if actor == "harness":
+            raise GoalRefused("harness rows are written by the goal driver only")
         async with self._db.session() as s:
             owned = await s.scalar(select(Goal.id).where(Goal.id == goal_id, Goal.agent_id == self.agent_id))
             if owned is None:
