@@ -81,6 +81,12 @@ export interface GoalDetail extends GoalRow {
 
 export interface GoalList { enabled: boolean; goals: GoalRow[] }
 
+/** A change's answer when the change was made and the goal could not be read back in full: read it again. */
+export interface GoalMade extends Pick<GoalRow, 'id' | 'ref' | 'title' | 'state' | 'pause_reason' | 'pending_request'> {
+  enabled: true;
+  reload: true;
+}
+
 export interface Limits {
   total_budget: number;
   day_budget: number;
@@ -127,9 +133,11 @@ export const listGoals = (signal?: AbortSignal) => apiRequest<GoalList>(BASE, 'G
 export const goalOptions = (signal?: AbortSignal) => apiRequest<GoalOptions>(`${BASE}/options`, 'GET', undefined, signal);
 export const getGoal = (ref: string, journal?: number, signal?: AbortSignal) =>
   apiRequest<GoalDetail | { enabled: false }>(`${goalPath(ref)}${journal ? `?journal=${journal}` : ''}`, 'GET', undefined, signal);
-export const createGoal = (body: CreateBody) => apiRequest<GoalDetail>(BASE, 'POST', body);
+// A change answers with the goal in full, or with `reload` when it was made and the goal could not be read back; the
+// screen reads the goal again after every change either way.
+export const createGoal = (body: CreateBody) => apiRequest<GoalDetail | GoalMade>(BASE, 'POST', body);
 export const goalAction = (ref: string, action: Action, body?: object) =>
-  apiRequest<GoalDetail>(`${goalPath(ref)}/${action}`, 'POST', body);
+  apiRequest<GoalDetail | GoalMade>(`${goalPath(ref)}/${action}`, 'POST', body);
 
 /** The background halt, when this server has the route. A 404 (no halt on this server) or any failure is null:
  * nothing to show, and never an error of the goals list. */

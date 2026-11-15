@@ -8,7 +8,8 @@ body and the goal are read only after it.
 
 The actor of every change is the owner: the guard let the call in on the owner's or the proxy's secret, and either is
 the owner. A body never names an actor (an unknown field is a 400). A refusal of the store is a 409 carrying the
-store's own sentence. A goal of another agent is not found.
+store's own sentence. A goal of another agent is not found. A change the store made is never answered with an error:
+when reading the goal back fails, the answer is the store's result with ``reload: true``.
 
 With ``NOUS_GOALS_ENABLED`` off there is no store: the reads answer 200 with ``enabled: false`` and nothing else, and
 the changes answer 503 ``GOALS_OFF``. Neither reads a table.
@@ -342,6 +343,21 @@ def goal_detail(
     }
 
 
+def made_only(goal: Goal) -> dict[str, Any]:
+    """What a change answers when it was made and the goal could not be read back in full: the goal's state as the
+    store returned it, and ``reload: true`` (read ``GET /goals/{ref}`` for the rest)."""
+    return {
+        "enabled": True,
+        "reload": True,
+        "id": str(goal.id),
+        "ref": format_short_id(goal.short_id),
+        "title": goal.title,
+        "state": goal.state,
+        "pause_reason": goal.pause_reason,
+        "pending_request": goal.pending_request,
+    }
+
+
 def _error(status: int, message: str) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status)
 
@@ -390,6 +406,15 @@ def build_goal_routes(*, database: Any, settings: Any, goals: GoalStore | None, 
             journal=await goals.journal(goal.id, limit=journal_limit),
             settings=settings,
         )
+
+    async def changed_answer(changed: Goal, what: str, status: int = 200) -> JSONResponse:
+        """The answer of a change the store made: the goal in full. When reading it back fails, the change still
+        stands, so the answer is ``status`` with what the store returned and ``reload: true``, never an error."""
+        try:
+            return JSONResponse(await detail(changed), status_code=status)
+        except Exception as exc:
+            logger.warning("F114: %s was made, and reading the goal back failed (%s)", what, type(exc).__name__)
+            return JSONResponse(made_only(changed), status_code=status)
 
     def failed(what: str, exc: Exception) -> JSONResponse:
         # The class only: an error's text can repeat what it was given.
@@ -462,7 +487,7 @@ def build_goal_routes(*, database: Any, settings: Any, goals: GoalStore | None, 
         except _BadRequest as exc:
             return _error(400, str(exc))
         try:
-            goal = await goals.create(
+            made = await goals.create(
                 title=body.title,
                 objective=body.objective,
                 done_when=body.done_when,
@@ -471,15 +496,15 @@ def build_goal_routes(*, database: Any, settings: Any, goals: GoalStore | None, 
                 proposed_by=ACTOR,
                 origin_channel=body.origin_channel,
             )
-            return JSONResponse(await detail(goal), status_code=201)
         except GoalRefused as exc:
             return _error(409, str(exc))
         except Exception as exc:
             return failed("creating a goal", exc)
+        return await changed_answer(made, "creating a goal", status=201)
 
     def action(name: str, model: type[_Body], call: Callable[[GoalStore, UUID, Any], Awaitable[Goal]]) -> Route:
         """``POST /goals/{ref}/<name>``: the body as ``model``, the goal looked up (404), then ``call`` (409 on a
-        refusal), answered with the goal's detail."""
+        refusal), answered with the goal's detail (``changed_answer``)."""
 
         async def run(request: Request) -> Response:
             if not goals:
@@ -494,11 +519,11 @@ def build_goal_routes(*, database: Any, settings: Any, goals: GoalStore | None, 
                 if goal is None:
                     return _no_goal(ref)
                 changed = await call(goals, goal.id, body)
-                return JSONResponse(await detail(changed))
             except GoalRefused as exc:
                 return _error(409, str(exc))
             except Exception as exc:
                 return failed(name, exc)
+            return await changed_answer(changed, name)
 
         run.__name__ = f"goal_{name.replace('-', '_')}"
         path = f"/goals/{{ref}}/{name}"

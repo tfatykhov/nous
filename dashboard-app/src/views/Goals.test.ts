@@ -217,6 +217,20 @@ describe('Goals: the actions', () => {
     expect(within(region).getByText('Sessions are not being started on this server yet.')).toBeTruthy();
   });
 
+  it('a change answered with reload shows its result and reads the goal again', async () => {
+    handlers['POST /goals/G-0001/pause'] = () => {
+      details['G-0001'] = { ...details['G-0001'], state: 'paused', pause_reason: 'owner', actions: ['resume', 'cancel'] };
+      return [200, { enabled: true, reload: true, id: 'a', ref: 'G-0001', title: A.title, state: 'paused', pause_reason: 'owner', pending_request: null }];
+    };
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    const before = calls.filter((c) => c.url.startsWith('/goals/G-0001') && c.method === 'GET').length;
+    await fireEvent.click(within(region).getByRole('button', { name: 'Pause' }));
+    expect(await within(region).findByText('Paused: no new session starts. A session already running finishes.')).toBeTruthy();
+    expect(calls.filter((c) => c.url.startsWith('/goals/G-0001') && c.method === 'GET').length).toBeGreaterThan(before);
+    expect(within(region).getByText('Paused by you')).toBeTruthy();
+  });
+
   it('pause acts at once', async () => {
     acting('G-0001', 'pause', { state: 'paused', pause_reason: 'owner', actions: ['resume', 'budget', 'deadline', 'note', 'cancel'] });
     render(Goals);

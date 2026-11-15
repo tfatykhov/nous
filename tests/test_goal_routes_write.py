@@ -369,3 +369,37 @@ async def test_the_app_mounts_the_goal_routes_over_the_store_it_builds_when_goal
     assert [row["id"] for row in listed.json()["goals"]] == [made.json()["id"]]
     approved = await send(app, "POST", f"/goals/{made.json()['ref']}/approve", headers=OWNER)
     assert (approved.status_code, approved.json()["state"]) == (200, "active")
+
+
+@pytest.mark.parametrize("path", ["pause", "create"])
+async def test_a_change_that_was_made_is_200_with_reload_when_reading_it_back_fails(
+    db, monkeypatch, caplog, path: str
+) -> None:
+    """The change committed, then reading the goal back failed: the caller is told what the store returned and to
+    reload, never a 500 for a change that was made."""
+    env = make_env(db)
+    goal = await active(env.store)
+
+    async def broken(*_args, **_kwargs):
+        raise RuntimeError("secret text")
+
+    monkeypatch.setattr(env.store, "sessions", broken)
+    caplog.set_level(logging.DEBUG)
+    if path == "create":
+        response = await env.call("POST", "/goals", json={**NEW, "origin_channel": CHAN})
+        assert response.status_code == 201
+        made = await env.store.get(response.json()["id"])
+        assert made is not None and made.state == "draft"
+        assert response.json() == {
+            "enabled": True, "reload": True, "id": str(made.id), "ref": format_short_id(made.short_id),
+            "title": NEW["title"], "state": "draft", "pause_reason": None, "pending_request": None,
+        }
+    else:
+        response = await env.call("POST", f"/goals/{goal.id}/pause")
+        assert response.status_code == 200
+        assert response.json()["reload"] is True
+        assert (response.json()["state"], response.json()["pause_reason"]) == ("paused", "owner")
+        assert (await reread(env.store, goal)).state == "paused"
+    assert any("reading the goal back failed (RuntimeError)" in record.getMessage() for record in caplog.records)
+    assert not any("secret text" in record.getMessage() for record in caplog.records)
+    assert "secret text" not in response.text
