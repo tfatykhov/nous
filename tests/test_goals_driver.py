@@ -726,6 +726,40 @@ async def test_a_session_whose_root_id_was_not_written_is_repaired(env_factory, 
     assert repaired.root_id == root_id and repaired.ended_at is None
 
 
+async def test_a_reopened_root_past_its_deadline_no_longer_holds_the_goal(env_factory):  # noqa: F811
+    """A late result reopens a closed root only until its deadline (then the TTL sweep ends it): an earlier
+    session's root holds the next start while it is open and its deadline has not passed, never after."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, _session_row = await _started(w, goal)
+    await _finish(w, root)
+    assert (await w.driver.tick()).closed == 1
+    await record(w.env, root)  # reopened
+    await set_intention(w.env, root.id, deadline=datetime.now(UTC) - timedelta(minutes=1))
+    await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
+    assert len((await w.driver.tick()).started) == 1
+
+
+async def test_a_session_whose_root_row_is_missing_is_closed_interrupted(env_factory):  # noqa: F811
+    w = await _world(env_factory)
+    goal = await _active(w)
+    async with w.db.session() as s:
+        s.add(
+            GoalSession(
+                agent_id=w.agent,
+                goal_id=goal.id,
+                n=1,
+                trigger="timer",
+                first_subtask_id=uuid.uuid4(),
+                root_id=uuid.uuid4(),  # no intention has this id
+            )
+        )
+        await s.commit()
+    assert (await w.driver.tick()).closed == 1
+    (session,) = await _sessions(w, goal)
+    assert (session.outcome, session.spent) == ("interrupted", 0)
+
+
 async def test_spent_of_a_recently_closed_session_is_re_read(env_factory):  # noqa: F811
     w = await _world(env_factory)
     goal = await _active(w)
@@ -836,6 +870,28 @@ async def test_more_than_fifty_reports_are_all_journalled(env_factory):  # noqa:
         await _goal_report(w, goal, body=f"report {i}")
     assert (await w.driver.tick()).claimed == 60
     assert sorted(r.text for r in await _journal(w, goal, "report")) == sorted(f"report {i}" for i in range(60))
+
+
+async def test_the_claim_leaves_another_agents_row_on_the_same_channel_alone(env_factory):  # noqa: F811
+    w = await _world(env_factory)
+    goal = await _active(w)
+    await _goal_report(w, goal, body="mine")
+    other = f"goals-other-{uuid.uuid4().hex[:8]}"
+    async with w.db.session() as s:
+        theirs = await continuation.insert_inbox_row(
+            s,
+            other,
+            source_kind=continuation.SOURCE_INTENTION_REPORT,
+            source_id=uuid.uuid4(),
+            msg_type="REPORT",
+            title="Update",
+            body="theirs",
+            channel=f"goal:{goal.id}",  # the same channel string, another agent
+        )
+        await s.commit()
+    assert (await w.driver.tick()).claimed == 1
+    assert [r.text for r in await _journal(w, goal, "report")] == ["mine"]
+    assert (await _inbox(w, theirs)).delivered_at is None
 
 
 async def test_a_crash_between_claim_and_journal_loses_no_report(env_factory, monkeypatch):  # noqa: F811
