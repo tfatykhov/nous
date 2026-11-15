@@ -12,17 +12,24 @@ would be indistinguishable from one that was never attempted.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
 import uuid
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select, text
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import delete, select, text, update
 
-from nous.a2ui.actions import ActionRouter
+from nous.a2ui.actions import OWNER_PROOF_TEXT, ActionRouter
 from nous.a2ui.builders import action_review, approval_gate, heartbeat_findings
+from nous.a2ui.builders.memory_write_health import ACK_ACTION
 from nous.a2ui.service import SurfaceService
+from nous.api.rest import create_app
+from nous.audits import AUDIT_VERDICT_ACTION
 from nous.storage.models import A2uiAction, A2uiSurface
 
 pytestmark = pytest.mark.postgres_only
@@ -311,6 +318,7 @@ async def test_nonce_is_accepted_on_both_channels(
             context={"optionId": "cancel"},
         ),
         content_type=JSON,
+        owner_verified=True,
     )
 
     assert status == 200, payload
@@ -379,6 +387,7 @@ async def test_censor_abort_blocks_a_mutating_action(
     status, payload = await router.handle(
         _body("approval.choose", surface_id, nonce=nonce, context={"optionId": "cancel"}),
         content_type=JSON,
+        owner_verified=True,
     )
 
     assert status == 403
@@ -434,6 +443,7 @@ async def test_approval_choose_completes_patches_and_resolves(
             source_component_id="opt_0",
         ),
         content_type=JSON,
+        owner_verified=True,
     )
 
     assert status == 200
@@ -748,7 +758,7 @@ async def test_handler_exception_is_a_500_not_a_silent_success(
     async def _explode(ctx: Any) -> Any:
         raise RuntimeError("boom")
 
-    router.register("approval.defer", _explode, mutating=False)
+    router.register("approval.defer", _explode, mutating=False, owner_proof=False)
     surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
     nonce = (await _surface_row(db, surface_id)).nonce
 
@@ -810,6 +820,7 @@ async def test_approval_choose_rejects_an_option_that_was_never_offered(
             context={"optionId": "rm_-rf_everything"},
         ),
         content_type=JSON,
+        owner_verified=True,
     )
 
     assert status == 422
@@ -838,6 +849,7 @@ async def test_audit_reads_source_component_id_from_the_action_object(
             source_component_id="opt_0",
         ),
         content_type=JSON,
+        owner_verified=True,
     )
 
     assert status == 200
@@ -867,8 +879,8 @@ async def test_overlapping_terminal_actions_dispatch_exactly_once(
     )
 
     results = await asyncio.gather(
-        router.handle(body, content_type=JSON),
-        router.handle(body, content_type=JSON),
+        router.handle(body, content_type=JSON, owner_verified=True),
+        router.handle(body, content_type=JSON, owner_verified=True),
     )
     statuses = sorted(status for status, _ in results)
 
@@ -942,3 +954,254 @@ async def test_censor_sees_prohibited_text_past_the_first_chunk(
     assert status == 403
     assert payload["error"]["code"] == "CENSORED"
     assert len(heart.chunks) > 1
+
+
+# ---------------------------------------------------------------------------
+# The owner's proof: five verbs require it
+# ---------------------------------------------------------------------------
+
+GATED = ["approval.choose", "intention.approve", "intention.reject", "intention.answer", "intention.cancel"]
+OWNER_VALUE = "owner-only-test-value"
+PROXY_VALUE = "proxy-only-test-value"
+
+
+def _owner_settings(a2ui_settings, **over: Any):
+    return a2ui_settings.model_copy(
+        update={
+            "a2ui_enabled": True,
+            "owner_route_secret_sha256": hashlib.sha256(OWNER_VALUE.encode()).hexdigest(),
+            "mcp_client_ui_secret_sha256": hashlib.sha256(PROXY_VALUE.encode()).hexdigest(),
+            **over,
+        }
+    )
+
+
+async def _all_gated_card(db, service: SurfaceService) -> tuple[str, str]:
+    """A live approval card that offers every gated verb (and defer): ``(surface_id, nonce)``. With no continuation
+    runner and an option nobody offered, every verb that reaches its handler fails there and leaves the card up."""
+    surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
+    async with db.session() as session:
+        await session.execute(
+            update(A2uiSurface)
+            .where(A2uiSurface.surface_id == surface_id)
+            .values(allowed_actions=[*GATED, "approval.defer"])
+        )
+        await session.commit()
+    return surface_id, (await _surface_row(db, surface_id)).nonce
+
+
+def _action_app(db, settings, service: SurfaceService, router: ActionRouter):
+    stand_in = SimpleNamespace()
+    return create_app(
+        stand_in, stand_in, stand_in, stand_in, db, settings, surface_service=service, action_router=router
+    )
+
+
+async def _post_action(app, body: dict, headers: dict[str, str]):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        return await client.post("/a2ui/action", content=json.dumps(body).encode(), headers=headers)
+
+
+async def test_a_verb_that_needs_the_owners_proof_is_refused_without_it(
+    router: ActionRouter, service: SurfaceService, db, a2ui_agent_id: str
+) -> None:
+    surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, payload = await router.handle(
+        _body("approval.choose", surface_id, nonce=nonce, context={"optionId": "cancel"}), content_type=JSON
+    )
+
+    assert status == 403
+    assert payload["error"]["code"] == "OWNER_PROOF_REQUIRED"
+    assert payload["error"]["message"] == OWNER_PROOF_TEXT
+    audits = await _audits(db, a2ui_agent_id)
+    assert [(a.action_name, a.status) for a in audits] == [("approval.choose", "rejected")]
+    assert (await _surface_row(db, surface_id)).status == "live", "the card stays"
+
+
+async def test_the_same_verb_with_the_proof_runs(router: ActionRouter, service: SurfaceService, db) -> None:
+    surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, payload = await router.handle(
+        _body("approval.choose", surface_id, nonce=nonce, context={"optionId": "cancel"}),
+        content_type=JSON,
+        owner_verified=True,
+    )
+
+    assert status == 200, payload
+    assert (await _surface_row(db, surface_id)).status == "resolved"
+
+
+async def test_a_stale_nonce_is_still_a_nonce_mismatch_without_the_proof(
+    router: ActionRouter, service: SurfaceService
+) -> None:
+    surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
+    status, payload = await router.handle(
+        _body("approval.choose", surface_id, nonce="stale", context={"optionId": "cancel"}), content_type=JSON
+    )
+    assert (status, payload["error"]["code"]) == (403, "NONCE_MISMATCH")
+
+
+async def test_a_verb_that_needs_no_proof_runs_without_it(router: ActionRouter, service: SurfaceService, db) -> None:
+    surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+    status, _ = await router.handle(_body("approval.defer", surface_id, nonce=nonce), content_type=JSON)
+    assert status == 200
+
+
+def test_a_verb_registered_without_saying_fails(router: ActionRouter) -> None:
+    async def fn(ctx: Any) -> Any:
+        return None
+
+    with pytest.raises(TypeError):
+        router.register("x.y", fn, mutating=False)  # type: ignore[call-arg]
+
+
+async def test_a_rejected_device_token_has_its_own_code(router: ActionRouter, service: SurfaceService, db) -> None:
+    surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+    status, payload = await router.handle(
+        _body("approval.choose", surface_id, nonce=nonce, context={"optionId": "cancel"}),
+        content_type=JSON,
+        owner_verified=False,
+        refusal="device_token_rejected",
+    )
+    assert (status, payload["error"]["code"]) == (403, "DEVICE_TOKEN_REJECTED")
+    assert (await _surface_row(db, surface_id)).status == "live"
+
+
+def test_every_verb_says_whether_it_needs_the_owners_proof(router: ActionRouter) -> None:
+    expected = dict.fromkeys(GATED, True) | dict.fromkeys(
+        [
+            "approval.defer",
+            "review.acknowledge",
+            "review.course_correct",
+            "review.make_rule",
+            "review.revert",
+            "heartbeat.acknowledge",
+            "heartbeat.resolve",
+            "heartbeat.dismiss",
+            "heartbeat.close_card",
+            "decision.resolve",
+            "dag.retry",
+            "dag.cancel",
+            AUDIT_VERDICT_ACTION,
+            ACK_ACTION,
+            "app.close",
+            "app.act",
+        ],
+        False,
+    )
+    assert {name: meta.owner_proof for name, meta in router._handlers.items()} == expected
+    assert len(expected) == 21
+
+
+async def test_a_gated_verb_through_the_real_route_and_router_with_no_header_is_refused(
+    db, a2ui_settings, service: SurfaceService
+) -> None:
+    settings = _owner_settings(a2ui_settings)
+    app = _action_app(db, settings, service, ActionRouter(db, settings, service))
+    surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+    body = _body("approval.choose", surface_id, nonce=nonce, context={"optionId": "cancel"})
+
+    bare = await _post_action(app, body, {"content-type": JSON})
+    smuggled = await _post_action(
+        app, body, {"content-type": "text/plain; application/json", "X-Nous-Proxy-Secret": PROXY_VALUE}
+    )
+
+    for response in (bare, smuggled):
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "OWNER_PROOF_REQUIRED"
+    assert (await _surface_row(db, surface_id)).status == "live"
+
+
+PROOFS = [
+    ({"content-type": JSON}, "OWNER_PROOF_REQUIRED"),
+    ({"content-type": JSON, "X-Nous-Owner-Secret": OWNER_VALUE}, "handler"),
+    ({"content-type": JSON, "X-Nous-Proxy-Secret": PROXY_VALUE}, "handler"),
+    ({"content-type": "application/json; charset=utf-8", "X-Nous-Proxy-Secret": PROXY_VALUE}, "handler"),
+    ({"content-type": "text/plain; application/json", "X-Nous-Proxy-Secret": PROXY_VALUE}, "OWNER_PROOF_REQUIRED"),
+    ({"content-type": "text/plain", "X-Nous-Proxy-Secret": PROXY_VALUE}, "UNSUPPORTED_MEDIA_TYPE"),
+    ({"content-type": JSON, "X-Nous-Owner-Secret": "a-wrong-value"}, "OWNER_PROOF_REQUIRED"),
+    ({"content-type": JSON, "X-Nous-Device-Token": "a-device-token"}, "OWNER_PROOF_REQUIRED"),
+]
+PROOF_IDS = ["none", "owner", "proxy-json", "proxy-json-charset", "proxy-smuggled", "proxy-text", "wrong", "device"]
+
+
+@pytest.mark.parametrize("verb", GATED)
+@pytest.mark.parametrize(("headers", "outcome"), PROOFS, ids=PROOF_IDS)
+async def test_each_gated_verb_through_the_real_route_against_each_proof(
+    db, a2ui_settings, service: SurfaceService, a2ui_agent_id: str, verb: str, headers: dict, outcome: str
+) -> None:
+    """Through ``create_app``'s route and the real router. "handler" means the gate let the verb through to its
+    handler, which refuses it on its own terms (no continuation runner; an option nobody offered) and leaves the
+    card up: a 422 ``ACTION_FAILED`` whose audit row carries the handler's reason."""
+    settings = _owner_settings(a2ui_settings)
+    app = _action_app(db, settings, service, ActionRouter(db, settings, service))
+    surface_id, nonce = await _all_gated_card(db, service)
+    context = {"optionId": "never-offered"} if verb == "approval.choose" else {}
+
+    response = await _post_action(app, _body(verb, surface_id, nonce=nonce, context=context), headers)
+
+    code = response.json()["error"]["code"]
+    if outcome == "handler":
+        assert (response.status_code, code) == (422, "ACTION_FAILED"), response.json()
+        audits = await _audits(db, a2ui_agent_id)
+        assert [(a.action_name, a.status) for a in audits] == [(verb, "rejected")]
+        reason = audits[0].rejection_reason
+        assert "not offered" in reason if verb == "approval.choose" else reason == "continuation is not running"
+    elif outcome == "UNSUPPORTED_MEDIA_TYPE":
+        assert (response.status_code, code) == (415, outcome)
+    else:
+        assert (response.status_code, code) == (403, outcome)
+    assert (await _surface_row(db, surface_id)).status == "live"
+
+
+async def test_the_route_takes_no_rate_slot_of_its_own(
+    db, a2ui_settings, service: SurfaceService, a2ui_agent_id: str
+) -> None:
+    """One action is one slot of the action limiter, counted by the router alone: with a limit of three, a refused
+    call, an accepted one and one carrying a device header all reach the router, and only the fourth is a 429. A
+    route that also took a slot (for a device lookup, say) would make the second or third call a 429."""
+    settings = _owner_settings(a2ui_settings, a2ui_action_rate_per_minute=3)
+    app = _action_app(db, settings, service, ActionRouter(db, settings, service))
+    surface_id, nonce = await _all_gated_card(db, service)
+    body = _body("approval.choose", surface_id, nonce=nonce, context={"optionId": "never-offered"})
+
+    refused = await _post_action(app, body, {"content-type": JSON})
+    accepted = await _post_action(app, body, {"content-type": JSON, "X-Nous-Owner-Secret": OWNER_VALUE})
+    device = await _post_action(app, body, {"content-type": JSON, "X-Nous-Device-Token": "a-device-token"})
+    fourth = await _post_action(app, body, {"content-type": JSON, "X-Nous-Owner-Secret": OWNER_VALUE})
+
+    assert [r.json()["error"]["code"] for r in (refused, accepted, device)] == [
+        "OWNER_PROOF_REQUIRED",
+        "ACTION_FAILED",
+        "OWNER_PROOF_REQUIRED",
+    ]
+    assert (fourth.status_code, fourth.json()["error"]["code"]) == (429, "RATE_LIMITED")
+    assert len(await _audits(db, a2ui_agent_id)) == 3
+
+
+async def test_no_log_record_carries_a_secret_on_the_action_route(
+    db, a2ui_settings, service: SurfaceService, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    settings = _owner_settings(a2ui_settings)
+    app = _action_app(db, settings, service, ActionRouter(db, settings, service))
+    surface_id, nonce = await _all_gated_card(db, service)
+    body = _body("approval.choose", surface_id, nonce=nonce, context={"optionId": "never-offered"})
+    wrong = {"X-Nous-Owner-Secret": "a-wrong-value", "X-Nous-Proxy-Secret": "another-wrong-value"}
+
+    codes = [
+        (await _post_action(app, body, {"content-type": JSON, **headers})).json()["error"]["code"]
+        for headers in (wrong, {"X-Nous-Owner-Secret": OWNER_VALUE}, {"X-Nous-Proxy-Secret": PROXY_VALUE})
+    ]
+
+    assert codes == ["OWNER_PROOF_REQUIRED", "ACTION_FAILED", "ACTION_FAILED"]
+    for record in caplog.records:
+        text = record.getMessage() + repr(record.args)
+        for value in (OWNER_VALUE, PROXY_VALUE, "a-wrong-value", "another-wrong-value"):
+            assert value not in text

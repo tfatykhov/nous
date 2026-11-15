@@ -58,7 +58,7 @@ from nous.api.companion_assets import OverlayStaticFiles
 from nous.api.execution_context import ExecutionContext
 from nous.api.intention_routes import build_intention_routes
 from nous.api.models import Attachment
-from nous.api.owner_guard import OwnerGuard
+from nous.api.owner_guard import CARD_DECISION, OwnerGuard
 from nous.api.runner import AgentRunner
 from nous.brain import Brain, continuation, intentions
 from nous.brain.intentions import IntentionSpec
@@ -3759,8 +3759,15 @@ def create_app(
                 or request.headers.get("x-forwarded-email")
                 or "unattributed"
             )
+        # Every call reaches the router; a verb registered with owner_proof=True needs the owner's or the proxy's
+        # secret (a proxy-only call also needs the media type exactly application/json).
+        owner_verified, refusal = await owner_guard.decide(request, CARD_DECISION)
         status_code, payload = await router.handle(
-            body, content_type=request.headers.get("content-type", ""), actor=actor
+            body,
+            content_type=request.headers.get("content-type", ""),
+            actor=actor,
+            owner_verified=owner_verified,
+            refusal=refusal,
         )
         return JSONResponse(payload, status_code=status_code)
 
