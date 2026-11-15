@@ -347,8 +347,9 @@ class GoalStore:
             return await self._apply(s, goal, ("active",), values, actor=actor, note="Asked for a session now.")
 
     async def raise_budget(self, ref: GoalRef, *, total: int | None = None, day: int | None = None, actor: str) -> Goal:
-        """New total and/or day budget for a draft, active or paused goal, within the table's ranges. The total
-        cannot go below what the goal has already spent."""
+        """New total and/or day budget for a draft, active or paused goal, within the table's ranges. A lowered
+        total cannot go below what the goal has already spent; a raised one may stay under it (a chain can
+        overshoot its goal's total)."""
         _owner_only(actor, "change a goal's budget")
         async with self._locked(ref) as (s, goal, now):
             if goal.state not in LIVE_STATES:
@@ -365,11 +366,12 @@ class GoalStore:
                 validate(new)
             except EnvelopeError as exc:
                 raise GoalRefused(str(exc)) from exc
-            spent = await self._spent(s, goal.id)
-            if new.total_budget < spent:
-                raise GoalRefused(
-                    f"{describe(goal)}: {spent} tokens are already spent; the total cannot be lower than that"
-                )
+            if new.total_budget < old.total_budget:  # only a lowered total is checked: a raise moves the right way
+                spent = await self._spent(s, goal.id)
+                if new.total_budget < spent:
+                    raise GoalRefused(
+                        f"{describe(goal)}: {spent} tokens are already spent; the total cannot be lowered below that"
+                    )
             values = {"total_budget": new.total_budget, "day_budget": new.day_budget}
             note = (
                 f"Budget: total {old.total_budget} -> {new.total_budget} tokens, "

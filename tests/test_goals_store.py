@@ -563,3 +563,16 @@ async def test_a_huge_extension_is_a_refusal_not_an_overflow(db):
         with pytest.raises(GoalRefused, match="90"):
             await store.extend_deadline(goal.id, days=days, actor="host")
     assert (await store.get(goal.id)).deadline_at == goal.deadline_at
+
+
+async def test_after_an_overshoot_the_budget_may_still_move_the_right_way(db):
+    store = _store(db)
+    goal = await _active(store)  # total 2,000,000, day 500,000
+    await _open_session(store, goal, spent=2_300_000)  # a chain overshot the total
+    day_only = await store.raise_budget(goal.id, day=600_000, actor="host")  # the total is not touched
+    assert (day_only.total_budget, day_only.day_budget) == (2_000_000, 600_000)
+    raised = await store.raise_budget(goal.id, total=2_200_000, actor="host")  # up, though still under spent
+    assert raised.total_budget == 2_200_000
+    with pytest.raises(GoalRefused, match="already spent"):
+        await store.raise_budget(goal.id, total=2_100_000, actor="host")  # down, below what is spent
+    assert (await store.get(goal.id)).total_budget == 2_200_000

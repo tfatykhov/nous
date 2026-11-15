@@ -139,3 +139,18 @@ async def test_a_state_change_between_the_read_and_the_update_is_refused(db, mon
     after = await store.get(goal.id)
     assert (after.state, after.pending_request) == ("active", None)  # rolled back, the injected change too
     assert len(await _state_rows(db, goal)) == count
+
+
+async def test_a_change_that_waited_on_the_lock_is_stamped_after_the_lock(db):
+    """The store's time is read after the row lock, not at its transaction's start (``now()``): a change that
+    waited behind another transaction is stamped after that transaction let the row go."""
+    store = _store(db)
+    goal = await _active(store)
+    async with db.session() as holding:
+        await holding.execute(select(Goal).where(Goal.id == goal.id).with_for_update())
+        waiting = asyncio.create_task(store.request_run_now(goal.id, actor="host"))
+        await _wait_for_a_waiter_on_goals(db)
+        released_at = (await holding.execute(text("SELECT clock_timestamp()"))).scalar_one()
+        await holding.commit()
+    asked = await waiting
+    assert asked.pending_request_at >= released_at
