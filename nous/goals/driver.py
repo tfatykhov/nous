@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Text, and_, cast, delete, exists, func, or_, select, text, update
+from sqlalchemy import ColumnElement, Text, and_, cast, delete, exists, func, or_, select, text, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -61,6 +61,8 @@ SESSION_NOTE_LABEL = "Note written by the session:"  # marks the chain's words i
 # How long before a session's close a question or an answer may have been written and still be journalled after
 # it (the close journals what it sees; a row it could not see was written in a transaction open across the close).
 QUESTIONS_BEFORE_CLOSE = timedelta(hours=1)
+# Closed sessions the restart catch-up reads per tick (``refresh_sessions``).
+CATCH_UP_BATCH = 200
 ANSWER_PREFIX_PATTERN = f"{continuation.ANSWER_CORRELATION_PREFIX}%"
 
 # The goal channel's claim: every undelivered row on it is stamped and returned in one statement, with the session
@@ -145,9 +147,10 @@ class GoalDriver:
         self._agent_id = store.agent_id
         self._failures: dict[UUID, int] = {}  # failed starts in a row, per goal (in memory: a restart resets it)
         # Closed sessions whose spend is read again at the next tick: closed since, or with lineage work whose
-        # usage is not settled yet (``refresh_sessions``). In memory; the first tick after a start catches up.
+        # usage is not settled yet (``refresh_sessions``). In memory; the first ticks after a start catch up.
         self._following: set[UUID] = set()
         self._caught_up = False
+        self._catch_up_after: tuple[datetime, UUID] | None = None  # the last closed session the catch-up read
         self._task: asyncio.Task | None = None
         self._running = False
 
@@ -918,11 +921,13 @@ class GoalDriver:
 
         Why a flag in memory rather than a time window: each tick reads only the open sessions, those whose root's
         deadline has not passed and the followed ones, all a handful, and checks unsettled work only over their
-        roots. After a restart the flags are gone, so the first tick also reads, once, every session closed within
-        ``intention_root_ttl_hours`` and every closed session whose lineage still has unsettled work, whatever its
-        age: work that settled while no driver ran is counted then. Within a tick, whether a closed session's work
-        has settled is read BEFORE its spend (and its questions), and the session is dropped only on that earlier
-        read: what is stored between the reads is in this tick's read, or the session stays followed one more tick.
+        roots. After a restart the flags are gone, and no age of a close proves its spend final (a worker may have
+        stored its tokens while no driver ran), so the first ticks after a start read EVERY closed session once:
+        ``CATCH_UP_BATCH`` a tick, newest close first, each batch as one set (one settled read, one tally of all its
+        roots, one read of their questions); the catch-up is done when a batch comes back short. A crash midway
+        starts it over. Within a tick, whether a closed session's work has settled is read BEFORE its spend (and
+        its questions), and the session is dropped only on that earlier read: what is stored between the reads is
+        in this tick's read, or the session stays followed one more tick.
 
         A closed session's root can resume (a late result reopens it), and its chain can then ask the owner and get
         an answer after the close journalled the session's questions: every tick, the questions and answers of the
@@ -932,9 +937,6 @@ class GoalDriver:
         reasons = [GoalSession.ended_at.is_(None), root.deadline > func.clock_timestamp()]
         if self._following:
             reasons.append(GoalSession.id.in_(sorted(self._following)))
-        if not self._caught_up:
-            window = timedelta(hours=float(self._settings.intention_root_ttl_hours))
-            reasons.append(GoalSession.ended_at > func.clock_timestamp() - window)
         columns = (
             GoalSession.id,
             GoalSession.goal_id,
@@ -951,14 +953,24 @@ class GoalDriver:
         changed = 0
         async with self._db.session() as s:
             rows = {r.id: r for r in (await s.execute(query)).all()}
+            batch: list[Any] = []
             if not self._caught_up:
-                unsettled_anywhere = select(*columns).where(
-                    GoalSession.agent_id == self._agent_id,
-                    GoalSession.ended_at.is_not(None),
-                    GoalSession.root_id.is_not(None),
-                    self._has_unsettled_work(GoalSession.root_id),
+                batch_query = (
+                    select(*columns)
+                    .where(
+                        GoalSession.agent_id == self._agent_id,
+                        GoalSession.ended_at.is_not(None),
+                        GoalSession.root_id.is_not(None),
+                    )
+                    .order_by(GoalSession.ended_at.desc(), GoalSession.id.desc())
+                    .limit(CATCH_UP_BATCH)
                 )
-                for r in (await s.execute(unsettled_anywhere)).all():
+                if self._catch_up_after is not None:
+                    batch_query = batch_query.where(
+                        tuple_(GoalSession.ended_at, GoalSession.id) < tuple_(*self._catch_up_after)
+                    )
+                batch = list((await s.execute(batch_query)).all())
+                for r in batch:
                     rows.setdefault(r.id, r)
             # Settled or not is read BEFORE the spend: when this read finds a closed session's work settled, every
             # token of it was stored before the spend read below, which is then final. Read the other way round,
@@ -993,7 +1005,11 @@ class GoalDriver:
                 asked = await self._new_questions_and_answers(s, [r for r in rows.values() if r.ended_at is not None])
             await s.commit()
         self._following = {r.id for r in rows.values() if r.ended_at is not None and r.root_id in unsettled_roots}
-        self._caught_up = True
+        if not self._caught_up:
+            if len(batch) < CATCH_UP_BATCH:
+                self._caught_up, self._catch_up_after = True, None
+            else:
+                self._catch_up_after = (batch[-1].ended_at, batch[-1].id)
         for session_id in asked:
             try:
                 await self._reconcile_questions_and_answers(session_id)

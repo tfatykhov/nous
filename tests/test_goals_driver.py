@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from f099_dashboard_support import put_intention
 from f099_support import (
     CHAN,
     CONT,
@@ -1052,6 +1053,121 @@ async def test_after_a_restart_the_first_tick_reads_a_session_whose_subtask_sett
     await _add_tokens(w, subtask_id, 1000)
     await restarted.tick()
     assert (await _session(w, session.id)).spent == 77
+
+
+async def _close_long_ago(w: SimpleNamespace, session_id: uuid.UUID) -> None:
+    """Move a session's close back past the root TTL: the time since the close says nothing about its spend."""
+    hours = w.env.settings.intention_root_ttl_hours + 24
+    async with w.db.session() as s:
+        await s.execute(
+            update(GoalSession)
+            .where(GoalSession.id == session_id)
+            .values(ended_at=GoalSession.ended_at - timedelta(hours=hours))
+        )
+        await s.commit()
+
+
+async def test_after_a_restart_long_after_the_close_the_first_tick_counts_usage_stored_meanwhile(
+    env_factory,  # noqa: F811
+):
+    """The session closed; its worker stored its final tokens while no driver ran; the restart comes long after
+    the root's TTL. The first tick reads every closed session once, so the tokens are counted."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    subtask_id = await _end_root_while_its_subtask_runs(w, root, "expired")
+    assert (await w.driver.tick()).closed == 1
+    await _settle(w, subtask_id, tokens_in=70, tokens_out=7)  # the work is settled before the restart
+    await _close_long_ago(w, session.id)
+    restarted = GoalDriver(w.db, w.env.settings, w.env.heart, w.store, FakeRunner())
+    await restarted.tick()
+    assert (await _session(w, session.id)).spent == 77
+    assert session.id not in restarted._following
+
+
+async def test_after_a_restart_a_question_a_resumed_chain_asked_while_no_driver_ran_is_journalled(
+    env_factory,  # noqa: F811
+):
+    """While no driver ran, a late result reopened a closed session's root, the chain asked, the owner answered and
+    the chain ended; the restart comes long after. The catch-up reads the session's questions too."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    await _finish(w, root)
+    assert (await w.driver.tick()).closed == 1
+    await record(w.env, root)  # no driver runs from here
+    asked = await commit_ask(w.env, await claim(w.env, root.id), "Keep the drafts?")
+    async with w.db.session() as s:
+        await continuation.record_answer(
+            s,
+            w.agent,
+            await _question_id(w, asked.arrival_id),
+            text="No, drop them.",
+            actor="telegram:42",
+            settings=w.env.settings,
+        )
+        await s.commit()
+    await set_intention(
+        w.env, root.id, state="closed", close_reason="resolved", deadline=datetime.now(UTC) - timedelta(days=4)
+    )
+    await _close_long_ago(w, session.id)
+    restarted = GoalDriver(w.db, w.env.settings, w.env.heart, w.store, FakeRunner())
+    await restarted.tick()
+    assert [q.text for q in await _journal(w, goal, "question")] == ["Keep the drafts?"]
+    assert [a.text for a in await _journal(w, goal, "answer")] == ["No, drop them."]
+
+
+async def test_the_restart_catch_up_reads_every_closed_session_once_in_batches_across_ticks(
+    env_factory,  # noqa: F811
+    monkeypatch,
+):
+    w = await _world(env_factory)
+    goal = await _active(w)
+    await w.store.pause(goal.id, actor="host")  # nothing new starts: only the old sessions are read
+    monkeypatch.setattr(driver_module, "CATCH_UP_BATCH", 3)
+    roots_by_session: dict[uuid.UUID, uuid.UUID] = {}
+    async with w.db.session() as s:
+        now = (await s.execute(select(func.clock_timestamp()))).scalar_one()
+    long_ago = now - timedelta(hours=w.env.settings.intention_root_ttl_hours + 24)
+    for i in range(1, 8):
+        root = await put_intention(w.env, state="closed", deadline=now - timedelta(days=5))
+        await add_arrival(w.env, root.id, 1, tokens=(10 * i, i))  # stored after the session's last read
+        async with w.db.session() as s:
+            row = GoalSession(
+                agent_id=w.agent,
+                goal_id=goal.id,
+                n=i,
+                trigger="timer",
+                first_subtask_id=uuid.uuid4(),
+                root_id=root.id,
+                started_at=long_ago - timedelta(hours=1),
+                ended_at=long_ago - timedelta(minutes=i),
+                outcome="no_step",
+                spent=0,
+            )
+            s.add(row)
+            await s.commit()
+            roots_by_session[row.id] = root.id
+    read_spend, tallied = spend.session_spent, []
+
+    async def counting(s, agent_id, root_ids):
+        tallied.extend(root_ids)
+        return await read_spend(s, agent_id, root_ids)
+
+    monkeypatch.setattr(spend, "session_spent", counting)
+    reconciled = []
+    for _tick in range(4):
+        await w.driver.tick()
+        rows = [await _session(w, session_id) for session_id in roots_by_session]
+        reconciled.append(sum(1 for row in rows if row.spent > 0))
+        if _tick < 2:
+            assert w.driver._caught_up is False
+    assert reconciled == [3, 6, 7, 7]  # newest first, three a tick, then done
+    assert w.driver._caught_up is True
+    for session_id, root_id in roots_by_session.items():
+        assert tallied.count(root_id) == 1  # each read once
+        n = (await _session(w, session_id)).n
+        assert (await _session(w, session_id)).spent == 11 * n
 
 
 async def test_after_a_restart_an_old_closed_session_with_a_subtask_still_running_is_followed(
