@@ -94,14 +94,39 @@ def test_plan_steps_are_framed_and_escaped_like_journal_entries():
 def test_the_task_never_exceeds_12000_characters():
     goal = _goal(title="T" * 200, objective="O" * 4000, done_when="D" * 2000)
     plan = [{"id": f"s{i}", "text": "p" * 300, "status": "open", "evidence": ["e" * 300] * 3} for i in range(20)]
-    notes = [_row(i, "n" * 1500, kind="owner_note", actor="owner") for i in range(30)]
+    notes = [_row(i, f"note {i:02d} " + "n" * 1490, kind="owner_note", actor="owner") for i in range(30)]
     others = [_row(100 + i, "r" * 1500) for i in range(30)]
     text = _task(goal=goal, plan=plan, rows=[*others, *notes])
     assert len(text) <= MAX_TASK_CHARS == 12_000
     assert "O" * 4000 in text and "D" * 2000 in text  # the charter is never cut
-    assert "<plan_step " in text  # the journal is cut first, then the older steps
-    assert '<plan_step id="s19"' in text and '<plan_step id="s0"' not in text
-    assert "older plan steps not shown" in text
+    assert '<journal_entry kind="report"' not in text  # the others go first
+    assert "<plan_step " not in text and "20 older open plan steps not shown" in text  # then the open steps
+    assert "note 29 " in text and "note 00 " not in text  # the owner's newest notes go last
+
+
+def test_closed_steps_and_their_evidence_go_before_an_owner_note():
+    goal = _goal(title="T" * 200, objective="O" * 4000, done_when="D" * 2000)
+    plan = [
+        {"id": f"s{i}", "text": "c" * 120, "status": "closed", "closed_session": 1, "evidence": ["e" * 300] * 3}
+        for i in range(20)
+    ]
+    note = _row(1, "Only the notes folder, never the archive.", kind="owner_note", actor="owner")
+    text = _task(goal=goal, plan=plan, rows=[note])
+    assert len(text) <= MAX_TASK_CHARS
+    assert "Only the notes folder, never the archive." in text
+    assert '<plan_step id="s19" status="closed">' in text  # the steps stay, the oldest steps' evidence went
+    assert '<plan_step id="s0" status="closed">\n' + "c" * 120 + "\n</plan_step>" in text
+    assert "evidence of" in text and "not shown" in text
+
+
+def test_an_open_step_outlasts_a_closed_one():
+    goal = _goal(title="T" * 200, objective="O" * 4000, done_when="D" * 2000)
+    closed = [{"id": f"c{i}", "text": "c" * 300, "status": "dropped"} for i in range(15)]
+    plan = [{"id": "next", "text": "Merge the second pair.", "status": "open"}, *closed]  # the open step is oldest
+    text = _task(goal=goal, plan=plan, rows=[_row(1, "r" * 1500) for _ in range(4)])
+    assert len(text) <= MAX_TASK_CHARS
+    assert '<plan_step id="next" status="open">' in text
+    assert "closed or dropped plan steps not shown" in text
 
 
 def test_a_charter_alone_over_the_cap_is_refused_not_cut():
