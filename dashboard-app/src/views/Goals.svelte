@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { Button } from '../lib/ui/button';
   import { makePollStore } from '../lib/stores/registry';
   import { usePoll } from '../lib/poll';
@@ -100,6 +100,17 @@
     return first ? { kind: 'goal', ref: first.ref } : { kind: 'new' };
   });
   let paneRef = $derived(pane.kind === 'goal' ? pane.ref : null);
+
+  // One column: the list and the pane replace each other, so a click would leave the focus on nothing. It goes to
+  // what came into view: the pane, or the list.
+  let lastSub: string | null = null;
+  $effect(() => {
+    const now = sub;
+    const moved = lastSub !== null && lastSub !== now;
+    lastSub = now;
+    if (!moved || !untrack(() => narrow)) return;
+    void tick().then(() => (document.getElementById('goal-pane') ?? document.getElementById('goal-list'))?.focus());
+  });
 
   // The pane's goal is read with the list: a new one is fetched at once, and its journal starts at the newest rows.
   $effect(() => {

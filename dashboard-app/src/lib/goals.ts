@@ -314,7 +314,6 @@ export function intervalText(seconds: number): string {
 /** When the next session is, in words; '' when the state word already says it. */
 export function nextSessionText(goal: Pick<GoalRow, 'state' | 'pause_reason' | 'open_session' | 'next_wake_at' | 'pending_request'>, now: number = Date.now()): string {
   if (goal.open_session !== null) return `Session ${goal.open_session} running`;
-  if (goal.state === 'paused' && goal.pause_reason === 'waiting_for_owner') return 'Waiting for you';
   if (goal.state === 'draft') return 'Not approved yet';
   if (goal.state !== 'active') return '';
   if (goal.pending_request === 'run_now') return 'A session was asked for';

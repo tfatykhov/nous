@@ -165,7 +165,7 @@ describe('time words', () => {
     expect(nextSessionText(goalRow({ next_wake_at: hours(2) }), NOW)).toBe('Next session in 2 hours');
     expect(nextSessionText(goalRow({ next_wake_at: hours(-1) }), NOW)).toBe('Next session due now');
     expect(nextSessionText(goalRow({ open_session: 3 }), NOW)).toBe('Session 3 running');
-    expect(nextSessionText(goalRow({ state: 'paused', pause_reason: 'waiting_for_owner' }), NOW)).toBe('Waiting for you');
+    expect(nextSessionText(goalRow({ state: 'paused', pause_reason: 'waiting_for_owner' }), NOW)).toBe(''); // the state word says it
     expect(nextSessionText(goalRow({ state: 'draft' }), NOW)).toBe('Not approved yet');
     expect(deadlineText(goalRow({ deadline_at: hours(24 * 6) }), NOW)).toBe('Deadline in 6 days');
     expect(deadlineText(goalRow({ deadline_at: hours(-1) }), NOW)).toBe('Deadline passed');

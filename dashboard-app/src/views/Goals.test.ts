@@ -414,6 +414,7 @@ describe('Goals: one column', () => {
     go('#/goals/g/G-0001');
     await pane('Tidy the notes');
     expect(screen.getByRole('link', { name: 'All goals' }).getAttribute('href')).toBe('#/goals');
+    await waitFor(() => expect(document.activeElement?.id).toBe('goal-pane')); // the focus follows what came into view
   });
 });
 

@@ -159,8 +159,10 @@
     cancel: 'Yes, cancel the goal',
   };
 
-  /** The actions that move a goal forward: drawn filled; the rest are outlined. */
-  const PRIMARY = new Set<Action>(['approve', 'resume', 'confirm-done']);
+  /** The action that moves a goal forward is drawn filled, the rest outlined. Waiting for the owner, that is Confirm
+   * done, not "Not done yet". */
+  const primary = (action: Action) =>
+    action === 'approve' || action === 'confirm-done' || (action === 'resume' && goal.pause_reason !== 'waiting_for_owner');
   const label = (action: Action) => (action === 'resume' ? resumeLabel(goal) : ACTION_TEXT[action].label);
   const sessionLength = (start: string | null, end: string | null) =>
     start && end ? spanText(new Date(end).getTime() - new Date(start).getTime()) : start ? 'running' : '';
@@ -196,7 +198,7 @@
       <div class="actions">
         {#each buttons as action (action)}
           <Button id={buttonId(action)} data-action={action} size="sm"
-            variant={PRIMARY.has(action) ? 'default' : 'outline'}
+            variant={primary(action) ? 'default' : 'outline'}
             class="max-md:min-h-11 max-md:px-4 {action === 'cancel' ? 'hover:border-[var(--err-text)] hover:text-[var(--err-text)]' : ''}"
             disabled={busy !== null} aria-expanded={asksFirst(action) ? confirming === action : undefined}
             onclick={() => void press(action)}>
@@ -406,18 +408,18 @@
   .fill { display: block; height: 100%; border-radius: 999px; background: var(--action); }
   .fill.full { background: var(--warn-text); }
   .steps, .sessions, .journal, .refs { list-style: none; margin: 0; padding: 0; }
-  .steps li, .sessions li, .journal li { padding: 0.5rem 0; border-top: 1px solid var(--border); font-size: 0.8125rem; min-width: 0; }
-  .steps li:first-child, .sessions li:first-child, .journal li:first-child { border-top: 0; }
+  .steps > li, .sessions > li, .journal > li { padding: 0.5rem 0; border-top: 1px solid var(--border); font-size: 0.8125rem; min-width: 0; }
+  .steps > li:first-child, .sessions > li:first-child, .journal > li:first-child { border-top: 0; }
   .step-state { font-size: 0.75rem; color: var(--muted); }
   .step-closed .text { color: var(--muted); }
   .refs { display: flex; flex-wrap: wrap; gap: 0.25rem 0.5rem; margin-top: 0.25rem; }
   .refs code { font-family: var(--font-mono); font-size: 0.75rem; overflow-wrap: anywhere; }
-  .sessions li { display: grid; grid-template-columns: 5.5rem repeat(3, minmax(0, 1fr)); gap: 0.25rem 0.75rem; align-items: baseline; }
+  .sessions > li { display: grid; grid-template-columns: 5.5rem repeat(3, minmax(0, 1fr)); gap: 0.25rem 0.75rem; align-items: baseline; }
   .session-n { font-weight: 600; }
   .summary { grid-column: 1 / -1; }
   .summary summary { cursor: pointer; color: var(--muted); font-size: 0.75rem; border-radius: var(--radius-sm); }
   .summary p { margin: 0.25rem 0 0; }
-  .journal li.own { background: var(--info-bg); border-radius: var(--radius-sm); padding: 0.5rem 0.625rem; border-top-color: transparent; }
+  .journal > li.own { background: var(--info-bg); border-radius: var(--radius-sm); padding: 0.5rem 0.625rem; border-top-color: transparent; }
   .journal-head { display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; font-size: 0.75rem; color: var(--muted); }
   .kind { font-weight: 600; color: var(--text); }
   .journal p { margin: 0.25rem 0 0; }
@@ -426,7 +428,7 @@
   @media (max-width: 768px) {
     .facts { grid-template-columns: minmax(0, 1fr); gap: 0.125rem; }
     .facts dd { margin-bottom: 0.375rem; }
-    .sessions li { grid-template-columns: minmax(0, 1fr); }
+    .sessions > li { grid-template-columns: minmax(0, 1fr); }
     .summary summary { line-height: 2.75rem; }
   }
 </style>
