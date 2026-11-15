@@ -429,6 +429,38 @@ async def test_stop_conditions_run_before_a_run_now(env_factory):  # noqa: F811
     assert (after.state, after.pause_reason, after.pending_request) == ("paused", "budget", None)
 
 
+async def test_a_start_is_held_by_the_total_budget_under_the_goal_lock(env_factory):  # noqa: F811
+    """A start called directly (no stop-condition step before it) reads the total budget under the goal lock: spent to
+    the token holds it, one token under starts."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    (session,) = await _closed(w, goal, ["step_closed"], spent=goal.total_budget)
+    await _set_goal(w, goal, day_budget=1, sessions_per_day=24)  # the day's budget is not what holds it
+    async with w.db.session() as s:  # yesterday's session: today's budget is free
+        await s.execute(
+            update(GoalSession)
+            .where(GoalSession.id == session.id)
+            .values(started_at=func.clock_timestamp() - timedelta(days=1))
+        )
+        await s.commit()
+    assert await w.driver.start_session(goal.id, trigger="run_now") is None
+    assert len(await _sessions(w, goal)) == 1
+    async with w.db.session() as s:
+        await s.execute(update(GoalSession).where(GoalSession.id == session.id).values(spent=goal.total_budget - 1))
+        await s.commit()
+    assert await w.driver.start_session(goal.id, trigger="run_now") is not None
+
+
+async def test_a_start_is_held_by_the_deadline_under_the_goal_lock(env_factory):  # noqa: F811
+    w = await _world(env_factory)
+    goal = await _active(w)
+    await _set_goal(w, goal, deadline_at=func.clock_timestamp() - timedelta(milliseconds=1))
+    assert await w.driver.start_session(goal.id, trigger="run_now") is None
+    assert await _sessions(w, goal) == []
+    await _set_goal(w, goal, deadline_at=func.clock_timestamp() + timedelta(minutes=5))
+    assert await w.driver.start_session(goal.id, trigger="run_now") is not None
+
+
 # ---- stuck sessions ----------------------------------------------------------------------------------------------
 
 
