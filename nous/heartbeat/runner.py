@@ -1627,7 +1627,7 @@ class HeartbeatRunner:
         sibling_cancelled = False
         outcome: dict[str, bool] = {}
         outcome_token = RUN_OUTCOME.set(outcome)
-        epoch = background_halt.current().epoch
+        epoch = background_halt.turn_epoch()
         try:
             with background_halt.epoch_scope(epoch):
                 result = await asyncio.wait_for(check.run(), timeout=check.timeout)

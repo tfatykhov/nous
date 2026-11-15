@@ -383,7 +383,7 @@ class DAGResultDelivery:
         # delivery generation -- a retry_node re-announces deliberately -- scope
         # the idempotency keys of every send this turn and its subtasks make.
         session_id = f"{SUMMARY_SESSION_PREFIX}{dag.id.hex}-g{dag.delivery_generation}"
-        epoch = background_halt.current().epoch  # Goals PR 0c: the turn's start
+        epoch = background_halt.turn_epoch()  # Goals PR 0c: the turn's start
         try:
             with background_halt.epoch_scope(epoch):
                 result = await asyncio.wait_for(

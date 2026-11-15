@@ -1959,6 +1959,17 @@ class AgentRunner:
         self._api = None
 
     async def run_turn(
+        self, session_id: str, user_message: str, *args: Any, **kwargs: Any
+    ) -> tuple[str, TurnContext, dict[str, int]]:
+        """Execute a single conversational turn (``_run_turn``, which documents the arguments).
+
+        Goals PR 0c: the turn's halt epoch is taken here, before its first await, so a halt that lands during any
+        part of the turn (its pre-turn work included) is seen by every check of the turn. An epoch the caller
+        already set (the work that claimed the turn) is kept."""
+        with background_halt.epoch_scope(background_halt.turn_epoch()):
+            return await self._run_turn(session_id, user_message, *args, **kwargs)
+
+    async def _run_turn(
         self,
         session_id: str,
         user_message: str,
@@ -2900,6 +2911,10 @@ class AgentRunner:
         if not self._dispatcher:
             raise RuntimeError("No tool dispatcher set -- call set_dispatcher() first")
 
+        # Goals PR 0c: the turn's halt epoch, taken before the first await and kept in a local (each __anext__ of
+        # this generator runs in a fresh context). It reaches _authorize_tool_call through epoch_scope around that
+        # synchronous call only.
+        _turn_epoch = background_halt.turn_epoch()
         _agent_id = agent_id or self._settings.agent_id
         # stream_chat serves REST /chat/stream only — a person is in the loop.
         _ctx = ExecutionContext(kind="interactive", session_id=session_id, channel=channel)
@@ -3180,9 +3195,6 @@ class AgentRunner:
             _f071_exclude = _build_exclude_ids(self._settings, turn_context)
             if _f071_exclude is not None:
                 CURRENT_TURN_EXCLUDE_IDS.set(_f071_exclude)
-            # Goals PR 0c: a local, for the same reason (each __anext__ runs in a fresh context). It reaches
-            # _authorize_tool_call through epoch_scope around that synchronous call only.
-            _turn_epoch = background_halt.turn_epoch()
             try:
                 for turn in range(self._settings.max_turns):
                     # Goals PR 0c: a halted background-session stream makes no further model call; the turn row and

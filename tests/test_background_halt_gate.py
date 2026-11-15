@@ -422,3 +422,39 @@ async def test_the_hardened_executor_is_unchanged_with_no_halt():
     assert result.ok and not state.halted
     heart.subtasks.complete.assert_awaited_once()
     heart.subtasks.cancel.assert_not_awaited()
+
+
+# ---- the epoch is taken at the turn's entry ---------------------------------------------------------------------
+
+
+async def test_a_halt_and_a_resume_inside_the_pre_turn_work_leave_a_run_turn_refused(runner_env):  # noqa: F811
+    env = await runner_env()  # no model step: a model call would fail the test
+    halt = _install()
+    original = env.cognitive.pre_turn
+
+    async def pre_turn_spanning_a_halt(*args, **kwargs):
+        await halt.halt(actor="t", surface="dashboard")
+        assert (await halt.resume(actor="t", via="dashboard")).changed
+        return await original(*args, **kwargs)
+
+    env.cognitive.pre_turn = pre_turn_spanning_a_halt
+    ctx = ExecutionContext(kind="heartbeat_triage", session_id="heartbeat-1")
+    text, _ctx, _usage = await env.runner.run_turn("heartbeat-1", "look", is_background=True, context=ctx)
+    assert not halt.halted and text == background_halt.HALT_TURN_TEXT and env.model.calls == []
+
+
+async def test_a_halt_and_a_resume_inside_the_pre_turn_work_leave_a_background_session_stream_refused():
+    halt = _install()
+    runner = _stream_runner()
+    turn_context = runner._cognitive.pre_turn.return_value
+
+    async def pre_turn_spanning_a_halt(*args, **kwargs):
+        await halt.halt(actor="t", surface="dashboard")
+        assert (await halt.resume(actor="t", via="dashboard")).changed
+        return turn_context
+
+    runner._cognitive.pre_turn = AsyncMock(side_effect=pre_turn_spanning_a_halt)
+    runner._call_api_stream = MagicMock(side_effect=AssertionError("no model call"))
+    events = await _pump(runner.stream_chat("claude-job-2", "the job finished"))
+    texts = [e.text for e in events if e.type == "text_delta"]
+    assert texts == [background_halt.HALT_TURN_TEXT] and not runner._call_api_stream.called
