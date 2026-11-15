@@ -431,13 +431,15 @@ class GoalStore:
             return goal
 
     async def delay_wake(self, goal_id: UUID, *, seconds: int, seen: datetime | None) -> bool:
-        """Move an active goal's next wake to ``seconds`` from now, only if it is still ``seen``: the wake the
-        caller read before deciding to delay. A wake someone set since (``add_note`` or ``resume`` set it to now)
-        is kept, and so is a goal paused or finished meanwhile. True when the wake moved."""
+        """Move an active goal's next wake to ``seconds`` from now, never earlier than it is, only if it is still
+        ``seen``: the wake the caller read before deciding to delay. A wake someone set since (``add_note`` or
+        ``resume`` set it to now) is kept, and so is a goal paused or finished meanwhile. A wake already later than
+        ``seconds`` from now stays where it is (a failed run-now must not bring the next timer session forward).
+        True when the update matched."""
         if seconds < 0:
             raise GoalRefused("a wake can only be delayed, not moved back")
         async with self._db.session() as s:
-            at = func.clock_timestamp() + timedelta(seconds=seconds)
+            at = func.greatest(Goal.next_wake_at, func.clock_timestamp() + timedelta(seconds=seconds))
             changed = await self._wake(s, goal_id, at, if_seen=True, seen=seen)
             await s.commit()
             return changed
