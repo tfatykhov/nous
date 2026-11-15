@@ -36,7 +36,7 @@ from uuid import UUID, uuid4
 from nous import background_halt, cancel_provenance
 from nous.api.call_outcome import CallOutcome
 from nous.api.call_outcome import _current as _outcome_var  # the one setter (harness 2b)
-from nous.api.execution_context import ExecutionContext, resolve_context
+from nous.api.execution_context import ExecutionContext, is_background_session, resolve_context
 from nous.api.tool_classes import mcp_tool_background
 from nous.api.tool_policy import INTERNAL_ONLY_LOGGED_TOOLS, lineage_runs_build, lineage_runs_runner
 from nous.brain import continuation, intentions
@@ -652,6 +652,10 @@ class ToolDispatcher:
                 # bash's longer default timeout would outlast a short turn, which would then
                 # be cancelled before the call returned its output or its timeout error.
                 args = {**args, "_long_timeout": not ctx.is_short_turn}
+                # Goals PR 0c: a background turn's command is tracked, so a halt can signal it. Not a chat turn's,
+                # and not an owner-approved call's.
+                background = ctx.kind != "approved_action" and (ctx.is_background or is_background_session(session_id))
+                args = {**args, "_background": background}
             if name in ("bash", "dag_manage"):
                 # Who a cancel belongs to (cancel_provenance): the agent's own turn, or the owner for an
                 # approved proposal. Set from the context, so the model cannot name another actor. bash

@@ -62,7 +62,7 @@ from uuid import UUID
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
-from nous import background_halt, cancel_provenance
+from nous import background_halt, background_processes, cancel_provenance
 from nous.brain.intentions import stamp_is_internal
 from nous.config import Settings
 from nous.dag._workspace import assert_inside_root, compute_workspace_path
@@ -2358,6 +2358,7 @@ class DAGOrchestrator:
                     # command and not only the /bin/sh that started it.
                     start_new_session=True,
                 )
+            tracked = background_processes.track(proc)  # Goals PR 0c: a halt signals it
             try:
                 stdout, stderr = await asyncio.wait_for(
                     proc.communicate(), timeout=_CHECK_CMD_TIMEOUT,
@@ -2378,6 +2379,8 @@ class DAGOrchestrator:
                 # must not outlive it.
                 await kill_process_group(proc, even_if_exited=True)
                 raise
+            finally:
+                background_processes.release(tracked)
 
             if proc.returncode == 0:
                 return CheckResult("success")

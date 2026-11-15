@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from nous import undo_journal
+from nous import background_processes, undo_journal
 from nous.api import tool_policy
 from nous.api.call_outcome import current_outcome
 from nous.api.commitment_routes import OWNER_SECRET_ENV
@@ -177,6 +177,7 @@ async def bash_tool(
     _actor: dict | None = None,
     _gh_repo: str = "",
     _lineage_runner: bool = True,
+    _background: bool = False,
 ) -> dict[str, Any]:
     """Execute a shell command in the workspace directory.
 
@@ -202,6 +203,8 @@ async def bash_tool(
             runner.sh (tool_policy.lineage_runs_runner), whose Claude Code job
             would inherit GH_REPO, so it gets none. True unless dispatch says
             otherwise
+        _background: Set by dispatch for a background turn (Goals PR 0c): the
+            command's process group is tracked, so a halt can signal it
 
     Returns:
         MCP-format response with stdout + stderr
@@ -227,11 +230,13 @@ async def bash_tool(
             # whole command (``a; b``, pipelines), not only the /bin/sh parent.
             start_new_session=True,
         )
+        tracked = background_processes.track(proc) if _background else None
 
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=effective_timeout)
         except TimeoutError:
             await kill_process_group(proc)
+            background_processes.release(tracked)
             # The first sentence is matched as is (ledger_store._BASH_TIMEOUT,
             # compaction, monitor): add to it, never reword it.
             if effective_timeout < _MAX_BASH_TIMEOUT:
@@ -246,7 +251,9 @@ async def bash_tool(
             # The calling turn was cancelled (e.g. its heartbeat check was
             # disabled by the DAG mid-run): don't leave the command running.
             await kill_process_group(proc)
+            background_processes.release(tracked)
             raise
+        background_processes.release(tracked)  # kept while a child it detached is still in its group
 
         # Decode and truncate
         stdout_text = stdout.decode("utf-8", errors="replace")
@@ -1022,6 +1029,7 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
         _long_timeout: bool = False,
         _actor: dict | None = None,
         _lineage_runner: bool = True,
+        _background: bool = False,
     ) -> dict[str, Any]:
         return await bash_tool(
             command,
@@ -1033,6 +1041,7 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
             _actor=_actor,
             _gh_repo=gh_repo,
             _lineage_runner=_lineage_runner,
+            _background=_background,
         )
 
     async def _read_file(path: str, offset: int = 0, limit: int = 0) -> dict[str, Any]:
