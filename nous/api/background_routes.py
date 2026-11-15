@@ -2,9 +2,11 @@
 
 - ``GET /background/state``: whether background work is halted, since when, by whom, and whether the halt is saved.
 - ``POST /background/halt``: halts at once and runs the cancel sweep. No secret: stopping is the safe direction.
-- ``POST /background/resume``: needs the owner route secret (``X-Nous-Owner-Secret``, the Telegram bot's) or the
-  login proxy's (``X-Nous-Proxy-Secret``). This process holds only their SHA-256 digests, compared in constant time.
-  With neither digest set, every resume is refused (fail closed). Refused under the host's hold.
+- ``POST /background/resume``: needs the owner route secret (``X-Nous-Owner-Secret`` against
+  ``NOUS_OWNER_ROUTE_SECRET_SHA256``, the Telegram bot's) or the login proxy's (``X-Nous-Proxy-Secret`` against
+  ``NOUS_MCP_CLIENT_UI_SECRET_SHA256``, the digest the MCP client routes read). This process holds only the SHA-256
+  digests, compared in constant time. With neither digest set, every resume is refused (fail closed). Refused under
+  the host's hold.
 
 Both POST routes take only the media type ``application/json`` (415 otherwise), so a cross-site page cannot send them
 through the owner's browser as a simple request. Answers are fixed vocabulary plus counts; header values are never
@@ -34,7 +36,7 @@ RESUMED_TEXT = (
 )
 NOT_HALTED_TEXT = "Background work is not halted."
 NOT_CONFIGURED_TEXT = (
-    "Resume is not configured on this server: set NOUS_OWNER_ROUTE_SECRET_SHA256 or NOUS_PROXY_SECRET_SHA256."
+    "Resume is not configured on this server: set NOUS_OWNER_ROUTE_SECRET_SHA256 or NOUS_MCP_CLIENT_UI_SECRET_SHA256."
 )
 _SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
 _NO_STORE = {"Cache-Control": "no-store"}
@@ -69,12 +71,10 @@ def _present(component: Any) -> Any:
 def build_background_routes(*, settings: Any, sweeper: Any = None, continuation_runner: Any = None) -> list[Route]:
     """The three routes, over the process's installed halt (``background_halt.current()``)."""
     owner_digest = _digest(getattr(settings, "owner_route_secret_sha256", ""))
-    proxy_digest = _digest(getattr(settings, "proxy_secret_sha256", "")) or _digest(
-        getattr(settings, "mcp_client_ui_secret_sha256", "")
-    )
+    proxy_digest = _digest(getattr(settings, "mcp_client_ui_secret_sha256", ""))
     if not owner_digest and not proxy_digest:
         logger.warning(
-            "Background halt: neither NOUS_OWNER_ROUTE_SECRET_SHA256 nor NOUS_PROXY_SECRET_SHA256 is set, so "
+            "Background halt: neither NOUS_OWNER_ROUTE_SECRET_SHA256 nor NOUS_MCP_CLIENT_UI_SECRET_SHA256 is set, so "
             "POST /background/resume refuses every call; a stored halt can then be cleared only on the host"
         )
 
@@ -107,8 +107,8 @@ def build_background_routes(*, settings: Any, sweeper: Any = None, continuation_
             report_body, text = report.as_dict(), report.describe()
         else:
             report_body, text = None, "Background work is halted."
-        if background_halt.clean_surface(body.get("surface")) in ("agent", "host"):
-            # Nobody is waiting on the answer: the owner gets the one message in their chat.
+        if outcome.announce:
+            # A halt from the agent or the host: nobody waits on the answer, so the owner gets the one message.
             await owner_notice.send_owner_text(settings, text)
         return JSONResponse(
             {

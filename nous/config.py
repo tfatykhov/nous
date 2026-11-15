@@ -2188,9 +2188,6 @@ class Settings(BaseSettings):
     # starts halted whatever the stored state says, and POST /background/resume answers 409 until it is cleared here
     # and the process restarts.
     background_halt: bool = False
-    # The hex SHA-256 of the secret the owner's login proxy adds as X-Nous-Proxy-Secret. POST /background/resume
-    # accepts it as well as the owner route secret. Empty: NOUS_MCP_CLIENT_UI_SECRET_SHA256 is used.
-    proxy_secret_sha256: str = ""
 
     action_gating_enabled: bool = True
     action_gating_mode: Literal["shadow", "warn", "enforce"] = "enforce"

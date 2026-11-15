@@ -232,3 +232,40 @@ def test_the_turn_epoch_scope_restores_the_outer_value():
         assert background_halt.TURN_EPOCH.get() == 3
     assert background_halt.TURN_EPOCH.get() is None
     assert background_halt.turn_epoch() == background_halt.current().epoch
+
+
+async def test_announce_false_records_and_gates_and_tells_the_caller_to_send_nothing():
+    store = FakeStore()
+    halt = make(store)
+    quiet = await halt.halt(actor="t", surface="agent", reason="r", announce=False)
+    assert halt.halted and halt.refuses("subtask", None, None)
+    assert [a.action for a in store.audits] == ["halt"] and store.row.halted
+    assert quiet.announce is False
+    assert (await halt.halt(actor="t", surface="agent")).announce is True
+    assert (await halt.halt(actor="t", surface="host")).announce is True
+    assert (await halt.halt(actor="t", surface="dashboard")).announce is False
+
+
+async def test_a_repeat_halt_writes_a_new_log_row_and_keeps_the_first_since():
+    store = FakeStore()
+    halt = make(store)
+    first = await halt.halt(actor="telegram:1", surface="telegram", reason="the bill")
+    since = halt.snapshot()["since"]
+    again = await halt.halt(actor="dashboard", surface="dashboard", reason="still the bill")
+    assert (first.already, again.already) == (False, True)
+    rows = [a for a in store.audits if a.action == "halt"]
+    assert [(r.actor, r.reason) for r in rows] == [("telegram:1", "the bill"), ("dashboard", "still the bill")]
+    snap = halt.snapshot()
+    assert (snap["since"], snap["by"], snap["reason"]) == (since, "telegram:1", "the bill")
+    assert store.row.halted_by == "telegram:1" and store.row.halted_at is not None
+
+
+async def test_persisted_is_known_right_after_the_first_write():
+    landed = await make(FakeStore()).halt(actor="t", surface="dashboard")
+    assert landed.persisted is True
+    store = FakeStore()
+    store.fail_writes = 1
+    halt = make(store, retry=60)
+    failed = await halt.halt(actor="t", surface="dashboard")
+    assert failed.persisted is False and halt.persisted is False and halt.snapshot()["persisted"] is False
+    await halt.close()

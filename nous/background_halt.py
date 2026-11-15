@@ -62,6 +62,9 @@ PROMPT_NOTE = (
 REFUSAL_CODE = "background_halt"
 
 SURFACES = ("dashboard", "telegram", "agent", "host")
+# A halt from these surfaces has nobody waiting on its answer, so its report goes to the owner's chat (unless the
+# caller passes announce=False).
+ANNOUNCED_SURFACES = frozenset({"agent", "host"})
 _ACTOR_MAX = 100
 _VIA_MAX = 40
 _REASON_MAX = 200
@@ -118,8 +121,12 @@ class HaltStore(Protocol):
 
 @dataclass(frozen=True)
 class HaltOutcome:
+    """What one ``halt()`` call did. ``persisted``: whether its first write landed (a failed one is retried).
+    ``announce``: whether the caller sends the halt's report to the owner's chat."""
+
     already: bool
     persisted: bool
+    announce: bool = False
 
 
 @dataclass(frozen=True)
@@ -219,7 +226,7 @@ class BackgroundHalt:
 
     def set_resume_sweep(self, sweep: Callable[[], Awaitable[Any]] | None) -> None:
         """What a resume runs, under the transition lock, before it writes: the cancel of any subtask or DAG left or
-        created since the halt's sweep, so clearing the flag starts none of it. Best effort. It runs under the
+        created since the halt's sweep, so nothing of it starts at the resume. Best effort. It runs under the
         transition lock, so it must not call ``halt`` or ``resume`` itself."""
         self._resume_sweep = sweep
 
@@ -250,11 +257,22 @@ class BackgroundHalt:
     # -- transitions ------------------------------------------------------------------------------------------
 
     async def halt(
-        self, *, actor: str | None, surface: str, reason: str | None = None, verified: bool = False
+        self,
+        *,
+        actor: str | None,
+        surface: str,
+        reason: str | None = None,
+        verified: bool = False,
+        announce: bool = True,
     ) -> HaltOutcome:
         """Halt: the flag and the epoch change at once, before any await; then the state and an audit row are
         written in one transaction. A failed write leaves the flag on and is retried every ``retry_seconds`` until
-        it lands or a newer transition supersedes it."""
+        it lands or a newer transition supersedes it; ``persisted`` (here and on the outcome) says at once whether
+        the first write landed.
+
+        A repeat while halted writes one more audit row with its own actor and reason, and keeps the first halt's
+        ``since``, ``by`` and ``reason`` in the state. ``announce=False``: recorded and enforced the same, and the
+        outcome tells the caller to send no owner message."""
         already = self.halted
         self._seq += 1
         seq = self._seq
@@ -272,7 +290,9 @@ class BackgroundHalt:
         landed = await self._write_halt(seq, audit, first=True)
         if not landed and self._seq == seq:
             self._start_retry(seq, audit)
-        return HaltOutcome(already=already, persisted=self._persisted)
+        return HaltOutcome(
+            already=already, persisted=self._persisted, announce=announce and surface_text in ANNOUNCED_SURFACES
+        )
 
     def _row(self) -> HaltRow:
         shown = self._shown

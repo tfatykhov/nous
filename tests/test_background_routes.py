@@ -51,7 +51,6 @@ class _Store:
 def _settings(**over):
     values = {
         "owner_route_secret_sha256": _sha(OWNER),
-        "proxy_secret_sha256": "",
         "mcp_client_ui_secret_sha256": _sha(PROXY),
         "telegram_bot_token": "",
         "telegram_chat_id": "",
@@ -141,14 +140,12 @@ async def test_resume_with_the_owner_or_the_proxy_secret_is_200(header):
     cont.wake.assert_called_once()
 
 
-async def test_the_proxy_digest_setting_wins_over_the_mcp_ui_one():
-    halt = _install()
-    await halt.halt(actor="t", surface="dashboard")
-    settings = _settings(proxy_secret_sha256=_sha("another-proxy-secret"))
-    async with _client(settings) as c:
-        old = await c.post("/background/resume", json={}, headers={"X-Nous-Proxy-Secret": PROXY})
-        new = await c.post("/background/resume", json={}, headers={"X-Nous-Proxy-Secret": "another-proxy-secret"})
-    assert old.status_code == 403 and new.status_code == 200
+def test_one_digest_per_secret():
+    """The proxy's secret is checked against the MCP client UI digest, the one setting for it."""
+    from nous.config import Settings
+
+    assert "proxy_secret_sha256" not in Settings.model_fields
+    assert {"owner_route_secret_sha256", "mcp_client_ui_secret_sha256"} <= set(Settings.model_fields)
 
 
 async def test_neither_digest_configured_refuses_every_resume_with_the_plain_reason(caplog):
