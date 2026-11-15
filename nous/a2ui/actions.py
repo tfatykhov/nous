@@ -29,6 +29,7 @@ from sqlalchemy import select, update
 
 from nous import cancel_provenance
 from nous.a2ui.intention_keys import KIND_ACTIVE, KIND_PROPOSAL, KIND_QUESTION, parse_key
+from nous.api.owner_guard import json_media_type
 from nous.audits import AUDIT_VERDICT_ACTION
 from nous.brain import continuation, intentions
 from nous.brain.intentions import IntentionSpec
@@ -200,7 +201,7 @@ class ActionRouter:
         calls write an audit row, censor their new content before pushing
         it, and self-lock their surface writes.
         """
-        if "application/json" not in (content_type or ""):
+        if not json_media_type(content_type):
             return 415, _fn_err("", "INVALID_FUNCTION_CALL", "Content-Type must be application/json")
 
         call = body.get("callAgentFunction") or {}
@@ -304,7 +305,7 @@ class ActionRouter:
         # Content-Type is the CSRF control here: no CORS middleware exists and
         # Request.json() never checks it, but a cross-origin simple request
         # cannot carry application/json without a preflight.
-        if "application/json" not in (content_type or ""):
+        if not json_media_type(content_type):
             return 415, _err("UNSUPPORTED_MEDIA_TYPE", "", "Content-Type must be application/json")
 
         action = body.get("action") or {}

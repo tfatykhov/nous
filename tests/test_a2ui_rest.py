@@ -455,8 +455,11 @@ _PROXY_VALUE = "proxy-only-test-value"
         ({"X-Nous-Owner-Secret": "a-wrong-value"}, False),
         ({"X-Nous-Proxy-Secret": "a-wrong-value"}, False),
         ({"X-Nous-Device-Token": "a-device-token"}, False),
+        # The route's own rule, whatever the router then checks: a proxy-only call that is not JSON proves nothing.
+        ({"X-Nous-Proxy-Secret": _PROXY_VALUE, "content-type": "text/plain; application/json"}, False),
+        ({"X-Nous-Owner-Secret": _OWNER_VALUE, "content-type": "text/plain; application/json"}, True),
     ],
-    ids=["none", "owner", "proxy", "wrong-owner", "wrong-proxy", "device-without-store"],
+    ids=["none", "owner", "proxy", "wrong-owner", "wrong-proxy", "device-without-store", "proxy-text", "owner-text"],
 )
 async def test_the_action_route_tells_the_router_whether_the_caller_proved_the_owner(
     brain, heart, cognitive, db, settings, fake_service, fake_router, headers: dict, verified: bool

@@ -211,6 +211,39 @@ async def test_non_json_content_type_is_refused(router: ActionRouter) -> None:
     assert payload["error"]["code"] == "UNSUPPORTED_MEDIA_TYPE"
 
 
+@pytest.mark.parametrize(
+    ("content_type", "accepted"),
+    [
+        ("application/json", True),
+        ("application/json; charset=utf-8", True),
+        ("Application/JSON", True),
+        ("text/plain; application/json", False),  # a type a page on another site can send with no preflight
+        ("text/plain;application/json", False),
+        ("application/json-patch+json", False),
+        ("", False),
+    ],
+)
+async def test_the_media_type_must_be_exactly_json(
+    router: ActionRouter, service: SurfaceService, db, content_type: str, accepted: bool
+) -> None:
+    """On /a2ui/action and /a2ui/call alike: the media type before any parameter is exactly application/json."""
+    surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, payload = await router.handle(_body("approval.defer", surface_id, nonce=nonce), content_type=content_type)
+    call_status, call_payload = await router.handle_call(
+        {"callAgentFunction": {"surfaceId": surface_id, "functionCallId": "f1", "callFunction": {"call": "nope"}}},
+        content_type=content_type,
+    )
+
+    if accepted:
+        assert status == 200, payload
+        assert call_status != 415, call_payload
+    else:
+        assert (status, payload["error"]["code"]) == (415, "UNSUPPORTED_MEDIA_TYPE")
+        assert call_status == 415, call_payload
+
+
 async def test_missing_action_fields_are_refused(router: ActionRouter) -> None:
     status, payload = await router.handle({"version": "v1.0", "action": {}}, content_type=JSON)
 
@@ -1120,9 +1153,9 @@ async def test_a_gated_verb_through_the_real_route_and_router_with_no_header_is_
         app, body, {"content-type": "text/plain; application/json", "X-Nous-Proxy-Secret": PROXY_VALUE}
     )
 
-    for response in (bare, smuggled):
-        assert response.status_code == 403
-        assert response.json()["error"]["code"] == "OWNER_PROOF_REQUIRED"
+    assert (bare.status_code, bare.json()["error"]["code"]) == (403, "OWNER_PROOF_REQUIRED")
+    # Not JSON: the router's own media-type check refuses it before the surface is read.
+    assert (smuggled.status_code, smuggled.json()["error"]["code"]) == (415, "UNSUPPORTED_MEDIA_TYPE")
     assert (await _surface_row(db, surface_id)).status == "live"
 
 
@@ -1131,7 +1164,7 @@ PROOFS = [
     ({"content-type": JSON, "X-Nous-Owner-Secret": OWNER_VALUE}, "handler"),
     ({"content-type": JSON, "X-Nous-Proxy-Secret": PROXY_VALUE}, "handler"),
     ({"content-type": "application/json; charset=utf-8", "X-Nous-Proxy-Secret": PROXY_VALUE}, "handler"),
-    ({"content-type": "text/plain; application/json", "X-Nous-Proxy-Secret": PROXY_VALUE}, "OWNER_PROOF_REQUIRED"),
+    ({"content-type": "text/plain; application/json", "X-Nous-Proxy-Secret": PROXY_VALUE}, "UNSUPPORTED_MEDIA_TYPE"),
     ({"content-type": "text/plain", "X-Nous-Proxy-Secret": PROXY_VALUE}, "UNSUPPORTED_MEDIA_TYPE"),
     ({"content-type": JSON, "X-Nous-Owner-Secret": "a-wrong-value"}, "OWNER_PROOF_REQUIRED"),
     ({"content-type": JSON, "X-Nous-Device-Token": "a-device-token"}, "OWNER_PROOF_REQUIRED"),
