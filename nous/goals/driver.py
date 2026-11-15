@@ -227,8 +227,10 @@ class GoalDriver:
     async def start_session(self, goal_id: UUID, *, trigger: str) -> UUID | None:
         """Start a session of an active goal: its root's id, or None when nothing started.
 
-        Transaction 1 takes the goal row ``FOR UPDATE``, re-reads that the goal is active and has no open session
-        and no open work left on an earlier session's root, and inserts the session row (its ``first_subtask_id``
+        Transaction 1 takes the goal row ``FOR UPDATE``, re-reads that the goal is active (and, for a ``timer``
+        start, that its wake has still come, by the database's clock: another tick may have started, ended and
+        rescheduled it since the due list was read) and has no open session and no open work left on an earlier
+        session's root, and inserts the session row (its ``first_subtask_id``
         drawn here, before the subtask exists) and commits; the partial unique index on open sessions is the final
         word against a second start (any other violation of the insert is a failed start). Then the first task is
         built and goes through the censor gate that every spawned task goes through, and the subtask and its root
@@ -252,6 +254,8 @@ class GoalDriver:
                 return None
             seen = goal.next_wake_at  # the wake as read under the lock (a rollback below expires the object)
             now = (await s.execute(select(func.clock_timestamp()))).scalar_one()
+            if trigger == "timer" and (seen is None or seen > now):
+                return None  # another tick started, ended and rescheduled it since the due list was read
             if await self._has_open_session(s, goal_id):
                 return None
             if await self._lineage_has_open_work(s, goal_id, now):

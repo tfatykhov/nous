@@ -207,6 +207,27 @@ async def test_any_other_violation_on_the_session_insert_is_a_failed_start(env_f
     assert w.driver._failures == {goal.id: 1}
 
 
+async def test_a_timer_start_rechecks_the_wake_under_the_goal_lock(env_factory):  # noqa: F811
+    """A goal listed as due can be started, finished and rescheduled by another tick before this one reaches it:
+    the timer start reads the wake again under the goal's lock and starts nothing when it is no longer due."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    assert goal.id in await w.driver._due_goals()
+    async with w.db.session() as other:
+        await other.execute(select(Goal).where(Goal.id == goal.id).with_for_update())
+        await other.execute(
+            update(Goal).where(Goal.id == goal.id).values(next_wake_at=func.clock_timestamp() + timedelta(hours=2))
+        )
+        starting = asyncio.create_task(w.driver.start_session(goal.id, trigger="timer"))
+        await _until_waiters(w, "brain.goals")
+        await other.commit()
+    assert await starting is None
+    assert await _sessions(w, goal) == [] and await _subtasks(w) == []
+    assert w.driver._failures == {}
+    assert not [r for r in await _journal(w, goal, "state") if r.actor == "harness"]
+    assert await w.driver.start_session(goal.id, trigger="run_now") is not None  # another trigger keeps its rule
+
+
 async def test_start_rechecks_state_under_the_goal_lock(env_factory):  # noqa: F811
     w = await _world(env_factory)
     goal = await _active(w)
@@ -356,6 +377,7 @@ async def test_a_censor_refusal_does_not_feed_the_next_start(env_factory):  # no
     assert await w.driver.start_session(goal.id, trigger="timer") is None
     assert w.driver._failures == {goal.id: 1}
     await _set_goal(w, goal, objective="Merge the duplicate notes")  # the owner takes the word out
+    await _set_goal(w, goal, next_wake_at=func.clock_timestamp())  # the refusal's delay has passed
     assert await w.driver.start_session(goal.id, trigger="timer") is not None  # the refusal's row does not refuse it
     assert w.driver._failures == {}
     refused = [r for r in await _journal(w, goal, "state") if r.actor == "harness"]
@@ -369,6 +391,7 @@ async def test_the_third_failed_start_in_a_row_pauses_the_goal_as_error(env_fact
     for attempt in (1, 2):
         assert await w.driver.start_session(goal.id, trigger="timer") is None
         assert (await w.store.get(goal.id)).state == "active" and w.driver._failures == {goal.id: attempt}
+        await _set_goal(w, goal, next_wake_at=func.clock_timestamp())  # the failure's delay has passed
     assert await w.driver.start_session(goal.id, trigger="timer") is None
     after = await w.store.get(goal.id)
     assert (after.state, after.pause_reason, after.next_wake_at) == ("paused", "error", None)
@@ -386,6 +409,7 @@ async def test_a_successful_start_resets_the_failure_count(env_factory, monkeypa
     assert await w.driver.start_session(goal.id, trigger="timer") is None
     assert w.driver._failures == {goal.id: 1}
     monkeypatch.undo()
+    await _set_goal(w, goal, next_wake_at=func.clock_timestamp())  # the failure's delay has passed
     assert await w.driver.start_session(goal.id, trigger="timer") is not None
     assert w.driver._failures == {}
 
