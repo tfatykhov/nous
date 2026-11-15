@@ -383,20 +383,22 @@ class DAGResultDelivery:
         # delivery generation -- a retry_node re-announces deliberately -- scope
         # the idempotency keys of every send this turn and its subtasks make.
         session_id = f"{SUMMARY_SESSION_PREFIX}{dag.id.hex}-g{dag.delivery_generation}"
+        epoch = background_halt.current().epoch  # Goals PR 0c: the turn's start
         try:
-            result = await asyncio.wait_for(
-                self._runner.run_turn(
-                    session_id=session_id,
-                    user_message=prompt,
-                    is_background=True,
-                    context=ExecutionContext(  # harness Phase 1a
-                        kind="dag_summary",
+            with background_halt.epoch_scope(epoch):
+                result = await asyncio.wait_for(
+                    self._runner.run_turn(
                         session_id=session_id,
-                        dag_id=dag.id,
+                        user_message=prompt,
+                        is_background=True,
+                        context=ExecutionContext(  # harness Phase 1a
+                            kind="dag_summary",
+                            session_id=session_id,
+                            dag_id=dag.id,
+                        ),
                     ),
-                ),
-                timeout=self._settings.dag_delivery_agent_summary_timeout_seconds,
-            )
+                    timeout=self._settings.dag_delivery_agent_summary_timeout_seconds,
+                )
         except TimeoutError:
             logger.warning(
                 "F087: agent summary timed out for DAG %s — using template",
@@ -416,6 +418,9 @@ class DAGResultDelivery:
                 None,
             )
 
+        if background_halt.current().refuses("dag_summary", session_id, epoch):
+            # Goals PR 0c: the halt ended the summary turn; its fixed text is not a summary. The template stands.
+            return LegResult("summary", ok=False, required=False, detail="halted"), None
         text = self._extract_text(result)
         if not text:
             return (

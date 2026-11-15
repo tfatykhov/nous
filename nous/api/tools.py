@@ -3938,6 +3938,10 @@ def create_subtask_tools(
                         ),
                         timeout=effective_timeout,
                     )
+                    if background_halt.current().halted:
+                        # Goals PR 0c: the halt ended this inline run; its row is cancelled, never completed.
+                        await heart.subtasks.cancel(subtask.id)
+                        return _tool_error(f"[Subtask {subtask.id.hex[:8]} blocked: {background_halt.HALT_REASON}]")
 
                     # F061 PR-1: record outcome on legacy path so dashboard rows
                     # are never NULL between PR-1 ship and PR-2 hardened-executor ship.

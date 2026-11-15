@@ -1294,6 +1294,12 @@ class ContinuationRunner:
                 # or was cut off returned no usage, so it is the one cost this cannot see.
                 await self._fail(claim, tokens=state.tokens)
                 return None
+            if background_halt.current().refuses("continuation", session_id, background_halt.TURN_EPOCH.get()):
+                # Goals PR 0c: the halt ended the turn. Nothing is committed (no fallback report of its fixed text):
+                # the claim is freed with no attempt charged, as for a stop, and the halt's sweep cancels the root.
+                logger.info("Background halt: the continuation of root %s ended by the halt", claim.root_id)
+                await self._release(claim)
+                return None
             # Read BEFORE the session ends: end_conversation pops the ledger.
             wrote_memory = any(
                 name in MEMORY_WRITE_TOOLS and status == "success"

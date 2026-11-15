@@ -1627,8 +1627,14 @@ class HeartbeatRunner:
         sibling_cancelled = False
         outcome: dict[str, bool] = {}
         outcome_token = RUN_OUTCOME.set(outcome)
+        epoch = background_halt.current().epoch
         try:
-            result = await asyncio.wait_for(check.run(), timeout=check.timeout)
+            with background_halt.epoch_scope(epoch):
+                result = await asyncio.wait_for(check.run(), timeout=check.timeout)
+            if not _code_only(check) and background_halt.current().refuses("heartbeat_check", None, epoch):
+                # Goals PR 0c: as in _tick, a run the halt reached is discarded, neither a success nor a failure.
+                run_succeeded = None
+                return CheckResult(skipped=True)
             # A skipped result means run() returned early because the check
             # was disabled at the execution boundary — no LLM turn ran.
             if result.skipped:

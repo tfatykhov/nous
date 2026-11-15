@@ -9,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from f099_support import RecordingBus, env_factory, inbox_rows  # noqa: F401
+from f099_support import RecordingBus, env_factory, inbox_rows, runner_env, say  # noqa: F401
 from sqlalchemy import select, update
 from test_f099_phase0b import _callback_check
 from test_f099_phase0b import _runner as _hb_runner
@@ -24,7 +24,7 @@ from nous.heart.subtasks import BackgroundHalted, SubtaskQueueFull
 from nous.heartbeat.checks import HealthCheck, SelfInitiatedCheck
 from nous.heartbeat.registry import CheckRegistry
 from nous.heartbeat.schemas import CheckResult, Finding
-from nous.storage.models import ExecutionDAG, Schedule, Subtask
+from nous.storage.models import ExecutionDAG, Intention, Schedule, Subtask
 
 GOOD_REPORT = {
     "summary": "Found 3 candidates matching the search criteria. Each was reviewed for fitness.",
@@ -377,3 +377,110 @@ async def test_agent_script_source_returns_halted():
     source = registry._fetchers["agent_script"]
     value = await source({"code": "print(1)", "shape": "series"})
     assert ran == [] and "halted" in str(value)
+
+
+# ---- every consumer of a background turn's text ------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_a_continuation_turn_the_halt_ended_commits_no_report_and_charges_no_attempt(runner_env):  # noqa: F811
+    from test_f099_phase2c_arrival import _arrivals, _cont, _owner_rows, _ready_root
+
+    halt = _install()
+
+    async def the_halt_lands_during_the_model_call(kwargs):
+        await halt.halt(actor="t", surface="dashboard")
+        return [say("I was going to report this.")]
+
+    env = await runner_env(the_halt_lands_during_the_model_call)
+    root = await _ready_root(env)
+    assert await _cont(env).run_arrival(root.id) is None
+    assert len(env.model.calls) == 1  # the follow-up turn made no model call
+    assert await _owner_rows(env) == []  # no fallback report of the fixed text
+    assert all(a.outcome is None for a in await _arrivals(env, root.id))
+    async with env.db.session() as s:
+        row = (await s.execute(select(Intention).where(Intention.id == root.id))).scalar_one()
+    assert row.attempts == 0 and row.claim_token is None  # released, as for a stop
+
+
+async def test_a_dag_summary_the_halt_cut_short_is_not_used():
+    from nous.dag.delivery import DAGResultDelivery
+
+    halt = _install()
+    delivery = DAGResultDelivery.__new__(DAGResultDelivery)
+    delivery._settings = SimpleNamespace(dag_delivery_agent_summary_timeout_seconds=5)
+    delivery._build_summary_prompt = MagicMock(return_value="summarise")
+    delivery._extract_text = MagicMock(side_effect=lambda result: result[0])
+
+    async def run_turn(**kwargs):
+        await halt.halt(actor="t", surface="dashboard")
+        return background_halt.HALT_TURN_TEXT, MagicMock(), {}
+
+    delivery._runner = SimpleNamespace(run_turn=run_turn)
+    dag = SimpleNamespace(id=uuid.uuid4(), delivery_generation=1)
+    leg, text = await delivery._leg_agent_summary(dag, "the template")
+    assert text is None and leg.detail == "halted"
+
+
+async def test_trigger_check_discards_a_run_the_halt_reached():
+    registry = CheckRegistry()
+    check = _callback_check("disk_watch")
+    halt = _install()
+
+    async def run_while_the_halt_lands():
+        await halt.halt(actor="t", surface="dashboard")
+        return CheckResult(has_updates=True, findings=[Finding(source="x", summary="y")])
+
+    check.run = AsyncMock(side_effect=run_while_the_halt_lands)
+    registry.register(check)
+    hb, _triage = _hb_runner(registry)
+    hb._record_run_stats = AsyncMock()
+    result = await hb.trigger_check("disk_watch")
+    assert result.skipped
+    hb._record_run_stats.assert_not_awaited()
+
+
+class _DagTickOrchestrator:
+    """A DAGOrchestrator with only what tick() touches stubbed."""
+
+    @staticmethod
+    def build(dags):
+        from nous.dag.orchestrator import DAGOrchestrator
+
+        orchestrator = DAGOrchestrator.__new__(DAGOrchestrator)
+        orchestrator._store = MagicMock()
+        orchestrator._store.get_active_dags = AsyncMock(return_value=dags)
+        orchestrator._lock = asyncio.Lock()
+        orchestrator._delivery_lock = MagicMock(locked=MagicMock(return_value=True))  # no delivery sweep task
+        orchestrator._sweep_leaked_approval_cards = AsyncMock()
+        orchestrator._sweep_leaked_heartbeat_checks = AsyncMock()
+        orchestrator._sweep_unclaimed_tokens = AsyncMock()
+        orchestrator._advance_dag = AsyncMock()
+        return orchestrator
+
+
+async def test_a_halted_dag_tick_reads_no_dag_and_advances_none():
+    dag = SimpleNamespace(id=uuid.uuid4(), nodes=[])
+    orchestrator = _DagTickOrchestrator.build([dag])
+    halt = _install()
+    await halt.halt(actor="t", surface="dashboard")
+    assert await orchestrator.tick() == 0
+    orchestrator._store.get_active_dags.assert_not_awaited()
+    orchestrator._advance_dag.assert_not_awaited()
+    orchestrator._sweep_leaked_heartbeat_checks.assert_awaited_once()  # the rest of the tick still runs
+    assert (await halt.resume(actor="t", via="dashboard")).changed
+    assert await orchestrator.tick() == 1
+    orchestrator._advance_dag.assert_awaited_once()
+
+
+async def test_a_halt_that_lands_during_a_dag_tick_stops_it_at_the_next_dag():
+    dags = [SimpleNamespace(id=uuid.uuid4(), nodes=[]) for _ in range(3)]
+    orchestrator = _DagTickOrchestrator.build(dags)
+    halt = _install()
+
+    async def advance(dag, may_start=True):
+        await halt.halt(actor="t", surface="dashboard")
+
+    orchestrator._advance_dag = AsyncMock(side_effect=advance)
+    await orchestrator.tick()
+    assert orchestrator._advance_dag.await_count == 1
