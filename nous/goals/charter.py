@@ -31,6 +31,12 @@ CLOSING = (
     "Put the result of the step in the final result of this task: what you did, what you found, and what the next "
     "step should be."
 )
+# When not even the plan's first open step fits, the session is not told to take a step it cannot see.
+CLOSING_WITHOUT_PLAN = (
+    "The plan's open steps do not fit in this task, so none is shown. Take no step: say in the final result of this "
+    "task that the plan could not be shown, so that the owner can be asked what to do next."
+)
+NEWEST_OWNER_ENTRIES_KEPT = 2  # the owner's entries kept until every open step but the first has gone
 
 
 def _charter(goal: Any, *, spent: int, day_spent: int) -> str:
@@ -60,6 +66,7 @@ class _Fit:
         self.shown_steps = set(range(len(steps)))
         self.with_evidence = {i for i, step in enumerate(steps) if step.get("evidence")}
         self.done = [i for i, step in enumerate(steps) if step.get("status") in DONE_STATUSES]
+        self.open = [i for i in range(len(steps)) if i not in set(self.done)]
         self.evidence_cut = 0
 
     def render(self, head: str) -> str:
@@ -70,11 +77,14 @@ class _Fit:
         ]
         notes = []
         hidden_done = sum(1 for i in self.done if i not in self.shown_steps)
-        hidden_open = len(self.steps) - len(self.shown_steps) - hidden_done
+        hidden_open = sum(1 for i in self.open if i not in self.shown_steps)
+        first_open_hidden = bool(self.open) and self.open[0] not in self.shown_steps
         if hidden_done:
             notes.append(f"({hidden_done} closed or dropped plan steps not shown.)")
-        if hidden_open:
-            notes.append(f"({hidden_open} older open plan steps not shown.)")
+        if first_open_hidden:
+            notes.append(f"(The open plan steps do not fit here: {hidden_open} not shown.)")
+        elif hidden_open:
+            notes.append(f"({hidden_open} later open plan steps not shown.)")
         if self.evidence_cut:
             notes.append(f"(The evidence of {self.evidence_cut} closed or dropped plan steps is not shown.)")
         plan = "\n".join([*notes, *shown]) if shown or notes else "No plan yet."
@@ -82,13 +92,19 @@ class _Fit:
         journal = "\n".join(entries) if entries else "No entries yet."
         if len(self.quoted) > len(self.kept):
             journal += f"\n({len(self.quoted) - len(self.kept)} more journal entries not shown.)"
+        closing = CLOSING_WITHOUT_PLAN if first_open_hidden else CLOSING
         return (
             f"{head}\n\n{FRAMING}\n\n## Plan\n{plan}\n\n## Journal, newest first\n{journal}\n\n"
-            f"## This session\n{CLOSING}"
+            f"## This session\n{closing}"
         )
 
     def cuts(self, owner: list[bool]) -> Iterator[bool]:
-        """Each step cuts one more thing, in the order things go (a higher journal index is an older entry)."""
+        """Each step cuts one more thing, in the order things go (a higher journal index is an older entry):
+        the journal's entries not from the owner, the evidence of closed and dropped steps, those steps, the
+        owner's entries but the newest two, the open steps from the last back to the second, the owner's two
+        newest entries, and last the first open step (the one the session is told to take)."""
+        owner_kept = sorted(i for i in self.kept if owner[i])  # newest first
+        newest_owner = owner_kept[:NEWEST_OWNER_ENTRIES_KEPT]
         for i in sorted((i for i in self.kept if not owner[i]), reverse=True):
             self.kept.discard(i)
             yield True
@@ -102,12 +118,17 @@ class _Fit:
             if self.steps[i].get("evidence"):
                 self.evidence_cut -= 1  # the whole step is hidden now, and counted as such
             yield True
-        for i in range(len(self.steps)):
-            if i in self.shown_steps:
-                self.shown_steps.discard(i)
-                yield True
-        for i in sorted((i for i in self.kept if owner[i]), reverse=True):
+        for i in reversed(owner_kept[NEWEST_OWNER_ENTRIES_KEPT:]):
             self.kept.discard(i)
+            yield True
+        for i in reversed(self.open[1:]):
+            self.shown_steps.discard(i)
+            yield True
+        for i in reversed(newest_owner):
+            self.kept.discard(i)
+            yield True
+        for i in self.open[:1]:
+            self.shown_steps.discard(i)
             yield True
 
 
@@ -127,9 +148,10 @@ def build_session_task(
     The journal shows the owner's entries first, then the others, each newest first, within ``JOURNAL_CHARS``.
     Over ``max_chars`` (``MAX_TASK_CHARS``, or less when the caller keeps room for text it adds), things go in this
     order until the text fits: the journal's entries not from the owner (oldest first), the evidence of closed and
-    dropped steps, those steps themselves, the open steps (oldest first), and last the owner's entries (oldest
-    first). The charter is never cut: ``ValueError`` when it alone is too long (the table's bounds keep it shorter
-    than ``MAX_TASK_CHARS``)."""
+    dropped steps, those steps themselves, the owner's entries but the newest two (oldest first), the open steps
+    from the last back to the second, the owner's two newest entries (the older first), and last the first open
+    step; then the closing line says the plan could not be shown instead of asking for a step. The charter is never
+    cut: ``ValueError`` when it alone is too long (the table's bounds keep it shorter than ``MAX_TASK_CHARS``)."""
     head = _charter(goal, spent=spent, day_spent=day_spent)
     steps = [step for step in plan if isinstance(step, Mapping)]
     rows = sorted(journal_rows, key=lambda row: row.seq, reverse=True)

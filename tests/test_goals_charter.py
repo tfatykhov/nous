@@ -100,8 +100,64 @@ def test_the_task_never_exceeds_12000_characters():
     assert len(text) <= MAX_TASK_CHARS == 12_000
     assert "O" * 4000 in text and "D" * 2000 in text  # the charter is never cut
     assert '<journal_entry kind="report"' not in text  # the others go first
-    assert "<plan_step " not in text and "20 older open plan steps not shown" in text  # then the open steps
-    assert "note 29 " in text and "note 00 " not in text  # the owner's newest notes go last
+    assert '<plan_step id="s0" status="open">' in text  # the first open step stays
+    assert '<plan_step id="s1"' not in text and "19 later open plan steps not shown" in text
+    assert "note 29 " in text and "note 00 " not in text  # the owner's newest note stays
+    assert text.rstrip().endswith(charter.CLOSING)
+
+
+def _reviewers_goal():
+    return _goal(objective="O" * 4000, done_when="D" * 2000)
+
+
+def _reviewers_plan():
+    closed = [
+        {"id": f"c{i}", "text": f"closed {i} " + "c" * 190, "status": "closed", "evidence": [f"subtask:{i:032d}"] * 3}
+        for i in range(3)
+    ]
+    return [*closed, *({"id": f"o{i}", "text": f"open {i} " + "p" * 240, "status": "open"} for i in range(9))]
+
+
+def _owner_notes(count: int, size: int = 1400):
+    return [_row(i, f"owner note {i} " + "n" * size, kind="owner_note", actor="owner") for i in range(count)]
+
+
+def test_the_first_open_step_and_the_two_newest_owner_notes_stay():
+    text = _task(goal=_reviewers_goal(), plan=_reviewers_plan(), rows=_owner_notes(4))
+    assert len(text) <= MAX_TASK_CHARS
+    assert '<plan_step id="o0" status="open">' in text  # the step the session is told to take
+    assert "owner note 3 " in text and "owner note 2 " in text  # the two newest
+    assert "owner note 1 " not in text and "owner note 0 " not in text
+    assert '<plan_step id="c0"' not in text  # closed steps went before any owner note
+    assert text.rstrip().endswith(charter.CLOSING)
+
+
+def test_open_steps_are_cut_from_the_end():
+    plan = [{"id": f"s{i}", "text": f"step {i} " + "p" * 290, "status": "open"} for i in range(10)]
+    full = _task(plan=plan)
+    text = build_session_task(_goal(), plan, [], spent=0, day_spent=0, max_chars=len(full) - 700)
+    shown = [i for i in range(10) if f'<plan_step id="s{i}"' in text]
+    assert shown == list(range(len(shown))) and 0 < len(shown) < 10  # a prefix of the plan: the last ones went
+    assert f"{10 - len(shown)} later open plan steps not shown" in text
+    assert text.rstrip().endswith(charter.CLOSING)
+
+
+def test_the_first_open_step_outlasts_every_owner_note():
+    plan = [{"id": "s0", "text": "Merge the first pair.", "status": "open"}]
+    alone = build_session_task(_goal(), plan, [], spent=0, day_spent=0)
+    notes = _owner_notes(3, size=500)
+    text = build_session_task(_goal(), plan, notes, spent=0, day_spent=0, max_chars=len(alone) + 60)
+    assert '<plan_step id="s0" status="open">' in text
+    assert "owner note" not in text and "3 more journal entries not shown" in text
+
+
+def test_a_task_that_cannot_show_the_first_open_step_does_not_ask_for_it():
+    plan = [{"id": "s0", "text": "Merge the first pair. " + "p" * 270, "status": "open"}]
+    empty = build_session_task(_goal(), [], [], spent=0, day_spent=0)
+    text = build_session_task(_goal(), plan, [], spent=0, day_spent=0, max_chars=len(empty) + 120)
+    assert "<plan_step " not in text
+    assert charter.CLOSING not in text and "Take the next open step" not in text
+    assert text.rstrip().endswith(charter.CLOSING_WITHOUT_PLAN)
 
 
 def test_closed_steps_and_their_evidence_go_before_an_owner_note():
