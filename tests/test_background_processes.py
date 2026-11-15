@@ -153,3 +153,22 @@ def test_a_group_whose_leader_has_another_start_time_or_none_readable_is_dropped
         if other.poll() is None:
             other.kill()
             other.wait()
+
+
+async def test_a_background_command_is_not_spawned_while_halted(tmp_path, monkeypatch):
+    from nous import background_halt
+
+    spawned: list[str] = []
+
+    async def fake_spawn(command, **kwargs):
+        spawned.append(command)
+        raise RuntimeError("spawned")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", fake_spawn)
+    halt = background_halt.BackgroundHalt(host_hold=False)
+    background_halt.install(halt)
+    await halt.halt(actor="t", surface="dashboard")
+    refused = await bash_tool("echo hi", 5, _workspace_dir=str(tmp_path), _background=True)
+    assert _text(refused) == background_halt.HALTED_TOOL_TEXT and spawned == []
+    await bash_tool("echo hi", 5, _workspace_dir=str(tmp_path), _background=False)  # a chat command still runs
+    assert spawned == ["echo hi"]

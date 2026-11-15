@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from nous import background_processes, undo_journal
+from nous import background_halt, background_processes, undo_journal
 from nous.api import tool_policy
 from nous.api.call_outcome import current_outcome
 from nous.api.commitment_routes import OWNER_SECRET_ENV
@@ -195,6 +195,10 @@ async def run_runner(workspace_dir: str, args: list[str], timeout: float) -> tup
     return proc.returncode, stdout.decode("utf-8", errors="replace")
 
 
+def _halt_refuses() -> bool:
+    return background_halt.current().refuses("background", None, background_halt.TURN_EPOCH.get())
+
+
 async def bash_tool(
     command: str,
     timeout: int | None = None,
@@ -248,6 +252,9 @@ async def bash_tool(
         workspace = Path(_workspace_dir)
         workspace.mkdir(parents=True, exist_ok=True)
 
+        # The halt is checked again at the point of the spawn.
+        if _background and _halt_refuses():
+            return _tool_error(background_halt.HALTED_TOOL_TEXT)
         proc = await asyncio.create_subprocess_shell(
             command,
             stdin=asyncio.subprocess.DEVNULL if _lineage and _lineage_build else None,
@@ -260,6 +267,10 @@ async def bash_tool(
             start_new_session=True,
         )
         tracked = background_processes.track(proc) if _background else None
+        if tracked is not None and _halt_refuses():
+            await kill_process_group(proc)
+            background_processes.release(tracked)
+            return _tool_error(background_halt.HALTED_TOOL_TEXT)
 
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=effective_timeout)
