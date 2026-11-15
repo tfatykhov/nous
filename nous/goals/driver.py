@@ -786,7 +786,13 @@ class GoalDriver:
         result = await s.execute(
             update(GoalSession)
             .where(GoalSession.id == row.id, GoalSession.ended_at.is_(None))
-            .values(ended_at=now, outcome=outcome, spent=spent, steps_closed=steps, summary=summary)
+            .values(
+                ended_at=now,
+                outcome=outcome,
+                spent=func.greatest(GoalSession.spent, spent),  # never lower than a newer read already wrote
+                steps_closed=steps,
+                summary=summary,
+            )
             .execution_options(synchronize_session=False)
         )
         if result.rowcount != 1:
@@ -851,11 +857,15 @@ class GoalDriver:
             if rows:
                 totals = await spend.session_spent(s, self._agent_id, [r.root_id for r in rows.values()])
                 for r in rows.values():
-                    if totals[r.root_id] != r.spent:
-                        await s.execute(
-                            update(GoalSession).where(GoalSession.id == r.id).values(spent=totals[r.root_id])
+                    if totals[r.root_id] > r.spent:
+                        # Every source only grows: a read taken before another tick wrote a newer total is older,
+                        # and must not put a lower one back.
+                        result = await s.execute(
+                            update(GoalSession)
+                            .where(GoalSession.id == r.id, GoalSession.spent < totals[r.root_id])
+                            .values(spent=totals[r.root_id])
                         )
-                        changed += 1
+                        changed += result.rowcount
                 closed_roots = sorted({r.root_id for r in rows.values() if r.ended_at is not None})
                 if closed_roots:
                     unsettled_roots = set(

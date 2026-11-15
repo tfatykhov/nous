@@ -29,7 +29,7 @@ from f099_support import (
 from sqlalchemy import func, select, text, update
 
 from nous.brain import continuation, intentions
-from nous.goals import charter
+from nous.goals import charter, spend
 from nous.goals.driver import GoalDriver, TickReport
 from nous.goals.store import GoalStore
 from nous.handlers.continuation_runner import ContinuationRunner
@@ -1106,6 +1106,24 @@ async def test_after_a_restart_an_old_closed_session_with_a_lineage_dag_still_ru
     await _bump_dag(w, dag, 1000)
     await restarted.tick()
     assert (await _session(w, session.id)).spent == 40
+
+
+async def test_an_older_read_never_writes_a_lower_spend(env_factory, monkeypatch):  # noqa: F811
+    """Every source of the spend only grows, so a read made before another tick wrote a newer total (two ticks at
+    once) must not put the older, lower total back."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    await add_arrival(w.env, root.id, 1, tokens=(100, 10))
+    await w.driver.tick()
+    assert (await _session(w, session.id)).spent == 110
+
+    async def stale(s, agent_id, root_ids):  # what a read taken before the arrival saw
+        return {root_id: 0 for root_id in root_ids}
+
+    monkeypatch.setattr(spend, "session_spent", stale)
+    await w.driver.tick()
+    assert (await _session(w, session.id)).spent == 110
 
 
 async def test_an_arrival_that_commits_after_the_roots_deadline_is_counted(env_factory):  # noqa: F811
