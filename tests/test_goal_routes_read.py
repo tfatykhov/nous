@@ -15,6 +15,7 @@ from sqlalchemy import func, select
 from nous.api.goal_routes import JOURNAL_MAX, masked_channel
 from nous.goals.envelope import _RANGES, PRESETS
 from nous.goals.seed import SPEND_NOTE
+from nous.goals.spend import goal_spent
 from nous.goals.store import format_short_id
 from nous.storage.models import GoalJournal
 
@@ -62,6 +63,9 @@ async def test_list_returns_rows_with_spend_by_the_databases_day(db) -> None:
     one, two = rows[str(first.id)], rows[str(second.id)]
     assert (one["spent_total"], one["spent_today"], one["open_session"]) == (755, 55, 3)
     assert (two["spent_total"], two["spent_today"], two["open_session"]) == (11, 0, None)
+    async with db.session() as s:  # one way of counting: the driver's
+        for goal, row in ((first, one), (second, two)):
+            assert (row["spent_total"], row["spent_today"]) == await goal_spent(s, env.store.agent_id, goal.id)
     assert one["ref"] == format_short_id(first.short_id) and one["state"] == "active" and one["mode"] == "contained"
     assert [row["id"] for row in body["goals"]] == [str(first.id), str(second.id)]  # by short id, newest last
 

@@ -38,6 +38,7 @@ from nous.api.owner_guard import OwnerGuard
 from nous.brain.continuation import owner_channel
 from nous.goals.envelope import _RANGES, PRESETS
 from nous.goals.seed import SPEND_NOTE
+from nous.goals.spend import goal_spent
 from nous.goals.store import (
     DELIVERED_CHANNEL_KINDS,
     EVIDENCE_MAX_REFS,
@@ -164,8 +165,8 @@ async def _parse(request: Request, model: type[_Body]) -> Any:
 
 @dataclass(frozen=True)
 class Tally:
-    """A goal's sessions in numbers: tokens spent in all and today (UTC, by the database's clock; a session counts
-    for the day it started), and the number of its open session."""
+    """A goal's sessions in numbers: tokens spent in all and today, as ``nous.goals.spend.goal_spent`` counts them,
+    and the number of its open session."""
 
     spent_total: int = 0
     spent_today: int = 0
@@ -357,29 +358,30 @@ def build_goal_routes(*, database: Any, settings: Any, goals: GoalStore | None, 
     ``/goals/{ref}``."""
     agent_id = settings.agent_id
 
-    async def tallies(goal_id: UUID | None = None) -> tuple[datetime, dict[UUID, Tally]]:
-        """The database's clock, and each goal's ``Tally`` (only ``goal_id``'s when given), in one query each."""
-        day_start = func.date_trunc("day", func.clock_timestamp(), "UTC")
-        query = (
-            select(
-                GoalSession.goal_id,
-                func.coalesce(func.sum(GoalSession.spent), 0),
-                func.coalesce(func.sum(GoalSession.spent).filter(GoalSession.started_at >= day_start), 0),
-                func.max(GoalSession.n).filter(GoalSession.ended_at.is_(None)),
-            )
-            .where(GoalSession.agent_id == agent_id)
-            .group_by(GoalSession.goal_id)
-        )
-        if goal_id is not None:
-            query = query.where(GoalSession.goal_id == goal_id)
+    async def tallies(goal_ids: list[UUID]) -> tuple[datetime, dict[UUID, Tally]]:
+        """The database's clock, and each goal's ``Tally``: its spend from ``goal_spent`` (one query a goal) and its
+        open session (one query for all)."""
         async with database.session() as session:
             now = (await session.execute(select(func.clock_timestamp()))).scalar_one()
-            rows = (await session.execute(query)).all()
-        return now, {row[0]: Tally(int(row[1]), int(row[2]), row[3]) for row in rows}
+            if not goal_ids:
+                return now, {}
+            open_rows = await session.execute(
+                select(GoalSession.goal_id, GoalSession.n).where(
+                    GoalSession.agent_id == agent_id,
+                    GoalSession.goal_id.in_(goal_ids),
+                    GoalSession.ended_at.is_(None),
+                )
+            )
+            open_by_goal = {goal_id: n for goal_id, n in open_rows.all()}
+            found: dict[UUID, Tally] = {}
+            for goal_id in goal_ids:
+                total, today = await goal_spent(session, agent_id, goal_id)
+                found[goal_id] = Tally(total, today, open_by_goal.get(goal_id))
+        return now, found
 
     async def detail(goal: Goal, journal_limit: int = JOURNAL_DEFAULT) -> dict[str, Any]:
         assert goals is not None
-        now, tally = await tallies(goal.id)
+        now, tally = await tallies([goal.id])
         return goal_detail(
             goal,
             tally.get(goal.id, Tally()),
@@ -404,7 +406,7 @@ def build_goal_routes(*, database: Any, settings: Any, goals: GoalStore | None, 
         states = None if wanted is None else LIVE_STATES if wanted == "open" else (wanted,)
         try:
             listed = await goals.list(states)
-            _now, by_goal = await tallies()
+            _now, by_goal = await tallies([g.id for g in listed])
         except Exception as exc:
             return failed("listing goals", exc)
         return JSONResponse({"enabled": True, "goals": [goal_row(g, by_goal.get(g.id, Tally())) for g in listed]})
@@ -429,7 +431,7 @@ def build_goal_routes(*, database: Any, settings: Any, goals: GoalStore | None, 
                     "deadline_days": MAX_DEADLINE_DAYS,
                     "journal": JOURNAL_MAX,
                 },
-                # Nothing in this process starts goal sessions yet: rows change, and no session follows.
+                # No driver is started by the app yet: rows change, and no session follows.
                 "driver_running": False,
                 "spend_note": SPEND_NOTE,
             }
