@@ -354,3 +354,39 @@ async def test_interactive_chat_still_works_while_halted(runner_env):  # noqa: F
     ]
     assert any(background_halt.HALTED_SPAWN_TEXT in str(block.get("content")) for block in results)
     assert await env.heart.subtasks.cancel_all_active() == []  # nothing was spawned
+
+
+async def test_a_second_halt_during_the_first_halts_write_leaves_one_sweep_doing_the_work(tmp_path, monkeypatch):
+    from nous import background_processes
+
+    class _GatedStore(_Store):
+        def __init__(self) -> None:
+            super().__init__()
+            self.gate = asyncio.Event()
+            self.entered = asyncio.Event()
+
+        async def write(self, row, audit):
+            self.entered.set()
+            await self.gate.wait()
+            await super().write(row, audit)
+
+    store = _GatedStore()
+    halt = _install(store=store)
+    heart = MagicMock()
+    heart.subtasks.cancel_all_active = AsyncMock(return_value=[])
+    signalled: list = []
+    monkeypatch.setattr(background_processes, "kill_all", lambda: signalled.append(1) or 0)
+    sweeper = HaltSweeper(settings=SimpleNamespace(agent_id="a", workspace_dir=str(tmp_path)), heart=heart, halt=halt)
+    async with _client(_settings(), sweeper=sweeper) as c:
+        first = asyncio.create_task(c.post("/background/halt", json={"surface": "dashboard"}))
+        await store.entered.wait()  # the first halt is writing
+        second = asyncio.create_task(c.post("/background/halt", json={"surface": "telegram"}))
+        for _ in range(50):
+            if halt.epoch == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert halt.epoch == 2  # the second halt flipped and waits for the lock
+        store.gate.set()
+        answers = [(await first).json(), (await second).json()]
+    assert heart.subtasks.cancel_all_active.await_count == 1 and signalled == [1]  # one sweep did the work
+    assert [a["report"]["stopped"] for a in answers] == [True, False]

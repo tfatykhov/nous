@@ -172,3 +172,50 @@ async def test_a_background_command_is_not_spawned_while_halted(tmp_path, monkey
     assert _text(refused) == background_halt.HALTED_TOOL_TEXT and spawned == []
     await bash_tool("echo hi", 5, _workspace_dir=str(tmp_path), _background=False)  # a chat command still runs
     assert spawned == ["echo hi"]
+
+
+@linux_only
+async def test_a_group_whose_members_all_started_after_the_leaders_exit_is_dropped_not_signalled(tmp_path):
+    result = await bash_tool(
+        "nohup sleep 30 > /dev/null 2>&1 & echo $!", 10, _workspace_dir=str(tmp_path), _background=True
+    )
+    child = int(_text(result).splitlines()[0])
+    try:
+        (entry,) = background_processes._entries.values()
+        assert entry.exited_ticks is not None and background_processes._stat(entry.pgid) is None  # the leader ended
+        _group, member_started = background_processes._stat(child)
+        kept = entry.exited_ticks
+        entry.exited_ticks = member_started - 1  # as if the leader's exit was seen before this member started
+        assert background_processes.kill_all() == 0 and _alive(child)  # not shown to be ours: dropped
+        assert entry.pgid not in background_processes._entries
+        entry.exited_ticks = kept
+        background_processes._entries[entry.pgid] = entry  # an older member: ours, signalled
+        assert background_processes.kill_all() == 1
+        await _until(lambda: not _alive(child))
+    finally:
+        if _alive(child):
+            os.kill(child, 9)
+
+
+@posix_only
+async def test_a_halt_landing_between_the_check_and_the_track_kills_the_command(tmp_path, monkeypatch):
+    from nous import background_halt
+
+    halt = background_halt.BackgroundHalt(host_hold=False)
+    background_halt.install(halt)
+    real_spawn = asyncio.create_subprocess_shell
+    started: list = []
+
+    async def spawn_then_the_halt_lands(command, **kwargs):
+        proc = await real_spawn(command, **kwargs)
+        started.append(proc)
+        await halt.halt(actor="t", surface="dashboard")
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", spawn_then_the_halt_lands)
+    result = await asyncio.wait_for(
+        bash_tool("sleep 5; echo finished", 10, _workspace_dir=str(tmp_path), _background=True), timeout=4
+    )
+    assert _text(result) == background_halt.HALTED_TOOL_TEXT
+    (proc,) = started
+    assert proc.returncode is not None and proc.returncode != 0  # killed, not finished
