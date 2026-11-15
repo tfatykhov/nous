@@ -371,6 +371,24 @@ async def test_the_app_mounts_the_goal_routes_over_the_store_it_builds_when_goal
     assert (approved.status_code, approved.json()["state"]) == (200, "active")
 
 
+async def test_a_change_let_in_by_the_proxys_secret_is_journalled_as_the_owner(db) -> None:
+    """The proxy's secret alone (the signed-in dashboard) is the owner too: the store records ``owner``, and a body
+    that names another actor is refused before anything is written."""
+    env = make_env(db)
+    proxy = {**PROXY, "content-type": "application/json"}
+    goal = await draft(env.store)
+    approved = await env.call("POST", f"/goals/{goal.id}/approve", headers=proxy)
+    noted = await env.call("POST", f"/goals/{goal.id}/note", json={"text": "From the dashboard."}, headers=proxy)
+    assert (approved.status_code, noted.status_code) == (200, 200)
+    rows = await journal_rows(env.store, goal)
+    assert [(row.kind, row.actor) for row in rows[-2:]] == [("state", "owner"), ("owner_note", "owner")]
+    for actor in ("host", "chain", "harness"):
+        named = await env.call("POST", f"/goals/{goal.id}/pause", json={"actor": actor}, headers=proxy)
+        assert named.status_code == 400
+    assert len(await journal_rows(env.store, goal)) == len(rows)
+    assert (await reread(env.store, goal)).state == "active"
+
+
 @pytest.mark.parametrize("path", ["pause", "create"])
 async def test_a_change_that_was_made_is_200_with_reload_when_reading_it_back_fails(
     db, monkeypatch, caplog, path: str
