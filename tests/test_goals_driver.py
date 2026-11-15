@@ -193,9 +193,10 @@ async def test_start_rechecks_state_under_the_goal_lock(env_factory):  # noqa: F
 
 
 async def test_a_full_queue_starts_nothing_and_leaves_no_session_row(env_factory):  # noqa: F811
-    """Race 3, second guard: the headroom count is unlocked, so the queue can fill between it and the create. With
-    no headroom the start reaches the create, which refuses; the session row is undone and the goal waits 60 s."""
-    w = await _world(env_factory, goals_queue_headroom=0)
+    """Race 3, second guard: the tick's headroom count is not locked, so the queue can fill between it and the
+    create. Called directly (as after such a race), the start reaches the create, which refuses; the session row is
+    undone and the goal waits 60 s."""
+    w = await _world(env_factory)
     goal = await _active(w)
     await _pending(w, 5)
     before = await _db_now(w)
