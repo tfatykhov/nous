@@ -219,8 +219,10 @@ def test_every_loop_exit_has_a_specific_code(command, code, ws):
 
 def test_the_exits_that_need_other_settings(ws):
     assert _refusal("cd nous && pytest", ws, build_commands=False).code == "git_off"
-    many = " && ".join(f"cd {d}" for d in ["nous", "dir", "research", "claude-jobs"] * 6)
-    assert _refusal(many, ws).code in ("cd_many", "cd")
+    for n in range(20):
+        (ws / f"d{n}").mkdir()
+    many = " && ".join(f"cd {ws}/d{n}" for n in range(20))
+    assert _refusal(many, ws).code == "cd_many"
     assert _refusal("bash x.sh", ws).code == "bash_script"
     assert _refusal(f"cd nous && git status && {ws}/claude-jobs/runner.sh status", ws).code == "build_token"
 
@@ -633,8 +635,9 @@ def real_repo(tmp_path):
 def test_branch_listing_forms_create_nothing(command, real_repo, ws):
     assert _ok(CD + command, ws), command  # the policy allows it ...
     before = _snapshot(real_repo)
-    _sh(real_repo, command)
-    assert _snapshot(real_repo) == before  # ... and git, run for real, changed neither a ref nor the config
+    done = _sh(real_repo, command)
+    assert done.returncode == 0, done.stderr  # git accepted the form (a form it rejects would prove nothing) ...
+    assert _snapshot(real_repo) == before  # ... and, run for real, changed neither a ref nor the config
     for name in ("newname", "x"):
         assert _real_git(real_repo, "branch", "--list", name).strip() == ""
 
