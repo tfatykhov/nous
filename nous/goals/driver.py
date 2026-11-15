@@ -58,6 +58,9 @@ FAILED_STARTS_BEFORE_PAUSE = 3  # the third failed start in a row pauses the goa
 UNCREATED_AFTER_SECONDS = 120  # a session whose first subtask does not exist after this long never got one
 SUMMARY_MAX = 1000  # a session's summary: its claimed report, else its newest arrival's note
 SESSION_NOTE_LABEL = "Note written by the session:"  # marks the chain's words inside the harness's end row
+# How long before a session's close a question or an answer may have been written and still be journalled after
+# it (the close journals what it sees; a row it could not see was written in a transaction open across the close).
+QUESTIONS_BEFORE_CLOSE = timedelta(hours=1)
 ANSWER_PREFIX_PATTERN = f"{continuation.ANSWER_CORRELATION_PREFIX}%"
 
 # The goal channel's claim: every undelivered row on it is stamped and returned in one statement, with the session
@@ -120,6 +123,16 @@ class _RootState:
     open_work: bool  # an intention of the root is in an open state
 
 
+@dataclass(frozen=True)
+class _JournalItem:
+    """A question or an answer to journal: its kind, actor, text and evidence refs."""
+
+    kind: str
+    actor: str
+    text: str
+    refs: list[str]
+
+
 class GoalDriver:
     """Starts goal sessions and closes them. ``runner`` is the continuation runner (``wake``)."""
 
@@ -132,7 +145,7 @@ class GoalDriver:
         self._agent_id = store.agent_id
         self._failures: dict[UUID, int] = {}  # failed starts in a row, per goal (in memory: a restart resets it)
         # Closed sessions whose spend is read again at the next tick: closed since, or with lineage work whose
-        # usage is not settled yet (``refresh_spent``). In memory; the first tick after a start catches up.
+        # usage is not settled yet (``refresh_sessions``). In memory; the first tick after a start catches up.
         self._following: set[UUID] = set()
         self._caught_up = False
         self._task: asyncio.Task | None = None
@@ -177,13 +190,13 @@ class GoalDriver:
 
     async def tick(self) -> TickReport:
         """One pass, in order: claim the goal channels into the journals, close the sessions whose chain has ended,
-        read the spend of open and recently closed sessions again, start the sessions that are due. With goals off
-        it does nothing."""
+        read again what open and recently closed sessions spent (and journal what a resumed chain of a closed one
+        asked the owner), start the sessions that are due. With goals off it does nothing."""
         if not self._enabled():
             return TickReport()
         claimed = await self.claim_reports()
         closed = await self.close_finished()
-        await self.refresh_spent()
+        await self.refresh_sessions()
         started, held = await self._start_due()
         return TickReport(claimed=claimed, closed=closed, started=started, held=held)
 
@@ -710,55 +723,88 @@ class GoalDriver:
             ).scalar_one_or_none()
         return (clip(text_, SUMMARY_MAX) if text_ else None), False
 
-    async def _journal_questions_and_answers(self, s: AsyncSession, goal_id: UUID, row: GoalSession) -> int:
-        """Journal the session's questions to the owner (``question``) and the owner's answers (``answer``), each
-        once: a row's evidence names its inbox row (``row:<id>``), and an answer's also its arrival, because an
-        answer is written once per intention it wakes. Returns the rows journalled."""
-        if row.root_id is None:
-            return 0
-        lineage = select(Intention.id).where(Intention.agent_id == self._agent_id, Intention.root_id == row.root_id)
-        source = (
-            await s.execute(
-                select(ResultInbox.id, ResultInbox.msg_type, ResultInbox.body, ResultInbox.arrival_id)
-                .where(
-                    ResultInbox.agent_id == self._agent_id,
-                    ResultInbox.source_kind == continuation.SOURCE_INTENTION_REPORT,
-                    ResultInbox.intention_id.in_(lineage),
-                    or_(
-                        ResultInbox.msg_type == continuation.MSG_QUESTION,
-                        and_(ResultInbox.msg_type == "INFORM", ResultInbox.correlation_id.like(ANSWER_PREFIX_PATTERN)),
-                    ),
-                )
-                .order_by(ResultInbox.created_at, ResultInbox.id)
+    async def _new_questions_and_answers(self, s: AsyncSession, rows: Iterable[Any]) -> dict[UUID, list[_JournalItem]]:
+        """For each session in ``rows`` (each with ``id``, ``goal_id``, ``root_id`` and ``ended_at``), the questions
+        to the owner and the owner's answers of its lineage that its goal's journal does not hold yet, oldest first.
+        A row is known by its evidence: ``row:<id>``, and for an answer also ``arrival:<id>``, because an answer is
+        written once per intention it wakes. Only rows created from an hour before a closed session's close are
+        read: those before were journalled by the close. Reads only."""
+        by_root = {r.root_id: r for r in rows if r.root_id is not None}
+        if not by_root:
+            return {}
+        member = aliased(Intention)
+        query = (
+            select(member.root_id, ResultInbox.id, ResultInbox.msg_type, ResultInbox.body, ResultInbox.arrival_id)
+            .join(member, and_(member.agent_id == self._agent_id, member.id == ResultInbox.intention_id))
+            .where(
+                ResultInbox.agent_id == self._agent_id,
+                ResultInbox.source_kind == continuation.SOURCE_INTENTION_REPORT,
+                member.root_id.in_(sorted(by_root)),
+                or_(
+                    ResultInbox.msg_type == continuation.MSG_QUESTION,
+                    and_(ResultInbox.msg_type == "INFORM", ResultInbox.correlation_id.like(ANSWER_PREFIX_PATTERN)),
+                ),
             )
-        ).all()
+            .order_by(ResultInbox.created_at, ResultInbox.id)
+        )
+        ended = [r.ended_at for r in by_root.values()]
+        if ended and all(at is not None for at in ended):
+            query = query.where(ResultInbox.created_at >= min(ended) - QUESTIONS_BEFORE_CLOSE)
+        source = (await s.execute(query)).all()
         if not source:
-            return 0
-        seen: set[str] = set()
-        for evidence in (
+            return {}
+        seen: dict[UUID, set[str]] = {}
+        for goal_id, evidence in (
             await s.execute(
-                select(GoalJournal.evidence).where(
+                select(GoalJournal.goal_id, GoalJournal.evidence).where(
                     GoalJournal.agent_id == self._agent_id,
-                    GoalJournal.goal_id == goal_id,
+                    GoalJournal.goal_id.in_(sorted({by_root[item.root_id].goal_id for item in source})),
                     GoalJournal.kind.in_(("question", "answer")),
                 )
             )
-        ).scalars():
-            seen.update(str(ref) for ref in evidence or [])
-        written = 0
+        ).all():
+            seen.setdefault(goal_id, set()).update(str(ref) for ref in evidence or [])
+        found: dict[UUID, list[_JournalItem]] = {}
         for item in source:
+            row = by_root[item.root_id]
             refs = [f"row:{item.id}"]
             if item.msg_type == continuation.MSG_QUESTION:
                 kind, actor = "question", "chain"
             else:
                 kind, actor = "answer", "owner"
                 refs.append(f"arrival:{item.arrival_id}")
-            if any(ref in seen for ref in refs):
+            known = seen.setdefault(row.goal_id, set())
+            if any(ref in known for ref in refs):
                 continue
-            seen.update(refs)
-            self._journal(s, goal_id, kind, item.body, actor=actor, session_n=row.n, evidence=refs)
-            written += 1
-        return written
+            known.update(refs)
+            found.setdefault(row.id, []).append(_JournalItem(kind, actor, item.body, refs))
+        return found
+
+    async def _journal_questions_and_answers(self, s: AsyncSession, goal_id: UUID, row: GoalSession) -> int:
+        """Journal the session's questions to the owner (``question``) and the owner's answers (``answer``) that the
+        journal does not hold yet (``_new_questions_and_answers``), in the caller's transaction. The caller holds the
+        session row's lock, so two writers cannot journal the same row twice. Returns the rows journalled."""
+        items = (await self._new_questions_and_answers(s, [row])).get(row.id, [])
+        for item in items:
+            self._journal(s, goal_id, item.kind, item.text, actor=item.actor, session_n=row.n, evidence=item.refs)
+        return len(items)
+
+    async def _reconcile_questions_and_answers(self, session_id: UUID) -> int:
+        """Journal what a closed session's resumed chain asked the owner and what the owner answered, in a
+        transaction of its own that holds the session row's lock (as the close does). Returns the rows journalled."""
+        async with self._db.session() as s:
+            row = (
+                await s.execute(
+                    select(GoalSession)
+                    .where(GoalSession.id == session_id, GoalSession.agent_id == self._agent_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return 0
+            written = await self._journal_questions_and_answers(s, row.goal_id, row)
+            await s.commit()
+            return written
 
     async def _end(
         self,
@@ -815,19 +861,25 @@ class GoalDriver:
         self._journal(s, goal.id, "state", note, actor="harness", session_n=row.n)
         return True
 
-    async def refresh_spent(self) -> int:
-        """Read the spend of these sessions again: the open ones; the closed ones whose root's deadline has not
-        passed (a late result can reopen the chain and add to it); and the closed ones followed in memory
-        (``_following``). A session is followed from its close while its lineage has work whose tokens are still to
-        come (``_has_unsettled_work``), and is read once more after that: the root's deadline is no accounting
-        cutoff, since an expiry or a cancel does not stop a running worker or a DAG, which store their tokens
-        later. Then the session keeps what it had and is not read again.
+    async def refresh_sessions(self) -> int:
+        """Read the spend of these sessions again, and journal the questions and answers of the closed ones among
+        them: the open ones; the closed ones whose root's deadline has not passed (a late result can reopen the chain
+        and add to it); and the closed ones followed in memory (``_following``). A session is followed from its
+        close while its lineage has work whose tokens are still to come (``_has_unsettled_work``), and is read once
+        more after that: the root's deadline is no accounting cutoff, since an expiry or a cancel does not stop a
+        running worker or a DAG, which store their tokens later. Then the session keeps what it had and is not read
+        again.
 
         Why a flag in memory rather than a time window: each tick reads only the open sessions, those whose root's
         deadline has not passed and the followed ones, all a handful, and checks unsettled work only over their
         roots. After a restart the flags are gone, so the first tick also reads, once, every session closed within
         ``intention_root_ttl_hours`` and every closed session whose lineage still has unsettled work, whatever its
-        age: work that settled while no driver ran is counted then. Returns the sessions whose spend changed."""
+        age: work that settled while no driver ran is counted then.
+
+        A closed session's root can resume (a late result reopens it), and its chain can then ask the owner and get
+        an answer after the close journalled the session's questions: every tick, the questions and answers of the
+        closed sessions read here that the journal does not hold yet are journalled, each session in a transaction
+        of its own holding the session row's lock, as the close does. Returns the sessions whose spend changed."""
         root = aliased(Intention)
         reasons = [GoalSession.ended_at.is_(None), root.deadline > func.clock_timestamp()]
         if self._following:
@@ -835,7 +887,14 @@ class GoalDriver:
         if not self._caught_up:
             window = timedelta(hours=float(self._settings.intention_root_ttl_hours))
             reasons.append(GoalSession.ended_at > func.clock_timestamp() - window)
-        columns = (GoalSession.id, GoalSession.root_id, GoalSession.spent, GoalSession.ended_at)
+        columns = (
+            GoalSession.id,
+            GoalSession.goal_id,
+            GoalSession.n,
+            GoalSession.root_id,
+            GoalSession.spent,
+            GoalSession.ended_at,
+        )
         query = (
             select(*columns)
             .join(root, and_(root.agent_id == self._agent_id, root.id == GoalSession.root_id))
@@ -854,6 +913,7 @@ class GoalDriver:
                 for r in (await s.execute(unsettled_anywhere)).all():
                     rows.setdefault(r.id, r)
             unsettled_roots: set[UUID] = set()
+            asked: dict[UUID, list[_JournalItem]] = {}
             if rows:
                 totals = await spend.session_spent(s, self._agent_id, [r.root_id for r in rows.values()])
                 for r in rows.values():
@@ -879,9 +939,16 @@ class GoalDriver:
                             )
                         ).scalars()
                     )
+                asked = await self._new_questions_and_answers(s, [r for r in rows.values() if r.ended_at is not None])
             await s.commit()
         self._following = {r.id for r in rows.values() if r.ended_at is not None and r.root_id in unsettled_roots}
         self._caught_up = True
+        for session_id in asked:
+            try:
+                await self._reconcile_questions_and_answers(session_id)
+            except Exception:
+                logger.exception("Goal session %s: its questions could not be journalled; tried again", session_id)
+                self._following.add(session_id)  # read again at the next tick, whatever its deadline
         return changed
 
     def _unsettled_subtask(self, subtask: Any) -> ColumnElement[bool]:

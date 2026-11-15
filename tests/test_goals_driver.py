@@ -1341,6 +1341,57 @@ async def test_questions_and_answers_of_a_session_are_journalled_once(env_factor
     assert (await _session(w, session.id)).outcome == "asked"
 
 
+async def test_questions_and_answers_of_a_reopened_root_reach_the_journal(env_factory):  # noqa: F811
+    """A late result reopens a closed session's root; the resumed chain asks the owner, who answers. The close
+    has run already, so the tick journals them, once."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    await _finish(w, root)
+    assert (await w.driver.tick()).closed == 1
+    assert await _journal(w, goal, "question") == []
+    await record(w.env, root)  # a late result reopens the root
+    asked = await commit_ask(w.env, await claim(w.env, root.id), "Merge the archive copies too?")
+    async with w.db.session() as s:
+        await continuation.record_answer(
+            s,
+            w.agent,
+            await _question_id(w, asked.arrival_id),
+            text="Yes, the archive too.",
+            actor="telegram:42",
+            settings=w.env.settings,
+        )
+        await s.commit()
+    await w.driver.tick()
+    questions, answers = await _journal(w, goal, "question"), await _journal(w, goal, "answer")
+    assert [(q.text, q.actor, q.session_n) for q in questions] == [("Merge the archive copies too?", "chain", 1)]
+    assert [(a.text, a.actor, a.session_n) for a in answers] == [("Yes, the archive too.", "owner", 1)]
+    await w.driver.tick()
+    assert len(await _journal(w, goal, "question")) == 1 and len(await _journal(w, goal, "answer")) == 1
+    assert (await _session(w, session.id)).outcome == "no_step"  # the close's outcome stands
+
+
+async def test_two_reconciles_at_once_journal_a_question_once(env_factory):  # noqa: F811
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    await _finish(w, root)
+    assert (await w.driver.tick()).closed == 1
+    await record(w.env, root)
+    await commit_ask(w.env, await claim(w.env, root.id), "Keep the old copies?")
+    twin = GoalDriver(w.db, w.env.settings, w.env.heart, w.store, FakeRunner())
+    async with w.db.session() as holding:
+        await holding.execute(select(GoalSession).where(GoalSession.id == session.id).with_for_update())
+        both = [
+            asyncio.create_task(w.driver._reconcile_questions_and_answers(session.id)),
+            asyncio.create_task(twin._reconcile_questions_and_answers(session.id)),
+        ]
+        await _until_waiters(w, "brain.goal_sessions", at_least=2)
+        await holding.commit()
+    assert sorted(await asyncio.gather(*both)) == [0, 1]
+    assert [q.text for q in await _journal(w, goal, "question")] == ["Keep the old copies?"]
+
+
 async def test_asked_comes_from_a_real_ask_then_an_expiry_and_a_report(runner_env):  # noqa: F811
     """An ask leaves the chain waiting (``awaiting_owner`` is an open state), so the session closes only after the
     question is answered or expires and the chain ends: the outcome is ``asked`` from the ask in its history."""
