@@ -42,7 +42,8 @@ JOBS_TIMEOUT_SECONDS = 120.0
 RUNNER_CALL_SECONDS = 30.0
 ROOTS_MAX = 200
 ROOTS_BATCH = 8
-JOBS_MAX = 50
+# The jobs step starts no new job after this many seconds, so a status and a cancel call still fit in its timeout.
+JOBS_SCAN_SECONDS = JOBS_TIMEOUT_SECONDS - 2 * RUNNER_CALL_SECONDS
 HALT_REASON_TEXT = "halted by the owner"
 
 _STEP_WORDS = {
@@ -70,6 +71,8 @@ class HaltReport:
     commands: int = 0
     jobs: int = 0
     jobs_checked: bool = True
+    jobs_not_checked: int = 0  # running jobs whose status could not be read, or that the deadline left unscanned
+    jobs_not_cancelled: int = 0  # running jobs whose cancel failed or timed out
     chains_truncated: bool = False
     failed: list[str] = field(default_factory=list)
     # The halt this sweep belongs to ended (a resume) or a newer halt replaced it: the steps after that point did not
@@ -88,6 +91,8 @@ class HaltReport:
             },
             "failed": list(self.failed),
             "jobs_checked": self.jobs_checked,
+            "jobs_not_checked": self.jobs_not_checked,
+            "jobs_not_cancelled": self.jobs_not_cancelled,
             "chains_truncated": self.chains_truncated,
             "stopped": self.stopped,
         }
@@ -119,7 +124,15 @@ class HaltReport:
             sentences.append(f"Could not stop: {words}. Press Halt again to retry.")
         if self.chains_truncated:
             sentences.append("Some chains were not reached. Press Halt again to reach them.")
-        if not self.jobs_checked and "jobs" not in self.failed:
+        if self.jobs_not_cancelled:
+            sentences.append(
+                f"{_count(self.jobs_not_cancelled, 'Claude Code job', 'Claude Code jobs')} could not be cancelled."
+            )
+        if self.jobs_not_checked:
+            sentences.append(
+                f"{_count(self.jobs_not_checked, 'Claude Code job', 'Claude Code jobs')} could not be checked."
+            )
+        elif not self.jobs_checked and "jobs" not in self.failed:
             sentences.append("Claude Code jobs were not checked.")
         sentences.append(_SCOPE_TEXT)
         return " ".join(sentences)
@@ -265,9 +278,11 @@ class HaltSweeper:
         report.commands += background_processes.kill_all()
 
     async def _jobs(self, report: HaltReport, epoch: int | None = None) -> None:
-        """Claude Code jobs: the job directories (names that are job ids, real directories), newest first; a job
-        whose ``status`` says running is cancelled and marked as cancelled by the harness. A job whose status could
-        not be read leaves the report saying the jobs were not checked."""
+        """Claude Code jobs: every job directory (names that are job ids, real directories), newest first. A job whose
+        status file records a final word is skipped; any other is asked ``runner.sh status``, and one that says
+        running is cancelled and marked as cancelled by the harness. A cancel that fails is counted and the scan
+        goes on. A status that cannot be read, and the jobs the deadline (``JOBS_SCAN_SECONDS``) leaves unscanned, are
+        counted as not checked. Either count marks the step failed, so the owner is offered the retry."""
         workspace = getattr(self._settings, "workspace_dir", "")
         jobs_dir = Path(workspace) / "claude-jobs" if workspace else None
         if jobs_dir is None or not jobs_dir.is_dir():
@@ -282,17 +297,27 @@ class HaltSweeper:
                 if JOB_ID_RE.fullmatch(entry.name) and entry.is_dir(follow_symlinks=False)
             ),
             reverse=True,
-        )[:JOBS_MAX]
+        )
         if not names:
             return
+        from nous.dag.typed_checks import job_state_for
+
         run_runner = self._run_runner
         if run_runner is None:
             from nous.api.builtin_tools import run_runner
-        unread = 0
-        for job_id in names:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + JOBS_SCAN_SECONDS
+        unread = failed = 0
+        for index, job_id in enumerate(names):
             if epoch is not None and not self._still_halted(epoch):
                 report.stopped = True
                 return
+            if loop.time() > deadline:
+                unread += len(names) - index
+                break
+            recorded = job_state_for(job_id, workspace)
+            if recorded is not None and recorded[0] != "running":
+                continue  # a final word (or a worker known gone): nothing to cancel
             code, out = await run_runner(workspace, ["status", job_id], RUNNER_CALL_SECONDS)
             status = observed_status(out) if code == 0 else None
             if status is None:
@@ -301,9 +326,16 @@ class HaltSweeper:
             if status != "running":
                 continue
             code, _out = await run_runner(workspace, ["cancel", job_id], RUNNER_CALL_SECONDS)
-            if code == 0:
-                report.jobs += 1
-                if not cancel_provenance.write_job_cancelled_by(workspace, job_id, cancel_provenance.halt_record()):
-                    logger.warning("Background halt: could not mark job %s as cancelled by the harness", job_id)
+            if code != 0:
+                failed += 1
+                logger.warning("Background halt: the cancel of job %s failed (exit %s)", job_id, code)
+                continue
+            report.jobs += 1
+            if not cancel_provenance.write_job_cancelled_by(workspace, job_id, cancel_provenance.halt_record()):
+                logger.warning("Background halt: could not mark job %s as cancelled by the harness", job_id)
+        report.jobs_not_checked += unread
+        report.jobs_not_cancelled += failed
         if unread:
             report.jobs_checked = False
+        if failed or unread:
+            report.failed.append("jobs")

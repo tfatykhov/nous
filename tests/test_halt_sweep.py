@@ -265,7 +265,8 @@ async def test_a_runner_that_prints_no_status_cancels_nothing_and_says_so(tmp_pa
     report = HaltReport()
     await sweeper._jobs(report)
     assert [c for c in calls if c[0] == "cancel"] == [] and report.jobs == 0
-    assert not report.jobs_checked and "Claude Code jobs were not checked." in report.describe()
+    assert not report.jobs_checked and report.jobs_not_checked == 2 and report.failed == ["jobs"]
+    assert "2 Claude Code jobs could not be checked." in report.describe()
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="runs a shell script")
@@ -460,3 +461,78 @@ async def test_a_sweep_stops_once_its_halt_is_no_longer_the_one_on(monkeypatch, 
 def test_an_empty_report_says_nothing_was_cancelled_and_names_a_failed_step():
     text = HaltReport(failed=["chains"]).describe()
     assert text.startswith("Background work is halted. Nothing was cancelled. Could not stop: chains.")
+
+
+def _many_jobs(tmp_path, count: int, running: set[int]) -> list[str]:
+    """``count`` job directories, oldest first in the list, each with a status file: ``running`` for the indexes in
+    ``running``, ``completed`` for the others."""
+    names = []
+    for i in range(count):
+        name = f"job-20261115-{i // 3600:02d}{(i // 60) % 60:02d}{i % 60:02d}-{i:08x}"
+        job = tmp_path / "claude-jobs" / name
+        job.mkdir(parents=True)
+        (job / "status").write_text("running\n" if i in running else "completed\n", encoding="utf-8")
+        names.append(name)
+    return names
+
+
+async def test_a_running_job_older_than_the_newest_fifty_is_cancelled(tmp_path):
+    names = _many_jobs(tmp_path, 60, running={0})  # the oldest of sixty
+    calls: list[list[str]] = []
+
+    async def runner(workspace, args, timeout):
+        calls.append(args)
+        return 0, "Status: running\n" if args[0] == "status" else "cancelled\n"
+
+    sweeper = HaltSweeper(
+        settings=SimpleNamespace(agent_id="a", workspace_dir=str(tmp_path)),
+        heart=MagicMock(),
+        halt=_halt(),
+        run_runner=runner,
+    )
+    report = HaltReport()
+    await sweeper._jobs(report)
+    assert calls == [["status", names[0]], ["cancel", names[0]]]  # the status files spared the runner the rest
+    assert report.jobs == 1 and report.failed == [] and report.jobs_checked
+
+
+async def test_a_scan_the_deadline_cuts_short_is_reported_incomplete(tmp_path, monkeypatch):
+    _many_jobs(tmp_path, 5, running={0, 1, 2, 3, 4})
+    monkeypatch.setattr(halt_sweep, "JOBS_SCAN_SECONDS", -1.0)  # already past it
+    runner = AsyncMock(return_value=(0, "Status: running\n"))
+    sweeper = HaltSweeper(
+        settings=SimpleNamespace(agent_id="a", workspace_dir=str(tmp_path)),
+        heart=MagicMock(),
+        halt=_halt(),
+        run_runner=runner,
+    )
+    report = HaltReport()
+    await sweeper._jobs(report)
+    runner.assert_not_awaited()
+    assert report.failed == ["jobs"] and report.jobs_not_checked == 5 and not report.jobs_checked
+    assert "5 Claude Code jobs could not be checked." in report.describe()
+    assert report.as_dict()["jobs_not_checked"] == 5
+
+
+@pytest.mark.parametrize("cancel_answer", [(1, "no such job"), (None, "")], ids=["nonzero", "timed out"])
+async def test_a_failed_cancel_is_counted_and_the_scan_goes_on(tmp_path, cancel_answer):
+    names = _many_jobs(tmp_path, 3, running={0, 2})
+    calls: list[list[str]] = []
+
+    async def runner(workspace, args, timeout):
+        calls.append(args)
+        if args[0] == "status":
+            return 0, "Status: running\n"
+        return cancel_answer if args[1] == names[2] else (0, "cancelled\n")
+
+    sweeper = HaltSweeper(
+        settings=SimpleNamespace(agent_id="a", workspace_dir=str(tmp_path)),
+        heart=MagicMock(),
+        halt=_halt(),
+        run_runner=runner,
+    )
+    report = HaltReport()
+    await sweeper._jobs(report)
+    assert ["cancel", names[0]] in calls  # the older job is still reached after the failure
+    assert report.jobs == 1 and report.jobs_not_cancelled == 1 and report.failed == ["jobs"]
+    assert "1 Claude Code job could not be cancelled." in report.describe()
