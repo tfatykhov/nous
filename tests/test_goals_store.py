@@ -1,0 +1,373 @@
+"""F114 goals: the envelope presets and the goal store (each transition, each refusal)."""
+
+from __future__ import annotations
+
+import inspect
+import uuid
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from sqlalchemy import select, text, update
+
+from nous.config import Settings
+from nous.goals import envelope
+from nous.goals.envelope import PRESETS, Envelope, EnvelopeError
+from nous.goals.store import JOURNAL_MAX_CHARS, GoalRefused, GoalStore, format_short_id, parse_ref
+from nous.storage.models import Goal, GoalJournal, GoalSession
+
+pytestmark = pytest.mark.postgres_only
+
+CHAN = "telegram:4242"
+
+
+def _store(db, **over) -> GoalStore:
+    agent = f"goals-store-{uuid.uuid4().hex[:8]}"
+    settings = Settings(_env_file=None, agent_id=agent, **{"telegram_chat_id": "", **over})
+    return GoalStore(db, agent, settings)
+
+
+async def _draft(store: GoalStore, **over) -> Goal:
+    values = {
+        "title": "Tidy the notes",
+        "objective": "Merge the duplicate notes in the notes folder",
+        "done_when": "No two notes say the same thing",
+        "proposed_by": "host",
+        "origin_channel": CHAN,
+        **over,
+    }
+    return await store.create(**values)
+
+
+async def _active(store: GoalStore, **over) -> Goal:
+    goal = await _draft(store, **over)
+    return await store.approve(goal.id, actor="host")
+
+
+async def _open_session(store: GoalStore, goal: Goal, *, n: int = 1, spent: int = 0) -> GoalSession:
+    async with store._db.session() as s:
+        row = GoalSession(
+            agent_id=store.agent_id, goal_id=goal.id, n=n, trigger="timer", first_subtask_id=uuid.uuid4(), spent=spent
+        )
+        s.add(row)
+        await s.commit()
+        return row
+
+
+async def _set(store: GoalStore, goal: Goal, **values) -> None:
+    async with store._db.session() as s:
+        await s.execute(update(Goal).where(Goal.id == goal.id).values(**values))
+        await s.commit()
+
+
+async def _journal(store: GoalStore, goal: Goal) -> list[GoalJournal]:
+    async with store._db.session() as s:
+        rows = await s.execute(select(GoalJournal).where(GoalJournal.goal_id == goal.id).order_by(GoalJournal.seq))
+        return list(rows.scalars())
+
+
+# ---- the envelope ---------------------------------------------------------------------------------------------
+
+
+def test_the_presets_are_the_specs():
+    assert PRESETS["small"] == Envelope(2_000_000, 500_000, 3, 2, 7_200, 1, False)
+    assert PRESETS["medium"] == Envelope(10_000_000, 2_000_000, 10, 4, 3_600, 2, False)
+    assert PRESETS["large"] == Envelope(40_000_000, 6_000_000, 30, 8, 1_800, 4, True)
+    for preset in PRESETS.values():
+        envelope.validate(preset)
+
+
+def test_overrides_make_a_custom_envelope_and_a_bad_one_is_refused_in_words():
+    name, env = envelope.envelope_for("small", {"total_budget": 3_000_000})
+    assert name == "custom" and env.total_budget == 3_000_000 and env.day_budget == 500_000
+    assert envelope.envelope_for("medium", None) == ("medium", PRESETS["medium"])
+    with pytest.raises(EnvelopeError, match="day budget"):
+        envelope.envelope_for("small", {"day_budget": 3_000_000})
+    with pytest.raises(EnvelopeError, match="mode"):
+        envelope.envelope_for("small", {"mode": "full_autonomy"})
+    with pytest.raises(EnvelopeError, match="preset"):
+        envelope.envelope_for("huge", None)
+    with pytest.raises(EnvelopeError, match="deadline"):
+        envelope.envelope_for("small", {"deadline_days": 91})
+
+
+# ---- create, approve ------------------------------------------------------------------------------------------
+
+
+async def test_create_makes_a_draft_with_the_preset_envelope(db):
+    store = _store(db)
+    goal = await _draft(store, preset="medium")
+    assert goal.state == "draft" and goal.pause_reason is None and goal.mode == "contained"
+    assert goal.preset == "medium" and goal.total_budget == 10_000_000 and goal.day_budget == 2_000_000
+    assert goal.deadline_days == 10 and goal.sessions_per_day == 4 and goal.min_interval_seconds == 3_600
+    assert goal.jobs_per_day == 2 and goal.quiet_hours_ok is False
+    assert goal.deadline_at is None and goal.next_wake_at is None and goal.approved_at is None
+    assert isinstance(goal.short_id, int) and goal.short_id >= 1
+    (row,) = await _journal(store, goal)
+    assert (row.kind, row.actor) == ("state", "host")
+
+
+async def test_create_refuses_empty_or_long_text_in_words(db):
+    store = _store(db)
+    with pytest.raises(GoalRefused, match="title"):
+        await _draft(store, title="  ")
+    with pytest.raises(GoalRefused, match="objective"):
+        await _draft(store, objective="x" * 4001)
+    assert await store.list() == []
+
+
+async def test_approve_sets_deadline_and_first_wake(db):
+    store = _store(db)
+    before = datetime.now(UTC)
+    goal = await _active(store)
+    assert goal.state == "active"
+    assert before <= goal.approved_at <= datetime.now(UTC)
+    assert goal.deadline_at == goal.approved_at + timedelta(days=goal.deadline_days)
+    assert goal.next_wake_at == goal.approved_at
+
+
+async def test_approve_twice_is_refused_and_changes_nothing(db):
+    store = _store(db)
+    goal = await _active(store)
+    rows_before = await _journal(store, goal)
+    with pytest.raises(GoalRefused, match="only a draft"):
+        await store.approve(goal.id, actor="host")
+    again = await store.get(goal.id)
+    assert (again.approved_at, again.deadline_at, again.state) == (goal.approved_at, goal.deadline_at, "active")
+    assert len(await _journal(store, goal)) == len(rows_before)
+
+
+async def test_approve_is_refused_without_an_owner_channel(db):
+    store = _store(db)  # telegram_chat_id is empty
+    goal = await _draft(store, origin_channel=None)
+    with pytest.raises(GoalRefused, match="nowhere to ask the owner"):
+        await store.approve(goal.id, actor="host")
+    assert (await store.get(goal.id)).state == "draft"
+    with_chat = _store(db, telegram_chat_id="77")
+    other = await _draft(with_chat, origin_channel=None)
+    assert (await with_chat.approve(other.id, actor="host")).state == "active"  # the default chat is enough
+
+
+# ---- pause, resume, confirm, cancel ---------------------------------------------------------------------------
+
+
+async def test_pause_resume_confirm_cancel_walk(db):
+    store = _store(db)
+    goal = await _active(store)
+    count = len(await _journal(store, goal))
+
+    paused = await store.pause(goal.id, actor="owner")
+    assert (paused.state, paused.pause_reason, paused.next_wake_at) == ("paused", "owner", None)
+    resumed = await store.resume(goal.id, actor="host")
+    assert (resumed.state, resumed.pause_reason) == ("active", None) and resumed.next_wake_at is not None
+    await _set(store, goal, state="paused", pause_reason="waiting_for_owner", next_wake_at=None)
+    done = await store.confirm_done(goal.id, actor="owner")
+    assert (done.state, done.pause_reason, done.next_wake_at) == ("done", None, None) and done.finished_at
+    with pytest.raises(GoalRefused):
+        await store.cancel(goal.id, actor="host")  # done is final
+
+    other = await _draft(store)
+    cancelled = await store.cancel(other.id, actor="host")
+    assert (cancelled.state, cancelled.pending_request) == ("cancelled", None) and cancelled.finished_at
+
+    rows = (await _journal(store, goal))[count:]
+    assert [(row.kind, row.actor) for row in rows] == [("state", "owner"), ("state", "host"), ("state", "owner")]
+
+
+async def test_resume_after_budget_pause_is_refused_until_the_budget_is_raised(db):
+    store = _store(db)
+    goal = await _active(store)
+    session = await _open_session(store, goal, spent=goal.total_budget)
+    async with store._db.session() as s:
+        await s.execute(
+            update(GoalSession)
+            .where(GoalSession.id == session.id)
+            .values(ended_at=datetime.now(UTC), outcome="no_step")
+        )
+        await s.commit()
+    await _set(store, goal, state="paused", pause_reason="budget", next_wake_at=None)
+    with pytest.raises(GoalRefused, match="total budget is spent"):
+        await store.resume(goal.id, actor="host")
+    raised = await store.raise_budget(goal.id, total=goal.total_budget * 2, actor="host")
+    assert raised.total_budget == goal.total_budget * 2 and raised.state == "paused"
+    assert (await store.resume(goal.id, actor="host")).state == "active"
+
+
+async def test_resume_after_a_deadline_pause_is_refused_until_the_deadline_is_extended(db):
+    store = _store(db)
+    goal = await _active(store)
+    past = datetime.now(UTC) - timedelta(minutes=1)
+    await _set(store, goal, state="paused", pause_reason="deadline", next_wake_at=None, deadline_at=past)
+    with pytest.raises(GoalRefused, match="deadline has passed"):
+        await store.resume(goal.id, actor="host")
+    extended = await store.extend_deadline(goal.id, days=2, actor="host")
+    assert extended.deadline_days == goal.deadline_days + 2 and extended.deadline_at == past + timedelta(days=2)
+    assert (await store.resume(goal.id, actor="host")).state == "active"
+    with pytest.raises(GoalRefused, match="90"):
+        await store.extend_deadline(goal.id, days=90, actor="host")
+
+
+async def test_confirm_done_only_from_waiting_for_owner(db):
+    store = _store(db)
+    goal = await _active(store)
+    with pytest.raises(GoalRefused, match="waiting for the owner"):
+        await store.confirm_done(goal.id, actor="host")
+    await store.pause(goal.id, actor="host")
+    with pytest.raises(GoalRefused, match="waiting for the owner"):
+        await store.confirm_done(goal.id, actor="host")
+    assert (await store.get(goal.id)).state == "paused"
+
+
+# ---- stop, cancel and run now with and without an open session ------------------------------------------------
+
+
+async def test_stop_with_no_open_session_is_a_plain_pause(db):
+    store = _store(db)
+    goal = await _active(store)
+    stopped = await store.stop(goal.id, actor="host")
+    assert (stopped.state, stopped.pause_reason, stopped.pending_request) == ("paused", "owner", None)
+
+
+async def test_stop_with_an_open_session_asks_the_driver_and_names_the_session(db):
+    store = _store(db)
+    goal = await _active(store)
+    await _open_session(store, goal, n=1)
+    stopped = await store.stop(goal.id, actor="host")
+    assert (stopped.state, stopped.pause_reason, stopped.pending_request) == ("paused", "owner", "stop")
+    assert stopped.pending_request_at is not None
+    assert (await _journal(store, goal))[-1].session_n == 1
+
+
+async def test_cancel_with_an_open_session_asks_the_driver_to_cancel_it(db):
+    store = _store(db)
+    goal = await _active(store)
+    await _open_session(store, goal, n=1)
+    cancelled = await store.cancel(goal.id, actor="host")
+    assert (cancelled.state, cancelled.pause_reason, cancelled.pending_request) == ("cancelled", None, "cancel")
+
+
+async def test_run_now_only_for_an_active_goal_with_no_open_session(db):
+    store = _store(db)
+    goal = await _active(store)
+    asked = await store.request_run_now(goal.id, actor="host")
+    assert asked.pending_request == "run_now" and asked.pending_request_at is not None
+    await _open_session(store, goal)
+    with pytest.raises(GoalRefused, match="session 1 is already running"):
+        await store.request_run_now(goal.id, actor="host")
+    draft = await _draft(store)
+    with pytest.raises(GoalRefused, match="only an active goal"):
+        await store.request_run_now(draft.id, actor="host")
+
+
+async def test_resume_and_approve_clear_a_pending_request(db):
+    store = _store(db)
+    goal = await _active(store)
+    await _open_session(store, goal)
+    assert (await store.stop(goal.id, actor="host")).pending_request == "stop"
+    resumed = await store.resume(goal.id, actor="host")
+    assert (resumed.pending_request, resumed.pending_request_at) == (None, None)
+
+    draft = await _draft(store)
+    await _set(store, draft, pending_request="run_now", pending_request_at=datetime.now(UTC))  # a stale row
+    approved = await store.approve(draft.id, actor="host")
+    assert (approved.pending_request, approved.pending_request_at) == (None, None)
+
+
+# ---- notes, wakes and the journal ----------------------------------------------------------------------------
+
+
+async def test_a_note_wakes_an_active_goal_with_no_session_and_never_resumes_a_paused_one(db):
+    store = _store(db)
+    goal = await _active(store)
+    later = datetime.now(UTC) + timedelta(hours=5)
+    await _set(store, goal, next_wake_at=later)
+    noted = await store.add_note(goal.id, "Look in the archive folder too", actor="owner")
+    assert noted.next_wake_at < later
+    assert (await _journal(store, goal))[-1].kind == "owner_note"
+
+    await _open_session(store, goal)
+    await _set(store, goal, next_wake_at=later)
+    assert (await store.add_note(goal.id, "and the drafts", actor="owner")).next_wake_at == later  # a session runs
+
+    other = await _active(store)
+    await store.pause(other.id, actor="owner")
+    still = await store.add_note(other.id, "keep going", actor="owner")
+    assert (still.state, still.pause_reason, still.next_wake_at) == ("paused", "owner", None)
+
+
+async def test_a_pause_is_not_overwritten_by_a_concurrent_wake_update(db):
+    store = _store(db)
+    goal = await _active(store)
+    async with store._db.session() as s:  # a reader that saw the goal active, before the pause
+        seen = (await s.execute(select(Goal.state).where(Goal.id == goal.id))).scalar_one()
+        assert seen == "active"
+        await s.commit()
+    await store.pause(goal.id, actor="owner")
+    assert await store.delay_wake(goal.id, seconds=60) is False  # the targeted update changes nothing
+    after = await store.get(goal.id)
+    assert (after.state, after.pause_reason, after.next_wake_at) == ("paused", "owner", None)
+
+
+async def test_journal_text_is_clipped_to_the_bound(db):
+    store = _store(db)
+    goal = await _draft(store)
+    row = await store.append_journal(
+        goal.id, "progress", "y" * 5000, actor="chain", session_n=2, evidence=[f"ref-{i}" * 80 for i in range(12)]
+    )
+    assert len(row.text) == JOURNAL_MAX_CHARS and row.text.endswith("[clipped]")
+    assert len(row.evidence) == 10 and all(len(ref) <= 300 for ref in row.evidence)
+    assert row.session_n == 2 and row.seq >= 1
+    short = await store.append_journal(goal.id, "progress", "short", actor="chain")
+    assert short.text == "short" and short.seq > row.seq
+
+
+async def test_the_journal_tail_is_bounded_newest_first_and_keeps_owner_notes(db):
+    store = _store(db)
+    goal = await _draft(store)
+    await store.add_note(goal.id, "the owner's first note", actor="owner")
+    for i in range(10):
+        await store.append_journal(goal.id, "progress", f"step {i} " + "z" * 1990, actor="chain")
+    tail = await store.journal_tail(goal.id, chars=6000)
+    assert tail[0].text.startswith("step 9")
+    assert [row.kind for row in tail].count("owner_note") == 1
+    assert all(len(row.text) <= 1500 for row in tail)
+    assert sum(len(row.text) for row in tail) <= 6000 + len("the owner's first note")
+    assert len([row for row in tail if row.kind == "progress"]) < 10
+
+
+async def test_the_store_has_no_way_to_edit_or_delete_a_journal_row():
+    public = {name for name, _ in inspect.getmembers(GoalStore, inspect.isfunction) if not name.startswith("_")}
+    assert not [name for name in public if "delete" in name or "remove" in name or "update" in name]
+    # the journal's only writer appends; the other two read
+    assert {name for name in public if "journal" in name} == {"append_journal", "journal", "journal_tail"}
+
+
+async def test_short_id_forms_resolve(db):
+    store = _store(db)
+    goal = await _draft(store)
+    label = format_short_id(goal.short_id)
+    assert label == f"G-{goal.short_id:04d}"
+    for ref in (goal.id, str(goal.id), goal.short_id, str(goal.short_id), label, label.lower()):
+        assert (await store.get(ref)).id == goal.id, ref
+    assert parse_ref("G-0007") == 7 and parse_ref("g7") == 7 and parse_ref("nonsense") is None
+    assert await store.get("G-999999999") is None
+    other = _store(db)
+    assert await other.get(goal.id) is None  # agent-scoped
+    with pytest.raises(GoalRefused, match="no goal"):
+        await other.pause(goal.id, actor="host")
+
+
+async def test_the_store_cannot_set_a_mode(db):
+    for name, fn in inspect.getmembers(GoalStore, inspect.isfunction):
+        assert "mode" not in inspect.signature(fn).parameters, name
+    store = _store(db)
+    with pytest.raises(GoalRefused, match="mode"):
+        await _draft(store, overrides={"mode": "full_autonomy"})
+    goal = await _draft(store, overrides={"jobs_per_day": 3})
+    assert (goal.mode, goal.mode_until, goal.preset) == ("contained", None, "custom")
+    async with store._db.session() as s:
+        assert (
+            await s.execute(
+                text("SELECT count(*) FROM brain.goals WHERE agent_id = :a AND mode <> 'contained'"),
+                {"a": store.agent_id},
+            )
+        ).scalar_one() == 0
