@@ -23,6 +23,10 @@ nous/
 │   ├── log_redaction.py        # Logging setup for both entry points: keeps the bot token and the API key out of the logs
 │   ├── cancellation.py         # cancel_requested(): a task's own cancellation, as opposed to one that came out of something it awaited
 │   ├── cancel_provenance.py    # Who cancelled a DAG or a Claude Code job: the record (owner, agent or harness), its renderers, the lone runner.sh call parser, the (by, via) pairs a job's cancelled_by may hold
+│   ├── background_halt.py      # Goals PR 0c: the process-wide halt of background work: the flag, the epoch, the refusal predicate (refuses), the serialized halt and resume, install/current/background_halted()
+│   ├── background_halt_store.py # Goals PR 0c: nous_system.background_halt and its audit log (migration 114), raw SQL, the state and its audit row in one transaction
+│   ├── background_processes.py # Goals PR 0c: the process groups of background shell commands; kill_all() signals them
+│   ├── owner_notice.py         # Goals PR 0c: one plain text to the owner's Telegram chat, sent by the process itself
 │   ├── storage/                # Database layer (async SQLAlchemy)
 │   │   ├── database.py         # Connection pool, session management
 │   │   ├── models.py           # ORM models
@@ -75,6 +79,7 @@ nous/
 │   │   ├── episode_summarizer.py  # Episode summary generation
 │   │   ├── job_lessons.py         # JobLessonLearner: lessons from bad runs of recurring jobs
 │   │   ├── job_fixes.py           # JobFixer: check-and-fix for a recurring job that keeps failing
+│   │   ├── halt_sweep.py          # Goals PR 0c: HaltSweeper, the one-shot cancel sweep of a halt (subtasks, chains, DAGs, shell commands, Claude Code jobs) and its HaltReport
 │   │   ├── tool_notes.py          # F108 Phase 3: ToolNoteStore (the nous_system.tool_note table, migration 103), ToolNotesReview (the sleep step: the keep-or-retire judge, one model call, the strict answer check, the owner card for guard patterns) and the review prompt, and the "Tool notes" procedure (`sync_procedure`, `render_notes`, rendered by `get_procedure`, never stored): capped notes about repeated tool mistakes (3 per tool, 40 in all, 300 characters) and the declined and guard rows that keep a pattern from being re-reviewed for 14 days; the app is its only reader and writer
 │   │   ├── fact_extractor.py      # Fact extraction from conversations
 │   │   ├── knowledge_extractor.py # Pre-prune fact extraction
@@ -181,6 +186,7 @@ nous/
 │   └── api/                    # External interfaces
 │       ├── rest.py             # Starlette REST API (the route list in `create_app`; see `docs/reference/rest-api.md`)
 │       ├── commitment_routes.py # F111: POST /commitments/{id}/drop|done, the owner's /drop and /done
+│       ├── background_routes.py # Goals PR 0c: GET /background/state, POST /background/halt (no secret) and /background/resume (owner or proxy secret)
 │       ├── mcp_client_routes.py # F112 PR 2a: the owner's /integrations/mcp routes (list, probe, add, change, refresh, remove MCP servers; PR 2c: store, replace and remove a server's key, never returned; PR 2d: OAuth start, callback page, paste fallback, sign-in state, sign-out), behind the proxy's X-Nous-Proxy-Secret; mounted only with NOUS_MCP_CLIENT_ENABLED
 │       ├── intention_routes.py # F099 Phase 2d: the four owner-action routes (decide, answer, list), thin over ContinuationRunner
 │       ├── intention_dashboard.py # F099 Phase 3c: GET /dashboard/intentions queries (the tree and the metrics), read-only, Postgres-only

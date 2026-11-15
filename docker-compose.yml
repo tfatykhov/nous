@@ -228,6 +228,10 @@ services:
       - NOUS_PROMISE_WATCHER_SINCE=${NOUS_PROMISE_WATCHER_SINCE:-}
       - NOUS_PROMISE_WATCHER_MAX_ITEMS=${NOUS_PROMISE_WATCHER_MAX_ITEMS:-10}
       - NOUS_OWNER_ROUTE_SECRET_SHA256=${NOUS_OWNER_ROUTE_SECRET_SHA256:-}
+      # Goals PR 0c: the host's hold on background work (read once at start) and the login proxy's digest for
+      # POST /background/resume (empty: NOUS_MCP_CLIENT_UI_SECRET_SHA256).
+      - NOUS_BACKGROUND_HALT=${NOUS_BACKGROUND_HALT:-false}
+      - NOUS_PROXY_SECRET_SHA256=${NOUS_PROXY_SECRET_SHA256:-}
     volumes:
       # F042: persist downloaded cross-encoder models across container restarts
       - huggingface_cache:/root/.cache/huggingface

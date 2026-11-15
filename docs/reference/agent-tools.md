@@ -6,6 +6,8 @@ Tool descriptions name other tools to use instead. Those cross-references assume
 
 With `NOUS_TOOL_REASON_ENABLED` on (F108, default off), every tool offered to the model carries one more required input, a string `reason` ("One sentence: why this tool, for this step."), added to the offered copies of the schemas in `AgentRunner._offered_tools` (a tool whose own schema declares `reason`, such as `create_censor`, keeps its own, and its handler still gets it). For every other tool the runner takes it out of the call before the tool runs, so the handler never sees it, and records it in `nous_system.tool_call_log` when `NOUS_TOOL_CALL_LOG_ENABLED` is on. The MCP server's tools do not get it.
 
+While background work is halted (Goals PR 0c), the dispatcher refuses `spawn_task`, `spawn_sync`, `dag_create` and `dag_manage` `retry_node` from any turn with a fixed sentence, and every tool call of a background turn is refused; `schedule_task` and `heartbeat_check_create` stay allowed (their rows fire only after a resume).
+
 | Tool | Frame Access | Description |
 |------|-------------|-------------|
 | `record_decision` | decision, task, debug, conversation, question | Record a decision with confidence + reasoning. Tool-call markup a model leaked into `description`, `context`, `pattern` or a reason's `text` is stripped first (`nous.tool_markup`); a value it gave to an unset `context` or `pattern` fills it (never one the call set, never from a later call in the markup); the result says so and names any call it held that never ran |
