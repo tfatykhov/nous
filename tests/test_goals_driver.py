@@ -296,6 +296,27 @@ async def test_a_censor_refusal_is_a_failed_start_and_is_journalled(env_factory,
     assert w.runner.wakes == 0
 
 
+async def test_the_stored_task_keeps_the_bound_after_the_gate_adds_its_guidance(env_factory):  # noqa: F811
+    """A steering censor appends its guidance to the task. The task the subtask stores stays within the bound:
+    the first task is built again with the guidance's length kept free, and the guidance is kept whole."""
+    w = await _world(env_factory)
+    goal = await _active(w, objective="Merge the duplicate notes. " + "O" * 3900, done_when="D" * 2000)
+    for i in range(6):
+        await w.store.append_journal(goal.id, "progress", f"step {i} " + "z" * 1400, actor="chain")
+    guidance = "Keep every merge reversible. " * 60
+    await w.env.heart.add_censor(
+        CensorInput(
+            trigger_pattern="duplicate notes", reason="Merges lose text.", action="steer", action_instruction=guidance
+        )
+    )
+    assert await w.driver.start_session(goal.id, trigger="timer") is not None
+    (subtask,) = await _subtasks(w)
+    assert len(subtask.task) <= charter.MAX_TASK_CHARS
+    assert subtask.task.endswith(f"## Active Guidance\n- {guidance}")  # the guidance whole, at the end
+    assert "O" * 3900 in subtask.task and "D" * 2000 in subtask.task  # the charter whole
+    assert "more journal entries not shown" in subtask.task  # the journal made room
+
+
 async def test_a_censor_refusal_does_not_feed_the_next_start(env_factory):  # noqa: F811
     """A real censor row, matched by its pattern. The refusal's journal row is part of the next task, which goes
     through the same gate: were the censor's words in it, the goal would stay refused after the owner removed the

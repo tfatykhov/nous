@@ -129,6 +129,15 @@ def test_an_open_step_outlasts_a_closed_one():
     assert "closed or dropped plan steps not shown" in text
 
 
+def test_a_smaller_bound_is_kept_the_same_way():
+    rows = [_row(i, f"entry {i:02d} " + "y" * 1400) for i in range(10)]
+    plan = [{"id": f"s{i}", "text": "p" * 300, "status": "open"} for i in range(10)]
+    text = build_session_task(_goal(), plan, rows, spent=0, day_spent=0, max_chars=5_000)
+    assert len(text) <= 5_000 and "Merge the duplicate notes" in text
+    with pytest.raises(ValueError, match="1000"):
+        build_session_task(_goal(), plan, rows, spent=0, day_spent=0, max_chars=1_000)
+
+
 def test_a_charter_alone_over_the_cap_is_refused_not_cut():
     with pytest.raises(ValueError, match="12000"):
         _task(goal=_goal(objective="O" * 13_000))

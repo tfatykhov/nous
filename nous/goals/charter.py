@@ -112,17 +112,24 @@ class _Fit:
 
 
 def build_session_task(
-    goal: Any, plan: Sequence[Any], journal_rows: Sequence[Any], *, spent: int, day_spent: int
+    goal: Any,
+    plan: Sequence[Any],
+    journal_rows: Sequence[Any],
+    *,
+    spent: int,
+    day_spent: int,
+    max_chars: int = MAX_TASK_CHARS,
 ) -> str:
     """The first task of a session of ``goal``: the charter with the budget left (``spent`` in all,
     ``day_spent`` today), the plan's steps and the journal's entries, newest first, both quoted as data, and what
     to do in this session. ``journal_rows`` need ``seq``, ``kind``, ``actor``, ``session_n`` and ``text``.
 
     The journal shows the owner's entries first, then the others, each newest first, within ``JOURNAL_CHARS``.
-    Over ``MAX_TASK_CHARS``, things go in this order until the text fits: the journal's entries not from the owner
-    (oldest first), the evidence of closed and dropped steps, those steps themselves, the open steps (oldest
-    first), and last the owner's entries (oldest first). The charter is never cut: ``ValueError`` when it alone is
-    too long (the table's bounds keep it shorter)."""
+    Over ``max_chars`` (``MAX_TASK_CHARS``, or less when the caller keeps room for text it adds), things go in this
+    order until the text fits: the journal's entries not from the owner (oldest first), the evidence of closed and
+    dropped steps, those steps themselves, the open steps (oldest first), and last the owner's entries (oldest
+    first). The charter is never cut: ``ValueError`` when it alone is too long (the table's bounds keep it shorter
+    than ``MAX_TASK_CHARS``)."""
     head = _charter(goal, spent=spent, day_spent=day_spent)
     steps = [step for step in plan if isinstance(step, Mapping)]
     rows = sorted(journal_rows, key=lambda row: row.seq, reverse=True)
@@ -141,8 +148,8 @@ def build_session_task(
     fit = _Fit(steps, quoted, kept)
     cuts = fit.cuts(owner)
     text = fit.render(head)
-    while len(text) > MAX_TASK_CHARS:
+    while len(text) > max_chars:
         if not next(cuts, False):
-            raise ValueError(f"the goal's charter alone is longer than {MAX_TASK_CHARS} characters")
+            raise ValueError(f"the goal's charter alone is longer than {max_chars} characters")
         text = fit.render(head)
     return text

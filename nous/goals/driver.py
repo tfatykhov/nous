@@ -267,8 +267,7 @@ class GoalDriver:
             return None
         session_id = row.id
         try:
-            task = await self._task_for(goal)
-            rejection, task = await gate_subtask_task(self._heart, task)
+            rejection, task = await self._gated_task(goal)
             if rejection is not None:
                 # A fixed sentence: the journal is part of the next task, which goes through the same gate, so the
                 # censor's words in it would refuse every later start too. The message goes to the log only.
@@ -299,12 +298,27 @@ class GoalDriver:
         logger.info("Goal %s: session %d started (root %s)", goal_id, n, root.id)
         return root.id
 
-    async def _task_for(self, goal: Goal) -> str:
-        """The session's first task, from the goal as read under its lock, its journal tail and its spend."""
+    async def _gated_task(self, goal: Goal) -> tuple[str | None, str]:
+        """``(rejection, task)``: the session's first task (from the goal as read under its lock, its journal tail
+        and its spend) through the censor gate that every spawned task goes through. A steering censor appends its
+        guidance; the task is then built again with that guidance's length kept free, so the stored task stays
+        within ``charter.MAX_TASK_CHARS`` and the guidance stays whole."""
         rows = await self._store.journal_tail(goal.id)
         async with self._db.session() as s:
             total, today = await spend.goal_spent(s, self._agent_id, goal.id)
-        return charter.build_session_task(goal, list(goal.plan or []), rows, spent=total, day_spent=today)
+
+        def build(max_chars: int) -> str:
+            plan = list(goal.plan or [])
+            return charter.build_session_task(goal, plan, rows, spent=total, day_spent=today, max_chars=max_chars)
+
+        task = build(charter.MAX_TASK_CHARS)
+        rejection, gated = await gate_subtask_task(self._heart, task)
+        if rejection is not None or len(gated) <= charter.MAX_TASK_CHARS:
+            return rejection, gated
+        if not gated.startswith(task):
+            raise ValueError("the censor gate changed the task instead of adding to it")
+        guidance = gated[len(task) :]
+        return None, build(charter.MAX_TASK_CHARS - len(guidance)) + guidance
 
     async def _has_open_session(self, s: AsyncSession, goal_id: UUID) -> bool:
         query = select(
