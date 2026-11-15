@@ -180,6 +180,33 @@ async def test_two_starts_at_once_make_one_session_and_one_root(env_factory):  #
     assert [r for r in results if r is not None] == [root.id]
 
 
+async def test_the_open_session_index_is_read_as_another_start_having_won(env_factory, monkeypatch):  # noqa: F811
+    """The index on open sessions is the last word against a second start: its violation is a quiet None."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    await w.driver.start_session(goal.id, trigger="timer")
+
+    async def nothing_seen(*args, **kwargs):  # as if the two checks had run before the first start committed
+        return False
+
+    monkeypatch.setattr(w.driver, "_has_open_session", nothing_seen)
+    monkeypatch.setattr(w.driver, "_lineage_has_open_work", nothing_seen)
+    assert await w.driver.start_session(goal.id, trigger="run_now") is None
+    assert len(await _sessions(w, goal)) == 1
+    assert w.driver._failures == {}
+    assert not [r for r in await _journal(w, goal, "state") if r.actor == "harness"]
+
+
+async def test_any_other_violation_on_the_session_insert_is_a_failed_start(env_factory):  # noqa: F811
+    w = await _world(env_factory)
+    goal = await _active(w)
+    assert await w.driver.start_session(goal.id, trigger="no such trigger") is None  # the CHECK on trigger
+    assert await _sessions(w, goal) == [] and await _subtasks(w) == []
+    row = (await _journal(w, goal, "state"))[-1]
+    assert (row.actor, row.text) == ("harness", "Session 1 could not start: IntegrityError.")
+    assert w.driver._failures == {goal.id: 1}
+
+
 async def test_start_rechecks_state_under_the_goal_lock(env_factory):  # noqa: F811
     w = await _world(env_factory)
     goal = await _active(w)

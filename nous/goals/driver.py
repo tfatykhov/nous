@@ -78,6 +78,18 @@ _CLAIM_SQL = text(
 )
 
 
+ONE_OPEN_SESSION_INDEX = "uq_goal_sessions_one_open"  # migration 113: at most one open session per goal
+
+
+def _constraint_of(exc: IntegrityError) -> str | None:
+    """The name of the constraint or index an INSERT violated, as the driver (asyncpg) reports it, else None."""
+    for error in (exc.orig, getattr(exc.orig, "__cause__", None)):
+        name = getattr(error, "constraint_name", None)
+        if name:
+            return str(name)
+    return None
+
+
 @dataclass(frozen=True)
 class TickReport:
     """What one tick did: reports journalled from the goal channels, sessions closed, the roots of the sessions
@@ -218,8 +230,9 @@ class GoalDriver:
         Transaction 1 takes the goal row ``FOR UPDATE``, re-reads that the goal is active and has no open session
         and no open work left on an earlier session's root, and inserts the session row (its ``first_subtask_id``
         drawn here, before the subtask exists) and commits; the partial unique index on open sessions is the final
-        word against a second start. Then the first task is built and goes through the censor gate that every
-        spawned task goes through, and the subtask and its root intention are created in a transaction of their own.
+        word against a second start (any other violation of the insert is a failed start). Then the first task is
+        built and goes through the censor gate that every spawned task goes through, and the subtask and its root
+        intention are created in a transaction of their own.
         If that fails, the session row is undone. A full queue only delays the goal a minute; a refusal by the gate
         or any other failure is journalled and counted, and the third in a row pauses the goal (``error``). With
         goals off, or while background work is halted, it does nothing: every caller (the tick, the owner's run-now)
@@ -228,6 +241,7 @@ class GoalDriver:
             return None
         subtask_id = uuid.uuid4()
         open_work = False
+        insert_failure: str | None = None
         async with self._db.session() as s:
             goal = (
                 await s.execute(
@@ -236,6 +250,7 @@ class GoalDriver:
             ).scalar_one_or_none()
             if goal is None or goal.state != "active":
                 return None
+            seen = goal.next_wake_at  # the wake as read under the lock (a rollback below expires the object)
             now = (await s.execute(select(func.clock_timestamp()))).scalar_one()
             if await self._has_open_session(s, goal_id):
                 return None
@@ -258,12 +273,17 @@ class GoalDriver:
                 s.add(row)
                 try:
                     await s.commit()
-                except IntegrityError:  # the one-open-session index: another start won
+                except IntegrityError as exc:
                     await s.rollback()
-                    return None
-        seen = goal.next_wake_at
+                    if _constraint_of(exc) == ONE_OPEN_SESSION_INDEX:
+                        return None  # another start won
+                    logger.warning("Goal %s: session %d could not be recorded", goal_id, n, exc_info=True)
+                    insert_failure = f"Session {n} could not start: {type(exc).__name__}."
         if open_work:
             await self._store.delay_wake(goal_id, seconds=OPEN_WORK_DELAY_SECONDS, seen=seen)
+            return None
+        if insert_failure is not None:  # no session row was written: nothing to undo
+            await self._failed_start(goal_id, n, insert_failure, seen=seen)
             return None
         session_id = row.id
         try:
