@@ -9,7 +9,8 @@ this command never runs a session itself. The goal driver, in the Nous process, 
 ``cancel`` within one tick (``NOUS_GOALS_TICK_SECONDS``), with ``NOUS_GOALS_ENABLED`` on. With that flag off (or a
 flag it needs off) the changing sub-commands refuse and change nothing; ``list`` and ``show`` still work.
 
-Exit status 0, or 2 on a refusal, with the reason on stderr.
+Exit status 0; 2 on a refusal, with the reason on stderr; 1 on a database error, with one fixed line naming only
+the error's class (its text would repeat the statement's parameters).
 """
 
 from __future__ import annotations

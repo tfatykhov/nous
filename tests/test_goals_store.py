@@ -554,3 +554,12 @@ def test_out_of_range_limits_are_refused_in_words():
         envelope.envelope_for("small", {"day_budget": 10**20, "total_budget": 10**20})
     with pytest.raises(EnvelopeError, match="day budget"):
         envelope.validate(replace(PRESETS["small"], day_budget=10**20))
+
+
+async def test_a_huge_extension_is_a_refusal_not_an_overflow(db):
+    store = _store(db)
+    goal = await _active(store)
+    for days in (91, 10**12):
+        with pytest.raises(GoalRefused, match="90"):
+            await store.extend_deadline(goal.id, days=days, actor="host")
+    assert (await store.get(goal.id)).deadline_at == goal.deadline_at

@@ -385,8 +385,8 @@ class GoalStore:
         async with self._locked(ref) as (s, goal, now):
             if goal.state not in LIVE_STATES:
                 raise GoalRefused(f"{describe(goal)}: only a draft, active or paused goal's deadline can change")
-            if isinstance(days, bool) or not isinstance(days, int) or days < 1:
-                raise GoalRefused("the extension must be a whole number of days, at least 1")
+            if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= MAX_DEADLINE_DAYS:
+                raise GoalRefused(f"the extension must be a whole number of days, 1 to {MAX_DEADLINE_DAYS}")
             values: dict[str, Any]
             if goal.deadline_at is None:
                 if goal.deadline_days + days > MAX_DEADLINE_DAYS:
