@@ -24,6 +24,7 @@ vi.mock('./views/Identity.svelte', () => ({ default: () => {} }));
 vi.mock('./views/Harness.svelte', () => ({ default: () => {} }));
 vi.mock('./views/Intentions.svelte', () => ({ default: () => {} }));
 vi.mock('./views/Autonomy.svelte', () => ({ default: () => {} }));
+vi.mock('./views/Goals.svelte', () => ({ default: () => {} }));
 vi.mock('./views/Integrations.svelte', () => ({ default: () => {} }));
 
 const { default: App } = await import('./App.svelte');
