@@ -199,11 +199,31 @@ async def test_resume_after_a_deadline_pause_is_refused_until_the_deadline_is_ex
     await _set(store, goal, state="paused", pause_reason="deadline", next_wake_at=None, deadline_at=past)
     with pytest.raises(GoalRefused, match="deadline has passed"):
         await store.resume(goal.id, actor="host")
+    before = datetime.now(UTC)
     extended = await store.extend_deadline(goal.id, days=2, actor="host")
-    assert extended.deadline_days == goal.deadline_days + 2 and extended.deadline_at == past + timedelta(days=2)
+    # counted from now, not from the passed deadline (which would leave only a day and 23 hours)
+    assert before + timedelta(days=2) <= extended.deadline_at <= datetime.now(UTC) + timedelta(days=2)
+    assert extended.deadline_days == goal.deadline_days  # the length it was approved with
     assert (await store.resume(goal.id, actor="host")).state == "active"
     with pytest.raises(GoalRefused, match="90"):
-        await store.extend_deadline(goal.id, days=90, actor="host")
+        await store.extend_deadline(goal.id, days=89, actor="host")  # more than 90 days from now
+    assert (await store.get(goal.id)).deadline_at == extended.deadline_at
+
+
+async def test_extend_counts_from_a_future_deadline_and_caps_at_90_days_from_now(db):
+    store = _store(db)
+    goal = await _active(store, overrides={"deadline_days": 60})
+    tomorrow = datetime.now(UTC) + timedelta(days=1)  # 59 of its 60 days have passed
+    await _set(store, goal, deadline_at=tomorrow)
+    extended = await store.extend_deadline(goal.id, days=80, actor="host")  # 60 + 80 > 90, but 81 days from now
+    assert extended.deadline_at == tomorrow + timedelta(days=80)
+    with pytest.raises(GoalRefused, match="90"):
+        await store.extend_deadline(goal.id, days=10, actor="host")  # 91 days from now
+    assert (await store.get(goal.id)).deadline_at == extended.deadline_at
+    draft = await _draft(store)
+    assert (await store.extend_deadline(draft.id, days=4, actor="host")).deadline_days == 7  # applied at approval
+    with pytest.raises(GoalRefused, match="90"):
+        await store.extend_deadline(draft.id, days=84, actor="host")
 
 
 async def test_confirm_done_only_from_waiting_for_owner(db):
@@ -225,6 +245,30 @@ async def test_stop_with_no_open_session_is_a_plain_pause(db):
     goal = await _active(store)
     stopped = await store.stop(goal.id, actor="host")
     assert (stopped.state, stopped.pause_reason, stopped.pending_request) == ("paused", "owner", None)
+
+
+async def test_pause_and_a_plain_stop_clear_a_pending_run_now(db):
+    store = _store(db)
+    for change in (store.pause, store.stop):
+        goal = await _active(store)
+        assert (await store.request_run_now(goal.id, actor="host")).pending_request == "run_now"
+        after = await change(goal.id, actor="host")
+        assert (after.state, after.pending_request, after.pending_request_at) == ("paused", None, None)
+
+
+async def test_stop_on_a_paused_goal_stops_its_open_session_and_keeps_the_pause(db):
+    store = _store(db)
+    goal = await _active(store)
+    await store.pause(goal.id, actor="owner")
+    with pytest.raises(GoalRefused, match="no session is open"):
+        await store.stop(goal.id, actor="host")  # paused with nothing running: nothing to stop
+    await _set(store, goal, pause_reason="budget")
+    await _open_session(store, goal, n=1)
+    count = len(await _journal(store, goal))
+    stopped = await store.stop(goal.id, actor="host")
+    assert (stopped.state, stopped.pause_reason, stopped.pending_request) == ("paused", "budget", "stop")
+    rows = await _journal(store, goal)
+    assert len(rows) == count + 1 and (rows[-1].kind, rows[-1].session_n) == ("state", 1)
 
 
 async def test_stop_with_an_open_session_asks_the_driver_and_names_the_session(db):
@@ -294,15 +338,22 @@ async def test_a_note_wakes_an_active_goal_with_no_session_and_never_resumes_a_p
     assert (still.state, still.pause_reason, still.next_wake_at) == ("paused", "owner", None)
 
 
-async def test_a_pause_is_not_overwritten_by_a_concurrent_wake_update(db):
+async def test_delay_wake_moves_only_the_wake_its_caller_saw(db):
     store = _store(db)
     goal = await _active(store)
-    async with store._db.session() as s:  # a reader that saw the goal active, before the pause
-        seen = (await s.execute(select(Goal.state).where(Goal.id == goal.id))).scalar_one()
-        assert seen == "active"
-        await s.commit()
+    seen = goal.next_wake_at  # the driver read the goal due
+    assert await store.delay_wake(goal.id, seconds=300, seen=seen) is True
+    delayed = (await store.get(goal.id)).next_wake_at
+    assert delayed > seen
+    await store.add_note(goal.id, "look at the drafts too", actor="owner")  # the owner wakes it now
+    woken = (await store.get(goal.id)).next_wake_at
+    assert woken < delayed
+    assert await store.delay_wake(goal.id, seconds=300, seen=delayed) is False  # a stale read moves nothing
+    assert (await store.get(goal.id)).next_wake_at == woken
+    with pytest.raises(GoalRefused, match="delayed"):
+        await store.delay_wake(goal.id, seconds=-1, seen=woken)
     await store.pause(goal.id, actor="owner")
-    assert await store.delay_wake(goal.id, seconds=60) is False  # the targeted update changes nothing
+    assert await store.delay_wake(goal.id, seconds=60, seen=None) is False  # paused: nothing moves
     after = await store.get(goal.id)
     assert (after.state, after.pause_reason, after.next_wake_at) == ("paused", "owner", None)
 
@@ -371,3 +422,61 @@ async def test_the_store_cannot_set_a_mode(db):
                 {"a": store.agent_id},
             )
         ).scalar_one() == 0
+
+
+# ---- who may change what, and whose goal ----------------------------------------------------------------------
+
+
+async def test_owner_only_changes_refuse_any_other_actor(db):
+    store = _store(db)
+    draft = await _draft(store)
+    with pytest.raises(GoalRefused, match="only the owner"):
+        await store.approve(draft.id, actor="chain")
+    goal = await _active(store)
+    await store.pause(goal.id, actor="host")
+    for change in (
+        lambda: store.resume(goal.id, actor="chain"),
+        lambda: store.raise_budget(goal.id, total=goal.total_budget * 2, actor="chain"),
+        lambda: store.extend_deadline(goal.id, days=1, actor="harness"),
+        lambda: store.confirm_done(goal.id, actor="chain"),
+    ):
+        with pytest.raises(GoalRefused, match="only the owner"):
+            await change()
+    after = await store.get(goal.id)
+    assert (after.state, after.total_budget, after.deadline_at) == ("paused", goal.total_budget, goal.deadline_at)
+    assert (await store.get(draft.id)).state == "draft"
+
+
+async def test_another_agents_store_cannot_write_to_this_agents_goal(db):
+    store = _store(db)
+    goal = await _active(store)
+    other = _store(db)
+    count = len(await _journal(store, goal))
+    with pytest.raises(GoalRefused, match="no goal"):
+        await other.append_journal(goal.id, "progress", "not mine", actor="chain")
+    assert await other.delay_wake(goal.id, seconds=60, seen=goal.next_wake_at) is False
+    assert len(await _journal(store, goal)) == count
+    assert (await store.get(goal.id)).next_wake_at == goal.next_wake_at
+
+
+async def test_raise_budget_refuses_a_total_below_what_is_spent(db):
+    store = _store(db)
+    goal = await _active(store)
+    await _open_session(store, goal, spent=700_000)
+    with pytest.raises(GoalRefused, match="already spent"):
+        await store.raise_budget(goal.id, total=600_000, day=100_000, actor="host")
+    assert (await store.raise_budget(goal.id, total=700_000, day=100_000, actor="host")).total_budget == 700_000
+
+
+async def test_a_note_on_a_finished_goal_is_refused(db):
+    store = _store(db)
+    goal = await _draft(store)
+    await store.cancel(goal.id, actor="host")
+    count = len(await _journal(store, goal))
+    with pytest.raises(GoalRefused, match="cancelled"):
+        await store.add_note(goal.id, "too late", actor="owner")
+    done = await _active(store)
+    await _set(store, done, state="done", next_wake_at=None)
+    with pytest.raises(GoalRefused, match="done"):
+        await store.add_note(done.id, "too late", actor="owner")
+    assert len(await _journal(store, goal)) == count

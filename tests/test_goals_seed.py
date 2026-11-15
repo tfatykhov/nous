@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import timedelta
 
 import pytest
 from sqlalchemy import select
@@ -100,7 +101,8 @@ async def test_every_change_is_journalled_with_actor_host(db, capsys):
     ):
         assert await _run(settings, store, *argv) == 0, argv
     goal = await store.get(label)
-    assert (goal.state, goal.total_budget, goal.day_budget, goal.deadline_days) == ("cancelled", 3_000_000, 600_000, 5)
+    assert (goal.state, goal.total_budget, goal.day_budget) == ("cancelled", 3_000_000, 600_000)
+    assert goal.deadline_at - goal.approved_at >= timedelta(days=goal.deadline_days + 2)  # extended by two days
     async with db.session() as s:
         rows = list((await s.execute(select(GoalJournal).where(GoalJournal.goal_id == goal.id))).scalars())
     assert len(rows) == 9  # created, then one per change
