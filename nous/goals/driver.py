@@ -317,9 +317,10 @@ class GoalDriver:
         return bool((await s.execute(query)).scalar_one())
 
     async def _lineage_has_open_work(self, s: AsyncSession, goal_id: UUID, now: datetime) -> bool:
-        """Whether a root of one of the goal's sessions, its deadline not passed, has an open intention. A result
-        reopens a closed intention of a root with no marker until that root's deadline, so a closed session's chain
-        can come back to life; a new session waits while it does."""
+        """Whether a root of one of the goal's sessions, with no cancel or expiry marker and its deadline not passed,
+        has an open intention. A result reopens a closed intention of a root with no marker until that root's
+        deadline, so a closed session's chain can come back to life; a new session waits while it does. A marked
+        root has ended, even while an intention of it is not closed yet: it holds nothing."""
         root, member = aliased(Intention), aliased(Intention)
         query = select(
             exists().where(
@@ -328,6 +329,8 @@ class GoalDriver:
                 GoalSession.root_id.is_not(None),
                 root.agent_id == self._agent_id,
                 root.id == GoalSession.root_id,
+                root.root_cancelled_at.is_(None),
+                root.root_expired_at.is_(None),
                 or_(root.deadline.is_(None), root.deadline > now),
                 exists().where(
                     member.agent_id == self._agent_id,

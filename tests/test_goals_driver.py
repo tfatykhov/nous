@@ -534,6 +534,21 @@ async def test_a_root_marker_ends_the_session_even_with_work_still_open(env_fact
     assert (await _session(w, session.id)).outcome == "interrupted"
 
 
+@pytest.mark.parametrize("marker", ["root_expired_at", "root_cancelled_at"])
+async def test_a_marked_root_with_work_still_open_does_not_hold_the_next_start(env_factory, marker):  # noqa: F811
+    """A marked root has ended (nothing reopens it), even while one of its intentions has not been closed yet: it
+    does not hold the goal until its deadline."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, _session_row = await _started(w, goal)
+    await make_child(w.env, root)  # still pending
+    await set_intention(w.env, root.id, **{marker: datetime.now(UTC)})
+    assert (await w.driver.tick()).closed == 1
+    await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
+    assert len((await w.driver.tick()).started) == 1
+    assert len(await _sessions(w, goal)) == 2
+
+
 async def test_next_wake_is_the_interval_after_a_step_and_twice_that_after_none(env_factory):  # noqa: F811
     w = await _world(env_factory)
     stepped, idle = await _active(w), await _active(w, title="Sort the photos")
