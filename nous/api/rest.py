@@ -3960,15 +3960,15 @@ def create_app(
         # F034: Heartbeat endpoints
         Route("/heartbeat/status", heartbeat_status),
         Route("/heartbeat/trigger", heartbeat_trigger, methods=["POST"]),
-        Route("/heartbeat/config", owner_guard.protect(heartbeat_config), methods=["PUT"]),
+        owner_guard.route("/heartbeat/config", heartbeat_config, methods=["PUT"]),
         Route("/undo/snapshots", undo_snapshots_list),
-        Route("/undo/snapshots/{id}/restore", owner_guard.protect(undo_snapshot_restore), methods=["POST"]),
+        owner_guard.route("/undo/snapshots/{id}/restore", undo_snapshot_restore, methods=["POST"]),
         # F034.1: Finding lifecycle endpoints
         Route("/heartbeat/findings/{fingerprint}/acknowledge", heartbeat_findings_acknowledge, methods=["POST"]),
         Route("/heartbeat/findings/{fingerprint}/resolve", heartbeat_findings_resolve, methods=["POST"]),
         Route("/heartbeat/findings/{fingerprint}/dismiss", heartbeat_findings_dismiss, methods=["POST"]),
         Route("/heartbeat/findings", heartbeat_findings),
-        Route("/heartbeat/escalation-policy", owner_guard.protect(heartbeat_escalation_policy), methods=["PUT"]),
+        owner_guard.route("/heartbeat/escalation-policy", heartbeat_escalation_policy, methods=["PUT"]),
         # F034.3: Tuning endpoints
         Route("/heartbeat/tuning-report", heartbeat_tuning_report),
         Route("/heartbeat/tune", heartbeat_tune, methods=["POST"]),
@@ -3984,7 +3984,7 @@ def create_app(
         Route("/sleep/trigger", trigger_sleep, methods=["POST"]),
         # Admin API endpoints (F025 prep)
         Route("/admin/search-weights", get_search_weights),
-        Route("/admin/search-weights", owner_guard.protect(set_search_weights), methods=["POST"]),
+        owner_guard.route("/admin/search-weights", set_search_weights, methods=["POST"]),
         # F024 Phase 3b: Rubric endpoints
         Route("/rubric/propose-dimension", propose_dimension, methods=["POST"]),
         Route("/rubric/proposals/{id}/approve", approve_proposal, methods=["POST"]),

@@ -292,9 +292,9 @@ def build_intention_routes(*, database: Any, settings: Any, continuation_runner:
     # the rule one sentence long).
     return [
         Route("/intentions/proposals", list_proposals),
-        Route("/intentions/proposals/{id}/decide", guard.protect(decide), methods=["POST"]),
-        Route("/intentions/questions/answer", guard.protect(answer_by_message), methods=["POST"]),
-        Route("/intentions/questions/{id}/answer", guard.protect(answer), methods=["POST"]),
+        guard.route("/intentions/proposals/{id}/decide", decide, methods=["POST"]),
+        guard.route("/intentions/questions/answer", answer_by_message, methods=["POST"]),
+        guard.route("/intentions/questions/{id}/answer", answer, methods=["POST"]),
         Route("/intentions", list_roots),
-        Route("/intentions/{root_id}/cancel", guard.protect(cancel), methods=["POST"]),
+        guard.route("/intentions/{root_id}/cancel", cancel, methods=["POST"]),
     ]

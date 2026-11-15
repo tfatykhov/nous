@@ -11,7 +11,6 @@ import pytest
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.routing import Route
 
 from nous.api.owner_guard import (
     CARD_DECISION,
@@ -43,7 +42,7 @@ class _Counter:
 
 
 def _app(guard: OwnerGuard, handler: _Counter) -> Starlette:
-    return Starlette(routes=[Route("/x", guard.protect(handler), methods=["GET", "POST"])])
+    return Starlette(routes=[guard.route("/x", handler, methods=["GET", "POST"])])
 
 
 async def _post(app: Starlette, **kwargs: object) -> httpx.Response:
@@ -202,13 +201,32 @@ async def test_the_refusal_logs_the_header_names_and_never_a_value(caplog: pytes
         assert sent not in repr(record.args)
 
 
+async def test_the_refusal_logs_the_route_template_and_never_the_callers_path(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    handler = _Counter()
+    app = Starlette(routes=[OwnerGuard(_settings()).route("/things/{id}", handler, methods=["POST"])])
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://nous") as client:
+        response = await client.post("/things/caller-chosen-segment", json={})
+    assert response.status_code == 403
+    assert handler.calls == 0
+    refusals = [record.getMessage() for record in caplog.records if "refused" in record.getMessage()]
+    assert refusals == [f"refused POST /things/{{id}}: no valid {OWNER_SECRET_HEADER} or {PROXY_SECRET_HEADER}"]
+    for record in caplog.records:
+        if record.name.startswith("nous"):  # the server's records; the test client logs its own request line
+            assert "caller-chosen-segment" not in record.getMessage() + repr(record.args)
+
+
 def test_the_wrapper_is_marked() -> None:
     async def handler(request: Request) -> JSONResponse:
         return JSONResponse({})
 
-    wrapped = OwnerGuard(_settings()).protect(handler)
+    wrapped = OwnerGuard(_settings()).protect(handler, "/x")
     assert wrapped.owner_guarded is True
     assert wrapped.__name__ == "handler"
+    route = OwnerGuard(_settings()).route("/x", handler, methods=["POST"])
+    assert (route.path, route.methods, route.endpoint.owner_guarded) == ("/x", {"POST"}, True)
 
 
 def test_the_proxy_header_name_is_the_mcp_routes_name() -> None:

@@ -26,6 +26,7 @@ from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from starlette.routing import Route
 
 from nous.api.commitment_routes import OWNER_SECRET_HEADER, owner_secret_matches
 
@@ -134,9 +135,10 @@ class OwnerGuard:
         """Whether the request holds ``capability``."""
         return (await self.decide(request, capability))[0]
 
-    def protect(self, handler: Handler) -> Handler:
+    def protect(self, handler: Handler, path: str) -> Handler:
         """``handler`` behind the ``owner`` capability: 403 without the owner's or the proxy's secret, 415 for a
-        proxy-only call that is not JSON, both before the body is read. Never looks a device up."""
+        proxy-only call that is not JSON, both before the body is read. Never looks a device up. ``path`` is the
+        route's template: a refusal logs it, never the path the caller sent."""
 
         @functools.wraps(handler)
         async def guarded(request: Request) -> Response:
@@ -145,7 +147,7 @@ class OwnerGuard:
                 logger.warning(
                     "refused %s %s: no valid %s or %s",
                     request.method,
-                    request.url.path,
+                    path,
                     OWNER_SECRET_HEADER,
                     PROXY_SECRET_HEADER,
                 )
@@ -156,3 +158,7 @@ class OwnerGuard:
 
         guarded.owner_guarded = True  # type: ignore[attr-defined]  # the route-table tests read it
         return guarded
+
+    def route(self, path: str, handler: Handler, *, methods: list[str]) -> Route:
+        """A ``Route`` at ``path`` for ``handler`` behind ``protect``."""
+        return Route(path, self.protect(handler, path), methods=methods)

@@ -143,6 +143,10 @@ async def test_no_log_record_carries_a_secret_on_a_refused_or_an_accepted_call(
     by_proxy = await _send(app, "POST", path, json={}, headers=PROXY)
     assert [refused.status_code, by_owner.status_code, by_proxy.status_code] == [403, 400, 400]
     assert caplog.records  # the refusal was logged
+    # The server's records (the test client logs its own request line): the template, never the caller's path.
+    messages = [record.getMessage() for record in caplog.records if record.name.startswith("nous")]
+    assert any("POST /intentions/proposals/{id}/decide" in message for message in messages)
+    assert not any("ffffffff" in message for message in messages)
     for record in caplog.records:
         text = record.getMessage() + repr(record.args)
         for value in (OWNER_VALUE, PROXY_VALUE, "a-wrong-value", "another-wrong-value", OWNER_DIGEST, PROXY_DIGEST):
