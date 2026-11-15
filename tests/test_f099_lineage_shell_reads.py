@@ -1095,3 +1095,90 @@ def test_the_hint_stays_short_with_the_longest_reason():
     hint = lineage_bash_refusal_hint(build_commands=True, extra_write_dirs=["research"], workspace_dir="/w")
     longest = max(len(f" Refused: {LineageReason(code, 'x' * 24)}.") for code in LINEAGE_REASONS)
     assert len(hint) + longest <= 1700
+
+
+# -- the shapes of the production replay, and the final tripwire --
+
+REPLAY = [
+    # (command, allowed now, reason code when refused)
+    ("cd nous && git status -sb", True, None),
+    ("cd nous && git remote -v", False, "git_remote"),
+    ("cd nous && git branch -a", True, None),
+    ("cd nous && git ls-tree --name-only -r HEAD", True, None),
+    ("cd nous && git ls-remote", False, "git_sub"),
+    ("cd nous && git fetch -q", False, "git_sub"),
+    ("cd nous; git status", False, "git_dir"),
+    ("cd research && cd ../nous && git status", False, "cd"),
+    ("git -C {W}/nous status", True, None),
+    ("git -C nous log --oneline", True, None),
+    ("git -C nous branch -a", True, None),
+    ("git -C nous remote", True, None),
+    ("cat {W}/dir/.env", False, "path"),
+    ("ls {W}/.ssh", False, "path"),
+    ("head -3 {W}/claude-jobs/.claude-home/x", False, "path"),
+    ("ls {W}/nope/*", False, "glob"),
+    ("bash {W}/claude-jobs/prompts/x.sh", False, "bash_script"),
+    ("bash x.sh", False, "bash_script"),
+    ("cut -d: -f1 {W}/a.md", True, None),
+    ("cat {W}/a.md | cut -f2", True, None),
+    ("sed -n 1p {W}/a.md", False, "program"),
+    ("find {W} -name x", False, "program"),
+    ("timeout 5 ls", False, "program"),
+    ("which git", False, "program"),
+    ("python3 x.py", False, "program"),
+    ("bash claude-jobs/runner.sh status", False, "runner_path"),
+    ("bash ./claude-jobs/runner.sh list", False, "runner_path"),
+    ("cd claude-jobs && bash ./runner.sh status", False, "runner_path"),
+    ("cd claude-jobs ; ./runner.sh status", False, "runner_path"),
+    ("./runner.sh status", False, "runner_path"),
+    ("bash runner.sh status", False, "runner_path"),
+    ("{R} launch nous p --sys-prompt x", False, "runner_args"),
+    ("{R} launch nous p --timeout 5", False, "runner_args"),
+    ("{R} launch nous --prompt-file claude-jobs/prompts/p.md", False, "runner_file"),
+    ("echo $HOME", False, "unreadable"),
+    ("ls {W}/*", False, "glob"),
+    ("cat $(pwd)/a.md", False, "unreadable"),
+    ("grep -rh x {W}/dir", False, "grep_r"),
+    ("grep -rl x {W}/dir", False, "grep_r"),
+    ("grep -rln --include='*.md' x {W}/dir", False, "grep_r"),
+    ("grep -B15 -n x {W}/a.md", True, None),
+    ("grep -A3 -n x {W}/a.md", True, None),
+    ("grep -o x {W}/a.md", True, None),
+    ("grep -c x {W}/a.md", True, None),
+    ("grep -E x {W}/a.md", True, None),
+    ("grep -i x {W}/a.md", True, None),
+    ("grep -n x {W}/a.md", True, None),
+    ("cd nous && pytest -q && gh pr checks 1", False, "build_token"),
+]
+
+
+@pytest.mark.parametrize(("command", "allowed", "code"), REPLAY, ids=[r[0] for r in REPLAY])
+def test_the_replay_shapes(command, allowed, code, ws):
+    reason = _refusal(_fmt(command, ws), ws)
+    if allowed:
+        assert reason is None, (command, reason and reason.code)
+    else:
+        assert reason is not None and reason.code == code, (command, reason and reason.code)
+        assert reason.code != "other"
+
+
+def test_the_widening_probes_stay_refused(ws):
+    """One tripwire over every 'still refused' list of the widenings; a failure names the command that got through."""
+    (ws / "claude-jobs" / ".git").mkdir()
+    (ws / "intentions" / str(RID) / ".git").mkdir(parents=True)
+    (ws / "out").symlink_to("/etc")
+    (ws / "link-to-etc").symlink_to("/etc")
+    probes = [
+        *(CD + c for c in REMOTE_REFUSED + BRANCH_REFUSED + LS_REFUSED),
+        *(c for c, _ in DASH_C_REFUSED),
+        *CUT_REFUSED,
+        *RUNNER_PATH_REFUSED,
+        *GREP_R,
+        *PROCFS_REFUSED,
+        *(
+            CD + c
+            for c, _ in [("git status -sbu", 0), ("git log -pU5", 0), ("git status -sb=x", 0), ("git log -wn", 0)]
+        ),
+    ]
+    through = [c for c in probes if _ok(_fmt(c.replace("{J}", "{W}/claude-jobs"), ws), ws)]
+    assert through == []
