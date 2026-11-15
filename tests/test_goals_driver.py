@@ -138,7 +138,7 @@ def _refuse(reason: str = "no work on the archive"):
     return check_censors
 
 
-# ---- the start path (Races 1 to 3) ------------------------------------------------------------------------------
+# ---- the start path ----------------------------------------------------------------------------------------------
 
 
 async def test_a_started_session_has_a_root_that_is_continue_and_internal_only(env_factory):  # noqa: F811
@@ -192,10 +192,26 @@ async def test_start_rechecks_state_under_the_goal_lock(env_factory):  # noqa: F
     assert w.runner.wakes == 0
 
 
+async def test_a_start_that_waited_on_the_goal_lock_is_stamped_after_the_lock(env_factory):  # noqa: F811
+    """The session's start time is the database clock read after the goal row's lock, not the transaction's start
+    (``now()``): a start that waited behind another transaction is stamped after that transaction let the row go."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    async with w.db.session() as holding:
+        await holding.execute(select(Goal).where(Goal.id == goal.id).with_for_update())
+        starting = asyncio.create_task(w.driver.start_session(goal.id, trigger="timer"))
+        await _until_waiters(w, "brain.goals")
+        released_at = (await holding.execute(text("SELECT clock_timestamp()"))).scalar_one()
+        await holding.commit()
+    assert await starting is not None
+    (session,) = await _sessions(w, goal)
+    assert session.started_at >= released_at
+
+
 async def test_a_full_queue_starts_nothing_and_leaves_no_session_row(env_factory):  # noqa: F811
-    """Race 3, second guard: the tick's headroom count is not locked, so the queue can fill between it and the
-    create. Called directly (as after such a race), the start reaches the create, which refuses; the session row is
-    undone and the goal waits 60 s."""
+    """The second guard of a full queue: the tick's headroom count is not locked, so the queue can fill between it
+    and the create. Called directly (as after such a race), the start reaches the create, which refuses; the session
+    row is undone and the goal waits 60 s."""
     w = await _world(env_factory)
     goal = await _active(w)
     await _pending(w, 5)
@@ -345,7 +361,7 @@ async def test_the_driver_loop_runs_only_with_goals_on(env_factory):  # noqa: F8
     assert on.driver._task is None and task.done()
 
 
-# ---- closing a session (Races 2, 4 and 5) -----------------------------------------------------------------------
+# ---- closing a session ------------------------------------------------------------------------------------------
 
 
 async def _started(w: SimpleNamespace, goal: Goal) -> tuple[Intention, GoalSession]:
@@ -548,6 +564,24 @@ async def test_a_close_waiting_behind_another_close_writes_nothing_twice(env_fac
     assert not [r for r in await _journal(w, goal, "state") if "ended" in r.text]
 
 
+async def test_a_close_that_waited_on_the_session_lock_is_stamped_after_the_lock(env_factory):  # noqa: F811
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    await _finish(w, root)
+    async with w.db.session() as holding:
+        await holding.execute(select(GoalSession).where(GoalSession.id == session.id).with_for_update())
+        closing = asyncio.create_task(w.driver.close_finished())
+        await _until_waiters(w, "brain.goal_sessions")
+        released_at = (await holding.execute(text("SELECT clock_timestamp()"))).scalar_one()
+        await holding.commit()
+    assert await closing == 1
+    closed = await _session(w, session.id)
+    assert closed.ended_at >= released_at
+    after = await w.store.get(goal.id)
+    assert after.next_wake_at == closed.ended_at + timedelta(seconds=2 * goal.min_interval_seconds)
+
+
 async def test_a_pause_during_a_session_lets_it_finish_and_starts_nothing_more(env_factory):  # noqa: F811
     w = await _world(env_factory)
     goal = await _active(w)
@@ -563,7 +597,7 @@ async def test_a_pause_during_a_session_lets_it_finish_and_starts_nothing_more(e
 
 
 async def test_a_session_whose_subtask_never_got_created_is_closed_interrupted(env_factory):  # noqa: F811
-    """Race 2: the start stopped between its two transactions. After 120 s with no subtask, the session is closed
+    """The start stopped between its two transactions. After 120 s with no subtask, the session is closed
     interrupted (not an error); a younger one is left for the start still in flight."""
     w = await _world(env_factory)
     old, young = await _active(w), await _active(w, title="Sort the photos")
