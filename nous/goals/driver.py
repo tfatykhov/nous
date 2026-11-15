@@ -327,9 +327,9 @@ class GoalDriver:
                 logger.warning("Goal %s: session %d was refused by the censor gate: %s", goal_id, n, rejection)
                 failure = f"Session {n} was refused by the censor gate; the log has the reason."
             else:
-                subtask = await roots.create_session_root(
-                    self._heart, self._settings, goal=goal, session_n=n, subtask_id=subtask_id, task=task
-                )
+                root_id = await self._publish(goal, n, session_id, subtask_id, task)
+                if root_id is None:  # recovery closed the session meanwhile: nothing was published
+                    return None
                 failure = None
         except SubtaskQueueFull:
             if await self._undo_start(session_id, subtask_id):
@@ -344,12 +344,51 @@ class GoalDriver:
             if await self._undo_start(session_id, subtask_id):
                 await self._failed_start(goal_id, n, failure, seen=seen)
             return None
-        root = await self._heart.intentions.get_for_source(intentions.SOURCE_SUBTASK, subtask.id)
-        await self._set_root(session_id, root.id)
         self._failures.pop(goal_id, None)
         self._runner.wake()
-        logger.info("Goal %s: session %d started (root %s)", goal_id, n, root.id)
-        return root.id
+        logger.info("Goal %s: session %d started (root %s)", goal_id, n, root_id)
+        return root_id
+
+    async def _publish(self, goal: Goal, n: int, session_id: UUID, subtask_id: UUID, task: str) -> UUID | None:
+        """Create the session's first subtask and its root intention, and attach the root to the session, in ONE
+        transaction that holds the session row ``FOR UPDATE`` and finds it still open with no root. The close's
+        recovery of a session whose first subtask never appeared takes the same lock, so the two cannot both win:
+        either recovery closed the session first and nothing is published (None; the start counts no failure), or
+        the work and the root id are committed together and recovery then finds the root. The root's id, or None.
+        A failure raises with nothing published."""
+        async with self._db.session() as s:
+            still_open = (
+                await s.execute(
+                    select(GoalSession.id)
+                    .where(
+                        GoalSession.id == session_id,
+                        GoalSession.agent_id == self._agent_id,
+                        GoalSession.ended_at.is_(None),
+                        GoalSession.root_id.is_(None),
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if still_open is None:
+                logger.info("Goal %s: session %d was closed before its first task was published", goal.id, n)
+                return None
+            subtask = await roots.create_session_root(
+                self._heart, self._settings, goal=goal, session_n=n, subtask_id=subtask_id, task=task, session=s
+            )
+            root_id = (
+                await s.execute(  # read in this transaction: another connection cannot see the new rows yet
+                    select(Intention.id).where(
+                        Intention.agent_id == self._agent_id,
+                        Intention.source_kind == intentions.SOURCE_SUBTASK,
+                        Intention.source_id == str(subtask.id),
+                    )
+                )
+            ).scalar_one()
+            if not await self._set_root(s, session_id, root_id):
+                await s.rollback()
+                return None
+            await s.commit()
+            return root_id
 
     async def _gated_task(self, goal: Goal) -> tuple[str | None, str]:
         """``(rejection, task)``: the session's first task (from the goal as read under its lock, its journal tail
@@ -449,16 +488,21 @@ class GoalDriver:
             await s.commit()
             return True
 
-    async def _set_root(self, session_id: UUID, root_id: UUID) -> None:
-        async with self._db.session() as s:
-            await s.execute(
-                update(GoalSession)
-                .where(
-                    GoalSession.id == session_id, GoalSession.agent_id == self._agent_id, GoalSession.root_id.is_(None)
-                )
-                .values(root_id=root_id)
+    async def _set_root(self, s: AsyncSession, session_id: UUID, root_id: UUID) -> bool:
+        """Attach ``root_id`` to a session that is still open and has none, in the caller's transaction. False when
+        the session was closed or got a root meanwhile (nothing written)."""
+        result = await s.execute(
+            update(GoalSession)
+            .where(
+                GoalSession.id == session_id,
+                GoalSession.agent_id == self._agent_id,
+                GoalSession.root_id.is_(None),
+                GoalSession.ended_at.is_(None),
             )
-            await s.commit()
+            .values(root_id=root_id)
+            .execution_options(synchronize_session=False)
+        )
+        return result.rowcount == 1
 
     async def _failed_start(self, goal_id: UUID, n: int, failure: str, *, seen: datetime | None) -> None:
         """Count a failed start. Below the limit: journal it and try again in five minutes. At the limit: pause the
@@ -602,7 +646,8 @@ class GoalDriver:
                     )
                     await s.commit()
                     return True
-                await s.execute(update(GoalSession).where(GoalSession.id == row.id).values(root_id=root_id))
+                if not await self._set_root(s, row.id, root_id):  # cannot fail under this lock; checked all the same
+                    return False
                 row.root_id = root_id
             state = await self._root_state(s, row.root_id)
             if state.found and not state.marked and state.open_work:

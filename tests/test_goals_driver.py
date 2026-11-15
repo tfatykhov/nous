@@ -29,7 +29,8 @@ from f099_support import (
 from sqlalchemy import func, select, text, update
 
 from nous.brain import continuation, intentions
-from nous.goals import charter, spend
+from nous.goals import charter, roots, spend
+from nous.goals import driver as driver_module
 from nous.goals.driver import GoalDriver, TickReport
 from nous.goals.store import GoalStore
 from nous.handlers.continuation_runner import ContinuationRunner
@@ -421,7 +422,6 @@ async def test_a_successful_start_resets_the_failure_count(env_factory, monkeypa
 async def test_any_other_failure_of_the_start_is_undone_journalled_and_counted(env_factory, monkeypatch):  # noqa: F811
     w = await _world(env_factory)
     goal = await _active(w)
-    from nous.goals import roots
 
     async def broken(*args, **kwargs):
         raise RuntimeError("the database went away")
@@ -835,21 +835,90 @@ async def test_a_session_whose_subtask_never_got_created_is_closed_interrupted(e
     assert (await w.store.get(old.id)).state == "active"
 
 
-async def test_a_session_whose_root_id_was_not_written_is_repaired(env_factory, monkeypatch):  # noqa: F811
+async def test_a_session_whose_root_id_was_not_written_is_repaired(env_factory):  # noqa: F811
+    """The start writes the root id in the transaction that publishes the first subtask, so it cannot leave a
+    live root unattached itself. A row in that state (written another way) is still repaired by the close."""
     w = await _world(env_factory)
     goal = await _active(w)
-
-    async def lost(session_id, root_id):  # the process stopped before the root id was written
-        return None
-
-    monkeypatch.setattr(w.driver, "_set_root", lost)
-    root_id = await w.driver.start_session(goal.id, trigger="timer")
-    (session,) = await _sessions(w, goal)
-    assert session.root_id is None
-    monkeypatch.undo()
+    first = uuid.uuid4()
+    async with w.db.session() as s:
+        s.add(GoalSession(agent_id=w.agent, goal_id=goal.id, n=1, trigger="timer", first_subtask_id=first))
+        await s.commit()
+    await roots.create_session_root(
+        w.env.heart, w.env.settings, goal=goal, session_n=1, subtask_id=first, task="the first task"
+    )
+    root = await w.env.heart.intentions.get_for_source(intentions.SOURCE_SUBTASK, first)
     assert (await w.driver.tick()).closed == 0
-    repaired = await _session(w, session.id)
-    assert repaired.root_id == root_id and repaired.ended_at is None
+    (repaired,) = await _sessions(w, goal)
+    assert repaired.root_id == root.id and repaired.ended_at is None
+
+
+async def test_a_start_held_past_the_window_publishes_nothing_once_recovery_closed_its_session(
+    env_factory,  # noqa: F811
+    monkeypatch,
+):
+    """Recovery wins: a start held between its two transactions past the window finds its session closed as
+    interrupted by another tick, and publishes nothing (no subtask, no root), with no failure counted."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    reached, release = asyncio.Event(), asyncio.Event()
+    gated_task = w.driver._gated_task
+
+    async def held(goal_row):
+        reached.set()
+        await release.wait()
+        return await gated_task(goal_row)
+
+    monkeypatch.setattr(w.driver, "_gated_task", held)
+    starting = asyncio.create_task(w.driver.start_session(goal.id, trigger="timer"))
+    await asyncio.wait_for(reached.wait(), timeout=10)
+    (session,) = await _sessions(w, goal)
+    async with w.db.session() as s:  # held past the window
+        await s.execute(
+            update(GoalSession)
+            .where(GoalSession.id == session.id)
+            .values(started_at=GoalSession.started_at - timedelta(seconds=600))
+        )
+        await s.commit()
+    recovery = GoalDriver(w.db, w.env.settings, w.env.heart, w.store, FakeRunner())
+    assert await recovery.close_finished() == 1  # another tick's connection closes it
+    release.set()
+    assert await starting is None
+    closed = await _session(w, session.id)
+    assert (closed.outcome, closed.root_id) == ("interrupted", None)
+    assert await _subtasks(w) == []
+    assert await w.env.heart.intentions.get_for_source(intentions.SOURCE_SUBTASK, session.first_subtask_id) is None
+    assert w.driver._failures == {} and w.runner.wakes == 0
+    assert not [r for r in await _journal(w, goal, "state") if "could not start" in r.text]
+
+
+async def test_a_start_that_publishes_first_is_left_alone_by_recovery(env_factory, monkeypatch):  # noqa: F811
+    """The mirror: the start holds the session row while it publishes; recovery, which would close a session
+    with no first subtask, waits on that row and then finds the root attached."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    reached, release = asyncio.Event(), asyncio.Event()
+    create_session_root = roots.create_session_root
+
+    async def held(*args, **kwargs):
+        reached.set()
+        await release.wait()
+        return await create_session_root(*args, **kwargs)
+
+    monkeypatch.setattr(roots, "create_session_root", held)
+    starting = asyncio.create_task(w.driver.start_session(goal.id, trigger="timer"))
+    await asyncio.wait_for(reached.wait(), timeout=10)
+    monkeypatch.setattr(driver_module, "UNCREATED_AFTER_SECONDS", 0)  # recovery would close it at once
+    recovery = GoalDriver(w.db, w.env.settings, w.env.heart, w.store, FakeRunner())
+    closing = asyncio.create_task(recovery.close_finished())
+    await _until_waiters(w, "brain.goal_sessions")
+    release.set()
+    root_id = await starting
+    assert root_id is not None
+    assert await closing == 0
+    (session,) = await _sessions(w, goal)
+    assert (session.root_id, session.ended_at) == (root_id, None)
+    assert [s.id for s in await _subtasks(w)] == [session.first_subtask_id]
 
 
 async def test_a_reopened_root_past_its_deadline_no_longer_holds_the_goal(env_factory):  # noqa: F811
