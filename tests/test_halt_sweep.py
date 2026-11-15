@@ -190,7 +190,7 @@ async def test_the_sweep_without_a_continuation_runner_still_cancels_dags_and_su
 
 
 def test_report_text_is_fixed_vocabulary():
-    assert HaltReport().describe().startswith("Background work is halted. Nothing was running. ")
+    assert HaltReport().describe().startswith("Background work is halted. Nothing was cancelled. ")
     one = HaltReport(subtasks=1, subtasks_running=1, jobs=1, jobs_checked=True)
     assert "Cancelled: 1 subtask (1 was running), 1 Claude Code job." in one.describe()
     unchecked = HaltReport(jobs_checked=False, failed=["dags"], chains_truncated=True)
@@ -455,3 +455,8 @@ async def test_a_sweep_stops_once_its_halt_is_no_longer_the_one_on(monkeypatch, 
     assert "dags" not in order and signalled == [] and jobs_ran == []  # work after that point is untouched
     assert report.stopped and report.as_dict()["stopped"] is True
     assert "The sweep stopped early: background work was resumed or halted again." in report.describe()
+
+
+def test_an_empty_report_says_nothing_was_cancelled_and_names_a_failed_step():
+    text = HaltReport(failed=["chains"]).describe()
+    assert text.startswith("Background work is halted. Nothing was cancelled. Could not stop: chains.")

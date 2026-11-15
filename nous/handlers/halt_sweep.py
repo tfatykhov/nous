@@ -110,7 +110,7 @@ class HaltReport:
             parts.append(_count(self.jobs, "Claude Code job", "Claude Code jobs"))
         sentences = [
             "Background work is halted.",
-            f"Cancelled: {', '.join(parts)}." if parts else "Nothing was running.",
+            f"Cancelled: {', '.join(parts)}." if parts else "Nothing was cancelled.",
         ]
         if self.stopped:
             sentences.append("The sweep stopped early: background work was resumed or halted again.")
