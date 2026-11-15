@@ -59,6 +59,7 @@ ORIGIN_SCHEDULER = "scheduler"
 ORIGIN_WORK_QUEUE = "work_queue"
 ORIGIN_APP_ACT = "app_act"
 ORIGIN_REST = "rest"  # REST POST /schedules: an operator's or another agent's call, no turn
+ORIGIN_GOAL = "goal"  # F114: the root of a goal session, started by the goal driver
 _CODE_PATH_POLICY = {
     ORIGIN_SCHEDULER: WAKE_NONE,
     ORIGIN_WORK_QUEUE: WAKE_REMEMBER,

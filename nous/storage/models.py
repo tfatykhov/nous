@@ -12,6 +12,7 @@ from sqlalchemy import (
     Computed,
     Date,
     DateTime,
+    FetchedValue,
     Float,
     ForeignKey,
     ForeignKeyConstraint,
@@ -604,6 +605,156 @@ class IntentionProposal(Base):
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class Goal(Base):
+    """F114: a goal worked on in background sessions (migration 113).
+
+    Every state change is a targeted UPDATE guarded by the expected state (``nous/goals/store.py``), never a save
+    of the whole row. ``short_id`` is assigned by the database (``G-0007``). The migration's length and JSON-shape
+    CHECKs are not repeated here: the SQLite test schema cannot create them.
+    """
+
+    __tablename__ = "goals"
+    __table_args__ = (
+        CheckConstraint("preset IN ('small', 'medium', 'large', 'custom')", name="goals_preset_check"),
+        CheckConstraint("total_budget BETWEEN 1 AND 1000000000", name="goals_total_budget_check"),
+        CheckConstraint("day_budget > 0", name="goals_day_budget_check"),
+        CheckConstraint("deadline_days BETWEEN 1 AND 90", name="goals_deadline_days_check"),
+        CheckConstraint("sessions_per_day BETWEEN 1 AND 24", name="goals_sessions_per_day_check"),
+        CheckConstraint("min_interval_seconds >= 60", name="goals_min_interval_seconds_check"),
+        CheckConstraint("jobs_per_day BETWEEN 0 AND 20", name="goals_jobs_per_day_check"),
+        CheckConstraint("stall_limit BETWEEN 1 AND 10", name="goals_stall_limit_check"),
+        CheckConstraint("mode IN ('contained', 'full_autonomy')", name="goals_mode_check"),
+        CheckConstraint(
+            "state IN ('draft', 'active', 'paused', 'done', 'failed', 'cancelled')", name="goals_state_check"
+        ),
+        CheckConstraint(
+            "pause_reason IS NULL OR pause_reason IN "
+            "('owner', 'budget', 'stalled', 'waiting_for_owner', 'error', 'deadline')",
+            name="goals_pause_reason_check",
+        ),
+        CheckConstraint("proposed_by IN ('owner', 'agent', 'host')", name="goals_proposed_by_check"),
+        CheckConstraint(
+            "pending_request IS NULL OR pending_request IN ('run_now', 'stop', 'cancel')",
+            name="goals_pending_request_check",
+        ),
+        CheckConstraint("(state = 'paused') = (pause_reason IS NOT NULL)", name="chk_goals_pause"),
+        CheckConstraint("state IN ('draft', 'cancelled') OR deadline_at IS NOT NULL", name="chk_goals_deadline"),
+        CheckConstraint("day_budget <= total_budget", name="chk_goals_day_within_total"),
+        CheckConstraint("(pending_request IS NULL) = (pending_request_at IS NULL)", name="chk_goals_request"),
+        CheckConstraint("mode = 'contained' OR mode_until IS NOT NULL", name="chk_goals_mode"),
+        {"schema": "brain"},
+    )
+    __mapper_args__ = {"eager_defaults": True}  # short_id comes back in the INSERT's RETURNING
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
+    )
+    short_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, server_default=FetchedValue())
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    objective: Mapped[str] = mapped_column(Text, nullable=False)
+    done_when: Mapped[str] = mapped_column(Text, nullable=False)
+    preset: Mapped[str] = mapped_column(Text, nullable=False)
+    total_budget: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    day_budget: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    deadline_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    sessions_per_day: Mapped[int] = mapped_column(Integer, nullable=False)
+    min_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    jobs_per_day: Mapped[int] = mapped_column(Integer, nullable=False)
+    quiet_hours_ok: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    stall_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=3, server_default="3")
+    mode: Mapped[str] = mapped_column(Text, nullable=False, default="contained", server_default="contained")
+    mode_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    state: Mapped[str] = mapped_column(Text, nullable=False, default="draft", server_default="draft")
+    pause_reason: Mapped[str | None] = mapped_column(Text)
+    plan: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="'[]'::jsonb")
+    proposed_by: Mapped[str] = mapped_column(Text, nullable=False)
+    origin_channel: Mapped[str | None] = mapped_column(Text)
+    pending_request: Mapped[str | None] = mapped_column(Text)
+    pending_request_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_wake_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
+class GoalSession(Base):
+    """F114: one background session of a goal (migration 113).
+
+    ``first_subtask_id`` is written before the subtask exists, so a start that stops between its two transactions
+    can be repaired from that subtask's intention. At most one open session (``ended_at IS NULL``) per goal.
+    """
+
+    __tablename__ = "goal_sessions"
+    __table_args__ = (
+        UniqueConstraint("goal_id", "n", name="uq_goal_sessions_n"),
+        UniqueConstraint("first_subtask_id", name="uq_goal_sessions_first_subtask"),
+        CheckConstraint("n >= 1", name="goal_sessions_n_check"),
+        CheckConstraint("trigger IN ('timer', 'run_now')", name="goal_sessions_trigger_check"),
+        CheckConstraint(
+            "outcome IN ('step_closed', 'no_step', 'asked', 'error', 'interrupted')", name="goal_sessions_outcome_check"
+        ),
+        CheckConstraint("spent >= 0", name="goal_sessions_spent_check"),
+        CheckConstraint("steps_closed >= 0", name="goal_sessions_steps_closed_check"),
+        CheckConstraint("(ended_at IS NULL) = (outcome IS NULL)", name="chk_goal_sessions_ended"),
+        # The one-open-session rule. The migration's other indexes serve queries only.
+        Index(
+            "uq_goal_sessions_one_open",
+            "goal_id",
+            unique=True,
+            postgresql_where=text("ended_at IS NULL"),
+            sqlite_where=text("ended_at IS NULL"),
+        ),
+        {"schema": "brain"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    goal_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("brain.goals.id"), nullable=False)
+    n: Mapped[int] = mapped_column(Integer, nullable=False)
+    trigger: Mapped[str] = mapped_column(Text, nullable=False)
+    first_subtask_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    root_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    outcome: Mapped[str | None] = mapped_column(Text)
+    spent: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    steps_closed: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    summary: Mapped[str | None] = mapped_column(Text)
+
+
+class GoalJournal(Base):
+    """F114: the append-only record of a goal (migration 113). The store has no update or delete of it."""
+
+    __tablename__ = "goal_journal"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('plan', 'progress', 'report', 'question', 'answer', 'owner_note', 'state', 'done_claim')",
+            name="goal_journal_kind_check",
+        ),
+        CheckConstraint("actor IN ('owner', 'host', 'chain', 'harness')", name="goal_journal_actor_check"),
+        {"schema": "brain"},
+    )
+    __mapper_args__ = {"eager_defaults": True}  # seq comes back in the INSERT's RETURNING
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
+    )
+    seq: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, server_default=FetchedValue())
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    goal_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("brain.goals.id"), nullable=False)
+    session_n: Mapped[int | None] = mapped_column(Integer)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(Text, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence: Mapped[list] = mapped_column(JSONB, nullable=False, default=list, server_default="'[]'::jsonb")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 # =============================================================================

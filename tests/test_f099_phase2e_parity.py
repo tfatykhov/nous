@@ -99,32 +99,33 @@ async def test_a_new_intention_starts_with_no_failed_tokens(env_factory):  # noq
 
 def test_2e_added_one_migration_and_no_setting():  # PIN: changes when a later PR adds one on purpose
     migrations = sorted((Path(__file__).resolve().parents[1] / "sql" / "migrations").glob("*.sql"))
-    assert migrations[-26].name == "087_task_scores.sql"  # task scores
-    assert migrations[-25].name == "088_scorer_heartbeat.sql"  # scorer heartbeat
-    assert migrations[-24].name == "089_dag_node_attempt_history.sql"  # a node reset archives the attempt
-    assert migrations[-23].name == "090_check_audits.sql"  # the owner's sampled audits of completion checks
-    assert migrations[-22].name == "091_schedule_policies.sql"  # F101 schedule concurrency and catch-up policies
-    assert migrations[-21].name == "092_procedure_versions.sql"  # F102 procedure version history
-    assert migrations[-20].name == "093_dag_wait_nodes.sql"  # typed waits for lineage DAGs
-    assert migrations[-19].name == "094_fact_deactivation_reason.sql"  # why a fact went inactive
-    assert migrations[-18].name == "095_edges_refines_relation.sql"  # the F027 refines edge relation
-    assert migrations[-17].name == "096_profile_card.sql"  # the bounded profile card
-    assert migrations[-16].name == "097_fact_temporal_columns.sql"  # fact event time and statement time
-    assert migrations[-15].name == "098_fact_merged_reason_backfill.sql"  # 'merged' stamped on pre-094 merges
-    assert migrations[-14].name == "099_memory_write_health_daily.sql"  # the daily memory write-health rollup
-    assert migrations[-13].name == "100_tool_call_log.sql"  # F108 tool-call and turn records
-    assert migrations[-12].name == "101_model_call_log.sql"  # F108 model-call and attempt records
-    assert migrations[-11].name == "102_model_call_text.sql"  # F108 model-call text blocks and their refs
-    assert migrations[-10].name == "103_tool_note.sql"  # F108 tool notes and the patterns closed to re-review
-    assert migrations[-9].name == "104_tool_call_result_text.sql"  # F108 the full result of a tool call
-    assert migrations[-8].name == "105_task_frame_keywords.sql"  # F110 task frame keywords
-    assert migrations[-7].name == "106_turn_frame_reason.sql"  # F110 frame reason, critic frame and error flag
-    assert migrations[-6].name == "107_commitments.sql"  # F111 obligation ledger and promise gate log
-    assert migrations[-5].name == "108_commitments_watch_index.sql"  # F111 the overdue watcher's index
-    assert migrations[-4].name == "109_mcp_client.sql"  # F112 the MCP client's servers and tools
-    assert migrations[-3].name == "110_mcp_client_secrets.sql"  # F112 PR 2c the servers' sealed credentials
-    assert migrations[-2].name == "111_mcp_servers_http_url.sql"  # F112 an http address for a listed host
-    assert migrations[-1].name == "112_mcp_server_images.sql"  # F112 a server's images switch
+    assert migrations[-27].name == "087_task_scores.sql"  # task scores
+    assert migrations[-26].name == "088_scorer_heartbeat.sql"  # scorer heartbeat
+    assert migrations[-25].name == "089_dag_node_attempt_history.sql"  # a node reset archives the attempt
+    assert migrations[-24].name == "090_check_audits.sql"  # the owner's sampled audits of completion checks
+    assert migrations[-23].name == "091_schedule_policies.sql"  # F101 schedule concurrency and catch-up policies
+    assert migrations[-22].name == "092_procedure_versions.sql"  # F102 procedure version history
+    assert migrations[-21].name == "093_dag_wait_nodes.sql"  # typed waits for lineage DAGs
+    assert migrations[-20].name == "094_fact_deactivation_reason.sql"  # why a fact went inactive
+    assert migrations[-19].name == "095_edges_refines_relation.sql"  # the F027 refines edge relation
+    assert migrations[-18].name == "096_profile_card.sql"  # the bounded profile card
+    assert migrations[-17].name == "097_fact_temporal_columns.sql"  # fact event time and statement time
+    assert migrations[-16].name == "098_fact_merged_reason_backfill.sql"  # 'merged' stamped on pre-094 merges
+    assert migrations[-15].name == "099_memory_write_health_daily.sql"  # the daily memory write-health rollup
+    assert migrations[-14].name == "100_tool_call_log.sql"  # F108 tool-call and turn records
+    assert migrations[-13].name == "101_model_call_log.sql"  # F108 model-call and attempt records
+    assert migrations[-12].name == "102_model_call_text.sql"  # F108 model-call text blocks and their refs
+    assert migrations[-11].name == "103_tool_note.sql"  # F108 tool notes and the patterns closed to re-review
+    assert migrations[-10].name == "104_tool_call_result_text.sql"  # F108 the full result of a tool call
+    assert migrations[-9].name == "105_task_frame_keywords.sql"  # F110 task frame keywords
+    assert migrations[-8].name == "106_turn_frame_reason.sql"  # F110 frame reason, critic frame and error flag
+    assert migrations[-7].name == "107_commitments.sql"  # F111 obligation ledger and promise gate log
+    assert migrations[-6].name == "108_commitments_watch_index.sql"  # F111 the overdue watcher's index
+    assert migrations[-5].name == "109_mcp_client.sql"  # F112 the MCP client's servers and tools
+    assert migrations[-4].name == "110_mcp_client_secrets.sql"  # F112 PR 2c the servers' sealed credentials
+    assert migrations[-3].name == "111_mcp_servers_http_url.sql"  # F112 an http address for a listed host
+    assert migrations[-2].name == "112_mcp_server_images.sql"  # F112 a server's images switch
+    assert migrations[-1].name == "113_goals.sql"  # F114 goals, their sessions and the journal
     assert not [name for name in Settings.model_fields if "cancel" in name or "failed_tokens" in name]
 
 

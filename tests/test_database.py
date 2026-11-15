@@ -94,7 +94,7 @@ async def test_all_tables_exist(db):
         ("scoring", "task_scores"),
         # The scoring command's heartbeat, one row per agent (migration 088)
         ("scoring", "scorer_heartbeat"),
-        # brain (12)
+        # brain (16)
         ("brain", "decisions"),
         ("brain", "decision_tags"),
         ("brain", "decision_reasons"),
@@ -111,6 +111,10 @@ async def test_all_tables_exist(db):
         ("brain", "intention_proposals"),
         # F111 obligation ledger (migration 107)
         ("brain", "commitments"),
+        # F114 goals, their sessions and the journal (migration 113)
+        ("brain", "goals"),
+        ("brain", "goal_sessions"),
+        ("brain", "goal_journal"),
         # heart (20)
         ("heart", "episodes"),
         # heart.episode_decisions dropped by migration 068 (no runtime writer;

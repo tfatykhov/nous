@@ -1537,6 +1537,17 @@ class Settings(BaseSettings):
                 kept.append(entry.rstrip("/"))
         return kept
 
+    # F114 goals: a goal the owner approves is worked on in background sessions, each a continuation chain.
+    # Needs continuation_enabled, intentions_enabled, result_inbox_enabled and subtask_enabled; without them a
+    # WARNING and it stays off. Default off.
+    goals_enabled: bool = False
+    goals_tick_seconds: int = Field(default=60, ge=5)
+    goals_max_active_sessions: int = Field(default=1, ge=1)
+    # Continuation slots a goal's chain may never take, so the owner's own chains are not queued behind goals.
+    goals_reserved_slots: int = Field(default=1, ge=0)
+    # Places a goal session leaves free in the subtask queue: none starts while fewer are free.
+    goals_queue_headroom: int = Field(default=2, ge=0, le=4)
+
     # F098 Phase C: result memory — a finished background subtask result
     # becomes an episode (+ document chunks), so recall_deep can find it.
     # Independent of result_inbox_enabled. Off: the hooks and the reconciler
@@ -4362,6 +4373,26 @@ class Settings(BaseSettings):
                 "NOUS_INTENTION_CALIBRATION_ENABLED=true needs NOUS_CONTINUATION_ENABLED=true; calibration stays OFF."
             )
             object.__setattr__(self, "intention_calibration_enabled", False)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_goals_dependency(self) -> "Settings":
+        """F114: a goal session is a continuation chain whose first step is a subtask. Runs after the
+        continuation validator, so a continuation flag forced off forces this off too."""
+        if not self.goals_enabled:
+            return self
+        needed = {
+            "NOUS_CONTINUATION_ENABLED": self.continuation_enabled,
+            "NOUS_INTENTIONS_ENABLED": self.intentions_enabled,
+            "NOUS_RESULT_INBOX_ENABLED": self.result_inbox_enabled,
+            "NOUS_SUBTASK_ENABLED": self.subtask_enabled,
+        }
+        missing = [f"{name}=true" for name, on in needed.items() if not on]
+        if missing:
+            logging.getLogger(__name__).warning(
+                "NOUS_GOALS_ENABLED=true needs %s; goals stay OFF.", " and ".join(missing)
+            )
+            object.__setattr__(self, "goals_enabled", False)
         return self
 
     @model_validator(mode="after")
