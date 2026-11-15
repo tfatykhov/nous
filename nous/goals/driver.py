@@ -23,7 +23,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import Text, and_, cast, delete, exists, func, or_, select, text, update
+from sqlalchemy import ColumnElement, Text, and_, cast, delete, exists, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
@@ -119,6 +119,10 @@ class GoalDriver:
         self._runner = runner
         self._agent_id = store.agent_id
         self._failures: dict[UUID, int] = {}  # failed starts in a row, per goal (in memory: a restart resets it)
+        # Closed sessions whose spend is read again at the next tick: closed since, or with lineage work whose
+        # usage is not settled yet (``refresh_spent``). In memory; the first tick after a start catches up.
+        self._following: set[UUID] = set()
+        self._caught_up = False
         self._task: asyncio.Task | None = None
         self._running = False
 
@@ -598,6 +602,7 @@ class GoalDriver:
             if not ended:
                 return False
             await s.commit()
+            self._following.add(row.id)  # read once more after the close, and while its lineage is unsettled
             logger.info("Goal %s: session %d closed (%s, %d tokens)", goal.id, row.n, outcome, spent)
             return True
 
@@ -793,29 +798,102 @@ class GoalDriver:
         return True
 
     async def refresh_spent(self) -> int:
-        """Read the spend of open sessions, and of closed ones whose root's deadline has not passed (a late result
-        can still add to it), again. Older sessions keep what they had. Returns the sessions whose spend changed."""
+        """Read the spend of these sessions again: the open ones; the closed ones whose root's deadline has not
+        passed (a late result can reopen the chain and add to it); and the closed ones followed in memory
+        (``_following``). A session is followed from its close until its lineage has no subtask whose usage is
+        still to come (``_unsettled``), and is read once more after that: the root's deadline is no accounting
+        cutoff, since an expiry or a cancel does not stop a running worker, which stores its tokens later. Then
+        the session keeps what it had and is not read again.
+
+        Why a flag in memory rather than a time window: each tick reads only the open sessions, those whose root's
+        deadline has not passed and the followed ones, all a handful, and checks unsettled work only over their
+        roots. After a restart the flags are gone, so the first tick also reads, once, every session closed within
+        ``intention_root_ttl_hours`` and every closed session whose lineage still has unsettled work, whatever its
+        age: a subtask that settled while no driver ran is counted then. Returns the sessions whose spend changed."""
         root = aliased(Intention)
+        reasons = [GoalSession.ended_at.is_(None), root.deadline > func.clock_timestamp()]
+        if self._following:
+            reasons.append(GoalSession.id.in_(sorted(self._following)))
+        if not self._caught_up:
+            window = timedelta(hours=float(self._settings.intention_root_ttl_hours))
+            reasons.append(GoalSession.ended_at > func.clock_timestamp() - window)
+        columns = (GoalSession.id, GoalSession.root_id, GoalSession.spent, GoalSession.ended_at)
         query = (
-            select(GoalSession.id, GoalSession.root_id, GoalSession.spent)
+            select(*columns)
             .join(root, and_(root.agent_id == self._agent_id, root.id == GoalSession.root_id))
-            .where(
-                GoalSession.agent_id == self._agent_id,
-                or_(GoalSession.ended_at.is_(None), root.deadline > func.clock_timestamp()),
-            )
+            .where(GoalSession.agent_id == self._agent_id, or_(*reasons))
         )
         changed = 0
         async with self._db.session() as s:
-            rows = (await s.execute(query)).all()
-            if not rows:
-                return 0
-            totals = await spend.session_spent(s, self._agent_id, [r.root_id for r in rows])
-            for r in rows:
-                if totals[r.root_id] != r.spent:
-                    await s.execute(update(GoalSession).where(GoalSession.id == r.id).values(spent=totals[r.root_id]))
-                    changed += 1
+            rows = {r.id: r for r in (await s.execute(query)).all()}
+            if not self._caught_up:
+                member, subtask = aliased(Intention), aliased(Subtask)
+                unsettled_anywhere = (
+                    select(*columns)
+                    .join(member, and_(member.agent_id == self._agent_id, member.root_id == GoalSession.root_id))
+                    .join(
+                        subtask,
+                        and_(subtask.agent_id == self._agent_id, cast(subtask.id, Text) == member.source_id),
+                    )
+                    .where(
+                        GoalSession.agent_id == self._agent_id,
+                        GoalSession.ended_at.is_not(None),
+                        member.source_kind == intentions.SOURCE_SUBTASK,
+                        self._unsettled(subtask),
+                    )
+                    .distinct()
+                )
+                for r in (await s.execute(unsettled_anywhere)).all():
+                    rows.setdefault(r.id, r)
+            unsettled_roots: set[UUID] = set()
+            if rows:
+                totals = await spend.session_spent(s, self._agent_id, [r.root_id for r in rows.values()])
+                for r in rows.values():
+                    if totals[r.root_id] != r.spent:
+                        await s.execute(
+                            update(GoalSession).where(GoalSession.id == r.id).values(spent=totals[r.root_id])
+                        )
+                        changed += 1
+                closed_roots = [r.root_id for r in rows.values() if r.ended_at is not None]
+                unsettled_roots = await self._roots_with_unsettled_work(s, closed_roots)
             await s.commit()
+        self._following = {r.id for r in rows.values() if r.ended_at is not None and r.root_id in unsettled_roots}
+        self._caught_up = True
         return changed
+
+    def _unsettled(self, subtask: Any) -> ColumnElement[bool]:
+        """A subtask whose token counters can still change, as ``nous.dag.orchestrator._subtask_usage_settled``
+        decides for the DAG roll-up: not yet completed, failed or cancelled; or cancelled after it started and its
+        run has not reported (``attempts`` is 0) while its timeout and the grace have not passed (a cancel does not
+        stop the worker, which stores its usage when it unwinds)."""
+        grace = int(self._settings.dag_node_timeout_grace_seconds)
+        report_by = subtask.started_at + func.make_interval(0, 0, 0, 0, 0, 0, subtask.timeout_seconds + grace)
+        return or_(
+            subtask.status.not_in(("completed", "failed", "cancelled")),
+            and_(
+                subtask.status == "cancelled",
+                subtask.started_at.is_not(None),
+                subtask.attempts == 0,
+                report_by > func.clock_timestamp(),
+            ),
+        )
+
+    async def _roots_with_unsettled_work(self, s: AsyncSession, root_ids: list[UUID]) -> set[UUID]:
+        """Which of ``root_ids`` have a lineage subtask whose usage can still change (``_unsettled``)."""
+        if not root_ids:
+            return set()
+        query = (
+            select(Intention.root_id)
+            .join(Subtask, and_(Subtask.agent_id == self._agent_id, cast(Subtask.id, Text) == Intention.source_id))
+            .where(
+                Intention.agent_id == self._agent_id,
+                Intention.root_id.in_(root_ids),
+                Intention.source_kind == intentions.SOURCE_SUBTASK,
+                self._unsettled(Subtask),
+            )
+            .distinct()
+        )
+        return set((await s.execute(query)).scalars())
 
     # ---- goal rows -----------------------------------------------------------------------------------------
 

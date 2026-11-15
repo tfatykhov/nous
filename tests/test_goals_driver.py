@@ -900,6 +900,110 @@ async def test_spent_of_a_recently_closed_session_is_re_read(env_factory):  # no
     assert (await _session(w, session.id)).spent == 120  # its root's deadline has passed: frozen
 
 
+async def _running(w: SimpleNamespace, subtask_id: uuid.UUID, **values) -> None:
+    """A worker has taken the subtask (or ``values`` say otherwise)."""
+    async with w.db.session() as s:
+        await s.execute(
+            update(Subtask)
+            .where(Subtask.id == subtask_id)
+            .values(**{"status": "running", "started_at": func.clock_timestamp(), "worker_id": "w1", **values})
+        )
+        await s.commit()
+
+
+async def _add_tokens(w: SimpleNamespace, subtask_id: uuid.UUID, tokens: int) -> None:
+    async with w.db.session() as s:
+        await s.execute(update(Subtask).where(Subtask.id == subtask_id).values(tokens_in=Subtask.tokens_in + tokens))
+        await s.commit()
+
+
+async def _end_root_while_its_subtask_runs(w: SimpleNamespace, root: Intention, how: str) -> uuid.UUID:
+    """The root's deadline passes and it is expired, or it is cancelled, while its first subtask still runs (the
+    worker is not stopped). Returns that subtask's id."""
+    subtask_id = uuid.UUID(root.source_id)
+    await _running(w, subtask_id)
+    await set_intention(w.env, root.id, deadline=datetime.now(UTC) - timedelta(hours=1))
+    if how == "expired":
+        async with w.db.session() as s:
+            assert await continuation.expire_roots(s, w.agent, ttl_hours=72.0, settings=w.env.settings) == [root.id]
+            await s.commit()
+    else:
+        assert await w.env.heart.subtasks.cancel(subtask_id)
+        await set_intention(
+            w.env, root.id, state="cancelled", close_reason="cancelled", root_cancelled_at=datetime.now(UTC)
+        )
+    return subtask_id
+
+
+async def _settle(w: SimpleNamespace, subtask_id: uuid.UUID, *, tokens_in: int, tokens_out: int) -> None:
+    """The worker finishes and stores its usage, as the worker does: complete(), which on a row cancelled under
+    it writes the usage with record_cancelled_usage() instead."""
+    await w.env.heart.subtasks.complete(subtask_id, RESULT, attempts=1, tokens_in=tokens_in, tokens_out=tokens_out)
+
+
+@pytest.mark.parametrize("how", ["expired", "cancelled"])
+async def test_a_closed_sessions_spend_follows_a_subtask_that_settles_after_its_roots_deadline(
+    env_factory,  # noqa: F811
+    how,
+):
+    """The root's deadline is not an accounting cutoff: a lineage subtask still running when its root ended stores
+    its tokens later. The closed session is read again until that subtask has settled, once more after, and then
+    no more."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    subtask_id = await _end_root_while_its_subtask_runs(w, root, how)
+    assert (await w.driver.tick()).closed == 1
+    assert (await _session(w, session.id)).spent == 0
+    await w.driver.tick()  # still running: followed, nothing new yet
+    await _settle(w, subtask_id, tokens_in=500, tokens_out=50)
+    await w.driver.tick()
+    assert (await _session(w, session.id)).spent == 550
+    await _add_tokens(w, subtask_id, 1000)  # nothing real adds to a settled run: this shows whether it is read
+    await w.driver.tick()
+    assert (await _session(w, session.id)).spent == 550  # settled and read once more: not read again
+
+
+async def test_after_a_restart_the_first_tick_reads_a_session_whose_subtask_settled_meanwhile(
+    env_factory,  # noqa: F811
+):
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    subtask_id = await _end_root_while_its_subtask_runs(w, root, "expired")
+    assert (await w.driver.tick()).closed == 1
+    await _settle(w, subtask_id, tokens_in=70, tokens_out=7)  # while no driver runs
+    restarted = GoalDriver(w.db, w.env.settings, w.env.heart, w.store, FakeRunner())
+    await restarted.tick()
+    assert (await _session(w, session.id)).spent == 77
+    await _add_tokens(w, subtask_id, 1000)
+    await restarted.tick()
+    assert (await _session(w, session.id)).spent == 77
+
+
+async def test_after_a_restart_an_old_closed_session_with_a_subtask_still_running_is_followed(
+    env_factory,  # noqa: F811
+):
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    subtask_id = await _end_root_while_its_subtask_runs(w, root, "expired")
+    assert (await w.driver.tick()).closed == 1
+    hours = w.env.settings.intention_root_ttl_hours + 24
+    async with w.db.session() as s:  # closed long before the restart, past the catch-up window
+        await s.execute(
+            update(GoalSession)
+            .where(GoalSession.id == session.id)
+            .values(ended_at=GoalSession.ended_at - timedelta(hours=hours))
+        )
+        await s.commit()
+    restarted = GoalDriver(w.db, w.env.settings, w.env.heart, w.store, FakeRunner())
+    await restarted.tick()
+    await _settle(w, subtask_id, tokens_in=30, tokens_out=3)
+    await restarted.tick()
+    assert (await _session(w, session.id)).spent == 33
+
+
 # ---- the goal channel: reports become journal rows ---------------------------------------------------------------
 
 
