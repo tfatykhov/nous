@@ -45,6 +45,7 @@ OPEN_WORK_DELAY_SECONDS = 60  # a root of an earlier session has open work again
 FAILED_STARTS_BEFORE_PAUSE = 3  # the third failed start in a row pauses the goal (``error``)
 UNCREATED_AFTER_SECONDS = 120  # a session whose first subtask does not exist after this long never got one
 SUMMARY_MAX = 1000  # a session's summary: its claimed report, else its newest arrival's note
+SESSION_NOTE_LABEL = "Note written by the session:"  # marks the chain's words inside the harness's end row
 ANSWER_PREFIX_PATTERN = f"{continuation.ANSWER_CORRELATION_PREFIX}%"
 
 # The goal channel's claim: every undelivered row on it is stamped and returned in one statement, with the session
@@ -486,8 +487,7 @@ class GoalDriver:
         ``UNCREATED_AFTER_SECONDS`` it is closed ``interrupted``. Whether the chain has ended is read again inside
         the transaction. The close writes the session's outcome, spend, steps and summary (``WHERE ended_at IS
         NULL``), journals its questions and the owner's answers, moves an active goal's next wake one interval on
-        after a closed step and two otherwise, and journals the end with the summary, so even a session that ended
-        in ``drop`` leaves the next one a memory. True when it closed the session."""
+        after a closed step and two otherwise, and journals the end (``_end``). True when it closed the session."""
         async with self._db.session() as s:
             row = (
                 await s.execute(
@@ -541,9 +541,20 @@ class GoalDriver:
             spent = (await spend.session_spent(s, self._agent_id, [row.root_id]))[row.root_id]
             steps = sum(1 for step in goal.plan or [] if isinstance(step, dict) and step.get("closed_session") == row.n)
             outcome = await self._outcome(s, row.root_id, steps=steps, ended_by_marker=state.marked or not state.found)
-            summary = await self._summary(s, row)
+            summary, from_report = await self._summary(s, row)
             await self._journal_questions_and_answers(s, goal.id, row)
-            if not await self._end(s, goal, row, now, outcome=outcome, spent=spent, steps=steps, summary=summary):
+            ended = await self._end(
+                s,
+                goal,
+                row,
+                now,
+                outcome=outcome,
+                spent=spent,
+                steps=steps,
+                summary=summary,
+                session_note=None if from_report else summary,
+            )
+            if not ended:
                 return False
             await s.commit()
             logger.info("Goal %s: session %d closed (%s, %d tokens)", goal.id, row.n, outcome, spent)
@@ -608,8 +619,9 @@ class GoalDriver:
             return "asked"
         return "interrupted" if ended_by_marker else "no_step"
 
-    async def _summary(self, s: AsyncSession, row: GoalSession) -> str | None:
-        """The session's newest claimed report, else its root's newest arrival note, clipped to ``SUMMARY_MAX``."""
+    async def _summary(self, s: AsyncSession, row: GoalSession) -> tuple[str | None, bool]:
+        """``(summary, from_report)``: the session's newest claimed report, else its root's newest arrival note,
+        clipped to ``SUMMARY_MAX``; ``from_report`` says which."""
         text_ = (
             await s.execute(
                 select(GoalJournal.text)
@@ -623,7 +635,9 @@ class GoalDriver:
                 .limit(1)
             )
         ).scalar_one_or_none()
-        if not text_ and row.root_id is not None:
+        if text_:
+            return clip(text_, SUMMARY_MAX), True
+        if row.root_id is not None:
             text_ = (
                 await s.execute(
                     select(IntentionArrival.note)
@@ -636,7 +650,7 @@ class GoalDriver:
                     .limit(1)
                 )
             ).scalar_one_or_none()
-        return clip(text_, SUMMARY_MAX) if text_ else None
+        return (clip(text_, SUMMARY_MAX) if text_ else None), False
 
     async def _journal_questions_and_answers(self, s: AsyncSession, goal_id: UUID, row: GoalSession) -> int:
         """Journal the session's questions to the owner (``question``) and the owner's answers (``answer``), each
@@ -699,11 +713,17 @@ class GoalDriver:
         spent: int,
         steps: int,
         summary: str | None,
+        session_note: str | None = None,
         detail: str | None = None,
     ) -> bool:
         """The close's writes, in the caller's transaction: the session row (only while still open), an active
-        goal's next wake, and the harness ``state`` row with the summary. False when the session was closed
-        meanwhile (nothing else is written)."""
+        goal's next wake, and the harness ``state`` row. False when the session was closed meanwhile (nothing else
+        is written).
+
+        The ``state`` row's own words are the harness's (``detail`` included). The chain's text goes in only as
+        ``session_note`` (its newest arrival note, when the session sent no report), after a fixed label, so a
+        session that ended in ``drop`` still leaves the next one a memory. A claimed report is not repeated here:
+        it has its own ``report`` row, under the chain's name."""
         result = await s.execute(
             update(GoalSession)
             .where(GoalSession.id == row.id, GoalSession.ended_at.is_(None))
@@ -720,9 +740,10 @@ class GoalDriver:
             .execution_options(synchronize_session=False)
         )
         note = f"Session {row.n} ended: {outcome}, {spent} tokens."
-        for extra in (detail, summary):
-            if extra:
-                note += f"\n{extra}"
+        if detail:
+            note += f"\n{detail}"
+        if session_note:
+            note += f"\n{SESSION_NOTE_LABEL} {session_note}"
         self._journal(s, goal.id, "state", note, actor="harness", session_n=row.n)
         return True
 
