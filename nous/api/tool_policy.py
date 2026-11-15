@@ -292,13 +292,15 @@ class _GitRoles:
     would read it as a path and compare a file outside the repo. ``short``: one letter per word, ``flag`` or ``value``
     (attached, ``-n5``). ``counts``: ``-<number>`` (``git log -5``). ``shape``: a check of the whole argument list
     after the subcommand for a subcommand whose danger is in its operands (``git branch NAME`` creates a branch);
-    it returns a problem code or None, and runs before the options are read."""
+    it returns a problem code or None, and runs before the options are read. ``clusters``: False when a short
+    option word may hold one letter only (``-q``, never ``-qq``)."""
 
     flags: frozenset[str]
     values: frozenset[str]
     short: Mapping[str, str]
     counts: bool = False
     shape: Callable[[list[str]], str | None] | None = None
+    clusters: bool = True
 
 
 _GIT_DIFF_FLAGS = (
@@ -343,7 +345,7 @@ def _git_branch_shape(rest: list[str]) -> str | None:
             listing = True
             if name != "--list" and "=" not in a and i < len(rest) and not rest[i].startswith("-"):
                 i += 1  # the revision
-        elif not a.startswith("-"):
+        elif a == "-" or not a.startswith("-"):
             operands += 1
     return None if listing or operands == 0 else "git_branch"
 
@@ -385,6 +387,7 @@ LINEAGE_GIT_READS: Mapping[str, _GitRoles] = MappingProxyType(
             ),
             frozenset(),
             {"q": "flag"},
+            clusters=False,
         ),
         # Bare `git remote` prints names (_git_remote_shape): no option, no word.
         "remote": _GitRoles(frozenset(), frozenset(), {}, shape=_git_remote_shape),
@@ -553,12 +556,44 @@ def _procfs(path: str) -> bool:
     return path.startswith("/") and bool(_PROCFS.match(path) or _PROCFS.match(os.path.normpath(path)))
 
 
+_MAX_LINK_HOPS = 40
+
+
+def _through_procfs(path: Path) -> bool:
+    """Whether resolving the absolute ``path`` step by step, links followed, passes through /proc or /dev (a link
+    ``l -> /proc/self/cwd`` makes ``l/x`` mean the shell's cwd to the shell and the process's to ``Path.resolve``).
+    Compares the components it walks and reads only links; a loop counts as passing through."""
+    cur = Path(path.anchor)
+    todo = list(reversed(path.parts[1:]))
+    hops = 0
+    while todo:
+        name = todo.pop()
+        if name in ("", "."):
+            continue
+        if name == "..":
+            cur = cur.parent
+            continue
+        cur = cur / name
+        if _procfs(str(cur)):
+            return True
+        if cur.is_symlink():
+            hops += 1
+            if hops > _MAX_LINK_HOPS:
+                return True
+            target = Path(os.readlink(cur))
+            cur = Path(cur.anchor) if target.is_absolute() else cur.parent
+            todo.extend(reversed(target.parts[1:] if target.is_absolute() else target.parts))
+    return False
+
+
 def _under(path: str, dirs: list[Path]) -> bool:
     """``path`` is absolute and inside one of ``dirs`` once resolved (symlinks and ``..`` followed), and not under
     /proc or /dev (``_procfs``)."""
     if not path.startswith("/") or "\x00" in path or _procfs(path):
         return False
     try:
+        if _through_procfs(Path(path)):
+            return False
         target = Path(path).resolve()
         return any(target.is_relative_to(d.resolve()) for d in dirs)
     except (OSError, ValueError, RuntimeError):  # an unresolvable name, a symlink loop: refused, not raised
@@ -572,7 +607,10 @@ def _readable(path: str, cwds: list[Path], workspace: Path) -> list[Path] | None
     if path.startswith("~") or "\x00" in path or _procfs(path):
         return None
     try:
-        targets = [Path(path).resolve()] if path.startswith("/") else [(d / path).resolve() for d in cwds]
+        named = [Path(path)] if path.startswith("/") else [d / path for d in cwds]
+        if any(_through_procfs(n) for n in named):
+            return None
+        targets = [n.resolve() for n in named]
         if all(
             t.is_relative_to(workspace) and not any(p.startswith(".") for p in t.relative_to(workspace).parts)
             for t in targets
@@ -796,6 +834,8 @@ def _write_target(path: str, cwd: Path | None, writable: list[Path], *, below: b
     if base is None:
         return None
     try:
+        if _through_procfs(base):
+            return None
         target = base.resolve()
         for d in writable:
             d = d.resolve()
@@ -1040,7 +1080,10 @@ def _build_repo(cwd: Path, root: Path, writable: list[Path]) -> bool:
     and neither inside nor around a directory a lineage may write (``lineage_write_dirs``, and ``intentions/`` as a
     whole: another root's lineage writes its own ``intentions/<root>/``), so no lineage can plant the
     ``.git/config``, Makefile or conftest.py that runs."""
-    if cwd == root or not cwd.is_relative_to(root) or not (cwd / ".git").exists():
+    try:
+        if cwd == root or not cwd.is_relative_to(root) or not (cwd / ".git").exists():
+            return False
+    except (OSError, ValueError):  # a name over the filename limit: not a repo, not an error
         return False
     dirs = [d.resolve() for d in (*writable, root / "intentions")]
     return not any(cwd.is_relative_to(d) or d.is_relative_to(cwd) for d in dirs)
@@ -1066,14 +1109,16 @@ def _short_word_problem(word: str, roles: _GitRoles) -> str | None:
     first = roles.short.get(letters[0])
     if first is None:
         return "git_opt"
+    if not roles.clusters and first == "flag" and len(letters) > 1:
+        return "git_cluster"
     if first == "value":
         return "git_value" if len(letters) == 1 else None
     return None if all(roles.short.get(c) == "flag" for c in letters) else "git_cluster"
 
 
 def _git_problem(args: list[str], repo: Path) -> tuple[str, str] | None:
-    """``git status|log|show|diff|merge-base|rev-parse`` with the options in LINEAGE_GIT_READS, and operands that stay
-    in ``repo``. None when allowed, else ``(reason code, the word to quote)``."""
+    """A git read (a subcommand of LINEAGE_GIT_READS) with the options of its closed map and operands that stay in
+    ``repo``. None when allowed, else ``(reason code, the word to quote)``."""
     if not args or args[0] not in LINEAGE_GIT_READS:
         return "git_sub", args[0] if args else ""
     roles = LINEAGE_GIT_READS[args[0]]
@@ -1317,17 +1362,14 @@ def _echo(word: object, kind: str) -> str:
 
 class LineageReason(str):
     """Why the lineage shell refused a command: the text (from ``LINEAGE_REASONS``), the ``code`` that names its
-    row and the ``word`` that was offered to ``_echo`` (never logged). An unknown code is a KeyError, so a typo
-    cannot ship."""
+    row. The word offered to ``_echo`` is not kept. An unknown code is a KeyError, so a typo cannot ship."""
 
     code: str
-    word: str
 
     def __new__(cls, code: str, word: object = "") -> LineageReason:
         text = LINEAGE_REASONS[code].replace("{w}", _echo(word, _REASON_KINDS.get(code, "")))
         self = super().__new__(cls, text)
         self.code = code
-        self.word = word if isinstance(word, str) else ""
         return self
 
 
@@ -1577,17 +1619,20 @@ def lineage_bash_allowed(
     extra_write_dirs: Sequence[str] = (),
 ) -> bool:
     """Whether an internal_only turn may run this bash ``command`` (F099 lineage shell): ``lineage_bash_refusal``
-    finds no reason to refuse it. See there for the rules."""
-    return (
-        lineage_bash_refusal(
-            ctx,
-            command,
-            workspace_dir=workspace_dir,
-            build_commands=build_commands,
-            extra_write_dirs=extra_write_dirs,
+    finds no reason to refuse it. See there for the rules. Fails closed: a decision that raises is a refusal."""
+    try:
+        return (
+            lineage_bash_refusal(
+                ctx,
+                command,
+                workspace_dir=workspace_dir,
+                build_commands=build_commands,
+                extra_write_dirs=extra_write_dirs,
+            )
+            is None
         )
-        is None
-    )
+    except Exception:
+        return False
 
 
 def internal_only_call_violation(
@@ -1677,74 +1722,31 @@ _HTTP_READ_FLAGS: dict[str, tuple[str, str, frozenset[str], frozenset[str]]] = {
     "curl": (
         "sSLfiIvkgGO46",
         "HomAweruxX",
-        frozenset(
-            {
-                "--silent",
-                "--show-error",
-                "--location",
-                "--fail",
-                "--fail-with-body",
-                "--include",
-                "--head",
-                "--verbose",
-                "--insecure",
-                "--compressed",
-                "--globoff",
-                "--get",
-                "--remote-name",
-                "--no-progress-meter",
-            }
-        ),
-        frozenset(
-            {
-                "--header",
-                "--output",
-                "--max-time",
-                "--connect-timeout",
-                "--user-agent",
-                "--write-out",
-                "--referer",
-                "--range",
-                "--user",
-                "--retry",
-                "--max-redirs",
-                "--url",
-                "--request",
-            }
-        ),
+        frozenset({
+            "--silent", "--show-error", "--location", "--fail", "--fail-with-body", "--include", "--head",
+            "--verbose", "--insecure", "--compressed", "--globoff", "--get", "--remote-name", "--no-progress-meter",
+        }),
+        frozenset({
+            "--header", "--output", "--max-time", "--connect-timeout", "--user-agent", "--write-out", "--referer",
+            "--range", "--user", "--retry", "--max-redirs", "--url", "--request",
+        }),
     ),
     "wget": (
         "qSc",
         "OTtUP",
         frozenset({"--quiet", "--spider", "--server-response", "--no-verbose", "-nv", "--no-check-certificate"}),
-        frozenset(
-            {
-                "--output-document",
-                "--timeout",
-                "--tries",
-                "--user-agent",
-                "--header",
-                "--directory-prefix",
-                "--max-redirect",
-                "--method",
-            }
-        ),
+        frozenset({
+            "--output-document", "--timeout", "--tries", "--user-agent", "--header", "--directory-prefix",
+            "--max-redirect", "--method",
+        }),
     ),
     "http": (
         "hbvFqdI",
         "posa",
-        frozenset(
-            {
-                "--headers",
-                "--body",
-                "--verbose",
-                "--follow",
-                "--check-status",
-                "--download",
-                "--quiet",
-                "--ignore-stdin",
-            }
-        ),
+        frozenset({
+            "--headers", "--body", "--verbose", "--follow", "--check-status", "--download", "--quiet",
+            "--ignore-stdin",
+        }),
         frozenset({"--print", "--output", "--style", "--auth", "--timeout", "--pretty", "--verify"}),
     ),
 }
@@ -1823,50 +1825,12 @@ def _http_client_writes(prog: str, args: list[str]) -> bool:
 
 # Git subcommands that cannot update a remote or run another program: an allowlist, so `send-pack`, `http-push`,
 # `svn dcommit`, `p4 submit`, `rebase --exec`, an alias and anything new are refused.
-_GIT_LOCAL = frozenset(
-    {
-        "status",
-        "log",
-        "diff",
-        "show",
-        "fetch",
-        "pull",
-        "rev-parse",
-        "rev-list",
-        "ls-files",
-        "ls-tree",
-        "ls-remote",
-        "blame",
-        "grep",
-        "describe",
-        "shortlog",
-        "cat-file",
-        "show-ref",
-        "for-each-ref",
-        "merge-base",
-        "name-rev",
-        "diff-tree",
-        "diff-files",
-        "diff-index",
-        "count-objects",
-        "check-ignore",
-        "whatchanged",
-        "reflog",
-        "request-pull",
-        "add",
-        "commit",
-        "checkout",
-        "switch",
-        "restore",
-        "merge",
-        "stash",
-        "tag",
-        "init",
-        "clone",
-        "mv",
-        "rm",
-    }
-)
+_GIT_LOCAL = frozenset({
+    "status", "log", "diff", "show", "fetch", "pull", "rev-parse", "rev-list", "ls-files", "ls-tree", "ls-remote",
+    "blame", "grep", "describe", "shortlog", "cat-file", "show-ref", "for-each-ref", "merge-base", "name-rev",
+    "diff-tree", "diff-files", "diff-index", "count-objects", "check-ignore", "whatchanged", "reflog", "request-pull",
+    "add", "commit", "checkout", "switch", "restore", "merge", "stash", "tag", "init", "clone", "mv", "rm",
+})
 _GIT_OPTS_WITH_VALUE = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"})
 _GIT_REMOTE_READ = frozenset({"-v", "--verbose", "show", "get-url"})
 
@@ -2021,7 +1985,9 @@ MCP_CLIENT_CONTEXT_TEXT = (
     "another form."
 )
 MCP_CLIENT_UNREGISTERED_TEXT = "Tool error: '{tool}' is not a tool of any connected MCP server."
-MCP_CLIENT_NOT_OFFERED_TEXT = "Tool error: '{tool}' is not available in this turn. Use only the tools offered to you."
+MCP_CLIENT_NOT_OFFERED_TEXT = (
+    "Tool error: '{tool}' is not available in this turn. Use only the tools offered to you."
+)
 
 
 def mcp_client_tool_allowed(kind: str, server_background: bool) -> bool:

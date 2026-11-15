@@ -870,8 +870,8 @@ class AgentRunner:
                 build_commands=self._settings.f099_lineage_build_commands,
                 extra_write_dirs=self._settings.f099_lineage_write_dirs,
             )
-        except Exception:
-            logger.warning("F099: the lineage shell refusal reason failed", exc_info=True)
+        except Exception as exc:  # the class only: an OSError's message carries path text from the command
+            logger.warning("F099: the lineage shell refusal reason failed (%s)", type(exc).__name__)
             return tool_policy.LineageReason("other")
 
     def _authorize_tool_call(

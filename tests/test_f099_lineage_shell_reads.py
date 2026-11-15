@@ -613,6 +613,10 @@ def _snapshot(repo: Path) -> dict[str, bytes | str]:
     snap: dict[str, bytes | str] = {"refs": _real_git(repo, "for-each-ref")}
     for name in ("config", "HEAD", "index"):
         snap[name] = (repo / ".git" / name).read_bytes()
+    # the working tree's files and the hooks directory: a listing form must not create or change either
+    snap["tree"] = "\n".join(
+        f"{p.relative_to(repo)} {p.stat().st_size}" for p in sorted(repo.rglob("*")) if ".git/objects" not in str(p)
+    )
     return snap
 
 
@@ -622,7 +626,9 @@ def real_repo(tmp_path):
     repo.mkdir()
     _real_git(repo, "init", "-q", "-b", "main")
     (repo / "a.txt").write_text("one\n")
-    _real_git(repo, "add", "a.txt")
+    (repo / "tests").mkdir()
+    (repo / "tests" / "test_a.py").write_text("x = 1\n")
+    _real_git(repo, "add", "a.txt", "tests")
     _real_git(repo, "commit", "-q", "-m", "one")
     _real_git(repo, "branch", "feat/a")
     _real_git(repo, "branch", "fix/b")
@@ -644,9 +650,11 @@ def test_branch_listing_forms_create_nothing(command, real_repo, ws):
 
 @needs_git
 @pytest.mark.parametrize("command", ["git remote", *LS_ALLOWED])
-def test_bare_remote_ls_files_and_ls_tree_write_nothing(command, real_repo):
+def test_bare_remote_ls_files_and_ls_tree_write_nothing(command, real_repo, ws):
+    assert _ok(CD + command, ws), command
     before = _snapshot(real_repo)
-    _sh(real_repo, command)
+    done = _sh(real_repo, command)
+    assert done.returncode == 0, done.stderr
     assert _snapshot(real_repo) == before
 
 
@@ -745,7 +753,10 @@ DASH_C_REFUSED = [
     ("git -C nous ls-remote", "git_sub"),
     ("git -C nous log --output=/tmp/x", "git_opt"),
     ("git -C nous status -sbu", "git_cluster"),
-    ("git -Cnous status", "git_repo"),  # attached: no -C at all, so git runs in the workspace root
+    (
+        "git -Cnous status",
+        "git_repo",
+    ),  # no cd first: the workspace root is no repo, refused before the -Cnous word is read
     ("cd nous && git -Cnous status", "git_sub"),
     ("git -C -c status", "git_C"),
     ("git -C nous status && gh pr list", "build_token"),
@@ -1185,3 +1196,79 @@ def test_the_widening_probes_stay_refused(ws):
     ]
     through = [c for c in probes if _ok(_fmt(c.replace("{J}", "{W}/claude-jobs"), ws), ws)]
     assert through == []
+
+
+# -- a decision that cannot be made is a refusal, never an exception --
+
+
+@pytest.mark.parametrize("command", ["git -C {L} status", "git -C nous/{L} status", "cd {L} && git status"])
+def test_a_directory_name_over_the_filename_limit_is_refused_through_the_runner(command, ws):
+    r, _, events = _shell_runner(ws)
+    refusal = _bash(r, command.format(L="d" * 300))
+    assert refusal is not None and "(external)" in refusal.text
+    assert events[0][1]["reason_code"] in LINEAGE_REASONS
+
+
+def test_an_exception_while_deciding_refuses_with_the_other_reason(ws, monkeypatch):
+    def boom(*a, **k):
+        raise OSError(36, "File name too long: /secret/path")
+
+    monkeypatch.setattr(tool_policy, "lineage_bash_refusal", boom)
+    r, _, events = _shell_runner(ws)
+    refusal = _bash(r, "ls")
+    assert refusal is not None and "(external)" in refusal.text
+    assert "Refused: this command is not on the lineage allowlist." in refusal.text
+    assert events[0][1]["reason_code"] == "other"
+    assert "secret" not in str(events) + refusal.text
+    assert not tool_policy.lineage_bash_allowed(_internal(), "ls", workspace_dir=str(ws))
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat plink/a.md",
+        "cd plink",
+        "ls plink",
+        "git -C plink/nous status",
+        "echo x > plink/research/y",
+        "touch plink/research/y",
+        "mkdir -p plink/research/z",
+        "cp {W}/a.md plink/research/y",
+        "cat {W}/plink/a.md",
+        "cat chain/a.md",
+        "cat dlink/null",
+    ],
+)
+def test_a_path_that_resolves_through_a_symlink_into_proc_or_dev_is_refused(command, ws, monkeypatch):
+    (ws / "plink").symlink_to("/proc/self/cwd")
+    (ws / "chain").symlink_to(ws / "plink")  # a link to a link into /proc
+    (ws / "dlink").symlink_to("/dev")
+    monkeypatch.chdir(ws)  # /proc/self/cwd is then a directory plain resolution calls the workspace
+    assert not _ok(_fmt(command, ws), ws), command
+
+
+def test_symlinks_that_stay_in_the_workspace_still_resolve(ws):
+    (ws / "link").symlink_to(ws / "dir")
+    (ws / "rel").symlink_to("dir")
+    assert _ok(_fmt("cat link/n.md", ws), ws)
+    assert _ok(_fmt("cat rel/n.md", ws), ws)
+    (ws / "loop").symlink_to("loop")
+    assert not _ok(_fmt("cat loop/x", ws), ws)
+
+
+def test_a_bare_dash_is_an_operand_of_git_branch(ws):
+    assert _refusal(CD + "git branch -", ws).code == "git_branch"
+    assert _refusal(CD + "git branch -a -", ws).code == "git_branch"
+    assert _ok(CD + "git branch --list -", ws)  # after --list it is a pattern, like any operand
+
+
+def test_git_rev_parse_takes_one_letter_per_word(ws):
+    assert _ok(CD + "git rev-parse -q HEAD", ws)
+    assert _ok(CD + "git rev-parse -q -q HEAD", ws)
+    for command in ("git rev-parse -qq HEAD", "git rev-parse -qq"):
+        assert _refusal(CD + command, ws).code == "git_cluster", command
+
+
+def test_a_reason_keeps_no_copy_of_the_word(ws):
+    reason = _refusal("ZQ9canaryprog arg", ws)
+    assert not hasattr(reason, "word") and "ZQ9canaryprog" in reason
