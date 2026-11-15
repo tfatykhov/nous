@@ -177,6 +177,10 @@ nous/
 │   │   ├── envelope.py         # A goal's limits: the small, medium and large presets, and custom values checked against migration 113's ranges
 │   │   ├── store.py            # GoalStore: brain.goals, goal_sessions and the append-only goal_journal (migration 113); each change a targeted update guarded by the state it read, plus a journal row naming the actor
 │   │   ├── roots.py            # create_session_root: a session's first subtask and its root intention (origin goal, internal authority, so its wake policy is continue)
+│   │   ├── spend.py            # session_spent: a session's spend is its root's token budget as continuation.root_limits counts it; goal_spent: a goal's total and today's (UTC)
+│   │   ├── quote.py            # A journal entry or plan step as data: its own tag, every journal_entry, plan_step and result_message delimiter in the text escaped
+│   │   ├── charter.py          # build_session_task: a session's first task (the charter, then the plan and the journal quoted as data), at most 12,000 characters
+│   │   ├── driver.py           # GoalDriver (not wired yet): each tick claims the goal channels into the journal, closes sessions whose chain ended, starts the goals that are due within the queue headroom
 │   │   └── seed.py             # `python -m nous.goals.seed create|list|show|approve|pause|resume|run-now|stop|cancel|confirm|note|raise-budget|extend`: the owner's host command; changes refused with the flag off
 │   └── api/                    # External interfaces
 │       ├── rest.py             # Starlette REST API (the route list in `create_app`; see `docs/reference/rest-api.md`)
