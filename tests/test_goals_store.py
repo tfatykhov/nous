@@ -480,3 +480,42 @@ async def test_a_note_on_a_finished_goal_is_refused(db):
     with pytest.raises(GoalRefused, match="done"):
         await store.add_note(done.id, "too late", actor="owner")
     assert len(await _journal(store, goal)) == count
+
+
+# ---- one clock --------------------------------------------------------------------------------------------------
+
+
+class _SlowClock(datetime):
+    """A process clock an hour behind the database's."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return datetime.now(tz) - timedelta(hours=1)
+
+
+async def test_every_stored_time_comes_from_the_database_clock(db, monkeypatch):
+    import nous.goals.store as store_module
+
+    monkeypatch.setattr(store_module, "datetime", _SlowClock)
+    store = _store(db)
+    goal = await _draft(store)
+    async with db.session() as s:
+        before = (await s.execute(text("SELECT clock_timestamp()"))).scalar_one()
+    approved = await store.approve(goal.id, actor="host")
+    assert approved.approved_at >= before and approved.next_wake_at >= before
+    assert approved.deadline_at == approved.approved_at + timedelta(days=approved.deadline_days)
+    # a session inserted under the goal's row lock (the driver's order), then a stop: the request is not older
+    async with db.session() as s:
+        await s.execute(select(Goal).where(Goal.id == goal.id).with_for_update())
+        s.add(
+            GoalSession(agent_id=store.agent_id, goal_id=goal.id, n=1, trigger="timer", first_subtask_id=uuid.uuid4())
+        )
+        await s.commit()
+    (session,) = await store.sessions(goal.id)
+    stopped = await store.stop(goal.id, actor="host")
+    assert stopped.pending_request_at >= session.started_at
+    cancelled = await store.cancel(goal.id, actor="host")
+    assert cancelled.finished_at >= session.started_at and cancelled.pending_request_at >= session.started_at
+    other = await _active(store)
+    assert await store.delay_wake(other.id, seconds=60, seen=other.next_wake_at)
+    assert (await store.get(other.id)).next_wake_at >= before + timedelta(seconds=60)

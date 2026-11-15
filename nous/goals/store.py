@@ -16,7 +16,7 @@ import re
 from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -107,10 +107,6 @@ def _envelope_of(goal: Goal) -> Envelope:
         jobs_per_day=goal.jobs_per_day,
         quiet_hours_ok=goal.quiet_hours_ok,
     )
-
-
-def _now() -> datetime:
-    return datetime.now(UTC)
 
 
 def _owner_only(actor: str, what: str) -> None:
@@ -239,7 +235,7 @@ class GoalStore:
         the goal has nowhere to ask the owner (no origin channel and no default chat): its questions and reports
         would be dropped."""
         _owner_only(actor, "approve a goal")
-        async with self._locked(ref) as (s, goal):
+        async with self._locked(ref) as (s, goal, now):
             if goal.state != "draft":
                 raise GoalRefused(f"{describe(goal)}: only a draft can be approved")
             if owner_channel(self._settings, goal.origin_channel) is None:
@@ -247,7 +243,6 @@ class GoalStore:
                     f"{describe(goal)} has nowhere to ask the owner: give it an origin channel or set "
                     "NOUS_TELEGRAM_CHAT_ID"
                 )
-            now = _now()
             deadline = now + timedelta(days=goal.deadline_days)
             values = {"state": "active", "approved_at": now, "deadline_at": deadline, "next_wake_at": now}
             note = f"Approved: active until {deadline:%Y-%m-%d %H:%M} UTC."
@@ -255,7 +250,7 @@ class GoalStore:
 
     async def pause(self, ref: GoalRef, *, actor: str) -> Goal:
         """``active`` to ``paused (owner)``: no new session starts; an open one runs to its end."""
-        async with self._locked(ref) as (s, goal):
+        async with self._locked(ref) as (s, goal, now):
             if goal.state != "active":
                 raise GoalRefused(f"{describe(goal)}: only an active goal can be paused")
             values = {"state": "paused", "pause_reason": "owner", "next_wake_at": None, **_NO_REQUEST}
@@ -266,10 +261,9 @@ class GoalStore:
         its budget whose total is still spent (``raise_budget`` first), or for its deadline that has passed
         (``extend_deadline`` first)."""
         _owner_only(actor, "resume a goal")
-        async with self._locked(ref) as (s, goal):
+        async with self._locked(ref) as (s, goal, now):
             if goal.state != "paused":
                 raise GoalRefused(f"{describe(goal)}: only a paused goal can be resumed")
-            now = _now()
             if goal.pause_reason == "budget":
                 spent = await self._spent(s, goal.id)
                 if spent >= goal.total_budget:
@@ -289,19 +283,18 @@ class GoalStore:
     async def confirm_done(self, ref: GoalRef, *, actor: str) -> Goal:
         """``paused (waiting_for_owner)`` to ``done``: only the owner's confirmation finishes a goal."""
         _owner_only(actor, "confirm a goal done")
-        async with self._locked(ref) as (s, goal):
+        async with self._locked(ref) as (s, goal, now):
             if (goal.state, goal.pause_reason) != ("paused", "waiting_for_owner"):
                 raise GoalRefused(f"{describe(goal)}: only a goal waiting for the owner can be confirmed done")
-            values = {"state": "done", "pause_reason": None, "finished_at": _now(), "next_wake_at": None}
+            values = {"state": "done", "pause_reason": None, "finished_at": now, "next_wake_at": None}
             return await self._apply(s, goal, ("paused",), values, actor=actor, note="Confirmed done.")
 
     async def cancel(self, ref: GoalRef, *, actor: str) -> Goal:
         """A draft, active or paused goal to ``cancelled``. With a session open, the driver is also asked to stop
         that session (``pending_request = 'cancel'``)."""
-        async with self._locked(ref) as (s, goal):
+        async with self._locked(ref) as (s, goal, now):
             if goal.state not in LIVE_STATES:
                 raise GoalRefused(f"{describe(goal)}: only a draft, active or paused goal can be cancelled")
-            now = _now()
             session = await self._open_session(s, goal.id)
             request = {"pending_request": "cancel", "pending_request_at": now} if session else _NO_REQUEST
             values = {"state": "cancelled", "pause_reason": None, "next_wake_at": None, "finished_at": now, **request}
@@ -314,13 +307,13 @@ class GoalStore:
         """Stop now. An active goal is paused (``owner``), as by ``pause``; a paused goal keeps its pause. With a
         session open, the driver is also asked to stop it (``pending_request = 'stop'``). A paused goal with no
         open session has nothing to stop: refused."""
-        async with self._locked(ref) as (s, goal):
+        async with self._locked(ref) as (s, goal, now):
             if goal.state not in ("active", "paused"):
                 raise GoalRefused(f"{describe(goal)}: only an active or paused goal can be stopped")
             session = await self._open_session(s, goal.id)
             if goal.state == "paused" and session is None:
                 raise GoalRefused(f"{describe(goal)}: no session is open, so there is nothing to stop")
-            request = {"pending_request": "stop", "pending_request_at": _now()} if session else _NO_REQUEST
+            request = {"pending_request": "stop", "pending_request_at": now} if session else _NO_REQUEST
             if goal.state == "active":
                 values = {"state": "paused", "pause_reason": "owner", "next_wake_at": None, **request}
                 note = "Paused."
@@ -334,20 +327,20 @@ class GoalStore:
 
     async def request_run_now(self, ref: GoalRef, *, actor: str) -> Goal:
         """Ask the driver for a session now (``pending_request = 'run_now'``): an active goal with no open session."""
-        async with self._locked(ref) as (s, goal):
+        async with self._locked(ref) as (s, goal, now):
             if goal.state != "active":
                 raise GoalRefused(f"{describe(goal)}: only an active goal can run a session now")
             session = await self._open_session(s, goal.id)
             if session is not None:
                 raise GoalRefused(f"{describe(goal)}: session {session.n} is already running")
-            values = {"pending_request": "run_now", "pending_request_at": _now()}
+            values = {"pending_request": "run_now", "pending_request_at": now}
             return await self._apply(s, goal, ("active",), values, actor=actor, note="Asked for a session now.")
 
     async def raise_budget(self, ref: GoalRef, *, total: int | None = None, day: int | None = None, actor: str) -> Goal:
         """New total and/or day budget for a draft, active or paused goal, within the table's ranges. The total
         cannot go below what the goal has already spent."""
         _owner_only(actor, "change a goal's budget")
-        async with self._locked(ref) as (s, goal):
+        async with self._locked(ref) as (s, goal, now):
             if goal.state not in LIVE_STATES:
                 raise GoalRefused(f"{describe(goal)}: only a draft, active or paused goal's budget can change")
             if total is None and day is None:
@@ -379,7 +372,7 @@ class GoalStore:
         goal's deadline moves to ``days`` after the later of its deadline and now, and may be at most 90 days from
         now; the length it was approved with is kept."""
         _owner_only(actor, "extend a goal's deadline")
-        async with self._locked(ref) as (s, goal):
+        async with self._locked(ref) as (s, goal, now):
             if goal.state not in LIVE_STATES:
                 raise GoalRefused(f"{describe(goal)}: only a draft, active or paused goal's deadline can change")
             if isinstance(days, bool) or not isinstance(days, int) or days < 1:
@@ -394,7 +387,6 @@ class GoalStore:
                 values = {"deadline_days": goal.deadline_days + days}
                 note = f"Deadline extended by {days} days (to {goal.deadline_days + days} days from approval)."
             else:
-                now = _now()
                 deadline = max(goal.deadline_at, now) + timedelta(days=days)
                 if deadline <= now:
                     raise GoalRefused("the new deadline would not be in the future")
@@ -413,12 +405,12 @@ class GoalStore:
         body = text.strip()
         if not body:
             raise GoalRefused("a note needs some text")
-        async with self._locked(ref) as (s, goal):
+        async with self._locked(ref) as (s, goal, now):
             if goal.state not in LIVE_STATES:
                 raise GoalRefused(f"{describe(goal)}: a note can only be added to a draft, active or paused goal")
             self._add_journal(s, goal.id, "owner_note", body, actor=actor)
             if goal.state == "active" and await self._open_session(s, goal.id) is None:
-                await self._wake(s, goal.id, _now())
+                await self._wake(s, goal.id, now)
             await s.commit()
             await s.refresh(goal)
             return goal
@@ -430,7 +422,8 @@ class GoalStore:
         if seconds < 0:
             raise GoalRefused("a wake can only be delayed, not moved back")
         async with self._db.session() as s:
-            changed = await self._wake(s, goal_id, _now() + timedelta(seconds=seconds), if_seen=True, seen=seen)
+            at = func.clock_timestamp() + timedelta(seconds=seconds)
+            changed = await self._wake(s, goal_id, at, if_seen=True, seen=seen)
             await s.commit()
             return changed
 
@@ -467,13 +460,16 @@ class GoalStore:
         return (await s.execute(query)).scalar_one_or_none()
 
     @asynccontextmanager
-    async def _locked(self, ref: GoalRef) -> AsyncIterator[tuple[AsyncSession, Goal]]:
-        """A session holding the goal row ``FOR UPDATE`` until it commits or closes."""
+    async def _locked(self, ref: GoalRef) -> AsyncIterator[tuple[AsyncSession, Goal, datetime]]:
+        """A session holding the goal row ``FOR UPDATE`` until it commits or closes, and the database's clock read
+        once after the lock: every time the store writes comes from it, never from this process's clock, so a
+        request is never stamped earlier than a session row written before it under the same lock."""
         async with self._db.session() as s:
             goal = await self._find(s, ref, lock=True)
             if goal is None:
                 raise GoalRefused(f"no goal {ref}")
-            yield s, goal
+            now = (await s.execute(select(func.clock_timestamp()))).scalar_one()
+            yield s, goal, now
 
     async def _apply(
         self,
@@ -490,7 +486,7 @@ class GoalStore:
         result = await s.execute(
             update(Goal)
             .where(Goal.id == goal.id, Goal.agent_id == self.agent_id, Goal.state.in_(from_states))
-            .values(**values, updated_at=func.now())
+            .values(**values, updated_at=func.clock_timestamp())
             .execution_options(synchronize_session=False)
         )
         if result.rowcount != 1:
@@ -510,7 +506,7 @@ class GoalStore:
         result = await s.execute(
             update(Goal)
             .where(*guard)
-            .values(next_wake_at=at, updated_at=func.now())
+            .values(next_wake_at=at, updated_at=func.clock_timestamp())
             .execution_options(synchronize_session=False)
         )
         return result.rowcount == 1
