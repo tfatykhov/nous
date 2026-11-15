@@ -70,7 +70,8 @@ def _members(pgid: int) -> dict[int, int]:
 def _now_ticks() -> int | None:
     try:
         with open("/proc/uptime", encoding="utf-8") as f:
-            return int(float(f.read().split()[0]) * _CLK_TCK)
+            # round, not int: 4.35 * 100 is 434.99999999999994 in floating point, a tick early
+            return round(float(f.read().split()[0]) * _CLK_TCK)
     except (OSError, IndexError, ValueError):
         return None
 

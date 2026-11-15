@@ -312,3 +312,21 @@ def test_a_group_whose_only_members_are_zombies_is_empty():
         assert background_processes.tracked() == []  # the group counts as empty
     finally:
         parent.wait()
+
+
+def test_the_exit_moment_is_rounded_to_the_tick_not_truncated(monkeypatch):
+    import builtins
+    import io
+
+    real_open = builtins.open
+
+    def fake_open(path, *args, **kwargs):
+        if path == "/proc/uptime":
+            return io.StringIO("4.35 0.00")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    monkeypatch.setattr(background_processes, "_CLK_TCK", 100)
+    # 4.35 * 100 is 434.99999999999994 in floating point: a truncated tick would read a member started in that
+    # very tick as started after the exit.
+    assert background_processes._now_ticks() == 435
