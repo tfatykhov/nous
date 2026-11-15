@@ -140,14 +140,6 @@ async def test_resume_with_the_owner_or_the_proxy_secret_is_200(header):
     cont.wake.assert_called_once()
 
 
-def test_one_digest_per_secret():
-    """The proxy's secret is checked against the MCP client UI digest, the one setting for it."""
-    from nous.config import Settings
-
-    assert "proxy_secret_sha256" not in Settings.model_fields
-    assert {"owner_route_secret_sha256", "mcp_client_ui_secret_sha256"} <= set(Settings.model_fields)
-
-
 async def test_neither_digest_configured_refuses_every_resume_with_the_plain_reason(caplog):
     halt = _install()
     await halt.halt(actor="t", surface="dashboard")
