@@ -51,7 +51,7 @@ EXPIRED_UNANSWERED_ACTIONS = frozenset({EXPIRED_UNANSWERED, "no_objection"})
 
 # What a verb registered with owner_proof=True answers (403) when the request did not prove the owner. A client shows
 # the message as it is.
-OWNER_PROOF_TEXT = "This action needs the owner's sign-in. Use the web companion through the login page, or Telegram."
+OWNER_PROOF_TEXT = "This action needs the owner's sign-in. Use the web companion through the login page."
 
 
 def is_expired_unanswered(action_name: str | None) -> bool:
