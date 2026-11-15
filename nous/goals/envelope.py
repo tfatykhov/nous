@@ -34,13 +34,14 @@ PRESETS: dict[str, Envelope] = {
 CUSTOM = "custom"
 FIELDS: tuple[str, ...] = tuple(field.name for field in fields(Envelope))
 
-# (field, low, high, words): the CHECK ranges of brain.goals. None is no upper bound.
-_RANGES: tuple[tuple[str, int, int | None, str], ...] = (
+# (field, low, high, words): the CHECK ranges of brain.goals, and a ceiling where the table has none (a day budget
+# no larger than the largest total, at most a week between sessions), so no value reaches the database out of range.
+_RANGES: tuple[tuple[str, int, int, str], ...] = (
     ("total_budget", 1, 1_000_000_000, "the total budget"),
-    ("day_budget", 1, None, "the day budget"),
+    ("day_budget", 1, 1_000_000_000, "the day budget"),
     ("deadline_days", 1, 90, "the deadline in days"),
     ("sessions_per_day", 1, 24, "sessions per day"),
-    ("min_interval_seconds", 60, None, "the interval between sessions in seconds"),
+    ("min_interval_seconds", 60, 7 * 86_400, "the interval between sessions in seconds"),
     ("jobs_per_day", 0, 20, "jobs per day"),
 )
 
@@ -52,8 +53,8 @@ def problems(envelope: Envelope) -> list[str]:
         value = getattr(envelope, name)
         if not isinstance(value, int) or isinstance(value, bool):
             found.append(f"{words} must be a whole number")
-        elif value < low or (high is not None and value > high):
-            found.append(f"{words} must be at least {low}" + (f" and at most {high}" if high is not None else ""))
+        elif not low <= value <= high:
+            found.append(f"{words} must be at least {low} and at most {high}")
     if not isinstance(envelope.quiet_hours_ok, bool):
         found.append("quiet_hours_ok must be true or false")
     if not found and envelope.day_budget > envelope.total_budget:

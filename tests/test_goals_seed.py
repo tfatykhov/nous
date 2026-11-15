@@ -137,3 +137,38 @@ async def test_with_the_flag_off_a_change_is_refused_and_list_and_show_still_wor
     assert label in capsys.readouterr().out
     assert await _run(off, store, "show", label) == 0
     assert label in capsys.readouterr().out
+
+
+async def test_an_out_of_range_number_is_a_refusal_not_a_traceback(db, capsys):
+    settings, store = _env(db)
+    assert await _run(settings, store, *CREATE, "--interval", str(10**12)) == 2
+    assert "interval" in capsys.readouterr().err
+    assert await store.list() == []
+
+
+async def test_a_database_error_prints_one_fixed_line_without_the_parameters(db, capsys, monkeypatch):
+    from sqlalchemy.exc import DataError
+
+    settings, store = _env(db)
+
+    async def fails(**kwargs):
+        raise DataError(
+            "INSERT INTO brain.goals ...", {"objective": "the secret plan"}, Exception("value out of range")
+        )
+
+    monkeypatch.setattr(store, "create", fails)
+    assert await _run(settings, store, *CREATE) == 1
+    captured = capsys.readouterr()
+    assert captured.err == seed.DB_ERROR_LINE.format(kind="DataError") + "\n"
+    assert "secret" not in captured.err + captured.out and "INSERT" not in captured.err
+
+
+async def test_quiet_hours_can_be_turned_on_and_off_from_the_preset(db, capsys):
+    settings, store = _env(db)
+    assert await _run(settings, store, *CREATE, "--preset", "large", "--no-quiet-hours-ok") == 0
+    assert await _run(settings, store, *CREATE, "--preset", "small", "--quiet-hours-ok") == 0
+    assert await _run(settings, store, *CREATE, "--preset", "large") == 0
+    large_off, small_on, large = await store.list()
+    assert (large_off.quiet_hours_ok, large_off.preset) == (False, "custom")
+    assert (small_on.quiet_hours_ok, small_on.preset) == (True, "custom")
+    assert (large.quiet_hours_ok, large.preset) == (True, "large")

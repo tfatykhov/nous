@@ -20,6 +20,8 @@ import sys
 from collections.abc import Sequence
 from typing import Any
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from nous.config import Settings
 from nous.goals.envelope import PRESETS
 from nous.goals.store import GoalRefused, GoalStore, clip, describe
@@ -34,6 +36,7 @@ SPEND_NOTE = (
     "launched from the chain, embeddings and helper calls are not counted."
 )
 FLAG_OFF_LINE = "refused: goals are off (NOUS_GOALS_ENABLED, or a flag it needs, is off); nothing was changed"
+DB_ERROR_LINE = "error: the database refused the command ({kind}); nothing was changed"
 _READ_ONLY = frozenset({"list", "show"})
 # create's limit options and the envelope field each sets
 _LIMIT_OPTIONS = (
@@ -62,7 +65,12 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     create.add_argument("--sessions-per-day", type=int)
     create.add_argument("--interval", type=int, help="seconds between sessions")
     create.add_argument("--jobs-per-day", type=int)
-    create.add_argument("--quiet-hours-ok", action="store_const", const=True, default=None)
+    create.add_argument(
+        "--quiet-hours-ok",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="whether sessions may start in quiet hours (default: the preset's)",
+    )
     create.add_argument("--origin-channel", help="where the goal asks and tells the owner (e.g. telegram:<chat id>)")
 
     sub.add_parser("list", help="every goal, one line each")
@@ -189,6 +197,9 @@ async def run(args: argparse.Namespace, settings: Any, store: GoalStore) -> int:
     except GoalRefused as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 2
+    except SQLAlchemyError as exc:  # its text carries the statement's parameters (the objective, a note): not shown
+        print(DB_ERROR_LINE.format(kind=type(exc).__name__), file=sys.stderr)
+        return 1
     print(_line(goal))
     return 0
 

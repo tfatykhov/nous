@@ -51,6 +51,9 @@ _NO_REQUEST = {"pending_request": None, "pending_request_at": None}
 # Who may approve, resume, confirm, or change a goal's budget or deadline: the owner, or the owner's host command.
 OWNER_ACTORS: frozenset[str] = frozenset({"owner", "host"})
 _SHORT_ID_RE = re.compile(r"^(?:g-?)?0*(\d{1,12})$", re.IGNORECASE)
+# The channel kinds an owner-facing row is delivered on: nous.handlers.continuation_publisher pushes rows whose
+# channel is LIKE 'telegram:%', to the chat id after the colon. A goal's questions and reports go to its channel.
+DELIVERED_CHANNEL_KINDS: tuple[str, ...] = ("telegram",)
 
 GoalRef = UUID | int | str
 
@@ -215,6 +218,13 @@ class GoalStore:
         except EnvelopeError as exc:
             raise GoalRefused(str(exc)) from exc
         channel = origin_channel.strip() if origin_channel and origin_channel.strip() else None
+        if channel is not None:
+            kind, colon, chat = channel.partition(":")
+            if kind not in DELIVERED_CHANNEL_KINDS or not colon or not chat or any(c.isspace() for c in chat):
+                raise GoalRefused(
+                    f"the origin channel must be <kind>:<id> of a kind the owner is sent to "
+                    f"({', '.join(f'{k}:<chat id>' for k in DELIVERED_CHANNEL_KINDS)}), not {channel!r}"
+                )
         async with self._db.session() as s:
             goal = Goal(
                 agent_id=self.agent_id,

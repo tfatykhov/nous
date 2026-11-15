@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -519,3 +520,37 @@ async def test_every_stored_time_comes_from_the_database_clock(db, monkeypatch):
     other = await _active(store)
     assert await store.delay_wake(other.id, seconds=60, seen=other.next_wake_at)
     assert (await store.get(other.id)).next_wake_at >= before + timedelta(seconds=60)
+
+
+# ---- what create accepts ------------------------------------------------------------------------------------------
+
+
+def test_the_delivered_channel_kinds_are_the_publishers():
+    from pathlib import Path
+
+    from nous.goals.store import DELIVERED_CHANNEL_KINDS
+
+    source = (Path(__file__).resolve().parents[1] / "nous" / "handlers" / "continuation_publisher.py").read_text(
+        encoding="utf-8"
+    )
+    assert DELIVERED_CHANNEL_KINDS == ("telegram",)
+    assert all(f'ResultInbox.channel.like("{kind}:%")' in source for kind in DELIVERED_CHANNEL_KINDS)
+
+
+async def test_create_refuses_an_origin_channel_the_owner_is_never_sent_to(db):
+    store = _store(db)
+    for channel in ("slack:42", "telegram:", "telegram", "4242", "telegram:42 43", "companion:web"):
+        with pytest.raises(GoalRefused, match="origin channel"):
+            await _draft(store, origin_channel=channel)
+    assert await store.list() == []
+    assert (await _draft(store, origin_channel=" telegram:-1001234 ")).origin_channel == "telegram:-1001234"
+    assert (await _draft(store, origin_channel=None)).origin_channel is None
+
+
+def test_out_of_range_limits_are_refused_in_words():
+    with pytest.raises(EnvelopeError, match="interval"):
+        envelope.envelope_for("small", {"min_interval_seconds": 10**12})
+    with pytest.raises(EnvelopeError, match="day budget"):
+        envelope.envelope_for("small", {"day_budget": 10**20, "total_budget": 10**20})
+    with pytest.raises(EnvelopeError, match="day budget"):
+        envelope.validate(replace(PRESETS["small"], day_budget=10**20))
