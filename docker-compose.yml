@@ -87,6 +87,13 @@ services:
       - NOUS_INTENTION_CARDS_ENABLED=${NOUS_INTENTION_CARDS_ENABLED:-false}
       # F099 Phase 3d: grade each arrival's Brain decision from the lineage's rows (needs continuation).
       - NOUS_INTENTION_CALIBRATION_ENABLED=${NOUS_INTENTION_CALIBRATION_ENABLED:-false}
+      # F114 goals: background sessions toward a goal the owner approved (needs continuation, intentions, the
+      # result inbox and subtasks). Lands dark.
+      - NOUS_GOALS_ENABLED=${NOUS_GOALS_ENABLED:-false}
+      - NOUS_GOALS_TICK_SECONDS=${NOUS_GOALS_TICK_SECONDS:-60}
+      - NOUS_GOALS_MAX_ACTIVE_SESSIONS=${NOUS_GOALS_MAX_ACTIVE_SESSIONS:-1}
+      - NOUS_GOALS_RESERVED_SLOTS=${NOUS_GOALS_RESERVED_SLOTS:-1}
+      - NOUS_GOALS_QUEUE_HEADROOM=${NOUS_GOALS_QUEUE_HEADROOM:-2}
       # F099 kill switches, both on by default: bash for internal_only turns (lineage_bash_allowed), and in it
       # read-only git, pytest, ruff and make in a repo's top level, run without the GitHub token.
       - NOUS_F099_LINEAGE_SHELL=${NOUS_F099_LINEAGE_SHELL:-true}
