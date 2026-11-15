@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from nous import background_halt
 from nous.api.execution_context import ExecutionContext
 from nous.api.idempotency import SUMMARY_SESSION_PREFIX
 from nous.brain import continuation
@@ -178,7 +179,8 @@ class DAGResultDelivery:
             legs.append(
                 LegResult("summary", ok=True, required=False, detail="cached")
             )
-        elif self._settings.dag_delivery_agent_summary_enabled:
+        elif self._settings.dag_delivery_agent_summary_enabled and not background_halt.current().halted:
+            # Goals PR 0c: no summary turn while background work is halted; the template stands.
             leg, authored = await self._leg_agent_summary(dag, summary)
             legs.append(leg)
             if authored:

@@ -10,6 +10,7 @@ from uuid import UUID
 
 from sqlalchemy import String, cast, func, select, text, update
 
+from nous import background_halt
 from nous.brain import intentions
 from nous.storage.database import Database
 from nous.storage.models import Subtask
@@ -37,6 +38,15 @@ class SubtaskQueueFull(ValueError):
     orchestrator can distinguish transient queue congestion — which should
     DEFER a node — from a genuine launch failure, which fails it.
     """
+
+
+class BackgroundHalted(SubtaskQueueFull):
+    """Goals PR 0c: background work is halted, so no subtask or DAG is created. A ``SubtaskQueueFull`` so every
+    caller that already handles a full queue (the REST schedule run, the DAG orchestrator's deferral, the companion
+    tap) refuses it the same way; its message is the sentence the owner reads."""
+
+    def __init__(self) -> None:
+        super().__init__(background_halt.HALT_REASON)
 
 
 class SubtaskManager:
@@ -86,6 +96,8 @@ class SubtaskManager:
         that its turn's ExecutionContext reads (I3). ``IntentionRootClosed`` /
         ``IntentionParentMissing`` propagate, and then neither row exists.
         """
+        if background_halt.current().halted:
+            raise BackgroundHalted()
         pri_val = _PRIORITY_MAP.get(priority, 100)
 
         async with self._db.session() as session:
@@ -341,6 +353,23 @@ class SubtaskManager:
             )
             await session.commit()
             return result.rowcount > 0
+
+    async def cancel_all_active(self) -> list[tuple[UUID, str]]:
+        """Goals PR 0c, the halt sweep's first step: cancel every pending and running subtask of this agent in one
+        statement (the columns ``cancel`` writes). Returns ``(id, status before)`` of each. A worker whose turn is
+        still running finds its row terminal, so its complete()/fail() are no-ops."""
+        async with self._db.session() as session:
+            result = await session.execute(
+                update(Subtask)
+                .where(Subtask.agent_id == self._agent_id)
+                .where(Subtask.status.in_(("pending", "running")))
+                .values(status="cancelled", final_outcome="cancelled", completed_at=datetime.now(UTC))
+                .returning(Subtask.id, Subtask.status)
+                .execution_options(synchronize_session=False)
+            )
+            rows = list(result.all())
+            await session.commit()
+        return [(row[0], row[1]) for row in rows]
 
     async def record_cancelled_usage(
         self,

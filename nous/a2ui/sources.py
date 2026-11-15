@@ -28,6 +28,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
+from nous import background_halt
 from nous.brain import continuation
 
 logger = logging.getLogger(__name__)
@@ -972,6 +973,9 @@ def build_default_registry(
                 raise ValueError(
                     f"agent_script shape must be one of {list(_SCRIPT_SHAPES)}, got {shape!r}"
                 )
+            if background_halt.current().halted:
+                # Goals PR 0c: the agent's stored script does not run while background work is halted.
+                return _script_failure("background work is halted by the owner", shape)
             # Push the SHARED source deadline into the worker so the thread
             # itself stops there and releases its run slot; cancelling only the
             # await would let concurrent slow refreshes starve every later

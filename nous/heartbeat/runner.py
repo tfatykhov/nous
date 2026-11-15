@@ -18,6 +18,7 @@ from uuid import uuid4
 
 import httpx
 
+from nous import background_halt
 from nous.api.anthropic_client import AnthropicClient
 from nous.api.execution_context import ExecutionContext, lineage_from_stamp
 from nous.api.runner import AgentRunner
@@ -92,6 +93,24 @@ def _await_chain(task: asyncio.Task) -> str:
         hops.append(f"{frame.f_code.co_name} ({frame.f_code.co_filename}:{frame.f_lineno})")
         awaitable = getattr(awaitable, "cr_await", None) or getattr(awaitable, "gi_yieldfrom", None)
     return " > ".join(hops) or "unknown"
+
+
+# Goals PR 0c: the checks that run while background work is halted. Each runs code only: database reads, the memory
+# search, a dashboard card; no model turn and no tool. Every other check (a DynamicCheck, the work queue, the
+# self-initiated check, and the ones not confirmed code-only: email, drive, behaviour drift) is skipped while halted.
+# By exact class, so a new subclass is skipped until someone adds it here.
+_CODE_ONLY_CHECKS = frozenset(
+    {
+        ("nous.heartbeat.checks", "HealthCheck"),
+        ("nous.heartbeat.fault_detector", "ProcessFaultCheck"),
+        ("nous.heartbeat.fault_detector", "RetrievalCanaryCheck"),
+        ("nous.heartbeat.memory_write_health_check", "MemoryWriteHealthCheck"),
+    }
+)
+
+
+def _code_only(check: object) -> bool:
+    return (type(check).__module__, type(check).__qualname__) in _CODE_ONLY_CHECKS
 
 
 class HeartbeatRunner:
@@ -715,13 +734,17 @@ class HeartbeatRunner:
             )
 
     async def _tick(self, urgent_only: bool = False) -> list[Finding]:
-        """Run due checks and triage findings."""
+        """Run due checks and triage findings. While background work is halted only the code-only checks run."""
         self._tick_count += 1
         now = datetime.now(UTC)
         due_checks = self._registry.get_due_checks(now)
 
         if urgent_only:
             due_checks = [c for c in due_checks if c.urgent_override]
+        halt = background_halt.current()
+        tick_epoch = halt.epoch
+        if halt.halted:
+            due_checks = [c for c in due_checks if _code_only(c)]
 
         if not due_checks:
             return []
@@ -775,10 +798,17 @@ class HeartbeatRunner:
             outcome: dict[str, bool] = {}
             outcome_token = RUN_OUTCOME.set(outcome)
             try:
-                result: CheckResult = await asyncio.wait_for(
-                    check.run(),
-                    timeout=check.timeout,
-                )
+                with background_halt.epoch_scope(tick_epoch):
+                    result: CheckResult = await asyncio.wait_for(
+                        check.run(),
+                        timeout=check.timeout,
+                    )
+                if not _code_only(check) and background_halt.current().refuses("heartbeat_check", None, tick_epoch):
+                    # Goals PR 0c: the halt landed during an agent-run check: its run is discarded, not counted
+                    # as a success or a failure (a check is never self-disabled by the halt).
+                    logger.info("Background halt: discarded the run of heartbeat check '%s'", check.name)
+                    run_succeeded = None
+                    continue
                 # A skipped result means run() returned early because the
                 # check was disabled at the execution boundary (race between
                 # _tick's snapshot and the first await in run()). Do not
@@ -1107,8 +1137,11 @@ class HeartbeatRunner:
         return self._runner
 
     async def _cognitive_triage(self, findings: list[Finding]) -> HeartbeatResult:
-        """Open a cognitive session to process findings."""
+        """Open a cognitive session to process findings. Not while background work is halted."""
         result = HeartbeatResult()
+        if background_halt.current().halted:
+            logger.info("Background halt: %d finding(s) not triaged", len(findings))
+            return result
 
         # Build a message summarizing findings
         lines = ["[Heartbeat] The following items need attention:"]
@@ -1187,7 +1220,12 @@ class HeartbeatRunner:
         1. Run callback prompt; on failure, retry once after delay
         2. On second failure, send Telegram notification
         3. Create warning Finding and persist callback context
+
+        Goals PR 0c: not while background work is halted.
         """
+        if background_halt.current().halted:
+            logger.info("Background halt: the callback of check '%s' did not run", check.name)
+            return
         session_id = f"dynamic-callback-{check.name}-{uuid4().hex[:8]}"
         triage_runner = self._get_triage_runner()
 
@@ -1440,8 +1478,8 @@ class HeartbeatRunner:
     # ------------------------------------------------------------------
 
     async def _detect_missed_checks(self) -> None:
-        """Detect if heartbeat was down and log it."""
-        if self._bus is None:
+        """Detect if heartbeat was down and log it. Not while background work is halted (the halt is not a gap)."""
+        if self._bus is None or background_halt.current().halted:
             return
 
         try:
@@ -1499,8 +1537,12 @@ class HeartbeatRunner:
         enforces MIN_SAMPLES per check and snapshots/rolls back, so a pass with
         no outcome data is a safe no-op. First pass is delayed one full interval
         after startup to avoid tuning on every restart.
+
+        Goals PR 0c: not while background work is halted (the tuner would learn from the gap).
         """
         if not self._settings.heartbeat_tuning_enabled or self._finding_store is None:
+            return
+        if background_halt.current().halted:
             return
         now = datetime.now(UTC)
         if self._last_tune is None:
@@ -1573,6 +1615,8 @@ class HeartbeatRunner:
         check = self._registry.get_check(name)
         if check is None:
             return None
+        if not _code_only(check) and background_halt.current().halted:
+            return CheckResult(skipped=True)  # Goals PR 0c: an agent-run check does not run while halted
         # A check whose DAG node is being terminalized starts no new run.
         if self._registry.is_fenced(name):
             return CheckResult(skipped=True)

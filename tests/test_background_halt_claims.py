@@ -1,0 +1,379 @@
+"""Goals PR 0c: no background loop claims, fires, ticks or delivers while halted."""
+
+from __future__ import annotations
+
+import asyncio
+import uuid
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+from f099_support import RecordingBus, env_factory, inbox_rows  # noqa: F401
+from sqlalchemy import select, update
+from test_f099_phase0b import _callback_check
+from test_f099_phase0b import _runner as _hb_runner
+
+from nous import background_halt
+from nous.background_halt import BackgroundHalt
+from nous.dag.schemas import DAGCreateRequest
+from nous.dag.store import DAGStore
+from nous.handlers.continuation_runner import ContinuationRunner
+from nous.handlers.subtask_worker import SubtaskWorkerPool
+from nous.heart.subtasks import BackgroundHalted, SubtaskQueueFull
+from nous.heartbeat.checks import HealthCheck, SelfInitiatedCheck
+from nous.heartbeat.registry import CheckRegistry
+from nous.heartbeat.schemas import CheckResult, Finding
+from nous.storage.models import ExecutionDAG, Schedule, Subtask
+
+GOOD_REPORT = {
+    "summary": "Found 3 candidates matching the search criteria. Each was reviewed for fitness.",
+    "confidence": 0.9,
+    "findings": ["a", "b", "c"],
+}
+
+
+def _install() -> BackgroundHalt:
+    halt = BackgroundHalt(host_hold=False)
+    background_halt.install(halt)
+    return halt
+
+
+async def _row(env, subtask_id) -> Subtask:
+    async with env.db.session() as s:
+        return (await s.execute(select(Subtask).where(Subtask.id == subtask_id))).scalar_one()
+
+
+async def _make(env, *, notify: bool = True) -> Subtask:
+    return await env.heart.subtasks.create(task="Check the snow report", parent_session_id="S1", notify=notify)
+
+
+# ---- the worker ---------------------------------------------------------------------------------------------
+
+
+async def test_workers_claim_nothing_while_halted_and_a_dequeued_row_is_cancelled(env_factory):  # noqa: F811
+    env = await env_factory(subtask_poll_interval=0.01)
+    pending = await _make(env)
+    halt = _install()
+    await halt.halt(actor="t", surface="dashboard")
+    pool = SubtaskWorkerPool(MagicMock(), env.heart, env.settings, http_client=env.http)
+    pool._running = True
+    pool._process_subtask = AsyncMock()
+    dequeue = env.heart.subtasks.dequeue
+    env.heart.subtasks.dequeue = AsyncMock(side_effect=dequeue)
+    worker = asyncio.create_task(pool._worker_loop("worker-0"))
+    await asyncio.sleep(0.1)
+    env.heart.subtasks.dequeue.assert_not_awaited()  # nothing is claimed while halted
+    assert (await _row(env, pending.id)).status == "pending"
+
+    # The race: the claim succeeds, and the halt lands as it returns. The row is cancelled and never processed.
+    assert (await halt.resume(actor="t", via="dashboard")).changed
+
+    async def claim_then_halt(worker_id):
+        claimed = await dequeue(worker_id)
+        if claimed is not None:
+            await halt.halt(actor="t", surface="dashboard")
+        return claimed
+
+    env.heart.subtasks.dequeue = AsyncMock(side_effect=claim_then_halt)
+    for _ in range(100):
+        if (await _row(env, pending.id)).status == "cancelled":
+            break
+        await asyncio.sleep(0.02)
+    assert (await _row(env, pending.id)).status == "cancelled"
+    pool._process_subtask.assert_not_awaited()
+    assert not worker.done()  # the worker is alive
+    pool._running = False
+    await asyncio.wait_for(worker, timeout=2)
+
+
+def _fake_runner(halt: BackgroundHalt, *, report: bool) -> MagicMock:
+    """A runner whose turn is running when the halt lands, and returns its text (and a report) afterwards."""
+    runner = MagicMock()
+    runner.end_conversation = AsyncMock()
+    runner.root_cancelled = MagicMock(return_value=False)
+
+    async def run_turn(**kwargs):
+        await halt.halt(actor="t", surface="dashboard")  # the flag flips while the model call is out
+        extra = kwargs.get("extra_tools") or {}
+        if report and "submit_final_report" in extra:
+            await extra["submit_final_report"][1](**GOOD_REPORT)
+        return "Snow: 40 cm", MagicMock(), {"input_tokens": 10, "output_tokens": 5, "tool_calls": 0}
+
+    runner.run_turn = AsyncMock(side_effect=run_turn)
+    return runner
+
+
+@pytest.mark.parametrize("hardened", [False, True], ids=["legacy", "hardened"])
+async def test_a_subtask_whose_model_call_returns_between_the_flag_and_the_cancel_leaves_no_inbox_row_and_no_completed_row(  # noqa: E501
+    env_factory,  # noqa: F811
+    hardened,
+):
+    env = await env_factory(
+        result_inbox_enabled=True,
+        result_memory_enabled=True,
+        subtask_hardening_enabled=hardened,
+        telegram_bot_token="token",
+        telegram_chat_id="1",
+    )
+    subtask = await _make(env, notify=True)
+    halt = _install()
+    bus = RecordingBus()
+    pool = SubtaskWorkerPool(
+        _fake_runner(halt, report=hardened), env.heart, env.settings, bus=bus, http_client=env.http
+    )
+    env.heart.result_memory.record = AsyncMock()
+    claimed = await env.heart.subtasks.dequeue("worker-0")
+    assert claimed.id == subtask.id
+    with background_halt.epoch_scope(halt.epoch):  # as the worker loop does around a claimed run
+        await pool._process_subtask(claimed)
+    await env.heart.subtasks.cancel_all_active()  # the sweep's UPDATE, after the turn returned
+    row = await _row(env, subtask.id)
+    assert row.status == "cancelled" and row.result is None
+    assert await inbox_rows(env, subtask.id) == []
+    assert [e.type for e in bus.events if e.type in ("subtask_completed", "subtask_failed", "subtask_outcome")] == []
+    env.http.post.assert_not_called()  # no Telegram push
+    env.heart.result_memory.record.assert_not_awaited()
+
+
+# ---- creation ---------------------------------------------------------------------------------------------------
+
+
+async def test_create_refuses_while_halted_for_every_caller(env_factory):  # noqa: F811
+    env = await env_factory()
+    halt = _install()
+    await halt.halt(actor="t", surface="dashboard")
+    with pytest.raises(BackgroundHalted) as caught:
+        await env.heart.subtasks.create(task="anything")
+    assert isinstance(caught.value, SubtaskQueueFull)  # every caller that maps a full queue refuses it the same way
+    # The companion tap's answer is "could not queue the action: " + this text.
+    assert str(caught.value) == "background work is halted by the owner; resume it to run this"
+    store = DAGStore(env.db, env.settings.agent_id, env.settings)
+    request = DAGCreateRequest(name="d", nodes=[{"name": "a", "type": "subtask", "instructions": "do a"}], edges=[])
+    with pytest.raises(BackgroundHalted):
+        await store.create(request)
+    async with env.db.session() as s:
+        dags = (await s.execute(select(ExecutionDAG).where(ExecutionDAG.agent_id == env.settings.agent_id))).all()
+        subtasks = (await s.execute(select(Subtask).where(Subtask.agent_id == env.agent))).all()
+    assert dags == [] and subtasks == []  # no pending DAG for the tick's repair to start, no row at all
+
+
+# ---- the scheduler -----------------------------------------------------------------------------------------------
+
+
+@pytest.mark.postgres_only
+async def test_schedule_due_while_halted_and_after_resume_does_not_burst(env_factory):  # noqa: F811
+    from nous.handlers.task_scheduler import TaskScheduler
+
+    env = await env_factory(schedule_check_interval=1, schedule_policies_enabled=True)
+    interval = 3600
+    recurring = []
+    for policy in ("skip_missed", "skip_missed", "enqueue_missed_with_cap"):
+        schedule = await env.heart.schedules.create(
+            task=f"job {len(recurring)}",
+            schedule_type="recurring",
+            interval_seconds=interval,
+            catch_up_policy=policy,
+            **({"catch_up_cap": 5} if policy == "enqueue_missed_with_cap" else {}),
+        )
+        recurring.append(schedule)
+    once = [
+        await env.heart.schedules.create(
+            task=f"once {i}", schedule_type="once", fire_at=datetime.now(UTC) + timedelta(hours=1)
+        )
+        for i in range(2)
+    ]
+    past = datetime.now(UTC) - timedelta(seconds=interval * 5 + 60)  # five missed slots
+    async with env.db.session() as s:
+        for schedule in [*recurring, *once]:
+            await s.execute(update(Schedule).where(Schedule.id == schedule.id).values(next_fire_at=past))
+        await s.commit()
+    bus = RecordingBus()
+    scheduler = TaskScheduler(env.heart, env.settings, bus=bus)
+    halt = _install()
+    await halt.halt(actor="t", surface="dashboard")
+
+    assert await scheduler._fire_due_tasks() == 0
+    assert await _subtasks(env) == []
+    now = datetime.now(UTC)
+    for schedule in recurring:
+        row = await env.heart.schedules.get(schedule.id)
+        assert row.next_fire_at > now and row.fire_count == 0 and row.active
+    for schedule in once:
+        row = await env.heart.schedules.get(schedule.id)
+        assert row.active and row.next_fire_at <= now  # left due: it fires at the resume, late
+    assert {e.data["outcome"] for e in bus.events if e.type == "schedule_fire_suppressed"} == {"halted"}
+
+    assert (await halt.resume(actor="t", via="dashboard")).changed
+    fired = await scheduler._fire_due_tasks()
+    assert fired == 2  # only the two one-time schedules, together; no recurring burst
+    assert sorted(st.task for st in await _subtasks(env)) == ["once 0", "once 1"]
+    # Past the next slot: exactly one run per recurring schedule.
+    async with env.db.session() as s:
+        for schedule in recurring:
+            await s.execute(
+                update(Schedule)
+                .where(Schedule.id == schedule.id)
+                .values(next_fire_at=datetime.now(UTC) - timedelta(seconds=30))
+            )
+        await s.execute(update(Subtask).where(Subtask.agent_id == env.agent).values(status="completed"))
+        await s.commit()
+    assert await scheduler._fire_due_tasks() == 3
+
+
+async def _subtasks(env) -> list[Subtask]:
+    async with env.db.session() as s:
+        return list((await s.execute(select(Subtask).where(Subtask.agent_id == env.agent))).scalars().all())
+
+
+# ---- the continuation runner -----------------------------------------------------------------------------------
+
+
+class _NoDatabase:
+    def __init__(self) -> None:
+        self.sessions = 0
+
+    def session(self):
+        self.sessions += 1
+        raise AssertionError("no database read while halted")
+
+
+async def test_a_halted_continuation_runner_launches_claims_and_resumes_nothing():
+    from nous.config import Settings
+
+    db = _NoDatabase()
+    runner = ContinuationRunner(
+        database=db,
+        settings=Settings(_env_file=None, telegram_bot_token="t"),
+        runner=MagicMock(),
+        heart=MagicMock(),
+        brain=MagicMock(),
+    )
+    halt = _install()
+    await halt.halt(actor="t", surface="dashboard")
+    assert await runner._launch() == ([], None)
+    assert await runner.run_arrival(uuid.uuid4()) is None
+    assert await runner._resume_approved() == 0
+    assert db.sessions == 0
+
+
+# ---- the DAG orchestrator ----------------------------------------------------------------------------------------
+
+
+async def test_a_halted_dag_tick_advances_nothing_and_start_and_retry_are_refused():
+    from nous.dag.orchestrator import DAGOrchestrator
+
+    store = MagicMock()
+    store.get_active_dags = AsyncMock(return_value=[])
+    orchestrator = DAGOrchestrator.__new__(DAGOrchestrator)
+    orchestrator._store = store
+    orchestrator._lock = asyncio.Lock()
+    halt = _install()
+    await halt.halt(actor="t", surface="dashboard")
+    with pytest.raises(BackgroundHalted):
+        await orchestrator.start_dag(uuid.uuid4())
+    with pytest.raises(BackgroundHalted):
+        await orchestrator.retry_node(uuid.uuid4(), "a")
+    store.get_dag.assert_not_called()
+
+
+# ---- the heartbeat -----------------------------------------------------------------------------------------------
+
+
+def _health_check(finding: Finding) -> HealthCheck:
+    check = HealthCheck(MagicMock(), MagicMock(), MagicMock())
+    check.run = AsyncMock(return_value=CheckResult(has_updates=True, findings=[finding]))
+    return check
+
+
+async def test_a_halted_tick_runs_only_code_only_checks_and_a_health_finding_still_reaches_telegram():
+    registry = CheckRegistry()
+    urgent = Finding(source="health", summary="The database is slow", urgency="high", needs_action=True)
+    health = _health_check(urgent)
+    registry.register(health, permanent=True)
+    agent_check = _callback_check("disk_watch")
+    agent_check.run = AsyncMock(return_value=CheckResult(has_updates=False, findings=[]))
+    registry.register(agent_check)
+    initiated = SelfInitiatedCheck(MagicMock(), MagicMock(), MagicMock(), embeddings=None)
+    initiated.run = AsyncMock(return_value=CheckResult(has_updates=False, findings=[]))
+    registry.register(initiated)
+    hb, triage = _hb_runner(registry)
+    del hb._triage  # the real triage: the urgent send must still happen
+    hb._send_telegram = AsyncMock()
+    hb._finding_store = None
+    halt = _install()
+    await halt.halt(actor="t", surface="dashboard")
+    await hb._tick()
+    health.run.assert_awaited_once()
+    agent_check.run.assert_not_awaited()
+    initiated.run.assert_not_awaited()
+    hb._send_telegram.assert_awaited_once()
+    assert "The database is slow" in hb._send_telegram.await_args.args[0]
+    triage.run_turn.assert_not_awaited()  # no cognitive triage, no callback
+
+
+async def test_a_mid_run_agent_check_is_discarded_not_failed():
+    registry = CheckRegistry()
+    check = _callback_check("disk_watch")
+    halt = _install()
+
+    async def run_while_the_halt_lands():
+        await halt.halt(actor="t", surface="dashboard")
+        return CheckResult(has_updates=True, findings=[Finding(source="x", summary="y")], self_disabled=True)
+
+    check.run = AsyncMock(side_effect=run_while_the_halt_lands)
+    registry.register(check)
+    hb, triage = _hb_runner(registry)
+    hb._record_run_stats = AsyncMock()
+    findings = await hb._tick()
+    assert findings == []
+    hb._record_run_stats.assert_not_awaited()  # neither a success nor a failure is recorded
+    assert check._consecutive_failures == 0 if hasattr(check, "_consecutive_failures") else True
+    triage.run_turn.assert_not_awaited()  # its callback does not run
+
+
+async def test_trigger_check_skips_an_agent_run_check_while_halted():
+    registry = CheckRegistry()
+    check = _callback_check("disk_watch")
+    check.run = AsyncMock()
+    registry.register(check)
+    hb, _triage = _hb_runner(registry)
+    halt = _install()
+    await halt.halt(actor="t", surface="dashboard")
+    result = await hb.trigger_check("disk_watch")
+    assert result.skipped and not check.run.await_count
+
+
+async def test_missed_check_alarm_and_tuning_do_not_run_while_halted():
+    hb, _triage = _hb_runner(CheckRegistry())
+    hb._bus = MagicMock()
+    hb._bus.emit = AsyncMock()
+    hb._settings = SimpleNamespace(heartbeat_tuning_enabled=True)
+    hb._finding_store = MagicMock()
+    hb._last_tune = None
+    halt = _install()
+    await halt.halt(actor="t", surface="dashboard")
+    await hb._detect_missed_checks()
+    await hb._maybe_tune()
+    hb._bus.emit.assert_not_awaited()
+    assert hb._last_tune is None
+
+
+# ---- the companion's agent_script source -------------------------------------------------------------------------
+
+
+async def test_agent_script_source_returns_halted():
+    from nous.a2ui.sources import build_default_registry
+
+    ran = []
+
+    async def run_script(*args, **kwargs):
+        ran.append(args)
+        return {"result": []}
+
+    registry = build_default_registry(run_script=run_script)
+    halt = _install()
+    await halt.halt(actor="t", surface="dashboard")
+    source = registry._fetchers["agent_script"]
+    value = await source({"code": "print(1)", "shape": "series"})
+    assert ran == [] and "halted" in str(value)

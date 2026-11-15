@@ -23,7 +23,7 @@ from uuid import UUID
 
 from sqlalchemy import or_, select
 
-from nous import cancel_provenance
+from nous import background_halt, cancel_provenance
 from nous.a2ui.intention_keys import ACTIVE_KEY, INTENTION_DEDUP_PREFIX, KIND_PROPOSAL, KIND_QUESTION, parse_key
 from nous.api import tool_policy
 from nous.api.execution_context import ExecutionContext
@@ -986,7 +986,10 @@ class ContinuationRunner:
     async def _resume_approved(self) -> int:
         """Start again the approved calls nothing started (a crash between the decision and the claim, carry-over 11).
         Each runs in its own tracked task, like the one a decision starts, so the sweep is not held for a call;
-        ``claim_execution`` stays the fence (at most once), and a proposal already running is not started twice."""
+        ``claim_execution`` stays the fence (at most once), and a proposal already running is not started twice.
+        Goals PR 0c: not while background work is halted (nobody is tapping then); the owner's own tap still runs."""
+        if background_halt.current().halted:
+            return 0
         async with self._db.session() as session:
             stalled = await continuation.stalled_approved_ids(
                 session, self._agent_id, settings=self._settings, limit=RESUME_BATCH
@@ -1022,7 +1025,9 @@ class ContinuationRunner:
 
     async def _launch(self) -> tuple[list[UUID], datetime | None]:
         """Claim-and-run every root that is due, while a slot is free. The claim itself happens inside the
-        arrival task, so a slow claim cannot hold the sweep."""
+        arrival task, so a slow claim cannot hold the sweep. Nothing is launched while background work is halted."""
+        if background_halt.current().halted:
+            return [], None
         settings = self._settings
         async with self._db.session() as session:
             eligible = await continuation.eligible_roots(
@@ -1125,8 +1130,15 @@ class ContinuationRunner:
         when nothing was claimable, the fence rejected the commit, or the attempt failed. Anything that raises
         after the claim (the gate, the limits, the lineage read, the prompt, the owner-channel read) is a failed
         attempt (contract 4.8), booked at once rather than left to the lease. So is a cancellation nobody requested
-        (Fix-Z), which is then re-raised; a stop or a cancel of this task releases the claim without an attempt."""
+        (Fix-Z), which is then re-raised; a stop or a cancel of this task releases the claim without an attempt.
+
+        Goals PR 0c: nothing is claimed while background work is halted, and the turn keeps the epoch taken before the
+        claim (a halt during it ends the turn even after a resume)."""
         settings = self._settings
+        halt = background_halt.current()
+        if halt.halted:
+            return None
+        epoch = halt.epoch
         async with self._db.session() as session:
             claim = await continuation.claim_root(
                 session,
@@ -1141,6 +1153,7 @@ class ContinuationRunner:
             await session.commit()
         # The arrival's state lives here, not in _turn, so that every failure below charges what the turn spent.
         state = ArrivalState()
+        epoch_token = background_halt.TURN_EPOCH.set(epoch)
         try:
             return await self._decide(claim, state)
         except asyncio.CancelledError:
@@ -1159,6 +1172,8 @@ class ContinuationRunner:
             logger.warning("F099: the arrival of root %s raised; a failed attempt", root_id, exc_info=True)
             await self._fail(claim, tokens=state.tokens)
             return None
+        finally:
+            background_halt.TURN_EPOCH.reset(epoch_token)
 
     async def _decide(self, claim: continuation.Claim, state: ArrivalState) -> continuation.ArrivalCommit | None:
         settings, agent_id = self._settings, self._agent_id

@@ -62,7 +62,7 @@ from uuid import UUID
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
-from nous import cancel_provenance
+from nous import background_halt, cancel_provenance
 from nous.brain.intentions import stamp_is_internal
 from nous.config import Settings
 from nous.dag._workspace import assert_inside_root, compute_workspace_path
@@ -109,7 +109,7 @@ from nous.dag.store import (
     DAGStore,
 )
 from nous.dag.waits import WaitOutcome, evaluate_wait, wait_for_problem
-from nous.heart.subtasks import SubtaskQueueFull
+from nous.heart.subtasks import BackgroundHalted, SubtaskQueueFull
 from nous.heartbeat.dynamic import FINAL_RUN_FINDINGS_KEY, DynamicCheckLimitReached, render_findings
 from nous.observability.github_verify import GitHubReader
 from nous.storage.models import DAGNode, ExecutionDAG
@@ -564,7 +564,10 @@ class DAGOrchestrator:
         """
         async with self._lock:
             self.last_tick_at = datetime.now(UTC)
-            dags = await self._store.get_active_dags()  # oldest first
+            # Goals PR 0c: while background work is halted no DAG advances; the delivery sweep below still runs.
+            halt = background_halt.current()
+            tick_epoch = halt.epoch
+            dags = [] if halt.halted else await self._store.get_active_dags()  # oldest first
             # Harness Phase 3 §3.11: resuming parked DAGs is admission-
             # controlled at dispatch. Parked DAGs do not count at creation, so
             # answering many at once could put up to MAX_ACTIVE_DAGS + the
@@ -578,6 +581,8 @@ class DAGOrchestrator:
             self._working_count = working
             self._held_this_tick = {}
             for dag in dags:
+                if background_halt.current().refuses("dag_node", None, tick_epoch):
+                    break  # a halt landed during this tick
                 was_working = _is_working(dag)
                 # Only a DAG with an approval node is ever held: a DAG without
                 # one keeps today's scheduling even while another waits on a
@@ -959,7 +964,9 @@ class DAGOrchestrator:
             )
 
     async def start_dag(self, dag_id: UUID) -> None:
-        """Transition a pending DAG to running and launch wave-0 nodes."""
+        """Transition a pending DAG to running and launch wave-0 nodes. Refused while background work is halted."""
+        if background_halt.current().halted:
+            raise BackgroundHalted()
         async with self._lock:
             dag = await self._store.get_dag(dag_id)
             if dag is None:
@@ -1026,7 +1033,10 @@ class DAGOrchestrator:
     async def retry_node(
         self, dag_id: UUID, node_name: str, *, allow_declined: bool = False
     ) -> None:
-        """Reset a failed node to ready for re-execution."""
+        """Reset a failed node to ready for re-execution. Refused while background work is halted (it would put a
+        cancelled DAG's work back in motion; the companion's retry comes through here too)."""
+        if background_halt.current().halted:
+            raise BackgroundHalted()
         dag = await self._store.get_dag(dag_id)
         if dag is None:
             raise ValueError(f"DAG {dag_id} not found")
