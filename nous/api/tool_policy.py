@@ -1345,7 +1345,7 @@ def lineage_bash_refusal_hint(
         ]
     )
     text = (
-        "The lineage shell allows only: plain reads (cat, ls, head, tail, wc, grep, jq, echo, printf, pwd, cd, "
+        "The lineage shell allows only: plain reads (cat, ls, head, tail, wc, grep, jq, cut, echo, printf, pwd, cd, "
         "sleep, true, test, [ ... ], basename, dirname, date, diff of two files) inside the workspace; mkdir -p, "
         f"touch and cp only into the workspace's {dirs}; read-only gh calls (pr view|checks|list|diff|status, "
         "issue view|list, run view|list, repo view, gh api GET); claude-jobs/runner.sh launch|status|list|result, "
@@ -1354,14 +1354,15 @@ def lineage_bash_refusal_hint(
     )
     if build_commands:
         text += (
-            "; and, in a git repo's top level reached by `cd <repo> &&`: "
-            "git status|log|diff|show|merge-base|rev-parse, pytest, "
+            "; and, in a git repo's top level reached by `cd <repo> &&` (or git -C <repo top> ...): "
+            "git status|log|diff|show|merge-base|rev-parse|ls-tree|ls-files|remote (names only)|branch --list, pytest, "
             "ruff check --no-fix --no-fix-only, ruff format --check|--diff, "
             f"make {'|'.join(sorted(LINEAGE_MAKE_TARGETS))}, "
             "each with a fixed set of options and paths inside the repo, in a bash call without gh or runner.sh"
         )
     return text + (
-        ". Write each command out in full: no $(...), no globs (except as a file operand of a read). "
+        ". Write each command out in full: no $(...), no globs (except as a file operand of a read); "
+        "grep takes no -r, use grep PATTERN dir/*.md. "
         "Join commands with ; && || | only. Propose anything else to the owner with propose_action."
     )
 

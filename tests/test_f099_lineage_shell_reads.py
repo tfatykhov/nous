@@ -1077,3 +1077,21 @@ def test_grep_r_would_read_a_hidden_file_that_cat_is_refused(ws):
     assert ".env" in done.stdout  # recursion descends into the hidden file ...
     assert not _ok(f"cat {ws}/dir/.env", ws)  # ... that a named read is refused
     assert not _ok(f"grep -r token {ws}/dir", ws)
+
+
+# -- the hint --
+
+
+def test_the_hint_lists_the_new_forms():
+    on = lineage_bash_refusal_hint(build_commands=True)
+    off = lineage_bash_refusal_hint(build_commands=False)
+    for needle in ("ls-tree", "ls-files", "remote (names only)", "branch --list", "git -C <repo top>"):
+        assert needle in on and needle not in off, needle
+    for needle in ("cut", "grep takes no -r, use grep PATTERN dir/*.md"):
+        assert needle in on and needle in off, needle
+
+
+def test_the_hint_stays_short_with_the_longest_reason():
+    hint = lineage_bash_refusal_hint(build_commands=True, extra_write_dirs=["research"], workspace_dir="/w")
+    longest = max(len(f" Refused: {LineageReason(code, 'x' * 24)}.") for code in LINEAGE_REASONS)
+    assert len(hint) + longest <= 1700
