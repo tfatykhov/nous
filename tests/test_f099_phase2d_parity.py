@@ -190,8 +190,8 @@ def test_2d_added_no_migration_and_no_setting():  # PIN: changes when a later PR
     # (F108), model-call text 102 (F108), tool notes 103 (F108), tool-call full result 104 (F108), task frame
     # keywords 105 (F110), turn frame reason 106 (F110), commitments 107 (F111), commitments watch index 108
     # (F111 B1), MCP client 109 (F112), MCP client credentials 110 (F112 PR 2c), MCP server http address 111
-    # (F112), MCP server images switch 112 (F112); 2d none
-    assert sorted(migrations.glob("*.sql"))[-1].name.startswith("112_")
+    # (F112), MCP server images switch 112 (F112), goals 113 (F114); 2d none
+    assert sorted(migrations.glob("*.sql"))[-1].name.startswith("113_")
     named = {name for name in Settings.model_fields if "proposal" in name or "owner_action" in name}
     assert named == {"intention_proposal_ttl_hours"}
 
