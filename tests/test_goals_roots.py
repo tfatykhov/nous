@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -85,3 +87,29 @@ async def test_a_pre_generated_subtask_id_is_the_subtask_id(env_factory):  # noq
     subtask, intention = await _root(env, subtask_id=wanted)
     assert subtask.id == wanted
     assert intention.source_id == str(wanted)
+
+
+def _imports_goals(node: ast.AST) -> bool:
+    if isinstance(node, ast.Import):
+        return any(alias.name == "nous.goals" or alias.name.startswith("nous.goals.") for alias in node.names)
+    if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+        if node.module == "nous":
+            return any(alias.name == "goals" for alias in node.names)
+        return node.module == "nous.goals" or node.module.startswith("nous.goals.")
+    return False
+
+
+def test_nothing_outside_nous_goals_imports_the_goal_package():
+    # PIN (flag-off parity of PR 1a): the goal package has no caller yet, so with NOUS_GOALS_ENABLED off no
+    # existing path runs a goal query, builds a goal prompt or offers a goal tool. The PR that wires the driver
+    # changes this test on purpose.
+    nous_dir = Path(__file__).resolve().parents[1] / "nous"
+    goals_dir = nous_dir / "goals"
+    importers = [
+        str(path.relative_to(nous_dir))
+        for path in sorted(nous_dir.rglob("*.py"))
+        if goals_dir not in path.parents
+        and any(_imports_goals(node) for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))))
+    ]
+    assert importers == []
+    assert not (goals_dir / "__main__.py").exists()
