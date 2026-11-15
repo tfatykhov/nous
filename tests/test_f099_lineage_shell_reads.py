@@ -13,15 +13,18 @@ import uuid
 from pathlib import Path
 
 import pytest
+from test_f099_enforcement import OFFERED, _auth, _shell_runner
 from test_f099_lineage_build_commands import ALLOWED, REFUSED
 from test_f099_lineage_shell_obstacles import NEW_COMMANDS
 
+from nous.api import tool_policy
 from nous.api.execution_context import ExecutionContext
 from nous.api.tool_policy import (
     LINEAGE_REASONS,
     LineageReason,
     lineage_bash_allowed,
     lineage_bash_refusal,
+    lineage_bash_refusal_hint,
 )
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="the rules read POSIX paths; CI is the gate")
@@ -223,3 +226,63 @@ def test_no_refusal_in_the_existing_refused_list_is_other(ws):
         if reason is not None and reason.code == "other":
             others.append(template)
     assert others == []
+
+
+# -- Task 2: show the reason, log its code ----------------------------------------------------------------------------
+
+
+def _bash(r, command, kind="subtask"):
+    return _auth(r, _internal(kind), "bash", OFFERED, {"command": command})
+
+
+def test_the_refusal_text_puts_the_reason_first_then_the_hint(ws):
+    r, _, _ = _shell_runner(ws)
+    refusal = _bash(r, _fmt("sed -n 1p {W}/a.md", ws))
+    hint = lineage_bash_refusal_hint(build_commands=True, workspace_dir=str(ws))
+    assert "(external)" in refusal.text
+    marker = "Refused: `sed` is not an allowed program."
+    assert marker in refusal.text and hint in refusal.text
+    assert refusal.text.index(marker) < refusal.text.index(hint)
+
+
+def test_the_event_carries_the_reason_code_not_the_word(ws):
+    r, _, events = _shell_runner(ws)
+    _bash(r, _fmt("sed -n 1p {W}/a.md", ws))
+    assert len(events) == 1
+    _, data = events[0]
+    assert data["reason_code"] == "program"
+    assert "command_head" in data
+    assert all("sed" not in str(v) for k, v in data.items() if k != "command_head")
+
+
+def test_other_refusals_have_no_reason_code_key(ws):
+    r, _, events = _shell_runner(ws)
+    refusal = _auth(r, _internal(), "write_file", OFFERED, {"path": "/etc/x", "content": "x"})
+    assert refusal is not None
+    refusal = _auth(r, _internal(), "bash", ["write_file"], {"command": "ls"})
+    assert refusal is not None
+    assert events and all("reason_code" not in data and "command_head" not in data for _, data in events)
+
+
+def test_a_command_with_a_secret_keeps_it_out_of_the_reason(ws):
+    r, _, events = _shell_runner(ws)
+    refusal = _bash(r, "printf x; rm --token=abc123secretvalue y")
+    assert refusal is not None and "abc123secretvalue" not in refusal.text
+    assert "abc123secretvalue" not in str(events[0][1].get("reason_code"))
+
+
+def test_a_failing_reason_lookup_still_refuses(ws, monkeypatch):
+    real, calls = tool_policy.lineage_bash_refusal, []
+
+    def boom(*a, **k):
+        calls.append(1)
+        if len(calls) > 1:  # the first call is the decision, the second the reason lookup for the text
+            raise RuntimeError("boom")
+        return real(*a, **k)
+
+    monkeypatch.setattr(tool_policy, "lineage_bash_refusal", boom)
+    r, _, events = _shell_runner(ws)
+    refusal = _bash(r, "rm -rf x")
+    assert refusal is not None and "(external)" in refusal.text
+    assert "Refused: this command is not on the lineage allowlist." in refusal.text
+    assert events[0][1]["reason_code"] == "other"

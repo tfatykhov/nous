@@ -418,18 +418,19 @@ def test_the_lineage_shell_refuses_and_logs_an_outward_command_in_every_mode(
     command = command.format(R=f"{tmp_path}/claude-jobs/runner.sh")
     refusal = _auth(r, _internal("continuation"), "bash", OFFERED, {"command": command})
     assert refusal is not None and refusal.code == "internal_only" and "(external)" in refusal.text
-    assert events == [
-        (
-            "harness_context_policy_violation",
-            {
-                "tool_name": "bash",
-                "context_kind": "continuation",
-                "violation": "internal_only:external",
-                "mode": "enforce",
-                "command_head": command,  # nothing to redact in these, and all under 300 characters
-            },
-        )
-    ]
+    [(event_type, data)] = events
+    # the code of the rule that refused, never the command's text
+    assert data.pop("reason_code") in tool_policy.LINEAGE_REASONS
+    assert (event_type, data) == (
+        "harness_context_policy_violation",
+        {
+            "tool_name": "bash",
+            "context_kind": "continuation",
+            "violation": "internal_only:external",
+            "mode": "enforce",
+            "command_head": command,  # nothing to redact in these, and all under 300 characters
+        },
+    )
 
 
 def _refused_bash_event(tmp_path, tool_input) -> dict:
