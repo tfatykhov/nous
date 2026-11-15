@@ -9,8 +9,11 @@ is empty an entry is dropped, and a new command with the same pid replaces a sta
 
 Before a group is signalled it is checked to still be the command's (Linux ``/proc``): the leader's start time is
 recorded at ``track``; a live process with the group's number must have that start time, and when the leader has
-ended, a member of the group must have started before the leader's exit was seen. Anything else (another start time,
-nothing readable) is dropped, never signalled.
+ended, the group must still hold a member recorded at ``track`` (same start time) or one that started before the
+leader's exit was seen. A leader already gone at ``track`` (a fast command whose shell exited and was reaped first)
+is identified by the members its group has then; with none, nothing is tracked. Anything else (another start time,
+nothing readable) is dropped, never signalled. A zombie is not a member: it has ended, and with no init process in
+the container nothing may ever collect it.
 """
 
 from __future__ import annotations
@@ -19,7 +22,7 @@ import logging
 import os
 import signal
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -35,16 +38,33 @@ class _Entry:
     exited_at: float | None = None
     start: int | None = None  # the leader's start time, clock ticks since boot (/proc/<pid>/stat field 22)
     exited_ticks: int | None = None  # when the leader's exit was seen, on the same clock
+    members: dict[int, int] = field(default_factory=dict)  # pid -> start time, when the leader was gone at track
 
 
-def _stat(pid: int) -> tuple[int, int] | None:
-    """``(process group, start time)`` of a live process from ``/proc``; None when it cannot be read."""
+def _stat(pid: int) -> tuple[str, int, int] | None:
+    """``(state, process group, start time)`` of a process from ``/proc``; None when it cannot be read."""
     try:
         with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
             fields = f.read().rsplit(") ", 1)[1].split()
-        return int(fields[2]), int(fields[19])
+        return fields[0], int(fields[2]), int(fields[19])
     except (OSError, IndexError, ValueError):
         return None
+
+
+def _members(pgid: int) -> dict[int, int]:
+    """The members of process group ``pgid`` that have not ended (a zombie has), as pid -> start time. Empty when
+    ``/proc`` cannot be read."""
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return {}
+    found: dict[int, int] = {}
+    for name in names:
+        if name.isdigit():
+            stat = _stat(int(name))
+            if stat is not None and stat[1] == pgid and stat[0] != "Z":
+                found[int(name)] = stat[2]
+    return found
 
 
 def _now_ticks() -> int | None:
@@ -55,35 +75,27 @@ def _now_ticks() -> int | None:
         return None
 
 
-def _member_started_by(pgid: int, ticks: int) -> bool:
-    try:
-        names = os.listdir("/proc")
-    except OSError:
-        return False
-    for name in names:
-        if name.isdigit():
-            found = _stat(int(name))
-            if found is not None and found[0] == pgid and found[1] <= ticks:
-                return True
-    return False
-
-
 def _still_ours(entry: _Entry) -> bool:
     """The group with this number is still the command's (see the module docstring)."""
-    if entry.start is None:
-        return False
-    leader = _stat(entry.pgid)
-    if leader is not None:
-        return leader[1] == entry.start
-    return entry.exited_ticks is not None and _member_started_by(entry.pgid, entry.exited_ticks)
+    if entry.start is not None:
+        leader = _stat(entry.pgid)
+        if leader is not None:
+            return leader[2] == entry.start
+    members = _members(entry.pgid)
+    if any(entry.members.get(pid) == started for pid, started in members.items()):
+        return True
+    return entry.exited_ticks is not None and any(started <= entry.exited_ticks for started in members.values())
 
 
 _entries: dict[int, _Entry] = {}
 
 
 def _group_alive(pgid: int) -> bool:
+    """Whether the group still has a member that has not ended. Without ``/proc``, whether a signal reaches it."""
     if not hasattr(os, "killpg"):
         return False
+    if os.path.isdir("/proc/self"):
+        return bool(_members(pgid))
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
@@ -108,8 +120,19 @@ def track(proc: Any) -> int | None:
     if not isinstance(pid, int):
         return None
     _prune()
+    if not hasattr(os, "killpg"):  # no process groups: the shell only, through its handle
+        _entries[pid] = _Entry(pid, proc)
+        return pid
     found = _stat(pid)
-    _entries[pid] = _Entry(pid, proc, start=found[1] if found else None)  # a stale entry with this number is replaced
+    if found is not None:
+        _entries[pid] = _Entry(pid, proc, start=found[2])  # a stale entry with this number is replaced
+        return pid
+    # The shell has already ended: the group is known by the members it has now.
+    members = _members(pid)
+    if not members:
+        _entries.pop(pid, None)
+        return None
+    _entries[pid] = _Entry(pid, proc, exited_at=time.monotonic(), exited_ticks=_now_ticks(), members=members)
     return pid
 
 

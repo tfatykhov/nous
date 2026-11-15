@@ -75,12 +75,28 @@ async def test_a_detached_nohup_child_is_killed_after_the_shell_exits(tmp_path):
 
 
 def test_a_new_child_with_a_reused_pid_replaces_the_stale_entry():
-    stale, fresh = SimpleNamespace(pid=4_000_000, returncode=0), SimpleNamespace(pid=4_000_000, returncode=None)
-    background_processes.track(stale)
-    background_processes._entries[4_000_000].exited_at = 0.0  # it exited long ago
-    background_processes.track(fresh)
-    entry = background_processes._entries[4_000_000]
-    assert entry.proc is fresh and entry.exited_at is None
+    if not hasattr(os, "killpg"):  # no process groups: entries are kept by handle
+        stale, fresh = SimpleNamespace(pid=4_000_000, returncode=0), SimpleNamespace(pid=4_000_000, returncode=None)
+        background_processes.track(stale)
+        background_processes._entries[4_000_000].exited_at = 0.0  # it exited long ago
+        background_processes.track(fresh)
+        entry = background_processes._entries[4_000_000]
+        assert entry.proc is fresh and entry.exited_at is None
+        return
+    import subprocess
+
+    fresh = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    try:
+        stale = background_processes._Entry(fresh.pid, None, exited_at=0.0, start=1)  # an old command's entry
+        background_processes._entries[fresh.pid] = stale
+        background_processes.track(fresh)
+        entry = background_processes._entries[fresh.pid]
+        assert (
+            entry.proc is fresh and entry.exited_at is None and entry.start == background_processes._stat(fresh.pid)[2]
+        )
+    finally:
+        fresh.kill()
+        fresh.wait()
 
 
 @posix_only
@@ -140,7 +156,7 @@ def test_a_group_whose_leader_has_another_start_time_or_none_readable_is_dropped
 
     other = subprocess.Popen(["sleep", "30"], start_new_session=True)  # a group this registry never started
     try:
-        _group, started = background_processes._stat(other.pid)
+        _state, _group, started = background_processes._stat(other.pid)
         background_processes._entries[other.pid] = background_processes._Entry(other.pid, None, start=started + 1)
         background_processes._entries[4_000_000] = background_processes._Entry(4_000_000, None, start=1)
         assert background_processes.kill_all() == 0
@@ -183,12 +199,13 @@ async def test_a_group_whose_members_all_started_after_the_leaders_exit_is_dropp
     try:
         (entry,) = background_processes._entries.values()
         assert entry.exited_ticks is not None and background_processes._stat(entry.pgid) is None  # the leader ended
-        _group, member_started = background_processes._stat(child)
-        kept = entry.exited_ticks
+        _state, _group, member_started = background_processes._stat(child)
+        kept_ticks, kept_members = entry.exited_ticks, entry.members
         entry.exited_ticks = member_started - 1  # as if the leader's exit was seen before this member started
+        entry.members = {}  # and no member was recorded at track
         assert background_processes.kill_all() == 0 and _alive(child)  # not shown to be ours: dropped
         assert entry.pgid not in background_processes._entries
-        entry.exited_ticks = kept
+        entry.exited_ticks, entry.members = kept_ticks, kept_members
         background_processes._entries[entry.pgid] = entry  # an older member: ours, signalled
         assert background_processes.kill_all() == 1
         await _until(lambda: not _alive(child))
@@ -219,3 +236,79 @@ async def test_a_halt_landing_between_the_check_and_the_track_kills_the_command(
     assert _text(result) == background_halt.HALTED_TOOL_TEXT
     (proc,) = started
     assert proc.returncode is not None and proc.returncode != 0  # killed, not finished
+
+
+def _detached(*, keep_shell: bool):
+    """A shell in its own session that starts ``sleep 60`` detached and prints its pid; with ``keep_shell`` it then
+    waits on stdin, so it is still alive until the test closes it."""
+    import subprocess
+
+    script = "sleep 60 </dev/null >/dev/null 2>&1 & echo $!" + ("; read _" if keep_shell else "")
+    shell = subprocess.Popen(
+        ["bash", "-c", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True, text=True
+    )
+    child = int(shell.stdout.readline())
+    return shell, child
+
+
+@linux_only
+async def test_a_detached_child_is_killed_when_the_shell_is_still_alive_at_track():
+    shell, child = _detached(keep_shell=True)
+    try:
+        assert background_processes.track(shell) == shell.pid
+        assert background_processes._entries[shell.pid].start is not None
+        shell.stdin.close()
+        shell.wait(timeout=5)  # the shell exits and is collected
+        background_processes.release(shell.pid)
+        assert background_processes.kill_all() == 1
+        await _until(lambda: not _alive(child))
+    finally:
+        if _alive(child):
+            os.kill(child, 9)
+
+
+@linux_only
+async def test_a_detached_child_is_killed_when_the_shell_was_already_collected_at_track():
+    shell, child = _detached(keep_shell=False)
+    try:
+        shell.wait(timeout=5)  # collected before the track, as a fast command can be
+        assert background_processes.track(SimpleNamespace(pid=shell.pid, returncode=0)) == shell.pid
+        entry = background_processes._entries[shell.pid]
+        assert entry.start is None and child in entry.members  # known by its members
+        assert background_processes.kill_all() == 1
+        await _until(lambda: not _alive(child))
+    finally:
+        if _alive(child):
+            os.kill(child, 9)
+
+
+@linux_only
+def test_a_collected_shell_with_no_member_left_is_not_tracked():
+    import subprocess
+
+    shell = subprocess.Popen(["true"], start_new_session=True)
+    shell.wait(timeout=5)
+    assert background_processes.track(SimpleNamespace(pid=shell.pid, returncode=0)) is None
+    assert shell.pid not in background_processes._entries
+
+
+@linux_only
+def test_a_group_whose_only_members_are_zombies_is_empty():
+    import subprocess
+    import time
+
+    # A killed process stays a zombie in its group until its parent (this test) collects it.
+    parent = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    try:
+        background_processes.track(parent)
+        os.kill(parent.pid, 9)
+        for _ in range(250):
+            stat = background_processes._stat(parent.pid)
+            if stat is not None and stat[0] == "Z":
+                break
+            time.sleep(0.02)
+        assert background_processes._stat(parent.pid)[0] == "Z"  # not collected yet: a zombie in its group
+        background_processes.release(parent.pid)
+        assert background_processes.tracked() == []  # the group counts as empty
+    finally:
+        parent.wait()
