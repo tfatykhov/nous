@@ -919,7 +919,9 @@ class GoalDriver:
         deadline has not passed and the followed ones, all a handful, and checks unsettled work only over their
         roots. After a restart the flags are gone, so the first tick also reads, once, every session closed within
         ``intention_root_ttl_hours`` and every closed session whose lineage still has unsettled work, whatever its
-        age: work that settled while no driver ran is counted then.
+        age: work that settled while no driver ran is counted then. Within a tick, whether a closed session's work
+        has settled is read BEFORE its spend (and its questions), and the session is dropped only on that earlier
+        read: what is stored between the reads is in this tick's read, or the session stays followed one more tick.
 
         A closed session's root can resume (a late result reopens it), and its chain can then ask the owner and get
         an answer after the close journalled the session's questions: every tick, the questions and answers of the
@@ -957,7 +959,23 @@ class GoalDriver:
                 )
                 for r in (await s.execute(unsettled_anywhere)).all():
                     rows.setdefault(r.id, r)
+            # Settled or not is read BEFORE the spend: when this read finds a closed session's work settled, every
+            # token of it was stored before the spend read below, which is then final. Read the other way round,
+            # usage stored between the two reads would be missed and the session dropped for good.
+            closed_roots = sorted({r.root_id for r in rows.values() if r.ended_at is not None})
             unsettled_roots: set[UUID] = set()
+            if closed_roots:
+                unsettled_roots = set(
+                    (
+                        await s.execute(
+                            select(Intention.id).where(
+                                Intention.agent_id == self._agent_id,
+                                Intention.id.in_(closed_roots),
+                                self._has_unsettled_work(Intention.id),
+                            )
+                        )
+                    ).scalars()
+                )
             asked: dict[UUID, list[_JournalItem]] = {}
             if rows:
                 totals = await spend.session_spent(s, self._agent_id, [r.root_id for r in rows.values()])
@@ -971,19 +989,6 @@ class GoalDriver:
                             .values(spent=totals[r.root_id])
                         )
                         changed += result.rowcount
-                closed_roots = sorted({r.root_id for r in rows.values() if r.ended_at is not None})
-                if closed_roots:
-                    unsettled_roots = set(
-                        (
-                            await s.execute(
-                                select(Intention.id).where(
-                                    Intention.agent_id == self._agent_id,
-                                    Intention.id.in_(closed_roots),
-                                    self._has_unsettled_work(Intention.id),
-                                )
-                            )
-                        ).scalars()
-                    )
                 asked = await self._new_questions_and_answers(s, [r for r in rows.values() if r.ended_at is not None])
             await s.commit()
         self._following = {r.id for r in rows.values() if r.ended_at is not None and r.root_id in unsettled_roots}

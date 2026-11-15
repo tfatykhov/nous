@@ -1177,6 +1177,40 @@ async def test_after_a_restart_an_old_closed_session_with_a_lineage_dag_still_ru
     assert (await _session(w, session.id)).spent == 40
 
 
+async def test_usage_stored_right_after_the_spend_read_is_counted_before_the_session_is_dropped(
+    env_factory,  # noqa: F811
+    monkeypatch,
+):
+    """The worker stores its usage just after a tick has read the spend. Whether the session's work had settled
+    is read before the spend, so that tick still follows it, and the next one reads the usage and then stops."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    subtask_id = await _end_root_while_its_subtask_runs(w, root, "expired")
+    assert (await w.driver.tick()).closed == 1
+    read_spend = spend.session_spent
+    fired = []
+
+    async def then_the_worker_reports(s, agent_id, root_ids):
+        totals = await read_spend(s, agent_id, root_ids)
+        if not fired:  # once: the usage lands between the spend read and anything after it in this tick
+            fired.append(True)
+            await _settle(w, subtask_id, tokens_in=400, tokens_out=40)
+        return totals
+
+    monkeypatch.setattr(spend, "session_spent", then_the_worker_reports)
+    await w.driver.tick()
+    assert fired and (await _session(w, session.id)).spent == 0  # this tick's read came before the usage
+    assert session.id in w.driver._following
+    monkeypatch.undo()
+    await w.driver.tick()
+    assert (await _session(w, session.id)).spent == 440
+    assert session.id not in w.driver._following
+    await _add_tokens(w, subtask_id, 1000)
+    await w.driver.tick()
+    assert (await _session(w, session.id)).spent == 440
+
+
 async def test_an_older_read_never_writes_a_lower_spend(env_factory, monkeypatch):  # noqa: F811
     """Every source of the spend only grows, so a read made before another tick wrote a newer total (two ticks at
     once) must not put the older, lower total back."""
