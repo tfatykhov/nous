@@ -211,17 +211,20 @@ class BackgroundHalt:
             return True
         return epoch is not None and epoch < self._epoch
 
-    def snapshot(self) -> dict[str, Any]:
-        """What ``GET /background/state`` answers: fixed vocabulary plus the cleaned, cut texts."""
+    def snapshot(self, *, full: bool = True) -> dict[str, Any]:
+        """What ``GET /background/state`` answers: fixed vocabulary plus the cleaned, cut texts. Not ``full`` (a caller
+        with no valid secret): ``by`` is the surface kind only (``dashboard``, ``telegram``, ``agent``, ``host``,
+        ``unknown``) and there is no ``reason``."""
         shown = self._shown
+        by = shown.by if full else (shown.surface or ("host" if self._host_hold else None))
         return {
             "halted": self.halted,
             "source": self.source,
             "since": shown.since.isoformat() if shown.since else None,
-            "by": shown.by,
+            "by": by,
             "surface": shown.surface,
             "verified": shown.verified,
-            "reason": shown.reason,
+            "reason": shown.reason if full else None,
             "persisted": self._persisted,
         }
 

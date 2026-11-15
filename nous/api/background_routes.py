@@ -84,8 +84,9 @@ def build_background_routes(*, settings: Any, sweeper: Any = None, continuation_
         )
 
     async def state(request: Request) -> JSONResponse:
-        """GET /background/state."""
-        return JSONResponse(background_halt.current().snapshot(), headers=_NO_STORE)
+        """GET /background/state. With a valid owner or proxy secret, ``by`` is the actor and ``reason`` the reason
+        given; without one, ``by`` is the surface kind only and ``reason`` is empty."""
+        return JSONResponse(background_halt.current().snapshot(full=_verified(request)), headers=_NO_STORE)
 
     async def halt(request: Request) -> JSONResponse:
         """POST /background/halt: 200 with the sweep's report and its one message; a repeat halts again and re-runs

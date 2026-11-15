@@ -170,6 +170,7 @@ async def test_state_reports_source_since_and_persisted_and_never_a_secret():
             headers={"X-Nous-Owner-Secret": OWNER},
         )
         after = await c.get("/background/state")
+        full = await c.get("/background/state", headers={"X-Nous-Proxy-Secret": PROXY})
     assert before.json() == {
         "halted": False,
         "source": "none",
@@ -180,16 +181,17 @@ async def test_state_reports_source_since_and_persisted_and_never_a_secret():
         "reason": None,
         "persisted": True,
     }
-    body = after.json()
+    body = after.json()  # no secret: the surface kind only, no reason
     assert (body["halted"], body["source"], body["by"], body["surface"], body["reason"]) == (
         True,
         "stored",
-        "telegram:7",
         "telegram",
-        "x y",
+        "telegram",
+        None,
     )
     assert body["since"] and body["persisted"] is True and after.headers["cache-control"] == "no-store"
-    assert OWNER not in after.text and PROXY not in after.text and halt.halted
+    assert (full.json()["by"], full.json()["reason"]) == ("telegram:7", "x y")  # a valid secret: the full values
+    assert OWNER not in after.text + full.text and PROXY not in after.text + full.text and halt.halted
 
 
 async def test_host_setting():

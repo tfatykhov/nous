@@ -2262,9 +2262,11 @@ export interface BackgroundState {
   halted: boolean;
   source: 'none' | 'stored' | 'host' | 'unreadable';
   since: string | null;
+  /** The actor with a valid owner or proxy secret; without one, the surface kind only. */
   by: string | null;
   surface: 'dashboard' | 'telegram' | 'agent' | 'host' | 'unknown' | null;
   verified: boolean;
+  /** The reason given, with a valid owner or proxy secret; null without one. */
   reason: string | null;
   /** False while the halt is not saved yet (the server retries the write). */
   persisted: boolean;
