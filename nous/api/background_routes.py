@@ -103,7 +103,7 @@ def build_background_routes(*, settings: Any, sweeper: Any = None, continuation_
             return JSONResponse({"error": "the halt is not available"}, status_code=503)
         swept = _present(sweeper)
         if swept is not None:
-            report = await swept.run(actor=background_halt.clean(body.get("actor"), 100))
+            report = await swept.run(actor=background_halt.clean(body.get("actor"), 100), epoch=outcome.epoch)
             report_body, text = report.as_dict(), report.describe()
         else:
             report_body, text = None, "Background work is halted."

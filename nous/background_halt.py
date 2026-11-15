@@ -127,6 +127,7 @@ class HaltOutcome:
     already: bool
     persisted: bool
     announce: bool = False
+    epoch: int = 0  # the epoch this halt set: its sweep runs while the halt on is still this one
 
 
 @dataclass(frozen=True)
@@ -277,6 +278,7 @@ class BackgroundHalt:
         self._seq += 1
         seq = self._seq
         self._epoch += 1
+        epoch = self._epoch
         actor_text, surface_text = clean(actor, _ACTOR_MAX), clean_surface(surface)
         reason_text = clean(reason, _REASON_MAX)
         if not self._stored or self._unreadable:
@@ -291,7 +293,10 @@ class BackgroundHalt:
         if not landed and self._seq == seq:
             self._start_retry(seq, audit)
         return HaltOutcome(
-            already=already, persisted=self._persisted, announce=announce and surface_text in ANNOUNCED_SURFACES
+            already=already,
+            persisted=self._persisted,
+            announce=announce and surface_text in ANNOUNCED_SURFACES,
+            epoch=epoch,
         )
 
     def _row(self) -> HaltRow:

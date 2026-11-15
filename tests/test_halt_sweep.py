@@ -130,6 +130,7 @@ async def test_a_root_with_nothing_running_is_skipped_not_failed(monkeypatch, tm
     monkeypatch.setattr(halt_sweep, "open_root_ids", one_root)
     monkeypatch.setattr(background_processes, "kill_all", lambda: 0)
     halt = _halt()
+    await halt.halt(actor="t", surface="dashboard")
     sweeper = HaltSweeper(
         settings=SimpleNamespace(agent_id="a", workspace_dir=str(tmp_path)),
         heart=heart,
@@ -139,7 +140,7 @@ async def test_a_root_with_nothing_running_is_skipped_not_failed(monkeypatch, tm
         dag_orchestrator=dags,
     )
     report = await sweeper.run(actor="t")
-    assert report.failed == [] and report.chains == 0
+    assert report.failed == [] and report.chains == 0 and not report.stopped
 
 
 async def test_a_failing_step_is_reported_and_the_halt_still_holds(monkeypatch, tmp_path):
@@ -152,7 +153,7 @@ async def test_a_failing_step_is_reported_and_the_halt_still_holds(monkeypatch, 
     monkeypatch.setattr(background_processes, "kill_all", broken)
     jobs_ran = []
 
-    async def jobs(self, report):
+    async def jobs(self, report, epoch=None):
         jobs_ran.append(True)
 
     monkeypatch.setattr(HaltSweeper, "_jobs", jobs)
@@ -176,10 +177,12 @@ async def test_the_sweep_without_a_continuation_runner_still_cancels_dags_and_su
     order: list[str] = []
     heart, _cont, _calls, dags = _fakes(order)
     monkeypatch.setattr(background_processes, "kill_all", lambda: 0)
+    halt = _halt()
+    await halt.halt(actor="t", surface="dashboard")
     sweeper = HaltSweeper(
         settings=SimpleNamespace(agent_id="a", workspace_dir=str(tmp_path)),
         heart=heart,
-        halt=_halt(),
+        halt=halt,
         dag_orchestrator=dags,
     )
     report = await sweeper.run(actor="t")
@@ -405,3 +408,50 @@ async def test_the_orchestrator_cancels_every_active_dag_and_reports_a_failure_a
     assert {c[2] for c in calls} == {"harness"}
     orchestrator._store.get_active_dags = AsyncMock(return_value=[SimpleNamespace(id=ids[0])])
     assert await orchestrator.cancel_all_active(cancel_provenance.halt_record()) == 1
+
+
+@pytest.mark.parametrize("what_lands", ["resume", "a newer halt"])
+async def test_a_sweep_stops_once_its_halt_is_no_longer_the_one_on(monkeypatch, tmp_path, what_lands):
+    order: list[str] = []
+    heart, cont, _calls, dags = _fakes(order)
+    halt = _halt()
+    outcome = await halt.halt(actor="t", surface="dashboard")
+    roots = [uuid.uuid4() for _ in range(10)]  # two batches of eight
+
+    async def ten_roots(session, agent_id, *, limit=200):
+        return roots
+
+    monkeypatch.setattr(halt_sweep, "open_root_ids", ten_roots)
+    reached: list = []
+
+    async def slow_cancel(root, **kwargs):
+        reached.append(root)
+        if len(reached) == 1:  # it lands while the chains step runs
+            if what_lands == "resume":
+                assert (await halt.resume(actor="t", via="dashboard")).changed
+            else:
+                await halt.halt(actor="t", surface="telegram")
+        return SimpleNamespace(truncated=False)
+
+    cont.cancel_root = slow_cancel
+    signalled: list = []
+    monkeypatch.setattr(background_processes, "kill_all", lambda: signalled.append(1) or 1)
+    jobs_ran: list = []
+
+    async def jobs(self, report, epoch=None):
+        jobs_ran.append(True)
+
+    monkeypatch.setattr(HaltSweeper, "_jobs", jobs)
+    sweeper = HaltSweeper(
+        settings=SimpleNamespace(agent_id="a", workspace_dir=str(tmp_path)),
+        heart=heart,
+        halt=halt,
+        database=_NoSessionDb(),
+        continuation_runner=cont,
+        dag_orchestrator=dags,
+    )
+    report = await sweeper.run(actor="t", epoch=outcome.epoch)
+    assert len(reached) == 8  # the batch in flight finished; the next one did not start
+    assert "dags" not in order and signalled == [] and jobs_ran == []  # work after that point is untouched
+    assert report.stopped and report.as_dict()["stopped"] is True
+    assert "The sweep stopped early: background work was resumed or halted again." in report.describe()

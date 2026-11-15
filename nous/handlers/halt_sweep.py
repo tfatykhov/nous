@@ -19,7 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -72,6 +72,9 @@ class HaltReport:
     jobs_checked: bool = True
     chains_truncated: bool = False
     failed: list[str] = field(default_factory=list)
+    # The halt this sweep belongs to ended (a resume) or a newer halt replaced it: the steps after that point did not
+    # run (the newer halt's own sweep does them).
+    stopped: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -86,6 +89,7 @@ class HaltReport:
             "failed": list(self.failed),
             "jobs_checked": self.jobs_checked,
             "chains_truncated": self.chains_truncated,
+            "stopped": self.stopped,
         }
 
     def describe(self) -> str:
@@ -108,6 +112,8 @@ class HaltReport:
             "Background work is halted.",
             f"Cancelled: {', '.join(parts)}." if parts else "Nothing was running.",
         ]
+        if self.stopped:
+            sentences.append("The sweep stopped early: background work was resumed or halted again.")
         if self.failed:
             words = ", ".join(_STEP_WORDS.get(step, step) for step in self.failed)
             sentences.append(f"Could not stop: {words}. Press Halt again to retry.")
@@ -165,16 +171,27 @@ class HaltSweeper:
         self._dags = dag_orchestrator
         self._run_runner = run_runner
 
-    async def run(self, *, actor: str | None) -> HaltReport:
-        """The whole sweep, then one ``sweep`` audit row with the counts."""
+    async def run(self, *, actor: str | None, epoch: int | None = None) -> HaltReport:
+        """The whole sweep, then one ``sweep`` audit row with the counts. ``epoch``: the halt this sweep belongs to
+        (``HaltOutcome.epoch``; default the current one). Before each step, and between the batches of a long one, the
+        sweep stops when that halt is no longer on: a resume landed, or a newer halt, whose own sweep goes on."""
+        epoch = self._halt.epoch if epoch is None else epoch
         report = HaltReport()
-        await self._step(report, "subtasks", self._subtasks(report), STEP_TIMEOUT_SECONDS)
+        steps: list[tuple[str, Callable[[], Awaitable[Any]], float]] = [
+            ("subtasks", lambda: self._subtasks(report), STEP_TIMEOUT_SECONDS)
+        ]
         if self._continuation is not None and self._db is not None:
-            await self._step(report, "chains", self._chains(report, actor), ROOTS_TIMEOUT_SECONDS)
+            steps.append(("chains", lambda: self._chains(report, actor, epoch), ROOTS_TIMEOUT_SECONDS))
         if self._dags is not None:
-            await self._step(report, "dags", self._cancel_dags(report), STEP_TIMEOUT_SECONDS)
-        await self._step(report, "commands", self._commands(report), STEP_TIMEOUT_SECONDS)
-        await self._step(report, "jobs", self._jobs(report), JOBS_TIMEOUT_SECONDS)
+            steps.append(("dags", lambda: self._cancel_dags(report), STEP_TIMEOUT_SECONDS))
+        steps.append(("commands", lambda: self._commands(report), STEP_TIMEOUT_SECONDS))
+        steps.append(("jobs", lambda: self._jobs(report, epoch), JOBS_TIMEOUT_SECONDS))
+        for name, work, timeout in steps:
+            if not self._still_halted(epoch):
+                report.stopped = True
+                break
+            await self._step(report, name, work(), timeout)
+        report.stopped = report.stopped or not self._still_halted(epoch)
         await self._halt.record(AuditEntry("sweep", actor, None, False, None, report.as_dict()))
         logger.warning("Background halt: sweep done %s", report.as_dict())
         return report
@@ -188,6 +205,10 @@ class HaltSweeper:
             await self._step(report, "dags", self._cancel_dags(report), STEP_TIMEOUT_SECONDS)
         if report.subtasks or report.dags or report.failed:
             logger.warning("Background halt: the resume sweep %s", report.as_dict())
+
+    def _still_halted(self, epoch: int) -> bool:
+        """The halt this sweep belongs to is still the one on."""
+        return self._halt.halted and self._halt.epoch == epoch
 
     async def _step(self, report: HaltReport, name: str, work: Awaitable[Any], timeout: float) -> None:
         try:
@@ -206,12 +227,15 @@ class HaltSweeper:
         report.subtasks += len(rows)
         report.subtasks_running += sum(1 for _id, status in rows if status == "running")
 
-    async def _chains(self, report: HaltReport, actor: str | None) -> None:
+    async def _chains(self, report: HaltReport, actor: str | None, epoch: int) -> None:
         async with self._db.session() as session:
             roots = await open_root_ids(session, self._settings.agent_id)
         failures = 0
         by_harness = cancel_provenance.halt_record()
         for start in range(0, len(roots), ROOTS_BATCH):
+            if not self._still_halted(epoch):
+                report.stopped = True
+                return
             batch = roots[start : start + ROOTS_BATCH]
             outcomes = await asyncio.gather(
                 *(
@@ -240,7 +264,7 @@ class HaltSweeper:
     async def _commands(self, report: HaltReport) -> None:
         report.commands += background_processes.kill_all()
 
-    async def _jobs(self, report: HaltReport) -> None:
+    async def _jobs(self, report: HaltReport, epoch: int | None = None) -> None:
         """Claude Code jobs: the job directories (names that are job ids, real directories), newest first; a job
         whose ``status`` says running is cancelled and marked as cancelled by the harness. A job whose status could
         not be read leaves the report saying the jobs were not checked."""
@@ -266,6 +290,9 @@ class HaltSweeper:
             from nous.api.builtin_tools import run_runner
         unread = 0
         for job_id in names:
+            if epoch is not None and not self._still_halted(epoch):
+                report.stopped = True
+                return
             code, out = await run_runner(workspace, ["status", job_id], RUNNER_CALL_SECONDS)
             status = observed_status(out) if code == 0 else None
             if status is None:
