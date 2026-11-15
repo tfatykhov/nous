@@ -129,3 +129,27 @@ async def test_a_chat_command_and_an_approved_proposal_command_are_not_tracked(t
         tracked.clear()
         await dispatcher.dispatch("bash", {"command": "true"}, session_id=session, context=ctx)
         assert tracked == ([True] if expected else []), ctx.kind
+
+
+linux_only = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="reads /proc")
+
+
+@linux_only
+def test_a_group_whose_leader_has_another_start_time_or_none_readable_is_dropped_not_signalled():
+    import subprocess
+
+    other = subprocess.Popen(["sleep", "30"], start_new_session=True)  # a group this registry never started
+    try:
+        _group, started = background_processes._stat(other.pid)
+        background_processes._entries[other.pid] = background_processes._Entry(other.pid, None, start=started + 1)
+        background_processes._entries[4_000_000] = background_processes._Entry(4_000_000, None, start=1)
+        assert background_processes.kill_all() == 0
+        assert other.poll() is None  # untouched
+        assert other.pid not in background_processes._entries and 4_000_000 not in background_processes._entries
+        background_processes._entries[other.pid] = background_processes._Entry(other.pid, None, start=started)
+        assert background_processes.kill_all() == 1  # the same leader: signalled
+        assert other.wait(timeout=5) == -9
+    finally:
+        if other.poll() is None:
+            other.kill()
+            other.wait()
