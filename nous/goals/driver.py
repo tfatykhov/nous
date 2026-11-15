@@ -136,7 +136,23 @@ class _JournalItem:
 
 
 class GoalDriver:
-    """Starts goal sessions and closes them. ``runner`` is the continuation runner (``wake``)."""
+    """Starts goal sessions and closes them. ``runner`` is the continuation runner (``wake``).
+
+    One driver object runs one tick at a time: ``tick`` holds ``_tick_lock`` for the whole pass, and a direct
+    ``start_session`` (the owner's run-now) takes the same lock, so a second call waits and never interleaves. The
+    state this object keeps in memory, each kept only for speed and rebuilt from the rows after a restart:
+
+    - ``_following``: closed sessions whose spend is read again. A close adds to it; a refresh removes only the
+      ids it read itself as closed and settled, never the whole set.
+    - ``_caught_up`` and ``_catch_up_after``: how far the restart catch-up has read; moved only from the cursor
+      the same pass started from.
+    - ``_failures``: failed starts in a row, per goal.
+
+    Two driver processes for one agent share none of it and are coordinated only through the rows: the goal row's
+    lock and the one-open-session index for a start, the session row's lock and ``ended_at IS NULL`` for a close
+    and for the first task's publish, the claim's ``delivered_at IS NULL``, spend written only upward, the
+    journal's evidence refs under the session row's lock, and wake changes compared with the wake read.
+    """
 
     def __init__(self, database: Database, settings: Any, heart: Any, store: GoalStore, runner: Any) -> None:
         self._db = database
@@ -151,6 +167,7 @@ class GoalDriver:
         self._following: set[UUID] = set()
         self._caught_up = False
         self._catch_up_after: tuple[datetime, UUID] | None = None  # the last closed session the catch-up read
+        self._tick_lock = asyncio.Lock()  # one tick, or one direct start, at a time
         self._task: asyncio.Task | None = None
         self._running = False
 
@@ -194,14 +211,16 @@ class GoalDriver:
     async def tick(self) -> TickReport:
         """One pass, in order: claim the goal channels into the journals, close the sessions whose chain has ended,
         read again what open and recently closed sessions spent (and journal what a resumed chain of a closed one
-        asked the owner), start the sessions that are due. With goals off it does nothing."""
+        asked the owner), start the sessions that are due. With goals off it does nothing. A second call waits for
+        this one to end (``_tick_lock``)."""
         if not self._enabled():
             return TickReport()
-        claimed = await self.claim_reports()
-        closed = await self.close_finished()
-        await self.refresh_sessions()
-        started, held = await self._start_due()
-        return TickReport(claimed=claimed, closed=closed, started=started, held=held)
+        async with self._tick_lock:
+            claimed = await self.claim_reports()
+            closed = await self.close_finished()
+            await self.refresh_sessions()
+            started, held = await self._start_due()
+            return TickReport(claimed=claimed, closed=closed, started=started, held=held)
 
     # ---- starting a session --------------------------------------------------------------------------------
 
@@ -248,7 +267,7 @@ class GoalDriver:
             if held is not None:
                 return tuple(started), held
             try:
-                root_id = await self.start_session(goal_id, trigger="timer")
+                root_id = await self._start_session(goal_id, trigger="timer")  # the tick holds the lock
             except Exception:
                 logger.exception("Goal %s: the session start failed", goal_id)
                 continue
@@ -257,17 +276,24 @@ class GoalDriver:
         return tuple(started), None
 
     async def start_session(self, goal_id: UUID, *, trigger: str) -> UUID | None:
+        """Start a session of an active goal (``_start_session``), holding the tick's lock, so a direct start (the
+        owner's run-now) never interleaves with a tick: the start counts failures in memory (``_failures``) at
+        several points across awaits. Its root's id, or None when nothing started."""
+        async with self._tick_lock:
+            return await self._start_session(goal_id, trigger=trigger)
+
+    async def _start_session(self, goal_id: UUID, *, trigger: str) -> UUID | None:
         """Start a session of an active goal: its root's id, or None when nothing started.
 
         Transaction 1 takes the goal row ``FOR UPDATE``, re-reads that the goal is active (and, for a ``timer``
         start, that its wake has still come, by the database's clock: another tick may have started, ended and
         rescheduled it since the due list was read) and has no open session and no open work left on an earlier
-        session's root, and inserts the session row (its ``first_subtask_id``
-        drawn here, before the subtask exists) and commits; the partial unique index on open sessions is the final
-        word against a second start (any other violation of the insert is a failed start). Then the first task is
-        built and goes through the censor gate that every spawned task goes through, and the subtask and its root
-        intention are created in a transaction of their own.
-        If that fails, the session row is undone. A full queue only delays the goal a minute; a refusal by the gate
+        session's root, and inserts the session row (its ``first_subtask_id`` drawn here, before the subtask
+        exists) and commits; the partial unique index on open sessions is the final word against a second start
+        (any other violation of the insert is a failed start). Then the first task is built and goes through the
+        censor gate that every spawned task goes through, and the subtask, its root intention and the session's root
+        id are written in one transaction that holds the session row's lock (``_publish``). If that fails, the
+        session row is undone. A full queue only delays the goal a minute; a refusal by the gate
         or any other failure is journalled and counted, and the third in a row pauses the goal (``error``). With
         goals off, or while background work is halted, it does nothing: every caller (the tick, the owner's run-now)
         gets that refusal here. The queue headroom is the tick's check."""

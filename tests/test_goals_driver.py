@@ -169,12 +169,14 @@ async def test_a_started_session_has_a_root_that_is_continue_and_internal_only(e
 
 
 async def test_two_starts_at_once_make_one_session_and_one_root(env_factory):  # noqa: F811
+    """Two driver objects (as two processes would run): only the rows coordinate them."""
     w = await _world(env_factory)
     goal = await _active(w)
+    twin = GoalDriver(w.db, w.env.settings, w.env.heart, w.store, FakeRunner())
     async with w.db.session() as holding:
         await holding.execute(select(Goal).where(Goal.id == goal.id).with_for_update())
         first = asyncio.create_task(w.driver.start_session(goal.id, trigger="timer"))
-        second = asyncio.create_task(w.driver.start_session(goal.id, trigger="run_now"))
+        second = asyncio.create_task(twin.start_session(goal.id, trigger="run_now"))
         await _until_waiters(w, "brain.goals", at_least=2)
         await holding.commit()
     results = await asyncio.gather(first, second)
@@ -454,6 +456,38 @@ async def test_undo_never_deletes_a_session_whose_subtask_exists(env_factory):  
         await s.commit()
     assert await w.driver._undo_start(row.id, ghost) is True
     assert await _sessions(w, goal) == []
+
+
+async def test_two_ticks_of_one_driver_run_one_after_the_other(env_factory, monkeypatch):  # noqa: F811
+    """One driver object runs one tick at a time: a second tick waits for the first, it does not interleave."""
+    w = await _world(env_factory)
+    events: list[str] = []
+    first_may_go = asyncio.Event()
+    claim_reports, start_due = w.driver.claim_reports, w.driver._start_due
+
+    async def entering():
+        n = sum(1 for event in events if event.startswith("enter")) + 1
+        events.append(f"enter {n}")
+        if n == 1:
+            await first_may_go.wait()
+        return await claim_reports()
+
+    async def leaving():
+        result = await start_due()
+        events.append(f"leave {sum(1 for event in events if event.startswith('leave')) + 1}")
+        return result
+
+    monkeypatch.setattr(w.driver, "claim_reports", entering)
+    monkeypatch.setattr(w.driver, "_start_due", leaving)
+    first = asyncio.create_task(w.driver.tick())
+    while not events:
+        await asyncio.sleep(0)
+    second = asyncio.create_task(w.driver.tick())
+    done, _pending = await asyncio.wait({second}, timeout=2)  # unlocked, the second would run to its end here
+    assert not done and events == ["enter 1"]
+    first_may_go.set()
+    await asyncio.gather(first, second)
+    assert events == ["enter 1", "leave 1", "enter 2", "leave 2"]
 
 
 async def test_a_session_closed_while_a_refresh_runs_stays_followed(env_factory, monkeypatch):  # noqa: F811
