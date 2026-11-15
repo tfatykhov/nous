@@ -304,7 +304,8 @@ async def test_any_other_failure_of_the_start_is_undone_journalled_and_counted(e
     assert await w.driver.start_session(goal.id, trigger="timer") is None
     assert await _sessions(w, goal) == []
     row = (await _journal(w, goal, "state"))[-1]
-    assert row.actor == "harness" and "could not start" in row.text and "RuntimeError" in row.text
+    assert row.actor == "harness" and row.text == "Session 1 could not start: RuntimeError."
+    assert "database went away" not in row.text  # the exception's text stays in the log
     assert w.driver._failures == {goal.id: 1}
 
 

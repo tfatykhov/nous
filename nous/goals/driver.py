@@ -43,7 +43,6 @@ QUEUE_FULL_DELAY_SECONDS = 60  # the subtask queue refused the first subtask: tr
 FAILED_START_DELAY_SECONDS = 300  # any other failed start
 OPEN_WORK_DELAY_SECONDS = 60  # a root of an earlier session has open work again (a late result reopened it)
 FAILED_STARTS_BEFORE_PAUSE = 3  # the third failed start in a row pauses the goal (``error``)
-FAILURE_TEXT_MAX = 300
 UNCREATED_AFTER_SECONDS = 120  # a session whose first subtask does not exist after this long never got one
 SUMMARY_MAX = 1000  # a session's summary: its claimed report, else its newest arrival's note
 ANSWER_PREFIX_PATTERN = f"{continuation.ANSWER_CORRELATION_PREFIX}%"
@@ -273,7 +272,8 @@ class GoalDriver:
             return None
         except Exception as exc:
             logger.warning("Goal %s: session %d could not start", goal_id, n, exc_info=True)
-            failure = f"Session {n} could not start: {type(exc).__name__}: {clip(str(exc), FAILURE_TEXT_MAX)}"
+            # The class only: the journal is read by later sessions, the exception's text stays in the log.
+            failure = f"Session {n} could not start: {type(exc).__name__}."
         if failure is not None:
             if await self._undo_start(session_id, subtask_id):
                 await self._failed_start(goal_id, n, failure, seen=seen)
