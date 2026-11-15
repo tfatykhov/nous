@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import asdict
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from goal_routes_support import CHAN, active, add_session, db_now, draft, make_env, paused, set_values
@@ -17,6 +19,9 @@ from nous.goals.store import format_short_id
 from nous.storage.models import GoalJournal
 
 pytestmark = pytest.mark.postgres_only
+
+# The dashboard's fixture of a goal's detail: the screen's tests read answers of this shape.
+FIXTURES = Path(__file__).resolve().parents[1] / "dashboard-app" / "src" / "lib" / "testing" / "goalFixtures.ts"
 
 ROW_KEYS = {
     "id", "ref", "title", "state", "pause_reason", "preset", "proposed_by", "total_budget", "day_budget",
@@ -92,6 +97,10 @@ async def test_detail_has_charter_limits_plan_sessions_journal_and_the_spend_not
     assert response.status_code == 200
     body = response.json()
     assert set(body) == DETAIL_KEYS
+    fixture = FIXTURES.read_text(encoding="utf-8")
+    keys = re.search(r"export const DETAIL_KEYS = \[(.*?)\];", fixture, re.S)
+    assert keys is not None and re.findall(r"'(\w+)'", keys.group(1)) == list(body)
+    assert f'"{SPEND_NOTE}"' in fixture  # the fixture's SPEND_NOTE is the server's sentence
     assert body["objective"] == goal.objective and body["done_when"] == goal.done_when
     assert body["origin_channel"] == "telegram:****" and body["proposed_by"] == "owner"
     assert (body["total_budget"], body["day_budget"], body["deadline_days"]) == (10_000_000, 2_000_000, 10)
