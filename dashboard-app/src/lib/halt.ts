@@ -24,9 +24,10 @@ export const WORDS = {
 
 const MEANING = 'Nothing new starts, and every tool call from background work is refused. It does not stop a script that is already running.';
 
-/** "Halted by you on Nov 15 09:31 UTC. Nothing new starts, ..." ("by you" is a halt from the dashboard or Telegram). */
-export function haltedText(s: Pick<BackgroundState, 'since' | 'surface'>): string {
-  const who = s.surface === 'dashboard' || s.surface === 'telegram' ? ' by you' : s.surface === 'agent' ? ' by Nous' : '';
+/** "Halted by you on Nov 15 09:31 UTC. Nothing new starts, ...". "By you" only for a halt that carried the owner's or the
+ * proxy's secret (verified): the halt route takes no secret, so the surface a caller names proves nothing. */
+export function haltedText(s: Pick<BackgroundState, 'since' | 'surface' | 'verified'>): string {
+  const who = s.verified ? ' by you' : s.surface === 'agent' ? ' by Nous' : '';
   const when = s.since && !Number.isNaN(Date.parse(s.since)) ? ` on ${fmtUtc(s.since)}` : '';
   return `Halted${who}${when}. ${MEANING}`;
 }

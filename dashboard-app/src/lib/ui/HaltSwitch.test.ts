@@ -36,7 +36,7 @@ const running = (over: Partial<BackgroundState> = {}): BackgroundState => ({
   halted: false, source: 'none', since: null, by: null, surface: null, verified: false, reason: null, persisted: true, ...over,
 });
 const halted = (over: Partial<BackgroundState> = {}): BackgroundState =>
-  running({ halted: true, source: 'stored', since: '2026-11-15T09:31:00Z', by: 'dashboard', surface: 'dashboard', ...over });
+  running({ halted: true, source: 'stored', since: '2026-11-15T09:31:00Z', by: 'dashboard', surface: 'dashboard', verified: true, ...over });
 
 let stateAnswer: BackgroundState = running();
 let posts: string[] = [];

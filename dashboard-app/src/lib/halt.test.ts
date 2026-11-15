@@ -21,7 +21,7 @@ const running = (over: Partial<BackgroundState> = {}): BackgroundState => ({
   halted: false, source: 'none', since: null, by: null, surface: null, verified: false, reason: null, persisted: true, ...over,
 });
 const halted = (over: Partial<BackgroundState> = {}): BackgroundState =>
-  running({ halted: true, source: 'stored', since: SINCE, by: 'dashboard', surface: 'dashboard', ...over });
+  running({ halted: true, source: 'stored', since: SINCE, by: 'dashboard', surface: 'dashboard', verified: true, ...over });
 const view = (over: Partial<HaltInput>) => haltView({ state: null, unreachable: false, pending: null, outcome: null, ...over });
 const labels = (v: ReturnType<typeof haltView>) => v.buttons.map((b) => b.label);
 
@@ -46,7 +46,7 @@ describe('the words per state', () => {
     expect(v.buttons).toEqual([{ kind: 'halt', label: 'Halt background work', disabled: true }]);
   });
 
-  it.each(['dashboard', 'telegram'] as const)('halted by you (surface %s): the pill, the sentence, Resume and its caption', (surface) => {
+  it.each(['dashboard', 'telegram'] as const)('halted by you (verified, surface %s): the pill, the sentence, Resume and its caption', (surface) => {
     const v = view({ state: halted({ surface }) });
     expect(v.pill).toEqual({ text: 'Background work halted', tone: 'warn' });
     expect(v.lines).toEqual([`Halted by you on ${WHEN}. ${REST}`]);
@@ -55,18 +55,22 @@ describe('the words per state', () => {
     expect(v.halted).toBe(true);
   });
 
+  it('a halt that carried no secret is not "by you", whatever surface it names', () => {
+    expect(view({ state: halted({ surface: 'dashboard', verified: false }) }).lines).toEqual([`Halted on ${WHEN}. ${REST}`]);
+  });
+
   it('halted by the agent: "Halted by Nous on"', () => {
-    expect(view({ state: halted({ surface: 'agent' }) }).lines).toEqual([`Halted by Nous on ${WHEN}. ${REST}`]);
+    expect(view({ state: halted({ surface: 'agent', verified: false }) }).lines).toEqual([`Halted by Nous on ${WHEN}. ${REST}`]);
   });
 
   it.each(['host', 'unknown', null] as const)('halted from surface %s: "Halted on"', (surface) => {
-    expect(view({ state: halted({ surface }) }).lines).toEqual([`Halted on ${WHEN}. ${REST}`]);
+    expect(view({ state: halted({ surface, verified: false }) }).lines).toEqual([`Halted on ${WHEN}. ${REST}`]);
   });
 
   it('with no time recorded the sentence drops " on <time>"', () => {
-    expect(haltedText({ since: null, surface: 'dashboard' })).toBe(`Halted by you. ${REST}`);
-    expect(haltedText({ since: null, surface: 'agent' })).toBe(`Halted by Nous. ${REST}`);
-    expect(haltedText({ since: 'not a time', surface: null })).toBe(`Halted. ${REST}`);
+    expect(haltedText({ since: null, surface: 'dashboard', verified: true })).toBe(`Halted by you. ${REST}`);
+    expect(haltedText({ since: null, surface: 'agent', verified: false })).toBe(`Halted by Nous. ${REST}`);
+    expect(haltedText({ since: 'not a time', surface: null, verified: false })).toBe(`Halted. ${REST}`);
   });
 
   it('not saved: a halt that is not stored yet says a restart would lose it', () => {
@@ -76,7 +80,7 @@ describe('the words per state', () => {
   });
 
   it('an unreadable halt is treated as halted, with Resume', () => {
-    for (const s of [halted({ source: 'unreadable', surface: null, since: null }), running({ source: 'unreadable' })]) {
+    for (const s of [halted({ source: 'unreadable', surface: null, since: null, verified: false }), running({ source: 'unreadable' })]) {
       const v = view({ state: s });
       expect(v.halted).toBe(true);
       expect(v.pill?.text).toBe('Background work halted');
@@ -167,7 +171,7 @@ describe('what a press leaves to say', () => {
 describe('timestamps through the shared formatter', () => {
   it('the halted sentence prints the time as fmtUtc does', () => {
     const at = '2026-01-02T03:04:59Z';
-    expect(haltedText({ since: at, surface: 'telegram' })).toBe(`Halted by you on ${fmtUtc(at)}. ${REST}`);
+    expect(haltedText({ since: at, surface: 'telegram', verified: true })).toBe(`Halted by you on ${fmtUtc(at)}. ${REST}`);
     expect(fmtUtc(at)).toBe('Jan 2 03:04 UTC');
   });
 
