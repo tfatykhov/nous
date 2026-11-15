@@ -470,9 +470,21 @@ def _write_path_allowed(
     return any(target.is_relative_to(d) for d in dirs)
 
 
+_PROCFS = re.compile(r"/+(?:proc|dev)(?:/|$)")
+
+
+def _procfs(path: str) -> bool:
+    """An absolute path that reaches /proc or /dev, by its text or once ``..`` is collapsed lexically (``/x/../proc``).
+    /proc/self/cwd, /proc/self/fd and /dev/fd mean something different to the shell than to this process, so no check
+    done here can stand for what the shell will open. /dev/null and the other sinks are handled before ``_readable``
+    is reached (``_LINEAGE_SINKS``)."""
+    return path.startswith("/") and bool(_PROCFS.match(path) or _PROCFS.match(os.path.normpath(path)))
+
+
 def _under(path: str, dirs: list[Path]) -> bool:
-    """``path`` is absolute and inside one of ``dirs`` once resolved (symlinks and ``..`` followed)."""
-    if not path.startswith("/") or "\x00" in path:
+    """``path`` is absolute and inside one of ``dirs`` once resolved (symlinks and ``..`` followed), and not under
+    /proc or /dev (``_procfs``)."""
+    if not path.startswith("/") or "\x00" in path or _procfs(path):
         return False
     try:
         target = Path(path).resolve()
@@ -485,7 +497,7 @@ def _readable(path: str, cwds: list[Path], workspace: Path) -> list[Path] | None
     """Where ``path`` resolves from each of ``cwds`` (symlinks and ``..`` followed), or None when one of them is
     outside ``workspace`` or has a hidden component below it (``.ssh``, ``.env``, ``claude-jobs/.claude-home``,
     ``.nous-undo``). ``cwds`` and ``workspace`` are resolved. ``~`` is refused."""
-    if path.startswith("~") or "\x00" in path:
+    if path.startswith("~") or "\x00" in path or _procfs(path):
         return None
     try:
         targets = [Path(path).resolve()] if path.startswith("/") else [(d / path).resolve() for d in cwds]
@@ -706,7 +718,7 @@ def _write_target(path: str, cwd: Path | None, writable: list[Path], *, below: b
     ``~``, a leading ``-`` and a ``..`` component are refused: ``mkdir -p`` creates every directory it walks, so
     ``research/../../x/../ws/research/ok`` would make ``x`` outside the workspace on the way to an endpoint inside
     (one rule for every write target)."""
-    if path.startswith(("~", "-")) or "\x00" in path or ".." in path.split("/"):
+    if path.startswith(("~", "-")) or "\x00" in path or ".." in path.split("/") or _procfs(path):
         return None
     base = Path(path) if path.startswith("/") else cwd / path if cwd is not None else None
     if base is None:

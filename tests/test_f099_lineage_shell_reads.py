@@ -286,3 +286,49 @@ def test_a_failing_reason_lookup_still_refuses(ws, monkeypatch):
     assert refusal is not None and "(external)" in refusal.text
     assert "Refused: this command is not on the lineage allowlist." in refusal.text
     assert events[0][1]["reason_code"] == "other"
+
+
+# -- Task 2b: /proc and /dev paths mean something else to the shell than to this process ------------------------------
+
+PROCFS_REFUSED = [
+    "cd /proc/self/cwd",
+    "cd {W}/intentions/{RID} && cd /proc/self/cwd/nous && git diff",
+    "cd //proc/self/cwd/nous",
+    "cd /x/../proc/self/cwd/nous",
+    "cat /proc/self/cwd/a.md",
+    "cat /proc/self/environ",
+    "cat /proc/1/cwd/a.md",
+    "cat /dev/stdin",
+    "cat /dev/fd/0",
+    "grep x /proc/self/cwd/a.md",
+    "diff /proc/self/cwd/a.md {W}/b.md",
+    "echo x > /proc/self/cwd/research/n.md",
+    "echo x > /dev/fd/1",
+    "cp {W}/a.md /proc/self/cwd/research/c.md",
+    "mkdir -p /proc/self/cwd/research/z",
+    "touch /proc/self/cwd/research/z",
+    "{R} launch nous --prompt-file /proc/self/cwd/claude-jobs/prompts/p.md",
+    "{R} launch nous p --plugins /proc/self/cwd/plugins/x",
+    "cat < /proc/self/cwd/a.md",
+]
+
+
+@pytest.mark.parametrize("command", PROCFS_REFUSED)
+def test_proc_and_dev_paths_are_refused_even_when_the_process_cwd_is_the_workspace(command, ws, monkeypatch):
+    monkeypatch.chdir(ws)  # /proc/self/cwd is then a directory the python check would call the workspace
+    assert not _ok(_fmt(command, ws), ws), command
+
+
+def test_dev_null_and_workspace_directories_named_proc_or_dev_stay_allowed(ws):
+    for d in ("proc", "dev"):
+        (ws / d).mkdir()
+        (ws / d / "a.md").write_text("x")
+    for command in (
+        "echo x > /dev/null",
+        "cat < /dev/null",
+        "ls 2>/dev/null",
+        "echo x 2>&1 >/dev/stderr",
+        "cat {W}/proc/a.md",
+        "cat {W}/dev/a.md",
+    ):
+        assert _ok(_fmt(command, ws), ws), command
