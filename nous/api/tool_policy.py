@@ -107,7 +107,7 @@ INTERNAL_ONLY_LOGGED_TOOLS: frozenset[str] = frozenset({"web_fetch", "web_search
 # rates `rm -rf` a mere write. Read-only commands that cannot write, run or reach the network whatever
 # their arguments (no sort -o, sed -i, find -exec, date -s, tee):
 LINEAGE_READ_COMMANDS: frozenset[str] = frozenset(
-    {"cat", "ls", "head", "tail", "wc", "grep", "jq", "echo", "pwd", "cd", "sleep", "true"}
+    {"cat", "ls", "head", "tail", "wc", "grep", "jq", "cut", "echo", "pwd", "cd", "sleep", "true"}
 )
 
 
@@ -166,6 +166,17 @@ _READ_ARG_ROLES: Mapping[str, _ArgRoles] = MappingProxyType(
                 **dict.fromkeys(_GREP_VALUE_LONG.split(), "value"),
                 "--file": "file",
                 "--exclude-from": "file",
+            },
+            closed=True,
+        ),
+        # cut takes no file as an option value, so its operands are its only files; a closed table keeps it so.
+        "cut": _ArgRoles(
+            {**dict.fromkeys("dfcb", "value"), **dict.fromkeys("snz", "flag")},
+            {
+                **dict.fromkeys(("--delimiter", "--fields", "--characters", "--bytes", "--output-delimiter"), "value"),
+                **dict.fromkeys(
+                    ("--complement", "--only-delimited", "--zero-terminated", "--help", "--version"), "flag"
+                ),
             },
             closed=True,
         ),

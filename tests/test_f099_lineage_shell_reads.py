@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import string
 import subprocess
 import uuid
 from pathlib import Path
@@ -25,6 +26,7 @@ from nous.api.tool_policy import (
     LINEAGE_REASONS,
     LineageReason,
     lineage_bash_allowed,
+    lineage_bash_description,
     lineage_bash_refusal,
     lineage_bash_refusal_hint,
     lineage_runs_build,
@@ -779,3 +781,84 @@ def test_dash_c_runs_in_the_repo_it_names(tmp_path):
 def test_dash_c_is_a_build_command_for_the_environment():
     assert lineage_runs_build("git -C nous status") is True
     assert lineage_runs_runner("git -C nous status") is False
+
+
+# -- cut as a read filter --
+
+CUT_ALLOWED = [
+    "cut -d: -f1 {W}/a.md",
+    "cut -d ' ' -f 2,3 {W}/a.md",
+    "cut -f1 -d, {W}/a.md",
+    "cut -c1-10 {W}/a.md",
+    "cut -b1-5 {W}/a.md",
+    "cut --complement -f2 {W}/a.md",
+    "cut -s -d: -f1 {W}/a.md",
+    "cut --delimiter=: --fields=1 {W}/a.md",
+    "cut --output-delimiter=, -f1,3 {W}/a.md",
+    "cat {W}/a.md | cut -d: -f1",
+    "git -C nous branch -a | cut -c3-",
+    "grep x {W}/a.md | cut -d: -f2 | head -3",
+    "cut -f1 {W}/dir/*.md",  # a glob file operand, as for cat; a top-level glob stays refused
+    "cut -d: -f1 - < {W}/a.md",
+    "cut -f1 {W}/a.md {W}/b.md",
+    "cut -f1 -- {W}/a.md",
+]
+CUT_REFUSED = [
+    "cut -f1 /etc/passwd",
+    "cut -f1 {W}/.env",
+    "cut -f1 {W}/.hid/x",
+    "cut -f1 ../outside",
+    "cut -f1 '~/x'",
+    "cut -f1 $HOME/x",
+    "cut -f1 {W}/a.md > /tmp/x",
+    "cut -f1 {W}/a.md > {W}/a.md",
+    "cut --com -f1 {W}/a.md",
+    "cut -x f",
+    "cut --no-such f",
+    "cut -f",
+    "cut -f1 /dev/stdin",
+    "cut -f1 /proc/self/environ",
+    "cut -f1 {W}/link-to-etc",
+    "cut -f1 *",
+    "cut -f1 {W}/nope*",
+    "cut -f1 $(echo x)",
+    "cut -f1 {W}/a.md; sed -n 1p x",
+]
+
+
+@pytest.mark.parametrize("command", CUT_ALLOWED)
+def test_cut_is_a_read_filter(command, ws):
+    assert _ok(_fmt(command, ws), ws), command
+
+
+@pytest.mark.parametrize("command", CUT_REFUSED)
+def test_cut_reads_what_cat_reads_and_nothing_else(command, ws):
+    (ws / "link-to-etc").symlink_to("/etc")
+    assert not _ok(_fmt(command, ws), ws), command
+
+
+def test_cut_hides_no_value_option(ws):
+    """A closed table: GNU cut has no option whose value is a file; a future edit adding one needs a test."""
+    for letter in string.ascii_letters + string.digits:
+        if letter not in "dfcbsnz":
+            assert not _ok(f"cut -{letter} x {ws}/a.md", ws), letter
+
+
+def test_the_description_lists_cut():
+    assert "cut" in lineage_bash_description(build_commands=True).split("reads (")[1].split(")")[0]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sort {W}/a.md",
+        "sort -o {W}/research/x {W}/a.md",
+        "sort --compress-program=sh {W}/a.md",
+        "sort -T /tmp {W}/a.md",
+        "uniq {W}/a.md",
+        "uniq {W}/a.md {W}/research/out",
+    ],
+)
+def test_sort_and_uniq_stay_refused(command, ws):
+    reason = _refusal(_fmt(command, ws), ws)
+    assert reason is not None and reason.code == "program"
