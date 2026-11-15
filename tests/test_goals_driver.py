@@ -256,6 +256,18 @@ async def test_a_halted_background_starts_nothing(env_factory, monkeypatch):  # 
     assert len((await w.driver.tick()).started) == 1
 
 
+async def test_a_direct_start_is_held_by_a_halted_background_too(env_factory, monkeypatch):  # noqa: F811
+    """A caller other than the tick (the owner's run-now) cannot skip the halt: start_session checks it first."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    monkeypatch.setattr(w.driver, "background_halted", lambda: True)
+    assert await w.driver.start_session(goal.id, trigger="run_now") is None
+    assert await _sessions(w, goal) == [] and await _subtasks(w) == []
+    assert (await w.store.get(goal.id)).next_wake_at == goal.next_wake_at
+    monkeypatch.undo()
+    assert await w.driver.start_session(goal.id, trigger="run_now") is not None
+
+
 async def test_a_goal_that_is_not_due_is_not_started(env_factory):  # noqa: F811
     w = await _world(env_factory)
     goal = await _active(w)

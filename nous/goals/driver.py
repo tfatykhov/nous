@@ -222,8 +222,9 @@ class GoalDriver:
         spawned task goes through, and the subtask and its root intention are created in a transaction of their own.
         If that fails, the session row is undone. A full queue only delays the goal a minute; a refusal by the gate
         or any other failure is journalled and counted, and the third in a row pauses the goal (``error``). With
-        goals off it does nothing."""
-        if not self._enabled():
+        goals off, or while background work is halted, it does nothing: every caller (the tick, the owner's run-now)
+        gets that refusal here. The queue headroom is the tick's check."""
+        if not self._enabled() or self.background_halted():
             return None
         subtask_id = uuid.uuid4()
         open_work = False
