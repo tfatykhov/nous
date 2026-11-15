@@ -623,6 +623,7 @@ class ContinuationRunner:
         self._view_checked_at: datetime | None = None
         self._surface_service: Any = None  # Phase 3a, bound late (set_surface_service)
         self._active_card_refused: str | None = None  # 3b: the fingerprint the censor gate last refused (logged once)
+        self._goals: Any = None  # F114: the goal driver (set_goals); None unless goals are on
 
     @property
     def running_roots(self) -> frozenset[UUID]:
@@ -640,6 +641,11 @@ class ContinuationRunner:
         setter = getattr(self._publisher, "set_surface_service", None)
         if setter is not None:
             setter(service)
+
+    def set_goals(self, goals: Any) -> None:
+        """Bind the goal driver (F114; ``None`` unbinds). While it is bound, ``_launch`` asks it which due roots are
+        goal sessions' (``goal_roots``) and keeps those out of the last ``goals_reserved_slots`` free slots."""
+        self._goals = goals
 
     def root_is_cancelled(self, root_id: UUID) -> bool:
         """The in-process view of cancelled roots, for ``AgentRunner.set_cancelled_roots``. A set lookup: no
@@ -1031,6 +1037,7 @@ class ContinuationRunner:
                 debounce_s=settings.continuation_debounce_seconds,
                 max_wait_s=settings.continuation_max_wait_seconds,
             )
+        goal_roots, goal_limit = await self._goal_roots(eligible)
         now = datetime.now(UTC)
         self._cooldown = {root: until for root, until in self._cooldown.items() if until > now}
         launched: list[UUID] = []
@@ -1047,6 +1054,8 @@ class ContinuationRunner:
                 continue
             if self._slots.locked():
                 break  # a slot frees when an arrival ends, and that wakes the loop
+            if root_id in goal_roots and len(self._running) >= goal_limit:
+                continue  # F114: not the owner's reserved slots; continue, so an owner root later in the list can go
             await self._slots.acquire()
             # The launch is run_once's LAST step, and nothing between this create_task and run_once's return yields
             # (the acquire above never waits: the slot was just seen free), so the task has not started when run_once
@@ -1056,6 +1065,24 @@ class ContinuationRunner:
             self._running[root_id] = task
             launched.append(root_id)
         return launched, next_due
+
+    async def _goal_roots(self, eligible: Sequence[tuple[UUID, datetime]]) -> tuple[frozenset[UUID], int]:
+        """F114: which due roots are goal sessions', and how many arrivals may be running for one of them to launch:
+        ``continuation_max_concurrent`` less ``goals_reserved_slots``, reserving at most all slots but one (with one
+        slot a goal's chain still runs, and the owner's wait behind it). With no goal driver bound: no goal roots,
+        and nothing is read. A lookup that fails is logged and the sweep launches as if there were none, so the
+        owner's chains never wait on it."""
+        goals = self._goals
+        if goals is None or not eligible:
+            return frozenset(), 0
+        settings = self._settings
+        reserved = min(int(settings.goals_reserved_slots), settings.continuation_max_concurrent - 1)
+        try:
+            roots = await goals.goal_roots([root_id for root_id, _due in eligible])
+        except Exception:
+            logger.warning("F114: the goal roots could not be read; this sweep launches without them", exc_info=True)
+            return frozenset(), 0
+        return frozenset(roots), settings.continuation_max_concurrent - reserved
 
     async def _arrival_task(self, root_id: UUID) -> None:
         """One root's arrival, in a task of its own: the per-root catch. Whatever it raises is logged and stays
