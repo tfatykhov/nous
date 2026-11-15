@@ -356,18 +356,27 @@ class SubtaskManager:
 
     async def cancel_all_active(self) -> list[tuple[UUID, str]]:
         """Goals PR 0c, the halt sweep's first step: cancel every pending and running subtask of this agent in one
-        statement (the columns ``cancel`` writes). Returns ``(id, status before)`` of each. A worker whose turn is
-        still running finds its row terminal, so its complete()/fail() are no-ops."""
+        transaction (the columns ``cancel`` writes), the rows locked first so their status before is the one
+        returned. Returns ``(id, status before)`` of each. A worker whose turn is still running finds its row
+        terminal, so its complete()/fail() are no-ops."""
+        active = ("pending", "running")
         async with self._db.session() as session:
-            result = await session.execute(
-                update(Subtask)
-                .where(Subtask.agent_id == self._agent_id)
-                .where(Subtask.status.in_(("pending", "running")))
-                .values(status="cancelled", final_outcome="cancelled", completed_at=datetime.now(UTC))
-                .returning(Subtask.id, Subtask.status)
-                .execution_options(synchronize_session=False)
-            )
-            rows = list(result.all())
+            rows = (
+                await session.execute(
+                    select(Subtask.id, Subtask.status)
+                    .where(Subtask.agent_id == self._agent_id)
+                    .where(Subtask.status.in_(active))
+                    .with_for_update()
+                )
+            ).all()
+            if rows:
+                await session.execute(
+                    update(Subtask)
+                    .where(Subtask.id.in_([row[0] for row in rows]))
+                    .where(Subtask.status.in_(active))
+                    .values(status="cancelled", final_outcome="cancelled", completed_at=datetime.now(UTC))
+                    .execution_options(synchronize_session=False)
+                )
             await session.commit()
         return [(row[0], row[1]) for row in rows]
 
