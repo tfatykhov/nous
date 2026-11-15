@@ -234,6 +234,19 @@ async def test_each_owner_setting_route_against_each_proof(
         assert (response.status_code, response.json()) == (403, FORBIDDEN)
 
 
+async def test_a_proxy_call_with_no_body_still_needs_the_json_media_type(tmp_path) -> None:
+    """A body-less restore or cancel with only the proxy's secret: 415 without the JSON media type; with it the
+    restore reaches its handler (503, no journal here)."""
+    rest, intentions = _rest_app(tmp_path), _intention_app(_settings())
+    restore = "/undo/snapshots/abc/restore"
+    bare_restore = await _send(rest, "POST", restore, headers=PROXY)
+    bare_cancel = await _send(intentions, "POST", "/intentions/ffffffff/cancel", headers=PROXY)
+    assert (bare_restore.status_code, bare_restore.json()) == (415, NOT_JSON)
+    assert (bare_cancel.status_code, bare_cancel.json()) == (415, NOT_JSON)
+    typed = await _send(rest, "POST", restore, headers={**PROXY, "content-type": "application/json"})
+    assert (typed.status_code, typed.json()) == (503, {"error": "Undo journal not enabled"})
+
+
 async def test_the_reads_beside_them_need_no_secret(tmp_path) -> None:
     app = _rest_app(tmp_path)
     for path in ("/undo/snapshots", "/admin/search-weights"):
