@@ -52,10 +52,7 @@ _STEP_WORDS = {
     "commands": "shell commands",
     "jobs": "Claude Code jobs",
 }
-_SCOPE_TEXT = (
-    "Nothing new can start, and every tool call from background work is refused. "
-    "This does not stop a script that is already running or a caller that posts to chat."
-)
+_SCOPE_TEXT = "Nothing new can start, and every tool call from background work is refused."
 
 
 def _count(n: int, one: str, many: str) -> str:

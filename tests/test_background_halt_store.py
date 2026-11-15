@@ -107,9 +107,9 @@ async def test_resume_persists_before_flipping(db, monkeypatch):
     assert await _log(db, agent) == ["halt", "resume"]
 
 
-async def test_a_failed_halt_write_followed_by_a_restart_loses_the_halt_but_a_landed_retry_survives(db, monkeypatch):
-    """The price of memory first: a process that dies before its retry lands comes back not halted. The state
-    route said ``persisted: false`` meanwhile."""
+async def test_the_next_start_reads_what_was_saved_before_and_after_a_retry(db, monkeypatch):
+    """A start reads the stored state: nothing while the halt's write has not landed (``persisted: false``), the
+    halt once a retry has saved it."""
     agent = _agent()
     real_write = BackgroundHaltStore.write
     failures = {"left": 1}
@@ -124,7 +124,7 @@ async def test_a_failed_halt_write_followed_by_a_restart_loses_the_halt_but_a_la
     lost = _halt(db, agent, retry=60)
     await lost.halt(actor="t", surface="dashboard")
     assert lost.halted and lost.snapshot()["persisted"] is False
-    await lost.close()  # the process dies before the retry
+    await lost.close()  # the process stops before the retry
     restarted = _halt(db, agent)
     await restarted.load()
     assert not restarted.halted

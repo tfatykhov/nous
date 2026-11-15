@@ -5,8 +5,7 @@ its pid. ``kill_all`` only signals: one ``SIGKILL`` per group, each in its own `
 pipes (the tool call that started the command is still waiting on them in ``communicate()``, and collects the exit
 itself). A command is kept after its shell exits, until its group is empty: a child it detached (``nohup ... &``)
 stays in the group. The kernel does not give the group's number to a new process while a member lives; once the group
-is empty an entry is dropped, and a new command with the same pid replaces a stale entry. A process that left its
-group (``setsid``) is out of reach.
+is empty an entry is dropped, and a new command with the same pid replaces a stale entry.
 """
 
 from __future__ import annotations

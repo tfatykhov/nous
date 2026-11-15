@@ -13,7 +13,7 @@ export const WORDS = {
   halt: 'Halt background work',
   resume: 'Resume background work',
   caption: 'Resuming does not restart work that was cancelled. One-time schedules that came due run now.',
-  notSaved: 'Halted, but the halt is not saved yet. A restart now would lose it.',
+  notSaved: 'Halted, but the halt is not saved yet. Nous keeps trying to save it.',
   hostText: 'The server is set to hold background work (NOUS_BACKGROUND_HALT). Clear that setting on the host and restart to resume.',
   needsSignIn: 'Resume needs your sign-in. Open the dashboard through the login page.',
   notConfigured: 'Resume is not configured on this server.',
@@ -22,7 +22,7 @@ export const WORDS = {
   unreachable: 'Cannot reach the server.',
 } as const;
 
-const MEANING = 'Nothing new starts, and every tool call from background work is refused. It does not stop a script that is already running.';
+const MEANING = 'Nothing new starts, and every tool call from background work is refused.';
 
 /** "Halted by you on Nov 15 09:31 UTC. Nothing new starts, ...". "By you" only for a halt that carried the owner's or the
  * proxy's secret (verified): the halt route takes no secret, so the surface a caller names proves nothing. */

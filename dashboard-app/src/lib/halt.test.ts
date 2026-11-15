@@ -11,10 +11,10 @@ import type { BackgroundHaltAnswer, BackgroundState } from './types/api';
 
 const SINCE = '2026-11-15T09:31:45Z';
 const WHEN = 'Nov 15 09:31 UTC';
-const REST = 'Nothing new starts, and every tool call from background work is refused. It does not stop a script that is already running.';
+const REST = 'Nothing new starts, and every tool call from background work is refused.';
 const CAPTION = 'Resuming does not restart work that was cancelled. One-time schedules that came due run now.';
 const HOST_TEXT = 'The server is set to hold background work (NOUS_BACKGROUND_HALT). Clear that setting on the host and restart to resume.';
-const NOT_SAVED = 'Halted, but the halt is not saved yet. A restart now would lose it.';
+const NOT_SAVED = 'Halted, but the halt is not saved yet. Nous keeps trying to save it.';
 const UNREACHABLE = 'Cannot reach the server.';
 
 const running = (over: Partial<BackgroundState> = {}): BackgroundState => ({
@@ -73,7 +73,7 @@ describe('the words per state', () => {
     expect(haltedText({ since: 'not a time', surface: null, verified: false })).toBe(`Halted. ${REST}`);
   });
 
-  it('not saved: a halt that is not stored yet says a restart would lose it', () => {
+  it('not saved: a halt that is not stored yet says so', () => {
     const v = view({ state: halted({ persisted: false }) });
     expect(v.lines).toEqual([`Halted by you on ${WHEN}. ${REST}`, NOT_SAVED]);
     expect(labels(v)).toEqual(['Resume background work']);

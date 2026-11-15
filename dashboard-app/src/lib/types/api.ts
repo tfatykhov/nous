@@ -2266,7 +2266,7 @@ export interface BackgroundState {
   surface: 'dashboard' | 'telegram' | 'agent' | 'host' | 'unknown' | null;
   verified: boolean;
   reason: string | null;
-  /** False while a halt is held in memory only (a restart would lose it). */
+  /** False while the halt is not saved yet (the server retries the write). */
   persisted: boolean;
 }
 

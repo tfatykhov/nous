@@ -109,8 +109,7 @@ async def test_the_sweep_cancels_in_order_and_reports_counts(monkeypatch, tmp_pa
     assert {c[3]["by"] for c in cont_calls} == {"harness"} and {c[1] for c in cont_calls} == {"halted by the owner"}
     assert report.describe() == (
         "Background work is halted. Cancelled: 2 chains, 3 subtasks (1 was running), 1 DAG, 1 shell command. "
-        "Nothing new can start, and every tool call from background work is refused. "
-        "This does not stop a script that is already running or a caller that posts to chat."
+        "Nothing new can start, and every tool call from background work is refused."
     )
     sweep_rows = [a for a in halt._store.audits if a.action == "sweep"]
     assert len(sweep_rows) == 1 and sweep_rows[0].detail["cancelled"]["subtasks"] == 3
