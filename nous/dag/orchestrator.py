@@ -1030,6 +1030,24 @@ class DAGOrchestrator:
             postmortem=cancel_provenance.dag_postmortem(cancelled_by) if cancelled_by is not None else None,
         )
 
+    async def cancel_all_active(self, cancelled_by: dict) -> int:
+        """Goals PR 0c, the halt sweep: cancel every pending and running DAG of this agent with ``cancelled_by``.
+        Returns how many were cancelled. Each is tried; when any failed, raises after the rest (the sweep reports
+        the step)."""
+        done, failed = 0, 0
+        for dag in await self._store.get_active_dags():
+            try:
+                await self.cancel_dag(dag.id, "halted by the owner", cancelled_by)
+                done += 1
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                failed += 1
+                logger.warning("Background halt: could not cancel DAG %s", dag.id, exc_info=True)
+        if failed:
+            raise RuntimeError(f"{failed} DAG(s) could not be cancelled")
+        return done
+
     async def retry_node(
         self, dag_id: UUID, node_name: str, *, allow_declined: bool = False
     ) -> None:

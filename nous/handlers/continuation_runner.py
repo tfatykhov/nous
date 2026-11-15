@@ -2010,7 +2010,9 @@ class ContinuationRunner:
     # the A2UI card call this one function. Not a tool: no model can cancel (it can only stop its own children).
     # ------------------------------------------------------------------
 
-    async def cancel_root(self, root_id: UUID, *, reason: str, actor: str) -> continuation.CancelOutcome:
+    async def cancel_root(
+        self, root_id: UUID, *, reason: str, actor: str, cancelled_by: dict | None = None
+    ) -> continuation.CancelOutcome:
         """Cancel a root and everything under it (T13). In this order:
 
         1. The store's one transaction (``continuation.cancel_root``): the marker, the lineage, its subtasks, its
@@ -2024,13 +2026,17 @@ class ContinuationRunner:
            past its model call and about to commit loses its fence instead.
         5. The bus.
 
-        Raises ``continuation.RootNotFound`` and ``continuation.CancelRefused`` (nothing written)."""
+        Raises ``continuation.RootNotFound`` and ``continuation.CancelRefused`` (nothing written).
+
+        ``cancelled_by``: the ``cancel_provenance`` record its DAGs get; None records the owner through ``actor`` (the
+        background halt's sweep passes the harness's own record)."""
         async with self._db.session() as session:
             outcome = await continuation.cancel_root(session, self._agent_id, root_id, reason=reason, actor=actor)
             await session.commit()
         self._cancelled.update(outcome.root_ids)
-        by_owner = cancel_provenance.record("owner", cancel_provenance.owner_via(actor))
-        cancelled_dags = await self._cancel_dags(outcome.dag_ids, by_owner)
+        if cancelled_by is None:
+            cancelled_by = cancel_provenance.record("owner", cancel_provenance.owner_via(actor))
+        cancelled_dags = await self._cancel_dags(outcome.dag_ids, cancelled_by)
         stopped = await self._stop_turns(outcome.root_ids)
         for cancelled in outcome.root_ids:
             await self._emit("intention.root_cancelled", {"root_id": str(cancelled), "reason": reason, "actor": actor})

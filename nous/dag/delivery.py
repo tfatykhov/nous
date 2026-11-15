@@ -35,7 +35,7 @@ from nous.api.idempotency import SUMMARY_SESSION_PREFIX
 from nous.brain import continuation
 from nous.brain.intentions import AUTHORITY_INTERNAL, SOURCE_DAG, WAKE_CONTINUE
 from nous.brain.intentions import enabled as intentions_enabled
-from nous.cancel_provenance import dag_cancel_line
+from nous.cancel_provenance import cancelled_by_halt, dag_cancel_line
 from nous.config import Settings
 from nous.dag.approval import approval_line, is_answered_approval, stopped_at_approval
 from nous.events import Event
@@ -150,7 +150,17 @@ class DAGResultDelivery:
         Never raises: a leg that throws is recorded as a failed LegResult so
         the orchestrator can decide between retry and give-up from data
         rather than from an exception type.
+
+        Goals PR 0c: a DAG the background halt cancelled is marked delivered with no leg run (no summary turn, no
+        inbox row, no bus event, no Telegram message): the halt's own report is the one message.
         """
+        if cancelled_by_halt(dag):
+            return DeliveryOutcome(
+                delivered=True,
+                legs=(LegResult("halt", ok=True, required=False, detail="cancelled by the background halt"),),
+                summary=self.build_template(dag),
+                summary_authored=False,
+            )
         legs: list[LegResult] = []
         summary_authored = False
 

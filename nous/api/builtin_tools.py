@@ -166,6 +166,35 @@ def _job_cancel_provenance(
 # ---------------------------------------------------------------------------
 
 
+async def run_runner(workspace_dir: str, args: list[str], timeout: float) -> tuple[int | None, str]:
+    """Goals PR 0c: run ``claude-jobs/runner.sh`` with ``args`` as its argv (no shell), in the workspace, with an
+    ordinary bash call's environment. Returns ``(exit code, stdout)``; ``(None, "")`` when it could not run or timed
+    out (its process group is then killed)."""
+    runner = Path(workspace_dir) / "claude-jobs" / "runner.sh"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            str(runner),
+            *args,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            cwd=workspace_dir,
+            env=_agent_env(),
+            start_new_session=True,
+        )
+    except OSError:
+        return None, ""
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        await kill_process_group(proc, even_if_exited=True)
+        return None, ""
+    except BaseException:
+        await kill_process_group(proc, even_if_exited=True)
+        raise
+    return proc.returncode, stdout.decode("utf-8", errors="replace")
+
+
 async def bash_tool(
     command: str,
     timeout: int | None = None,

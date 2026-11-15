@@ -315,4 +315,5 @@ def test_the_job_actor_set_is_what_the_dispatcher_builds_for_every_context_kind(
     from nous.cancel_provenance import JOB_ACTORS
 
     built = {(actor["by"], actor["via"]) for actor in map(context_actor, CONTEXT_KINDS)}
-    assert built == JOB_ACTORS and ("owner", "approved proposal") in JOB_ACTORS
+    # Goals PR 0c: plus the background halt's sweep, which cancels jobs as the harness.
+    assert built | {("harness", "background halt")} == JOB_ACTORS and ("owner", "approved proposal") in JOB_ACTORS

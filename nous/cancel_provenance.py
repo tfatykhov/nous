@@ -91,7 +91,25 @@ def context_actor(kind: str | None) -> dict[str, str]:
 
 # The only (by, via) pairs a job's cancelled_by mark holds: what context_actor builds for a context kind (the
 # dispatcher's actor for bash). Built from the same function, so the two cannot drift.
-JOB_ACTORS: frozenset[tuple[str, str]] = frozenset(_context_by_via(kind) for kind in CONTEXT_KINDS)
+# Goals PR 0c: the background halt's sweep cancels jobs as the harness, so its pair is listed too.
+HALT_VIA = "background halt"
+JOB_ACTORS: frozenset[tuple[str, str]] = frozenset(_context_by_via(kind) for kind in CONTEXT_KINDS) | {
+    ("harness", HALT_VIA)
+}
+
+
+def halt_record() -> dict[str, str]:
+    """The record of a cancel made by the background halt's sweep."""
+    return record("harness", HALT_VIA)
+
+
+def cancelled_by_halt(dag: object) -> bool:
+    """A cancelled DAG whose record says the background halt cancelled it. Never raises."""
+    if getattr(dag, "status", None) != "cancelled":
+        return False
+    postmortem = getattr(dag, "postmortem", None)
+    rec = postmortem.get("cancellation") if isinstance(postmortem, dict) else None
+    return isinstance(rec, dict) and rec.get("by") == "harness" and rec.get("via") == HALT_VIA
 
 
 def describe(rec: object) -> str | None:
