@@ -230,11 +230,24 @@ class SubtaskWorkerPool:
                 inbox_written = await self._record_inbox(subtask)
                 await self._record_shadow(subtask, inbox_written=inbox_written)
 
-    async def _ended_by_halt(self, subtask: Subtask, state: Any = None) -> bool:
+    async def _ended_by_halt(self, subtask: Subtask, state: Any = None, *, persisted: bool = False) -> bool:
         """Goals PR 0c: the halt ended this run (it is halted, or the run was claimed before the last halt). Then the
-        row is cancelled (a no-op once the sweep did it) and the run is remembered, so the caller delivers nothing."""
-        if not (getattr(state, "halted", False) or self._halt_refuses()):
-            return False
+        row is cancelled (a no-op once the sweep did it) and the run is remembered, so the caller delivers nothing.
+
+        ``persisted``: the hardened executor already wrote the run's outcome. Then the run counts as ended by the halt
+        only when its row is ``cancelled``: an outcome written before the halt landed is delivered as usual (a row
+        that cannot be read counts as ended)."""
+        if not getattr(state, "halted", False):
+            if not self._halt_refuses():
+                return False
+            if persisted:
+                try:
+                    row = await self._heart.subtasks.get(subtask.id)
+                except Exception:
+                    row = None
+                    logger.warning("Subtask %s: could not read its row after the halt", subtask.id.hex[:8])
+                if row is not None and row.status != "cancelled":
+                    return False
         self._halt_ended.add(subtask.id)
         try:
             await self._heart.subtasks.cancel(subtask.id)
@@ -539,7 +552,7 @@ class SubtaskWorkerPool:
                     executed = True
                     # Telemetry parity with the legacy path. Persistence is
                     # already done inside execute_hardened.
-                    if await self._ended_by_halt(subtask, state):
+                    if await self._ended_by_halt(subtask, state, persisted=True):
                         pass  # Goals PR 0c: nothing is delivered
                     elif _result.ok:
                         await self._emit_event(
@@ -576,7 +589,7 @@ class SubtaskWorkerPool:
                         "Subtask %s hardened-path errored",
                         subtask.id.hex[:8],
                     )
-                    if await self._ended_by_halt(subtask, state):
+                    if await self._ended_by_halt(subtask, state, persisted=executed):
                         return  # Goals PR 0c: nothing is delivered
                     if not executed:
                         attempts = max(1, state.attempts)
@@ -831,8 +844,6 @@ class SubtaskWorkerPool:
         """Send Telegram notification if configured and subtask has notify=True."""
         if not subtask.notify:
             return
-        if background_halt.current().halted:
-            return  # Goals PR 0c: while halted the owner gets one message, the halt's report
 
         token = self._settings.telegram_bot_token
         chat_id = self._settings.telegram_chat_id

@@ -507,3 +507,41 @@ async def test_a_legacy_inline_run_spanning_a_halt_and_a_resume_is_cancelled_not
     assert is_error and background_halt.HALT_REASON in text and not halt.halted
     (row,) = await _subtasks(env)
     assert row.status == "cancelled" and row.result is None
+
+
+async def test_a_hardened_run_saved_before_the_halt_landed_is_delivered_as_usual(env_factory):  # noqa: F811
+    env = await env_factory(
+        result_inbox_enabled=True,
+        subtask_hardening_enabled=True,
+        telegram_bot_token="token",
+        telegram_chat_id="1",
+    )
+    subtask = await _make(env, notify=True)
+    halt = _install()
+    runner = MagicMock()
+    runner.end_conversation = AsyncMock()
+    runner.root_cancelled = MagicMock(return_value=False)
+
+    async def run_turn(**kwargs):
+        await kwargs["extra_tools"]["submit_final_report"][1](**GOOD_REPORT)
+        return "Report submitted.", MagicMock(), {"input_tokens": 10, "output_tokens": 5, "tool_calls": 1}
+
+    runner.run_turn = AsyncMock(side_effect=run_turn)
+    real_complete = env.heart.subtasks.complete
+
+    async def complete_then_the_halt_lands(*args, **kwargs):
+        await real_complete(*args, **kwargs)
+        await halt.halt(actor="t", surface="dashboard")
+
+    env.heart.subtasks.complete = complete_then_the_halt_lands
+    bus = RecordingBus()
+    pool = SubtaskWorkerPool(runner, env.heart, env.settings, bus=bus, http_client=env.http)
+    claimed = await env.heart.subtasks.dequeue("worker-0")
+    with background_halt.epoch_scope(halt.epoch):
+        await pool._process_subtask(claimed)
+    assert halt.halted
+    row = await _row(env, subtask.id)
+    assert row.status == "completed"
+    assert "subtask_completed" in [e.type for e in bus.events]
+    env.http.post.assert_called_once()  # its push
+    assert len(await inbox_rows(env, subtask.id)) == 1  # its inbox row
