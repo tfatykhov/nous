@@ -182,7 +182,8 @@ nous/
 │       ├── rest.py             # Starlette REST API (the route list in `create_app`; see `docs/reference/rest-api.md`)
 │       ├── commitment_routes.py # F111: POST /commitments/{id}/drop|done, the owner's /drop and /done
 │       ├── mcp_client_routes.py # F112 PR 2a: the owner's /integrations/mcp routes (list, probe, add, change, refresh, remove MCP servers; PR 2c: store, replace and remove a server's key, never returned; PR 2d: OAuth start, callback page, paste fallback, sign-in state, sign-out), behind the proxy's X-Nous-Proxy-Secret; mounted only with NOUS_MCP_CLIENT_ENABLED
-│       ├── intention_routes.py # F099 Phase 2d: the four owner-action routes (decide, answer, list), thin over ContinuationRunner
+│       ├── intention_routes.py # F099 Phase 2d/2e: the owner-action routes (decide, answer, list, cancel), thin over ContinuationRunner; the POSTs require the owner's or the proxy's secret
+│       ├── owner_guard.py # Owner routes require the owner's or the proxy's secret: the check and the route wrapper (OwnerGuard), and which proof grants which capability
 │       ├── intention_dashboard.py # F099 Phase 3c: GET /dashboard/intentions queries (the tree and the metrics), read-only, Postgres-only
 │       ├── autonomy_dashboard.py # Autonomy scoreboard: GET /dashboard/autonomy data (taps, approval cards, grades, task scores, inventory, warn classes), read-only
 │       ├── memory_write_health_dashboard.py # P4: GET /dashboard/memory-write-health data (rollup, rules evaluated now, acknowledgements) and the acknowledge body parser
