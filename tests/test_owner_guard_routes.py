@@ -147,3 +147,139 @@ async def test_no_log_record_carries_a_secret_on_a_refused_or_an_accepted_call(
         text = record.getMessage() + repr(record.args)
         for value in (OWNER_VALUE, PROXY_VALUE, "a-wrong-value", "another-wrong-value", OWNER_DIGEST, PROXY_DIGEST):
             assert value not in text
+
+
+# ---- the owner setting routes in rest.py ----------------------------------------------------------------------
+
+# Each owner setting route, with a body, and what its handler answers with the stand-ins below (proof it ran).
+OWNER_ROUTES = {
+    ("PUT", "/heartbeat/config"): (b"{}", 503, {"error": "Heartbeat not enabled"}),
+    ("PUT", "/heartbeat/escalation-policy"): (b"{}", 503, {"error": "Finding store not available"}),
+    ("POST", "/admin/search-weights"): (b'{"vector_weight": "x"}', 400, {"error": "vector_weight must be a number"}),
+    ("POST", "/undo/snapshots/abc/restore"): (b"{}", 503, {"error": "Undo journal not enabled"}),
+}
+INTENTION_ROUTE_SET = {
+    ("POST", "/intentions/proposals/{id}/decide"),
+    ("POST", "/intentions/questions/answer"),
+    ("POST", "/intentions/questions/{id}/answer"),
+    ("POST", "/intentions/{root_id}/cancel"),
+}
+REST_ROUTE_SET = {
+    ("PUT", "/heartbeat/config"),
+    ("PUT", "/heartbeat/escalation-policy"),
+    ("POST", "/admin/search-weights"),
+    ("POST", "/undo/snapshots/{id}/restore"),
+}
+
+
+def _rest_app(tmp_path, *, owner: bool = True, proxy: bool = True, **kw: object) -> Starlette:
+    from nous.api.rest import create_app
+    from nous.config import Settings
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        owner_route_secret_sha256=OWNER_DIGEST if owner else "",
+        mcp_client_ui_secret_sha256=PROXY_DIGEST if proxy else "",
+    )
+    return create_app(
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(schedules=None),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        settings,
+        heartbeat_runner=SimpleNamespace(finding_store=None),
+        **kw,
+    )
+
+
+@pytest.mark.parametrize(("method", "path"), list(OWNER_ROUTES))
+async def test_an_owner_setting_route_without_a_secret_is_403(tmp_path, method: str, path: str) -> None:
+    app = _rest_app(tmp_path)
+    as_json = await _send(app, method, path, json={})
+    not_json = await _send(app, method, path, content=b"not json")
+    assert (as_json.status_code, not_json.status_code) == (403, 403)
+    assert as_json.json() == not_json.json() == FORBIDDEN
+
+
+@pytest.mark.parametrize(("method", "path"), list(OWNER_ROUTES))
+@pytest.mark.parametrize(
+    ("headers", "allowed"),
+    [
+        ({}, False),
+        (OWNER, True),
+        ({**PROXY, "content-type": "application/json"}, True),
+        ({**PROXY, "content-type": "text/plain"}, False),
+        ({**PROXY, "content-type": "text/plain; application/json"}, False),
+        ({**OWNER, "content-type": "text/plain"}, True),
+    ],
+    ids=["none", "owner", "proxy-json", "proxy-text", "proxy-smuggled-json", "owner-text"],
+)
+async def test_each_owner_setting_route_against_each_proof(
+    tmp_path, method: str, path: str, headers: dict[str, str], allowed: bool
+) -> None:
+    probe, status, body = OWNER_ROUTES[(method, path)]
+    sent = {"content-type": "application/json", **headers}
+    response = await _send(_rest_app(tmp_path), method, path, content=probe, headers=sent)
+    if allowed:
+        assert (response.status_code, response.json()) == (status, body)
+    elif "X-Nous-Proxy-Secret" in headers:
+        assert (response.status_code, response.json()) == (415, NOT_JSON)
+    else:
+        assert (response.status_code, response.json()) == (403, FORBIDDEN)
+
+
+async def test_the_reads_beside_them_need_no_secret(tmp_path) -> None:
+    app = _rest_app(tmp_path)
+    for path in ("/undo/snapshots", "/admin/search-weights"):
+        response = await _send(app, "GET", path)
+        assert response.status_code != 403, path
+
+
+def test_exactly_the_owner_routes_are_guarded(tmp_path) -> None:
+    app = _rest_app(tmp_path)
+    guarded = {
+        (method, route.path)
+        for route in app.routes
+        if getattr(route, "methods", None) and getattr(route.endpoint, "owner_guarded", False)
+        for method in route.methods - {"HEAD"}
+    }
+    assert guarded == REST_ROUTE_SET | INTENTION_ROUTE_SET
+
+
+def _unconfigured_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if "NOUS_OWNER_ROUTE_SECRET_SHA256" in record.getMessage()
+        and "NOUS_MCP_CLIENT_UI_SECRET_SHA256" in record.getMessage()
+    ]
+
+
+async def test_an_unconfigured_guard_says_so_once_at_start(tmp_path, caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING)
+    _rest_app(tmp_path, owner=False, proxy=False)
+    assert len(_unconfigured_records(caplog)) == 1
+    caplog.clear()
+    _rest_app(tmp_path, owner=True, proxy=False)
+    _rest_app(tmp_path, owner=False, proxy=True)
+    assert _unconfigured_records(caplog) == []
+
+
+async def test_no_log_record_carries_a_secret_on_an_owner_setting_route(
+    tmp_path, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    app = _rest_app(tmp_path)
+    wrong = {"X-Nous-Owner-Secret": "a-wrong-value", "X-Nous-Proxy-Secret": "another-wrong-value"}
+    statuses = [
+        (await _send(app, "PUT", "/heartbeat/config", json={}, headers=headers)).status_code
+        for headers in (wrong, OWNER, PROXY)
+    ]
+    assert statuses == [403, 503, 503]
+    assert caplog.records
+    for record in caplog.records:
+        text = record.getMessage() + repr(record.args)
+        for value in (OWNER_VALUE, PROXY_VALUE, "a-wrong-value", "another-wrong-value", OWNER_DIGEST, PROXY_DIGEST):
+            assert value not in text

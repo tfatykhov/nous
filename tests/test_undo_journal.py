@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import threading
@@ -32,6 +33,11 @@ from nous.heartbeat.dynamic import DynamicCheckLoader
 from nous.heartbeat.registry import CheckRegistry
 from nous.storage.models import DynamicCheckModel, Schedule
 from nous.undo_journal import RestoreDeps, UndoJournal
+
+# The restore and the heartbeat config routes require the owner's secret.
+OWNER_SECRET = "owner-only-test-value"
+OWNER_HEADERS = {"X-Nous-Owner-Secret": OWNER_SECRET}
+OWNER_DIGEST = hashlib.sha256(OWNER_SECRET.encode()).hexdigest()
 
 # ---------------------------------------------------------------------------
 # Fixtures and helpers
@@ -191,14 +197,15 @@ class TestJournalStore:
             SimpleNamespace(schedules=None),
             SimpleNamespace(),
             SimpleNamespace(),
-            Settings(workspace_dir=str(workspace)),
+            Settings(workspace_dir=str(workspace), owner_route_secret_sha256=OWNER_DIGEST),
         )
         bad = uuid.uuid4().hex
         journal._root.mkdir(parents=True, exist_ok=True)
         journal._write_file(f"20260101T000000000000-{bad}.json", {}, b"not json")
         keyless = uuid.uuid4().hex
         journal._write_file(f"20260101T000000000001-{keyless}.json", {"restorable": True})
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test", headers=OWNER_HEADERS) as client:
             missing = await client.post(f"/undo/snapshots/{uuid.uuid4().hex}/restore")
             malformed = await client.post(f"/undo/snapshots/{bad}/restore")
             shapeless = await client.post(f"/undo/snapshots/{keyless}/restore")
@@ -909,7 +916,7 @@ class TestConfigKind:
         from nous.api.rest import create_app
         from nous.config import Settings
 
-        settings = Settings(workspace_dir=str(workspace))
+        settings = Settings(workspace_dir=str(workspace), owner_route_secret_sha256=OWNER_DIGEST)
         heartbeat_runner = SimpleNamespace(registry=CheckRegistry())
         app = create_app(
             SimpleNamespace(),
@@ -928,7 +935,8 @@ class TestConfigKind:
 
         monkeypatch.setattr(journal, "record", _slow_record)
         original = settings.heartbeat_tick_interval
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test", headers=OWNER_HEADERS) as client:
             first = asyncio.create_task(client.put("/heartbeat/config", json={"tick_interval": original + 1}))
             await asyncio.sleep(0.01)
             second = asyncio.create_task(client.put("/heartbeat/config", json={"tick_interval": original + 2}))
@@ -948,7 +956,7 @@ async def test_end_to_end_restore_every_kind_identically(db, heart, workspace, j
     from nous.api.rest import create_app
     from nous.config import Settings
 
-    settings = Settings(workspace_dir=str(workspace))
+    settings = Settings(workspace_dir=str(workspace), owner_route_secret_sha256=OWNER_DIGEST)
     loader = DynamicCheckLoader(db=db, registry=CheckRegistry(), agent_id=settings.agent_id)
     heartbeat_runner = SimpleNamespace(registry=loader._registry, dynamic_loader=loader)
     app = create_app(
@@ -957,7 +965,7 @@ async def test_end_to_end_restore_every_kind_identically(db, heart, workspace, j
 
     async def restore(client: AsyncClient, kind: str, action: str) -> None:
         sid = (await _only(journal, kind, action))["id"]
-        resp = await client.post(f"/undo/snapshots/{sid}/restore")
+        resp = await client.post(f"/undo/snapshots/{sid}/restore", headers=OWNER_HEADERS)
         assert resp.status_code == 200, resp.json()
         assert resp.json()["pre_restore_id"]
 
@@ -988,7 +996,7 @@ async def test_end_to_end_restore_every_kind_identically(db, heart, workspace, j
 
         # runtime config
         before = settings.heartbeat_tick_interval
-        resp = await client.put("/heartbeat/config", json={"tick_interval": before + 17})
+        resp = await client.put("/heartbeat/config", json={"tick_interval": before + 17}, headers=OWNER_HEADERS)
         assert resp.json()["fields"] == ["tick_interval"] and settings.heartbeat_tick_interval == before + 17
         await restore(client, "config", "heartbeat_config")
         assert settings.heartbeat_tick_interval == before
