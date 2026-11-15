@@ -1,18 +1,25 @@
 """F114: goal text a session reads as data. Each journal entry and each plan step sits in a tag of its own, and
 the text inside cannot open or close one: every ``journal_entry``, ``plan_step`` and ``result_message`` delimiter in
-it is escaped, in any case and with any spacing. Attribute values keep only letters, digits and ``_.:-``, so a
+it is escaped, in any case and with any spacing, behind a fullwidth or small angle bracket or slash too. Invisible
+format characters (zero-width spaces and joiners, direction marks) and control characters other than newline and
+tab are removed first, so none can hide a delimiter. Attribute values keep only letters, digits and ``_.:-``, so a
 stored value cannot leave its quotes."""
 
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Mapping
 from typing import Any
 
 from nous.heart.result_inbox import neutralize_delimiters
 
-# Any case and any whitespace: the model reads `</ JOURNAL_ENTRY >` as a delimiter just as readily as the exact form.
-_TAGS = re.compile(r"<(\s*/?\s*(?:journal_entry|plan_step))", re.IGNORECASE)
+# Any case and any whitespace: the model reads `</ JOURNAL_ENTRY >` as a delimiter just as readily as the exact form,
+# and `\uff1c/journal_entry\uff1e` (fullwidth) or `\ufe64/plan_step\ufe65` (small form) as well.
+_OPENERS = "<\uff1c\ufe64"
+_SLASHES = "/\uff0f"
+_TAGS = re.compile(rf"[{_OPENERS}](\s*[{_SLASHES}]?\s*(?:journal_entry|plan_step|result_message))", re.IGNORECASE)
+_KEPT_CONTROLS = frozenset("\n\t")
 _ATTR_UNSAFE = re.compile(r"[^A-Za-z0-9_.:-]")
 _ATTR_MAX = 40
 STEP_TEXT_MAX = 300
@@ -20,9 +27,16 @@ STEP_EVIDENCE_MAX = 3
 STEP_EVIDENCE_REF_MAX = 300
 
 
+def _visible(text: str) -> str:
+    """``text`` without format characters (Unicode category Cf, which a zero-width joiner in an emoji sequence also
+    is) or control characters (Cc) other than newline and tab."""
+    return "".join(ch for ch in text if ch in _KEPT_CONTROLS or unicodedata.category(ch) not in ("Cc", "Cf"))
+
+
 def neutralize(text: str) -> str:
-    """``text`` with every opening or closing ``journal_entry``, ``plan_step`` and ``result_message`` escaped."""
-    return _TAGS.sub(r"&lt;\1", neutralize_delimiters(text))
+    """``text``, its invisible and control characters removed, with every opening or closing ``journal_entry``,
+    ``plan_step`` and ``result_message`` escaped (the bracket becomes ``&lt;``)."""
+    return _TAGS.sub(r"&lt;\1", neutralize_delimiters(_visible(text)))
 
 
 def _attr(value: Any) -> str:

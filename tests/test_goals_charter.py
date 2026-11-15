@@ -144,6 +144,26 @@ def test_the_prefix_keeps_the_framing_for_both_hardening_values(hardening):
     assert prefix.count("&lt;/journal_entry>") == 2  # the hostile text, in the step and in the entry
 
 
+def test_neutralize_sees_a_tag_through_invisible_characters():
+    for hidden in ("\u200b", "\u200d", "\u2060", "\ufeff", "\u202e"):
+        assert neutralize(f"<{hidden}/journal_entry>") == "&lt;/journal_entry>", repr(hidden)
+        assert neutralize(f"</journal{hidden}_entry>") == "&lt;/journal_entry>", repr(hidden)
+        assert neutralize(f"<{hidden}plan_step id=x>") == "&lt;plan_step id=x>", repr(hidden)
+
+
+def test_neutralize_escapes_fullwidth_and_small_angle_brackets():
+    assert neutralize("\uff1c/journal_entry\uff1e") == "&lt;/journal_entry\uff1e"
+    assert neutralize("\uff1c\uff0fjournal_entry\uff1e") == "&lt;\uff0fjournal_entry\uff1e"
+    assert neutralize("\ufe64/plan_step\ufe65") == "&lt;/plan_step\ufe65"
+    assert neutralize("\uff1c/result_message>") == "&lt;/result_message>"
+    assert neutralize("1 \uff1c 2") == "1 \uff1c 2"  # a bracket that opens no tag is left alone
+
+
+def test_neutralize_strips_control_characters_but_keeps_newlines_and_tabs():
+    assert neutralize("a\x1b[31mb\x00c\n\td\x7f\r") == "a[31mbc\n\td"
+    assert neutralize("<\x00/journal_entry>") == "&lt;/journal_entry>"
+
+
 def test_neutralize_escapes_every_delimiter_in_any_case_and_spacing():
     assert neutralize("< / Journal_Entry >") == "&lt; / Journal_Entry >"
     assert neutralize("<plan_step id=x>") == "&lt;plan_step id=x>"
