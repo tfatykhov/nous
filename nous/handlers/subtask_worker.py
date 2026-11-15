@@ -230,13 +230,18 @@ class SubtaskWorkerPool:
                 inbox_written = await self._record_inbox(subtask)
                 await self._record_shadow(subtask, inbox_written=inbox_written)
 
-    async def _ended_by_halt(self, subtask: Subtask, state: Any = None, *, persisted: bool = False) -> bool:
+    async def _ended_by_halt(
+        self, subtask: Subtask, state: Any = None, *, persisted: bool = False, usage: dict | None = None
+    ) -> bool:
         """Goals PR 0c: the halt ended this run (it is halted, or the run was claimed before the last halt). Then the
         row is cancelled (a no-op once the sweep did it) and the run is remembered, so the caller delivers nothing.
 
         ``persisted``: the hardened executor already wrote the run's outcome. Then the run counts as ended by the halt
         only when its row is ``cancelled``: an outcome written before the halt landed is delivered as usual (a row
-        that cannot be read counts as ended)."""
+        that cannot be read counts as ended).
+
+        The run's usage (``state``'s counters, else the turn's ``usage``) stays on the cancelled row, where the DAG
+        roll-up reads it."""
         if not getattr(state, "halted", False):
             if not self._halt_refuses():
                 return False
@@ -249,10 +254,31 @@ class SubtaskWorkerPool:
                 if row is not None and row.status != "cancelled":
                     return False
         self._halt_ended.add(subtask.id)
+        if state is not None:
+            counters = {
+                "attempts": max(1, getattr(state, "attempts", 0) or 0),
+                "tokens_in": getattr(state, "tokens_in", 0),
+                "tokens_out": getattr(state, "tokens_out", 0),
+                "tool_calls_made": getattr(state, "tool_calls_made", 0),
+            }
+        elif usage is not None:
+            counters = {
+                "attempts": 1,
+                "tokens_in": usage.get("input_tokens", 0),
+                "tokens_out": usage.get("output_tokens", 0),
+                "tool_calls_made": usage.get("tool_calls", 0),
+            }
+        else:
+            counters = None
         try:
             await self._heart.subtasks.cancel(subtask.id)
         except Exception:
             logger.exception("Subtask %s: could not cancel the run the halt ended", subtask.id.hex[:8])
+        if counters is not None:
+            try:  # bookkeeping: a failed write never fails the halt
+                await self._heart.subtasks.record_cancelled_usage(subtask.id, **counters)
+            except Exception:
+                logger.warning("Subtask %s: could not record the halted run's usage", subtask.id.hex[:8])
         logger.info("Background halt: subtask %s ended by the halt; nothing delivered", subtask.id.hex[:8])
         return True
 
@@ -682,7 +708,7 @@ class SubtaskWorkerPool:
             # zero in the default configuration (and, because the claim is
             # one-shot, freezes that zero permanently).
             usage = usage or {}
-            if await self._ended_by_halt(subtask):
+            if await self._ended_by_halt(subtask, usage=usage):
                 return  # Goals PR 0c: the halted turn's text is never delivered as a result
             written = await self._heart.subtasks.complete(
                 subtask.id, response_text,

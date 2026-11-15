@@ -453,12 +453,27 @@ async def execute_hardened(
         if not cancelled and state.halted:
             # Goals PR 0c: the row is cancelled, never completed or failed, and no outcome is emitted, so nothing
             # delivers the halted run's text. complete()/fail() would also be no-ops once the sweep cancelled it.
+            # The run's usage stays on the cancelled row, where the DAG roll-up reads it.
             try:
                 await asyncio.shield(heart.subtasks.cancel(subtask.id))
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("Subtask %s: could not cancel the halted run's row", subtask.id.hex[:8])
+            try:  # bookkeeping: a failed write never fails the halt
+                await asyncio.shield(
+                    heart.subtasks.record_cancelled_usage(
+                        subtask.id,
+                        attempts=attempt or 1,
+                        tokens_in=total_in,
+                        tokens_out=total_out,
+                        tool_calls_made=total_calls,
+                    )
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Subtask %s: could not record the halted run's usage", subtask.id.hex[:8])
         elif not cancelled:
             try:
                 await asyncio.shield(_persist_outcome(

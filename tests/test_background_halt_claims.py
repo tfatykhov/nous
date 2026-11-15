@@ -401,6 +401,7 @@ async def test_a_continuation_turn_the_halt_ended_commits_no_report_and_charges_
     async with env.db.session() as s:
         row = (await s.execute(select(Intention).where(Intention.id == root.id))).scalar_one()
     assert row.attempts == 0 and row.claim_token is None  # released, as for a stop
+    assert row.failed_tokens == 110  # what the turn spent still counts against its root
 
 
 async def test_a_dag_summary_the_halt_cut_short_is_not_used():
@@ -617,3 +618,93 @@ async def test_a_check_that_runs_no_turn_keeps_its_result_when_the_halt_lands_du
     findings = await hb._tick()
     assert [f.summary for f in findings] == ["A new invoice arrived"]  # kept, not discarded
     hb._record_run_stats.assert_awaited_once()
+
+
+async def test_a_halted_hardened_run_records_its_usage_on_the_cancelled_row():
+    from test_f061_subtask_executor import _make_heart_mock, _make_settings, _make_subtask, _scripted_runner
+
+    from nous.handlers.subtask_executor import execute_hardened
+
+    halt = _install()
+    runner = _scripted_runner(
+        scripted_payloads=[GOOD_REPORT], scripted_usages=[{"input_tokens": 300, "output_tokens": 120, "tool_calls": 4}]
+    )
+    inner = runner.run_turn.side_effect
+
+    async def halt_then_return(**kwargs):
+        await halt.halt(actor="t", surface="dashboard")
+        return await inner(**kwargs)
+
+    runner.run_turn.side_effect = halt_then_return
+    heart = _make_heart_mock()
+    heart.subtasks.cancel = AsyncMock(return_value=True)
+    heart.subtasks.record_cancelled_usage = AsyncMock(return_value=True)
+    subtask = _make_subtask()
+    await execute_hardened(subtask, "subtask-1", runner=runner, heart=heart, settings=_make_settings())
+    heart.subtasks.record_cancelled_usage.assert_awaited_once_with(
+        subtask.id, attempts=1, tokens_in=300, tokens_out=120, tool_calls_made=4
+    )
+
+
+@pytest.mark.postgres_only  # the usage write uses GREATEST
+async def test_a_halted_dag_node_run_keeps_its_tokens_on_its_row_and_in_its_dags_total(db):
+    from test_fix_586_cancelled_subtask_usage import REPORT, _dag_with_running_node
+
+    from nous import cancel_provenance
+
+    store, manager, orch, dag_id, row = await _dag_with_running_node(db)
+    halt = _install()
+
+    class _Runner:
+        async def run_turn(self, **kwargs):
+            await halt.halt(actor="t", surface="dashboard")  # lands while the model call is out
+            _schema, submit = kwargs["extra_tools"]["submit_final_report"]
+            await submit(**REPORT)
+            return "Report submitted.", None, {"input_tokens": 300, "output_tokens": 120, "tool_calls": 4}
+
+        async def end_conversation(self, session_id, **_):
+            return True
+
+        def root_cancelled(self, _root):
+            return False
+
+    from test_fix_586_cancelled_subtask_usage import _settings as _586_settings
+
+    pool = SubtaskWorkerPool(runner=_Runner(), heart=SimpleNamespace(subtasks=manager), settings=_586_settings())
+    with background_halt.epoch_scope(halt.epoch):
+        await pool._process_subtask(row)
+    stored = await manager.get(row.id)
+    assert stored.status == "cancelled" and stored.result is None
+    assert (stored.tokens_in, stored.tokens_out, stored.tool_calls_made) == (300, 120, 4)
+    await orch.cancel_dag(dag_id, "halted by the owner", cancel_provenance.halt_record())  # the sweep's DAG step
+    await orch.tick()
+    await orch.wait_for_delivery()
+    await orch.tick()
+    assert (await store.get_dag(dag_id)).tokens_consumed == 420
+
+
+@pytest.mark.postgres_only  # the usage write uses GREATEST
+async def test_a_halted_legacy_run_records_its_usage_on_the_cancelled_row(env_factory):  # noqa: F811
+    env = await env_factory(subtask_hardening_enabled=False)
+    subtask = await _make(env, notify=False)
+    halt = _install()
+    runner = MagicMock()
+    runner.end_conversation = AsyncMock()
+    runner.root_cancelled = MagicMock(return_value=False)
+
+    async def run_turn(**kwargs):
+        await halt.halt(actor="t", surface="dashboard")
+        return "late", MagicMock(), {"input_tokens": 70, "output_tokens": 30, "tool_calls": 2}
+
+    runner.run_turn = AsyncMock(side_effect=run_turn)
+    pool = SubtaskWorkerPool(runner, env.heart, env.settings, http_client=env.http)
+    claimed = await env.heart.subtasks.dequeue("worker-0")
+    with background_halt.epoch_scope(halt.epoch):
+        await pool._process_subtask(claimed)
+    row = await _row(env, subtask.id)
+    assert row.status == "cancelled" and (row.tokens_in, row.tokens_out, row.tool_calls_made, row.attempts) == (
+        70,
+        30,
+        2,
+        1,
+    )

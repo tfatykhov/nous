@@ -21,7 +21,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, update
 
 from nous import background_halt, cancel_provenance
 from nous.a2ui.intention_keys import ACTIVE_KEY, INTENTION_DEDUP_PREFIX, KIND_PROPOSAL, KIND_QUESTION, parse_key
@@ -1297,8 +1297,9 @@ class ContinuationRunner:
             if background_halt.current().refuses("continuation", session_id, background_halt.TURN_EPOCH.get()):
                 # Goals PR 0c: the halt ended the turn. Nothing is committed (no fallback report of its fixed text):
                 # the claim is freed with no attempt charged, as for a stop, and the halt's sweep cancels the root.
+                # What the turn spent still counts against its root.
                 logger.info("Background halt: the continuation of root %s ended by the halt", claim.root_id)
-                await self._release(claim)
+                await self._release(claim, tokens=state.tokens)
                 return None
             # Read BEFORE the session ends: end_conversation pops the ledger.
             wrote_memory = any(
@@ -1800,9 +1801,23 @@ class ContinuationRunner:
             )
         self.wake()
 
-    async def _release(self, claim: continuation.Claim) -> None:
+    async def _release(self, claim: continuation.Claim, *, tokens: tuple[int, int] = (0, 0)) -> None:
+        """Free the claim with no attempt charged. ``tokens``: what the claim's turn spent, booked as a failed
+        attempt's are (``failed_tokens`` of the claim's deepest intention, under the claim's fence) in the same
+        transaction."""
+        spent = int(tokens[0]) + int(tokens[1])
         try:
             async with self._db.session() as session:
+                if spent > 0:
+                    await session.execute(
+                        update(Intention)
+                        .where(
+                            Intention.agent_id == self._agent_id,
+                            Intention.id == claim.deepest.id,
+                            Intention.claim_token == claim.claim_token,
+                        )
+                        .values(failed_tokens=Intention.failed_tokens + spent, updated_at=datetime.now(UTC))
+                    )
                 await continuation.release_claim(session, self._agent_id, claim)
                 await session.commit()
         except Exception:

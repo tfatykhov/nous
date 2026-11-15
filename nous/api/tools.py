@@ -3943,8 +3943,19 @@ def create_subtask_tools(
                         timeout=effective_timeout,
                     )
                     if background_halt.current().refuses("subtask", subtask_session_id, halt_epoch):
-                        # Goals PR 0c: the halt ended this inline run; its row is cancelled, never completed.
+                        # Goals PR 0c: the halt ended this inline run; its row is cancelled, never completed, and
+                        # keeps the run's usage.
                         await heart.subtasks.cancel(subtask.id)
+                        try:  # bookkeeping: a failed write never fails the refusal
+                            await heart.subtasks.record_cancelled_usage(
+                                subtask.id,
+                                attempts=1,
+                                tokens_in=(_usage or {}).get("input_tokens", 0),
+                                tokens_out=(_usage or {}).get("output_tokens", 0),
+                                tool_calls_made=(_usage or {}).get("tool_calls", 0),
+                            )
+                        except Exception:
+                            logger.warning("Subtask %s: could not record the halted run's usage", subtask.id.hex[:8])
                         return _tool_error(f"[Subtask {subtask.id.hex[:8]} blocked: {background_halt.HALT_REASON}]")
 
                     # F061 PR-1: record outcome on legacy path so dashboard rows
