@@ -20,6 +20,7 @@ from f099_support import (
     commit_ask,
     env_factory,  # noqa: F401
     make_child,
+    make_dag,
     record,
     runner_env,  # noqa: F401
     set_intention,
@@ -34,6 +35,9 @@ from nous.goals.store import GoalStore
 from nous.handlers.continuation_runner import ContinuationRunner
 from nous.heart.schemas import CensorInput
 from nous.storage.models import (
+    DAGNode,
+    DynamicCheckModel,
+    ExecutionDAG,
     Goal,
     GoalJournal,
     GoalSession,
@@ -1002,6 +1006,129 @@ async def test_after_a_restart_an_old_closed_session_with_a_subtask_still_runnin
     await _settle(w, subtask_id, tokens_in=30, tokens_out=3)
     await restarted.tick()
     assert (await _session(w, session.id)).spent == 33
+
+
+async def _lineage_dag(w: SimpleNamespace, root: Intention, shape: str) -> ExecutionDAG:
+    """A DAG of the session's lineage whose token total can still rise, in one of three ways: ``running`` (the
+    DAG is not terminal), ``unclaimed`` (terminal, but a finished node's tokens are not claimed into the total
+    yet) or ``check`` (terminal, but a check node's heartbeat check is still enabled and its runs add tokens)."""
+    dag, _store = await make_dag(w.env, parent=root, status="running" if shape == "running" else "completed")
+    async with w.db.session() as s:
+        node = (await s.execute(select(DAGNode).where(DAGNode.dag_id == dag.id))).scalar_one()
+        if shape == "running":
+            values = {"status": "pending"}
+        elif shape == "unclaimed":
+            values = {"status": "completed", "subtask_id": uuid.uuid4(), "tokens_counted": False}
+        else:
+            check_name = f"dag-check-{uuid.uuid4().hex[:8]}"
+            values = {"status": "completed", "node_type": "check", "check_name": check_name, "tokens_counted": True}
+            s.add(
+                DynamicCheckModel(
+                    agent_id=w.agent, name=check_name, description="the DAG's check", prompt="Is it done?", enabled=True
+                )
+            )
+        await s.execute(update(DAGNode).where(DAGNode.id == node.id).values(**values))
+        await s.commit()
+    return dag
+
+
+async def _dag_settles(w: SimpleNamespace, dag: ExecutionDAG, *, tokens: int) -> None:
+    """The DAG ends and its total is final: every node's tokens claimed, any check disabled."""
+    async with w.db.session() as s:
+        await s.execute(
+            update(ExecutionDAG)
+            .where(ExecutionDAG.id == dag.id)
+            .values(status="completed", completed_at=func.clock_timestamp(), tokens_consumed=tokens)
+        )
+        await s.execute(update(DAGNode).where(DAGNode.dag_id == dag.id).values(status="completed", tokens_counted=True))
+        await s.execute(update(DynamicCheckModel).where(DynamicCheckModel.agent_id == w.agent).values(enabled=False))
+        await s.commit()
+
+
+async def _bump_dag(w: SimpleNamespace, dag: ExecutionDAG, tokens: int) -> None:
+    async with w.db.session() as s:
+        await s.execute(
+            update(ExecutionDAG)
+            .where(ExecutionDAG.id == dag.id)
+            .values(tokens_consumed=ExecutionDAG.tokens_consumed + tokens)
+        )
+        await s.commit()
+
+
+async def _expire(w: SimpleNamespace, root: Intention) -> None:
+    await set_intention(w.env, root.id, deadline=datetime.now(UTC) - timedelta(hours=1))
+    async with w.db.session() as s:
+        assert await continuation.expire_roots(s, w.agent, ttl_hours=72.0, settings=w.env.settings) == [root.id]
+        await s.commit()
+
+
+@pytest.mark.parametrize("shape", ["running", "unclaimed", "check"])
+async def test_a_closed_sessions_spend_follows_a_lineage_dag_until_its_total_is_final(env_factory, shape):  # noqa: F811
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    await w.env.heart.subtasks.complete(uuid.UUID(root.source_id), RESULT)  # the first subtask is done
+    dag = await _lineage_dag(w, root, shape)
+    await _expire(w, root)
+    assert (await w.driver.tick()).closed == 1
+    await w.driver.tick()  # the DAG's total can still rise: followed
+    await _dag_settles(w, dag, tokens=300)
+    await w.driver.tick()
+    assert (await _session(w, session.id)).spent == 300
+    await _bump_dag(w, dag, 1000)  # nothing real adds to a final total: this shows whether it is read
+    await w.driver.tick()
+    assert (await _session(w, session.id)).spent == 300
+
+
+async def test_after_a_restart_an_old_closed_session_with_a_lineage_dag_still_running_is_followed(
+    env_factory,  # noqa: F811
+):
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    await w.env.heart.subtasks.complete(uuid.UUID(root.source_id), RESULT)
+    dag = await _lineage_dag(w, root, "running")
+    await _expire(w, root)
+    assert (await w.driver.tick()).closed == 1
+    hours = w.env.settings.intention_root_ttl_hours + 24
+    async with w.db.session() as s:  # closed long before the restart, past the catch-up window
+        await s.execute(
+            update(GoalSession)
+            .where(GoalSession.id == session.id)
+            .values(ended_at=GoalSession.ended_at - timedelta(hours=hours))
+        )
+        await s.commit()
+    restarted = GoalDriver(w.db, w.env.settings, w.env.heart, w.store, FakeRunner())
+    await restarted.tick()
+    await _dag_settles(w, dag, tokens=40)
+    await restarted.tick()
+    assert (await _session(w, session.id)).spent == 40
+    await _bump_dag(w, dag, 1000)
+    await restarted.tick()
+    assert (await _session(w, session.id)).spent == 40
+
+
+async def test_an_arrival_that_commits_after_the_roots_deadline_is_counted(env_factory):  # noqa: F811
+    """A late result reopens a closed session's root before its deadline; the decision turn's claim is taken
+    then and commits after the deadline. Arrival tokens are written only under a live claim, so a root with an
+    open intention (and no cancel or expiry marker) is followed across its deadline until it has none."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    await _finish(w, root)
+    assert (await w.driver.tick()).closed == 1
+    await record(w.env, root)  # reopened
+    got = await claim(w.env, root.id)  # a decision turn takes it
+    assert got is not None
+    await w.driver.tick()  # deadline not passed: read, and now followed for the open intention
+    await set_intention(w.env, root.id, deadline=datetime.now(UTC) - timedelta(minutes=1))
+    await add_arrival(w.env, root.id, 1, tokens=(90, 9))  # the turn commits after the deadline
+    await set_intention(w.env, root.id, state="closed", close_reason="resolved", claim_token=None)
+    await w.driver.tick()
+    assert (await _session(w, session.id)).spent == 99
+    await add_arrival(w.env, root.id, 2, tokens=(1000, 0))  # shows whether the session is still read
+    await w.driver.tick()
+    assert (await _session(w, session.id)).spent == 99
 
 
 # ---- the goal channel: reports become journal rows ---------------------------------------------------------------

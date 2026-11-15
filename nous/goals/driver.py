@@ -30,12 +30,24 @@ from sqlalchemy.orm import aliased
 
 from nous.brain import continuation, intentions
 from nous.cancellation import cancel_requested
+from nous.dag.store import TERMINAL_NODE_STATUSES
 from nous.goals import charter, roots, spend
 from nous.goals.store import GoalStore, clip
 from nous.heart.censor_actions import gate_subtask_task
 from nous.heart.subtasks import MAX_PENDING, SubtaskQueueFull
 from nous.storage.database import Database
-from nous.storage.models import Goal, GoalJournal, GoalSession, Intention, IntentionArrival, ResultInbox, Subtask
+from nous.storage.models import (
+    DAGNode,
+    DynamicCheckModel,
+    ExecutionDAG,
+    Goal,
+    GoalJournal,
+    GoalSession,
+    Intention,
+    IntentionArrival,
+    ResultInbox,
+    Subtask,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -800,16 +812,16 @@ class GoalDriver:
     async def refresh_spent(self) -> int:
         """Read the spend of these sessions again: the open ones; the closed ones whose root's deadline has not
         passed (a late result can reopen the chain and add to it); and the closed ones followed in memory
-        (``_following``). A session is followed from its close until its lineage has no subtask whose usage is
-        still to come (``_unsettled``), and is read once more after that: the root's deadline is no accounting
-        cutoff, since an expiry or a cancel does not stop a running worker, which stores its tokens later. Then
-        the session keeps what it had and is not read again.
+        (``_following``). A session is followed from its close while its lineage has work whose tokens are still to
+        come (``_has_unsettled_work``), and is read once more after that: the root's deadline is no accounting
+        cutoff, since an expiry or a cancel does not stop a running worker or a DAG, which store their tokens
+        later. Then the session keeps what it had and is not read again.
 
         Why a flag in memory rather than a time window: each tick reads only the open sessions, those whose root's
         deadline has not passed and the followed ones, all a handful, and checks unsettled work only over their
         roots. After a restart the flags are gone, so the first tick also reads, once, every session closed within
         ``intention_root_ttl_hours`` and every closed session whose lineage still has unsettled work, whatever its
-        age: a subtask that settled while no driver ran is counted then. Returns the sessions whose spend changed."""
+        age: work that settled while no driver ran is counted then. Returns the sessions whose spend changed."""
         root = aliased(Intention)
         reasons = [GoalSession.ended_at.is_(None), root.deadline > func.clock_timestamp()]
         if self._following:
@@ -827,21 +839,11 @@ class GoalDriver:
         async with self._db.session() as s:
             rows = {r.id: r for r in (await s.execute(query)).all()}
             if not self._caught_up:
-                member, subtask = aliased(Intention), aliased(Subtask)
-                unsettled_anywhere = (
-                    select(*columns)
-                    .join(member, and_(member.agent_id == self._agent_id, member.root_id == GoalSession.root_id))
-                    .join(
-                        subtask,
-                        and_(subtask.agent_id == self._agent_id, cast(subtask.id, Text) == member.source_id),
-                    )
-                    .where(
-                        GoalSession.agent_id == self._agent_id,
-                        GoalSession.ended_at.is_not(None),
-                        member.source_kind == intentions.SOURCE_SUBTASK,
-                        self._unsettled(subtask),
-                    )
-                    .distinct()
+                unsettled_anywhere = select(*columns).where(
+                    GoalSession.agent_id == self._agent_id,
+                    GoalSession.ended_at.is_not(None),
+                    GoalSession.root_id.is_not(None),
+                    self._has_unsettled_work(GoalSession.root_id),
                 )
                 for r in (await s.execute(unsettled_anywhere)).all():
                     rows.setdefault(r.id, r)
@@ -854,14 +856,25 @@ class GoalDriver:
                             update(GoalSession).where(GoalSession.id == r.id).values(spent=totals[r.root_id])
                         )
                         changed += 1
-                closed_roots = [r.root_id for r in rows.values() if r.ended_at is not None]
-                unsettled_roots = await self._roots_with_unsettled_work(s, closed_roots)
+                closed_roots = sorted({r.root_id for r in rows.values() if r.ended_at is not None})
+                if closed_roots:
+                    unsettled_roots = set(
+                        (
+                            await s.execute(
+                                select(Intention.id).where(
+                                    Intention.agent_id == self._agent_id,
+                                    Intention.id.in_(closed_roots),
+                                    self._has_unsettled_work(Intention.id),
+                                )
+                            )
+                        ).scalars()
+                    )
             await s.commit()
         self._following = {r.id for r in rows.values() if r.ended_at is not None and r.root_id in unsettled_roots}
         self._caught_up = True
         return changed
 
-    def _unsettled(self, subtask: Any) -> ColumnElement[bool]:
+    def _unsettled_subtask(self, subtask: Any) -> ColumnElement[bool]:
         """A subtask whose token counters can still change, as ``nous.dag.orchestrator._subtask_usage_settled``
         decides for the DAG roll-up: not yet completed, failed or cancelled; or cancelled after it started and its
         run has not reported (``attempts`` is 0) while its timeout and the grace have not passed (a cancel does not
@@ -878,22 +891,73 @@ class GoalDriver:
             ),
         )
 
-    async def _roots_with_unsettled_work(self, s: AsyncSession, root_ids: list[UUID]) -> set[UUID]:
-        """Which of ``root_ids`` have a lineage subtask whose usage can still change (``_unsettled``)."""
-        if not root_ids:
-            return set()
-        query = (
-            select(Intention.root_id)
-            .join(Subtask, and_(Subtask.agent_id == self._agent_id, cast(Subtask.id, Text) == Intention.source_id))
-            .where(
-                Intention.agent_id == self._agent_id,
-                Intention.root_id.in_(root_ids),
-                Intention.source_kind == intentions.SOURCE_SUBTASK,
-                self._unsettled(Subtask),
-            )
-            .distinct()
+    def _unsettled_dag(self, dag: Any) -> ColumnElement[bool]:
+        """A DAG whose ``tokens_consumed`` can still rise, as the orchestrator accounts it: not terminal yet; or
+        terminal with a subtask-backed node whose tokens are not claimed into the total yet, while the orchestrator
+        still claims them (its sweep's window after the DAG ended, or until the DAG is delivered when delivery is
+        on); or with a check node whose heartbeat check is still enabled (each run of it adds its tokens to the
+        total, whatever the DAG's status)."""
+        node, check_node, check = aliased(DAGNode), aliased(DAGNode), aliased(DynamicCheckModel)
+        window = timedelta(
+            seconds=int(self._settings.dag_node_max_timeout) + int(self._settings.dag_node_timeout_grace_seconds)
         )
-        return set((await s.execute(query)).scalars())
+        still_claimed = [and_(dag.completed_at.is_not(None), dag.completed_at + window > func.clock_timestamp())]
+        if getattr(self._settings, "dag_result_delivery_enabled", False) is True:
+            still_claimed.append(dag.delivered_at.is_(None))
+        unclaimed = exists().where(
+            node.dag_id == dag.id,
+            node.subtask_id.is_not(None),
+            node.tokens_counted.is_(False),
+            or_(node.status.not_in(sorted(TERMINAL_NODE_STATUSES)), *still_claimed),
+        )
+        checking = exists().where(
+            check_node.dag_id == dag.id,
+            check_node.node_type == "check",
+            check.agent_id == self._agent_id,
+            check.name == check_node.check_name,
+            check.enabled.is_(True),
+        )
+        return or_(dag.status.not_in(intentions.TERMINAL_DAG_STATUSES), unclaimed, checking)
+
+    def _has_unsettled_work(self, root_id: Any) -> ColumnElement[bool]:
+        """Whether the lineage of ``root_id`` (a column) can still add to its spend, source by source of
+        ``continuation.root_token_parts``: a lineage subtask whose usage is still to come (``_unsettled_subtask``);
+        a lineage DAG whose total can still rise (``_unsettled_dag``); and, for a root with no cancel or expiry
+        marker, an intention in an open state, since an arrival's tokens and a failed attempt's ``failed_tokens``
+        are written only under a live claim on an open intention (both fenced on the claim token, so a claim the
+        marker ended writes nothing)."""
+        member_subtask, subtask = aliased(Intention), aliased(Subtask)
+        member_dag, dag = aliased(Intention), aliased(ExecutionDAG)
+        member_open, marked = aliased(Intention), aliased(Intention)
+        subtasks = exists().where(
+            member_subtask.agent_id == self._agent_id,
+            member_subtask.root_id == root_id,
+            member_subtask.source_kind == intentions.SOURCE_SUBTASK,
+            subtask.agent_id == self._agent_id,
+            cast(subtask.id, Text) == member_subtask.source_id,
+            self._unsettled_subtask(subtask),
+        )
+        dags = exists().where(
+            member_dag.agent_id == self._agent_id,
+            member_dag.root_id == root_id,
+            member_dag.source_kind == intentions.SOURCE_DAG,
+            dag.agent_id == self._agent_id,
+            cast(dag.id, Text) == member_dag.source_id,
+            self._unsettled_dag(dag),
+        )
+        open_claimable = and_(
+            exists().where(
+                member_open.agent_id == self._agent_id,
+                member_open.root_id == root_id,
+                member_open.state.in_(continuation.OPEN_STATES),
+            ),
+            ~exists().where(
+                marked.agent_id == self._agent_id,
+                marked.id == root_id,
+                or_(marked.root_cancelled_at.is_not(None), marked.root_expired_at.is_not(None)),
+            ),
+        )
+        return or_(subtasks, dags, open_claimable)
 
     # ---- goal rows -----------------------------------------------------------------------------------------
 
