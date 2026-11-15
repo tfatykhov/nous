@@ -27,6 +27,8 @@ from nous.api.tool_policy import (
     lineage_bash_allowed,
     lineage_bash_refusal,
     lineage_bash_refusal_hint,
+    lineage_runs_build,
+    lineage_runs_runner,
 )
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="the rules read POSIX paths; CI is the gate")
@@ -661,6 +663,7 @@ NEW_GIT_COMMANDS = [
     "cd nous && git remote",
     "cd nous && git ls-files",
     "cd nous && git ls-tree HEAD",
+    "git -C {W}/nous status",
 ]
 
 
@@ -674,6 +677,105 @@ def test_the_new_git_commands_run_in_every_mode(tmp_path, offered_mode, policy_m
         tool_offered_set_enforcement_mode=offered_mode,
         tool_context_policy_mode=policy_mode,
     )
-    for command in NEW_GIT_COMMANDS:  # the classifier rates ls-tree a write: the _LOCAL levels allow it
+    for command in (c.format(W=ws) for c in NEW_GIT_COMMANDS):  # ls-tree is rated a write: _LOCAL allows it
         assert _auth(r, _internal(kind), "bash", OFFERED, {"command": command}) is None, command
     assert events == []
+
+
+# -- git -C <repo top> --
+
+DASH_C_ALLOWED = [
+    "git -C {W}/nous status",
+    "git -C {W}/nous status -sb",
+    "git -C nous log --oneline -5",
+    "git -C nous diff --stat",
+    "git -C nous branch -a",
+    "git -C nous remote",
+    "git -C nous ls-tree --name-only -r HEAD",
+    "git -C nous rev-parse --show-toplevel",
+    "git -C nous/ status",
+    "cd nous && git -C . rev-parse HEAD",
+    "git -C {W}/nous status && git -C {W}/nous log -3",
+    "cd x; git -C {W}/nous status",  # an absolute -C needs no known directory
+    "git -C nous status | head -5",
+    "git -C nous status 2>&1 | tail -3",
+    "git -C link status",
+    "git -C nous diff -- tests/test_a.py",
+]
+
+
+@pytest.mark.parametrize("command", DASH_C_ALLOWED)
+def test_git_dash_c_runs_as_cd_to_the_repo_top_would(command, ws):
+    (ws / "x").mkdir()
+    (ws / "link").symlink_to(ws / "nous")
+    assert _ok(_fmt(command, ws), ws), command
+
+
+DASH_C_REFUSED = [
+    ("git -C /etc status", "git_C"),
+    ("git -C {W}/../outside status", "git_C"),
+    ("git -C ../outside status", "git_C"),
+    ("git -C nous/../nous status", "git_C"),
+    ("git -C '~' status", "git_C"),
+    ("git -C /proc/self/cwd/nous status", "git_C"),
+    ("git -C //proc/self/cwd/nous status", "git_C"),
+    ("git -C /dev/../proc/self/cwd/nous status", "git_C"),
+    ("git -C {W} status", "git_repo"),
+    ("git -C {W}/nous/tests status", "git_repo"),
+    ("git -C {W}/nous/.git status", "git_C"),
+    ("git -C .hid status", "git_C"),
+    ("git -C {W}/missing status", "git_repo"),
+    ("git -C {W}/intentions/{RID} status", "git_repo"),
+    ("git -C {W}/claude-jobs status", "git_repo"),
+    ("git -C nous -c core.pager=x status", "git_sub"),
+    ("git -C nous -C nous status", "git_sub"),
+    ("git -C nous --git-dir=/tmp/x status", "git_sub"),
+    ("git -C nous --work-tree=/ status", "git_sub"),
+    ("git -C nous --exec-path=/tmp log", "git_sub"),
+    ("git -C nous -p log", "git_sub"),
+    ("git -C nous", "git_C"),
+    ("git -C", "git_C"),
+    ("git -C nous push", "git_sub"),
+    ("git -C nous fetch", "git_sub"),
+    ("git -C nous ls-remote", "git_sub"),
+    ("git -C nous log --output=/tmp/x", "git_opt"),
+    ("git -C nous status -sbu", "git_cluster"),
+    ("git -Cnous status", "git_repo"),  # attached: no -C at all, so git runs in the workspace root
+    ("cd nous && git -Cnous status", "git_sub"),
+    ("git -C -c status", "git_C"),
+    ("git -C nous status && gh pr list", "build_token"),
+    ("gh pr view 1; git -C nous status", "build_token"),
+    ("git -C nous status && {R} status", "build_token"),
+    ("cd nous || git -C tests status", "git_dir"),
+    ("cd nous ; git -C tests status", "git_dir"),
+    ("git -C nous status > /etc/x", "redirect"),
+    ("git -C out status", "git_C"),
+]
+
+
+@pytest.mark.parametrize(("command", "code"), DASH_C_REFUSED)
+def test_git_dash_c_refuses_everything_cd_would_and_every_other_option(command, code, ws):
+    (ws / "claude-jobs" / ".git").mkdir()
+    (ws / "intentions" / str(RID) / ".git").mkdir(parents=True)
+    (ws / "out").symlink_to("/etc")
+    reason = _refusal(_fmt(command, ws), ws)
+    assert reason is not None and reason.code == code, (command, reason and reason.code)
+
+
+@needs_git
+def test_dash_c_runs_in_the_repo_it_names(tmp_path):
+    repo = tmp_path / "gr"
+    repo.mkdir()
+    _real_git(repo, "init", "-q", "-b", "main")
+    (repo / "a.txt").write_text("one\n")
+    _real_git(repo, "add", "a.txt")
+    (tmp_path / "claude-jobs" / "prompts").mkdir(parents=True)
+    assert _ok("git -C gr status --porcelain", tmp_path)
+    via_c = _sh(tmp_path, "git -C gr status --porcelain").stdout
+    via_cd = _sh(tmp_path, "cd gr && git status --porcelain").stdout
+    assert via_c == via_cd == "A  a.txt\n"
+
+
+def test_dash_c_is_a_build_command_for_the_environment():
+    assert lineage_runs_build("git -C nous status") is True
+    assert lineage_runs_runner("git -C nous status") is False

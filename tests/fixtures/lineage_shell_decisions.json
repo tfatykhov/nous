@@ -259,7 +259,7 @@
 ["cd nous && git merge-base --al HEAD main", false, [], false],
 ["cd nous && git merge-base /etc/passwd HEAD", true, [], false],
 ["cd nous && git merge-base /etc/passwd HEAD", false, [], false],
-["cd nous && git -C . rev-parse HEAD", true, [], false],
+["cd nous && git -C . rev-parse HEAD", true, [], true],
 ["cd nous && git -C . rev-parse HEAD", false, [], false],
 ["cd nous && git rev-parse HEAD && gh pr view 1", true, [], false],
 ["cd nous && git rev-parse HEAD && gh pr view 1", false, [], false],

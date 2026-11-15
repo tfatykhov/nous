@@ -344,7 +344,7 @@ _GIT_LOG_ROLES = _GitRoles(
     counts=True,
 )
 # No --output, --ext-diff, --textconv, --no-index (a diff of any two files), -O<orderfile>, --submodule, and no
-# option before the subcommand (-C, -c, --git-dir, --work-tree, --exec-path, -p).
+# option before the subcommand (-c, --git-dir, --work-tree, --exec-path, -p) but one ``-C <repo top>`` (_git_dash_c).
 LINEAGE_GIT_READS: Mapping[str, _GitRoles] = MappingProxyType(
     {
         "status": _GitRoles(
@@ -1086,6 +1086,28 @@ def _git_allowed(args: list[str], repo: Path) -> bool:
     return _git_problem(args, repo) is None
 
 
+def _git_dash_c(
+    args: list[str], *, cwd: Path | None, root: Path, writable: list[Path]
+) -> tuple[Path, list[str]] | LineageReason:
+    """``git -C DIR SUB ...``: the repository DIR names and the arguments after it, or why not. DIR is checked as a
+    ``cd DIR &&`` is: ``_readable`` from the workspace for an absolute one, from the SURE cwd for a relative one
+    (``cwd``, None when it is not sure), then ``_build_repo``. No ``..`` component (cd resolves it logically, git
+    physically: one rule), no ``/proc`` or ``/dev`` path, and nothing but one ``-C DIR`` before the subcommand."""
+    if len(args) < 3:
+        return LineageReason("git_C")
+    dir_, rest = args[1], args[2:]
+    if dir_.startswith(("-", "~")) or "\x00" in dir_ or ".." in dir_.split("/") or _procfs(dir_):
+        return LineageReason("git_C")
+    if not dir_.startswith("/") and cwd is None:
+        return LineageReason("git_dir", "git")
+    reached = _readable(dir_, [root] if dir_.startswith("/") else [cwd], root)
+    if reached is None:
+        return LineageReason("git_C")
+    if not _build_repo(reached[0], root, writable):
+        return LineageReason("git_repo")
+    return reached[0], rest
+
+
 def _build_allowed(prog: str, args: list[str], repo: Path) -> bool:
     """A build command (LINEAGE_BUILD_PROGRAMS) whose options are all in its closed map and whose paths stay in
     ``repo``. ``make`` takes only LINEAGE_MAKE_TARGETS (at least one: a bare make runs the default goal) and
@@ -1445,6 +1467,14 @@ def lineage_bash_refusal(
         elif prog in _FS_WRITE_ROLES:
             if not _fs_write_allowed(prog, args, cwd=cwd, cwds=cwds, root=root, writable=writable):
                 return LineageReason("write", prog)
+        elif build_commands and prog == "git" and args[:1] == ["-C"]:
+            dashed = _git_dash_c(args, cwd=cwd, root=root, writable=writable)
+            if isinstance(dashed, LineageReason):
+                return dashed
+            problem = _git_problem(dashed[1], dashed[0])
+            if problem is not None:
+                return LineageReason(*problem)
+            builds = True
         elif build_commands and prog in LINEAGE_BUILD_PROGRAMS:
             if cwd is None:
                 return LineageReason("git_dir" if prog == "git" else "build_dir", prog)
