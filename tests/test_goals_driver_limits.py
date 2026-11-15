@@ -120,14 +120,22 @@ def _held_root(w: SimpleNamespace, subtask_id: uuid.UUID, *, past: int) -> objec
 # ---- stop and cancel ---------------------------------------------------------------------------------------------
 
 
-async def test_stop_cancels_the_root_and_pauses_the_goal(env_factory):  # noqa: F811
+async def test_stop_cancels_the_root_and_pauses_the_goal(env_factory, monkeypatch):  # noqa: F811
     w = await _cont_world(env_factory)
     goal = await _active(w)
     root, session = await _started(w, goal)  # its first subtask is pending
     stopped = await w.store.stop(goal.id, actor="host")
     assert (stopped.state, stopped.pause_reason, stopped.pending_request) == ("paused", "owner", "stop")
+    real_cancel, seen_at_cancel = w.runner.cancel_root, []
+
+    async def cancel_root(root_id, **kwargs):  # the harness's row is committed before the root is cancelled
+        seen_at_cancel.extend(r.evidence for r in await _harness(w, goal))
+        return await real_cancel(root_id, **kwargs)
+
+    monkeypatch.setattr(w.runner, "cancel_root", cancel_root)
     report = await w.driver.tick()
     assert report.stopped == 1
+    assert [f"ending:{session.id}"] in seen_at_cancel
     after_root = await _intention(w, root.id)
     assert after_root.root_cancelled_at is not None and after_root.state == "cancelled"
     async with w.db.session() as s:
@@ -401,7 +409,7 @@ async def test_a_running_subtask_inside_its_timeout_is_left_alone(env_factory): 
     w = await _cont_world(env_factory)
     goal = await _active(w)
     root, session = await _started(w, goal)
-    await _held_root(w, session.first_subtask_id, past=-30)
+    await _held_root(w, session.first_subtask_id, past=-5)  # five seconds inside its limit
     assert (await w.driver.tick()).stopped == 0
     assert (await _intention(w, root.id)).root_cancelled_at is None
     assert (await _session(w, session.id)).ended_at is None
@@ -527,7 +535,7 @@ async def test_a_resumed_chain_that_ends_again_leaves_one_row_and_the_close_stan
 async def test_a_resumed_chains_ending_is_named_by_the_close_rules(env_factory, arrivals, plan_step, outcome):  # noqa: F811
     w = await _world(env_factory)
     goal = await _active(w)
-    root, _closed_row = await _closed_with_arrival(w, goal)
+    root, closed_row = await _closed_with_arrival(w, goal)
     await record(w.env, root)
     for n, (decision, how) in enumerate(arrivals, start=2):
         await add_arrival(w.env, root.id, n, decision=decision, outcome=how)
@@ -538,6 +546,8 @@ async def test_a_resumed_chains_ending_is_named_by_the_close_rules(env_factory, 
     await w.driver.tick()
     (row,) = [r for r in await _harness(w, goal) if "resumed" in r.text]
     assert row.text.endswith(f"ended again: {outcome}.")
+    again = await _session(w, closed_row.id)
+    assert (again.outcome, again.steps_closed, again.summary) == ("no_step", 0, "Listed the notes.")  # never rewritten
 
 
 async def test_a_chain_that_resumes_twice_leaves_a_row_each_time(env_factory):  # noqa: F811
