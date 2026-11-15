@@ -976,6 +976,22 @@ def _in_repo(operand: str, repo: Path) -> bool:
     return _readable(operand.split("::", 1)[0], [repo], repo) is not None  # a pytest node id: path::Class::test
 
 
+def _short_word_problem(word: str, roles: _GitRoles) -> str | None:
+    """None when a short git option word is allowed: a count (``-5``), one value letter then its attached value
+    (``-n5``, ``-uno``, ``-U5``), or letters that are ALL flag-role letters (``-sb``, ``-pw``). Else the problem
+    code: ``git_opt`` (the first letter is no option), ``git_value`` (a value letter with no value) or
+    ``git_cluster`` (a flag letter first, then a letter that is not a flag)."""
+    letters = word[1:]
+    if roles.counts and letters.isdigit():
+        return None
+    first = roles.short.get(letters[0])
+    if first is None:
+        return "git_opt"
+    if first == "value":
+        return "git_value" if len(letters) == 1 else None
+    return None if all(roles.short.get(c) == "flag" for c in letters) else "git_cluster"
+
+
 def _git_problem(args: list[str], repo: Path) -> tuple[str, str] | None:
     """``git status|log|show|diff|merge-base|rev-parse`` with the options in LINEAGE_GIT_READS, and operands that stay
     in ``repo``. None when allowed, else ``(reason code, the word to quote)``."""
@@ -993,15 +1009,9 @@ def _git_problem(args: list[str], repo: Path) -> tuple[str, str] | None:
             if not (name in roles.flags or (eq and name in roles.values)):
                 return "git_opt", a
         elif a.startswith("-") and len(a) > 1:
-            role = roles.short.get(a[1])
-            if roles.counts and a[1:].isdigit():
-                continue
-            if role is None:
-                return "git_opt", a
-            if role == "flag" and len(a) > 2:
-                return "git_cluster", ""
-            if role == "value" and len(a) == 2:
-                return "git_value", a
+            code = _short_word_problem(a, roles)
+            if code is not None:
+                return code, a if code != "git_cluster" else ""
         elif not _in_repo(a, repo):
             return "git_operand", ""
     return None

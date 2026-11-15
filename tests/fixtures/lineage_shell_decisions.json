@@ -203,7 +203,7 @@
 ["cd nous && git diff -O/etc/passwd", false, [], false],
 ["cd nous && git diff --submodule=diff", true, [], false],
 ["cd nous && git diff --submodule=diff", false, [], false],
-["cd nous && git log -pw", true, [], false],
+["cd nous && git log -pw", true, [], true],
 ["cd nous && git log -pw", false, [], false],
 ["cd nous && git log --show-signature", true, [], false],
 ["cd nous && git log --show-signature", false, [], false],

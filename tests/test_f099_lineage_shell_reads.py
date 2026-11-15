@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import uuid
 from pathlib import Path
 
@@ -332,3 +334,99 @@ def test_dev_null_and_workspace_directories_named_proc_or_dev_stay_allowed(ws):
         "cat {W}/dev/a.md",
     ):
         assert _ok(_fmt(command, ws), ws), command
+
+
+# -- Task 3: combined short flags for git reads -----------------------------------------------------------------------
+
+CD = "cd nous && "
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git status -sb",
+        "git status -sbz",
+        "git status -bs",
+        "git status -sbv",
+        "git status -s -b",
+        "git log -pw",
+        "git log -pu",
+        "git log -psw -5",
+        "git show -pw HEAD",
+        "git diff -pw",
+        "git diff -suw HEAD^",
+        "git log -n5",
+        "git status -uno",
+    ],
+)
+def test_git_flags_may_share_a_word_when_every_letter_is_a_flag(command, ws):
+    assert _ok(CD + command, ws), command
+
+
+@pytest.mark.parametrize(
+    ("command", "code"),
+    [
+        ("git status -sbu", "git_cluster"),
+        ("git status -sbuno", "git_cluster"),
+        ("git status -bu", "git_cluster"),
+        ("git log -pU5", "git_cluster"),
+        ("git log -pn5", "git_cluster"),
+        ("git log -wn", "git_cluster"),
+        ("git diff -pU", "git_cluster"),
+        ("git status -sbx", "git_cluster"),
+        ("git status -sb=x", "git_cluster"),
+        ("git status -s5", "git_cluster"),
+        ("git status -x", "git_opt"),
+        ("git log -5p", "git_opt"),
+        ("git rev-parse -qv HEAD", "git_cluster"),
+        ("git status -n", "git_opt"),
+        ("git log -n", "git_value"),
+        ("git status -u", "git_value"),
+    ],
+)
+def test_a_value_letter_hidden_in_a_cluster_is_refused(command, code, ws):
+    reason = _refusal(CD + command, ws)
+    assert reason is not None and reason.code == code, command
+
+
+def test_a_cluster_quotes_nothing_of_the_command(ws):
+    assert "ZQ9" not in _refusal(CD + "git status -sbZQ9canary", ws)
+    assert "that word" not in _refusal(CD + "git status -sbu", ws)
+
+
+def test_two_flags_in_two_words_still_work_and_a_count_beside_a_flag_word(ws):
+    assert _ok(CD + "git log -5 -p", ws)
+    assert _ok(CD + "git log -5 -pw", ws)
+
+
+def _real_git(repo: Path, *args: str) -> str:
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(repo.parent),
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.com",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.com",
+        "GIT_AUTHOR_DATE": "2026-01-01T00:00:00",
+        "GIT_COMMITTER_DATE": "2026-01-01T00:00:00",
+    }
+    done = subprocess.run(["git", *args], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    return done.stdout
+
+
+needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+
+
+@needs_git
+def test_a_cluster_means_the_same_to_git(tmp_path):
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _real_git(repo, "init", "-q", "-b", "main")
+    (repo / "a.txt").write_text("one\n")
+    _real_git(repo, "add", "a.txt")
+    _real_git(repo, "commit", "-q", "-m", "one")
+    (repo / "a.txt").write_text("one\ntwo\n")
+    assert _real_git(repo, "status", "-sb") == _real_git(repo, "status", "-s", "-b")
+    assert _real_git(repo, "log", "-pw") == _real_git(repo, "log", "-p", "-w")
