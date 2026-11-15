@@ -53,6 +53,7 @@ from starlette.routing import Mount, Route
 from starlette.types import Scope
 
 from nous import undo_journal
+from nous.api.background_routes import build_background_routes
 from nous.api.commitment_routes import build_commitment_routes
 from nous.api.companion_assets import OverlayStaticFiles
 from nous.api.execution_context import ExecutionContext
@@ -108,6 +109,7 @@ def create_app(
     model_call_text_store: Any | None = None,
     context_view: Any | None = None,
     mcp_client: Any | None = None,
+    halt_sweeper: Any | None = None,
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
 
@@ -4088,6 +4090,10 @@ def create_app(
     )
     # F111: the owner's /drop and /done of a commitment.
     routes.extend(build_commitment_routes(database=database, settings=settings))
+    # Goals PR 0c: the halt switch for background work, always mounted.
+    routes.extend(
+        build_background_routes(settings=settings, sweeper=halt_sweeper, continuation_runner=continuation_runner)
+    )
     # F112 PR 2a: the owner's MCP server routes, only with the MCP client on (off, nothing of it is imported).
     if settings.mcp_client_enabled:
         from nous.api.mcp_client_routes import build_mcp_client_routes

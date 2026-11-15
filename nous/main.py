@@ -595,6 +595,15 @@ async def create_components(settings: Settings) -> dict:
     await database.connect()  # F1: connect() not initialize()
     await run_migrations(database.engine)  # Apply pending SQL migrations
     await _rollback_continuation(settings, database)
+    # Goals PR 0c: the halt is loaded before any loop starts, so a process that restarts halted claims nothing.
+    from nous import background_halt
+    from nous.background_halt_store import BackgroundHaltStore
+
+    halt = background_halt.BackgroundHalt(settings, store=BackgroundHaltStore(database, settings.agent_id))
+    await halt.load()
+    background_halt.install(halt)
+    if halt.halted:
+        logger.warning("Background work is halted (%s): nothing runs on its own until a resume", halt.source)
 
     # Load runtime config overrides from DB (must be after migrations)
     from nous.runtime_config import RuntimeConfig
@@ -2029,6 +2038,26 @@ async def create_components(settings: Settings) -> dict:
                 len(mcp_client.registered()),
             )
 
+    # Goals PR 0c: the halt's cancel sweep, over every component it reaches. A resume re-runs its subtask and DAG
+    # steps. Halted at boot: it runs once now (idempotent), so nothing left from before the restart starts later.
+    from nous.handlers.halt_sweep import HaltSweeper
+
+    halt_sweeper = HaltSweeper(
+        settings=settings,
+        heart=heart,
+        halt=halt,
+        database=database,
+        continuation_runner=continuation_runner,
+        dag_orchestrator=dag_orchestrator,
+    )
+    halt.set_resume_sweep(halt_sweeper.cancel_new_work)
+    if halt.halted:
+        report = await halt_sweeper.run(actor="startup")
+        if halt.host_hold:
+            from nous import owner_notice
+
+            await owner_notice.send_owner_text(settings, report.describe())
+
     # F099 Phase 2c: started last, once every tool and component a continuation turn may use exists.
     if continuation_runner is not None:
         await continuation_runner.start()
@@ -2048,6 +2077,7 @@ async def create_components(settings: Settings) -> dict:
         "identity_manager": identity_manager,
         "subtask_pool": subtask_pool,
         "task_scheduler": task_scheduler,
+        "halt_sweeper": halt_sweeper,
         "decision_reviewer": decision_reviewer,
         "strategy_card_distiller": strategy_card_distiller,
         "api_client": api_client,
@@ -2089,6 +2119,11 @@ async def shutdown_components(components: dict) -> None:
     continuation_runner = components.get("continuation_runner")
     if continuation_runner is not None:
         await continuation_runner.stop()
+
+    # Goals PR 0c: a pending retry of an unsaved halt stops here (the next start reads what was saved).
+    from nous import background_halt
+
+    await background_halt.current().close()
 
     # F034: Stop heartbeat before other components
     heartbeat_runner = components.get("heartbeat_runner")
@@ -2358,6 +2393,7 @@ def build_app(settings: Settings) -> Starlette:
         model_call_text_store=_lazy_component(components, "model_call_text_store"),
         context_view=_lazy_component(components, "context_view"),
         mcp_client=_lazy_component(components, "mcp_client"),
+        halt_sweeper=_lazy_component(components, "halt_sweeper"),
     )
 
     if settings.mcp_enabled:

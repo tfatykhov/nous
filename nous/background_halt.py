@@ -219,7 +219,8 @@ class BackgroundHalt:
 
     def set_resume_sweep(self, sweep: Callable[[], Awaitable[Any]] | None) -> None:
         """What a resume runs, under the transition lock, before it writes: the cancel of any subtask or DAG left or
-        created since the halt's sweep, so clearing the flag starts none of it. Best effort."""
+        created since the halt's sweep, so clearing the flag starts none of it. Best effort. It runs under the
+        transition lock, so it must not call ``halt`` or ``resume`` itself."""
         self._resume_sweep = sweep
 
     # -- start ------------------------------------------------------------------------------------------------
