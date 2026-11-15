@@ -29,7 +29,7 @@ from sqlalchemy import func, select, text, update
 
 from nous.brain import continuation, intentions
 from nous.goals import charter
-from nous.goals.driver import GoalDriver
+from nous.goals.driver import GoalDriver, TickReport
 from nous.goals.store import GoalStore
 from nous.handlers.continuation_runner import ContinuationRunner
 from nous.storage.models import (
@@ -55,8 +55,11 @@ class FakeRunner:
         self.wakes += 1
 
 
+GOALS = {**CONT, "subtask_enabled": True, "goals_enabled": True}  # the flag and every setting it needs
+
+
 async def _world(env_factory, **settings) -> SimpleNamespace:  # noqa: F811
-    env = await env_factory(**{**CONT, **settings})
+    env = await env_factory(**{**GOALS, **settings})
     store = GoalStore(env.db, env.agent, env.settings)
     runner = FakeRunner()
     driver = GoalDriver(env.db, env.settings, env.heart, store, runner)
@@ -346,19 +349,43 @@ async def test_undo_never_deletes_a_session_whose_subtask_exists(env_factory):  
 
 
 async def test_the_driver_loop_runs_only_with_goals_on(env_factory):  # noqa: F811
-    off = await _world(env_factory)
+    off = await _world(env_factory, goals_enabled=False)
     await off.driver.start()
     assert off.driver._task is None
     await off.driver.stop()
-    on = await _world(
-        env_factory, goals_enabled=True, subtask_enabled=True, result_inbox_enabled=True, intentions_enabled=True
-    )
+    on = await _world(env_factory)
     assert on.env.settings.goals_enabled is True
     await on.driver.start()
     task = on.driver._task
     assert task is not None and not task.done()
     await on.driver.stop()
     assert on.driver._task is None and task.done()
+
+
+async def test_with_goals_off_a_tick_and_a_start_do_nothing(env_factory):  # noqa: F811
+    w = await _world(env_factory, goals_enabled=False)
+    assert w.env.settings.goals_enabled is False
+    due, stale = await _active(w), await _active(w, title="Sort the photos")  # both due now
+    async with w.db.session() as s:
+        s.add(
+            GoalSession(
+                agent_id=w.agent,
+                goal_id=stale.id,
+                n=1,
+                trigger="timer",
+                first_subtask_id=uuid.uuid4(),  # never created: a tick with goals on closes it
+                started_at=func.clock_timestamp() - timedelta(seconds=600),
+            )
+        )
+        await s.commit()
+    row_id = await _goal_report(w, stale)
+    assert await w.driver.tick() == TickReport()
+    assert await w.driver.start_session(due.id, trigger="run_now") is None
+    assert await _sessions(w, due) == [] and await _subtasks(w) == []
+    assert (await _inbox(w, row_id)).delivered_at is None
+    (session,) = await _sessions(w, stale)
+    assert session.ended_at is None
+    assert await _journal(w, stale, "report") == []
 
 
 # ---- closing a session ------------------------------------------------------------------------------------------
@@ -837,7 +864,7 @@ async def test_asked_comes_from_a_real_ask_then_an_expiry_and_a_report(runner_en
     ask = use("resolve_intention", decision="ask", note=note, progress=False, confidence=0.7)
     done = "Nobody answered, so I merged the notes folder only."
     report = use("resolve_intention", decision="report", note=done, progress=True, confidence=0.7)
-    env = await runner_env([ask], [report])
+    env = await runner_env([ask], [report], subtask_enabled=True, goals_enabled=True)
     cont = ContinuationRunner(
         database=env.db, settings=env.settings, runner=env.runner, heart=env.heart, brain=env.brain, bus=env.bus
     )

@@ -111,9 +111,12 @@ class GoalDriver:
 
     # ---- the loop ------------------------------------------------------------------------------------------
 
+    def _enabled(self) -> bool:
+        return getattr(self._settings, "goals_enabled", False) is True
+
     async def start(self) -> None:
         """Run the loop: one tick every ``goals_tick_seconds``. Does nothing, and builds no task, with goals off."""
-        if getattr(self._settings, "goals_enabled", False) is not True or self._task is not None:
+        if not self._enabled() or self._task is not None:
             return
         self._running = True
         self._task = asyncio.create_task(self._loop(), name="goal-driver")
@@ -145,7 +148,10 @@ class GoalDriver:
 
     async def tick(self) -> TickReport:
         """One pass, in order: claim the goal channels into the journals, close the sessions whose chain has ended,
-        read the spend of open and recently closed sessions again, start the sessions that are due."""
+        read the spend of open and recently closed sessions again, start the sessions that are due. With goals off
+        it does nothing."""
+        if not self._enabled():
+            return TickReport()
         claimed = await self.claim_reports()
         closed = await self.close_finished()
         await self.refresh_spent()
@@ -214,7 +220,10 @@ class GoalDriver:
         word against a second start. Then the first task is built and goes through the censor gate that every
         spawned task goes through, and the subtask and its root intention are created in a transaction of their own.
         If that fails, the session row is undone. A full queue only delays the goal a minute; a refusal by the gate
-        or any other failure is journalled and counted, and the third in a row pauses the goal (``error``)."""
+        or any other failure is journalled and counted, and the third in a row pauses the goal (``error``). With
+        goals off it does nothing."""
+        if not self._enabled():
+            return None
         subtask_id = uuid.uuid4()
         open_work = False
         async with self._db.session() as s:
