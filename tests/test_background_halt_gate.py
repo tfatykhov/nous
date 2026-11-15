@@ -7,7 +7,8 @@ import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
-from f099_support import env_factory, runner_env, say  # noqa: F401
+from f099_support import env_factory, runner_env, say, use  # noqa: F401
+from sqlalchemy import select
 from test_f061_subtask_executor import _make_heart_mock, _make_settings, _make_subtask, _scripted_runner
 from test_runner_authorization import _run_loop, _runner
 
@@ -19,6 +20,7 @@ from nous.api.tools import ToolDispatcher
 from nous.background_halt import BackgroundHalt
 from nous.cognitive.ledger_store import REFUSAL_CODES
 from nous.handlers.subtask_executor import HardenedRunState, execute_hardened
+from nous.storage.models import Subtask
 
 
 def _install() -> BackgroundHalt:
@@ -479,3 +481,45 @@ async def test_a_stream_turn_spanning_a_halt_and_a_resume_refuses_its_next_call(
     assert not halt.halted and calls["n"] == 1 and runner._dispatcher.dispatch.await_count == 1
     assert blocked.codes == ["background_halt"]  # refused by the epoch alone: the flag is off again
     assert background_halt.HALT_TURN_TEXT in [e.text for e in events if e.type == "text_delta"]
+
+
+# ---- a chat turn hands no epoch to the work it starts --------------------------------------------------------------
+
+
+async def test_a_chat_turn_spanning_a_halt_and_a_resume_can_still_run_spawn_sync(runner_env):  # noqa: F811
+    halt = _install()
+
+    async def the_chat_turn_spans_a_halt(kwargs):
+        await halt.halt(actor="t", surface="dashboard")
+        assert (await halt.resume(actor="t", via="dashboard")).changed
+        return [use("spawn_sync", task="Check the snow report", intent="Tell the user about the snow")]
+
+    env = await runner_env(
+        the_chat_turn_spans_a_halt,
+        [use("submit_final_report", **GOOD_REPORT)],  # the inline run's own turn
+        [say("It snowed 40 cm.")],
+        subtask_hardening_enabled=True,
+        subtask_payload_schema_enabled=True,  # spawn_sync is registered with both
+    )
+    text, _ctx, _usage = await env.runner.run_turn("s1", "how much snow?")
+    assert text == "It snowed 40 cm." and not halt.halted
+    async with env.db.session() as s:
+        (row,) = (await s.execute(select(Subtask).where(Subtask.agent_id == env.agent))).scalars().all()
+    assert row.status == "completed" and row.final_outcome == "completed"
+
+
+async def test_a_background_turns_inline_run_keeps_its_epoch_after_a_halt_and_a_resume(runner_env):  # noqa: F811
+    halt = _install()
+    env = await runner_env(subtask_hardening_enabled=False)  # no model step: the inline run makes no model call
+    epoch = halt.epoch
+    await halt.halt(actor="t", surface="dashboard")
+    assert (await halt.resume(actor="t", via="dashboard")).changed
+    background = ExecutionContext(kind="background", session_id="heartbeat-1")
+    with background_halt.epoch_scope(epoch):  # the background turn that spawns started before the halt
+        text, is_error = await env.dispatcher.dispatch(
+            "spawn_task",
+            {"task": "Check the snow report", "await_result": True, "intent": "Tell the user about the snow"},
+            session_id="heartbeat-1",
+            context=background,
+        )
+    assert is_error and background_halt.HALT_REASON in text and env.model.calls == []

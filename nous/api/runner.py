@@ -1963,10 +1963,16 @@ class AgentRunner:
     ) -> tuple[str, TurnContext, dict[str, int]]:
         """Execute a single conversational turn (``_run_turn``, which documents the arguments).
 
-        Goals PR 0c: the turn's halt epoch is taken here, before its first await, so a halt that lands during any
-        part of the turn (its pre-turn work included) is seen by every check of the turn. An epoch the caller
-        already set (the work that claimed the turn) is kept."""
-        with background_halt.epoch_scope(background_halt.turn_epoch()):
+        Goals PR 0c: a background turn's halt epoch is taken here, before its first await, so a halt that lands during
+        any part of the turn (its pre-turn work included) is seen by every check of the turn; an epoch the caller
+        already set (the work that claimed the turn) is kept, and work the turn starts inherits it. A chat turn
+        (``interactive`` or ``mcp`` outside a background session) is never refused by the epoch and hands none on:
+        background work it starts takes the current epoch at its own start."""
+        ctx = resolve_context(
+            kwargs.get("context"), is_background=bool(kwargs.get("is_background", False)), session_id=session_id
+        )
+        foreground = not ctx.is_background and not is_background_session(session_id)
+        with background_halt.epoch_scope(None if foreground else background_halt.turn_epoch()):
             return await self._run_turn(session_id, user_message, *args, **kwargs)
 
     async def _run_turn(
