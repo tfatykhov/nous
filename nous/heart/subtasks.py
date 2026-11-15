@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 _PRIORITY_MAP = {"urgent": 50, "normal": 100, "low": 200}
 _MAX_PENDING = 5
+# The pending limit, for callers that keep places free below it (the F114 goal driver's queue headroom).
+MAX_PENDING = _MAX_PENDING
 # An id prefix a lookup accepts, once its hyphens are dropped: only hex digits, so no LIKE wildcard gets through.
 _HEX_PREFIX_RE = re.compile(r"[0-9a-f]{1,32}")
 
