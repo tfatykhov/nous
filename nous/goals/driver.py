@@ -880,20 +880,23 @@ class GoalDriver:
         if at < session.started_at:
             await self._drop_request(request.id, kind, at, why=f"it was made before session {session.n} started")
             return 0
-        if not await self._end_chain(session, kind):
-            return 0  # the session is still open: the request stays for the next tick
+        if not await self._end_chain(session, kind, request_at=at):
+            return 0  # the request changed, or the session is still open: the next tick reads the row again
         await self._drop_request(request.id, kind, at)
         return 1
 
-    async def _end_chain(self, session: GoalSession, why: str) -> bool:
+    async def _end_chain(self, session: GoalSession, why: str, *, request_at: datetime | None = None) -> bool:
         """End the chain of an open session (``why``: ``stop``, ``cancel`` or ``stuck``) and close the session. In
         order: a harness ``state`` row naming the session (its evidence ``ending:<session id>``, written once,
         committed before anything else, so the close never takes the cancel for the owner's), the root's cancel
         through the continuation runner (``CancelRefused``, nothing left running, and ``RootNotFound`` are not
         errors), then the close, which finds the root marked. A session whose first task was never published is
-        closed ``interrupted`` under its lock (a start still publishing it then publishes nothing). True when the
-        session is closed."""
-        await self._journal_ending(session.id, _ending_text(why, session.n))
+        closed ``interrupted`` under its lock (a start still publishing it then publishes nothing). With
+        ``request_at`` (a stop or a cancel) nothing is done unless that request is still the goal's when the row is
+        written. True when the session is closed."""
+        request = (why, request_at) if request_at is not None else None
+        if not await self._journal_ending(session.id, _ending_text(why, session.n), request=request):
+            return False
         root_id = session.root_id or await self._root_or_close_unpublished(session.id)
         if root_id is None:
             return True
@@ -906,9 +909,14 @@ class GoalDriver:
         async with self._db.session() as s:
             return (await s.scalar(select(GoalSession.ended_at).where(GoalSession.id == session.id))) is not None
 
-    async def _journal_ending(self, session_id: UUID, note: str) -> None:
+    async def _journal_ending(
+        self, session_id: UUID, note: str, *, request: tuple[str, datetime] | None = None
+    ) -> bool:
         """The harness's row saying it is ending this session's chain, once: under the session row's lock, skipped
-        when a row with its evidence ref exists (a retry after a crash between the row and the cancel)."""
+        when a row with its evidence ref exists (a retry after a crash between the row and the cancel). With
+        ``request`` (kind, time) the goal row is locked too (after the session row, the close's order) and nothing
+        is written unless that request is still the goal's: a resume or an approve clears it and a cancel replaces
+        a stop, any time after the tick read it. False when nothing may be done."""
         ref = f"{ENDING_REF}{session_id}"
         async with self._db.session() as s:
             row = (
@@ -918,9 +926,20 @@ class GoalDriver:
                     .with_for_update()
                 )
             ).scalar_one()
+            if request is not None:
+                pending = (
+                    await s.execute(
+                        select(Goal.pending_request, Goal.pending_request_at)
+                        .where(Goal.id == row.goal_id, Goal.agent_id == self._agent_id)
+                        .with_for_update()
+                    )
+                ).one()
+                if tuple(pending) != request:
+                    return False
             if not await self._harness_ended(s, row):
                 self._journal(s, row.goal_id, "state", note, actor="harness", session_n=row.n, evidence=[ref])
             await s.commit()
+            return True
 
     async def _harness_ended(self, s: AsyncSession, row: GoalSession) -> bool:
         """Whether the driver wrote that it is ending this session's chain (``_journal_ending``)."""

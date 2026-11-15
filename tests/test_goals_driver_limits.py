@@ -205,6 +205,51 @@ async def test_a_crash_between_the_ending_row_and_the_cancel_writes_the_row_once
     assert (await _goal(w, goal)).pause_reason == "owner"
 
 
+async def test_a_stop_the_owner_takes_back_after_the_tick_read_it_ends_nothing(env_factory, monkeypatch):  # noqa: F811
+    """The tick reads a stop; before it acts, the owner resumes the goal (which clears the request). The request is
+    read again under the goal's lock when the ending row would be written: nothing is ended."""
+    w = await _cont_world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    await w.store.stop(goal.id, actor="host")
+    end_chain = w.driver._end_chain
+
+    async def resumed_first(*args, **kwargs):
+        await w.store.resume(goal.id, actor="host")
+        return await end_chain(*args, **kwargs)
+
+    monkeypatch.setattr(w.driver, "_end_chain", resumed_first)
+    assert (await w.driver.tick()).stopped == 0
+    assert (await _intention(w, root.id)).root_cancelled_at is None
+    assert (await _session(w, session.id)).ended_at is None
+    assert not [r for r in await _harness(w, goal) if r.evidence == [f"ending:{session.id}"]]
+    assert (await _goal(w, goal)).state == "active"
+
+
+async def test_a_cancel_that_replaces_a_stop_after_the_read_is_acted_on_as_a_cancel(env_factory, monkeypatch):  # noqa: F811
+    w = await _cont_world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    await w.store.stop(goal.id, actor="host")
+    end_chain, fired = w.driver._end_chain, []
+
+    async def cancelled_first(*args, **kwargs):
+        if not fired:
+            fired.append(True)
+            await w.store.cancel(goal.id, actor="host")
+        return await end_chain(*args, **kwargs)
+
+    monkeypatch.setattr(w.driver, "_end_chain", cancelled_first)
+    assert (await w.driver.tick()).stopped == 0  # the stop it read is gone
+    assert (await _goal(w, goal)).pending_request == "cancel"
+    assert (await w.driver.tick()).stopped == 1
+    ending = [r for r in await _harness(w, goal) if r.evidence == [f"ending:{session.id}"]]
+    assert [r.text for r in ending] == ["Session 1 is being stopped: the owner cancelled the goal."]
+    after = await _goal(w, goal)
+    assert (after.state, after.pending_request) == ("cancelled", None)
+    assert (await _intention(w, root.id)).root_cancelled_at is not None
+
+
 async def test_an_owner_cancel_through_the_route_pauses_the_goal(env_factory):  # noqa: F811
     w = await _cont_world(env_factory)
     goal = await _active(w)
