@@ -5,20 +5,26 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 from goal_routes_support import (
     CHAN,
+    OWNER,
+    OWNER_VALUE,
     PROXY,
     active,
     add_session,
     db_now,
+    digest,
     draft,
     journal_rows,
     make_env,
     paused,
     reread,
+    send,
     set_values,
 )
 
@@ -333,3 +339,33 @@ async def test_an_unknown_goal_is_404_before_the_store_is_asked(db, monkeypatch)
     monkeypatch.setattr(env.store, "pause", pause)
     response = await env.call("POST", "/goals/not-a-goal/pause")
     assert (response.status_code, response.json(), called) == (404, {"error": "no goal not-a-goal"}, [])
+
+
+async def test_the_app_mounts_the_goal_routes_over_the_store_it_builds_when_goals_are_on(db, tmp_path) -> None:
+    """Through ``create_app``, as the server mounts them: the store rest.py builds writes and reads real rows."""
+    from nous.api.rest import create_app
+    from nous.config import Settings
+
+    settings = Settings(
+        _env_file=None,
+        agent_id=f"goal-app-{uuid.uuid4().hex[:8]}",
+        workspace_dir=str(tmp_path),
+        owner_route_secret_sha256=digest(OWNER_VALUE),
+        telegram_chat_id="",
+        goals_enabled=True,
+        result_inbox_enabled=True,
+        intentions_enabled=True,
+        continuation_enabled=True,
+        subtask_enabled=True,
+    )
+    assert settings.goals_enabled is True
+    app = create_app(
+        SimpleNamespace(), SimpleNamespace(), SimpleNamespace(schedules=None), SimpleNamespace(), db, settings,
+        heartbeat_runner=SimpleNamespace(finding_store=None),
+    )
+    made = await send(app, "POST", "/goals", json={**NEW, "origin_channel": CHAN}, headers=OWNER)
+    assert made.status_code == 201, made.text
+    listed = await send(app, "GET", "/goals", headers=OWNER)
+    assert [row["id"] for row in listed.json()["goals"]] == [made.json()["id"]]
+    approved = await send(app, "POST", f"/goals/{made.json()['ref']}/approve", headers=OWNER)
+    assert (approved.status_code, approved.json()["state"]) == (200, "active")
