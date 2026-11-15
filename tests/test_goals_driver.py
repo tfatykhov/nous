@@ -1202,21 +1202,16 @@ async def test_after_a_restart_a_question_a_resumed_chain_asked_while_no_driver_
     assert [a.text for a in await _journal(w, goal, "answer")] == ["No, drop them."]
 
 
-async def test_the_restart_catch_up_reads_every_closed_session_once_in_batches_across_ticks(
-    env_factory,  # noqa: F811
-    monkeypatch,
-):
-    w = await _world(env_factory)
-    goal = await _active(w)
-    await w.store.pause(goal.id, actor="host")  # nothing new starts: only the old sessions are read
-    monkeypatch.setattr(driver_module, "CATCH_UP_BATCH", 3)
+async def _old_closed_sessions(w: SimpleNamespace, goal: Goal, count: int) -> dict[uuid.UUID, uuid.UUID]:
+    """``count`` sessions of ``goal`` closed long ago (n = 1 is the newest), each on a settled root whose arrival
+    stored 11 x n tokens after the session's last read. Returns each session's root id."""
     roots_by_session: dict[uuid.UUID, uuid.UUID] = {}
     async with w.db.session() as s:
         now = (await s.execute(select(func.clock_timestamp()))).scalar_one()
     long_ago = now - timedelta(hours=w.env.settings.intention_root_ttl_hours + 24)
-    for i in range(1, 8):
+    for i in range(1, count + 1):
         root = await put_intention(w.env, state="closed", deadline=now - timedelta(days=5))
-        await add_arrival(w.env, root.id, 1, tokens=(10 * i, i))  # stored after the session's last read
+        await add_arrival(w.env, root.id, 1, tokens=(10 * i, i))
         async with w.db.session() as s:
             row = GoalSession(
                 agent_id=w.agent,
@@ -1233,6 +1228,38 @@ async def test_the_restart_catch_up_reads_every_closed_session_once_in_batches_a
             s.add(row)
             await s.commit()
             roots_by_session[row.id] = root.id
+    return roots_by_session
+
+
+async def test_the_catch_up_cursor_moves_only_from_the_cursor_the_pass_read_from(env_factory, monkeypatch):  # noqa: F811
+    """A pass that read the catch-up from one cursor does not move it once something else has moved it meanwhile
+    (a pass decided from an outdated view would put it back over ground already read)."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    await w.store.pause(goal.id, actor="host")
+    monkeypatch.setattr(driver_module, "CATCH_UP_BATCH", 2)
+    await _old_closed_sessions(w, goal, 5)
+    elsewhere = (datetime(2000, 1, 1, tzinfo=UTC), uuid.uuid4())  # where another pass moved it meanwhile
+    read_spend = spend.session_spent
+
+    async def moved_meanwhile(s, agent_id, root_ids):
+        w.driver._catch_up_after = elsewhere
+        return await read_spend(s, agent_id, root_ids)
+
+    monkeypatch.setattr(spend, "session_spent", moved_meanwhile)
+    await w.driver.refresh_sessions()
+    assert w.driver._catch_up_after == elsewhere and w.driver._caught_up is False
+
+
+async def test_the_restart_catch_up_reads_every_closed_session_once_in_batches_across_ticks(
+    env_factory,  # noqa: F811
+    monkeypatch,
+):
+    w = await _world(env_factory)
+    goal = await _active(w)
+    await w.store.pause(goal.id, actor="host")  # nothing new starts: only the old sessions are read
+    monkeypatch.setattr(driver_module, "CATCH_UP_BATCH", 3)
+    roots_by_session = await _old_closed_sessions(w, goal, 7)
     read_spend, tallied = spend.session_spent, []
 
     async def counting(s, agent_id, root_ids):
