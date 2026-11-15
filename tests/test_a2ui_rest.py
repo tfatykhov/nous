@@ -111,16 +111,9 @@ class FakeActionRouter:
         content_type: str,
         actor: str = "unattributed",
         owner_verified: bool = False,
-        refusal: str | None = None,
     ) -> tuple[int, dict]:
         self.calls.append(
-            {
-                "body": body,
-                "content_type": content_type,
-                "actor": actor,
-                "owner_verified": owner_verified,
-                "refusal": refusal,
-            }
+            {"body": body, "content_type": content_type, "actor": actor, "owner_verified": owner_verified}
         )
         return self._status, {"ok": True, "message": "", "resolved": False}
 
@@ -485,7 +478,6 @@ async def test_the_action_route_tells_the_router_whether_the_caller_proved_the_o
 
     assert response.status_code == 200
     assert fake_router.calls[0]["owner_verified"] is verified
-    assert fake_router.calls[0]["refusal"] is None  # no device store: a device token is never looked up
 
 
 async def test_the_action_route_hands_every_call_to_the_router(

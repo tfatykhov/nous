@@ -1059,19 +1059,6 @@ def test_a_verb_registered_without_saying_fails(router: ActionRouter) -> None:
         router.register("x.y", fn, mutating=False)  # type: ignore[call-arg]
 
 
-async def test_a_rejected_device_token_has_its_own_code(router: ActionRouter, service: SurfaceService, db) -> None:
-    surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
-    nonce = (await _surface_row(db, surface_id)).nonce
-    status, payload = await router.handle(
-        _body("approval.choose", surface_id, nonce=nonce, context={"optionId": "cancel"}),
-        content_type=JSON,
-        owner_verified=False,
-        refusal="device_token_rejected",
-    )
-    assert (status, payload["error"]["code"]) == (403, "DEVICE_TOKEN_REJECTED")
-    assert (await _surface_row(db, surface_id)).status == "live"
-
-
 def test_every_verb_says_whether_it_needs_the_owners_proof(router: ActionRouter) -> None:
     expected = dict.fromkeys(GATED, True) | dict.fromkeys(
         [

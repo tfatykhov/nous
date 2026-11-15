@@ -50,8 +50,7 @@ EXPIRED_UNANSWERED_ACTIONS = frozenset({EXPIRED_UNANSWERED, "no_objection"})
 
 # What a verb registered with owner_proof=True answers (403) when the request did not prove the owner. A client shows
 # the message as it is.
-OWNER_PROOF_TEXT = "This device is not paired. Pair it in the app's settings, or use Telegram."
-DEVICE_TOKEN_REJECTED_TEXT = "This device is no longer paired. Pair it again in the app's settings, or use Telegram."
+OWNER_PROOF_TEXT = "This action needs the owner's sign-in. Use the web companion through the login page, or Telegram."
 
 
 def is_expired_unanswered(action_name: str | None) -> bool:
@@ -290,7 +289,6 @@ class ActionRouter:
         content_type: str,
         actor: str = "unattributed",
         owner_verified: bool = False,
-        refusal: str | None = None,
     ) -> tuple[int, dict]:
         """Returns (http_status, response_body).
 
@@ -300,9 +298,8 @@ class ActionRouter:
         forged action would otherwise corrupt the evidence tier).
 
         ``owner_verified`` is the route's word that the request proved the
-        owner (``OwnerGuard.decide``); a verb registered with
-        ``owner_proof=True`` is refused without it. ``refusal`` is the
-        guard's reason when it has one (``device_token_rejected``).
+        owner (``OwnerGuard.grants``); a verb registered with
+        ``owner_proof=True`` is refused without it.
         """
         # Content-Type is the CSRF control here: no CORS middleware exists and
         # Request.json() never checks it, but a cross-origin simple request
@@ -329,7 +326,7 @@ class ActionRouter:
         # status re-read inside the lock turns the loser into a 404).
         async with self._service.surface_lock(surface_id):
             return await self._handle_locked(
-                surface_id, name, context, data_model, action, actor, owner_verified=owner_verified, refusal=refusal
+                surface_id, name, context, data_model, action, actor, owner_verified=owner_verified
             )
 
     async def _handle_locked(
@@ -342,7 +339,6 @@ class ActionRouter:
         actor: str,
         *,
         owner_verified: bool = False,
-        refusal: str | None = None,
     ) -> tuple[int, dict]:
         # Status is read INSIDE the surface lock — a terminal action that
         # just resolved this surface makes the second request 404 here.
@@ -406,8 +402,6 @@ class ActionRouter:
 
         # After the allowlist and the nonce (a stale or foreign card is told what it always was), before the censor.
         if meta.owner_proof and not owner_verified:
-            if refusal == "device_token_rejected":
-                return await reject(403, "DEVICE_TOKEN_REJECTED", DEVICE_TOKEN_REJECTED_TEXT)
             return await reject(403, "OWNER_PROOF_REQUIRED", OWNER_PROOF_TEXT)
 
         if meta.mutating and self._heart is not None:
