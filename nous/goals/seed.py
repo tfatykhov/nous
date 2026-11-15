@@ -33,6 +33,7 @@ SPEND_NOTE = (
     "Spend counts the uncached input and output tokens of each session's chain. Cache reads and writes, jobs "
     "launched from the chain, embeddings and helper calls are not counted."
 )
+FLAG_OFF_LINE = "refused: goals are off (NOUS_GOALS_ENABLED, or a flag it needs, is off); nothing was changed"
 _READ_ONLY = frozenset({"list", "show"})
 # create's limit options and the envelope field each sets
 _LIMIT_OPTIONS = (
@@ -139,10 +140,7 @@ async def run(args: argparse.Namespace, settings: Any, store: GoalStore) -> int:
     """Run one sub-command against ``store``. Returns the exit status."""
     command = args.command
     if command not in _READ_ONLY and not getattr(settings, "goals_enabled", False):
-        print(
-            "refused: goals are off (NOUS_GOALS_ENABLED, or a flag it needs, is off); nothing was changed",
-            file=sys.stderr,
-        )
+        print(FLAG_OFF_LINE, file=sys.stderr)
         return 2
     try:
         if command == "list":

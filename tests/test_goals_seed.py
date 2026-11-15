@@ -120,11 +120,18 @@ async def test_with_the_flag_off_a_change_is_refused_and_list_and_show_still_wor
     label = await _created(settings, store, capsys)
     off = Settings(_env_file=None, agent_id=store.agent_id, telegram_chat_id="")
     assert off.goals_enabled is False
+    goal = await store.get(label)
+    journal_before = await store.journal(goal.id, limit=100)
     assert await _run(off, store, "approve", label) == 2
-    assert "NOUS_GOALS_ENABLED" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert captured.err == seed.FLAG_OFF_LINE + "\n" and "goals are off" in captured.err
+    assert captured.out == ""
     assert (await store.get(label)).state == "draft"
     assert await _run(off, store, *CREATE) == 2
+    assert capsys.readouterr().err == seed.FLAG_OFF_LINE + "\n"
     assert len(await store.list()) == 1
+    assert len(await store.journal(goal.id, limit=100)) == len(journal_before)  # nothing written
     assert await _run(off, store, "list") == 0
     assert label in capsys.readouterr().out
     assert await _run(off, store, "show", label) == 0
+    assert label in capsys.readouterr().out
