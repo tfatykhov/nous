@@ -490,6 +490,30 @@ async def test_two_ticks_of_one_driver_run_one_after_the_other(env_factory, monk
     assert events == ["enter 1", "leave 1", "enter 2", "leave 2"]
 
 
+async def test_a_direct_start_waits_for_a_running_tick(env_factory, monkeypatch):  # noqa: F811
+    """A direct start (the owner's run-now) takes the tick's lock: it waits for a tick that is running."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    await _set_goal(w, goal, next_wake_at=func.clock_timestamp() + timedelta(hours=1))  # the tick starts nothing
+    tick_may_go, tick_entered = asyncio.Event(), asyncio.Event()
+    claim_reports = w.driver.claim_reports
+
+    async def held():
+        tick_entered.set()
+        await tick_may_go.wait()
+        return await claim_reports()
+
+    monkeypatch.setattr(w.driver, "claim_reports", held)
+    ticking = asyncio.create_task(w.driver.tick())
+    await asyncio.wait_for(tick_entered.wait(), timeout=10)
+    starting = asyncio.create_task(w.driver.start_session(goal.id, trigger="run_now"))
+    done, _pending = await asyncio.wait({starting}, timeout=2)  # unlocked, the start would finish here
+    assert not done and await _sessions(w, goal) == []
+    tick_may_go.set()
+    await ticking
+    assert await starting is not None
+
+
 async def test_a_session_closed_while_a_refresh_runs_stays_followed(env_factory, monkeypatch):  # noqa: F811
     """A refresh reads a session while it is still open; a close runs meanwhile and follows it; the refresh then
     ends. Only what the refresh itself read as closed and settled leaves the followed set, so the id the close
