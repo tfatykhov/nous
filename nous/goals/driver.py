@@ -954,7 +954,8 @@ class GoalDriver:
         async with self._db.session() as s:
             rows = {r.id: r for r in (await s.execute(query)).all()}
             batch: list[Any] = []
-            if not self._caught_up:
+            catching_up, cursor_read = not self._caught_up, self._catch_up_after
+            if catching_up:
                 batch_query = (
                     select(*columns)
                     .where(
@@ -965,10 +966,8 @@ class GoalDriver:
                     .order_by(GoalSession.ended_at.desc(), GoalSession.id.desc())
                     .limit(CATCH_UP_BATCH)
                 )
-                if self._catch_up_after is not None:
-                    batch_query = batch_query.where(
-                        tuple_(GoalSession.ended_at, GoalSession.id) < tuple_(*self._catch_up_after)
-                    )
+                if cursor_read is not None:
+                    batch_query = batch_query.where(tuple_(GoalSession.ended_at, GoalSession.id) < tuple_(*cursor_read))
                 batch = list((await s.execute(batch_query)).all())
                 for r in batch:
                     rows.setdefault(r.id, r)
@@ -1004,8 +1003,13 @@ class GoalDriver:
                         changed += result.rowcount
                 asked = await self._new_questions_and_answers(s, [r for r in rows.values() if r.ended_at is not None])
             await s.commit()
-        self._following = {r.id for r in rows.values() if r.ended_at is not None and r.root_id in unsettled_roots}
-        if not self._caught_up:
+        # Only what this pass read itself changes the followed set: a closed session it read as settled leaves,
+        # one it read as unsettled joins. An id a close added meanwhile (a session this pass read while it was
+        # still open) stays, so its later usage is still read.
+        read_closed = [r for r in rows.values() if r.ended_at is not None]
+        self._following -= {r.id for r in read_closed if r.root_id not in unsettled_roots}
+        self._following |= {r.id for r in read_closed if r.root_id in unsettled_roots}
+        if catching_up and self._catch_up_after == cursor_read:  # moved only from the cursor this pass read from
             if len(batch) < CATCH_UP_BATCH:
                 self._caught_up, self._catch_up_after = True, None
             else:

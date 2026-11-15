@@ -456,6 +456,33 @@ async def test_undo_never_deletes_a_session_whose_subtask_exists(env_factory):  
     assert await _sessions(w, goal) == []
 
 
+async def test_a_session_closed_while_a_refresh_runs_stays_followed(env_factory, monkeypatch):  # noqa: F811
+    """A refresh reads a session while it is still open; a close runs meanwhile and follows it; the refresh then
+    ends. Only what the refresh itself read as closed and settled leaves the followed set, so the id the close
+    added stays, and usage stored later is counted."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    subtask_id = await _end_root_while_its_subtask_runs(w, root, "expired")  # due to close, not closed yet
+    read_spend, fired = spend.session_spent, []
+
+    async def a_close_runs_meanwhile(s, agent_id, root_ids):
+        totals = await read_spend(s, agent_id, root_ids)
+        if not fired:
+            fired.append(True)
+            assert await w.driver._close(session.id)  # another coroutine's close, between the reads
+        return totals
+
+    monkeypatch.setattr(spend, "session_spent", a_close_runs_meanwhile)
+    await w.driver.refresh_sessions()  # read the session as open
+    monkeypatch.undo()
+    assert fired and (await _session(w, session.id)).ended_at is not None
+    assert session.id in w.driver._following
+    await _settle(w, subtask_id, tokens_in=200, tokens_out=20)
+    await w.driver.tick()
+    assert (await _session(w, session.id)).spent == 220
+
+
 async def test_the_driver_loop_runs_only_with_goals_on(env_factory):  # noqa: F811
     off = await _world(env_factory, goals_enabled=False)
     await off.driver.start()
