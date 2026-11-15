@@ -458,3 +458,24 @@ async def test_a_halt_and_a_resume_inside_the_pre_turn_work_leave_a_background_s
     events = await _pump(runner.stream_chat("claude-job-2", "the job finished"))
     texts = [e.text for e in events if e.type == "text_delta"]
     assert texts == [background_halt.HALT_TURN_TEXT] and not runner._call_api_stream.called
+
+
+async def test_a_stream_turn_spanning_a_halt_and_a_resume_refuses_its_next_call():
+    halt = _install()
+    runner = _stream_runner()
+    blocked = _Blocked()
+    runner.set_ledger_store(blocked)
+    runner._dispatcher.is_registered = MagicMock(return_value=True)
+
+    async def dispatch_then_halt_and_resume(*args, **kwargs):
+        await halt.halt(actor="t", surface="dashboard")
+        assert (await halt.resume(actor="t", via="dashboard")).changed
+        return "40 cm", False
+
+    runner._dispatcher.dispatch = AsyncMock(side_effect=dispatch_then_halt_and_resume)
+    calls = {"n": 0}
+    runner._call_api_stream = MagicMock(side_effect=_two_streamed_calls_then_text(calls))
+    events = await _pump(runner.stream_chat("claude-job-3", "the job finished"))
+    assert not halt.halted and calls["n"] == 1 and runner._dispatcher.dispatch.await_count == 1
+    assert blocked.codes == ["background_halt"]  # refused by the epoch alone: the flag is off again
+    assert background_halt.HALT_TURN_TEXT in [e.text for e in events if e.type == "text_delta"]

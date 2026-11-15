@@ -140,6 +140,27 @@ async def test_resume_with_the_owner_or_the_proxy_secret_is_200(header):
     cont.wake.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"X-Nous-Owner-Secret": ""},
+        {"X-Nous-Proxy-Secret": ""},
+        {"X-Nous-Owner-Secret": PROXY},  # the proxy's secret in the owner's header
+        {"X-Nous-Proxy-Secret": OWNER},  # the owner's secret in the proxy's header
+    ],
+)
+async def test_an_empty_header_or_a_secret_in_the_other_header_is_refused(headers):
+    halt = _install()
+    await halt.halt(actor="t", surface="dashboard")
+    async with _client(_settings()) as c:
+        refused = await c.post("/background/resume", json={}, headers=headers)
+        state = await c.get("/background/state", headers=headers)
+        halted = await c.post("/background/halt", json={}, headers=headers)
+    assert (refused.status_code, refused.json()["reason"]) == (403, "no_secret") and halt.halted
+    assert state.json()["by"] == "dashboard"  # not verified: the surface kind only
+    assert halted.json()["verified"] is False
+
+
 async def test_neither_digest_configured_refuses_every_resume_with_the_plain_reason(caplog):
     halt = _install()
     await halt.halt(actor="t", surface="dashboard")
