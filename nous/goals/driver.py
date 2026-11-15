@@ -758,8 +758,9 @@ class GoalDriver:
         is written).
 
         The ``state`` row's own words are the harness's (``detail`` included). The chain's text goes in only as
-        ``session_note`` (its newest arrival note, when the session sent no report), after a fixed label, so a
-        session that ended in ``drop`` still leaves the next one a memory. A claimed report is not repeated here:
+        ``session_note`` (its newest arrival note, when the session sent no report), on one line after a fixed label
+        and at most ``SUMMARY_MAX`` characters, so a session that ended in ``drop`` still leaves the next one a
+        memory. A claimed report is not repeated here:
         it has its own ``report`` row, under the chain's name."""
         result = await s.execute(
             update(GoalSession)
@@ -779,8 +780,11 @@ class GoalDriver:
         note = f"Session {row.n} ended: {outcome}, {spent} tokens."
         if detail:
             note += f"\n{detail}"
-        if session_note:
-            note += f"\n{SESSION_NOTE_LABEL} {session_note}"
+        # The chain's note on one line after the label (line breaks and runs of whitespace become one space), so no
+        # line of it stands alone in the harness's entry.
+        flat_note = clip(" ".join((session_note or "").split()), SUMMARY_MAX)
+        if flat_note:
+            note += f"\n{SESSION_NOTE_LABEL} {flat_note}"
         self._journal(s, goal.id, "state", note, actor="harness", session_n=row.n)
         return True
 
