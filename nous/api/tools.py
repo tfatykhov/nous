@@ -33,7 +33,7 @@ from functools import partial
 from typing import Any
 from uuid import UUID, uuid4
 
-from nous import cancel_provenance
+from nous import background_halt, cancel_provenance
 from nous.api.call_outcome import CallOutcome
 from nous.api.call_outcome import _current as _outcome_var  # the one setter (harness 2b)
 from nous.api.execution_context import ExecutionContext, resolve_context
@@ -305,6 +305,16 @@ def _schema_type_errors(args: dict[str, Any], schema: dict[str, Any]) -> list[st
     return errors
 
 
+# Goals PR 0c: the tools that start background work. While halted, the dispatcher refuses them, and dag_manage's
+# retry_node (it would put a cancelled DAG's work back in motion). schedule_task and heartbeat_check_create are left
+# allowed: their rows fire only after a resume.
+_HALT_REFUSED_TOOLS = frozenset({"spawn_task", "spawn_sync", "dag_create"})
+
+
+def _starts_background_work(name: str, args: dict[str, Any]) -> bool:
+    return name in _HALT_REFUSED_TOOLS or (name == "dag_manage" and args.get("action") == "retry_node")
+
+
 def _required_handler_params(handler: Callable[..., Any]) -> set[str] | None:
     """Parameter names the handler cannot be invoked without.
 
@@ -570,6 +580,11 @@ class ToolDispatcher:
         handler = self._handlers.get(name)
         if not handler:
             return f"Unknown tool: {name}", True
+        if _starts_background_work(name, args) and background_halt.current().halted:
+            # Goals PR 0c: nothing new starts while halted, from a chat turn too (a background turn's call was
+            # already refused by the runner).
+            logger.info("Background halt: refused %s from a %s turn", name, ctx.kind)
+            return background_halt.HALTED_SPAWN_TEXT, True
         try:
             # Guard the **args unpacking below: validate schema-required keys
             # up front and, when one is missing, try to salvage a value the

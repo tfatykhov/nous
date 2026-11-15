@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, NamedTuple
 from uuid import UUID, uuid4
 
+from nous import background_halt
 from nous.api import attachment_store, tool_policy
 from nous.api.anthropic_client import (
     AnthropicClient,
@@ -126,6 +127,10 @@ class Refusal:
 
     text: str
     code: str
+
+
+class _HaltEndedTurn(Exception):
+    """Goals PR 0c: the streaming loop's max_turns call is skipped because the halt ended the turn."""
 
 
 def _no_cancelled_roots(_root_id: UUID) -> bool:
@@ -894,7 +899,23 @@ class AgentRunner:
         kind of turn and the two mode settings say: the owner stopped this work, and a subtask that was already
         running, a DAG node or a lineage check must not do one more thing. The view is a set lookup, read only
         when the context names a root (a chat turn names none).
+
+        Goals PR 0c: first of all, a call of a background turn that is halted, or that started before the last halt
+        (the epoch the loop put in ``background_halt.TURN_EPOCH``), is refused. Chat is never refused here.
         """
+        if background_halt.current().refuses(ctx.kind, session_id, background_halt.TURN_EPOCH.get()):
+            logger.warning("Background halt: refused %r in a %s turn (session=%s)", tool_name, ctx.kind, session_id)
+            self._log_f026_decision(
+                "harness_context_policy_violation",
+                {
+                    "tool_name": tool_name,
+                    "context_kind": ctx.kind,
+                    "violation": background_halt.REFUSAL_CODE,
+                    "mode": "enforce",
+                },
+                session_id=session_id,
+            )
+            return Refusal(background_halt.HALTED_TOOL_TEXT, background_halt.REFUSAL_CODE)
         if ctx.root_intention_id is not None and self._root_cancelled(ctx.root_intention_id):
             logger.warning(
                 "F099: refused %r in a %s turn (the root %s was cancelled, session=%s)",
@@ -2407,6 +2428,8 @@ class AgentRunner:
             shown = [_gate_footer] if _gate_footer and not _ctx.is_background else []
             if not error and (dead_man := self._dead_man_line(_ctx, session_id)):
                 shown.append(dead_man)  # F111 PR B1: the watcher has stalled
+            if halt_line := self._halt_line(_ctx, session_id):
+                shown.append(halt_line)  # Goals PR 0c: background work is halted
             if shown:
                 return "\n\n".join([response_text, *shown]), turn_context, usage
             return response_text, turn_context, usage
@@ -3157,8 +3180,17 @@ class AgentRunner:
             _f071_exclude = _build_exclude_ids(self._settings, turn_context)
             if _f071_exclude is not None:
                 CURRENT_TURN_EXCLUDE_IDS.set(_f071_exclude)
+            # Goals PR 0c: a local, for the same reason (each __anext__ runs in a fresh context). It reaches
+            # _authorize_tool_call through epoch_scope around that synchronous call only.
+            _turn_epoch = background_halt.turn_epoch()
             try:
                 for turn in range(self._settings.max_turns):
+                    # Goals PR 0c: a halted background-session stream makes no further model call; the turn row and
+                    # post_turn still run in the finally below.
+                    if self._halt_ends_turn(_ctx, session_id, _turn_epoch):
+                        response_text = background_halt.HALT_TURN_TEXT
+                        yield StreamEvent(type="text_delta", text=response_text)
+                        break
                     # Unified block accumulator: keyed by block_index, preserves
                     # original order for thinking block preservation (007 Phase D).
                     all_blocks: dict[int, dict[str, Any]] = {}
@@ -3453,13 +3485,14 @@ class AgentRunner:
                             continue
 
                         # Harness: was this tool offered this turn, and may this context use it?
-                        refusal = self._authorize_tool_call(
-                            _ctx,
-                            tool_name,
-                            offered_names,
-                            session_id,
-                            tool_input,
-                        )
+                        with background_halt.epoch_scope(_turn_epoch):
+                            refusal = self._authorize_tool_call(
+                                _ctx,
+                                tool_name,
+                                offered_names,
+                                session_id,
+                                tool_input,
+                            )
                         if refusal is not None:
                             refusal_text = _with_alias_note(alias_note, refusal.text)
                             tool_results_for_message.append(
@@ -3785,6 +3818,8 @@ class AgentRunner:
                     # Max turns reached -- final call without tools
                     logger.warning("Streaming tool loop reached max_turns=%d", self._settings.max_turns)
                     try:
+                        if self._halt_ends_turn(_ctx, session_id, _turn_epoch):
+                            raise _HaltEndedTurn
                         final = await self._call_api(
                             system_prompt=system_prompt,
                             messages=messages,
@@ -3792,6 +3827,8 @@ class AgentRunner:
                             call_context=_stream_call_context,
                         )
                         response_text = self._extract_text(final.content)
+                    except _HaltEndedTurn:
+                        response_text = background_halt.HALT_TURN_TEXT
                     except Exception:
                         response_text = "I reached the maximum number of tool iterations."
 
@@ -3913,6 +3950,9 @@ class AgentRunner:
             if _gate_due and not error and (dead_man := self._dead_man_line(_ctx, session_id)):
                 # F111 PR B1: as the footer, after the reply is stored; never part of the conversation.
                 yield StreamEvent(type="text_delta", text=f"\n\n{dead_man}")
+            if halt_line := self._halt_line(_ctx, session_id):
+                # Goals PR 0c: under every live chat reply while halted; never part of the conversation.
+                yield StreamEvent(type="text_delta", text=f"\n\n{halt_line}")
             yield StreamEvent(type="done", stop_reason="end_turn", usage=total_usage)
 
     # ------------------------------------------------------------------
@@ -4243,6 +4283,7 @@ class AgentRunner:
 
         ctx = resolve_context(context, is_background=is_background, session_id=session_id)
         is_background = ctx.is_background
+        turn_epoch = background_halt.turn_epoch()  # Goals PR 0c: the earliest start of this turn wins
 
         # F099: one helper builds the offered set for both loops (frame tools, the 012.2
         # subtask exclusion, F034.5 tool_filter, the F078 refuse denylist, the internal_only
@@ -4313,6 +4354,9 @@ class AgentRunner:
         _force_fires_remaining = 2
 
         while turns < max_turns:
+            # Goals PR 0c: a halted background turn makes no further model call.
+            if self._halt_ends_turn(ctx, session_id, turn_epoch):
+                return background_halt.HALT_TURN_TEXT, all_tool_results, total_usage, all_thinking_blocks
             # F064.1 ping site 1 — top of every iteration. Fires for both
             # tool-using and text-only turns. asyncio.shield prevents a
             # wait_for cancellation from killing an in-flight ping write.
@@ -4547,7 +4591,8 @@ class AgentRunner:
                         continue
 
                     # Harness: was this tool offered this iteration, and may this context use it?
-                    refusal = self._authorize_tool_call(ctx, tool_name, offered_names, session_id, tool_input)
+                    with background_halt.epoch_scope(turn_epoch):
+                        refusal = self._authorize_tool_call(ctx, tool_name, offered_names, session_id, tool_input)
                     if refusal is not None:
                         refusal_text = _with_alias_note(alias_note, refusal.text)
                         tool_results_for_message.append(
@@ -4818,6 +4863,8 @@ class AgentRunner:
             # 012.2: Enforce subtask tool call limit
             if max_tool_calls and total_tool_calls >= max_tool_calls:
                 logger.info("Subtask tool call limit reached (%d/%d)", total_tool_calls, max_tool_calls)
+                if self._halt_ends_turn(ctx, session_id, turn_epoch):
+                    return background_halt.HALT_TURN_TEXT, all_tool_results, total_usage, all_thinking_blocks
                 final = await self._call_api(
                     system_prompt=system_prompt,
                     messages=messages,
@@ -4852,6 +4899,8 @@ class AgentRunner:
 
         # Max turns reached -- extract text from last response if any
         logger.warning("Tool loop reached max_turns=%d", max_turns)
+        if self._halt_ends_turn(ctx, session_id, turn_epoch):
+            return background_halt.HALT_TURN_TEXT, all_tool_results, total_usage, all_thinking_blocks
         # Make one final call without tools to get a text response
         try:
             final_response = await self._call_api(
@@ -4946,6 +4995,8 @@ Rules:
                 dynamic_extras.append("[Previous Turn Corrections]\n" + "\n".join(corrections))
             if platform == "telegram":
                 dynamic_extras.append(self._TELEGRAM_FORMAT_INSTRUCTIONS)
+            if background_halt.current().halted:
+                dynamic_extras.append(background_halt.PROMPT_NOTE)  # Goals PR 0c
 
             # Append runner extras to dynamic tier
             if dynamic_extras:
@@ -4971,6 +5022,8 @@ Rules:
             parts.append("[Previous Turn Corrections]\n" + "\n".join(corrections))
         if platform == "telegram":
             parts.append(self._TELEGRAM_FORMAT_INSTRUCTIONS)
+        if background_halt.current().halted:
+            parts.append(background_halt.PROMPT_NOTE)  # Goals PR 0c
 
         return "\n\n".join(parts)
 
@@ -5297,6 +5350,24 @@ Rules:
             # No running event loop — happens in some test paths. Silent
             # by design; the stall scan's NULL-fallback policy covers us.
             pass
+
+    def _halt_ends_turn(self, ctx: ExecutionContext, session_id: str | None, turn_epoch: int | None) -> bool:
+        """Goals PR 0c: the model loop of this background turn stops here (it is halted, or it started before the
+        last halt). A refusal does not end a turn by itself, so both loops ask before every model call."""
+        if not background_halt.current().refuses(ctx.kind, session_id, turn_epoch):
+            return False
+        logger.warning("Background halt: ended a %s turn before its next model call (session=%s)", ctx.kind, session_id)
+        return True
+
+    def _halt_line(self, ctx: ExecutionContext, session_id: str | None) -> str | None:
+        """Goals PR 0c: the line under a live chat reply (as ``_dead_man_line``: an ``interactive`` turn outside a
+        background session) while background work is halted. None otherwise."""
+        if ctx.kind != "interactive" or is_background_session(session_id):
+            return None
+        halt = background_halt.current()
+        if not halt.halted:
+            return None
+        return background_halt.HALT_LINE_HOST if halt.host_hold else background_halt.HALT_LINE
 
     def _dead_man_line(self, ctx: ExecutionContext, session_id: str | None) -> str | None:
         """F111 PR B1: the watcher's stall warning for a live chat reply (an ``interactive`` turn in a session a
