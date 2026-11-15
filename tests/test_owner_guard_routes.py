@@ -1,0 +1,149 @@
+"""The owner routes require the owner's or the proxy's secret: which routes, in what order, and what a call with each
+secret gets. No database: every call either is refused before any lookup or fails the handler's own check first."""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+from types import SimpleNamespace
+
+import httpx
+import pytest
+from starlette.applications import Starlette
+
+from nous.api.intention_routes import build_intention_routes
+
+OWNER_VALUE = "owner-only-test-value"
+PROXY_VALUE = "proxy-only-test-value"
+OWNER_DIGEST = hashlib.sha256(OWNER_VALUE.encode()).hexdigest()
+PROXY_DIGEST = hashlib.sha256(PROXY_VALUE.encode()).hexdigest()
+OWNER = {"X-Nous-Owner-Secret": OWNER_VALUE}
+PROXY = {"X-Nous-Proxy-Secret": PROXY_VALUE}
+FORBIDDEN = {"error": "forbidden"}
+NOT_JSON = {"error": "Content-Type must be application/json"}
+
+
+def _settings(owner: bool = True, proxy: bool = True) -> SimpleNamespace:
+    return SimpleNamespace(
+        agent_id="guard-test",
+        continuation_enabled=False,
+        owner_route_secret_sha256=OWNER_DIGEST if owner else "",
+        mcp_client_ui_secret_sha256=PROXY_DIGEST if proxy else "",
+    )
+
+
+def _intention_app(settings: SimpleNamespace) -> Starlette:
+    return Starlette(routes=build_intention_routes(database=None, settings=settings, continuation_runner=None))
+
+
+async def _send(app: Starlette, method: str, path: str, **kwargs: object) -> httpx.Response:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://nous") as client:
+        return await client.request(method, path, **kwargs)
+
+
+# Each intention POST, with a body its handler refuses before it needs the database: the answer proves the handler
+# ran (and the guard let the call through).
+INTENTION_POSTS = {
+    "/intentions/proposals/ffffffff/decide": (b"{}", {"error": "decision must be 'approve' or 'reject'"}),
+    "/intentions/questions/ffffffff/answer": (b"{}", None),  # "text is required (at most N characters)"
+    "/intentions/questions/answer": (b"{}", {"error": "chat_id and message_id (integers) and text are required"}),
+    "/intentions/ffffffff/cancel": (b"[1]", {"error": "the body must be a JSON object"}),
+}
+POSTS = list(INTENTION_POSTS)
+
+
+def _handler_ran(path: str, response: httpx.Response) -> None:
+    _probe, expected = INTENTION_POSTS[path]
+    assert response.status_code == 400, response.text
+    if expected is None:
+        assert response.json()["error"].startswith("text is required")
+    else:
+        assert response.json() == expected
+
+
+@pytest.mark.parametrize("path", POSTS)
+async def test_an_intention_post_without_a_secret_is_403(path: str) -> None:
+    response = await _send(_intention_app(_settings()), "POST", path, json={})
+    assert response.status_code == 403
+    assert response.json() == FORBIDDEN
+
+
+@pytest.mark.parametrize("path", POSTS)
+async def test_the_refusal_comes_before_the_body_and_the_lookup(path: str) -> None:
+    # Not JSON, and no database: anything but the guard would answer 400 or raise on the None database.
+    response = await _send(_intention_app(_settings()), "POST", path, content=b"not json")
+    assert response.status_code == 403
+    assert response.json() == FORBIDDEN
+
+
+@pytest.mark.parametrize("path", POSTS)
+@pytest.mark.parametrize(
+    ("headers", "allowed"),
+    [
+        ({}, False),
+        (OWNER, True),
+        ({**PROXY, "content-type": "application/json"}, True),
+        ({**PROXY, "content-type": "application/json; charset=utf-8"}, True),
+        ({**PROXY, "content-type": "text/plain"}, False),
+        ({**PROXY, "content-type": "text/plain; application/json"}, False),
+        ({**OWNER, "content-type": "text/plain"}, True),
+    ],
+    ids=["none", "owner", "proxy-json", "proxy-json-charset", "proxy-text", "proxy-smuggled-json", "owner-text"],
+)
+async def test_each_intention_post_against_each_proof(path: str, headers: dict[str, str], allowed: bool) -> None:
+    probe, _expected = INTENTION_POSTS[path]
+    sent = {"content-type": "application/json", **headers}
+    response = await _send(_intention_app(_settings()), "POST", path, content=probe, headers=sent)
+    if allowed:
+        _handler_ran(path, response)
+    elif "X-Nous-Proxy-Secret" in headers:
+        assert response.status_code == 415
+        assert response.json() == NOT_JSON
+    else:
+        assert response.status_code == 403
+        assert response.json() == FORBIDDEN
+
+
+@pytest.mark.parametrize("headers", [OWNER, PROXY], ids=["owner", "proxy"])
+async def test_with_no_digest_an_intention_post_is_403_even_with_a_header(headers: dict[str, str]) -> None:
+    app = _intention_app(_settings(owner=False, proxy=False))
+    response = await _send(app, "POST", "/intentions/proposals/ffffffff/decide", json={}, headers=headers)
+    assert response.status_code == 403
+
+
+async def test_the_intention_reads_need_no_secret() -> None:
+    response = await _send(_intention_app(_settings()), "GET", "/intentions")
+    assert response.status_code == 200
+    assert response.json() == {"roots": [], "continuation": False}
+
+
+def test_exactly_the_intention_posts_are_guarded() -> None:
+    routes = build_intention_routes(database=None, settings=_settings(), continuation_runner=None)
+    guarded = {route.path for route in routes if getattr(route.endpoint, "owner_guarded", False)}
+    assert guarded == {
+        "/intentions/proposals/{id}/decide",
+        "/intentions/questions/answer",
+        "/intentions/questions/{id}/answer",
+        "/intentions/{root_id}/cancel",
+    }
+    for route in routes:
+        if route.path in guarded:
+            assert route.methods == {"POST"}
+
+
+async def test_no_log_record_carries_a_secret_on_a_refused_or_an_accepted_call(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    app = _intention_app(_settings())
+    path = "/intentions/proposals/ffffffff/decide"
+    wrong = {"X-Nous-Owner-Secret": "a-wrong-value", "X-Nous-Proxy-Secret": "another-wrong-value"}
+    refused = await _send(app, "POST", path, json={}, headers=wrong)
+    by_owner = await _send(app, "POST", path, json={}, headers=OWNER)
+    by_proxy = await _send(app, "POST", path, json={}, headers=PROXY)
+    assert [refused.status_code, by_owner.status_code, by_proxy.status_code] == [403, 400, 400]
+    assert caplog.records  # the refusal was logged
+    for record in caplog.records:
+        text = record.getMessage() + repr(record.args)
+        for value in (OWNER_VALUE, PROXY_VALUE, "a-wrong-value", "another-wrong-value", OWNER_DIGEST, PROXY_DIGEST):
+            assert value not in text

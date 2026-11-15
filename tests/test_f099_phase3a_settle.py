@@ -20,6 +20,7 @@ from f099_cards_support import (
     wake,
 )
 from f099_support import (
+    OWNER_HEADERS,
     SEND_EMAIL_SCHEMA,
     ask_with_proposals,
     claim,
@@ -348,6 +349,7 @@ async def test_a_card_approve_does_not_wait_for_the_tool_and_the_card_is_already
 
 async def _route(env, method, path, **kwargs) -> httpx.Response:
     app = Starlette(routes=build_intention_routes(database=env.db, settings=env.settings, continuation_runner=env.cont))
+    kwargs["headers"] = {**OWNER_HEADERS, **kwargs.get("headers", {})}  # the owner routes require the secret
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://nous") as client:
         return await client.request(method, path, **kwargs)
 

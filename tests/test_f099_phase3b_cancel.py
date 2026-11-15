@@ -9,7 +9,15 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from f099_cards_support import CARDS, cards_env, tap  # noqa: F401
-from f099_support import env_factory, finish, make_child, make_root, runner_env, set_intention  # noqa: F401
+from f099_support import (  # noqa: F401
+    OWNER_HEADERS,
+    env_factory,
+    finish,
+    make_child,
+    make_root,
+    runner_env,
+    set_intention,
+)
 from sqlalchemy import select
 from starlette.applications import Starlette
 
@@ -141,7 +149,8 @@ async def test_the_card_and_the_rest_route_leave_the_same_rows_and_say_the_same_
     app = Starlette(routes=build_intention_routes(database=env.db, settings=env.settings, continuation_runner=env.cont))
 
     card = await _run(env.router, _ctx(env.router, via_card.id))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://nous") as client:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://nous", headers=OWNER_HEADERS) as client:
         rest = (await client.post(f"/intentions/{via_rest.id}/cancel", json={"actor": "t"})).json()
         again = (await client.post(f"/intentions/{via_rest.id}/cancel", json={"actor": "t"})).json()
     assert card.ok and card.message == f"Cancelled: {rest['cancelled_intentions']} piece(s) of work stopped"
@@ -155,7 +164,8 @@ async def test_the_card_and_the_rest_route_leave_the_same_rows_and_say_the_same_
     await finish(env, await env.heart.subtasks.get(uuid.UUID(finished.source_id)))
     await set_intention(env, finished.id, state="closed", close_reason="resolved")
     refused = await _run(env.router, _ctx(env.router, finished.id))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://nous") as client:
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://nous", headers=OWNER_HEADERS) as client:
         route = await client.post(f"/intentions/{finished.id}/cancel", json={})
     assert route.status_code == 409 and route.json()["refusal"] == "finished"
     assert not refused.ok and refused.message == owner_actions.CANCEL_REFUSALS["finished"]

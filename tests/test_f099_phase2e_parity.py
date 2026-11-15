@@ -14,6 +14,7 @@ import httpx
 import pytest
 from f099_support import (
     ON,
+    OWNER_HEADERS,
     env_factory,  # noqa: F401
     finish,
     inbox_rows,
@@ -40,6 +41,7 @@ pytestmark = pytest.mark.postgres_only
 
 
 async def _call(app, method, path, **kwargs) -> httpx.Response:
+    kwargs["headers"] = {**OWNER_HEADERS, **kwargs.get("headers", {})}  # the owner routes require the secret
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://nous") as client:
         return await client.request(method, path, **kwargs)
 
