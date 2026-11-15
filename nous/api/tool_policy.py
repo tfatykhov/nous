@@ -1014,14 +1014,21 @@ def _runner_allowed(args: list[str], *, workspace: Path, readable: list[Path]) -
 
 
 def _runner_args(prog: str, args: list[str], *, jobs: Path, cwd: Path | None) -> list[str] | None:
-    """runner.sh's own arguments when the simple command runs it in one of its three accepted spellings, else None:
-    ``<workspace>/claude-jobs/runner.sh ARGS``; ``bash <workspace>/claude-jobs/runner.sh ARGS`` (exactly: no bash
-    option, which could read a script or startup file); ``./runner.sh ARGS`` only when the shell's cwd is surely
-    the jobs directory (``cwd``, resolved, is None when it is not sure)."""
-    runner = str(jobs / "runner.sh")
-    if prog == runner:
+    """runner.sh's own arguments when the simple command runs it in one of its accepted spellings, else None:
+    ``<workspace>/claude-jobs/runner.sh ARGS``, written as the setting names the workspace or as it resolves (what
+    ``pwd`` prints in a symlinked workspace); ``bash`` and exactly one such path (no bash option, which could read a
+    script or startup file); ``./runner.sh ARGS`` only when the shell's cwd is surely the jobs directory (``cwd``,
+    resolved, is None when it is not sure). The model's word is compared as TEXT with those two paths: never
+    resolved, normalised or compared by its parent, since a word like ``/proc/self/cwd/claude-jobs/runner.sh`` names
+    another directory to the shell than to this process, and ``a//b`` or ``a/./b`` are equal in the shell only."""
+    texts = {str(jobs / "runner.sh")}
+    try:
+        texts.add(str(jobs.resolve() / "runner.sh"))
+    except (OSError, RuntimeError):
+        pass
+    if prog in texts:
         return args
-    if prog == "bash" and args[:1] == [runner]:
+    if prog == "bash" and args[:1] and args[0] in texts:
         return args[1:]
     if prog == "./runner.sh" and cwd is not None and cwd == jobs.resolve():
         return args

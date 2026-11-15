@@ -862,3 +862,218 @@ def test_the_description_lists_cut():
 def test_sort_and_uniq_stay_refused(command, ws):
     reason = _refusal(_fmt(command, ws), ws)
     assert reason is not None and reason.code == "program"
+
+
+# -- the resolved spelling of the job runner path, and the grep options that are (not) allowed --
+
+
+@pytest.fixture
+def linked(tmp_path):
+    """A real workspace and a symlink to it: the setting names one, the shell's ``pwd`` prints the other."""
+    real = _layout(tmp_path / "real")
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    return real, link
+
+
+def test_the_resolved_path_of_a_symlinked_workspace_is_accepted_as_text(linked):
+    real, link = linked
+    for spelling in (f"{real}/claude-jobs/runner.sh", f"{link}/claude-jobs/runner.sh"):  # setting: the link
+        assert _ok(f"{spelling} status", link), spelling
+        assert _ok(f"bash {spelling} list", link), spelling
+    assert not _ok(f"{link}/claude-jobs/runner.sh status", real)  # the setting's own text or its resolved one only
+    assert lineage_runs_runner(f"bash {real}/claude-jobs/runner.sh list")
+
+
+RUNNER_PINNED = [
+    "{R} status",
+    "bash {R} status",
+    "cd {J} && ./runner.sh status",
+    "cd claude-jobs && ./runner.sh status",
+]
+
+
+@pytest.mark.parametrize("command", RUNNER_PINNED)
+def test_the_spellings_that_already_worked_still_do(command, ws):
+    assert _ok(_fmt(command.replace("{J}", "{W}/claude-jobs"), ws), ws), command
+
+
+def test_a_runner_reached_through_cd_dotdot_is_refused_at_the_cd(ws):
+    assert _refusal(_fmt("cd {W}/claude-jobs && cd .. && ./runner.sh status", ws), ws).code == "cd"
+
+
+RUNNER_PATH_REFUSED = [
+    "runner.sh status",
+    "bash runner.sh status",
+    "cd {J} && runner.sh status",
+    "cd {J} && bash runner.sh status",
+    "cd {J} ; ./runner.sh status",
+    "cd {J} || ./runner.sh status",
+    "cd claude-jobs | ./runner.sh status",
+    # the relative forms stay refused on purpose
+    "claude-jobs/runner.sh status",
+    "./claude-jobs/runner.sh status",
+    "bash claude-jobs/runner.sh status",
+    "bash ./claude-jobs/runner.sh status",
+    "cd {J} && bash ./runner.sh status",
+    "cd {W} && ./claude-jobs/runner.sh status",
+    "../claude-jobs/runner.sh status",
+    "{J}/../claude-jobs/runner.sh status",
+    "claude-jobs/../claude-jobs/runner.sh status",
+    "./claude-jobs/prompts/../runner.sh status",
+    # the process's cwd is not the shell's cwd after a cd, so /proc/self/cwd names the wrong directory
+    "/proc/self/cwd/claude-jobs/runner.sh status",
+    "bash /proc/self/cwd/claude-jobs/runner.sh status",
+    "cd {W}/intentions/{RID} && bash /proc/self/cwd/claude-jobs/runner.sh status",
+    "bash /proc/self/root{W}/claude-jobs/runner.sh status",
+    # equal in the shell but not as text: compared as text only
+    "bash {W}/claude-jobs/./runner.sh status",
+    "bash {W}/claude-jobs//runner.sh status",
+    "bash {J}/../claude-jobs/runner.sh status",
+    "{W}/runner.sh status",
+    "{W}/claude-jobs/prompts/runner.sh status",
+    "{W}/other/claude-jobs/runner.sh status",
+    "/tmp/claude-jobs/runner.sh status",
+    "{W}/claude-jobs/runner.sh.bak status",
+    "bash -x {R} status",
+    "bash -c '{R} status'",
+    "bash --norc {R} status",
+]
+
+
+@pytest.mark.parametrize("command", RUNNER_PATH_REFUSED)
+def test_every_other_spelling_of_the_runner_is_refused_with_its_own_reason(command, ws):
+    reason = _refusal(_fmt(command.replace("{J}", "{W}/claude-jobs"), ws), ws)
+    assert reason is not None and reason.code == "runner_path", (command, reason and reason.code)
+    assert "<workspace>/claude-jobs/runner.sh" in reason
+
+
+@pytest.mark.parametrize(
+    ("command", "code"),
+    [
+        ("bash -lc x", "bash_script"),
+        ("bash {R} status; bash {W}/claude-jobs/prompts/x.sh", "bash_script"),
+        ("bash {W}/claude-jobs/prompts/x.sh", "bash_script"),
+        ("bash", "bash_script"),
+        ("sh {R} status", "program"),
+        ("source {R}", "program"),
+        (". {R}", "program"),
+        ("exec {R}", "program"),
+        ("env {R} status", "program"),
+        ("xargs {R}", "program"),
+        ("{W}/research/r.sh status", "program"),
+    ],
+)
+def test_a_script_other_than_the_runner_is_not_the_runner(command, code, ws):
+    reason = _refusal(_fmt(command, ws), ws)
+    assert reason is not None and reason.code == code, (command, reason and reason.code)
+
+
+def test_a_symlink_to_the_runner_inside_the_workspace_is_not_the_runner(ws):
+    (ws / "research" / "runner.sh").symlink_to(ws / "claude-jobs" / "runner.sh")
+    assert _refusal(f"{ws}/research/runner.sh status", ws).code == "runner_path"
+
+
+def test_a_workspace_that_is_another_directory_is_not_the_one_set(tmp_path):
+    ws = _layout(tmp_path / "ws")
+    other = tmp_path / "other"
+    other.symlink_to(tmp_path / "elsewhere")
+    (tmp_path / "elsewhere").mkdir()
+    assert _refusal(f"{other}/claude-jobs/runner.sh status", ws).code == "runner_path"
+
+
+@pytest.mark.parametrize(
+    ("args", "code"),
+    [
+        ("cancel job-20261010-222549-6e37c52b", "runner_cancel"),
+        ("cleanup", "runner_verb"),
+        ("gc", "runner_verb"),
+        ("launch nous p --sys-prompt x", "runner_args"),
+        ("launch nous p --timeout 5", "runner_args"),
+        ("launch nous --prompt-file claude-jobs/prompts/x.md", "runner_file"),
+        ("launch nous --prompt-file /etc/passwd", "runner_file"),
+        ("launch 'a b' p", "runner_args"),
+        ("launch nous p --plugins {W}/research", "runner_args"),
+        ("status extra", "runner_args"),
+        ("result", "runner_args"),
+        ("list --bogus", "runner_args"),
+    ],
+)
+def test_the_runner_verbs_are_unchanged_in_every_accepted_spelling(args, code, ws):
+    for prefix in ("{R}", "bash {R}", "cd {W}/claude-jobs && ./runner.sh"):
+        reason = _refusal(_fmt(f"{prefix} {args}", ws), ws)
+        assert reason is not None and reason.code == code, (prefix, args, reason and reason.code)
+
+
+def test_every_accepted_spelling_still_drops_gh_repo():
+    for command in (
+        "/w/claude-jobs/runner.sh status",
+        "bash /w/claude-jobs/runner.sh list",
+        "cd /w/claude-jobs && ./runner.sh status",
+    ):
+        assert lineage_runs_runner(command), command
+        assert not lineage_runs_build(command), command
+
+
+def test_a_runner_spelling_cannot_join_a_build_command(linked):
+    real, link = linked
+    for command in (
+        f"cd nous && pytest && bash {real}/claude-jobs/runner.sh status",
+        f"git -C nous status; {link}/claude-jobs/runner.sh list",
+    ):
+        reason = _refusal(command, link)
+        assert reason is not None and reason.code == "build_token", command
+
+
+GREP_ALLOWED = [
+    "grep -n x {W}/a.md",
+    "grep -B15 -n x {W}/a.md",
+    "grep -A3 -n x {W}/a.md",
+    "grep -A 3 x {W}/a.md",
+    "grep -C2 x {W}/a.md",
+    "grep -o x {W}/a.md",
+    "grep -c x {W}/a.md",
+    "grep -E 'a|b' {W}/a.md",
+    "grep -i x {W}/a.md",
+    "grep -nE x {W}/a.md",
+    "grep -m1 x {W}/a.md",
+    "grep -h x {W}/a.md {W}/b.md",
+    "grep --include='*.md' x {W}/a.md",
+]
+GREP_R = [
+    "grep -rh x {W}/dir",
+    "grep -rl x {W}/dir",
+    "grep -rln --include='*.md' x {W}/dir",
+    "grep -r x {W}/dir",
+    "grep -R x {W}/dir",
+    "grep -d recurse x {W}/dir",
+    "grep -drecurse x {W}/dir",
+    "grep --directories=recurse x {W}/dir",
+    "grep --directories recurse x {W}/dir",
+    "grep --recursive x {W}/dir",
+    "grep --dereference-recursive x {W}/dir",
+    "grep -nr x {W}/dir",
+    "grep -rn x",
+    "grep -A3 -r x {W}/dir",
+    "grep -e x -r {W}/dir",
+]
+
+
+@pytest.mark.parametrize("command", GREP_ALLOWED)
+def test_grep_context_and_filter_options_are_accepted(command, ws):
+    assert _ok(_fmt(command, ws), ws), command
+
+
+@pytest.mark.parametrize("command", GREP_R)
+def test_grep_recursion_is_refused_for_its_own_reason(command, ws):
+    reason = _refusal(_fmt(command, ws), ws)
+    assert reason is not None and reason.code == "grep_r", (command, reason and reason.code)
+    assert "dir/*.md" in reason
+
+
+@pytest.mark.skipif(shutil.which("grep") is None, reason="needs grep")
+def test_grep_r_would_read_a_hidden_file_that_cat_is_refused(ws):
+    done = subprocess.run(["grep", "-r", "token", str(ws / "dir")], capture_output=True, text=True)
+    assert ".env" in done.stdout  # recursion descends into the hidden file ...
+    assert not _ok(f"cat {ws}/dir/.env", ws)  # ... that a named read is refused
+    assert not _ok(f"grep -r token {ws}/dir", ws)
