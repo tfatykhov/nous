@@ -3918,6 +3918,7 @@ def create_subtask_tools(
 
                 # Legacy inline path — bytewise unchanged from pre-F061.
                 system_prefix = build_subtask_prefix(task, frame_type)
+                halt_epoch = background_halt.turn_epoch()  # Goals PR 0c: the run's start, as its turn sees it
 
                 try:
                     response_text, _ctx, _usage = await _asyncio.wait_for(
@@ -3938,7 +3939,7 @@ def create_subtask_tools(
                         ),
                         timeout=effective_timeout,
                     )
-                    if background_halt.current().halted:
+                    if background_halt.current().refuses("subtask", subtask_session_id, halt_epoch):
                         # Goals PR 0c: the halt ended this inline run; its row is cancelled, never completed.
                         await heart.subtasks.cancel(subtask.id)
                         return _tool_error(f"[Subtask {subtask.id.hex[:8]} blocked: {background_halt.HALT_REASON}]")

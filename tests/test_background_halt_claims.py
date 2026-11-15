@@ -484,3 +484,26 @@ async def test_a_halt_that_lands_during_a_dag_tick_stops_it_at_the_next_dag():
     orchestrator._advance_dag = AsyncMock(side_effect=advance)
     await orchestrator.tick()
     assert orchestrator._advance_dag.await_count == 1
+
+
+async def test_a_legacy_inline_run_spanning_a_halt_and_a_resume_is_cancelled_not_completed(runner_env):  # noqa: F811
+    from nous.api.execution_context import ExecutionContext
+
+    halt = _install()
+
+    async def the_inline_turn_spans_a_halt(kwargs):
+        await halt.halt(actor="t", surface="dashboard")
+        assert (await halt.resume(actor="t", via="dashboard")).changed
+        return [say("Snow: 40 cm")]
+
+    env = await runner_env(the_inline_turn_spans_a_halt, subtask_hardening_enabled=False)
+    chat = ExecutionContext(kind="interactive", session_id="s1")
+    text, is_error = await env.dispatcher.dispatch(
+        "spawn_task",
+        {"task": "Check the snow report", "await_result": True, "intent": "Tell the user about the snow"},
+        session_id="s1",
+        context=chat,
+    )
+    assert is_error and background_halt.HALT_REASON in text and not halt.halted
+    (row,) = await _subtasks(env)
+    assert row.status == "cancelled" and row.result is None
