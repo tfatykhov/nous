@@ -545,3 +545,33 @@ async def test_a_hardened_run_saved_before_the_halt_landed_is_delivered_as_usual
     assert "subtask_completed" in [e.type for e in bus.events]
     env.http.post.assert_called_once()  # its push
     assert len(await inbox_rows(env, subtask.id)) == 1  # its inbox row
+
+
+@pytest.mark.postgres_only  # complete() on a terminal row books the run's usage with GREATEST
+async def test_a_legacy_run_whose_row_the_sweep_cancelled_first_announces_nothing(env_factory):  # noqa: F811
+    env = await env_factory(
+        result_inbox_enabled=True, subtask_hardening_enabled=False, telegram_bot_token="token", telegram_chat_id="1"
+    )
+    subtask = await _make(env, notify=True)
+    halt = _install()
+    runner = MagicMock()
+    runner.end_conversation = AsyncMock()
+    runner.root_cancelled = MagicMock(return_value=False)
+    runner.run_turn = AsyncMock(return_value=("Snow: 40 cm", MagicMock(), {"input_tokens": 1, "output_tokens": 1}))
+    real_complete = env.heart.subtasks.complete
+
+    async def the_sweep_lands_first(*args, **kwargs):
+        await halt.halt(actor="t", surface="dashboard")
+        await env.heart.subtasks.cancel_all_active()  # the sweep's first step, before this write
+        return await real_complete(*args, **kwargs)
+
+    env.heart.subtasks.complete = the_sweep_lands_first
+    bus = RecordingBus()
+    pool = SubtaskWorkerPool(runner, env.heart, env.settings, bus=bus, http_client=env.http)
+    claimed = await env.heart.subtasks.dequeue("worker-0")
+    with background_halt.epoch_scope(halt.epoch):
+        await pool._process_subtask(claimed)
+    assert (await _row(env, subtask.id)).status == "cancelled"
+    assert "subtask_completed" not in [e.type for e in bus.events]
+    env.http.post.assert_not_called()
+    assert await inbox_rows(env, subtask.id) == []

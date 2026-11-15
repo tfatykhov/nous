@@ -193,8 +193,9 @@ class SubtaskManager:
         payload_schema_valid: bool | None = None,
         # F107: True for a run with nothing to deliver, so no reader picks it up.
         delivered: bool | None = None,
-    ) -> None:
-        """Mark a subtask as completed with its result."""
+    ) -> bool:
+        """Mark a subtask as completed with its result. Returns whether the row was written: False when it was already
+        terminal (for example cancelled first)."""
         values: dict = {
             "status": "completed",
             "result": result,
@@ -242,7 +243,7 @@ class SubtaskManager:
                     tokens_out=tokens_out,
                     tool_calls_made=tool_calls_made,
                 )
-                return
+                return False
             # F061: include outcome in log so operators can grep for the new
             # 5-state enum (completed / incomplete_blocked / ...). Falls back
             # to the legacy message when no outcome was supplied.
@@ -252,6 +253,7 @@ class SubtaskManager:
                 )
             else:
                 logger.info("Completed subtask %s", subtask_id.hex[:8])
+            return True
 
     async def fail(
         self,

@@ -684,13 +684,17 @@ class SubtaskWorkerPool:
             usage = usage or {}
             if await self._ended_by_halt(subtask):
                 return  # Goals PR 0c: the halted turn's text is never delivered as a result
-            await self._heart.subtasks.complete(
+            written = await self._heart.subtasks.complete(
                 subtask.id, response_text,
                 final_outcome="completed", attempts=1,
                 tokens_in=usage.get("input_tokens", 0),
                 tokens_out=usage.get("output_tokens", 0),
                 tool_calls_made=usage.get("tool_calls", 0),
             )
+            if written is False:
+                # The row was already terminal (the halt's sweep cancelled it first): nothing is announced.
+                logger.info("Subtask %s was not completed (its row was already terminal)", subtask.id.hex[:8])
+                return
             await self._emit_event("subtask_completed", subtask, result=response_text)
             await self._notify_telegram(subtask, result=response_text)
             logger.info("Subtask %s completed", subtask.id.hex[:8])
