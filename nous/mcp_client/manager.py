@@ -1366,8 +1366,16 @@ class McpClientManager:
             getattr(item, "type", None) == "image" for item in getattr(raw, "content", None) or []
         )
         if decodes:
-            async with self._decoding:
-                text, is_error = await asyncio.to_thread(flatten_result, raw, self._max_chars, withheld, take, images)
+            # The slot is the thread's, not the caller's: a call cancelled while its images are decoded (a client
+            # that went away, the runner's tool timeout) leaves the thread running, since a thread cannot be
+            # stopped, and the slot is given back when the thread ends. The decode is shielded so that it is never
+            # dropped between the slot being taken and the thread starting.
+            await self._decoding.acquire()
+            decode = asyncio.ensure_future(
+                asyncio.to_thread(flatten_result, raw, self._max_chars, withheld, take, images)
+            )
+            decode.add_done_callback(self._decode_ended)
+            text, is_error = await asyncio.shield(decode)
         elif result_chars(raw) > OFF_LOOP_RESULT_CHARS:
             text, is_error = await asyncio.to_thread(flatten_result, raw, self._max_chars, withheld, take, images)
         else:
@@ -1375,6 +1383,13 @@ class McpClientManager:
         # The text first, always: the dispatcher reads it there. The images follow it, for the runner to send.
         content = [{"type": "text", "text": wrap_result(server_name, text)}, *(image.block() for image in images)]
         return {"content": content, "is_error": is_error}, None
+
+    def _decode_ended(self, decode: asyncio.Future[Any]) -> None:
+        """A decode's thread has ended: its slot is free. The error of a decode nobody waits for any more (its call
+        was cancelled) is read here, so it is not reported as never retrieved."""
+        self._decoding.release()
+        if not decode.cancelled():
+            decode.exception()
 
     async def _emit_error(self, server_name: str, exc: BaseException) -> None:
         """An ``mcp_client_server_error`` event: the server's name and the error's class, never its text."""

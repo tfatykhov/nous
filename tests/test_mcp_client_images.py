@@ -2055,3 +2055,70 @@ def test_an_ordinary_png_with_a_colour_profile_is_taken_without_it():
     src = _encoded(Image.new("RGB", (40, 30), (10, 120, 200)), "PNG", icc_profile=profile)
     assert src.count(PROFILE) == 1
     _assert_plain(_usable(_b64(src), "image/png"))
+
+
+async def test_a_cancelled_call_keeps_its_decode_slot_until_its_thread_ends(monkeypatch):
+    # A thread cannot be stopped: a call cancelled while its images are decoded leaves the decoder running. Were its
+    # slot freed at the cancel, two cancelled calls and two new ones would be four decoders at once.
+    import threading
+
+    from nous.mcp_client import manager as manager_module
+
+    lock = threading.Lock()
+    go = threading.Event()
+    running = peak = started = 0
+
+    def held(*_args: Any, **_kwargs: Any) -> tuple[str, bool]:
+        nonlocal running, peak, started
+        with lock:
+            running += 1
+            started += 1
+            peak = max(peak, running)
+        go.wait(10)
+        with lock:
+            running -= 1
+        return "seen", False
+
+    monkeypatch.setattr(manager_module, "flatten_result", held)
+    manager, d, _fake = await _image_manager(SHOT)
+    call = d._handlers["mcp__alpha__shot"]
+
+    async def until(condition: Any) -> None:
+        for _ in range(500):
+            if condition():
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("timed out")
+
+    try:
+        first = [asyncio.ensure_future(call(q="one")) for _ in range(manager_module.DECODES_AT_ONCE)]
+        await until(lambda: started == manager_module.DECODES_AT_ONCE)
+        for task in first:
+            task.cancel()
+        assert [type(r) for r in await asyncio.gather(*first, return_exceptions=True)] == [asyncio.CancelledError] * 2
+        later = [asyncio.ensure_future(call(q="one")) for _ in range(2)]
+        await asyncio.sleep(0.15)
+        # The cancelled calls' threads are still decoding: the new calls wait, and no third decoder has started.
+        assert (started, running, peak) == (2, 2, 2) and not any(task.done() for task in later)
+    finally:
+        go.set()
+    assert [answer["is_error"] for answer in await asyncio.wait_for(asyncio.gather(*later), 10)] == [False, False]
+    assert (started, peak) == (4, manager_module.DECODES_AT_ONCE)
+    await until(lambda: not manager._decoding.locked())
+    assert manager._decoding._value == manager_module.DECODES_AT_ONCE  # every slot is back, none twice
+    await manager.close()
+
+
+async def test_a_decode_that_raises_gives_its_slot_back(monkeypatch):
+    from nous.mcp_client import manager as manager_module
+
+    def broken(*_args: Any, **_kwargs: Any) -> tuple[str, bool]:
+        raise RuntimeError("decoder bug")
+
+    monkeypatch.setattr(manager_module, "flatten_result", broken)
+    manager, d, _fake = await _image_manager(SHOT)
+    for _ in range(manager_module.DECODES_AT_ONCE + 1):
+        with pytest.raises(RuntimeError):
+            await d._handlers["mcp__alpha__shot"](q="one")
+    assert manager._decoding._value == manager_module.DECODES_AT_ONCE
+    await manager.close()
