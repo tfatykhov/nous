@@ -132,6 +132,27 @@ async def test_a_value_that_is_not_a_digest_counts_as_unset(raw: object) -> None
     assert handler.calls == 0
 
 
+@pytest.mark.parametrize(
+    "settings",
+    [SimpleNamespace(), _settings(owner="", proxy=""), _settings(owner=OWNER_DIGEST, proxy=""), _settings(proxy="")],
+    ids=["no-attrs", "both-empty", "owner-only", "proxy-empty"],
+)
+@pytest.mark.parametrize("header", [OWNER_SECRET_HEADER, PROXY_SECRET_HEADER])
+async def test_an_empty_header_never_matches_an_unset_digest(settings: SimpleNamespace, header: str) -> None:
+    """An empty value in either header proves nothing, whichever digest is unset: an empty header must never equal
+    an empty digest."""
+    guard = OwnerGuard(settings)
+    request = _request(headers={header: "", "content-type": "application/json"})
+    assert guard.proof(request) is None
+    assert guard.allows(request) is False
+    assert await guard.grants(request, OWNER) is False
+    assert await guard.grants(request, CARD_DECISION) is False
+    handler = _Counter()
+    response = await _post(_app(guard, handler), json={}, headers={header: ""})
+    assert response.status_code == 403
+    assert handler.calls == 0
+
+
 @pytest.mark.parametrize("raw", [f"{OWNER_DIGEST}  -", OWNER_DIGEST.upper()], ids=["sha256sum", "upper"])
 async def test_sha256sum_output_is_accepted(raw: str) -> None:
     guard = OwnerGuard(_settings(owner=raw, proxy=""))

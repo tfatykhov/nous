@@ -1034,6 +1034,27 @@ async def test_the_same_verb_with_the_proof_runs(router: ActionRouter, service: 
     assert (await _surface_row(db, surface_id)).status == "resolved"
 
 
+async def test_the_owners_proof_is_checked_before_the_censor(
+    db, a2ui_settings, service: SurfaceService, a2ui_agent_id: str
+) -> None:
+    """An unproven tap on a gated verb never reaches the censor (it is refused first, with no censor call); a proven
+    one does (and this heart blocks it)."""
+    heart = BlockingHeart()
+    router = ActionRouter(db, a2ui_settings, service, heart=heart)
+    surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
+    nonce = (await _surface_row(db, surface_id)).nonce
+    body = _body("approval.choose", surface_id, nonce=nonce, context={"optionId": "cancel"})
+
+    unproven, payload = await router.handle(body, content_type=JSON)
+    assert (unproven, payload["error"]["code"]) == (403, "OWNER_PROOF_REQUIRED")
+    assert heart.checked == []
+
+    proven, payload = await router.handle(body, content_type=JSON, owner_verified=True)
+    assert (proven, payload["error"]["code"]) == (403, "CENSORED")
+    assert len(heart.checked) >= 1
+    assert (await _surface_row(db, surface_id)).status == "live"
+
+
 async def test_a_stale_nonce_is_still_a_nonce_mismatch_without_the_proof(
     router: ActionRouter, service: SurfaceService
 ) -> None:
