@@ -784,5 +784,5 @@ class GoalDriver:
         session_n: int | None = None,
         evidence: Iterable[str] = (),
     ) -> GoalJournal:
-        """A journal row in the caller's transaction, through the store's one row builder (its text bound)."""
-        return self._store._add_journal(s, goal_id, kind, text, actor=actor, session_n=session_n, evidence=evidence)
+        """A journal row in the caller's transaction (``GoalStore.add_journal_row``, with the journal's bounds)."""
+        return self._store.add_journal_row(s, goal_id, kind, text, actor=actor, session_n=session_n, evidence=evidence)

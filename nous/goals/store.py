@@ -236,7 +236,7 @@ class GoalStore:
             )
             s.add(goal)
             await s.flush()
-            self._add_journal(s, goal.id, "state", f"Created as a draft ({preset_name} limits).", actor=actor)
+            self.add_journal_row(s, goal.id, "state", f"Created as a draft ({preset_name} limits).", actor=actor)
             await s.commit()
             return goal
 
@@ -420,7 +420,7 @@ class GoalStore:
         async with self._locked(ref) as (s, goal, now):
             if goal.state not in LIVE_STATES:
                 raise GoalRefused(f"{describe(goal)}: a note can only be added to a draft, active or paused goal")
-            self._add_journal(s, goal.id, "owner_note", body, actor=actor)
+            self.add_journal_row(s, goal.id, "owner_note", body, actor=actor)
             if goal.state == "active" and await self._open_session(s, goal.id) is None:
                 await self._wake(s, goal.id, now)
             await s.commit()
@@ -455,7 +455,7 @@ class GoalStore:
             owned = await s.scalar(select(Goal.id).where(Goal.id == goal_id, Goal.agent_id == self.agent_id))
             if owned is None:
                 raise GoalRefused(f"no goal {goal_id}")
-            row = self._add_journal(s, goal_id, kind, text, actor=actor, session_n=session_n, evidence=evidence)
+            row = self.add_journal_row(s, goal_id, kind, text, actor=actor, session_n=session_n, evidence=evidence)
             await s.commit()
             return row
 
@@ -503,7 +503,7 @@ class GoalStore:
         )
         if result.rowcount != 1:
             raise GoalRefused(f"{describe(goal)} changed meanwhile; nothing was done")
-        self._add_journal(s, goal.id, "state", note, actor=actor, session_n=session_n)
+        self.add_journal_row(s, goal.id, "state", note, actor=actor, session_n=session_n)
         await s.commit()
         await s.refresh(goal)
         return goal
@@ -535,7 +535,7 @@ class GoalStore:
         )
         return int((await s.execute(query)).scalar_one())
 
-    def _add_journal(
+    def add_journal_row(
         self,
         s: AsyncSession,
         goal_id: UUID,
@@ -546,6 +546,10 @@ class GoalStore:
         session_n: int | None = None,
         evidence: Iterable[str] = (),
     ) -> GoalJournal:
+        """Append one journal row in the caller's transaction: it is added to ``s`` and neither flushed nor
+        committed, so it is written with the caller's other changes or not at all (the goal driver claims a report
+        and journals it this way). Same bounds as ``append_journal``. The caller has already scoped ``goal_id``
+        to this store's agent: the row is not checked against it."""
         if kind not in JOURNAL_KINDS:
             raise ValueError(f"unknown journal kind {kind!r}")
         if actor not in ACTORS:
