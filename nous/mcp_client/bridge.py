@@ -19,14 +19,17 @@ from jsonschema import SchemaError
 from jsonschema.validators import Draft202012Validator
 
 from nous.api.tool_classes import MCP_TOOL_PREFIX
+from nous.mcp_client.images import OutsideImage, prepare_image
 
 TOOL_NAME_MAX_CHARS = 64  # the model API's limit on a tool name
 DESCRIPTION_MAX_CHARS = 1000
 SCHEMA_STRING_MAX_CHARS = 500  # one description, title or enum string inside an input schema
 SCHEMA_MAX_CHARS = 8000  # the registered input schema, serialized (serialize_schema)
 TOOLS_PER_SERVER = 60  # registered tools of one server; the rest are skipped
+IMAGES_PER_RESULT = 4  # images taken from one result (when its server's are taken at all); the rest stay words
 WRAPPER_PREFIX = "[Result from the external MCP server"
 _TRUNCATION_PREFIX = "[truncated:"
+_IMAGE_LINE_PREFIX = "[image:"  # how OutsideImage.line starts: the line that says an image follows the text
 _UNSAFE_NAME_CHARS = re.compile(r"[^A-Za-z0-9_-]")
 # Removed from server text: controls (Cc), format characters (Cf: zero-width, bidi controls, tags), line and
 # paragraph separators (Zl, Zp), and the variation selectors below.
@@ -257,16 +260,16 @@ def prepare_tool(server: str, tool: str, description: str, input_schema: Any) ->
 
 def _clean_result_text(text: str) -> str:
     """Server result text with the removed characters dropped (newlines and tabs kept; a line or paragraph separator
-    becomes a newline), and every line that starts like the wrapper line or the truncation note quoted with ``> ``,
-    so the server cannot forge either. It is a prefix match: a look-alike line (other wording, other brackets) is
-    left as it is, and only the real wrapper line comes first."""
+    becomes a newline), and every line that starts like the wrapper line, the truncation note or the line that
+    names an image quoted with ``> ``, so the server cannot forge any of them. It is a prefix match: a look-alike line
+    (other wording, other brackets) is left as it is, and only the real wrapper line comes first."""
     kept = "".join(
         "\n" if unicodedata.category(ch) in ("Zl", "Zp") else ch
         for ch in text
         if ch in "\n\t" or unicodedata.category(ch) in ("Zl", "Zp") or not _removed(ch)
     )
     return "\n".join(
-        f"> {line}" if line.lstrip().startswith((WRAPPER_PREFIX, _TRUNCATION_PREFIX)) else line
+        f"> {line}" if line.lstrip().startswith((WRAPPER_PREFIX, _TRUNCATION_PREFIX, _IMAGE_LINE_PREFIX)) else line
         for line in kept.split("\n")
     )
 
@@ -437,11 +440,23 @@ def _withhold_leaves(value: Any, needles: Sequence[str]) -> Any:
     return value
 
 
-def flatten_result(raw: Any, max_chars: int, withheld: Sequence[str] = ()) -> tuple[str, bool]:
+def flatten_result(
+    raw: Any,
+    max_chars: int,
+    withheld: Sequence[str] = (),
+    take_images: int = 0,
+    images: list[OutsideImage] | None = None,
+) -> tuple[str, bool]:
     """One MCP ``CallToolResult`` as ``(text, is_error)``.
 
     Text items are joined with newlines; an embedded text resource gives its text; an image, audio or resource
-    link becomes a short placeholder. A result with no content but structured content gives that as JSON. The text
+    link becomes a short placeholder. With ``take_images`` (how many image items of this result are looked at;
+    0, the default, looks at none) a PNG or JPEG image is prepared (``images.prepare_image``: decoded and encoded
+    again here, so call this off the event loop) and appended to ``images``; one that cannot be used, or is past
+    the count, is a placeholder that says why. Each image taken is named by one line after the text, added after
+    the cut, so the text always says how many images follow it, and a line of the server's that starts the same
+    way is quoted. An error result gives no image: the model API takes only text there. A result with no content
+    but structured content gives that as JSON. The text
     is cleaned (``_clean_result_text``), then cut to ``max_chars`` with a note saying so. ``is_error`` is the
     result's ``isError``. ``withheld`` (``credential_needles`` of the server's stored credential) is cut out of the
     cleaned text once, before the cut (a server that reflects request headers, or splits a value with characters
@@ -450,6 +465,8 @@ def flatten_result(raw: Any, max_chars: int, withheld: Sequence[str] = ()) -> tu
     """
     is_error = bool(getattr(raw, "isError", False))
     parts: list[str] = []
+    image_lines: list[str] = []
+    looked_at = 0
     for item in getattr(raw, "content", None) or []:
         kind = getattr(item, "type", None)
         if kind == "text":
@@ -457,16 +474,33 @@ def flatten_result(raw: Any, max_chars: int, withheld: Sequence[str] = ()) -> tu
         elif kind == "resource":
             text = getattr(getattr(item, "resource", None), "text", None)
             parts.append(text if isinstance(text, str) else "[resource omitted]")
+        elif kind == "image" and take_images > 0 and images is not None:
+            if is_error:
+                parts.append("[image omitted: an error result carries text only]")
+            elif looked_at >= take_images:  # usable or not: a result of a thousand broken images costs four tries
+                parts.append(f"[image omitted: only the first {take_images} images of a result are looked at]")
+            else:
+                looked_at += 1
+                prepared = prepare_image(getattr(item, "data", None), getattr(item, "mimeType", None))
+                if isinstance(prepared, OutsideImage):
+                    images.append(prepared)
+                    image_lines.append(prepared.line())
+                else:
+                    parts.append(f"[image omitted: {prepared}]")
         else:
             parts.append(f"[{_OMITTED.get(kind, 'content')} omitted]")
     structured = getattr(raw, "structuredContent", None)
-    if not parts and structured is not None:
+    # Structured content stands in for a result with nothing else to show; an image that was taken is something.
+    if not parts and not image_lines and structured is not None:
         parts.append(json.dumps(_withhold_leaves(structured, withheld), ensure_ascii=False, default=str))
-    text = withhold(_clean_result_text("\n".join(parts)), withheld) or "(the server returned no content)"
+    text = withhold(_clean_result_text("\n".join(parts)), withheld)
+    if not text and not image_lines:
+        text = "(the server returned no content)"
     if len(text) > max_chars:
         note = f"{_TRUNCATION_PREFIX} the result was {len(text)} characters; the first {max_chars} are shown]"
         text = f"{text[:max_chars]}\n{note}"
-    return text, is_error
+    # This process's own lines, after the cleaning and the cut: one for each image that follows the text.
+    return "\n".join([text, *image_lines] if text else image_lines), is_error
 
 
 def result_chars(raw: Any) -> int:

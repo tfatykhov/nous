@@ -51,12 +51,89 @@ def test_the_migration_has_nothing_the_splitter_or_text_would_mangle():
     assert all(";" not in line for line in sql.splitlines() if line.lstrip().startswith("--"))
 
 
+def _added_later(table: str) -> set[str]:
+    """The columns migrations after 109 add to ``table`` (``ALTER TABLE <table> ADD COLUMN [IF NOT EXISTS] <name>``)."""
+    added: set[str] = set()
+    pattern = rf"ALTER TABLE {re.escape(table)}\s+ADD COLUMN(?:\s+IF NOT EXISTS)?\s+([a-z_]+)"
+    for path in sorted(MIGRATION.parent.glob("*.sql")):
+        if int(path.name.split("_", 1)[0]) <= 109:
+            continue
+        for statement in _split_sql_statements(path.read_text(encoding="utf-8")):
+            added.update(re.findall(pattern, statement, re.I))
+    return added
+
+
 def test_the_columns_match_the_orm_models():
+    # 109 creates both tables; 112 adds mcp_servers.images. What they make together is what the models hold.
+    assert _added_later("nous_system.mcp_servers") == {"images"}
+    assert _added_later("nous_system.mcp_server_tools") == set()
     for statement, model in zip(_split_sql_statements(_sql()), (McpServer, McpServerTool), strict=True):
         sql_columns = set(re.findall(r"^\s{4}([a-z_]+)\s+(?:UUID|TEXT|BOOLEAN|INT|JSONB|TIMESTAMPTZ)", statement, re.M))
+        sql_columns |= _added_later(model.__table__.fullname)
         assert sql_columns == {c.name for c in model.__table__.columns}, model.__tablename__
     assert McpServer.__table__.fullname == "nous_system.mcp_servers"
     assert McpServerTool.__table__.fullname == "nous_system.mcp_server_tools"
+
+
+# --- migration 112: the images switch ---------------------------------------------------------------------------------
+
+IMAGES_MIGRATION = ROOT / "sql" / "migrations" / "112_mcp_server_images.sql"
+IMAGES_STATEMENT = "ALTER TABLE nous_system.mcp_servers ADD COLUMN IF NOT EXISTS images BOOLEAN NOT NULL DEFAULT FALSE"
+
+
+def _images_sql() -> str:
+    return IMAGES_MIGRATION.read_text(encoding="utf-8")
+
+
+def _images_code() -> str:
+    return "\n".join(line for line in _images_sql().splitlines() if not line.lstrip().startswith("--"))
+
+
+def test_migration_112_is_one_idempotent_add_column():
+    (statement,) = _split_sql_statements(_images_sql())
+    assert statement == IMAGES_STATEMENT
+
+
+def test_migration_112_adds_only_the_column():
+    code = _images_code()
+    for word in ("GRANT", "REVOKE", "OWNER", "ROLE", "DROP", "AUTHORIZATION", "CREATE", "UPDATE", "DELETE"):
+        assert not re.search(rf"\b{word}\b", code.upper()), word
+    assert not re.search(r"scoring\.|brain\.|heart\.|public\.", code, re.I)
+
+
+def test_migration_112_has_nothing_the_splitter_or_text_would_mangle():
+    sql = _images_sql()
+    assert "/*" not in sql and "$$" not in sql and "%" not in _images_code()
+    assert not re.search(r"(?<!:):[A-Za-z_]", _images_code())  # text() reads :name as a bind parameter
+    assert all(";" not in line for line in sql.splitlines() if line.lstrip().startswith("--"))
+
+
+@pytest.mark.postgres_only
+async def test_migration_112_column_on_postgres(session):
+    column = (
+        await session.execute(
+            text(
+                "SELECT data_type, is_nullable, column_default FROM information_schema.columns "
+                "WHERE table_schema = 'nous_system' AND table_name = 'mcp_servers' AND column_name = 'images'"
+            )
+        )
+    ).one()
+    assert (column.data_type, column.is_nullable, column.column_default) == ("boolean", "NO", "false")
+    agent = _agent()
+    insert = text("INSERT INTO nous_system.mcp_servers (agent_id, name, url) VALUES (:a, 'alpha', :u) RETURNING images")
+    assert (await session.execute(insert, {"a": agent, "u": "https://a.example.com/mcp"})).scalar_one() is False
+    with pytest.raises(IntegrityError):
+        async with session.begin_nested():
+            await session.execute(
+                text("UPDATE nous_system.mcp_servers SET images = NULL WHERE agent_id = :a"), {"a": agent}
+            )
+    for _ in range(2):  # the migration's statement again, twice: the column is there, nothing changes
+        await session.execute(text(IMAGES_STATEMENT))
+    count = text(
+        "SELECT count(*) FROM information_schema.columns "
+        "WHERE table_schema = 'nous_system' AND table_name = 'mcp_servers' AND column_name = 'images'"
+    )
+    assert (await session.execute(count)).scalar_one() == 1
 
 
 @pytest.mark.postgres_only
@@ -118,6 +195,46 @@ async def test_a_row_that_no_longer_validates_is_skipped(db, caplog):
         await session.commit()
     assert await McpRegistry(db, agent).list_enabled() == []
     assert all("SECRET-55" not in record.getMessage() for record in caplog.records)
+
+
+TOOLS = [ToolConfig(server="alpha", tool="search", description="d", input_schema=SCHEMA, permission="allow")]
+
+
+async def _images(registry: McpRegistry) -> dict[str, bool]:
+    return {config.name: config.images for config, _tools in await registry.list_all()}
+
+
+async def test_the_images_switch_is_off_on_insert_and_set_only_by_its_own_field(db):
+    registry = McpRegistry(db, _agent())
+    await registry.upsert_server(ServerConfig(name="alpha", url="https://alpha.example.com/mcp"))
+    await registry.replace_server(ServerConfig(name="beta", url="https://beta.example.com/mcp"), [])
+    assert await _images(registry) == {"alpha": False, "beta": False}
+    assert await registry.update_server("alpha", images=True) is True
+    assert await _images(registry) == {"alpha": True, "beta": False}
+    ((config, _tools),) = [row for row in await registry.list_enabled() if row[0].name == "alpha"]
+    assert config.images is True and config.background is False and config.enabled is True
+    # Other fields, images=None: left as it is.
+    assert await registry.update_server("alpha", background=True, call_timeout_seconds=9, images=None) is True
+    assert await registry.update_server("alpha", enabled=False) is True
+    ((config, _tools),) = [row for row in await registry.list_all() if row[0].name == "alpha"]
+    assert (config.images, config.background, config.call_timeout_seconds, config.enabled) == (True, True, 9, False)
+    assert await registry.update_server("alpha", images=False) is True
+    assert await _images(registry) == {"alpha": False, "beta": False}
+    assert await registry.update_server("zeta", images=True) is False
+
+
+async def test_replacing_or_upserting_a_server_writes_its_configs_switch(db):
+    registry = McpRegistry(db, _agent())
+    url = "https://alpha.example.com/mcp"
+    await registry.replace_server(ServerConfig(name="alpha", url=url), TOOLS)
+    await registry.update_server("alpha", images=True)
+    # A replace with a config that does not set the switch (as the routes build one) turns it off.
+    created, _deleted = await registry.replace_server(ServerConfig(name="alpha", url=url, background=True), TOOLS)
+    assert created is False and await _images(registry) == {"alpha": False}
+    await registry.replace_server(ServerConfig(name="alpha", url=url, images=True), TOOLS)
+    assert await _images(registry) == {"alpha": True}
+    await registry.upsert_server(ServerConfig(name="alpha", url="https://alpha.example.com/v2"))
+    assert await _images(registry) == {"alpha": False}
 
 
 async def test_rows_are_per_agent(db):

@@ -37,6 +37,7 @@ from nous import cancel_provenance
 from nous.api.call_outcome import CallOutcome
 from nous.api.call_outcome import _current as _outcome_var  # the one setter (harness 2b)
 from nous.api.execution_context import ExecutionContext, resolve_context
+from nous.api.tool_classes import mcp_tool_background
 from nous.api.tool_policy import INTERNAL_ONLY_LOGGED_TOOLS, lineage_runs_build, lineage_runs_runner
 from nous.brain import continuation, intentions
 from nous.brain.brain import Brain
@@ -748,6 +749,13 @@ class ToolDispatcher:
             # returns) — absent means success, as before.
             result_text = result["content"][0]["text"]
             is_error = bool(result.get("is_error"))
+            if outcome is not None and not is_error and mcp_tool_background(name) is not None:
+                # The call's text is what this returns, as ever. Image blocks after it go to the runner on the
+                # call's outcome, and only for a tool the MCP client has registered: its images are the ones behind
+                # the owner's switch and encoded again by the client. The model API takes none with an error result.
+                outcome.images = [
+                    block for block in result["content"][1:] if isinstance(block, dict) and block.get("type") == "image"
+                ] or None
             if salvaged_keys and not is_error:
                 # Salvage recovered the call, but a silent success teaches the
                 # model nothing -- it emitted XML inside a JSON string and got

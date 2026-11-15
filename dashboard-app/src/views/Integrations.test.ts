@@ -25,7 +25,7 @@ const LIST = () => ({
   servers: [
     {
       name: 'deepwiki', url: 'https://mcp.deepwiki.com/mcp', enabled: true, background: false, background_in_effect: false,
-      background_blocked_by_ceiling: false, call_timeout_seconds: 30, connected: true, blocked_by_ceiling: false, skip_reason: null,
+      background_blocked_by_ceiling: false, images: false, call_timeout_seconds: 30, connected: true, blocked_by_ceiling: false, skip_reason: null,
       auth: NO_AUTH(),
       tools: [
         tool('ask_question', { permission: 'allow', registered: true, skip_reason: null }),
@@ -36,7 +36,7 @@ const LIST = () => ({
     },
     {
       name: 'files', url: 'https://files.example.com/mcp', enabled: false, background: true, background_in_effect: false,
-      background_blocked_by_ceiling: true, call_timeout_seconds: 30, connected: false, blocked_by_ceiling: false,
+      background_blocked_by_ceiling: true, images: true, call_timeout_seconds: 30, connected: false, blocked_by_ceiling: false,
       skip_reason: 'the server is disabled', auth: NO_AUTH(),
       tools: [tool('list', { name: 'mcp__files__list', permission: 'allow', skip_reason: 'the server is disabled' })],
     },
@@ -79,9 +79,10 @@ function patching(server: string) {
   listAnswer = () => [200, JSON.parse(JSON.stringify(state))];
   handlers[`PATCH /integrations/mcp/servers/${server}`] = (body) => {
     const s = state.servers.find((x) => x.name === server)!;
-    const b = body as { enabled?: boolean; background?: boolean; tools?: Record<string, string> };
+    const b = body as { enabled?: boolean; background?: boolean; images?: boolean; tools?: Record<string, string> };
     if (b.enabled !== undefined) s.enabled = b.enabled;
     if (b.background !== undefined) s.background = b.background;
+    if (b.images !== undefined) s.images = b.images;
     for (const [tool, permission] of Object.entries(b.tools ?? {})) {
       const t = s.tools.find((x) => x.tool === tool)!;
       Object.assign(t, { permission, registered: permission === 'allow', skip_reason: permission === 'allow' ? null : 'its permission is deny' });
@@ -422,6 +423,89 @@ describe('Integrations: changing a server', () => {
     expect(changes().map(sent)).toEqual([{ method: 'PATCH', url: '/integrations/mcp/servers/files', body: { background: false } }]);
   });
 
+  it('sending images to the model asks first, and sends images true only when confirmed', async () => {
+    patching('deepwiki');
+    render(Integrations);
+    const deepwiki = await screen.findByRole('region', { name: 'deepwiki' });
+    expect(within(deepwiki).getByText("PNG and JPEG images in a tool's result, a screenshot for one, go to the model with the "
+      + "result's text. While this is off, each is a line of text.")).toBeTruthy();
+    const box = within(deepwiki).getByRole('checkbox', { name: 'Send its images to the model' }) as HTMLInputElement;
+    expect(box.checked).toBe(false);
+    await fireEvent.click(box);
+    expect(box.checked).toBe(false); // nothing is stored yet
+    expect(changes()).toEqual([]);
+    const ask = within(deepwiki).getByRole('group', { name: 'Confirm images for deepwiki' });
+    expect(within(ask).getByText("Send deepwiki's images to the model? An image can hold instructions that no check of the text sees.")).toBeTruthy();
+    await waitFor(() => expect(document.activeElement?.textContent?.trim()).toBe('Yes, send its images'));
+    await fireEvent.click(within(ask).getByRole('button', { name: 'Cancel' }));
+    expect(within(deepwiki).queryByRole('group', { name: /^Confirm/ })).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(box));
+    expect(changes()).toEqual([]);
+
+    await fireEvent.click(box);
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Yes, send its images' }));
+    await waitFor(() => expect(changes()).toHaveLength(1));
+    expect(changes().map(sent)).toEqual([{ method: 'PATCH', url: '/integrations/mcp/servers/deepwiki', body: { images: true } }]);
+    expect((await within(card('deepwiki')).findByRole('status')).textContent).toBe('Images in its results now go to the model.');
+    const after = within(card('deepwiki')).getByRole('checkbox', { name: 'Send its images to the model' }) as HTMLInputElement;
+    expect(after.checked).toBe(true);
+    await waitFor(() => expect(document.activeElement).toBe(after));
+    expect(within(card('deepwiki')).queryByRole('group', { name: /^Confirm/ })).toBeNull();
+  });
+
+  it('stopping images needs no confirmation', async () => {
+    patching('files');
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    const files = await openServer('files');
+    const box = within(files).getByRole('checkbox', { name: 'Send its images to the model' }) as HTMLInputElement;
+    expect(box.checked).toBe(true);
+    await fireEvent.click(box);
+    await waitFor(() => expect(changes()).toHaveLength(1));
+    expect(changes().map(sent)).toEqual([{ method: 'PATCH', url: '/integrations/mcp/servers/files', body: { images: false } }]);
+    expect(within(card('files')).queryByRole('group', { name: /^Confirm/ })).toBeNull();
+    expect((await within(card('files')).findByRole('status')).textContent).toBe('Images in its results are no longer sent to the model.');
+  });
+
+  it('one question is open at a time: asking about images closes the one about background work, and the other way', async () => {
+    render(Integrations);
+    const deepwiki = await screen.findByRole('region', { name: 'deepwiki' });
+    const groups = () => within(deepwiki).queryAllByRole('group', { name: /^Confirm/ }).map((g) => g.getAttribute('aria-label'));
+    await fireEvent.click(within(deepwiki).getByRole('checkbox', { name: 'Allow in background work' }));
+    expect(groups()).toEqual(['Confirm background work for deepwiki']);
+    await fireEvent.click(within(deepwiki).getByRole('checkbox', { name: 'Send its images to the model' }));
+    expect(groups()).toEqual(['Confirm images for deepwiki']);
+    await fireEvent.click(within(deepwiki).getByRole('checkbox', { name: 'Allow in background work' }));
+    expect(groups()).toEqual(['Confirm background work for deepwiki']);
+    expect(changes()).toEqual([]);
+  });
+
+  it('a yes to one question never sends the other: each button sends its own field', async () => {
+    patching('deepwiki');
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByRole('checkbox', { name: 'Send its images to the model' }));
+    expect(within(card('deepwiki')).queryByRole('button', { name: 'Yes, allow in background work' })).toBeNull();
+    await fireEvent.click(within(card('deepwiki')).getByRole('checkbox', { name: 'Allow in background work' }));
+    expect(within(card('deepwiki')).queryByRole('button', { name: 'Yes, send its images' })).toBeNull();
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Yes, allow in background work' }));
+    await waitFor(() => expect(changes()).toHaveLength(1));
+    expect(changes().map((c) => c.body)).toEqual([{ background: true }]);
+    await within(card('deepwiki')).findByRole('status');
+    expect((within(card('deepwiki')).getByRole('checkbox', { name: 'Send its images to the model' }) as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('an images question left open goes when another server is opened, and is not there on the way back', async () => {
+    render(Integrations);
+    const deepwiki = await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(deepwiki).getByRole('checkbox', { name: 'Send its images to the model' }));
+    expect(within(deepwiki).getByRole('button', { name: 'Yes, send its images' })).toBeTruthy();
+    await openServer('files');
+    const back = await openServer('deepwiki');
+    expect(within(back).queryByRole('group', { name: /^Confirm/ })).toBeNull();
+    expect(changes()).toEqual([]);
+  });
+
   it('a tool is allowed or not allowed by its own name', async () => {
     patching('deepwiki');
     render(Integrations);
@@ -625,18 +709,18 @@ describe('Integrations: adding a server', () => {
     expect(within(addCard()).getByText('The name or address changed since the check: check the server again.')).toBeTruthy();
   });
 
-  it('a name already taken says what replacing does, background work off included, and the button says Replace server', async () => {
+  it('a name already taken says what replacing does, background work and images off included, and the button says Replace server', async () => {
     handlers['POST /integrations/mcp/probe'] = () => [200, PROBE()];
     adding();
     render(Integrations);
     await screen.findByRole('region', { name: 'deepwiki' });
     await fill('deepwiki', 'https://mcp.deepwiki.com/mcp');
     expect(within(addCard()).getByText('A server named deepwiki exists. Adding it again replaces the server: its tools are checked '
-      + 'again, it is switched on, and background work is turned off. Its call timeout goes back to 30 s.')).toBeTruthy();
+      + 'again, it is switched on, and background work and images are turned off. Its call timeout goes back to 30 s.')).toBeTruthy();
     await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
     await fireEvent.click(await within(addCard()).findByRole('button', { name: 'Replace server' }));
     // The form gives way to the server it replaced.
-    expect((await screen.findByText('Replaced deepwiki. It is switched on, and background work is off.')).getAttribute('role')).toBe('status');
+    expect((await screen.findByText('Replaced deepwiki. It is switched on, and background work and images are off.')).getAttribute('role')).toBe('status');
     await waitFor(() => expect(location.hash).toBe('#/integrations/s/deepwiki'));
     expect(await screen.findByRole('region', { name: 'deepwiki' })).toBeTruthy();
     expect(screen.queryByRole('region', { name: 'Add a server' })).toBeNull();
@@ -653,10 +737,27 @@ describe('Integrations: adding a server', () => {
     await fill('deepwiki', 'https://mcp.deepwiki.com/mcp');
     await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
     await fireEvent.click(await within(addCard()).findByRole('button', { name: 'Replace server' }));
-    await screen.findByText('Replaced deepwiki. It is switched on, and background work is off.');
+    await screen.findByText('Replaced deepwiki. It is switched on, and background work and images are off.');
     // the question was about the server that was replaced: it must not be answerable for the new one
     const replaced = await screen.findByRole('region', { name: 'deepwiki' });
     expect(within(replaced).queryByRole('button', { name: 'Yes, allow in background work' })).toBeNull();
+    expect(within(replaced).queryByRole('group', { name: /^Confirm/ })).toBeNull();
+    expect(changes().filter((c) => c.method === 'PATCH')).toEqual([]);
+  });
+
+  it('an images question left open is closed when the form opens, so the replaced server cannot be granted it', async () => {
+    handlers['POST /integrations/mcp/probe'] = () => [200, PROBE()];
+    adding();
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByLabelText('Send its images to the model'));
+    expect(within(card('deepwiki')).getByRole('button', { name: 'Yes, send its images' })).toBeTruthy();
+    await fill('deepwiki', 'https://mcp.deepwiki.com/mcp');
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await fireEvent.click(await within(addCard()).findByRole('button', { name: 'Replace server' }));
+    await screen.findByText('Replaced deepwiki. It is switched on, and background work and images are off.');
+    const replaced = await screen.findByRole('region', { name: 'deepwiki' });
+    expect(within(replaced).queryByRole('button', { name: 'Yes, send its images' })).toBeNull();
     expect(within(replaced).queryByRole('group', { name: /^Confirm/ })).toBeNull();
     expect(changes().filter((c) => c.method === 'PATCH')).toEqual([]);
   });
@@ -877,6 +978,32 @@ describe('Integrations: names a server chose', () => {
 });
 
 describe('Integrations: notes stay true', () => {
+  it("a server's images note goes when the list shows them stopped elsewhere", async () => {
+    patching('deepwiki');
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByRole('checkbox', { name: 'Send its images to the model' }));
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Yes, send its images' }));
+    expect((await within(card('deepwiki')).findByRole('status')).textContent).toBe('Images in its results now go to the model.');
+    // Stopped elsewhere: "now go to the model" must not stay beside an empty box.
+    state.servers[0].images = false;
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(within(card('deepwiki')).queryByRole('status')).toBeNull());
+    expect((within(card('deepwiki')).getByRole('checkbox', { name: 'Send its images to the model' }) as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('a note about switching a server on or off stays while only that is what the list shows', async () => {
+    patching('deepwiki');
+    state.servers[0].images = true;
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Switch off' }));
+    expect((await within(card('deepwiki')).findByRole('status')).textContent).toBe('Switched off: its tools are no longer offered to the agent.');
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(lists()).toBeGreaterThanOrEqual(3));
+    expect(within(card('deepwiki')).getByRole('status').textContent).toBe('Switched off: its tools are no longer offered to the agent.');
+  });
+
   it('S3: a tool\'s note goes when the list shows another state for it, and on a refresh', async () => {
     patching('deepwiki');
     handlers['POST /integrations/mcp/servers/deepwiki/refresh'] = () =>
@@ -1316,6 +1443,94 @@ describe('Integrations: a key for a new server', () => {
     await within(addCard()).findByText('3 tools listed');
     expect(setItem.mock.calls.filter((args) => args.join(' ').includes('test-key'))).toEqual([]);
     setItem.mockRestore();
+  });
+});
+
+describe('Integrations: a server replaced elsewhere', () => {
+  // Another tab, another device or the seed command put another address under the same name: what was open on this
+  // page was opened for the old server, and must not be answered, stored or signed in for the new one.
+  const elsewhere = (change: (s: (typeof state.servers)[number]) => void) => {
+    change(state.servers[0]);
+    return fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+  };
+  const listedUrl = (url: string) => waitFor(() => expect(within(card('deepwiki')).getByText(url)).toBeTruthy());
+
+  it.each([
+    ['Send its images to the model', 'Yes, send its images'],
+    ['Allow in background work', 'Yes, allow in background work'],
+  ])('a question opened by "%s" is closed when the address under the name changed', async (box, yes) => {
+    patching('deepwiki');
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByRole('checkbox', { name: box }));
+    expect(within(card('deepwiki')).getByRole('button', { name: yes })).toBeTruthy();
+    // A reload that shows the same server leaves the question as it is.
+    await elsewhere((s) => { s.connected = false; });
+    await waitFor(() => expect(lists()).toBeGreaterThanOrEqual(2));
+    await settle();
+    expect(within(card('deepwiki')).getByRole('button', { name: yes })).toBeTruthy();
+    await elsewhere((s) => { s.url = 'https://other.example.com/mcp'; });
+    await listedUrl('https://other.example.com/mcp');
+    expect(within(card('deepwiki')).queryByRole('button', { name: yes })).toBeNull();
+    expect(within(card('deepwiki')).queryByRole('group', { name: /^Confirm/ })).toBeNull();
+    expect(changes()).toEqual([]);
+  });
+
+  it('a Remove question is closed when the address under the name changed', async () => {
+    patching('deepwiki');
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Remove' }));
+    expect(within(card('deepwiki')).getByRole('button', { name: 'Yes, remove' })).toBeTruthy();
+    await elsewhere((s) => { s.url = 'https://other.example.com/mcp'; });
+    await listedUrl('https://other.example.com/mcp');
+    expect(within(card('deepwiki')).queryByRole('button', { name: 'Yes, remove' })).toBeNull();
+    expect(changes()).toEqual([]);
+  });
+
+  it('a key being typed is dropped when the address under the name changed: it is not stored for another host', async () => {
+    state = keyed() as typeof state;
+    patching('deepwiki');
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Replace key' }));
+    await fireEvent.input(within(card('deepwiki')).getByLabelText('Header 1 value'), { target: { value: KEY } });
+    await elsewhere((s) => { s.url = 'https://other.example.com/mcp'; });
+    await listedUrl('https://other.example.com/mcp');
+    expect(within(card('deepwiki')).queryByLabelText('Header 1 value')).toBeNull();
+    expect(within(card('deepwiki')).queryByRole('button', { name: 'Save key' })).toBeNull();
+    for (const input of Array.from(document.querySelectorAll('input'))) expect(input.value).not.toContain('test-key');
+    expect(changes()).toEqual([]);
+  });
+
+  it('a sign-in panel is closed when the address under the name changed', async () => {
+    state = { ...LIST(), oauth_available: true } as typeof state;
+    patching('deepwiki');
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Sign in (OAuth)' }));
+    expect(within(card('deepwiki')).getByRole('group', { name: 'Sign in for deepwiki' })).toBeTruthy();
+    await elsewhere((s) => { s.connected = false; });
+    await waitFor(() => expect(lists()).toBeGreaterThanOrEqual(2));
+    await settle();
+    expect(within(card('deepwiki')).getByRole('group', { name: 'Sign in for deepwiki' })).toBeTruthy();
+    await elsewhere((s) => { s.url = 'https://other.example.com/mcp'; });
+    await listedUrl('https://other.example.com/mcp');
+    expect(within(card('deepwiki')).queryByRole('group', { name: 'Sign in for deepwiki' })).toBeNull();
+    expect(changes()).toEqual([]);
+  });
+
+  it('a key being typed stays through a reload that shows the same address', async () => {
+    state = keyed() as typeof state;
+    patching('deepwiki');
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fireEvent.click(within(card('deepwiki')).getByRole('button', { name: 'Replace key' }));
+    await fireEvent.input(within(card('deepwiki')).getByLabelText('Header 1 value'), { target: { value: KEY } });
+    await elsewhere((s) => { s.connected = false; });
+    await waitFor(() => expect(lists()).toBeGreaterThanOrEqual(2));
+    await settle();
+    expect((within(card('deepwiki')).getByLabelText('Header 1 value') as HTMLInputElement).value).toBe(KEY);
   });
 });
 
@@ -2219,6 +2434,69 @@ describe('Integrations: after an add', () => {
     await openForm();
     expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe('wiki3');
     expect((screen.getByLabelText('Address') as HTMLInputElement).value).toBe('https://wiki3.example.com/mcp');
+  });
+
+  it.each([
+    ['only the name', 'wiki3', 'https://mcp.deepwiki.com/mcp'],
+    ['only the address', 'wiki2', 'https://wiki3.example.com/mcp'],
+  ])('an add that lands while the owner is away keeps a form on which %s was changed since', async (_, name, url) => {
+    const { answer } = await heldAdd();
+    await openServer('files');
+    await openForm();
+    await fill(name, url);
+    await openServer('files');
+    await land(answer, [201, { created: true, definitions_sha256: 'a'.repeat(64), server: null }]);
+    await openForm();
+    expect((screen.getByLabelText('Name') as HTMLInputElement).value).toBe(name);
+    expect((screen.getByLabelText('Address') as HTMLInputElement).value).toBe(url);
+  });
+
+  /** The checked form's add, held: `store()` stores the server as the route would and loses the answer. */
+  function lostAnswer() {
+    const post = handlers['POST /integrations/mcp/servers'];
+    const gate = held();
+    handlers['POST /integrations/mcp/servers'] = async (body) => {
+      await gate.promise;
+      await post(body);
+      return [0, undefined]; // stored, and the answer never arrived
+    };
+    return () => gate.resolve([200, {}]);
+  }
+
+  it('an add that was stored though its answer was lost is not said to have failed once the list holds the server', async () => {
+    await checked();
+    const store = lostAnswer();
+    await addServer();
+    await openServer('files');
+    store();
+    await waitFor(() => expect(link('wiki2')).toBeTruthy()); // the reload shows it
+    await settle();
+    expect(screen.queryByText(/was not added/)).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('a replace that failed after its form was left stays said: the list held that name before', async () => {
+    handlers['POST /integrations/mcp/probe'] = () => [200, PROBE()];
+    const answer = held();
+    handlers['POST /integrations/mcp/servers'] = () => answer.promise;
+    render(Integrations);
+    await screen.findByRole('region', { name: 'deepwiki' });
+    await fill('deepwiki', 'https://mcp.deepwiki.com/mcp');
+    await fireEvent.click(screen.getByRole('button', { name: 'Check server' }));
+    await fireEvent.click(await within(addCard()).findByRole('button', { name: 'Replace server' }));
+    await openServer('files');
+    await land(answer, UNREACHABLE);
+    expect(screen.getByRole('alert').textContent).toBe("deepwiki was not added: Could not list the server's tools: ReadTimeout.");
+  });
+
+  it('an add that failed after its form was left stays said while the list does not hold the server', async () => {
+    await checked();
+    const answer = held();
+    handlers['POST /integrations/mcp/servers'] = () => answer.promise;
+    await addServer();
+    await openServer('files');
+    await land(answer, [0, undefined]);
+    expect(screen.getByRole('alert').textContent).toMatch(/^wiki2 was not added: /);
   });
 
   it('a 502 that lands while the form is shown is said on the form, not above the pane', async () => {

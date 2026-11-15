@@ -2428,6 +2428,8 @@ class McpServer(Base):
     )
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     background: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Migration 112: the owner's "its images may reach the model" switch.
+    images: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     call_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=30, server_default="30")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

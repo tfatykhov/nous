@@ -360,9 +360,9 @@ def test_tool_result_content_counts_in_message_estimate():
     assert _estimate_messages_tokens(result("x" * 4000)) == 1000  # a string result
     blocks = [{"type": "text", "text": "x" * 3000}, {"type": "text", "text": "y" * 1000}]
     assert _estimate_messages_tokens(result(blocks)) == 1000  # a list of text blocks
-    # an image block in a result has no text to count, and never breaks the estimate
+    # an image block in a result (an MCP tool's) counts a fixed 1600, whatever its data, and never breaks the estimate
     with_image = [*blocks, {"type": "image", "source": {"type": "base64", "data": "AAAA"}}]
-    assert _estimate_messages_tokens(result(with_image)) == 1000
+    assert _estimate_messages_tokens(result(with_image)) == 1000 + 1600
     stats = analyze_context("", result("x" * 4000), None, 200_000)
     assert stats.section_tokens_est["messages"] == 1000
 

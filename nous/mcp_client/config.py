@@ -252,6 +252,9 @@ class ServerConfig(BaseModel):
     transport: Literal["streamable_http"] = "streamable_http"
     enabled: bool = True
     background: bool = False  # the row's background switch (and the host's list, when one is set)
+    # The row's images switch: the PNG and JPEG images of this server's results go to the model (images.py). Off
+    # unless the owner turns it on: an image can hold what no text check sees.
+    images: bool = False
     call_timeout_seconds: int = Field(default=30, ge=1, le=600)
 
     @field_validator("name")

@@ -234,6 +234,10 @@ class KnowledgeExtractor:
                 for item in content:
                     if isinstance(item, dict):
                         text = item.get("content") or item.get("text") or ""
+                        if isinstance(text, list):  # a tool result that carries images: its text blocks
+                            text = " ".join(
+                                b["text"] for b in text if isinstance(b, dict) and isinstance(b.get("text"), str)
+                            )
                         if isinstance(text, str) and text:
                             is_tool = item.get("type") == "tool_result"
                             (tool_parts if is_tool else parts).append(text[:500])

@@ -76,6 +76,7 @@ from nous.api.tool_classes import forget_mcp_tool, note_mcp_tool
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.mcp_client.bridge import (
+    IMAGES_PER_RESULT,
     TOOLS_PER_SERVER,
     PreparedTool,
     ServerErrorReply,
@@ -99,6 +100,7 @@ from nous.mcp_client.config import (
     pin_host,
     url_problem,
 )
+from nous.mcp_client.images import OutsideImage
 from nous.mcp_client.oauth import (
     HttpFactory,
     OAuthFlows,
@@ -122,6 +124,9 @@ from nous.mcp_client.secrets import (
 logger = logging.getLogger(__name__)
 
 CALLS_PER_SERVER = 4  # calls in flight to one server at a time
+# Results whose images are being decoded at a time, over every server: one decode of the largest image taken holds
+# up to about 190 MB at its peak (images.PIXELS_MAX), and four calls a server could otherwise each run one.
+DECODES_AT_ONCE = 2
 _BACKOFF_FIRST_SECONDS = 1.0
 _BACKOFF_MAX_SECONDS = 60.0
 _CLOSE_WAIT_SECONDS = 5.0
@@ -663,6 +668,7 @@ class McpClientManager:
         self._sources: dict[str, str] = {}  # tool name -> the server's own name of the tool its handler calls
         self._closed = False
         self._lock = asyncio.Lock()  # one start or reload at a time
+        self._decoding = asyncio.Semaphore(DECODES_AT_ONCE)  # results whose images are being decoded
         # PR 2d: OAuth. The sign-ins in progress; the client every OAuth request goes through (its own, with no
         # credential: never a session's); one refresh lock per server name (a reload replaces _Server objects, not
         # these); the refresh tasks, owned here so a caller that goes away cannot cancel a refresh after the provider
@@ -1350,11 +1356,40 @@ class McpClientManager:
             server.refusal = None
         # What the call was sent with, and what is held now.
         withheld = tuple(sorted(set(sent_values) | set(server.withheld), key=len, reverse=True))
-        if result_chars(raw) > OFF_LOOP_RESULT_CHARS:
-            text, is_error = await asyncio.to_thread(flatten_result, raw, self._max_chars, withheld)
+        take = IMAGES_PER_RESULT if server.config.images else 0  # the owner's switch on this server's row
+        images: list[OutsideImage] = []
+        # An image is decoded off the event loop whatever its size in characters: a few kilobytes can unpack to tens
+        # of megabytes of pixels. What a decode costs is bounded by images.prepare_image (about a second and up to
+        # 190 MB for the largest picture it takes; the slowest file found within its bounds, one of empty metadata
+        # segments, took under 3 s), and no more than DECODES_AT_ONCE results are being decoded at a time.
+        decodes = take > 0 and any(
+            getattr(item, "type", None) == "image" for item in getattr(raw, "content", None) or []
+        )
+        if decodes:
+            # The slot is the thread's, not the caller's: a call cancelled while its images are decoded (a client
+            # that went away, the runner's tool timeout) leaves the thread running, since a thread cannot be
+            # stopped, and the slot is given back when the thread ends. The decode is shielded so that it is never
+            # dropped between the slot being taken and the thread starting.
+            await self._decoding.acquire()
+            decode = asyncio.ensure_future(
+                asyncio.to_thread(flatten_result, raw, self._max_chars, withheld, take, images)
+            )
+            decode.add_done_callback(self._decode_ended)
+            text, is_error = await asyncio.shield(decode)
+        elif result_chars(raw) > OFF_LOOP_RESULT_CHARS:
+            text, is_error = await asyncio.to_thread(flatten_result, raw, self._max_chars, withheld, take, images)
         else:
-            text, is_error = flatten_result(raw, self._max_chars, withheld)
-        return {"content": [{"type": "text", "text": wrap_result(server_name, text)}], "is_error": is_error}, None
+            text, is_error = flatten_result(raw, self._max_chars, withheld, take, images)
+        # The text first, always: the dispatcher reads it there. The images follow it, for the runner to send.
+        content = [{"type": "text", "text": wrap_result(server_name, text)}, *(image.block() for image in images)]
+        return {"content": content, "is_error": is_error}, None
+
+    def _decode_ended(self, decode: asyncio.Future[Any]) -> None:
+        """A decode's thread has ended: its slot is free. The error of a decode nobody waits for any more (its call
+        was cancelled) is read here, so it is not reported as never retrieved."""
+        self._decoding.release()
+        if not decode.cancelled():
+            decode.exception()
 
     async def _emit_error(self, server_name: str, exc: BaseException) -> None:
         """An ``mcp_client_server_error`` event: the server's name and the error's class, never its text."""

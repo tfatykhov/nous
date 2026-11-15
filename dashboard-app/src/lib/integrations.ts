@@ -37,6 +37,8 @@ export interface McpServer {
   background: boolean;
   background_in_effect: boolean;
   background_blocked_by_ceiling: boolean;
+  /** Whether the PNG and JPEG images of its tools' results go to the model (off: each is a line of text). */
+  images: boolean;
   call_timeout_seconds: number;
   connected: boolean;
   blocked_by_ceiling: boolean;
@@ -89,6 +91,7 @@ export interface RefreshResult {
 export interface ServerChange {
   enabled?: boolean;
   background?: boolean;
+  images?: boolean;
   tools?: Record<string, 'allow' | 'deny'>;
   /** Replace the stored credential, or remove it with null. */
   headers?: Record<string, string> | null;
