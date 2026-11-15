@@ -7,6 +7,7 @@ import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from f099_support import env_factory, runner_env, say, use  # noqa: F401
 from sqlalchemy import select
 from test_f061_subtask_executor import _make_heart_mock, _make_settings, _make_subtask, _scripted_runner
@@ -523,3 +524,105 @@ async def test_a_background_turns_inline_run_keeps_its_epoch_after_a_halt_and_a_
             context=background,
         )
     assert is_error and background_halt.HALT_REASON in text and env.model.calls == []
+
+
+# ---- the halt is checked again at the dispatch, after every await of the pre-dispatch work -------------------------
+
+
+AWAIT_POINTS = ["action gate", "ledger row", "compensation snapshot"]
+
+
+def _halt_lands_at(runner, halt, point: str, entry_id) -> AsyncMock:
+    """Make the halt land while the runner awaits ``point``; returns the stand-in of ``_ledger_close``."""
+    from types import SimpleNamespace
+
+    async def gate_check(*args, **kwargs):
+        await halt.halt(actor="t", surface="dashboard")
+        return SimpleNamespace(approved=True, reason="fine", suggestion=None)
+
+    async def open_row(*args, **kwargs):
+        if point == "ledger row":
+            await halt.halt(actor="t", surface="dashboard")
+        return entry_id, None, None
+
+    async def snapshot(*args, **kwargs):
+        if point == "compensation snapshot":
+            await halt.halt(actor="t", surface="dashboard")
+        return False
+
+    if point == "action gate":
+        runner._action_gate = SimpleNamespace(check=gate_check)
+    runner._open_for_call = open_row
+    runner._capture_compensation_snapshot = snapshot
+    closed = AsyncMock()
+    runner._ledger_close = closed
+    return closed
+
+
+@pytest.mark.parametrize("point", AWAIT_POINTS)
+async def test_a_halt_landing_during_the_pre_dispatch_work_refuses_the_call_in_the_tool_loop(point):
+    from nous.cognitive.execution_ledger import ExecutionLedger
+
+    halt = _install()
+    r, d = _runner(["send_email"])
+    entry_id = uuid.uuid4()
+    closed = _halt_lands_at(r, halt, point, entry_id)
+
+    async def one_send_then_text(system_prompt, messages, tools=None, **_):
+        if len(messages) == 1:
+            return ApiResponse(
+                content=[{"type": "tool_use", "id": "s", "name": "send_email", "input": {"to": "a@b.c"}}],
+                stop_reason="tool_use",
+            )
+        return ApiResponse(content=[{"type": "text", "text": "late"}], stop_reason="end_turn")
+
+    r._call_api = one_send_then_text
+    ledger = ExecutionLedger(session_id="subtask-1")
+    ctx = ExecutionContext(kind="subtask", session_id="subtask-1")
+    text, results, *_ = await _run_loop(r, is_background=True, context=ctx, ledger=ledger)
+    assert d.calls == []  # the handler never ran
+    assert results[0].error == background_halt.HALTED_TOOL_TEXT and text == background_halt.HALT_TURN_TEXT
+    closed.assert_awaited_once_with(entry_id, "blocked", "refused by background_halt", keyed=False)
+    assert "blocked" in [action.status for action in ledger.actions]  # as a refused snapshot records it
+
+
+@pytest.mark.parametrize("point", AWAIT_POINTS)
+async def test_a_halt_landing_during_the_pre_dispatch_work_refuses_the_call_in_the_stream(point):
+    halt = _install()
+    runner = _stream_runner()
+    runner._dispatcher.available_tools.return_value = [
+        {"name": "send_email", "description": "Send", "input_schema": {}}
+    ]
+    entry_id = uuid.uuid4()
+    closed = _halt_lands_at(runner, halt, point, entry_id)
+    calls = {"n": 0}
+
+    async def one_send_then_text(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            yield StreamEvent(type="tool_start", tool_name="send_email", tool_id="s1", block_index=1)
+            yield StreamEvent(type="tool_input_delta", text=json.dumps({"to": "a@b.c"}), block_index=1)
+            yield StreamEvent(type="block_stop", block_index=1)
+            yield StreamEvent(type="done", stop_reason="tool_use")
+        else:
+            yield StreamEvent(type="text_delta", text="late")
+            yield StreamEvent(type="done", stop_reason="end_turn")
+
+    runner._call_api_stream = MagicMock(side_effect=one_send_then_text)
+    await _pump(runner.stream_chat("claude-job-4", "send it"))
+    runner._dispatcher.dispatch.assert_not_called()
+    closed.assert_awaited_once_with(entry_id, "blocked", "refused by background_halt", keyed=False)
+    assert calls["n"] == 1  # and the loop made no further model call
+
+
+@pytest.mark.parametrize("point", AWAIT_POINTS)
+async def test_a_chat_call_is_not_refused_at_its_dispatch(point):
+    from nous.cognitive.execution_ledger import ExecutionLedger
+
+    halt = _install()
+    r, d = _runner(["recall_deep"])
+    _halt_lands_at(r, halt, point, uuid.uuid4())
+    r._call_api, _calls = _two_calls_then("ok")
+    chat = ExecutionContext(kind="interactive", session_id="s1")
+    await _run_loop(r, is_background=False, context=chat, ledger=ExecutionLedger(session_id="s1"))
+    assert halt.halted and [c[0] for c in d.calls] == ["recall_deep", "recall_deep"]  # chat runs while halted

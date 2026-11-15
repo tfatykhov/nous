@@ -437,6 +437,20 @@ def background_halted() -> bool:
     return current().halted
 
 
+# The tool call running now, as the dispatcher sets it around the handler: (kind, session id, epoch). A handler
+# that awaits before its own action (a connection, a browser start, a step of an inner loop) checks ``call_refused``
+# right before that action.
+CALL_SCOPE: ContextVar[tuple[str, str | None, int | None] | None] = ContextVar(
+    "background_halt_call_scope", default=None
+)
+
+
+def call_refused() -> bool:
+    """Whether the halt refuses the tool call running now. Outside a tool call: False."""
+    scope = CALL_SCOPE.get()
+    return scope is not None and current().refuses(*scope)
+
+
 def turn_epoch() -> int:
     """The epoch a turn starting now captures: the one already in ``TURN_EPOCH`` (set by the work that claimed this
     turn, so the earliest start wins), else the current one."""

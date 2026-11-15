@@ -759,9 +759,12 @@ class ToolDispatcher:
                 # a companion card can be traced back to its conversation.
                 args = {**args, "_session_id": session_id}
             token = _outcome_var.set(outcome)
+            # Goals PR 0c: the call's scope, for a handler that checks the halt at its own action.
+            scope_token = background_halt.CALL_SCOPE.set((ctx.kind, session_id, background_halt.TURN_EPOCH.get()))
             try:
                 result = await handler(**args)  # P0-6: **kwargs unpacking
             finally:
+                background_halt.CALL_SCOPE.reset(scope_token)
                 _outcome_var.reset(token)
             # P1-1: Extract text from MCP-format response. is_error honors
             # the MCP field when a handler sets it (#179: run_python error

@@ -3678,6 +3678,21 @@ class AgentRunner:
                                             result_text,
                                             "blocked" if is_error else "success",
                                         )
+                                elif self._halt_refuses_dispatch(_ctx, tool_name, session_id, _turn_epoch):
+                                    # Goals PR 0c: the halt is checked again at the dispatch.
+                                    result_text = await self._refuse_halted_dispatch(
+                                        _ctx,
+                                        tool_name,
+                                        dispatch_input,
+                                        session_id,
+                                        entry_id,
+                                        send_key,
+                                        ledger,
+                                        _snapshotted,
+                                        outcome,
+                                    )
+                                    is_error = True
+                                    duration_ms = int((time.monotonic() - start_time) * 1000)
                                 else:
                                     timed_out = False
                                     try:
@@ -3990,6 +4005,7 @@ class AgentRunner:
         turn_number: int | None,
         is_background: bool,
         turn_id: UUID | None = None,
+        turn_epoch: int | None = None,
     ) -> Dispatched:
         """Everything between "this call may run" and "its text": the F064.1 ping and activity heartbeat, the
         durable ledger row (a keyed send claimed first, or suppressed), the write-path lock and compensation
@@ -4057,6 +4073,12 @@ class AgentRunner:
                 result_text, is_error = _snap_blocked2, True
             elif suppressed is not None:
                 result_text, is_error = suppressed.text, suppressed.is_error
+            elif self._halt_refuses_dispatch(ctx, tool_name, session_id, turn_epoch):
+                # Goals PR 0c: the halt is checked again at the dispatch, after every await of the work above.
+                result_text = await self._refuse_halted_dispatch(
+                    ctx, tool_name, tool_input, session_id, entry_id, send_key, ledger, _snapshotted2, outcome
+                )
+                is_error = True
             else:
                 keyed = send_key is not None
                 self._note_ingress(session_id, tool_name, tool_input)
@@ -4738,6 +4760,7 @@ class AgentRunner:
                                 turn_number=turn_number,
                                 is_background=is_background,
                                 turn_id=turn_id,
+                                turn_epoch=turn_epoch,
                             )
                             result_text, is_error = dispatched.text, dispatched.is_error
                             call_images = dispatched.images
@@ -5376,6 +5399,64 @@ Rules:
             return False
         logger.warning("Background halt: ended a %s turn before its next model call (session=%s)", ctx.kind, session_id)
         return True
+
+    def _halt_refuses_dispatch(
+        self, ctx: ExecutionContext, tool_name: str, session_id: str | None, turn_epoch: int | None
+    ) -> bool:
+        """Goals PR 0c: whether the halt refuses this call at its dispatch, after the action gate, the ledger row and
+        the compensation snapshot were awaited. The same predicate as ``_authorize_tool_call`` (chat and
+        owner-approved calls are never refused); ``turn_epoch`` is the loop's, else the one in ``TURN_EPOCH``."""
+        epoch = turn_epoch if turn_epoch is not None else background_halt.TURN_EPOCH.get()
+        if not background_halt.current().refuses(ctx.kind, session_id, epoch):
+            return False
+        logger.warning(
+            "Background halt: refused %r at its dispatch in a %s turn (session=%s)", tool_name, ctx.kind, session_id
+        )
+        self._log_f026_decision(
+            "harness_context_policy_violation",
+            {
+                "tool_name": tool_name,
+                "context_kind": ctx.kind,
+                "violation": background_halt.REFUSAL_CODE,
+                "mode": "enforce",
+            },
+            session_id=session_id,
+        )
+        return True
+
+    async def _refuse_halted_dispatch(
+        self,
+        ctx: ExecutionContext,
+        tool_name: str,
+        tool_input: dict,
+        session_id: str | None,
+        entry_id: Any,
+        send_key: str | None,
+        ledger: ExecutionLedger | None,
+        snapshotted: bool,
+        outcome: CallOutcome,
+    ) -> str:
+        """A call the halt refused at its dispatch: its durable row is closed as a refused call's is (``blocked``,
+        ``refused by background_halt``: never dispatched, its key freed), the session ledger records it blocked, and
+        a snapshot taken for it is released. Returns the refusal text."""
+        text = background_halt.HALTED_TOOL_TEXT
+        await self._ledger_close(
+            entry_id, "blocked", f"refused by {background_halt.REFUSAL_CODE}", keyed=send_key is not None
+        )
+        if ledger:
+            ledger.record(tool_name, tool_input, text, "blocked")
+        if snapshotted:
+            await self._after_compensable_call(
+                ctx,
+                tool_name,
+                entry_id,
+                session_id,
+                snapshotted=True,
+                status="blocked",
+                tool_input=tool_input,
+                outcome=outcome,
+            )
+        return text
 
     def _halt_line(self, ctx: ExecutionContext, session_id: str | None) -> str | None:
         """Goals PR 0c: the line under a live chat reply (as ``_dead_man_line``: an ``interactive`` turn outside a

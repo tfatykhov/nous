@@ -72,6 +72,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from nous import background_halt
 from nous.api.tool_classes import forget_mcp_tool, note_mcp_tool
 from nous.config import Settings
 from nous.events import Event, EventBus
@@ -1319,6 +1320,9 @@ class McpClientManager:
                     if self._closed:  # closed while this call waited for a slot: open nothing
                         return closed, None
                     conn = await server.connection()  # raises ClientClosed when closed meanwhile
+                    if background_halt.call_refused():
+                        # Goals PR 0c: the halt is checked again at the point of the call.
+                        return _error("background work is halted by the owner: the call was not sent."), None
                     session = conn.session
                     # The server's own name for the tool; the call ends with its connection.
                     raw = await _unless_ended(conn.stop, lambda: session.call_tool(raw_name, arguments))
