@@ -268,7 +268,10 @@ class GoalDriver:
             task = await self._task_for(goal)
             rejection, task = await gate_subtask_task(self._heart, task)
             if rejection is not None:
-                failure = f"Session {n} was refused by the censor gate: {rejection}"
+                # A fixed sentence: the journal is part of the next task, which goes through the same gate, so the
+                # censor's words in it would refuse every later start too. The message goes to the log only.
+                logger.warning("Goal %s: session %d was refused by the censor gate: %s", goal_id, n, rejection)
+                failure = f"Session {n} was refused by the censor gate; the log has the reason."
             else:
                 subtask = await roots.create_session_root(
                     self._heart, self._settings, goal=goal, session_n=n, subtask_id=subtask_id, task=task

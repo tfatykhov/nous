@@ -32,6 +32,7 @@ from nous.goals import charter
 from nous.goals.driver import GoalDriver, TickReport
 from nous.goals.store import GoalStore
 from nous.handlers.continuation_runner import ContinuationRunner
+from nous.heart.schemas import CensorInput
 from nous.storage.models import (
     Goal,
     GoalJournal,
@@ -276,11 +277,29 @@ async def test_a_censor_refusal_is_a_failed_start_and_is_journalled(env_factory,
     assert await _sessions(w, goal) == [] and await _subtasks(w) == []
     row = (await _journal(w, goal, "state"))[-1]
     assert row.actor == "harness" and row.session_n == 1
-    assert "refused by the censor gate" in row.text and "no work on the archive" in row.text
+    assert row.text == "Session 1 was refused by the censor gate; the log has the reason."
     after = await w.store.get(goal.id)
     assert after.state == "active" and after.next_wake_at >= before + timedelta(seconds=295)
     assert w.driver._failures == {goal.id: 1}
     assert w.runner.wakes == 0
+
+
+async def test_a_censor_refusal_does_not_feed_the_next_start(env_factory):  # noqa: F811
+    """A real censor row, matched by its pattern. The refusal's journal row is part of the next task, which goes
+    through the same gate: were the censor's words in it, the goal would stay refused after the owner removed the
+    word from the goal."""
+    w = await _world(env_factory)
+    goal = await _active(w, objective="Merge the duplicate notes, then sort the old archive")
+    await w.env.heart.add_censor(
+        CensorInput(trigger_pattern="archive", reason="Never touch the archive folder.", action="refuse")
+    )
+    assert await w.driver.start_session(goal.id, trigger="timer") is None
+    assert w.driver._failures == {goal.id: 1}
+    await _set_goal(w, goal, objective="Merge the duplicate notes")  # the owner takes the word out
+    assert await w.driver.start_session(goal.id, trigger="timer") is not None  # the refusal's row does not refuse it
+    assert w.driver._failures == {}
+    refused = [r for r in await _journal(w, goal, "state") if r.actor == "harness"]
+    assert len(refused) == 1 and "censor gate" in refused[0].text and "archive" not in refused[0].text.lower()
 
 
 async def test_the_third_failed_start_in_a_row_pauses_the_goal_as_error(env_factory, monkeypatch):  # noqa: F811
