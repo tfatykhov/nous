@@ -470,10 +470,9 @@ class GoalDriver:
                 GoalSession.ended_at.is_(None),
                 or_(
                     GoalSession.root_id.is_(None),
-                    root.id.is_(None),
                     root.root_cancelled_at.is_not(None),
                     root.root_expired_at.is_not(None),
-                    ~open_work,
+                    ~open_work,  # also a root whose row is missing: nothing has its id as root_id
                 ),
             )
             .order_by(GoalSession.started_at, GoalSession.id)
