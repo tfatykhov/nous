@@ -177,9 +177,10 @@ async def live_cards(env):
         )
 
 
-async def tap(env, surface_id, name, context, *, model=None, actor="alice"):
-    """A tap through the REAL ActionRouter gate (live surface, allowed_actions, shape, nonce, handler, audit):
-    ``(http status, body)``."""
+async def tap(env, surface_id, name, context, *, model=None, actor="alice", owner_verified=True):
+    """A tap through the REAL ActionRouter gate (live surface, allowed_actions, shape, nonce, the owner's proof,
+    handler, audit): ``(http status, body)``. ``owner_verified`` is what the route would pass: by default the
+    request proved the owner."""
     async with env.db.session() as s:
         nonce = (await s.execute(select(A2uiSurface.nonce).where(A2uiSurface.surface_id == surface_id))).scalar_one()
     body = {
@@ -192,7 +193,7 @@ async def tap(env, surface_id, name, context, *, model=None, actor="alice"):
     }
     if model is not None:  # the renderer ships its local data model with the action (transport.ts)
         body["a2uiRendererDataModel"] = {"surfaces": {surface_id: model}}
-    return await env.router.handle(body, content_type="application/json", actor=actor)
+    return await env.router.handle(body, content_type="application/json", actor=actor, owner_verified=owner_verified)
 
 
 async def report(env, root, intention, body, *, hours_ago=0):

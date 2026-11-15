@@ -93,6 +93,7 @@ async def test_the_route_reads_this_agents_rows_only(app, db, agent):
                     surface_id="s",
                     action_name="heartbeat.resolve",
                     actor="unattributed",
+                    status="completed",
                     created_at=now - timedelta(hours=1),
                 ),
                 A2uiAction(
@@ -100,6 +101,7 @@ async def test_the_route_reads_this_agents_rows_only(app, db, agent):
                     surface_id="s",
                     action_name="heartbeat.resolve",
                     actor="unattributed",
+                    status="completed",
                     created_at=now - timedelta(hours=1),
                 ),
             ]

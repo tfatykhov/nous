@@ -20,6 +20,7 @@ from f099_cards_support import (
     wake,
 )
 from f099_support import (
+    OWNER_HEADERS,
     SEND_EMAIL_SCHEMA,
     ask_with_proposals,
     claim,
@@ -343,11 +344,32 @@ async def test_a_card_approve_does_not_wait_for_the_tool_and_the_card_is_already
     assert len(calls) == 1
 
 
+async def test_a_card_approve_without_the_owners_proof_runs_nothing(cards_env):  # noqa: F811
+    env = await cards_env()
+    calls = []
+
+    async def send_email(**kwargs):
+        calls.append(kwargs)
+        return {"content": [{"type": "text", "text": "sent"}]}
+
+    env.dispatcher.register("send_email", send_email, SEND_EMAIL_SCHEMA)
+    (pid,) = (await ask_with_proposals(env)).ids
+    await env.publisher.push_due(now=later())
+    card = await card_row(env, proposal_key(pid))
+    status, body = await tap(env, card.surface_id, "intention.approve", {"proposalId": str(pid)}, owner_verified=False)
+    assert (status, body["error"]["code"]) == (403, "OWNER_PROOF_REQUIRED")
+    assert (await proposal_row(env, pid)).state == "pending"
+    assert (await card_row(env, proposal_key(pid))).status == "live"
+    await asyncio.sleep(0.05)  # an approve would have started the call by now
+    assert calls == []
+
+
 # ---- the card and the route leave the same rows (invariant 1) ---------------------------------------------------
 
 
 async def _route(env, method, path, **kwargs) -> httpx.Response:
     app = Starlette(routes=build_intention_routes(database=env.db, settings=env.settings, continuation_runner=env.cont))
+    kwargs["headers"] = {**OWNER_HEADERS, **kwargs.get("headers", {})}  # the owner routes require the secret
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://nous") as client:
         return await client.request(method, path, **kwargs)
 
