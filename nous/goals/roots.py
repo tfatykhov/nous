@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from nous.brain import intentions
 from nous.brain.intentions import IntentionSpec
 from nous.storage.models import Subtask
@@ -15,14 +17,22 @@ class GoalsUnavailable(RuntimeError):
 
 
 async def create_session_root(
-    heart: Any, settings: Any, *, goal: Any, session_n: int, subtask_id: UUID, task: str
+    heart: Any,
+    settings: Any,
+    *,
+    goal: Any,
+    session_n: int,
+    subtask_id: UUID,
+    task: str,
+    session: AsyncSession | None = None,
 ) -> Subtask:
     """Create the first subtask of a goal session and, in the same transaction, its root intention.
 
     The intention has internal authority, so ``resolve_wake_policy`` gives it ``continue`` and the row is
     ``internal_only``: the whole lineage runs with the lineage tool set and its results go back to the
     continuation, never to the chat. The wake policy is not passed but resolved; ``tests/test_goals_roots.py``
-    pins what it resolves to. The task text is built by the caller.
+    pins what it resolves to. The task text is built by the caller. With ``session`` both rows are written in
+    the caller's transaction and not committed (the goal driver attaches the root to its session in the same one).
     """
     if not intentions.enabled(settings) or getattr(settings, "continuation_enabled", False) is not True:
         raise GoalsUnavailable("goal sessions need NOUS_INTENTIONS_ENABLED and NOUS_CONTINUATION_ENABLED")
@@ -44,4 +54,5 @@ async def create_session_root(
         metadata={"goal_id": str(goal.id), "goal_session": session_n},
         subtask_id=subtask_id,
         intention=spec,
+        session=session,
     )
