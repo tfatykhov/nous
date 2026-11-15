@@ -175,10 +175,10 @@ nous/
 │   │   └── seed.py             # `python -m nous.mcp_client.seed --name --url --allow [--background] [--write]`: lists a server's tools, prints each as the model would get it and the pin entry, stores the server and its permissions (unlisted tools set to deny)
 │   ├── goals/                  # F114 goals (NOUS_GOALS_ENABLED, dark; nothing outside the package imports it): a goal the owner approves is worked on in background sessions
 │   │   ├── envelope.py         # A goal's limits: the small, medium and large presets, and custom values checked against migration 113's ranges
-│   │   ├── store.py            # GoalStore: brain.goals, goal_sessions and the append-only goal_journal (migration 113); each change a targeted update guarded by the state it read, plus a journal row naming the actor
+│   │   ├── store.py            # GoalStore: brain.goals, goal_sessions and the append-only goal_journal (migration 113); each change a targeted update guarded by the state it read, plus a journal row naming the actor; add_journal_row appends in the caller's transaction
 │   │   ├── roots.py            # create_session_root: a session's first subtask and its root intention (origin goal, internal authority, so its wake policy is continue)
 │   │   ├── spend.py            # session_spent: a session's spend is its root's token budget as continuation.root_limits counts it; goal_spent: a goal's total and today's (UTC)
-│   │   ├── quote.py            # A journal entry or plan step as data: its own tag, every journal_entry, plan_step and result_message delimiter in the text escaped
+│   │   ├── quote.py            # A journal entry or plan step as data: its own tag, invisible and control characters removed, every journal_entry, plan_step and result_message delimiter escaped (fullwidth brackets too)
 │   │   ├── charter.py          # build_session_task: a session's first task (the charter, then the plan and the journal quoted as data), at most 12,000 characters
 │   │   ├── driver.py           # GoalDriver (not wired yet): each tick claims the goal channels into the journal, closes sessions whose chain ended, starts the goals that are due within the queue headroom
 │   │   └── seed.py             # `python -m nous.goals.seed create|list|show|approve|pause|resume|run-now|stop|cancel|confirm|note|raise-budget|extend`: the owner's host command; changes refused with the flag off
