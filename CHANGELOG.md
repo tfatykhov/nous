@@ -2,6 +2,110 @@
 
 All notable changes to Nous. Release notes for each version also live on the [GitHub releases page](https://github.com/tfatykhov/nous/releases).
 
+# v1.3.0 — The Connected Agent
+
+**17 commits, 17 pull requests, 115 files changed since v1.2.0** (November 12 → November 14, 2026)
+
+v1.2.0 made Nous's work legible. v1.3.0 lets Nous **reach past its own tools**: it can use the tools of external MCP servers that the owner adds and allows, from a new Integrations screen, with stored keys, sign-in and a switch for images. Beside that, two ways for text the user never said to be stored as theirs are closed, and Nous starts to record which sessions read content from outside.
+
+---
+
+## ✨ Highlights
+
+- **An MCP client (F112).** The tools of an external MCP server appear to the agent as `mcp__<server>__<tool>`. The owner adds a server, sees every tool before anything is stored, and allows tools one by one. Ships dark.
+- **The Integrations screen.** A list of servers beside one pane: add a server, check it, allow or refuse each tool, switch it off, refresh its tools, remove it.
+- **Credentials for a server.** An API key or other headers, stored encrypted; or OAuth sign-in with PKCE, by dynamic registration or a client ID metadata document.
+- **Images from a server reach the model.** A switch per server, off: a screenshot from a desktop-control server arrives as an image, decoded and rebuilt from its pixels first.
+- **Only the user's words count as the user's.** Compaction no longer feeds a model-written summary to the fact extractor as the user, and the inbound `nous_teach` tool can no longer name a source that admission trusts.
+- **Outside-content tagging, in shadow.** Nous records per session whether it read content from outside (web, documents, network reads, spawned work, MCP tools) and logs how many facts would be tagged. Off by default.
+- **A check of subtask reports, in shadow (F113).** A background subtask's validated report is compared with what the subtask did, and the result is recorded as an event.
+- **Consolidation as a sleep journal.** A chart of the last 30 sleeps, one sentence per sleep, and a report that opens in place.
+
+---
+
+## 🔌 F112 — MCP Client *(off by default)*
+
+### Core
+- **Tools of external servers** as `mcp__<server>__<tool>`, over streamable HTTP, registered at boot from stored rows. With `NOUS_MCP_CLIENT_ENABLED` off, nothing of the client is imported and no tool is registered (#913, migration 109)
+- **Where they may run:** interactive turns and approved actions; never through Nous's own inbound MCP server; in background work (subtasks, DAG nodes, schedules, heartbeats, continuations) only for a server the owner marked for it. A name the client has not registered is refused everywhere (#913)
+- **Treated as outside:** every `mcp__` tool counts as an external side effect and as outside content (#913)
+
+### Adding and changing servers
+- **Routes** under `/integrations/mcp`: list, probe (connects once, shows what would be registered, writes nothing), create (the approval), change, refresh and remove. A change applies without a restart (#915)
+- **Refresh is conservative:** a new tool arrives not allowed, a vanished one stops being allowed, and a changed definition keeps its permission and is reported (#915)
+- **Behind the login proxy:** every route but one needs a secret header whose SHA-256 is in `NOUS_MCP_CLIENT_UI_SECRET_SHA256`; unset, they answer 503. The exception is the client ID metadata document, which a provider fetches with no credential (#915, #923)
+- **Host-side ceilings,** both optional: `NOUS_MCP_CLIENT_PINNED_SERVERS` limits which servers and tools can register, `NOUS_MCP_CLIENT_BACKGROUND_SERVERS` which servers background work may use (#915)
+
+### Credentials
+- **Stored API keys and headers,** sealed with AES-256-GCM under a key file on the host (`NOUS_MCP_CLIENT_KEY_FILE`). A sealed row is bound to the agent, the server's name, its address and the kind of credential. A stored value is never returned by a route or written to an audit event. A server that answers 401 or 403 is shown as refused, with no retry loop (#917, migration 110)
+- **OAuth sign-in:** authorization code with PKCE (S256), discovery from the server's 401, a dynamically registered client or the owner's client id. Tokens live in the same sealed row. A failed refresh marks the server as needing sign-in; a tool call never starts a login (#919)
+- **Client ID metadata document:** for providers that take one instead of registration. `NOUS_MCP_CLIENT_ID_METADATA_URL`, empty by default. When Nous serves the document, the proxy must let that one path through with no sign-in (#923, #924)
+
+### Reach
+- **An `http://` address** only for a host named in `NOUS_MCP_CLIENT_ALLOW_PRIVATE_HOSTS`. Sign-in stays https only (#925, migration 111)
+- **Images:** for a server whose images switch is on, the PNG and JPEG images of a tool result go to the model after its text. Each is decoded, scaled to at most 1568 pixels a side and encoded again from its pixels alone. Off for every server until the owner turns it on (#928, migration 112)
+
+### The Integrations screen
+- **Add a server:** name and address, "Check server" lists every tool as it would be registered or why it would be skipped, each with an allow box that starts empty (#916)
+- **Per server:** switch off and on, allow in background work, refresh tools, remove, a key or sign-in. **Per tool:** allow or don't allow (#916, #917, #919)
+- **A list of servers beside one pane,** one line per tool that opens to its description and schema, with a search field and an allowed filter from nine tools up (#926)
+
+---
+
+## 🛡️ Memory Integrity
+
+- **Compaction:** the summary of an earlier compaction is a user-role message that the model wrote. It reached the fact extractor as `User:`; it is now left out. A tool-result block, should one ever reach the extractor, is labelled as tool output (#910)
+- **`nous_teach`:** the caller's `source` is kept as a description behind an `mcp:` prefix, so it can never equal a source that admission stores without scoring. A taught fact that admission rejects is now answered with "Fact not stored" (#911)
+- **Outside-content tagging** *(shadow, off by default)*: tools are classified by whether they read outside content, the session's list is recorded at dispatch and carried on the compaction, session-end and summary events, and the extractors log how many facts would be tagged. Nothing stored changes. `NOUS_OUTSIDE_CONTENT_TAGGING_MODE` (#912)
+
+---
+
+## ✅ F113 — Subtask Report Check *(shadow: an event only)*
+
+- Once a background subtask's validated report is persisted, the claim verifier checks its summary and findings against the session's ledger and emits one `subtask_report_claim_check` event. No score, outcome, retry or prompt changes. It has no setting of its own: it runs where report checking does (`NOUS_CLAIM_VERIFICATION_REPORTS_ENABLED`, on by default) (#914)
+
+---
+
+## 🖥️ Dashboard and Companion
+
+- **Consolidation is a sleep journal:** a chart of the newest 30 sleeps (facts, graph links or duration), one sentence per sleep under its day, and a report in plain words that opens in place (#922)
+- **Companion:** the list of live surfaces moves from a row of chips to a drawer on a phone and a sidebar on a wide screen, and the top bar stays in place (#909)
+
+---
+
+## 📚 Docs
+
+- The quickstart lists the four containers compose starts, `nous-scorer` among them (#921)
+- The order for turning on the client ID metadata document (#924)
+
+---
+
+## 📊 By the Numbers
+
+| | v1.2.0 | v1.3.0 |
+|---|---|---|
+| Migrations | 108 | 112 |
+| Pull requests since the previous release | 112 | 17 |
+
+---
+
+## Upgrade Notes
+
+- **Migrations 109 to 112** run at startup.
+- **Dependencies:** the `runtime` extra now needs `mcp>=1.30`, `cryptography>=42` and `Pillow`. Rebuild the image, or reinstall with the `runtime` extra.
+- **Behaviour that changes without a flag:**
+  - from a session's second compaction on, the fact extractor no longer reads the previous summary (#910);
+  - a fact taught through `nous_teach` with a source such as `user_stated` is scored like any other `mcp` fact (#911);
+  - a taught fact that admission rejects is answered with "Fact not stored" instead of an id (#911);
+  - a `subtask_report_claim_check` event is emitted for each validated background subtask report, on a default install (#914);
+  - the dashboard has an Integrations entry; with the MCP client off, the screen says so;
+  - the Consolidation screen and the companion shell look different.
+- **To use the MCP client:** set `NOUS_MCP_CLIENT_ENABLED`, and `NOUS_MCP_CLIENT_UI_SECRET_SHA256` with a proxy that adds the secret header to the requests it has authenticated. Stored keys and sign-in also need `NOUS_MCP_CLIENT_KEY_FILE`, a file mounted read-only into the container. Sign-in also needs `NOUS_A2UI_PUBLIC_BASE_URL` set to an https address: it redirects to `<that address>/integrations/mcp/oauth/callback`. See `docs/reference/environment-variables.md`.
+- **Everything marked off** stays off until its setting is changed. The repository's `docker-compose.yml` lists the container's environment explicitly and passes none of the new settings, so each one needs a compose line as well as a `.env` line.
+- `pyproject.toml` and `nous.__version__` now read `1.3.0`.
+
+---
+
 # v1.2.0 — The Legible Agent
 
 **112 commits, 112 pull requests, 776 files changed since v1.1.0** (October 22 → November 12, 2026)
