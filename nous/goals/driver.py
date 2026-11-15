@@ -653,7 +653,8 @@ class GoalDriver:
             if state.found and not state.marked and state.open_work:
                 await s.commit()  # keeps a repaired root id
                 return False
-            spent = (await spend.session_spent(s, self._agent_id, [row.root_id]))[row.root_id]
+            # Never lower than what an earlier read stored: the row lock is held, so row.spent is what is stored.
+            spent = max((await spend.session_spent(s, self._agent_id, [row.root_id]))[row.root_id], row.spent)
             steps = sum(1 for step in goal.plan or [] if isinstance(step, dict) and step.get("closed_session") == row.n)
             outcome = await self._outcome(s, row.root_id, steps=steps, ended_by_marker=state.marked or not state.found)
             summary, from_report = await self._summary(s, row)
@@ -880,7 +881,7 @@ class GoalDriver:
             .values(
                 ended_at=now,
                 outcome=outcome,
-                spent=func.greatest(GoalSession.spent, spent),  # never lower than a newer read already wrote
+                spent=spent,
                 steps_closed=steps,
                 summary=summary,
             )

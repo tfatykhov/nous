@@ -1211,6 +1211,27 @@ async def test_usage_stored_right_after_the_spend_read_is_counted_before_the_ses
     assert (await _session(w, session.id)).spent == 440
 
 
+async def test_the_close_never_writes_a_lower_spend_than_is_stored(env_factory, monkeypatch):  # noqa: F811
+    """The close keeps the greater of the stored spend and what it read. Under the close's row lock a concurrent
+    refresh's write waits, so this is the case of a close whose read is below what an earlier read stored."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    async with w.db.session() as s:
+        await s.execute(update(GoalSession).where(GoalSession.id == session.id).values(spent=500))
+        await s.commit()
+    await _finish(w, root)
+
+    async def lower(s, agent_id, root_ids):
+        return {root_id: 300 for root_id in root_ids}
+
+    monkeypatch.setattr(spend, "session_spent", lower)
+    assert (await w.driver.tick()).closed == 1
+    closed = await _session(w, session.id)
+    assert (closed.outcome, closed.spent) == ("no_step", 500)
+    assert (await _journal(w, goal, "state"))[-1].text.startswith("Session 1 ended: no_step, 500 tokens.")
+
+
 async def test_an_older_read_never_writes_a_lower_spend(env_factory, monkeypatch):  # noqa: F811
     """Every source of the spend only grows, so a read made before another tick wrote a newer total (two ticks at
     once) must not put the older, lower total back."""
