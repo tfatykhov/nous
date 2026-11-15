@@ -1150,7 +1150,7 @@ def test_the_hint_lists_the_new_programs_and_the_write_dirs(tmp_path):
             "cancel a job with propose_action",
         ):
             assert needle in hint, needle
-        assert len(hint) < 1200  # appended to the tool error of every refusal
+        assert len(hint) < 1400  # appended to the tool error of every refusal, after the reason (<= 1700 in all)
     assert "research/" not in lineage_bash_refusal_hint(build_commands=False)
     r, _, _ = _shell_runner(_whole_ws(tmp_path), f099_lineage_write_dirs=["research"])
     refusal = _auth(r, _internal(), "bash", OFFERED, {"command": "rm -rf x"})

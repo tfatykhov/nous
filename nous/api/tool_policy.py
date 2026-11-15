@@ -12,7 +12,7 @@ import os
 import re
 import shlex
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
@@ -107,7 +107,7 @@ INTERNAL_ONLY_LOGGED_TOOLS: frozenset[str] = frozenset({"web_fetch", "web_search
 # rates `rm -rf` a mere write. Read-only commands that cannot write, run or reach the network whatever
 # their arguments (no sort -o, sed -i, find -exec, date -s, tee):
 LINEAGE_READ_COMMANDS: frozenset[str] = frozenset(
-    {"cat", "ls", "head", "tail", "wc", "grep", "jq", "echo", "pwd", "cd", "sleep", "true"}
+    {"cat", "ls", "head", "tail", "wc", "grep", "jq", "cut", "echo", "pwd", "cd", "sleep", "true"}
 )
 
 
@@ -166,6 +166,17 @@ _READ_ARG_ROLES: Mapping[str, _ArgRoles] = MappingProxyType(
                 **dict.fromkeys(_GREP_VALUE_LONG.split(), "value"),
                 "--file": "file",
                 "--exclude-from": "file",
+            },
+            closed=True,
+        ),
+        # cut takes no file as an option value, so its operands are its only files; a closed table keeps it so.
+        "cut": _ArgRoles(
+            {**dict.fromkeys("dfcb", "value"), **dict.fromkeys("snz", "flag")},
+            {
+                **dict.fromkeys(("--delimiter", "--fields", "--characters", "--bytes", "--output-delimiter"), "value"),
+                **dict.fromkeys(
+                    ("--complement", "--only-delimited", "--zero-terminated", "--help", "--version"), "flag"
+                ),
             },
             closed=True,
         ),
@@ -279,12 +290,17 @@ class _GitRoles:
     """A read-only git subcommand's options. ``flags``: long options, with or without ``=value``. ``values``: long
     options that must carry ``=value``; the next word is never taken as a value, because `git diff -U /etc/passwd x`
     would read it as a path and compare a file outside the repo. ``short``: one letter per word, ``flag`` or ``value``
-    (attached, ``-n5``). ``counts``: ``-<number>`` (``git log -5``)."""
+    (attached, ``-n5``). ``counts``: ``-<number>`` (``git log -5``). ``shape``: a check of the whole argument list
+    after the subcommand for a subcommand whose danger is in its operands (``git branch NAME`` creates a branch);
+    it returns a problem code or None, and runs before the options are read. ``clusters``: False when a short
+    option word may hold one letter only (``-q``, never ``-qq``)."""
 
     flags: frozenset[str]
     values: frozenset[str]
     short: Mapping[str, str]
     counts: bool = False
+    shape: Callable[[list[str]], str | None] | None = None
+    clusters: bool = True
 
 
 _GIT_DIFF_FLAGS = (
@@ -302,6 +318,38 @@ _GIT_LOG_VALUES = (
     "--unified"
 )
 _GIT_DIFF_SHORT = {**dict.fromkeys("pusw", "flag"), "U": "value"}
+_BRANCH_LISTING = ("--list", "--contains", "--merged", "--no-merged")
+
+
+def _git_remote_shape(rest: list[str]) -> str | None:
+    """Bare ``git remote`` only: it prints the remotes' names. ``-v`` and ``get-url`` print URLs (a token may be in
+    one), add, remove, rename, set-url, set-head, set-branches and prune write, show and update contact the
+    remote."""
+    return None if rest == [] else "git_remote"
+
+
+def _git_branch_shape(rest: list[str]) -> str | None:
+    """A branch is listed, never made: a bare operand is the NAME of a branch to create. An operand is allowed only
+    where git is certain to be listing: after ``--list`` (a pattern), or as the revision of ``--contains``,
+    ``--merged`` or ``--no-merged`` (each forces list mode). ``--`` is refused. The option map (not this function)
+    refuses -d -D -m -M -c -C -f -u -t --set-upstream-to --unset-upstream --edit-description --track
+    --create-reflog and -l."""
+    listing, operands, i = False, 0, 0
+    while i < len(rest):
+        a = rest[i]
+        i += 1
+        if a == "--":
+            return "git_branch"
+        name = a.partition("=")[0]
+        if name in _BRANCH_LISTING:
+            listing = True
+            if name != "--list" and "=" not in a and i < len(rest) and not rest[i].startswith("-"):
+                i += 1  # the revision
+        elif a == "-" or not a.startswith("-"):
+            operands += 1
+    return None if listing or operands == 0 else "git_branch"
+
+
 _GIT_LOG_ROLES = _GitRoles(
     frozenset(f"{_GIT_DIFF_FLAGS} {_GIT_LOG_FLAGS}".split()),
     frozenset(_GIT_LOG_VALUES.split()),
@@ -309,7 +357,7 @@ _GIT_LOG_ROLES = _GitRoles(
     counts=True,
 )
 # No --output, --ext-diff, --textconv, --no-index (a diff of any two files), -O<orderfile>, --submodule, and no
-# option before the subcommand (-C, -c, --git-dir, --work-tree, --exec-path, -p).
+# option before the subcommand (-c, --git-dir, --work-tree, --exec-path, -p) but one ``-C <repo top>`` (_git_dash_c).
 LINEAGE_GIT_READS: Mapping[str, _GitRoles] = MappingProxyType(
     {
         "status": _GitRoles(
@@ -339,6 +387,33 @@ LINEAGE_GIT_READS: Mapping[str, _GitRoles] = MappingProxyType(
             ),
             frozenset(),
             {"q": "flag"},
+            clusters=False,
+        ),
+        # Bare `git remote` prints names (_git_remote_shape): no option, no word.
+        "remote": _GitRoles(frozenset(), frozenset(), {}, shape=_git_remote_shape),
+        # List forms only (_git_branch_shape). Not -d -D -m -M -c -C -f -u -t -l, --delete --move --copy --force
+        # --set-upstream-to --track --edit-description, nor --sort --format --points-at (abbreviations are refused:
+        # the maps are exact).
+        "branch": _GitRoles(
+            frozenset("--all --remotes --verbose --list --show-current --contains --merged --no-merged".split()),
+            frozenset(),
+            dict.fromkeys("arv", "flag"),
+            shape=_git_branch_shape,
+        ),
+        # Names only. Not ls-tree --format, nor ls-files -x -X --exclude --exclude-from --exclude-per-directory
+        # --with-tree --recurse-submodules --format --error-unmatch --debug -f -t -v.
+        "ls-tree": _GitRoles(
+            frozenset("--name-only --name-status --object-only --full-name --full-tree --long --abbrev".split()),
+            frozenset(),
+            dict.fromkeys("drtlz", "flag"),
+        ),
+        "ls-files": _GitRoles(
+            frozenset(
+                "--cached --deleted --modified --others --ignored --stage --unmerged --full-name --directory "
+                "--no-empty-directory --exclude-standard --eol --deduplicate".split()
+            ),
+            frozenset(),
+            dict.fromkeys("cdmoisuz", "flag"),
         ),
     }
 )
@@ -470,11 +545,55 @@ def _write_path_allowed(
     return any(target.is_relative_to(d) for d in dirs)
 
 
+_PROCFS = re.compile(r"/+(?:proc|dev)(?:/|$)")
+
+
+def _procfs(path: str) -> bool:
+    """An absolute path that reaches /proc or /dev, by its text or once ``..`` is collapsed lexically (``/x/../proc``).
+    /proc/self/cwd, /proc/self/fd and /dev/fd mean something different to the shell than to this process, so no check
+    done here can stand for what the shell will open. /dev/null and the other sinks are handled before ``_readable``
+    is reached (``_LINEAGE_SINKS``)."""
+    return path.startswith("/") and bool(_PROCFS.match(path) or _PROCFS.match(os.path.normpath(path)))
+
+
+_MAX_LINK_HOPS = 40
+
+
+def _through_procfs(path: Path) -> bool:
+    """Whether resolving the absolute ``path`` step by step, links followed, passes through /proc or /dev (a link
+    ``l -> /proc/self/cwd`` makes ``l/x`` mean the shell's cwd to the shell and the process's to ``Path.resolve``).
+    Compares the components it walks and reads only links; a loop counts as passing through."""
+    cur = Path(path.anchor)
+    todo = list(reversed(path.parts[1:]))
+    hops = 0
+    while todo:
+        name = todo.pop()
+        if name in ("", "."):
+            continue
+        if name == "..":
+            cur = cur.parent
+            continue
+        cur = cur / name
+        if _procfs(str(cur)):
+            return True
+        if cur.is_symlink():
+            hops += 1
+            if hops > _MAX_LINK_HOPS:
+                return True
+            target = Path(os.readlink(cur))
+            cur = Path(cur.anchor) if target.is_absolute() else cur.parent
+            todo.extend(reversed(target.parts[1:] if target.is_absolute() else target.parts))
+    return False
+
+
 def _under(path: str, dirs: list[Path]) -> bool:
-    """``path`` is absolute and inside one of ``dirs`` once resolved (symlinks and ``..`` followed)."""
-    if not path.startswith("/") or "\x00" in path:
+    """``path`` is absolute and inside one of ``dirs`` once resolved (symlinks and ``..`` followed), and not under
+    /proc or /dev (``_procfs``)."""
+    if not path.startswith("/") or "\x00" in path or _procfs(path):
         return False
     try:
+        if _through_procfs(Path(path)):
+            return False
         target = Path(path).resolve()
         return any(target.is_relative_to(d.resolve()) for d in dirs)
     except (OSError, ValueError, RuntimeError):  # an unresolvable name, a symlink loop: refused, not raised
@@ -485,10 +604,13 @@ def _readable(path: str, cwds: list[Path], workspace: Path) -> list[Path] | None
     """Where ``path`` resolves from each of ``cwds`` (symlinks and ``..`` followed), or None when one of them is
     outside ``workspace`` or has a hidden component below it (``.ssh``, ``.env``, ``claude-jobs/.claude-home``,
     ``.nous-undo``). ``cwds`` and ``workspace`` are resolved. ``~`` is refused."""
-    if path.startswith("~") or "\x00" in path:
+    if path.startswith("~") or "\x00" in path or _procfs(path):
         return None
     try:
-        targets = [Path(path).resolve()] if path.startswith("/") else [(d / path).resolve() for d in cwds]
+        named = [Path(path)] if path.startswith("/") else [d / path for d in cwds]
+        if any(_through_procfs(n) for n in named):
+            return None
+        targets = [n.resolve() for n in named]
         if all(
             t.is_relative_to(workspace) and not any(p.startswith(".") for p in t.relative_to(workspace).parts)
             for t in targets
@@ -549,9 +671,13 @@ def _glob_matches(pattern: str, cwds: list[Path], workspace: Path) -> list[Path]
     return targets
 
 
-def _split_read_args(args: list[str], roles: _ArgRoles) -> tuple[list[str], list[str], list[tuple[str, str]]] | None:
+def _split_read_args(
+    args: list[str], roles: _ArgRoles, *, bad: list[str] | None = None
+) -> tuple[list[str], list[str], list[tuple[str, str]]] | None:
     """``(operands, file values, (option, value) pairs)`` of a read command's arguments, or None when an option
-    is refused, unknown to a closed ``roles``, or missing its value."""
+    is refused, unknown to a closed ``roles``, or missing its value. On a refusal the option word at fault is
+    appended to ``bad`` (the refusal reason quotes at most its first characters)."""
+    refused = bad if bad is not None else []
     operands: list[str] = []
     files: list[str] = []
     values: list[tuple[str, str]] = []
@@ -569,9 +695,11 @@ def _split_read_args(args: list[str], roles: _ArgRoles) -> tuple[list[str], list
             name, eq, value = a.partition("=")
             role = roles.long.get(name, None if roles.closed else "flag")
             if role is None or any(r.startswith(name) for r in roles.refused_long):
+                refused.append(a)
                 return None
             if role.startswith("pair"):
                 if eq or i + 1 >= len(args):
+                    refused.append(a)
                     return None
                 option, value = name, args[i + 1]
                 i += 2
@@ -583,11 +711,13 @@ def _split_read_args(args: list[str], roles: _ArgRoles) -> tuple[list[str], list
                 option, value = name, args[i]
                 i += 1
             else:
+                refused.append(a)
                 return None
         else:
             for j, letter in enumerate(a[1:], 2):
                 role = roles.short.get(letter, None if roles.closed else "flag")
                 if role is None:
+                    refused.append(f"-{letter}")
                     return None
                 if role != "flag":
                     break
@@ -596,6 +726,7 @@ def _split_read_args(args: list[str], roles: _ArgRoles) -> tuple[list[str], list
             option, value = f"-{letter}", a[j:]
             if not value:
                 if i >= len(args):
+                    refused.append(option)
                     return None
                 value = args[i]
                 i += 1
@@ -606,9 +737,10 @@ def _split_read_args(args: list[str], roles: _ArgRoles) -> tuple[list[str], list
     return operands, files, values
 
 
-def _read_paths(prog: str, args: list[str]) -> tuple[list[str], list[str]] | None:
+def _read_paths(prog: str, args: list[str], *, bad: list[str] | None = None) -> tuple[list[str], list[str]] | None:
     """The arguments of a read command that name a file, as ``(option values, operands)`` (for ``cd``, its
-    directory is the operand), or None when the call is refused whatever its paths name."""
+    directory is the operand), or None when the call is refused whatever its paths name. ``bad`` collects the
+    option word at fault (``_split_read_args``); a refusal that is not an option leaves it empty."""
     if prog == "cd":
         # Bare `cd` goes to $HOME, `cd -` to $OLDPWD; no option (-L, -P) either. No `..` component: cd resolves
         # it LOGICALLY (`l/..` is where the link l sits), _readable physically (the link target's parent), so
@@ -616,7 +748,7 @@ def _read_paths(prog: str, args: list[str]) -> tuple[list[str], list[str]] | Non
         # resolved by the kernel, physically, and needs no such rule.
         ok = len(args) == 1 and not args[0].startswith("-") and ".." not in args[0].split("/")
         return ([], args) if ok else None
-    split = _split_read_args(args, _READ_ARG_ROLES[prog])
+    split = _split_read_args(args, _READ_ARG_ROLES[prog], bad=bad)
     if split is None:
         return None
     operands, files, values = split
@@ -696,12 +828,14 @@ def _write_target(path: str, cwd: Path | None, writable: list[Path], *, below: b
     ``~``, a leading ``-`` and a ``..`` component are refused: ``mkdir -p`` creates every directory it walks, so
     ``research/../../x/../ws/research/ok`` would make ``x`` outside the workspace on the way to an endpoint inside
     (one rule for every write target)."""
-    if path.startswith(("~", "-")) or "\x00" in path or ".." in path.split("/"):
+    if path.startswith(("~", "-")) or "\x00" in path or ".." in path.split("/") or _procfs(path):
         return None
     base = Path(path) if path.startswith("/") else cwd / path if cwd is not None else None
     if base is None:
         return None
     try:
+        if _through_procfs(base):
+            return None
         target = base.resolve()
         for d in writable:
             d = d.resolve()
@@ -858,32 +992,38 @@ def _printf_allowed(args: list[str]) -> bool:
     return not (first != "--" and first.startswith("-") and len(first) > 1 and "v" in first)
 
 
-def _runner_allowed(args: list[str], *, workspace: Path, readable: list[Path]) -> bool:
+def _runner_problem(args: list[str], *, workspace: Path, readable: list[Path]) -> tuple[str, str] | None:
     """runner.sh: ``status|result <job id>``, ``status``, ``list [--active|--all]``, or ``launch <repo>
     <prompt>|--prompt-file <file>`` with ``--model``, ``--effort``, ``--base-branch``, ``--plugins`` (installed
     plugins only) and ``--prompt-file`` (one of ``readable``). No ``--sys-prompt``; ``cancel``, ``cleanup`` and
-    ``gc`` are not a lineage's to run (a lineage cancels a job through ``propose_action``)."""
+    ``gc`` are not a lineage's to run (a lineage cancels a job through ``propose_action``). None when allowed,
+    else ``(reason code, the word to quote)``."""
     if not args:
-        return False
+        return "runner_verb", ""
     action, rest = args[0], args[1:]
     if action == "list":
-        return rest in ([], ["--active"], ["--all"])
+        return None if rest in ([], ["--active"], ["--all"]) else ("runner_args", _dash_word(rest))
     if action == "status" and not rest:
-        return True
+        return None
     # cancel is NOT allowed here: a lineage can list --all to enumerate ALL jobs
     # (including other lineages') then cancel them; ownership cannot be verified
     # without a runner.sh protocol change (see #725). Use propose_action instead.
+    if action == "cancel":
+        return "runner_cancel", ""
     if action in ("status", "result"):
-        return len(rest) == 1 and _RUNNER_JOB_ID.fullmatch(rest[0]) is not None
-    if action != "launch" or not rest or not _RUNNER_NAME.fullmatch(rest[0]):
-        return False
+        ok = len(rest) == 1 and _RUNNER_JOB_ID.fullmatch(rest[0]) is not None
+        return None if ok else ("runner_args", _dash_word(rest))
+    if action != "launch":
+        return "runner_verb", action
+    if not rest or not _RUNNER_NAME.fullmatch(rest[0]):
+        return "runner_args", _dash_word(rest)
     rest = rest[1:]
     if rest and rest[0] != "--prompt-file":
         if rest[0].startswith("-"):
-            return False
+            return "runner_args", rest[0]
         rest = rest[1:]  # the prompt itself: runner.sh writes it to a file, never into code
     if len(rest) % 2:
-        return False
+        return "runner_args", _dash_word(rest)
     plugins = [workspace / "plugins"]
     for opt, value in zip(rest[::2], rest[1::2], strict=True):
         if opt in ("--model", "--effort"):
@@ -893,23 +1033,42 @@ def _runner_allowed(args: list[str], *, workspace: Path, readable: list[Path]) -
         elif opt == "--plugins":
             ok = all(_under(p, plugins) for p in value.split(","))
         elif opt == "--prompt-file":
-            ok = _under(value, readable)
+            if not _under(value, readable):
+                return "runner_file", ""
+            ok = True
         else:
             ok = False
         if not ok:
-            return False
-    return True
+            return "runner_args", opt
+    return None
+
+
+def _dash_word(words: list[str]) -> str:
+    """The first of ``words`` when it is an option (the only kind of word a reason may quote), else empty."""
+    return words[0] if words and words[0].startswith("-") else ""
+
+
+def _runner_allowed(args: list[str], *, workspace: Path, readable: list[Path]) -> bool:
+    """Whether ``_runner_problem`` finds nothing wrong with runner.sh's arguments."""
+    return _runner_problem(args, workspace=workspace, readable=readable) is None
 
 
 def _runner_args(prog: str, args: list[str], *, jobs: Path, cwd: Path | None) -> list[str] | None:
-    """runner.sh's own arguments when the simple command runs it in one of its three accepted spellings, else None:
-    ``<workspace>/claude-jobs/runner.sh ARGS``; ``bash <workspace>/claude-jobs/runner.sh ARGS`` (exactly: no bash
-    option, which could read a script or startup file); ``./runner.sh ARGS`` only when the shell's cwd is surely
-    the jobs directory (``cwd``, resolved, is None when it is not sure)."""
-    runner = str(jobs / "runner.sh")
-    if prog == runner:
+    """runner.sh's own arguments when the simple command runs it in one of its accepted spellings, else None:
+    ``<workspace>/claude-jobs/runner.sh ARGS``, written as the setting names the workspace or as it resolves (what
+    ``pwd`` prints in a symlinked workspace); ``bash`` and exactly one such path (no bash option, which could read a
+    script or startup file); ``./runner.sh ARGS`` only when the shell's cwd is surely the jobs directory (``cwd``,
+    resolved, is None when it is not sure). The model's word is compared as TEXT with those two paths: never
+    resolved, normalised or compared by its parent, since a word like ``/proc/self/cwd/claude-jobs/runner.sh`` names
+    another directory to the shell than to this process, and ``a//b`` or ``a/./b`` are equal in the shell only."""
+    texts = {str(jobs / "runner.sh")}
+    try:
+        texts.add(str(jobs.resolve() / "runner.sh"))
+    except (OSError, RuntimeError):
+        pass
+    if prog in texts:
         return args
-    if prog == "bash" and args[:1] == [runner]:
+    if prog == "bash" and args[:1] and args[0] in texts:
         return args[1:]
     if prog == "./runner.sh" and cwd is not None and cwd == jobs.resolve():
         return args
@@ -921,7 +1080,10 @@ def _build_repo(cwd: Path, root: Path, writable: list[Path]) -> bool:
     and neither inside nor around a directory a lineage may write (``lineage_write_dirs``, and ``intentions/`` as a
     whole: another root's lineage writes its own ``intentions/<root>/``), so no lineage can plant the
     ``.git/config``, Makefile or conftest.py that runs."""
-    if cwd == root or not cwd.is_relative_to(root) or not (cwd / ".git").exists():
+    try:
+        if cwd == root or not cwd.is_relative_to(root) or not (cwd / ".git").exists():
+            return False
+    except (OSError, ValueError):  # a name over the filename limit: not a repo, not an error
         return False
     dirs = [d.resolve() for d in (*writable, root / "intentions")]
     return not any(cwd.is_relative_to(d) or d.is_relative_to(cwd) for d in dirs)
@@ -936,29 +1098,77 @@ def _in_repo(operand: str, repo: Path) -> bool:
     return _readable(operand.split("::", 1)[0], [repo], repo) is not None  # a pytest node id: path::Class::test
 
 
-def _git_allowed(args: list[str], repo: Path) -> bool:
-    """``git status|log|show|diff|merge-base|rev-parse`` with the options in LINEAGE_GIT_READS, and operands that stay
-    in ``repo``."""
+def _short_word_problem(word: str, roles: _GitRoles) -> str | None:
+    """None when a short git option word is allowed: a count (``-5``), one value letter then its attached value
+    (``-n5``, ``-uno``, ``-U5``), or letters that are ALL flag-role letters (``-sb``, ``-pw``). Else the problem
+    code: ``git_opt`` (the first letter is no option), ``git_value`` (a value letter with no value) or
+    ``git_cluster`` (a flag letter first, then a letter that is not a flag)."""
+    letters = word[1:]
+    if roles.counts and letters.isdigit():
+        return None
+    first = roles.short.get(letters[0])
+    if first is None:
+        return "git_opt"
+    if not roles.clusters and first == "flag" and len(letters) > 1:
+        return "git_cluster"
+    if first == "value":
+        return "git_value" if len(letters) == 1 else None
+    return None if all(roles.short.get(c) == "flag" for c in letters) else "git_cluster"
+
+
+def _git_problem(args: list[str], repo: Path) -> tuple[str, str] | None:
+    """A git read (a subcommand of LINEAGE_GIT_READS) with the options of its closed map and operands that stay in
+    ``repo``. None when allowed, else ``(reason code, the word to quote)``."""
     if not args or args[0] not in LINEAGE_GIT_READS:
-        return False
+        return "git_sub", args[0] if args else ""
     roles = LINEAGE_GIT_READS[args[0]]
     rest = args[1:]
+    shape = roles.shape(rest) if roles.shape is not None else None
+    if shape is not None:
+        return shape, ""
     for i, a in enumerate(rest):
         if a == "--":
-            return all(_in_repo(o, repo) for o in rest[i + 1 :])
+            return None if all(_in_repo(o, repo) for o in rest[i + 1 :]) else ("git_operand", "")
         if a.startswith("--"):
             name, eq, _ = a.partition("=")
+            if name in roles.values and not eq:
+                return "git_value", a
             if not (name in roles.flags or (eq and name in roles.values)):
-                return False
+                return "git_opt", a
         elif a.startswith("-") and len(a) > 1:
-            role = roles.short.get(a[1])
-            if roles.counts and a[1:].isdigit():
-                continue
-            if role is None or (role == "flag" and len(a) > 2) or (role == "value" and len(a) == 2):
-                return False
+            code = _short_word_problem(a, roles)
+            if code is not None:
+                return code, a if code != "git_cluster" else ""
         elif not _in_repo(a, repo):
-            return False
-    return True
+            return "git_operand", ""
+    return None
+
+
+def _git_allowed(args: list[str], repo: Path) -> bool:
+    """Whether ``_git_problem`` finds nothing wrong with a git call."""
+    return _git_problem(args, repo) is None
+
+
+def _git_dash_c(
+    args: list[str], *, cwd: Path | None, root: Path, writable: list[Path]
+) -> tuple[Path, list[str]] | LineageReason:
+    """``git -C DIR SUB ...``: the repository DIR names and the arguments after it, or why not. DIR is checked as a
+    ``cd DIR &&`` is: ``_readable`` from the workspace for an absolute one, from the SURE cwd for a relative one
+    (``cwd``, None when it is not sure), then ``_build_repo``. No ``..`` component (cd resolves it logically, git
+    physically: one rule), no ``/proc`` or ``/dev`` path, and nothing but one ``-C DIR`` before the subcommand."""
+    if len(args) < 3:
+        return LineageReason("git_C")
+    dir_, rest = args[1], args[2:]
+    if dir_.startswith(("-", "~")) or "\x00" in dir_ or ".." in dir_.split("/") or _procfs(dir_):
+        return LineageReason("git_C")
+    if not dir_.startswith("/") and cwd is None:
+        return LineageReason("git_dir", "git")
+    reached = _readable(dir_, [root] if dir_.startswith("/") else [cwd], root)
+    if reached is None:
+        return LineageReason("git_C")
+    if not _build_repo(reached[0], root, writable):
+        return LineageReason("git_repo")
+    return reached[0], rest
 
 
 def _build_allowed(prog: str, args: list[str], repo: Path) -> bool:
@@ -1054,6 +1264,115 @@ def lineage_write_file_description(workspace_dir: str, *, lineage_shell: bool, e
     return f"{LINEAGE_TURNS_TEXT}, write_file writes only under {listed}."
 
 
+# Why the lineage shell refused a command (``lineage_bash_refusal``): one closed vocabulary, shown to the model and
+# logged by code. A text holds at most one ``{w}``, filled by ``_echo`` with one program, subcommand, verb or option
+# NAME that fits a strict pattern, never a path, pattern, URL or value.
+LINEAGE_REASONS: Mapping[str, str] = MappingProxyType(
+    {
+        "unreadable": "the command cannot be read exactly: a $ or backtick, a brace, ~, &, &>, an unquoted glob "
+        "outside a file operand, an unbalanced quote or more than the size cap",
+        "empty": "the command is empty",
+        "join": "that join is not allowed; use ; && || | or a newline",
+        "program": "{w} is not an allowed program",
+        "bash_script": "bash may only run <workspace>/claude-jobs/runner.sh; a script cannot be run, propose it "
+        "with propose_action",
+        "redirect": "an output redirection may only write to /dev/null or a file in a write directory",
+        "input": "an input redirection must read a file in the workspace with no hidden component",
+        "path": "a path with a hidden component (a name starting with .) or outside the workspace cannot be read",
+        "glob": "a glob is allowed only as a whole file operand of cat, ls, head, tail, wc, grep, jq or cut, and it "
+        "must match at least one visible file",
+        "option": "{w} is not an allowed option here",
+        "args": "{w} is called with an option or operand outside its allowed list",
+        "cd": "cd takes one directory inside the workspace, written without ..",
+        "cd_many": "too many directories to check after earlier cd commands",
+        "grep_r": "grep -r and -R read below a directory, hidden files included; name the files or use a glob like "
+        "dir/*.md",
+        "gh": "gh: only read-only calls are allowed (pr, issue, run view or list, repo view, gh api GET)",
+        "printf": "printf -v is not allowed",
+        "write": "{w}: every target must be inside a write directory, with no .. and no hidden name",
+        "git_off": "git, pytest, ruff and make are off in this deployment",
+        "git_dir": "git needs cd <repo top> && git ... or git -C <repo top> ...; the directory is not known here",
+        "build_dir": "{w} runs only in a repository's top level reached by cd <repo top> &&, and the directory is "
+        "not known here",
+        "jq_filter": "jq: the filter reads the environment or imports a module or file",
+        "git_repo": "git runs only in a repository's top level under the workspace, and not in one a lineage can "
+        "write into",
+        "git_sub": "git: {w} is not an allowed subcommand",
+        "git_opt": "git: {w} is not an allowed option",
+        "git_value": "git: {w} takes a value; write it attached (for example -n5) or as --name=value",
+        "git_cluster": "git: a short-option word mixes a value option with others; write each option as its own word",
+        "git_operand": "git: an operand must be a revision or a relative path inside the repository",
+        "git_remote": "git remote: only bare git remote (the names) is allowed; for a URL use gh repo view",
+        "git_branch": "git branch: only list forms are allowed; a bare name creates a branch, so use --list <pattern>",
+        "git_C": "git -C: the directory must be a repository's top level under the workspace, written without ..",
+        "build_token": "git, pytest, ruff and make run without the GitHub token, so they cannot be joined with gh "
+        "or runner.sh",
+        "runner_path": "runner.sh: write it as <workspace>/claude-jobs/runner.sh, bash "
+        "<workspace>/claude-jobs/runner.sh, or ./runner.sh right after cd <workspace>/claude-jobs &&",
+        "runner_verb": "runner.sh: {w} is not an allowed verb (launch, status, list, result)",
+        "runner_cancel": "runner.sh cancel is not allowed here; propose it with propose_action",
+        "runner_args": "runner.sh: {w} is not an allowed argument for that verb",
+        "runner_file": "runner.sh --prompt-file must be an absolute path inside a write directory",
+        "other": "this command is not on the lineage allowlist",
+    }
+)
+# What kind of word each reason quotes; a code not listed here quotes nothing.
+_REASON_KINDS: Mapping[str, str] = MappingProxyType(
+    {
+        "program": "program",
+        "args": "program",
+        "write": "program",
+        "build_dir": "program",
+        "option": "option",
+        "git_opt": "option",
+        "git_value": "option",
+        "runner_args": "option",
+        "git_sub": "subcommand",
+        "runner_verb": "verb",
+    }
+)
+_ECHO_PROGRAM = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,23}")
+_ECHO_NAME = re.compile(r"[a-z][a-z0-9-]{0,23}")
+_ECHO_LONG = re.compile(r"--[A-Za-z0-9][A-Za-z0-9-]{0,23}")
+_ECHO_SHORT = re.compile(r"-[A-Za-z0-9]")
+
+
+def _echo(word: object, kind: str) -> str:
+    """The one word a refusal reason may quote, in backticks, or ``that word``. A program is quoted by its last path
+    component, a subcommand or verb as is, a long option up to its ``=`` and a short option as its first two
+    characters (``-S`` for ``-Spassword``): only when it fits the pattern of its kind, so no value, path or secret
+    can reach a reason. Never more than 28 characters."""
+    if not isinstance(word, str):
+        return "that word"
+    if kind == "program":
+        word = word.rsplit("/", 1)[-1]
+        fits = _ECHO_PROGRAM.fullmatch(word)
+    elif kind in ("subcommand", "verb"):
+        fits = _ECHO_NAME.fullmatch(word)
+    elif kind == "option" and word.startswith("--"):
+        word = word.partition("=")[0]
+        fits = _ECHO_LONG.fullmatch(word)
+    elif kind == "option":
+        word = word[:2]
+        fits = _ECHO_SHORT.fullmatch(word)
+    else:
+        fits = None
+    return f"`{word}`" if fits else "that word"
+
+
+class LineageReason(str):
+    """Why the lineage shell refused a command: the text (from ``LINEAGE_REASONS``), the ``code`` that names its
+    row. The word offered to ``_echo`` is not kept. An unknown code is a KeyError, so a typo cannot ship."""
+
+    code: str
+
+    def __new__(cls, code: str, word: object = "") -> LineageReason:
+        text = LINEAGE_REASONS[code].replace("{w}", _echo(word, _REASON_KINDS.get(code, "")))
+        self = super().__new__(cls, text)
+        self.code = code
+        return self
+
+
 def lineage_bash_refusal_hint(
     *, build_commands: bool, extra_write_dirs: Sequence[str] = (), workspace_dir: str | None = None
 ) -> str:
@@ -1068,7 +1387,7 @@ def lineage_bash_refusal_hint(
         ]
     )
     text = (
-        "The lineage shell allows only: plain reads (cat, ls, head, tail, wc, grep, jq, echo, printf, pwd, cd, "
+        "The lineage shell allows only: plain reads (cat, ls, head, tail, wc, grep, jq, cut, echo, printf, pwd, cd, "
         "sleep, true, test, [ ... ], basename, dirname, date, diff of two files) inside the workspace; mkdir -p, "
         f"touch and cp only into the workspace's {dirs}; read-only gh calls (pr view|checks|list|diff|status, "
         "issue view|list, run view|list, repo view, gh api GET); claude-jobs/runner.sh launch|status|list|result, "
@@ -1077,27 +1396,28 @@ def lineage_bash_refusal_hint(
     )
     if build_commands:
         text += (
-            "; and, in a git repo's top level reached by `cd <repo> &&`: "
-            "git status|log|diff|show|merge-base|rev-parse, pytest, "
+            "; and, in a git repo's top level reached by `cd <repo> &&` (or git -C <repo top> ...): "
+            "git status|log|diff|show|merge-base|rev-parse|ls-tree|ls-files|remote (names only)|branch --list, pytest, "
             "ruff check --no-fix --no-fix-only, ruff format --check|--diff, "
             f"make {'|'.join(sorted(LINEAGE_MAKE_TARGETS))}, "
             "each with a fixed set of options and paths inside the repo, in a bash call without gh or runner.sh"
         )
     return text + (
-        ". Write each command out in full: no $(...), no globs (except as a file operand of a read). "
+        ". Write each command out in full: no $(...), no globs (except as a file operand of a read); "
+        "grep takes no -r, use grep PATTERN dir/*.md. "
         "Join commands with ; && || | only. Propose anything else to the owner with propose_action."
     )
 
 
-def lineage_bash_allowed(
+def lineage_bash_refusal(
     ctx: ExecutionContext,
     command: str,
     *,
     workspace_dir: str,
     build_commands: bool = False,
     extra_write_dirs: Sequence[str] = (),
-) -> bool:
-    """Whether an internal_only turn may run this bash ``command`` (F099 lineage shell).
+) -> LineageReason | None:
+    """Why an internal_only turn may NOT run this bash ``command`` (F099 lineage shell), or None when it may.
 
     An allowlist, failing closed: every simple command must be a LINEAGE_READ_COMMANDS command, a read-only
     ``gh`` call, or ``<workspace_dir>/claude-jobs/runner.sh`` (the owner's Claude Code delegation path, also as
@@ -1128,8 +1448,10 @@ def lineage_bash_allowed(
     lands, and the only place ``./runner.sh`` runs from.
     """
     commands = simple_commands(command, globs=True)
-    if commands is None or not any(words for words, _, _, _ in commands):
-        return False
+    if commands is None:
+        return LineageReason("unreadable")
+    if not any(words for words, _, _, _ in commands):
+        return LineageReason("redirect" if any(t or src for _, t, src, _ in commands) else "empty")
     builds = needs_token = False
     workspace = Path(workspace_dir)
     jobs = workspace / "claude-jobs"
@@ -1142,75 +1464,175 @@ def lineage_bash_allowed(
     prev: str | None = None
     for words, targets, sources, op in commands:
         if op not in _LINEAGE_JOINS:
-            return False
+            return LineageReason("join")
         after, prev = prev, op  # the join before this command; this one's is the next one's
         if moved and after not in ("&&", "|"):
             cwd = None  # `cd x; pytest` runs pytest where the shell was if the cd failed
         if not words:
             if targets or sources:
-                return False
+                return LineageReason("redirect")
             continue
         if not all(_redirect_allowed(t, cwd, writable) for t in targets):
-            return False
+            return LineageReason("redirect")
         if not all(s in _LINEAGE_SINKS or _readable(s, cwds, root) is not None for s in sources):
-            return False
+            return LineageReason("input")
         prog, args = words[0], words[1:]
         # `[` as the command word lexes as a glob (an unmatched bracket, which the shell keeps as it is); it is the
         # one glob word a command that is not in _READ_ARG_ROLES may hold.
         globbed = [w for w in (args if prog == "[" else words) if isinstance(w, GlobWord)]
         if globbed and prog not in _READ_ARG_ROLES:
-            return False
+            return LineageReason("glob")
         if prog in _READ_ARG_ROLES or prog == "cd":
-            split = _read_paths(prog, args)
-            if split is None or not all(any(w is o for o in split[1]) for w in globbed):
-                return False  # a glob that is not a file operand: compared by identity, a quoted '*' is equal
+            bad: list[str] = []
+            split = _read_paths(prog, args, bad=bad)
+            if split is None:
+                return LineageReason(_read_refusal(prog, args, bad), bad[0] if bad else "")
+            if not all(any(w is o for o in split[1]) for w in globbed):
+                return LineageReason("glob")  # a glob that is not a file operand: compared by identity
+            items = split[0] + split[1]
             reached = [
-                _glob_matches(p, cwds, root) if isinstance(p, GlobWord) else _readable(p, cwds, root)
-                for p in split[0] + split[1]
+                _glob_matches(p, cwds, root) if isinstance(p, GlobWord) else _readable(p, cwds, root) for p in items
             ]
             if None in reached:
-                return False
+                return LineageReason("glob" if isinstance(items[reached.index(None)], GlobWord) else "path")
             if prog == "cd":
                 cwds = list(dict.fromkeys([*cwds, *reached[0]]))
                 if len(cwds) > _MAX_LINEAGE_CWDS:
-                    return False
+                    return LineageReason("cd_many")
                 base = [root] if args[0].startswith("/") else [cwd] if cwd is not None else None
                 runs = after in (None, "&&", ";", "\n") and op != "|"  # not skipped, not in a subshell
                 target = _readable(args[0], base, root) if runs and base is not None else None
                 cwd, moved = (target[0] if target else None), True
         runner_args = _runner_args(prog, args, jobs=jobs, cwd=cwd)
         if runner_args is not None:
-            if not _runner_allowed(runner_args, workspace=workspace, readable=writable):
-                return False
+            problem = _runner_problem(runner_args, workspace=workspace, readable=writable)
+            if problem is not None:
+                return LineageReason(*problem)
             needs_token = True
         elif prog == "gh":
             if not _gh_allowed(args):
-                return False
+                return LineageReason("gh")
             needs_token = True
         elif prog == "printf":
             if not _printf_allowed(args):
-                return False
+                return LineageReason("printf")
         elif prog in _TEST_PROGRAMS or prog in _READ_ONLY_ROLES:
             checked = _read_only_files(prog, args)
             if checked is None:
-                return False
+                return LineageReason("args", prog)
             files, regular = checked
             for path in files:
                 reached = _readable(path, cwds, root)
                 if reached is None or (regular and not _regular_files(reached)):
-                    return False
+                    return LineageReason("path")
         elif prog in _FS_WRITE_ROLES:
             if not _fs_write_allowed(prog, args, cwd=cwd, cwds=cwds, root=root, writable=writable):
-                return False
+                return LineageReason("write", prog)
+        elif build_commands and prog == "git" and args[:1] == ["-C"]:
+            dashed = _git_dash_c(args, cwd=cwd, root=root, writable=writable)
+            if isinstance(dashed, LineageReason):
+                return dashed
+            problem = _git_problem(dashed[1], dashed[0])
+            if problem is not None:
+                return LineageReason(*problem)
+            builds = True
         elif build_commands and prog in LINEAGE_BUILD_PROGRAMS:
-            if cwd is None or not _build_repo(cwd, root, writable):
-                return False
-            if not _build_allowed(prog, args, cwd):
-                return False
+            if cwd is None:
+                return LineageReason("git_dir" if prog == "git" else "build_dir", prog)
+            if not _build_repo(cwd, root, writable):
+                return LineageReason("git_repo")
+            if prog == "git":
+                problem = _git_problem(args, cwd)
+                if problem is not None:
+                    return LineageReason(*problem)
+            elif not _build_allowed(prog, args, cwd):
+                return LineageReason("args", prog)
             builds = True
         elif prog not in LINEAGE_READ_COMMANDS:
+            return _unlisted_program(prog, args, build_commands)
+    return LineageReason("build_token") if builds and needs_token else None
+
+
+def _read_refusal(prog: str, args: list[str], bad: list[str]) -> str:
+    """The reason code for a read command (or ``cd``) whose arguments ``_read_paths`` refused whatever its paths
+    name. ``bad``: the option word ``_split_read_args`` refused, if it was an option (jq's filter is not one)."""
+    if prog == "cd":
+        return "cd"
+    if prog == "grep" and _grep_recursive(args):
+        return "grep_r"
+    if prog == "jq" and not bad:
+        return "jq_filter"
+    return "option"
+
+
+def _grep_recursive(args: list[str]) -> bool:
+    """Whether grep's arguments ask it to recurse: ``-r``, ``-R``, ``--recursive``, ``--dereference-recursive`` or
+    ``-d recurse`` / ``--directories=recurse`` in any spelling."""
+    roles = _READ_ARG_ROLES["grep"]
+    i = 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
             return False
-    return not (builds and needs_token)
+        if a.startswith("--"):
+            name, eq, value = a.partition("=")
+            if name in ("--recursive", "--dereference-recursive"):
+                return True
+            if name == "--directories" and (value if eq else args[i] if i < len(args) else "") == "recurse":
+                return True
+            if not eq and roles.long.get(name) in ("value", "file"):
+                i += 1
+        elif a.startswith("-") and a != "-":
+            for j, letter in enumerate(a[1:], 2):
+                if letter in "rR":
+                    return True
+                if roles.short.get(letter) in ("value", "file"):
+                    value = a[j:] or (args[i] if i < len(args) else "")
+                    if letter == "d" and value == "recurse":
+                        return True
+                    if not a[j:]:
+                        i += 1
+                    break
+    return False
+
+
+def _unlisted_program(prog: str, args: list[str], build_commands: bool) -> LineageReason:
+    """The reason for a simple command whose program is on no list: something that looks like the job runner
+    (``runner_path``), bash given anything else (``bash_script``), a build program with the build commands off, or
+    an unlisted program."""
+    if "runner.sh" in prog or (prog == "bash" and any("runner.sh" in w for w in args)):
+        return LineageReason("runner_path")
+    if prog == "bash":
+        return LineageReason("bash_script")
+    if prog in LINEAGE_BUILD_PROGRAMS and not build_commands:
+        return LineageReason("git_off")
+    return LineageReason("program", prog)
+
+
+def lineage_bash_allowed(
+    ctx: ExecutionContext,
+    command: str,
+    *,
+    workspace_dir: str,
+    build_commands: bool = False,
+    extra_write_dirs: Sequence[str] = (),
+) -> bool:
+    """Whether an internal_only turn may run this bash ``command`` (F099 lineage shell): ``lineage_bash_refusal``
+    finds no reason to refuse it. See there for the rules. Fails closed: a decision that raises is a refusal."""
+    try:
+        return (
+            lineage_bash_refusal(
+                ctx,
+                command,
+                workspace_dir=workspace_dir,
+                build_commands=build_commands,
+                extra_write_dirs=extra_write_dirs,
+            )
+            is None
+        )
+    except Exception:
+        return False
 
 
 def internal_only_call_violation(

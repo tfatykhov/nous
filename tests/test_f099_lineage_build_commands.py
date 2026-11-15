@@ -60,6 +60,8 @@ ALLOWED = [
     "cd nous && git log -n20 --format=%H --since=2.days",
     "cd nous && git log --graph --decorate --all --max-count=3",
     "cd nous && git log -p --stat main..HEAD -- nous tests/test_a.py",
+    "cd nous && git log -pw",  # two flag letters in one word: every letter is a flag
+    "cd nous && git -C . rev-parse HEAD",  # -C to the repo the shell is already in
     "cd nous && git diff",
     "cd nous && git diff --cached --stat",
     "cd nous && git diff --name-only origin/main...HEAD",
@@ -179,7 +181,6 @@ REFUSED = [
     "cd nous && git diff --unified /etc/passwd x",
     "cd nous && git diff -O/etc/passwd",
     "cd nous && git diff --submodule=diff",
-    "cd nous && git log -pw",
     "cd nous && git log --show-signature",
     "cd nous && git show ~/x",
     "cd nous && git status --no-such-option",
@@ -208,7 +209,6 @@ REFUSED = [
     "cd nous && git merge-base --octopus-x a b",
     "cd nous && git merge-base --al HEAD main",
     "cd nous && git merge-base /etc/passwd HEAD",
-    "cd nous && git -C . rev-parse HEAD",
     "cd nous && git rev-parse HEAD && gh pr view 1",
     "cd nous && git merge-base HEAD main; {W}/claude-jobs/runner.sh status",
     "git rev-parse HEAD",

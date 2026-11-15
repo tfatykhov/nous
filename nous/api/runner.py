@@ -17,7 +17,7 @@ import time
 import unicodedata
 import weakref
 from collections import OrderedDict
-from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Iterator
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Iterator, Mapping
 from contextlib import AbstractContextManager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -856,6 +856,24 @@ class AgentRunner:
             tools = add_reason_field(tools)
         return tools
 
+    def _lineage_refusal_reason(
+        self, ctx: ExecutionContext, tool_input: Mapping[str, Any]
+    ) -> tool_policy.LineageReason | None:
+        """Why the lineage shell refused this bash call, for the refusal text and the event. A failed lookup is the
+        ``other`` reason: the call is refused whatever this says, and it must never raise."""
+        command = tool_input.get("command")
+        try:
+            return tool_policy.lineage_bash_refusal(
+                ctx,
+                command if isinstance(command, str) else "",
+                workspace_dir=self._settings.workspace_dir,
+                build_commands=self._settings.f099_lineage_build_commands,
+                extra_write_dirs=self._settings.f099_lineage_write_dirs,
+            )
+        except Exception as exc:  # the class only: an OSError's message carries path text from the command
+            logger.warning("F099: the lineage shell refusal reason failed (%s)", type(exc).__name__)
+            return tool_policy.LineageReason("other")
+
     def _authorize_tool_call(
         self,
         ctx: ExecutionContext,
@@ -928,6 +946,7 @@ class AgentRunner:
                 # mode "enforce": it was refused, which is what the dashboard counts under it. A refused lineage
                 # bash call also keeps the head of its command, to check the shell's allowlist against.
                 shell = scope == "internal_only" and strict == "external" and tool_name == "bash"
+                reason = self._lineage_refusal_reason(ctx, tool_input) if shell else None
                 self._log_f026_decision(
                     "harness_context_policy_violation",
                     {
@@ -936,6 +955,7 @@ class AgentRunner:
                         "violation": f"{scope}:{strict}",
                         "mode": "enforce",
                         **({"command_head": _command_head(tool_input.get("command"))} if shell else {}),
+                        **({"reason_code": reason.code} if reason is not None else {}),
                     },
                     session_id=session_id,
                 )
@@ -948,6 +968,8 @@ class AgentRunner:
                         extra_write_dirs=self._settings.f099_lineage_write_dirs,
                     )
                 elif strict == "external" and tool_name == "bash" and ctx.authority == AUTHORITY_INTERNAL:
+                    if reason is not None:
+                        text += f" Refused: {reason}."
                     text += " " + tool_policy.lineage_bash_refusal_hint(
                         build_commands=self._settings.f099_lineage_build_commands,
                         extra_write_dirs=self._settings.f099_lineage_write_dirs,
