@@ -46,7 +46,7 @@ export async function resumeNow(): Promise<void> {
   haltAction.set({ pending: 'resume', outcome: null });
   let outcome: HaltOutcome | null = null;
   try {
-    await apiRequest<BackgroundResumeAnswer>('/background/resume', 'POST', { actor: 'dashboard' });
+    await apiRequest<BackgroundResumeAnswer>('/background/resume', 'POST', { actor: 'dashboard', surface: 'dashboard' });
   } catch (err) {
     outcome = resumeRefused(err as ApiAnswerError);
   }

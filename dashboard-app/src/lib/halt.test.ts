@@ -238,7 +238,7 @@ describe('one tap halts', () => {
     await haltPoll.refresh();
     await resumeNow();
     expect(calls.filter((c) => c.method === 'POST')).toEqual([
-      { url: '/background/resume', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: { actor: 'dashboard' } },
+      { url: '/background/resume', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: { actor: 'dashboard', surface: 'dashboard' } },
     ]);
     expect(get(haltState).lines).toContain('Resume needs your sign-in. Open the dashboard through the login page.');
   });
