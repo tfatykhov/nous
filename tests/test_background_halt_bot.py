@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import httpx
 import pytest
 from test_f099_phase2d_bot import _bot, _message, _Response, _sent
 
-from nous.telegram_bot import HALT_UNREACHABLE_TEXT
+from nous.telegram_bot import HALT_LANDED_TEXT, HALT_SENT_TEXT, HALT_UNREACHABLE_TEXT
 
 SECRET = "s" * 40
 RESUMED = (
@@ -15,25 +16,37 @@ RESUMED = (
 
 
 class _Http:
-    """The REST API as the bot sees it: ``posts`` maps a path to ``(status, body)``; ``down`` raises."""
+    """The REST API as the bot sees it: ``posts`` and ``gets`` map a path to ``(status, body)``. ``post_error`` and
+    ``get_error``: an exception the call raises instead."""
 
-    def __init__(self, posts=None, *, down=False):
-        self.posts, self.down = posts or {}, down
+    def __init__(self, posts=None, *, gets=None, post_error=None, get_error=None):
+        self.posts, self.gets = posts or {}, gets or {}
+        self.post_error, self.get_error = post_error, get_error
         self.calls: list[tuple[str, dict | None, dict | None]] = []
 
     async def post(self, url, json=None, timeout=None, headers=None):  # noqa: A002 - httpx's keyword
         path = url.removeprefix("http://nous.test")
         self.calls.append((path, json, headers))
-        if self.down:
-            raise ConnectionError("down")
+        if self.post_error is not None:
+            raise self.post_error
         return _Response(*self.posts.get(path, (404, {})))
 
+    async def get(self, url, timeout=None):
+        path = url.removeprefix("http://nous.test")
+        self.calls.append((path, None, None))
+        if self.get_error is not None:
+            raise self.get_error
+        return _Response(*self.gets.get(path, (404, {})))
 
-def _owner_bot(posts=None, *, down=False, secret: str | None = SECRET):
+
+def _owner_bot(posts=None, *, secret: str | None = SECRET, **http):
     bot = _bot()
-    bot._http = _Http(posts, down=down)
+    bot._http = _Http(posts, **http)
     bot.owner_route_secret = secret
     return bot
+
+
+HALTED_STATE = {"/background/state": (200, {"halted": True, "source": "stored"})}
 
 
 async def test_halt_posts_with_the_owner_secret_and_the_actor_and_replies_with_the_report():
@@ -53,10 +66,27 @@ async def test_halt_without_a_secret_still_halts_and_an_unreachable_server_gets_
     )
     await bot._handle_update(_message("/halt"))
     assert bot._http.calls[0][2] is None and bot._http.calls[0][1]["reason"] is None
-    down = _owner_bot(down=True)
+    down = _owner_bot(post_error=httpx.ConnectError("refused"), get_error=httpx.ConnectError("refused"))
     await down._handle_update(_message("/halt"))
     assert _sent(down) == [HALT_UNREACHABLE_TEXT]
     down._chat_streaming.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("post_error", "gets", "get_error", "expected"),
+    [
+        (httpx.ReadTimeout("slow"), HALTED_STATE, None, HALT_LANDED_TEXT),  # sent, and the state says it landed
+        (httpx.ReadTimeout("slow"), None, httpx.ReadTimeout("slow"), HALT_SENT_TEXT),  # sent, state unreadable
+        (httpx.ConnectError("refused"), HALTED_STATE, None, HALT_LANDED_TEXT),  # halted already
+        (httpx.ConnectError("refused"), {"/background/state": (200, {"halted": False})}, None, HALT_UNREACHABLE_TEXT),
+    ],
+)
+async def test_a_halt_with_no_answer_checks_the_state_once_before_answering(post_error, gets, get_error, expected):
+    bot = _owner_bot(post_error=post_error, gets=gets, get_error=get_error)
+    await bot._handle_update(_message("/halt"))
+    assert [c[0] for c in bot._http.calls] == ["/background/halt", "/background/state"]
+    assert _sent(bot) == [expected]
+    bot._chat_streaming.assert_not_awaited()
 
 
 @pytest.mark.parametrize(

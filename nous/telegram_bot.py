@@ -245,6 +245,10 @@ def describe_commitment_close(status: int, body: dict, drop: bool, short_id: int
 HALT_UNREACHABLE_TEXT = (
     "Could not reach Nous. If it is running, set NOUS_BACKGROUND_HALT=true on the host and restart it."
 )
+HALT_LANDED_TEXT = "The halt was received: background work is halted. Its report did not arrive in time."
+HALT_SENT_TEXT = (
+    "The halt was sent, but Nous did not answer in time. Its report may follow; send /halt again if it does not."
+)
 _HALT_REASON_MAX = 200
 
 
@@ -960,6 +964,28 @@ class NousTelegramBot:
             body = {}
         return response.status_code, body if isinstance(body, dict) else {}
 
+    async def _post_halt(self, payload: dict[str, Any], headers: dict[str, str] | None) -> tuple[int, dict, bool]:
+        """POST /background/halt: ``(status, body, sent)``. Status 0 when no answer came; ``sent`` is false only when
+        the connection was never made (so the request cannot have reached the server)."""
+        try:
+            response = await self._http.post(
+                f"{self.nous_url}/background/halt",
+                json=payload,
+                timeout=httpx.Timeout(connect=10, read=OWNER_REQUEST_TIMEOUT, write=10, pool=10),
+                **({"headers": headers} if headers else {}),
+            )
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            logger.warning("Background halt: /halt could not connect (%s)", type(exc).__name__)
+            return 0, {}, False
+        except Exception as exc:
+            logger.warning("Background halt: /halt got no answer (%s)", type(exc).__name__)
+            return 0, {}, True
+        try:
+            body = response.json()
+        except Exception:
+            body = {}
+        return response.status_code, body if isinstance(body, dict) else {}, True
+
     async def _owner_get(self, path: str) -> tuple[int, dict]:
         """GET a REST owner route: ``(status, body)``; status 0 when the server could not be reached. The connect is
         bounded like ``_owner_post``'s; a read takes no call, so 30 s is plenty."""
@@ -1097,8 +1123,18 @@ class NousTelegramBot:
             actor = f"telegram:{user_id}"
             if command == "/halt":
                 payload = {"actor": actor, "surface": "telegram", "reason": rest.strip()[:_HALT_REASON_MAX] or None}
-                status, body = await self._owner_post("/background/halt", payload, headers=secret)
-                await self._send_owner(chat_id, describe_halt(status, body))
+                status, body, sent = await self._post_halt(payload, secret)
+                if status == 0:
+                    # No answer: the state says whether the halt landed. Only a request that never left and a server
+                    # that cannot be read get the unreachable sentence.
+                    state_status, state = await self._owner_get("/background/state")
+                    if state_status == 200 and state.get("halted") is True:
+                        text = HALT_LANDED_TEXT
+                    else:
+                        text = HALT_SENT_TEXT if sent else HALT_UNREACHABLE_TEXT
+                else:
+                    text = describe_halt(status, body)
+                await self._send_owner(chat_id, text)
             else:
                 status, body = await self._owner_post(
                     "/background/resume", {"actor": actor, "surface": "telegram"}, headers=secret
