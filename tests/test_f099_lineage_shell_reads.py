@@ -15,9 +15,9 @@ import uuid
 from pathlib import Path
 
 import pytest
-from test_f099_enforcement import OFFERED, _auth, _shell_runner
+from test_f099_enforcement import MODES, OFFERED, _auth, _shell_runner
 from test_f099_lineage_build_commands import ALLOWED, REFUSED
-from test_f099_lineage_shell_obstacles import NEW_COMMANDS
+from test_f099_lineage_shell_obstacles import NEW_COMMANDS, _whole_ws
 
 from nous.api import tool_policy
 from nous.api.execution_context import ExecutionContext
@@ -75,7 +75,7 @@ def _fmt(template, ws):
     return template.format(W=ws, RID=RID, R=f"{ws}/claude-jobs/runner.sh")
 
 
-# -- Task 1: a reason for every refusal -------------------------------------------------------------------------------
+# -- a reason for every refusal --
 
 
 def test_the_decisions_did_not_change(tmp_path):
@@ -230,7 +230,7 @@ def test_no_refusal_in_the_existing_refused_list_is_other(ws):
     assert others == []
 
 
-# -- Task 2: show the reason, log its code ----------------------------------------------------------------------------
+# -- show the reason, log its code --
 
 
 def _bash(r, command, kind="subtask"):
@@ -290,7 +290,7 @@ def test_a_failing_reason_lookup_still_refuses(ws, monkeypatch):
     assert events[0][1]["reason_code"] == "other"
 
 
-# -- Task 2b: /proc and /dev paths mean something else to the shell than to this process ------------------------------
+# -- /proc and /dev paths mean something else to the shell than to this process --
 
 PROCFS_REFUSED = [
     "cd /proc/self/cwd",
@@ -336,7 +336,7 @@ def test_dev_null_and_workspace_directories_named_proc_or_dev_stay_allowed(ws):
         assert _ok(_fmt(command, ws), ws), command
 
 
-# -- Task 3: combined short flags for git reads -----------------------------------------------------------------------
+# -- combined short flags for git reads --
 
 CD = "cd nous && "
 
@@ -430,3 +430,250 @@ def test_a_cluster_means_the_same_to_git(tmp_path):
     (repo / "a.txt").write_text("one\ntwo\n")
     assert _real_git(repo, "status", "-sb") == _real_git(repo, "status", "-s", "-b")
     assert _real_git(repo, "log", "-pw") == _real_git(repo, "log", "-p", "-w")
+
+
+# -- bare git remote, git branch list forms, git ls-tree, git ls-files --
+
+BRANCH_ALLOWED = [
+    "git branch",
+    "git branch -a",
+    "git branch -r",
+    "git branch -v",
+    "git branch -vv",
+    "git branch -avv",
+    "git branch --list",
+    "git branch --list 'feat/*'",
+    "git branch --list -a 'feat*' 'fix*'",
+    "git branch --show-current",
+    "git branch --contains HEAD",
+    "git branch --contains=HEAD",
+    "git branch -a --contains main",
+    "git branch --merged main",
+    "git branch --no-merged",
+    "git branch --merged=main --list 'x*'",
+]
+BRANCH_QUIRKS = [  # allowed by the shape check; the real-git test below is the authority that they create nothing
+    "git branch x --list",
+    "git branch --contains HEAD newname",
+    "git branch --merged HEAD newname",
+    "git branch --no-merged HEAD newname",
+]
+LS_ALLOWED = [
+    "git ls-tree HEAD",
+    "git ls-tree --name-only -r HEAD",
+    "git ls-tree -r -t --long HEAD tests",
+    "git ls-tree -rd HEAD",
+    "git ls-tree --full-tree --abbrev=8 HEAD:tests",
+    "git ls-files",
+    "git ls-files -s",
+    "git ls-files -o --exclude-standard",
+    "git ls-files -c -- tests",
+    "git ls-files --deleted --modified tests/test_a.py",
+    "git ls-files -z --full-name",
+]
+
+
+@pytest.mark.parametrize("command", ["git remote", *BRANCH_ALLOWED, *BRANCH_QUIRKS, *LS_ALLOWED])
+def test_the_new_git_read_forms_are_allowed(command, ws):
+    assert _ok(CD + command, ws), command
+
+
+REMOTE_REFUSED = [
+    # printing a URL: -v and get-url (a token may sit in one); the four ways an output filter was got around
+    "git remote -v | cut -d@ -f1",
+    "git remote -v > {W}/research/o",
+    'g""it remote -v',
+    "git remote -v | head -c 100000",
+    "git remote -v",
+    "git remote --verbose",
+    "git remote -vv",
+    "git remote get-url origin",
+    "git remote get-url --all origin",
+    "git remote get-url --push origin",
+    "git remote get-url",
+    "git remote get-url origin extra",
+    "git remote get-url -- origin",
+    # writes
+    "git remote add x url",
+    "git remote add -f x url",
+    "git remote rm origin",
+    "git remote remove origin",
+    "git remote rename a b",
+    "git remote set-url origin x",
+    "git remote set-url --push origin x",
+    "git remote set-head origin -a",
+    "git remote set-branches origin x",
+    "git remote prune origin",
+    # the network
+    "git remote update",
+    "git remote show origin",
+    "git remote -f",
+    "git remote -t x",
+    "git remote origin",
+    "git remote -- x",
+]
+BRANCH_REFUSED = [
+    "git branch newname",
+    "git branch -D x",
+    "git branch -d x",
+    "git branch -m a b",
+    "git branch -M a b",
+    "git branch -c a b",
+    "git branch -f x HEAD",
+    "git branch -u origin/x",
+    "git branch --set-upstream-to=origin/x",
+    "git branch --unset-upstream",
+    "git branch -t x origin/x",
+    "git branch --track x",
+    "git branch --edit-description",
+    "git branch -l x",
+    "git branch -a newname",
+    "git branch -v newname",
+    "git branch -r newname",
+    "git branch --show-current newname",
+    "git branch -vD x",
+    "git branch -aD x",
+    "git branch -- newname",
+    "git branch --list -- newname",
+    "git branch --delete x",
+    "git branch --force x",
+    "git branch --li x",
+    "git branch --sort=x",
+    "git branch --format=x",
+    "git branch --points-at HEAD",
+]
+LS_REFUSED = [
+    "git ls-files -x '*'",
+    "git ls-files --exclude='*'",
+    "git ls-files -X /etc/passwd",
+    "git ls-files --exclude-from=/etc/passwd",
+    "git ls-files --exclude-per-directory=.x",
+    "git ls-files --with-tree=HEAD",
+    "git ls-files --recurse-submodules",
+    "git ls-files --format=x",
+    "git ls-files --error-unmatch x",
+    "git ls-files /etc/passwd",
+    "git ls-files ../x",
+    "git ls-files -- /etc",
+    "git ls-files .git",
+    "git ls-files -ox",
+    "git ls-tree HEAD /etc",
+    "git ls-tree HEAD ../x",
+    "git ls-tree --format=x HEAD",
+    "git ls-tree -f HEAD",
+    "git ls-remote",
+    "git ls-remote origin",
+    "git fetch",
+    "git fetch -q",
+    "git fetch --all",
+]
+
+
+@pytest.mark.parametrize("command", REMOTE_REFUSED + BRANCH_REFUSED + LS_REFUSED)
+def test_the_new_git_forms_refuse_everything_that_writes_prints_a_url_or_reaches_out(command, ws):
+    assert not _ok(_fmt(CD + command, ws), ws), command
+
+
+def test_the_reasons_of_the_new_git_forms(ws):
+    for command, code in (
+        ("git remote -v", "git_remote"),
+        ("git remote add x y", "git_remote"),
+        ("git remote get-url origin", "git_remote"),
+        ("git branch newname", "git_branch"),
+        ("git branch --sort=x", "git_opt"),
+        ("git ls-remote", "git_sub"),
+        ("git fetch", "git_sub"),
+        ("git ls-files -x '*'", "git_opt"),
+    ):
+        reason = _refusal(CD + command, ws)
+        assert reason is not None and reason.code == code, command
+    assert "gh repo view" in _refusal(CD + "git remote -v", ws)
+
+
+def test_the_joins_and_contexts_of_the_new_git_forms(ws):
+    assert _refusal(CD + "git remote && gh pr list", ws).code == "build_token"
+    assert _refusal("cd nous && git branch -a; gh pr view 1", ws).code == "build_token"
+    assert _refusal("git remote", ws).code == "git_repo"  # the workspace root is no repo
+    assert _refusal("cd nous; git remote", ws).code == "git_dir"
+    assert _refusal(CD + "git branch -a", ws, build_commands=False).code == "git_off"
+
+
+def _sh(repo: Path, command: str, **env_over: str) -> subprocess.CompletedProcess:
+    env = {"PATH": os.environ["PATH"], "HOME": str(repo.parent), "GIT_CONFIG_GLOBAL": "/dev/null", **env_over}
+    return subprocess.run(["/bin/sh", "-c", command], cwd=repo, env=env, capture_output=True, text=True)
+
+
+def _snapshot(repo: Path) -> dict[str, bytes | str]:
+    snap: dict[str, bytes | str] = {"refs": _real_git(repo, "for-each-ref")}
+    for name in ("config", "HEAD", "index"):
+        snap[name] = (repo / ".git" / name).read_bytes()
+    return snap
+
+
+@pytest.fixture
+def real_repo(tmp_path):
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _real_git(repo, "init", "-q", "-b", "main")
+    (repo / "a.txt").write_text("one\n")
+    _real_git(repo, "add", "a.txt")
+    _real_git(repo, "commit", "-q", "-m", "one")
+    _real_git(repo, "branch", "feat/a")
+    _real_git(repo, "branch", "fix/b")
+    _real_git(repo, "remote", "add", "origin", "https://ZQ9tok@example.com/x.git")
+    return repo
+
+
+@needs_git
+@pytest.mark.parametrize("command", BRANCH_ALLOWED + BRANCH_QUIRKS)
+def test_branch_listing_forms_create_nothing(command, real_repo, ws):
+    assert _ok(CD + command, ws), command  # the policy allows it ...
+    before = _snapshot(real_repo)
+    _sh(real_repo, command)
+    assert _snapshot(real_repo) == before  # ... and git, run for real, changed neither a ref nor the config
+    for name in ("newname", "x"):
+        assert _real_git(real_repo, "branch", "--list", name).strip() == ""
+
+
+@needs_git
+@pytest.mark.parametrize("command", ["git remote", *LS_ALLOWED])
+def test_bare_remote_ls_files_and_ls_tree_write_nothing(command, real_repo):
+    before = _snapshot(real_repo)
+    _sh(real_repo, command)
+    assert _snapshot(real_repo) == before
+
+
+@needs_git
+def test_a_global_insteadof_cannot_leak_a_url_through_an_allowed_command(real_repo, ws):
+    rewrite = '[url "https://ZQ9tok@example.com/"]\n\tinsteadOf = https://example.com/\n'
+    (real_repo.parent / ".gitconfig").write_text(rewrite)
+    for command in ["git remote", *BRANCH_ALLOWED, *LS_ALLOWED]:
+        assert _ok(CD + command, ws), command
+        done = _sh(real_repo, command, GIT_CONFIG_GLOBAL=str(real_repo.parent / ".gitconfig"))
+        assert "ZQ9tok" not in done.stdout + done.stderr, command
+    # the commands that would print a URL are the refused ones
+    for command in ("git remote -v", "git remote get-url origin", "git ls-remote"):
+        assert not _ok(CD + command, ws), command
+
+
+NEW_GIT_COMMANDS = [
+    "cd nous && git branch -a",
+    "cd nous && git remote",
+    "cd nous && git ls-files",
+    "cd nous && git ls-tree HEAD",
+]
+
+
+@pytest.mark.parametrize(("offered_mode", "policy_mode"), MODES)
+@pytest.mark.parametrize("kind", ["continuation", "subtask", "dag_node"])
+def test_the_new_git_commands_run_in_every_mode(tmp_path, offered_mode, policy_mode, kind):
+    ws = _whole_ws(tmp_path)
+    r, _, events = _shell_runner(
+        ws,
+        f099_lineage_write_dirs=["research"],
+        tool_offered_set_enforcement_mode=offered_mode,
+        tool_context_policy_mode=policy_mode,
+    )
+    for command in NEW_GIT_COMMANDS:  # the classifier rates ls-tree a write: the _LOCAL levels allow it
+        assert _auth(r, _internal(kind), "bash", OFFERED, {"command": command}) is None, command
+    assert events == []

@@ -12,7 +12,7 @@ import os
 import re
 import shlex
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
@@ -279,12 +279,15 @@ class _GitRoles:
     """A read-only git subcommand's options. ``flags``: long options, with or without ``=value``. ``values``: long
     options that must carry ``=value``; the next word is never taken as a value, because `git diff -U /etc/passwd x`
     would read it as a path and compare a file outside the repo. ``short``: one letter per word, ``flag`` or ``value``
-    (attached, ``-n5``). ``counts``: ``-<number>`` (``git log -5``)."""
+    (attached, ``-n5``). ``counts``: ``-<number>`` (``git log -5``). ``shape``: a check of the whole argument list
+    after the subcommand for a subcommand whose danger is in its operands (``git branch NAME`` creates a branch);
+    it returns a problem code or None, and runs before the options are read."""
 
     flags: frozenset[str]
     values: frozenset[str]
     short: Mapping[str, str]
     counts: bool = False
+    shape: Callable[[list[str]], str | None] | None = None
 
 
 _GIT_DIFF_FLAGS = (
@@ -302,6 +305,38 @@ _GIT_LOG_VALUES = (
     "--unified"
 )
 _GIT_DIFF_SHORT = {**dict.fromkeys("pusw", "flag"), "U": "value"}
+_BRANCH_LISTING = ("--list", "--contains", "--merged", "--no-merged")
+
+
+def _git_remote_shape(rest: list[str]) -> str | None:
+    """Bare ``git remote`` only: it prints the remotes' names. ``-v`` and ``get-url`` print URLs (a token may be in
+    one), add, remove, rename, set-url, set-head, set-branches and prune write, show and update contact the
+    remote."""
+    return None if rest == [] else "git_remote"
+
+
+def _git_branch_shape(rest: list[str]) -> str | None:
+    """A branch is listed, never made: a bare operand is the NAME of a branch to create. An operand is allowed only
+    where git is certain to be listing: after ``--list`` (a pattern), or as the revision of ``--contains``,
+    ``--merged`` or ``--no-merged`` (each forces list mode). ``--`` is refused. The option map (not this function)
+    refuses -d -D -m -M -c -C -f -u -t --set-upstream-to --unset-upstream --edit-description --track
+    --create-reflog and -l."""
+    listing, operands, i = False, 0, 0
+    while i < len(rest):
+        a = rest[i]
+        i += 1
+        if a == "--":
+            return "git_branch"
+        name = a.partition("=")[0]
+        if name in _BRANCH_LISTING:
+            listing = True
+            if name != "--list" and "=" not in a and i < len(rest) and not rest[i].startswith("-"):
+                i += 1  # the revision
+        elif not a.startswith("-"):
+            operands += 1
+    return None if listing or operands == 0 else "git_branch"
+
+
 _GIT_LOG_ROLES = _GitRoles(
     frozenset(f"{_GIT_DIFF_FLAGS} {_GIT_LOG_FLAGS}".split()),
     frozenset(_GIT_LOG_VALUES.split()),
@@ -339,6 +374,32 @@ LINEAGE_GIT_READS: Mapping[str, _GitRoles] = MappingProxyType(
             ),
             frozenset(),
             {"q": "flag"},
+        ),
+        # Bare `git remote` prints names (_git_remote_shape): no option, no word.
+        "remote": _GitRoles(frozenset(), frozenset(), {}, shape=_git_remote_shape),
+        # List forms only (_git_branch_shape). Not -d -D -m -M -c -C -f -u -t -l, --delete --move --copy --force
+        # --set-upstream-to --track --edit-description, nor --sort --format --points-at (abbreviations are refused:
+        # the maps are exact).
+        "branch": _GitRoles(
+            frozenset("--all --remotes --verbose --list --show-current --contains --merged --no-merged".split()),
+            frozenset(),
+            dict.fromkeys("arv", "flag"),
+            shape=_git_branch_shape,
+        ),
+        # Names only. Not ls-tree --format, nor ls-files -x -X --exclude --exclude-from --exclude-per-directory
+        # --with-tree --recurse-submodules --format --error-unmatch --debug -f -t -v.
+        "ls-tree": _GitRoles(
+            frozenset("--name-only --name-status --object-only --full-name --full-tree --long --abbrev".split()),
+            frozenset(),
+            dict.fromkeys("drtlz", "flag"),
+        ),
+        "ls-files": _GitRoles(
+            frozenset(
+                "--cached --deleted --modified --others --ignored --stage --unmerged --full-name --directory "
+                "--no-empty-directory --exclude-standard --eol --deduplicate".split()
+            ),
+            frozenset(),
+            dict.fromkeys("cdmoisuz", "flag"),
         ),
     }
 )
@@ -999,6 +1060,9 @@ def _git_problem(args: list[str], repo: Path) -> tuple[str, str] | None:
         return "git_sub", args[0] if args else ""
     roles = LINEAGE_GIT_READS[args[0]]
     rest = args[1:]
+    shape = roles.shape(rest) if roles.shape is not None else None
+    if shape is not None:
+        return shape, ""
     for i, a in enumerate(rest):
         if a == "--":
             return None if all(_in_repo(o, repo) for o in rest[i + 1 :]) else ("git_operand", "")
