@@ -3,8 +3,8 @@
 Approve, reject and answer are one function each on the continuation runner (``decide_proposal``,
 ``answer_question``); these routes only resolve an id, call it, and map the result to a status. The Telegram bot
 calls these routes, and the A2UI cards of Phase 3 will call the same two runner functions: no owner action has any
-semantics of its own here. No agent tool reaches them. They have the existing no-auth LAN posture of ``rest.py``
-(spec section 9): there is no in-app authentication, and the gate is the network and the bot's owner-chat check.
+semantics of its own here. No agent tool reaches them. Each POST requires the owner's or the proxy's secret
+(``nous/api/owner_guard.py``); the two reads require none.
 
 The id of a route is looked up BEFORE the runner is needed: an id that names nothing is a 404 whatever is wired,
 and a row with no runner is a 503, so a deployment with continuation off (no rows, no runner) answers 404.
@@ -20,6 +20,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
+from nous.api.owner_guard import OwnerGuard
 from nous.brain import continuation
 from nous.owner_actions import (  # the one refusal vocabulary (fixed sentences)
     ANSWER_REFUSALS,
@@ -67,8 +68,9 @@ def _reason(body: dict[str, Any]) -> str:
 def build_intention_routes(*, database: Any, settings: Any, continuation_runner: Any) -> list[Route]:
     """The owner-action routes: the four of 2d and, from 2e, the list of the owner's roots and the cancel.
     ``continuation_runner`` may be None, or a proxy that is falsy until the component exists: it is read per
-    request."""
+    request. The POSTs require the owner's or the proxy's secret, checked before the body or the id is read."""
     agent_id = settings.agent_id
+    guard = OwnerGuard(settings)
 
     async def list_proposals(request: Request) -> JSONResponse:
         """GET /intentions/proposals?state=pending&limit=20"""
@@ -290,9 +292,9 @@ def build_intention_routes(*, database: Any, settings: Any, continuation_runner:
     # the rule one sentence long).
     return [
         Route("/intentions/proposals", list_proposals),
-        Route("/intentions/proposals/{id}/decide", decide, methods=["POST"]),
-        Route("/intentions/questions/answer", answer_by_message, methods=["POST"]),
-        Route("/intentions/questions/{id}/answer", answer, methods=["POST"]),
+        guard.route("/intentions/proposals/{id}/decide", decide, methods=["POST"]),
+        guard.route("/intentions/questions/answer", answer_by_message, methods=["POST"]),
+        guard.route("/intentions/questions/{id}/answer", answer, methods=["POST"]),
         Route("/intentions", list_roots),
-        Route("/intentions/{root_id}/cancel", cancel, methods=["POST"]),
+        guard.route("/intentions/{root_id}/cancel", cancel, methods=["POST"]),
     ]

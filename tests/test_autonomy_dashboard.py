@@ -54,9 +54,14 @@ async def data(db, agent, **kw):
         return await dash.get_autonomy_data(s, agent, now=NOW, **kw)
 
 
-def tap(agent, name, actor="unattributed", age_days=1) -> A2uiAction:
+def tap(agent, name, actor="unattributed", age_days=1, status="completed") -> A2uiAction:
     return A2uiAction(
-        agent_id=agent, surface_id="s", action_name=name, actor=actor, created_at=NOW - timedelta(days=age_days)
+        agent_id=agent,
+        surface_id="s",
+        action_name=name,
+        actor=actor,
+        status=status,
+        created_at=NOW - timedelta(days=age_days),
     )
 
 
@@ -163,6 +168,19 @@ async def test_taps_are_the_owners_in_the_window_grouped_by_action(db, agent):
     ]
     assert got["triage_taps"] == {"heartbeat": 3, "decision": 2}
     assert (await data(db, agent, days=60))["taps"]["total"] == 8
+
+
+async def test_a_refused_or_unfinished_action_is_not_a_tap(db, agent):
+    await add(
+        db,
+        tap(agent, "intention.approve"),
+        tap(agent, "intention.approve", status="rejected"),  # refused (no owner's proof, censor, nonce) or failed
+        tap(agent, "heartbeat.resolve", status="rejected"),
+        tap(agent, "heartbeat.resolve", status="dispatched"),  # the handler never finished
+    )
+    got = await data(db, agent)
+    assert got["taps"] == {"total": 1, "by_action": [{"action_name": "intention.approve", "count": 1}]}
+    assert got["triage_taps"] == {"heartbeat": 0, "decision": 0}
 
 
 async def test_approval_cards_asked_counts_only_approval_surfaces_in_the_window(db, agent):

@@ -69,6 +69,9 @@ _ID_ARG_RE = re.compile(r"[0-9a-fA-F-]{8,36}")
 _HEX_ID_RE = re.compile(r"[0-9a-f]{8,32}")
 _UNREACHABLE = "I could not reach Nous. Try again in a moment."
 _NOT_RUNNING = "Nous is not running its follow-up work."
+# A 403 from an owner route: the bot's secret is missing or does not match the API's digest.
+_OWNER_NOT_SET_UP = "Owner actions are not set up on this server."
+_OWNER_REFUSED_LOG = "the API refused the bot's owner secret; set NOUS_OWNER_ROUTE_SECRET to match the API"
 OWNER_REQUEST_TIMEOUT = 300  # an approve runs the call inline, bounded by the server's tool timeout
 
 
@@ -109,6 +112,9 @@ def describe_decision(status: int, body: dict, approve: bool, short_id: str) -> 
         return "I could not read that id.", False
     if status == 503:
         return _NOT_RUNNING, False
+    if status == 403:
+        logger.warning(_OWNER_REFUSED_LOG)
+        return _OWNER_NOT_SET_UP, False
     return _UNREACHABLE, False
 
 
@@ -127,6 +133,9 @@ def describe_answer(status: int, body: dict) -> str:
         return "I could not read that."
     if status == 503:
         return _NOT_RUNNING
+    if status == 403:
+        logger.warning(_OWNER_REFUSED_LOG)
+        return _OWNER_NOT_SET_UP
     return _UNREACHABLE
 
 
@@ -271,6 +280,9 @@ def describe_cancel(status: int, body: dict, short_id: str) -> str:
         return "I could not read that id."
     if status == 503:
         return _NOT_RUNNING
+    if status == 403:
+        logger.warning(_OWNER_REFUSED_LOG)
+        return _OWNER_NOT_SET_UP
     return _UNREACHABLE
 
 
@@ -699,8 +711,9 @@ class NousTelegramBot:
         owner_route_secret: str | None = None,
     ):
         self.bot_token = bot_token
-        # F111: sent to the owner's commitment routes only (X-Nous-Owner-Secret); the API holds just its SHA-256.
+        # F111: sent to the owner's routes only (X-Nous-Owner-Secret); the API holds just its SHA-256.
         self.owner_route_secret = owner_route_secret or None
+        self._owner_refusal_logged = False  # a reply's 403 is logged once per process
         self.nous_url = nous_url.rstrip("/")
         self.allowed_users = allowed_users
         self.attachments_enabled = attachments_enabled
@@ -900,6 +913,10 @@ class NousTelegramBot:
             return user_id in self.allowed_users
         return user_id == self.owner_chat_id
 
+    def _owner_headers(self) -> dict[str, str] | None:
+        """The owner's secret for an owner route's POST, or None when the bot has none (no header is sent)."""
+        return {"X-Nous-Owner-Secret": self.owner_route_secret} if self.owner_route_secret else None
+
     async def _owner_post(
         self, path: str, payload: dict[str, Any], headers: dict[str, str] | None = None
     ) -> tuple[int, dict]:
@@ -945,6 +962,7 @@ class NousTelegramBot:
         status, body = await self._owner_post(
             f"/intentions/proposals/{hex_id}/decide",
             {"decision": "approve" if approve else "reject", "actor": f"telegram:{user_id}"},
+            headers=self._owner_headers(),
         )
         return (status, *describe_decision(status, body, approve, hex_id[:8]))
 
@@ -1011,7 +1029,9 @@ class NousTelegramBot:
             if hex_id is None:
                 return False
             status, body = await self._owner_post(
-                f"/intentions/questions/{hex_id}/answer", {"text": parts[1].strip(), "actor": f"telegram:{user_id}"}
+                f"/intentions/questions/{hex_id}/answer",
+                {"text": parts[1].strip(), "actor": f"telegram:{user_id}"},
+                headers=self._owner_headers(),
             )
             if status == 404:
                 return False  # no such question: ordinary chat, as before 2d
@@ -1031,7 +1051,9 @@ class NousTelegramBot:
             if hex_id is None:
                 return False  # no id, or not one: it was never ours (and no argument reaches a URL)
             status, body = await self._owner_post(
-                f"/intentions/{hex_id}/cancel", {"actor": f"telegram:{user_id}", "reason": "cancelled from Telegram"}
+                f"/intentions/{hex_id}/cancel",
+                {"actor": f"telegram:{user_id}", "reason": "cancelled from Telegram"},
+                headers=self._owner_headers(),
             )
             if status == 404:
                 return False  # no such root: ordinary chat, as before 2e
@@ -1045,7 +1067,7 @@ class NousTelegramBot:
             status, body = await self._owner_post(
                 f"/commitments/{short_id}/{command[1:]}",
                 {"actor": f"telegram:{user_id}"},
-                headers={"X-Nous-Owner-Secret": self.owner_route_secret} if self.owner_route_secret else None,
+                headers=self._owner_headers(),
             )
             # A 404 is answered too (unlike /cancel_intention): the id came from a footer, and passed on to chat the
             # model could claim it dropped something.
@@ -1065,11 +1087,15 @@ class NousTelegramBot:
         """A reply to a bot message: the answer to the question that was sent as it. Only a 200 (recorded) or a 409
         (a known question that can no longer be answered) proves the reply was addressed to a question; anything
         else (a 404, an error status, no answer at all) goes on to the ordinary chat path with the original text,
-        so a route failure never swallows an ordinary reply."""
+        so a route failure never swallows an ordinary reply (a 403 included: it is logged once per process)."""
         status, body = await self._owner_post(
             "/intentions/questions/answer",
             {"chat_id": chat_id, "message_id": message_id, "text": text, "actor": f"telegram:{user_id}"},
+            headers=self._owner_headers(),
         )
+        if status == 403 and not self._owner_refusal_logged:
+            self._owner_refusal_logged = True
+            logger.warning(_OWNER_REFUSED_LOG)
         if status not in (200, 409):
             return False
         await self._send_owner(chat_id, describe_answer(status, body))
@@ -1430,7 +1456,10 @@ async def main() -> None:
         owner_route_secret=os.environ.get("NOUS_OWNER_ROUTE_SECRET"),
     )
     if not bot.owner_route_secret:
-        logger.warning("F111: NOUS_OWNER_ROUTE_SECRET is not set, so /drop and /done will be refused by the API")
+        logger.warning(
+            "F111: NOUS_OWNER_ROUTE_SECRET is not set, so the API will refuse /approve, /reject, /answer, "
+            "/cancel_intention, /drop, /done and the Approve and Reject buttons"
+        )
     elif len(bot.owner_route_secret) < 32:
         # The API keeps only an unsalted SHA-256 of it, which code in that process can read: a short value can be
         # guessed offline.

@@ -87,6 +87,7 @@ async def _tap(world, surface_id, option):
             }
         },
         content_type="application/json",
+        owner_verified=True,  # the owner's tap: the route passes this when the request proves the owner
     )
 
 

@@ -228,6 +228,8 @@ services:
       - NOUS_PROMISE_WATCHER_SINCE=${NOUS_PROMISE_WATCHER_SINCE:-}
       - NOUS_PROMISE_WATCHER_MAX_ITEMS=${NOUS_PROMISE_WATCHER_MAX_ITEMS:-10}
       - NOUS_OWNER_ROUTE_SECRET_SHA256=${NOUS_OWNER_ROUTE_SECRET_SHA256:-}
+      # The SHA-256 of the secret the login proxy adds as X-Nous-Proxy-Secret; also accepted on the owner routes.
+      - NOUS_MCP_CLIENT_UI_SECRET_SHA256=${NOUS_MCP_CLIENT_UI_SECRET_SHA256:-}
     volumes:
       # F042: persist downloaded cross-encoder models across container restarts
       - huggingface_cache:/root/.cache/huggingface
@@ -294,7 +296,7 @@ services:
       NOUS_API_URL: http://nous:8000
       NOUS_ALLOWED_USERS: ${NOUS_ALLOWED_USERS:-}
       NOUS_TELEGRAM_CHAT_ID: ${NOUS_TELEGRAM_CHAT_ID:-}
-      # F111: the secret the bot sends to the owner's /drop and /done routes (openssl rand -hex 32). This service
+      # F111: the secret the bot sends to the owner's routes (openssl rand -hex 32). This service
       # only: the nous service gets its SHA-256 (NOUS_OWNER_ROUTE_SECRET_SHA256).
       NOUS_OWNER_ROUTE_SECRET: ${NOUS_OWNER_ROUTE_SECRET:-}
     depends_on:

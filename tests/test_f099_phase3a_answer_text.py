@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 
 import httpx
@@ -12,6 +13,9 @@ from nous import owner_actions
 from nous.api import intention_routes
 from nous.brain import continuation
 from nous.config import Settings
+
+OWNER_SECRET = "owner-only-test-value"
+OWNER_DIGEST = hashlib.sha256(OWNER_SECRET.encode()).hexdigest()
 
 LONE_SURROGATE = "a" + chr(0xD800) + "b"
 
@@ -48,13 +52,17 @@ async def test_the_route_texts_are_unchanged(text):  # PIN
     hoisted validator and the surrogate case gets past the 400 into the missing database (an exception here)."""
     app = Starlette(
         routes=intention_routes.build_intention_routes(
-            database=None, settings=Settings(_env_file=None), continuation_runner=None
+            database=None,
+            settings=Settings(_env_file=None, owner_route_secret_sha256=OWNER_DIGEST),
+            continuation_runner=None,
         )
     )
     # ASCII-escaped JSON: httpx's json= would try to UTF-8 encode the lone surrogate on the client side.
     body = json.dumps({"chat_id": 1, "message_id": 2, "text": text})
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://nous") as client:
         response = await client.post(
-            "/intentions/questions/answer", content=body, headers={"content-type": "application/json"}
+            "/intentions/questions/answer",
+            content=body,
+            headers={"content-type": "application/json", "X-Nous-Owner-Secret": OWNER_SECRET},
         )
     assert response.status_code == 400
