@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -15,6 +16,8 @@ from nous.storage.database import Database
 from nous.storage.models import Subtask
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from nous.brain.intentions import IntentionSpec
 
 logger = logging.getLogger(__name__)
@@ -78,6 +81,10 @@ class SubtaskManager:
         parent_channel: str | None = None,
         # F099 I1: the intention behind this spawn, written in this transaction.
         intention: IntentionSpec | None = None,
+        # F114: the caller's transaction. The rows are written in it and not
+        # committed: nothing is published (no worker can dequeue it) until the
+        # caller commits, and a rollback leaves neither row.
+        session: AsyncSession | None = None,
     ) -> Subtask:
         """Create a new subtask: pending, or already running for ``worker_id``.
 
@@ -87,10 +94,15 @@ class SubtaskManager:
         transaction, and the row carries the lineage stamp (``metadata.intention``)
         that its turn's ExecutionContext reads (I3). ``IntentionRootClosed`` /
         ``IntentionParentMissing`` propagate, and then neither row exists.
+
+        With ``session``, that transaction is the caller's and this does not
+        commit (the goal driver publishes a session's first subtask together
+        with the session's root id). Without it, as before, it commits its own.
         """
         pri_val = _PRIORITY_MAP.get(priority, 100)
+        own = session is None
 
-        async with self._db.session() as session:
+        async with self._db.session() if own else nullcontext(session) as session:
             # Check pending limit
             count = await session.scalar(
                 select(func.count())
@@ -136,9 +148,17 @@ class SubtaskManager:
                 await intentions.insert_prepared(
                     session, self._agent_id, prepared, source_kind=intentions.SOURCE_SUBTASK, source_id=subtask.id
                 )
-            await session.commit()
+            if own:
+                await session.commit()
+            else:
+                await session.flush()
             await session.refresh(subtask)
-            logger.info("Created subtask %s: %s", subtask.id.hex[:8], task[:80])
+            logger.info(
+                "Created subtask %s%s: %s",
+                subtask.id.hex[:8],
+                "" if own else " (in the caller's transaction)",
+                task[:80],
+            )
             return subtask
 
     async def dequeue(self, worker_id: str) -> Subtask | None:

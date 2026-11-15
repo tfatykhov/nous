@@ -438,6 +438,23 @@ class TestSubtaskManagerEnhancements:
         assert subtask.model is None
         assert subtask.status == "pending"
 
+    async def test_create_in_the_callers_transaction_commits_and_rolls_back_with_it(
+        self, subtask_mgr: SubtaskManager, db
+    ):
+        """With ``session``, the subtask is written in the caller's transaction: nothing is published until the
+        caller commits, and a rollback leaves no row (the goal driver publishes a session's first subtask together
+        with the session's root id this way)."""
+        async with db.session() as s:
+            dropped = await subtask_mgr.create(task="Rolled back", session=s)
+            assert dropped.id is not None and dropped.status == "pending"
+            assert await subtask_mgr.get(dropped.id) is None  # not visible outside the transaction
+            await s.rollback()
+        assert await subtask_mgr.get(dropped.id) is None
+        async with db.session() as s:
+            kept = await subtask_mgr.create(task="Committed", session=s)
+            await s.commit()
+        assert (await subtask_mgr.get(kept.id)).task == "Committed"
+
 
 class TestSubtaskManager:
     """SubtaskManager CRUD and queue tests."""
