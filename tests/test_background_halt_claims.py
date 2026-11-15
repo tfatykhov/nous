@@ -575,3 +575,45 @@ async def test_a_legacy_run_whose_row_the_sweep_cancelled_first_announces_nothin
     assert "subtask_completed" not in [e.type for e in bus.events]
     env.http.post.assert_not_called()
     assert await inbox_rows(env, subtask.id) == []
+
+
+# ---- a halt that lands during a tick, and the usage of a run the halt ended ---------------------------------------
+
+
+async def test_a_halt_landing_during_a_tick_stops_the_remaining_agent_run_checks():
+    registry = CheckRegistry()
+    halt = _install()
+    first = _callback_check("first")
+
+    async def run_while_the_halt_lands():
+        await halt.halt(actor="t", surface="dashboard")
+        return CheckResult(has_updates=False, findings=[])
+
+    first.run = AsyncMock(side_effect=run_while_the_halt_lands)
+    registry.register(first)
+    second = SelfInitiatedCheck(MagicMock(), MagicMock(), MagicMock(), embeddings=None)
+    second.run = AsyncMock(return_value=CheckResult(has_updates=False, findings=[]))
+    registry.register(second)
+    hb, _triage = _hb_runner(registry)
+    await hb._tick()
+    first.run.assert_awaited_once()
+    second.run.assert_not_awaited()  # due at tick start, not started once the halt was on
+
+
+async def test_a_check_that_runs_no_turn_keeps_its_result_when_the_halt_lands_during_it():
+    registry = CheckRegistry()
+    halt = _install()
+    found = Finding(source="email", summary="A new invoice arrived", urgency="normal", needs_action=False)
+    email_like = SelfInitiatedCheck(MagicMock(), MagicMock(), MagicMock(), embeddings=None)
+
+    async def run_while_the_halt_lands():
+        await halt.halt(actor="t", surface="dashboard")  # its own cursor has already moved
+        return CheckResult(has_updates=True, findings=[found])
+
+    email_like.run = AsyncMock(side_effect=run_while_the_halt_lands)
+    registry.register(email_like)
+    hb, _triage = _hb_runner(registry)
+    hb._record_run_stats = AsyncMock()
+    findings = await hb._tick()
+    assert [f.summary for f in findings] == ["A new invoice arrived"]  # kept, not discarded
+    hb._record_run_stats.assert_awaited_once()

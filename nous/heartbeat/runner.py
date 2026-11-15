@@ -764,6 +764,9 @@ class HeartbeatRunner:
         callback_candidates: list[tuple[DynamicCheck, list[Finding]]] = []
 
         for check in due_checks:
+            if not _code_only(check) and background_halt.current().refuses("heartbeat_check", None, tick_epoch):
+                # Goals PR 0c: a halt that landed while an earlier check ran: the rest run only if code-only.
+                continue
             # Codex P1: a DAG task can reap/cancel a DAG-managed dynamic
             # check between the snapshot (get_due_checks) and here.  Re-
             # verify the check is still registered and active before
@@ -803,9 +806,12 @@ class HeartbeatRunner:
                         check.run(),
                         timeout=check.timeout,
                     )
-                if not _code_only(check) and background_halt.current().refuses("heartbeat_check", None, tick_epoch):
-                    # Goals PR 0c: the halt landed during an agent-run check: its run is discarded, not counted
-                    # as a success or a failure (a check is never self-disabled by the halt).
+                if isinstance(check, DynamicCheck) and background_halt.current().refuses(
+                    "heartbeat_check", None, tick_epoch
+                ):
+                    # Goals PR 0c: the halt landed during an agent-run check (its turn was cut short): its run is
+                    # discarded, not counted as a success or a failure (a check is never self-disabled by the halt).
+                    # A check that runs no turn keeps its result: it may already have moved a cursor of its own.
                     logger.info("Background halt: discarded the run of heartbeat check '%s'", check.name)
                     run_succeeded = None
                     continue
@@ -1631,8 +1637,8 @@ class HeartbeatRunner:
         try:
             with background_halt.epoch_scope(epoch):
                 result = await asyncio.wait_for(check.run(), timeout=check.timeout)
-            if not _code_only(check) and background_halt.current().refuses("heartbeat_check", None, epoch):
-                # Goals PR 0c: as in _tick, a run the halt reached is discarded, neither a success nor a failure.
+            if isinstance(check, DynamicCheck) and background_halt.current().refuses("heartbeat_check", None, epoch):
+                # Goals PR 0c: as in _tick, an agent-run check the halt reached is discarded.
                 run_succeeded = None
                 return CheckResult(skipped=True)
             # A skipped result means run() returned early because the check
