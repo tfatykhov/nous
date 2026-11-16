@@ -13,11 +13,10 @@ from goal_routes_support import CHAN, active, add_session, db_now, draft, make_e
 from sqlalchemy import func, select
 
 from nous.api.goal_routes import JOURNAL_MAX, masked_channel
-from nous.goals.driver import SESSION_NOTE_LABEL
 from nous.goals.envelope import _RANGES, PRESETS
 from nous.goals.seed import SPEND_NOTE
 from nous.goals.spend import goal_spent
-from nous.goals.store import format_short_id
+from nous.goals.store import SESSION_NOTE_LABEL, format_short_id
 from nous.storage.models import Goal, GoalJournal, GoalSession
 
 pytestmark = pytest.mark.postgres_only

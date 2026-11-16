@@ -34,6 +34,9 @@ EVIDENCE_REF_MAX_CHARS = 300
 TAIL_CHARS = 6000
 TAIL_ENTRY_CHARS = 1500
 CLIP_MARKER = " [clipped]"
+# Marks the chain's own words inside the harness's session-close journal row (written by the goal driver; the goal
+# routes leave such a row out when they look for the row of a pause).
+SESSION_NOTE_LABEL = "Note written by the session:"
 MAX_DEADLINE_DAYS = 90
 ACTORS: frozenset[str] = frozenset({"owner", "host", "chain", "harness"})
 JOURNAL_KINDS: frozenset[str] = frozenset(
