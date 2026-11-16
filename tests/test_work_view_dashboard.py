@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
+from f099_support import OWNER_DIGEST, OWNER_HEADERS
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 
@@ -33,12 +34,20 @@ def _agent() -> str:
 
 
 def _settings(agent_id: str, **over) -> Settings:
+    # The session, trace, call-result and block reads require the owner's or the proxy's secret: every client here
+    # sends the owner's.
+    over.setdefault("owner_route_secret_sha256", OWNER_DIGEST)
     return Settings(agent_id=agent_id, telegram_bot_token=None, telegram_chat_id=None, **over)
 
 
 def make_app(db, settings: Settings):
     """The REST app with mocked organs: the Work endpoints use only the database and the settings."""
     return create_app(MagicMock(), MagicMock(), MagicMock(), MagicMock(), db, settings)
+
+
+def _client(app) -> AsyncClient:
+    """A client of ``app`` that sends the owner's secret."""
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers=OWNER_HEADERS)
 
 
 @pytest.fixture
@@ -53,7 +62,7 @@ def work_settings(agent_id: str) -> Settings:
 
 @pytest_asyncio.fixture
 async def client(db, work_settings):
-    async with AsyncClient(transport=ASGITransport(app=make_app(db, work_settings)), base_url="http://test") as c:
+    async with _client(make_app(db, work_settings)) as c:
         yield c
 
 
@@ -442,7 +451,7 @@ async def test_sessions_flag_off_is_empty_and_opens_no_session(db, agent_id, mon
 
     monkeypatch.setattr(db, "session", counting_session)
     off = make_app(db, _settings(agent_id, tool_call_log_enabled=False))
-    async with AsyncClient(transport=ASGITransport(app=off), base_url="http://test") as c:
+    async with _client(off) as c:
         body = await get_json(c)
     assert body["enabled"] is False and body["sessions"] == [] and body["counts"] == ZERO_COUNTS
     assert body == wv.disabled_sessions(7)
@@ -450,7 +459,7 @@ async def test_sessions_flag_off_is_empty_and_opens_no_session(db, agent_id, mon
 
     # The counter does see the handler's session when the log is on (so the zero above means something).
     on = make_app(db, _settings(agent_id, tool_call_log_enabled=True))
-    async with AsyncClient(transport=ASGITransport(app=on), base_url="http://test") as c:
+    async with _client(on) as c:
         body = await get_json(c)
     assert body["enabled"] is True and opened == 1
 
@@ -1245,10 +1254,10 @@ async def test_trace_input_tokens_sums_every_main_loop_call_past_the_cap(db, age
         # Another agent's call under my turn id is not counted.
         await insert_model_call(db, other, busy, session_id="sess-TK", purpose="theirs")
         on = make_app(db, _settings(agent_id, tool_call_log_enabled=True, model_call_log_enabled=True))
-        async with AsyncClient(transport=ASGITransport(app=on), base_url="http://test") as c:
+        async with _client(on) as c:
             body_on = await get_json(c, trace_path("sess-TK"))
         off = make_app(db, _settings(agent_id, tool_call_log_enabled=True, model_call_log_enabled=False))
-        async with AsyncClient(transport=ASGITransport(app=off), base_url="http://test") as c:
+        async with _client(off) as c:
             body_off = await get_json(c, trace_path("sess-TK"))
     finally:
         await delete_agent_rows(db, other)
@@ -1309,10 +1318,10 @@ async def test_trace_model_calls_attached_only_when_model_log_on(db, agent_id, c
         # Another agent's call under my turn id.
         await insert_model_call(db, other, turn, session_id="sess-MC", purpose="theirs")
         on = make_app(db, _settings(agent_id, tool_call_log_enabled=True, model_call_log_enabled=True))
-        async with AsyncClient(transport=ASGITransport(app=on), base_url="http://test") as c:
+        async with _client(on) as c:
             body_on = await get_json(c, trace_path("sess-MC"))
         off = make_app(db, _settings(agent_id, tool_call_log_enabled=True, model_call_log_enabled=False))
-        async with AsyncClient(transport=ASGITransport(app=off), base_url="http://test") as c:
+        async with _client(off) as c:
             body_off = await get_json(c, trace_path("sess-MC"))
     finally:
         await delete_agent_rows(db, other)
@@ -1359,7 +1368,7 @@ async def test_trace_model_call_input_total_is_null_only_without_usage(db, agent
         at = base + timedelta(seconds=i)
         await insert_model_call(db, agent_id, turn, session_id="sess-IT", started_at=at, **parts)
     on = make_app(db, _settings(agent_id, tool_call_log_enabled=True, model_call_log_enabled=True))
-    async with AsyncClient(transport=ASGITransport(app=on), base_url="http://test") as c:
+    async with _client(on) as c:
         body = await get_json(c, trace_path("sess-IT"))
     got = [m["input_total"] for m in body["turns"][0]["model_calls"]]
     assert got == [expected for _, _, expected in cases], list(zip([name for name, _, _ in cases], got, strict=True))
@@ -1431,14 +1440,14 @@ async def test_trace_flag_off_is_empty(db, agent_id, cleanup, monkeypatch):
 
     monkeypatch.setattr(db, "session", counting_session)
     off = make_app(db, _settings(agent_id, tool_call_log_enabled=False, model_call_log_enabled=True))
-    async with AsyncClient(transport=ASGITransport(app=off), base_url="http://test") as c:
+    async with _client(off) as c:
         assert await get_json(c, trace_path("sess-off")) == wv.disabled_trace()
         assert await get_json(c, trace_path("sess-nothing")) == wv.disabled_trace()  # no 404 either
     assert opened == 0
 
     # The counter does see the handler's session when the log is on (so the zero above means something).
     on = make_app(db, _settings(agent_id, tool_call_log_enabled=True))
-    async with AsyncClient(transport=ASGITransport(app=on), base_url="http://test") as c:
+    async with _client(on) as c:
         body = await get_json(c, trace_path("sess-off"))
     assert body["enabled"] is True and _turn_ids(body) == [str(turn)] and opened == 1
 
@@ -1855,7 +1864,7 @@ async def test_today_is_agent_scoped_and_flag_off_is_empty(db, agent_id, cleanup
 
     monkeypatch.setattr(db, "session", counting_session)
     off = make_app(db, _settings(agent_id, tool_call_log_enabled=False, model_call_log_enabled=True))
-    async with AsyncClient(transport=ASGITransport(app=off), base_url="http://test") as c:
+    async with _client(off) as c:
         body = await get_json(c, TODAY)
     assert opened == 0
     assert (body["enabled"], body["turns"], body["truncated"], body["totals"]) == (False, [], False, ZERO_TOTALS)
@@ -1964,14 +1973,14 @@ async def test_patterns_flag_off(db, agent_id, cleanup, monkeypatch):
 
     monkeypatch.setattr(db, "session", counting_session)
     off = make_app(db, _settings(agent_id, tool_call_log_enabled=False))
-    async with AsyncClient(transport=ASGITransport(app=off), base_url="http://test") as c:
+    async with _client(off) as c:
         assert await get_json(c, PATTERNS) == wv.disabled_patterns(7)
         assert await get_json(c, PATTERNS, days="3") == wv.disabled_patterns(3)
     assert opened == 0
 
     # The counter does see the handler's session when the log is on (so the zero above means something).
     on = make_app(db, _settings(agent_id, tool_call_log_enabled=True))
-    async with AsyncClient(transport=ASGITransport(app=on), base_url="http://test") as c:
+    async with _client(on) as c:
         body = await get_json(c, PATTERNS)
     assert body["enabled"] is True and opened == 1
     assert body["reason_coverage"] == {"calls": 1, "with_reason": 1}
@@ -2234,7 +2243,7 @@ async def mc_client(db, agent_id):
     """The REST app with the model-call log on (the tool-call log stays off: the model-call endpoints need only
     their own flag)."""
     app = make_app(db, _settings(agent_id, model_call_log_enabled=True))
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+    async with _client(app) as c:
         yield c
 
 
@@ -2328,7 +2337,7 @@ async def test_model_calls_flag_off(db, agent_id, cleanup, monkeypatch):
     monkeypatch.setattr(db, "session", counting_session)
     # The tool-call log on does not open the model-call endpoint.
     off = make_app(db, _settings(agent_id, model_call_log_enabled=False, tool_call_log_enabled=True))
-    async with AsyncClient(transport=ASGITransport(app=off), base_url="http://test") as c:
+    async with _client(off) as c:
         assert await get_json(c, MODEL_CALLS) == wv.disabled_model_calls(7, False)
         assert await get_json(c, MODEL_CALLS, days="30") == wv.disabled_model_calls(30, False)
         assert (await c.get(MODEL_CALLS, params={"status": "x"})).status_code == 400  # parsing still applies
@@ -2336,7 +2345,7 @@ async def test_model_calls_flag_off(db, agent_id, cleanup, monkeypatch):
 
     # The counter does see the handler's session when the log is on (so the zero above means something).
     on = make_app(db, _settings(agent_id, model_call_log_enabled=True))
-    async with AsyncClient(transport=ASGITransport(app=on), base_url="http://test") as c:
+    async with _client(on) as c:
         body = await get_json(c, MODEL_CALLS)
     assert body["enabled"] is True and len(body["calls"]) == 1 and opened == 1
 
@@ -2360,7 +2369,7 @@ async def test_model_calls_text_enabled_needs_the_setting_and_a_store(db, agent_
         (False, True, None, False),
     ]
     for log, text_on, store, expected in cases:
-        async with AsyncClient(transport=ASGITransport(app=app(log, text_on, store)), base_url="http://test") as c:
+        async with _client(app(log, text_on, store)) as c:
             body = await get_json(c, MODEL_CALLS)
         assert (body["enabled"], body["text_enabled"]) == (log, expected), (log, text_on, store)
 
@@ -2827,7 +2836,7 @@ def text_store(db, agent_id) -> TextStore:
 async def mct_client(db, agent_id, text_store):
     """The REST app with the model-call log and its text on, reading ``text_store``."""
     app = text_app(db, agent_id, text_store)
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+    async with _client(app) as c:
         yield c
 
 
@@ -3121,7 +3130,7 @@ async def test_model_call_text_status(db, agent_id, cleanup, text_store):
 
     async def status(call_id, store=text_store, **flags) -> tuple[str, bool, list]:
         app = text_app(db, agent_id, store, **flags)
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        async with _client(app) as c:
             body = await get_json(c, call_path(call_id))
         return body["text_status"], body["text_enabled"], body["blocks"]
 
@@ -3222,7 +3231,7 @@ async def test_block_body_endpoint(mct_client, db, agent_id, cleanup, text_store
     # Text off (the setting, the store, or the model-call log): 404.
     for store, flags in ((text_store, {"text_on": False}), (text_store, {"log": False}), (None, {})):
         app = text_app(db, agent_id, store, **flags)
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        async with _client(app) as c:
             assert (await c.get(block_path(call_id, "system", 0))).status_code == 404, (store, flags)
 
 
@@ -3265,7 +3274,7 @@ async def test_detail_flag_off(db, agent_id, cleanup, monkeypatch, text_store):
         agent_id, model_call_log_enabled=False, model_call_text_enabled=True, tool_call_log_enabled=True
     )
     off = create_app(MagicMock(), MagicMock(), MagicMock(), MagicMock(), db, settings, model_call_text_store=text_store)
-    async with AsyncClient(transport=ASGITransport(app=off), base_url="http://test") as c:
+    async with _client(off) as c:
         assert await get_json(c, call_path(call_id)) == wv.disabled_model_call(True)
         assert (await c.get(block_path(call_id, "system", 0))).status_code == 404
         assert (await c.get(call_path("not-a-uuid"))).status_code == 400  # parsing still applies
@@ -3275,12 +3284,12 @@ async def test_detail_flag_off(db, agent_id, cleanup, monkeypatch, text_store):
     off_proxy = create_app(
         MagicMock(), MagicMock(), MagicMock(), MagicMock(), db, settings, model_call_text_store=empty_proxy
     )
-    async with AsyncClient(transport=ASGITransport(app=off_proxy), base_url="http://test") as c:
+    async with _client(off_proxy) as c:
         assert await get_json(c, call_path(call_id)) == wv.disabled_model_call(False)
         assert (await c.get(block_path(call_id, "system", 0))).status_code == 404
     # The text off: the detail opens one session for the call's numbers, the block endpoint none.
     text_off = text_app(db, agent_id, text_store, text_on=False)
-    async with AsyncClient(transport=ASGITransport(app=text_off), base_url="http://test") as c:
+    async with _client(text_off) as c:
         assert (await c.get(block_path(call_id, "system", 0))).status_code == 404
         assert opened == 0
         assert (await get_json(c, call_path(call_id)))["text_status"] == "off"
@@ -3289,7 +3298,7 @@ async def test_detail_flag_off(db, agent_id, cleanup, monkeypatch, text_store):
     # Both on: the handler's session, then the text store's (so the zeros above mean something), one after the
     # other: a request never holds two connections at once.
     both_on = text_app(db, agent_id, text_store)
-    async with AsyncClient(transport=ASGITransport(app=both_on), base_url="http://test") as c:
+    async with _client(both_on) as c:
         assert (await get_json(c, call_path(call_id)))["text_status"] == "ok"
         assert opened == 3
         assert (await get_json(c, block_path(call_id, "system", 0)))["body"] == "be brief"
@@ -3327,7 +3336,7 @@ async def test_model_call_detail_blocks_failure_is_a_plain_500(db, agent_id, cle
     call_id = await insert_model_call(db, agent_id, purpose="chat", started_at=_hour_ago())
     store = MagicMock()
     store.describe = AsyncMock(side_effect=RuntimeError("secret detail from the text store"))
-    async with AsyncClient(transport=ASGITransport(app=text_app(db, agent_id, store)), base_url="http://test") as c:
+    async with _client(text_app(db, agent_id, store)) as c:
         resp = await c.get(call_path(call_id))
     assert resp.status_code == 500 and resp.json() == {"error": "work view query failed"}
     assert "secret detail" not in resp.text
@@ -3428,7 +3437,7 @@ async def test_trace_ledger_ref_says_whether_it_holds_a_send(db, agent_id, clean
             db, agent_id, turn, i, session_id="sess-H", tool="send_email", ledger_entry_id=led, started_at=base
         )
     settings = _settings(agent_id, tool_call_log_enabled=True, execution_ledger_persist_enabled=persist)
-    async with AsyncClient(transport=ASGITransport(app=make_app(db, settings)), base_url="http://test") as c:
+    async with _client(make_app(db, settings)) as c:
         body = (await c.get("/dashboard/work/sessions/sess-H")).json()
     held = [call["ledger"]["held"] for call in body["turns"][0]["calls"]]
     assert held == [persist, False, False]
@@ -3528,7 +3537,7 @@ async def test_call_result_bad_id_is_400(client):
 async def test_call_result_with_the_log_off_is_404_and_opens_no_session():
     database = MagicMock()
     settings = _settings(_agent(), tool_call_log_enabled=False)
-    async with AsyncClient(transport=ASGITransport(app=make_app(database, settings)), base_url="http://test") as c:
+    async with _client(make_app(database, settings)) as c:
         resp = await c.get(result_path(uuid.uuid4()))
     assert resp.status_code == 404 and resp.json() == {"error": "not found"}
     database.session.assert_not_called()

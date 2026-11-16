@@ -4035,18 +4035,20 @@ def create_app(
         # F036.1: Cache dashboard
         Route("/dashboard/cache", dashboard_cache),
         # F108: Work view
-        Route("/dashboard/work/sessions", dashboard_work_sessions),
-        Route("/dashboard/work/sessions/{session_id}", dashboard_work_trace),
+        owner_guard.route("/dashboard/work/sessions", dashboard_work_sessions, methods=["GET"]),
+        owner_guard.route("/dashboard/work/sessions/{session_id}", dashboard_work_trace, methods=["GET"]),
         Route("/dashboard/work/patterns", dashboard_work_patterns),
         Route("/dashboard/work/today", dashboard_work_today),
-        Route("/dashboard/work/calls/{call_id}/result", dashboard_work_call_result),
+        owner_guard.route("/dashboard/work/calls/{call_id}/result", dashboard_work_call_result, methods=["GET"]),
         Route("/dashboard/model-calls", dashboard_model_calls),
         Route("/dashboard/model-calls/{call_id}", dashboard_model_call),
-        Route("/dashboard/model-calls/{call_id}/blocks/{part}/{ord}", dashboard_model_call_block),
+        owner_guard.route(
+            "/dashboard/model-calls/{call_id}/blocks/{part}/{ord}", dashboard_model_call_block, methods=["GET"]
+        ),
         # F038: DAG orchestration dashboard
         Route("/dashboard/dag", dashboard_dag),
         Route("/dashboard/execution", dashboard_execution),
-        Route("/dashboard/execution/{entry_id}", dashboard_execution_detail),
+        owner_guard.route("/dashboard/execution/{entry_id}", dashboard_execution_detail, methods=["GET"]),
         Route("/dashboard/harness", dashboard_harness),
         Route("/dashboard/intentions", dashboard_intentions),
         Route("/dashboard/attention", dashboard_attention),
@@ -4070,8 +4072,8 @@ def create_app(
         # F035.4: Context visibility
         Route("/context/log", context_log_list, methods=["GET"]),
         Route("/context/log/{id}", context_log_detail, methods=["GET"]),
-        Route("/context/log/{id}/payload", context_log_payload, methods=["GET"]),
-        Route("/context/log/{id}/sections", context_log_sections, methods=["GET"]),
+        owner_guard.route("/context/log/{id}/payload", context_log_payload, methods=["GET"]),
+        owner_guard.route("/context/log/{id}/sections", context_log_sections, methods=["GET"]),
         Route("/context/diff", context_diff, methods=["GET"]),
         # F035.3: Behavioral drift detection
         Route("/behavior/snapshot/latest", behavior_snapshot_latest, methods=["GET"]),

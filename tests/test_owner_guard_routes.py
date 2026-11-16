@@ -270,6 +270,13 @@ REST_ROUTE_SET = {
     ("POST", "/rubric/evolve"),
     ("POST", "/dashboard/memory-write-health/acknowledge"),
     ("GET", "/a2ui/push/installations"),
+    ("GET", "/dashboard/work/sessions"),
+    ("GET", "/dashboard/work/sessions/{session_id}"),
+    ("GET", "/dashboard/work/calls/{call_id}/result"),
+    ("GET", "/dashboard/model-calls/{call_id}/blocks/{part}/{ord}"),
+    ("GET", "/dashboard/execution/{entry_id}"),
+    ("GET", "/context/log/{id}/payload"),
+    ("GET", "/context/log/{id}/sections"),
 }
 
 
@@ -382,6 +389,14 @@ async def test_a_proxy_call_with_no_body_still_needs_the_json_media_type(tmp_pat
 # secret needs no media type.
 GUARDED_READS: dict[str, tuple[int, dict[str, object] | None]] = {
     "/a2ui/push/installations": (503, {"error": "A2UI not available"}),
+    # The stored prompt, response, message and tool-result reads
+    "/dashboard/work/sessions": (200, None),
+    "/dashboard/work/sessions/abc": (200, {"enabled": False, "session": None, "turns": [], "next_after": None}),
+    "/dashboard/work/calls/abc/result": (400, {"error": "call id must be a UUID"}),
+    "/dashboard/model-calls/abc/blocks/system/0": (400, {"error": "call id must be a UUID"}),
+    "/dashboard/execution/abc": (500, None),
+    "/context/log/abc/payload": (404, {"error": "Not enabled"}),
+    "/context/log/abc/sections": (404, {"error": "Not enabled"}),
 }
 
 

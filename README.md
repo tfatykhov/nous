@@ -298,7 +298,7 @@ curl -X POST http://localhost:8000/chat \
 
 The secret header is required when `NOUS_OWNER_ENTRY_MODE=enforce` (see [environment variables](docs/reference/environment-variables.md)). From the Telegram bot's container, `python -m nous.ping SESSION_ID "MESSAGE"` posts one message with it.
 
-The dashboard is at `http://localhost:8000/dashboard`. Opened directly, without the login proxy, it can read most screens; its edits and the Goals and Integrations screens require the proxy's secret, which the login proxy adds. Migrations run on startup. The [Quickstart guide](docs/quickstart.md) covers Telegram, local development and verification.
+The dashboard is at `http://localhost:8000/dashboard`. Opened directly, without the login proxy, it can read most screens; its edits, the Goals and Integrations screens, the Work screen's sessions and change details, and a model call's text require the proxy's secret, which the login proxy adds. Migrations run on startup. The [Quickstart guide](docs/quickstart.md) covers Telegram, local development and verification.
 
 ## Documentation
 
