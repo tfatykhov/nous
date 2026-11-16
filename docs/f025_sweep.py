@@ -5,6 +5,7 @@ Stores raw results with all scores to F025-sweep-raw-results.json
 """
 
 import json
+import os
 import time
 import urllib.request
 import urllib.error
@@ -77,9 +78,14 @@ QUERIES = {
     ],
 }
 
+def _owner_headers():
+    """The owner's secret from NOUS_OWNER_ROUTE_SECRET, when set: POST /admin/search-weights requires it."""
+    secret = os.environ.get("NOUS_OWNER_ROUTE_SECRET", "")
+    return {"X-Nous-Owner-Secret": secret} if secret else {}
+
 def api_get(path):
     """GET request to API, return parsed JSON."""
-    req = urllib.request.Request(f"{API_BASE}{path}")
+    req = urllib.request.Request(f"{API_BASE}{path}", headers=_owner_headers())
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read())
 
@@ -87,7 +93,7 @@ def api_post(path, data):
     """POST request to API, return parsed JSON."""
     body = json.dumps(data).encode()
     req = urllib.request.Request(f"{API_BASE}{path}", data=body,
-                                 headers={"Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json", **_owner_headers()})
     with urllib.request.urlopen(req, timeout=30) as resp:
         return json.loads(resp.read())
 

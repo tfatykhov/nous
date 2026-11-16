@@ -118,9 +118,13 @@ def ingest() -> None:
         out(f"  session {si} ({len(notes)} notes) done; facts={nf}")
     out("\ntriggering sleep (cosine backfill + co_mention + episode edges + ...)...")
     try:
-        httpx.post(f"{BASE}/sleep/trigger", timeout=400)
+        r = httpx.post(f"{BASE}/sleep/trigger", headers=owner_headers(), timeout=400)
     except Exception as ex:
         out(f"  (sleep err: {ex})")
+    else:
+        if r.status_code != 200:
+            out(f"  sleep trigger answered {r.status_code}: {r.text[:200]} (is NOUS_OWNER_ROUTE_SECRET set?)")
+            sys.exit(2)
     time.sleep(8)
     nf = psql(f"SELECT count(*) FROM heart.facts WHERE agent_id='{AGENT}'")
     ne = psql(f"SELECT count(*) FROM brain.graph_edges WHERE agent_id='{AGENT}'")

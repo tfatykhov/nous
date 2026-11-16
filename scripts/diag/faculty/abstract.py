@@ -116,9 +116,13 @@ async def _ingest() -> None:
     await db.disconnect()
     out(f"direct-inserted {len(facts)} abstract facts; triggering sleep...")
     try:
-        httpx.post(f"{BASE}/sleep/trigger", timeout=400)
+        r = httpx.post(f"{BASE}/sleep/trigger", headers=owner_headers(), timeout=400)
     except Exception as ex:
         out(f"  (sleep err: {ex})")
+    else:
+        if r.status_code != 200:
+            out(f"  sleep trigger answered {r.status_code}: {r.text[:200]} (is NOUS_OWNER_ROUTE_SECRET set?)")
+            sys.exit(2)
     time.sleep(8)
     for c in ABSTRACT + [ABSTRACT_CONTROL]:
         tok = c["answer_token"].split()[-1]

@@ -206,9 +206,13 @@ def ingest() -> None:
         out(f"  R{i} sent (tc={tc}): {ans[:80]}")
     out("  triggering sleep (full-cycle consolidation)...")
     try:
-        httpx.post(f"{BASE}/sleep/trigger", timeout=400)
+        r = httpx.post(f"{BASE}/sleep/trigger", headers=owner_headers(), timeout=400)
     except Exception as ex:
         out(f"  (sleep err: {ex})")
+    else:
+        if r.status_code != 200:
+            out(f"  sleep trigger answered {r.status_code}: {r.text[:200]} (is NOUS_OWNER_ROUTE_SECRET set?)")
+            sys.exit(2)
     time.sleep(8)
     # verify each rule landed; backstop direct-insert any miss (logged) so the test measures
     # retrieve+apply, not extraction coverage.
@@ -250,10 +254,14 @@ async def _verify_and_backstop_async() -> list[int]:
         await sess.commit()
     await db.disconnect()
     try:
-        httpx.post(f"{BASE}/sleep/trigger", timeout=400)
-        time.sleep(6)
+        r = httpx.post(f"{BASE}/sleep/trigger", headers=owner_headers(), timeout=400)
     except Exception:
         pass
+    else:
+        if r.status_code != 200:
+            out(f"  sleep trigger answered {r.status_code}: {r.text[:200]} (is NOUS_OWNER_ROUTE_SECRET set?)")
+            sys.exit(2)
+        time.sleep(6)
     return missing
 
 
