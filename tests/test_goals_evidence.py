@@ -61,6 +61,14 @@ async def _other_session(w: SimpleNamespace) -> tuple[Intention, GoalSession]:
     return await started(w, other)
 
 
+def _symlink_or_skip(link, target) -> None:
+    """Make ``link`` point at ``target``, or skip where links cannot be made (Windows without the privilege)."""
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("this machine cannot create a symbolic link")
+
+
 # ---- ledger ------------------------------------------------------------------------------------------------------
 
 
@@ -200,12 +208,11 @@ async def test_a_file_outside_the_sessions_directory_or_missing_is_refused(runne
         assert checked.ref is None and "is not a file of this work" in checked.refusal, ref
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="creating a symlink needs a privilege Windows rarely grants")
 async def test_a_symlink_out_of_the_sessions_directory_is_refused(runner_env, tmp_path):  # noqa: F811
     w = await _session(runner_env, tmp_path)
     w.dir.mkdir(parents=True)
     (tmp_path / "secret.md").write_text("x", encoding="utf-8")
-    (w.dir / "link.md").symlink_to(tmp_path / "secret.md")
+    _symlink_or_skip(w.dir / "link.md", tmp_path / "secret.md")
     assert (await _check(w, f"file:intentions/{w.root.id}/link.md")).ref is None
 
 
@@ -271,12 +278,11 @@ async def test_a_file_older_than_the_session_is_evidence_and_two_spellings_are_o
     assert first.identity == second.identity is not None
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="creating a symlink needs a privilege Windows rarely grants")
 async def test_a_symlink_inside_the_sessions_directory_is_refused_too(runner_env, tmp_path):  # noqa: F811
     w = await _session(runner_env, tmp_path)
     w.dir.mkdir(parents=True)
     (w.dir / "real.md").write_text("x", encoding="utf-8")
-    (w.dir / "link.md").symlink_to(w.dir / "real.md")
+    _symlink_or_skip(w.dir / "link.md", w.dir / "real.md")
     assert (await _check(w, f"file:intentions/{w.root.id}/link.md")).ref is None
     assert (await _check(w, f"file:intentions/{w.root.id}/real.md")).ref is not None
 
