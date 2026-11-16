@@ -21,7 +21,8 @@ from nous.dag.store import DAGStore
 from nous.handlers.continuation_runner import ContinuationRunner
 from nous.handlers.subtask_worker import SubtaskWorkerPool
 from nous.heart.subtasks import BackgroundHalted, SubtaskQueueFull
-from nous.heartbeat.checks import HealthCheck, SelfInitiatedCheck
+from nous.heartbeat.checks import EmailCheck, HealthCheck, SelfInitiatedCheck
+from nous.heartbeat.finding_store import FindingStore
 from nous.heartbeat.registry import CheckRegistry
 from nous.heartbeat.schemas import CheckResult, Finding
 from nous.storage.models import ExecutionDAG, Intention, Schedule, Subtask
@@ -310,6 +311,77 @@ async def test_a_halted_tick_runs_only_code_only_checks_and_a_health_finding_sti
     hb._send_telegram.assert_awaited_once()
     assert "The database is slow" in hb._send_telegram.await_args.args[0]
     triage.run_turn.assert_not_awaited()  # no cognitive triage, no callback
+
+
+def _triage_messages(triage: MagicMock) -> list[str]:
+    return [c.args[1] for c in triage.run_turn.call_args_list if c.args[1].startswith("[Heartbeat] The following")]
+
+
+@pytest.mark.parametrize("urgency", ["normal", "high"])
+@pytest.mark.parametrize("with_store", [True, False], ids=["finding-store", "no-store"])
+async def test_a_finding_kept_while_a_halt_landed_is_triaged_once_after_the_resume(with_store, urgency):
+    """An email check reports a finding once (its cursor moves) while a halt lands: no triage turn while halted, one
+    at the first tick after the resume, none at the next. A high-urgency one reaches Telegram once, while halted."""
+    registry = CheckRegistry()
+    halt = _install()
+    finding = Finding(source="email", summary="The bank asks for a signed form", urgency=urgency, needs_action=True)
+    reports: list[int] = []
+
+    async def report_once_while_the_halt_lands():
+        if reports:
+            return CheckResult(has_updates=False, findings=[])
+        reports.append(1)
+        await halt.halt(actor="t", surface="dashboard")
+        return CheckResult(has_updates=True, findings=[finding])
+
+    email = EmailCheck(
+        SimpleNamespace(heartbeat_email_interval=3600, heartbeat_email_imap_host="", email_user="", email_password="")
+    )
+    email.run = AsyncMock(side_effect=report_once_while_the_halt_lands)
+    registry.register(email)
+    hb, triage = _hb_runner(registry)
+    del hb._triage  # the real triage
+    hb._send_telegram = AsyncMock()
+    if with_store:
+        hb._finding_store = FindingStore()
+        hb._finding_store._startup_suppression_seconds = 0
+    await hb._tick()  # the halt lands during the check; its result is kept
+    assert _triage_messages(triage) == []
+    assert hb._send_telegram.await_count == (1 if urgency == "high" else 0)
+    await hb._tick()  # still halted
+    assert _triage_messages(triage) == [] and email.run.await_count == 1
+    await halt.resume(actor="t", via="dashboard")
+    await hb._tick()
+    (message,) = _triage_messages(triage)
+    assert "The bank asks for a signed form" in message
+    await hb._tick()
+    await hb._tick()
+    assert len(_triage_messages(triage)) == 1
+    assert hb._send_telegram.await_count == (1 if urgency == "high" else 0)  # not sent again at the resume
+
+
+async def test_findings_held_while_halted_keep_the_newest_and_a_resolved_one_is_not_triaged():
+    from nous.heartbeat import runner as hb_runner_module
+    from nous.heartbeat.schemas import FindingState
+
+    hb, triage = _hb_runner(CheckRegistry())
+    hb._finding_store = FindingStore()
+    hb._finding_store._startup_suppression_seconds = 0
+    halt = _install()
+    await halt.halt(actor="t", surface="dashboard")
+    total = hb_runner_module._UNTRIAGED_MAX + 3
+    names = [f"item {'abcdefghij'[i // 10]}{'abcdefghij'[i % 10]}" for i in range(total)]  # digits fingerprint alike
+    many = [Finding(source="x", summary=name, needs_action=True) for name in names]
+    for f in many:
+        hb._finding_store.ingest(f)
+    await hb._cognitive_triage(many)
+    assert list(hb._untriaged) == [f.fingerprint() for f in many[3:]]
+    hb._finding_store.get_tracked(many[-1].fingerprint()).state = FindingState.RESOLVED
+    await halt.resume(actor="t", via="dashboard")
+    await hb._tick()
+    (message,) = _triage_messages(triage)
+    assert [line for line in message.splitlines() if line.startswith("- [")] == [f"- [x] {n}" for n in names[3:-1]]
+    assert hb._untriaged == {}
 
 
 async def test_a_mid_run_agent_check_is_discarded_not_failed():
