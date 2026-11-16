@@ -264,7 +264,9 @@ class DeviceTokenTransportTest {
         // The app has no logger: no line it could write can hold the token. A new
         // logging call fails here, so whoever adds one decides what it may print.
         val calls = Regex("""\b(android\.util\.Log|Log\.(v|d|i|w|e|wtf)\(|println\(|printStackTrace\(|Timber\.)""")
-        val found = File("src/main/kotlin").walkTopDown().filter { it.isFile && it.extension == "kt" }
+        // `:core` ships inside the app, so its sources count too.
+        val found = listOf(File("src/main/kotlin"), File("../core/src/main/kotlin")).onEach { assertTrue(it.path, it.isDirectory) }
+            .flatMap { dir -> dir.walkTopDown().filter { it.isFile && it.extension == "kt" }.toList() }
             .flatMap { f -> f.readLines().mapIndexedNotNull { i, l -> if (calls.containsMatchIn(l)) "${f.name}:${i + 1}: ${l.trim()}" else null } }
             .toList()
         assertTrue(found.joinToString("\n"), found.isEmpty())
