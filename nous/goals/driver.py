@@ -1991,8 +1991,10 @@ class GoalDriver:
                 return None
             return f"Paused: the total budget is spent ({total} of {goal.total_budget} tokens)."
         if reason == "stalled":
+            # A session that claimed the goal done takes no step by design: it waits for the owner's answer, and
+            # after "go on" the goal must not resume with a stall counted for it.
             stall = await self._run_length(
-                s, goal.id, counts="no_step", breaks=("step_closed", "error"), reason="stalled"
+                s, goal.id, counts="no_step", breaks=("step_closed", "error"), reason="stalled", skip_done_claims=True
             )
             return f"Paused: {stall} sessions in a row took no step." if stall >= goal.stall_limit else None
         errors = await self._run_length(
@@ -2020,11 +2022,20 @@ class GoalDriver:
             return True
 
     async def _run_length(
-        self, s: AsyncSession, goal_id: UUID, *, counts: str, breaks: tuple[str, ...], reason: str
+        self,
+        s: AsyncSession,
+        goal_id: UUID,
+        *,
+        counts: str,
+        breaks: tuple[str, ...],
+        reason: str,
+        skip_done_claims: bool = False,
     ) -> int:
         """The newest run of ``counts`` outcomes of the goal's closed sessions: those after the newest session whose
         outcome is in ``breaks`` and after the session of the newest pause for ``reason`` (``stop:<reason>``); any
-        other outcome neither counts nor breaks it. One count, with nothing stored to drift."""
+        other outcome neither counts nor breaks it. With ``skip_done_claims`` a session whose chain claimed the goal
+        done (a ``done_claim`` journal row of that session) is not counted either: like a session that asked the
+        owner, it neither counts nor breaks the run. One count, with nothing stored to drift."""
         broken = (
             select(func.coalesce(func.max(GoalSession.n), 0))
             .where(
@@ -2045,18 +2056,23 @@ class GoalDriver:
             )
             .scalar_subquery()
         )
-        return int(
-            await s.scalar(
-                select(func.count()).where(
-                    GoalSession.agent_id == self._agent_id,
-                    GoalSession.goal_id == goal_id,
-                    GoalSession.outcome == counts,
-                    GoalSession.n > broken,
-                    GoalSession.n > paused_at,
+        counted = [
+            GoalSession.agent_id == self._agent_id,
+            GoalSession.goal_id == goal_id,
+            GoalSession.outcome == counts,
+            GoalSession.n > broken,
+            GoalSession.n > paused_at,
+        ]
+        if skip_done_claims:
+            counted.append(
+                ~exists().where(
+                    GoalJournal.agent_id == self._agent_id,
+                    GoalJournal.goal_id == goal_id,
+                    GoalJournal.session_n == GoalSession.n,
+                    GoalJournal.kind == "done_claim",
                 )
             )
-            or 0
-        )
+        return int(await s.scalar(select(func.count()).where(*counted)) or 0)
 
     # ---- the continuation runner's priority ----------------------------------------------------------------
 

@@ -25,13 +25,13 @@ from goals_support import (
     started,
     world,
 )
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from nous.brain import continuation
 from nous.goals import tools
 from nous.goals.store import GoalRefused
 from nous.handlers.continuation_publisher import OwnerPublisher
-from nous.storage.models import Intention
+from nous.storage.models import GoalSession, Intention
 
 pytestmark = pytest.mark.postgres_only
 
@@ -240,3 +240,51 @@ async def test_a_session_claims_the_goal_done_at_most_three_times(runner_env):  
     said, err = await w.note(kind="done_claim", text=CLAIM)
     assert err and "this session has claimed the goal done 3 times, the most one session may" in said
     assert len(await journal(w, w.goal, "done_claim")) == tools.DONE_CLAIMS_PER_SESSION
+
+
+# ---- a done claim and the stall run -------------------------------------------------------------------------------
+
+
+async def _end_chain(w, root_id) -> None:
+    async with w.db.session() as s:
+        await s.execute(
+            update(Intention).where(Intention.root_id == root_id).values(state="closed", close_reason="resolved")
+        )
+        await s.commit()
+
+
+async def _due_now(w) -> None:
+    await set_goal(w, w.goal, next_wake_at=datetime.now(UTC) - timedelta(seconds=1))
+
+
+async def test_a_done_claim_session_neither_counts_toward_nor_breaks_the_stall_run(runner_env):  # noqa: F811
+    """Stall limit 2: a session that took no step, then a session that claimed done (no step), the owner says go on,
+    then one more session with no step: the goal pauses as stalled with 2 counted, not 3. The claim's session did
+    not count (the goal was not paused as stalled at the resume) and did not reset the run either (the first
+    session still counts)."""
+    w = await world(runner_env, bind=False)
+    w.goal = await active(w)
+    await set_goal(w, w.goal, stall_limit=2, sessions_per_day=10)
+    (root_1,) = (await w.driver.tick()).started
+    await _end_chain(w, root_1)
+    assert (await w.driver.tick()).closed == 1  # session 1: no step
+    await _due_now(w)
+    (root_2,) = (await w.driver.tick()).started
+    async with w.db.session() as s:
+        row_2 = (await s.execute(select(GoalSession).where(GoalSession.root_id == root_2))).scalar_one()
+    note, _plan = goal_tools(w, w.goal, row_2)
+    said, err = await note(kind="done_claim", text=CLAIM)
+    assert not err and "waits for the owner" in said
+    await _end_chain(w, root_2)
+    assert (await w.driver.tick()).closed == 1  # session 2: no step, with a done claim
+    await w.store.resume(w.goal.id, actor="owner")  # not done: go on
+    report = await w.driver.tick()
+    assert report.paused == 0 and len(report.started) == 1  # the claim's session counted nothing
+    (root_3,) = report.started
+    await _end_chain(w, root_3)
+    report = await w.driver.tick()
+    assert report.closed == 1 and report.paused == 1
+    goal = await goal_row(w, w.goal)
+    assert (goal.state, goal.pause_reason) == ("paused", "stalled")
+    pause = (await journal(w, w.goal, "state"))[-1]
+    assert pause.text == "Paused: 2 sessions in a row took no step."
