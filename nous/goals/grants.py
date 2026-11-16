@@ -124,6 +124,10 @@ GRANT_FACTS: Mapping[str, GrantFact] = MappingProxyType(
     }
 )
 MCP_NOTE = "It can do whatever that tool does there, which Nous cannot check: read, change or delete things."
+# The one question asked before a new goal is created with tools (the create form lists each tool's words under it).
+CREATE_CONFIRM = (
+    "Allow this goal to use these tools without asking you each time, from its first session after you approve it?"
+)
 
 
 def lead_sentence() -> str:

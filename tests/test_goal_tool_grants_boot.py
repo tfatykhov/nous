@@ -298,3 +298,29 @@ async def test_a_start_whose_grant_read_raises_still_starts_and_its_first_task_h
         subtask = (await s.execute(select(Subtask).where(Subtask.id == session.first_subtask_id))).scalar_one()
     first_task = ExecutionContext.for_subtask(subtask, f"subtask-{subtask.id}")
     assert "send_email" not in _offered(runner, first_task)
+
+
+async def test_the_first_task_of_a_goal_created_with_a_grant_is_offered_it(env_factory):  # noqa: F811
+    w = await _world(env_factory, **GRANTS)
+    goal = await w.store.create(
+        title="Send the notes",
+        objective="Mail the weekly summary",
+        done_when="Sent",
+        proposed_by="owner",
+        origin_channel="telegram:4242",
+        tools=[("send_email", None)],
+        proof="owner",
+    )
+    goal = await w.store.approve(goal.id, actor="owner")
+    tool_guard.install(ToolGuard())
+    view = GoalToolGrants(w.db, w.env.settings)
+    assert await view.refresh()
+    w.driver.tool_grants = view
+    runner = _runner_over(("send_email", "send_file"))
+    runner.set_goal_lift(view.lifts, view.note_used)
+    root, session = await _started(w, goal)
+    async with w.db.session() as s:
+        subtask = (await s.execute(select(Subtask).where(Subtask.id == session.first_subtask_id))).scalar_one()
+    first_task = ExecutionContext.for_subtask(subtask, f"subtask-{subtask.id}")
+    assert first_task.root_intention_id == root.id
+    assert "send_email" in _offered(runner, first_task) and "send_file" not in _offered(runner, first_task)

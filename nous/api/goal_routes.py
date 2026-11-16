@@ -52,7 +52,7 @@ from nous.api.tool_classes import MCP_TOOL_PREFIX, McpIdentity, mcp_tool_backgro
 from nous.autonomy import tool_guard
 from nous.brain.continuation import owner_channel
 from nous.goals.envelope import _RANGES, PRESETS
-from nous.goals.grants import NEVER_SENTENCE, lead_sentence, not_ready, words_for
+from nous.goals.grants import CREATE_CONFIRM, NEVER_SENTENCE, lead_sentence, not_ready, words_for
 from nous.goals.seed import SPEND_NOTE
 from nous.goals.spend import goal_spent
 from nous.goals.store import (
@@ -159,8 +159,19 @@ class Limits(_Body):
     quiet_hours_ok: StrictBool | None = None
 
 
+class GrantItem(_Body):
+    """One tool a new goal may use without asking (F115): its name, the owner's confirmation, and for an MCP client
+    tool the id of the server the screen showed. The shape of ``PUT /goals/{ref}/tools/{tool}``'s body, with the
+    tool's name."""
+
+    tool: Text = Field(max_length=200)
+    confirm: StrictBool | None = None
+    server_id: Text | None = Field(default=None, max_length=36)
+
+
 class CreateGoal(_Body):
-    """``POST /goals``: a new draft. ``origin_channel`` is ``telegram:<chat id>``, or none for the owner's default."""
+    """``POST /goals``: a new draft. ``origin_channel`` is ``telegram:<chat id>``, or none for the owner's default.
+    ``tools`` (F115 per-goal tools): the tools it may use without asking, granted with it or not at all."""
 
     title: Text = Field(max_length=TITLE_MAX_CHARS)
     objective: Text = Field(max_length=OBJECTIVE_MAX_CHARS)
@@ -168,6 +179,7 @@ class CreateGoal(_Body):
     preset: Text = Field(default="small", max_length=PRESET_MAX_CHARS)
     limits: Limits | None = None
     origin_channel: Text | None = Field(default=None, max_length=CHANNEL_MAX_CHARS)
+    tools: list[GrantItem] | None = None
 
 
 class BudgetChange(_Body):
@@ -726,6 +738,8 @@ def build_goal_routes(
                 # Whether the app's goal driver runs its loop now: without it, rows change and no session follows.
                 "driver_running": bool(driver) and driver.running is True,
                 "spend_note": SPEND_NOTE,
+                # F115 per-goal tools, with that flag on: what a new goal may be allowed when it is created.
+                **({"tools": new_goal_tools()} if grants_on() else {}),
             }
         )
 
@@ -753,6 +767,14 @@ def build_goal_routes(
             body: CreateGoal = await _parse(request, CreateGoal)
         except _BadRequest as exc:
             return _error(400, str(exc))
+        tools: list[tuple[str, McpIdentity | None]] = []
+        if body.tools is not None:
+            if not grants_on():
+                return JSONResponse(GRANTS_OFF, status_code=503)
+            checked = new_goal_grants(body.tools)
+            if isinstance(checked, JSONResponse):
+                return checked
+            tools = checked
         try:
             made = await goals.create(
                 title=body.title,
@@ -762,6 +784,7 @@ def build_goal_routes(
                 overrides=body.limits.model_dump(exclude_none=True) if body.limits else None,
                 proposed_by=ACTOR,
                 origin_channel=body.origin_channel,
+                **({"tools": tools, "proof": guard.proof(request)} if tools else {}),
             )
         except GoalRefused as exc:
             return _error(409, str(exc))
@@ -822,22 +845,69 @@ def build_goal_routes(
             "not_usable_why": why,
         }
 
-    def available_row(goal: Goal, tool: str, *, full: bool) -> dict[str, Any]:
+    def available_row(ref: str, tool: str, *, full: bool) -> dict[str, Any]:
         identity = mcp_tool_identity(tool) if tool.startswith(MCP_TOOL_PREFIX) else None
         refusal = grant_refusal_for(tool, registered=True, settings=settings)
         if refusal is None and full:
             refusal = GrantRefusal(409, "cap", f"A goal can have at most {GRANTS_MAX} tools. Remove one first.")
         return {
             "tool": tool,
-            **tool_words(tool, identity, format_short_id(goal.short_id)),
+            **tool_words(tool, identity, ref),
             "blocked": None if refusal is None else {"code": refusal.code, "sentence": refusal.sentence},
         }
+
+    def grantable(tools: dict[str, str], granted: set[str]) -> list[str]:
+        return sorted(name for name in tools if tool_policy.grant_refusal(name) is None and name not in granted)
+
+    def new_goal_tools() -> dict[str, Any]:
+        """What ``GET /goals/options`` says a new goal may be allowed: the same rows as a goal's own, for "this
+        goal", and the one question asked before it is created with any."""
+        return {
+            "applies_in": lead_sentence(),
+            "never": NEVER_SENTENCE,
+            "limit": GRANTS_MAX,
+            "confirm": CREATE_CONFIRM,
+            "available": [available_row("this goal", name, full=False) for name in grantable(listed(), set())],
+        }
+
+    def new_goal_grants(items: list[GrantItem]) -> list[tuple[str, McpIdentity | None]] | JSONResponse:
+        """The tools of a new goal, each checked as ``PUT /goals/{ref}/tools/{tool}`` checks it. The first one
+        refused is the answer, naming the tool with its sentence, and then nothing is created."""
+        if len(items) > GRANTS_MAX:
+            return _error(409, f"A goal can have at most {GRANTS_MAX} tools. Remove one first.")
+        tools = listed()
+        found: list[tuple[str, McpIdentity | None]] = []
+        for item in items:
+            refusal = new_goal_refusal(item, tools, [tool for tool, _identity in found])
+            if isinstance(refusal, GrantRefusal):
+                name = clip(item.tool, TOOL_ECHO_CHARS)
+                return JSONResponse({"error": refusal.sentence, "tool": name}, status_code=refusal.status)
+            found.append((item.tool, refusal))
+        return found
+
+    def new_goal_refusal(
+        item: GrantItem, tools: dict[str, str], earlier: list[str]
+    ) -> GrantRefusal | McpIdentity | None:
+        """Why one tool of a new goal cannot be allowed (a ``GrantRefusal``), else its MCP identity (None for a
+        built-in tool)."""
+        if item.confirm is not True:
+            return GrantRefusal(400, "confirm", CONFIRM_SENTENCE)
+        if item.tool in earlier:
+            return GrantRefusal(400, "twice", "A tool is listed twice.")
+        refusal = grant_refusal_for(item.tool, registered=item.tool in tools, settings=settings)
+        if refusal is not None:
+            return refusal
+        identity = mcp_tool_identity(item.tool) if item.tool.startswith(MCP_TOOL_PREFIX) else None
+        if (identity is None) != (item.server_id is None):
+            return GrantRefusal(400, "server_id", "Not accepted: tools.server_id.")
+        if identity is not None and item.server_id != str(identity.server_id):
+            return GrantRefusal(409, "server_changed", SERVER_CHANGED_SENTENCE)
+        return identity
 
     async def tools_payload(goal: Goal) -> dict[str, Any]:
         rows = await goals.tool_grants(goal.id) if goals else []
         tools = listed()
         granted = {row.tool for row in rows}
-        grantable = sorted(name for name in tools if tool_policy.grant_refusal(name) is None and name not in granted)
         full = len(rows) >= GRANTS_MAX
         return {
             "enabled": True,
@@ -847,7 +917,9 @@ def build_goal_routes(
             "applies_in": lead_sentence(),
             "never": NEVER_SENTENCE,
             "grants": [grant_row(goal, row, tools) for row in rows],
-            "available": [available_row(goal, name, full=full) for name in grantable],
+            "available": [
+                available_row(format_short_id(goal.short_id), name, full=full) for name in grantable(tools, granted)
+            ],
         }
 
     async def tools_answer(goal: Goal, changed: bool) -> JSONResponse:

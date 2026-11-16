@@ -13,7 +13,7 @@ from the chain, embeddings and helper calls are not counted.
 from __future__ import annotations
 
 import re
-from collections.abc import AsyncIterator, Iterable, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta
@@ -149,6 +149,14 @@ def grant_identity(grant: GoalToolGrant) -> McpIdentity | None:
     )
 
 
+def _allowed_text(tool: str, identity: McpIdentity | None, *, replaced: bool = False) -> str:
+    """The owner's journal row of a grant."""
+    named = f"{tool} (server {identity.server_name})" if identity else tool
+    if replaced:
+        return f"Allowed to use {named} without asking, from now on, in place of its earlier grant."
+    return f"Allowed to use {named} without asking, from now on."
+
+
 def _tools_changeable(goal: Goal) -> None:
     if goal.state not in LIVE_STATES:
         raise GoalRefused(f"{format_short_id(goal.short_id)} is finished; its tools can no longer be changed.")
@@ -255,11 +263,25 @@ class GoalStore:
         overrides: Mapping[str, Any] | None = None,
         proposed_by: str,
         origin_channel: str | None = None,
+        tools: Sequence[tuple[str, McpIdentity | None]] = (),
+        proof: str | None = None,
     ) -> Goal:
-        """A new ``draft`` goal with a preset's limits, or custom ones when ``overrides`` are given."""
+        """A new ``draft`` goal with a preset's limits, or custom ones when ``overrides`` are given. ``tools`` (F115
+        per-goal tools, the owner's only): each ``(tool, identity)`` the goal may use without asking, granted in the
+        same transaction as the goal, each with ``proof`` as ``granted_by`` and an owner ``state`` journal row after
+        the creation's; nothing is written when one cannot be."""
         actor = _PROPOSER_ACTOR.get(proposed_by)
         if actor is None:
             raise GoalRefused(f"proposed_by must be one of {', '.join(_PROPOSER_ACTOR)}")
+        if tools:
+            _owner_only(actor, "change the tools a goal may use")
+            if proof is None:
+                raise ValueError("a grant needs the proof the owner's route accepted")
+            if len(tools) > GRANTS_MAX:
+                raise GoalRefused(f"A goal can have at most {GRANTS_MAX} tools. Remove one first.")
+            names = [tool for tool, _identity in tools]
+            if len(set(names)) != len(names):
+                raise GoalRefused("A tool is listed twice.")
         texts = {"title": title.strip(), "objective": objective.strip(), "done_when": done_when.strip()}
         for column, longest, words in _TEXT_BOUNDS:
             if not 1 <= len(texts[column]) <= longest:
@@ -288,6 +310,10 @@ class GoalStore:
             s.add(goal)
             await s.flush()
             self.add_journal_row(s, goal.id, "state", f"Created as a draft ({preset_name} limits).", actor=actor)
+            for tool, identity in tools:
+                assert proof is not None
+                self._add_grant(s, goal.id, tool, identity, proof=proof)
+                self.add_journal_row(s, goal.id, "state", _allowed_text(tool, identity), actor=actor)
             await s.commit()
             return goal
 
@@ -505,25 +531,10 @@ class GoalStore:
                     raise GoalRefused(f"A goal can have at most {GRANTS_MAX} tools. Remove one first.")
             else:
                 await self._revoke_grant(s, current.id, proof, now)
-            s.add(
-                GoalToolGrant(
-                    agent_id=self.agent_id,
-                    goal_id=goal.id,
-                    tool=tool,
-                    server_name=identity.server_name if identity else None,
-                    server_host=identity.server_host if identity else None,
-                    server_id=identity.server_id if identity else None,
-                    url_sha256=identity.url_sha256 if identity else None,
-                    remote_tool=identity.remote_tool if identity else None,
-                    granted_by=proof,
-                    granted_at=now,
-                )
+            self._add_grant(s, goal.id, tool, identity, proof=proof, at=now)
+            self.add_journal_row(
+                s, goal.id, "state", _allowed_text(tool, identity, replaced=current is not None), actor=actor
             )
-            named = f"{tool} (server {identity.server_name})" if identity else tool
-            text = f"Allowed to use {named} without asking, from now on."
-            if current is not None:
-                text = f"Allowed to use {named} without asking, from now on, in place of its earlier grant."
-            self.add_journal_row(s, goal.id, "state", text, actor=actor)
             await s.commit()
             return True
 
@@ -541,6 +552,32 @@ class GoalStore:
             self.add_journal_row(s, goal.id, "state", f"No longer allowed to use {tool} without asking.", actor=actor)
             await s.commit()
             return True
+
+    def _add_grant(
+        self,
+        s: AsyncSession,
+        goal_id: UUID,
+        tool: str,
+        identity: McpIdentity | None,
+        *,
+        proof: str,
+        at: datetime | None = None,
+    ) -> None:
+        """One grant row in the caller's transaction (``at`` None: the database's time)."""
+        s.add(
+            GoalToolGrant(
+                agent_id=self.agent_id,
+                goal_id=goal_id,
+                tool=tool,
+                server_name=identity.server_name if identity else None,
+                server_host=identity.server_host if identity else None,
+                server_id=identity.server_id if identity else None,
+                url_sha256=identity.url_sha256 if identity else None,
+                remote_tool=identity.remote_tool if identity else None,
+                granted_by=proof,
+                **({"granted_at": at} if at is not None else {}),
+            )
+        )
 
     async def _active_grant(self, s: AsyncSession, goal_id: UUID, tool: str) -> GoalToolGrant | None:
         query = select(GoalToolGrant).where(
