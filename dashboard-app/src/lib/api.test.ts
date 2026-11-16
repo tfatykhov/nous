@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { apiGet, apiRequest } from './api';
+import { apiGet, apiRequest, apiSend } from './api';
 
 describe('apiGet', () => {
   beforeEach(() => vi.restoreAllMocks());
@@ -35,6 +35,29 @@ describe('apiGet', () => {
       return new Response('{}', { status: 200 });
     }));
     await expect(apiGet('/status', { signal: ac.signal })).rejects.toThrow();
+  });
+});
+
+describe('apiSend', () => {
+  beforeEach(() => vi.restoreAllMocks());
+
+  // A route that requires the owner's or the proxy's secret takes a call carrying only the proxy's when its media
+  // type is exactly application/json, even with no body.
+  it('apiSend sends the JSON content type on a PUT, a POST and a body-less DELETE', async () => {
+    const f = vi.fn(async () => new Response('{}', { status: 200 }));
+    vi.stubGlobal('fetch', f);
+    await apiSend('/identity/character', { content: 'x' });
+    await apiSend('/facts/1/core', { core: true }, 'POST');
+    await apiSend('/facts/1', undefined, 'DELETE');
+    const inits = f.mock.calls.map((c) => (c as unknown[])[1] as RequestInit);
+    expect(inits.map((i) => i.method)).toEqual(['PUT', 'POST', 'DELETE']);
+    expect(inits.map((i) => i.headers)).toEqual(Array(3).fill({ 'Content-Type': 'application/json' }));
+    expect(inits.map((i) => i.body)).toEqual(['{"content":"x"}', '{"core":true}', undefined]);
+  });
+
+  it('a refused answer throws with the status in its message', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'forbidden' }), { status: 403 })));
+    await expect(apiSend('/facts/1', undefined, 'DELETE')).rejects.toThrow('HTTP 403 for /facts/1');
   });
 });
 
