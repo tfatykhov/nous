@@ -1,0 +1,538 @@
+// F114 goals PR 2: the Goals screen's types, requests and words. The answers are those of nous/api/goal_routes.py;
+// every sentence the owner reads before an action, and every word for a state, is here (one table, pinned by
+// goals.test.ts). Text a goal's sessions wrote (plan, journal, summaries) is shown as text nodes only.
+
+import { apiRequest, type ApiAnswerError } from './api';
+import { fmtUtc } from './harness';
+
+export type GoalState = 'draft' | 'active' | 'paused' | 'done' | 'failed' | 'cancelled';
+export type PauseReason = 'owner' | 'budget' | 'stalled' | 'waiting_for_owner' | 'error' | 'deadline';
+/** The owner's actions on a goal, in the order the server lists them: each is the last segment of its route. */
+export const ACTIONS = ['approve', 'run-now', 'resume', 'confirm-done', 'pause', 'stop', 'budget', 'deadline', 'note', 'cancel'] as const;
+export type Action = typeof ACTIONS[number];
+export type Tone = 'ok' | 'warn' | 'bad' | 'info' | 'neutral';
+
+export interface GoalRow {
+  id: string;
+  ref: string;
+  title: string;
+  state: GoalState;
+  pause_reason: PauseReason | null;
+  preset: string;
+  proposed_by: 'owner' | 'agent' | 'host';
+  total_budget: number;
+  day_budget: number;
+  spent_total: number;
+  spent_today: number;
+  deadline_at: string | null;
+  next_wake_at: string | null;
+  open_session: number | null;
+  pending_request: 'run_now' | 'stop' | 'cancel' | null;
+  mode: string;
+  updated_at: string | null;
+}
+
+export interface GoalSessionRow {
+  n: number;
+  trigger: 'timer' | 'run_now';
+  started_at: string | null;
+  ended_at: string | null;
+  outcome: 'step_closed' | 'no_step' | 'asked' | 'error' | 'interrupted' | null;
+  spent: number;
+  steps_closed: number;
+  summary: string | null;
+}
+
+export interface JournalRow {
+  seq: number;
+  session_n: number | null;
+  kind: string;
+  actor: string;
+  text: string;
+  evidence: string[];
+  created_at: string | null;
+}
+
+/** A plan step: only the keys the server found with the right type. */
+export interface PlanStep { text?: string; status?: string; evidence?: string[]; closed_session?: number }
+
+export interface GoalDetail extends GoalRow {
+  enabled: true;
+  objective: string;
+  done_when: string;
+  origin_channel: string | null;
+  deadline_days: number;
+  sessions_per_day: number;
+  min_interval_seconds: number;
+  jobs_per_day: number;
+  quiet_hours_ok: boolean;
+  stall_limit: number;
+  mode_until: string | null;
+  approved_at: string | null;
+  finished_at: string | null;
+  created_at: string | null;
+  plan: PlanStep[];
+  /** The newest sessions (at most 50), the oldest of them first; `sessions_total` counts them all. */
+  sessions: GoalSessionRow[];
+  sessions_total: number;
+  journal: JournalRow[];
+  /** For a goal the harness paused, the harness's own sentence of why; null otherwise. */
+  pause_sentence: string | null;
+  actions: Action[];
+  resume_blocked: 'budget' | 'deadline' | null;
+  spend_note: string;
+}
+
+/** `total`: how many goals match the filter (the list holds the newest of them). */
+export interface GoalList { enabled: boolean; goals: GoalRow[]; total?: number }
+
+/** A change's answer when the change was made and the goal could not be read back in full: read it again. */
+export interface GoalMade extends Pick<GoalRow, 'id' | 'ref' | 'title' | 'state' | 'pause_reason' | 'pending_request'> {
+  enabled: true;
+  reload: true;
+}
+
+export interface Limits {
+  total_budget: number;
+  day_budget: number;
+  deadline_days: number;
+  sessions_per_day: number;
+  min_interval_seconds: number;
+  jobs_per_day: number;
+  quiet_hours_ok: boolean;
+}
+export type NumberLimit = Exclude<keyof Limits, 'quiet_hours_ok'>;
+export interface Range { field: NumberLimit; low: number; high: number; words: string }
+
+export interface GoalOptions {
+  enabled: boolean;
+  presets?: Record<string, Limits>;
+  ranges?: Range[];
+  has_default_channel?: boolean;
+  channel_kinds?: string[];
+  bounds?: { title: number; objective: number; done_when: number; channel: number; note: number; deadline_days: number; journal: number };
+  driver_running?: boolean;
+  spend_note?: string;
+}
+
+/** What the screen reads of the background halt (GET /background/state). */
+export interface HaltState { halted: boolean }
+
+export interface CreateBody {
+  title: string;
+  objective: string;
+  done_when: string;
+  preset: string;
+  limits?: Limits;
+  origin_channel?: string;
+}
+
+// ── Requests ────────────────────────────────────────────────────────────────
+// Every goal route needs the owner's or the proxy's secret: the login proxy adds it, the dashboard sends none.
+
+const BASE = '/goals';
+/** A goal's route. A ref is encoded as a path segment whatever it holds. */
+export const goalPath = (ref: string) => `${BASE}/${encodeURIComponent(ref)}`;
+
+/** Which goals the list asks for: the open ones (the server's default), every one, or the finished ones. */
+export type GoalFilter = 'open' | 'all' | 'finished';
+export const listGoals = (filter: GoalFilter = 'open', signal?: AbortSignal) =>
+  apiRequest<GoalList>(`${BASE}?state=${filter}`, 'GET', undefined, signal);
+export const goalOptions = (signal?: AbortSignal) => apiRequest<GoalOptions>(`${BASE}/options`, 'GET', undefined, signal);
+export const getGoal = (ref: string, journal?: number, signal?: AbortSignal) =>
+  apiRequest<GoalDetail | { enabled: false }>(`${goalPath(ref)}${journal ? `?journal=${journal}` : ''}`, 'GET', undefined, signal);
+// A change answers with the goal in full, or with `reload` when it was made and the goal could not be read back; the
+// screen reads the goal again after every change either way.
+export const createGoal = (body: CreateBody) =>
+  timed((signal) => apiRequest<GoalDetail | GoalMade>(BASE, 'POST', body, signal));
+export const goalAction = (ref: string, action: Action, body?: object) =>
+  timed((signal) => apiRequest<GoalDetail | GoalMade>(`${goalPath(ref)}/${action}`, 'POST', body, signal));
+
+/** A request with no answer after this long is given up: a read says the server could not be reached, a change that
+ * its answer was lost. */
+export const REQUEST_TIMEOUT_MS = 15_000;
+
+/** Run `request` with a signal that aborts after `REQUEST_TIMEOUT_MS`, or when `outer` aborts. */
+export async function timed<T>(request: (signal: AbortSignal) => Promise<T>, outer?: AbortSignal): Promise<T> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), REQUEST_TIMEOUT_MS);
+  const stop = () => ac.abort();
+  if (outer?.aborted) ac.abort();
+  outer?.addEventListener('abort', stop);
+  try {
+    return await request(ac.signal);
+  } finally {
+    clearTimeout(timer);
+    outer?.removeEventListener('abort', stop);
+  }
+}
+
+/** The background halt, when this server has the route. A 404 (no halt on this server) or any failure is null:
+ * nothing to show, and never an error of the goals list. */
+export async function haltState(signal?: AbortSignal): Promise<HaltState | null> {
+  try {
+    const answer = await apiRequest<{ halted?: unknown }>('/background/state', 'GET', undefined, signal);
+    return { halted: answer?.halted === true };
+  } catch {
+    return null;
+  }
+}
+
+// ── Words ───────────────────────────────────────────────────────────────────
+
+export const GOALS_OFF_TEXT = 'Goals are off on this server.';
+export const DRIVER_OFF_TEXT = 'Sessions are not being started on this server yet.';
+export const HALT_TEXT = 'Background work is halted. No goal starts a session until you resume it.';
+export const HELD_TEXT = 'Held by the halt';
+export const READ_FORBIDDEN_TEXT = 'Your sign-in is needed to see goals. Open the dashboard through the login page.';
+export const WRITE_FORBIDDEN_TEXT = 'Your sign-in is needed to change goals. Open the dashboard through the login page.';
+/** A read that got no answer. */
+export const UNREACHABLE_TEXT = 'Could not reach the server.';
+/** A change whose answer was lost: it may or may not have been made. */
+export const NO_ANSWER_TEXT = 'No answer came back. Check the goal before trying again.';
+export const NO_CHANNEL_TEXT =
+  'This goal has nowhere to ask you questions, so it cannot be approved. Set a default chat on the server, or cancel it and create it again with a channel.';
+export const DRAFT_NOTE = 'Nothing runs until you approve it.';
+export const CHANNEL_HINT = 'Questions and reports go here, as telegram:<chat id>.';
+
+const PAUSED: Record<PauseReason, { text: string; tone: Tone }> = {
+  owner: { text: 'Paused by you', tone: 'warn' },
+  budget: { text: 'Paused for its budget', tone: 'warn' },
+  stalled: { text: 'Paused: stalled', tone: 'warn' },
+  waiting_for_owner: { text: 'Waiting for you to confirm it is done', tone: 'info' },
+  error: { text: 'Paused after an error', tone: 'bad' },
+  deadline: { text: 'Paused for its deadline', tone: 'warn' },
+};
+
+/** A goal's state as a word and a colour. While no session is started on the server (`driverRunning` false), an
+ * approved goal is only "Approved": nothing about it is about to run. */
+export function stateWord(
+  goal: Pick<GoalRow, 'state' | 'pause_reason' | 'open_session'>,
+  driverRunning = true,
+): { text: string; tone: Tone } {
+  switch (goal.state) {
+    case 'draft': return { text: 'Draft', tone: 'neutral' };
+    case 'active':
+      if (!driverRunning) return { text: 'Approved', tone: 'neutral' };
+      return goal.open_session !== null ? { text: 'Working', tone: 'info' } : { text: 'Waiting for its next session', tone: 'ok' };
+    case 'paused': return (goal.pause_reason && PAUSED[goal.pause_reason]) || { text: 'Paused', tone: 'warn' };
+    case 'done': return { text: 'Done', tone: 'ok' };
+    case 'failed': return { text: 'Failed', tone: 'bad' };
+    case 'cancelled': return { text: 'Cancelled', tone: 'neutral' };
+    default: return { text: String(goal.state), tone: 'neutral' };
+  }
+}
+
+export const PILL: Record<Tone, string> = {
+  ok: 'status-pill--ok', warn: 'status-pill--warn', bad: 'status-pill--bad', info: 'status-pill--info', neutral: '',
+};
+
+/** Each action's button and what it costs. `spends`: it lets the goal spend tokens; `ends`: it ends a session or the
+ * goal. Pause and Note ask nothing first: neither spends nor ends anything. */
+export const ACTION_TEXT: Record<Action, { label: string; spends: boolean; ends: boolean; done: string }> = {
+  approve: { label: 'Approve', spends: true, ends: false, done: 'Approved.' },
+  'run-now': { label: 'Run a session now', spends: true, ends: false, done: 'Asked for a session now.' },
+  resume: { label: 'Resume', spends: true, ends: false, done: 'Resumed.' },
+  'confirm-done': { label: 'Confirm done', spends: false, ends: true, done: 'Closed as done.' },
+  pause: { label: 'Pause', spends: false, ends: false, done: 'Paused: no new session starts. A session already running finishes.' },
+  stop: { label: 'Stop now', spends: false, ends: true, done: 'Stopped.' },
+  budget: { label: 'Change budget', spends: true, ends: false, done: 'Budget changed.' },
+  deadline: { label: 'Extend deadline', spends: true, ends: false, done: 'Deadline extended.' },
+  note: { label: 'Add note', spends: false, ends: false, done: 'Added. The next session reads it.' },
+  cancel: { label: 'Cancel goal', spends: false, ends: true, done: 'Cancelled.' },
+};
+
+/** Whether an action asks for a sentence and a Yes before it is sent. */
+export const asksFirst = (action: Action) => ACTION_TEXT[action].spends || ACTION_TEXT[action].ends;
+
+/** The Resume button's words: for a goal waiting for the owner, resuming means its done claim is turned down. */
+export const resumeLabel = (goal: Pick<GoalRow, 'pause_reason'>) =>
+  goal.pause_reason === 'waiting_for_owner' ? 'Not done yet, keep working' : ACTION_TEXT.resume.label;
+
+/** "2,000,000 tokens". */
+export const formatTokens = (n: number) => `${formatNumber(n)} tokens`;
+export const formatNumber = (n: number) => n.toLocaleString('en-US');
+
+/** What the owner is told before an action, with the goal's own numbers. `input` holds a budget or deadline change. */
+export function confirmText(
+  action: Action,
+  goal: Pick<GoalDetail, 'total_budget' | 'day_budget' | 'deadline_days' | 'deadline_at' | 'open_session' | 'state'>,
+  opts: { driverRunning: boolean; total?: number; day?: number; days?: number; now?: number } = { driverRunning: false },
+): string {
+  const ready = opts.driverRunning ? 'This starts the goal.' : 'This marks the goal ready to start.';
+  switch (action) {
+    case 'approve':
+      return `${ready} It can work in the background for up to ${goal.deadline_days} days and spend up to ${formatTokens(goal.total_budget)} (${formatNumber(goal.day_budget)} a day). You can pause or stop it at any time.`;
+    case 'run-now':
+      return opts.driverRunning
+        ? "This starts a session now. It spends tokens from this goal's budget."
+        : "This asks for a session as soon as sessions run on this server. It spends tokens from this goal's budget.";
+    case 'resume':
+      return 'This lets the goal start sessions again. They spend tokens from its budget.';
+    case 'budget':
+      return budgetText(goal, opts.total, opts.day);
+    case 'deadline':
+      return deadlineChangeText(goal, opts.days ?? 0, opts.now ?? Date.now());
+    case 'stop':
+      return goal.open_session !== null
+        ? `This cancels session ${goal.open_session}, which is running${goal.state === 'active' ? ', and pauses the goal' : ''}. Work already done stays.`
+        : 'This pauses the goal. No session is running, so none is cancelled. Work already done stays.';
+    case 'cancel':
+      return `This ends the goal for good. It cannot be reopened.${goal.open_session !== null ? ` Session ${goal.open_session}, which is running, is cancelled too.` : ''}`;
+    case 'confirm-done':
+      return 'This closes the goal as done. Nothing more runs for it.';
+    default:
+      return '';
+  }
+}
+
+function budgetText(goal: Pick<GoalDetail, 'total_budget' | 'day_budget'>, total?: number, day?: number): string {
+  const parts: string[] = [];
+  const change = (what: string, from: number, to: number | undefined) => {
+    if (to === undefined || to === from) return;
+    parts.push(`${to > from ? 'raises' : 'lowers'} ${what} from ${formatNumber(from)} to ${formatTokens(to)}`);
+  };
+  change('the total budget', goal.total_budget, total);
+  change('the day budget', goal.day_budget, day);
+  if (!parts.length) return 'This keeps the budget as it is.';
+  const more = (total ?? goal.total_budget) > goal.total_budget || (day ?? goal.day_budget) > goal.day_budget;
+  return `This ${parts.join(' and ')}.${more ? ' The goal can spend more.' : ''}`;
+}
+
+function deadlineChangeText(goal: Pick<GoalDetail, 'deadline_days' | 'deadline_at'>, days: number, now: number): string {
+  const unit = `${days} more day${days === 1 ? '' : 's'}`;
+  if (!goal.deadline_at) {
+    return `This lets the goal work, and spend tokens, for ${unit} once it is approved: ${goal.deadline_days + days} days in all.`;
+  }
+  const from = Math.max(new Date(goal.deadline_at).getTime(), now);
+  const until = fmtUtc(new Date(from + days * 86_400_000).toISOString());
+  return `This lets the goal keep working, and spending tokens, ${unit}, until ${until}.`;
+}
+
+const rangeOf = (options: GoalOptions, field: NumberLimit) => options.ranges?.find((r) => r.field === field);
+const inRange = (value: number, low: number, high: number) => Number.isInteger(value) && value >= low && value <= high;
+
+/** What is wrong with a new budget, in words; null when it can be sent. The ranges are the server's
+ * (`options.ranges`), the same as the create form's. `total` and `day` are what was typed, as numbers (NaN when the
+ * text is not a whole number). */
+export function budgetProblem(total: number, day: number, goal: Pick<GoalDetail, 'total_budget' | 'day_budget'>, options: GoalOptions): string | null {
+  for (const [value, field] of [[total, 'total_budget'], [day, 'day_budget']] as const) {
+    const range = rangeOf(options, field) ?? { low: 1, high: Number.MAX_SAFE_INTEGER, words: field };
+    if (!Number.isInteger(value)) return capital(`${range.words} must be a whole number`);
+    if (!inRange(value, range.low, range.high)) return capital(`${range.words} must be at least ${formatNumber(range.low)} and at most ${formatNumber(range.high)}`);
+  }
+  if (day > total) return capital('the day budget cannot be larger than the total budget');
+  if (total === goal.total_budget && day === goal.day_budget) return 'Type a new total or day budget.';
+  return null;
+}
+
+/** What is wrong with a number of days to add, in words; null when it can be sent. */
+export function deadlineProblem(days: number, options: GoalOptions): string | null {
+  const most = options.bounds?.deadline_days ?? 90;
+  return inRange(days, 1, most) ? null : `Type a whole number of days, 1 to ${most}.`;
+}
+
+/** What is typed in a number field, as a number: NaN unless it is a whole number. */
+export const typedNumber = (raw: string) => (/^-?\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN);
+
+/** The hint beside a Resume that the store would refuse. */
+export const RESUME_BLOCKED_TEXT: Record<'budget' | 'deadline', string> = {
+  budget: 'Raise the budget first.',
+  deadline: 'Extend the deadline first.',
+};
+
+export const PENDING_TEXT: Record<'run_now' | 'stop' | 'cancel', string> = {
+  run_now: 'A session was asked for. It has not started yet.',
+  stop: 'A stop was asked for. It has not happened yet.',
+  cancel: 'A cancel was asked for. It has not happened yet.',
+};
+
+const OUTCOMES: Record<string, string> = {
+  step_closed: 'Closed a step', no_step: 'No step closed', asked: 'Asked you a question', error: 'Error', interrupted: 'Interrupted',
+};
+export const sessionOutcomeWord = (outcome: string | null) => (outcome === null ? 'Running' : OUTCOMES[outcome] ?? outcome);
+
+const KINDS: Record<string, string> = {
+  plan: 'Plan', progress: 'Progress', report: 'Report', question: 'Question', answer: 'Your answer', owner_note: 'Your note',
+  state: 'State', done_claim: 'Says it is done',
+};
+export const journalKindWord = (kind: string) => KINDS[kind] ?? kind;
+/** The owner's own rows are shown first-class. */
+export const fromOwner = (row: Pick<JournalRow, 'kind'>) => row.kind === 'owner_note' || row.kind === 'answer';
+
+const ACTORS: Record<string, string> = { owner: 'You', host: 'The host', chain: 'The chain', harness: 'The harness' };
+export const actorWord = (actor: string) => ACTORS[actor] ?? actor;
+
+const PROPOSERS: Record<string, string> = { owner: 'You', agent: 'Nous', host: 'The host command' };
+export const proposerWord = (who: string) => PROPOSERS[who] ?? who;
+
+/** "3 days", "2 hours", "15 minutes", "under a minute". */
+export function spanText(ms: number): string {
+  const minutes = Math.floor(Math.abs(ms) / 60_000);
+  if (minutes < 1) return 'under a minute';
+  const plural = (n: number, unit: string) => `${n} ${unit}${n === 1 ? '' : 's'}`;
+  if (minutes < 60) return plural(minutes, 'minute');
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return plural(hours, 'hour');
+  return plural(Math.floor(hours / 24), 'day');
+}
+
+/** The interval between sessions in words: "1 hour", "30 minutes". */
+export function intervalText(seconds: number): string {
+  return spanText(seconds * 1000);
+}
+
+/** When the next session is, in words; '' when the state word already says it, and for an approved goal while no
+ * session is started on the server. */
+export function nextSessionText(
+  goal: Pick<GoalRow, 'state' | 'pause_reason' | 'open_session' | 'next_wake_at' | 'pending_request'>,
+  now: number = Date.now(),
+  driverRunning = true,
+): string {
+  if (goal.state === 'active' && !driverRunning) return '';
+  if (goal.open_session !== null) return `Session ${goal.open_session} running`;
+  if (goal.state === 'draft') return 'Not approved yet';
+  if (goal.state !== 'active') return '';
+  if (goal.pending_request === 'run_now') return 'A session was asked for';
+  if (!goal.next_wake_at) return 'No session planned';
+  const wait = new Date(goal.next_wake_at).getTime() - now;
+  return wait <= 0 ? 'Next session due now' : `Next session in ${spanText(wait)}`;
+}
+
+/** The deadline in words; '' for a finished goal. */
+export function deadlineText(goal: Pick<GoalRow, 'state' | 'deadline_at'> & { deadline_days?: number }, now: number = Date.now()): string {
+  if (goal.state === 'done' || goal.state === 'failed' || goal.state === 'cancelled') return '';
+  if (!goal.deadline_at) return goal.deadline_days ? `Runs for ${goal.deadline_days} days once approved` : '';
+  const left = new Date(goal.deadline_at).getTime() - now;
+  return left <= 0 ? 'Deadline passed' : `Deadline in ${spanText(left)}`;
+}
+
+/** Part of a budget spent, 0 to 100, for a bar. */
+export const spentPercent = (spent: number, budget: number) => (budget > 0 ? Math.min(100, Math.round((spent / budget) * 100)) : 0);
+
+/** A refused or failed request in words: the server's own sentence when it sent one, never an object or a stack. */
+export function refusalText(err: unknown, doing: 'see' | 'change' = 'change'): string {
+  const e = err as ApiAnswerError | null;
+  const status = e?.status;
+  if (status === undefined) return doing === 'see' ? UNREACHABLE_TEXT : NO_ANSWER_TEXT;
+  if (status === 403) return doing === 'see' ? READ_FORBIDDEN_TEXT : WRITE_FORBIDDEN_TEXT;
+  if (status === 415) return 'The request was not sent as JSON, so it was refused.';
+  const api = (e?.body as { error?: unknown } | undefined)?.error;
+  if (typeof api === 'string' && api.trim()) {
+    const text = api.trim();
+    return `${text[0].toUpperCase()}${text.slice(1)}${/[.!?]$/.test(text) ? '' : '.'}`;
+  }
+  if (status === 503) return GOALS_OFF_TEXT;
+  return `The request failed (HTTP ${status}).`;
+}
+
+// ── The create form ─────────────────────────────────────────────────────────
+
+export const PRESET_NAMES = ['small', 'medium', 'large'] as const;
+export const PRESET_LABEL: Record<string, string> = { small: 'Small', medium: 'Medium', large: 'Large' };
+export const LIMIT_LABEL: Record<NumberLimit, string> = {
+  total_budget: 'Total budget (tokens)',
+  day_budget: 'Day budget (tokens)',
+  deadline_days: 'Deadline (days from approval)',
+  sessions_per_day: 'Sessions per day',
+  min_interval_seconds: 'Shortest gap between sessions (seconds)',
+  jobs_per_day: 'Job launches per day',
+};
+
+export interface CreateForm {
+  title: string;
+  objective: string;
+  done_when: string;
+  preset: string;
+  custom: boolean;
+  limits: Record<NumberLimit, string>;
+  quiet_hours_ok: boolean;
+  origin_channel: string;
+}
+
+const capital = (text: string) => `${text[0].toUpperCase()}${text.slice(1)}.`;
+
+/** What is wrong with the form, in words, before anything is sent. The limits follow the server's ranges (the same
+ * rules and words as nous/goals/envelope.py `problems`). */
+export function createProblems(form: CreateForm, options: GoalOptions): string[] {
+  const found: string[] = [];
+  const bounds = options.bounds;
+  const text = (value: string, missing: string, label: string, longest: number | undefined) => {
+    if (!value.trim()) found.push(missing);
+    else if (longest !== undefined && value.length > longest) found.push(`${label} is at most ${formatNumber(longest)} characters.`);
+  };
+  text(form.title, 'Give it a title.', 'The title', bounds?.title);
+  text(form.objective, 'Give it an objective.', 'The objective', bounds?.objective);
+  text(form.done_when, 'Say what done looks like.', 'What done looks like', bounds?.done_when);
+  if (form.custom) {
+    const limits: string[] = [];
+    const values: Partial<Record<NumberLimit, number>> = {};
+    for (const range of options.ranges ?? []) {
+      const raw = (form.limits[range.field] ?? '').trim();
+      if (!/^-?\d+$/.test(raw)) {
+        limits.push(`${range.words} must be a whole number`);
+        continue;
+      }
+      const value = Number(raw);
+      values[range.field] = value;
+      if (value < range.low || value > range.high) limits.push(`${range.words} must be at least ${formatNumber(range.low)} and at most ${formatNumber(range.high)}`);
+    }
+    if (!limits.length && (values.day_budget ?? 0) > (values.total_budget ?? 0)) {
+      limits.push('the day budget cannot be larger than the total budget');
+    }
+    found.push(...limits.map(capital));
+  } else if (!options.presets?.[form.preset]) {
+    found.push('Choose a size.');
+  }
+  const channel = form.origin_channel.trim();
+  if (!channel) {
+    if (options.has_default_channel === false) found.push('Give it a channel: this server has no default chat to ask you.');
+  } else {
+    const [kind, ...rest] = channel.split(':');
+    const chat = rest.join(':');
+    if (!(options.channel_kinds ?? ['telegram']).includes(kind) || !chat || /\s/.test(chat)) {
+      found.push('The channel must be telegram:<chat id>.');
+    }
+  }
+  return found;
+}
+
+/** The body of POST /goals for a form with no problems. */
+export function createBody(form: CreateForm): CreateBody {
+  const body: CreateBody = {
+    title: form.title.trim(),
+    objective: form.objective.trim(),
+    done_when: form.done_when.trim(),
+    preset: form.custom ? 'custom' : form.preset,
+  };
+  if (form.custom) {
+    const n = (field: NumberLimit) => Number(form.limits[field].trim());
+    body.limits = {
+      total_budget: n('total_budget'),
+      day_budget: n('day_budget'),
+      deadline_days: n('deadline_days'),
+      sessions_per_day: n('sessions_per_day'),
+      min_interval_seconds: n('min_interval_seconds'),
+      jobs_per_day: n('jobs_per_day'),
+      quiet_hours_ok: form.quiet_hours_ok,
+    };
+  }
+  if (form.origin_channel.trim()) body.origin_channel = form.origin_channel.trim();
+  return body;
+}
+
+/** A preset's numbers as the form's text fields. */
+export function limitFields(limits: Limits): Record<NumberLimit, string> {
+  return {
+    total_budget: String(limits.total_budget),
+    day_budget: String(limits.day_budget),
+    deadline_days: String(limits.deadline_days),
+    sessions_per_day: String(limits.sessions_per_day),
+    min_interval_seconds: String(limits.min_interval_seconds),
+    jobs_per_day: String(limits.jobs_per_day),
+  };
+}
+
+/** A preset in one line: "2,000,000 tokens, 500,000 a day, 3 days". */
+export const presetLine = (limits: Limits) =>
+  `${formatTokens(limits.total_budget)}, ${formatNumber(limits.day_budget)} a day, ${limits.deadline_days} days`;

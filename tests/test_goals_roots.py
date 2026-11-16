@@ -99,17 +99,18 @@ def _imports_goals(node: ast.AST) -> bool:
     return False
 
 
-def test_nothing_outside_nous_goals_imports_the_goal_package():
-    # PIN (flag-off parity of PR 1a): the goal package has no caller yet, so with NOUS_GOALS_ENABLED off no
-    # existing path runs a goal query, builds a goal prompt or offers a goal tool. The PR that wires the driver
-    # changes this test on purpose.
+def test_only_the_goal_routes_import_the_goal_package():
+    # PIN (flag-off parity of PR 1a, widened by PR 2): outside the package only the goal routes and their mount
+    # import it. With NOUS_GOALS_ENABLED off the routes answer fixed sentences and read no table
+    # (tests/test_goal_routes_guard.py), so no existing path runs a goal query, builds a goal prompt or offers a goal
+    # tool. The PR that wires the driver changes this test on purpose.
     nous_dir = Path(__file__).resolve().parents[1] / "nous"
     goals_dir = nous_dir / "goals"
     importers = [
-        str(path.relative_to(nous_dir))
+        path.relative_to(nous_dir).as_posix()
         for path in sorted(nous_dir.rglob("*.py"))
         if goals_dir not in path.parents
         and any(_imports_goals(node) for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))))
     ]
-    assert importers == []
+    assert importers == ["api/goal_routes.py", "api/rest.py"]
     assert not (goals_dir / "__main__.py").exists()

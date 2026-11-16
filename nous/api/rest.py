@@ -58,6 +58,7 @@ from nous.api.commitment_routes import build_commitment_routes
 from nous.api.companion_assets import OverlayStaticFiles
 from nous.api.entry_gate import EntryGate
 from nous.api.execution_context import ExecutionContext
+from nous.api.goal_routes import build_goal_routes
 from nous.api.intention_routes import build_intention_routes
 from nous.api.models import Attachment
 from nous.api.owner_guard import CARD_DECISION, OwnerGuard
@@ -68,6 +69,7 @@ from nous.cognitive import CognitiveLayer
 from nous.cognitive.context import PROFILE_CORE_TAG, TIER1_FACT_CATEGORIES
 from nous.config import Settings
 from nous.events import Event, EventBus
+from nous.goals.store import GoalStore
 from nous.heart import Heart
 from nous.heart.result_inbox import derive_channel
 from nous.observability.context_view import RingContextView
@@ -4111,6 +4113,10 @@ def create_app(
     routes.extend(
         build_intention_routes(database=database, settings=settings, continuation_runner=continuation_runner)
     )
+    # F114: the owner's goals. Always mounted: with NOUS_GOALS_ENABLED off there is no store, and the routes give
+    # their fixed "goals are off" answers.
+    goal_store = GoalStore(database, settings.agent_id, settings) if settings.goals_enabled else None
+    routes.extend(build_goal_routes(database=database, settings=settings, goals=goal_store, guard=owner_guard))
     # F111: the owner's /drop and /done of a commitment.
     routes.extend(build_commitment_routes(database=database, settings=settings))
     # Goals PR 0c: the halt switch for background work, always mounted.

@@ -166,6 +166,32 @@ OWNER_ROUTES = {
         200,
         {"halted": False, "changed": False, "text": "Background work is not halted."},
     ),
+    # F114: the goal changes, with goals off (the default)
+    **{
+        ("POST", path): (b"{}", 503, {"error": "goals are off", "goals_enabled": False})
+        for path in (
+            "/goals",
+            *(
+                f"/goals/G-0001/{action}"
+                for action in (
+                    "approve", "pause", "resume", "confirm-done", "stop", "cancel", "run-now", "budget", "deadline",
+                    "note",
+                )
+            ),
+        )
+    },
+}
+# F114: the goal reads require a secret too; a read carries no body, so any media type passes with the proxy's.
+GOAL_READS = {
+    "/goals": {"enabled": False, "goals": []},
+    "/goals/options": {"enabled": False},
+    "/goals/G-0001": {"enabled": False},
+}
+GOAL_ROUTE_SET = {
+    ("GET", "/goals"),
+    ("GET", "/goals/options"),
+    ("GET", "/goals/{ref}"),
+    *{(method, path.replace("G-0001", "{ref}")) for method, path in OWNER_ROUTES if path.startswith("/goals")},
 }
 INTENTION_ROUTE_SET = {
     ("POST", "/intentions/proposals/{id}/decide"),
@@ -269,7 +295,48 @@ def test_exactly_the_owner_routes_are_guarded(tmp_path) -> None:
         if getattr(route, "methods", None) and getattr(route.endpoint, "owner_guarded", False)
         for method in route.methods - {"HEAD"}
     }
-    assert guarded == REST_ROUTE_SET | INTENTION_ROUTE_SET
+    assert guarded == REST_ROUTE_SET | INTENTION_ROUTE_SET | GOAL_ROUTE_SET
+    assert len(GOAL_ROUTE_SET) == 14
+
+
+@pytest.mark.parametrize("path", list(GOAL_READS))
+@pytest.mark.parametrize(
+    ("headers", "allowed"),
+    [({}, False), (OWNER, True), (PROXY, True), ({**PROXY, "content-type": "text/plain"}, True)],
+    ids=["none", "owner", "proxy", "proxy-text"],
+)
+async def test_each_goal_read_against_each_proof(tmp_path, path: str, headers: dict[str, str], allowed: bool) -> None:
+    response = await _send(_rest_app(tmp_path), "GET", path, headers=headers)
+    expected = (200, GOAL_READS[path]) if allowed else (403, FORBIDDEN)
+    assert (response.status_code, response.json()) == expected
+
+
+async def test_the_goal_routes_answer_from_their_store_when_goals_are_on(tmp_path) -> None:
+    """With the flag (and the flags it needs) on, ``/goals/options`` is the options route, not a goal named
+    "options": no table is read for it (the database here is a stand-in)."""
+    from nous.api.rest import create_app
+    from nous.config import Settings
+
+    settings = Settings(
+        _env_file=None,
+        workspace_dir=str(tmp_path),
+        owner_route_secret_sha256=OWNER_DIGEST,
+        goals_enabled=True,
+        result_inbox_enabled=True,
+        intentions_enabled=True,
+        continuation_enabled=True,
+        subtask_enabled=True,
+    )
+    assert settings.goals_enabled is True
+    app = create_app(
+        SimpleNamespace(), SimpleNamespace(), SimpleNamespace(schedules=None), SimpleNamespace(), SimpleNamespace(),
+        settings, heartbeat_runner=SimpleNamespace(finding_store=None),
+    )
+    response = await _send(app, "GET", "/goals/options", headers=OWNER)
+    assert response.status_code == 200
+    assert response.json()["enabled"] is True and set(response.json()["presets"]) == {"small", "medium", "large"}
+    paths = [getattr(route, "path", None) for route in app.routes]
+    assert paths.index("/goals/options") < paths.index("/goals/{ref}")
 
 
 def _unconfigured_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
