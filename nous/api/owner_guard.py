@@ -38,6 +38,8 @@ __all__ = [
     "DEVICE_TOKEN_HEADER",
     "DEVICE_TOKEN_PREFIX",
     "DEVICE_TOKEN_REJECTED",
+    "DEVICE_TOKEN_REJECTED_CODE",
+    "DEVICE_TOKEN_TEXT",
     "GRANTS",
     "OWNER",
     "OWNER_SECRET_HEADER",
@@ -57,6 +59,10 @@ PROXY_SECRET_HEADER = "X-Nous-Proxy-Secret"  # the name the MCP client routes re
 DEVICE_TOKEN_HEADER = "X-Nous-Device-Token"
 DEVICE_TOKEN_MAX_CHARS = 200
 DEVICE_TOKEN_REJECTED = "device_token_rejected"
+# What a client is answered (403) when the device token it sent is held by no live device. A client shows the message
+# as it is.
+DEVICE_TOKEN_REJECTED_CODE = "DEVICE_TOKEN_REJECTED"
+DEVICE_TOKEN_TEXT = "This device is no longer paired. Pair it again in the app's settings."
 # A device token is this prefix and 256 random bits, URL-safe base64 without padding (43 characters).
 DEVICE_TOKEN_PREFIX = "nd1_"
 _DEVICE_TOKEN_RE = re.compile(r"nd1_[A-Za-z0-9_-]{43}")

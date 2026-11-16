@@ -55,12 +55,13 @@ from starlette.types import Scope
 from nous import undo_journal
 from nous.api.commitment_routes import build_commitment_routes
 from nous.api.companion_assets import OverlayStaticFiles
+from nous.api.companion_devices import Device, DeviceStore, PairingDesk, build_device_routes
 from nous.api.entry_gate import EntryGate
 from nous.api.execution_context import ExecutionContext
 from nous.api.goal_routes import build_goal_routes
 from nous.api.intention_routes import build_intention_routes
 from nous.api.models import Attachment
-from nous.api.owner_guard import CARD_DECISION, OwnerGuard
+from nous.api.owner_guard import CARD_DECISION, OwnerGuard, device_caller_key
 from nous.api.runner import AgentRunner
 from nous.brain import Brain, continuation, intentions
 from nous.brain.intentions import IntentionSpec
@@ -115,8 +116,11 @@ def create_app(
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
 
-    # The owner routes require the owner's or the proxy's secret (nous/api/owner_guard.py).
-    owner_guard = OwnerGuard(settings)
+    # The owner routes require the owner's or the proxy's secret (nous/api/owner_guard.py). A paired companion
+    # device's token is looked up in the device store (nous/api/companion_devices.py), which reads the database only
+    # when a call carries a device token.
+    devices = DeviceStore(database, settings.agent_id)
+    owner_guard = OwnerGuard(settings, devices=devices)
     if not owner_guard.configured:
         logger.warning(
             "Neither NOUS_OWNER_ROUTE_SECRET_SHA256 nor NOUS_MCP_CLIENT_UI_SECRET_SHA256 is set to a SHA-256 digest, "
@@ -4117,6 +4121,25 @@ def create_app(
     routes.extend(build_goal_routes(database=database, settings=settings, goals=goal_store, guard=owner_guard))
     # F111: the owner's /drop and /done of a commitment.
     routes.extend(build_commitment_routes(database=database, settings=settings))
+    # Companion devices: pairing, the owner's list and revoke, and a device's unpair (nous/api/companion_devices.py).
+    if settings.a2ui_enabled:
+
+        async def drop_device_window(device: Device) -> None:
+            """A revoked device's window of the action limiter goes with it."""
+            resolved = _a2ui_services()
+            if resolved is not None:
+                resolved[1].forget_caller(device_caller_key(device.id))
+
+        async def drop_device_push(device: Device) -> None:
+            """A revoked device's push installation goes with it, unless a live device holds it (it paired again)."""
+            push = _a2ui_push()
+            if push is not None and not await devices.installation_bound(device.installation_id):
+                await push.deregister(device.installation_id)
+
+        devices.revoke_hooks.extend([drop_device_window, drop_device_push])
+        routes.extend(
+            build_device_routes(store=devices, desk=PairingDesk(), guard=owner_guard, settings=settings, bus=bus)
+        )
     # F112 PR 2a: the owner's MCP server routes, only with the MCP client on (off, nothing of it is imported).
     if settings.mcp_client_enabled:
         from nous.api.mcp_client_routes import build_mcp_client_routes
