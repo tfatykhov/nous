@@ -31,6 +31,7 @@ from test_goals_driver import (
     _db_now,
     _finish,
     _journal,
+    _pending,
     _running,
     _session,
     _sessions,
@@ -404,6 +405,76 @@ async def test_a_failed_run_now_never_brings_the_wake_forward(env_factory, monke
     assert (await _harness(w, goal))[-1].text == "Session 1 could not start: RuntimeError."
     assert (await w.driver.tick()).started == ()  # the request was acted on once: no second failure
     assert w.driver._failures == {goal.id: 1}
+
+
+NOT_STARTED = "Run now was not started"
+
+
+async def test_a_run_now_that_finds_the_queue_full_at_its_publish_leaves_one_row(env_factory, monkeypatch):  # noqa: F811
+    """The queue fills after the tick's headroom check: the publish is refused, the session row undone, and the
+    request (cleared with that row) leaves one harness row saying the run-now was not started."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    await _later_wake(w, goal)
+    gated_task = w.driver._gated_task
+
+    async def queue_fills(goal_row):
+        await _pending(w, 5)
+        return await gated_task(goal_row)
+
+    monkeypatch.setattr(w.driver, "_gated_task", queue_fills)
+    await w.store.request_run_now(goal.id, actor="host")
+    assert (await w.driver.tick()).started == ()
+    assert await _sessions(w, goal) == []
+    assert (await _goal(w, goal)).pending_request is None
+    rows = [r for r in await _harness(w, goal) if r.text.startswith(NOT_STARTED)]
+    assert [(r.text, r.session_n) for r in rows] == [
+        ("Run now was not started: the subtask queue has too few free places.", None)
+    ]
+    assert w.driver._failures == {}
+    assert (await w.driver.tick()).started == ()  # the request was acted on once: no second row
+    assert len([r for r in await _harness(w, goal) if r.text.startswith(NOT_STARTED)]) == 1
+
+
+async def test_a_run_now_whose_session_recovery_closed_before_its_publish_leaves_one_row(
+    env_factory,  # noqa: F811
+    monkeypatch,
+):
+    """The start is held between its two transactions past the window, and another tick's close finds no first task
+    and closes the session: the publish finds it closed and publishes nothing, and the run-now leaves one row."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    reached, release = asyncio.Event(), asyncio.Event()
+    gated_task = w.driver._gated_task
+
+    async def held(goal_row):
+        reached.set()
+        await release.wait()
+        return await gated_task(goal_row)
+
+    monkeypatch.setattr(w.driver, "_gated_task", held)
+    await w.store.request_run_now(goal.id, actor="host")
+    ticking = asyncio.create_task(w.driver.tick())
+    await asyncio.wait_for(reached.wait(), timeout=10)
+    (session,) = await _sessions(w, goal)
+    async with w.db.session() as s:
+        await s.execute(
+            update(GoalSession)
+            .where(GoalSession.id == session.id)
+            .values(started_at=GoalSession.started_at - timedelta(seconds=600))
+        )
+        await s.commit()
+    recovery = GoalDriver(w.db, w.env.settings, w.env.heart, w.store, FakeRunner())
+    assert await recovery.close_finished() == 1
+    release.set()
+    assert (await ticking).started == ()
+    closed = await _session(w, session.id)
+    assert (closed.trigger, closed.outcome, closed.root_id) == ("run_now", "interrupted", None)
+    rows = [r for r in await _harness(w, goal) if r.text.startswith(NOT_STARTED)]
+    assert [(r.text, r.session_n) for r in rows] == [
+        ("Run now was not started: its session was closed before its first task was published.", 1)
+    ]
+    assert w.driver._failures == {} and (await _goal(w, goal)).pending_request is None
 
 
 async def test_a_full_queue_never_brings_a_later_wake_forward(env_factory):  # noqa: F811

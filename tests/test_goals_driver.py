@@ -979,7 +979,7 @@ async def test_a_start_held_past_the_window_publishes_nothing_once_recovery_clos
     assert await _subtasks(w) == []
     assert await w.env.heart.intentions.get_for_source(intentions.SOURCE_SUBTASK, session.first_subtask_id) is None
     assert w.driver._failures == {} and w.runner.wakes == 0
-    assert not [r for r in await _journal(w, goal, "state") if "could not start" in r.text]
+    assert not [r for r in await _journal(w, goal, "state") if "could not start" in r.text or "Run now" in r.text]
 
 
 async def test_a_start_that_publishes_first_is_left_alone_by_recovery(env_factory, monkeypatch):  # noqa: F811

@@ -95,6 +95,7 @@ HELD_WORDS: dict[str, str] = {
     "quiet": "it is quiet hours",
     "jobs": "today's job launches are used up",
     "sessions": "the most goal sessions allowed at once are open",
+    "closed": "its session was closed before its first task was published",
 }
 REQUEST_WORDS = {"run_now": "run-now", "stop": "stop", "cancel": "cancel"}
 # How the driver ends a session's chain: (the root's cancel reason, the cancel's actor).
@@ -433,8 +434,10 @@ class GoalDriver:
         now, and quiet hours are kept for the owner); every other limit holds it. With
         ``request_at`` it acts on the owner's pending request: only while that request is still the one read, and
         the request is cleared in transaction 1 (with the session row, or with a journal row saying what held it), so
-        a request is acted on at most once. A delay never moves the wake earlier (``GoalStore.delay_wake``), so a
-        run-now that fails does not bring the next timer session forward."""
+        a request is acted on at most once. A run-now whose session then does not start leaves one row saying so: a
+        full queue (in the transaction that undoes the session row), a session closed by recovery before its first
+        task was published, or a failed start (``_failed_start``'s row). A delay never moves the wake earlier
+        (``GoalStore.delay_wake``), so a run-now that fails does not bring the next timer session forward."""
         if not self._enabled():
             return _Start()
         if self.background_halted():
@@ -512,6 +515,7 @@ class GoalDriver:
             await self._failed_start(goal_id, n, insert_failure, seen=seen, request_at=request_at)
             return _Start()
         session_id = row.id
+        root_id: UUID | None = None
         try:
             rejection, task = await self._gated_task(goal)
             if rejection is not None:
@@ -521,11 +525,11 @@ class GoalDriver:
                 failure = f"Session {n} was refused by the censor gate; the log has the reason."
             else:
                 root_id = await self._publish(goal, n, session_id, subtask_id, task)
-                if root_id is None:  # recovery closed the session meanwhile: nothing was published
-                    return _Start()
                 failure = None
         except SubtaskQueueFull:
-            if await self._undo_start(session_id, subtask_id):
+            # A run-now's request was cleared with the session row: the row that undoes it says it did not start.
+            note = _not_started("queue") if request_at is not None else None
+            if await self._undo_start(session_id, subtask_id, note=note):
                 await self._store.delay_wake(goal_id, seconds=QUEUE_FULL_DELAY_SECONDS, seen=seen)
                 logger.info("Goal %s: the subtask queue is full; session %d waits a minute", goal_id, n)
             return _Start(held="queue")
@@ -536,6 +540,12 @@ class GoalDriver:
         if failure is not None:
             if await self._undo_start(session_id, subtask_id):
                 await self._failed_start(goal_id, n, failure, seen=seen)
+            return _Start()
+        if root_id is None:  # recovery closed the session meanwhile: nothing was published, no failure counted
+            if request_at is not None:  # its request was cleared with the session row
+                async with self._db.session() as s:
+                    self._journal(s, goal_id, "state", _not_started("closed"), actor="harness", session_n=n)
+                    await s.commit()
             return _Start()
         self._failures.pop(goal_id, None)
         self._runner.wake()
@@ -699,14 +709,15 @@ class GoalDriver:
         )
         return bool((await s.execute(query)).scalar_one())
 
-    async def _undo_start(self, session_id: UUID, subtask_id: UUID) -> bool:
-        """Delete a session row whose first subtask was never created (the driver's only DELETE). Never one whose
-        subtask or its intention exists: a create that committed and then raised left a live root, which the close
-        attaches. True when the row was deleted."""
+    async def _undo_start(self, session_id: UUID, subtask_id: UUID, *, note: str | None = None) -> bool:
+        """Delete a session row whose first subtask was never created (the driver's only DELETE), with ``note`` as a
+        harness ``state`` row of its goal in the same transaction. Never one whose subtask or its intention exists: a
+        create that committed and then raised left a live root, which the close attaches. True when the row was
+        deleted."""
         async with self._db.session() as s:
-            row = (
+            goal_id = (
                 await s.execute(
-                    select(GoalSession.id)
+                    select(GoalSession.goal_id)
                     .where(
                         GoalSession.id == session_id,
                         GoalSession.agent_id == self._agent_id,
@@ -716,7 +727,7 @@ class GoalDriver:
                     .with_for_update()
                 )
             ).scalar_one_or_none()
-            if row is None:
+            if goal_id is None:
                 return False
             created = (
                 await s.execute(
@@ -737,6 +748,8 @@ class GoalDriver:
                     GoalSession.id == session_id, GoalSession.root_id.is_(None), GoalSession.ended_at.is_(None)
                 )
             )
+            if note is not None:
+                self._journal(s, goal_id, "state", note, actor="harness")
             await s.commit()
             return True
 
