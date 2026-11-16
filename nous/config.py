@@ -2184,6 +2184,15 @@ class Settings(BaseSettings):
     # (NOUS_OWNER_ROUTE_SECRET, set on the bot only). Only the digest lives in this process: the agent's run_python
     # runs here and could read anything else. Unset, those routes refuse every call.
     owner_route_secret_sha256: str = ""
+    # The chat routes (POST /chat, POST /chat/stream, DELETE /chat/{session_id}) require the owner's or the proxy's
+    # secret, and the inbound MCP server at /mcp the owner's secret or the MCP key below (nous/api/entry_gate.py).
+    # off: no check. warn: calls that carry no proof are logged and counted by session class, and the owner gets one
+    # Telegram line a day with the count. enforce: such a call is refused (403) before its body is read. Any other
+    # value fails Settings() at start.
+    owner_entry_mode: Literal["off", "warn", "enforce"] = "warn"
+    # The hex SHA-256 of the key an external MCP client sends to /mcp as "Authorization: Bearer <key>" or as
+    # X-Nous-Mcp-Secret. Only the digest lives in this process. The key opens /mcp only, never an owner route.
+    mcp_server_secret_sha256: str = ""
 
     action_gating_enabled: bool = True
     action_gating_mode: Literal["shadow", "warn", "enforce"] = "enforce"
