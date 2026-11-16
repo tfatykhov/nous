@@ -157,10 +157,10 @@ describe('Devices: the states', () => {
     expect(s.queryByRole('textbox')).toBeNull();
   });
 
-  it('404: says this server does not support pairing yet, and offers nothing to change', async () => {
+  it('404: says device pairing is not available on this server, and offers nothing to change', async () => {
     handlers['GET /a2ui/devices'] = () => [404, undefined];
     const s = await shown();
-    expect(await s.findByText('This server does not support device pairing yet.')).toBeTruthy();
+    expect(await s.findByText('Device pairing is not available on this server.')).toBeTruthy();
     expect(s.queryByRole('button')).toBeNull();
   });
 

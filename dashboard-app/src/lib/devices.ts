@@ -69,7 +69,8 @@ export const NAME_MAX = 60;
 export const CODE_HELP = 'Type this code in the app under Settings, Pair this device. It works once.';
 export const REPLACED_TEXT = 'The earlier code no longer works.';
 export const FORBIDDEN_TEXT = 'Sign in through the login page to manage devices.';
-export const UNSUPPORTED_TEXT = 'This server does not support device pairing yet.';
+/** A 404 of the routes: an older server, or one with the companion off. */
+export const UNSUPPORTED_TEXT = 'Device pairing is not available on this server.';
 export const UNREACHABLE_TEXT = 'Could not reach the server.';
 /** A change whose answer was lost: it may or may not have been made. */
 export const NO_ANSWER_TEXT = 'No answer came back. Check the list before trying again.';

@@ -239,7 +239,7 @@ describe('a refused or failed request in words', () => {
   it('a 404 of the list or of a new code means no pairing on this server; a revoke\'s 404 is the server\'s sentence', () => {
     expect(problemText(err(404, undefined), 'see')).toBe(UNSUPPORTED_TEXT);
     expect(problemText(err(404, { error: 'not found' }), 'pair')).toBe(UNSUPPORTED_TEXT);
-    expect(UNSUPPORTED_TEXT).toBe('This server does not support device pairing yet.');
+    expect(UNSUPPORTED_TEXT).toBe('Device pairing is not available on this server.');
     expect(problemText(err(404, { error: 'no such device' }), 'revoke')).toBe('No such device.');
   });
 
