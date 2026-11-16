@@ -197,7 +197,9 @@ async def test_the_first_task_and_the_decision_turn_of_a_started_session_are_off
     )
     assert "send_email" in _offered(runner, decision)
 
-    # The first use's harness row is not one of the chain's notes: the session can still write all of its own.
+    # The first use's harness row (written when a lifted call is dispatched, through this hook) is not one of the
+    # chain's notes: the session can still write all of its own.
+    view.note_used(first_task, "send_email")
     await asyncio.gather(*view._tasks)
     async with w.db.session() as s:
         rows = list(

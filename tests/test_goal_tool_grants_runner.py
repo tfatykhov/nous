@@ -367,22 +367,22 @@ async def test_a_fork_has_the_hooks_and_a_later_one_reaches_it(granted):
     assert "send_email" in _offered(fork, _goal_turn(w))
 
 
-async def test_a_lifted_call_that_is_authorized_notes_its_first_use(granted):
+async def _progress_rows(db, goal_id) -> list:
+    async with db.session() as s:
+        query = select(GoalJournal).where(GoalJournal.goal_id == goal_id, GoalJournal.kind == "progress")
+        return list((await s.execute(query)).scalars())
+
+
+async def test_authorizing_a_lifted_call_writes_no_first_use_row(granted):
+    """The row is written when the call is dispatched (``_dispatch_with_ledger``), not when it is authorized."""
     w = granted
     ctx = _goal_turn(w)
-    assert w.runner._authorize_tool_call(ctx, "send_email", frozenset({"send_email"}), "s", {}) is None
+    assert w.runner._authorize_and_lift(ctx, "send_email", frozenset({"send_email"}), "s", {}) == (None, True)
     tool_guard.install(ToolGuard(denied=frozenset({ON})))
-    assert w.runner._authorize_tool_call(ctx, ON, frozenset({ON}), "s", {}) is not None  # refused: no note
+    refusal, lifted = w.runner._authorize_and_lift(ctx, ON, frozenset({ON}), "s", {})
+    assert refusal is not None and lifted is True  # lifted, then refused by the guard
     await asyncio.gather(*w.view._tasks)
-    async with w.db.session() as s:
-        rows = list(
-            (
-                await s.execute(
-                    select(GoalJournal).where(GoalJournal.goal_id == w.goal.id, GoalJournal.kind == "progress")
-                )
-            ).scalars()
-        )
-    assert [row.evidence for row in rows] == [["grant-used:send_email"]]
+    assert await _progress_rows(w.db, w.goal.id) == []
 
 
 async def test_a_granted_tool_can_still_be_proposed_as_before(granted):
@@ -689,3 +689,5 @@ async def test_action_gate_still_blocks_a_granted_call_in_a_real_turn(runner_env
     await env.runner.run_turn("subtask-79", "send the note", is_background=True, is_subtask=True, context=ctx)
     assert checked == ["send_email"] and calls == []
     assert "BLOCKED by ActionGate" in str(env.model.calls[-1]["messages"])
+    await asyncio.gather(*view._tasks)
+    assert await _progress_rows(env.db, goal.id) == []  # the call never ran: no row says the session used it

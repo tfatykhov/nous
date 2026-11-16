@@ -909,16 +909,26 @@ class AgentRunner:
         session_id: str | None,
         tool_input: dict,
     ) -> Refusal | None:
-        """Return a refusal for a call the harness must not execute, else None (``_authorize_checks``).
+        """Return a refusal for a call the harness must not execute, else None (``_authorize_and_lift``)."""
+        return self._authorize_and_lift(ctx, tool_name, offered_names, session_id, tool_input)[0]
+
+    def _authorize_and_lift(
+        self,
+        ctx: ExecutionContext,
+        tool_name: str,
+        offered_names: frozenset[str],
+        session_id: str | None,
+        tool_input: dict,
+    ) -> tuple[Refusal | None, bool]:
+        """``(refusal, lifted)``: the refusal for a call the harness must not execute, else None
+        (``_authorize_checks``), and whether a goal's grant lifted it.
 
         F115 per-goal tools: the per-goal tool grant hook (``set_goal_lift``) is asked once per call; its answer
-        reaches only the class verdicts of the internal_only floor and of the context policy. When the call is
-        authorized on it, the first-use hook is told."""
+        reaches only the class verdicts of the internal_only floor and of the context policy. ``_tool_loop`` hands
+        ``lifted`` to ``_dispatch_with_ledger``, which tells the first-use hook only once the call is dispatched,
+        past ActionGate, a suppressed repeat and a snapshot that blocks it."""
         lifted = self._goal_lift(ctx, tool_name)
-        refusal = self._authorize_checks(ctx, tool_name, offered_names, session_id, tool_input, lifted=lifted)
-        if refusal is None and lifted:
-            self._goal_note_use(ctx, tool_name)
-        return refusal
+        return self._authorize_checks(ctx, tool_name, offered_names, session_id, tool_input, lifted=lifted), lifted
 
     def _authorize_checks(
         self,
@@ -4021,11 +4031,13 @@ class AgentRunner:
         turn_number: int | None,
         is_background: bool,
         turn_id: UUID | None = None,
+        goal_lifted: bool = False,
     ) -> Dispatched:
         """Everything between "this call may run" and "its text": the F064.1 ping and activity heartbeat, the
         durable ledger row (a keyed send claimed first, or suppressed), the write-path lock and compensation
         snapshot, the dispatch, the close of the row (a cancellation closes it ``unknown`` and re-raises, any
-        other exception closes it and re-raises) and the review-card hand-off.
+        other exception closes it and re-raises) and the review-card hand-off. ``goal_lifted`` (a goal's grant lifted
+        the call, ``_authorize_and_lift``): the first-use hook is told right before the dispatch.
 
         Lifted UNCHANGED out of ``_tool_loop`` (F099 2d) so that the approved-action path
         (``execute_single_call``) runs the very same code: one definition of the ledger invariants. The
@@ -4090,6 +4102,8 @@ class AgentRunner:
                 result_text, is_error = suppressed.text, suppressed.is_error
             else:
                 keyed = send_key is not None
+                if goal_lifted:  # F115: past every check that could still refuse it
+                    self._goal_note_use(ctx, tool_name)
                 self._note_ingress(session_id, tool_name, tool_input)
                 # @codex P1 on e8841b2: in-flight heartbeat
                 # for tool calls that may exceed stall_timeout.
@@ -4636,7 +4650,9 @@ class AgentRunner:
                         continue
 
                     # Harness: was this tool offered this iteration, and may this context use it?
-                    refusal = self._authorize_tool_call(ctx, tool_name, offered_names, session_id, tool_input)
+                    refusal, goal_lifted = self._authorize_and_lift(
+                        ctx, tool_name, offered_names, session_id, tool_input
+                    )
                     if refusal is not None:
                         refusal_text = _with_alias_note(alias_note, refusal.text)
                         tool_results_for_message.append(
@@ -4764,6 +4780,7 @@ class AgentRunner:
                                 turn_number=turn_number,
                                 is_background=is_background,
                                 turn_id=turn_id,
+                                goal_lifted=goal_lifted,
                             )
                             result_text, is_error = dispatched.text, dispatched.is_error
                             call_images = dispatched.images
