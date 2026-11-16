@@ -34,8 +34,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
@@ -45,9 +46,10 @@ from sqlalchemy import and_, select, text
 
 from nous.api import tool_policy
 from nous.api.execution_context import ExecutionContext
-from nous.api.tool_classes import MCP_TOOL_PREFIX, McpIdentity, mcp_tool_identity
+from nous.api.tool_classes import MCP_TOOL_PREFIX, McpIdentity, mcp_tool_background, mcp_tool_identity
 from nous.autonomy import tool_guard
 from nous.brain.intentions import AUTHORITY_INTERNAL
+from nous.goals.charter import ToolLine
 from nous.goals.store import grant_identity
 from nous.storage.models import Goal, GoalSession, GoalToolGrant
 
@@ -156,6 +158,45 @@ def not_ready(tool: str, settings: Any) -> str | None:
     """Why ``tool`` cannot be allowed while the server lacks a setting, or None."""
     fact = GRANT_FACTS.get(tool)
     return fact.ready(settings) if fact is not None else None
+
+
+_SAFE_SERVER = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def offered_now(tool: str, *, lifted: bool) -> bool:
+    """Whether a turn whose lift decision is ``lifted`` is offered ``tool``: the lift, then what the runner checks
+    after it (the tool guard's hold, and for an MCP client tool its server's background switch)."""
+    if not lifted:
+        return False
+    guard = tool_guard.current()
+    if guard is None or guard.reason("continuation", None, tool) is not None:
+        return False
+    return not tool.startswith(MCP_TOOL_PREFIX) or mcp_tool_background(tool) is True
+
+
+def lifted_for_a_new_session(goal: Any, grant: Any) -> bool:
+    """``decide``'s answer for the first task of a session of ``goal`` about to start (it has no root in the view
+    yet): the goal active, the guard installed, a tool a goal may be given, and an MCP tool's identity unchanged."""
+    if goal.state != "active" or tool_guard.current() is None or tool_policy.grant_refusal(grant.tool) is not None:
+        return False
+    return not grant.tool.startswith(MCP_TOOL_PREFIX) or mcp_tool_identity(grant.tool) == grant_identity(grant)
+
+
+def session_tool_lines(grants: Sequence[Any], available: Callable[[Any], bool]) -> list[ToolLine]:
+    """What a goal's session is told of each grant (``charter.tools_section``): the tool's name from the grant row,
+    and when ``available`` says it is, what it does in the harness's words; an MCP tool is named with its server's name
+    (letters, digits, ``_`` and ``-`` only), never the server's own text."""
+    lines: list[ToolLine] = []
+    for grant in grants:
+        if not available(grant):
+            lines.append(ToolLine(grant.tool, None))
+        elif grant.tool.startswith(MCP_TOOL_PREFIX):
+            server = _SAFE_SERVER.sub("", grant.server_name or "") or "unnamed"
+            lines.append(ToolLine(grant.tool, f"a tool of the MCP server {server}"))
+        else:
+            fact = GRANT_FACTS.get(grant.tool)
+            lines.append(ToolLine(grant.tool, fact.does if fact is not None else None))
+    return lines
 
 
 def used_ref(tool: str) -> str:

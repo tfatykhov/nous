@@ -105,8 +105,10 @@ class GoalChain:
             )
             refs = await evidence.citeable(s, scope, limit=charter.REFS_SHOWN)
             ended = row.ended_at is not None
+        tools = None
         if self._tool_grants is not None:
             await self._tool_grants.refresh_root(root_id)
+            tools = await self._tool_lines(goal.id, root_id)
         # The directory is walked after the transaction and off the event loop: nothing in it is a database row.
         refs += await asyncio.to_thread(evidence.files, scope)
         journal = await self._store.journal_tail(goal.id)
@@ -121,5 +123,23 @@ class GoalChain:
             citeable=refs,
             root_dir=scope.root_dir,
             moved=moved,
+            tools=tools,
         )
         return GoalTurn(block=block, tools=make_goal_tools(self._db, self._settings, self._store, ref))
+
+    async def _tool_lines(self, goal_id: UUID, root_id: UUID) -> list[Any]:
+        """F115 per-goal tools: what the turn is told of the goal's grants, each available when the runner would
+        offer it to a decision turn of ``root_id`` (``grants.decide``, then the guard and the MCP floor)."""
+        from nous.api.execution_context import ExecutionContext
+        from nous.brain.intentions import AUTHORITY_INTERNAL
+        from nous.goals.grants import decide, offered_now, session_tool_lines
+
+        view = self._tool_grants
+        assert view is not None
+        ctx = ExecutionContext(
+            kind="continuation", authority=AUTHORITY_INTERNAL, intention_id=root_id, root_intention_id=root_id
+        )
+        grants = await self._store.tool_grants(goal_id)
+        return session_tool_lines(
+            grants, lambda grant: offered_now(grant.tool, lifted=decide(view, ctx, grant.tool).lifted)
+        )

@@ -724,11 +724,12 @@ class GoalDriver:
         async with self._db.session() as s:
             total, today = await spend.goal_spent(s, self._agent_id, goal.id)
             moved = len(await moved_steps(s, self._agent_id, goal.id))  # steps the plan moved to the journal
+        tools = await self._tool_lines(goal) if self.tool_grants is not None else None
 
         def build(max_chars: int) -> str:
             plan = list(goal.plan or [])
             return charter.build_session_task(
-                goal, plan, rows, spent=total, day_spent=today, max_chars=max_chars, moved=moved
+                goal, plan, rows, spent=total, day_spent=today, max_chars=max_chars, moved=moved, tools=tools
             )
 
         task = build(charter.MAX_TASK_CHARS)
@@ -739,6 +740,16 @@ class GoalDriver:
             raise ValueError("the censor gate changed the task instead of adding to it")
         guidance = gated[len(task) :]
         return None, build(charter.MAX_TASK_CHARS - len(guidance)) + guidance
+
+    async def _tool_lines(self, goal: Goal) -> list[Any]:
+        """F115 per-goal tools: what a new session's first task is told of the goal's grants, each available when
+        its first task would be offered it (``grants.lifted_for_a_new_session``, then the guard and the MCP floor)."""
+        from nous.goals.grants import lifted_for_a_new_session, offered_now, session_tool_lines
+
+        grants = await self._store.tool_grants(goal.id)
+        return session_tool_lines(
+            grants, lambda grant: offered_now(grant.tool, lifted=lifted_for_a_new_session(goal, grant))
+        )
 
     async def _has_open_session(self, s: AsyncSession, goal_id: UUID) -> bool:
         query = select(
