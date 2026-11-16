@@ -377,10 +377,10 @@ async def test_authorizing_a_lifted_call_writes_no_first_use_row(granted):
     """The row is written when the call is dispatched (``_dispatch_with_ledger``), not when it is authorized."""
     w = granted
     ctx = _goal_turn(w)
-    assert w.runner._authorize_and_lift(ctx, "send_email", frozenset({"send_email"}), "s", {}) == (None, True)
+    assert w.runner._authorize_tool_call(ctx, "send_email", frozenset({"send_email"}), "s", {}) is None
+    assert w.view.lifts(ctx, "send_email") is True
     tool_guard.install(ToolGuard(denied=frozenset({ON})))
-    refusal, lifted = w.runner._authorize_and_lift(ctx, ON, frozenset({ON}), "s", {})
-    assert refusal is not None and lifted is True  # lifted, then refused by the guard
+    assert w.runner._authorize_tool_call(ctx, ON, frozenset({ON}), "s", {}) is not None  # refused by the guard
     await asyncio.gather(*w.view._tasks)
     assert await _progress_rows(w.db, w.goal.id) == []
 

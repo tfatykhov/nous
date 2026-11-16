@@ -909,26 +909,14 @@ class AgentRunner:
         session_id: str | None,
         tool_input: dict,
     ) -> Refusal | None:
-        """Return a refusal for a call the harness must not execute, else None (``_authorize_and_lift``)."""
-        return self._authorize_and_lift(ctx, tool_name, offered_names, session_id, tool_input)[0]
-
-    def _authorize_and_lift(
-        self,
-        ctx: ExecutionContext,
-        tool_name: str,
-        offered_names: frozenset[str],
-        session_id: str | None,
-        tool_input: dict,
-    ) -> tuple[Refusal | None, bool]:
-        """``(refusal, lifted)``: the refusal for a call the harness must not execute, else None
-        (``_authorize_checks``), and whether a goal's grant lifted it.
+        """Return a refusal for a call the harness must not execute, else None (``_authorize_checks``).
 
         F115 per-goal tools: the per-goal tool grant hook (``set_goal_lift``) is asked once per call; its answer
-        reaches only the class verdicts of the internal_only floor and of the context policy. ``_tool_loop`` hands
-        ``lifted`` to ``_dispatch_with_ledger``, which tells the first-use hook only once the call is dispatched,
-        past ActionGate, a suppressed repeat and a snapshot that blocks it."""
+        reaches only the class verdicts of the internal_only floor and of the context policy. The first-use hook is
+        not told here: ``_tool_loop`` reads the lift of an authorized call again, with no await in between, and hands
+        it to ``_dispatch_with_ledger``, which tells the hook only once the call is dispatched."""
         lifted = self._goal_lift(ctx, tool_name)
-        return self._authorize_checks(ctx, tool_name, offered_names, session_id, tool_input, lifted=lifted), lifted
+        return self._authorize_checks(ctx, tool_name, offered_names, session_id, tool_input, lifted=lifted)
 
     def _authorize_checks(
         self,
@@ -4037,7 +4025,7 @@ class AgentRunner:
         durable ledger row (a keyed send claimed first, or suppressed), the write-path lock and compensation
         snapshot, the dispatch, the close of the row (a cancellation closes it ``unknown`` and re-raises, any
         other exception closes it and re-raises) and the review-card hand-off. ``goal_lifted`` (a goal's grant lifted
-        the call, ``_authorize_and_lift``): the first-use hook is told right before the dispatch.
+        the call, read by ``_tool_loop``): the first-use hook is told right before the dispatch.
 
         Lifted UNCHANGED out of ``_tool_loop`` (F099 2d) so that the approved-action path
         (``execute_single_call``) runs the very same code: one definition of the ledger invariants. The
@@ -4650,9 +4638,10 @@ class AgentRunner:
                         continue
 
                     # Harness: was this tool offered this iteration, and may this context use it?
-                    refusal, goal_lifted = self._authorize_and_lift(
-                        ctx, tool_name, offered_names, session_id, tool_input
-                    )
+                    refusal = self._authorize_tool_call(ctx, tool_name, offered_names, session_id, tool_input)
+                    # F115: whether a goal's grant lifted it, read with no await since the authorization; the
+                    # first-use hook is told at the dispatch (``_dispatch_with_ledger``).
+                    goal_lifted = refusal is None and self._goal_lift(ctx, tool_name)
                     if refusal is not None:
                         refusal_text = _with_alias_note(alias_note, refusal.text)
                         tool_results_for_message.append(
