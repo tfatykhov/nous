@@ -62,7 +62,8 @@ class FakeRunner:
         self.wakes += 1
 
 
-GOALS = {**CONT, "subtask_enabled": True, "goals_enabled": True}  # the flag and every setting it needs
+# The flag and every setting it needs; no quiet hours (a start then never depends on the hour the test runs at).
+GOALS = {**CONT, "subtask_enabled": True, "goals_enabled": True, "heartbeat_quiet_start": 0, "heartbeat_quiet_end": 0}
 
 
 async def _world(env_factory, **settings) -> SimpleNamespace:  # noqa: F811
@@ -706,13 +707,16 @@ async def test_a_marked_root_with_work_still_open_does_not_hold_the_next_start(e
     await make_child(w.env, root)  # still pending
     await set_intention(w.env, root.id, **{marker: datetime.now(UTC)})
     assert (await w.driver.tick()).closed == 1
+    if marker == "root_cancelled_at":  # a cancel the driver did not make is the owner's: the goal paused
+        assert (await w.store.get(goal.id)).pause_reason == "owner"
+        await w.store.resume(goal.id, actor="host")
     await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
     assert len((await w.driver.tick()).started) == 1
     assert len(await _sessions(w, goal)) == 2
 
 
 async def test_next_wake_is_the_interval_after_a_step_and_twice_that_after_none(env_factory):  # noqa: F811
-    w = await _world(env_factory)
+    w = await _world(env_factory, goals_max_active_sessions=2)  # both goals' sessions are open at once
     stepped, idle = await _active(w), await _active(w, title="Sort the photos")
     plan = [{"id": "s1", "text": "List the notes", "status": "closed", "closed_session": 1, "evidence": ["x"]}]
     await _set_goal(w, stepped, plan=plan)
@@ -975,7 +979,7 @@ async def test_a_start_held_past_the_window_publishes_nothing_once_recovery_clos
     assert await _subtasks(w) == []
     assert await w.env.heart.intentions.get_for_source(intentions.SOURCE_SUBTASK, session.first_subtask_id) is None
     assert w.driver._failures == {} and w.runner.wakes == 0
-    assert not [r for r in await _journal(w, goal, "state") if "could not start" in r.text]
+    assert not [r for r in await _journal(w, goal, "state") if "could not start" in r.text or "Run now" in r.text]
 
 
 async def test_a_start_that_publishes_first_is_left_alone_by_recovery(env_factory, monkeypatch):  # noqa: F811
@@ -1781,7 +1785,7 @@ async def test_asked_comes_from_a_real_ask_then_an_expiry_and_a_report(runner_en
     ask = use("resolve_intention", decision="ask", note=note, progress=False, confidence=0.7)
     done = "Nobody answered, so I merged the notes folder only."
     report = use("resolve_intention", decision="report", note=done, progress=True, confidence=0.7)
-    env = await runner_env([ask], [report], subtask_enabled=True, goals_enabled=True)
+    env = await runner_env([ask], [report], **{key: GOALS[key] for key in GOALS if key not in CONT})
     cont = ContinuationRunner(
         database=env.db, settings=env.settings, runner=env.runner, heart=env.heart, brain=env.brain, bus=env.bus
     )

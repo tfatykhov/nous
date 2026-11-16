@@ -34,9 +34,12 @@ EVIDENCE_REF_MAX_CHARS = 300
 TAIL_CHARS = 6000
 TAIL_ENTRY_CHARS = 1500
 CLIP_MARKER = " [clipped]"
-# Marks the chain's own words inside the harness's session-close journal row (written by the goal driver; the goal
-# routes leave such a row out when they look for the row of a pause).
+# Marks the chain's own words inside the harness's session-close journal row (written by the goal driver).
 SESSION_NOTE_LABEL = "Note written by the session:"
+# The evidence ref (+ the pause reason) of the harness row the goal driver writes with each pause it makes for a
+# reason other than the owner's: the goal routes select a paused goal's row by it, and the driver restarts runs of
+# outcomes after its session.
+STOP_REF = "stop:"
 MAX_DEADLINE_DAYS = 90
 ACTORS: frozenset[str] = frozenset({"owner", "host", "chain", "harness"})
 JOURNAL_KINDS: frozenset[str] = frozenset(
@@ -426,18 +429,18 @@ class GoalStore:
             self.add_journal_row(s, goal.id, "owner_note", body, actor=actor)
             if goal.state == "active" and await self._open_session(s, goal.id) is None:
                 await self._wake(s, goal.id, now)
-            await s.commit()
-            await s.refresh(goal)
-            return goal
+            return await self._commit_read(s, goal)
 
     async def delay_wake(self, goal_id: UUID, *, seconds: int, seen: datetime | None) -> bool:
-        """Move an active goal's next wake to ``seconds`` from now, only if it is still ``seen``: the wake the
-        caller read before deciding to delay. A wake someone set since (``add_note`` or ``resume`` set it to now)
-        is kept, and so is a goal paused or finished meanwhile. True when the wake moved."""
+        """Move an active goal's next wake to ``seconds`` from now, never earlier than it is, only if it is still
+        ``seen``: the wake the caller read before deciding to delay. A wake someone set since (``add_note`` or
+        ``resume`` set it to now) is kept, and so is a goal paused or finished meanwhile. A wake already later than
+        ``seconds`` from now stays where it is (a failed run-now must not bring the next timer session forward).
+        True when the update matched."""
         if seconds < 0:
             raise GoalRefused("a wake can only be delayed, not moved back")
         async with self._db.session() as s:
-            at = func.clock_timestamp() + timedelta(seconds=seconds)
+            at = func.greatest(Goal.next_wake_at, func.clock_timestamp() + timedelta(seconds=seconds))
             changed = await self._wake(s, goal_id, at, if_seen=True, seen=seen)
             await s.commit()
             return changed
@@ -453,7 +456,11 @@ class GoalStore:
         evidence: Iterable[str] = (),
     ) -> GoalJournal:
         """Append one journal row in its own transaction: text clipped to ``JOURNAL_MAX_CHARS``, at most
-        ``EVIDENCE_MAX_REFS`` evidence refs of at most ``EVIDENCE_REF_MAX_CHARS`` each."""
+        ``EVIDENCE_MAX_REFS`` evidence refs of at most ``EVIDENCE_REF_MAX_CHARS`` each. Never under the
+        ``harness`` actor: the goal driver writes those rows itself, in its own transactions, and reads some of them
+        back (where a run of outcomes restarts, which session's chain it is ending)."""
+        if actor == "harness":
+            raise GoalRefused("harness rows are written by the goal driver only")
         async with self._db.session() as s:
             owned = await s.scalar(select(Goal.id).where(Goal.id == goal_id, Goal.agent_id == self.agent_id))
             if owned is None:
@@ -507,8 +514,14 @@ class GoalStore:
         if result.rowcount != 1:
             raise GoalRefused(f"{describe(goal)} changed meanwhile; nothing was done")
         self.add_journal_row(s, goal.id, "state", note, actor=actor, session_n=session_n)
-        await s.commit()
+        return await self._commit_read(s, goal)
+
+    async def _commit_read(self, s: AsyncSession, goal: Goal) -> Goal:
+        """Read ``goal`` back inside the changing transaction (its row lock still held, so the values read are the ones
+        committed), then commit, and return it. Nothing is read after the commit, so a read that fails rolls the
+        change back with it instead of answering a change that was made with an error."""
         await s.refresh(goal)
+        await s.commit()
         return goal
 
     async def _wake(

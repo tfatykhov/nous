@@ -4,10 +4,18 @@ A session of a goal is an ordinary continuation chain: its root is the first sub
 authority, wake policy ``continue``, ``nous.goals.roots``), and the continuation runner works it like any other root.
 The driver starts a session when a goal is due and closes it, by polling, once its chain has ended.
 
-The driver keeps no state that matters beyond its loop: wakes come from the rows (``next_wake_at``), so a restart
-loses nothing but the count of failed starts in a row. Every time it writes comes from the database's clock. Every
-change of a goal's columns is a targeted UPDATE guarded by ``state = 'active'``, never a save of the whole row, so an
-owner's pause or cancel made meanwhile is never overwritten.
+The driver keeps no state that matters beyond its loop: wakes come from the rows (``next_wake_at``,
+``pending_request``), so a restart loses nothing but the count of failed starts in a row. Every time it writes comes
+from the database's clock. Every change of a goal's columns is a targeted UPDATE guarded by ``state = 'active'``
+(or by the request it read), never a save of the whole row, so an owner's pause or cancel made meanwhile is never
+overwritten.
+
+It also acts on the owner's requests (run now, stop, cancel), stops the chain of a session whose task ran past its
+time limit, pauses a goal on a stop condition (deadline, total budget, a stall, errors in a row) and holds a start
+on the limits of the goal (day budget, sessions of the day, quiet hours, job launches of the day) and of all goals
+(sessions open at once). ``goal_roots`` tells the continuation runner which roots are goal sessions', so a goal's
+chain never takes the slots kept for the owner's own chains, and ``cancel_record_for`` tells its sweep who cancelled
+a stray DAG of a chain the driver ended.
 
 Nothing builds the driver yet: it is constructed by tests only.
 """
@@ -23,16 +31,17 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import ColumnElement, Text, and_, cast, delete, exists, func, or_, select, text, tuple_, update
+from sqlalchemy import ColumnElement, Text, and_, cast, delete, exists, false, func, or_, select, text, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from nous import cancel_provenance
 from nous.brain import continuation, intentions
 from nous.cancellation import cancel_requested
 from nous.dag.store import TERMINAL_NODE_STATUSES
 from nous.goals import charter, roots, spend
-from nous.goals.store import SESSION_NOTE_LABEL, GoalStore, clip
+from nous.goals.store import SESSION_NOTE_LABEL, STOP_REF, GoalStore, clip
 from nous.heart.censor_actions import gate_subtask_task
 from nous.heart.subtasks import MAX_PENDING, SubtaskQueueFull
 from nous.storage.database import Database
@@ -63,6 +72,54 @@ QUESTIONS_BEFORE_CLOSE = timedelta(hours=1)
 # Closed sessions the restart catch-up reads per tick (``refresh_sessions``).
 CATCH_UP_BATCH = 200
 ANSWER_PREFIX_PATTERN = f"{continuation.ANSWER_CORRELATION_PREFIX}%"
+# A running subtask is stuck this long past its timeout: the task scheduler's grace for a run (``find_active_run``).
+STUCK_GRACE_SECONDS = 300
+ERRORS_BEFORE_PAUSE = 3  # sessions in a row that end in an error before the goal pauses (``error``)
+STOP_REASONS: tuple[str, ...] = ("deadline", "budget", "stalled", "error")  # stop conditions, in the order read
+# The refresh reads every closed session whose root's deadline has not passed. A root's deadline is the TTL counted
+# from the publish of its first task, which comes after the session's start; the scan is bounded by the start, with
+# this much room for the publish's delay and for a difference between this process's clock and the database's.
+DEADLINE_SCAN_SLACK = timedelta(hours=1)
+# Evidence refs of the driver's own journal rows (``state``, actor ``harness``), read back by the driver:
+ENDING_REF = "ending:"  # + session id: the driver is ending this session's chain (a stop, a cancel, a stuck task)
+REQUEST_REF = "request:"  # + kind@time: the owner's stop or cancel an ending row was written for
+ARRIVALS_REF = "arrivals:"  # + n: a session's end row records its root's newest arrival number at the close
+RESUMED_REF = "resumed:"  # + arrival id: a closed session's chain resumed and ended again, up to that arrival
+# STOP_REF (the store's) + reason: the driver paused the goal (a stop condition, or failed starts); runs of outcomes
+# restart after the row's session_n (a failed-start pause has none: the start made no session).
+# Why a start did not happen, in the words of the journal row a run-now that did not start leaves.
+HELD_WORDS: dict[str, str] = {
+    "halted": "background work is halted",
+    "queue": "the subtask queue has too few free places",
+    "open_session": "a session is open",
+    "open_work": "an earlier session's chain is working again",
+    "deadline": "the deadline has passed",
+    "budget": "the total budget is spent",
+    "day_budget": "today's budget is spent",
+    "day_sessions": "today's sessions are used up",
+    "quiet": "it is quiet hours",
+    "jobs": "today's job launches are used up",
+    "sessions": "the most goal sessions allowed at once are open",
+    "closed": "its session was closed before its first task was published",
+}
+REQUEST_WORDS = {"run_now": "run-now", "stop": "stop", "cancel": "cancel"}
+# How the driver ends a session's chain: (the root's cancel reason, the cancel's actor).
+_ENDINGS = {
+    "stop": ("goal stopped by the owner", "goal:owner"),
+    "cancel": ("goal cancelled by the owner", "goal:owner"),
+    "stuck": ("goal session stuck", "goal:harness"),
+}
+# Who the lineage's DAGs record as having cancelled them when the driver ends a stuck chain (``cancel_provenance``).
+STUCK_CANCEL_VIA = "goal driver: a task ran past its time limit"
+# The same, for a DAG of such a chain that the continuation runner's sweep cancels later (at most 60 characters).
+STUCK_SWEEP_VIA = "goal driver: task ran past its time limit; finished by sweep"
+
+
+def _cancelled_by(why: str) -> dict[str, str] | None:
+    """The ``cancel_provenance`` record of a chain's end, for the DAGs its cancel stops: the harness's for a stuck
+    task; None for the owner's stop or cancel (the continuation runner records the owner, through ``actor``)."""
+    return cancel_provenance.record("harness", STUCK_CANCEL_VIA) if why == "stuck" else None
+
 
 # The goal channel's claim: every undelivered row on it is stamped and returned in one statement, with the session
 # it belongs to: the session whose root is the row's intention's root, else the one whose first subtask is that
@@ -97,6 +154,39 @@ _CLAIM_SQL = text(
 ONE_OPEN_SESSION_INDEX = "uq_goal_sessions_one_open"  # migration 113: at most one open session per goal
 
 
+def _deadline_passed(goal: Goal, now: datetime) -> bool:
+    """Whether the goal's deadline has passed at ``now``: a deadline at ``now`` has (the store's rule for
+    ``resume``). One comparison for the start's hold and the stop condition, so the two cannot disagree."""
+    return goal.deadline_at is not None and goal.deadline_at <= now
+
+
+def _budget_spent(spent: int, budget: int) -> bool:
+    """Whether ``spent`` tokens use up ``budget``: spent to the token is spent (the store's rule for ``resume``)."""
+    return spent >= budget
+
+
+def _not_started(held: str) -> str:
+    """The harness's row for a run-now request that a hold kept from starting."""
+    return f"Run now was not started: {HELD_WORDS[held]}."
+
+
+def _request_ref(kind: str, at: datetime) -> str:
+    """The evidence ref of an ending row written for the owner's request ``kind`` made at ``at``."""
+    return f"{REQUEST_REF}{kind}@{at.isoformat()}"
+
+
+def _ending_text(why: str, n: int, *, resumed: bool = False) -> str:
+    """The harness's row saying it is ending a session's chain, and why."""
+    if resumed:
+        return f"Session {n}'s chain, resumed after the session closed, is being stopped: a task ran past its limit."
+    because = {
+        "stop": "the owner asked to stop it",
+        "cancel": "the owner cancelled the goal",
+        "stuck": "a task of its chain ran past its time limit",
+    }[why]
+    return f"Session {n} is being stopped: {because}."
+
+
 def _constraint_of(exc: IntegrityError) -> str | None:
     """The name of the constraint or index an INSERT violated, as the driver (asyncpg) reports it, else None."""
     for error in (exc.orig, getattr(exc.orig, "__cause__", None)):
@@ -108,11 +198,14 @@ def _constraint_of(exc: IntegrityError) -> str | None:
 
 @dataclass(frozen=True)
 class TickReport:
-    """What one tick did: reports journalled from the goal channels, sessions closed, the roots of the sessions
-    it started, and why it started no more (``held``: ``halted`` or ``queue``), else None."""
+    """What one tick did: reports journalled from the goal channels, sessions closed, chains the driver ended (the
+    owner's stop or cancel, a stuck task), goals paused by a stop condition, the roots of the sessions it started,
+    and why it started no more (``held``: ``halted``, ``queue`` or ``sessions``), else None."""
 
     claimed: int = 0
     closed: int = 0
+    stopped: int = 0
+    paused: int = 0
     started: tuple[UUID, ...] = ()
     held: str | None = None
 
@@ -122,6 +215,15 @@ class _RootState:
     found: bool
     marked: bool  # the root carries a cancel or an expiry marker
     open_work: bool  # an intention of the root is in an open state
+    cancelled: bool = False  # the marker is a cancel
+
+
+@dataclass(frozen=True)
+class _Start:
+    """What a start did: the root of the session it started, else why it held (a ``HELD_WORDS`` key) or None."""
+
+    root_id: UUID | None = None
+    held: str | None = None
 
 
 @dataclass(frozen=True)
@@ -135,22 +237,28 @@ class _JournalItem:
 
 
 class GoalDriver:
-    """Starts goal sessions and closes them. ``runner`` is the continuation runner (``wake``).
+    """Starts goal sessions and closes them. ``runner`` is the continuation runner (``wake``, ``cancel_root``).
 
     One driver object runs one tick at a time: ``tick`` holds ``_tick_lock`` for the whole pass, and a direct
-    ``start_session`` (the owner's run-now) takes the same lock, so a second call waits and never interleaves. The
-    state this object keeps in memory, each kept only for speed and rebuilt from the rows after a restart:
+    ``start_session`` takes the same lock, so a second call waits and never interleaves. The state this object
+    keeps in memory, each kept only for speed and rebuilt from the rows after a restart:
 
     - ``_following``: closed sessions whose spend is read again. A close adds to it; a refresh removes only the
       ids it read itself as closed and settled, never the whole set.
     - ``_caught_up`` and ``_catch_up_after``: how far the restart catch-up has read; moved only from the cursor
       the same pass started from.
-    - ``_failures``: failed starts in a row, per goal.
+    - ``_failures``: failed starts in a row, per goal. With P driver processes a goal can see up to 3 x P failed
+      starts before one of them pauses it: each counts its own.
+    - ``_failures_since``: per goal with a run of failed starts, the newest ``stop:error`` row's seq when the run
+      began; a pause for ``error`` written after it restarts the run instead of pausing the goal again.
+    - ``_call_log_noted``: whether the start-up line about an uncounted job cap was logged (a log line only).
 
-    Two driver processes for one agent share none of it and are coordinated only through the rows: the goal row's
-    lock and the one-open-session index for a start, the session row's lock and ``ended_at IS NULL`` for a close
-    and for the first task's publish, the claim's ``delivered_at IS NULL``, spend written only upward, the
-    journal's evidence refs under the session row's lock, and wake changes compared with the wake read.
+    Two driver processes for one agent share none of it and are coordinated only through the rows: every active
+    goal row's lock and the one-open-session index for a start (so the count of open sessions across goals is
+    read by one start at a time), the session row's lock and ``ended_at IS NULL`` for a close and for the first
+    task's publish, the claim's ``delivered_at IS NULL``, spend written only upward (a refresh updates its session
+    rows in id order), the journal's evidence refs under the session row's lock, a request cleared only while it is
+    still the one read, a pause only while its condition still holds, and wake changes compared with the wake read.
     """
 
     def __init__(self, database: Database, settings: Any, heart: Any, store: GoalStore, runner: Any) -> None:
@@ -161,12 +269,14 @@ class GoalDriver:
         self._runner = runner
         self._agent_id = store.agent_id
         self._failures: dict[UUID, int] = {}  # failed starts in a row, per goal (in memory: a restart resets it)
+        self._failures_since: dict[UUID, int] = {}  # per goal: the newest ``stop:error`` row's seq when its run began
         # Closed sessions whose spend is read again at the next tick: closed since, or with lineage work whose
         # usage is not settled yet (``refresh_sessions``). In memory; the first ticks after a start catch up.
         self._following: set[UUID] = set()
         self._caught_up = False
         self._catch_up_after: tuple[datetime, UUID] | None = None  # the last closed session the catch-up read
         self._tick_lock = asyncio.Lock()  # one tick, or one direct start, at a time
+        self._call_log_noted = False
         self._task: asyncio.Task | None = None
         self._running = False
 
@@ -182,6 +292,9 @@ class GoalDriver:
         self._running = True
         self._task = asyncio.create_task(self._loop(), name="goal-driver")
         logger.info("Goal driver started (tick=%ds)", self._settings.goals_tick_seconds)
+        if getattr(self._settings, "tool_call_log_enabled", False) is not True and not self._call_log_noted:
+            self._call_log_noted = True
+            logger.info("Goal driver: NOUS_TOOL_CALL_LOG_ENABLED is off, so the goals' job launches are not counted")
 
     async def stop(self) -> None:
         """Cancel the loop and wait for it. A session in flight is the continuation runner's, not the loop's."""
@@ -208,18 +321,26 @@ class GoalDriver:
                 logger.exception("Goal tick failed")
 
     async def tick(self) -> TickReport:
-        """One pass, in order: claim the goal channels into the journals, close the sessions whose chain has ended,
-        read again what open and recently closed sessions spent (and journal what a resumed chain of a closed one
-        asked the owner), start the sessions that are due. With goals off it does nothing. A second call waits for
-        this one to end (``_tick_lock``)."""
+        """One pass, in order: claim the goal channels into the journals (first, so a session the owner stops
+        has its reports journalled before its close), act on the owner's stop and cancel requests, close the
+        sessions whose chain has ended, end the chains with a task stuck past its time limit, read again what open
+        and recently closed sessions spent (and journal what a resumed chain of a closed one asked the owner and how
+        it ended), pause the goals a stop condition holds, then start: the run-now requests first, then the sessions
+        that are due. Stop conditions run before any start, so a goal that should pause never gets one more session.
+        With goals off it does nothing. A second call waits for this one to end (``_tick_lock``)."""
         if not self._enabled():
             return TickReport()
         async with self._tick_lock:
             claimed = await self.claim_reports()
+            stopped = await self.handle_requests()
             closed = await self.close_finished()
+            stopped += await self.catch_stuck()
             await self.refresh_sessions()
+            paused = await self.apply_stop_conditions()
             started, held = await self._start_due()
-            return TickReport(claimed=claimed, closed=closed, started=started, held=held)
+            return TickReport(
+                claimed=claimed, closed=closed, stopped=stopped, paused=paused, started=started, held=held
+            )
 
     # ---- starting a session --------------------------------------------------------------------------------
 
@@ -259,65 +380,136 @@ class GoalDriver:
         async with self._db.session() as s:
             return list((await s.execute(query)).scalars())
 
+    async def _run_now_requests(self) -> list[tuple[UUID, datetime]]:
+        """``(goal id, request time)`` of the active goals with a run-now request and no open session, oldest
+        request first. The request is acted on, and cleared, under the goal's lock (``_start_session``)."""
+        open_session = exists().where(GoalSession.goal_id == Goal.id, GoalSession.ended_at.is_(None))
+        query = (
+            select(Goal.id, Goal.pending_request_at)
+            .where(
+                Goal.agent_id == self._agent_id,
+                Goal.state == "active",
+                Goal.pending_request == "run_now",
+                ~open_session,
+            )
+            .order_by(Goal.pending_request_at, Goal.id)
+        )
+        async with self._db.session() as s:
+            return [(row.id, row.pending_request_at) for row in (await s.execute(query)).all()]
+
     async def _start_due(self) -> tuple[tuple[UUID, ...], str | None]:
+        """The owner's run-now requests, then the goals whose wake has come. A run-now request is acted on once:
+        it starts a session, or is cleared with one journal row saying what held it. A hold of every start
+        (background halted, too few free queue places, the most sessions open at once) ends the timer starts for
+        this tick; a goal's own hold (``_held_by_limits``) skips that goal only."""
         started: list[UUID] = []
+        for goal_id, request_at in await self._run_now_requests():
+            try:
+                held = await self._start_held()
+                if held is not None:
+                    await self._drop_request(goal_id, "run_now", request_at, held=held)
+                    continue
+                result = await self._start_session(goal_id, trigger="run_now", request_at=request_at)
+            except Exception:
+                logger.exception("Goal %s: the run-now start failed", goal_id)
+                continue
+            if result.root_id is not None:
+                started.append(result.root_id)
         for goal_id in await self._due_goals():
             held = await self._start_held()
             if held is not None:
                 return tuple(started), held
             try:
-                root_id = await self._start_session(goal_id, trigger="timer")  # the tick holds the lock
+                result = await self._start_session(goal_id, trigger="timer")  # the tick holds the lock
             except Exception:
                 logger.exception("Goal %s: the session start failed", goal_id)
                 continue
-            if root_id is not None:
-                started.append(root_id)
+            if result.root_id is not None:
+                started.append(result.root_id)
+            elif result.held == "sessions":
+                return tuple(started), "sessions"
         return tuple(started), None
 
     async def start_session(self, goal_id: UUID, *, trigger: str) -> UUID | None:
-        """Start a session of an active goal (``_start_session``), holding the tick's lock, so a direct start (the
-        owner's run-now) never interleaves with a tick: the start counts failures in memory (``_failures``) at
-        several points across awaits. Its root's id, or None when nothing started."""
+        """Start a session of an active goal (``_start_session``), holding the tick's lock, so a direct start never
+        interleaves with a tick: the start counts failures in memory (``_failures``) at several points across
+        awaits. Its root's id, or None when nothing started."""
         async with self._tick_lock:
-            return await self._start_session(goal_id, trigger=trigger)
+            return (await self._start_session(goal_id, trigger=trigger)).root_id
 
-    async def _start_session(self, goal_id: UUID, *, trigger: str) -> UUID | None:
-        """Start a session of an active goal: its root's id, or None when nothing started.
+    async def _start_session(self, goal_id: UUID, *, trigger: str, request_at: datetime | None = None) -> _Start:
+        """Start a session of an active goal: the root of the session it started, else why it held.
 
-        Transaction 1 takes the goal row ``FOR UPDATE``, re-reads that the goal is active (and, for a ``timer``
-        start, that its wake has still come, by the database's clock: another tick may have started, ended and
-        rescheduled it since the due list was read) and has no open session and no open work left on an earlier
-        session's root, and inserts the session row (its ``first_subtask_id`` drawn here, before the subtask
-        exists) and commits; the partial unique index on open sessions is the final word against a second start
-        (any other violation of the insert is a failed start). Then the first task is built and goes through the
-        censor gate that every spawned task goes through, and the subtask, its root intention and the session's root
-        id are written in one transaction that holds the session row's lock (``_publish``). If that fails, the
-        session row is undone. A full queue only delays the goal a minute; a refusal by the gate
-        or any other failure is journalled and counted, and the third in a row pauses the goal (``error``). With
-        goals off, or while background work is halted, it does nothing: every caller (the tick, the owner's run-now)
-        gets that refusal here. The queue headroom is the tick's check."""
-        if not self._enabled() or self.background_halted():
-            return None
+        Transaction 1 takes every active goal row of the agent ``FOR UPDATE``, in id order (so two starts of
+        different goals never read the count of open sessions at once), re-reads that this goal is active (and,
+        for a ``timer`` start, that its wake has still come, by the database's clock: another tick may have
+        started, ended and rescheduled it since the due list was read), that it has no open session and no open
+        work left on an earlier session's root, and that no limit holds it (``_held_by_limits``), and inserts the
+        session row (its ``first_subtask_id`` drawn here, before the subtask exists) and commits; the partial unique
+        index on open sessions is the final word against a second start (any other violation of the insert is a
+        failed start). Then the first task is built and goes through the censor gate that every spawned task goes
+        through, and the subtask, its root intention and the session's root id are written in one transaction that
+        holds the session row's lock (``_publish``). If that fails, the session row is undone. A full queue only
+        delays the goal a minute; a refusal by the gate or any other failure is journalled and counted, and the
+        third in a row pauses the goal (``error``). With goals off, or while background work is halted, it does
+        nothing: every caller gets that refusal here. The queue headroom is the tick's check.
+
+        A ``run_now`` start skips the wake, the count of the day's sessions and quiet hours (the owner asked for it
+        now, and quiet hours are kept for the owner); every other limit holds it. With
+        ``request_at`` it acts on the owner's pending request: only while that request is still the one read, and
+        the request is cleared in transaction 1 (with the session row, or with a journal row saying what held it), so
+        a request is acted on at most once. A run-now whose session then does not start leaves one row saying so: a
+        full queue (in the transaction that undoes the session row), a session closed by recovery before its first
+        task was published, or a failed start (``_failed_start``'s row). A delay never moves the wake earlier
+        (``GoalStore.delay_wake``), so a run-now that fails does not bring the next timer session forward."""
+        if not self._enabled():
+            return _Start()
+        if self.background_halted():
+            return _Start(held="halted")
         subtask_id = uuid.uuid4()
         open_work = False
         insert_failure: str | None = None
         async with self._db.session() as s:
+            await s.execute(
+                select(Goal.id)
+                .where(Goal.agent_id == self._agent_id, Goal.state == "active")
+                .order_by(Goal.id)
+                .with_for_update()
+            )
             goal = (
                 await s.execute(
                     select(Goal).where(Goal.id == goal_id, Goal.agent_id == self._agent_id).with_for_update()
                 )
             ).scalar_one_or_none()
             if goal is None or goal.state != "active":
-                return None
+                return _Start()
+            if request_at is not None and (goal.pending_request, goal.pending_request_at) != ("run_now", request_at):
+                return _Start()  # the request was cleared or replaced since it was read
             seen = goal.next_wake_at  # the wake as read under the lock (a rollback below expires the object)
             now = (await s.execute(select(func.clock_timestamp()))).scalar_one()
             if trigger == "timer" and (seen is None or seen > now):
-                return None  # another tick started, ended and rescheduled it since the due list was read
+                return _Start()  # another tick started, ended and rescheduled it since the due list was read
             if await self._has_open_session(s, goal_id):
-                return None
-            if await self._lineage_has_open_work(s, goal_id, now):
-                open_work = True
+                held: str | None = "open_session"
+            elif await self._lineage_has_open_work(s, goal_id, now):
+                held, open_work = "open_work", True
             else:
+                held = await self._held_by_limits(s, goal, now, trigger=trigger)
+            if held is not None:
+                if request_at is not None:
+                    open_work = False  # the request is spent: the wake is the timer's, left as it is
+                    await self._clear_request(s, goal_id, "run_now", request_at)
+                    self._journal(s, goal_id, "state", _not_started(held), actor="harness")
+                    await s.commit()
+                elif held in ("day_budget", "day_sessions"):
+                    # Only the next UTC day frees these; the goal lock is held, so the wake read is still the wake.
+                    await self._wake_next_day(s, goal_id, seen, now)
+                    await s.commit()
+                if not open_work:
+                    return _Start(held=held)
+            else:
+                if request_at is not None:  # consumed with the session row, in the same commit
+                    await self._clear_request(s, goal_id, "run_now", request_at)
                 n = (
                     await s.execute(
                         select(func.coalesce(func.max(GoalSession.n), 0) + 1).where(GoalSession.goal_id == goal_id)
@@ -337,16 +529,17 @@ class GoalDriver:
                 except IntegrityError as exc:
                     await s.rollback()
                     if _constraint_of(exc) == ONE_OPEN_SESSION_INDEX:
-                        return None  # another start won
+                        return _Start(held="open_session")  # another start won
                     logger.warning("Goal %s: session %d could not be recorded", goal_id, n, exc_info=True)
                     insert_failure = f"Session {n} could not start: {type(exc).__name__}."
         if open_work:
             await self._store.delay_wake(goal_id, seconds=OPEN_WORK_DELAY_SECONDS, seen=seen)
-            return None
+            return _Start(held="open_work")
         if insert_failure is not None:  # no session row was written: nothing to undo
-            await self._failed_start(goal_id, n, insert_failure, seen=seen)
-            return None
+            await self._failed_start(goal_id, n, insert_failure, seen=seen, request_at=request_at)
+            return _Start()
         session_id = row.id
+        root_id: UUID | None = None
         try:
             rejection, task = await self._gated_task(goal)
             if rejection is not None:
@@ -356,14 +549,14 @@ class GoalDriver:
                 failure = f"Session {n} was refused by the censor gate; the log has the reason."
             else:
                 root_id = await self._publish(goal, n, session_id, subtask_id, task)
-                if root_id is None:  # recovery closed the session meanwhile: nothing was published
-                    return None
                 failure = None
         except SubtaskQueueFull:
-            if await self._undo_start(session_id, subtask_id):
+            # A run-now's request was cleared with the session row: the row that undoes it says it did not start.
+            note = _not_started("queue") if request_at is not None else None
+            if await self._undo_start(session_id, subtask_id, note=note):
                 await self._store.delay_wake(goal_id, seconds=QUEUE_FULL_DELAY_SECONDS, seen=seen)
                 logger.info("Goal %s: the subtask queue is full; session %d waits a minute", goal_id, n)
-            return None
+            return _Start(held="queue")
         except Exception as exc:
             logger.warning("Goal %s: session %d could not start", goal_id, n, exc_info=True)
             # The class only: the journal is read by later sessions, the exception's text stays in the log.
@@ -371,11 +564,67 @@ class GoalDriver:
         if failure is not None:
             if await self._undo_start(session_id, subtask_id):
                 await self._failed_start(goal_id, n, failure, seen=seen)
-            return None
+            return _Start()
+        if root_id is None:  # recovery closed the session meanwhile: nothing was published, no failure counted
+            if request_at is not None:  # its request was cleared with the session row
+                async with self._db.session() as s:
+                    self._journal(s, goal_id, "state", _not_started("closed"), actor="harness", session_n=n)
+                    await s.commit()
+            return _Start()
         self._failures.pop(goal_id, None)
+        self._failures_since.pop(goal_id, None)
         self._runner.wake()
         logger.info("Goal %s: session %d started (root %s)", goal_id, n, root_id)
-        return root_id
+        return _Start(root_id=root_id)
+
+    async def _held_by_limits(self, s: AsyncSession, goal: Goal, now: datetime, *, trigger: str) -> str | None:
+        """The first limit that holds a start of ``goal`` at ``now`` (a ``HELD_WORDS`` key), else None, read in
+        the start's transaction under the goal locks: the deadline, the total budget, the day's budget (spend counts
+        for the UTC day its session started), the day's sessions (not for a run-now), quiet hours (unless the goal
+        may run then; not for a run-now), the day's job launches (when the tool-call log is on; a cap of 0 holds like
+        a cap of 1, once one launch is counted: a launch inside a session cannot be stopped, only the next start
+        held), and the sessions open across all goals. The comparisons are the store's: a deadline at ``now``
+        has passed, a budget spent to the token is spent. Spend can rise after this read (a refresh writes it): a
+        chain can overshoot its goal by at most its own token limit."""
+        if _deadline_passed(goal, now):
+            return "deadline"
+        total, today = await spend.goal_spent(s, self._agent_id, goal.id, now=now)
+        if _budget_spent(total, goal.total_budget):
+            return "budget"
+        if _budget_spent(today, goal.day_budget):
+            return "day_budget"
+        if trigger != "run_now":
+            started = await spend.sessions_started_today(s, self._agent_id, goal.id, now=now)
+            if started >= goal.sessions_per_day:
+                return "day_sessions"
+        if not goal.quiet_hours_ok and trigger != "run_now":
+            from nous.heartbeat.quiet_hours import quiet_hours_end  # the heartbeat package is heavy to import
+
+            if quiet_hours_end(self._settings, now) != now:
+                return "quiet"
+        jobs = await spend.jobs_launched_today(s, self._agent_id, goal.id, self._settings, now=now)
+        if jobs is not None and jobs >= max(int(goal.jobs_per_day), 1):
+            return "jobs"
+        open_sessions = await s.scalar(
+            select(func.count()).where(GoalSession.agent_id == self._agent_id, GoalSession.ended_at.is_(None))
+        )
+        if int(open_sessions or 0) >= int(self._settings.goals_max_active_sessions):
+            return "sessions"
+        return None
+
+    async def _wake_next_day(self, s: AsyncSession, goal_id: UUID, seen: datetime | None, now: datetime) -> None:
+        """An active goal's wake to the start of the next UTC day after ``now``, while it is still ``seen``."""
+        await s.execute(
+            update(Goal)
+            .where(
+                Goal.id == goal_id,
+                Goal.agent_id == self._agent_id,
+                Goal.state == "active",
+                Goal.next_wake_at.is_not_distinct_from(seen),
+            )
+            .values(next_wake_at=spend.day_start(now) + timedelta(days=1), updated_at=func.clock_timestamp())
+            .execution_options(synchronize_session=False)
+        )
 
     async def _publish(self, goal: Goal, n: int, session_id: UUID, subtask_id: UUID, task: str) -> UUID | None:
         """Create the session's first subtask and its root intention, and attach the root to the session, in ONE
@@ -450,12 +699,29 @@ class GoalDriver:
         )
         return bool((await s.execute(query)).scalar_one())
 
+    def _root_holds_goal(self, root: Any, now: Any) -> ColumnElement[bool]:
+        """Whether ``root`` (an aliased intention, joined to a session) holds its goal at ``now``: no cancel or
+        expiry marker, its deadline not passed, and an intention of it in an open state. The start waits on such a
+        root of an earlier session (``_lineage_has_open_work``), and ``catch_stuck`` looks for a stuck task on the
+        same roots, so the two cannot disagree on which closed sessions still hold a goal."""
+        member = aliased(Intention)
+        return and_(
+            root.root_cancelled_at.is_(None),
+            root.root_expired_at.is_(None),
+            or_(root.deadline.is_(None), root.deadline > now),
+            exists().where(
+                member.agent_id == self._agent_id,
+                member.root_id == root.id,
+                member.state.in_(continuation.OPEN_STATES),
+            ),
+        )
+
     async def _lineage_has_open_work(self, s: AsyncSession, goal_id: UUID, now: datetime) -> bool:
         """Whether a root of one of the goal's sessions, with no cancel or expiry marker and its deadline not passed,
         has an open intention. A result reopens a closed intention of a root with no marker until that root's
         deadline, so a closed session's chain can come back to life; a new session waits while it does. A marked
         root has ended, even while an intention of it is not closed yet: it holds nothing."""
-        root, member = aliased(Intention), aliased(Intention)
+        root = aliased(Intention)
         query = select(
             exists().where(
                 GoalSession.agent_id == self._agent_id,
@@ -463,26 +729,20 @@ class GoalDriver:
                 GoalSession.root_id.is_not(None),
                 root.agent_id == self._agent_id,
                 root.id == GoalSession.root_id,
-                root.root_cancelled_at.is_(None),
-                root.root_expired_at.is_(None),
-                or_(root.deadline.is_(None), root.deadline > now),
-                exists().where(
-                    member.agent_id == self._agent_id,
-                    member.root_id == root.id,
-                    member.state.in_(continuation.OPEN_STATES),
-                ),
+                self._root_holds_goal(root, now),
             )
         )
         return bool((await s.execute(query)).scalar_one())
 
-    async def _undo_start(self, session_id: UUID, subtask_id: UUID) -> bool:
-        """Delete a session row whose first subtask was never created (the driver's only DELETE). Never one whose
-        subtask or its intention exists: a create that committed and then raised left a live root, which the close
-        attaches. True when the row was deleted."""
+    async def _undo_start(self, session_id: UUID, subtask_id: UUID, *, note: str | None = None) -> bool:
+        """Delete a session row whose first subtask was never created (the driver's only DELETE), with ``note`` as a
+        harness ``state`` row of its goal in the same transaction. Never one whose subtask or its intention exists: a
+        create that committed and then raised left a live root, which the close attaches. True when the row was
+        deleted."""
         async with self._db.session() as s:
-            row = (
+            goal_id = (
                 await s.execute(
-                    select(GoalSession.id)
+                    select(GoalSession.goal_id)
                     .where(
                         GoalSession.id == session_id,
                         GoalSession.agent_id == self._agent_id,
@@ -492,7 +752,7 @@ class GoalDriver:
                     .with_for_update()
                 )
             ).scalar_one_or_none()
-            if row is None:
+            if goal_id is None:
                 return False
             created = (
                 await s.execute(
@@ -513,6 +773,8 @@ class GoalDriver:
                     GoalSession.id == session_id, GoalSession.root_id.is_(None), GoalSession.ended_at.is_(None)
                 )
             )
+            if note is not None:
+                self._journal(s, goal_id, "state", note, actor="harness")
             await s.commit()
             return True
 
@@ -532,20 +794,95 @@ class GoalDriver:
         )
         return result.rowcount == 1
 
-    async def _failed_start(self, goal_id: UUID, n: int, failure: str, *, seen: datetime | None) -> None:
-        """Count a failed start. Below the limit: journal it and try again in five minutes. At the limit: pause the
-        goal (``error``), saying why."""
+    async def _failed_start(
+        self, goal_id: UUID, n: int, failure: str, *, seen: datetime | None, request_at: datetime | None = None
+    ) -> None:
+        """Count a failed start. Below the limit: journal it and try again in five minutes (never earlier than the
+        wake was). At the limit: pause the goal (``error``), saying why, in a row with the pause's evidence ref
+        (``stop:error``) and no session: the start made none, and the number it tried is the next session's, so the
+        pause leaves the run of error sessions as it was. The pause is decided under the goal row's lock: when a pause
+        for ``error`` was written since this run's first failure (``_failures_since``: another driver process's, which
+        the owner may have resumed since), the run restarts at this failure instead. A run-now request still pending
+        (the insert that would have cleared it rolled back) is cleared with the journal row: it is acted on once."""
         count = self._failures.get(goal_id, 0) + 1
         if count >= FAILED_STARTS_BEFORE_PAUSE:
-            self._failures.pop(goal_id, None)
             note = f"{failure}\nPaused: the start failed {count} times in a row."
-            await self._pause(goal_id, "error", note, session_n=n)
-            return
+            if await self._pause_after_failed_starts(goal_id, note, since=self._failures_since.get(goal_id, 0)):
+                self._failures.pop(goal_id, None)
+                self._failures_since.pop(goal_id, None)
+                return
+            count = 1
         self._failures[goal_id] = count
         async with self._db.session() as s:
+            if request_at is not None:
+                await self._clear_request(s, goal_id, "run_now", request_at)
             self._journal(s, goal_id, "state", failure, actor="harness", session_n=n)
+            if count == 1:
+                self._failures_since[goal_id] = await self._newest_pause_seq(s, goal_id, "error")
             await s.commit()
         await self._store.delay_wake(goal_id, seconds=FAILED_START_DELAY_SECONDS, seen=seen)
+
+    async def _pause_after_failed_starts(self, goal_id: UUID, note: str, *, since: int) -> bool:
+        """Pause an active goal (``error``) after failed starts in a row, in one transaction under the goal row's
+        lock, unless a pause for ``error`` newer than ``since`` (the newest such row when the run began) was written
+        meanwhile. True when the run is over: the goal paused, or it is no longer active (nothing written). False
+        when such a pause restarted the run (nothing written)."""
+        async with self._db.session() as s:
+            if await self._lock_active(s, goal_id) is None:
+                return True
+            if await self._newest_pause_seq(s, goal_id, "error") != since:
+                return False
+            await self._paused(s, goal_id, "error", note, evidence=[f"{STOP_REF}error"])
+            await s.commit()
+            return True
+
+    async def _newest_pause_seq(self, s: AsyncSession, goal_id: UUID, reason: str) -> int:
+        """The journal seq of the goal's newest harness pause row for ``reason`` (``stop:<reason>``), else 0."""
+        return int(
+            await s.scalar(
+                select(func.coalesce(func.max(GoalJournal.seq), 0)).where(
+                    GoalJournal.agent_id == self._agent_id,
+                    GoalJournal.goal_id == goal_id,
+                    GoalJournal.kind == "state",
+                    GoalJournal.actor == "harness",
+                    GoalJournal.evidence.contains([f"{STOP_REF}{reason}"]),
+                )
+            )
+            or 0
+        )
+
+    async def _clear_request(self, s: AsyncSession, goal_id: UUID, kind: str, at: datetime) -> bool:
+        """Clear a goal's request in the caller's transaction, only while it is still the one read (``kind`` made
+        at ``at``): a request made since is kept. True when it was cleared."""
+        result = await s.execute(
+            update(Goal)
+            .where(
+                Goal.id == goal_id,
+                Goal.agent_id == self._agent_id,
+                Goal.pending_request == kind,
+                Goal.pending_request_at == at,
+            )
+            .values(pending_request=None, pending_request_at=None, updated_at=func.clock_timestamp())
+            .execution_options(synchronize_session=False)
+        )
+        return result.rowcount == 1
+
+    async def _drop_request(
+        self, goal_id: UUID, kind: str, at: datetime, *, held: str | None = None, why: str | None = None
+    ) -> bool:
+        """Clear a request that is not acted on, with one harness row saying why (a run-now that a hold kept from
+        starting, or a request with nothing to act on), or with none when ``held`` and ``why`` are both None (a
+        request that was acted on). One transaction; nothing when the request changed since it was read."""
+        async with self._db.session() as s:
+            if not await self._clear_request(s, goal_id, kind, at):
+                return False
+            if held is not None:
+                self._journal(s, goal_id, "state", _not_started(held), actor="harness")
+            elif why is not None:
+                note = f"The {REQUEST_WORDS[kind]} request was cleared: {why}."
+                self._journal(s, goal_id, "state", note, actor="harness")
+            await s.commit()
+            return True
 
     # ---- the goal channel ----------------------------------------------------------------------------------
 
@@ -581,6 +918,259 @@ class GoalDriver:
                 )
             await s.commit()
         return len(rows)
+
+    # ---- the owner's requests and stuck sessions -----------------------------------------------------------
+
+    async def handle_requests(self) -> int:
+        """Act on the owner's stop and cancel requests, and clear the requests that have nothing to act on. A stop
+        or a cancel (``GoalStore.stop`` / ``cancel`` already paused or cancelled the goal) ends the chain of the
+        session that was open when it was made (``_end_chain``) and is then cleared. A request is cleared with one
+        harness row, and nothing else is done, when it has nothing to act on: no session is open, or it was made
+        before the open session started (a stale stop never ends a later session), or a run-now finds the goal not
+        active or a session open. A run-now that may start is left for the start step of the tick, which comes
+        after the stop conditions. Returns the sessions ended."""
+        query = (
+            select(Goal.id, Goal.state, Goal.pending_request, Goal.pending_request_at)
+            .where(Goal.agent_id == self._agent_id, Goal.pending_request.is_not(None))
+            .order_by(Goal.pending_request_at, Goal.id)
+        )
+        async with self._db.session() as s:
+            requests = (await s.execute(query)).all()
+        ended = 0
+        for request in requests:
+            try:
+                ended += await self._handle_request(request)
+            except Exception:
+                logger.exception("Goal %s: its %s request failed; tried again", request.id, request.pending_request)
+        return ended
+
+    async def _handle_request(self, request: Any) -> int:
+        kind, at = request.pending_request, request.pending_request_at
+        async with self._db.session() as s:
+            session = (
+                await s.execute(
+                    select(GoalSession).where(
+                        GoalSession.agent_id == self._agent_id,
+                        GoalSession.goal_id == request.id,
+                        GoalSession.ended_at.is_(None),
+                    )
+                )
+            ).scalar_one_or_none()
+        if kind == "run_now":
+            if request.state != "active":
+                await self._drop_request(request.id, kind, at, why="the goal is not active")
+            elif session is not None:
+                await self._drop_request(request.id, kind, at, why=f"session {session.n} is open")
+            return 0  # otherwise the start step acts on it
+        if session is None:
+            await self._drop_request(request.id, kind, at, why="no session is open")
+            return 0
+        if at < session.started_at:
+            await self._drop_request(request.id, kind, at, why=f"it was made before session {session.n} started")
+            return 0
+        if not await self._end_chain(session, kind, request_at=at):
+            return 0  # the request changed, or the session is still open: the next tick reads the row again
+        await self._drop_request(request.id, kind, at)
+        return 1
+
+    async def _end_chain(self, session: GoalSession, why: str, *, request_at: datetime | None = None) -> bool:
+        """End the chain of an open session (``why``: ``stop``, ``cancel`` or ``stuck``) and close the session. In
+        order: a harness ``state`` row naming the session (its evidence ``ending:<session id>``, and for a stop or a
+        cancel the request's ``request:<kind>@<time>``; written once, committed before anything else, so the close
+        never takes the cancel for the owner's), the root's cancel
+        through the continuation runner (``CancelRefused``, nothing left running, and ``RootNotFound`` are not
+        errors), then the close, which finds the root marked. A session whose first task was never published is
+        closed ``interrupted`` under its lock (a start still publishing it then publishes nothing). With
+        ``request_at`` (a stop or a cancel) nothing is done unless that request is still the goal's when the row is
+        written. True when the session is closed."""
+        request = (why, request_at) if request_at is not None else None
+        if not await self._journal_ending(session.id, _ending_text(why, session.n), request=request):
+            return False
+        root_id = session.root_id or await self._root_or_close_unpublished(session.id)
+        if root_id is None:
+            return True
+        reason, actor = _ENDINGS[why]
+        try:
+            await self._runner.cancel_root(root_id, reason=reason, actor=actor, cancelled_by=_cancelled_by(why))
+        except (continuation.CancelRefused, continuation.RootNotFound) as exc:
+            logger.info("Goal session %s: the root's cancel did nothing (%s)", session.id, type(exc).__name__)
+        await self._close(session.id)
+        async with self._db.session() as s:
+            return (await s.scalar(select(GoalSession.ended_at).where(GoalSession.id == session.id))) is not None
+
+    async def _journal_ending(
+        self, session_id: UUID, note: str, *, request: tuple[str, datetime] | None = None
+    ) -> bool:
+        """The harness's row saying it is ending this session's chain, once: under the session row's lock, skipped
+        when such a row still holds (``_harness_ended``: a retry after a crash between the row and the cancel). With
+        ``request`` (kind, time) the goal row is locked too (after the session row, the close's order), nothing is
+        written unless that request is still the goal's (a resume or an approve clears it and a cancel replaces a
+        stop, any time after the tick read it), and the row names the request (``request:<kind>@<time>``). False
+        when nothing may be done."""
+        ref = f"{ENDING_REF}{session_id}"
+        async with self._db.session() as s:
+            row = (
+                await s.execute(
+                    select(GoalSession)
+                    .where(GoalSession.id == session_id, GoalSession.agent_id == self._agent_id)
+                    .with_for_update()
+                )
+            ).scalar_one()
+            query = select(Goal.pending_request, Goal.pending_request_at).where(
+                Goal.id == row.goal_id, Goal.agent_id == self._agent_id
+            )
+            pending = tuple((await s.execute(query.with_for_update() if request is not None else query)).one())
+            if request is not None and pending != request:
+                return False
+            if not await self._harness_ended(s, row, pending):
+                refs = [ref] if request is None else [ref, _request_ref(*request)]
+                self._journal(s, row.goal_id, "state", note, actor="harness", session_n=row.n, evidence=refs)
+            await s.commit()
+            return True
+
+    async def _harness_ended(self, s: AsyncSession, row: GoalSession, pending: tuple[Any, ...]) -> bool:
+        """Whether a row of the driver's saying it is ending this session's chain (``_journal_ending``) still holds.
+        One written for a stuck task always does; one written for the owner's stop or cancel only while that request
+        is still the goal's (``pending``: its kind and time, as read from the goal row). So when a driver stopped
+        between such a row and its cancel and the owner then resumed the goal (the request cleared), a cancel the
+        owner makes later is not taken for the driver's: the close reads it as the owner's."""
+        ref = f"{ENDING_REF}{row.id}"
+        kind, at = pending
+        current = _request_ref(kind, at) if kind is not None and at is not None else None
+        rows = await s.scalars(
+            select(GoalJournal.evidence).where(
+                GoalJournal.agent_id == self._agent_id,
+                GoalJournal.goal_id == row.goal_id,
+                GoalJournal.kind == "state",
+                GoalJournal.actor == "harness",
+                GoalJournal.evidence.contains([ref]),
+            )
+        )
+        for evidence in rows:
+            asked = [e for e in evidence or [] if isinstance(e, str) and e.startswith(REQUEST_REF)]
+            if not asked or current in asked:
+                return True
+        return False
+
+    async def _root_or_close_unpublished(self, session_id: UUID) -> UUID | None:
+        """For an open session with no root id, under its lock: the root its first subtask has (attached), else
+        the session closed ``interrupted`` (nothing was published; a start still publishing finds it closed)."""
+        async with self._db.session() as s:
+            row = (
+                await s.execute(
+                    select(GoalSession)
+                    .where(
+                        GoalSession.id == session_id,
+                        GoalSession.agent_id == self._agent_id,
+                        GoalSession.ended_at.is_(None),
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return None
+            if row.root_id is not None:
+                return row.root_id
+            root_id = (
+                await s.execute(
+                    select(Intention.id).where(
+                        Intention.agent_id == self._agent_id,
+                        Intention.source_kind == intentions.SOURCE_SUBTASK,
+                        Intention.source_id == str(row.first_subtask_id),
+                    )
+                )
+            ).scalar_one_or_none()
+            if root_id is not None:
+                await self._set_root(s, row.id, root_id)
+                await s.commit()
+                return root_id
+            now = (await s.execute(select(func.clock_timestamp()))).scalar_one()
+            goal = (await s.execute(select(Goal).where(Goal.id == row.goal_id))).scalar_one()
+            await self._end(
+                s,
+                goal,
+                row,
+                now,
+                outcome="interrupted",
+                spent=0,
+                steps=0,
+                summary=None,
+                detail="It was stopped before its first task was created.",
+            )
+            await s.commit()
+            return None
+
+    async def catch_stuck(self) -> int:
+        """End the chains with a lineage subtask stuck: ``running`` past its timeout and the grace
+        (``STUCK_GRACE_SECONDS``, from its start, as ``task_scheduler.find_active_run`` reads a run). A worker
+        that stopped (a restart) leaves such a row ``running``, and ``reclaim_stale`` puts it back only at the next
+        restart, so the chain would wait on it until its root's deadline.
+
+        Two kinds of session are looked at: open ones whose root has no marker, and closed ones whose root still
+        holds the goal (``_root_holds_goal``: a late result reopened it, no marker, its deadline not passed; the next
+        session waits on it). An open one's chain is ended and the session closed (``_end_chain``); the goal stays
+        active, and the session's outcome is the close's (``interrupted``, from the cancel's marker, unless an earlier
+        rule holds: the stuck task itself is not an error). A closed one's chain is ended the same way, the session
+        row is not touched (``_stop_resumed``).
+        Waiting is not stuck: an intention ``awaiting_owner``, a subtask still ``pending`` in the queue, a DAG are
+        left alone. Returns the chains ended."""
+        rows = await self._stuck_sessions()
+        ended = 0
+        for row in rows:
+            try:
+                if row.ended_at is None:
+                    ended += 1 if await self._end_chain(row, "stuck") else 0
+                else:
+                    ended += 1 if await self._stop_resumed(row) else 0
+            except Exception:
+                logger.exception("Goal session %s: its stuck chain could not be ended; tried again next tick", row.id)
+        return ended
+
+    async def _stuck_sessions(self) -> list[GoalSession]:
+        root, member, subtask = aliased(Intention), aliased(Intention), aliased(Subtask)
+        timeout = func.coalesce(func.nullif(subtask.timeout_seconds, 0), int(self._settings.subtask_default_timeout))
+        stuck = exists().where(
+            member.agent_id == self._agent_id,
+            member.root_id == root.id,
+            member.source_kind == intentions.SOURCE_SUBTASK,
+            subtask.agent_id == self._agent_id,
+            cast(subtask.id, Text) == member.source_id,
+            subtask.status == "running",
+            func.coalesce(subtask.started_at, subtask.created_at)
+            + func.make_interval(0, 0, 0, 0, 0, 0, timeout + STUCK_GRACE_SECONDS)
+            < func.clock_timestamp(),
+        )
+        query = (
+            select(GoalSession)
+            .join(root, and_(root.agent_id == self._agent_id, root.id == GoalSession.root_id))
+            .where(
+                GoalSession.agent_id == self._agent_id,
+                or_(
+                    and_(
+                        GoalSession.ended_at.is_(None),
+                        root.root_cancelled_at.is_(None),
+                        root.root_expired_at.is_(None),
+                    ),
+                    and_(GoalSession.ended_at.is_not(None), self._root_holds_goal(root, func.clock_timestamp())),
+                ),
+                stuck,
+            )
+            .order_by(GoalSession.started_at, GoalSession.id)
+        )
+        async with self._db.session() as s:
+            return list((await s.execute(query)).scalars())
+
+    async def _stop_resumed(self, row: GoalSession) -> bool:
+        """End the stuck chain of a closed session whose root came back to life: the harness row (once), then the
+        root's cancel. The session row keeps what its close wrote; the refresh journals how the chain ended."""
+        await self._journal_ending(row.id, _ending_text("stuck", row.n, resumed=True))
+        reason, actor = _ENDINGS["stuck"]
+        try:
+            await self._runner.cancel_root(row.root_id, reason=reason, actor=actor, cancelled_by=_cancelled_by("stuck"))
+        except (continuation.CancelRefused, continuation.RootNotFound) as exc:
+            logger.info("Goal session %s: the root's cancel did nothing (%s)", row.id, type(exc).__name__)
+            return False
+        return True
 
     # ---- closing a session ---------------------------------------------------------------------------------
 
@@ -686,6 +1276,18 @@ class GoalDriver:
             steps = sum(1 for step in goal.plan or [] if isinstance(step, dict) and step.get("closed_session") == row.n)
             outcome = await self._outcome(s, row.root_id, steps=steps, ended_by_marker=state.marked or not state.found)
             summary, from_report = await self._summary(s, row)
+            # Read after the root's state: an arrival that committed before that read is in it. A later arrival
+            # needs the root reopened, so an arrival numbered above this one means the chain resumed after the close.
+            last_arrival = await s.scalar(
+                select(func.coalesce(func.max(IntentionArrival.n), 0)).where(
+                    IntentionArrival.agent_id == self._agent_id, IntentionArrival.root_id == row.root_id
+                )
+            )
+            # A cancel marker the driver did not announce is the owner's (the routes, the bot, the companion): the
+            # driver commits its ending row before it cancels, so its own cancels are never read as the owner's. A row
+            # written for a request the owner has since cleared announces nothing (``_harness_ended``).
+            pending = (goal.pending_request, goal.pending_request_at)
+            by_owner = state.cancelled and not await self._harness_ended(s, row, pending)
             await self._journal_questions_and_answers(s, goal.id, row)
             ended = await self._end(
                 s,
@@ -697,6 +1299,8 @@ class GoalDriver:
                 steps=steps,
                 summary=summary,
                 session_note=None if from_report else summary,
+                evidence=[f"{ARRIVALS_REF}{int(last_arrival or 0)}"],
+                cancelled_by_owner=by_owner,
             )
             if not ended:
                 return False
@@ -726,8 +1330,9 @@ class GoalDriver:
         ).scalar_one()
         if marks is None:
             return _RootState(found=False, marked=False, open_work=bool(open_work))
-        marked = marks.root_cancelled_at is not None or marks.root_expired_at is not None
-        return _RootState(found=True, marked=marked, open_work=bool(open_work))
+        cancelled = marks.root_cancelled_at is not None
+        marked = cancelled or marks.root_expired_at is not None
+        return _RootState(found=True, marked=marked, open_work=bool(open_work), cancelled=cancelled)
 
     async def _outcome(self, s: AsyncSession, root_id: UUID, *, steps: int, ended_by_marker: bool) -> str:
         """The first that holds: ``error`` (an intention of the lineage closed ``failed_report``), ``step_closed``
@@ -880,6 +1485,133 @@ class GoalDriver:
             await s.commit()
             return written
 
+    async def _resumed_endings(self, s: AsyncSession, rows: Iterable[Any]) -> dict[UUID, list[_JournalItem]]:
+        """For each closed session in ``rows`` (each with ``id``, ``goal_id``, ``n``, ``root_id``, ``ended_at`` and
+        ``steps_closed``) whose chain resumed after the close and has ended again, the harness row that says so,
+        when the journal does not hold it yet. Reads only.
+
+        Resumed: its root has an arrival numbered above the one its close recorded (``arrivals:<k>`` on its end
+        row): a later arrival needs a reopened root, and arrival numbers do not depend on any clock. Ended again: no
+        intention of the root is open, or it carries a marker. The row's evidence is ``resumed:<newest arrival id>``,
+        so it is written once for that arrival, and once more only if the chain resumes again later. Its words are
+        fixed, with the outcome of the arrivals after the close by the close's rules: ``error`` (one failed),
+        ``step_closed`` (the plan has more steps closed in this session than the close counted), ``asked`` (one
+        decided ``ask``), ``interrupted`` (the root is marked), else ``no_step``. The session row is not changed."""
+        closed = {r.root_id: r for r in rows if r.root_id is not None and r.ended_at is not None}
+        if not closed:
+            return {}
+        pairs = sorted({(r.goal_id, r.n) for r in closed.values()})
+        recorded: dict[tuple[UUID, int], int] = {}
+        known: set[str] = set()
+        for goal_id, session_n, evidence in (
+            await s.execute(
+                select(GoalJournal.goal_id, GoalJournal.session_n, GoalJournal.evidence).where(
+                    GoalJournal.agent_id == self._agent_id,
+                    GoalJournal.kind == "state",
+                    GoalJournal.actor == "harness",
+                    tuple_(GoalJournal.goal_id, GoalJournal.session_n).in_(pairs),
+                )
+            )
+        ).all():
+            for ref in (str(item) for item in evidence or []):
+                if ref.startswith(ARRIVALS_REF) and ref[len(ARRIVALS_REF) :].isdigit():
+                    recorded[(goal_id, session_n)] = int(ref[len(ARRIVALS_REF) :])
+                elif ref.startswith(RESUMED_REF):
+                    known.add(ref)
+        roots = sorted(closed)
+        arrivals: dict[UUID, list[Any]] = {}
+        for item in (
+            await s.execute(
+                select(
+                    IntentionArrival.root_id,
+                    IntentionArrival.id,
+                    IntentionArrival.n,
+                    IntentionArrival.decision,
+                    IntentionArrival.outcome,
+                )
+                .where(IntentionArrival.agent_id == self._agent_id, IntentionArrival.root_id.in_(roots))
+                .order_by(IntentionArrival.root_id, IntentionArrival.n)
+            )
+        ).all():
+            arrivals.setdefault(item.root_id, []).append(item)
+        member = aliased(Intention)
+        states = {
+            item.id: item
+            for item in (
+                await s.execute(
+                    select(
+                        Intention.id,
+                        Intention.root_cancelled_at,
+                        Intention.root_expired_at,
+                        exists()
+                        .where(
+                            member.agent_id == self._agent_id,
+                            member.root_id == Intention.id,
+                            member.state.in_(continuation.OPEN_STATES),
+                        )
+                        .label("open_work"),
+                    ).where(Intention.agent_id == self._agent_id, Intention.id.in_(roots))
+                )
+            ).all()
+        }
+        plans = dict(
+            (
+                await s.execute(
+                    select(Goal.id, Goal.plan).where(
+                        Goal.agent_id == self._agent_id, Goal.id.in_(sorted({r.goal_id for r in closed.values()}))
+                    )
+                )
+            ).all()
+        )
+        found: dict[UUID, list[_JournalItem]] = {}
+        for root_id, row in closed.items():
+            since = recorded.get((row.goal_id, row.n))
+            after = [a for a in arrivals.get(root_id, []) if since is not None and a.n > since]
+            state = states.get(root_id)
+            if not after or state is None:
+                continue
+            marked = state.root_cancelled_at is not None or state.root_expired_at is not None
+            ref = f"{RESUMED_REF}{after[-1].id}"
+            if (state.open_work and not marked) or ref in known:
+                continue
+            steps = sum(
+                1
+                for step in plans.get(row.goal_id) or []
+                if isinstance(step, dict) and step.get("closed_session") == row.n
+            )
+            if any(a.outcome == continuation.OUTCOME_FAILED for a in after):
+                outcome = "error"
+            elif steps > row.steps_closed:
+                outcome = "step_closed"
+            elif any(a.decision == "ask" for a in after):
+                outcome = "asked"
+            else:
+                outcome = "interrupted" if marked else "no_step"
+            text_ = f"Session {row.n}'s chain resumed after the session closed and ended again: {outcome}."
+            found[row.id] = [_JournalItem("state", "harness", text_, [ref])]
+        return found
+
+    async def _reconcile_resumed(self, session_id: UUID) -> int:
+        """Journal that a closed session's resumed chain ended (``_resumed_endings``), in a transaction of its own
+        that holds the session row's lock, so two drivers cannot both write it. Returns the rows journalled."""
+        async with self._db.session() as s:
+            row = (
+                await s.execute(
+                    select(GoalSession)
+                    .where(GoalSession.id == session_id, GoalSession.agent_id == self._agent_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if row is None:
+                return 0
+            items = (await self._resumed_endings(s, [row])).get(row.id, [])
+            for item in items:
+                self._journal(
+                    s, row.goal_id, item.kind, item.text, actor=item.actor, session_n=row.n, evidence=item.refs
+                )
+            await s.commit()
+            return len(items)
+
     async def _end(
         self,
         s: AsyncSession,
@@ -893,10 +1625,13 @@ class GoalDriver:
         summary: str | None,
         session_note: str | None = None,
         detail: str | None = None,
+        evidence: Iterable[str] = (),
+        cancelled_by_owner: bool = False,
     ) -> bool:
         """The close's writes, in the caller's transaction: the session row (only while still open), an active
-        goal's next wake, and the harness ``state`` row. False when the session was closed meanwhile (nothing else
-        is written).
+        goal's next wake, and the harness ``state`` row (with ``evidence``). False when the session was closed
+        meanwhile (nothing else is written). When the owner cancelled the session's root (``cancelled_by_owner``),
+        an active goal is paused (``owner``) instead, its wake and request cleared, with a harness row saying so.
 
         The ``state`` row's own words are the harness's (``detail`` included). The chain's text goes in only as
         ``session_note`` (its newest arrival note, when the session sent no report), on one line after a fixed label
@@ -917,13 +1652,26 @@ class GoalDriver:
         )
         if result.rowcount != 1:
             return False
-        interval = timedelta(seconds=goal.min_interval_seconds * (1 if outcome == "step_closed" else 2))
-        await s.execute(
-            update(Goal)
-            .where(Goal.id == goal.id, Goal.agent_id == self._agent_id, Goal.state == "active")
-            .values(next_wake_at=now + interval, updated_at=func.clock_timestamp())
-            .execution_options(synchronize_session=False)
-        )
+        active = [Goal.id == goal.id, Goal.agent_id == self._agent_id, Goal.state == "active"]
+        paused = False
+        if cancelled_by_owner:
+            values = {"state": "paused", "pause_reason": "owner", "next_wake_at": None}
+            paused = (
+                await s.execute(
+                    update(Goal)
+                    .where(*active)
+                    .values(**values, pending_request=None, pending_request_at=None, updated_at=func.clock_timestamp())
+                    .execution_options(synchronize_session=False)
+                )
+            ).rowcount == 1
+        else:
+            interval = timedelta(seconds=goal.min_interval_seconds * (1 if outcome == "step_closed" else 2))
+            await s.execute(
+                update(Goal)
+                .where(*active)
+                .values(next_wake_at=now + interval, updated_at=func.clock_timestamp())
+                .execution_options(synchronize_session=False)
+            )
         note = f"Session {row.n} ended: {outcome}, {spent} tokens."
         if detail:
             note += f"\n{detail}"
@@ -932,7 +1680,16 @@ class GoalDriver:
         flat_note = clip(" ".join((session_note or "").split()), SUMMARY_MAX)
         if flat_note:
             note += f"\n{SESSION_NOTE_LABEL} {flat_note}"
-        self._journal(s, goal.id, "state", note, actor="harness", session_n=row.n)
+        self._journal(s, goal.id, "state", note, actor="harness", session_n=row.n, evidence=evidence)
+        if paused:
+            self._journal(
+                s,
+                goal.id,
+                "state",
+                f"Paused: the owner cancelled session {row.n}'s chain.",
+                actor="harness",
+                session_n=row.n,
+            )
         return True
 
     async def refresh_sessions(self) -> int:
@@ -957,11 +1714,27 @@ class GoalDriver:
         A closed session's root can resume (a late result reopens it), and its chain can then ask the owner and get
         an answer after the close journalled the session's questions: every tick, the questions and answers of the
         closed sessions read here that the journal does not hold yet are journalled, each session in a transaction
-        of its own holding the session row's lock, as the close does. Returns the sessions whose spend changed."""
+        of its own holding the session row's lock, as the close does. When such a chain has ended again, one harness
+        row says so and how it ended (``_resumed_endings``); the session's outcome, steps and summary stay what the
+        close wrote, and runs of outcomes (a stall, errors in a row) read only those.
+
+        The closed sessions whose root's deadline has not passed are found among those started within the root
+        TTL plus ``DEADLINE_SCAN_SLACK`` (an index range, not every session the agent ever had); one whose first task
+        was published more than the slack after its start, or which started under a longer TTL than today's, is
+        read from that branch only while it falls inside the range. A lineage DAG that leaves a terminal state again
+        (``retry_node`` reactivates a failed one) makes its closed session unsettled: the agent's DAGs that are not
+        terminal (an index on status) bring their closed sessions into the read, and so into ``_following``. Not
+        followed: a retry that starts, finishes and has its tokens claimed between two ticks after the session was
+        dropped, and a check run already under way when its heartbeat check was disabled (its tokens land after the
+        check stopped holding the session).
+        Returns the sessions whose spend changed."""
         root = aliased(Intention)
-        reasons = [GoalSession.ended_at.is_(None), root.deadline > func.clock_timestamp()]
-        if self._following:
-            reasons.append(GoalSession.id.in_(sorted(self._following)))
+        following = GoalSession.id.in_(sorted(self._following)) if self._following else false()
+        # now(), the transaction's start: stable, so the planner can use it as an index bound (clock_timestamp()
+        # is volatile and cannot be one). The slack is far larger than the moments between the two.
+        recent = GoalSession.started_at > func.now() - (
+            timedelta(hours=float(self._settings.intention_root_ttl_hours)) + DEADLINE_SCAN_SLACK
+        )
         columns = (
             GoalSession.id,
             GoalSession.goal_id,
@@ -969,15 +1742,35 @@ class GoalDriver:
             GoalSession.root_id,
             GoalSession.spent,
             GoalSession.ended_at,
+            GoalSession.steps_closed,
         )
         query = (
             select(*columns)
             .join(root, and_(root.agent_id == self._agent_id, root.id == GoalSession.root_id))
-            .where(GoalSession.agent_id == self._agent_id, or_(*reasons))
+            .where(
+                GoalSession.agent_id == self._agent_id,
+                # On the session row alone, so each branch is an index range: open, recent, followed.
+                or_(GoalSession.ended_at.is_(None), recent, following),
+                or_(GoalSession.ended_at.is_(None), root.deadline > func.clock_timestamp(), following),
+            )
+        )
+        member, dag = aliased(Intention), aliased(ExecutionDAG)
+        reactivated = (
+            select(*columns)
+            .join(member, and_(member.agent_id == self._agent_id, member.root_id == GoalSession.root_id))
+            .join(dag, and_(dag.agent_id == self._agent_id, cast(dag.id, Text) == member.source_id))
+            .where(
+                GoalSession.agent_id == self._agent_id,
+                GoalSession.ended_at.is_not(None),
+                member.source_kind == intentions.SOURCE_DAG,
+                dag.status.not_in(intentions.TERMINAL_DAG_STATUSES),
+            )
         )
         changed = 0
         async with self._db.session() as s:
             rows = {r.id: r for r in (await s.execute(query)).all()}
+            for r in (await s.execute(reactivated)).all():
+                rows.setdefault(r.id, r)
             batch: list[Any] = []
             catching_up, cursor_read = not self._caught_up, self._catch_up_after
             if catching_up:
@@ -1014,9 +1807,12 @@ class GoalDriver:
                     ).scalars()
                 )
             asked: dict[UUID, list[_JournalItem]] = {}
+            resumed: dict[UUID, list[_JournalItem]] = {}
             if rows:
                 totals = await spend.session_spent(s, self._agent_id, [r.root_id for r in rows.values()])
-                for r in rows.values():
+                # In id order: two processes refreshing the same sessions take their row locks in one order, so
+                # neither waits on a row the other holds while holding one it waits for.
+                for r in sorted(rows.values(), key=lambda r: r.id):
                     if totals[r.root_id] > r.spent:
                         # Every source only grows: a read taken before another tick wrote a newer total is older,
                         # and must not put a lower one back.
@@ -1026,7 +1822,9 @@ class GoalDriver:
                             .values(spent=totals[r.root_id])
                         )
                         changed += result.rowcount
-                asked = await self._new_questions_and_answers(s, [r for r in rows.values() if r.ended_at is not None])
+                closed_rows = [r for r in rows.values() if r.ended_at is not None]
+                asked = await self._new_questions_and_answers(s, closed_rows)
+                resumed = await self._resumed_endings(s, closed_rows)
             await s.commit()
         # Only what this pass read itself changes the followed set: a closed session it read as settled leaves,
         # one it read as unsettled joins. An id a close added meanwhile (a session this pass read while it was
@@ -1039,11 +1837,14 @@ class GoalDriver:
                 self._caught_up, self._catch_up_after = True, None
             else:
                 self._catch_up_after = (batch[-1].ended_at, batch[-1].id)
-        for session_id in asked:
+        for session_id in dict.fromkeys([*asked, *resumed]):  # a session's questions before how its chain ended
             try:
-                await self._reconcile_questions_and_answers(session_id)
+                if session_id in asked:
+                    await self._reconcile_questions_and_answers(session_id)
+                if session_id in resumed:
+                    await self._reconcile_resumed(session_id)
             except Exception:
-                logger.exception("Goal session %s: its questions could not be journalled; tried again", session_id)
+                logger.exception("Goal session %s: its resumed chain could not be journalled; tried again", session_id)
                 self._following.add(session_id)  # read again at the next tick, whatever its deadline
         return changed
 
@@ -1132,30 +1933,224 @@ class GoalDriver:
         )
         return or_(subtasks, dags, open_claimable)
 
-    # ---- goal rows -----------------------------------------------------------------------------------------
+    # ---- stop conditions -----------------------------------------------------------------------------------
 
-    async def _pause(self, goal_id: UUID, reason: str, note: str, *, session_n: int | None = None) -> bool:
-        """An active goal to ``paused`` for ``reason``, its wake and any request cleared, with a harness ``state``
-        row saying why, in one transaction. False (nothing written) when the goal is no longer active."""
+    async def apply_stop_conditions(self, *, now: datetime | None = None) -> int:
+        """Pause every active goal a stop condition holds, the first that holds (``_stop_reason``): ``deadline``,
+        ``budget``, ``stalled``, ``error``. A first read finds them; each pause is ``_pause_on_stop``, which locks the
+        goal row and reads that condition again from it before it writes: its wake and any request cleared, with one
+        harness row whose evidence is ``stop:<reason>`` and whose session is the goal's newest, so runs of outcomes
+        restart after it. A paused goal (``waiting_for_owner`` included) is never looked at, and a pause cannot
+        happen twice. ``now`` defaults to the database's clock. Returns the goals paused.
+
+        What gets each one going again is the store's: ``resume`` (refused while the budget is spent or the
+        deadline has passed: ``raise_budget`` or ``extend_deadline`` first). A stall or an error run counts only
+        sessions after the pause that ended it, so a resumed goal is not paused again for the same sessions."""
         async with self._db.session() as s:
-            result = await s.execute(
-                update(Goal)
-                .where(Goal.id == goal_id, Goal.agent_id == self._agent_id, Goal.state == "active")
-                .values(
-                    state="paused",
-                    pause_reason=reason,
-                    next_wake_at=None,
-                    pending_request=None,
-                    pending_request_at=None,
-                    updated_at=func.clock_timestamp(),
-                )
-                .execution_options(synchronize_session=False)
+            read_at = now if now is not None else (await s.execute(select(func.clock_timestamp()))).scalar_one()
+            goals = list(
+                (await s.execute(select(Goal).where(Goal.agent_id == self._agent_id, Goal.state == "active"))).scalars()
             )
-            if result.rowcount != 1:
+            found = [(goal.id, await self._stop_reason(s, goal, read_at)) for goal in goals]
+        paused = 0
+        for goal_id, stop in found:
+            if stop is None:
+                continue
+            reason, _note = stop
+            try:
+                if await self._pause_on_stop(goal_id, reason, now=now):
+                    paused += 1
+            except Exception:
+                logger.exception("Goal %s: the pause (%s) failed; tried again next tick", goal_id, reason)
+        return paused
+
+    async def _stop_reason(self, s: AsyncSession, goal: Goal, now: datetime) -> tuple[str, str] | None:
+        """The first stop condition that holds for ``goal`` at ``now``: ``(reason, the pause row's words)``, else
+        None."""
+        for reason in STOP_REASONS:
+            note = await self._stop_note(s, goal, reason, now)
+            if note is not None:
+                return reason, note
+        return None
+
+    async def _stop_note(self, s: AsyncSession, goal: Goal, reason: str, now: datetime) -> str | None:
+        """The pause row's words when the stop condition ``reason`` holds for ``goal`` at ``now``, else None. Spend
+        only grows; the runs are read from closing outcomes only, after the newest pause for their reason."""
+        if reason == "deadline":
+            return "Paused: the deadline has passed." if _deadline_passed(goal, now) else None
+        if reason == "budget":
+            total, _today = await spend.goal_spent(s, self._agent_id, goal.id, now=now)
+            if not _budget_spent(total, goal.total_budget):
+                return None
+            return f"Paused: the total budget is spent ({total} of {goal.total_budget} tokens)."
+        if reason == "stalled":
+            stall = await self._run_length(
+                s, goal.id, counts="no_step", breaks=("step_closed", "error"), reason="stalled"
+            )
+            return f"Paused: {stall} sessions in a row took no step." if stall >= goal.stall_limit else None
+        errors = await self._run_length(
+            s, goal.id, counts="error", breaks=("step_closed", "asked", "no_step"), reason="error"
+        )
+        return f"Paused: {errors} sessions in a row ended in an error." if errors >= ERRORS_BEFORE_PAUSE else None
+
+    async def _pause_on_stop(self, goal_id: UUID, reason: str, *, now: datetime | None) -> bool:
+        """Pause an active goal for the stop condition ``reason``, read again in the pause's own transaction under
+        the goal row's lock (``_stop_note``; the clock read after the lock unless ``now`` is given). So a pause another
+        driver process made meanwhile (its ``stop:<reason>`` row restarts the run) and an owner's change after it (a
+        resume, a raised budget, an extended deadline) are what the condition is read against. False (nothing
+        written) when the goal is no longer active or the condition no longer holds."""
+        async with self._db.session() as s:
+            goal = await self._lock_active(s, goal_id)
+            if goal is None:
                 return False
-            self._journal(s, goal_id, "state", note, actor="harness", session_n=session_n)
+            at = now if now is not None else (await s.execute(select(func.clock_timestamp()))).scalar_one()
+            note = await self._stop_note(s, goal, reason, at)
+            if note is None:
+                return False
+            if not await self._paused(s, goal_id, reason, note, evidence=[f"{STOP_REF}{reason}"], newest_session=True):
+                return False
             await s.commit()
             return True
+
+    async def _run_length(
+        self, s: AsyncSession, goal_id: UUID, *, counts: str, breaks: tuple[str, ...], reason: str
+    ) -> int:
+        """The newest run of ``counts`` outcomes of the goal's closed sessions: those after the newest session whose
+        outcome is in ``breaks`` and after the session of the newest pause for ``reason`` (``stop:<reason>``); any
+        other outcome neither counts nor breaks it. One count, with nothing stored to drift."""
+        broken = (
+            select(func.coalesce(func.max(GoalSession.n), 0))
+            .where(
+                GoalSession.agent_id == self._agent_id,
+                GoalSession.goal_id == goal_id,
+                GoalSession.outcome.in_(breaks),
+            )
+            .scalar_subquery()
+        )
+        paused_at = (
+            select(func.coalesce(func.max(GoalJournal.session_n), 0))
+            .where(
+                GoalJournal.agent_id == self._agent_id,
+                GoalJournal.goal_id == goal_id,
+                GoalJournal.kind == "state",
+                GoalJournal.actor == "harness",
+                GoalJournal.evidence.contains([f"{STOP_REF}{reason}"]),
+            )
+            .scalar_subquery()
+        )
+        return int(
+            await s.scalar(
+                select(func.count()).where(
+                    GoalSession.agent_id == self._agent_id,
+                    GoalSession.goal_id == goal_id,
+                    GoalSession.outcome == counts,
+                    GoalSession.n > broken,
+                    GoalSession.n > paused_at,
+                )
+            )
+            or 0
+        )
+
+    # ---- the continuation runner's priority ----------------------------------------------------------------
+
+    async def goal_roots(self, root_ids: Iterable[UUID]) -> frozenset[UUID]:
+        """Which of ``root_ids`` are roots of goal sessions: one indexed read (``idx_goal_sessions_root``). The
+        continuation runner keeps such a root out of the slots it reserves for the owner's chains. A session's root
+        id is written in the transaction that creates the root (``_publish``), so a root that can be launched has
+        it."""
+        ids = list(dict.fromkeys(root_ids))
+        if not ids:
+            return frozenset()
+        async with self._db.session() as s:
+            found = await s.execute(
+                select(GoalSession.root_id).where(GoalSession.agent_id == self._agent_id, GoalSession.root_id.in_(ids))
+            )
+            return frozenset(found.scalars())
+
+    async def cancel_record_for(self, root_id: UUID) -> dict[str, str] | None:
+        """For the continuation runner's sweep, which finishes the cancel of a DAG still running under a cancelled
+        root: the ``cancel_provenance`` record of that cancel when it was the driver's own end of a stuck chain, else
+        None (the sweep then records the owner). Read from durable rows only: the goal session whose root ``root_id``
+        is (a reopened root is the same root), and that session's newest ending row (``_journal_ending``). One written
+        for a stuck task (no ``request:`` ref) gives the harness's record in the sweep's words; one written for the
+        owner's stop or cancel, no ending row, or a root of no goal session gives None."""
+        async with self._db.session() as s:
+            session = (
+                await s.execute(
+                    select(GoalSession.id, GoalSession.goal_id)
+                    .where(GoalSession.agent_id == self._agent_id, GoalSession.root_id == root_id)
+                    .limit(1)
+                )
+            ).one_or_none()
+            if session is None:
+                return None
+            newest = await s.scalar(
+                select(GoalJournal.evidence)
+                .where(
+                    GoalJournal.agent_id == self._agent_id,
+                    GoalJournal.goal_id == session.goal_id,
+                    GoalJournal.kind == "state",
+                    GoalJournal.actor == "harness",
+                    GoalJournal.evidence.contains([f"{ENDING_REF}{session.id}"]),
+                )
+                .order_by(GoalJournal.seq.desc())
+                .limit(1)
+            )
+        if newest is None or any(isinstance(ref, str) and ref.startswith(REQUEST_REF) for ref in newest):
+            return None
+        return cancel_provenance.record("harness", STUCK_SWEEP_VIA)
+
+    # ---- goal rows -----------------------------------------------------------------------------------------
+
+    async def _lock_active(self, s: AsyncSession, goal_id: UUID) -> Goal | None:
+        """The goal row ``FOR UPDATE`` in the caller's transaction, or None when it is not active."""
+        return (
+            await s.execute(
+                select(Goal)
+                .where(Goal.id == goal_id, Goal.agent_id == self._agent_id, Goal.state == "active")
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+
+    async def _paused(
+        self,
+        s: AsyncSession,
+        goal_id: UUID,
+        reason: str,
+        note: str,
+        *,
+        session_n: int | None = None,
+        evidence: Iterable[str] = (),
+        newest_session: bool = False,
+    ) -> bool:
+        """In the caller's transaction (which has read whatever the pause depends on under the goal row's lock): an
+        active goal to ``paused`` for ``reason``, its wake and any request cleared, with a harness ``state`` row saying
+        why (with ``evidence``). With ``newest_session`` the row's session is the goal's newest, read with the goal
+        row locked (no start of this goal can add one before the commit). False (nothing written) when the goal is no
+        longer active."""
+        result = await s.execute(
+            update(Goal)
+            .where(Goal.id == goal_id, Goal.agent_id == self._agent_id, Goal.state == "active")
+            .values(
+                state="paused",
+                pause_reason=reason,
+                next_wake_at=None,
+                pending_request=None,
+                pending_request_at=None,
+                updated_at=func.clock_timestamp(),
+            )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            return False
+        if newest_session:
+            session_n = await s.scalar(
+                select(func.max(GoalSession.n)).where(
+                    GoalSession.agent_id == self._agent_id, GoalSession.goal_id == goal_id
+                )
+            )
+        self._journal(s, goal_id, "state", note, actor="harness", session_n=session_n, evidence=evidence)
+        return True
 
     def _journal(
         self,

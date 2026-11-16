@@ -30,7 +30,7 @@ from nous.api.execution_context import ExecutionContext
 from nous.api.tool_classes import tool_class
 from nous.brain import continuation, intention_calibration
 from nous.brain.continuation import INTENT_SESSION_PREFIX, Resolution
-from nous.brain.intentions import AUTHORITY_INTERNAL
+from nous.brain.intentions import AUTHORITY_INTERNAL, SOURCE_DAG
 from nous.cancellation import cancel_requested
 from nous.cognitive.claim_verifier import ClaimVerifier, ClaimViolation, Evidence, runner_path, unverified_note
 from nous.cognitive.execution_ledger import RUNNER_STATUSES, bash_exit_code, bash_masked_failure
@@ -623,6 +623,7 @@ class ContinuationRunner:
         self._view_checked_at: datetime | None = None
         self._surface_service: Any = None  # Phase 3a, bound late (set_surface_service)
         self._active_card_refused: str | None = None  # 3b: the fingerprint the censor gate last refused (logged once)
+        self._goals: Any = None  # F114: the goal driver (set_goals); None unless goals are on
 
     @property
     def running_roots(self) -> frozenset[UUID]:
@@ -640,6 +641,11 @@ class ContinuationRunner:
         setter = getattr(self._publisher, "set_surface_service", None)
         if setter is not None:
             setter(service)
+
+    def set_goals(self, goals: Any) -> None:
+        """Bind the goal driver (F114; ``None`` unbinds). While it is bound, ``_launch`` asks it which due roots are
+        goal sessions' (``goal_roots``) and keeps those out of the last ``goals_reserved_slots`` free slots."""
+        self._goals = goals
 
     def root_is_cancelled(self, root_id: UUID) -> bool:
         """The in-process view of cancelled roots, for ``AgentRunner.set_cancelled_roots``. A set lookup: no
@@ -749,7 +755,9 @@ class ContinuationRunner:
     async def _cancel_sweep(self) -> int:
         """Every sweep: take in the roots cancelled since the last one (a cancel through another surface, or by a
         second process), then cancel the DAGs that are still running under a cancelled root (a cancel whose
-        orchestrator call failed, or whose process stopped after the commit). Returns the DAGs it cancelled."""
+        orchestrator call failed, or whose process stopped after the commit), recording the owner unless the bound goal
+        driver gives the record of a chain it ended itself (``_goal_cancel_record``). With no goal driver bound, or no
+        stray DAG, nothing more is read than before goals. Returns the DAGs it cancelled."""
         since = (
             self._view_checked_at - timedelta(seconds=CANCEL_VIEW_MARGIN_SECONDS)
             if self._view_checked_at is not None
@@ -761,18 +769,60 @@ class ContinuationRunner:
         async with self._db.session() as session:
             strays = await continuation.stray_dag_ids(session, self._agent_id, limit=STRAY_DAG_BATCH)
         swept = cancel_provenance.record("owner", "root cancelled earlier, finished by the sweep")
-        return await self._cancel_dags(strays, swept)
+        if self._goals is None or not strays:
+            return await self._cancel_dags(strays, swept)
+        roots = await self._stray_roots(strays)
+        done = 0
+        for dag_id in strays:
+            record = await self._goal_cancel_record(roots[dag_id]) if dag_id in roots else None
+            done += await self._cancel_dags([dag_id], record or swept)
+        return done
+
+    async def _stray_roots(self, dag_ids: Sequence[UUID]) -> dict[UUID, UUID]:
+        """F114, only with a goal driver bound: each stray DAG's root (the root of the DAG's own intention), in one
+        read for the whole batch. A read that fails is logged by its class and gives none: the sweep records the
+        owner."""
+        try:
+            async with self._db.session() as session:
+                rows = await session.execute(
+                    select(Intention.source_id, Intention.root_id).where(
+                        Intention.agent_id == self._agent_id,
+                        Intention.source_kind == SOURCE_DAG,
+                        Intention.source_id.in_([str(dag_id) for dag_id in dag_ids]),
+                    )
+                )
+                return {UUID(source_id): root_id for source_id, root_id in rows.all() if root_id is not None}
+        except Exception as exc:
+            logger.warning("F114: the stray DAGs' roots could not be read (%s)", type(exc).__name__)
+            return {}
+
+    async def _goal_cancel_record(self, root_id: UUID) -> dict[str, str] | None:
+        """F114: the ``cancel_provenance`` record the bound goal driver gives a stray DAG of ``root_id``, when the
+        driver itself ended that root's chain (``GoalDriver.cancel_record_for``); else None, and the sweep records the
+        owner as before: a root it did not end, an answer that is not a record, or a lookup that failed (logged by its
+        class)."""
+        try:
+            found = await self._goals.cancel_record_for(root_id)
+        except Exception as exc:
+            logger.warning("F114: the goal driver's cancel record for root %s failed (%s)", root_id, type(exc).__name__)
+            return None
+        return found if found is not None and cancel_provenance.describe(found) is not None else None
 
     async def _cancel_dags(self, dag_ids: Sequence[UUID], cancelled_by: dict) -> int:
-        """The orchestrator's cancel for each DAG, recording ``cancelled_by`` (a ``cancel_provenance`` record); one
-        that raises is logged and left for the sweep."""
+        """The orchestrator's cancel for each DAG, recording ``cancelled_by`` (a ``cancel_provenance`` record) and a
+        reason from it: "cancelled by the owner" for the owner's, else the record's fixed sentence; one that raises is
+        logged and left for the sweep."""
+        if cancelled_by.get("by") == "owner":
+            reason = "cancelled by the owner"
+        else:
+            reason = cancel_provenance.describe(cancelled_by) or "cancelled"
         done = 0
         for dag_id in dag_ids:
             if self._cancel_dag is None:
                 logger.warning("F099: DAG %s is running under a cancelled root and no orchestrator is bound", dag_id)
                 continue
             try:
-                await self._cancel_dag(dag_id, "cancelled by the owner", cancelled_by)
+                await self._cancel_dag(dag_id, reason, cancelled_by)
                 done += 1
             except asyncio.CancelledError:
                 raise
@@ -1031,6 +1081,7 @@ class ContinuationRunner:
                 debounce_s=settings.continuation_debounce_seconds,
                 max_wait_s=settings.continuation_max_wait_seconds,
             )
+        goal_roots, goal_limit = await self._goal_roots(eligible)
         now = datetime.now(UTC)
         self._cooldown = {root: until for root, until in self._cooldown.items() if until > now}
         launched: list[UUID] = []
@@ -1047,6 +1098,8 @@ class ContinuationRunner:
                 continue
             if self._slots.locked():
                 break  # a slot frees when an arrival ends, and that wakes the loop
+            if root_id in goal_roots and len(self._running) >= goal_limit:
+                continue  # F114: not the owner's reserved slots; continue, so an owner root later in the list can go
             await self._slots.acquire()
             # The launch is run_once's LAST step, and nothing between this create_task and run_once's return yields
             # (the acquire above never waits: the slot was just seen free), so the task has not started when run_once
@@ -1056,6 +1109,24 @@ class ContinuationRunner:
             self._running[root_id] = task
             launched.append(root_id)
         return launched, next_due
+
+    async def _goal_roots(self, eligible: Sequence[tuple[UUID, datetime]]) -> tuple[frozenset[UUID], int]:
+        """F114: which due roots are goal sessions', and how many arrivals may be running for one of them to launch:
+        ``continuation_max_concurrent`` less ``goals_reserved_slots``, reserving at most all slots but one (with one
+        slot a goal's chain still runs, and the owner's wait behind it). With no goal driver bound: no goal roots,
+        and nothing is read. A lookup that fails is logged and the sweep launches as if there were none, so the
+        owner's chains never wait on it."""
+        goals = self._goals
+        if goals is None or not eligible:
+            return frozenset(), 0
+        settings = self._settings
+        reserved = min(int(settings.goals_reserved_slots), settings.continuation_max_concurrent - 1)
+        try:
+            roots = await goals.goal_roots([root_id for root_id, _due in eligible])
+        except Exception:
+            logger.warning("F114: the goal roots could not be read; this sweep launches without them", exc_info=True)
+            return frozenset(), 0
+        return frozenset(roots), settings.continuation_max_concurrent - reserved
 
     async def _arrival_task(self, root_id: UUID) -> None:
         """One root's arrival, in a task of its own: the per-root catch. Whatever it raises is logged and stays
@@ -1995,8 +2066,13 @@ class ContinuationRunner:
     # the A2UI card call this one function. Not a tool: no model can cancel (it can only stop its own children).
     # ------------------------------------------------------------------
 
-    async def cancel_root(self, root_id: UUID, *, reason: str, actor: str) -> continuation.CancelOutcome:
-        """Cancel a root and everything under it (T13). In this order:
+    async def cancel_root(
+        self, root_id: UUID, *, reason: str, actor: str, cancelled_by: dict[str, str] | None = None
+    ) -> continuation.CancelOutcome:
+        """Cancel a root and everything under it (T13). ``cancelled_by`` is the ``cancel_provenance`` record the
+        lineage's DAGs keep: by default the owner's, through the surface ``actor`` names (the routes, the bot, the
+        companion); the goal driver gives the harness's for a chain it ends itself. Checked before anything is
+        written (ValueError). In this order:
 
         1. The store's one transaction (``continuation.cancel_root``): the marker, the lineage, its subtasks, its
            proposals, its containers and their fires. It commits.
@@ -2010,12 +2086,15 @@ class ContinuationRunner:
         5. The bus.
 
         Raises ``continuation.RootNotFound`` and ``continuation.CancelRefused`` (nothing written)."""
+        if cancelled_by is None:
+            cancelled_by = cancel_provenance.record("owner", cancel_provenance.owner_via(actor))
+        elif cancel_provenance.describe(cancelled_by) is None:
+            raise ValueError("cancelled_by is not a cancel_provenance record")
         async with self._db.session() as session:
             outcome = await continuation.cancel_root(session, self._agent_id, root_id, reason=reason, actor=actor)
             await session.commit()
         self._cancelled.update(outcome.root_ids)
-        by_owner = cancel_provenance.record("owner", cancel_provenance.owner_via(actor))
-        cancelled_dags = await self._cancel_dags(outcome.dag_ids, by_owner)
+        cancelled_dags = await self._cancel_dags(outcome.dag_ids, cancelled_by)
         stopped = await self._stop_turns(outcome.root_ids)
         for cancelled in outcome.root_ids:
             await self._emit("intention.root_cancelled", {"root_id": str(cancelled), "reason": reason, "actor": actor})

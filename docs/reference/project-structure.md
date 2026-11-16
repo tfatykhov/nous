@@ -85,7 +85,7 @@ nous/
 │   │   ├── sleep_handler.py       # Sleep/reflection handler (its `tool_notes` phase runs `ToolNotesReview`; counts under `sleep_stats["tool_notes"]`)
 │   │   ├── subtask_worker.py      # Async subtask execution
 │   │   ├── schedule_guard.py      # F107: run-level guard for scheduled script jobs (a schedule's `metadata.guard` names an entry of the `NOUS_SCHEDULE_GUARD_COMMANDS` allowlist, which runs before the model turn; `exit0_quiet`: exit 0 + empty stdout + empty stderr completes the run without one in `mode: skip`; the default `shadow` mode only records it, and `acted_signals` defines whether the model acted)
-│   │   ├── continuation_runner.py # F099 Phase 2c: ContinuationRunner (the loop, the turn, resolve_intention, the follow-up and fallbacks), build_arrival_prompt; Phase 3a: the card settle step
+│   │   ├── continuation_runner.py # F099 Phase 2c: ContinuationRunner (the loop, the turn, resolve_intention, the follow-up and fallbacks), build_arrival_prompt; Phase 3a: the card settle step; F114: set_goals, and the sweep keeps a goal session's root out of the slots reserved for the owner's chains
 │   │   ├── continuation_publisher.py # F099 Phase 2c: OwnerPublisher, the owner push to Telegram (quiet-hours aware, once per row); Phase 2d: PROPOSAL rows with buttons, QUESTION rows with force_reply, escaped HTML; Phase 3a: the companion card leg
 │   │   ├── task_scheduler.py      # Cron/one-shot scheduling
 │   │   └── time_parser.py         # Natural language time parsing
@@ -178,10 +178,10 @@ nous/
 │   │   ├── envelope.py         # A goal's limits: the small, medium and large presets, and custom values checked against migration 113's ranges
 │   │   ├── store.py            # GoalStore: brain.goals, goal_sessions and the append-only goal_journal (migration 113); each change a targeted update guarded by the state it read, plus a journal row naming the actor; add_journal_row appends in the caller's transaction
 │   │   ├── roots.py            # create_session_root: a session's first subtask and its root intention (origin goal, internal authority, so its wake policy is continue)
-│   │   ├── spend.py            # session_spent: a session's spend is its root's token budget as continuation.root_limits counts it; goal_spent: a goal's total and today's (UTC)
+│   │   ├── spend.py            # session_spent: a session's spend is its root's token budget as continuation.root_limits counts it; goal_spent: a goal's total and today's (UTC, by the day each session started); sessions_started_today; jobs_launched_today: job launches of a goal's lineages from the tool-call log (None with it off), each logged command read as shell words, one launch per simple command (job_launches)
 │   │   ├── quote.py            # A journal entry or plan step as data: its own tag, invisible and control characters removed, every journal_entry, plan_step and result_message delimiter escaped (fullwidth brackets too)
 │   │   ├── charter.py          # build_session_task: a session's first task (the charter, then the plan and the journal quoted as data), at most 12,000 characters
-│   │   ├── driver.py           # GoalDriver (not wired yet): each tick claims the goal channels into the journal, closes sessions whose chain ended, starts the goals that are due within the queue headroom
+│   │   ├── driver.py           # GoalDriver (not wired yet): each tick claims the goal channels into the journal, acts on the owner's stop and cancel, closes sessions whose chain ended, ends chains with a task stuck past its limit, reads spend again, pauses goals on a stop condition (deadline, budget, stall, errors), starts the run-now requests and the goals that are due within their limits and the queue headroom; goal_roots for the continuation runner's reserved slots
 │   │   └── seed.py             # `python -m nous.goals.seed create|list|show|approve|pause|resume|run-now|stop|cancel|confirm|note|raise-budget|extend`: the owner's host command; changes refused with the flag off
 │   └── api/                    # External interfaces
 │       ├── rest.py             # Starlette REST API (the route list in `create_app`; see `docs/reference/rest-api.md`)

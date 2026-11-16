@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from f099_support import (
@@ -23,6 +25,7 @@ from f099_support import (
 from sqlalchemy import select
 
 import nous.handlers.continuation_runner as runner_module
+from nous import cancel_provenance
 from nous.api.execution_context import ExecutionContext
 from nous.brain import continuation
 from nous.handlers.continuation_runner import ContinuationRunner
@@ -135,6 +138,49 @@ async def test_the_owner_root_cancel_attributes_the_cascaded_dag(runner_env):  #
     owner, swept = dags.by
     assert (owner["by"], owner["via"]) == ("owner", "Telegram")
     assert swept["by"] == "owner" and "sweep" in swept["via"]
+
+
+async def test_a_harness_root_cancel_records_the_harness_on_the_cascaded_dag(runner_env):  # noqa: F811
+    """The goal driver ends a stuck chain with the harness's record: the DAG's cancel carries that record and its
+    fixed sentence, not the owner's."""
+    env = await runner_env()
+    root = await make_root(env)
+    running, _ = await make_dag(env, status="running", parent=root)
+    dags = DagRecorder()
+    cont = _cont(env, cancel_dag=dags)
+    harness = cancel_provenance.record("harness", "goal driver: a task ran past its time limit")
+    await cont.cancel_root(root.id, reason="goal session stuck", actor="goal:harness", cancelled_by=harness)
+    assert dags.calls == [(running.id, "cancelled by the harness (goal driver: a task ran past its time limit)")]
+    assert dags.by == [harness]
+
+
+async def test_a_cancel_with_a_record_that_is_not_one_raises_before_anything_is_written(runner_env):  # noqa: F811
+    env = await runner_env()
+    root = await make_root(env)
+    cont = _cont(env, cancel_dag=DagRecorder())
+    with pytest.raises(ValueError):
+        await cont.cancel_root(root.id, reason="t", actor="t", cancelled_by={"by": "someone"})
+    assert not cont.root_is_cancelled(root.id) and (await intention_of(env, "subtask", root.source_id)).state != (
+        "cancelled"
+    )
+
+
+def test_every_owner_surface_cancels_with_the_owners_record():
+    """The owner's surfaces (the routes, the companion) call ``cancel_root`` without ``cancelled_by``, so the
+    runner records the owner through their actor; only the goal driver passes a record of its own."""
+    root = Path(runner_module.__file__).resolve().parents[1]
+    runner_call = re.compile(r"(?<!continuation)\.cancel_root\(")  # not the store's continuation.cancel_root
+    calls = {
+        path.relative_to(root).as_posix(): len(runner_call.findall(path.read_text(encoding="utf-8")))
+        for path in root.rglob("*.py")
+        if runner_call.search(path.read_text(encoding="utf-8"))
+    }
+    assert calls == {"a2ui/actions.py": 1, "api/intention_routes.py": 1, "goals/driver.py": 2}
+    for owner_surface in ("a2ui/actions.py", "api/intention_routes.py"):
+        text = (root / owner_surface).read_text(encoding="utf-8")
+        start = text.index(".cancel_root(")
+        call = text[start : text.index("\n", start)]  # the call is one line: it ends with its closing parenthesis
+        assert call.endswith(")") and "cancelled_by" not in call
 
 
 async def test_the_sweep_leaves_a_running_dag_of_a_live_root_alone(runner_env):  # noqa: F811

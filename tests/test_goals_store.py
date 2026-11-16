@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import inspect
 import uuid
+import weakref
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.config import Settings
 from nous.goals import envelope
@@ -337,6 +339,44 @@ async def test_a_note_wakes_an_active_goal_with_no_session_and_never_resumes_a_p
     await store.pause(other.id, actor="owner")
     still = await store.add_note(other.id, "keep going", actor="owner")
     assert (still.state, still.pause_reason, still.next_wake_at) == ("paused", "owner", None)
+
+
+@pytest.mark.parametrize("change", ["pause", "resume", "note"])
+async def test_a_change_returns_the_changed_goal_when_a_read_after_its_commit_would_fail(db, monkeypatch, change):
+    """The goal a change returns is read inside the changing transaction: a session that can no longer read once it
+    has committed (the connection went away) still answers the change with the goal as changed."""
+    store = _store(db)
+    goal = await _active(store)
+    if change == "resume":
+        await store.pause(goal.id, actor="owner")
+    later = datetime.now(UTC) + timedelta(hours=5)
+    await _set(store, goal, next_wake_at=later)
+    committed: weakref.WeakSet[AsyncSession] = weakref.WeakSet()
+    real_commit, real_refresh = AsyncSession.commit, AsyncSession.refresh
+
+    async def commit(self, *args, **kwargs):
+        await real_commit(self, *args, **kwargs)
+        committed.add(self)
+
+    async def refresh(self, *args, **kwargs):
+        if self in committed:
+            raise ConnectionError("the connection went away")
+        return await real_refresh(self, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "commit", commit)
+    monkeypatch.setattr(AsyncSession, "refresh", refresh)
+    if change == "pause":
+        changed = await store.pause(goal.id, actor="owner")
+        assert (changed.state, changed.pause_reason, changed.next_wake_at) == ("paused", "owner", None)
+    elif change == "resume":
+        changed = await store.resume(goal.id, actor="owner")
+        assert (changed.state, changed.pause_reason) == ("active", None) and changed.next_wake_at < later
+    else:
+        changed = await store.add_note(goal.id, "Look in the archive folder too", actor="owner")
+        assert changed.state == "active" and changed.next_wake_at < later
+    monkeypatch.undo()
+    stored = await store.get(goal.id)
+    assert (stored.state, stored.next_wake_at) == (changed.state, changed.next_wake_at)
 
 
 async def test_delay_wake_moves_only_the_wake_its_caller_saw(db):
