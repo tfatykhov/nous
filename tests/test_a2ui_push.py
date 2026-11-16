@@ -17,13 +17,16 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.a2ui.builders import approval_gate
 from nous.a2ui.push import (
@@ -381,6 +384,121 @@ async def test_registration_cap_refuses_a_new_install_but_not_an_existing_one(
     # The existing installs still rotate their tokens.
     status, _ = await push_service.register("a", fcm_token="tok-a-rotated")
     assert status == 200
+
+
+class _CommitGate:
+    """The test database, except that the first session to commit stops just before its commit
+    until ``release`` is set. A registration stopped there still holds every lock it took."""
+
+    def __init__(self, db: Any) -> None:
+        self._db = db
+        self.reached = asyncio.Event()
+        self.release = asyncio.Event()
+
+    @asynccontextmanager
+    async def session(self) -> AsyncIterator[AsyncSession]:
+        async with self._db.session() as session:
+            commit = session.commit
+
+            async def gated_commit() -> None:
+                if not self.reached.is_set():
+                    self.reached.set()
+                    await self.release.wait()
+                await commit()
+
+            session.commit = gated_commit  # type: ignore[method-assign]
+            yield session
+
+
+async def _advisory_lock_waiters(db: Any) -> int:
+    async with db.engine.connect() as conn:
+        return (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                    "AND wait_event_type = 'Lock' AND wait_event = 'advisory' "
+                    "AND query LIKE '%pg_advisory_xact_lock%'"
+                )
+            )
+        ).scalar_one()
+
+
+async def _two_registrations_at_once(
+    db: Any, settings: Any, first_id: str, second_id: str
+) -> tuple[list[tuple[int, dict[str, Any]]], bool, list[str]]:
+    """Two registrations on two connections. The first is stopped just before its commit; the
+    second starts then, and the first is let go once the second waits for an advisory lock, or
+    has finished. Returns both results in that order, whether the second waited, and the names
+    the owner was told about."""
+    gate = _CommitGate(db)
+    svc = PushService(gate, settings, http=FakeFcm())
+    told: list[str] = []
+
+    async def record(name: str) -> None:
+        told.append(name)
+
+    svc._notify_new_installation = record  # type: ignore[method-assign]
+    tasks = [asyncio.create_task(svc.register(first_id, fcm_token="tok-first", name="First"))]
+    waited = False
+    try:
+        await asyncio.wait_for(gate.reached.wait(), 10)
+        tasks.append(asyncio.create_task(svc.register(second_id, fcm_token="tok-second", name="Second")))
+        for _ in range(200):
+            if await _advisory_lock_waiters(db) >= 1:
+                waited = True
+                break
+            if tasks[1].done():
+                break
+            await asyncio.sleep(0.05)
+    finally:
+        gate.release.set()
+    results = await asyncio.gather(*tasks)
+    return results, waited, told
+
+
+async def _stored(db: Any, agent_id: str) -> dict[str, str | None]:
+    async with db.session() as session:
+        rows = (
+            await session.execute(
+                select(A2uiPushInstallation.installation_id, A2uiPushInstallation.fcm_token).where(
+                    A2uiPushInstallation.agent_id == agent_id
+                )
+            )
+        ).all()
+    return {row.installation_id: row.fcm_token for row in rows}
+
+
+@pytest.mark.postgres_only
+async def test_two_first_registrations_of_one_installation_at_once_store_one_row(
+    db, push_service, push_settings
+) -> None:
+    """The second registration waits for the first, then updates the row the first stored: both
+    answer 200, only the first says created, and the owner is told once."""
+    (first, second), waited, told = await _two_registrations_at_once(db, push_settings, "install-1", "install-1")
+
+    assert first == (200, {"ok": True, "created": True})
+    assert second == (200, {"ok": True, "created": False})
+    assert waited, "the second registration never waited for the first"
+    assert told == ["First"]
+    assert await _stored(db, push_settings.agent_id) == {"install-1": "tok-second"}
+
+
+@pytest.mark.postgres_only
+async def test_two_first_registrations_one_below_the_cap_admit_only_one(db, push_service, push_settings) -> None:
+    """One below the cap, two new installations register at once: the one that waited counts the
+    other's row and is refused."""
+    settings = push_settings.model_copy(update={"a2ui_push_max_installations": 3})
+    push_service._settings = settings
+    await _register(push_service, "a")
+    await _register(push_service, "b")
+
+    (first, second), waited, told = await _two_registrations_at_once(db, settings, "c", "d")
+
+    assert first == (200, {"ok": True, "created": True})
+    assert second[0] == 409 and "cap" in second[1]["error"]
+    assert waited, "the second registration never waited for the first"
+    assert told == ["First"]
+    assert set(await _stored(db, settings.agent_id)) == {"a", "b", "c"}
 
 
 @pytest.mark.postgres_only
