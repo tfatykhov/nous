@@ -3,6 +3,7 @@ import uuid as _uuid
 
 import pytest
 import pytest_asyncio
+from f099_support import OWNER_DIGEST, OWNER_HEADERS
 from httpx import ASGITransport, AsyncClient
 
 from nous.heart import FactInput, Heart
@@ -82,8 +83,10 @@ def _build_app(brain, heart, cognitive, db, settings, identity_manager):
     from nous.api.runner import AgentRunner
 
     mock_runner = AsyncMock(spec=AgentRunner)
+    # The fact writes require the owner's or the proxy's secret: the clients send the owner's.
+    owner_settings = settings.model_copy(update={"owner_route_secret_sha256": OWNER_DIGEST})
     return create_app(
-        mock_runner, brain, heart, cognitive, db, settings,
+        mock_runner, brain, heart, cognitive, db, owner_settings,
         identity_manager=identity_manager,
     )
 
@@ -96,7 +99,7 @@ def app(brain, heart, cognitive, db, settings, identity_manager):
 @pytest_asyncio.fixture
 async def client(app):
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(transport=transport, base_url="http://test", headers=OWNER_HEADERS) as c:
         yield c
 
 
@@ -111,7 +114,7 @@ async def _make_client_for_heart(heart, db, settings):
     identity_manager = IdentityManager(db, settings.agent_id)
     app = _build_app(brain, heart, cognitive, db, settings, identity_manager)
     transport = ASGITransport(app=app)
-    return AsyncClient(transport=transport, base_url="http://test")
+    return AsyncClient(transport=transport, base_url="http://test", headers=OWNER_HEADERS)
 
 
 async def _insert_fact_raw(db, agent_id, content, category, subject):

@@ -1156,7 +1156,8 @@ def create_app(
         result_text = body.get("result")
         reviewer = body.get("reviewer", "external")
         # The scorer counts a review carrying this tag as the owner's own grade, and only the companion actions write
-        # it (in-process). Anything that reaches this endpoint could otherwise send it, so it is refused here.
+        # it (in-process). The reviewer is the request's word, so this endpoint refuses the tag: no review sent here
+        # carries it.
         if isinstance(reviewer, str) and reviewer.strip().lower() == OWNER_GRADE_REVIEWER:
             return JSONResponse(
                 {"error": f'reviewer "{OWNER_GRADE_REVIEWER}" is reserved for the owner\'s companion actions'},
@@ -3914,26 +3915,26 @@ def create_app(
         Route("/status", status),
         Route("/decisions", list_decisions),
         Route("/decisions/unreviewed", list_unreviewed),
-        Route("/decisions/{id}/review", review_decision, methods=["POST"]),
+        owner_guard.route("/decisions/{id}/review", review_decision, methods=["POST"]),
         Route("/decisions/{id}", get_decision),
         Route("/episodes", list_episodes),
         Route("/profile/facts", list_profile_facts),
-        Route("/facts/{fact_id}/core", set_fact_core, methods=["POST"]),
+        owner_guard.route("/facts/{fact_id}/core", set_fact_core, methods=["POST"]),
         Route("/profile-card", get_profile_card),
-        Route("/profile-card/entries/{entry_id}", delete_profile_card_entry, methods=["DELETE"]),
-        Route("/profile-card/rebuild", rebuild_profile_card, methods=["POST"]),
-        Route("/facts/{fact_id}", update_fact, methods=["PUT"]),
-        Route("/facts/{fact_id}", delete_fact, methods=["DELETE"]),
+        owner_guard.route("/profile-card/entries/{entry_id}", delete_profile_card_entry, methods=["DELETE"]),
+        owner_guard.route("/profile-card/rebuild", rebuild_profile_card, methods=["POST"]),
+        owner_guard.route("/facts/{fact_id}", update_fact, methods=["PUT"]),
+        owner_guard.route("/facts/{fact_id}", delete_fact, methods=["DELETE"]),
         Route("/facts", search_facts),
         Route("/chunks", list_chunks),
-        Route("/censors/{id}", update_censor, methods=["PUT"]),
+        owner_guard.route("/censors/{id}", update_censor, methods=["PUT"]),
         Route("/censors", list_censors),
         Route("/procedures", list_procedures),
         Route("/frames", list_frames),
         Route("/calibration", calibration),
         Route("/identity", get_identity),
-        Route("/identity/{section}", update_identity_section, methods=["PUT"]),
-        Route("/reinitiate", reinitiate, methods=["POST"]),
+        owner_guard.route("/identity/{section}", update_identity_section, methods=["PUT"]),
+        owner_guard.route("/reinitiate", reinitiate, methods=["POST"]),
         Route("/subtasks", list_subtasks),
         Route("/subtasks/{id}", get_subtask),
         Route("/subtasks/{id}", cancel_subtask, methods=["DELETE"]),
