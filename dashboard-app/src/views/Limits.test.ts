@@ -216,8 +216,10 @@ describe('Limits and tools: the limits', () => {
       return reads === 1 ? [200, { enabled: true, loaded: false, message: NOT_LOADED_MESSAGE }] : [200, limitsAnswer(limits)];
     };
     render(Limits);
-    expect(await screen.findByRole('heading', { name: 'The saved settings could not be read.' })).toBeTruthy();
-    expect(screen.getByText(NOT_LOADED_MESSAGE)).toBeTruthy();
+    // The server's sentence once, as what the section is about; nothing repeats it.
+    const said = await screen.findByText(NOT_LOADED_MESSAGE);
+    expect(said.closest('section')?.getAttribute('aria-labelledby')).toBe(said.id);
+    expect(screen.queryAllByText(/^The saved settings could not be read/)).toHaveLength(1);
     expect(screen.queryByRole('textbox')).toBeNull();
     expect(calls.map((c) => c.url)).not.toContain('/autonomy/log?kind=limits');
     const retry = screen.getAllByRole('button', { name: 'Retry' }).find((b) => b.closest('section'));
@@ -264,7 +266,9 @@ describe('Limits and tools: the tools', () => {
     expect(radios.map((r) => r.closest('label')?.textContent?.trim())).toEqual(['Allowed', 'Not allowed']);
     expect(radios[0].checked).toBe(true);
     expect(within(web).getByText('Reads only, and brings in outside text.')).toBeTruthy();
-    expect(within(web).getByText('Background calls are not recorded on this server.')).toBeTruthy();
+    // With the call log off, the tab says so once, not on every tool.
+    expect(within(web).queryByText('Background calls are not recorded on this server.')).toBeNull();
+    expect(screen.getAllByText('Background calls are not recorded on this server.')).toHaveLength(1);
     const mail = screen.getByText('send_email').closest('li') as HTMLElement;
     expect(within(mail).getByText('Locked by the server')).toBeTruthy();
     for (const r of within(mail).getAllByRole('radio') as HTMLInputElement[]) expect(r.disabled).toBe(true);

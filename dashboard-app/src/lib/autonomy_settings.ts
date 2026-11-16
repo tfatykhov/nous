@@ -147,7 +147,6 @@ export const OFF_TEXT =
 export const GUARD_OFF_TITLE = 'The tool guard is off on this server.';
 export const GUARD_OFF_TEXT =
   'Set NOUS_TOOL_GUARD_ENABLED=true, with NOUS_AUTONOMY_SETTINGS_ENABLED=true, on the host to choose the tools background work may use. Until then background work is offered the tools it was before.';
-export const NOT_LOADED_TITLE = 'The saved settings could not be read.';
 export const FORBIDDEN_TEXT = 'Sign in through the login page to see and change these settings.';
 export const UNSUPPORTED_TEXT = 'Limits and tools are not available on this server.';
 export const UNREACHABLE_TEXT = 'Could not reach the server.';

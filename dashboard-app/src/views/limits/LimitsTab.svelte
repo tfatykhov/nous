@@ -4,7 +4,7 @@
   import { makePollStore } from '../../lib/stores/registry';
   import { usePoll } from '../../lib/poll';
   import {
-    ALREADY_TEXT, FORBIDDEN_TEXT, LIMITS_SUBTITLE, LOG_TITLE, NOT_LOADED_TITLE, NO_CEILING_TEXT, NO_CHANGES_TEXT,
+    ALREADY_TEXT, FORBIDDEN_TEXT, LIMITS_SUBTITLE, LOG_TITLE, NO_CEILING_TEXT, NO_CHANGES_TEXT,
     OFF_TEXT, OFF_TITLE, READING_TEXT, REFRESH_LABEL, RETRY_LABEL, UNSUPPORTED_TEXT,
     changeLine, changeText, factsText, problemText, rangeText, readGate, readLimits, readLog, readStateText,
     resetLimit, resetText, saveLimit, typedValue,
@@ -118,8 +118,7 @@
   </section>
 {:else if answer && answer.loaded === false}
   <section class="notice" role="status" aria-labelledby="lim-unread">
-    <h2 id="lim-unread">{NOT_LOADED_TITLE}</h2>
-    <p>{answer.message}</p>
+    <p id="lim-unread" class="unread">{answer.message}</p>
     <div class="notice-actions">
       <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={$store.loading}
         onclick={() => void store.refresh()}>{RETRY_LABEL}</Button>
@@ -193,6 +192,7 @@
   .notice { padding: 0.875rem 1rem; border-radius: var(--card-radius-sm); background: var(--warn-bg);
     border: 1px solid var(--warn-border); font-size: 0.8125rem; margin: 0; }
   .notice p { margin: 0; }
+  .notice .unread { font-weight: 600; }
   .notice-actions { margin-top: 0.625rem; }
   .read-error { font-size: 0.8125rem; color: var(--warn-text); margin: 0; overflow-wrap: anywhere; }
   .card { background: var(--surface); border: var(--card-border); border-radius: var(--card-radius); box-shadow: var(--card-shadow);

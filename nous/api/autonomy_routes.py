@@ -45,7 +45,7 @@ from nous.autonomy.store import (
     Change,
     tool_key,
 )
-from nous.autonomy.tool_guard import held_places
+from nous.autonomy.tool_guard import HARNESS_TOOLS, held_places
 from nous.storage.models import ToolCallLog
 
 logger = logging.getLogger(__name__)
@@ -358,9 +358,13 @@ def build_autonomy_routes(
         }
 
     def listed_tools() -> dict[str, str]:
-        """The tools a background turn can be offered (every registered tool but the initiation ones), by name, with
-        each one's description."""
-        return {tool["name"]: tool.get("description", "") for tool in dispatcher.available_tools("task")}
+        """The tools a background turn can be offered (every registered tool but the initiation ones and the
+        harness's own per-turn tools, which no setting holds), by name, with each one's description."""
+        return {
+            tool["name"]: tool.get("description", "")
+            for tool in dispatcher.available_tools("task")
+            if tool["name"] not in HARNESS_TOOLS
+        }
 
     async def tools(request: Request) -> Response:
         """GET /autonomy/tools"""

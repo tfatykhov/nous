@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   ACTOR_WORDS, ALREADY_SETTING_TEXT, ALREADY_TEXT, FORBIDDEN_TEXT, GROUPS, NOT_HELD_TEXT, NOT_JSON_TEXT,
-  NOT_LISTED_TEXT, NOT_LOADED_TITLE, NOT_RECORDED_TEXT, NO_ANSWER_TEXT, OFF_TEXT, PREFERENCES_TEXT, READING_TEXT,
+  NOT_LISTED_TEXT, NOT_RECORDED_TEXT, NO_ANSWER_TEXT, OFF_TEXT, PREFERENCES_TEXT, READING_TEXT,
   SAME_TEXT, SETTING_WORDS, TOOL_FILTERS, UNREACHABLE_TEXT, UNSUPPORTED_TEXT, GUARD_OFF_TEXT,
   callsText, changeLine, changeText, classesText, factsText, heldText, limitPath, listWords, logPath, notOfferedLines,
   problemText, rangeText, readAtText, readGate, readStateText, resetText, toolChangeText, toolPath, toolShown,
@@ -24,7 +24,6 @@ describe('autonomy settings: the words', () => {
     expect(TOOL_FILTERS.map((f) => f.label)).toEqual(['All', 'Changed', 'Not allowed']);
     expect(OFF_TEXT).toContain('NOUS_AUTONOMY_SETTINGS_ENABLED=true');
     expect(GUARD_OFF_TEXT).toContain('NOUS_TOOL_GUARD_ENABLED=true');
-    expect(NOT_LOADED_TITLE).toBe('The saved settings could not be read.');
     expect(NOT_LISTED_TEXT).toBe(
       "A tool of a server that is not connected now is not listed, so it cannot be switched off ahead of time, and a newly added server's tools start Allowed.",
     );

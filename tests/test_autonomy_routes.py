@@ -46,6 +46,7 @@ TOOLS = {
     "bash": "Run a shell command.",
     "send_email": "Send an email.",
     "store_identity": "Initiation only.",
+    "submit_final_report": "Hand in the report.",  # the harness's own: never listed
     MCP: "Search the notes server.",
 }
 
@@ -344,7 +345,7 @@ async def test_the_tools_list(rig, db, agent_id):
     assert [place["key"] for place in body["places"]][:3] == ["chain_decisions", "chain_work", "tasks"]
     rows = {row["name"]: row for row in body["tools"]}
     assert "store_identity" not in rows  # an initiation tool is never offered to background work
-    assert set(rows) == set(TOOLS) - {"store_identity"}
+    assert set(rows) == set(TOOLS) - {"store_identity", "submit_final_report"}
     assert rows["web_search"] | {"not_offered": None} == {
         "name": "web_search",
         "summary": "Search the web.",
@@ -479,4 +480,5 @@ async def test_the_tools_list_names_where_not_allowed_applies(rig):
     r = await rig()
     body = (await _send(r.app, "GET", "/autonomy/tools", headers=OWNER)).json()
     assert body["loaded"] is True and body["held_in"] == tool_guard.held_places()
+    assert {row["name"] for row in body["tools"]} == set(TOOLS) - {"store_identity", "submit_final_report"}
     assert "chain decisions" in body["held_in"] and not any("companion" in place for place in body["held_in"])

@@ -6,7 +6,7 @@
   import { usePoll } from '../../lib/poll';
   import {
     ALREADY_SETTING_TEXT, FORBIDDEN_TEXT, GROUPS, GUARD_OFF_TEXT, GUARD_OFF_TITLE, LOCKED_TEXT, LOG_TITLE,
-    NOT_HELD_TEXT, NOT_LISTED_TEXT, NOT_LOADED_TITLE, NOT_REGISTERED_TEXT, NO_CHANGES_TEXT, NO_TOOL_MATCH_TEXT,
+    NOT_HELD_TEXT, NOT_LISTED_TEXT, NOT_RECORDED_TEXT, NOT_REGISTERED_TEXT, NO_CHANGES_TEXT, NO_TOOL_MATCH_TEXT,
     READING_TEXT, REFRESH_LABEL, RETRY_LABEL, SETTING_WORDS, TOOLS_DEFAULT_TEXT, TOOLS_SUBTITLE, TOOL_FILTERS,
     UNSUPPORTED_TEXT,
     callsText, changeLine, classesText, denyTool, heldText, notOfferedLines, problemText, readGate, readLog,
@@ -101,8 +101,7 @@
   </section>
 {:else if answer && answer.loaded === false}
   <section class="notice" role="status" aria-labelledby="tool-unread">
-    <h2 id="tool-unread">{NOT_LOADED_TITLE}</h2>
-    <p>{answer.message}</p>
+    <p id="tool-unread" class="unread">{answer.message}</p>
     <div class="notice-actions">
       <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={$store.loading}
         onclick={() => void store.refresh()}>{RETRY_LABEL}</Button>
@@ -113,6 +112,7 @@
     {#if held}<p class="hint">{held} {NOT_HELD_TEXT}</p>{/if}
     <p class="hint">{TOOLS_DEFAULT_TEXT}</p>
     <p class="hint">{NOT_LISTED_TEXT}</p>
+    {#if !recorded}<p class="hint">{NOT_RECORDED_TEXT}</p>{/if}
   </div>
   <div class="find">
     <div class="field">
@@ -150,7 +150,7 @@
             <div class="more">
               {#if row.locked}<p class="locked">{LOCKED_TEXT}</p>{/if}
               {#each notOfferedLines(row, places) as line, i (i)}<p class="line">{line}</p>{/each}
-              <p class="line">{callsText(row, recorded)}</p>
+              {#if recorded}<p class="line">{callsText(row, recorded)}</p>{/if}
               {#if busy === row.name}<p class="line" role="status">Saving…</p>{/if}
               {#if said}
                 <p class="note" class:note-err={!said.ok} id="tool-n.{slug(row.name)}" tabindex="-1" role={said.ok ? 'status' : 'alert'}>{said.text}</p>
@@ -190,6 +190,7 @@
   .notice { padding: 0.875rem 1rem; border-radius: var(--card-radius-sm); background: var(--warn-bg);
     border: 1px solid var(--warn-border); font-size: 0.8125rem; margin: 0; }
   .notice p { margin: 0; }
+  .notice .unread { font-weight: 600; }
   .notice-actions { margin-top: 0.625rem; }
   .read-error { font-size: 0.8125rem; color: var(--warn-text); margin: 0; overflow-wrap: anywhere; }
   .hint { font-size: 0.75rem; color: var(--muted); margin: 0; max-width: 80ch; }
