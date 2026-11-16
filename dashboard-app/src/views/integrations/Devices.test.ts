@@ -625,6 +625,18 @@ describe('Devices: Revoke', () => {
     expect(changes()).toEqual([]);
   });
 
+  it('a pairing refused for too many devices is no longer said once a device is revoked', async () => {
+    handlers['POST /a2ui/devices/pairings'] = () => [409, { error: 'revoke a device first' }];
+    handlers['DELETE /a2ui/devices/d-1'] = () => [200, { revoked: true }];
+    const s = await shown();
+    await fireEvent.click(await s.findByRole('button', { name: 'Show a code' }));
+    expect((await s.findByRole('alert')).textContent).toBe('Revoke a device first.');
+    await fireEvent.click(s.getByRole('button', { name: 'Revoke Pixel 7' }));
+    await fireEvent.click(s.getByRole('button', { name: 'Yes, revoke' }));
+    expect((await s.findByRole('status')).textContent).toBe('Revoked Pixel 7.');
+    expect(s.queryByText('Revoke a device first.')).toBeNull();
+  });
+
   it('a device that was already revoked (from elsewhere) is said to be, not said revoked now', async () => {
     handlers['DELETE /a2ui/devices/d-1'] = () => [200, { revoked: false }];
     const s = await shown();

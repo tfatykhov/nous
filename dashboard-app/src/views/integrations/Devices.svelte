@@ -173,6 +173,7 @@
     busy = d.id;
     confirming = null;
     note = null;
+    pairError = null; // "Revoke a device first" is answered by this
     let outcome: Note;
     try {
       const answer = await revokeDevice(d.id);
