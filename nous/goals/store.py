@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import ColumnElement, and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.brain.continuation import owner_channel
@@ -40,6 +40,9 @@ SESSION_NOTE_LABEL = "Note written by the session:"
 # reason other than the owner's: the goal routes select a paused goal's row by it, and the driver restarts runs of
 # outcomes after its session.
 STOP_REF = "stop:"
+# The evidence ref (+ the session's number) of the harness row written when a session's done claim made the goal wait
+# for the owner: the goal driver leaves that session out of a run of sessions without a step.
+WAITING_REF = "waiting:"
 MAX_DEADLINE_DAYS = 90
 ACTORS: frozenset[str] = frozenset({"owner", "host", "chain", "harness"})
 JOURNAL_KINDS: frozenset[str] = frozenset(
@@ -62,6 +65,12 @@ _SHORT_ID_RE = re.compile(r"^(?:g-?)?0*(\d{1,12})$", re.IGNORECASE)
 DELIVERED_CHANNEL_KINDS: tuple[str, ...] = ("telegram",)
 
 GoalRef = UUID | int | str
+# A plan keeps its open steps and its newest closed or dropped ones; an older one leaves the plan with one journal row
+# of the chain (kind ``plan``) whose evidence is ``moved:<step id>`` and the refs the step was closed with, so one-use
+# and step ids still see it. The row is known by that first ref (``moved_row``), never by its text, which a note can
+# copy (``MOVED_TEXT`` only begins what a reader sees).
+MOVED_TEXT = "Moved out of the plan"
+MOVED_REF = "moved:"
 
 
 class GoalRefused(ValueError):
@@ -343,6 +352,7 @@ class GoalStore:
 
     async def request_run_now(self, ref: GoalRef, *, actor: str) -> Goal:
         """Ask the driver for a session now (``pending_request = 'run_now'``): an active goal with no open session."""
+        _owner_only(actor, "ask for a session now")
         async with self._locked(ref) as (s, goal, now):
             if goal.state != "active":
                 raise GoalRefused(f"{describe(goal)}: only an active goal can run a session now")
@@ -419,7 +429,8 @@ class GoalStore:
 
     async def add_note(self, ref: GoalRef, text: str, *, actor: str) -> Goal:
         """An ``owner_note`` journal row on a draft, active or paused goal. An active goal with no open session is
-        woken now so the next session reads it; a note never resumes a paused goal."""
+        woken now so the next session reads it; a note never resumes a paused goal. Only the owner writes one."""
+        _owner_only(actor, "write an owner's note")
         body = text.strip()
         if not body:
             raise GoalRefused("a note needs some text")
@@ -582,3 +593,25 @@ class GoalStore:
         )
         s.add(row)
         return row
+
+
+def moved_row() -> ColumnElement[bool]:
+    """A journal row that keeps a step the plan moved out: a ``plan`` row of the chain whose first evidence ref is
+    ``moved:<step id>``. Only the plan tool's own code writes that ref: a ref a call sends must pass
+    ``evidence.check`` (a subtask, a DAG, a recorded call or a file), and ``goal_note`` writes no evidence."""
+    return and_(
+        GoalJournal.kind == "plan",
+        GoalJournal.actor == "chain",
+        func.coalesce(GoalJournal.evidence[0].astext, "").startswith(MOVED_REF),
+    )
+
+
+async def moved_steps(session: AsyncSession, agent_id: str, goal_id: UUID) -> list[list[str]]:
+    """The evidence of each journal row that keeps a step the goal's plan moved out (``moved_row``), oldest first:
+    ``moved:<step id>`` and the refs that step was closed with."""
+    query = (
+        select(GoalJournal.evidence)
+        .where(GoalJournal.agent_id == agent_id, GoalJournal.goal_id == goal_id, moved_row())
+        .order_by(GoalJournal.seq)
+    )
+    return [[str(ref) for ref in evidence or []] for evidence in (await session.execute(query)).scalars()]

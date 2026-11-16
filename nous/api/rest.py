@@ -108,6 +108,7 @@ def create_app(
     push_service: Any | None = None,
     dag_orchestrator: Any | None = None,
     continuation_runner: Any | None = None,
+    goal_driver: Any | None = None,
     tool_call_recorder: Any | None = None,
     model_call_recorder: Any | None = None,
     model_call_text_store: Any | None = None,
@@ -4121,7 +4122,9 @@ def create_app(
     # F114: the owner's goals. Always mounted: with NOUS_GOALS_ENABLED off there is no store, and the routes give
     # their fixed "goals are off" answers.
     goal_store = GoalStore(database, settings.agent_id, settings) if settings.goals_enabled else None
-    routes.extend(build_goal_routes(database=database, settings=settings, goals=goal_store, guard=owner_guard))
+    routes.extend(
+        build_goal_routes(database=database, settings=settings, goals=goal_store, guard=owner_guard, driver=goal_driver)
+    )
     # F111: the owner's /drop and /done of a commitment.
     routes.extend(build_commitment_routes(database=database, settings=settings))
     # Companion devices: pairing, the owner's list and revoke, and a device's unpair (nous/api/companion_devices.py).

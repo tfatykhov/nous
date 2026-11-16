@@ -30,7 +30,7 @@ from nous.api.execution_context import ExecutionContext
 from nous.api.tool_classes import tool_class
 from nous.brain import continuation, intention_calibration
 from nous.brain.continuation import INTENT_SESSION_PREFIX, Resolution
-from nous.brain.intentions import AUTHORITY_INTERNAL, SOURCE_DAG
+from nous.brain.intentions import AUTHORITY_INTERNAL, ORIGIN_GOAL, SOURCE_DAG
 from nous.cancellation import cancel_requested
 from nous.cognitive.claim_verifier import ClaimVerifier, ClaimViolation, Evidence, runner_path, unverified_note
 from nous.cognitive.execution_ledger import RUNNER_STATUSES, bash_exit_code, bash_masked_failure
@@ -456,6 +456,7 @@ def build_arrival_prompt(
     root_intent: str | None = None,
     observed: ObservedState | None = None,
     unverified: Sequence[tuple[Any, list[ClaimViolation]]] = (),
+    goal_block: str | None = None,
 ) -> str:
     """The turn's input, from rows only (spec 4.5.4): the idle monitor deletes conversation state, so
     nothing here can come from it. ``children_of_failed_attempt`` is read as the children the claimed
@@ -468,12 +469,18 @@ def build_arrival_prompt(
     2b's envelope): neither is repeated here. ``observed`` is the harness's read of the root, the intentions and
     their work, and the proposals: the turn is told that it may claim an outcome only if a row shows it (a turn
     that had no ground truth once reported a cancel that nobody had asked for as failed). ``unverified`` pairs a
-    result row with the action claims in it that no call its work recorded backs (F099 gate hardening B)."""
+    result row with the action claims in it that no call its work recorded backs (F099 gate hardening B).
+    ``goal_block`` (F114) is the goal a goal session's root works for, as ``nous.goals.charter`` renders it; it
+    goes after the first paragraph. None leaves the prompt exactly as it was."""
     lines = [
         "This is a continuation turn: you are acting on your own, on work you started earlier. Nobody is "
         "waiting for this reply, and you cannot send anything outward from here. If something needs the "
         "owner, ask through resolve_intention.",
         "",
+    ]
+    if goal_block is not None:
+        lines += [goal_block, ""]
+    lines += [
         "## Why this work exists",
     ]
     if root_intent:
@@ -604,6 +611,8 @@ class ContinuationRunner:
         self._bus = bus
         self._dispatcher = dispatcher  # 2d: execute_approved_proposal
         self._publisher = publisher
+        # F114: the goal a decision turn's root works for (set_goal_turns); None unless main.py binds it.
+        self._goal_turns: Callable[[UUID], Awaitable[Any]] | None = None
         self._agent_id = settings.agent_id
         self._wake = asyncio.Event()
         # Bounded: a stray release raises instead of quietly widening the cap.
@@ -632,6 +641,33 @@ class ContinuationRunner:
     def set_cancel_dag(self, cancel_dag: Callable[[UUID, str, dict | None], Awaitable[None]] | None) -> None:
         """Bind ``DAGOrchestrator.cancel_dag`` (main.py, once the orchestrator exists)."""
         self._cancel_dag = cancel_dag
+
+    def set_goal_turns(self, goal_turns: Callable[[UUID], Awaitable[Any]] | None) -> None:
+        """F114: bind the goals' lookup of a root (``GoalChain.turn_context``, main.py with ``NOUS_GOALS_ENABLED``
+        on). For a root that is a goal session's, it gives the turn's goal block and goal tools; for any other root,
+        None. While unbound, a decision turn looks nothing up. When the lookup raises, a root whose row the turn
+        already read with an origin other than ``goal`` cannot be a goal's, so its turn runs as before
+        (``_goal_turn``); any other root fails closed, as a failed attempt."""
+        self._goal_turns = goal_turns
+
+    async def _goal_turn(self, root_id: UUID, observed: ObservedState) -> Any:
+        """F114: the goal turn of ``root_id`` from the bound lookup. A raise costs an ordinary root nothing: the root's
+        row, read for this turn's ground truth already, says it is not a goal session's (only a goal session's root
+        has origin ``goal``), so it is logged by its class and the turn gets no goal. A root of origin ``goal``, or
+        one whose row was not read, re-raises: a goal turn must not run without its block and tools."""
+        try:
+            return await self._goal_turns(root_id)
+        except Exception as exc:
+            root = observed.root
+            if root is None or root.origin_kind == ORIGIN_GOAL:
+                raise
+            logger.warning(
+                "F114: the goal lookup of root %s failed (%s); its origin is %s, not a goal's, so its turn runs",
+                root_id,
+                type(exc).__name__,
+                root.origin_kind,
+            )
+            return None
 
     def set_surface_service(self, service: Any) -> None:
         """Bind the A2UI surface service (main.py, once it exists; the runner is built before it, like the DAG
@@ -1289,6 +1325,8 @@ class ContinuationRunner:
                     logger.warning("F099: could not read the calls of root %s", claim.root_id, exc_info=True)
                     mode = None
         unverified = self._unverified_results(claim, lineage) if mode is not None else []
+        # F114: a goal session's root sees its goal, and gets the goal tools (extra tools, below).
+        goal_turn = await self._goal_turn(claim.root_id, observed) if self._goal_turns is not None else None
         prompt = build_arrival_prompt(
             claim,
             earlier,
@@ -1298,6 +1336,7 @@ class ContinuationRunner:
             root_intent=root_intent,
             observed=observed,
             unverified=unverified if mode in ("warn", "enforce") else (),
+            goal_block=goal_turn.block if goal_turn is not None else None,
         )
         context = ExecutionContext(
             kind="continuation",
@@ -1334,6 +1373,8 @@ class ContinuationRunner:
                     on_alias=lambda alias, target: self._runner.log_tool_alias_used(context, alias, target, session_id),
                 ),
             )
+        if goal_turn is not None:
+            extra_tools.update(goal_turn.tools)
         try:
             try:
                 text = await asyncio.wait_for(

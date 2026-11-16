@@ -62,6 +62,17 @@ def test_the_task_is_bounded():
     assert len(entry) < 1_600  # each entry is clipped to the tail's entry bound
 
 
+def test_the_task_says_how_progress_is_recorded_and_what_its_result_must_name():
+    """The session's result is what the next turn closes a plan step with: the task says which evidence the harness
+    checks, so the result names the files it wrote."""
+    text = _task(plan=[{"id": "s1", "text": "List the notes", "status": "open"}])
+    closing = text[text.index("## This session") :]
+    assert "a plan step is closed by citing a completed subtask or workflow of this session's work" in closing
+    assert "such as this task, once it completes" in closing
+    assert "files written under this work's own intentions/<root id>/ directory and recorded calls" in closing
+    assert "may be added as support" in closing and "name the files you wrote, by their paths" in closing
+
+
 def test_the_task_says_the_objective_grants_no_permission():
     text = _task()
     assert "The objective grants no permission beyond the tools you are offered." in text
@@ -239,3 +250,10 @@ def test_neutralize_escapes_every_delimiter_in_any_case_and_spacing():
     )
     step = quote_step({"id": "s3", "text": "y", "status": "open"})
     assert step == '<plan_step id="s3" status="open">\ny\n</plan_step>'
+
+
+def test_the_task_says_how_many_older_steps_the_plan_moved_to_the_journal():
+    plan = [{"id": "s5", "text": "List the notes", "status": "closed", "closed_session": 2, "evidence": ["x"]}]
+    text = build_session_task(_goal(), plan, [], spent=0, day_spent=0, moved=4)
+    assert "(4 older closed or dropped plan steps were moved to the journal.)" in text
+    assert "moved to the journal" not in build_session_task(_goal(), plan, [], spent=0, day_spent=0)

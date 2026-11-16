@@ -61,6 +61,9 @@ TOOL_CLASSES: Mapping[str, ToolClass] = MappingProxyType({
     # registered); classified so the ledger and the internal_only rules read one table.
     "resolve_intention": _WRITE,
     "propose_action": _WRITE,
+    # F114: a goal session's decision turn records its progress (per-turn extra tools, never registered).
+    "goal_note": _WRITE,
+    "goal_plan": _WRITE,
     "run_python": _WRITE,  # the floor; code that reaches the network is external
     "bash": _WRITE,        # the floor; classify_side_effect reads the command itself
     # start other agent work — NOT compensable: cancelling a schedule or check

@@ -298,6 +298,16 @@ async def insert_inbox_row(
     return row_id if result.rowcount else None
 
 
+GoalReportChannel = Callable[[AsyncSession, str, UUID], Awaitable[str | None]]
+_goal_report_channel: GoalReportChannel | None = None
+
+
+def set_goal_report_channel(fn: GoalReportChannel | None) -> None:
+    """Bind the goals' lookup (main.py) or clear it (shutdown, tests). While None, no REPORT row is looked at."""
+    global _goal_report_channel
+    _goal_report_channel = fn
+
+
 async def insert_report(
     session: AsyncSession,
     agent_id: str,
@@ -318,7 +328,7 @@ async def insert_report(
     Keyed to ``channel`` (never NULL: section 4.3 item 4); its ``source_id`` is
     ``report_id`` (a fresh uuid unless the caller needs the write to be
     idempotent) and its generation 0. Returns ``report_id``. ``root_id`` is for
-    the log only: the table has no root column (contract C2).
+    the log and the goals' REPORT channel (``set_goal_report_channel``): the table has no root column (contract C2).
     """
     if kind not in REPORT_KINDS:
         raise ValueError(f"an owner-facing row is one of {REPORT_KINDS}, not {kind!r}")
@@ -361,6 +371,10 @@ async def _insert_report_row(
     owner can see it, so F098's claim window (``result_inbox_max_age_hours``) starts then."""
     if not channel or not channel.strip():
         raise ValueError("an owner-facing row needs a channel (spec section 4.3 item 4)")
+    if kind == MSG_REPORT and _goal_report_channel is not None:
+        goal_channel = await _goal_report_channel(session, agent_id, root_id)
+        if goal_channel is not None:  # a goal chain's report goes to the goal's journal, not to the owner's chat
+            channel, push_after = goal_channel, None
     row_id = await insert_inbox_row(
         session,
         agent_id,
