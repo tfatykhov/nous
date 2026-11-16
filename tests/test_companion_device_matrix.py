@@ -438,12 +438,12 @@ class _Bus:
 
 
 async def test_no_secret_in_any_log_record_at_debug(
-    db, owned, service: SurfaceService, push: PushService, caplog: pytest.LogCaptureFixture
+    db, owned, service: SurfaceService, push: PushService, caplog: pytest.LogCaptureFixture, agent_id: str
 ) -> None:
     """Open, a wrong and a right redeem, a wrong, a revoked and a valid token on an action, a read, the list, a revoke
-    and an unpair: no log record, event or listing carries a token, a code or the digest of either. Header names may
-    appear; values never. The "sqlalchemy" logger stays at WARNING (its own default), so statement parameters are
-    not logged at all."""
+    and an unpair: no log record, event, audit row or listing carries a token, a code or the digest of either. Header
+    names may appear; values never. The "sqlalchemy" logger stays at WARNING (its own default), so statement
+    parameters are not logged at all."""
     caplog.set_level(logging.DEBUG)
     bus = _Bus()
     stand_in = SimpleNamespace()
@@ -498,3 +498,10 @@ async def test_no_secret_in_any_log_record_at_debug(
             assert secret not in json.dumps(event.data)
     for secret in secrets_seen:
         assert secret not in listing.text
+    async with db.session() as session:
+        audits = (await session.execute(select(A2uiAction).where(A2uiAction.agent_id == agent_id))).scalars().all()
+    assert [(row.action_name, row.status) for row in audits] == [("approval.choose", "rejected")] * 3
+    for row in audits:
+        text = " ".join(str(getattr(row, column.key)) for column in A2uiAction.__table__.columns)
+        for secret in secrets_seen:
+            assert secret not in text
