@@ -1206,9 +1206,9 @@ async def test_the_route_takes_no_rate_slot_of_its_own(
     db, a2ui_settings, service: SurfaceService, a2ui_agent_id: str
 ) -> None:
     """One action is one slot of the action limiter, taken by the router alone, in the caller's window: with a limit
-    of two, a refused call and one carrying a malformed device token share the window of callers without a proof, so
-    a third such call is a 429, while the owner's calls have a window of their own. A route that also took a slot (for
-    a device lookup, say) would fill the windows twice as fast."""
+    of two, a refused call and one carrying a malformed device token share the one window of every caller that is not
+    granted, so a third such call is a 429, while the owner's calls have a window of their own. A route that also took
+    a slot (for a device lookup, say) would fill the windows twice as fast."""
     settings = _owner_settings(a2ui_settings, a2ui_action_rate_per_minute=2)
     router = ActionRouter(db, settings, service)
     taken: list[str] = []

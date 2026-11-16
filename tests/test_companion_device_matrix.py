@@ -347,7 +347,7 @@ async def test_a_device_token_grants_nothing_on_the_mcp_client_routes(
     db, owned, service: SurfaceService, push: PushService
 ) -> None:
     """Every ``/integrations/mcp`` route answers a device token exactly as it answers a call with no header: 403 on
-    the routes that need the proxy's secret, and the same answer on the few that need none."""
+    the routes that need the proxy's secret, and the same answer on the others."""
     app = _app(db, owned.model_copy(update={"mcp_client_enabled": True}), service, push)
     device = await _pair(app)
     routes = [route for route in app.routes if getattr(route, "path", "").startswith("/integrations/mcp")]
