@@ -160,7 +160,8 @@ class SyncEngine(
             return false
         }
         refused = r; stopped = true
-        lastError = if (r == Refusal.TOKEN_REJECTED) PairingWords.TOKEN_REJECTED else PairingWords.INBOX_NOT_PAIRED
+        // Short, for Diagnostics: the screens say it in full from [refused].
+        lastError = if (r == Refusal.TOKEN_REJECTED) "device token rejected (HTTP 403)" else "not paired (HTTP 403)"
         store.connection = Connection.ERROR
         return false
     }

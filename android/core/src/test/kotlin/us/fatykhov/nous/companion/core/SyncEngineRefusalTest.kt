@@ -31,7 +31,7 @@ class SyncEngineRefusalTest {
         assertTrue(sleeps.isEmpty(), "no backoff: a retry gets the same answer")
         assertEquals(Refusal.NOT_PAIRED, e.refused)
         assertEquals(Connection.ERROR, store.connection)
-        assertEquals(PairingWords.INBOX_NOT_PAIRED, e.lastError)
+        assertEquals("not paired (HTTP 403)", e.lastError)
     }
 
     @Test fun a_refused_snapshot_read_stops_the_loop_too() = runTest {
@@ -46,7 +46,7 @@ class SyncEngineRefusalTest {
         val e = SyncEngine(SurfaceStore(), ScriptedHttp { _, _ -> rejected }, unconfined, sleep = { error("no backoff") })
         e.run()
         assertEquals(Refusal.TOKEN_REJECTED, e.refused)
-        assertEquals(PairingWords.TOKEN_REJECTED, e.lastError)
+        assertEquals("device token rejected (HTTP 403)", e.lastError)
     }
 
     @Test fun a_token_the_server_could_not_check_backs_off_and_keeps_going() = runTest {
