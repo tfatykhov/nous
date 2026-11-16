@@ -47,6 +47,10 @@ KNOWN_WRITES = {
     ("POST", "/goals/{}/{}"),
     ("POST", "/a2ui/devices/pairings"),
     ("DELETE", "/a2ui/devices/{}"),
+    ("PUT", "/autonomy/limits/{}"),
+    ("DELETE", "/autonomy/limits/{}"),
+    ("PUT", "/autonomy/tools/{}"),
+    ("DELETE", "/autonomy/tools/{}"),
 }
 KNOWN_COMPANION_WRITES = {("POST", "/a2ui/action"), ("POST", "/a2ui/call")}
 

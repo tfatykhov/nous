@@ -133,6 +133,14 @@ ROUTE_RULE: dict[tuple[str, str], str] = {
     ("POST", "/goals/{ref}/budget"): OWNER,
     ("POST", "/goals/{ref}/deadline"): OWNER,
     ("POST", "/goals/{ref}/note"): OWNER,
+    # F115 autonomy settings: the limits, the record of changes and the tools (reads included)
+    ("GET", "/autonomy/limits"): OWNER,
+    ("PUT", "/autonomy/limits/{key}"): OWNER,
+    ("DELETE", "/autonomy/limits/{key}"): OWNER,
+    ("GET", "/autonomy/log"): OWNER,
+    ("GET", "/autonomy/tools"): OWNER,
+    ("PUT", "/autonomy/tools/{tool}"): OWNER,
+    ("DELETE", "/autonomy/tools/{tool}"): OWNER,
     # MCP client (mcp_client_enabled)
     ("GET", "/integrations/mcp/servers"): PROXY_SECRET,
     ("POST", "/integrations/mcp/servers"): PROXY_SECRET,
