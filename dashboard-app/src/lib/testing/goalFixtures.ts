@@ -56,11 +56,13 @@ export function goalDetail(over: Partial<GoalDetail> = {}): GoalDetail {
     sessions: [
       { n: 1, trigger: 'timer', started_at: '2026-11-14T09:00:00+00:00', ended_at: '2026-11-14T09:20:00+00:00', outcome: 'step_closed', spent: 120_000, steps_closed: 1, summary: 'Listed 14 duplicate pairs.' },
     ],
+    sessions_total: 1,
     journal: [
       { seq: 12, session_n: null, kind: 'owner_note', actor: 'owner', text: 'Use the 2024 folder.', evidence: [], created_at: '2026-11-15T10:00:00+00:00' },
       { seq: 11, session_n: 1, kind: 'progress', actor: 'chain', text: 'Listed the duplicates.', evidence: ['notes/index.md'], created_at: '2026-11-14T09:19:00+00:00' },
       { seq: 10, session_n: null, kind: 'state', actor: 'owner', text: 'Approved: active until 2026-11-21 12:00 UTC.', evidence: [], created_at: '2026-11-11T12:00:00+00:00' },
     ],
+    pause_sentence: null,
     actions: ['run-now', 'pause', 'stop', 'budget', 'deadline', 'note', 'cancel'],
     resume_blocked: null,
     spend_note: SPEND_NOTE,
@@ -85,7 +87,7 @@ export const OPTIONS = (over: Partial<GoalOptions> = {}): GoalOptions => ({
   ],
   has_default_channel: false,
   channel_kinds: ['telegram'],
-  bounds: { title: 200, objective: 4000, done_when: 2000, note: 4000, deadline_days: 90, journal: 200 },
+  bounds: { title: 200, objective: 4000, done_when: 2000, channel: 200, note: 4000, deadline_days: 90, journal: 200 },
   driver_running: false,
   spend_note: SPEND_NOTE,
   ...over,
@@ -96,6 +98,6 @@ export const DETAIL_KEYS = [
   'enabled', 'id', 'ref', 'title', 'state', 'pause_reason', 'preset', 'proposed_by', 'total_budget', 'day_budget',
   'spent_total', 'spent_today', 'deadline_at', 'next_wake_at', 'open_session', 'pending_request', 'mode', 'updated_at',
   'objective', 'done_when', 'origin_channel', 'deadline_days', 'sessions_per_day', 'min_interval_seconds', 'jobs_per_day',
-  'quiet_hours_ok', 'stall_limit', 'mode_until', 'approved_at', 'finished_at', 'created_at', 'plan', 'sessions', 'journal',
-  'actions', 'resume_blocked', 'spend_note',
+  'quiet_hours_ok', 'stall_limit', 'mode_until', 'approved_at', 'finished_at', 'created_at', 'plan', 'sessions',
+  'sessions_total', 'journal', 'pause_sentence', 'actions', 'resume_blocked', 'spend_note',
 ];

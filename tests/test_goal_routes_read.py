@@ -17,7 +17,7 @@ from nous.goals.envelope import _RANGES, PRESETS
 from nous.goals.seed import SPEND_NOTE
 from nous.goals.spend import goal_spent
 from nous.goals.store import format_short_id
-from nous.storage.models import GoalJournal
+from nous.storage.models import GoalJournal, GoalSession
 
 pytestmark = pytest.mark.postgres_only
 
@@ -32,7 +32,8 @@ ROW_KEYS = {
 DETAIL_KEYS = ROW_KEYS | {
     "enabled", "objective", "done_when", "origin_channel", "deadline_days", "sessions_per_day",
     "min_interval_seconds", "jobs_per_day", "quiet_hours_ok", "stall_limit", "mode_until", "approved_at",
-    "finished_at", "created_at", "plan", "sessions", "journal", "actions", "resume_blocked", "spend_note",
+    "finished_at", "created_at", "plan", "sessions", "sessions_total", "journal", "pause_sentence", "actions",
+    "resume_blocked", "spend_note",
 }
 
 
@@ -84,11 +85,29 @@ async def test_list_filters_by_state_and_rejects_an_unknown_state(db) -> None:
         return {row["id"] for row in response.json()["goals"]}
 
     assert await ids("?state=open") == {str(a_draft.id), str(an_active.id), str(a_paused.id)}
+    assert await ids("") == await ids("?state=open")  # a poll never re-reads finished goals
     assert await ids("?state=cancelled") == {str(cancelled.id)}
-    assert await ids("") == {str(a_draft.id), str(an_active.id), str(a_paused.id), str(cancelled.id)}
+    assert await ids("?state=finished") == {str(cancelled.id)}
+    assert await ids("?state=all") == {str(a_draft.id), str(an_active.id), str(a_paused.id), str(cancelled.id)}
     bogus = await env.call("GET", "/goals?state=bogus")
     assert bogus.status_code == 400
-    assert bogus.json() == {"error": "state must be one of draft, active, paused, done, failed, cancelled or open"}
+    assert bogus.json() == {
+        "error": "state must be one of draft, active, paused, done, failed, cancelled, open, finished or all"
+    }
+
+
+async def test_the_list_takes_the_newest_goals_up_to_its_limit_and_says_how_many_there_are(db) -> None:
+    env = make_env(db)
+    made = [await draft(env.store, title=f"Goal {i}") for i in range(3)]
+    response = await env.call("GET", "/goals?state=all&limit=2")
+    body = response.json()
+    assert [row["id"] for row in body["goals"]] == [str(made[1].id), str(made[2].id)]  # the newest two, newest last
+    assert body["total"] == 3
+    assert (await env.call("GET", "/goals")).json()["total"] == 3
+    for bad in ("0", "x", "-1", "1" * 10, "9" * 5000):
+        refused = await env.call("GET", f"/goals?limit={bad}")
+        assert refused.status_code == 400, bad
+        assert refused.json() == {"error": "limit must be a whole number from 1 (at most 200 are sent)"}
 
 
 async def test_detail_has_charter_limits_plan_sessions_journal_and_the_spend_note(db) -> None:
@@ -124,7 +143,7 @@ async def test_detail_has_charter_limits_plan_sessions_journal_and_the_spend_not
     await _bulk_journal(env, goal, 200)
     clamped = await env.call("GET", f"/goals/{goal.id}?journal=999")
     assert len(clamped.json()["journal"]) == JOURNAL_MAX
-    for bad in ("0", "x", "-1", "1.5"):
+    for bad in ("0", "x", "-1", "1.5", "1" * 10, "9" * 5000):
         assert (await env.call("GET", f"/goals/{goal.id}?journal={bad}")).status_code == 400, bad
 
 
@@ -197,6 +216,38 @@ async def test_the_plan_and_journal_text_come_back_unchanged_and_unmarked(db) ->
     assert steps[1] == {}
     assert len(steps[2]["text"]) == 4000 and steps[2]["status"] == "done"
     assert len(steps) == 3
+
+
+async def test_the_detail_sends_the_newest_sessions_and_how_many_there_are(db) -> None:
+    env = make_env(db)
+    goal = await active(env.store)
+    async with db.session() as s:
+        for n in range(1, 56):
+            s.add(
+                GoalSession(
+                    agent_id=env.store.agent_id, goal_id=goal.id, n=n, trigger="timer", first_subtask_id=uuid.uuid4(),
+                    ended_at=func.clock_timestamp(), outcome="no_step",
+                )
+            )
+        await s.commit()
+    body = (await env.call("GET", f"/goals/{goal.id}")).json()
+    assert [row["n"] for row in body["sessions"]] == list(range(6, 56))
+    assert body["sessions_total"] == 55
+
+
+async def test_the_pause_sentence_is_the_harness_row_of_the_pause_not_any_state_row(db) -> None:
+    env = make_env(db)
+    goal = await paused(env.store, "error")
+    await env.store.append_journal(goal.id, "state", "Session 3 could not start. Paused.", actor="harness", session_n=3)
+    await env.store.raise_budget(goal.id, total=goal.total_budget * 2, actor="owner")  # a newer state row, the owner's
+    body = (await env.call("GET", f"/goals/{goal.id}")).json()
+    assert body["journal"][0]["actor"] == "owner"
+    assert body["pause_sentence"] == "Session 3 could not start. Paused."
+    by_owner = await paused(env.store, "owner")
+    await env.store.append_journal(by_owner.id, "state", "An older harness row.", actor="harness")
+    assert (await env.call("GET", f"/goals/{by_owner.id}")).json()["pause_sentence"] is None
+    running = await active(env.store)
+    assert (await env.call("GET", f"/goals/{running.id}")).json()["pause_sentence"] is None
 
 
 async def test_a_paused_goals_resume_blocked_follows_its_spend_and_deadline(db) -> None:

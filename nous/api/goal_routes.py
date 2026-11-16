@@ -8,8 +8,9 @@ body and the goal are read only after it.
 
 The actor of every change is the owner: the guard let the call in on the owner's or the proxy's secret, and either is
 the owner. A body never names an actor (an unknown field is a 400). A refusal of the store is a 409 carrying the
-store's own sentence. A goal of another agent is not found. A change the store made is never answered with an error:
-when reading the goal back fails, the answer is the store's result with ``reload: true``.
+store's own sentence. A goal of another agent is not found. When the store has made a change and reading the goal
+back for the answer fails, the answer is 200 (201 for a new draft) with ``reload: true`` and the goal's state as the
+store returned it.
 
 With ``NOUS_GOALS_ENABLED`` off there is no store: the reads answer 200 with ``enabled: false`` and nothing else, and
 the changes answer 503 ``GOALS_OFF``. Neither reads a table.
@@ -26,10 +27,10 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, ValidationError
 from sqlalchemy import func, select
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -58,6 +59,17 @@ logger = logging.getLogger(__name__)
 
 GOALS_OFF = {"error": "goals are off", "goals_enabled": False}
 STATES: tuple[str, ...] = ("draft", "active", "paused", "done", "failed", "cancelled")
+FINISHED_STATES: tuple[str, ...] = ("done", "failed", "cancelled")
+# The list's filters: a state, or one of these names (``open`` by default, so a poll never re-reads finished goals).
+STATE_FILTERS: dict[str, tuple[str, ...] | None] = {
+    "open": LIVE_STATES,
+    "finished": FINISHED_STATES,
+    "all": None,
+    **{state: (state,) for state in STATES},
+}
+LIST_DEFAULT = 100
+LIST_MAX = 200
+SESSIONS_SHOWN = 50
 # The owner's actions on a goal, in the order the screen shows them; each is the last segment of its route.
 ACTIONS: tuple[str, ...] = (
     "approve",
@@ -74,6 +86,9 @@ ACTIONS: tuple[str, ...] = (
 ACTOR = "owner"
 JOURNAL_DEFAULT = 50
 JOURNAL_MAX = 200
+QUERY_NUMBER_DIGITS = 9  # a longer number in a query is refused, never converted
+PRESET_MAX_CHARS = 20
+ECHO_CHARS = 40  # at most this much of a field name the caller sent is said back
 NOTE_MAX_CHARS = JOURNAL_MAX_CHARS
 # The text bounds of brain.goals (the store refuses longer text; the body model refuses it first, with the field).
 TITLE_MAX_CHARS = 200
@@ -87,6 +102,16 @@ Handler = Callable[[Request], Awaitable[Response]]
 
 
 # ---- bodies ------------------------------------------------------------------------------------------------------
+
+
+def _no_nul(value: str) -> str:
+    if "\x00" in value:
+        raise ValueError("must not contain a NUL character")
+    return value
+
+
+# A text field: a string, never coerced, with no NUL (the database's text cannot hold one).
+Text = Annotated[StrictStr, AfterValidator(_no_nul)]
 
 
 class _Body(BaseModel):
@@ -114,12 +139,12 @@ class Limits(_Body):
 class CreateGoal(_Body):
     """``POST /goals``: a new draft. ``origin_channel`` is ``telegram:<chat id>``, or none for the owner's default."""
 
-    title: StrictStr = Field(max_length=TITLE_MAX_CHARS)
-    objective: StrictStr = Field(max_length=OBJECTIVE_MAX_CHARS)
-    done_when: StrictStr = Field(max_length=DONE_WHEN_MAX_CHARS)
-    preset: StrictStr = "small"
+    title: Text = Field(max_length=TITLE_MAX_CHARS)
+    objective: Text = Field(max_length=OBJECTIVE_MAX_CHARS)
+    done_when: Text = Field(max_length=DONE_WHEN_MAX_CHARS)
+    preset: Text = Field(default="small", max_length=PRESET_MAX_CHARS)
     limits: Limits | None = None
-    origin_channel: StrictStr | None = Field(default=None, max_length=CHANNEL_MAX_CHARS)
+    origin_channel: Text | None = Field(default=None, max_length=CHANNEL_MAX_CHARS)
 
 
 class BudgetChange(_Body):
@@ -138,11 +163,22 @@ class DeadlineChange(_Body):
 class NoteBody(_Body):
     """``POST /goals/{ref}/note``: a note the next session reads."""
 
-    text: StrictStr = Field(max_length=NOTE_MAX_CHARS)
+    text: Text = Field(max_length=NOTE_MAX_CHARS)
 
 
 class _BadRequest(Exception):
     """A body or a query the route refuses (400); the text names the field and the rule, never the value."""
+
+
+def _field(loc: tuple[Any, ...]) -> str:
+    """The field an error names, as ``limits.total_budget``: each part cut to ``ECHO_CHARS`` (an unknown field's
+    name is the caller's text)."""
+    return ".".join(clip(str(part), ECHO_CHARS) for part in loc) or "body"
+
+
+def _whole_number(raw: str) -> int | None:
+    """A query's whole number of at most ``QUERY_NUMBER_DIGITS`` digits, or None."""
+    return int(raw) if raw.isascii() and raw.isdigit() and len(raw) <= QUERY_NUMBER_DIGITS else None
 
 
 async def _parse(request: Request, model: type[_Body]) -> Any:
@@ -150,14 +186,14 @@ async def _parse(request: Request, model: type[_Body]) -> Any:
     raw = await request.body()
     try:
         data = json.loads(raw) if raw.strip() else {}
-    except ValueError:
+    except (ValueError, RecursionError):
         raise _BadRequest("the body must be JSON") from None
     if not isinstance(data, dict):
         raise _BadRequest("the body must be a JSON object")
     try:
         return model.model_validate(data)
     except ValidationError as exc:
-        problems = [f"{'.'.join(str(p) for p in error['loc']) or 'body'}: {error['msg']}" for error in exc.errors()]
+        problems = [f"{_field(error['loc'])}: {error['msg']}" for error in exc.errors()]
         raise _BadRequest("; ".join(problems)) from None
 
 
@@ -184,6 +220,16 @@ def resume_blocked(goal: Goal, *, spent: int, now: datetime) -> str | None:
     if goal.pause_reason == "deadline" and goal.deadline_at is not None and goal.deadline_at <= now:
         return "deadline"
     return None
+
+
+def pause_sentence(goal: Goal, journal: list[GoalJournal]) -> str | None:
+    """Why the harness paused ``goal``, in its own words: the newest ``state`` row the harness wrote, for a goal
+    paused for any reason but the owner's (the driver journals each pause it makes as a harness ``state`` row in
+    the same transaction). None for a goal that is not paused, paused by the owner, or with no such row in
+    ``journal`` (newest first)."""
+    if goal.state != "paused" or goal.pause_reason == "owner":
+        return None
+    return next((row.text for row in journal if row.kind == "state" and row.actor == "harness"), None)
 
 
 def _can_extend(goal: Goal, now: datetime) -> bool:
@@ -290,11 +336,13 @@ def goal_detail(
     *,
     now: datetime,
     sessions: list[GoalSession],
+    sessions_total: int,
     journal: list[GoalJournal],
     settings: Any,
 ) -> dict[str, Any]:
-    """A goal in full: its row, charter, limits, plan, sessions (oldest first), journal (newest first), the actions
-    the store accepts now and the sentence of what its spend does not count."""
+    """A goal in full: its row, charter, limits, plan, its newest sessions (the oldest of them first) and how many it
+    has in all, journal (newest first), why the harness paused it, the actions the store accepts now and the
+    sentence of what its spend does not count."""
     return {
         "enabled": True,
         **goal_row(goal, tally),
@@ -325,6 +373,7 @@ def goal_detail(
             }
             for row in sessions
         ],
+        "sessions_total": sessions_total,
         "journal": [
             {
                 "seq": row.seq,
@@ -337,6 +386,7 @@ def goal_detail(
             }
             for row in journal
         ],
+        "pause_sentence": pause_sentence(goal, journal),
         "actions": available_actions(goal, tally=tally, now=now, settings=settings),
         "resume_blocked": resume_blocked(goal, spent=tally.spent_total, now=now),
         "spend_note": SPEND_NOTE,
@@ -395,21 +445,34 @@ def build_goal_routes(*, database: Any, settings: Any, goals: GoalStore | None, 
                 found[goal_id] = Tally(total, today, open_by_goal.get(goal_id))
         return now, found
 
+    async def newest_sessions(goal_id: UUID) -> tuple[list[GoalSession], int]:
+        """The goal's newest ``SESSIONS_SHOWN`` sessions, the oldest of them first, and how many it has in all."""
+        mine = (GoalSession.agent_id == agent_id, GoalSession.goal_id == goal_id)
+        async with database.session() as session:
+            total = await session.scalar(select(func.count()).select_from(GoalSession).where(*mine))
+            rows = await session.execute(
+                select(GoalSession).where(*mine).order_by(GoalSession.n.desc()).limit(SESSIONS_SHOWN)
+            )
+            newest = list(rows.scalars())
+        return newest[::-1], int(total or 0)
+
     async def detail(goal: Goal, journal_limit: int = JOURNAL_DEFAULT) -> dict[str, Any]:
         assert goals is not None
         now, tally = await tallies([goal.id])
+        sessions, sessions_total = await newest_sessions(goal.id)
         return goal_detail(
             goal,
             tally.get(goal.id, Tally()),
             now=now,
-            sessions=await goals.sessions(goal.id),
+            sessions=sessions,
+            sessions_total=sessions_total,
             journal=await goals.journal(goal.id, limit=journal_limit),
             settings=settings,
         )
 
     async def changed_answer(changed: Goal, what: str, status: int = 200) -> JSONResponse:
         """The answer of a change the store made: the goal in full. When reading it back fails, the change still
-        stands, so the answer is ``status`` with what the store returned and ``reload: true``, never an error."""
+        stands, so the answer is ``status`` with what the store returned and ``reload: true``."""
         try:
             return JSONResponse(await detail(changed), status_code=status)
         except Exception as exc:
@@ -421,20 +484,33 @@ def build_goal_routes(*, database: Any, settings: Any, goals: GoalStore | None, 
         logger.warning("F114: %s failed (%s)", what, type(exc).__name__)
         return _error(500, FAILED)
 
+    async def listed_goals(states: tuple[str, ...] | None, limit: int) -> tuple[list[Goal], int]:
+        """The newest ``limit`` goals in ``states`` (every state when None), by short id with the newest last, and how
+        many there are in all."""
+        mine = [Goal.agent_id == agent_id] + ([Goal.state.in_(states)] if states is not None else [])
+        async with database.session() as session:
+            total = await session.scalar(select(func.count()).select_from(Goal).where(*mine))
+            rows = await session.execute(select(Goal).where(*mine).order_by(Goal.short_id.desc()).limit(limit))
+            newest = list(rows.scalars())
+        return newest[::-1], int(total or 0)
+
     async def list_goals(request: Request) -> Response:
-        """GET /goals?state=open"""
+        """GET /goals?state=open&limit=100"""
         if not goals:
             return JSONResponse({"enabled": False, "goals": []})
-        wanted = request.query_params.get("state")
-        if wanted is not None and wanted != "open" and wanted not in STATES:
-            return _error(400, f"state must be one of {', '.join(STATES)} or open")
-        states = None if wanted is None else LIVE_STATES if wanted == "open" else (wanted,)
+        wanted = request.query_params.get("state", "open")
+        if wanted not in STATE_FILTERS:
+            return _error(400, f"state must be one of {', '.join(STATES)}, open, finished or all")
+        limit = _whole_number(request.query_params.get("limit", str(LIST_DEFAULT)))
+        if limit is None or limit < 1:
+            return _error(400, f"limit must be a whole number from 1 (at most {LIST_MAX} are sent)")
         try:
-            listed = await goals.list(states)
+            listed, total = await listed_goals(STATE_FILTERS[wanted], min(limit, LIST_MAX))
             _now, by_goal = await tallies([g.id for g in listed])
         except Exception as exc:
             return failed("listing goals", exc)
-        return JSONResponse({"enabled": True, "goals": [goal_row(g, by_goal.get(g.id, Tally())) for g in listed]})
+        rows = [goal_row(g, by_goal.get(g.id, Tally())) for g in listed]
+        return JSONResponse({"enabled": True, "goals": rows, "total": total})
 
     async def options(request: Request) -> Response:
         """GET /goals/options"""
@@ -452,6 +528,7 @@ def build_goal_routes(*, database: Any, settings: Any, goals: GoalStore | None, 
                     "title": TITLE_MAX_CHARS,
                     "objective": OBJECTIVE_MAX_CHARS,
                     "done_when": DONE_WHEN_MAX_CHARS,
+                    "channel": CHANNEL_MAX_CHARS,
                     "note": NOTE_MAX_CHARS,
                     "deadline_days": MAX_DEADLINE_DAYS,
                     "journal": JOURNAL_MAX,
@@ -466,15 +543,15 @@ def build_goal_routes(*, database: Any, settings: Any, goals: GoalStore | None, 
         """GET /goals/{ref}?journal=50"""
         if not goals:
             return JSONResponse({"enabled": False})
-        raw = request.query_params.get("journal", str(JOURNAL_DEFAULT))
-        if not (raw.isascii() and raw.isdigit()) or int(raw) < 1:
+        journal = _whole_number(request.query_params.get("journal", str(JOURNAL_DEFAULT)))
+        if journal is None or journal < 1:
             return _error(400, f"journal must be a whole number from 1 (at most {JOURNAL_MAX} are sent)")
         ref = request.path_params["ref"]
         try:
             goal = await goals.get(ref)
             if goal is None:
                 return _no_goal(ref)
-            return JSONResponse(await detail(goal, min(int(raw), JOURNAL_MAX)))
+            return JSONResponse(await detail(goal, min(journal, JOURNAL_MAX)))
         except Exception as exc:
             return failed("reading a goal", exc)
 

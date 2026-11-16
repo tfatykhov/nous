@@ -72,14 +72,19 @@ export interface GoalDetail extends GoalRow {
   finished_at: string | null;
   created_at: string | null;
   plan: PlanStep[];
+  /** The newest sessions (at most 50), the oldest of them first; `sessions_total` counts them all. */
   sessions: GoalSessionRow[];
+  sessions_total: number;
   journal: JournalRow[];
+  /** For a goal the harness paused, the harness's own sentence of why; null otherwise. */
+  pause_sentence: string | null;
   actions: Action[];
   resume_blocked: 'budget' | 'deadline' | null;
   spend_note: string;
 }
 
-export interface GoalList { enabled: boolean; goals: GoalRow[] }
+/** `total`: how many goals match the filter (the list holds the newest of them). */
+export interface GoalList { enabled: boolean; goals: GoalRow[]; total?: number }
 
 /** A change's answer when the change was made and the goal could not be read back in full: read it again. */
 export interface GoalMade extends Pick<GoalRow, 'id' | 'ref' | 'title' | 'state' | 'pause_reason' | 'pending_request'> {
@@ -105,7 +110,7 @@ export interface GoalOptions {
   ranges?: Range[];
   has_default_channel?: boolean;
   channel_kinds?: string[];
-  bounds?: { title: number; objective: number; done_when: number; note: number; deadline_days: number; journal: number };
+  bounds?: { title: number; objective: number; done_when: number; channel: number; note: number; deadline_days: number; journal: number };
   driver_running?: boolean;
   spend_note?: string;
 }

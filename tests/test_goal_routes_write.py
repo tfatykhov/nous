@@ -401,7 +401,7 @@ async def test_a_change_that_was_made_is_200_with_reload_when_reading_it_back_fa
     async def broken(*_args, **_kwargs):
         raise RuntimeError("secret text")
 
-    monkeypatch.setattr(env.store, "sessions", broken)
+    monkeypatch.setattr(env.store, "journal", broken)
     caplog.set_level(logging.DEBUG)
     if path == "create":
         response = await env.call("POST", "/goals", json={**NEW, "origin_channel": CHAN})
@@ -421,3 +421,50 @@ async def test_a_change_that_was_made_is_200_with_reload_when_reading_it_back_fa
     assert any("reading the goal back failed (RuntimeError)" in record.getMessage() for record in caplog.records)
     assert not any("secret text" in record.getMessage() for record in caplog.records)
     assert "secret text" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("path", "field"),
+    [
+        ("create", "title"),
+        ("create", "objective"),
+        ("create", "done_when"),
+        ("create", "preset"),
+        ("create", "origin_channel"),
+        ("note", "text"),
+    ],
+)
+async def test_a_nul_in_any_text_is_400_and_nothing_is_written(db, path: str, field: str) -> None:
+    env = make_env(db)
+    goal = await draft(env.store)
+    nul = "a" + chr(0) + "b"
+    body = {**NEW, field: nul} if path == "create" else {field: nul}
+    response = await env.call("POST", "/goals" if path == "create" else f"/goals/{goal.id}/{path}", json=body)
+    assert (response.status_code, response.json()) == (
+        400, {"error": f"{field}: Value error, must not contain a NUL character"}
+    )
+    assert len(await journal_rows(env.store, goal)) == 1
+    assert len((await env.call("GET", "/goals?state=all")).json()["goals"]) == 1
+
+
+async def test_a_deeply_nested_body_is_400(db) -> None:
+    env = make_env(db)
+    goal = await draft(env.store)
+    for content in (b"[" * 200_000 + b"]" * 200_000, b'{"a":' * 200_000 + b"1" + b"}" * 200_000):
+        response = await env.call(
+            "POST", f"/goals/{goal.id}/pause", content=content, headers={**PROXY, "content-type": "application/json"}
+        )
+        assert (response.status_code, response.json()) == (400, {"error": "the body must be JSON"})
+
+
+async def test_a_long_preset_or_field_name_is_400_and_said_back_only_in_part(db) -> None:
+    env = make_env(db)
+    long_preset = await env.call("POST", "/goals", json={**NEW, "preset": "p" * 5000})
+    assert long_preset.status_code == 400
+    assert long_preset.json()["error"].startswith("preset: String should have at most 20 characters")
+    name = "k" * 5000
+    unknown = await env.call("POST", "/goals", json={**NEW, name: 1})
+    assert unknown.status_code == 400
+    assert unknown.json()["error"].endswith(": Extra inputs are not permitted")
+    assert len(unknown.json()["error"]) < 100
+    assert (await env.call("GET", "/goals?state=all")).json()["goals"] == []
