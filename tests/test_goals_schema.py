@@ -128,15 +128,16 @@ async def test_pending_request_and_its_time_move_together(db):
     await _insert_goal(db, agent, pending_request="stop", pending_request_at=datetime.now(UTC))
 
 
-async def test_mode_defaults_to_contained_and_full_autonomy_needs_mode_until(db):
+async def test_mode_defaults_to_contained_and_commands_needs_its_hours(db):
     agent = _agent()
     goal_id = await _insert_goal(db, agent)
     async with db.session() as s:
         assert (await s.execute(text("SELECT mode FROM brain.goals WHERE id = :i"), {"i": goal_id})).scalar_one() == (
             "contained"
         )
-    await _refused(db, agent, mode="full_autonomy")
-    await _insert_goal(db, agent, mode="full_autonomy", mode_until=datetime.now(UTC) + timedelta(hours=1))
+    await _refused(db, agent, mode="full_autonomy", mode_until=datetime.now(UTC) + timedelta(hours=1))
+    await _refused(db, agent, mode="commands")
+    await _insert_goal(db, agent, mode="commands", mode_hours=1)
 
 
 async def test_short_id_is_assigned_on_insert(db):

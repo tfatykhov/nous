@@ -626,7 +626,8 @@ class Goal(Base):
         CheckConstraint("min_interval_seconds >= 60", name="goals_min_interval_seconds_check"),
         CheckConstraint("jobs_per_day BETWEEN 0 AND 20", name="goals_jobs_per_day_check"),
         CheckConstraint("stall_limit BETWEEN 1 AND 10", name="goals_stall_limit_check"),
-        CheckConstraint("mode IN ('contained', 'full_autonomy')", name="goals_mode_check"),
+        CheckConstraint("mode IN ('contained', 'commands')", name="chk_goals_mode_value"),
+        CheckConstraint("mode_hours IS NULL OR mode_hours BETWEEN 1 AND 2160", name="goals_mode_hours_check"),
         CheckConstraint(
             "state IN ('draft', 'active', 'paused', 'done', 'failed', 'cancelled')", name="goals_state_check"
         ),
@@ -644,7 +645,14 @@ class Goal(Base):
         CheckConstraint("state IN ('draft', 'cancelled') OR deadline_at IS NOT NULL", name="chk_goals_deadline"),
         CheckConstraint("day_budget <= total_budget", name="chk_goals_day_within_total"),
         CheckConstraint("(pending_request IS NULL) = (pending_request_at IS NULL)", name="chk_goals_request"),
-        CheckConstraint("mode = 'contained' OR mode_until IS NOT NULL", name="chk_goals_mode"),
+        CheckConstraint(
+            "(mode = 'contained' AND mode_hours IS NULL AND mode_until IS NULL) "
+            "OR (mode = 'commands' AND mode_hours IS NOT NULL)",
+            name="chk_goals_mode",
+        ),
+        CheckConstraint(
+            "mode_until IS NULL OR deadline_at IS NULL OR mode_until <= deadline_at", name="chk_goals_mode_end"
+        ),
         {"schema": "brain"},
     )
     __mapper_args__ = {"eager_defaults": True}  # short_id comes back in the INSERT's RETURNING
@@ -667,6 +675,9 @@ class Goal(Base):
     quiet_hours_ok: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     stall_limit: Mapped[int] = mapped_column(Integer, nullable=False, default=3, server_default="3")
     mode: Mapped[str] = mapped_column(Text, nullable=False, default="contained", server_default="contained")
+    # 'commands': the goal's tasks may run any command, for mode_hours hours from approval (migration 118); mode_until
+    # is that end, set when the goal is approved.
+    mode_hours: Mapped[int | None] = mapped_column(Integer)
     mode_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     state: Mapped[str] = mapped_column(Text, nullable=False, default="draft", server_default="draft")
     pause_reason: Mapped[str | None] = mapped_column(Text)
