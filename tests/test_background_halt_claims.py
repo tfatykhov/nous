@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -676,6 +677,77 @@ class _DagTickOrchestrator:
         orchestrator._sweep_unclaimed_tokens = AsyncMock()
         orchestrator._advance_dag = AsyncMock()
         return orchestrator
+
+
+async def test_a_dag_tick_advances_each_dag_with_its_epoch():
+    dag = SimpleNamespace(id=uuid.uuid4(), nodes=[])
+    orchestrator = _DagTickOrchestrator.build([dag])
+    halt = _install()
+    seen: list = []
+    orchestrator._advance_dag = AsyncMock(side_effect=lambda *a, **k: seen.append(background_halt.TURN_EPOCH.get()))
+    await orchestrator.tick()
+    assert seen == [halt.epoch]
+
+
+def _completion_orchestrator(tmp_path, get_dag):
+    from nous.dag.orchestrator import DAGOrchestrator
+
+    orchestrator = DAGOrchestrator.__new__(DAGOrchestrator)
+    orchestrator._store = SimpleNamespace(get_dag=get_dag)
+    orchestrator._settings = SimpleNamespace(dag_workspace_root=tmp_path, workspace_dir=None, github_token="")
+    node = SimpleNamespace(completion_check="echo done", dag_id=uuid.uuid4(), name="step")
+    return orchestrator, node
+
+
+@pytest.mark.parametrize("what_lands", ["a halt", "a halt and a resume"])
+async def test_a_completion_command_whose_dag_lookup_a_halt_landed_in_is_not_spawned(tmp_path, monkeypatch, what_lands):
+    from nous.dag.orchestrator import _CheckHalted
+
+    halt = _install()
+    spawned: list = []
+
+    async def spawn(*args, **kwargs):
+        spawned.append(args)
+        raise AssertionError("spawned")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", spawn)
+
+    async def lookup_while_the_halt_lands(dag_id):
+        await halt.halt(actor="t", surface="dashboard")
+        if what_lands == "a halt and a resume":
+            await halt.resume(actor="t", via="dashboard")
+        return SimpleNamespace(id=dag_id, created_at=None)
+
+    orchestrator, node = _completion_orchestrator(tmp_path, lookup_while_the_halt_lands)
+    with background_halt.epoch_scope(halt.epoch), pytest.raises(_CheckHalted):  # as the tick sets it
+        await orchestrator._run_completion_check(node)
+    assert spawned == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX only")
+async def test_a_completion_command_spawned_as_a_halt_landed_is_killed(tmp_path, monkeypatch):
+    from nous.dag.orchestrator import _CheckHalted
+
+    halt = _install()
+    real_spawn = asyncio.create_subprocess_shell
+    procs: list = []
+
+    async def spawn_while_the_halt_lands(*args, **kwargs):
+        await halt.halt(actor="t", surface="dashboard")
+        proc = await real_spawn("sleep 30", **kwargs)
+        procs.append(proc)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", spawn_while_the_halt_lands)
+
+    async def lookup(dag_id):
+        return SimpleNamespace(id=dag_id, created_at=None)
+
+    orchestrator, node = _completion_orchestrator(tmp_path, lookup)
+    with background_halt.epoch_scope(halt.epoch), pytest.raises(_CheckHalted):
+        await orchestrator._run_completion_check(node)
+    (proc,) = procs
+    assert await asyncio.wait_for(proc.wait(), 5) == -9  # killed, not left running
 
 
 async def test_a_halted_dag_tick_reads_no_dag_and_advances_none():

@@ -322,6 +322,10 @@ CheckStatus = Literal["success", "failed", "pending"]
 
 
 @dataclass(frozen=True, slots=True)
+class _CheckHalted(Exception):
+    """Goals PR 0c: the halt refused a completion check at its spawn: nothing ran, and no attempt is counted."""
+
+
 class CheckResult:
     """Result of a completion_check command invocation."""
 
@@ -594,7 +598,9 @@ class DAGOrchestrator:
                     or working < MAX_ACTIVE_DAGS
                 )
                 try:
-                    await self._advance_dag(dag, may_start=may_start)
+                    # Goals PR 0c: the tick's epoch, for the halt's check at a completion command's spawn.
+                    with background_halt.epoch_scope(tick_epoch):
+                        await self._advance_dag(dag, may_start=may_start)
                 except Exception:
                     logger.exception("Error advancing DAG %s", dag.id)
                 # Counter rule: count a DAG only if it now has real work. A
@@ -1970,6 +1976,8 @@ class DAGOrchestrator:
                         "Completion check pending for node %s (attempt %d)",
                         node.name, attempts,
                     )
+            except _CheckHalted:
+                logger.info("Background halt: the completion check of node %s did not run", node.name)
             except Exception:
                 logger.exception(
                     "Error polling completion check for node %s", node.name
@@ -2293,6 +2301,9 @@ class DAGOrchestrator:
         cmd = node.completion_check
         if not cmd:
             return CheckResult("success")
+        # Goals PR 0c: the epoch of the tick running this check (tick() sets it around _advance_dag), else the
+        # current one. The halt is checked with it right before the command is spawned and again right after.
+        epoch = background_halt.turn_epoch()
         if lineage_internal and lineage_refuses_check(cmd):
             raise LineageShellCheckRefused(lineage_shell_check_message([node.name]))
 
@@ -2348,6 +2359,8 @@ class DAGOrchestrator:
                 f"workspace containment failure: {e}",
             )
 
+        if background_halt.current().refuses("dag_node", None, epoch):
+            raise _CheckHalted  # a halt landed during the DAG lookup above
         try:
             if lineage_internal:
                 # The built-in PR check, exactly (lineage_refuses_check): every
@@ -2377,6 +2390,11 @@ class DAGOrchestrator:
                     start_new_session=True,
                 )
             tracked = background_processes.track(proc)  # Goals PR 0c: a halt signals it
+            if background_halt.current().refuses("dag_node", None, epoch):
+                # Goals PR 0c: a halt landed while the spawn was awaited.
+                await kill_process_group(proc, even_if_exited=True)
+                background_processes.release(tracked)
+                raise _CheckHalted
             try:
                 stdout, stderr = await asyncio.wait_for(
                     proc.communicate(), timeout=_CHECK_CMD_TIMEOUT,
@@ -2408,6 +2426,8 @@ class DAGOrchestrator:
             else:
                 # Exit code 2 or anything else → still pending
                 return CheckResult("pending")
+        except _CheckHalted:
+            raise
         except Exception as e:
             logger.error("Completion check error for node %s: %s", node.name, e)
             return CheckResult("pending", str(e))
