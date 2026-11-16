@@ -17,7 +17,10 @@ import javax.crypto.spec.GCMParameterSpec
  *
  * What this keeps: the token off the disk in plain text, out of any backup
  * and away from other apps. What it does not: code running in this app's
- * own process, or a rooted phone, can still ask the Keystore to decrypt.
+ * own process, or a rooted phone, can still ask the Keystore to decrypt. On
+ * a debuggable build someone with USB debugging can also use the token, and
+ * that build trusts user-installed certificate authorities; the release
+ * build does neither.
  *
  * Any failure (no Keystore, a lost or invalidated key, a provider error,
  * which can be unchecked) answers null, and the app reads that as not paired.

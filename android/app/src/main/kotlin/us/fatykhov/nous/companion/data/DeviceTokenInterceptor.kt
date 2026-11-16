@@ -30,6 +30,7 @@ class DeviceTokenInterceptor(private val credential: DeviceCredential, private v
         } else null
         if (token == null) return chain.proceed(request)
         val response = chain.proceed(request.newBuilder().header(DeviceToken.HEADER, token).build())
+        // The body is read as sent: a refusal compressed in transit would not parse here, so it would not be recognised and the token would be kept.
         if (response.code == 403 && Refusal.of(403, response.peekBody(PEEK_BYTES).string()) == Refusal.TOKEN_REJECTED) {
             credential.clear(onlyIf = token)
         }
