@@ -3,6 +3,7 @@ route and verb. Real Postgres: a real ``DeviceStore``, ``ActionRouter``, ``Surfa
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -14,7 +15,7 @@ from typing import Any
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select, text, update
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Mount
@@ -137,6 +138,79 @@ async def test_pairing_again_keeps_the_push_installation_the_new_device_holds(
     listed = (await _call(app, "GET", "/a2ui/devices", headers=OWNER)).json()["devices"]
     assert {(d["id"], d["revoked_at"] is None) for d in listed} == {(old["device_id"], False), (new["device_id"], True)}
     assert await _installations(db, agent_id) == {"inst-1"}  # superseded, and still the new device's
+
+
+class _GatedPush(PushService):
+    """A push service whose ``deregister`` waits at a gate the test opens: a revoke held between its check that no
+    live device holds the installation and its deletion of the push row."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.reached = asyncio.Event()
+        self.gate = asyncio.Event()
+
+    async def deregister(self, installation_id: str) -> tuple[int, dict[str, Any]]:
+        self.reached.set()
+        await self.gate.wait()
+        return await super().deregister(installation_id)
+
+
+async def _lock_waiters(db) -> int:
+    async with db.engine.connect() as conn:
+        return (
+            await conn.execute(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                    "AND wait_event_type = 'Lock' AND wait_event = 'advisory' "
+                    "AND query LIKE '%pg_advisory_xact_lock%'"
+                )
+            )
+        ).scalar_one()
+
+
+@pytest.mark.parametrize("how", ["owner-revoke", "unpair"])
+async def test_a_revoke_cannot_drop_the_push_row_of_a_device_paired_meanwhile(
+    db, owned, service: SurfaceService, agent_id: str, how: str
+) -> None:
+    """The old device is revoked and its push cleanup is held after the check that no live device holds the
+    installation; meanwhile the same phone pairs again and registers its push token at once. Afterwards the push row
+    exists, with the new token, and the live device holds the installation: the cleanup did not delete it."""
+    push = _GatedPush(db, owned)
+    app = _app(db, owned, service, push)
+    old = await _pair(app, "inst-phone")
+    await push.register("inst-phone", fcm_token="fcm-old")
+    if how == "owner-revoke":
+        revoking = _call(app, "DELETE", f"/a2ui/devices/{old['device_id']}", headers=OWNER)
+    else:
+        revoking = _call(app, "POST", "/a2ui/devices/unpair", headers={"X-Nous-Device-Token": old["token"]})
+    revoke = asyncio.create_task(revoking)
+    await asyncio.wait_for(push.reached.wait(), 10)
+    code = (await _call(app, "POST", "/a2ui/devices/pairings", json={}, headers=OWNER)).json()["code"]
+
+    async def pair_and_register() -> httpx.Response:
+        body = {"code": code, "installation_id": "inst-phone"}
+        response = await _call(app, "POST", "/a2ui/devices/redeem", json=body)
+        await push.register("inst-phone", fcm_token="fcm-new")  # the phone registers as soon as it is paired
+        return response
+
+    repair = asyncio.create_task(pair_and_register())
+    for _ in range(200):  # the pairing either finishes or waits for the device lock the cleanup holds
+        if repair.done() or await _lock_waiters(db) >= 1:
+            break
+        await asyncio.sleep(0.05)
+    push.gate.set()
+    revoked, repaired = await asyncio.gather(revoke, repair)
+    assert (revoked.status_code, repaired.status_code) == (200, 200)
+    async with db.session() as session:
+        rows = (
+            await session.execute(
+                select(A2uiPushInstallation.installation_id, A2uiPushInstallation.fcm_token).where(
+                    A2uiPushInstallation.agent_id == agent_id
+                )
+            )
+        ).all()
+    assert [tuple(row) for row in rows] == [("inst-phone", "fcm-new")]
+    assert await DeviceStore(db, agent_id).installation_bound("inst-phone")
 
 
 # ---- the matrix: every proof against every verb that needs one, every owner route, chat and /mcp ----------------

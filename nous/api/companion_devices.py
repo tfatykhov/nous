@@ -346,6 +346,30 @@ class DeviceStore:
             ).first()
         return found is not None
 
+    async def run_if_unbound(self, installation_id: str, action: Callable[[], Awaitable[object]]) -> bool:
+        """Await ``action`` when no live device holds ``installation_id``; True when it ran.
+
+        The check and ``action`` run under the agent's device lock, the one ``create`` takes, held from the check
+        until ``action`` returns: a device for the same installation is stored either before the check (which then
+        sees it, and ``action`` does not run) or after ``action`` (which then cannot undo anything done for it)."""
+        async with self._db.session() as session:
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": limit_lock_key(self._agent_id)}
+            )
+            bound = (
+                await session.execute(
+                    select(A2uiDevice.id).where(
+                        A2uiDevice.agent_id == self._agent_id,
+                        A2uiDevice.installation_id == installation_id,
+                        A2uiDevice.revoked_at.is_(None),
+                    )
+                )
+            ).first()
+            if bound is not None:
+                return False
+            await action()
+            return True  # the session ends here, which releases the lock
+
     async def _run_hooks(self, device: Device) -> None:
         for hook in list(self.revoke_hooks):
             try:

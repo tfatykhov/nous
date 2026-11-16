@@ -919,6 +919,21 @@ async def test_a_store_failure_after_the_code_is_taken_burns_the_code(make_rig, 
     assert rig.telegram.requests == []
 
 
+@pg
+async def test_run_if_unbound_runs_only_while_no_live_device_holds_the_installation(store: DeviceStore) -> None:
+    ran: list[str] = []
+
+    async def action() -> None:
+        ran.append("ran")
+
+    device, _ = await store.create("Pixel 7", "inst-1")
+    assert await store.run_if_unbound("inst-1", action) is False
+    assert ran == []
+    await store.revoke(device.id)
+    assert await store.run_if_unbound("inst-1", action) is True
+    assert ran == ["ran"]
+
+
 # ---- the live-device limit, held with the insert -----------------------------------------------------------------
 
 
