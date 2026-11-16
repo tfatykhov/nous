@@ -57,14 +57,14 @@ describe('autonomy settings: the words', () => {
     expect(changeText(limitRow({ value: 50 }), 50)).toBe(SAME_TEXT);
     expect(changeText(TURNS({ value: 1000 }), 600)).toContain('chat included');
     expect(changeText(limitRow({ key: 'some_new_limit', value: 9 }), 5)).toBe('Saved: 9 tool calls.');
-    expect(resetText(limitRow({ value: 50 }), true)).toBe("Back to the host's value: 50 tool calls.");
-    expect(resetText(limitRow({ value: 50 }), false)).toBe("This already uses the host's value: 50 tool calls.");
+    expect(resetText(limitRow({ value: 50 }), true)).toBe("Back to the server's value: 50 tool calls.");
+    expect(resetText(limitRow({ value: 50 }), false)).toBe("This already uses the server's value: 50 tool calls.");
   });
 
   it('a change in the list, in words, with who made it', () => {
-    expect(changeLine(change())).toBe('Tool calls per background task: host value to 80, from the dashboard, Nov 16 14:31 UTC');
+    expect(changeLine(change())).toBe("Tool calls per background task: the server's value to 80, from the dashboard, Nov 16 14:31 UTC");
     expect(changeLine(change({ old: 80, new: null, actor: 'owner' })))
-      .toBe("Tool calls per background task: 80 to host value, with the owner's secret, Nov 16 14:31 UTC");
+      .toBe("Tool calls per background task: 80 to the server's value, with the owner's secret, Nov 16 14:31 UTC");
     expect(changeLine(change({ key: 'tool_guard:background:web_search', label: null, tool: 'web_search', old: null, new: 'denied' })))
       .toBe('web_search: default to Not allowed, from the dashboard, Nov 16 14:31 UTC');
   });

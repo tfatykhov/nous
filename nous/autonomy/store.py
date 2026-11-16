@@ -77,6 +77,8 @@ LOG_MAX = 100
 # What GET /autonomy/log may list: every change, the limits' or the tools'.
 LOG_KINDS: tuple[str, ...] = ("all", "limits", "tools")
 TOOL_KEY_PREFIX = "tool_guard:"
+# The wait between two reads of the saved settings (its own name, so a test can replace it alone).
+_sleep = asyncio.sleep
 
 
 class AutonomyRefused(Exception):
@@ -209,7 +211,7 @@ class AutonomyStore:
     async def _read_again(self) -> None:
         delay = RETRY_FIRST_SECONDS
         while True:
-            await asyncio.sleep(delay)
+            await _sleep(delay)
             try:
                 rows, tool_rows = await self._read()
             except Exception as exc:

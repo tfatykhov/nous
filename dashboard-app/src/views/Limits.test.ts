@@ -81,11 +81,11 @@ describe('Limits and tools: the limits', () => {
     expect(within(row).getByText('From the next task that starts.')).toBeTruthy();
     expect(within(row).getByText('tool calls')).toBeTruthy(); // the unit beside the input
     expect(within(rowOf('Rounds of tool use per turn')).getByText(/in chat and in background work alike\./)).toBeTruthy();
-    expect(screen.getByText('No host ceiling set.')).toBeTruthy();
-    // no "Use the host's value" while the value is the host's
-    expect(within(row).queryByRole('button', { name: /Use the host's value/ })).toBeNull();
+    expect(screen.getByText('The server sets no ceiling.')).toBeTruthy();
+    // no "Use the server's value" while the value is the host's
+    expect(within(row).queryByRole('button', { name: /Use the server's value/ })).toBeNull();
     // the last changes of the limits, in words, with who made them
-    expect(screen.getByText('Tool calls per background task: host value to 80, from the dashboard, Nov 16 14:31 UTC')).toBeTruthy();
+    expect(screen.getByText("Tool calls per background task: the server's value to 80, from the dashboard, Nov 16 14:31 UTC")).toBeTruthy();
     expect(calls.map((c) => c.url)).toContain('/autonomy/log?kind=limits');
     expect(calls.map((c) => c.url)).not.toContain('/autonomy/log?kind=tools');
   });
@@ -103,7 +103,7 @@ describe('Limits and tools: the limits', () => {
     expect(within(rowOf('Rounds of tool use per turn')).getByText("Server's value 600, lowered to its ceiling of 300.")).toBeTruthy();
     expect(within(rowOf('Tool calls per background task')).getByText("Server's value: 60. Ceiling: 60.")).toBeTruthy();
     expect(screen.queryByText(/Lowered by the server/)).toBeNull();
-    expect(screen.queryByText('No host ceiling set.')).toBeNull();
+    expect(screen.queryByText('The server sets no ceiling.')).toBeNull();
   });
 
   it('a save sends PUT with the whole number as JSON and says what it does', async () => {
@@ -122,7 +122,7 @@ describe('Limits and tools: the limits', () => {
     await waitFor(() => expect(document.activeElement).toBe(said));
     const row = rowOf('Tool calls per background task');
     expect(within(row).getByText("Your value. The server's value is 50.")).toBeTruthy();
-    expect(within(row).getByRole('button', { name: "Use the host's value for Tool calls per background task" })).toBeTruthy();
+    expect(within(row).getByRole('button', { name: "Use the server's value for Tool calls per background task" })).toBeTruthy();
   });
 
   it('lowering says it stops sooner', async () => {
@@ -164,7 +164,7 @@ describe('Limits and tools: the limits', () => {
     expect(got).toEqual({ value: '12.5' });
   });
 
-  it("\"Use the host's value\" sends DELETE as JSON", async () => {
+  it("\"Use the server's value\" sends DELETE as JSON", async () => {
     serve({ limits: [TURNS(), limitRow({ value: 80, source: 'owner' })] });
     handlers['DELETE /autonomy/limits/subtask_tool_call_limit'] = () => {
       limits = [TURNS(), limitRow()];
@@ -172,8 +172,8 @@ describe('Limits and tools: the limits', () => {
     };
     render(Limits);
     await screen.findByLabelText('Tool calls per background task');
-    await fireEvent.click(screen.getByRole('button', { name: "Use the host's value for Tool calls per background task" }));
-    expect(await screen.findByText("Back to the host's value: 50 tool calls.")).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: "Use the server's value for Tool calls per background task" }));
+    expect(await screen.findByText("Back to the server's value: 50 tool calls.")).toBeTruthy();
     expect(sent('DELETE')).toEqual([{ url: '/autonomy/limits/subtask_tool_call_limit', method: 'DELETE', body: undefined, type: 'application/json' }]);
   });
 

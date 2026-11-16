@@ -589,7 +589,7 @@ async def test_the_read_is_tried_again_with_a_growing_wait_until_it_works(db, ag
 
     settings = _settings(agent_id)
     store = AutonomyStore(FlakyDatabase(), settings)
-    monkeypatch.setattr(store_module.asyncio, "sleep", counted_sleep)
+    monkeypatch.setattr(store_module, "_sleep", counted_sleep)
     await store.load()
     assert not store.loaded and tool_guard.current().hold_all
     try:

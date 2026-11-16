@@ -147,7 +147,7 @@
             {#if row.source === 'owner'}
               <span class="reset">
                 <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={busy !== null}
-                  aria-label="Use the host's value for {row.label}" onclick={() => void useHost(row)}>Use the host's value</Button>
+                  aria-label="Use the server's value for {row.label}" onclick={() => void useHost(row)}>Use the server's value</Button>
               </span>
             {:else}
               <span class="reset-slot" aria-hidden="true"></span>
@@ -208,7 +208,7 @@
   .label { font-size: 0.875rem; font-weight: 600; overflow-wrap: anywhere; }
   .range { font-size: 0.75rem; color: var(--muted); margin: 0.125rem 0 0; }
   /* One grid for every row, so the inputs, units and buttons line up down the card; the last column is kept even when a
-     row has no "Use the host's value". */
+     row has no "Use the server's value". */
   .edit { display: grid; grid-template-columns: 7rem 8rem auto 10.5rem; align-items: center; gap: 0.5rem; }
   .value { width: 7rem; height: 2rem; padding: 0 0.5rem; background: var(--surface); border: 1px solid var(--field-border);
     border-radius: var(--radius-sm); color: var(--text); font: inherit; font-size: 0.875rem; text-align: right;

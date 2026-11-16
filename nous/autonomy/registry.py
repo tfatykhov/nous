@@ -131,23 +131,24 @@ LIMITS: tuple[Limit, ...] = (
         1,
         72,
         "How long a question Nous asks you, or an action it proposes, waits for your answer before it lapses.",
-        "For proposals made after the change: a proposal already waiting keeps its deadline. A question already "
+        "For proposals made after the change: a proposal already waiting keeps its deadline. A proposal you "
+        "approved that has not run yet is still run only if you approved it within the new value. A question already "
         "waiting is judged by the new value at once: lowering it can close the question, and raising it can reopen "
         "one that had lapsed.",
     ),
     Limit(
         "subtask_default_timeout",
-        "Time limit of a task that names none",
+        "Time limit of a spawned task that names none",
         "seconds",
         60,
         6000,
-        "How long a spawned task, a scheduled task or the first task of a goal session may run when it gives no time "
-        "limit of its own.",
+        "How long a task spawned to run in the background, a scheduled task or the first task of a goal session may "
+        "run when it gives no time limit of its own. A task the turn waits for has its own, shorter default.",
         "For tasks and schedules created after the change.",
     ),
     Limit(
         "subtask_max_timeout",
-        "Longest time limit of a task",
+        "Longest time limit of a spawned task",
         "seconds",
         60,
         10_000,

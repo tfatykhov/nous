@@ -34,7 +34,7 @@ export interface LimitRow {
   value: number;
   /** The value the host's environment set. */
   host_value: number;
-  /** What "Use the host's value" restores: the host's value, lowered to its ceiling. */
+  /** What "Use the server's value" restores: the host's value, lowered to its ceiling. */
   baseline: number;
   source: Source;
   ceiling: number | null;
@@ -113,7 +113,7 @@ export const readTools = (signal?: AbortSignal) =>
 /** The owner's value of a limit. A value that is not a whole number is sent as typed: the server says why not. */
 export const saveLimit = (key: string, value: number | string) =>
   timed((signal) => apiRequest<LimitChanged>(limitPath(key), 'PUT', { value }, signal));
-/** Back to the host's value. */
+/** Back to the server's value. */
 export const resetLimit = (key: string) =>
   timed((signal) => apiRequest<LimitChanged>(limitPath(key), 'DELETE', undefined, signal));
 /** Not allowed for background work. */
@@ -143,17 +143,17 @@ export const NOT_LISTED_TEXT =
 export const NOT_HELD_TEXT = 'Chat itself, a tap on a companion card and an action you approved are not held.';
 export const OFF_TITLE = 'Autonomy settings are off on this server.';
 export const OFF_TEXT =
-  "Set NOUS_AUTONOMY_SETTINGS_ENABLED=true on the host to change the limits of background work here. Until then every limit is the host's.";
+  "Set NOUS_AUTONOMY_SETTINGS_ENABLED=true on the server to change the limits of background work here. Until then every limit is the server's own value.";
 export const GUARD_OFF_TITLE = 'The tool guard is off on this server.';
 export const GUARD_OFF_TEXT =
-  'Set NOUS_TOOL_GUARD_ENABLED=true, with NOUS_AUTONOMY_SETTINGS_ENABLED=true, on the host to choose the tools background work may use. Until then background work is offered the tools it was before.';
+  'Set NOUS_TOOL_GUARD_ENABLED=true, with NOUS_AUTONOMY_SETTINGS_ENABLED=true, on the server to choose the tools background work may use. Until then background work is offered the tools it was before.';
 export const FORBIDDEN_TEXT = 'Sign in through the login page to see and change these settings.';
 export const UNSUPPORTED_TEXT = 'Limits and tools are not available on this server.';
 export const UNREACHABLE_TEXT = 'Could not reach the server.';
 /** A change whose answer was lost: it may or may not have been made. */
 export const NO_ANSWER_TEXT = 'No answer came back. Refresh the page before trying again.';
 export const NOT_JSON_TEXT = 'The request was not sent as JSON, so it was refused.';
-export const NO_CEILING_TEXT = 'No host ceiling set.';
+export const NO_CEILING_TEXT = 'The server sets no ceiling.';
 export const SAME_TEXT = 'Saved. The value is the same as before.';
 /** A save of the value already saved: the server wrote nothing. */
 export const ALREADY_TEXT = 'That was already the saved value.';
@@ -254,9 +254,9 @@ export function changeText(row: LimitRow, before: number): string {
   return LOWER[row.key] ?? `Saved: ${n(row.value)} ${row.unit}.`;
 }
 
-/** The sentence after "Use the host's value". */
+/** The sentence after "Use the server's value". */
 export const resetText = (row: LimitRow, changed: boolean) =>
-  changed ? `Back to the host's value: ${n(row.value)} ${row.unit}.` : `This already uses the host's value: ${n(row.value)} ${row.unit}.`;
+  changed ? `Back to the server's value: ${n(row.value)} ${row.unit}.` : `This already uses the server's value: ${n(row.value)} ${row.unit}.`;
 
 /** A tool's sentence after its setting changed. */
 export const toolChangeText = (tool: string, setting: ToolSetting) =>
@@ -277,12 +277,12 @@ export const heldText = (heldIn: string[]) => (heldIn.length ? `Not allowed appl
 
 /** A value of a change in words: null is the host's value (a limit) or the default (a tool). */
 function valueWords(change: Change, value: unknown): string {
-  if (value === null || value === undefined) return change.tool !== null ? 'default' : 'host value';
+  if (value === null || value === undefined) return change.tool !== null ? 'default' : "the server's value";
   if (value === 'allowed' || value === 'denied') return SETTING_WORDS[value];
   return typeof value === 'number' ? n(value) : String(value);
 }
 
-/** A change as the list says it: "Tool calls per background task: host value to 80, from the dashboard, Nov 16 14:31
+/** A change as the list says it: "Tool calls per background task: the server's value to 80, from the dashboard, Nov 16 14:31
  * UTC". */
 export function changeLine(change: Change): string {
   const what = change.label ?? change.tool ?? change.key;

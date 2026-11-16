@@ -178,3 +178,7 @@ def test_the_words_of_the_three_limits_the_screen_must_get_right():
     assert "plus 10 minutes" in by_key("subtask_max_timeout").description
     ttl = by_key("intention_proposal_ttl_hours").applies
     assert "proposal already waiting keeps its deadline" in ttl and "question already waiting" in ttl
+    assert "approved that has not run yet" in ttl
+    assert "waits for has its own" in by_key("subtask_default_timeout").description
+    for key in ("subtask_default_timeout", "subtask_max_timeout"):
+        assert "spawned task" in by_key(key).label, key
