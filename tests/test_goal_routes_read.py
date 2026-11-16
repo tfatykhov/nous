@@ -283,6 +283,15 @@ async def test_the_pause_sentence_is_the_harness_row_of_the_pause_not_any_state_
     assert (await env.call("GET", f"/goals/{running.id}")).json()["pause_sentence"] is None
 
 
+async def test_of_two_pause_rows_the_newest_is_the_pause_sentence(db) -> None:
+    env = make_env(db)
+    goal = await paused(env.store, "error")
+    await env.store.append_journal(goal.id, "state", "Paused: the first start failed.", actor="harness")
+    await env.store.append_journal(goal.id, "state", "Paused: the start failed 3 times in a row.", actor="harness")
+    body = (await env.call("GET", f"/goals/{goal.id}")).json()
+    assert body["pause_sentence"] == "Paused: the start failed 3 times in a row."
+
+
 async def test_a_paused_goals_resume_blocked_follows_its_spend_and_deadline(db) -> None:
     env = make_env(db)
     budget = await paused(env.store, "budget")
