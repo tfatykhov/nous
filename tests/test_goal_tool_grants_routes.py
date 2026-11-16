@@ -515,3 +515,26 @@ async def test_a_failing_read_after_an_action_does_not_fail_the_route(db):
     goal = await active(store, origin_channel=CHAN)
     response = await send(app, "POST", f"/goals/{goal.id}/pause", headers=OWNER, json={})
     assert response.status_code == 200 and response.json()["state"] == "paused"
+
+
+@pytest.mark.parametrize(
+    ("state", "why"),
+    [
+        ("draft", "The goal is a draft: nothing runs until you approve it."),
+        ("paused", "The goal is paused."),
+        ("cancelled", "The goal is finished."),
+    ],
+)
+async def test_a_grant_of_a_goal_that_is_not_active_says_it_is_not_used(env, state, why):
+    goal = await draft(env.store, origin_channel=CHAN)
+    await env.allow(goal.id, "send_email")
+    if state == "paused":
+        await env.store.pause((await env.store.approve(goal.id, actor="owner")).id, actor="owner")
+    if state == "cancelled":
+        await env.store.cancel(goal.id, actor="owner")
+    [grant] = (await env.call("GET", f"/goals/{goal.id}/tools")).json()["grants"]
+    assert (grant["usable"], grant["not_usable_why"]) == (False, why)
+    if state == "paused":
+        await env.store.resume(goal.id, actor="owner")
+        [grant] = (await env.call("GET", f"/goals/{goal.id}/tools")).json()["grants"]
+        assert (grant["usable"], grant["not_usable_why"]) == (True, None)

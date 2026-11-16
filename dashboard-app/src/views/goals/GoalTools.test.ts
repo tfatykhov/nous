@@ -145,6 +145,13 @@ describe('the tools a goal may use without asking', () => {
     expect(within(email).getByText('Not used now. Switched off for background work under Limits and tools.')).toBeTruthy();
   });
 
+  it("a paused goal's grant says it is not used now and why", async () => {
+    current = goalToolsAnswer({ grants: [toolGrant('send_email', { usable: false, not_usable_why: 'The goal is paused.' })] });
+    render(GoalTools, { goal: { ...GOAL, state: 'paused' } });
+    const email = await waitFor(() => rowOf('send_email'));
+    expect(within(email).getByText('Not used now. The goal is paused.')).toBeTruthy();
+  });
+
   it('a finished goal lists its tools with no button and nothing to add', async () => {
     current = goalToolsAnswer({ can_edit: false });
     render(GoalTools, { goal: { ...GOAL, state: 'cancelled' } });

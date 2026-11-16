@@ -118,8 +118,8 @@ GRANT_FACTS: Mapping[str, GrantFact] = MappingProxyType(
         ),
         "browser_task": GrantFact(
             "open web pages on the sites each call names, click and type",
-            "It has no logins, and it stops before signing in, paying, buying, accepting terms, sending messages or "
-            "deleting anything.",
+            "It has no logins, and it stops before a step that looks like signing in, paying, accepting terms, "
+            "sending a message or deleting something.",
         ),
     }
 )

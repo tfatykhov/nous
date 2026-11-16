@@ -118,7 +118,7 @@ export function toolWords(tool: string, ref = 'G-0001'): GoalToolWords {
     send_file: ['send files from the server to your Telegram chat', 'A sent file cannot be taken back.'],
     browser_task: [
       'open web pages on the sites each call names, click and type',
-      'It has no logins, and it stops before signing in, paying, buying, accepting terms, sending messages or deleting anything.',
+      'It has no logins, and it stops before a step that looks like signing in, paying, accepting terms, sending a message or deleting something.',
     ],
     mcp__notes__search: [
       'use search on notes (notes.example.com)',

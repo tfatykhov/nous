@@ -517,6 +517,18 @@ def grant_refusal_for(tool: str, *, registered: bool, settings: Any) -> GrantRef
     return None
 
 
+def goal_not_running(goal: Goal) -> str | None:
+    """Why no grant of ``goal`` is used now because of the goal's own state, or None for an active goal: grants
+    reach only the open session of an active goal."""
+    if goal.state == "active":
+        return None
+    if goal.state == "draft":
+        return "The goal is a draft: nothing runs until you approve it."
+    if goal.state == "paused":
+        return "The goal is paused."
+    return "The goal is finished."
+
+
 def grant_not_usable(tool: str, identity: McpIdentity | None, *, registered: bool, settings: Any) -> str | None:
     """Why a goal's grant of ``tool`` is not used now, in words, from the checks the runner makes; None when it is
     (while the goal is active and a session is open)."""
@@ -799,7 +811,9 @@ def build_goal_routes(
 
     def grant_row(goal: Goal, row: GoalToolGrant, tools: dict[str, str]) -> dict[str, Any]:
         identity = grant_identity(row)
-        why = grant_not_usable(row.tool, identity, registered=row.tool in tools, settings=settings)
+        why = goal_not_running(goal) or grant_not_usable(
+            row.tool, identity, registered=row.tool in tools, settings=settings
+        )
         return {
             "tool": row.tool,
             **tool_words(row.tool, identity, format_short_id(goal.short_id)),
