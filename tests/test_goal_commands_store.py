@@ -285,6 +285,41 @@ async def test_two_approvals_at_once_leave_one_goal_in_the_mode(db, monkeypatch)
     assert count == 1
 
 
+async def test_a_return_to_contained_during_an_approval_waits_for_it(db, monkeypatch):
+    """The approval holds the goal's row; the owner's return waits for it, then clears the end it set."""
+    store = _store(db)
+    goal = await _draft(store, commands=_ask())
+    real = GoalStore._one_at_a_time
+    holding, release = asyncio.Event(), asyncio.Event()
+
+    async def held(self, s, goal_row, now):
+        await real(self, s, goal_row, now)
+        holding.set()
+        await release.wait()
+
+    monkeypatch.setattr(GoalStore, "_one_at_a_time", held)
+    approval = asyncio.create_task(store.approve(goal.id, actor="owner"))
+    await holding.wait()
+    returned = asyncio.create_task(store.return_to_contained(goal.id, actor="owner", proof="owner"))
+    waiting = 0
+    for _ in range(100):
+        async with db.session() as s:
+            waiting = await s.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
+                    "AND datname = current_database()"
+                )
+            )
+        if waiting:
+            break
+        await asyncio.sleep(0.02)
+    assert waiting == 1 and not returned.done()
+    release.set()
+    assert (await approval).mode == "commands"
+    final = await returned
+    assert (final.state, final.mode, final.mode_until) == ("active", "contained", None)
+
+
 async def test_an_armed_draft_approved_after_the_flag_went_off_is_approved_contained(db):
     store = _store(db)
     goal = await _draft(store, commands=_ask())
