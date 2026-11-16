@@ -134,6 +134,10 @@ async def test_an_mcp_tool_allowed_again_with_another_identity_replaces_its_gran
     old, new = await _grants(db, goal)
     assert (old.server_id, old.revoked_by, old.revoked_at is not None) == (NOTES.server_id, "proxy", True)
     assert (new.server_id, new.revoked_at) == (moved.server_id, None)
+    journal = (await _state_rows(db, goal))[-1]
+    assert journal.text == (
+        "Allowed to use mcp__notes__search (server notes) without asking, from now on, in place of its earlier grant."
+    )
 
 
 async def test_a_revoke_marks_the_row_with_the_proof_and_journals_as_the_owner(db):

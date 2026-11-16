@@ -318,8 +318,7 @@ class GoalDriver:
         """Run the loop: one tick every ``goals_tick_seconds``. Does nothing, and builds no task, with goals off."""
         if not self._enabled() or self._task is not None:
             return
-        if self.tool_grants is not None:
-            await self.tool_grants.refresh()
+        await self._read_grants()
         self._running = True
         self._task = asyncio.create_task(self._loop(), name="goal-driver")
         logger.info("Goal driver started (tick=%ds)", self._settings.goals_tick_seconds)
@@ -371,11 +370,24 @@ class GoalDriver:
             paused = await self.apply_stop_conditions()
             started, held = await self._start_due()
             await self.tell_owner_of_pauses()  # after every pause of this tick has committed
-            if self.tool_grants is not None:  # F115: after this tick's pauses, closes and starts
-                await self.tool_grants.refresh()
+            await self._read_grants()  # F115: after this tick's pauses, closes and starts
             return TickReport(
                 claimed=claimed, closed=closed, stopped=stopped, paused=paused, started=started, held=held
             )
+
+    async def _read_grants(self, root_id: UUID | None = None) -> None:
+        """F115: read the goals' tool grants into the runner's view again (all of them, or one session's root), when
+        a view is set. Called after the driver's own transactions have committed, so it holds no row lock of theirs.
+        A read that fails (the view is then empty) never fails the tick, the start or the close: logged by its class."""
+        if self.tool_grants is None:
+            return
+        try:
+            if root_id is None:
+                await self.tool_grants.refresh()
+            else:
+                await self.tool_grants.refresh_root(root_id)
+        except Exception as exc:
+            logger.warning("F115: the goals' tool grants were not read again (%s)", type(exc).__name__)
 
     # ---- starting a session --------------------------------------------------------------------------------
 
@@ -608,8 +620,7 @@ class GoalDriver:
             return _Start()
         self._failures.pop(goal_id, None)
         self._failures_since.pop(goal_id, None)
-        if self.tool_grants is not None:  # F115: the new session's first task is offered the goal's tools
-            await self.tool_grants.refresh_root(root_id)
+        await self._read_grants(root_id)  # F115: the new session's first task is offered the goal's tools
         self._runner.wake()
         logger.info("Goal %s: session %d started (root %s)", goal_id, n, root_id)
         return _Start(root_id=root_id)
@@ -1349,8 +1360,7 @@ class GoalDriver:
             await s.commit()
             self._following.add(row.id)  # read once more after the close, and while its lineage is unsettled
             logger.info("Goal %s: session %d closed (%s, %d tokens)", goal.id, row.n, outcome, spent)
-        if self.tool_grants is not None:  # F115: a closed session's root keeps no grant
-            await self.tool_grants.refresh_root(row.root_id)
+        await self._read_grants(row.root_id)  # F115: a closed session's root keeps no grant
         return True
 
     async def _root_state(self, s: AsyncSession, root_id: UUID) -> _RootState:

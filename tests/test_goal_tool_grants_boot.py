@@ -274,3 +274,27 @@ async def test_a_real_turn_of_each_kind_calls_the_granted_tool_and_the_ledger_re
         )
     assert [(row.context_kind, row.status) for row in rows] == [(kind, "success")]
     await asyncio.gather(*view._tasks)
+
+
+async def test_a_start_whose_grant_read_raises_still_starts_and_its_first_task_has_no_lift(env_factory, caplog):  # noqa: F811
+    w = await _world(env_factory, **GRANTS)
+    goal = await _active(w)
+    await w.store.grant_tool(goal.id, "send_email", None, actor="owner", proof="owner")
+    tool_guard.install(ToolGuard())
+    view = GoalToolGrants(w.db, w.env.settings)
+    assert await view.refresh()
+
+    async def raising(root_id):
+        raise RuntimeError("the read blew up")
+
+    view.refresh_root = raising
+    w.driver.tool_grants = view
+    runner = _runner_over(("send_email", "web_search"))
+    runner.set_goal_lift(view.lifts, view.note_used)
+    root, session = await _started(w, goal)  # started, not failed and not delayed
+    assert session.ended_at is None and w.driver._runner.wakes == 1
+    assert "RuntimeError" in caplog.text and "blew up" not in caplog.text
+    async with w.db.session() as s:
+        subtask = (await s.execute(select(Subtask).where(Subtask.id == session.first_subtask_id))).scalar_one()
+    first_task = ExecutionContext.for_subtask(subtask, f"subtask-{subtask.id}")
+    assert "send_email" not in _offered(runner, first_task)

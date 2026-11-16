@@ -520,9 +520,10 @@ class GoalStore:
                 )
             )
             named = f"{tool} (server {identity.server_name})" if identity else tool
-            self.add_journal_row(
-                s, goal.id, "state", f"Allowed to use {named} without asking, from now on.", actor=actor
-            )
+            text = f"Allowed to use {named} without asking, from now on."
+            if current is not None:
+                text = f"Allowed to use {named} without asking, from now on, in place of its earlier grant."
+            self.add_journal_row(s, goal.id, "state", text, actor=actor)
             await s.commit()
             return True
 
