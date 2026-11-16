@@ -11,10 +11,11 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-from f099_support import env_factory, runner_env, use  # noqa: F401
+from f099_support import env_factory, make_child, make_subtask, record, runner_env, use  # noqa: F401
 from goals_support import (
     active,
     first_result,
+    goal_row,
     reset_goal_report_channel,  # noqa: F401
     set_goal,
     started,
@@ -285,8 +286,6 @@ async def test_a_decision_turn_of_a_goal_root_gets_the_block_and_the_tools(runne
 
 @pytest.mark.postgres_only
 async def test_a_decision_turn_of_an_ordinary_root_gets_neither(runner_env):  # noqa: F811
-    from f099_support import make_subtask, record
-
     w = await world(runner_env, [REPORT])
     await started(w, await active(w))  # a goal with a running session, and this root is not its
     subtask = await make_subtask(w.env)
@@ -322,3 +321,33 @@ def test_the_runner_has_no_goal_hook_by_default():
 
     runner = ContinuationRunner(database=None, settings=SETTINGS, runner=None, heart=None, brain=None)
     assert runner._goal_turns is None
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("kind", ["subtask", "file"])
+async def test_a_decision_turn_closes_a_step_with_evidence_its_lineage_produced(runner_env, tmp_path, kind):  # noqa: F811
+    """A step the chain spawned completed (or the work wrote a file under the root's own directory): the decision
+    turn finds it in its goal block and closes the plan step with it, counted for its session."""
+    cited: dict = {}
+
+    async def close_the_step(call):
+        assert cited["ref"] in _prompt_of(call)  # the goal block lists it
+        return [use("goal_plan", steps=[{"id": "s1", "status": "closed", "evidence": [cited["ref"]]}])]
+
+    w = await world(runner_env, close_the_step, [REPORT], workspace_dir=str(tmp_path))
+    goal = await active(w)
+    await set_goal(w, goal, plan=[{"id": "s1", "text": "Merge the duplicates", "status": "open"}])
+    root, session = await started(w, goal)
+    if kind == "subtask":
+        child = await make_child(w.env, root)  # a step the chain spawned under this root
+        await w.env.heart.subtasks.complete(uuid.UUID(child.source_id), "merged", final_outcome="completed")
+        cited["ref"] = f"subtask:{child.source_id}"
+    else:
+        directory = tmp_path / "intentions" / str(root.id)
+        directory.mkdir(parents=True)
+        (directory / "merged.md").write_text("the merged notes", encoding="utf-8")
+        cited["ref"] = f"file:intentions/{root.id}/merged.md"
+    await first_result(w, root)
+    assert await w.cont.run_arrival(root.id) is not None
+    (step,) = (await goal_row(w, goal)).plan
+    assert (step["status"], step["evidence"], step["closed_session"]) == ("closed", [cited["ref"]], session.n)
