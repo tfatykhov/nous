@@ -72,7 +72,7 @@ async def test_with_goals_off_nothing_is_built_bound_or_read(monkeypatch, flags)
     )
     built = main._build_goals(settings, database=db, heart=Untouchable(), continuation_runner=runner)
     assert built is None
-    assert continuation._goal_report_channel is None and runner._goal_turns is None
+    assert continuation._goal_report_channel is None and runner._goal_turns is None and runner._goals is None
     assert db.sessions == 0
 
 
@@ -97,6 +97,7 @@ async def test_with_goals_on_one_driver_is_built_and_both_hooks_are_bound(runner
     assert runner._goal_turns.__func__ is GoalChain.turn_context and runner._goal_turns.__self__._store.agent_id == (
         env.agent
     )
+    assert runner._goals is built  # the owner's priority in _launch asks this driver which roots are goals'
 
 
 def test_create_components_binds_the_hooks_before_anything_runs_and_starts_the_loop_last():  # PIN
@@ -128,22 +129,28 @@ async def test_running_is_true_only_while_the_loop_runs(runner_env):  # noqa: F8
     assert not [t for t in asyncio.all_tasks() if t.get_name() == "goal-driver" and not t.done()]
 
 
-async def test_the_driver_stops_before_the_runner_and_the_hook_is_cleared():
+async def test_the_driver_stops_before_the_runner_and_every_hook_is_cleared():
     order: list[str] = []
 
     class Stopping:
         def __init__(self, name: str) -> None:
             self.name = name
+            self.goals, self.turns = object(), object()
 
         async def stop(self) -> None:
             order.append(self.name)
 
+        def set_goals(self, goals) -> None:
+            self.goals = goals
+
+        def set_goal_turns(self, turns) -> None:
+            self.turns = turns
+
     continuation.set_goal_report_channel(report_channel)
-    await main.shutdown_components(
-        {"goal_driver": Stopping("goal driver"), "continuation_runner": Stopping("continuation runner")}
-    )
+    runner = Stopping("continuation runner")
+    await main.shutdown_components({"goal_driver": Stopping("goal driver"), "continuation_runner": runner})
     assert order == ["goal driver", "continuation runner"]
-    assert continuation._goal_report_channel is None
+    assert continuation._goal_report_channel is None and runner.goals is None and runner.turns is None
 
 
 @pytest.mark.postgres_only
@@ -289,6 +296,8 @@ def test_a_boot_with_goals_on_runs_one_driver_and_its_shutdown_stops_it(monkeypa
                     tasks=goal_tasks(),
                     hook=continuation._goal_report_channel,
                     turns=components["continuation_runner"]._goal_turns,
+                    goals=components["continuation_runner"]._goals,
+                    runner=components["continuation_runner"],
                 )
                 transport = httpx.ASGITransport(app=app)
                 async with httpx.AsyncClient(transport=transport, base_url="http://nous") as client:
@@ -317,5 +326,7 @@ def test_a_boot_with_goals_on_runs_one_driver_and_its_shutdown_stops_it(monkeypa
     _run(scenario, seconds=120)
     assert isinstance(seen["driver"], GoalDriver) and seen["running"] is True and seen["tasks"] == ["goal-driver"]
     assert seen["hook"] is report_channel and seen["turns"].__func__ is GoalChain.turn_context
+    assert seen["goals"] is seen["driver"]
+    assert seen["runner"]._goals is None and seen["runner"]._goal_turns is None  # cleared at the shutdown
     assert seen["options"]["enabled"] is True and seen["options"]["driver_running"] is True
     assert seen["after_running"] is False and seen["after_tasks"] == [] and seen["after_hook"] is None

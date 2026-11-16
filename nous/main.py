@@ -613,9 +613,11 @@ def _build_goals(
     settings: Settings, *, database: Database, heart: Heart, continuation_runner: Any | None
 ) -> Any | None:
     """F114: with ``NOUS_GOALS_ENABLED`` on (its validator turns it off unless continuation, intentions, the result
-    inbox and subtasks are on) and a continuation runner, bind the chain's two hooks (a goal session's REPORT goes to
-    the goal's journal; its decision turn sees its goal and gets the goal tools) and build the one goal driver. Its
-    loop is started by the caller, after the runner's. None otherwise: nothing of the chain is imported or bound."""
+    inbox and subtasks are on) and a continuation runner, build the one goal driver and bind the three goal hooks: a
+    goal session's REPORT goes to the goal's journal (``continuation.set_goal_report_channel``), its decision turn
+    sees its goal and gets the goal tools (``set_goal_turns``), and the runner keeps goal chains out of the owner's
+    reserved slots (``set_goals``). Its loop is started by the caller, after the runner's. None otherwise: nothing of
+    the chain is imported or bound."""
     if not settings.goals_enabled or continuation_runner is None:
         return None
     from nous.goals.chain import GoalChain, report_channel
@@ -625,7 +627,9 @@ def _build_goals(
     store = GoalStore(database, settings.agent_id, settings)
     continuation.set_goal_report_channel(report_channel)
     continuation_runner.set_goal_turns(GoalChain(database, settings, store).turn_context)
-    return GoalDriver(database, settings, heart, store, continuation_runner)
+    goal_driver = GoalDriver(database, settings, heart, store, continuation_runner)
+    continuation_runner.set_goals(goal_driver)
+    return goal_driver
 
 
 async def create_components(settings: Settings) -> dict:
@@ -2157,6 +2161,9 @@ async def shutdown_components(components: dict) -> None:
     continuation_runner = components.get("continuation_runner")
     if continuation_runner is not None:
         await continuation_runner.stop()
+        if components.get("goal_driver") is not None:  # F114: no goal hook outlives the driver
+            continuation_runner.set_goals(None)
+            continuation_runner.set_goal_turns(None)
 
     # F034: Stop heartbeat before other components
     heartbeat_runner = components.get("heartbeat_runner")
