@@ -9,7 +9,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from goal_routes_support import CHAN, active, add_session, db_now, draft, make_env, paused, set_values
+from goal_routes_support import CHAN, active, add_session, db_now, draft, harness_row, make_env, paused, set_values
 from sqlalchemy import func, select
 
 from nous.api.goal_routes import JOURNAL_MAX, masked_channel
@@ -259,25 +259,23 @@ async def test_the_detail_sends_the_newest_sessions_and_how_many_there_are(db) -
 async def test_the_pause_sentence_is_the_harness_row_of_the_pause_not_any_state_row(db) -> None:
     env = make_env(db)
     goal = await paused(env.store, "error")
-    await env.store.append_journal(goal.id, "state", "Session 3 could not start. Paused.", actor="harness", session_n=3)
+    await harness_row(env.store, goal, "Session 3 could not start. Paused.", session_n=3)
     await env.store.raise_budget(goal.id, total=goal.total_budget * 2, actor="owner")  # a newer state row, the owner's
     # Session close rows written after the pause, as the driver writes them, with and without the session's note.
     closed = "Session 3 ended: no_step, 10 tokens."
-    await env.store.append_journal(goal.id, "state", closed, actor="harness", session_n=3)
-    await env.store.append_journal(
-        goal.id, "state", f"A row of the session's.\n{SESSION_NOTE_LABEL} It was hard.", actor="harness", session_n=3
-    )
+    await harness_row(env.store, goal, closed, session_n=3)
+    await harness_row(env.store, goal, f"A row of the session's.\n{SESSION_NOTE_LABEL} It was hard.", session_n=3)
     for i in range(55):  # newer rows beyond the journal the detail sends
         await env.store.append_journal(goal.id, "progress", f"progress {i}", actor="chain")
     body = (await env.call("GET", f"/goals/{goal.id}")).json()
     assert body["journal"][0]["actor"] == "chain"
     assert body["pause_sentence"] == "Session 3 could not start. Paused."
     long = await paused(env.store, "error")
-    await env.store.append_journal(long.id, "state", "w" * 1000, actor="harness")
+    await harness_row(env.store, long, "w" * 1000)
     clipped = (await env.call("GET", f"/goals/{long.id}")).json()["pause_sentence"]
     assert len(clipped) == 300 and clipped.endswith("[clipped]")
     by_owner = await paused(env.store, "owner")
-    await env.store.append_journal(by_owner.id, "state", "An older harness row.", actor="harness")
+    await harness_row(env.store, by_owner, "An older harness row.")
     assert (await env.call("GET", f"/goals/{by_owner.id}")).json()["pause_sentence"] is None
     running = await active(env.store)
     assert (await env.call("GET", f"/goals/{running.id}")).json()["pause_sentence"] is None
@@ -286,8 +284,8 @@ async def test_the_pause_sentence_is_the_harness_row_of_the_pause_not_any_state_
 async def test_of_two_pause_rows_the_newest_is_the_pause_sentence(db) -> None:
     env = make_env(db)
     goal = await paused(env.store, "error")
-    await env.store.append_journal(goal.id, "state", "Paused: the first start failed.", actor="harness")
-    await env.store.append_journal(goal.id, "state", "Paused: the start failed 3 times in a row.", actor="harness")
+    await harness_row(env.store, goal, "Paused: the first start failed.")
+    await harness_row(env.store, goal, "Paused: the start failed 3 times in a row.")
     body = (await env.call("GET", f"/goals/{goal.id}")).json()
     assert body["pause_sentence"] == "Paused: the start failed 3 times in a row."
 
