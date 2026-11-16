@@ -2,7 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/svelte';
 import Devices from './Devices.svelte';
 import Integrations from '../Integrations.svelte';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { initRouter } from '../../lib/router';
+import { parseBlocks, styleBlocks } from '../../lib/testing/css';
 import { OPEN, deviceList, deviceRow } from '../../lib/testing/deviceFixtures';
 import type { DeviceList } from '../../lib/devices';
 
@@ -296,6 +299,40 @@ describe('Devices: a pairing code', () => {
     await vi.advanceTimersByTimeAsync(100);
     expect(s.getByText(CODE)).toBeTruthy();
     expect(s.queryByText(/no longer works/)).toBeNull();
+  });
+
+  it('when a read ends the code, the focus that was on it goes to the sentence in its place', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    opening();
+    const s = await showCode();
+    const code = await s.findByText(CODE);
+    await vi.waitFor(() => expect(document.activeElement).toBe(code));
+    listed = { ...listed, pairing: { state: 'used' } };
+    await vi.advanceTimersByTimeAsync(15_500);
+    const said = await s.findByText('A code was used. The new device is in the list below.');
+    await vi.waitFor(() => expect(document.activeElement).toBe(said));
+  });
+
+  it('when a read ends the code, focus elsewhere stays where it is', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    opening();
+    const s = await showCode();
+    const code = await s.findByText(CODE);
+    await vi.waitFor(() => expect(document.activeElement).toBe(code)); // the new code took the focus; the owner moves on
+    const field = s.getByLabelText('Name (optional)') as HTMLInputElement;
+    field.focus();
+    listed = { ...listed, pairing: { state: 'used' } };
+    await vi.advanceTimersByTimeAsync(15_500);
+    await s.findByText('A code was used. The new device is in the list below.');
+    await vi.advanceTimersByTimeAsync(50);
+    expect(document.activeElement).toBe(field);
+  });
+
+  it('the code and the sentence that replaces it show the same focus outline as the Revoke sentence', () => {
+    const css = parseBlocks(styleBlocks(readFileSync(join(__dirname, 'Devices.svelte'), 'utf-8')));
+    const ring = css.get('.confirm p:focus');
+    expect(ring?.outline).toBe('2px solid var(--focus-ring)');
+    for (const sel of ['.code:focus', '.ended p:focus']) expect(css.get(sel), sel).toEqual(ring);
   });
 
   it('while the code is open, the tries left are said once a wrong code was tried', async () => {

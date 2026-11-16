@@ -67,6 +67,12 @@
   function finish(end: CodeEnd) {
     shown = null;
     ended = end;
+    // The code's box is gone, with the focus it may have held: the focus goes to the sentence in its place. Focus
+    // elsewhere (the name field, say) stays where it is.
+    void tick().then(() => {
+      const at = document.activeElement;
+      if (!at || at === document.body || !at.isConnected) document.getElementById('dev-ended')?.focus();
+    });
   }
 
   // A read made after the code: once it says the code is used, closed, expired, gone or replaced by a newer one, the
@@ -228,7 +234,7 @@
       </div>
     {:else if ended}
       <div class="ended">
-        <p class="line {TONE[END_TEXT[ended].tone]}" role="status">{END_TEXT[ended].text}</p>
+        <p id="dev-ended" tabindex="-1" class="line {TONE[END_TEXT[ended].tone]}" role="status">{END_TEXT[ended].text}</p>
         <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" onclick={() => void done()}>Done</Button>
       </div>
     {:else if serverLine}
@@ -316,11 +322,12 @@
     max-width: 30rem; }
   .code { font-family: var(--font-mono); font-size: 2rem; font-weight: 600; letter-spacing: 0.08em; line-height: 1.2;
     margin: 0; color: var(--text); user-select: all; overflow-wrap: anywhere; }
-  .code:focus { outline: none; }
+  .code:focus { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: var(--radius-sm); }
   .valid { font-size: 0.875rem; font-weight: 500; margin: 0.25rem 0 0; }
   .code-box .actions { margin-top: 0.625rem; }
   .ended { display: flex; align-items: center; gap: 0.25rem 0.75rem; flex-wrap: wrap; margin-top: 0.5rem; }
   .ended .line { margin: 0; }
+  .ended p:focus { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: var(--radius-sm); }
   .devices { list-style: none; margin: 0; padding: 0; }
   /* A device: its name and line on the left, Revoke at the right whatever the name's length; the question below. */
   .device { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 0 0.75rem;
