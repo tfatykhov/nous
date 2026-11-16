@@ -184,3 +184,44 @@ def test_a_table_missing_at_start_holds_every_tool_until_it_is_read(monkeypatch)
 
 def test_a_first_read_that_fails_holds_every_tool_until_the_next_read(monkeypatch):
     _boot_scenario(monkeypatch, "transient")
+
+
+def test_a_locked_name_that_matches_no_registered_tool_is_named_at_start(monkeypatch, caplog):
+    agent_id = f"test-autonomy-boot-{uuid.uuid4().hex[:8]}"
+    settings = _settings(agent_id)
+    object.__setattr__(settings, "autonomy_locked_tools", f"{DENIED},no_such_tool,mcp__notes__search")
+
+    async def already_migrated(engine: Any) -> None:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO nous_system.agents (id, name, config) VALUES (:id, 'x', '{}')"), {"id": agent_id}
+            )
+
+    monkeypatch.setattr(main, "run_migrations", already_migrated)
+    caplog.set_level("WARNING", logger=store_module.__name__)
+
+    async def scenario() -> None:
+        components: dict | None = None
+        try:
+            components = await main.create_components(settings)
+            assert components["dispatcher"].is_registered(DENIED)
+            assert components["autonomy"].locked == frozenset({DENIED, "no_such_tool", "mcp__notes__search"})
+        finally:
+            if components is not None:
+                await main.shutdown_components(components)
+            await _sql(
+                settings,
+                ("DELETE FROM heart.rubric_versions WHERE agent_id = :a", {"a": agent_id}),
+                ("DELETE FROM nous_system.agents WHERE id = :a", {"a": agent_id}),
+            )
+            tool_guard.install(None)
+
+    _run(scenario)
+    said = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == store_module.__name__ and "no registered tool" in r.getMessage()
+    ]
+    # Named after the tools were registered: the registered one is not named, and an MCP name may connect later.
+    assert len(said) == 1 and "no_such_tool" in said[0]
+    assert DENIED not in said[0] and "mcp__" not in said[0]

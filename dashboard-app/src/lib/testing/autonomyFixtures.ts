@@ -42,7 +42,7 @@ export function limitsAnswer(rows: LimitRow[] = [TURNS(), limitRow()], over: Par
 }
 
 export const NOT_LOADED_MESSAGE =
-  "The saved settings could not be read; background work is held from tools until they can. Every limit is the server's own value until then.";
+  "The saved settings could not be read; background work and a tap on a companion card are held from tools until they can. Every limit is the server's own value until then.";
 
 export function change(over: Partial<Change> = {}): Change {
   return {
@@ -67,7 +67,7 @@ export const PLACES: Place[] = [
   { key: 'triage', words: 'Heartbeat triage' },
 ];
 
-/** The places the guard holds, as the server lists them (nous/autonomy/tool_guard.held_places). */
+/** The places the owner's Not allowed holds, as the server lists them (nous/autonomy/tool_guard.places). */
 export const HELD_IN = [
   'background tasks',
   'workflow steps',
@@ -80,6 +80,15 @@ export const HELD_IN = [
   'other background turns',
   'a chat or MCP turn in a session background work started',
 ];
+/** Where Not allowed does not apply, as the server lists it. */
+export const NOT_HELD = [
+  'chat in an ordinary session',
+  'an MCP call from another agent in an ordinary session',
+  'a tap on a companion card',
+  'an action you approved',
+];
+/** Where a tool the server locks is held beyond Not allowed, as the server lists it. */
+export const LOCKED_ALSO_IN = ['a tap on a companion card', 'an action you approved'];
 
 export function toolRow(over: Partial<ToolRow> = {}): ToolRow {
   return {
@@ -99,5 +108,16 @@ export function toolRow(over: Partial<ToolRow> = {}): ToolRow {
 }
 
 export function toolsAnswer(tools: ToolRow[], over: Partial<ToolsAnswer> = {}): ToolsAnswer {
-  return { enabled: true, loaded: true, recorded: false, held_in: HELD_IN, locks_set: false, places: PLACES, tools, ...over };
+  return {
+    enabled: true,
+    loaded: true,
+    recorded: false,
+    held_in: HELD_IN,
+    not_held: NOT_HELD,
+    locked_also_in: LOCKED_ALSO_IN,
+    locks_set: false,
+    places: PLACES,
+    tools,
+    ...over,
+  };
 }

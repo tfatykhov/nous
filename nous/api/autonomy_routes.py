@@ -45,7 +45,7 @@ from nous.autonomy.store import (
     Change,
     tool_key,
 )
-from nous.autonomy.tool_guard import HARNESS_TOOLS, held_places
+from nous.autonomy.tool_guard import HARNESS_TOOLS, LOCK, OWNER, also_held, places
 from nous.storage.models import ToolCallLog
 
 logger = logging.getLogger(__name__)
@@ -383,7 +383,11 @@ def build_autonomy_routes(
                 "enabled": True,
                 "loaded": True,
                 "recorded": calls is not None,
-                "held_in": held_places(),
+                # Where the owner's Not allowed applies and where it does not, and where a host lock holds beyond
+                # it: each from the guard's one table (tool_guard.KINDS).
+                "held_in": places(OWNER),
+                "not_held": places(OWNER, held=False),
+                "locked_also_in": also_held(LOCK),
                 "locks_set": bool(current.locked),
                 "places": [{"key": place.key, "words": place.words} for place in PLACES],
                 "tools": [tool_row(current, name, listed.get(name), calls) for name in names],

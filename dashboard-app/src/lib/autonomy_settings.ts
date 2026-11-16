@@ -85,6 +85,10 @@ export interface ToolsAnswer {
   recorded?: boolean;
   /** Where Not allowed applies, in words, from the guard's own table. */
   held_in?: string[];
+  /** Where it does not apply, in words, from the same table. */
+  not_held?: string[];
+  /** Where a tool the server locks is held beyond where Not allowed applies, in words, from the same table. */
+  locked_also_in?: string[];
   locks_set?: boolean;
   places?: Place[];
   tools?: ToolRow[];
@@ -140,7 +144,6 @@ export const TOOLS_SUBTITLE =
 export const TOOLS_DEFAULT_TEXT = 'Allowed is the default. It does not add a tool where Nous does not offer it.';
 export const NOT_LISTED_TEXT =
   "A tool of a server that is not connected now is not listed, so it cannot be switched off ahead of time, and a newly added server's tools start Allowed.";
-export const NOT_HELD_TEXT = 'Chat itself, a tap on a companion card and an action you approved are not held.';
 export const OFF_TITLE = 'Autonomy settings are off on this server.';
 export const OFF_TEXT =
   "Set NOUS_AUTONOMY_SETTINGS_ENABLED=true on the server to change the limits of background work here. Until then every limit is the server's own value.";
@@ -274,6 +277,15 @@ export function classesText(classes: string[]): string {
 
 /** Where Not allowed applies, from the server's own list. */
 export const heldText = (heldIn: string[]) => (heldIn.length ? `Not allowed applies to ${listWords(heldIn)}.` : '');
+
+/** Where Not allowed does not apply, from the server's own list. */
+export const notHeldText = (notHeld: string[]) => (notHeld.length ? `It does not apply to ${listWords(notHeld)}.` : '');
+
+/** Where a tool the server locks is off, from the server's own list of where it is held beyond Not allowed. */
+export const lockedHeldText = (alsoIn: string[]) =>
+  alsoIn.length
+    ? `A tool the server locks is off in the same places, and also for ${listWords(alsoIn)}.`
+    : 'A tool the server locks is off in the same places.';
 
 /** A value of a change in words: null is the host's value (a limit) or the default (a tool). */
 function valueWords(change: Change, value: unknown): string {

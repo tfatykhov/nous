@@ -344,7 +344,11 @@ describe('Limits and tools: the tools', () => {
     render(Limits);
     await screen.findByText('web_search');
     expect(screen.getByText(/^Not allowed applies to background tasks, workflow steps, scheduled tasks, chain decisions,/)).toBeTruthy();
-    expect(screen.getByText(/a chat or MCP turn in a session background work started\. Chat itself, a tap on a companion card and an action you approved are not held\.$/)).toBeTruthy();
+    expect(
+      screen.getByText(
+        /a chat or MCP turn in a session background work started\. It does not apply to chat in an ordinary session, an MCP call from another agent in an ordinary session, a tap on a companion card, and an action you approved\.$/,
+      ),
+    ).toBeTruthy();
     expect(screen.getByText(/a newly added server's tools start Allowed\.$/)).toBeTruthy();
     expect(screen.getByText("web_search: default to Not allowed, with the owner's secret, Nov 16 14:31 UTC")).toBeTruthy();
     expect(calls.map((c) => c.url)).toContain('/autonomy/log?kind=tools');
@@ -352,9 +356,28 @@ describe('Limits and tools: the tools', () => {
   });
 
   it('the places come from the answer, not from the screen', async () => {
-    handlers['GET /autonomy/tools'] = () => [200, toolsAnswer(tools, { held_in: ['scheduled tasks', 'chain decisions'] })];
+    handlers['GET /autonomy/tools'] = () => [
+      200,
+      toolsAnswer(tools, {
+        held_in: ['scheduled tasks', 'chain decisions'],
+        not_held: ['chat'],
+        locked_also_in: ['a tap on a companion card'],
+        locks_set: true,
+      }),
+    ];
     render(Limits);
-    expect(await screen.findByText(/^Not allowed applies to scheduled tasks and chain decisions\./)).toBeTruthy();
+    expect(
+      await screen.findByText('Not allowed applies to scheduled tasks and chain decisions. It does not apply to chat.'),
+    ).toBeTruthy();
+    expect(
+      screen.getByText('A tool the server locks is off in the same places, and also for a tap on a companion card.'),
+    ).toBeTruthy();
+  });
+
+  it('where a locked tool is off is said only when the server locks a tool', async () => {
+    render(Limits);
+    expect(await screen.findByText(/^Not allowed applies to background tasks,/)).toBeTruthy();
+    expect(screen.queryByText(/^A tool the server locks is off/)).toBeNull();
   });
 
   it('a tool setting already saved says so', async () => {

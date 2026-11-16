@@ -2121,6 +2121,9 @@ async def create_components(settings: Settings) -> dict:
     # F114: the goal driver's loop, once the runner that works its sessions runs.
     if goal_driver is not None:
         await goal_driver.start()
+    # F115: a locked tool name that matches no tool registered by now locks nothing (an MCP tool may connect later).
+    if autonomy is not None:
+        autonomy.warn_unknown_locks(dispatcher.is_registered)
 
     return {
         "database": database,

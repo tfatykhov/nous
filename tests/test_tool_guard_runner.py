@@ -1,6 +1,7 @@
 """F115: the tool guard in the runner: a tool switched off for background work is not offered to a background turn,
 and a call to it anyway is refused with the ``tool_guard`` code in every enforcement mode, on the runner and on its
-forks. Chat, an inbound MCP call and one call the owner approved are not held."""
+forks. Chat and an inbound MCP call in an ordinary session are not held; a companion tap is held by a host lock and
+while the settings could not be read, and an action the owner approved by a host lock only."""
 
 from __future__ import annotations
 
@@ -136,22 +137,48 @@ async def test_a_host_locked_tool_is_refused_with_no_owner_setting(env_factory):
     assert refusal is not None and refusal.code == "tool_guard"
 
 
-async def test_chat_mcp_an_approved_action_and_a_companion_tap_are_not_refused(env_factory):  # noqa: F811
+async def test_chat_and_mcp_in_an_ordinary_session_are_never_refused(env_factory):  # noqa: F811
     _env, runner = await _runner(env_factory, **WARN)
     for guard in (
         ToolGuard(denied=frozenset({"web_search"}), locked=frozenset({"web_search"})),
         ToolGuard(hold_all=True),
     ):
         tool_guard.install(guard)
-        for ctx in (
-            _ctx("interactive", session_id="telegram-1"),
-            _ctx("mcp", session_id=None),
-            _ctx("approved_action", session_id="proposal-1"),  # a background session prefix: the kind decides
-            _ctx("agent_action", session_id="subtask-4"),  # the owner tapped a companion card
-        ):
+        for ctx in (_ctx("interactive", session_id="telegram-1"), _ctx("mcp", session_id=None)):
             refusal = runner._authorize_tool_call(ctx, "web_search", frozenset({"web_search"}), ctx.session_id, {})
             assert refusal is None or refusal.code != "tool_guard", ctx.kind
-        assert "web_search" in _names(runner, _ctx("agent_action", session_id="subtask-4"), True)
+
+
+async def test_a_companion_tap_is_held_by_a_lock_and_while_unread_not_by_the_owner(env_factory):  # noqa: F811
+    _env, runner = await _runner(env_factory, **WARN)
+    tap = _ctx("agent_action", session_id="subtask-4")  # a background session prefix: the kind decides
+    tool_guard.install(ToolGuard(denied=frozenset({"web_search"})))
+    assert "web_search" in _names(runner, tap, True)
+    refusal = runner._authorize_tool_call(tap, "web_search", frozenset({"web_search"}), tap.session_id, {})
+    assert refusal is None or refusal.code != "tool_guard"
+    for guard, text in (
+        (ToolGuard(locked=frozenset({"web_search"})), "Tool error: 'web_search' is locked by the server."),
+        (
+            ToolGuard(hold_all=True),
+            "Tool error: the saved tool settings could not be read, so 'web_search' is held until they can.",
+        ),
+    ):
+        tool_guard.install(guard)
+        assert "web_search" not in _names(runner, tap, True)
+        refusal = runner._authorize_tool_call(tap, "web_search", frozenset({"web_search"}), tap.session_id, {})
+        assert refusal is not None and refusal.code == "tool_guard" and refusal.text == text
+
+
+async def test_an_approved_action_is_held_by_a_lock_only(env_factory):  # noqa: F811
+    _env, runner = await _runner(env_factory, **WARN)
+    approved = _ctx("approved_action", session_id="proposal-1")  # a background session prefix: the kind decides
+    for guard in (ToolGuard(denied=frozenset({"web_search"})), ToolGuard(hold_all=True)):
+        tool_guard.install(guard)
+        refusal = runner._authorize_tool_call(approved, "web_search", frozenset({"web_search"}), "proposal-1", {})
+        assert refusal is None or refusal.code != "tool_guard"
+    tool_guard.install(ToolGuard(locked=frozenset({"web_search"})))
+    refusal = runner._authorize_tool_call(approved, "web_search", frozenset({"web_search"}), "proposal-1", {})
+    assert refusal is not None and refusal.code == "tool_guard"
 
 
 async def test_a_refusal_writes_its_own_event_not_a_context_policy_violation(env_factory):  # noqa: F811
@@ -164,10 +191,17 @@ async def test_a_refusal_writes_its_own_event_not_a_context_policy_violation(env
     tool_guard.install(ToolGuard(hold_all=True))
     refusal = runner._authorize_tool_call(_ctx("scheduled"), "read_file", frozenset({"read_file"}), "s", {})
     assert refusal.code == "tool_guard" and "could not be read" in refusal.text
+    tool_guard.install(ToolGuard(locked=frozenset({"web_search"})))
+    refusal = runner._authorize_tool_call(_ctx("agent_action"), "web_search", frozenset({"web_search"}), "s", {})
+    assert refusal.text == "Tool error: 'web_search' is locked by the server."
     assert events == [
         ("harness_tool_guard_refusal", {"tool_name": "web_search", "context_kind": "scheduled", "held_by": "owner"}),
         ("harness_tool_guard_refusal", {"tool_name": "bash", "context_kind": "scheduled", "held_by": "server"}),
         ("harness_tool_guard_refusal", {"tool_name": "read_file", "context_kind": "scheduled", "held_by": "not_read"}),
+        (
+            "harness_tool_guard_refusal",
+            {"tool_name": "web_search", "context_kind": "agent_action", "held_by": "server"},
+        ),
     ]
 
 
@@ -277,10 +311,10 @@ async def test_a_denied_tool_called_by_its_old_name_is_refused(runner_env):  # n
     assert calls == [] and ledger.blocked == ["tool_guard"]
 
 
-async def test_an_approved_action_runs_a_denied_tool(runner_env):  # noqa: F811
+async def test_an_approved_action_runs_a_denied_tool_and_not_a_locked_one(runner_env):  # noqa: F811
     env = await runner_env(**WARN)
     calls = _recording_tool(env, "web_search")
-    tool_guard.install(ToolGuard(denied=frozenset({"web_search"}), locked=frozenset({"web_search"})))
+    tool_guard.install(ToolGuard(denied=frozenset({"web_search"})))
     ctx = ExecutionContext(
         kind="approved_action",
         session_id="proposal-9",
@@ -289,3 +323,6 @@ async def test_an_approved_action_runs_a_denied_tool(runner_env):  # noqa: F811
     )
     result = await env.runner.execute_single_call(ctx, "web_search", {"query": "snow"})
     assert calls == [{"query": "snow"}] and not result.is_error
+    tool_guard.install(ToolGuard(locked=frozenset({"web_search"})))
+    result = await env.runner.execute_single_call(ctx, "web_search", {"query": "rain"})
+    assert calls == [{"query": "snow"}] and result.is_error and "locked by the server" in result.text

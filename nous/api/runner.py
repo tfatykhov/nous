@@ -850,8 +850,9 @@ class AgentRunner:
         # F112: the MCP client floor drops a tool of an external MCP server where _authorize_tool_call refuses it on
         # that floor. An earlier floor may still refuse one that stays (a heartbeat_triage turn may not act outward).
         tools = [t for t in tools if tool_policy.mcp_client_violation(ctx.kind, t["name"]) is None]
-        # F115: a tool switched off for background work is not offered to a turn the guard holds (the snapshot is
-        # process-wide, so a fork reads the same one). _authorize_tool_call refuses a call to it in every mode.
+        # F115: a tool the guard holds from this turn (the owner's setting, a host lock, or every tool while the saved
+        # settings could not be read) is not offered; the snapshot is process-wide, so a fork reads the same one.
+        # _authorize_tool_call refuses a call to it in every mode.
         guard = tool_guard.current()
         if guard is not None:
             tools = [t for t in tools if not guard.denies(ctx.kind, ctx.session_id, t["name"])]
@@ -926,10 +927,10 @@ class AgentRunner:
             )
             return Refusal("Tool error: this work was cancelled by the owner; stop.", "root_cancelled")
         guard = tool_guard.current()
-        if guard is not None and guard.denies(ctx.kind, ctx.session_id, tool_name):
-            held_by = guard.held_by(tool_name)
+        held_by = guard.reason(ctx.kind, ctx.session_id, tool_name) if guard is not None else None
+        if held_by is not None:
             logger.warning(
-                "F115: refused %r in a %s turn (held for background work: %s, session=%s)",
+                "F115: refused %r in a %s turn (held: %s, session=%s)",
                 tool_name,
                 ctx.kind,
                 held_by,
@@ -940,7 +941,7 @@ class AgentRunner:
                 {"tool_name": tool_name, "context_kind": ctx.kind, "held_by": held_by},
                 session_id=session_id,
             )
-            return Refusal(guard.refusal(tool_name), "tool_guard")
+            return Refusal(tool_guard.ToolGuard.refusal(tool_name, held_by), "tool_guard")
         # F099 section 4.4: an internal_only turn, and an approved_action call, are
         # enforced here FIRST, whatever the two mode settings say. The modes are for
         # tuning the ordinary rules; this is a security floor. For both, a call to a

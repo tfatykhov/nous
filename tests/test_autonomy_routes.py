@@ -423,8 +423,8 @@ async def test_while_the_saved_settings_cannot_be_read_the_reads_say_so_and_the_
     app = _app(_BrokenDatabase(), settings, store)
     try:
         message = (
-            "The saved settings could not be read; background work is held from tools until they can. Every limit is "
-            "the server's own value until then."
+            "The saved settings could not be read; background work and a tap on a companion card are held from tools "
+            "until they can. Every limit is the server's own value until then."
         )
         for path in ("/autonomy/limits", "/autonomy/tools"):
             response = await _send(app, "GET", path, headers=OWNER)
@@ -486,6 +486,10 @@ async def test_saving_what_is_already_saved_answers_unchanged_and_records_nothin
 async def test_the_tools_list_names_where_not_allowed_applies(rig):
     r = await rig()
     body = (await _send(r.app, "GET", "/autonomy/tools", headers=OWNER)).json()
-    assert body["loaded"] is True and body["held_in"] == tool_guard.held_places()
+    assert body["loaded"] is True and body["held_in"] == tool_guard.places(tool_guard.OWNER)
+    assert body["not_held"] == tool_guard.places(tool_guard.OWNER, held=False)
+    assert body["locked_also_in"] == tool_guard.also_held(tool_guard.LOCK)
     assert {row["name"] for row in body["tools"]} == set(TOOLS) - {"store_identity", "submit_final_report"}
     assert "chain decisions" in body["held_in"] and not any("companion" in place for place in body["held_in"])
+    assert "an MCP call from another agent in an ordinary session" in body["not_held"]
+    assert body["locked_also_in"] == ["a tap on a companion card", "an action you approved"]

@@ -6,10 +6,11 @@
   import { usePoll } from '../../lib/poll';
   import {
     ALREADY_SETTING_TEXT, FORBIDDEN_TEXT, GROUPS, GUARD_OFF_TEXT, GUARD_OFF_TITLE, LOCKED_TEXT, LOG_TITLE,
-    NOT_HELD_TEXT, NOT_LISTED_TEXT, NOT_RECORDED_TEXT, NOT_REGISTERED_TEXT, NO_CHANGES_TEXT, NO_TOOL_MATCH_TEXT,
+    NOT_LISTED_TEXT, NOT_RECORDED_TEXT, NOT_REGISTERED_TEXT, NO_CHANGES_TEXT, NO_TOOL_MATCH_TEXT,
     READING_TEXT, REFRESH_LABEL, RETRY_LABEL, SETTING_WORDS, TOOLS_DEFAULT_TEXT, TOOLS_SUBTITLE, TOOL_FILTERS,
     UNSUPPORTED_TEXT,
-    callsText, changeLine, classesText, denyTool, heldText, notOfferedLines, problemText, readGate, readLog,
+    callsText, changeLine, classesText, denyTool, heldText, lockedHeldText, notHeldText, notOfferedLines, problemText,
+    readGate, readLog,
     readStateText, readTools, resetTool, toolChangeText, toolShown,
     type LogAnswer, type ToolFilter, type ToolRow, type ToolSetting, type ToolsAnswer,
   } from '../../lib/autonomy_settings';
@@ -42,6 +43,8 @@
   let places = $derived(answer?.places ?? []);
   let recorded = $derived(answer?.recorded === true);
   let held = $derived(heldText(answer?.held_in ?? []));
+  let notHeld = $derived(notHeldText(answer?.not_held ?? []));
+  let lockedHeld = $derived(lockedHeldText(answer?.locked_also_in ?? []));
   let changes = $derived($store.data?.log?.changes ?? []);
   let readLine = $derived(readStateText($store, 'tools'));
   let shown = $derived((answer?.tools ?? []).filter((row) => toolShown(row, filter as ToolFilter, search)));
@@ -109,7 +112,8 @@
   </section>
 {:else if answer}
   <div class="about-guard">
-    {#if held}<p class="hint">{held} {NOT_HELD_TEXT}</p>{/if}
+    {#if held}<p class="hint">{held} {notHeld}</p>{/if}
+    {#if held && answer.locks_set}<p class="hint">{lockedHeld}</p>{/if}
     <p class="hint">{TOOLS_DEFAULT_TEXT}</p>
     <p class="hint">{NOT_LISTED_TEXT}</p>
     {#if !recorded}<p class="hint">{NOT_RECORDED_TEXT}</p>{/if}

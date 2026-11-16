@@ -536,7 +536,10 @@ async def test_a_failed_read_holds_every_tool_keeps_the_host_limits_and_refuses_
         assert guard.hold_all and guard.denies("scheduled", "schedule-1", "web_search")
         errors = [r for r in caplog.records if r.levelno == logging.ERROR and r.name == store_module.__name__]
         assert len(errors) == 1 and "tool" in errors[0].getMessage() and "ConnectionError" in errors[0].getMessage()
-        assert "background work is held from tools" in store.not_loaded_message()
+        assert "background work and a tap on a companion card are held from tools" in store.not_loaded_message()
+        assert guard.denies("agent_action", "s", "web_search") and not guard.denies(
+            "approved_action", "s", "web_search"
+        )
         for change in (
             store.set_limit("max_turns", 50, "owner"),
             store.clear_limit("max_turns", "owner"),
@@ -651,7 +654,47 @@ async def test_a_cancel_after_the_commit_still_applies_the_change(db, agent_id, 
     assert len(await _log(db, agent_id)) == 4
 
 
-async def test_a_request_cancelled_during_the_commit_still_lands_whole(db, agent_id, cleanup):
+# Each writer: (the change, whether it applied, the rows after it). A clear first saves the value it clears.
+WRITERS = {
+    "set_limit": (
+        lambda store: store.set_limit("max_turns", 66, "owner"),
+        lambda store: store._settings.max_turns == 66 and store.owner == {"max_turns": 66},
+        {"max_turns": 66},
+    ),
+    "clear_limit": (
+        lambda store: store.clear_limit("max_turns", "owner"),
+        lambda store: store._settings.max_turns == 10 and store.owner == {},
+        {},
+    ),
+    "set_tool": (
+        lambda store: store.set_tool("web_search", "denied", "owner"),
+        lambda store: tool_guard.current().denies("scheduled", "s", "web_search"),
+        {"web_search": "denied"},
+    ),
+    "clear_tool": (
+        lambda store: store.clear_tool("web_search", "owner"),
+        lambda store: not tool_guard.current().denies("scheduled", "s", "web_search"),
+        {},
+    ),
+}
+
+
+async def _saved_before(store: AutonomyStore, writer: str) -> None:
+    if writer == "clear_limit":
+        assert await store.set_limit("max_turns", 66, "owner") is True
+    if writer == "clear_tool":
+        assert await store.set_tool("web_search", "denied", "owner") is True
+
+
+async def _tool_rows(db, agent_id: str) -> dict:
+    async with db.session() as session:
+        rows = (await session.execute(select(ToolGuardRow).where(ToolGuardRow.agent_id == agent_id))).scalars()
+        return {row.tool: row.setting for row in rows}
+
+
+@pytest.mark.parametrize("writer", list(WRITERS))
+async def test_a_request_cancelled_during_the_commit_still_lands_whole(db, agent_id, cleanup, writer):
+    change, applied, rows = WRITERS[writer]
     settings = _settings(agent_id)
     gate, waiting = asyncio.Event(), asyncio.Event()
 
@@ -671,28 +714,111 @@ async def test_a_request_cancelled_during_the_commit_still_lands_whole(db, agent
 
     store = AutonomyStore(db, settings)
     await store.load()
+    await _saved_before(store, writer)
     store._db = GatedDatabase()
-    for change, applied in (
-        (lambda: store.set_limit("max_turns", 66, "owner"), lambda: settings.max_turns == 66),
-        (
-            lambda: store.set_tool("web_search", "denied", "owner"),
-            lambda: tool_guard.current().denies("scheduled", "s", "web_search"),
-        ),
-    ):
-        gate.clear()
-        waiting.clear()
-        request = asyncio.create_task(change())
-        await asyncio.wait_for(waiting.wait(), 10)
-        request.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await request
-        gate.set()
-        for _ in range(500):
-            if applied():
-                break
-            await asyncio.sleep(0.01)
-        assert applied()
-    assert await _rows(db, agent_id) == {"max_turns": 66}
+    request = asyncio.create_task(change(store))
+    await asyncio.wait_for(waiting.wait(), 10)
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    gate.set()
+    for _ in range(500):
+        if applied(store):
+            break
+        await asyncio.sleep(0.01)
+    assert applied(store)
+    saved = await _tool_rows(db, agent_id) if "tool" in writer else await _rows(db, agent_id)
+    assert saved == rows
+
+
+class _RaisesAtCommit:
+    """The real database, whose commit raises: after the transaction committed (``landed``) or before it."""
+
+    def __init__(self, db, *, landed: bool, reads: bool = True) -> None:
+        self._db = db
+        self._landed = landed
+        self._reads = reads
+        self.commits = 0
+
+    @asynccontextmanager
+    async def session(self):
+        if self.commits and not self._reads:
+            raise ConnectionError("the database is down")
+        async with self._db.session() as session:
+            commit = session.commit
+
+            async def raising_commit():
+                self.commits += 1
+                if self._landed:
+                    await commit()
+                raise ConnectionError("the connection was lost")
+
+            session.commit = raising_commit
+            yield session
+
+
+@pytest.mark.parametrize("writer", list(WRITERS))
+async def test_a_commit_that_lands_and_then_raises_applies_what_the_database_holds(
+    db, agent_id, cleanup, caplog, writer
+):
+    change, applied, rows = WRITERS[writer]
+    settings = _settings(agent_id)
+    store = AutonomyStore(db, settings)
+    await store.load()
+    await _saved_before(store, writer)
+    caplog.clear()
+    caplog.set_level(logging.INFO)
+    store._db = _RaisesAtCommit(db, landed=True)
+    with pytest.raises(ConnectionError):
+        await change(store)
+    assert applied(store)
+    saved = await _tool_rows(db, agent_id) if "tool" in writer else await _rows(db, agent_id)
+    assert saved == rows
+    lines = [r.getMessage() for r in caplog.records if r.name == store_module.__name__]
+    assert len(lines) == 1 and "ConnectionError" in lines[0] and "what the database holds" in lines[0]
+    assert store.loaded is True
+
+
+@pytest.mark.parametrize("writer", list(WRITERS))
+async def test_a_commit_that_raises_before_it_lands_changes_nothing(db, agent_id, cleanup, writer):
+    change, applied, _rows_after = WRITERS[writer]
+    settings = _settings(agent_id)
+    store = AutonomyStore(db, settings)
+    await store.load()
+    await _saved_before(store, writer)
+    before = (settings.max_turns, dict(store.owner), dict(store.tools), tool_guard.current())
+    store._db = _RaisesAtCommit(db, landed=False)
+    with pytest.raises(ConnectionError):
+        await change(store)
+    assert not applied(store)
+    assert (settings.max_turns, store.owner, store.tools) == before[:3]
+    assert tool_guard.current().denied == before[3].denied
+
+
+@pytest.mark.parametrize("writer", ["set_limit", "set_tool"])
+async def test_a_commit_that_raises_and_cannot_be_read_back_holds_until_the_read_works(
+    db, agent_id, cleanup, caplog, monkeypatch, writer
+):
+    monkeypatch.setattr(store_module, "RETRY_FIRST_SECONDS", 3600.0)  # no second read in this test
+    change, _applied, _rows_after = WRITERS[writer]
+    settings = _settings(agent_id)
+    store = AutonomyStore(db, settings)
+    await store.load()
+    caplog.clear()
+    caplog.set_level(logging.INFO)
+    store._db = _RaisesAtCommit(db, landed=True, reads=False)
+    try:
+        with pytest.raises(ConnectionError):
+            await change(store)
+        assert store.loaded is False and tool_guard.current().hold_all
+        assert settings.max_turns == 10 and store.owner == {}  # the host's value until the read works
+        assert store._retry is not None and not store._retry.done()
+        lines = [r.getMessage() for r in caplog.records if r.name == store_module.__name__]
+        assert len(lines) == 1 and "could not be read back" in lines[0]
+        with pytest.raises(AutonomyRefused):
+            await store.set_limit("max_turns", 20, "owner")
+    finally:
+        await store.close()
 
 
 async def test_saving_the_value_already_saved_writes_nothing(db, agent_id, cleanup):
@@ -718,6 +844,7 @@ async def test_the_record_is_this_agents_and_can_be_read_by_kind_and_length(db, 
         await session.commit()
     try:
         assert [c.new for c in await store.changes()] == ["denied", 22, 21, 20]
+        assert (await store.last_changes(["max_turns"]))["max_turns"].new == 22  # not the other agent's newer row
         assert [c.new for c in await store.changes(kind="limits")] == [22, 21, 20]
         assert [c.key for c in await store.changes(kind="tools")] == ["tool_guard:background:web_search"]
         assert [c.new for c in await store.changes(2)] == ["denied", 22]
@@ -733,3 +860,20 @@ async def test_the_record_is_this_agents_and_can_be_read_by_kind_and_length(db, 
         async with db.session() as session:
             await session.execute(delete(AutonomySettingLog).where(AutonomySettingLog.agent_id == other))
             await session.commit()
+
+
+# ---- a locked name that matches no tool ---------------------------------------------------------------------------
+
+
+def test_a_locked_name_that_matches_no_tool_is_named_in_one_warning(agent_id, caplog):
+    caplog.set_level(logging.WARNING)
+    settings = _settings(agent_id, autonomy_locked_tools="bash,no_such_tool,mcp__notes__search,also_unknown")
+    store = AutonomyStore(_NoDatabase(), settings)
+    assert store.warn_unknown_locks(lambda name: name == "bash") == ["also_unknown", "no_such_tool"]
+    lines = [r.getMessage() for r in caplog.records if r.name == store_module.__name__]
+    assert len(lines) == 1
+    assert "also_unknown" in lines[0] and "no_such_tool" in lines[0]
+    assert "bash" not in lines[0] and "mcp__" not in lines[0]  # an MCP server may connect later
+    caplog.clear()
+    assert store.warn_unknown_locks(lambda name: True) == []
+    assert not caplog.records

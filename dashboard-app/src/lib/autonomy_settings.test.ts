@@ -1,13 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import {
-  ACTOR_WORDS, ALREADY_SETTING_TEXT, ALREADY_TEXT, FORBIDDEN_TEXT, GROUPS, NOT_HELD_TEXT, NOT_JSON_TEXT,
+  ACTOR_WORDS, ALREADY_SETTING_TEXT, ALREADY_TEXT, FORBIDDEN_TEXT, GROUPS, NOT_JSON_TEXT,
   NOT_LISTED_TEXT, NOT_RECORDED_TEXT, NO_ANSWER_TEXT, OFF_TEXT, PREFERENCES_TEXT, READING_TEXT,
   SAME_TEXT, SETTING_WORDS, TOOL_FILTERS, UNREACHABLE_TEXT, UNSUPPORTED_TEXT, GUARD_OFF_TEXT,
-  callsText, changeLine, changeText, classesText, factsText, heldText, limitPath, listWords, logPath, notOfferedLines,
+  callsText, changeLine, changeText, classesText, factsText, heldText, limitPath, listWords, lockedHeldText, logPath,
+  notHeldText, notOfferedLines,
   problemText, rangeText, readAtText, readGate, readStateText, resetText, toolChangeText, toolPath, toolShown,
   typedValue,
 } from './autonomy_settings';
-import { HELD_IN, PLACES, TURNS, change, limitRow, toolRow } from './testing/autonomyFixtures';
+import { HELD_IN, LOCKED_ALSO_IN, NOT_HELD, PLACES, TURNS, change, limitRow, toolRow } from './testing/autonomyFixtures';
 
 const refused = (status: number | undefined, body?: unknown) => Object.assign(new Error('x'), { status, body });
 
@@ -29,7 +30,6 @@ describe('autonomy settings: the words', () => {
     expect(NOT_LISTED_TEXT).toBe(
       "A tool of a server that is not connected now is not listed, so it cannot be switched off ahead of time, and a newly added server's tools start Allowed.",
     );
-    expect(NOT_HELD_TEXT).toBe('Chat itself, a tap on a companion card and an action you approved are not held.');
     expect(ALREADY_TEXT).toBe('That was already the saved value.');
     expect(ALREADY_SETTING_TEXT).toBe('That was already the saved setting.');
   });
@@ -89,6 +89,18 @@ describe('autonomy settings: the words', () => {
     );
     expect(heldText(['scheduled tasks', 'chain decisions'])).toBe('Not allowed applies to scheduled tasks and chain decisions.');
     expect(heldText([])).toBe('');
+  });
+
+  it('where Not allowed does not apply, and where a locked tool is off, come from the server\'s own lists', () => {
+    expect(notHeldText(NOT_HELD)).toBe(
+      'It does not apply to chat in an ordinary session, an MCP call from another agent in an ordinary session, a tap on a companion card, and an action you approved.',
+    );
+    expect(notHeldText(['chat'])).toBe('It does not apply to chat.');
+    expect(notHeldText([])).toBe('');
+    expect(lockedHeldText(LOCKED_ALSO_IN)).toBe(
+      'A tool the server locks is off in the same places, and also for a tap on a companion card and an action you approved.',
+    );
+    expect(lockedHeldText([])).toBe('A tool the server locks is off in the same places.');
   });
 
   it('the tool sentences', () => {

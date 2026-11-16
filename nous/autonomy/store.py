@@ -16,16 +16,18 @@ the settings ``allowed`` and ``denied`` is read or written; an ``allowed`` row c
 tools away). Nothing else in the code writes these tables.
 
 When the saved settings cannot be read at start, the store is not loaded (``loaded`` is False): every limit is the
-host's (lowered to its ceiling), the tool guard holds every tool for background work (``ToolGuard.hold_all``), a
-change is refused, and the store reads again in the background, from ``RETRY_FIRST_SECONDS`` doubling to
-``RETRY_MAX_SECONDS``, until it can; then it applies what it read as ``load`` does.
+host's (lowered to its ceiling), the tool guard holds every tool from background work and a companion tap
+(``ToolGuard.hold_all``), a change is refused, and the store reads again in the background, from
+``RETRY_FIRST_SECONDS`` doubling to ``RETRY_MAX_SECONDS``, until it can; then it applies what it read as ``load`` does.
+A change whose commit raises may or may not have been saved: the store reads that one row and applies what it holds,
+or, when that read fails too, is not loaded until the background read succeeds.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -33,6 +35,7 @@ from typing import Any
 from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from nous.api.tool_classes import MCP_TOOL_PREFIX
 from nous.autonomy import tool_guard
 from nous.autonomy.registry import LIMITS, by_key, ceiling_problem, cross_problem, parse_ceilings, range_problem
 from nous.autonomy.tool_guard import HARNESS_TOOLS, ToolGuard, parse_locked_tools
@@ -70,7 +73,12 @@ SCOPE_UNKNOWN = "That scope is not known. A tool's setting applies to background
 GOAL_SESSION = "goal_session"
 GUARD_NOT_AVAILABLE = f"The destructive-command guard is {NOT_AVAILABLE}."
 # While the saved settings could not be read.
-NOT_LOADED_TOOLS = "The saved settings could not be read; background work is held from tools until they can."
+# Background work and every other kind the hold covers beyond the owner's setting (the guard's table).
+_NOT_LOADED_HELD = tool_guard.list_words(["background work", *tool_guard.also_held(tool_guard.NOT_READ)])
+NOT_LOADED_TOOLS = (
+    f"The saved settings could not be read; {_NOT_LOADED_HELD} "
+    f"{'are' if tool_guard.also_held(tool_guard.NOT_READ) else 'is'} held from tools until they can."
+)
 NOT_LOADED_LIMITS = "Every limit is the server's own value until then."
 NOT_LOADED_LIMITS_ONLY = "The saved settings could not be read; every limit is the server's own value until they can."
 NOT_LOADED_WRITE = "The saved settings could not be read, so nothing can be changed until they can."
@@ -171,6 +179,20 @@ class AutonomyStore:
         if not self.loaded:
             raise AutonomyRefused(503, NOT_LOADED_WRITE)
 
+    def warn_unknown_locks(self, is_registered: Callable[[str], bool]) -> list[str]:
+        """At start, once the tools are registered: one warning naming each name in ``NOUS_AUTONOMY_LOCKED_TOOLS`` that
+        matches no registered tool, so locks nothing. An ``mcp__`` name is left out: its server may connect later.
+        Returns the names warned about."""
+        unknown = sorted(
+            name for name in self.locked if not name.startswith(MCP_TOOL_PREFIX) and not is_registered(name)
+        )
+        if unknown:
+            logger.warning(
+                "NOUS_AUTONOMY_LOCKED_TOOLS names no registered tool for %s; those names lock nothing",
+                ", ".join(name[:80] for name in unknown),
+            )
+        return unknown
+
     def not_loaded_message(self) -> str:
         """What the screen says while the saved settings could not be read."""
         if self._settings.tool_guard_enabled:
@@ -181,8 +203,8 @@ class AutonomyStore:
         """At start: apply the clamped host values and the owner's stored limits in one pass, and install the tool
         guard's snapshot. Off (``NOUS_AUTONOMY_SETTINGS_ENABLED``): nothing is read or changed. A stored value that
         fails a check is skipped with a warning. When the rows cannot be read the store is not loaded: the limits are
-        the host's (lowered to its ceilings), the guard holds every tool for background work, and the rows are read
-        again in the background until they can be."""
+        the host's (lowered to its ceilings), the guard holds every tool from background work and a companion tap,
+        and the rows are read again in the background until they can be."""
         if not self._settings.autonomy_settings_enabled:
             return
         try:
@@ -193,7 +215,7 @@ class AutonomyStore:
             logger.error(
                 "F115: the saved autonomy settings could not be read (%s): %s; reading them again in the background",
                 type(exc).__name__,
-                "background work is held from every tool and every limit is the host's"
+                "tools are held and every limit is the host's"
                 if self._settings.tool_guard_enabled
                 else "every limit is the host's",
             )
@@ -338,7 +360,11 @@ class AutonomyStore:
                         )
                     )
                     session.add(self._record(key, old, value, actor))
-                    await session.commit()
+                    try:
+                        await session.commit()
+                    except BaseException as exc:
+                        await self._after_failed_commit(exc, key=key)
+                        raise
                     committed = True
             finally:
                 if committed:
@@ -373,13 +399,81 @@ class AutonomyStore:
                         )
                     )
                     session.add(self._record(key, old, None, actor))
-                    await session.commit()
+                    try:
+                        await session.commit()
+                    except BaseException as exc:
+                        await self._after_failed_commit(exc, key=key)
+                        raise
                     committed = True
             finally:
                 if committed:
                     self._set(key, self.baseline[key])
                     self.owner.pop(key, None)
             return True
+
+    async def _after_failed_commit(
+        self, exc: BaseException, *, key: str | None = None, tool: str | None = None
+    ) -> None:
+        """A commit that raised may or may not have been saved: apply what the database holds for ``key`` (a limit)
+        or ``tool``, checked as ``load`` checks it. When that read fails too, the store is not loaded until the
+        background read succeeds. One log line either way."""
+        what = key if key is not None else f"the tool {tool}"
+        try:
+            async with self._db.session() as session:
+                if key is not None:
+                    stored = (
+                        await session.execute(
+                            select(AutonomySetting.value).where(
+                                AutonomySetting.agent_id == self._agent_id, AutonomySetting.key == key
+                            )
+                        )
+                    ).scalar_one_or_none()
+                else:
+                    stored = (
+                        await session.execute(
+                            select(ToolGuardRow.setting).where(
+                                ToolGuardRow.agent_id == self._agent_id,
+                                ToolGuardRow.scope == BACKGROUND,
+                                ToolGuardRow.tool == tool,
+                            )
+                        )
+                    ).scalar_one_or_none()
+        except Exception as read_exc:
+            # The classes only: an error's text can repeat what it was given.
+            logger.error(
+                "F115: saving %s raised (%s) and it could not be read back (%s); the saved settings are read again in "
+                "the background, and tools are held until then",
+                what,
+                type(exc).__name__,
+                type(read_exc).__name__,
+            )
+            self._apply([], [], loaded=False)
+            if self._retry is None or self._retry.done():
+                self._retry = asyncio.create_task(self._read_again(), name="autonomy-settings-read")
+            return
+        if key is not None:
+            limit = by_key(key)
+            fits = (
+                stored is not None
+                and limit is not None
+                and range_problem(limit, stored) is None
+                and ceiling_problem(limit, stored, self.ceilings.get(key)) is None
+            )
+            if fits:
+                self._set(key, stored)
+                self.owner[key] = stored
+            else:
+                self._set(key, self.baseline[key])
+                self.owner.pop(key, None)
+        else:
+            if stored in TOOL_SETTINGS:
+                self.tools[tool] = stored
+            else:
+                self.tools.pop(tool, None)
+            self._install_guard()
+        logger.error(
+            "F115: saving %s raised (%s); what the database holds for it now applies", what, type(exc).__name__
+        )
 
     async def _locked_row(self, session: Any, key: str) -> Any:
         """The stored value of ``key``, its row locked for this transaction; None when there is none."""
@@ -444,7 +538,11 @@ class AutonomyStore:
                         )
                     )
                     session.add(self._record(tool_key(tool), old, setting, actor))
-                    await session.commit()
+                    try:
+                        await session.commit()
+                    except BaseException as exc:
+                        await self._after_failed_commit(exc, tool=tool)
+                        raise
                     committed = True
             finally:
                 if committed:
@@ -481,7 +579,11 @@ class AutonomyStore:
                         )
                     )
                     session.add(self._record(tool_key(tool), old, None, actor))
-                    await session.commit()
+                    try:
+                        await session.commit()
+                    except BaseException as exc:
+                        await self._after_failed_commit(exc, tool=tool)
+                        raise
                     committed = True
             finally:
                 if committed:

@@ -6,6 +6,7 @@ from __future__ import annotations
 import inspect
 import logging
 import re
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
@@ -138,6 +139,19 @@ async def test_locked_tools_without_the_tool_guard_say_so(caplog, monkeypatch):
     assert said == ["NOUS_AUTONOMY_LOCKED_TOOLS does nothing while NOUS_TOOL_GUARD_ENABLED is off"]
 
 
-def test_shutdown_stops_the_store_reading_again():
-    source = inspect.getsource(main.shutdown_components)
-    assert 'components.get("autonomy")' in source and "await autonomy.close()" in source
+async def test_shutdown_ends_the_store_reading_again(monkeypatch):
+    from nous.autonomy import store as store_module
+
+    class Down:
+        @asynccontextmanager
+        async def session(self):
+            raise ConnectionError("the database is down")
+            yield
+
+    monkeypatch.setattr(store_module, "RETRY_FIRST_SECONDS", 3600.0)
+    store = store_module.AutonomyStore(Down(), Settings(_env_file=None, autonomy_settings_enabled=True))
+    await store.load()
+    task = store._retry
+    assert task is not None and not task.done()
+    await main.shutdown_components({"autonomy": store})
+    assert task.cancelled() and store._retry is None
