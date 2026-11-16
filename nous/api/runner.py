@@ -831,7 +831,7 @@ class AgentRunner:
         Both loops call this, so there is one definition of the offered set. The
         narrowing keeps only tools for which ``tool_policy.internal_only_allowed``
         is true, for every kind whose ``ctx.authority`` is ``internal_only`` (a lineage
-        check's ``tool_filter`` included: the intersection spec section 4.4 names), with ``lifted`` from the per-goal
+        check's ``tool_filter`` included: a tool must pass both), with ``lifted`` from the per-goal
         tool grant hook (``set_goal_lift``); the MCP floor and the guard still drop a lifted tool after it.
         Extra tools are the caller's and are not filtered.
         """
