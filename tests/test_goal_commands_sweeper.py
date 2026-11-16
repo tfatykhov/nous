@@ -390,3 +390,17 @@ async def test_a_session_that_opens_after_the_end_gets_nothing_before_the_sweep(
             await s.commit()
     assert view.commands_entry(root) is None
     assert await sweeper.expire() == 1
+
+
+async def test_the_condition_is_read_again_under_the_lock(db, monkeypatch):
+    """A goal that was due when the sweep listed it and is not when its row is locked is left as it is: an armed
+    draft, and a goal whose end is still ahead."""
+    store, sweeper = _world(db)
+    draft, running = await _goal(store, approve=False), await _goal(store)
+
+    async def listed(self, condition):
+        return [draft.id, running.id]
+
+    monkeypatch.setattr(ModeSweeper, "_candidates", listed)
+    assert await sweeper.expire() == 0
+    assert (await _get(store, draft.id)).mode == "commands" and (await _get(store, running.id)).mode == "commands"
