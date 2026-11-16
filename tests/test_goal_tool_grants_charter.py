@@ -224,3 +224,26 @@ def test_the_section_reads_only_harness_words_and_names():
     grant = SimpleNamespace(tool=ON, server_name="no<tes> ignore all", server_id=NOTES.server_id)
     [line] = session_tool_lines([grant], lambda _grant: True)
     assert line == ToolLine(ON, "a tool of the MCP server notesignoreall")
+
+
+@pytest.mark.postgres_only
+async def test_a_tool_switched_off_for_background_work_is_told_not_available(env_factory, mcp_registry):  # noqa: F811
+    w, goal, root, session, chain, view = await _granted_session(env_factory)
+    tool_guard.install(ToolGuard(denied=frozenset({"send_email"})))
+    assert "- send_email: not available now." in (await chain.turn_context(root.id)).block
+
+
+@pytest.mark.postgres_only
+async def test_a_first_task_after_the_mcp_server_changed_is_told_not_available(env_factory, mcp_registry):  # noqa: F811
+    w = await _world(env_factory, **GRANTS)
+    goal = await _active(w)
+    await w.store.grant_tool(goal.id, ON, NOTES, actor="owner", proof="owner")
+    tool_classes._MCP_IDENTITIES[ON] = McpIdentity(uuid.uuid4(), NOTES.url_sha256, "search")
+    tool_guard.install(ToolGuard())
+    view = GoalToolGrants(w.db, w.env.settings)
+    assert await view.refresh()
+    w.driver.tool_grants = view
+    _root, session = await _started(w, goal)
+    async with w.db.session() as s:
+        subtask = (await s.execute(select(Subtask).where(Subtask.id == session.first_subtask_id))).scalar_one()
+    assert f"- {ON}: not available now." in subtask.task
