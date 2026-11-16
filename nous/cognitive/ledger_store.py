@@ -71,7 +71,7 @@ KEY_HOLDING_STATUSES = ("pending", "success", "unknown")
 # reason is written from a prompt that carries the call's arguments, so it can
 # echo a subject, a body or a bare key.
 REFUSAL_CODES = frozenset(
-    {"offered_set", "action_gate", "context_policy", "duplicate", "internal_only", "root_cancelled"}
+    {"offered_set", "action_gate", "context_policy", "duplicate", "internal_only", "root_cancelled", "tool_guard"}
 )
 _TERMINAL = frozenset(s for s in LEDGER_STATUSES if s != "pending")
 

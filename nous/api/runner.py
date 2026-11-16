@@ -58,6 +58,7 @@ from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.api.session_referent import ChannelLastReply
 from nous.api.smart_compress import add_cache_key, smart_compress
 from nous.api.tool_classes import refuse_denylist
+from nous.autonomy import tool_guard
 from nous.brain.brain import Brain
 from nous.brain.continuation import INTENT_SESSION_PREFIX
 from nous.brain.intentions import AUTHORITY_INTERNAL
@@ -809,7 +810,8 @@ class AgentRunner:
         """Exactly the tool definitions a turn is offered, in this order: frame tools (D5),
         the subtask exclusion (012.2), the heartbeat_triage spawn and resolve exclusion, ``tool_filter`` (F034.5),
         the F078 refuse denylist, F099's ``internal_only`` narrowing, the F112 MCP client floor
-        (``tool_policy.mcp_client_violation``), then the per-call ``extra_tools`` schemas (F061);
+        (``tool_policy.mcp_client_violation``), the F115 tool guard (a tool switched off for background work,
+        ``nous.autonomy.tool_guard``), then the per-call ``extra_tools`` schemas (F061);
         last, with ``tool_reason_enabled``, F108's required ``reason`` on every schema that does not declare its own.
 
         Both loops call this, so there is one definition of the offered set. The
@@ -848,6 +850,11 @@ class AgentRunner:
         # F112: the MCP client floor drops a tool of an external MCP server where _authorize_tool_call refuses it on
         # that floor. An earlier floor may still refuse one that stays (a heartbeat_triage turn may not act outward).
         tools = [t for t in tools if tool_policy.mcp_client_violation(ctx.kind, t["name"]) is None]
+        # F115: a tool switched off for background work is not offered to a turn the guard holds (the snapshot is
+        # process-wide, so a fork reads the same one). _authorize_tool_call refuses a call to it in every mode.
+        guard = tool_guard.current()
+        if guard is not None:
+            tools = [t for t in tools if not guard.denies(ctx.kind, ctx.session_id, t["name"])]
         if extra_tools:
             tools = [*tools, *(schema for schema, _executor in extra_tools.values())]
         if self._settings.tool_reason_enabled:
@@ -894,6 +901,10 @@ class AgentRunner:
         kind of turn and the two mode settings say: the owner stopped this work, and a subtask that was already
         running, a DAG node or a lineage check must not do one more thing. The view is a set lookup, read only
         when the context names a root (a chat turn names none).
+
+        F115: next, a call from a turn the tool guard holds to a tool switched off for background work (by the owner,
+        or locked by the host) is refused, whatever the two mode settings say. The turn's session is read from
+        ``ctx``, as ``_offered_tools`` reads it.
         """
         if ctx.root_intention_id is not None and self._root_cancelled(ctx.root_intention_id):
             logger.warning(
@@ -914,6 +925,20 @@ class AgentRunner:
                 session_id=session_id,
             )
             return Refusal("Tool error: this work was cancelled by the owner; stop.", "root_cancelled")
+        guard = tool_guard.current()
+        if guard is not None and guard.denies(ctx.kind, ctx.session_id, tool_name):
+            logger.warning(
+                "F115: refused %r in a %s turn (switched off for background work, session=%s)",
+                tool_name,
+                ctx.kind,
+                session_id,
+            )
+            self._log_f026_decision(
+                "harness_context_policy_violation",
+                {"tool_name": tool_name, "context_kind": ctx.kind, "violation": "tool_guard", "mode": "enforce"},
+                session_id=session_id,
+            )
+            return Refusal(tool_guard.refusal_text(tool_name), "tool_guard")
         # F099 section 4.4: an internal_only turn, and an approved_action call, are
         # enforced here FIRST, whatever the two mode settings say. The modes are for
         # tuning the ordinary rules; this is a security floor. For both, a call to a
