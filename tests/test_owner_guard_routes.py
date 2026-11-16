@@ -188,6 +188,10 @@ OWNER_ROUTES: dict[tuple[str, str], tuple[bytes, int, dict[str, object] | None]]
     ("PUT", "/censors/abc"): (b"{}", 400, {"error": "No fields to update"}),
     ("PUT", "/identity/nonsense"): (b"{}", 503, {"error": "Identity manager not initialized"}),
     ("POST", "/reinitiate"): (b"", 503, {"error": "Identity manager not initialized"}),
+    # Subtasks and schedules
+    ("DELETE", "/subtasks/abc"): (b"", 400, {"error": "Invalid subtask ID"}),
+    ("DELETE", "/schedules/abc"): (b"", 400, {"error": "Invalid schedule ID"}),
+    ("POST", "/schedules/abc/run"): (b"", 400, {"error": "Invalid schedule ID"}),
 }
 # F114: the goal reads require a secret too; a read carries no body, so any media type passes with the proxy's.
 GOAL_READS = {
@@ -222,6 +226,9 @@ REST_ROUTE_SET = {
     ("PUT", "/censors/{id}"),
     ("PUT", "/identity/{section}"),
     ("POST", "/reinitiate"),
+    ("DELETE", "/subtasks/{id}"),
+    ("DELETE", "/schedules/{id}"),
+    ("POST", "/schedules/{id}/run"),
 }
 
 
