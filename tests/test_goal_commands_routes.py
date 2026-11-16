@@ -349,3 +349,20 @@ def test_the_words_table_has_its_keys():
         "code-host token is passed to them. Nous checks the end time before each tool call. A command already running "
         "at that time, anything it left running, and anything it changed stay as they are."
     )
+
+
+async def test_with_the_flag_off_the_banner_read_says_not_allowed(db):
+    env = _env(db, goal_commands_enabled=False)
+    assert (await env.call("GET", "/goals/commands")).json() == {"enabled": True, "allowed": False, "active": []}
+
+
+async def test_only_an_end_as_the_newest_change_of_mode_says_ended(db):
+    from goal_routes_support import harness_row
+
+    env = _env(db)
+    plain = (await env.call("POST", "/goals", json=NEW)).json()
+    goal = await env.store.get(plain["ref"])
+    await harness_row(env.store, goal, "May run any command until 2026-01-01 00:00 UTC.", evidence=("mode:on",))
+    assert (await env.call("GET", f"/goals/{plain['ref']}")).json()["commands"]["state"] == "off"
+    await harness_row(env.store, goal, C.ENDED["expired"], evidence=("mode:off", "why:expired"))
+    assert (await env.call("GET", f"/goals/{plain['ref']}")).json()["commands"]["says"] == "Ended: Its end time passed."
