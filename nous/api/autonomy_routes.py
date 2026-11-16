@@ -74,18 +74,17 @@ class LimitChange(_Body):
 
 
 class ToolScope(_Body):
-    """``DELETE /autonomy/tools/{tool}``: optionally the scope, which must be ``background`` (goal sessions are not
-    available yet: the store answers so)."""
+    """``DELETE /autonomy/tools/{tool}``: optionally the scope, which must be ``background``. Goal sessions and a
+    destructive guard are not available yet: the store answers so, with the same sentence as for ``PUT``."""
 
     scope: Any = None
+    destructive_guard: Any = None
 
 
 class ToolChange(ToolScope):
-    """``PUT /autonomy/tools/{tool}``: ``allowed`` or ``denied``. A destructive guard is not available yet (the store
-    answers so)."""
+    """``PUT /autonomy/tools/{tool}``: ``allowed`` or ``denied``."""
 
     setting: Any
-    destructive_guard: Any = None
 
 
 def _scope(body: ToolScope) -> str:
@@ -431,7 +430,9 @@ def build_autonomy_routes(
             return _error(400, str(exc))
         name = request.path_params["tool"]
         try:
-            changed = await current.clear_tool(name, actor(request), scope=_scope(body))
+            changed = await current.clear_tool(
+                name, actor(request), scope=_scope(body), destructive_guard=body.destructive_guard
+            )
         except AutonomyRefused as exc:
             return _error(exc.status, str(exc))
         except Exception as exc:

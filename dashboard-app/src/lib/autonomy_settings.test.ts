@@ -13,8 +13,10 @@ const refused = (status: number | undefined, body?: unknown) => Object.assign(ne
 
 describe('autonomy settings: the words', () => {
   it('pins the sentences the owner reads', () => {
+    // Nothing in Nous reads a provider's limit, so the card never leans on one.
+    expect(PREFERENCES_TEXT).not.toMatch(/provider|spend/i);
     expect(PREFERENCES_TEXT).toBe(
-      "You can set each limit within the range shown, and each change is recorded. Where the server sets a ceiling, the ceiling wins, and a tool the server locks stays off. Your provider's spend limit is the one that holds whatever is set here.",
+      "You can set each limit within the range shown, and each change is recorded. Where the server sets a ceiling, the ceiling wins, and a tool the server locks stays off.",
     );
     // Nothing on the screen says the server's own settings always win: a limit may go above the server's value.
     expect(PREFERENCES_TEXT).not.toMatch(/always win/);

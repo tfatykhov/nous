@@ -133,7 +133,7 @@ export function typedValue(text: string): number | string {
 
 export const TITLE = 'Limits and tools';
 export const PREFERENCES_TEXT =
-  "You can set each limit within the range shown, and each change is recorded. Where the server sets a ceiling, the ceiling wins, and a tool the server locks stays off. Your provider's spend limit is the one that holds whatever is set here.";
+  "You can set each limit within the range shown, and each change is recorded. Where the server sets a ceiling, the ceiling wins, and a tool the server locks stays off.";
 export const LIMITS_SUBTITLE = 'How much background work may do, and for how long. A change applies without a restart.';
 export const TOOLS_SUBTITLE =
   'Which tools background work may use. Not allowed takes a tool away from background work: it is not offered there and a call to it is refused.';

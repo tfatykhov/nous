@@ -20,6 +20,7 @@ from nous.autonomy.store import (
     GUARD_NOT_AVAILABLE,
     NOT_LOADED_WRITE,
     SCOPE_NOT_AVAILABLE,
+    SCOPE_UNKNOWN,
     SETTING_NOT_AVAILABLE,
     AutonomyRefused,
     AutonomyStore,
@@ -367,6 +368,8 @@ async def test_a_tool_switched_off_is_held_at_once_and_back_on_cleared(db, agent
         ({"setting": "maybe"}, SETTING_NOT_AVAILABLE),
         ({"setting": "denied", "scope": "goal_session"}, SCOPE_NOT_AVAILABLE),
         ({"setting": "allowed", "scope": "goal_session"}, SCOPE_NOT_AVAILABLE),
+        ({"setting": "denied", "scope": "everywhere"}, SCOPE_UNKNOWN),
+        ({"setting": "denied", "scope": ""}, SCOPE_UNKNOWN),
         ({"setting": "denied", "destructive_guard": "off"}, GUARD_NOT_AVAILABLE),
         ({"setting": "denied", "destructive_guard": "common"}, GUARD_NOT_AVAILABLE),
     ],
@@ -379,9 +382,14 @@ async def test_what_is_not_available_yet_is_refused_with_its_fixed_sentence(db, 
     with pytest.raises(AutonomyRefused) as refused:
         await store.set_tool("web_search", setting, "owner", **kwargs)
     assert (refused.value.status, str(refused.value)) == (400, sentence)
-    with pytest.raises(AutonomyRefused) as refused:
-        await store.clear_tool("web_search", "owner", scope="goal_session")
-    assert (refused.value.status, str(refused.value)) == (400, SCOPE_NOT_AVAILABLE)
+    for kwargs, error in (
+        ({"scope": "goal_session"}, SCOPE_NOT_AVAILABLE),
+        ({"scope": "everywhere"}, SCOPE_UNKNOWN),
+        ({"destructive_guard": "off"}, GUARD_NOT_AVAILABLE),
+    ):
+        with pytest.raises(AutonomyRefused) as refused:
+            await store.clear_tool("web_search", "owner", **kwargs)
+        assert (refused.value.status, str(refused.value)) == (400, error), kwargs
     assert await _log(db, agent_id) == []
     async with db.session() as session:
         assert (await session.execute(select(ToolGuardRow).where(ToolGuardRow.agent_id == agent_id))).first() is None

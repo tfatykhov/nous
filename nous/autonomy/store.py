@@ -48,6 +48,7 @@ __all__ = [
     "LOG_MAX",
     "NOT_LOADED_WRITE",
     "SCOPE_NOT_AVAILABLE",
+    "SCOPE_UNKNOWN",
     "SETTING_NOT_AVAILABLE",
     "TOOL_SETTINGS",
     "AutonomyRefused",
@@ -65,6 +66,8 @@ NOT_AVAILABLE = "not available yet"
 ASK_NOT_AVAILABLE = f"Ask each time is {NOT_AVAILABLE}. A tool is Allowed or Not allowed."
 SETTING_NOT_AVAILABLE = f"That setting is {NOT_AVAILABLE}. A tool is Allowed or Not allowed."
 SCOPE_NOT_AVAILABLE = f"Settings for goal sessions are {NOT_AVAILABLE}. A tool's setting applies to background work."
+SCOPE_UNKNOWN = "That scope is not known. A tool's setting applies to background work."
+GOAL_SESSION = "goal_session"
 GUARD_NOT_AVAILABLE = f"The destructive-command guard is {NOT_AVAILABLE}."
 # While the saved settings could not be read.
 NOT_LOADED_TOOLS = "The saved settings could not be read; background work is held from tools until they can."
@@ -400,9 +403,13 @@ class AutonomyStore:
             raise AutonomyRefused(409, f"{tool} is locked by the server and cannot be changed here.")
 
     @staticmethod
-    def _scope_refusal(scope: str) -> None:
-        if scope != BACKGROUND:
+    def _scope_refusal(scope: str, destructive_guard: Any = None) -> None:
+        if scope == GOAL_SESSION:
             raise AutonomyRefused(400, SCOPE_NOT_AVAILABLE)
+        if scope != BACKGROUND:
+            raise AutonomyRefused(400, SCOPE_UNKNOWN)
+        if destructive_guard is not None:
+            raise AutonomyRefused(400, GUARD_NOT_AVAILABLE)
 
     async def set_tool(
         self, tool: str, setting: str, actor: str, *, scope: str = BACKGROUND, destructive_guard: Any = None
@@ -411,9 +418,7 @@ class AutonomyStore:
         one transaction, then the guard's snapshot replaced. 400 with a fixed sentence for another scope, a destructive
         guard, ``ask`` or another word (not available yet); 409 for a tool the host locked; 503 while the saved
         settings could not be read. False, and nothing written, when it is the setting already saved."""
-        self._scope_refusal(scope)
-        if destructive_guard is not None:
-            raise AutonomyRefused(400, GUARD_NOT_AVAILABLE)
+        self._scope_refusal(scope, destructive_guard)
         if setting not in TOOL_SETTINGS:
             raise AutonomyRefused(400, ASK_NOT_AVAILABLE if setting == "ask" else SETTING_NOT_AVAILABLE)
         self._tool_refusal(tool)
@@ -447,11 +452,13 @@ class AutonomyStore:
                     self._install_guard()
             return True
 
-    async def clear_tool(self, tool: str, actor: str, *, scope: str = BACKGROUND) -> bool:
+    async def clear_tool(
+        self, tool: str, actor: str, *, scope: str = BACKGROUND, destructive_guard: Any = None
+    ) -> bool:
         """Back to the default (allowed): the row deleted with its record, then the snapshot replaced. False (and no
-        record) when the owner had set nothing. 400 for another scope (not available yet); 503 while the saved
-        settings could not be read."""
-        self._scope_refusal(scope)
+        record) when the owner had set nothing. 400 with a fixed sentence for another scope or a destructive guard
+        (not available yet); 503 while the saved settings could not be read."""
+        self._scope_refusal(scope, destructive_guard)
         self._tool_refusal(tool)
         self._require_loaded()
         return await asyncio.shield(self._clear_tool(tool, actor))
