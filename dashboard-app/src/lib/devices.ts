@@ -48,6 +48,14 @@ export const openPairing = (name: string) =>
 export const revokeDevice = (id: string) =>
   timed((signal) => apiRequest<{ revoked: boolean }>(devicePath(id), 'DELETE', undefined, signal));
 
+/** A read of the list and how many codes had been made when it STARTED. A read that started before the code on screen
+ * was made says nothing about that code, even when it answers after it. */
+export interface StampedList { list: DeviceList; made: number }
+export function readStamped(made: () => number, signal?: AbortSignal): Promise<StampedList> {
+  const asked = made();
+  return listDevices(signal).then((list) => ({ list, made: asked }));
+}
+
 // ── Words ───────────────────────────────────────────────────────────────────
 
 export const INTRO_TEXT =

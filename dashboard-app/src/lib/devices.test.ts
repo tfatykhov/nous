@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   END_TEXT, FORBIDDEN_TEXT, NO_ANSWER_TEXT, UNREACHABLE_TEXT, UNSUPPORTED_TEXT, codeEnd, deviceLine, lastSeenWords, listDevices,
-  listGate, openPairing, pairingLine, problemText, revokeDevice, revokedLine, triesText, validForText, type CodeEnd, type Pairing,
+  listGate, openPairing, pairingLine, problemText, readStamped, revokeDevice, revokedLine, triesText, validForText, type CodeEnd,
+  type Pairing,
 } from './devices';
 import * as devices from './devices';
 import { OPEN, deviceRow } from './testing/deviceFixtures';
@@ -51,6 +52,16 @@ describe('the requests', () => {
       { url: '/a2ui/devices/00000000-0000-4000-8000-000000000001', method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: undefined },
       { url: '/a2ui/devices/a%2Fb%3Fc', method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: undefined },
     ]);
+  });
+
+  it('a read carries the count of codes made when it started, not when it answered', async () => {
+    let answer!: (r: Response) => void;
+    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((r) => { answer = r; })));
+    let made = 0;
+    const read = readStamped(() => made);
+    made = 1; // a code is made while the read is in flight
+    answer(new Response(JSON.stringify({ devices: [], pairing: null, redeem: { limited: false } }), { status: 200 }));
+    expect((await read).made).toBe(0);
   });
 
   it('a refused change throws its status and the server\'s body', async () => {

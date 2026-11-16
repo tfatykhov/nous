@@ -7,9 +7,9 @@
   import {
     CODE_HELP, EMPTY_TEXT, END_TEXT, FORBIDDEN_TEXT, INTRO_TEXT, LIMITED_TEXT, NAME_HINT, NAME_MAX, REPLACED_TEXT,
     REVOKE_TEXT, UNSUPPORTED_TEXT,
-    codeEnd, deviceLine, listDevices, listGate, openPairing, pairingLine, problemText, revokeDevice, revokedLine,
+    codeEnd, deviceLine, listGate, openPairing, pairingLine, problemText, readStamped, revokeDevice, revokedLine,
     triesText, validForText,
-    type CodeEnd, type Device, type DeviceList,
+    type CodeEnd, type Device, type StampedList,
   } from '../../lib/devices';
 
   // The companion devices paired with this Nous (GET /a2ui/devices), the one pairing code the owner can open for a
@@ -23,14 +23,10 @@
   /** How long the sentence saying how a code ended stays, unless Done takes it away sooner. */
   const ENDED_MS = 120_000;
 
-  /** How many codes were made. A read carries the count it started under: one that started before the code on screen
-   * was made says nothing about that code. */
+  /** How many codes were made. A read carries the count it started under (readStamped): one that started before the
+   * code on screen was made says nothing about that code. */
   let made = 0;
-  type Page = { list: DeviceList; made: number };
-  const store = usePoll(makePollStore<Page>((signal) => {
-    const asked = made;
-    return listDevices(signal).then((list) => ({ list, made: asked }));
-  }, 0));
+  const store = usePoll(makePollStore<StampedList>((signal) => readStamped(() => made, signal), 0));
 
   /** Read the list now: the screen's Refresh reads it too. */
   export function refresh(): Promise<void> {
