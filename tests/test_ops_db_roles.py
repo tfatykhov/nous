@@ -419,6 +419,7 @@ READER_VERIFY_LABELS = (
     "reader cannot read the autonomy settings",
     "reader cannot read the autonomy record",
     "reader cannot read the tool guard",
+    "reader cannot read the goal tool grants",
     "reader cannot INSERT",
     "reader cannot read a server file",
     "reader cannot run a program",
@@ -507,6 +508,7 @@ def test_a_check_waits_only_for_a_migration_after_106_that_exists():
         "reader cannot read the autonomy settings": "116",
         "reader cannot read the autonomy record": "116",
         "reader cannot read the tool guard": "116",
+        "reader cannot read the goal tool grants": "117",
     }
     body = VERIFY.split("FOR c IN", 1)[1].split("AS t(label, run_as", 1)[0]
     migrations = {path.name.split("_", 1)[0] for path in (OPS.parents[1] / "sql" / "migrations").glob("*.sql")}

@@ -758,6 +758,45 @@ class GoalJournal(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
+class GoalToolGrant(Base):
+    """F115 per-goal tools: a tool the owner allowed one goal to use without asking (migration 117).
+
+    A row is changed only to revoke it (``revoked_by`` and ``revoked_at``); a revoked row stays. The five ``server_*``,
+    ``url_sha256`` and ``remote_tool`` columns hold an MCP tool's identity and are NULL for any other tool. The
+    migration's name, length and MCP CHECKs are not repeated here: the SQLite test schema cannot create them.
+    """
+
+    __tablename__ = "goal_tool_grants"
+    __table_args__ = (
+        CheckConstraint("(revoked_by IS NULL) = (revoked_at IS NULL)", name="chk_goal_tool_grants_revoked"),
+        Index(
+            "uq_goal_tool_grants_active",
+            "goal_id",
+            "tool",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+            sqlite_where=text("revoked_at IS NULL"),
+        ),
+        {"schema": "brain"},
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
+    )
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    goal_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("brain.goals.id"), nullable=False)
+    tool: Mapped[str] = mapped_column(Text, nullable=False)
+    server_name: Mapped[str | None] = mapped_column(Text)
+    server_host: Mapped[str | None] = mapped_column(Text)
+    server_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    url_sha256: Mapped[str | None] = mapped_column(Text)
+    remote_tool: Mapped[str | None] = mapped_column(Text)
+    granted_by: Mapped[str] = mapped_column(Text, nullable=False)
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    revoked_by: Mapped[str | None] = mapped_column(Text)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 # =============================================================================
 # HEART SCHEMA
 # =============================================================================
