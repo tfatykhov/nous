@@ -66,6 +66,11 @@ DECLARE
     flag boolean;
     err text;
     passed int := 0;
+    -- A check on a table that a migration after 106 creates waits for that migration (CI runs this script once with
+    -- the migrations up to 106 and again after the later ones): until the migration is recorded the check is skipped
+    -- and counted apart. Once it is, the check runs and its table must exist.
+    waits jsonb := '{"reader cannot read a device digest": "115"}';
+    waiting int := 0;
     upsert text := 'INSERT INTO scoring.task_scores (agent_id, task_kind, task_id, finished_at, scorer_version, outcome) '
                    || 'VALUES (''verify'', ''subtask'', ''verify-1'', now(), 0, ''done_self'') '
                    || 'ON CONFLICT (agent_id, task_kind, task_id, scorer_version) DO UPDATE SET scored_at = now()';
@@ -149,6 +154,7 @@ BEGIN
         ('reader reads the model-call attempts', 'nous_reader', 'SELECT count(*) FROM nous_system.model_call_attempt', 'ok', NULL),
         ('reader cannot read an embedding', 'nous_reader', 'SELECT embedding FROM heart.facts', 'error', NULL),
         ('reader cannot read a push token', 'nous_reader', 'SELECT fcm_token FROM nous_system.a2ui_push_installations', 'error', NULL),
+        ('reader cannot read a device digest', 'nous_reader', 'SELECT token_sha256 FROM nous_system.a2ui_devices', 'error', NULL),
         ('reader cannot INSERT', 'nous_reader', 'INSERT INTO heart.subtasks DEFAULT VALUES', 'error', NULL),
         ('reader cannot read a server file', 'nous_reader', 'SELECT pg_read_file(''/etc/hostname'')', 'error', NULL),
         ('reader cannot run a program', 'nous_reader', 'COPY (SELECT 1) TO PROGRAM ''true''', 'error', NULL),
@@ -245,6 +251,12 @@ BEGIN
             'SELECT NOT EXISTS (SELECT 1 FROM pg_class c WHERE c.relnamespace::regnamespace::text IN (''brain'', ''heart'', ''nous_system'') AND has_table_privilege(''nous_scorer'', c.oid, ''SELECT'') AND (c.relkind <> ''r'' OR c.relrowsecurity OR c.relforcerowsecurity)) AND NOT EXISTS (SELECT 1 FROM pg_policy p WHERE has_table_privilege(''nous_scorer'', p.polrelid, ''SELECT''))', 'true', NULL)
         ) AS t(label, run_as, stmt, expect, after)
     LOOP
+        IF waits ? c.label AND NOT EXISTS (
+            SELECT 1 FROM nous_system.schema_migrations m WHERE m.version = waits ->> c.label
+        ) THEN
+            waiting := waiting + 1;
+            CONTINUE;
+        END IF;
         EXECUTE format('SET LOCAL ROLE %I', c.run_as);
         err := NULL;
         flag := NULL;
@@ -273,6 +285,9 @@ BEGIN
         passed := passed + 1;
     END LOOP;
     RAISE NOTICE 'verify_db_roles: % checks passed', passed;
+    IF waiting > 0 THEN
+        RAISE NOTICE 'verify_db_roles: % checks wait for a migration that is not applied yet', waiting;
+    END IF;
 END
 $verify$;
 

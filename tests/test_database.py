@@ -60,6 +60,8 @@ async def test_all_tables_exist(db):
         ("nous_system", "a2ui_outbox"),
         ("nous_system", "a2ui_actions"),
         ("nous_system", "a2ui_push_installations"),
+        # Companion devices paired by a code, each with its own token stored as a digest (migration 115)
+        ("nous_system", "a2ui_devices"),
         # Harness Phase 1b: durable execution ledger (migration 074)
         ("nous_system", "execution_ledger"),
         # Fault detector: per-phase process heartbeat (migration 078)

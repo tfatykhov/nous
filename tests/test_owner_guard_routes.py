@@ -200,6 +200,10 @@ REST_ROUTE_SET = {
     ("POST", "/admin/search-weights"),
     ("POST", "/undo/snapshots/{id}/restore"),
     ("POST", "/schedules"),
+    # Companion devices: the owner opens a pairing, lists and revokes (nous/api/companion_devices.py)
+    ("POST", "/a2ui/devices/pairings"),
+    ("GET", "/a2ui/devices"),
+    ("DELETE", "/a2ui/devices/{id}"),
 }
 
 
@@ -331,6 +335,24 @@ async def test_the_goal_routes_answer_from_their_store_when_goals_are_on(tmp_pat
     assert response.json()["enabled"] is True and set(response.json()["presets"]) == {"small", "medium", "large"}
     paths = [getattr(route, "path", None) for route in app.routes]
     assert paths.index("/goals/options") < paths.index("/goals/{ref}")
+
+
+def test_the_device_routes_are_mounted_only_with_the_companion_on(tmp_path) -> None:
+    from nous.api.rest import create_app
+    from nous.config import Settings
+
+    stand_in = SimpleNamespace()
+    off = Settings(_env_file=None, workspace_dir=str(tmp_path), a2ui_enabled=False)
+    app = create_app(stand_in, stand_in, SimpleNamespace(schedules=None), stand_in, stand_in, off)
+    assert not [route.path for route in app.routes if getattr(route, "path", "").startswith("/a2ui/devices")]
+    on = {route.path for route in _rest_app(tmp_path).routes if getattr(route, "path", "").startswith("/a2ui/devices")}
+    assert on == {
+        "/a2ui/devices/pairings",
+        "/a2ui/devices/redeem",
+        "/a2ui/devices/unpair",
+        "/a2ui/devices/{id}",
+        "/a2ui/devices",
+    }
 
 
 def _unconfigured_records(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:

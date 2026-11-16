@@ -122,9 +122,9 @@ async def test_reader_reads_nothing_in_scoring_or_a2ui(db, reader_role):
     [(guarded,)] = await _rows(
         db,
         "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-        "WHERE c.relkind = 'r' AND (n.nspname = 'scoring' OR c.relname = 'a2ui_push_installations')",
+        "WHERE c.relkind = 'r' AND (n.nspname = 'scoring' OR c.relname IN ('a2ui_push_installations', 'a2ui_devices'))",
     )
-    assert guarded >= 3
+    assert guarded >= 4
 
 
 async def test_reader_reads_nothing_in_public(db, reader_role):
@@ -533,6 +533,8 @@ async def test_reader_denied_reply_text(db, reader_role, reader_settings):
         "select * from scoring.task_scores",
         "select * from scoring.scorer_heartbeat",
         "select fcm_token from nous_system.a2ui_push_installations",
+        "select token_sha256 from nous_system.a2ui_devices",
+        "select name from nous_system.a2ui_devices",
         "select embedding from heart.facts",
         "select search_tsv from brain.decisions",
         "select * from heart.facts",

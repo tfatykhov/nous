@@ -30,6 +30,7 @@ import json
 import logging
 import re
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -37,6 +38,7 @@ from typing import Any
 
 import httpx
 from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.storage.models import A2uiPushInstallation
 
@@ -313,9 +315,14 @@ class PushService:
             await session.commit()
             return 200, {"ok": True, "created": False}
 
-    async def deregister(self, installation_id: str) -> tuple[int, dict[str, Any]]:
+    async def deregister(
+        self, installation_id: str, *, session: AsyncSession | None = None
+    ) -> tuple[int, dict[str, Any]]:
+        """Delete one installation. With ``session``, the delete runs in the caller's transaction and this does not
+        commit (a companion device's revoke checks and deletes on one connection). Without it, it commits its own."""
         agent_id = self._settings.agent_id
-        async with self._db.session() as session:
+        own = session is None
+        async with self._db.session() if own else nullcontext(session) as session:
             row = (
                 await session.execute(
                     select(A2uiPushInstallation).where(
@@ -327,7 +334,10 @@ class PushService:
             if row is None:
                 return 404, {"error": "unknown installation"}
             await session.delete(row)
-            await session.commit()
+            if own:
+                await session.commit()
+            else:
+                await session.flush()
         return 200, {"ok": True}
 
     async def list_installations(self) -> dict[str, Any]:
