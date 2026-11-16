@@ -457,6 +457,17 @@ async def test_a_deeply_nested_body_is_400(db) -> None:
         assert (response.status_code, response.json()) == (400, {"error": "the body must be JSON"})
 
 
+async def test_many_unknown_fields_are_named_five_at_most_and_the_rest_counted(db) -> None:
+    env = make_env(db)
+    unknown = {f"field{i}": i for i in range(8)}
+    response = await env.call("POST", "/goals", json={**NEW, **unknown})
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error.endswith("; and 3 more")
+    assert [part.split(":")[0] for part in error.split("; ")[:5]] == [f"field{i}" for i in range(5)]
+    assert "field5" not in error
+
+
 async def test_a_long_preset_or_field_name_is_400_and_said_back_only_in_part(db) -> None:
     env = make_env(db)
     long_preset = await env.call("POST", "/goals", json={**NEW, "preset": "p" * 5000})

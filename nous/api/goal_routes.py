@@ -38,6 +38,7 @@ from starlette.routing import Route
 
 from nous.api.owner_guard import OwnerGuard
 from nous.brain.continuation import owner_channel
+from nous.goals.driver import SESSION_NOTE_LABEL
 from nous.goals.envelope import _RANGES, PRESETS
 from nous.goals.seed import SPEND_NOTE
 from nous.goals.spend import goal_spent
@@ -70,6 +71,11 @@ STATE_FILTERS: dict[str, tuple[str, ...] | None] = {
 LIST_DEFAULT = 100
 LIST_MAX = 200
 SESSIONS_SHOWN = 50
+PAUSE_SENTENCE_CHARS = 300
+# A session's close row as the driver writes it (``nous/goals/driver.py``: "Session <n> ended: <outcome>, ...").
+CLOSE_ROW_PATTERN = "Session % ended: %"
+# At most this many problems of a body are listed; the rest are counted.
+PROBLEMS_SHOWN = 5
 # The owner's actions on a goal, in the order the screen shows them; each is the last segment of its route.
 ACTIONS: tuple[str, ...] = (
     "approve",
@@ -194,7 +200,9 @@ async def _parse(request: Request, model: type[_Body]) -> Any:
         return model.model_validate(data)
     except ValidationError as exc:
         problems = [f"{_field(error['loc'])}: {error['msg']}" for error in exc.errors()]
-        raise _BadRequest("; ".join(problems)) from None
+        more = len(problems) - PROBLEMS_SHOWN
+        listed = "; ".join(problems[:PROBLEMS_SHOWN])
+        raise _BadRequest(f"{listed}; and {more} more" if more > 0 else listed) from None
 
 
 # ---- what a goal offers ----------------------------------------------------------------------------------------
@@ -222,14 +230,24 @@ def resume_blocked(goal: Goal, *, spent: int, now: datetime) -> str | None:
     return None
 
 
-def pause_sentence(goal: Goal, journal: list[GoalJournal]) -> str | None:
-    """Why the harness paused ``goal``, in its own words: the newest ``state`` row the harness wrote, for a goal
-    paused for any reason but the owner's (the driver journals each pause it makes as a harness ``state`` row in
-    the same transaction). None for a goal that is not paused, paused by the owner, or with no such row in
-    ``journal`` (newest first)."""
-    if goal.state != "paused" or goal.pause_reason == "owner":
-        return None
-    return next((row.text for row in journal if row.kind == "state" and row.actor == "harness"), None)
+def pause_sentence_query(agent_id: str, goal_id: UUID) -> Any:
+    """The newest ``state`` row the harness wrote for ``goal_id`` that is not a session's close row: the driver
+    journals each pause it makes as such a row, in the transaction that pauses the goal. A close row is told by
+    its text, as the driver writes it: it starts "Session <n> ended: " and may carry ``SESSION_NOTE_LABEL``; both
+    kinds are left out, so a session that ends after the pause never takes the pause's place."""
+    return (
+        select(GoalJournal.text)
+        .where(
+            GoalJournal.agent_id == agent_id,
+            GoalJournal.goal_id == goal_id,
+            GoalJournal.kind == "state",
+            GoalJournal.actor == "harness",
+            GoalJournal.text.not_like(CLOSE_ROW_PATTERN),
+            GoalJournal.text.not_like(f"%{SESSION_NOTE_LABEL}%"),
+        )
+        .order_by(GoalJournal.seq.desc())
+        .limit(1)
+    )
 
 
 def _can_extend(goal: Goal, now: datetime) -> bool:
@@ -338,6 +356,7 @@ def goal_detail(
     sessions: list[GoalSession],
     sessions_total: int,
     journal: list[GoalJournal],
+    pause_sentence: str | None,
     settings: Any,
 ) -> dict[str, Any]:
     """A goal in full: its row, charter, limits, plan, its newest sessions (the oldest of them first) and how many it
@@ -386,7 +405,7 @@ def goal_detail(
             }
             for row in journal
         ],
-        "pause_sentence": pause_sentence(goal, journal),
+        "pause_sentence": pause_sentence,
         "actions": available_actions(goal, tally=tally, now=now, settings=settings),
         "resume_blocked": resume_blocked(goal, spent=tally.spent_total, now=now),
         "spend_note": SPEND_NOTE,
@@ -456,6 +475,15 @@ def build_goal_routes(*, database: Any, settings: Any, goals: GoalStore | None, 
             newest = list(rows.scalars())
         return newest[::-1], int(total or 0)
 
+    async def harness_pause_sentence(goal: Goal) -> str | None:
+        """Why the harness paused ``goal``, in its own words (``pause_sentence_query``), cut to
+        ``PAUSE_SENTENCE_CHARS``; None for a goal that is not paused, or paused by the owner."""
+        if goal.state != "paused" or goal.pause_reason == "owner":
+            return None
+        async with database.session() as session:
+            found = await session.scalar(pause_sentence_query(agent_id, goal.id))
+        return clip(found, PAUSE_SENTENCE_CHARS) if found is not None else None
+
     async def detail(goal: Goal, journal_limit: int = JOURNAL_DEFAULT) -> dict[str, Any]:
         assert goals is not None
         now, tally = await tallies([goal.id])
@@ -467,6 +495,7 @@ def build_goal_routes(*, database: Any, settings: Any, goals: GoalStore | None, 
             sessions=sessions,
             sessions_total=sessions_total,
             journal=await goals.journal(goal.id, limit=journal_limit),
+            pause_sentence=await harness_pause_sentence(goal),
             settings=settings,
         )
 

@@ -13,11 +13,12 @@ from goal_routes_support import CHAN, active, add_session, db_now, draft, make_e
 from sqlalchemy import func, select
 
 from nous.api.goal_routes import JOURNAL_MAX, masked_channel
+from nous.goals.driver import SESSION_NOTE_LABEL
 from nous.goals.envelope import _RANGES, PRESETS
 from nous.goals.seed import SPEND_NOTE
 from nous.goals.spend import goal_spent
 from nous.goals.store import format_short_id
-from nous.storage.models import GoalJournal, GoalSession
+from nous.storage.models import Goal, GoalJournal, GoalSession
 
 pytestmark = pytest.mark.postgres_only
 
@@ -104,10 +105,31 @@ async def test_the_list_takes_the_newest_goals_up_to_its_limit_and_says_how_many
     assert [row["id"] for row in body["goals"]] == [str(made[1].id), str(made[2].id)]  # the newest two, newest last
     assert body["total"] == 3
     assert (await env.call("GET", "/goals")).json()["total"] == 3
+    await env.store.cancel(made[0].id, actor="owner")
+    assert (await env.call("GET", "/goals")).json()["total"] == 2  # total follows the filter
+    assert (await env.call("GET", "/goals?state=finished")).json()["total"] == 1
+    assert (await env.call("GET", "/goals?state=all")).json()["total"] == 3
     for bad in ("0", "x", "-1", "1" * 10, "9" * 5000):
         refused = await env.call("GET", f"/goals?limit={bad}")
         assert refused.status_code == 400, bad
         assert refused.json() == {"error": "limit must be a whole number from 1 (at most 200 are sent)"}
+
+
+async def test_the_list_sends_at_most_200_goals_however_many_are_asked_for(db) -> None:
+    env = make_env(db)
+    async with db.session() as s:
+        for i in range(205):
+            s.add(
+                Goal(
+                    agent_id=env.store.agent_id, title=f"Goal {i}", objective="o", done_when="d", preset="small",
+                    total_budget=10, day_budget=1, deadline_days=3, sessions_per_day=2, min_interval_seconds=7200,
+                    jobs_per_day=1, proposed_by="owner",
+                )
+            )
+        await s.commit()
+    body = (await env.call("GET", "/goals?limit=500")).json()
+    assert (len(body["goals"]), body["total"]) == (200, 205)
+    assert body["goals"][-1]["title"] == "Goal 204"  # the newest, last
 
 
 async def test_detail_has_charter_limits_plan_sessions_journal_and_the_spend_note(db) -> None:
@@ -240,9 +262,21 @@ async def test_the_pause_sentence_is_the_harness_row_of_the_pause_not_any_state_
     goal = await paused(env.store, "error")
     await env.store.append_journal(goal.id, "state", "Session 3 could not start. Paused.", actor="harness", session_n=3)
     await env.store.raise_budget(goal.id, total=goal.total_budget * 2, actor="owner")  # a newer state row, the owner's
+    # Session close rows written after the pause, as the driver writes them, with and without the session's note.
+    closed = "Session 3 ended: no_step, 10 tokens."
+    await env.store.append_journal(goal.id, "state", closed, actor="harness", session_n=3)
+    await env.store.append_journal(
+        goal.id, "state", f"A row of the session's.\n{SESSION_NOTE_LABEL} It was hard.", actor="harness", session_n=3
+    )
+    for i in range(55):  # newer rows beyond the journal the detail sends
+        await env.store.append_journal(goal.id, "progress", f"progress {i}", actor="chain")
     body = (await env.call("GET", f"/goals/{goal.id}")).json()
-    assert body["journal"][0]["actor"] == "owner"
+    assert body["journal"][0]["actor"] == "chain"
     assert body["pause_sentence"] == "Session 3 could not start. Paused."
+    long = await paused(env.store, "error")
+    await env.store.append_journal(long.id, "state", "w" * 1000, actor="harness")
+    clipped = (await env.call("GET", f"/goals/{long.id}")).json()["pause_sentence"]
+    assert len(clipped) == 300 and clipped.endswith("[clipped]")
     by_owner = await paused(env.store, "owner")
     await env.store.append_journal(by_owner.id, "state", "An older harness row.", actor="harness")
     assert (await env.call("GET", f"/goals/{by_owner.id}")).json()["pause_sentence"] is None
