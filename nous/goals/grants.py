@@ -28,6 +28,11 @@ A refresh that fails clears the whole view. A new session's root is added by ``p
 that gives the session its root, before its commit lets a worker claim the session's first task. The first use of a
 granted tool in a session writes one harness journal row (``note_use``).
 
+With ``commands`` (``NOUS_GOAL_COMMANDS_ENABLED``) the view also holds, in a map of its own, the open sessions' roots
+of active goals that may run any command now (``nous.goals.commands``), each with its end on the view's clock: read in
+the same transaction as the grants, replaced by every refresh, cleared with them, and asked through
+``commands_for``.
+
 The screen's words come from the tables here (``GRANT_PLACES``, ``NEVER_SENTENCE``, ``GRANT_FACTS``), which the
 routes read and tests tie to the code's own tables.
 """
@@ -47,7 +52,7 @@ from types import MappingProxyType
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import and_, select, text
+from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.api import tool_policy
@@ -56,6 +61,7 @@ from nous.api.tool_classes import MCP_TOOL_PREFIX, McpIdentity, mcp_tool_backgro
 from nous.autonomy import tool_guard
 from nous.brain.intentions import AUTHORITY_INTERNAL
 from nous.goals.charter import ToolLine
+from nous.goals.commands import MODE_COMMANDS, CommandsEntry, decide_commands
 from nous.goals.store import grant_identity
 from nous.storage.models import Goal, GoalSession, GoalToolGrant
 
@@ -246,18 +252,31 @@ class Decision:
 class GoalToolGrants:
     """The grants of the open sessions of active goals, by root and tool. Built from the database by ``refresh``
     (all of it), ``refresh_root`` (one session's root) and ``refresh_goal`` (one goal's roots); each returns whether
-    it read, never raises, and clears the whole view when it fails. Only ``refresh`` renews ``fresh``."""
+    it read, never raises, and clears the whole view when it fails. Only ``refresh`` renews ``fresh``. With
+    ``commands``, the same reads fill the map of roots that may run any command (``commands_entry``); ``run`` keeps
+    refreshing the whole view every ``goals_tick_seconds``."""
 
-    def __init__(self, database: Any, settings: Any, *, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        database: Any,
+        settings: Any,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        commands: bool = False,
+    ) -> None:
         self._db = database
         self._agent_id = settings.agent_id
         self._max_age = float(max(3 * int(settings.goals_tick_seconds), MIN_FRESH_SECONDS))
+        self._tick_seconds = float(settings.goals_tick_seconds)
         self._clock = clock
         self._lock = asyncio.Lock()
         self._by_root: dict[UUID, dict[str, Grant]] = {}
+        self._commands_on = commands
+        self._commands: dict[UUID, CommandsEntry] = {}
         self._loaded_at: float | None = None
         self._used: set[tuple[UUID, str]] = set()
         self._tasks: set[asyncio.Task[None]] = set()
+        self._loop_task: asyncio.Task[None] | None = None
 
     # ---- the runner's reads (sync, no await) ----------------------------------------------------------------
 
@@ -272,6 +291,18 @@ class GoalToolGrants:
     def lifts(self, ctx: ExecutionContext, tool: str) -> bool:
         """``decide``'s answer, as the runner's hook takes it."""
         return decide(self, ctx, tool).lifted
+
+    def now(self) -> float:
+        """The view's clock (monotonic), which the ends of ``commands_entry`` are on."""
+        return self._clock()
+
+    def commands_entry(self, root_id: UUID) -> CommandsEntry | None:
+        """The entry of the open session whose root is ``root_id``, when its goal may run any command, or None."""
+        return self._commands.get(root_id)
+
+    def commands_for(self, ctx: ExecutionContext) -> CommandsEntry | None:
+        """``decide_commands``'s answer, as the runner's and the dispatcher's hook take it."""
+        return decide_commands(self, ctx)
 
     def note_used(self, ctx: ExecutionContext, tool: str) -> None:
         """The runner's hook after it authorized a call ``lifts`` allowed: ``note_use`` for the turn's root."""
@@ -334,6 +365,26 @@ class GoalToolGrants:
         """Read the grants of the goal's open session again."""
         return await self._refresh(goal_id=goal_id)
 
+    async def run(self) -> None:
+        """Read the whole view again every ``goals_tick_seconds``, until cancelled: the view stays fresh while a
+        driver tick runs long. A read that fails clears the view, and the next one fills it again."""
+        while True:
+            await asyncio.sleep(self._tick_seconds)
+            await self.refresh()
+
+    def start_loop(self) -> None:
+        """Start ``run`` in a task of its own (once)."""
+        if self._loop_task is None:
+            self._loop_task = asyncio.get_running_loop().create_task(self.run(), name="goal-tool-grants-view")
+
+    async def stop_loop(self) -> None:
+        """Cancel ``run`` and wait for it."""
+        task, self._loop_task = self._loop_task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
     @contextlib.asynccontextmanager
     async def publishing(self, session: AsyncSession, root_id: UUID) -> AsyncIterator[None]:
         """Around the commit of ``session``, the transaction that gives a new goal session its root ``root_id``
@@ -341,36 +392,41 @@ class GoalToolGrants:
         lets a worker claim the session's first task, and the lock is held until the commit is done, so no refresh
         can read the session as it was before the commit and drop them. The read runs under a savepoint: a failed
         one clears the view (logged by its class) and the transaction goes on. When the body raises (the commit
-        failed), the root's entry is taken out again. Never raises on entry."""
+        failed), the root's entry is taken out again. Never raises on entry. With ``commands``, the root's entry in
+        the commands map is read, put in and taken out the same way."""
         async with self._lock:
             try:
                 async with session.begin_nested():
-                    found = await self._read(root_id=root_id, goal_id=None, session=session)
+                    found, commands = await self._read(root_id=root_id, goal_id=None, session=session)
             except Exception as exc:
                 self._failed(exc)
             else:
                 self._by_root = {**{root: tools for root, tools in self._by_root.items() if root != root_id}, **found}
+                self._commands = {**{r: e for r, e in self._commands.items() if r != root_id}, **commands}
             try:
                 yield
             except BaseException:
                 self._by_root.pop(root_id, None)
+                self._commands.pop(root_id, None)
                 raise
 
     def _failed(self, exc: BaseException) -> None:
-        """A read failed: the whole view is cleared and stale until a full read succeeds."""
+        """A read failed: the whole view (both maps) is cleared and stale until a full read succeeds."""
         self._by_root = {}
+        self._commands = {}
         self._loaded_at = None
         logger.warning("F115: the goals' tool grants could not be read; none apply (%s)", type(exc).__name__)
 
     async def _refresh(self, *, root_id: UUID | None = None, goal_id: UUID | None = None) -> bool:
         async with self._lock:  # around the whole read and apply
             try:
-                found = await self._read(root_id=root_id, goal_id=goal_id)
+                found, commands = await self._read(root_id=root_id, goal_id=goal_id)
             except Exception as exc:
                 self._failed(exc)
                 return False
             if root_id is None and goal_id is None:
                 self._by_root = found
+                self._commands = commands
                 self._loaded_at = self._clock()
                 self._used = {key for key in self._used if key[0] in found}
                 return True
@@ -380,13 +436,58 @@ class GoalToolGrants:
                 if root != root_id and not any(grant.goal_id == goal_id for grant in tools.values())
             }
             self._by_root = {**kept, **found}
+            # Kept by each entry's own goal, not through the grants: a goal with no grant has no entry there.
+            kept_commands = {r: e for r, e in self._commands.items() if r != root_id and e.goal_id != goal_id}
+            self._commands = {**kept_commands, **commands}
             return True
 
     async def _read(
         self, *, root_id: UUID | None, goal_id: UUID | None, session: AsyncSession | None = None
+    ) -> tuple[dict[UUID, dict[str, Grant]], dict[UUID, CommandsEntry]]:
+        """The grants of the open sessions of active goals (of one root, or one goal), and with ``commands`` those
+        sessions' roots whose goal may run any command now, read in ``session`` when given, else in a transaction of
+        its own."""
+        if session is not None:
+            return await self._read_grants(session, root_id, goal_id), await self._read_commands(
+                session, root_id, goal_id
+            )
+        async with self._db.session() as s:
+            return await self._read_grants(s, root_id, goal_id), await self._read_commands(s, root_id, goal_id)
+
+    async def _read_commands(
+        self, session: AsyncSession, root_id: UUID | None, goal_id: UUID | None
+    ) -> dict[UUID, CommandsEntry]:
+        """The open sessions' roots of active goals in the mode whose end is after the database's clock, each with
+        its end on the view's clock: the time left, as the database measures it, added to the view's clock now.
+        Nothing is read without ``commands``."""
+        if not self._commands_on:
+            return {}
+        remaining = func.extract("epoch", Goal.mode_until - func.clock_timestamp())
+        query = (
+            select(GoalSession.root_id, GoalSession.n, Goal.id, remaining)
+            .join(GoalSession, and_(GoalSession.goal_id == Goal.id, GoalSession.agent_id == Goal.agent_id))
+            .where(
+                Goal.agent_id == self._agent_id,
+                Goal.state == "active",
+                Goal.mode == MODE_COMMANDS,
+                Goal.mode_until.is_not(None),
+                Goal.mode_until > func.clock_timestamp(),
+                GoalSession.ended_at.is_(None),
+                GoalSession.root_id.is_not(None),
+            )
+        )
+        if root_id is not None:
+            query = query.where(GoalSession.root_id == root_id)
+        if goal_id is not None:
+            query = query.where(Goal.id == goal_id)
+        rows = (await session.execute(query)).all()
+        now = self._clock()
+        return {root: CommandsEntry(goal, n, now + float(left)) for root, n, goal, left in rows}
+
+    async def _read_grants(
+        self, session: AsyncSession, root_id: UUID | None, goal_id: UUID | None
     ) -> dict[UUID, dict[str, Grant]]:
-        """The grants of the open sessions of active goals (of one root, or one goal), read in ``session`` when
-        given, else in a transaction of its own."""
+        """The grants of the open sessions of active goals (of one root, or one goal)."""
         query = (
             select(GoalSession.root_id, GoalSession.n, GoalToolGrant)
             .join(
@@ -408,11 +509,7 @@ class GoalToolGrants:
             query = query.where(GoalSession.root_id == root_id)
         if goal_id is not None:
             query = query.where(GoalToolGrant.goal_id == goal_id)
-        if session is not None:
-            rows = (await session.execute(query)).all()
-        else:
-            async with self._db.session() as s:
-                rows = (await s.execute(query)).all()
+        rows = (await session.execute(query)).all()
         found: dict[UUID, dict[str, Grant]] = {}
         for root, n, row in rows:
             found.setdefault(root, {})[row.tool] = Grant(row.goal_id, n, row.tool, grant_identity(row))
