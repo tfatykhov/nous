@@ -55,7 +55,6 @@ logger = logging.getLogger(__name__)
 
 MAX_STEPS = 20  # the steps one goal_plan call may send
 MAX_OPEN_STEPS = 20  # the open steps a plan holds
-KEPT_DONE_STEPS = 30  # the closed or dropped steps a plan keeps, newest; older ones move to the journal
 MAX_PLAN_ENTRIES = 20  # every step the plan holds: brain.goals' CHECK on the plan (migration 113)
 STEP_STATUSES = ("open", "closed", "dropped")
 NOTE_KINDS = ("progress", "done_claim")
@@ -375,9 +374,8 @@ class GoalTools:
 
     async def _make_room(self, s: AsyncSession, goal: Goal, plan: list[dict[str, Any]]) -> tuple[list[dict], bool]:
         """Move the oldest closed or dropped steps out of ``plan`` (in place) while it holds more than
-        ``MAX_PLAN_ENTRIES`` steps or more than ``KEPT_DONE_STEPS`` closed or dropped ones. A step closed in the
-        goal's session that is still open stays: its close counts it (``steps_closed``). ``(moved, full)``: full when
-        the plan is still too long with nothing left that may move."""
+        ``MAX_PLAN_ENTRIES`` steps. A step closed in the goal's session that is still open stays: its close counts it
+        (``steps_closed``). ``(moved, full)``: full when the plan is still too long with nothing left that may move."""
         open_n = await s.scalar(
             select(GoalSession.n).where(
                 GoalSession.agent_id == self._agent_id, GoalSession.goal_id == goal.id, GoalSession.ended_at.is_(None)
@@ -390,9 +388,7 @@ class GoalTools:
             return step.get("status") == "closed" and (open_n is None or step.get("closed_session") != open_n)
 
         moving: list[dict[str, Any]] = []
-        while len(plan) > MAX_PLAN_ENTRIES or sum(step.get("status") in DONE_STATUSES for step in plan) > (
-            KEPT_DONE_STEPS
-        ):
+        while len(plan) > MAX_PLAN_ENTRIES:
             oldest = next((i for i, step in enumerate(plan) if may_move(step)), None)
             if oldest is None:
                 return moving, True
