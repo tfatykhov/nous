@@ -28,7 +28,8 @@ from sqlalchemy import func, update
 
 from nous.brain import continuation
 from nous.goals import roots
-from nous.goals.driver import PAUSE_SENTENCES, GoalDriver
+from nous.goals.driver import PAUSE_SENTENCES, PAUSES_TOLD_PER_TICK, GoalDriver
+from nous.goals.store import STOP_REF
 from nous.storage.models import GoalJournal, GoalSession
 
 pytestmark = pytest.mark.postgres_only
@@ -207,3 +208,79 @@ async def test_a_root_the_owner_cancelled_pauses_the_goal_and_sends_nothing(runn
     assert (await goal_row(w, goal)).pause_reason == "owner"
     assert any(row.actor == "harness" and "owner cancelled" in row.text for row in await journal(w, goal, "state"))
     assert await _messages(w) == []
+
+
+async def _answer(w, goal) -> None:
+    """The owner answers a deadline pause: a day more, then resume."""
+    await w.store.extend_deadline(goal.id, days=1, actor="owner")
+    await w.store.resume(goal.id, actor="owner")
+
+
+def _past() -> datetime:
+    return datetime.now(UTC) - timedelta(minutes=1)
+
+
+async def test_only_the_goals_newest_driver_pause_is_told(runner_env):  # noqa: F811
+    """Three deadline pauses of one goal: the first is told; the owner answers the second before a tick tells it, so
+    it is never told, not even while the third pause has the goal paused for the same reason; the third is told. Two
+    messages for three pauses."""
+    w = await world(runner_env, bind=False)
+    goal = await _deadline_passed(w)
+    assert (await w.driver.tick()).paused == 1
+    first = await _pause_row(w, goal)
+    await _answer(w, goal)
+    await set_goal(w, goal, deadline_at=_past())
+    assert await w.driver.apply_stop_conditions() == 1
+    second = await _pause_row(w, goal)
+    await _answer(w, goal)
+    await set_goal(w, goal, deadline_at=_past())
+    assert (await w.driver.tick()).paused == 1
+    third = await _pause_row(w, goal)
+    assert len({first.id, second.id, third.id}) == 3
+    assert all(f"{STOP_REF}deadline" in row.evidence for row in (first, second, third))
+    assert [message.source_id for message in await _messages(w)] == [first.id, third.id]
+    await w.driver.tick()
+    assert len(await _messages(w)) == 2
+
+
+async def test_at_most_twenty_pauses_are_told_a_pass(runner_env):  # noqa: F811
+    """Twenty-one goals paused in one pass: twenty are told on the first pass, the last on the next, then none."""
+    w = await world(runner_env, bind=False)
+    for i in range(PAUSES_TOLD_PER_TICK + 1):
+        goal = await active(w, title=f"Goal {i}")
+        await set_goal(w, goal, deadline_at=_past())
+    assert await w.driver.apply_stop_conditions() == PAUSES_TOLD_PER_TICK + 1
+    assert [await w.driver.tell_owner_of_pauses() for _ in range(3)] == [PAUSES_TOLD_PER_TICK, 1, 0]
+    assert len({message.source_id for message in await _messages(w)}) == PAUSES_TOLD_PER_TICK + 1
+
+
+async def test_a_goal_paused_again_for_another_reason_is_told_its_new_reason(runner_env, monkeypatch):  # noqa: F811
+    """Between the read of untold pauses and the message, the owner resumes a goal paused for its deadline and the
+    driver pauses it for its budget: nothing is sent for the deadline pause row (the goal is re-read for the reason
+    that row names), and the budget pause is told, in its own words, on the next pass."""
+    w = await world(runner_env, bind=False)
+    goal = await _deadline_passed(w)
+    assert await w.driver.apply_stop_conditions() == 1
+    deadline_row = await _pause_row(w, goal)
+    real = w.driver._untold_pauses
+    interleave = [True]
+
+    async def paused_again_after_the_read():
+        pauses = await real()
+        if interleave.pop() if interleave else False:
+            assert [row_id for row_id, _goal, _reason in pauses] == [deadline_row.id]
+            await _answer(w, goal)
+            await set_goal(w, goal, total_budget=1000, day_budget=1000)
+            await _closed(w, goal, 1, "no_step", spent=2000)
+            assert await w.driver.apply_stop_conditions() == 1
+        return pauses
+
+    monkeypatch.setattr(w.driver, "_untold_pauses", paused_again_after_the_read)
+    assert await w.driver.tell_owner_of_pauses() == 0
+    assert (await goal_row(w, goal)).pause_reason == "budget"
+    assert await _messages(w) == []
+    assert await w.driver.tell_owner_of_pauses() == 1
+    budget_row = await _pause_row(w, goal)
+    (message,) = await _messages(w)
+    assert message.source_id == budget_row.id != deadline_row.id
+    assert PAUSE_SENTENCES["budget"] in message.body and PAUSE_SENTENCES["deadline"] not in message.body
