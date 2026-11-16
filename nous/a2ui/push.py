@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nous.storage.models import A2uiPushInstallation
@@ -260,15 +260,25 @@ class PushService:
         agent_id = self._settings.agent_id
         name = _clean(name, _NAME_MAX)
         app_version = _clean(app_version, _APP_VERSION_MAX)
+        query = select(A2uiPushInstallation).where(
+            A2uiPushInstallation.agent_id == agent_id,
+            A2uiPushInstallation.installation_id == installation_id,
+        )
         async with self._db.session() as session:
-            existing = (
+            existing = (await session.execute(query)).scalar_one_or_none()
+
+            if existing is None:
+                # First registrations run one at a time per agent, under a transaction-level
+                # advisory lock, so the count and the insert below cannot interleave with another
+                # one's. A registration that waited looks again and updates the row stored
+                # meanwhile. Lock order: this lock, then this table's rows. The device lock is
+                # never taken here, and the device store, in whose transaction
+                # `deregister(session=...)` runs, never takes this one.
                 await session.execute(
-                    select(A2uiPushInstallation).where(
-                        A2uiPushInstallation.agent_id == agent_id,
-                        A2uiPushInstallation.installation_id == installation_id,
-                    )
+                    text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                    {"key": f"nous_push_installations:{agent_id}"},
                 )
-            ).scalar_one_or_none()
+                existing = (await session.execute(query)).scalar_one_or_none()
 
             if existing is None:
                 total = len(
