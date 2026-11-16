@@ -230,7 +230,7 @@ async def test_the_citeable_list_has_the_sessions_refs_with_full_ids_and_nothing
     w.dir.mkdir(parents=True)
     (w.dir / "notes.md").write_text("merged", encoding="utf-8")
     async with w.db.session() as s:
-        listed = await evidence.citeable(s, w.scope, limit=10)
+        listed = await evidence.citeable(s, w.scope, limit=10) + evidence.files(w.scope)
     assert [c.ref for c in listed] == [
         f"subtask:{first}",
         f"dag:{dag.id}",
@@ -247,8 +247,7 @@ async def test_the_citeable_list_looks_at_a_bounded_number_of_files(runner_env, 
     for name in ("a.md", "b.md", "c.md"):
         (w.dir / name).write_text("x", encoding="utf-8")
     monkeypatch.setattr(evidence, "FILES_SCANNED", 2)
-    async with w.db.session() as s:
-        listed = await evidence.citeable(s, w.scope, limit=10)
+    listed = evidence.files(w.scope)
     assert [c.ref for c in listed] == [f"file:intentions/{w.root.id}/a.md", f"file:intentions/{w.root.id}/b.md"]
     assert (await _check(w, f"file:intentions/{w.root.id}/c.md")).ref is not None  # still citeable by its path
 
@@ -296,6 +295,5 @@ async def test_a_hard_link_is_the_same_file(runner_env, tmp_path):  # noqa: F811
     a = await _check(w, f"file:intentions/{w.root.id}/a.md")
     b = await _check(w, f"file:intentions/{w.root.id}/b.md")
     assert a.ref != b.ref and a.identity == b.identity
-    async with w.db.session() as s:
-        listed = [c.ref for c in await evidence.citeable(s, w.scope, limit=10) if c.ref.startswith("file:")]
+    listed = [c.ref for c in evidence.files(w.scope)]
     assert listed == [a.ref]  # listed once

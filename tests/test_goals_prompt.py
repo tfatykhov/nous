@@ -6,6 +6,7 @@ block existed: with no goal block (the flag off, or a root that is not a goal's)
 
 from __future__ import annotations
 
+import threading
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -435,3 +436,21 @@ async def test_a_failed_goal_lookup_of_a_goal_root_is_a_failed_attempt(runner_en
     assert await w.cont.run_arrival(root.id) is None
     assert await _attempts(w, root.id) == 1
     assert w.model.calls == []
+
+
+@pytest.mark.postgres_only
+async def test_the_goal_block_walks_the_directory_off_the_event_loop(runner_env, monkeypatch):  # noqa: F811
+
+    w = await world(runner_env)
+    goal = await active(w)
+    root, _session = await started(w, goal)
+    walked: list[int] = []
+
+    def files(scope):
+        walked.append(threading.get_ident())
+        return [evidence.Citeable(f"file:intentions/{root.id}/notes.md", "a file this work wrote")]
+
+    monkeypatch.setattr(evidence, "files", files)
+    turn = await w.chain.turn_context(root.id)
+    assert walked and walked[0] != threading.get_ident()
+    assert f"<file_ref>\nfile:intentions/{root.id}/notes.md\n</file_ref>" in turn.block

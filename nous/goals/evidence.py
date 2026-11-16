@@ -222,9 +222,9 @@ async def check(s: AsyncSession, scope: Scope, raw: Any) -> Checked:
 
 
 async def citeable(s: AsyncSession, scope: Scope, *, limit: int) -> list[Citeable]:
-    """The refs the session's lineage can cite now, at most ``limit`` of each kind: its completed subtasks and DAGs,
-    then its successful recorded calls newest first, then the files under its directory (at most
-    ``FILES_LISTED``)."""
+    """The rows the session's lineage can cite now, at most ``limit`` of each kind: its completed subtasks and DAGs,
+    then its successful recorded calls newest first. The files are ``files``: a walk of a directory, which the caller
+    runs off the event loop and outside its transaction."""
     found: list[Citeable] = []
     for kind in ("subtask", "dag"):
         table, where = _TABLES[kind]
@@ -239,13 +239,12 @@ async def citeable(s: AsyncSession, scope: Scope, *, limit: int) -> list[Citeabl
         Citeable(f"ledger:{row.id}", f"a recorded call at {row.created_at:%Y-%m-%d %H:%M} UTC")
         for row in rows
     ]
-    found += _files(scope)
     return found
 
 
-def _files(scope: Scope) -> list[Citeable]:
+def files(scope: Scope) -> list[Citeable]:
     """Files under the root's directory (each once, however many names it has), at most ``FILES_LISTED`` of the
-    first ``FILES_SCANNED`` entries."""
+    first ``FILES_SCANNED`` entries. Blocking (it walks the directory): run it in a thread."""
     try:
         workspace = Path(scope.workspace_dir).resolve()
         root_dir = workspace / "intentions" / str(scope.root_id)

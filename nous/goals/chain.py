@@ -13,6 +13,7 @@ with ``NOUS_GOALS_ENABLED`` on:
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -94,6 +95,8 @@ class GoalChain:
             )
             refs = await evidence.citeable(s, scope, limit=charter.REFS_SHOWN)
             ended = row.ended_at is not None
+        # The directory is walked after the transaction and off the event loop: nothing in it is a database row.
+        refs += await asyncio.to_thread(evidence.files, scope)
         journal = await self._store.journal_tail(goal.id)
         block = charter.render_goal_block(
             goal,
