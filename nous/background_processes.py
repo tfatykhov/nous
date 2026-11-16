@@ -10,10 +10,13 @@ is empty an entry is dropped, and a new command with the same pid replaces a sta
 Before a group is signalled it is checked to still be the command's (Linux ``/proc``): the leader's start time is
 recorded at ``track``; a live process with the group's number must have that start time, and when the leader has
 ended, the group must still hold a member recorded at ``track`` (same start time) or one that started before the
-leader's exit was seen. A leader already gone at ``track`` (a fast command whose shell exited and was reaped first)
-is identified by the members its group has then; with none, nothing is tracked. Anything else (another start time,
+leader's exit was seen, that tick included: a start time and that moment are both whole clock ticks, so a child the
+command started in its last moment can carry the very tick at which the exit was seen, and leaving it out would leave
+that child running. A leader already gone at ``track`` (a fast command whose shell exited and was reaped first) is
+identified by the members its group has then; with none, nothing is tracked. Anything else (another start time,
 nothing readable) is dropped, never signalled. A zombie is not a member: it has ended, and with no init process in
-the container nothing may ever collect it.
+the container nothing may ever collect it. On a POSIX host without ``/proc`` nothing is tracked: no start time can be
+read, so no group could be shown to be the command's.
 """
 
 from __future__ import annotations
@@ -51,20 +54,26 @@ def _stat(pid: int) -> tuple[str, int, int] | None:
         return None
 
 
-def _members(pgid: int) -> dict[int, int]:
-    """The members of process group ``pgid`` that have not ended (a zombie has), as pid -> start time. Empty when
-    ``/proc`` cannot be read."""
+def _groups() -> dict[int, dict[int, int]] | None:
+    """Every process that has not ended (a zombie has), by process group: pgid -> {pid: start time}. One scan of
+    ``/proc``; None when it cannot be read."""
     try:
         names = os.listdir("/proc")
     except OSError:
-        return {}
-    found: dict[int, int] = {}
+        return None
+    groups: dict[int, dict[int, int]] = {}
     for name in names:
         if name.isdigit():
             stat = _stat(int(name))
-            if stat is not None and stat[1] == pgid and stat[0] != "Z":
-                found[int(name)] = stat[2]
-    return found
+            if stat is not None and stat[0] != "Z":
+                groups.setdefault(stat[1], {})[int(name)] = stat[2]
+    return groups
+
+
+def _members(pgid: int) -> dict[int, int]:
+    """The members of process group ``pgid`` that have not ended, as pid -> start time. Empty when ``/proc`` cannot
+    be read."""
+    return (_groups() or {}).get(pgid, {})
 
 
 def _now_ticks() -> int | None:
@@ -91,12 +100,13 @@ def _still_ours(entry: _Entry) -> bool:
 _entries: dict[int, _Entry] = {}
 
 
-def _group_alive(pgid: int) -> bool:
-    """Whether the group still has a member that has not ended. Without ``/proc``, whether a signal reaches it."""
+def _group_alive(pgid: int, groups: dict[int, dict[int, int]] | None) -> bool:
+    """Whether the group still has a member that has not ended, from ``groups`` (one scan of ``/proc``). Without
+    ``/proc``, whether a signal reaches it."""
     if not hasattr(os, "killpg"):
         return False
-    if os.path.isdir("/proc/self"):
-        return bool(_members(pgid))
+    if groups is not None:
+        return bool(groups.get(pgid))
     try:
         os.killpg(pgid, 0)
     except ProcessLookupError:
@@ -107,16 +117,22 @@ def _group_alive(pgid: int) -> bool:
 
 
 def _prune() -> None:
+    """Drop the entries whose shell has exited and whose group is empty (or that were kept too long). One scan of
+    ``/proc`` for all of them."""
+    exited = [pgid for pgid, entry in _entries.items() if entry.exited_at is not None]
+    if not exited:
+        return
     now = time.monotonic()
-    for pgid, entry in list(_entries.items()):
-        if entry.exited_at is None:
-            continue
-        if now - entry.exited_at > _EXITED_KEEP_SECONDS or not _group_alive(pgid):
+    groups = _groups() if hasattr(os, "killpg") and os.path.isdir("/proc/self") else None
+    for pgid in exited:
+        entry = _entries[pgid]
+        if now - entry.exited_at > _EXITED_KEEP_SECONDS or not _group_alive(pgid, groups):
             _entries.pop(pgid, None)
 
 
 def track(proc: Any) -> int | None:
-    """Track a command just started in its own session. Returns its group id (its pid), or None without one."""
+    """Track a command just started in its own session. Returns its group id (its pid), or None when it is not
+    tracked (no pid, or on a POSIX host its group cannot be read from ``/proc``)."""
     pid = getattr(proc, "pid", None)
     if not isinstance(pid, int):
         return None

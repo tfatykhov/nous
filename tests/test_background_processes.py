@@ -339,6 +339,26 @@ def test_a_group_whose_only_members_are_zombies_is_empty():
         parent.wait()
 
 
+@linux_only
+def test_pruning_scans_proc_once_however_many_entries_have_exited(monkeypatch):
+    import time
+
+    for pgid in (4_000_001, 4_000_002, 4_000_003):  # groups with no member: each entry is dropped
+        background_processes._entries[pgid] = background_processes._Entry(
+            pgid, SimpleNamespace(pid=pgid), exited_at=time.monotonic()
+        )
+    scans: list[str] = []
+    listdir = os.listdir
+
+    def counting(path="."):
+        if path == "/proc":
+            scans.append(path)
+        return listdir(path)
+
+    monkeypatch.setattr(background_processes.os, "listdir", counting)
+    assert background_processes.tracked() == [] and len(scans) == 1
+
+
 def test_the_exit_moment_is_rounded_to_the_tick_not_truncated(monkeypatch):
     import builtins
     import io
