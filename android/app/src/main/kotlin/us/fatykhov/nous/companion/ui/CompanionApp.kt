@@ -11,6 +11,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,37 +22,52 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.JsonObject
 import us.fatykhov.nous.companion.core.Connection
 import us.fatykhov.nous.companion.core.Net
+import us.fatykhov.nous.companion.core.Pairing
+import us.fatykhov.nous.companion.core.PairingWords
+import us.fatykhov.nous.companion.core.RedeemOutcome
+import us.fatykhov.nous.companion.core.Refusal
 import us.fatykhov.nous.companion.core.Shell
 import us.fatykhov.nous.companion.core.SurfaceState
 import us.fatykhov.nous.companion.data.AppGraph
+import us.fatykhov.nous.companion.data.DeviceCredential
 import us.fatykhov.nous.companion.push.Notifications
 import us.fatykhov.nous.companion.push.TokenState
 
 /** Android 16+ runtime permission for private / link-local / CGNAT addresses; a string so older compile targets need no constant. */
 private const val LOCAL_NETWORK_PERMISSION = "android.permission.ACCESS_LOCAL_NETWORK"
+
+/** Opens Settings from anywhere in the tree (a refused tap offers it); a no-op where no shell provides it. */
+val LocalOpenSettings = staticCompositionLocalOf<() -> Unit> { {} }
 
 sealed interface Route {
     data object Inbox : Route
@@ -68,15 +84,37 @@ fun CompanionApp(graph: AppGraph, route: Route, navigate: (Route) -> Unit) {
     // stayed (on-device report). This state is what flips the shell.
     var configured by remember { mutableStateOf(graph.settings.configured) }
     NousThemed(t) {
-        Box(Modifier.fillMaxSize().background(t.bg).safeDrawingPadding()) {
-            if (!configured) ConnectScreen(graph) { configured = true; navigate(Route.Inbox) }
-            else when (route) {
-                Route.Inbox -> InboxScreen(graph, version, navigate)
-                Route.Settings -> SettingsScreen(graph, onDisconnect = { configured = false; navigate(Route.Inbox) }) { navigate(Route.Inbox) }
-                is Route.Surface -> SurfaceScreen(graph, version, route.id) { navigate(Route.Inbox) }
+        CompositionLocalProvider(LocalOpenSettings provides { navigate(Route.Settings) }) {
+            Box(Modifier.fillMaxSize().background(t.bg).safeDrawingPadding()) {
+                if (!configured) ConnectScreen(graph) { configured = true; navigate(Route.Inbox) }
+                else when (route) {
+                    Route.Inbox -> InboxScreen(graph, version, navigate)
+                    Route.Settings -> SettingsScreen(graph, onDisconnect = { configured = false; navigate(Route.Inbox) }) { navigate(Route.Inbox) }
+                    is Route.Surface -> SurfaceScreen(graph, version, route.id) { navigate(Route.Inbox) }
+                }
             }
         }
     }
+}
+
+/** A refused action's sentence and, when pairing is the remedy, a way to Settings beside it. */
+@Composable
+fun ActionError(message: String, refusal: Refusal?) {
+    val t = LocalNousTheme.current
+    Text(message, color = t.crit, fontSize = 12.sp)
+    if (refusal != null) TextButton(onClick = LocalOpenSettings.current, contentPadding = PaddingValues(0.dp)) { Text("Open Settings", color = t.accent, fontSize = 12.sp) }
+}
+
+/** The pairing is a plain object Compose cannot see; this counter, bumped on every change, recomposes its readers. */
+@Composable
+private fun rememberCredentialVersion(credential: DeviceCredential): State<Int> {
+    val v = remember(credential) { mutableIntStateOf(0) }
+    DisposableEffect(credential) {
+        val l = { v.intValue = v.intValue + 1 }
+        credential.onChange(l)
+        onDispose { credential.removeListener(l) }
+    }
+    return v
 }
 
 // ------------------------------------------------------------- Connect
@@ -179,11 +217,11 @@ fun InboxScreen(graph: AppGraph, version: Int, navigate: (Route) -> Unit) {
     Column(Modifier.fillMaxSize()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Nous", color = t.text, fontSize = 22.sp, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-            ConnectionPill(conn)
+            ConnectionPill(conn, graph.engine.refused)
             Spacer(Modifier.width(8.dp))
             TextButton(onClick = { navigate(Route.Settings) }) { Text("Settings", color = t.accent) }
         }
-        if (conn == Connection.ERROR) NotConnected(graph) else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (conn == Connection.ERROR) NotConnected(graph) { navigate(Route.Settings) } else Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             if (feed.isEmpty()) Text(if (conn == Connection.LIVE) "Nothing needs you right now. Surfaces Nous pushes — escalations, action reviews, triage — appear here." else "Connecting…", color = t.muted, fontSize = 15.sp, modifier = Modifier.padding(top = 24.dp))
             val micro = feed.filter { Shell.kindOf(it.surfaceId) == "micro_app" }
             for (s in feed) SurfaceRow(graph, s) { navigate(Route.Surface(s.surfaceId)) }
@@ -200,9 +238,9 @@ fun InboxScreen(graph: AppGraph, version: Int, navigate: (Route) -> Unit) {
 }
 
 @Composable
-private fun ConnectionPill(conn: Connection) {
+private fun ConnectionPill(conn: Connection, refused: Refusal?) {
     val t = LocalNousTheme.current
-    val (label, color) = when (conn) {
+    val (label, color) = if (conn == Connection.ERROR && refused != null) "Not paired" to t.warn else when (conn) {
         Connection.LIVE -> "Live" to t.ok; Connection.CONNECTING -> "Connecting" to t.muted
         Connection.RESYNCING -> "Resyncing" to t.warn; Connection.ERROR -> "Not connected" to t.crit
     }
@@ -230,8 +268,19 @@ private fun SurfaceRow(graph: AppGraph, s: SurfaceState, onOpen: () -> Unit) {
 }
 
 @Composable
-private fun NotConnected(graph: AppGraph) {
+private fun NotConnected(graph: AppGraph, openSettings: () -> Unit) {
     val t = LocalNousTheme.current
+    val refused = graph.engine.refused
+    if (refused != null) {
+        // The server refused the reads for the device proof: retrying cannot help, pairing can.
+        Column(Modifier.fillMaxWidth().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Spacer(Modifier.height(32.dp))
+            Text(if (refused == Refusal.TOKEN_REJECTED) PairingWords.INBOX_UNPAIRED_TITLE else PairingWords.INBOX_NOT_PAIRED_TITLE, color = t.text, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Text(if (refused == Refusal.TOKEN_REJECTED) PairingWords.TOKEN_REJECTED else PairingWords.INBOX_NOT_PAIRED, color = t.soft, fontSize = 15.sp)
+            NousButton(onClick = openSettings, kind = ButtonKind.Primary, modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(14.dp)) { Text("Open Settings", color = t.onAccent, fontWeight = FontWeight.SemiBold) }
+        }
+        return
+    }
     Column(Modifier.fillMaxWidth().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Spacer(Modifier.height(32.dp))
         Text("Can't reach Nous", color = t.text, fontSize = 24.sp, fontWeight = FontWeight.Bold)
@@ -299,29 +348,97 @@ fun SettingsScreen(graph: AppGraph, onDisconnect: () -> Unit = {}, onBack: () ->
         Section("Connection") {
             KV("Nous address", graph.settings.baseUrl); KV("Status", graph.store.connection.name.lowercase()); KV("Device name", graph.settings.deviceName)
         }
+        PairingSection(graph)
         Section("Notifications") {
             KV("Push", graph.push.status); KV("Registered", TokenState.registeredAt?.let { java.text.DateFormat.getTimeInstance().format(it) } ?: "—")
             KV("System permission", if (graph.push.notificationsEnabled()) "Allowed" else "Blocked")
             TokenState.lastError?.let { KV("Last error", it) }
-            NousButton(onClick = { scope.launch { graph.push.refreshConfig(); val r = runCatching { graph.http.postJson("/a2ui/push/test", """{"installation_id":"${graph.settings.installationId}"}""") }.getOrNull(); testMsg = if (r?.ok == true) "Test notification sent" else "Not available (${r?.status ?: "offline"})" } }, modifier = Modifier.fillMaxWidth()) { Text("Send test notification", color = t.text) }
+            NousButton(onClick = { scope.launch { graph.push.refreshConfig(); val r = runCatching { graph.http.postJson("/a2ui/push/test", """{"installation_id":"${graph.settings.installationId}"}""") }.getOrNull()
+                testMsg = when {
+                    r?.ok == true -> "Test notification sent"
+                    r != null && Refusal.of(r.status, r.body) == Refusal.TOKEN_REJECTED -> PairingWords.TOKEN_REJECTED
+                    r != null && Refusal.of(r.status, r.body) == Refusal.NOT_PAIRED -> "Pair this device to send a test notification."
+                    else -> "Not available (${r?.status ?: "offline"})"
+                } } }, modifier = Modifier.fillMaxWidth()) { Text("Send test notification", color = t.text) }
             if (testMsg.isNotEmpty()) Text(testMsg, color = t.muted, fontSize = 13.sp)
         }
         Section("Diagnostics") {
             KV("last seq", graph.store.lastSeq.toString()); KV("reconnects", graph.engine.reconnects.toString()); KV("last error", graph.engine.lastError ?: "none")
             KV("installation", graph.settings.installationId.take(8))
         }
-        TextButton(onClick = { us.fatykhov.nous.companion.data.UrlOpener.open(graph.appContext, graph.settings.baseUrl + "/companion") }) { Text("Open web companion", color = t.accent) }
+        // The web companion's address comes from the pairing (the server's public base URL); none, no link.
+        val credVersion by rememberCredentialVersion(graph.credential)
+        val web = remember(credVersion) { graph.webBaseUrl() }
+        if (web != null) TextButton(onClick = { us.fatykhov.nous.companion.data.UrlOpener.open(graph.appContext, "$web/companion") }) { Text("Open web companion", color = t.accent) }
         TextButton(onClick = { scope.launch {
             graph.engine.stop()
-            // Deregister FIRST, while the installation id still exists: after clear()
-            // nothing could name the orphaned row, and the server would keep pushing
-            // to a phone that shows the setup screen (codex P1). Bounded and
-            // best-effort — a dead server must not trap the user on this phone.
-            runCatching { withTimeout(5_000) { graph.http.delete("/a2ui/push/tokens/" + java.net.URLEncoder.encode(graph.settings.installationId, "UTF-8")) } }
+            // Deregister FIRST, while the installation id still exists and the device
+            // token still works: after clear() nothing could name the orphaned row, and
+            // the server would keep pushing to a phone that shows the setup screen
+            // (codex P1). Then the device revokes itself, then everything local goes.
+            // Each step bounded and best-effort: a dead server must not trap the user.
+            Pairing.unpair(graph.http, graph.settings.installationId, paired = graph.credential.pairedFor(graph.settings.baseUrl) != null, forget = { graph.credential.clear() })
             Notifications.cancelAll(graph.appContext)
-            graph.settings.clear(); onDisconnect()
+            graph.credential.clear(); graph.settings.clear(); onDisconnect()
         } }) { Text("Disconnect this phone", color = t.crit) }
         Text("Nous Companion " + runCatching { graph.appContext.packageManager.getPackageInfo(graph.appContext.packageName, 0).versionName }.getOrNull(), color = t.muted, fontSize = 12.sp)
+    }
+}
+
+/**
+ * Pair this phone with a code the owner opens in the dashboard, or unpair it.
+ * Paired means a token is held for the origin of the configured address.
+ */
+@Composable
+private fun PairingSection(graph: AppGraph) {
+    val t = LocalNousTheme.current
+    val scope = rememberCoroutineScope()
+    val credVersion by rememberCredentialVersion(graph.credential)
+    val paired = remember(credVersion) { graph.credential.pairedFor(graph.settings.baseUrl) }
+    var code by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var note by remember { mutableStateOf("") }
+    var noteIsError by remember { mutableStateOf(false) }
+    Section("Pairing") {
+        if (paired != null) {
+            KV("Status", "Paired"); KV("Paired as", paired.name)
+            NousButton(onClick = {
+                busy = true; note = ""
+                scope.launch {
+                    val report = Pairing.unpair(graph.http, graph.settings.installationId, paired = true, forget = { graph.credential.clear() })
+                    note = if (report.revoked) PairingWords.UNPAIRED else PairingWords.UNPAIRED_UNCONFIRMED
+                    noteIsError = !report.revoked
+                    busy = false
+                    graph.engine.connect()
+                }
+            }, enabled = !busy, busy = busy, modifier = Modifier.fillMaxWidth()) { Text(if (busy) "Unpairing…" else "Unpair", color = t.crit) }
+        } else {
+            KV("Status", "Not paired")
+            Text(PairingWords.NOT_PAIRED_HINT, color = t.muted, fontSize = 13.sp)
+            OutlinedTextField(
+                value = code, onValueChange = { code = it.take(20) }, label = { Text("Code from the dashboard") },
+                modifier = Modifier.fillMaxWidth(), singleLine = true, colors = fieldColors(),
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters, autoCorrectEnabled = false, keyboardType = KeyboardType.Ascii),
+            )
+            NousButton(onClick = {
+                busy = true; note = ""
+                scope.launch {
+                    val base = graph.settings.baseUrl
+                    when (val out = Pairing.redeem(graph.http, base, code, graph.settings.installationId, graph.settings.deviceName, graph.debuggable)) {
+                        is RedeemOutcome.Done -> if (graph.credential.save(out.paired, base)) {
+                            code = ""; note = PairingWords.paired(out.paired.name); noteIsError = false
+                            graph.engine.connect()
+                            graph.push.registerIfPossible()
+                        } else { note = PairingWords.NOT_STORED; noteIsError = true }
+                        is RedeemOutcome.Refused -> { note = PairingWords.of(out.error); noteIsError = true }
+                    }
+                    busy = false
+                }
+            }, enabled = !busy && code.isNotBlank(), busy = busy, kind = ButtonKind.Primary, modifier = Modifier.fillMaxWidth()) {
+                Text(if (busy) "Pairing…" else "Pair this device", color = t.onAccent, fontWeight = FontWeight.SemiBold)
+            }
+        }
+        if (note.isNotEmpty()) Text(note, color = if (noteIsError) t.crit else t.muted, fontSize = 13.sp)
     }
 }
 

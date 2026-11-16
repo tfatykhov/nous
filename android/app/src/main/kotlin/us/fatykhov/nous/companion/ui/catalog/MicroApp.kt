@@ -106,6 +106,7 @@ fun AppFooterView(node: Node.Render) {
     val host = LocalSurfaceHost.current; val t = LocalNousTheme.current
     val scope = rememberCoroutineScope()
     var error by remember { mutableStateOf("") }
+    var refusal by remember { mutableStateOf<us.fatykhov.nous.companion.core.Refusal?>(null) }
     var closing by remember { mutableStateOf(false) }
     val closeArm = remember { Shell.CloseAll { System.currentTimeMillis() } }
     var armed by remember { mutableStateOf(false) }
@@ -135,9 +136,9 @@ fun AppFooterView(node: Node.Render) {
     val refine = opts("refineOptions"); val actions = opts("agentActions")
     val showRefresh = (node.props["showRefresh"] as? JsonPrimitive)?.content != "false"
     fun act(id: String) { if (locked) return; error = ""; val token = host.store.beginActivity(host.surfaceId, ActivityKind.ACT, id)
-        scope.launch { var held = false; try { val r = host.engine.postAction(host.surfaceId, "app.act", node.componentId, buildJsonObject { put("actionId", id) }); if (r.ok) held = host.store.holdForStamp(host.surfaceId, token) else error = r.message } finally { if (!held) host.store.endActivityIf(host.surfaceId, token, false) } } }
+        scope.launch { var held = false; try { val r = host.engine.postAction(host.surfaceId, "app.act", node.componentId, buildJsonObject { put("actionId", id) }); if (r.ok) held = host.store.holdForStamp(host.surfaceId, token) else { error = r.message; refusal = r.refusal } } finally { if (!held) host.store.endActivityIf(host.surfaceId, token, false) } } }
     fun call(name: String, args: JsonObject, kind: ActivityKind, id: String) { if (locked) return; error = ""; val token = host.store.beginActivity(host.surfaceId, kind, id)
-        scope.launch { var held = false; try { val r = host.engine.callAgentFunction(host.surfaceId, name, args); if (r.ok) held = host.store.holdForModel(host.surfaceId, token, ActivityRules.responseSeq(r.value)) else error = r.message } finally { if (!held) host.store.endActivityIf(host.surfaceId, token, false) } } }
+        scope.launch { var held = false; try { val r = host.engine.callAgentFunction(host.surfaceId, name, args); if (r.ok) held = host.store.holdForModel(host.surfaceId, token, ActivityRules.responseSeq(r.value)) else { error = r.message; refusal = r.refusal } } finally { if (!held) host.store.endActivityIf(host.surfaceId, token, false) } } }
     @Composable fun Ctl(label: String, pressed: Boolean, enabled: Boolean, primary: Boolean = false, onClick: () -> Unit) {
         us.fatykhov.nous.companion.ui.NousButton(onClick = onClick, enabled = enabled, shape = RoundedCornerShape(999.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 14.dp, vertical = 8.dp)) {
             Text((if (pressed) "… " else "") + label, color = if (pressed) t.accent else if (primary) t.text else t.soft, fontSize = 13.sp)
@@ -151,12 +152,12 @@ fun AppFooterView(node: Node.Render) {
             if (showRefresh) Ctl(if (activity?.kind == ActivityKind.REFRESH) "Refreshing" else "refresh", pressed = activity?.kind == ActivityKind.REFRESH, enabled = !locked) { call("app.refresh", JsonObject(emptyMap()), ActivityKind.REFRESH, "refresh") }
             Ctl(if (armed && closeArm.armed) "sure? close" else "close", pressed = false, enabled = !inFlight && !closing) {
                 val ids = closeArm.tap(listOf(host.surfaceId)); armed = ids == null
-                if (ids != null) { closing = true; scope.launch { val r = host.engine.postAction(host.surfaceId, "app.close", node.componentId, JsonObject(emptyMap())); if (!r.ok) { error = r.message; closing = false } } }
+                if (ids != null) { closing = true; scope.launch { val r = host.engine.postAction(host.surfaceId, "app.close", node.componentId, JsonObject(emptyMap())); if (!r.ok) { error = r.message; refusal = r.refusal; closing = false } } }
             }
         }
         if (pending != null && !pendingFresh) Text("\"${pending.label}\" got no update — the agent may have failed; tap again to retry.", color = t.warn, fontSize = 12.sp)
         if (actionError.isNotEmpty()) Text(actionError, color = t.crit, fontSize = 12.sp)
-        if (error.isNotEmpty()) Text(error, color = t.crit, fontSize = 12.sp)
+        if (error.isNotEmpty()) us.fatykhov.nous.companion.ui.ActionError(error, refusal)
     }
 }
 

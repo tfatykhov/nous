@@ -7,18 +7,19 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import us.fatykhov.nous.companion.push.PushManager
 import us.fatykhov.nous.companion.core.Functions
+import us.fatykhov.nous.companion.core.SecretBox
 import us.fatykhov.nous.companion.core.SurfaceStore
 import us.fatykhov.nous.companion.core.SyncEngine
 import us.fatykhov.nous.companion.core.TokenPolicy
 import java.io.File
 
-/** Hand-wired object graph (no DI framework for a beta). One per process. */
-class AppGraph(context: Context) {
+/** Hand-wired object graph (no DI framework for a beta). One per process. [box] is replaceable for tests only. */
+class AppGraph(context: Context, box: SecretBox = KeystoreSecretBox()) {
     val appContext: Context = context.applicationContext
     val settings = Settings(appContext)
     /** Read at run time: the project generates no BuildConfig. A release build is not debuggable. */
     val debuggable = (appContext.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
-    val credential = DeviceCredential(File(appContext.noBackupFilesDir, "device.properties"), KeystoreSecretBox())
+    val credential = DeviceCredential(File(appContext.noBackupFilesDir, "device.properties"), box)
     val store = SurfaceStore()
     val mainScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     val http = OkHttpTransport(settings, credential, debuggable)
