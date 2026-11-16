@@ -148,7 +148,7 @@ class HeartbeatRunner:
         self._http = http_client
         self._finding_store = finding_store
         # Goals PR 0c: the needs-action findings whose triage turn a halt skipped, by fingerprint, for the first tick
-        # after the resume (see _cognitive_triage and _triage_untriaged).
+        # after the resume in this process (see _cognitive_triage and _triage_untriaged). In memory only.
         self._untriaged: dict[str, Finding] = {}
         self._api_client = api_client
         self._dynamic_loader = dynamic_loader
@@ -1156,7 +1156,8 @@ class HeartbeatRunner:
 
     def _hold_untriaged(self, findings: list[Finding]) -> None:
         """Goals PR 0c: keep findings whose triage turn a halt skipped, one per fingerprint, the newest
-        ``_UNTRIAGED_MAX``."""
+        ``_UNTRIAGED_MAX``. They are kept in this process's memory, as the finding store keeps its findings: they are
+        triaged after the resume in the same process, and a restart while halted loses them."""
         for f in findings:
             fp = f.fingerprint()
             self._untriaged.pop(fp, None)
