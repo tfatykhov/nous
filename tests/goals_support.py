@@ -1,7 +1,9 @@
 """Shared builders for the F114 goal tests of the chain (PR 1c).
 
 ``world`` builds a goal store, a driver and a real continuation runner on one fresh agent of ``runner_env`` (a
-scripted model).
+scripted model), with the chain's hook bound the way ``main.py`` binds it. ``reset_goal_report_channel`` is an
+autouse fixture a test module imports by name: the report hook is a module global of ``nous.brain.continuation``,
+so a test that binds it must never leave it bound for the next one.
 """
 
 from __future__ import annotations
@@ -9,6 +11,7 @@ from __future__ import annotations
 import uuid
 from types import SimpleNamespace
 
+import pytest
 from f099_support import CHAN, CONT, RESULT, record
 from sqlalchemy import select, update
 
@@ -19,6 +22,14 @@ from nous.handlers.continuation_runner import ContinuationRunner
 from nous.storage.models import Goal, GoalJournal, GoalSession, Intention, ResultInbox
 
 GOALS = {**CONT, "subtask_enabled": True, "goals_enabled": True}  # the flag and every setting it needs
+
+
+@pytest.fixture(autouse=True)
+def reset_goal_report_channel():
+    """The report hook is unbound before and after every test of a module that imports this fixture."""
+    continuation.set_goal_report_channel(None)
+    yield
+    continuation.set_goal_report_channel(None)
 
 
 async def world(runner_env, *steps, bind: bool = True, **settings) -> SimpleNamespace:
