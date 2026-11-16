@@ -437,6 +437,8 @@ Used by the `telegram` container in docker-compose and by `python -m nous.telegr
 | `POST` | `/schedules` | Create a schedule |
 | `DELETE` | `/schedules/{id}` | Deactivate a schedule |
 
+Routes that change state or start work require a secret: the owner's or the proxy's for most, and the route's own row in the [REST reference](reference/rest-api.md) says which. Chat checks as `NOUS_OWNER_ENTRY_MODE` says; the companion routes under `/a2ui` apply their own checks.
+
 ---
 
 ## 7. Agent Tools

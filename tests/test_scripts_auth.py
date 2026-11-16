@@ -1,5 +1,5 @@
 """The diagnostic scripts and the benchmark adapters send the owner's secret (NOUS_OWNER_ROUTE_SECRET, when set) on
-every request to chat. No database: the helper is called and the sources are read."""
+every request to chat and to the sleep trigger. No database: the helper is called and the sources are read."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 SECRET = "q" * 64
 
-# Every file under scripts/ and benchmarks/ that calls chat.
+# Every file under scripts/ and benchmarks/ that calls chat or the sleep trigger.
 CHAT_CALLERS = [
     "scripts/diag/followup_probe.py",
     "scripts/diag/faculty/abstract.py",
@@ -30,8 +30,9 @@ CHAT_CALLERS = [
     "benchmarks/nous_longmemeval_adapter.py",
 ]
 HELPERS = {"owner_headers", "_owner_headers"}
-# A string that names Nous's chat route: "/chat" alone or "/chat/<id>", not another API's ".../chat/completions".
-_CHAT_PATH = re.compile(r"/chat(/|$)(?!completions)")
+# A string that names Nous's chat route ("/chat" alone or "/chat/<id>", not another API's ".../chat/completions") or
+# the sleep trigger.
+_CHAT_PATH = re.compile(r"/chat(/|$)(?!completions)|/sleep/trigger")
 
 
 def _load(relative: str) -> ModuleType:
@@ -200,9 +201,9 @@ def _chat_requests(tree: ast.AST) -> list[ast.Call]:
 
 @pytest.mark.parametrize("relative", CHAT_CALLERS)
 def test_every_request_to_chat_in_the_file_sends_the_owners_secret(relative: str) -> None:
-    """Every request whose URL names the chat route (a literal, a concatenation, a variable or attribute that holds
-    one, or a ``url=`` keyword) passes ``headers=`` built by the helper, or goes through a function of the file whose
-    every request does."""
+    """Every request whose URL names the chat route or the sleep trigger (a literal, a concatenation, a variable or
+    attribute that holds one, or a ``url=`` keyword) passes ``headers=`` built by the helper, or goes through a function
+    of the file whose every request does."""
     tree = ast.parse((REPO / relative).read_text(encoding="utf-8"))
     sending_helpers = {
         fn.name
@@ -218,11 +219,11 @@ def test_every_request_to_chat_in_the_file_sends_the_owners_secret(relative: str
 
 
 # The chat route in a file's plain text: "/chat" followed by a quote, a slash, a space or the end, not "/chats" nor
-# another API's "/chat/completions".
-_CHAT_IN_TEXT = re.compile(r"/chat(?!s)(?!/completions)(?=[/\"'` ?)\]]|$)", re.M)
+# another API's "/chat/completions"; or the sleep trigger.
+_CHAT_IN_TEXT = re.compile(r"/chat(?!s)(?!/completions)(?=[/\"'` ?)\]]|$)|/sleep/trigger", re.M)
 
 
-def test_the_list_is_every_file_under_scripts_and_benchmarks_that_names_chat() -> None:
+def test_the_list_is_every_file_under_scripts_and_benchmarks_that_names_chat_or_the_sleep_trigger() -> None:
     """A plain-text search, so a file that reaches chat in a way the rule above does not read still has to be listed
     and use the helper."""
     found = set()

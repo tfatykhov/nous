@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from f099_support import OWNER_DIGEST, OWNER_HEADERS
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import delete, update
 
@@ -580,13 +581,14 @@ def _app(db, agent: str, sleep_handler=None):
         heart=AsyncMock(),
         cognitive=AsyncMock(),
         database=db,
-        settings=_settings(agent),
+        settings=_settings(agent, owner_route_secret_sha256=OWNER_DIGEST),
         sleep_handler=sleep_handler,
     )
 
 
 async def _call(app, method: str, path: str):
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    # The card's delete and rebuild require the owner's or the proxy's secret: the client sends the owner's.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers=OWNER_HEADERS) as client:
         return await client.request(method, path)
 
 

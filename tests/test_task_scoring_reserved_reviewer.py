@@ -1,5 +1,5 @@
 """The owner-grade reviewer tag is reserved: the scorer counts a review that carries it as the owner's own grade, so
-the REST review endpoint, which anything reaching the API can call, refuses it. Only the companion actions write it."""
+the REST review endpoint refuses it. Only the companion actions write it."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import uuid
 
 import pytest
 import pytest_asyncio
+from f099_support import OWNER_DIGEST, OWNER_HEADERS
 from httpx import ASGITransport, AsyncClient
 
 from nous.brain.brain import Brain
@@ -23,7 +24,11 @@ class _Runner:
 async def app(db, heart):
     from nous.api.rest import create_app
 
-    settings = Settings(_env_file=None, agent_id=f"test-reserved-reviewer-{uuid.uuid4().hex[:8]}")
+    settings = Settings(
+        _env_file=None,
+        agent_id=f"test-reserved-reviewer-{uuid.uuid4().hex[:8]}",
+        owner_route_secret_sha256=OWNER_DIGEST,
+    )
     brain = Brain(database=db, settings=settings)
     cognitive = CognitiveLayer(brain, heart, settings, identity_prompt="You are Nous.")
     yield create_app(_Runner(), brain, heart, cognitive, db, settings)
@@ -31,7 +36,7 @@ async def app(db, heart):
 
 
 async def _review(app, reviewer: str):
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers=OWNER_HEADERS) as c:
         return await c.post(f"/decisions/{uuid.uuid4()}/review", json={"outcome": "success", "reviewer": reviewer})
 
 

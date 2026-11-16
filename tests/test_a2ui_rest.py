@@ -17,6 +17,7 @@ from typing import Any
 
 import pytest
 import pytest_asyncio
+from f099_support import OWNER_DIGEST, OWNER_HEADERS
 from httpx import ASGITransport, AsyncClient
 
 from nous.api.rest import create_app
@@ -168,7 +169,7 @@ def app(brain, heart, cognitive, db, settings, fake_service, fake_router):
         heart,
         cognitive,
         db,
-        settings,
+        settings.model_copy(update={"owner_route_secret_sha256": OWNER_DIGEST}),
         surface_service=fake_service,
         action_router=fake_router,
     )
@@ -683,7 +684,7 @@ async def push_client(brain, heart, cognitive, db, settings, fake_service, fake_
         heart,
         cognitive,
         db,
-        settings,
+        settings.model_copy(update={"owner_route_secret_sha256": OWNER_DIGEST}),
         surface_service=fake_service,
         action_router=fake_router,
         push_service=fake_push,
@@ -783,7 +784,7 @@ async def test_deregister_routes_the_path_parameter(push_client, fake_push) -> N
 
 
 async def test_installations_listing_is_served(push_client) -> None:
-    response = await push_client.get("/a2ui/push/installations")
+    response = await push_client.get("/a2ui/push/installations", headers=OWNER_HEADERS)
 
     assert response.status_code == 200
     assert response.json()["installations"] == []
@@ -793,7 +794,9 @@ async def test_installations_is_not_swallowed_by_the_token_detail_route(
     push_client, fake_push
 ) -> None:
     """Route ordering: /tokens/{id} must not shadow a sibling collection."""
-    await push_client.get("/a2ui/push/installations")
+    response = await push_client.get("/a2ui/push/installations", headers=OWNER_HEADERS)
+
+    assert response.status_code == 200
 
     assert fake_push.deregistered == []
 
@@ -816,5 +819,5 @@ async def test_push_routes_are_503_without_the_service(client) -> None:
         response = await getattr(client, method)(path, json={}, headers=JSON)
         assert response.status_code == 503, path
 
-    assert (await client.get("/a2ui/push/installations")).status_code == 503
+    assert (await client.get("/a2ui/push/installations", headers=OWNER_HEADERS)).status_code == 503
     assert (await client.delete("/a2ui/push/tokens/x")).status_code == 503
