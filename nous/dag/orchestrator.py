@@ -321,11 +321,11 @@ _WAIT_GITHUB_BACKOFF = timedelta(minutes=15)
 CheckStatus = Literal["success", "failed", "pending"]
 
 
-@dataclass(frozen=True, slots=True)
 class _CheckHalted(Exception):
     """Goals PR 0c: the halt refused a completion check at its spawn: nothing ran, and no attempt is counted."""
 
 
+@dataclass(frozen=True, slots=True)
 class CheckResult:
     """Result of a completion_check command invocation."""
 
