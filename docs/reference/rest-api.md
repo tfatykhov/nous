@@ -2,7 +2,7 @@
 
 Documented routes served by `nous/api/rest.py`, which is the full list. Part of the [Nous development guide](../../CLAUDE.md).
 
-Routes that change state or start work require a secret: the owner's or the proxy's for most, and the route's own row says which (the commitment close takes only the owner's, the `/integrations/mcp` routes only the proxy's). Chat and the inbound MCP server apply the entry check their rows describe (`NOUS_OWNER_ENTRY_MODE`), and the companion routes under `/a2ui` apply their own checks. The dashboard sends its writes through the login page, which adds the proxy's secret, with `Content-Type: application/json`.
+Routes that change state or start work require a secret: the owner's or the proxy's for most, and the route's own row says which (the commitment close takes only the owner's, the `/integrations/mcp` routes only the proxy's; a companion device's redeem takes its pairing code and its unpair its own device token). Chat and the inbound MCP server apply the entry check their rows describe (`NOUS_OWNER_ENTRY_MODE`), and the companion routes under `/a2ui` apply their own checks. The dashboard sends its writes through the login page, which adds the proxy's secret, with `Content-Type: application/json`.
 
 | Method | Path | Description |
 |--------|------|-------------|
