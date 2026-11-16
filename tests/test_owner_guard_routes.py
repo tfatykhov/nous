@@ -192,6 +192,19 @@ OWNER_ROUTES: dict[tuple[str, str], tuple[bytes, int, dict[str, object] | None]]
     ("DELETE", "/subtasks/abc"): (b"", 400, {"error": "Invalid subtask ID"}),
     ("DELETE", "/schedules/abc"): (b"", 400, {"error": "Invalid schedule ID"}),
     ("POST", "/schedules/abc/run"): (b"", 400, {"error": "Invalid schedule ID"}),
+    # Heartbeat operations and sleep
+    ("POST", "/heartbeat/trigger"): (b"", 503, {"error": "Heartbeat not enabled"}),
+    ("POST", "/heartbeat/findings/abc/acknowledge"): (b"", 503, {"error": "Finding store not available"}),
+    ("POST", "/heartbeat/findings/abc/resolve"): (b"", 503, {"error": "Finding store not available"}),
+    ("POST", "/heartbeat/findings/abc/dismiss"): (b"", 503, {"error": "Finding store not available"}),
+    ("POST", "/heartbeat/tune"): (b"", 400, {"error": "Tuning not enabled"}),
+    ("POST", "/heartbeat/check/abc/trigger"): (b"", 503, {"error": "Heartbeat not enabled"}),
+    ("POST", "/heartbeat/check/abc/reset"): (b"", 503, {"error": "Heartbeat not enabled"}),
+    ("POST", "/heartbeat/checks/dynamic"): (b"{}", 503, {"error": "Heartbeat not enabled"}),
+    ("PATCH", "/heartbeat/checks/dynamic/abc"): (b"{}", 503, {"error": "Heartbeat not enabled"}),
+    ("DELETE", "/heartbeat/checks/dynamic/abc"): (b"", 503, {"error": "Heartbeat not enabled"}),
+    ("POST", "/heartbeat/checks/dynamic/abc/trigger"): (b"", 503, {"error": "Heartbeat not enabled"}),
+    ("POST", "/sleep/trigger"): (b"", 503, {"error": "Sleep handler not configured"}),
 }
 # F114: the goal reads require a secret too; a read carries no body, so any media type passes with the proxy's.
 GOAL_READS = {
@@ -229,6 +242,18 @@ REST_ROUTE_SET = {
     ("DELETE", "/subtasks/{id}"),
     ("DELETE", "/schedules/{id}"),
     ("POST", "/schedules/{id}/run"),
+    ("POST", "/heartbeat/trigger"),
+    ("POST", "/heartbeat/findings/{fingerprint}/acknowledge"),
+    ("POST", "/heartbeat/findings/{fingerprint}/resolve"),
+    ("POST", "/heartbeat/findings/{fingerprint}/dismiss"),
+    ("POST", "/heartbeat/tune"),
+    ("POST", "/heartbeat/check/{name}/trigger"),
+    ("POST", "/heartbeat/check/{name}/reset"),
+    ("POST", "/heartbeat/checks/dynamic"),
+    ("PATCH", "/heartbeat/checks/dynamic/{name}"),
+    ("DELETE", "/heartbeat/checks/dynamic/{name}"),
+    ("POST", "/heartbeat/checks/dynamic/{name}/trigger"),
+    ("POST", "/sleep/trigger"),
 }
 
 

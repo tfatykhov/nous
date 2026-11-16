@@ -3970,29 +3970,31 @@ def create_app(
         Route("/events/modifications", events_modifications, methods=["GET"]),
         # F034: Heartbeat endpoints
         Route("/heartbeat/status", heartbeat_status),
-        Route("/heartbeat/trigger", heartbeat_trigger, methods=["POST"]),
+        owner_guard.route("/heartbeat/trigger", heartbeat_trigger, methods=["POST"]),
         owner_guard.route("/heartbeat/config", heartbeat_config, methods=["PUT"]),
         Route("/undo/snapshots", undo_snapshots_list),
         owner_guard.route("/undo/snapshots/{id}/restore", undo_snapshot_restore, methods=["POST"]),
         # F034.1: Finding lifecycle endpoints
-        Route("/heartbeat/findings/{fingerprint}/acknowledge", heartbeat_findings_acknowledge, methods=["POST"]),
-        Route("/heartbeat/findings/{fingerprint}/resolve", heartbeat_findings_resolve, methods=["POST"]),
-        Route("/heartbeat/findings/{fingerprint}/dismiss", heartbeat_findings_dismiss, methods=["POST"]),
+        owner_guard.route(
+            "/heartbeat/findings/{fingerprint}/acknowledge", heartbeat_findings_acknowledge, methods=["POST"]
+        ),
+        owner_guard.route("/heartbeat/findings/{fingerprint}/resolve", heartbeat_findings_resolve, methods=["POST"]),
+        owner_guard.route("/heartbeat/findings/{fingerprint}/dismiss", heartbeat_findings_dismiss, methods=["POST"]),
         Route("/heartbeat/findings", heartbeat_findings),
         owner_guard.route("/heartbeat/escalation-policy", heartbeat_escalation_policy, methods=["PUT"]),
         # F034.3: Tuning endpoints
         Route("/heartbeat/tuning-report", heartbeat_tuning_report),
-        Route("/heartbeat/tune", heartbeat_tune, methods=["POST"]),
+        owner_guard.route("/heartbeat/tune", heartbeat_tune, methods=["POST"]),
         # F034: Check-level endpoints
-        Route("/heartbeat/check/{name}/trigger", heartbeat_check_trigger, methods=["POST"]),
-        Route("/heartbeat/check/{name}/reset", heartbeat_check_reset, methods=["POST"]),
+        owner_guard.route("/heartbeat/check/{name}/trigger", heartbeat_check_trigger, methods=["POST"]),
+        owner_guard.route("/heartbeat/check/{name}/reset", heartbeat_check_reset, methods=["POST"]),
         # F034.5: Dynamic check endpoints
-        Route("/heartbeat/checks/dynamic/{name}/trigger", dynamic_checks_trigger, methods=["POST"]),
-        Route("/heartbeat/checks/dynamic/{name}", dynamic_checks_update, methods=["PATCH"]),
-        Route("/heartbeat/checks/dynamic/{name}", dynamic_checks_delete, methods=["DELETE"]),
+        owner_guard.route("/heartbeat/checks/dynamic/{name}/trigger", dynamic_checks_trigger, methods=["POST"]),
+        owner_guard.route("/heartbeat/checks/dynamic/{name}", dynamic_checks_update, methods=["PATCH"]),
+        owner_guard.route("/heartbeat/checks/dynamic/{name}", dynamic_checks_delete, methods=["DELETE"]),
         Route("/heartbeat/checks/dynamic", dynamic_checks_list),
-        Route("/heartbeat/checks/dynamic", dynamic_checks_create, methods=["POST"]),
-        Route("/sleep/trigger", trigger_sleep, methods=["POST"]),
+        owner_guard.route("/heartbeat/checks/dynamic", dynamic_checks_create, methods=["POST"]),
+        owner_guard.route("/sleep/trigger", trigger_sleep, methods=["POST"]),
         # Admin API endpoints (F025 prep)
         Route("/admin/search-weights", get_search_weights),
         owner_guard.route("/admin/search-weights", set_search_weights, methods=["POST"]),
