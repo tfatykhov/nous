@@ -389,8 +389,28 @@ async def test_the_journal_tail_is_bounded_newest_first_and_keeps_owner_notes(db
 async def test_the_store_has_no_way_to_edit_or_delete_a_journal_row():
     public = {name for name, _ in inspect.getmembers(GoalStore, inspect.isfunction) if not name.startswith("_")}
     assert not [name for name in public if "delete" in name or "remove" in name or "update" in name]
-    # the journal's only writer appends; the other two read
-    assert {name for name in public if "journal" in name} == {"append_journal", "journal", "journal_tail"}
+    # the journal's two writers append (in a transaction of their own, or in the caller's); the other two read
+    assert {name for name in public if "journal" in name} == {
+        "append_journal",
+        "add_journal_row",
+        "journal",
+        "journal_tail",
+    }
+
+
+async def test_a_journal_row_added_in_the_callers_transaction_commits_and_rolls_back_with_it(db):
+    store = _store(db)
+    goal = await _draft(store)
+    before = len(await _journal(store, goal))
+    async with db.session() as s:
+        row = store.add_journal_row(s, goal.id, "report", "r" * 5000, actor="chain", session_n=1, evidence=["row:1"])
+        assert len(row.text) == JOURNAL_MAX_CHARS and row.agent_id == store.agent_id
+        await s.rollback()  # the caller's transaction ends without the row
+    assert len(await _journal(store, goal)) == before
+    async with db.session() as s:
+        store.add_journal_row(s, goal.id, "report", "kept", actor="chain")
+        await s.commit()
+    assert [r.text for r in await _journal(store, goal)][-1] == "kept"
 
 
 async def test_short_id_forms_resolve(db):

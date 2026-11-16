@@ -105,9 +105,16 @@ class FakeActionRouter:
         self._status = status
 
     async def handle(
-        self, body: dict, *, content_type: str, actor: str = "unattributed"
+        self,
+        body: dict,
+        *,
+        content_type: str,
+        actor: str = "unattributed",
+        owner_verified: bool = False,
     ) -> tuple[int, dict]:
-        self.calls.append({"body": body, "content_type": content_type, "actor": actor})
+        self.calls.append(
+            {"body": body, "content_type": content_type, "actor": actor, "owner_verified": owner_verified}
+        )
         return self._status, {"ok": True, "message": "", "resolved": False}
 
 
@@ -433,6 +440,58 @@ async def test_actor_is_unattributed_without_a_proxy_header(
     await client.post("/a2ui/action", json={"action": {}})
 
     assert fake_router.calls[0]["actor"] == "unattributed"
+
+
+_OWNER_VALUE = "owner-only-test-value"
+_PROXY_VALUE = "proxy-only-test-value"
+
+
+@pytest.mark.parametrize(
+    ("headers", "verified"),
+    [
+        ({}, False),
+        ({"X-Nous-Owner-Secret": _OWNER_VALUE}, True),
+        ({"X-Nous-Proxy-Secret": _PROXY_VALUE}, True),
+        ({"X-Nous-Owner-Secret": "a-wrong-value"}, False),
+        ({"X-Nous-Proxy-Secret": "a-wrong-value"}, False),
+        ({"X-Nous-Device-Token": "a-device-token"}, False),
+        # The route's own rule, whatever the router then checks: a proxy-only call that is not JSON proves nothing.
+        ({"X-Nous-Proxy-Secret": _PROXY_VALUE, "content-type": "text/plain; application/json"}, False),
+        ({"X-Nous-Owner-Secret": _OWNER_VALUE, "content-type": "text/plain; application/json"}, True),
+    ],
+    ids=["none", "owner", "proxy", "wrong-owner", "wrong-proxy", "device-without-store", "proxy-text", "owner-text"],
+)
+async def test_the_action_route_tells_the_router_whether_the_caller_proved_the_owner(
+    brain, heart, cognitive, db, settings, fake_service, fake_router, headers: dict, verified: bool
+) -> None:
+    import hashlib
+
+    owned = settings.model_copy(
+        update={
+            "a2ui_enabled": True,
+            "owner_route_secret_sha256": hashlib.sha256(_OWNER_VALUE.encode()).hexdigest(),
+            "mcp_client_ui_secret_sha256": hashlib.sha256(_PROXY_VALUE.encode()).hexdigest(),
+        }
+    )
+    app = create_app(
+        MockAgentRunner(), brain, heart, cognitive, db, owned, surface_service=fake_service, action_router=fake_router
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as owned_client:
+        response = await owned_client.post("/a2ui/action", json={"action": {}}, headers=headers)
+
+    assert response.status_code == 200
+    assert fake_router.calls[0]["owner_verified"] is verified
+
+
+async def test_the_action_route_hands_every_call_to_the_router(
+    client: AsyncClient, fake_router: FakeActionRouter
+) -> None:
+    """The proof is the router's to require, per verb: a call with no secret still reaches it, marked unverified."""
+    response = await client.post("/a2ui/action", json={"action": {}})
+
+    assert response.status_code == 200
+    assert len(fake_router.calls) == 1
+    assert fake_router.calls[0]["owner_verified"] is False
 
 
 # ---------------------------------------------------------------------------

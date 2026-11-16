@@ -2,7 +2,8 @@
 
 Pipeline for every POST /a2ui/action, in order:
 Content-Type check -> surface exists and is live -> action name in the
-surface's allowed_actions -> nonce match -> rate limit -> censor gate for
+surface's allowed_actions -> nonce match -> rate limit -> the owner's proof
+for a verb registered with ``owner_proof=True`` -> censor gate for
 mutating handlers -> durable audit row -> handler dispatch -> audit update.
 
 The client is never trusted: allowed_actions and the nonce live on the
@@ -28,6 +29,7 @@ from sqlalchemy import select, update
 
 from nous import cancel_provenance
 from nous.a2ui.intention_keys import KIND_ACTIVE, KIND_PROPOSAL, KIND_QUESTION, parse_key
+from nous.api.owner_guard import json_media_type
 from nous.audits import AUDIT_VERDICT_ACTION
 from nous.brain import continuation, intentions
 from nous.brain.intentions import IntentionSpec
@@ -46,6 +48,10 @@ EXPIRED_UNANSWERED = "expired_unanswered"
 # before 2026-10 carry the legacy "no_objection" label for the same event;
 # they are not rewritten, so readers must treat both as unanswered.
 EXPIRED_UNANSWERED_ACTIONS = frozenset({EXPIRED_UNANSWERED, "no_objection"})
+
+# What a verb registered with owner_proof=True answers (403) when the request did not prove the owner. A client shows
+# the message as it is.
+OWNER_PROOF_TEXT = "This action needs the owner's sign-in. Use the web companion through the login page."
 
 
 def is_expired_unanswered(action_name: str | None) -> bool:
@@ -93,6 +99,9 @@ class _HandlerMeta:
     fn: Handler
     mutating: bool
     irreversible: bool
+    # The tap is the owner's consent or answer: refused unless the request proved the owner (the route's
+    # ``owner_verified``).
+    owner_proof: bool = False
 
 
 @dataclass
@@ -158,8 +167,13 @@ class ActionRouter:
         _register_micro_app_handlers(self)
         _register_micro_app_functions(self)
 
-    def register(self, name: str, fn: Handler, *, mutating: bool, irreversible: bool = False) -> None:
-        self._handlers[name] = _HandlerMeta(fn=fn, mutating=mutating, irreversible=irreversible)
+    def register(
+        self, name: str, fn: Handler, *, mutating: bool, owner_proof: bool, irreversible: bool = False
+    ) -> None:
+        """``owner_proof`` has no default: every verb says whether its tap needs the owner's proof."""
+        self._handlers[name] = _HandlerMeta(
+            fn=fn, mutating=mutating, irreversible=irreversible, owner_proof=owner_proof
+        )
 
     def register_function(
         self,
@@ -187,7 +201,7 @@ class ActionRouter:
         calls write an audit row, censor their new content before pushing
         it, and self-lock their surface writes.
         """
-        if "application/json" not in (content_type or ""):
+        if not json_media_type(content_type):
             return 415, _fn_err("", "INVALID_FUNCTION_CALL", "Content-Type must be application/json")
 
         call = body.get("callAgentFunction") or {}
@@ -269,18 +283,29 @@ class ActionRouter:
 
     # ------------------------------------------------------------------ gate
 
-    async def handle(self, body: dict, *, content_type: str, actor: str = "unattributed") -> tuple[int, dict]:
+    async def handle(
+        self,
+        body: dict,
+        *,
+        content_type: str,
+        actor: str = "unattributed",
+        owner_verified: bool = False,
+    ) -> tuple[int, dict]:
         """Returns (http_status, response_body).
 
         ``actor`` is the oauth2-proxy identity header when fronted, else
         'unattributed' — audit rows must never imply human consent the
         server cannot demonstrate (review finding: on a LAN-exposed port a
         forged action would otherwise corrupt the evidence tier).
+
+        ``owner_verified`` is the route's word that the request proved the
+        owner (``OwnerGuard.grants``); a verb registered with
+        ``owner_proof=True`` is refused without it.
         """
         # Content-Type is the CSRF control here: no CORS middleware exists and
         # Request.json() never checks it, but a cross-origin simple request
         # cannot carry application/json without a preflight.
-        if "application/json" not in (content_type or ""):
+        if not json_media_type(content_type):
             return 415, _err("UNSUPPORTED_MEDIA_TYPE", "", "Content-Type must be application/json")
 
         action = body.get("action") or {}
@@ -301,7 +326,9 @@ class ActionRouter:
         # two overlapping terminal actions still dispatch exactly once (the
         # status re-read inside the lock turns the loser into a 404).
         async with self._service.surface_lock(surface_id):
-            return await self._handle_locked(surface_id, name, context, data_model, action, actor)
+            return await self._handle_locked(
+                surface_id, name, context, data_model, action, actor, owner_verified=owner_verified
+            )
 
     async def _handle_locked(
         self,
@@ -311,6 +338,8 @@ class ActionRouter:
         data_model: dict | None,
         action: dict,
         actor: str,
+        *,
+        owner_verified: bool = False,
     ) -> tuple[int, dict]:
         # Status is read INSIDE the surface lock — a terminal action that
         # just resolved this surface makes the second request 404 here.
@@ -371,6 +400,10 @@ class ActionRouter:
         meta = self._handlers.get(name)
         if meta is None:
             return await reject(501, "NO_HANDLER", f"no handler registered for {name!r}")
+
+        # After the allowlist and the nonce (a stale or foreign card is told what it always was), before the censor.
+        if meta.owner_proof and not owner_verified:
+            return await reject(403, "OWNER_PROOF_REQUIRED", OWNER_PROOF_TEXT)
 
         if meta.mutating and self._heart is not None:
             from nous.a2ui.service import check_censors_chunked
@@ -715,8 +748,8 @@ def _register_default_handlers(router: ActionRouter) -> None:
         # Hides the card only: findings keep their state in the store.
         return ActionResult(message="card closed", resolve_surface=True)
 
-    router.register("approval.choose", approval_choose, mutating=True, irreversible=True)
-    router.register("approval.defer", approval_defer, mutating=False)
+    router.register("approval.choose", approval_choose, mutating=True, owner_proof=True, irreversible=True)
+    router.register("approval.defer", approval_defer, mutating=False, owner_proof=False)
 
     async def review_revert(ctx: ActionContext) -> ActionResult:
         registry = router._compensation_registry
@@ -788,14 +821,14 @@ def _register_default_handlers(router: ActionRouter) -> None:
         # Do NOT mark reverted on failure: allows retry without "already reverted" block.
         return ActionResult(ok=False, message=f"revert failed: {result.message}")
 
-    router.register("review.acknowledge", review_acknowledge, mutating=False)
-    router.register("review.course_correct", review_course_correct, mutating=True)
-    router.register("review.make_rule", review_make_rule, mutating=True)
-    router.register("review.revert", review_revert, mutating=True, irreversible=True)
-    router.register("heartbeat.acknowledge", hb_ack, mutating=True)
-    router.register("heartbeat.resolve", hb_resolve, mutating=True)
-    router.register("heartbeat.dismiss", hb_dismiss, mutating=True)
-    router.register("heartbeat.close_card", hb_close_card, mutating=False)
+    router.register("review.acknowledge", review_acknowledge, mutating=False, owner_proof=False)
+    router.register("review.course_correct", review_course_correct, mutating=True, owner_proof=False)
+    router.register("review.make_rule", review_make_rule, mutating=True, owner_proof=False)
+    router.register("review.revert", review_revert, mutating=True, owner_proof=False, irreversible=True)
+    router.register("heartbeat.acknowledge", hb_ack, mutating=True, owner_proof=False)
+    router.register("heartbeat.resolve", hb_resolve, mutating=True, owner_proof=False)
+    router.register("heartbeat.dismiss", hb_dismiss, mutating=True, owner_proof=False)
+    router.register("heartbeat.close_card", hb_close_card, mutating=False, owner_proof=False)
 
 
 def _escape_pointer(token: str) -> str:
@@ -874,9 +907,9 @@ def _register_phase2_handlers(router: ActionRouter) -> None:
     async def dag_cancel(ctx: ActionContext) -> ActionResult:
         return await _dag_verb(ctx, "cancel")
 
-    router.register("decision.resolve", decision_resolve, mutating=True)
-    router.register("dag.retry", dag_retry, mutating=True)
-    router.register("dag.cancel", dag_cancel, mutating=True, irreversible=True)
+    router.register("decision.resolve", decision_resolve, mutating=True, owner_proof=False)
+    router.register("dag.retry", dag_retry, mutating=True, owner_proof=False)
+    router.register("dag.cancel", dag_cancel, mutating=True, owner_proof=False, irreversible=True)
 
 
 def _register_intention_handlers(router: ActionRouter) -> None:
@@ -1001,10 +1034,10 @@ def _register_intention_handlers(router: ActionRouter) -> None:
         # No resolve: other roots remain on the card. The next sweep rebuilds it without this one.
         return ActionResult(message=message, data_patches=[(f"/roots/{_escape_pointer(str(root_id))}/status", message)])
 
-    router.register("intention.approve", approve, mutating=True, irreversible=True)
-    router.register("intention.reject", reject, mutating=True)
-    router.register("intention.answer", answer, mutating=True)
-    router.register("intention.cancel", cancel, mutating=True, irreversible=True)
+    router.register("intention.approve", approve, mutating=True, owner_proof=True, irreversible=True)
+    router.register("intention.reject", reject, mutating=True, owner_proof=True)
+    router.register("intention.answer", answer, mutating=True, owner_proof=True)
+    router.register("intention.cancel", cancel, mutating=True, owner_proof=True, irreversible=True)
 
 
 def _register_audit_handlers(router: ActionRouter) -> None:
@@ -1056,7 +1089,7 @@ def _register_audit_handlers(router: ActionRouter) -> None:
             resolve_surface=remaining == 0,
         )
 
-    router.register(AUDIT_VERDICT_ACTION, audit_verdict, mutating=True)
+    router.register(AUDIT_VERDICT_ACTION, audit_verdict, mutating=True, owner_proof=False)
 
 
 def _register_memory_write_health_handlers(router: ActionRouter) -> None:
@@ -1100,7 +1133,7 @@ def _register_memory_write_health_handlers(router: ActionRouter) -> None:
             resolve_surface=all(v != TRIPPED for k, v in offered.items() if k != rule),
         )
 
-    router.register(ACK_ACTION, acknowledge, mutating=True)
+    router.register(ACK_ACTION, acknowledge, mutating=True, owner_proof=False)
 
 
 def _register_default_functions(router: ActionRouter) -> None:
@@ -1187,7 +1220,7 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
             await _retire_action_subtask(router, pending)
         return ActionResult(message="app closed", resolve_surface=True)
 
-    router.register("app.close", app_close, mutating=False)
+    router.register("app.close", app_close, mutating=False, owner_proof=False)
 
     async def app_act(ctx: ActionContext) -> ActionResult:
         """F092.2: a footer tap becomes a background agent turn.
@@ -1376,7 +1409,7 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
         watcher.add_done_callback(router._action_watchers.discard)
         return ActionResult(message=f"working on: {stamp['label']}")
 
-    router.register("app.act", app_act, mutating=True)
+    router.register("app.act", app_act, mutating=True, owner_proof=True)
 
 
 # F092.2 helpers — module-level so tests can exercise them directly.

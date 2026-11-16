@@ -18,8 +18,13 @@ Env:   NOUS_PROBE_BASE (default http://localhost:8000), NOUS_PROBE_SUMMARY_WAIT 
 import argparse
 import json
 import os
+import sys
 import time
 import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from scripts._nous_auth import owner_headers  # noqa: E402
 
 BASE = os.environ.get("NOUS_PROBE_BASE", "http://localhost:8000")
 SUMMARY_WAIT = int(os.environ.get("NOUS_PROBE_SUMMARY_WAIT", "45"))
@@ -44,7 +49,7 @@ PROBES = [
 def _req(method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(f"{BASE}{path}", data=data, method=method,
-                                 headers={"Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json", **owner_headers()})
     return json.loads(urllib.request.urlopen(req, timeout=300).read())
 
 

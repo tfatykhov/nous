@@ -71,11 +71,17 @@ def is_owner_tap() -> ColumnElement[bool]:
 
 
 async def _taps(session: AsyncSession, agent_id: str, since: datetime) -> tuple[dict[str, Any], dict[str, int]]:
-    """The owner's taps by action, and the triage share of them; both read the same ``is_owner_tap`` rows."""
+    """The owner's taps by action, and the triage share of them; both read the same ``is_owner_tap`` rows, and only
+    those that completed (a refused or failed action is not a tap the owner made count)."""
     rows = (
         await session.execute(
             select(A2uiAction.action_name, func.count().label("n"))
-            .where(A2uiAction.agent_id == agent_id, is_owner_tap(), A2uiAction.created_at >= since)
+            .where(
+                A2uiAction.agent_id == agent_id,
+                is_owner_tap(),
+                A2uiAction.status == "completed",
+                A2uiAction.created_at >= since,
+            )
             .group_by(A2uiAction.action_name)
         )
     ).all()

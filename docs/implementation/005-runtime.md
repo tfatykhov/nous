@@ -15,6 +15,7 @@ After this phase:
 docker compose up -d
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
+  -H "X-Nous-Owner-Secret: $NOUS_OWNER_ROUTE_SECRET" \
   -d '{"message": "Should we use Redis for caching?"}'
 ```
 
@@ -2040,7 +2041,7 @@ This ensures no decision is lost, even if Claude forgets.
 - [ ] Run `docker compose up -d`
 - [ ] Check `docker compose logs nous` for startup errors
 - [ ] Test health: `curl http://localhost:8000/health`
-- [ ] Test chat: `curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -d '{"message": "Hello"}'`
+- [ ] Test chat: `curl -X POST http://localhost:8000/chat -H "Content-Type: application/json" -H "X-Nous-Owner-Secret: $NOUS_OWNER_ROUTE_SECRET" -d '{"message": "Hello"}'`
 - [ ] Check decision was recorded: `curl http://localhost:8000/decisions`
 - [ ] Monitor calibration: `curl http://localhost:8000/calibration`
 

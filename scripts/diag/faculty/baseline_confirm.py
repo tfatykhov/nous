@@ -54,6 +54,7 @@ os.environ.update({
 
 import subprocess  # noqa: E402
 
+from scripts._nous_auth import owner_headers  # noqa: E402
 from scripts.diag.faculty.baseline_corpus import NO_HANDLE_PAIRS  # noqa: E402
 
 AGENT = "nous-baseline-eval"
@@ -108,14 +109,15 @@ def ask(query: str) -> tuple[str, int]:
     data: dict = {}
     prompt = ("Search your memory with the recall tool before answering. " + query)
     try:
-        r = httpx.post(f"{BASE}/chat", json={"message": prompt, "session_id": sid, "debug": True}, timeout=280)
+        r = httpx.post(f"{BASE}/chat", headers=owner_headers(),
+                       json={"message": prompt, "session_id": sid, "debug": True}, timeout=280)
         if r.headers.get("content-type", "").startswith("application/json"):
             data = r.json()
     except Exception as ex:
         return f"(err {ex})", -1
     finally:
         try:
-            httpx.delete(f"{BASE}/chat/{sid}", timeout=20)
+            httpx.delete(f"{BASE}/chat/{sid}", headers=owner_headers(), timeout=20)
         except Exception:
             pass
     txt = ""

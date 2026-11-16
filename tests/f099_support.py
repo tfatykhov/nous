@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -28,6 +29,10 @@ ON = {"result_inbox_enabled": True, "intentions_enabled": True}
 CONT = {**ON, "continuation_enabled": True}
 CHAN = "telegram:8080"
 RESULT = "Powder: 40cm overnight on the upper mountain."
+# The owner's secret the owner routes require: every environment's settings carry its digest.
+OWNER_SECRET = "owner-only-test-value"
+OWNER_HEADERS = {"X-Nous-Owner-Secret": OWNER_SECRET}
+OWNER_DIGEST = hashlib.sha256(OWNER_SECRET.encode()).hexdigest()
 
 
 class RecordingBus:
@@ -51,7 +56,7 @@ async def env_factory(db, mock_embeddings):
 
     async def build(**over):
         agent = f"f099-2b-{uuid.uuid4().hex[:8]}"
-        values = {"telegram_bot_token": "", "telegram_chat_id": "", **over}
+        values = {"telegram_bot_token": "", "telegram_chat_id": "", "owner_route_secret_sha256": OWNER_DIGEST, **over}
         settings = Settings(_env_file=None, agent_id=agent, **values)
         heart = Heart(db, settings, embedding_provider=mock_embeddings)
         hearts.append(heart)

@@ -56,9 +56,11 @@ from nous import undo_journal
 from nous.api.background_routes import build_background_routes
 from nous.api.commitment_routes import build_commitment_routes
 from nous.api.companion_assets import OverlayStaticFiles
+from nous.api.entry_gate import EntryGate
 from nous.api.execution_context import ExecutionContext
 from nous.api.intention_routes import build_intention_routes
 from nous.api.models import Attachment
+from nous.api.owner_guard import CARD_DECISION, OwnerGuard
 from nous.api.runner import AgentRunner
 from nous.brain import Brain, continuation, intentions
 from nous.brain.intentions import IntentionSpec
@@ -113,6 +115,18 @@ def create_app(
 ) -> Starlette:
     """Create the Starlette ASGI app with all routes."""
 
+    # The owner routes require the owner's or the proxy's secret (nous/api/owner_guard.py).
+    owner_guard = OwnerGuard(settings)
+    if not owner_guard.configured:
+        logger.warning(
+            "Neither NOUS_OWNER_ROUTE_SECRET_SHA256 nor NOUS_MCP_CLIENT_UI_SECRET_SHA256 is set to a SHA-256 digest, "
+            "so the owner routes refuse every call"
+        )
+    # The chat routes and the MCP server require the owner's or the proxy's secret under NOUS_OWNER_ENTRY_MODE
+    # (nous/api/entry_gate.py). main.py wraps the /mcp mount with the same gate, from app.state.
+    entry_gate = EntryGate(settings, owner_guard)
+    entry_gate.startup_report()
+
     def _context_view() -> Any | None:
         """F108: what the context endpoints read: the view main.py built (the model-call table while
         NOUS_MODEL_CALL_LOG_ENABLED is on), else the ring of ``context_logger``, else None. Truthiness, not
@@ -152,6 +166,7 @@ def create_app(
             body = await request.json()
         except Exception:
             return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+        entry_gate.note_session(request, body.get("session_id") if isinstance(body, dict) else None)
 
         message = body.get("message")
         attachments = _parse_attachments(body) if settings.attachments_enabled else []
@@ -214,6 +229,7 @@ def create_app(
             body = await request.json()
         except Exception:
             return JSONResponse({"error": "Invalid JSON body"}, status_code=400)
+        entry_gate.note_session(request, body.get("session_id") if isinstance(body, dict) else None)
 
         message = body.get("message")
         attachments = _parse_attachments(body) if settings.attachments_enabled else []
@@ -307,6 +323,7 @@ def create_app(
     async def end_chat(request: Request) -> JSONResponse:
         """DELETE /chat/{session_id} - End a conversation."""
         session_id = request.path_params["session_id"]
+        entry_gate.note_session(request, session_id)
         try:
             await runner.end_conversation(session_id)
             return JSONResponse({"status": "ended", "session_id": session_id})
@@ -3752,8 +3769,14 @@ def create_app(
                 or request.headers.get("x-forwarded-email")
                 or "unattributed"
             )
+        # Every call reaches the router; a verb registered with owner_proof=True needs the owner's or the proxy's
+        # secret (a proxy-only call also needs the media type exactly application/json).
+        owner_verified = await owner_guard.grants(request, CARD_DECISION)
         status_code, payload = await router.handle(
-            body, content_type=request.headers.get("content-type", ""), actor=actor
+            body,
+            content_type=request.headers.get("content-type", ""),
+            actor=actor,
+            owner_verified=owner_verified,
         )
         return JSONResponse(payload, status_code=status_code)
 
@@ -3885,9 +3908,9 @@ def create_app(
         return JSONResponse(catalog)
 
     routes = [
-        Route("/chat", chat, methods=["POST"]),
-        Route("/chat/stream", chat_stream, methods=["POST"]),
-        Route("/chat/{session_id}", end_chat, methods=["DELETE"]),
+        entry_gate.route("/chat", chat, methods=["POST"]),
+        entry_gate.route("/chat/stream", chat_stream, methods=["POST"]),
+        entry_gate.route("/chat/{session_id}", end_chat, methods=["DELETE"]),
         Route("/status", status),
         Route("/decisions", list_decisions),
         Route("/decisions/unreviewed", list_unreviewed),
@@ -3915,7 +3938,7 @@ def create_app(
         Route("/subtasks/{id}", get_subtask),
         Route("/subtasks/{id}", cancel_subtask, methods=["DELETE"]),
         Route("/schedules", list_schedules),
-        Route("/schedules", create_schedule, methods=["POST"]),
+        owner_guard.route("/schedules", create_schedule, methods=["POST"]),
         Route("/schedules/{id}", deactivate_schedule, methods=["DELETE"]),
         Route("/schedules/{id}/run", run_schedule, methods=["POST"]),
         Route("/health", health),
@@ -3947,15 +3970,15 @@ def create_app(
         # F034: Heartbeat endpoints
         Route("/heartbeat/status", heartbeat_status),
         Route("/heartbeat/trigger", heartbeat_trigger, methods=["POST"]),
-        Route("/heartbeat/config", heartbeat_config, methods=["PUT"]),
+        owner_guard.route("/heartbeat/config", heartbeat_config, methods=["PUT"]),
         Route("/undo/snapshots", undo_snapshots_list),
-        Route("/undo/snapshots/{id}/restore", undo_snapshot_restore, methods=["POST"]),
+        owner_guard.route("/undo/snapshots/{id}/restore", undo_snapshot_restore, methods=["POST"]),
         # F034.1: Finding lifecycle endpoints
         Route("/heartbeat/findings/{fingerprint}/acknowledge", heartbeat_findings_acknowledge, methods=["POST"]),
         Route("/heartbeat/findings/{fingerprint}/resolve", heartbeat_findings_resolve, methods=["POST"]),
         Route("/heartbeat/findings/{fingerprint}/dismiss", heartbeat_findings_dismiss, methods=["POST"]),
         Route("/heartbeat/findings", heartbeat_findings),
-        Route("/heartbeat/escalation-policy", heartbeat_escalation_policy, methods=["PUT"]),
+        owner_guard.route("/heartbeat/escalation-policy", heartbeat_escalation_policy, methods=["PUT"]),
         # F034.3: Tuning endpoints
         Route("/heartbeat/tuning-report", heartbeat_tuning_report),
         Route("/heartbeat/tune", heartbeat_tune, methods=["POST"]),
@@ -3971,7 +3994,7 @@ def create_app(
         Route("/sleep/trigger", trigger_sleep, methods=["POST"]),
         # Admin API endpoints (F025 prep)
         Route("/admin/search-weights", get_search_weights),
-        Route("/admin/search-weights", set_search_weights, methods=["POST"]),
+        owner_guard.route("/admin/search-weights", set_search_weights, methods=["POST"]),
         # F024 Phase 3b: Rubric endpoints
         Route("/rubric/propose-dimension", propose_dimension, methods=["POST"]),
         Route("/rubric/proposals/{id}/approve", approve_proposal, methods=["POST"]),
@@ -4146,4 +4169,6 @@ def create_app(
     kwargs: dict[str, Any] = {"routes": routes}
     if lifespan is not None:
         kwargs["lifespan"] = lifespan
-    return Starlette(**kwargs)
+    app = Starlette(**kwargs)
+    app.state.entry_gate = entry_gate
+    return app

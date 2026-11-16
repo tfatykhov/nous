@@ -487,8 +487,44 @@ def _gate_continuation_flag(settings: Settings) -> None:
         object.__setattr__(settings, "continuation_enabled", False)
 
 
-def _telegram_text_push(settings: Settings) -> Callable[[str], Awaitable[bool]] | None:
-    """A raw Telegram text sender for the rollback's no-inbox fallback, or None when Telegram is not configured."""
+def _start_entry_notice(app: Starlette, settings: Settings) -> asyncio.Task | None:
+    """In NOUS_OWNER_ENTRY_MODE=warn, the loop that sends the owner one Telegram line a day with the count of calls to
+    chat or the MCP server that carried no proof (nous/api/entry_gate.py). None in another mode or without Telegram."""
+    gate = getattr(app.state, "entry_gate", None)
+    if gate is None or gate.mode != "warn":
+        return None
+    send = _telegram_text_push(settings, raise_errors=True)
+    if send is None:
+        logger.info("Telegram is not configured: the count of calls that carried no proof is in the log only")
+        return None
+    return asyncio.create_task(gate.daily_notice_loop(send), name="owner-entry-notice")
+
+
+async def _entry_notice_at_shutdown(app: Starlette, settings: Settings) -> None:
+    """In NOUS_OWNER_ENTRY_MODE=warn with Telegram configured: the pending count of calls that carried no proof, sent
+    once at a graceful shutdown (at most a few seconds; nous/api/entry_gate.py)."""
+    gate = getattr(app.state, "entry_gate", None)
+    if gate is None or gate.mode != "warn":
+        return
+    send = _telegram_text_push(settings, raise_errors=True)
+    if send is not None:
+        await gate.notice_at_shutdown(send)
+
+
+async def _stop_task(task: asyncio.Task | None) -> None:
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+def _telegram_text_push(settings: Settings, *, raise_errors: bool = False) -> Callable[[str], Awaitable[bool]] | None:
+    """A raw Telegram text sender for the rollback's no-inbox fallback, or None when Telegram is not configured. With
+    ``raise_errors`` a failed send raises to the caller instead of being logged here (the entry gate's notices log its
+    class only)."""
     token, chat_id = settings.telegram_bot_token, settings.telegram_chat_id
     if not token or not chat_id:
         return None
@@ -503,6 +539,8 @@ def _telegram_text_push(settings: Settings) -> Callable[[str], Awaitable[bool]] 
                 )
             return response.status_code < 400
         except Exception:
+            if raise_errors:
+                raise
             logger.warning("F099: the rollback's Telegram push failed", exc_info=True)
             return False
 
@@ -2346,12 +2384,15 @@ def build_app(settings: Settings) -> Starlette:
         )
         # Armed only once startup is done: a slow startup is not a stall.
         watchdog = start_event_loop_watchdog(settings)
+        app.state.entry_notice_task = _start_entry_notice(app, settings)
         try:
             yield
         finally:
             # Also on an exception thrown in at `yield`: the timer is
             # process-global and must not outlive the app it guards.
             await stop_event_loop_watchdog(watchdog)
+            await _stop_task(app.state.entry_notice_task)
+            await _entry_notice_at_shutdown(app, settings)
 
         # Shutdown (reverse order)
         # MCP session manager cleanup (F25)
@@ -2416,7 +2457,8 @@ def build_app(settings: Settings) -> Starlette:
                     app.state.mcp_manager = _mcp_manager
                 await _mcp_manager.handle_request(scope, receive, send)
 
-            app.routes.append(Mount("/mcp", app=mcp_asgi))
+            # The MCP server requires the owner's secret or the MCP key, under the same switch as chat.
+            app.routes.append(Mount("/mcp", app=app.state.entry_gate.asgi(mcp_asgi, name="/mcp")))
             logger.info("MCP server mounted at /mcp")
         except ImportError:
             logger.warning("MCP dependencies not installed, skipping MCP server")

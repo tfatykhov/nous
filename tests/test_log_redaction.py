@@ -17,6 +17,7 @@ import contextlib
 import io
 import logging
 import os
+import re
 import subprocess
 import sys
 import textwrap
@@ -263,6 +264,12 @@ BOT_ENTRY_POINT = """
         asyncio.run(bot.main())
     except Stop:
         pass
+
+    from nous.log_redaction import HTTP_CLIENT_LOGGERS, RedactingFilter
+
+    print("FILTERED", all(
+        any(isinstance(f, RedactingFilter) for f in logging.getLogger(name).filters) for name in HTTP_CLIENT_LOGGERS
+    ))
 """
 
 
@@ -273,6 +280,7 @@ def test_the_bot_entry_point_writes_no_token(tmp_path):
     requests = [line for line in proc.stderr.splitlines() if " httpx INFO HTTP Request: " in line]
     assert len(requests) == 3  # getMe and two polls
     assert all("GET https://api.telegram.org/bot<redacted>/get" in line for line in requests)
+    assert "FILTERED True" in proc.stdout
     assert " DEBUG " not in proc.stderr  # the bot logs at INFO
     assert SECRET not in proc.stderr + proc.stdout
 
@@ -303,6 +311,11 @@ SERVER_ENTRY_POINT = """
         encoder.encode([(b"x-api-key", os.environ["MADE_UP_API_KEY"].encode())])
         encoder.header_table_size = 1  # evicts the header: the encoder's second logger writes it too
         logging.getLogger("nous.made_up").debug("a debug line")
+        from nous.log_redaction import HTTP_CLIENT_LOGGERS, RedactingFilter
+
+        print("FILTERED", all(
+            any(isinstance(f, RedactingFilter) for f in logging.getLogger(name).filters) for name in HTTP_CLIENT_LOGGERS
+        ))
 
 
     server.build_app = lambda settings: app
@@ -322,7 +335,148 @@ def test_the_server_entry_point_writes_no_token_and_no_api_key(level, tmp_path):
     requests = [line for line in proc.stderr.splitlines() if " httpx INFO HTTP Request: " in line]
     assert len(requests) == 1
     assert f'POST {REDACTED_URL} "HTTP/1.1 200 OK"' in requests[0]
+    assert "FILTERED True" in proc.stdout
     assert (" nous.made_up DEBUG a debug line" in proc.stderr) == (level == "debug")
     written = proc.stderr + proc.stdout
     assert SECRET not in written
     assert API_KEY not in written
+
+
+SCORER_ENTRY_POINT = """
+    import logging
+    import sys
+
+    import nous.observability.task_score_job as job
+    from nous.log_redaction import HTTP_CLIENT_LOGGERS, RedactingFilter
+
+
+    async def run(agent_id, window_days):
+        "Stands in for the scoring pass, which runs once the logging is set up."
+        print("FILTERED", all(
+            any(isinstance(f, RedactingFilter) for f in logging.getLogger(name).filters) for name in HTTP_CLIENT_LOGGERS
+        ))
+        return 0
+
+
+    job._run = run
+    sys.exit(job.main([]))
+"""
+
+
+def test_the_scorer_entry_point_installs_the_filter(tmp_path):
+    proc = _run_entry_point(SCORER_ENTRY_POINT, tmp_path)
+
+    assert proc.returncode == 0, proc.stderr
+    assert "FILTERED True" in proc.stdout
+
+
+@pytest.fixture
+def configure(monkeypatch):
+    """``configure_logging`` in this process, with the root handlers and pytest's own left alone; the HTTP client's
+    loggers get their filters back as they were afterwards."""
+    import nous.log_redaction as log_redaction
+
+    names = (*log_redaction.HTTP_CLIENT_LOGGERS, "hpack")
+    saved = {name: (logging.getLogger(name).level, list(logging.getLogger(name).filters)) for name in names}
+    monkeypatch.setattr(log_redaction.logging, "basicConfig", lambda **kwargs: None)
+    monkeypatch.setattr(log_redaction, "install_log_redaction", lambda: None)
+    try:
+        yield log_redaction.configure_logging
+    finally:
+        for name, (level, filters) in saved.items():
+            client_logger = logging.getLogger(name)
+            client_logger.setLevel(level)
+            client_logger.filters[:] = filters
+
+
+def _records(caplog, name: str = "httpx") -> list[logging.LogRecord]:
+    return [record for record in caplog.records if record.name == name]
+
+
+async def test_a_request_line_holds_no_token_in_the_record_once_configured(configure, caplog):
+    caplog.set_level(logging.DEBUG)
+    await _post()
+    # Without configure_logging, the request line's record holds the token.
+    assert [SECRET in record.getMessage() for record in _records(caplog)] == [True]
+    caplog.clear()
+
+    configure(logging.INFO)
+    await _post()
+
+    [record] = _records(caplog)
+    assert record.getMessage() == f'HTTP Request: POST {REDACTED_URL} "HTTP/1.1 200 OK"'
+    assert SECRET not in str(record.msg) and SECRET not in repr(record.args)  # the record itself, not a handler's text
+
+
+async def test_the_notices_sender_writes_its_request_line_with_the_token_redacted_in_the_record(
+    configure, monkeypatch, caplog
+):
+    from types import SimpleNamespace
+
+    import nous.main as server
+
+    class Client(httpx.AsyncClient):
+        def __init__(self, **kwargs):
+            super().__init__(transport=httpx.MockTransport(lambda request: httpx.Response(200)), **kwargs)
+
+    monkeypatch.setattr(server.httpx, "AsyncClient", Client)
+    configure(logging.INFO)
+    caplog.set_level(logging.DEBUG)
+    push = server._telegram_text_push(
+        SimpleNamespace(telegram_bot_token=TOKEN, telegram_chat_id="1"), raise_errors=True
+    )
+
+    assert await push("one line") is True
+
+    [record] = _records(caplog)
+    assert REDACTED_URL in record.getMessage()
+    for each in caplog.records:
+        assert SECRET not in str(each.msg) + repr(each.args), each.name
+
+
+async def test_a_model_api_request_line_is_unchanged(configure, caplog):
+    configure(logging.INFO)
+    caplog.set_level(logging.DEBUG)
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={}))
+    async with httpx.AsyncClient(transport=transport) as client:
+        await client.post("https://api.anthropic.com/v1/messages?beta=true", json={})
+
+    [record] = _records(caplog)
+    assert record.getMessage() == 'HTTP Request: POST https://api.anthropic.com/v1/messages?beta=true "HTTP/1.1 200 OK"'
+    assert record.args  # left as the client wrote it
+
+
+def test_every_http_client_logger_gets_the_filter_once(configure):
+    from nous.log_redaction import HTTP_CLIENT_LOGGERS, RedactingFilter
+
+    configure(logging.INFO)
+    configure(logging.INFO)
+    for name in HTTP_CLIENT_LOGGERS:
+        assert sum(isinstance(f, RedactingFilter) for f in logging.getLogger(name).filters) == 1, name
+    assert "httpx" in HTTP_CLIENT_LOGGERS and "httpcore" in HTTP_CLIENT_LOGGERS
+
+
+def test_the_list_names_every_logger_the_installed_transport_creates():
+    import httpcore
+
+    from nous.log_redaction import HTTP_CLIENT_LOGGERS
+
+    source = Path(httpcore.__file__).parent
+    created = {
+        match
+        for path in source.rglob("*.py")
+        for match in re.findall(r'getLogger\("([^"]+)"\)', path.read_text(encoding="utf-8"))
+    }
+    assert created  # the scan found the transport's loggers
+    assert created <= set(HTTP_CLIENT_LOGGERS)
+
+
+@pytest.mark.parametrize("name", ["httpcore", "httpcore.connection", "httpcore.http11", "httpcore.http2"])
+def test_a_transport_debug_line_that_holds_a_token_is_redacted_in_the_record(configure, caplog, name):
+    configure(logging.DEBUG)
+    caplog.set_level(logging.DEBUG)
+    logging.getLogger(name).debug("send_request_headers.started target=%s", URL)
+
+    [record] = _records(caplog, name)
+    assert record.getMessage() == f"send_request_headers.started target={REDACTED_URL}"
+    assert SECRET not in str(record.msg) + repr(record.args)

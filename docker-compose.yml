@@ -230,6 +230,12 @@ services:
       - NOUS_OWNER_ROUTE_SECRET_SHA256=${NOUS_OWNER_ROUTE_SECRET_SHA256:-}
       # Goals PR 0c: the host's hold on background work, read once at start.
       - NOUS_BACKGROUND_HALT=${NOUS_BACKGROUND_HALT:-false}
+      # The SHA-256 of the secret the login proxy adds as X-Nous-Proxy-Secret; also accepted on the owner routes.
+      - NOUS_MCP_CLIENT_UI_SECRET_SHA256=${NOUS_MCP_CLIENT_UI_SECRET_SHA256:-}
+      # Chat and the inbound MCP server: off, warn (log and count calls that carry no proof) or enforce.
+      - NOUS_OWNER_ENTRY_MODE=${NOUS_OWNER_ENTRY_MODE:-warn}
+      # The SHA-256 of the key an external MCP client sends to /mcp (a bearer token or X-Nous-Mcp-Secret).
+      - NOUS_MCP_SERVER_SECRET_SHA256=${NOUS_MCP_SERVER_SECRET_SHA256:-}
     volumes:
       # F042: persist downloaded cross-encoder models across container restarts
       - huggingface_cache:/root/.cache/huggingface
@@ -296,7 +302,7 @@ services:
       NOUS_API_URL: http://nous:8000
       NOUS_ALLOWED_USERS: ${NOUS_ALLOWED_USERS:-}
       NOUS_TELEGRAM_CHAT_ID: ${NOUS_TELEGRAM_CHAT_ID:-}
-      # F111: the secret the bot sends to the owner's /drop and /done routes (openssl rand -hex 32). This service
+      # F111: the secret the bot sends to the owner's routes and on chat (openssl rand -hex 32). This service
       # only: the nous service gets its SHA-256 (NOUS_OWNER_ROUTE_SECRET_SHA256).
       NOUS_OWNER_ROUTE_SECRET: ${NOUS_OWNER_ROUTE_SECRET:-}
     depends_on:

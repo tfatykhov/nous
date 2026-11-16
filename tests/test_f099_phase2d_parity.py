@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
-from f099_support import env_factory, runner_env  # noqa: F401
+from f099_support import OWNER_HEADERS, OWNER_SECRET, env_factory, runner_env  # noqa: F401
 from sqlalchemy import func, select
 from starlette.applications import Starlette
 from test_f099_phase2c_parity import PROD, NoDatabase, Untouchable
@@ -32,6 +32,7 @@ def _prod_routes(env, runner=None) -> Starlette:
 
 
 async def _call(app, method, path, **kwargs) -> httpx.Response:
+    kwargs["headers"] = {**OWNER_HEADERS, **kwargs.get("headers", {})}  # the owner routes require the secret
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://nous") as client:
         return await client.request(method, path, **kwargs)
 
@@ -137,7 +138,9 @@ async def test_the_real_bot_against_the_real_routes_is_inert_under_prods_flags(e
     service is passed ``NOUS_TELEGRAM_CHAT_ID`` from 2d-9 on); without one it makes no REST call at all."""
     env = await env_factory(**PROD, telegram_bot_token="test-token", telegram_chat_id="8080")
     before = await _counts(env)
-    bot = NousTelegramBot("test-token", "http://nous.test", allowed_users={42}, owner_chat_id=42)
+    bot = NousTelegramBot(
+        "test-token", "http://nous.test", allowed_users={42}, owner_chat_id=42, owner_route_secret=OWNER_SECRET
+    )
     await bot._http.aclose()
     bot._http = httpx.AsyncClient(transport=httpx.ASGITransport(app=_prod_routes(env)))  # the real routes
     sent = []

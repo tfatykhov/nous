@@ -13,6 +13,7 @@ import pytest
 from f099_support import (
     CONT,
     ON,
+    OWNER_HEADERS,
     add_arrival,
     ask_with_proposals,
     claim,
@@ -57,6 +58,7 @@ def _runner(env) -> ContinuationRunner:
 
 
 async def _call(app, method, path, **kwargs) -> httpx.Response:
+    kwargs["headers"] = {**OWNER_HEADERS, **kwargs.get("headers", {})}  # the owner routes require the secret
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://nous") as client:
         return await client.request(method, path, **kwargs)
 

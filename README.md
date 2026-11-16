@@ -292,8 +292,11 @@ Then say hello:
 ```bash
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" \
+  -H "X-Nous-Owner-Secret: $NOUS_OWNER_ROUTE_SECRET" \
   -d '{"message": "Hello, who are you?"}'
 ```
+
+The secret header is required when `NOUS_OWNER_ENTRY_MODE=enforce` (see [environment variables](docs/reference/environment-variables.md)). From the Telegram bot's container, `python -m nous.ping SESSION_ID "MESSAGE"` posts one message with it.
 
 The dashboard is at `http://localhost:8000/dashboard`. Migrations run on startup. The [Quickstart guide](docs/quickstart.md) covers Telegram, local development and verification.
 

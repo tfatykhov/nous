@@ -14,7 +14,8 @@ nous/
 │   ├── config.py               # Settings via pydantic-settings
 │   ├── main.py                 # Entry point, component wiring, lifecycle
 │   ├── undo_journal.py         # Passive before-state snapshots (files, schedules, heartbeat checks, heartbeat config) + owner-run restore (NOUS_UNDO_JOURNAL_ENABLED)
-│   ├── telegram_bot.py         # Telegram interface (streaming + usage); F099 2d: owner actions (buttons, /approve, /reject, /answer, reply-to)
+│   ├── telegram_bot.py         # Telegram interface (streaming + usage); F099 2d: owner actions (buttons, /approve, /reject, /answer, reply-to); sends the owner's secret on owner actions and chat
+│   ├── ping.py                 # python -m nous.ping SESSION_ID MESSAGE: one message to /chat with the owner's secret, run in the bot's container
 │   ├── owner_actions.py        # F099 Phase 2d: callback-data codec and refusal vocabulary shared by the publisher, the REST routes and the Telegram bot (stdlib only)
 │   ├── events.py               # Event bus (async pub/sub)
 │   ├── utils.py                # Shared utilities
@@ -180,15 +181,21 @@ nous/
 │   │   └── seed.py             # `python -m nous.mcp_client.seed --name --url --allow [--background] [--write]`: lists a server's tools, prints each as the model would get it and the pin entry, stores the server and its permissions (unlisted tools set to deny)
 │   ├── goals/                  # F114 goals (NOUS_GOALS_ENABLED, dark; nothing outside the package imports it): a goal the owner approves is worked on in background sessions
 │   │   ├── envelope.py         # A goal's limits: the small, medium and large presets, and custom values checked against migration 113's ranges
-│   │   ├── store.py            # GoalStore: brain.goals, goal_sessions and the append-only goal_journal (migration 113); each change a targeted update guarded by the state it read, plus a journal row naming the actor
+│   │   ├── store.py            # GoalStore: brain.goals, goal_sessions and the append-only goal_journal (migration 113); each change a targeted update guarded by the state it read, plus a journal row naming the actor; add_journal_row appends in the caller's transaction
 │   │   ├── roots.py            # create_session_root: a session's first subtask and its root intention (origin goal, internal authority, so its wake policy is continue)
+│   │   ├── spend.py            # session_spent: a session's spend is its root's token budget as continuation.root_limits counts it; goal_spent: a goal's total and today's (UTC)
+│   │   ├── quote.py            # A journal entry or plan step as data: its own tag, invisible and control characters removed, every journal_entry, plan_step and result_message delimiter escaped (fullwidth brackets too)
+│   │   ├── charter.py          # build_session_task: a session's first task (the charter, then the plan and the journal quoted as data), at most 12,000 characters
+│   │   ├── driver.py           # GoalDriver (not wired yet): each tick claims the goal channels into the journal, closes sessions whose chain ended, starts the goals that are due within the queue headroom
 │   │   └── seed.py             # `python -m nous.goals.seed create|list|show|approve|pause|resume|run-now|stop|cancel|confirm|note|raise-budget|extend`: the owner's host command; changes refused with the flag off
 │   └── api/                    # External interfaces
 │       ├── rest.py             # Starlette REST API (the route list in `create_app`; see `docs/reference/rest-api.md`)
 │       ├── commitment_routes.py # F111: POST /commitments/{id}/drop|done, the owner's /drop and /done
 │       ├── background_routes.py # Goals PR 0c: GET /background/state, POST /background/halt (no secret) and /background/resume (owner or proxy secret)
 │       ├── mcp_client_routes.py # F112 PR 2a: the owner's /integrations/mcp routes (list, probe, add, change, refresh, remove MCP servers; PR 2c: store, replace and remove a server's key, never returned; PR 2d: OAuth start, callback page, paste fallback, sign-in state, sign-out), behind the proxy's X-Nous-Proxy-Secret; mounted only with NOUS_MCP_CLIENT_ENABLED
-│       ├── intention_routes.py # F099 Phase 2d: the four owner-action routes (decide, answer, list), thin over ContinuationRunner
+│       ├── intention_routes.py # F099 Phase 2d/2e: the owner-action routes (decide, answer, list, cancel), thin over ContinuationRunner; the POSTs require the owner's or the proxy's secret
+│       ├── owner_guard.py # Owner routes require the owner's or the proxy's secret: the check and the route wrapper (OwnerGuard), and which proof grants which capability
+│       ├── entry_gate.py # The chat routes and the inbound MCP server require the owner's or the proxy's secret (on /mcp, the owner's secret or the MCP key) under NOUS_OWNER_ENTRY_MODE (off, warn, enforce): the route and mount wrappers, the count by session class and the daily notice
 │       ├── intention_dashboard.py # F099 Phase 3c: GET /dashboard/intentions queries (the tree and the metrics), read-only, Postgres-only
 │       ├── autonomy_dashboard.py # Autonomy scoreboard: GET /dashboard/autonomy data (taps, approval cards, grades, task scores, inventory, warn classes), read-only
 │       ├── memory_write_health_dashboard.py # P4: GET /dashboard/memory-write-health data (rollup, rules evaluated now, acknowledgements) and the acknowledge body parser
