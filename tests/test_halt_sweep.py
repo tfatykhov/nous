@@ -581,6 +581,58 @@ async def test_the_status_files_are_read_off_the_event_loop(tmp_path, monkeypatc
     assert on_loop == [False, False, False]
 
 
+async def test_each_status_ask_has_the_short_cap_and_a_cancel_the_long_one(tmp_path):
+    _many_jobs(tmp_path, 3, running={0, 1, 2})
+    asked: list[tuple[str, float]] = []
+
+    async def runner(workspace, args, timeout):
+        asked.append((args[0], timeout))
+        return 0, "Status: running\n" if args[0] == "status" else "cancelled\n"
+
+    await _jobs_sweeper(tmp_path, runner)._jobs(HaltReport())
+    assert {(verb, cap) for verb, cap in asked} == {
+        ("status", halt_sweep.STATUS_ASK_SECONDS),
+        ("cancel", halt_sweep.RUNNER_CALL_SECONDS),
+    }
+    assert halt_sweep.STATUS_ASK_SECONDS * 12 <= halt_sweep.JOBS_SCAN_SECONDS  # a dozen hung asks fit in one press
+
+
+async def test_repeated_presses_walk_the_whole_list_and_a_resume_starts_it_again(tmp_path, monkeypatch):
+    import asyncio
+
+    names = _many_jobs(tmp_path, 6, running={0, 1, 2, 3, 4, 5})
+    order = list(reversed(names))  # newest first
+    monkeypatch.setattr(halt_sweep, "JOBS_SCAN_SECONDS", 0.25)
+    asked: list[str] = []
+
+    async def slow(workspace, args, timeout):  # every ask takes most of the press's time, as a hung runner does
+        asked.append(args[1])
+        await asyncio.sleep(0.1)
+        return 0, "Status: completed\n"
+
+    sweeper = _jobs_sweeper(tmp_path, slow)
+    presses: list[list[str]] = []
+    for _ in range(8):
+        before = len(asked)
+        await sweeper._jobs(HaltReport())
+        presses.append(asked[before:])
+        if set(asked) == set(order):
+            break
+    assert set(asked) == set(order)  # every job was reached
+    assert all(presses) and len(presses) > 1
+    for previous, current in zip(presses, presses[1:]):  # each press starts after the last one the previous asked
+        assert order.index(current[0]) == (order.index(previous[-1]) + 1) % len(order)
+    for _ in range(5):  # a cursor on the last job would send the next press to the head anyway
+        if sweeper._jobs_cursor != order[-1]:
+            break
+        await sweeper._jobs(HaltReport())
+    assert sweeper._jobs_cursor != order[-1]
+    await sweeper.cancel_new_work()  # a resume
+    before = len(asked)
+    await sweeper._jobs(HaltReport())
+    assert asked[before] == order[0]  # the next halt starts from the head
+
+
 @pytest.mark.parametrize("cancel_answer", [(1, "no such job"), (None, "")], ids=["nonzero", "timed out"])
 async def test_a_failed_cancel_is_counted_and_the_scan_goes_on(tmp_path, cancel_answer):
     names = _many_jobs(tmp_path, 3, running={0, 2})

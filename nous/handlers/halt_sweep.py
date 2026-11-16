@@ -40,6 +40,8 @@ STEP_TIMEOUT_SECONDS = 30.0
 ROOTS_TIMEOUT_SECONDS = 180.0
 JOBS_TIMEOUT_SECONDS = 120.0
 RUNNER_CALL_SECONDS = 30.0
+# One job's ``runner.sh status`` inside the sweep: a dozen fit in the scan's time even when every one hangs.
+STATUS_ASK_SECONDS = 5.0
 ROOTS_MAX = 200
 ROOTS_BATCH = 8
 # The jobs step starts no new job after this many seconds, so a status and a cancel call still fit in its timeout.
@@ -194,6 +196,14 @@ def _jobs_to_ask(jobs_dir: Path, workspace: str) -> list[str]:
     return worded + unread
 
 
+def _after(names: list[str], cursor: str | None) -> list[str]:
+    """``names`` starting after ``cursor`` and going round to it; as they are when the cursor is not among them."""
+    if cursor not in names:
+        return names
+    index = names.index(cursor) + 1
+    return names[index:] + names[:index]
+
+
 class HaltSweeper:
     """The cancel sweep. Every component is optional: a missing one's step is skipped."""
 
@@ -215,6 +225,8 @@ class HaltSweeper:
         self._continuation = continuation_runner
         self._dags = dag_orchestrator
         self._run_runner = run_runner
+        # The job the last press's scan asked last: the next press starts after it. In memory; reset by a resume.
+        self._jobs_cursor: str | None = None
 
     async def run(self, *, actor: str | None, epoch: int | None = None) -> HaltReport:
         """The whole sweep, then one ``sweep`` audit row with the counts. ``epoch``: the halt this sweep belongs to
@@ -243,7 +255,9 @@ class HaltSweeper:
 
     async def cancel_new_work(self) -> None:
         """What a resume runs before it clears the flag: the subtask and DAG steps again, so nothing created or left
-        since the halt's sweep starts when the flag clears."""
+        since the halt's sweep starts when the flag clears. The jobs scan starts from the head again at the next
+        halt."""
+        self._jobs_cursor = None
         report = HaltReport()
         await self._step(report, "subtasks", self._subtasks(report), STEP_TIMEOUT_SECONDS)
         if self._dags is not None:
@@ -311,8 +325,9 @@ class HaltSweeper:
 
     async def _jobs(self, report: HaltReport, epoch: int | None = None) -> None:
         """Claude Code jobs: the job directories whose status file shows no final word (``_jobs_to_ask``, read off
-        the event loop) are asked ``runner.sh status``, those with a status word first, newest first, then those
-        whose status file could not be read, so a halt pressed again reaches further when some of them are slow to
+        the event loop) are asked ``runner.sh status``, at most ``STATUS_ASK_SECONDS`` each: those with a status word
+        first, newest first, then those whose status file could not be read. A press starts after the job the
+        previous press asked last, so presses repeated while halted walk the whole list even when some jobs never
         answer. One that says running is cancelled and marked as cancelled by the harness. A cancel that fails is
         counted and the scan goes on. A job whose status the runner did not give, and the jobs the deadline
         (``JOBS_SCAN_SECONDS``) leaves unasked, are counted as not checked. Either count marks the step failed, so
@@ -325,7 +340,7 @@ class HaltSweeper:
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + JOBS_SCAN_SECONDS
-        names = await asyncio.to_thread(_jobs_to_ask, jobs_dir, workspace)
+        names = _after(await asyncio.to_thread(_jobs_to_ask, jobs_dir, workspace), self._jobs_cursor)
         if not names:
             return
         run_runner = self._run_runner
@@ -339,7 +354,8 @@ class HaltSweeper:
             if loop.time() > deadline:
                 unread += len(names) - index
                 break
-            code, out = await run_runner(workspace, ["status", job_id], RUNNER_CALL_SECONDS)
+            self._jobs_cursor = job_id
+            code, out = await run_runner(workspace, ["status", job_id], STATUS_ASK_SECONDS)
             status = observed_status(out) if code == 0 else None
             if status is None:
                 unread += 1
