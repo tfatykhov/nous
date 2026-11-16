@@ -139,8 +139,10 @@
             <Button size="sm" class="max-md:min-h-11 max-md:px-4" disabled={busy !== null || !edited(row)}
               aria-label="Save {row.label}" onclick={() => void save(row)}>{busy === row.key ? 'Saving…' : 'Save'}</Button>
             {#if row.source === 'owner'}
-              <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={busy !== null}
+              <Button variant="outline" size="sm" class="lim-reset max-md:min-h-11 max-md:px-4" disabled={busy !== null}
                 aria-label="Use the host's value for {row.label}" onclick={() => void useHost(row)}>Use the host's value</Button>
+            {:else}
+              <span class="reset-slot" aria-hidden="true"></span>
             {/if}
           </div>
           <p class="facts" id="lim-f.{row.key}">
@@ -196,13 +198,15 @@
   .what { min-width: 0; }
   .label { font-size: 0.875rem; font-weight: 600; overflow-wrap: anywhere; }
   .range { font-size: 0.75rem; color: var(--muted); margin: 0.125rem 0 0; }
-  .edit { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; justify-content: flex-end; }
+  /* One grid for every row, so the inputs, units and buttons line up down the card; the last column is kept even when a
+     row has no "Use the host's value". */
+  .edit { display: grid; grid-template-columns: 7rem 8rem auto 10.5rem; align-items: center; gap: 0.5rem; }
   .value { width: 7rem; height: 2rem; padding: 0 0.5rem; background: var(--surface); border: 1px solid var(--field-border);
     border-radius: var(--radius-sm); color: var(--text); font: inherit; font-size: 0.875rem; text-align: right;
     font-variant-numeric: tabular-nums; }
   .value:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
   .value:disabled { opacity: 0.6; }
-  .unit { font-size: 0.75rem; color: var(--muted); min-width: 4.5rem; }
+  .unit { font-size: 0.75rem; color: var(--muted); line-height: 1.2; }
   .facts { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; font-size: 0.75rem; color: var(--muted);
     margin: 0; }
   .source { font-weight: 600; }
@@ -217,7 +221,9 @@
   .log li:first-child { border-top: 0; }
   @media (max-width: 768px) {
     .row { grid-template-columns: minmax(0, 1fr); }
-    .edit { justify-content: flex-start; }
+    .edit { grid-template-columns: 7rem minmax(0, 1fr) auto; }
+    .edit :global(.lim-reset) { grid-column: 1 / -1; justify-self: start; }
+    .reset-slot { display: none; }
     .value { height: 2.75rem; }
   }
 </style>
