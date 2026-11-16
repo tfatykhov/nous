@@ -1167,7 +1167,8 @@ PROOFS = [
     ({"content-type": "text/plain; application/json", "X-Nous-Proxy-Secret": PROXY_VALUE}, "UNSUPPORTED_MEDIA_TYPE"),
     ({"content-type": "text/plain", "X-Nous-Proxy-Secret": PROXY_VALUE}, "UNSUPPORTED_MEDIA_TYPE"),
     ({"content-type": JSON, "X-Nous-Owner-Secret": "a-wrong-value"}, "OWNER_PROOF_REQUIRED"),
-    ({"content-type": JSON, "X-Nous-Device-Token": "a-device-token"}, "OWNER_PROOF_REQUIRED"),
+    # Not token-shaped: no live device has it (tests/test_companion_device_matrix.py runs every device row).
+    ({"content-type": JSON, "X-Nous-Device-Token": "a-device-token"}, "DEVICE_TOKEN_REJECTED"),
 ]
 PROOF_IDS = ["none", "owner", "proxy-json", "proxy-json-charset", "proxy-smuggled", "proxy-text", "wrong", "device"]
 
@@ -1204,26 +1205,42 @@ async def test_each_gated_verb_through_the_real_route_against_each_proof(
 async def test_the_route_takes_no_rate_slot_of_its_own(
     db, a2ui_settings, service: SurfaceService, a2ui_agent_id: str
 ) -> None:
-    """One action is one slot of the action limiter, counted by the router alone: with a limit of three, a refused
-    call, an accepted one and one carrying a device header all reach the router, and only the fourth is a 429. A
-    route that also took a slot (for a device lookup, say) would make the second or third call a 429."""
-    settings = _owner_settings(a2ui_settings, a2ui_action_rate_per_minute=3)
-    app = _action_app(db, settings, service, ActionRouter(db, settings, service))
+    """One action is one slot of the action limiter, taken by the router alone, in the caller's window: with a limit
+    of two, a refused call and one carrying a malformed device token share the window of callers without a proof, so
+    a third such call is a 429, while the owner's calls have a window of their own. A route that also took a slot (for
+    a device lookup, say) would fill the windows twice as fast."""
+    settings = _owner_settings(a2ui_settings, a2ui_action_rate_per_minute=2)
+    router = ActionRouter(db, settings, service)
+    taken: list[str] = []
+    rate_ok = router._rate_ok
+
+    async def counted(caller: str = "anonymous") -> bool:
+        taken.append(caller)
+        return await rate_ok(caller)
+
+    router._rate_ok = counted  # type: ignore[method-assign]
+    app = _action_app(db, settings, service, router)
     surface_id, nonce = await _all_gated_card(db, service)
     body = _body("approval.choose", surface_id, nonce=nonce, context={"optionId": "never-offered"})
+    owner = {"content-type": JSON, "X-Nous-Owner-Secret": OWNER_VALUE}
 
     refused = await _post_action(app, body, {"content-type": JSON})
-    accepted = await _post_action(app, body, {"content-type": JSON, "X-Nous-Owner-Secret": OWNER_VALUE})
+    accepted = await _post_action(app, body, owner)
     device = await _post_action(app, body, {"content-type": JSON, "X-Nous-Device-Token": "a-device-token"})
-    fourth = await _post_action(app, body, {"content-type": JSON, "X-Nous-Owner-Secret": OWNER_VALUE})
+    third = await _post_action(app, body, {"content-type": JSON})
+    owner_again = await _post_action(app, body, owner)
 
-    assert [r.json()["error"]["code"] for r in (refused, accepted, device)] == [
+    assert [r.json()["error"]["code"] for r in (refused, accepted, device, owner_again)] == [
         "OWNER_PROOF_REQUIRED",
         "ACTION_FAILED",
-        "OWNER_PROOF_REQUIRED",
+        "DEVICE_TOKEN_REJECTED",
+        "ACTION_FAILED",
     ]
-    assert (fourth.status_code, fourth.json()["error"]["code"]) == (429, "RATE_LIMITED")
-    assert len(await _audits(db, a2ui_agent_id)) == 3
+    assert (third.status_code, third.json()["error"]["code"]) == (429, "RATE_LIMITED")
+    assert taken == ["anonymous", "owner", "anonymous", "anonymous", "owner"]  # one call each, by the router
+    assert {key: len(window) for key, window in router._windows.items()} == {"anonymous": 2, "owner": 2}
+    assert len(router._recent) == 4
+    assert len(await _audits(db, a2ui_agent_id)) == 4  # the 429 writes none
 
 
 async def test_no_log_record_carries_a_secret_on_the_action_route(

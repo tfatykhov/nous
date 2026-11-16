@@ -3952,8 +3952,10 @@ class Settings(BaseSettings):
         default=30,
         ge=1,
         description=(
-            "F092: in-process sliding-window cap on POST /a2ui/action, keyed on "
-            "agent_id (single-user deployment — effectively global). Beyond it: 429."
+            "F092: in-process 60-second sliding window per caller on POST "
+            "/a2ui/action (owner, proxy, each paired device, and every caller "
+            "without a proof together); POST /a2ui/call counts in the last of "
+            "these. The process as a whole is held to four times it. Beyond it: 429."
         ),
     )
     a2ui_surface_retention_days: int = Field(

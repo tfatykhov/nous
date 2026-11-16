@@ -29,7 +29,7 @@ from sqlalchemy import select, update
 
 from nous import cancel_provenance
 from nous.a2ui.intention_keys import KIND_ACTIVE, KIND_PROPOSAL, KIND_QUESTION, parse_key
-from nous.api.owner_guard import json_media_type
+from nous.api.owner_guard import DEVICE_TOKEN_REJECTED, DEVICE_TOKEN_REJECTED_CODE, DEVICE_TOKEN_TEXT, json_media_type
 from nous.audits import AUDIT_VERDICT_ACTION
 from nous.brain import continuation, intentions
 from nous.brain.intentions import IntentionSpec
@@ -305,6 +305,7 @@ class ActionRouter:
         actor: str = "unattributed",
         owner_verified: bool = False,
         caller: str = "anonymous",
+        proof_refusal: str | None = None,
     ) -> tuple[int, dict]:
         """Returns (http_status, response_body).
 
@@ -315,7 +316,9 @@ class ActionRouter:
 
         ``owner_verified`` is the route's word that the request proved the
         owner or is a paired device (``OwnerGuard.resolve``); a verb
-        registered with ``owner_proof=True`` is refused without it.
+        registered with ``owner_proof=True`` is refused without it, with
+        ``DEVICE_TOKEN_REJECTED`` when ``proof_refusal`` says the device token
+        it sent is held by no live device, else ``OWNER_PROOF_REQUIRED``.
 
         ``caller`` is the window of the action limiter the action takes its
         one slot in (the route takes none).
@@ -345,7 +348,15 @@ class ActionRouter:
         # status re-read inside the lock turns the loser into a 404).
         async with self._service.surface_lock(surface_id):
             return await self._handle_locked(
-                surface_id, name, context, data_model, action, actor, owner_verified=owner_verified, caller=caller
+                surface_id,
+                name,
+                context,
+                data_model,
+                action,
+                actor,
+                owner_verified=owner_verified,
+                caller=caller,
+                proof_refusal=proof_refusal,
             )
 
     async def _handle_locked(
@@ -359,6 +370,7 @@ class ActionRouter:
         *,
         owner_verified: bool = False,
         caller: str = "anonymous",
+        proof_refusal: str | None = None,
     ) -> tuple[int, dict]:
         # Status is read INSIDE the surface lock — a terminal action that
         # just resolved this surface makes the second request 404 here.
@@ -422,6 +434,8 @@ class ActionRouter:
 
         # After the allowlist and the nonce (a stale or foreign card is told what it always was), before the censor.
         if meta.owner_proof and not owner_verified:
+            if proof_refusal == DEVICE_TOKEN_REJECTED:
+                return await reject(403, DEVICE_TOKEN_REJECTED_CODE, DEVICE_TOKEN_TEXT)
             return await reject(403, "OWNER_PROOF_REQUIRED", OWNER_PROOF_TEXT)
 
         if meta.mutating and self._heart is not None:

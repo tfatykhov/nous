@@ -111,9 +111,18 @@ class FakeActionRouter:
         content_type: str,
         actor: str = "unattributed",
         owner_verified: bool = False,
+        caller: str = "anonymous",
+        proof_refusal: str | None = None,
     ) -> tuple[int, dict]:
         self.calls.append(
-            {"body": body, "content_type": content_type, "actor": actor, "owner_verified": owner_verified}
+            {
+                "body": body,
+                "content_type": content_type,
+                "actor": actor,
+                "owner_verified": owner_verified,
+                "caller": caller,
+                "proof_refusal": proof_refusal,
+            }
         )
         return self._status, {"ok": True, "message": "", "resolved": False}
 
@@ -447,22 +456,38 @@ _PROXY_VALUE = "proxy-only-test-value"
 
 
 @pytest.mark.parametrize(
-    ("headers", "verified"),
+    ("headers", "verified", "caller", "refusal"),
     [
-        ({}, False),
-        ({"X-Nous-Owner-Secret": _OWNER_VALUE}, True),
-        ({"X-Nous-Proxy-Secret": _PROXY_VALUE}, True),
-        ({"X-Nous-Owner-Secret": "a-wrong-value"}, False),
-        ({"X-Nous-Proxy-Secret": "a-wrong-value"}, False),
-        ({"X-Nous-Device-Token": "a-device-token"}, False),
+        ({}, False, "anonymous", None),
+        ({"X-Nous-Owner-Secret": _OWNER_VALUE}, True, "owner", None),
+        ({"X-Nous-Proxy-Secret": _PROXY_VALUE}, True, "proxy", None),
+        ({"X-Nous-Owner-Secret": "a-wrong-value"}, False, "anonymous", None),
+        ({"X-Nous-Proxy-Secret": "a-wrong-value"}, False, "anonymous", None),
+        # Not token-shaped: refused with no lookup, and the router is told the token was rejected.
+        ({"X-Nous-Device-Token": "a-device-token"}, False, "anonymous", "device_token_rejected"),
         # The route's own rule, whatever the router then checks: a proxy-only call that is not JSON proves nothing.
-        ({"X-Nous-Proxy-Secret": _PROXY_VALUE, "content-type": "text/plain; application/json"}, False),
-        ({"X-Nous-Owner-Secret": _OWNER_VALUE, "content-type": "text/plain; application/json"}, True),
+        (
+            {"X-Nous-Proxy-Secret": _PROXY_VALUE, "content-type": "text/plain; application/json"},
+            False,
+            "anonymous",
+            None,
+        ),
+        ({"X-Nous-Owner-Secret": _OWNER_VALUE, "content-type": "text/plain; application/json"}, True, "owner", None),
     ],
-    ids=["none", "owner", "proxy", "wrong-owner", "wrong-proxy", "device-without-store", "proxy-text", "owner-text"],
+    ids=["none", "owner", "proxy", "wrong-owner", "wrong-proxy", "malformed-device-token", "proxy-text", "owner-text"],
 )
 async def test_the_action_route_tells_the_router_whether_the_caller_proved_the_owner(
-    brain, heart, cognitive, db, settings, fake_service, fake_router, headers: dict, verified: bool
+    brain,
+    heart,
+    cognitive,
+    db,
+    settings,
+    fake_service,
+    fake_router,
+    headers: dict,
+    verified: bool,
+    caller: str,
+    refusal: str | None,
 ) -> None:
     import hashlib
 
@@ -481,6 +506,7 @@ async def test_the_action_route_tells_the_router_whether_the_caller_proved_the_o
 
     assert response.status_code == 200
     assert fake_router.calls[0]["owner_verified"] is verified
+    assert (fake_router.calls[0]["caller"], fake_router.calls[0]["proof_refusal"]) == (caller, refusal)
 
 
 async def test_the_action_route_hands_every_call_to_the_router(
@@ -492,6 +518,7 @@ async def test_the_action_route_hands_every_call_to_the_router(
     assert response.status_code == 200
     assert len(fake_router.calls) == 1
     assert fake_router.calls[0]["owner_verified"] is False
+    assert fake_router.calls[0]["caller"] == "anonymous"
 
 
 # ---------------------------------------------------------------------------

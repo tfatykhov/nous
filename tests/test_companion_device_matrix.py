@@ -4,6 +4,9 @@ route and verb. Real Postgres: a real ``DeviceStore``, ``ActionRouter``, ``Surfa
 from __future__ import annotations
 
 import hashlib
+import json
+import logging
+import re
 import uuid
 from types import SimpleNamespace
 from typing import Any
@@ -11,10 +14,16 @@ from typing import Any
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
+from starlette.applications import Starlette
+from starlette.responses import JSONResponse
+from starlette.routing import Mount
 
+from nous.a2ui.actions import ActionRouter
+from nous.a2ui.builders import approval_gate
 from nous.a2ui.push import PushService
 from nous.a2ui.service import SurfaceService
+from nous.api.companion_devices import DeviceStore
 from nous.api.rest import create_app
 from nous.storage.models import A2uiAction, A2uiDevice, A2uiPushInstallation, A2uiSurface
 
@@ -128,3 +137,364 @@ async def test_pairing_again_keeps_the_push_installation_the_new_device_holds(
     listed = (await _call(app, "GET", "/a2ui/devices", headers=OWNER)).json()["devices"]
     assert {(d["id"], d["revoked_at"] is None) for d in listed} == {(old["device_id"], False), (new["device_id"], True)}
     assert await _installations(db, agent_id) == {"inst-1"}  # superseded, and still the new device's
+
+
+# ---- the matrix: every proof against every verb that needs one, every owner route, chat and /mcp ----------------
+
+ANOTHER_AGENT = "test-devmatrix-another-agent"
+PROOF_NAMES = [
+    "none",
+    "owner",
+    "proxy-json",
+    "proxy-text",
+    "device",
+    "revoked-device",
+    "another-agents-device",
+    "wrong-prefix",
+    "wrong-length",
+    "pairing-code",
+    "wrong-owner-and-device",
+    "wrong-proxy-and-device",
+    "oversize",
+]
+# What a verb registered with owner_proof=True answers. "ACTION_FAILED": the proof held and the verb reached its
+# handler, which refuses it on its own terms here (an option nobody offered, no continuation runner, no agent).
+VERB_OUTCOME = {
+    "none": (403, "OWNER_PROOF_REQUIRED"),
+    "owner": (422, "ACTION_FAILED"),
+    "proxy-json": (422, "ACTION_FAILED"),
+    "proxy-text": (415, "UNSUPPORTED_MEDIA_TYPE"),
+    "device": (422, "ACTION_FAILED"),
+    "revoked-device": (403, "DEVICE_TOKEN_REJECTED"),
+    "another-agents-device": (403, "DEVICE_TOKEN_REJECTED"),
+    "wrong-prefix": (403, "DEVICE_TOKEN_REJECTED"),
+    "wrong-length": (403, "DEVICE_TOKEN_REJECTED"),
+    "pairing-code": (403, "DEVICE_TOKEN_REJECTED"),
+    "wrong-owner-and-device": (403, "OWNER_PROOF_REQUIRED"),
+    "wrong-proxy-and-device": (403, "OWNER_PROOF_REQUIRED"),
+    "oversize": (403, "OWNER_PROOF_REQUIRED"),
+}
+OWNER_PROVEN = {"owner", "proxy-json"}
+
+
+@pytest_asyncio.fixture
+async def another_agents_token(db):
+    _device, token = await DeviceStore(db, ANOTHER_AGENT).create("Elsewhere", f"inst-{uuid.uuid4().hex[:8]}")
+    yield token
+    async with db.session() as session:
+        await session.execute(delete(A2uiDevice).where(A2uiDevice.agent_id == ANOTHER_AGENT))
+        await session.commit()
+
+
+async def _proofs(app: Any, another: str) -> dict[str, dict[str, str]]:
+    """Each proof as the headers of a request; the device rows pair a live and a revoked device on ``app``."""
+    live = await _pair(app, "inst-live")
+    gone = await _pair(app, "inst-gone")
+    assert (await _call(app, "DELETE", f"/a2ui/devices/{gone['device_id']}", headers=OWNER)).status_code == 200
+
+    def token(value: str) -> dict[str, str]:
+        return {"X-Nous-Device-Token": value, "content-type": JSON}
+
+    proofs = {
+        "none": {"content-type": JSON},
+        "owner": OWNER,
+        "proxy-json": PROXY,
+        "proxy-text": {"X-Nous-Proxy-Secret": PROXY_VALUE, "content-type": "text/plain"},
+        "device": token(live["token"]),
+        "revoked-device": token(gone["token"]),
+        "another-agents-device": token(another),
+        "wrong-prefix": token("nd2_" + live["token"][4:]),
+        "wrong-length": token(live["token"][:-1]),
+        "pairing-code": token("K7QM-2XRD"),
+        "wrong-owner-and-device": {**token(live["token"]), "X-Nous-Owner-Secret": "a-wrong-value"},
+        "wrong-proxy-and-device": {**token(live["token"]), "X-Nous-Proxy-Secret": "a-wrong-value"},
+        "oversize": token("nd1_" + "A" * 197),
+    }
+    assert list(proofs) == PROOF_NAMES
+    return proofs
+
+
+async def _card(db, service: SurfaceService, verbs: list[str]) -> tuple[str, str]:
+    """A live approval card that offers ``verbs``: ``(surface_id, nonce)``."""
+    surface_id = await service.push_built(approval_gate(APPROVAL_PARAMS))
+    async with db.session() as session:
+        await session.execute(
+            update(A2uiSurface).where(A2uiSurface.surface_id == surface_id).values(allowed_actions=verbs)
+        )
+        await session.commit()
+        nonce = (await session.execute(select(A2uiSurface.nonce).where(A2uiSurface.surface_id == surface_id))).scalar()
+    return surface_id, nonce
+
+
+def _action(verb: str, surface_id: str, nonce: str, **context: Any) -> bytes:
+    body = {
+        "version": "v1.0",
+        "action": {
+            "name": verb,
+            "surfaceId": surface_id,
+            "context": {"optionId": "never-offered", **context},
+            "metadata": {"extensions": {"com_nous_nonce": nonce}},
+        },
+    }
+    return json.dumps(body).encode()
+
+
+APPROVAL_PARAMS = {
+    "title": "Cancel the running backfill?",
+    "summary": "It has processed 40% of rows.",
+    "risk": "Partial state; resumable from the watermark.",
+    "options": [{"id": "cancel", "label": "Cancel"}, {"id": "let_it_run", "label": "Let it run"}],
+}
+
+
+@pytest.mark.parametrize("proof", PROOF_NAMES)
+async def test_each_verb_that_needs_proof_against_each_proof(
+    db, owned, service: SurfaceService, push: PushService, another_agents_token: str, proof: str
+) -> None:
+    """A device token is a proof on exactly the verbs that need one, like the owner's and the proxy's secrets; a token
+    no live device has is ``DEVICE_TOKEN_REJECTED``, and a failed secret is not rescued by a valid token. The verbs are
+    read from the router, so a verb added with ``owner_proof=True`` is in the matrix at once."""
+    router = ActionRouter(db, owned, service)
+    gated = sorted(name for name, meta in router._handlers.items() if meta.owner_proof)
+    assert {"approval.choose", "app.act"} <= set(gated)
+    app = _app(db, owned, service, push, router)
+    headers = (await _proofs(app, another_agents_token))[proof]
+    surface_id, nonce = await _card(db, service, gated)
+
+    for verb in gated:
+        response = await _call(app, "POST", "/a2ui/action", content=_action(verb, surface_id, nonce), headers=headers)
+        error = response.json().get("error") or {}
+        assert (response.status_code, error.get("code")) == VERB_OUTCOME[proof], (verb, response.json())
+    async with db.session() as session:
+        status = (
+            await session.execute(select(A2uiSurface.status).where(A2uiSurface.surface_id == surface_id))
+        ).scalar()
+    assert status == "live"
+
+
+async def _owner_routes(app: Any) -> list[tuple[str, str]]:
+    found = sorted(
+        (method, route.path)
+        for route in app.routes
+        if getattr(route, "methods", None) and getattr(route.endpoint, "owner_guarded", False)
+        for method in route.methods - {"HEAD"}
+    )
+    assert ("POST", "/a2ui/devices/pairings") in found and ("POST", "/schedules") in found
+    return found
+
+
+@pytest.mark.parametrize("proof", PROOF_NAMES)
+async def test_a_device_token_is_refused_on_every_owner_route(
+    db, owned, service: SurfaceService, push: PushService, another_agents_token: str, proof: str
+) -> None:
+    """Every route behind the owner guard, read from the app's route table (the device management routes among them):
+    only the owner's and the proxy's secrets pass; every device row is 403 before the handler."""
+    app = _app(db, owned, service, push, ActionRouter(db, owned, service))
+    headers = (await _proofs(app, another_agents_token))[proof]
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://nous") as client:
+        for method, path in await _owner_routes(app):
+            concrete = re.sub(r"\{[^}]+\}", "ffffffff", path)
+            response = await client.request(method, concrete, content=b"{}", headers=headers)
+            if proof in OWNER_PROVEN:
+                assert response.status_code not in (403, 415), (method, path, response.text)
+            elif proof == "proxy-text":
+                assert response.status_code == (415 if method != "GET" else 200), (method, path)
+            else:
+                assert (response.status_code, response.json()) == (403, {"error": "forbidden"}), (method, path, proof)
+
+
+async def test_a_device_token_is_not_a_proof_on_chat(db, owned, service: SurfaceService, push: PushService) -> None:
+    enforce = owned.model_copy(update={"owner_entry_mode": "enforce"})
+    app = _app(db, enforce, service, push)
+    device = await _pair(app)
+    token = {"X-Nous-Device-Token": device["token"], "content-type": JSON}
+    for method, path in (("POST", "/chat"), ("POST", "/chat/stream"), ("DELETE", "/chat/abc")):
+        response = await _call(app, method, path, json={"message": "hi"}, headers=token)
+        assert (response.status_code, response.json()) == (403, {"error": "forbidden"}), path
+    warn = _app(db, owned.model_copy(update={"owner_entry_mode": "warn"}), service, push)
+    warned = await _pair(warn)
+    transport = httpx.ASGITransport(app=warn, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://nous") as client:
+        await client.post("/chat", json={"message": "hi"}, headers={"X-Nous-Device-Token": warned["token"]})
+    assert sum(warn.state.entry_gate.drain_counts().values()) == 1  # counted as a call that carried no proof
+
+
+async def test_a_device_token_is_not_a_proof_on_the_mcp_server(
+    db, owned, service: SurfaceService, push: PushService
+) -> None:
+    """The inbound MCP server is wrapped with the app's entry gate, as main.build_app wraps it."""
+    for mode in ("enforce", "warn"):
+        app = _app(db, owned.model_copy(update={"owner_entry_mode": mode, "mcp_enabled": True}), service, push)
+        device = await _pair(app)
+        reached: list[str] = []
+
+        async def mcp(scope: Any, receive: Any, send: Any) -> None:
+            reached.append(scope["path"])
+            await JSONResponse({"mcp": True})(scope, receive, send)
+
+        gated = Starlette(routes=[Mount("/mcp", app=app.state.entry_gate.asgi(mcp, name="/mcp"))])
+        headers = {"X-Nous-Device-Token": device["token"], "content-type": JSON}
+        response = await _call(gated, "POST", "/mcp/", json={}, headers=headers)
+        if mode == "enforce":
+            assert (response.status_code, reached) == (403, [])
+        else:
+            assert response.status_code == 200
+            assert sum(app.state.entry_gate.drain_counts().values()) == 1
+
+
+async def test_a_device_token_grants_nothing_on_the_mcp_client_routes(
+    db, owned, service: SurfaceService, push: PushService
+) -> None:
+    """Every ``/integrations/mcp`` route answers a device token exactly as it answers a call with no header: 403 on
+    the routes that need the proxy's secret, and the same answer on the few that need none."""
+    app = _app(db, owned.model_copy(update={"mcp_client_enabled": True}), service, push)
+    device = await _pair(app)
+    routes = [route for route in app.routes if getattr(route, "path", "").startswith("/integrations/mcp")]
+    refused = 0
+    for route in routes:
+        concrete = re.sub(r"\{[^}]+\}", "x", route.path)
+        for method in sorted(route.methods - {"HEAD"}):
+            bare = await _call(app, method, concrete, json={})
+            with_token = await _call(app, method, concrete, json={}, headers={"X-Nous-Device-Token": device["token"]})
+            assert (with_token.status_code, with_token.content) == (bare.status_code, bare.content), (
+                method,
+                route.path,
+            )
+            refused += with_token.status_code == 403
+    assert refused >= 5
+
+
+# ---- revocation, the limiter and the logs, through the real route and router ---------------------------------
+
+
+async def test_revocation_takes_effect_on_the_next_call(
+    db, owned, service: SurfaceService, push: PushService, agent_id: str
+) -> None:
+    app = _app(db, owned, service, push, ActionRouter(db, owned, service))
+    device = await _pair(app, "inst-phone")
+    await push.register("inst-phone", fcm_token="fcm-phone")
+    token = {"X-Nous-Device-Token": device["token"], "content-type": JSON}
+    first, nonce = await _card(db, service, ["approval.choose"])
+    acted = await _call(
+        app, "POST", "/a2ui/action", content=_action("approval.choose", first, nonce, optionId="cancel"), headers=token
+    )
+    assert acted.status_code == 200, acted.text
+    assert (await _call(app, "DELETE", f"/a2ui/devices/{device['device_id']}", headers=OWNER)).status_code == 200
+    second, nonce = await _card(db, service, ["approval.choose"])
+    refused = await _call(
+        app, "POST", "/a2ui/action", content=_action("approval.choose", second, nonce, optionId="cancel"), headers=token
+    )
+    assert refused.status_code == 403
+    assert refused.json()["error"]["code"] == "DEVICE_TOKEN_REJECTED"
+    assert refused.json()["error"]["message"] == "This device is no longer paired. Pair it again in the app's settings."
+    assert await _installations(db, agent_id) == set()
+
+
+async def test_revoking_drops_the_devices_rate_window(db, owned, service: SurfaceService, push: PushService) -> None:
+    router = ActionRouter(db, owned, service)
+    app = _app(db, owned, service, push, router)
+    device = await _pair(app)
+    surface_id, nonce = await _card(db, service, ["approval.choose"])
+    for headers in ({"X-Nous-Device-Token": device["token"], "content-type": JSON}, OWNER):
+        await _call(app, "POST", "/a2ui/action", content=_action("approval.choose", surface_id, nonce), headers=headers)
+    key = f"device:{device['device_id']}"
+    assert {k: len(v) for k, v in router._windows.items()} == {key: 1, "owner": 1}
+    await _call(app, "DELETE", f"/a2ui/devices/{device['device_id']}", headers=OWNER)
+    assert set(router._windows) == {"owner"}
+
+
+async def test_a_store_error_is_a_plain_refusal_not_a_rejected_token(
+    db, owned, service: SurfaceService, push: PushService, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    app = _app(db, owned, service, push, ActionRouter(db, owned, service))
+    device = await _pair(app)
+
+    async def broken(self: DeviceStore, token: object) -> None:
+        raise RuntimeError(f"the database is down {token}")
+
+    monkeypatch.setattr(DeviceStore, "verify", broken)
+    surface_id, nonce = await _card(db, service, ["approval.choose"])
+    response = await _call(
+        app,
+        "POST",
+        "/a2ui/action",
+        content=_action("approval.choose", surface_id, nonce),
+        headers={"X-Nous-Device-Token": device["token"], "content-type": JSON},
+    )
+    assert (response.status_code, response.json()["error"]["code"]) == (403, "OWNER_PROOF_REQUIRED")
+    assert "RuntimeError" in caplog.text
+    for record in caplog.records:
+        assert device["token"] not in record.getMessage() + repr(record.args)
+
+
+class _Bus:
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    async def emit(self, event: Any) -> None:
+        self.events.append(event)
+
+
+async def test_no_secret_in_any_log_record_at_debug(
+    db, owned, service: SurfaceService, push: PushService, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Open, a wrong and a right redeem, a wrong, a revoked and a valid token on an action, a read, the list, a revoke
+    and an unpair: no log record, event or listing carries a token, a code or the digest of either. Header names may
+    appear; values never. The "sqlalchemy" logger stays at WARNING (its own default), so statement parameters are
+    not logged at all."""
+    caplog.set_level(logging.DEBUG)
+    bus = _Bus()
+    stand_in = SimpleNamespace()
+    router = ActionRouter(db, owned, service)
+    app = create_app(
+        stand_in,
+        stand_in,
+        SimpleNamespace(schedules=None),
+        stand_in,
+        db,
+        owned,
+        bus=bus,
+        surface_service=service,
+        action_router=router,
+        push_service=push,
+    )
+    opened = (await _call(app, "POST", "/a2ui/devices/pairings", json={"name": "Desk phone"}, headers=OWNER)).json()
+    code = opened["code"]
+    wrong = "".join("2" if c != "2" else "3" for c in code.replace("-", ""))
+    await _call(app, "POST", "/a2ui/devices/redeem", json={"code": wrong, "installation_id": "inst-1"})
+    live = (await _call(app, "POST", "/a2ui/devices/redeem", json={"code": code, "installation_id": "inst-1"})).json()
+    gone = await _pair(app, "inst-2")
+    other = await _pair(app, "inst-3")
+    await _call(app, "DELETE", f"/a2ui/devices/{gone['device_id']}", headers=OWNER)
+    surface_id, nonce = await _card(db, service, ["approval.choose"])
+    for value in (live["token"], gone["token"], live["token"][:-1]):
+        await _call(
+            app,
+            "POST",
+            "/a2ui/action",
+            content=_action("approval.choose", surface_id, nonce),
+            headers={"X-Nous-Device-Token": value, "content-type": JSON},
+        )
+    await _call(app, "GET", "/a2ui/surfaces", headers={"X-Nous-Device-Token": live["token"]})
+    listing = await _call(app, "GET", "/a2ui/devices", headers=OWNER)
+    await _call(app, "DELETE", f"/a2ui/devices/{live['device_id']}", headers=OWNER)
+    await _call(app, "POST", "/a2ui/devices/unpair", headers={"X-Nous-Device-Token": other["token"]})
+
+    secrets_seen = []
+    for token in (live["token"], gone["token"], other["token"]):
+        secrets_seen += [token, hashlib.sha256(token.encode()).hexdigest()]
+    for value in (code, code.replace("-", ""), wrong):
+        secrets_seen += [value, hashlib.sha256(value.encode()).hexdigest()]
+    assert caplog.records
+    for record in caplog.records:
+        text = record.getMessage() + repr(record.args) + (record.exc_text or "")
+        for secret in secrets_seen:
+            assert secret not in text, record.getMessage()
+    assert [event.data["action"] for event in bus.events] == ["paired", "paired", "paired"]
+    for event in bus.events:
+        for secret in secrets_seen:
+            assert secret not in json.dumps(event.data)
+    for secret in secrets_seen:
+        assert secret not in listing.text
