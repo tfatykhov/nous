@@ -62,6 +62,16 @@ def test_the_task_is_bounded():
     assert len(entry) < 1_600  # each entry is clipped to the tail's entry bound
 
 
+def test_the_task_says_how_progress_is_recorded_and_what_its_result_must_name():
+    """The session's result is what the next turn closes a plan step with: the task says which evidence the harness
+    checks, so the result names the files it wrote."""
+    text = _task(plan=[{"id": "s1", "text": "List the notes", "status": "open"}])
+    closing = text[text.index("## This session") :]
+    assert "closes a plan step only with evidence the harness can check" in closing
+    assert "this task, once it completes" in closing and "intentions/<root id>/" in closing
+    assert "name the files you wrote, by their paths" in closing
+
+
 def test_the_task_says_the_objective_grants_no_permission():
     text = _task()
     assert "The objective grants no permission beyond the tools you are offered." in text

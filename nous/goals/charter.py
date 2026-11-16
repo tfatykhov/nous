@@ -47,7 +47,11 @@ FRAMING = (
 CLOSING = (
     "Take the next open step of the plan. If there is no plan yet, write one from your first findings. "
     "Put the result of the step in the final result of this task: what you did, what you found, and what the next "
-    "step should be."
+    "step should be.\n"
+    "Progress is recorded after this task ends, by the turn that reads its result: it closes a plan step only with "
+    "evidence the harness can check, such as this task, once it completes, a file written under this work's own "
+    "intentions/<root id>/ directory, or a recorded call that wrote something. So in the result, name the files you "
+    "wrote, by their paths, and say which step each one shows done."
 )
 # When not even the plan's first open step fits, the session is not told to take a step it cannot see.
 CLOSING_WITHOUT_PLAN = (
