@@ -1046,7 +1046,9 @@ class TestClassifyWholeBashCommand:
 
         start = time.perf_counter()
         assert _classify_bash_command(cmd) in allowed
-        assert time.perf_counter() - start < 0.5
+        # The bound catches runaway work (seconds or more), not a slow machine: a shared runner has
+        # taken over half a second on the 60 kB case.
+        assert time.perf_counter() - start < 2.0
 
     @pytest.mark.parametrize("cmd, expected", [
         ("sudo env " * 1500 + "ssh h", "external"),

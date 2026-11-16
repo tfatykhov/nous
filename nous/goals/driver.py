@@ -32,7 +32,7 @@ from nous.brain import continuation, intentions
 from nous.cancellation import cancel_requested
 from nous.dag.store import TERMINAL_NODE_STATUSES
 from nous.goals import charter, roots, spend
-from nous.goals.store import GoalStore, clip
+from nous.goals.store import SESSION_NOTE_LABEL, GoalStore, clip
 from nous.heart.censor_actions import gate_subtask_task
 from nous.heart.subtasks import MAX_PENDING, SubtaskQueueFull
 from nous.storage.database import Database
@@ -57,7 +57,6 @@ OPEN_WORK_DELAY_SECONDS = 60  # a root of an earlier session has open work again
 FAILED_STARTS_BEFORE_PAUSE = 3  # the third failed start in a row pauses the goal (``error``)
 UNCREATED_AFTER_SECONDS = 120  # a session whose first subtask does not exist after this long never got one
 SUMMARY_MAX = 1000  # a session's summary: its claimed report, else its newest arrival's note
-SESSION_NOTE_LABEL = "Note written by the session:"  # marks the chain's words inside the harness's end row
 # How long before a session's close a question or an answer may have been written and still be journalled after
 # it (the close journals what it sees; a row it could not see was written in a transaction open across the close).
 QUESTIONS_BEFORE_CLOSE = timedelta(hours=1)

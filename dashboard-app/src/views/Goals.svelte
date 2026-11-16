@@ -37,6 +37,8 @@
   let knownOptions: GoalOptions | null = null;
   /** The filter whose list could not be read last (null once a list was read). */
   let listFailedFor = $state<GoalFilter | null>(null);
+  /** Whether, in the page's last failed read, the goal's own read failed too (else only another part did). */
+  let goalReadFailed = $state(false);
 
   /** Every read of the page, given up after the request timeout (`timed`). */
   function fetchPage(signal?: AbortSignal): Promise<Page> {
@@ -60,11 +62,18 @@
           throw err;
         },
       );
-      const [listed, options, halt, shown] = await Promise.all([
-        list, knownOptions ?? goalOptions(sig), haltState(sig), detail,
-      ]);
-      if (options.enabled) knownOptions = options;
-      return { filter: asked, list: listed, options, halt, shown };
+      try {
+        const [listed, options, halt, shown] = await Promise.all([
+          list, knownOptions ?? goalOptions(sig), haltState(sig), detail,
+        ]);
+        goalReadFailed = false;
+        if (options.enabled) knownOptions = options;
+        return { filter: asked, list: listed, options, halt, shown };
+      } catch (err) {
+        // The read failed: say whether the goal's own read did (it never throws: its failure is in its answer).
+        goalReadFailed = (await detail)?.error != null;
+        throw err;
+      }
     }, signal);
   }
 
@@ -139,7 +148,27 @@
    * goal is at hand, listed or not, so a change (a cancel, a confirm done) or a filter switch never moves the pane to
    * another goal or to the form. A goal's own address, or the list, changes it. */
   const FORM = '#form';
-  let stay = $state<string | null>(null);
+  /** The goal last shown in this browser: the bare address shows it again after a reload. The page works without
+   * the storage (a private window, blocked site data). */
+  const REMEMBER = 'nous.goals.shown';
+  function remembered(): string | null {
+    try {
+      return sessionStorage.getItem(REMEMBER);
+    } catch {
+      return null;
+    }
+  }
+  function remember(ref: string | null) {
+    try {
+      if (ref) sessionStorage.setItem(REMEMBER, ref);
+      else sessionStorage.removeItem(REMEMBER);
+    } catch {
+      // nothing is remembered: the bare address shows the first open goal
+    }
+  }
+  let stay = $state<string | null>(remembered());
+  /** Said once above the pane when the goal it kept no longer exists. */
+  let goneNote = $state<string | null>(null);
   let pane = $derived.by((): Pane => {
     if (sub === 'new') return { kind: 'new' };
     if (picked) {
@@ -153,7 +182,7 @@
     }
     if (narrow) return { kind: 'list' };
     if (stay === FORM) return { kind: 'new' };
-    if (stay && (goals.some((g) => g.ref === stay) || lastGood?.ref === stay)) return { kind: 'goal', ref: stay };
+    if (stay) return { kind: 'goal', ref: stay };
     const first = goals.find(isOpen) ?? goals[goals.length - 1];
     return first ? { kind: 'goal', ref: first.ref } : { kind: 'new' };
   });
@@ -193,13 +222,38 @@
   $effect(() => {
     if (shown?.detail) {
       stay = shown.detail.ref;
+      remember(shown.detail.ref);
       lastGood = { ref: shown.ref, detail: shown.detail };
+      return;
     }
+    // A kept goal that answers 404 no longer exists here: it is dropped, said once, and the bare address shows the
+    // list's first goal (or the form) instead.
+    if ((shown?.error as ApiAnswerError | null)?.status !== 404) return;
+    const gone = shown!.ref;
+    untrack(() => {
+      if (lastGood?.ref === gone) lastGood = null;
+      if (!picked && stay !== FORM) {
+        stay = null;
+        remember(null);
+        goneNote = `No goal ${gone} here any more.`;
+      }
+    });
+  });
+  // The note goes once the owner moves elsewhere.
+  let noteSub: string | null = null;
+  $effect(() => {
+    const now = sub;
+    if (noteSub !== null && noteSub !== now) untrack(() => (goneNote = null));
+    noteSub = now;
   });
   let paneDetail = $derived(shown?.detail ?? (lastGood && lastGood.ref === paneRef ? lastGood.detail : null));
-  // The page's last read failed (the goal's, or the whole page's, a timeout included) while a detail is shown.
-  let failedRead = $derived(shown?.error ?? $store.error ?? null);
-  let readError = $derived(failedRead && paneDetail ? refusalText(failedRead, 'see') : null);
+  /** What a failed read means for the detail shown: the goal could not be read again, or only the list could not. */
+  let readError = $derived.by((): string | null => {
+    if (!paneDetail) return null;
+    const failed = shown?.error ?? ($store.error && goalReadFailed ? $store.error : null);
+    if (failed) return `Could not read ${paneRef} again: ${refusalText(failed, 'see')} What is shown is from the last read.`;
+    return $store.error ? 'Could not refresh the list. What is shown is from the last read.' : null;
+  });
   let missing = $derived((shown?.error as ApiAnswerError | null)?.status === 404);
 
   function showMore() {
@@ -284,10 +338,11 @@
     {#if pane.kind !== 'list'}
       <div class="detail" id="goal-pane" tabindex="-1" role="group" aria-label={pane.kind === 'new' ? 'New goal' : (paneDetail?.title ?? pane.ref)}>
         <a class="back" href={LIST_HREF}>All goals</a>
+        {#if goneNote}<p class="read-error" role="status">{goneNote}</p>{/if}
         {#if pane.kind === 'new'}
           <NewGoal {options} onCreated={(ref) => void created(ref)} />
         {:else if paneDetail}
-          {#if readError}<p class="read-error" role="alert">Could not read {pane.ref} again: {readError} What is shown is from the last read.</p>{/if}
+          {#if readError}<p class="read-error" role="alert">{readError}</p>{/if}
           {#key paneDetail.id}
             <GoalPane goal={paneDetail} {options} {halted} {now} {journalAll} onChanged={() => store.refresh()} onMore={showMore} />
           {/key}

@@ -26,6 +26,12 @@ function install() {
       answer = created;
       if (created[0] === 201) listed = [created[1]];
     } else if (method === 'GET' && url.startsWith('/goals/G-0002')) answer = [200, created[1]];
+    if (answer[0] === -1) {
+      // never answers: it ends only when its signal aborts
+      return new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')));
+      });
+    }
     return new Response(JSON.stringify(answer[1]), { status: answer[0] });
   }));
 }
@@ -46,6 +52,7 @@ async function fillTexts(form: HTMLElement) {
 }
 
 beforeEach(() => {
+  sessionStorage.clear(); // the goal last shown is remembered per browser tab
   calls = [];
   options = OPTIONS();
   listed = [];
@@ -135,5 +142,22 @@ describe('Goals: the create form', () => {
     expect((within(form).getByLabelText('Title') as HTMLInputElement).value).toBe('Sort the photos');
     expect((within(form).getByLabelText('Channel') as HTMLInputElement).value).toBe('telegram:4242');
     expect(location.hash).toBe('#/goals/new');
+  });
+});
+
+describe('Goals: the create form and a lost answer', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('a create with no answer is given up after 15 s, and the form keeps what was typed', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    created = [-1, null];
+    const form = await openForm();
+    await fillTexts(form);
+    await type(form, 'Channel', 'telegram:4242');
+    await fireEvent.click(within(form).getByRole('button', { name: 'Create draft' }));
+    await vi.advanceTimersByTimeAsync(16_000);
+    await vi.waitFor(() => expect(within(form).getByText('No answer came back. Check the goal before trying again.')).toBeTruthy());
+    expect((within(form).getByLabelText('Title') as HTMLInputElement).value).toBe('Sort the photos');
+    expect((within(form).getByRole('button', { name: 'Create draft' }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

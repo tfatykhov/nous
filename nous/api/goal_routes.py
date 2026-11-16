@@ -38,7 +38,6 @@ from starlette.routing import Route
 
 from nous.api.owner_guard import OwnerGuard
 from nous.brain.continuation import owner_channel
-from nous.goals.driver import SESSION_NOTE_LABEL
 from nous.goals.envelope import _RANGES, PRESETS
 from nous.goals.seed import SPEND_NOTE
 from nous.goals.spend import goal_spent
@@ -49,6 +48,7 @@ from nous.goals.store import (
     JOURNAL_MAX_CHARS,
     LIVE_STATES,
     MAX_DEADLINE_DAYS,
+    SESSION_NOTE_LABEL,
     GoalRefused,
     GoalStore,
     clip,
