@@ -99,6 +99,9 @@ INTERNAL_ONLY_SPAWN_TOOLS: frozenset[str] = frozenset({"spawn_task", "dag_create
 INTERNAL_ONLY_EXTRA_TOOLS: frozenset[str] = frozenset({"resolve_intention", "propose_action", "goal_note", "goal_plan"})
 # Per-call rules (path and lineage), evaluated at dispatch.
 INTERNAL_ONLY_CHECKED_TOOLS: frozenset[str] = frozenset({"write_file", "cancel_task"})
+# Per-goal tool grants: the kinds of turn a goal session's own lineage runs in. A tool the owner allowed for one goal
+# can be lifted only in a turn of these kinds (nous/goals/grants.py decides which turn).
+GRANT_KINDS: frozenset[str] = frozenset({"continuation", "subtask", "dag_node"})
 # Logged with their root when called from a lineage (spec section 9).
 INTERNAL_ONLY_LOGGED_TOOLS: frozenset[str] = frozenset({"web_fetch", "web_search"})
 
@@ -459,16 +462,45 @@ _RUNNER_BRANCH = re.compile(r"[A-Za-z0-9][A-Za-z0-9_./-]*")
 _RUNNER_JOB_ID = re.compile(r"job-\d{8}-\d{6}-[0-9a-f]{8}")
 
 
-def internal_only_allowed(name: str, *, ctx: ExecutionContext, lineage_shell: bool = False) -> bool:
+def grant_refusal(name: str) -> str | None:
+    """None when the owner may allow a goal to use ``name`` without asking; else why not: ``unclassified`` (nobody
+    classified it), ``harness`` (a turn's own decision or report tool), ``never`` (on the internal_only denylist, or a
+    chain's spawn tool), ``spawns`` (it starts other work) or ``not_outward`` (its class does not reach outside Nous,
+    so an internal_only turn may use it already, or never). Exactly the tools whose class is external or
+    irreversible pass: send_file, send_email, browser_task and every MCP client tool."""
+    cls = tool_class(name)
+    if cls is None:
+        return "unclassified"
+    if name in INTERNAL_ONLY_EXTRA_TOOLS or name == "submit_final_report":
+        return "harness"
+    if name in INTERNAL_ONLY_DENYLIST or name in INTERNAL_ONLY_SPAWN_TOOLS:
+        return "never"
+    if cls.spawns:
+        return "spawns"
+    if cls.side_effect not in ("external", "irreversible"):
+        return "not_outward"
+    return None
+
+
+def _lift(name: str, lifted: bool) -> bool:
+    """Whether ``lifted`` applies to ``name``: only to a tool a goal may be given (``grant_refusal``)."""
+    return lifted and grant_refusal(name) is None
+
+
+def internal_only_allowed(
+    name: str, *, ctx: ExecutionContext, lineage_shell: bool = False, lifted: bool = False
+) -> bool:
     """Whether an internal_only context may be OFFERED ``name``.
 
     Fails closed on an unclassified tool: a tool nobody classified is not
     allowed, so a new tool is denied to a lineage until someone adds it on purpose.
     ``lineage_shell`` (``NOUS_F099_LINEAGE_SHELL``) lifts the denylist for ``bash``
-    alone; its calls are then held to ``lineage_bash_allowed``.
+    alone; its calls are then held to ``lineage_bash_allowed``. ``lifted`` (the owner allowed this tool for the
+    turn's goal, ``nous/goals/grants.py``) skips the class rule for a tool ``grant_refusal`` accepts; the other
+    rules still apply.
     """
     cls = tool_class(name)
-    if cls is None or cls.side_effect not in ("none", "write"):
+    if cls is None or (cls.side_effect not in ("none", "write") and not _lift(name, lifted)):
         return False
     if name == "bash" and lineage_shell:
         return True
@@ -1644,11 +1676,13 @@ def internal_only_call_violation(
     lineage_shell: bool = False,
     build_commands: bool = False,
     extra_write_dirs: Sequence[str] = (),
+    lifted: bool = False,
 ) -> str | None:
     """The per-call rules of an internal_only turn, for a tool that WAS offered.
 
     ``"external"``: ``classify_side_effect`` rates the call external (or
-    irreversible), such as a URL in run_python; for bash, the command is not on
+    irreversible), such as a URL in run_python; not returned when ``lifted`` applies to the tool (the owner allowed
+    it for the turn's goal, see ``internal_only_allowed``); for bash, the command is not on
     the lineage allowlist (``lineage_bash_allowed``, with the build commands when ``build_commands``, i.e.
     ``NOUS_F099_LINEAGE_BUILD_COMMANDS``). ``"write_path"``: write_file outside
     ``lineage_write_dirs`` (``claude-jobs/prompts/`` only with ``lineage_shell``, i.e.
@@ -1667,7 +1701,7 @@ def internal_only_call_violation(
         ):
             return "external"
         return None
-    if classify_side_effect(name, dict(tool_input)) in ("external", "irreversible"):
+    if not _lift(name, lifted) and classify_side_effect(name, dict(tool_input)) in ("external", "irreversible"):
         return "external"
     if name == "write_file" and not _write_path_allowed(
         ctx, tool_input, workspace_dir, lineage_shell=lineage_shell, extra_write_dirs=extra_write_dirs
@@ -1960,8 +1994,9 @@ def heartbeat_resolve_violation(tool_name: str) -> bool:
 # runs both in `warn`). "always": a chat with the owner, and one call the owner already approved. "never": an inbound
 # MCP caller (another agent, with the owner's authority but nobody watching). "background": every turn nobody
 # watches, and only for a tool whose server the owner marked available to background work. A kind not listed here
-# is refused. The other floors still apply first: a heartbeat_triage turn may not act outward and an internal_only
-# turn may not call an external tool, so neither ever reaches an MCP tool.
+# is refused. The other floors still apply first: a heartbeat_triage turn may not act outward, so it never reaches an
+# MCP tool, and an internal_only turn may not call an external tool unless the owner allowed that tool for the turn's
+# goal (``lifted``); this floor then applies to it as to any background turn.
 MCP_CLIENT_KIND_RULES: Mapping[str, str] = MappingProxyType(
     {
         "interactive": "always",
@@ -2041,13 +2076,15 @@ def evaluate(
     *,
     workspace_dir: str | None = None,
     extra_write_dirs: Sequence[str] = (),
+    lifted: bool = False,
 ) -> str | None:
     """None if ``ctx`` may make this call; otherwise the violation code:
     ``unclassified``, ``undeclared``, ``level:<level>``, ``spawn``, ``reenable``.
 
     With ``workspace_dir``, an internal_only bash call on the lineage allowlist (with ``extra_write_dirs``,
     ``NOUS_F099_LINEAGE_WRITE_DIRS``) is judged at ``write``: the read-only gh calls it permits are ``external``
-    only to the classifier, and a continuation's row is local."""
+    only to the classifier, and a continuation's row is local. ``lifted`` (the owner allowed the tool for the turn's
+    goal, see ``internal_only_allowed``) skips the level rule alone for a tool ``grant_refusal`` accepts."""
     if ctx.kind in FOREGROUND_KINDS:
         return None
     policy = CONTEXT_POLICY[ctx.kind]
@@ -2068,7 +2105,7 @@ def evaluate(
         )
     ):
         level = "write"
-    if level not in policy.levels:
+    if level not in policy.levels and not _lift(tool_name, lifted):
         return f"level:{level}"
     # Phase 2.8: check undoability BEFORE the spawn gate so that a tool that
     # both spawns and lacks a compensator (e.g. dag_create) returns
