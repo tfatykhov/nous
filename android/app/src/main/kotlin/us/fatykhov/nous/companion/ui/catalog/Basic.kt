@@ -213,6 +213,7 @@ fun ButtonView(node: Node.Render) {
     val scope = rememberCoroutineScope()
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf("") }
+    var refusal by remember { mutableStateOf<us.fatykhov.nous.companion.core.Refusal?>(null) }
     val failures = host.functions.runChecks(node.props["checks"] as? JsonArray, host.ctx(node.scope))
     // Actions pause while not LIVE: during a reconnect backoff the snapshot on
     // screen may be stale, and an approval submitted against it would be
@@ -233,7 +234,7 @@ fun ButtonView(node: Node.Render) {
             busy = true
             scope.launch {
                 val r = host.engine.postAction(host.surfaceId, name, node.componentId, ctxObj)
-                if (!r.ok) error = r.message
+                if (!r.ok) { error = r.message; refusal = r.refusal }
                 busy = false
             }
         }
@@ -248,7 +249,7 @@ fun ButtonView(node: Node.Render) {
         // `busy` while the action is in flight: the tap is acknowledged at once
         // instead of the button sitting unchanged until the server answers.
         us.fatykhov.nous.companion.ui.NousButton(onClick = onClick, enabled = enabled || busy, busy = busy, kind = kind) { label() }
-        if (error.isNotEmpty()) Text(error, color = t.crit, fontSize = 12.sp)
+        if (error.isNotEmpty()) us.fatykhov.nous.companion.ui.ActionError(error, refusal)
         else failures.firstOrNull()?.message?.let { Text(it, color = t.muted, fontSize = 12.sp) }
     }
 }
