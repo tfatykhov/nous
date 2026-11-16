@@ -332,7 +332,7 @@ def _repointed(identity: McpIdentity, *, url: str | None = None, remote: str | N
     changes), or with another remote tool behind the name."""
     return McpIdentity(
         identity.server_id,
-        url or "c3" * 32,
+        url or identity.url_sha256,
         remote or identity.remote_tool,
         server_name=identity.server_name,
         server_host="elsewhere.example.com",
@@ -363,7 +363,7 @@ async def test_a_server_repointed_after_the_page_was_read_is_refused_and_nothing
 async def test_a_stale_identity_does_not_replace_a_grant_that_stopped_working(env):
     goal = await active(env.store, origin_channel=CHAN)
     await env.allow(goal.id, ON, {"confirm": True, "identity": identity_token(NOTES)})
-    tool_classes._MCP_IDENTITIES[ON] = _repointed(NOTES)
+    tool_classes._MCP_IDENTITIES[ON] = _repointed(NOTES, url="c3" * 32)
     response = await env.allow(goal.id, ON, {"confirm": True, "identity": identity_token(NOTES)})
     assert response.status_code == 409
     [row] = await _rows(env.db, goal)
