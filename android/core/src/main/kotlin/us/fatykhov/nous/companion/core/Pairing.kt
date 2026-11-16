@@ -207,12 +207,18 @@ object Pairing {
      * Unpair, in this order, each step bounded and best effort: delete this
      * installation's push registration while the token still works, revoke
      * the device at the server (only when [paired]), then [forget] the token
-     * whatever the server answered.
+     * whatever the server answered, and also when the caller is cancelled
+     * halfway (a phone left paired without its push row is the worse state).
      */
     suspend fun unpair(http: Http, installationId: String, paired: Boolean, forget: () -> Unit, boundMs: Long = BOUND_MS): UnpairReport {
-        val push = attempt(boundMs) { http.delete("/a2ui/push/tokens/" + encodeURIComponent(installationId)) }
-        val revoke = if (paired) attempt(boundMs) { http.postJson(DeviceToken.UNPAIR_PATH, "{}") } else null
-        forget()
+        var push: Http.Response? = null
+        var revoke: Http.Response? = null
+        try {
+            push = attempt(boundMs) { http.delete("/a2ui/push/tokens/" + encodeURIComponent(installationId)) }
+            if (paired) revoke = attempt(boundMs) { http.postJson(DeviceToken.UNPAIR_PATH, "{}") }
+        } finally {
+            forget()
+        }
         return UnpairReport(
             pushDeleted = push?.ok == true,
             // A token the server already rejects is as revoked as one it just revoked.

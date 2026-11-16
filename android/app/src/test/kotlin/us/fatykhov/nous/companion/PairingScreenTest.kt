@@ -47,6 +47,8 @@ import us.fatykhov.nous.companion.ui.SettingsScreen
 import us.fatykhov.nous.companion.ui.SurfaceHost
 import us.fatykhov.nous.companion.ui.Themes
 import java.net.InetAddress
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.CopyOnWriteArrayList
 
 /** The pairing screens against a scripted server: pair, unpair, the inbox when not paired, a refused tap. */
@@ -115,6 +117,69 @@ class PairingScreenTest {
         assertNull(g.credential.pairedFor(base))
         val order = seen.filter { it.method != "GET" }.map { "${it.method} ${path(it)} ${it.headers[DeviceToken.HEADER] == SAMPLE_TOKEN}" }
         assertEquals(listOf("DELETE /a2ui/push/tokens/${g.settings.installationId} true", "POST /a2ui/devices/unpair true"), order.take(2))
+    }
+
+    // ------------------------------------------- leaving Settings mid-way
+
+    /** Runs the main looper, where the app's own scope resumes, until [done]; at most 5 s. */
+    private fun idleMainUntil(what: String, done: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + 5_000
+        while (!done() && System.currentTimeMillis() < deadline) { shadowOf(android.os.Looper.getMainLooper()).idle(); Thread.sleep(10) }
+        assertTrue(what, done())
+    }
+
+    /** Settings that the test can take away (Back, a rotation) and bring back. */
+    private fun settingsThatCanLeave(g: AppGraph): androidx.compose.runtime.MutableState<Boolean> {
+        val shown = mutableStateOf(true)
+        rule.setContent { NousThemed(Themes.nousDefault) { if (shown.value) SettingsScreen(g) { } } }
+        return shown
+    }
+
+    @Test fun pairing_finishes_when_settings_is_left_while_the_server_answers() {
+        val arrived = CountDownLatch(1); val release = CountDownLatch(1)
+        answers = { r ->
+            when (path(r)) {
+                "/a2ui/devices/redeem" -> { arrived.countDown(); release.await(10, TimeUnit.SECONDS); json(200, """{"device_id":"d-1","name":"Pixel","token":"$SAMPLE_TOKEN"}""") }
+                "/a2ui/surfaces" -> json(200, """{"latest_seq":0,"surfaces":[]}""")
+                else -> json(200, "{}")
+            }
+        }
+        val g = graph()
+        val shown = settingsThatCanLeave(g)
+        rule.onNode(hasSetTextAction()).performTextInput("K7QM2XRD")
+        rule.onNodeWithText("Pair this device").performClick()
+        idleMainUntil("the redeem is in flight") { arrived.count == 0L }
+        rule.runOnIdle { shown.value = false }   // Settings goes away; its scope is cancelled
+        rule.waitForIdle()
+        release.countDown()
+        idleMainUntil("the token is kept") { g.credential.pairedFor(base) != null }
+        rule.runOnIdle { shown.value = true }    // and comes back
+        waitForText(PairingWords.paired("Pixel"))
+        rule.onNodeWithText("Paired as").assertExists()
+    }
+
+    @Test fun unpair_finishes_when_settings_is_left_while_the_server_answers() {
+        val arrived = CountDownLatch(1); val release = CountDownLatch(1)
+        answers = { r ->
+            when (path(r)) {
+                "/a2ui/devices/unpair" -> { arrived.countDown(); release.await(10, TimeUnit.SECONDS); json(200, """{"revoked":true}""") }
+                "/a2ui/surfaces" -> json(200, """{"latest_seq":0,"surfaces":[]}""")
+                else -> json(200, "{}")
+            }
+        }
+        val g = graph()
+        assertTrue(g.credential.save(Paired(SAMPLE_TOKEN, "d-1", "Pixel", null), base))
+        val shown = settingsThatCanLeave(g)
+        rule.onNodeWithText("Unpair").performClick()
+        idleMainUntil("the unpair is in flight") { arrived.count == 0L }
+        rule.runOnIdle { shown.value = false }
+        rule.waitForIdle()
+        release.countDown()
+        idleMainUntil("the token is forgotten") { g.credential.pairedFor(base) == null && !g.pairing.state.busy }
+        rule.runOnIdle { shown.value = true }
+        waitForText(PairingWords.UNPAIRED)
+        rule.onNodeWithText("Not paired").assertExists()
+        assertEquals(listOf("DELETE", "POST"), seen.filter { it.method != "GET" }.map { it.method }.take(2))
     }
 
     @Test fun each_refused_code_shows_its_sentence() {

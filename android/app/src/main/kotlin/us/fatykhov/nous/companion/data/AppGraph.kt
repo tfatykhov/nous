@@ -42,4 +42,6 @@ class AppGraph(context: Context, box: SecretBox = KeystoreSecretBox()) {
     val functions = Functions(fmt = AndroidFormatter, opener = { url -> UrlOpener.open(appContext, url) }, zone = java.time.ZoneId.systemDefault())
     val push = PushManager(appContext, settings, http)
     val lifecycle = ForegroundLifecycle(this)
+    /** Pair and Unpair, on [mainScope] so they finish whatever the screen does. */
+    val pairing = PairingActions(this)
 }

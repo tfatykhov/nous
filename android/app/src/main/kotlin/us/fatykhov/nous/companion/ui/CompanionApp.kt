@@ -54,7 +54,6 @@ import us.fatykhov.nous.companion.core.Connection
 import us.fatykhov.nous.companion.core.Net
 import us.fatykhov.nous.companion.core.Pairing
 import us.fatykhov.nous.companion.core.PairingWords
-import us.fatykhov.nous.companion.core.RedeemOutcome
 import us.fatykhov.nous.companion.core.Refusal
 import us.fatykhov.nous.companion.core.Shell
 import us.fatykhov.nous.companion.core.SurfaceState
@@ -377,7 +376,8 @@ fun SettingsScreen(graph: AppGraph, onDisconnect: () -> Unit = {}, onBack: () ->
         val credVersion by rememberCredentialVersion(graph.credential)
         val web = remember(credVersion) { graph.webBaseUrl() }
         TextButton(onClick = { us.fatykhov.nous.companion.data.UrlOpener.open(graph.appContext, "$web/companion") }) { Text("Open web companion", color = t.accent) }
-        TextButton(onClick = { scope.launch {
+        // On the app's scope, like pairing: leaving the screen must not stop it halfway.
+        TextButton(onClick = { graph.mainScope.launch {
             graph.engine.stop()
             // Deregister FIRST, while the installation id still exists and the device
             // token still works: after clear() nothing could name the orphaned row, and
@@ -399,26 +399,17 @@ fun SettingsScreen(graph: AppGraph, onDisconnect: () -> Unit = {}, onBack: () ->
 @Composable
 private fun PairingSection(graph: AppGraph) {
     val t = LocalNousTheme.current
-    val scope = rememberCoroutineScope()
     val credVersion by rememberCredentialVersion(graph.credential)
     val paired = remember(credVersion) { graph.credential.pairedFor(graph.settings.baseUrl) }
     var code by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
-    var note by remember { mutableStateOf("") }
-    var noteIsError by remember { mutableStateOf(false) }
+    // The work runs on the app's scope (PairingActions), so it finishes if this screen goes away.
+    val work = graph.pairing.state
+    val busy = work.busy
+    LaunchedEffect(paired != null) { if (paired != null) code = "" }
     Section("Pairing") {
         if (paired != null) {
             KV("Status", "Paired"); KV("Paired as", paired.name)
-            NousButton(onClick = {
-                busy = true; note = ""
-                scope.launch {
-                    val report = Pairing.unpair(graph.http, graph.settings.installationId, paired = true, forget = { graph.credential.clear() })
-                    note = if (report.revoked) PairingWords.UNPAIRED else PairingWords.UNPAIRED_UNCONFIRMED
-                    noteIsError = !report.revoked
-                    busy = false
-                    graph.engine.connect()
-                }
-            }, enabled = !busy, busy = busy, modifier = Modifier.fillMaxWidth()) { Text(if (busy) "Unpairing…" else "Unpair", color = t.crit) }
+            NousButton(onClick = { graph.pairing.unpair() }, enabled = !busy, busy = busy, modifier = Modifier.fillMaxWidth()) { Text(if (busy) "Unpairing…" else "Unpair", color = t.crit) }
         } else {
             KV("Status", "Not paired")
             Text(PairingWords.NOT_PAIRED_HINT, color = t.muted, fontSize = 13.sp)
@@ -427,25 +418,11 @@ private fun PairingSection(graph: AppGraph) {
                 modifier = Modifier.fillMaxWidth(), singleLine = true, colors = fieldColors(),
                 keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters, autoCorrectEnabled = false, keyboardType = KeyboardType.Ascii),
             )
-            NousButton(onClick = {
-                busy = true; note = ""
-                scope.launch {
-                    val base = graph.settings.baseUrl
-                    when (val out = Pairing.redeem(graph.http, us.fatykhov.nous.companion.data.Endpoints.of(base), code, graph.settings.installationId, graph.settings.deviceName, graph.debuggable)) {
-                        is RedeemOutcome.Done -> if (graph.credential.save(out.paired, base)) {
-                            code = ""; note = PairingWords.paired(out.paired.name); noteIsError = false
-                            graph.engine.connect()
-                            graph.push.registerIfPossible()
-                        } else { note = PairingWords.NOT_STORED; noteIsError = true }
-                        is RedeemOutcome.Refused -> { note = PairingWords.of(out.error); noteIsError = true }
-                    }
-                    busy = false
-                }
-            }, enabled = !busy && code.isNotBlank(), busy = busy, kind = ButtonKind.Primary, modifier = Modifier.fillMaxWidth()) {
+            NousButton(onClick = { graph.pairing.pair(code) }, enabled = !busy && code.isNotBlank(), busy = busy, kind = ButtonKind.Primary, modifier = Modifier.fillMaxWidth()) {
                 Text(if (busy) "Pairing…" else "Pair this device", color = t.onAccent, fontWeight = FontWeight.SemiBold)
             }
         }
-        if (note.isNotEmpty()) Text(note, color = if (noteIsError) t.crit else t.muted, fontSize = 13.sp)
+        if (work.note.isNotEmpty()) Text(work.note, color = if (work.isError) t.crit else t.muted, fontSize = 13.sp)
     }
 }
 

@@ -1,6 +1,8 @@
 package us.fatykhov.nous.companion.core
 
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
@@ -181,6 +183,17 @@ class PairingTest {
         assertEquals(listOf("DELETE /a2ui/push/tokens/i", "POST /a2ui/devices/unpair"), http.log)
         assertTrue(forgotten)
         assertEquals(UnpairReport(pushDeleted = false, revoked = false), report)
+    }
+
+    @Test fun unpair_forgets_the_token_even_when_cancelled_halfway() = runTest {
+        val http = ScriptedHttp { method, _ -> if (method == "POST") awaitCancellation() else res(200, "{}") }
+        var forgotten = false
+        val job = launch { Pairing.unpair(http, "i", paired = true, forget = { forgotten = true }) }
+        runCurrent()   // the push row is deleted; the revoke is in flight
+        assertEquals(listOf("DELETE /a2ui/push/tokens/i", "POST /a2ui/devices/unpair"), http.log)
+        assertFalse(forgotten)
+        job.cancel(); job.join()
+        assertTrue(forgotten, "a phone must not stay paired after its push row is gone")
     }
 
     @Test fun an_unpaired_phone_deletes_its_push_row_and_calls_no_unpair() = runTest {
