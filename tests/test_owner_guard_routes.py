@@ -205,6 +205,16 @@ OWNER_ROUTES: dict[tuple[str, str], tuple[bytes, int, dict[str, object] | None]]
     ("DELETE", "/heartbeat/checks/dynamic/abc"): (b"", 503, {"error": "Heartbeat not enabled"}),
     ("POST", "/heartbeat/checks/dynamic/abc/trigger"): (b"", 503, {"error": "Heartbeat not enabled"}),
     ("POST", "/sleep/trigger"): (b"", 503, {"error": "Sleep handler not configured"}),
+    # Rubric and the memory-write-health acknowledgement
+    ("POST", "/rubric/propose-dimension"): (b"{}", 503, {"error": "Rubric system not enabled"}),
+    ("POST", "/rubric/proposals/abc/approve"): (b"{}", 503, {"error": "Rubric system not enabled"}),
+    ("POST", "/rubric/rollback"): (b"{}", 503, {"error": "Rubric system not enabled"}),
+    ("POST", "/rubric/evolve"): (b"", 503, {"error": "Rubric evolution not enabled"}),
+    ("POST", "/dashboard/memory-write-health/acknowledge"): (
+        b"{}",
+        400,
+        {"error": "rule must be one of ['H1', 'F1', 'S1', 'P1', 'R1', 'A1']"},
+    ),
 }
 # F114: the goal reads require a secret too; a read carries no body, so any media type passes with the proxy's.
 GOAL_READS = {
@@ -254,6 +264,11 @@ REST_ROUTE_SET = {
     ("DELETE", "/heartbeat/checks/dynamic/{name}"),
     ("POST", "/heartbeat/checks/dynamic/{name}/trigger"),
     ("POST", "/sleep/trigger"),
+    ("POST", "/rubric/propose-dimension"),
+    ("POST", "/rubric/proposals/{id}/approve"),
+    ("POST", "/rubric/rollback"),
+    ("POST", "/rubric/evolve"),
+    ("POST", "/dashboard/memory-write-health/acknowledge"),
 }
 
 
@@ -290,7 +305,7 @@ def _owner_route_ran(method: str, path: str, response: httpx.Response, *, owner_
 
 
 # Routes whose handler checks the media type itself: with the owner's secret and another type, the handler answers 415.
-OWN_MEDIA_CHECK: set[tuple[str, str]] = set()
+OWN_MEDIA_CHECK = {("POST", "/dashboard/memory-write-health/acknowledge")}
 
 
 @pytest.mark.parametrize(("method", "path"), list(OWNER_ROUTES))

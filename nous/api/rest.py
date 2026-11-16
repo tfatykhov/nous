@@ -3999,13 +3999,13 @@ def create_app(
         Route("/admin/search-weights", get_search_weights),
         owner_guard.route("/admin/search-weights", set_search_weights, methods=["POST"]),
         # F024 Phase 3b: Rubric endpoints
-        Route("/rubric/propose-dimension", propose_dimension, methods=["POST"]),
-        Route("/rubric/proposals/{id}/approve", approve_proposal, methods=["POST"]),
+        owner_guard.route("/rubric/propose-dimension", propose_dimension, methods=["POST"]),
+        owner_guard.route("/rubric/proposals/{id}/approve", approve_proposal, methods=["POST"]),
         Route("/rubric/proposals", list_proposals),
-        Route("/rubric/rollback", rollback_rubric, methods=["POST"]),
+        owner_guard.route("/rubric/rollback", rollback_rubric, methods=["POST"]),
         Route("/rubric/history", get_rubric_history),
         Route("/rubric/signals", get_outcome_signals),
-        Route("/rubric/evolve", trigger_evolution, methods=["POST"]),
+        owner_guard.route("/rubric/evolve", trigger_evolution, methods=["POST"]),
         Route("/rubric", get_rubric),
         # Dashboard API endpoints (F021) — MUST be before static Mount
         Route("/dashboard/graph", dashboard_graph),
@@ -4045,7 +4045,7 @@ def create_app(
         Route("/dashboard/intentions", dashboard_intentions),
         Route("/dashboard/attention", dashboard_attention),
         Route("/dashboard/autonomy", dashboard_autonomy),
-        Route(
+        owner_guard.route(
             "/dashboard/memory-write-health/acknowledge",
             dashboard_memory_write_health_acknowledge,
             methods=["POST"],
