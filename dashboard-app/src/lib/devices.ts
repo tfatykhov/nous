@@ -27,7 +27,8 @@ export interface DeviceList {
   /** Live devices oldest first, then the most recently revoked. */
   devices: Device[];
   pairing: Pairing;
-  redeem: { limited: boolean };
+  /** Whether redeeming a code is held back; an answer without it is read as not held back. */
+  redeem?: { limited: boolean };
 }
 
 /** A code just made: shown once, valid for `expires_in` seconds. */

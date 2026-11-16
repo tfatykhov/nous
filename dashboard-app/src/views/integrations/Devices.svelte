@@ -241,7 +241,7 @@
     {:else if serverLine}
       <p class="line {TONE[serverLine.tone]}">{serverLine.text}</p>
     {/if}
-    {#if list.redeem.limited}<p class="line tone-warn" role="status">{LIMITED_TEXT}</p>{/if}
+    {#if list.redeem?.limited === true}<p class="line tone-warn" role="status">{LIMITED_TEXT}</p>{/if}
     {#if pairError}<p class="note note-err" role="alert">{pairError}</p>{/if}
 
     <h3>Paired devices</h3>

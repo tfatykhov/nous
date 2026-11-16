@@ -441,6 +441,14 @@ describe('Devices: a pairing code', () => {
     expect(await s.findByText('Pairing is being held back for a minute because of too many tries.')).toBeTruthy();
   });
 
+  it('a list answer without its redeem field shows the list and reads as not held back', async () => {
+    handlers['GET /a2ui/devices'] = () => [200, { devices: [PIXEL()], pairing: null }];
+    const s = await shown();
+    expect(await s.findByText('Pixel 7')).toBeTruthy();
+    expect(s.queryByText('Pairing is being held back for a minute because of too many tries.')).toBeNull();
+    expect(s.queryByRole('alert')).toBeNull();
+  });
+
   it('with no code on screen, says what the server holds', async () => {
     listed = deviceList({ pairing: { state: 'closed_tries' } });
     const s = await shown();
