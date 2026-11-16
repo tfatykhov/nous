@@ -19,7 +19,7 @@ function install() {
     const body = typeof init.body === 'string' ? JSON.parse(init.body) : undefined;
     calls.push({ url, method, body });
     let answer: Answer = [500, { error: 'unexpected' }];
-    if (method === 'GET' && url === '/goals') answer = [200, { enabled: true, goals: listed }];
+    if (method === 'GET' && url.startsWith('/goals?state=')) answer = [200, { enabled: true, goals: listed, total: listed.length }];
     else if (url === '/goals/options') answer = [200, options];
     else if (url === '/background/state') answer = [404, { error: 'not found' }];
     else if (method === 'POST' && url === '/goals') {

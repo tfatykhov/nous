@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
-  ACTION_TEXT, ACTIONS, PENDING_TEXT, RESUME_BLOCKED_TEXT, actorWord, asksFirst, confirmText, createBody, createProblems,
+  ACTION_TEXT, ACTIONS, PENDING_TEXT, RESUME_BLOCKED_TEXT, actorWord, asksFirst, budgetProblem, confirmText, createBody,
+  createProblems, deadlineProblem, typedNumber,
   deadlineText, formatTokens, goalAction, haltState, journalKindWord, limitFields, listGoals, getGoal, nextSessionText,
   refusalText, resumeLabel, sessionOutcomeWord, spanText, stateWord, type Action, type CreateForm, type GoalState, type PauseReason,
 } from './goals';
@@ -41,6 +42,10 @@ describe('state words', () => {
     expect(word('draft')).toEqual({ text: 'Draft', tone: 'neutral' });
     expect(word('active', null, 3)).toEqual({ text: 'Working', tone: 'info' });
     expect(word('active')).toEqual({ text: 'Waiting for its next session', tone: 'ok' });
+    // While no session is started on the server, an approved goal is not about to run.
+    expect(stateWord({ state: 'active', pause_reason: null, open_session: null }, false)).toEqual({ text: 'Approved', tone: 'neutral' });
+    expect(stateWord({ state: 'active', pause_reason: null, open_session: 3 }, false)).toEqual({ text: 'Approved', tone: 'neutral' });
+    expect(stateWord({ state: 'paused', pause_reason: 'owner', open_session: null }, false)).toEqual({ text: 'Paused by you', tone: 'warn' });
     expect(word('paused', 'owner')).toEqual({ text: 'Paused by you', tone: 'warn' });
     expect(word('paused', 'waiting_for_owner')).toEqual({ text: 'Waiting for you to confirm it is done', tone: 'info' });
     expect(word('paused', 'error')).toEqual({ text: 'Paused after an error', tone: 'bad' });
@@ -109,7 +114,8 @@ describe('actions', () => {
     expect(resumeLabel({ pause_reason: 'waiting_for_owner' })).toBe('Not done yet, keep working');
     expect(resumeLabel({ pause_reason: 'owner' })).toBe('Resume');
     expect(RESUME_BLOCKED_TEXT).toEqual({ budget: 'Raise the budget first.', deadline: 'Extend the deadline first.' });
-    expect(PENDING_TEXT.stop).toBe('A stop was asked and is waiting for the driver.');
+    expect(PENDING_TEXT.stop).toBe('A stop was asked for. It has not happened yet.');
+    for (const text of Object.values(PENDING_TEXT)) expect(text).not.toMatch(/driver/);
   });
 });
 
@@ -167,6 +173,8 @@ describe('time words', () => {
     expect(nextSessionText(goalRow({ open_session: 3 }), NOW)).toBe('Session 3 running');
     expect(nextSessionText(goalRow({ state: 'paused', pause_reason: 'waiting_for_owner' }), NOW)).toBe(''); // the state word says it
     expect(nextSessionText(goalRow({ state: 'draft' }), NOW)).toBe('Not approved yet');
+    expect(nextSessionText(goalRow({ next_wake_at: hours(2) }), NOW, false)).toBe(''); // no session is started
+    expect(nextSessionText(goalRow({ open_session: 3 }), NOW, false)).toBe('');
     expect(deadlineText(goalRow({ deadline_at: hours(24 * 6) }), NOW)).toBe('Deadline in 6 days');
     expect(deadlineText(goalRow({ deadline_at: hours(-1) }), NOW)).toBe('Deadline passed');
     expect(deadlineText({ state: 'draft', deadline_at: null, deadline_days: 3 }, NOW)).toBe('Runs for 3 days once approved');
@@ -203,7 +211,7 @@ describe('requests', () => {
     await listGoals();
     await getGoal('G-0007', 200);
     expect(seen.map((s) => `${s.method} ${s.url}`)).toEqual([
-      'POST /goals/G-0007/confirm-done', 'POST /goals/a%2Fb/budget', 'GET /goals', 'GET /goals/G-0007?journal=200',
+      'POST /goals/G-0007/confirm-done', 'POST /goals/a%2Fb/budget', 'GET /goals?state=open', 'GET /goals/G-0007?journal=200',
     ]);
     expect(seen[0].headers).toEqual({ 'Content-Type': 'application/json' });
     expect(seen[1].body).toBe('{"total":5}');
@@ -227,7 +235,8 @@ describe('requests', () => {
       .toBe('G-0001 draft: only an active goal can be paused.');
     expect(refusalText(err(403, { error: 'forbidden' }))).toBe('Your sign-in is needed to change goals. Open the dashboard through the login page.');
     expect(refusalText(err(403), 'see')).toBe('Your sign-in is needed to see goals. Open the dashboard through the login page.');
-    expect(refusalText(err(undefined))).toBe('Could not reach the server. Nothing was changed.');
+    expect(refusalText(err(undefined))).toBe('No answer came back. Check the goal before trying again.');
+    expect(refusalText(err(undefined), 'see')).toBe('Could not reach the server.');
     expect(refusalText(err(500, { error: { nested: true } }))).toBe('The request failed (HTTP 500).');
     expect(refusalText(err(503))).toBe('Goals are off on this server.');
     expect(refusalText(err(500, '<html>stack</html>'))).toBe('The request failed (HTTP 500).');
@@ -252,5 +261,30 @@ describe('fixtures and words', () => {
     for (const action of ACTIONS) strings.push(confirmText(action, goal, { driverRunning: false, total: 1, day: 1, days: 1, now: NOW }));
     expect(strings.length).toBeGreaterThan(40);
     for (const s of strings) expect(s, s).not.toMatch(GLYPH);
+  });
+});
+
+describe('the budget and deadline forms', () => {
+  const options = OPTIONS();
+  const goal = goalDetail({ total_budget: 10_000_000, day_budget: 2_000_000 });
+  it('follow the server\'s ranges in its words, and an unchanged budget is not sent', () => {
+    expect(budgetProblem(20_000_000, 2_000_000, goal, options)).toBeNull();
+    expect(budgetProblem(0, 2_000_000, goal, options)).toBe('The total budget must be at least 1 and at most 1000000000.');
+    expect(budgetProblem(2_000_000_000, 2_000_000, goal, options)).toBe('The total budget must be at least 1 and at most 1000000000.');
+    expect(budgetProblem(10_000_000, Number.NaN, goal, options)).toBe('The day budget must be a whole number.');
+    expect(budgetProblem(1_000_000, 2_000_000, goal, options)).toBe('The day budget cannot be larger than the total budget.');
+    expect(budgetProblem(10_000_000, 2_000_000, goal, options)).toBe('Type a new total or day budget.');
+    const narrower = OPTIONS({ ranges: [{ field: 'total_budget', low: 1, high: 15_000_000, words: 'the total budget' }] });
+    expect(budgetProblem(20_000_000, 2_000_000, goal, narrower)).toBe('The total budget must be at least 1 and at most 15000000.');
+  });
+  it('a deadline change is 1 to the server\'s bound of whole days', () => {
+    expect(deadlineProblem(5, options)).toBeNull();
+    expect(deadlineProblem(90, options)).toBeNull();
+    for (const bad of [0, 91, Number.NaN, 1.5]) expect(deadlineProblem(bad, options), String(bad)).toBe('Type a whole number of days, 1 to 90.');
+    expect(deadlineProblem(30, OPTIONS({ bounds: { ...options.bounds!, deadline_days: 20 } }))).toBe('Type a whole number of days, 1 to 20.');
+  });
+  it('typed numbers are whole numbers or not a number', () => {
+    expect([typedNumber(' 42 '), typedNumber('-3')]).toEqual([42, -3]);
+    for (const bad of ['', '1.5', '1e3', '12a']) expect(Number.isNaN(typedNumber(bad)), bad).toBe(true);
   });
 });

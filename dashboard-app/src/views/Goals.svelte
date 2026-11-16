@@ -11,7 +11,7 @@
   import {
     DRIVER_OFF_TEXT, GOALS_OFF_TEXT, HALT_TEXT, HELD_TEXT, PILL, READ_FORBIDDEN_TEXT,
     deadlineText, formatNumber, getGoal, goalOptions, haltState, listGoals, nextSessionText, refusalText, spentPercent, stateWord,
-    type GoalDetail, type GoalList, type GoalOptions, type GoalRow, type HaltState,
+    type GoalDetail, type GoalFilter, type GoalList, type GoalOptions, type GoalRow, type HaltState,
   } from '../lib/goals';
   import type { ApiAnswerError } from '../lib/api';
 
@@ -22,29 +22,61 @@
   // refusal is the server's sentence. Text a goal's sessions wrote is shown as text nodes only.
 
   type Shown = { ref: string; detail: GoalDetail | null; error: unknown };
-  type Page = { list: GoalList; options: GoalOptions; halt: HaltState | null; shown: Shown | null };
+  type Page = { filter: GoalFilter; list: GoalList; options: GoalOptions; halt: HaltState | null; shown: Shown | null };
 
-  /** The goal the pane shows, and how much of its journal: read by each fetch, so one poll serves the whole screen. */
+  /** The goal the pane shows, how much of its journal, and which goals the list asks for: read by each fetch, so one
+   * poll serves the whole screen. */
   let want: string | null = null;
   let journalAll = $state(false);
+  let filter = $state<GoalFilter>('open');
   const JOURNAL_ALL = 200;
+  /** A fetch that has no answer after this long is given up: the screen says so, and the next tick tries again. */
+  const REQUEST_TIMEOUT_MS = 15_000;
+  /** The options change only with the server's settings: read once, and again on the page Refresh. */
+  let knownOptions: GoalOptions | null = null;
 
   async function fetchPage(signal?: AbortSignal): Promise<Page> {
     const ref = want;
     const all = journalAll;
-    const detail = ref
-      ? getGoal(ref, all ? JOURNAL_ALL : undefined, signal).then(
-          (d): Shown => ({ ref, detail: d.enabled ? (d as GoalDetail) : null, error: null }),
-          (error: unknown): Shown => ({ ref, detail: null, error }),
-        )
-      : Promise.resolve(null);
-    const [list, options, halt, shown] = await Promise.all([listGoals(signal), goalOptions(signal), haltState(signal), detail]);
-    return { list, options, halt, shown };
+    const asked = filter;
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(), REQUEST_TIMEOUT_MS);
+    const stop = () => timeout.abort();
+    signal?.addEventListener('abort', stop);
+    try {
+      const detail = ref
+        ? getGoal(ref, all ? JOURNAL_ALL : undefined, timeout.signal).then(
+            (d): Shown => ({ ref, detail: d.enabled ? (d as GoalDetail) : null, error: null }),
+            (error: unknown): Shown => ({ ref, detail: null, error }),
+          )
+        : Promise.resolve(null);
+      const [list, options, halt, shown] = await Promise.all([
+        listGoals(asked, timeout.signal),
+        knownOptions ?? goalOptions(timeout.signal),
+        haltState(timeout.signal),
+        detail,
+      ]);
+      if (options.enabled) knownOptions = options;
+      return { filter: asked, list, options, halt, shown };
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', stop);
+    }
   }
 
   const store = usePoll(makePollStore<Page>(fetchPage, 15_000));
-  /** The page Refresh: everything this screen shows. */
-  const refreshPage = () => store.refresh();
+  /** The page Refresh: everything this screen shows, the options included. */
+  const refreshPage = () => {
+    knownOptions = null;
+    return store.refresh();
+  };
+
+  // No poll while the tab is hidden: it starts again, with a fetch at once, when the tab is shown.
+  $effect(() => {
+    const seen = () => (document.hidden ? store.stop() : store.start());
+    document.addEventListener('visibilitychange', seen);
+    return () => document.removeEventListener('visibilitychange', seen);
+  });
 
   let forbidden = $derived(($store.error as ApiAnswerError | null)?.status === 403);
   let enabled = $derived($store.data?.list.enabled === true);
@@ -59,9 +91,18 @@
     { value: 'all', label: 'All' },
     { value: 'finished', label: 'Finished' },
   ];
-  let filter = $state('open');
   const isOpen = (g: GoalRow) => g.state === 'draft' || g.state === 'active' || g.state === 'paused';
-  let listed = $derived(goals.filter((g) => filter === 'all' || (filter === 'open') === isOpen(g)));
+  /** The list as the server sent it for the filter shown (an answer for another filter is not shown). */
+  let listed = $derived($store.data?.filter === filter ? goals : []);
+  let listTotal = $derived($store.data?.list.total ?? listed.length);
+  // A new filter asks the server at once.
+  let lastFilter: GoalFilter = 'open';
+  $effect(() => {
+    const now = filter;
+    if (now === lastFilter) return;
+    lastFilter = now;
+    untrack(() => void store.refresh());
+  });
 
   // ── Which pane is open ─────────────────────────────────────────────────────
   let sub = $derived($currentRoute === 'goals' ? $currentSub : '');
@@ -123,10 +164,19 @@
     });
   });
 
+  // Only an answer for the goal the pane shows is used: one fetched for another goal is never shown under this one.
   let shown = $derived($store.data?.shown && $store.data.shown.ref === paneRef ? $store.data.shown : null);
+  /** The last good detail of the goal the pane shows: when a later read of it fails, the pane keeps it (and what is
+   * typed in it) and says the read failed above it. */
+  let lastGood = $state<{ ref: string; detail: GoalDetail } | null>(null);
   $effect(() => {
-    if (shown?.detail) stay = shown.detail.ref;
+    if (shown?.detail) {
+      stay = shown.detail.ref;
+      lastGood = { ref: shown.ref, detail: shown.detail };
+    }
   });
+  let paneDetail = $derived(shown?.detail ?? (lastGood && lastGood.ref === paneRef ? lastGood.detail : null));
+  let readError = $derived(shown?.error && paneDetail ? refusalText(shown.error, 'see') : null);
   let missing = $derived((shown?.error as ApiAnswerError | null)?.status === 404);
 
   function showMore() {
@@ -175,15 +225,13 @@
         class="w-full max-md:min-h-11 aria-[current=page]:border-[var(--muted)] aria-[current=page]:bg-[var(--bg)]"
         aria-current={pane.kind === 'new' ? 'page' : undefined}>New goal</Button>
       <div class="filters"><FilterBar options={FILTERS} bind:value={filter} required label="Which goals to show" /></div>
-      {#if goals.length === 0}
-        <p class="empty">No goals yet.</p>
-      {:else if listed.length === 0}
-        <p class="empty">{filter === 'open' ? 'No open goals.' : 'No finished goals.'}</p>
+      {#if listed.length === 0}
+        <p class="empty">{filter === 'open' ? 'No open goals.' : filter === 'finished' ? 'No finished goals.' : 'No goals yet.'}</p>
       {:else}
         <ul>
           {#each listed as g (g.id)}
-            {@const word = stateWord(g)}
-            {@const next = nextSessionText(g, now)}
+            {@const word = stateWord(g, driverRunning)}
+            {@const next = nextSessionText(g, now, driverRunning)}
             {@const due = deadlineText(g, now)}
             <li>
               <a class="item" href={goalHref(g.ref)} aria-current={shown?.detail?.id === g.id ? 'page' : undefined}>
@@ -204,17 +252,19 @@
             </li>
           {/each}
         </ul>
+        {#if listTotal > listed.length}<p class="list-note">Showing the newest {listed.length} of {listTotal}.</p>{/if}
       {/if}
     </nav>
 
     {#if pane.kind !== 'list'}
-      <div class="detail" id="goal-pane" tabindex="-1" role="group" aria-label={pane.kind === 'new' ? 'New goal' : pane.ref}>
+      <div class="detail" id="goal-pane" tabindex="-1" role="group" aria-label={pane.kind === 'new' ? 'New goal' : (paneDetail?.title ?? pane.ref)}>
         <a class="back" href={LIST_HREF}>All goals</a>
         {#if pane.kind === 'new'}
           <NewGoal {options} onCreated={(ref) => void created(ref)} />
-        {:else if shown?.detail}
-          {#key shown.detail.id}
-            <GoalPane goal={shown.detail} {options} {halted} {now} {journalAll} onChanged={refreshPage} onMore={showMore} />
+        {:else if paneDetail}
+          {#if readError}<p class="read-error" role="alert">Could not read {pane.ref} again: {readError} What is shown is from the last read.</p>{/if}
+          {#key paneDetail.id}
+            <GoalPane goal={paneDetail} {options} {halted} {now} {journalAll} onChanged={() => store.refresh()} onMore={showMore} />
           {/key}
         {:else if missing}
           <section class="card" role="status">
@@ -277,6 +327,8 @@
   .back:hover { text-decoration: underline; }
   .empty { color: var(--muted); font-size: 0.875rem; text-align: center; padding: 1rem 0; margin: 0; }
   .list .empty { padding: 0.875rem 0 0.375rem; font-size: 0.8125rem; }
+  .list-note { font-size: 0.75rem; color: var(--muted); margin: 0.5rem 0.625rem 0; }
+  .read-error { font-size: 0.8125rem; color: var(--warn-text); margin: 0 0 0.75rem; overflow-wrap: anywhere; }
   .list:focus, .detail:focus { outline: none; }
   @media (max-width: 1040px) {
     /* One column: the list first, then (once something is picked) the pane alone, with a way back to the list. */

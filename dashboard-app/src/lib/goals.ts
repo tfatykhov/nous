@@ -134,7 +134,10 @@ const BASE = '/goals';
 /** A goal's route. A ref is encoded as a path segment whatever it holds. */
 export const goalPath = (ref: string) => `${BASE}/${encodeURIComponent(ref)}`;
 
-export const listGoals = (signal?: AbortSignal) => apiRequest<GoalList>(BASE, 'GET', undefined, signal);
+/** Which goals the list asks for: the open ones (the server's default), every one, or the finished ones. */
+export type GoalFilter = 'open' | 'all' | 'finished';
+export const listGoals = (filter: GoalFilter = 'open', signal?: AbortSignal) =>
+  apiRequest<GoalList>(`${BASE}?state=${filter}`, 'GET', undefined, signal);
 export const goalOptions = (signal?: AbortSignal) => apiRequest<GoalOptions>(`${BASE}/options`, 'GET', undefined, signal);
 export const getGoal = (ref: string, journal?: number, signal?: AbortSignal) =>
   apiRequest<GoalDetail | { enabled: false }>(`${goalPath(ref)}${journal ? `?journal=${journal}` : ''}`, 'GET', undefined, signal);
@@ -163,7 +166,10 @@ export const HALT_TEXT = 'Background work is halted. No goal starts a session un
 export const HELD_TEXT = 'Held by the halt';
 export const READ_FORBIDDEN_TEXT = 'Your sign-in is needed to see goals. Open the dashboard through the login page.';
 export const WRITE_FORBIDDEN_TEXT = 'Your sign-in is needed to change goals. Open the dashboard through the login page.';
-export const UNREACHABLE_TEXT = 'Could not reach the server. Nothing was changed.';
+/** A read that got no answer. */
+export const UNREACHABLE_TEXT = 'Could not reach the server.';
+/** A change whose answer was lost: it may or may not have been made. */
+export const NO_ANSWER_TEXT = 'No answer came back. Check the goal before trying again.';
 export const NO_CHANNEL_TEXT =
   'This goal has nowhere to ask you questions, so it cannot be approved. Set a default chat on the server, or cancel it and create it again with a channel.';
 export const DRAFT_NOTE = 'Nothing runs until you approve it.';
@@ -178,11 +184,17 @@ const PAUSED: Record<PauseReason, { text: string; tone: Tone }> = {
   deadline: { text: 'Paused for its deadline', tone: 'warn' },
 };
 
-/** A goal's state as a word and a colour. */
-export function stateWord(goal: Pick<GoalRow, 'state' | 'pause_reason' | 'open_session'>): { text: string; tone: Tone } {
+/** A goal's state as a word and a colour. While no session is started on the server (`driverRunning` false), an
+ * approved goal is only "Approved": nothing about it is about to run. */
+export function stateWord(
+  goal: Pick<GoalRow, 'state' | 'pause_reason' | 'open_session'>,
+  driverRunning = true,
+): { text: string; tone: Tone } {
   switch (goal.state) {
     case 'draft': return { text: 'Draft', tone: 'neutral' };
-    case 'active': return goal.open_session !== null ? { text: 'Working', tone: 'info' } : { text: 'Waiting for its next session', tone: 'ok' };
+    case 'active':
+      if (!driverRunning) return { text: 'Approved', tone: 'neutral' };
+      return goal.open_session !== null ? { text: 'Working', tone: 'info' } : { text: 'Waiting for its next session', tone: 'ok' };
     case 'paused': return (goal.pause_reason && PAUSED[goal.pause_reason]) || { text: 'Paused', tone: 'warn' };
     case 'done': return { text: 'Done', tone: 'ok' };
     case 'failed': return { text: 'Failed', tone: 'bad' };
@@ -277,6 +289,32 @@ function deadlineChangeText(goal: Pick<GoalDetail, 'deadline_days' | 'deadline_a
   return `This lets the goal keep working, and spending tokens, ${unit}, until ${until}.`;
 }
 
+const rangeOf = (options: GoalOptions, field: NumberLimit) => options.ranges?.find((r) => r.field === field);
+const inRange = (value: number, low: number, high: number) => Number.isInteger(value) && value >= low && value <= high;
+
+/** What is wrong with a new budget, in words; null when it can be sent. The ranges are the server's
+ * (`options.ranges`), the same as the create form's. `total` and `day` are what was typed, as numbers (NaN when the
+ * text is not a whole number). */
+export function budgetProblem(total: number, day: number, goal: Pick<GoalDetail, 'total_budget' | 'day_budget'>, options: GoalOptions): string | null {
+  for (const [value, field] of [[total, 'total_budget'], [day, 'day_budget']] as const) {
+    const range = rangeOf(options, field) ?? { low: 1, high: Number.MAX_SAFE_INTEGER, words: field };
+    if (!Number.isInteger(value)) return capital(`${range.words} must be a whole number`);
+    if (!inRange(value, range.low, range.high)) return capital(`${range.words} must be at least ${range.low} and at most ${range.high}`);
+  }
+  if (day > total) return capital('the day budget cannot be larger than the total budget');
+  if (total === goal.total_budget && day === goal.day_budget) return 'Type a new total or day budget.';
+  return null;
+}
+
+/** What is wrong with a number of days to add, in words; null when it can be sent. */
+export function deadlineProblem(days: number, options: GoalOptions): string | null {
+  const most = options.bounds?.deadline_days ?? 90;
+  return inRange(days, 1, most) ? null : `Type a whole number of days, 1 to ${most}.`;
+}
+
+/** What is typed in a number field, as a number: NaN unless it is a whole number. */
+export const typedNumber = (raw: string) => (/^-?\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN);
+
 /** The hint beside a Resume that the store would refuse. */
 export const RESUME_BLOCKED_TEXT: Record<'budget' | 'deadline', string> = {
   budget: 'Raise the budget first.',
@@ -284,9 +322,9 @@ export const RESUME_BLOCKED_TEXT: Record<'budget' | 'deadline', string> = {
 };
 
 export const PENDING_TEXT: Record<'run_now' | 'stop' | 'cancel', string> = {
-  run_now: 'A session was asked for and is waiting for the driver.',
-  stop: 'A stop was asked and is waiting for the driver.',
-  cancel: 'A cancel was asked and is waiting for the driver.',
+  run_now: 'A session was asked for. It has not started yet.',
+  stop: 'A stop was asked for. It has not happened yet.',
+  cancel: 'A cancel was asked for. It has not happened yet.',
 };
 
 const OUTCOMES: Record<string, string> = {
@@ -324,8 +362,14 @@ export function intervalText(seconds: number): string {
   return spanText(seconds * 1000);
 }
 
-/** When the next session is, in words; '' when the state word already says it. */
-export function nextSessionText(goal: Pick<GoalRow, 'state' | 'pause_reason' | 'open_session' | 'next_wake_at' | 'pending_request'>, now: number = Date.now()): string {
+/** When the next session is, in words; '' when the state word already says it, and for an approved goal while no
+ * session is started on the server. */
+export function nextSessionText(
+  goal: Pick<GoalRow, 'state' | 'pause_reason' | 'open_session' | 'next_wake_at' | 'pending_request'>,
+  now: number = Date.now(),
+  driverRunning = true,
+): string {
+  if (goal.state === 'active' && !driverRunning) return '';
   if (goal.open_session !== null) return `Session ${goal.open_session} running`;
   if (goal.state === 'draft') return 'Not approved yet';
   if (goal.state !== 'active') return '';
@@ -350,7 +394,7 @@ export const spentPercent = (spent: number, budget: number) => (budget > 0 ? Mat
 export function refusalText(err: unknown, doing: 'see' | 'change' = 'change'): string {
   const e = err as ApiAnswerError | null;
   const status = e?.status;
-  if (status === undefined) return UNREACHABLE_TEXT;
+  if (status === undefined) return doing === 'see' ? UNREACHABLE_TEXT : NO_ANSWER_TEXT;
   if (status === 403) return doing === 'see' ? READ_FORBIDDEN_TEXT : WRITE_FORBIDDEN_TEXT;
   if (status === 415) return 'The request was not sent as JSON, so it was refused.';
   const api = (e?.body as { error?: unknown } | undefined)?.error;

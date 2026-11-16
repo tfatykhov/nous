@@ -67,15 +67,15 @@
   <form onsubmit={submit} novalidate>
     <div class="field">
       <label for="goal-new-title">Title</label>
-      <input id="goal-new-title" bind:value={form.title} autocomplete="off" disabled={sending} />
+      <input id="goal-new-title" bind:value={form.title} autocomplete="off" maxlength={options.bounds?.title} disabled={sending} />
     </div>
     <div class="field">
       <label for="goal-new-objective">Objective</label>
-      <textarea id="goal-new-objective" rows="3" bind:value={form.objective} disabled={sending}></textarea>
+      <textarea id="goal-new-objective" rows="3" bind:value={form.objective} maxlength={options.bounds?.objective} disabled={sending}></textarea>
     </div>
     <div class="field">
       <label for="goal-new-done">What done looks like</label>
-      <textarea id="goal-new-done" rows="2" bind:value={form.done_when} disabled={sending}></textarea>
+      <textarea id="goal-new-done" rows="2" bind:value={form.done_when} maxlength={options.bounds?.done_when} disabled={sending}></textarea>
     </div>
 
     <fieldset class="sizes" disabled={sending || form.custom}>
@@ -116,7 +116,7 @@
 
     <div class="field">
       <label for="goal-new-channel">Channel{options.has_default_channel ? ' (optional)' : ''}</label>
-      <input id="goal-new-channel" bind:value={form.origin_channel} autocomplete="off" spellcheck="false" disabled={sending}
+      <input id="goal-new-channel" bind:value={form.origin_channel} autocomplete="off" spellcheck="false" maxlength={options.bounds?.channel} disabled={sending}
         placeholder="telegram:<chat id>" aria-describedby="goal-new-channel-hint" />
       <span class="hint" id="goal-new-channel-hint">{CHANNEL_HINT}{options.has_default_channel ? ' Left empty, they go to the default chat.' : ''}</span>
     </div>

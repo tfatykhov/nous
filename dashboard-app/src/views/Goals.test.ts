@@ -12,6 +12,8 @@ import type { Action, GoalDetail } from '../lib/goals';
 // answers with; every value is made up.
 
 type Answer = [number, unknown];
+/** A status for a request that never answers: it ends only when its signal aborts. */
+const HANG = -1;
 type Call = { url: string; method: string; body: unknown };
 
 let calls: Call[] = [];
@@ -32,7 +34,15 @@ function rowOf(d: GoalDetail) {
 
 function install(goals: GoalDetail[] = [A, B, C]) {
   details = Object.fromEntries(goals.map((g) => [g.ref, g]));
-  handlers['GET /goals'] = () => [200, { enabled: true, goals: Object.values(details).map(rowOf) }];
+  handlers['GET /goals'] = () => [200, { enabled: true, goals: Object.values(details).map(rowOf), total: Object.keys(details).length }];
+  // The list as the server filters it: open by default, finished or all on request.
+  for (const [filter, keep] of [['open', ['draft', 'active', 'paused']], ['finished', ['done', 'failed', 'cancelled']]] as const) {
+    handlers[`GET /goals?state=${filter}`] = () => {
+      const rows = Object.values(details).filter((g) => (keep as readonly string[]).includes(g.state)).map(rowOf);
+      return [200, { enabled: true, goals: rows, total: rows.length }];
+    };
+  }
+  handlers['GET /goals?state=all'] = handlers['GET /goals'];
   handlers['GET /goals/options'] = () => [200, OPTIONS()];
   handlers['GET /background/state'] = () => [404, { error: 'not found' }];
   vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit = {}) => {
@@ -50,6 +60,11 @@ function install(goals: GoalDetail[] = [A, B, C]) {
     else answer = [500, { error: `unexpected ${method} ${url}` }];
     const [status, payload] = await answer;
     if (status === 0) throw new TypeError('Failed to fetch');
+    if (status === HANG) {
+      return new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(new DOMException('The operation was aborted.', 'AbortError')));
+      });
+    }
     return new Response(payload === undefined ? '' : JSON.stringify(payload), { status });
   }));
 }
@@ -84,7 +99,7 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('Goals: the states', () => {
   it('goals off shows the card and no form', async () => {
-    handlers['GET /goals'] = () => [200, { enabled: false, goals: [] }];
+    handlers['GET /goals?state=open'] = () => [200, { enabled: false, goals: [] }];
     handlers['GET /goals/options'] = () => [200, { enabled: false }];
     render(Goals);
     expect(await screen.findByRole('heading', { name: 'Goals are off on this server.' })).toBeTruthy();
@@ -93,14 +108,14 @@ describe('Goals: the states', () => {
   });
 
   it('a 403 asks for the sign-in, in words', async () => {
-    handlers['GET /goals'] = () => [403, { error: 'forbidden' }];
+    handlers['GET /goals?state=open'] = () => [403, { error: 'forbidden' }];
     render(Goals);
     expect(await screen.findByText('Your sign-in is needed to see goals. Open the dashboard through the login page.')).toBeTruthy();
     expect(screen.queryByText('forbidden')).toBeNull();
   });
 
   it('a failed list says so', async () => {
-    handlers['GET /goals'] = () => [500, { error: 'the request could not be processed' }];
+    handlers['GET /goals?state=open'] = () => [500, { error: 'the request could not be processed' }];
     render(Goals);
     expect(await screen.findByText('Could not load the goals: The request could not be processed.')).toBeTruthy();
   });
@@ -108,7 +123,7 @@ describe('Goals: the states', () => {
   it('no goal yet: the list says so and the pane is the form', async () => {
     install([]);
     render(Goals);
-    expect(await screen.findByText('No goals yet.')).toBeTruthy();
+    expect(await screen.findByText('No open goals.')).toBeTruthy();
     expect(await screen.findByRole('region', { name: 'New goal' })).toBeTruthy();
   });
 
@@ -116,14 +131,15 @@ describe('Goals: the states', () => {
     render(Goals);
     const nav = await screen.findByRole('navigation', { name: 'Goals' });
     await within(nav).findByText('Tidy the notes');
-    expect(within(nav).getByText('Waiting for its next session')).toBeTruthy();
+    expect(within(nav).getAllByText('Approved').length).toBeGreaterThan(0); // no session is started on this server
     expect(within(nav).getByText('Paused for its budget')).toBeTruthy();
     expect(within(nav).queryByText('Old report')).toBeNull(); // finished: not in Open
     expect(within(nav).getAllByText('Today 23,000 of 2,000,000').length).toBe(2);
     expect(within(nav).getByText('In all 10,000,000 of 10,000,000 tokens')).toBeTruthy();
     expect(within(nav).getAllByText(/Deadline in \d+ days?|Deadline passed/).length).toBeGreaterThan(0);
     await fireEvent.click(within(nav).getByRole('button', { name: 'Finished' }));
-    expect(within(nav).getByText('Old report')).toBeTruthy();
+    expect(await within(nav).findByText('Old report')).toBeTruthy(); // the server is asked for the finished goals
+    expect(calls.some((c) => c.url === '/goals?state=finished')).toBe(true);
     expect(within(nav).getByText('Done')).toBeTruthy();
     expect(within(nav).queryByText('Tidy the notes')).toBeNull();
   });
@@ -266,7 +282,7 @@ describe('Goals: the actions', () => {
     const line = await within(region).findByText('G-0001 active: changed meanwhile; nothing was done.');
     expect(line.classList.contains('result-err')).toBe(true);
     expect(line.getAttribute('role')).toBe('alert');
-    expect(within(region).getByText('Waiting for its next session')).toBeTruthy();
+    expect(within(region).getByText('Approved')).toBeTruthy();
     expect((within(region).getByRole('button', { name: 'Pause' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
@@ -278,7 +294,7 @@ describe('Goals: the actions', () => {
     expect(await within(region).findByText('Your sign-in is needed to change goals. Open the dashboard through the login page.')).toBeTruthy();
     handlers['POST /goals/G-0001/pause'] = () => [0, null];
     await fireEvent.click(within(region).getByRole('button', { name: 'Pause' }));
-    expect(await within(region).findByText('Could not reach the server. Nothing was changed.')).toBeTruthy();
+    expect(await within(region).findByText('No answer came back. Check the goal before trying again.')).toBeTruthy();
   });
 
   it('raise budget and extend deadline send their bodies, and the sentence says raise or lower', async () => {
@@ -340,6 +356,7 @@ describe('Goals: the actions', () => {
   it('a goal waiting for the owner offers "Not done yet, keep working"; a paused goal shows its newest state sentence', async () => {
     details['G-0001'] = {
       ...A, state: 'paused', pause_reason: 'error', actions: ['resume', 'budget', 'deadline', 'note', 'cancel'],
+      pause_sentence: 'Session 3 could not start: the queue was full.',
       journal: [{ seq: 30, session_n: 3, kind: 'state', actor: 'harness', text: 'Session 3 could not start: the queue was full.', evidence: [], created_at: A.updated_at }],
     };
     details['G-0002'] = { ...B, pause_reason: 'waiting_for_owner', resume_blocked: null, actions: ['resume', 'confirm-done', 'cancel'] };
@@ -347,6 +364,7 @@ describe('Goals: the actions', () => {
     const region = await pane('Tidy the notes');
     expect(within(region).getByText('Paused after an error')).toBeTruthy();
     expect(within(region).getAllByText('Session 3 could not start: the queue was full.').length).toBe(2); // reason and journal
+    expect(region.querySelector('.reason')?.textContent).toBe('Session 3 could not start: the queue was full.'); // the server's pause_sentence
     go('#/goals/g/G-0002');
     const waiting = await pane('Sort the photos');
     await fireEvent.click(within(waiting).getByRole('button', { name: 'Not done yet, keep working' }));
@@ -358,8 +376,8 @@ describe('Goals: the actions', () => {
     details['G-0002'] = { ...B, state: 'draft', pause_reason: null, proposed_by: 'agent', resume_blocked: null, actions: ['approve', 'cancel'] };
     render(Goals);
     const region = await pane('Tidy the notes');
-    expect(within(region).getByText('A stop was asked and is waiting for the driver.')).toBeTruthy();
-    expect(within(region).getByText('Working')).toBeTruthy();
+    expect(within(region).getByText('A stop was asked for. It has not happened yet.')).toBeTruthy();
+    expect(within(region).getByText('Approved')).toBeTruthy();
     go('#/goals/g/G-0002');
     const draft = await pane('Sort the photos');
     expect(within(draft).getByText('Nous')).toBeTruthy();
@@ -438,5 +456,154 @@ describe('Goals: the source', () => {
     const src = read(f);
     expect(src).not.toMatch(/\{@html/);
     expect(src).not.toMatch(/href="#\//);
+  });
+});
+
+describe('Goals: the review fixes', () => {
+  it('with no session started on the server, an active goal reads "Approved" with no next-session line', async () => {
+    details['G-0001'] = { ...A, next_wake_at: new Date(Date.now() + 2 * 3_600_000).toISOString() };
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    expect(within(region).getByText('Approved')).toBeTruthy();
+    expect(screen.queryByText(/Next session/)).toBeNull();
+    expect(screen.queryByText('Waiting for its next session')).toBeNull();
+  });
+
+  it('a confirmation puts the focus on its sentence, never on Yes, and the group is described by the sentence', async () => {
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await fireEvent.click(within(region).getByRole('button', { name: 'Cancel goal' }));
+    const group = within(region).getByRole('group', { name: 'Confirm: Cancel goal' });
+    const sentence = document.getElementById(group.getAttribute('aria-describedby')!)!;
+    expect(sentence.textContent).toMatch(/^This ends the goal for good\./);
+    await waitFor(() => expect(document.activeElement).toBe(sentence));
+    expect(document.activeElement?.textContent).not.toMatch(/^Yes/);
+    await fireEvent.click(within(region).getByRole('button', { name: 'No' }));
+    await fireEvent.click(within(region).getByRole('button', { name: 'Change budget' }));
+    await waitFor(() => expect(document.activeElement).toBe(within(region).getByLabelText('Total budget (tokens)')));
+  });
+
+  it('Run now says what it spends before anything is sent', async () => {
+    acting('G-0001', 'run-now', { pending_request: 'run_now' });
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await fireEvent.click(within(region).getByRole('button', { name: 'Run a session now' }));
+    expect(within(region).getByText("This asks for a session as soon as sessions run on this server. It spends tokens from this goal's budget.")).toBeTruthy();
+    expect(posts()).toEqual([]);
+    await fireEvent.click(within(region).getByRole('button', { name: 'Yes, run a session now' }));
+    await within(region).findByText('Asked for a session now.');
+    expect(posts().map((c) => c.url)).toEqual(['/goals/G-0001/run-now']);
+  });
+
+  it('an invalid budget or deadline is said, and Yes cannot be pressed', async () => {
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await fireEvent.click(within(region).getByRole('button', { name: 'Change budget' }));
+    await fireEvent.input(within(region).getByLabelText('Total budget (tokens)'), { target: { value: '2000000000' } });
+    expect(within(region).getByText('The total budget must be at least 1 and at most 1000000000.')).toBeTruthy();
+    expect((within(region).getByRole('button', { name: 'Yes, change the budget' }) as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.input(within(region).getByLabelText('Total budget (tokens)'), { target: { value: '1000000' } });
+    expect(within(region).getByText('The day budget cannot be larger than the total budget.')).toBeTruthy();
+    expect((within(region).getByRole('button', { name: 'Yes, change the budget' }) as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.click(within(region).getByRole('button', { name: 'No' }));
+    await fireEvent.click(within(region).getByRole('button', { name: 'Extend deadline' }));
+    await fireEvent.input(within(region).getByLabelText('More days'), { target: { value: '91' } });
+    expect(within(region).getByText('Type a whole number of days, 1 to 90.')).toBeTruthy();
+    expect((within(region).getByRole('button', { name: 'Yes, extend the deadline' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(posts()).toEqual([]);
+  });
+
+  it('a failed read of the open goal keeps the last good detail and what was typed, and says so above it', async () => {
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    const box = within(region).getByLabelText('A note for the next session') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'Half a thought' } });
+    handlers['GET /goals/G-0001'] = () => [500, { error: 'the request could not be processed' }];
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByText(/^Could not read G-0001 again: The request could not be processed\./)).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Tidy the notes' })).toBe(region);
+    expect((within(region).getByLabelText('A note for the next session') as HTMLTextAreaElement).value).toBe('Half a thought');
+    delete handlers['GET /goals/G-0001'];
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(screen.queryByText(/^Could not read G-0001 again/)).toBeNull());
+  });
+
+  it('the pane never shows a goal fetched for another address', async () => {
+    const hold = held();
+    render(Goals);
+    await pane('Tidy the notes');
+    handlers['GET /goals/G-0002'] = () => hold.promise;
+    go('#/goals/g/G-0002');
+    await waitFor(() => expect(screen.queryByRole('region', { name: 'Tidy the notes' })).toBeNull());
+    expect(screen.getAllByText('Loading…').length).toBeGreaterThan(0);
+    hold.resolve([200, details['G-0002']]);
+    expect(await pane('Sort the photos')).toBeTruthy();
+  });
+
+  it('cut lists say so in words, and the pane is named by the goal\'s title', async () => {
+    const sessions = Array.from({ length: 50 }, (_, i) => ({ ...A.sessions[0], n: i + 11 }));
+    const journal = Array.from({ length: 200 }, (_, i) => ({ seq: 1000 - i, session_n: null, kind: 'progress', actor: 'chain', text: `row ${i}`, evidence: [], created_at: A.updated_at }));
+    details['G-0001'] = { ...A, sessions, sessions_total: 60, journal };
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    expect(within(region).getByText('Showing the newest 50 of 60.')).toBeTruthy();
+    await fireEvent.click(within(region).getByRole('button', { name: 'Show more' }));
+    expect(await within(region).findByText('Showing the newest 200 entries.')).toBeTruthy();
+    expect(within(region).queryByRole('button', { name: 'Show more' })).toBeNull();
+    expect(screen.getByRole('group', { name: 'Tidy the notes' }).id).toBe('goal-pane');
+  });
+
+  it('the options are read once, and again on the page Refresh', async () => {
+    render(Goals);
+    await pane('Tidy the notes');
+    const reads = () => calls.filter((c) => c.url === '/goals/options').length;
+    expect(reads()).toBe(1);
+    acting('G-0001', 'pause', { state: 'paused', pause_reason: 'owner', actions: ['resume', 'cancel'] });
+    await fireEvent.click(screen.getByRole('button', { name: 'Pause' }));
+    await screen.findByText('Paused: no new session starts. A session already running finishes.');
+    expect(reads()).toBe(1);
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await waitFor(() => expect(reads()).toBe(2));
+  });
+
+  it('the create form holds no more text than the server takes', async () => {
+    go('#/goals/new');
+    render(Goals);
+    const form = await screen.findByRole('region', { name: 'New goal' });
+    const bounds = OPTIONS().bounds!;
+    expect(within(form).getByLabelText('Title').getAttribute('maxlength')).toBe(String(bounds.title));
+    expect(within(form).getByLabelText('Objective').getAttribute('maxlength')).toBe(String(bounds.objective));
+    expect(within(form).getByLabelText('What done looks like').getAttribute('maxlength')).toBe(String(bounds.done_when));
+    expect(within(form).getByLabelText('Channel').getAttribute('maxlength')).toBe(String(bounds.channel));
+  });
+});
+
+describe('Goals: the poll', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+  });
+
+  it('pauses while the tab is hidden and reads at once when it is shown again', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(Goals);
+    await pane('Tidy the notes');
+    const lists = () => calls.filter((c) => c.url.startsWith('/goals?')).length;
+    const before = lists();
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(lists()).toBe(before);
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => false });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await vi.waitFor(() => expect(lists()).toBe(before + 1));
+  });
+
+  it('a read with no answer is given up, and the screen says the server could not be reached', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    handlers['GET /goals?state=open'] = () => [HANG, null];
+    render(Goals);
+    await vi.advanceTimersByTimeAsync(16_000);
+    await vi.waitFor(() => expect(screen.getByText('Could not load the goals: Could not reach the server.')).toBeTruthy());
   });
 });

@@ -3,7 +3,8 @@
   import { Button } from '../../lib/ui/button';
   import { fmtUtc } from '../../lib/harness';
   import {
-    ACTION_TEXT, DRIVER_OFF_TEXT, HELD_TEXT, NO_CHANNEL_TEXT, PENDING_TEXT, PILL, RESUME_BLOCKED_TEXT,
+    ACTION_TEXT, DRIVER_OFF_TEXT, HELD_TEXT, NO_CHANNEL_TEXT, PENDING_TEXT, PILL, RESUME_BLOCKED_TEXT, budgetProblem,
+    deadlineProblem, typedNumber,
     actorWord, asksFirst, confirmText, deadlineText, formatNumber, formatTokens, fromOwner, goalAction, intervalText,
     journalKindWord, nextSessionText, proposerWord, refusalText, resumeLabel, sessionOutcomeWord, spanText, spentPercent,
     stateWord, type Action, type GoalDetail, type GoalOptions, type PlanStep,
@@ -42,10 +43,8 @@
   let noteResult = $state<Note | null>(null);
 
   let driverRunning = $derived(options.driver_running === true);
-  let word = $derived(stateWord(goal));
+  let word = $derived(stateWord(goal, driverRunning));
   let buttons = $derived(goal.actions.filter((a) => a !== 'note'));
-  /** The newest state row: the store's (or the driver's) own sentence of why the goal is as it is. */
-  let lastState = $derived(goal.journal.find((row) => row.kind === 'state'));
   let openSteps = $derived(goal.plan.filter((s) => !closed(s)));
   let closedSteps = $derived(goal.plan.filter(closed));
 
@@ -64,17 +63,15 @@
   const byId = (id: string) => document.getElementById(id);
   const buttonId = (action: Action) => `goal-a.${goal.ref}.${action}`;
 
-  function wholeNumber(raw: string): number | undefined {
-    return /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : undefined;
-  }
-  let newTotal = $derived(wholeNumber(total));
-  let newDay = $derived(wholeNumber(day));
-  let newDays = $derived(wholeNumber(days));
-  let budgetReady = $derived(
-    newTotal !== undefined && newDay !== undefined && newTotal > 0 && newDay > 0
-      && (newTotal !== goal.total_budget || newDay !== goal.day_budget),
-  );
-  let deadlineReady = $derived(newDays !== undefined && newDays >= 1 && newDays <= (options.bounds?.deadline_days ?? 90));
+  // The budget and deadline forms: the same ranges as the create form (the server's); Yes only for a valid change.
+  let newTotal = $derived(typedNumber(total));
+  let newDay = $derived(typedNumber(day));
+  let newDays = $derived(typedNumber(days));
+  let budgetWrong = $derived(budgetProblem(newTotal, newDay, goal, options));
+  let deadlineWrong = $derived(deadlineProblem(newDays, options));
+  let budgetReady = $derived(budgetWrong === null);
+  let deadlineReady = $derived(deadlineWrong === null);
+  const sentenceId = () => `goal-s.${goal.ref}`;
 
   async function press(action: Action) {
     if (busy) return;
@@ -86,7 +83,8 @@
     if (!asksFirst(action)) return run(action);
     confirming = action;
     await tick();
-    byId(`goal-c.${goal.ref}`)?.querySelector<HTMLElement>('input, button')?.focus();
+    // The focus never lands on Yes: on the form's first field, else on the sentence, which is read first.
+    (byId(`goal-c.${goal.ref}`)?.querySelector<HTMLElement>('input') ?? byId(sentenceId()))?.focus();
   }
 
   async function no() {
@@ -187,9 +185,9 @@
     <div class="state">
       <span class="status-pill {PILL[word.tone]}">{word.text}</span>
       {#if halted && goal.state === 'active'}<span class="status-pill status-pill--warn">{HELD_TEXT}</span>{/if}
-      {#if nextSessionText(goal, now)}<span class="when">{nextSessionText(goal, now)}</span>{/if}
+      {#if nextSessionText(goal, now, driverRunning)}<span class="when">{nextSessionText(goal, now, driverRunning)}</span>{/if}
     </div>
-    {#if goal.state === 'paused' && lastState}<p class="reason">{lastState.text}</p>{/if}
+    {#if goal.pause_sentence}<p class="reason">{goal.pause_sentence}</p>{/if}
     {#if goal.pending_request}<p class="reason">{PENDING_TEXT[goal.pending_request]}</p>{/if}
     {#if !driverRunning && (goal.state === 'draft' || goal.state === 'active')}<p class="reason">{DRIVER_OFF_TEXT}</p>{/if}
     {#if goal.state === 'draft' && !goal.actions.includes('approve')}<p class="reason">{NO_CHANNEL_TEXT}</p>{/if}
@@ -215,7 +213,7 @@
 
     {#if confirming}
       {@const action = confirming}
-      <div class="confirm" id="goal-c.{goal.ref}" role="group" aria-label="Confirm: {label(action)}">
+      <div class="confirm" id="goal-c.{goal.ref}" role="group" aria-label="Confirm: {label(action)}" aria-describedby={sentenceId()}>
         {#if action === 'budget'}
           <div class="fields">
             <div class="field">
@@ -227,15 +225,15 @@
               <input id="goal-d.{goal.ref}" inputmode="numeric" autocomplete="off" bind:value={day} disabled={busy !== null} />
             </div>
           </div>
-          <p>{budgetReady ? confirmText('budget', goal, { driverRunning, total: newTotal, day: newDay }) : 'Type a new total or day budget, in whole tokens.'}</p>
+          <p id={sentenceId()} tabindex="-1" class:wrong={!budgetReady}>{budgetReady ? confirmText('budget', goal, { driverRunning, total: newTotal, day: newDay }) : budgetWrong}</p>
         {:else if action === 'deadline'}
           <div class="field">
             <label for="goal-e.{goal.ref}">More days</label>
             <input id="goal-e.{goal.ref}" inputmode="numeric" autocomplete="off" bind:value={days} disabled={busy !== null} />
           </div>
-          <p>{deadlineReady ? confirmText('deadline', goal, { driverRunning, days: newDays, now }) : `Type a number of days, 1 to ${options.bounds?.deadline_days ?? 90}.`}</p>
+          <p id={sentenceId()} tabindex="-1" class:wrong={!deadlineReady}>{deadlineReady ? confirmText('deadline', goal, { driverRunning, days: newDays, now }) : deadlineWrong}</p>
         {:else}
-          <p>{confirmText(action, goal, { driverRunning })}</p>
+          <p id={sentenceId()} tabindex="-1">{confirmText(action, goal, { driverRunning })}</p>
         {/if}
         <div class="actions">
           <Button size="sm" class="max-md:min-h-11 max-md:px-4" variant={ACTION_TEXT[action].ends ? 'destructive' : 'default'}
@@ -309,6 +307,7 @@
 
   <div class="card">
     <h3>Sessions</h3>
+    {#if goal.sessions_total > goal.sessions.length}<p class="hint">Showing the newest {goal.sessions.length} of {goal.sessions_total}.</p>{/if}
     {#if goal.sessions.length === 0}
       <p class="hint">No session has run yet.</p>
     {:else}
@@ -346,6 +345,7 @@
           </li>
         {/each}
       </ul>
+      {#if goal.journal.length >= (journalAll ? 200 : 50)}<p class="hint">Showing the newest {goal.journal.length} entries.</p>{/if}
       {#if !journalAll && goal.journal.length >= 50}
         <div class="actions">
           <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" onclick={onMore}>Show more</Button>
@@ -388,6 +388,8 @@
   .actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.75rem; }
   .confirm { margin-top: 0.75rem; padding: 0.75rem 0.875rem; border-radius: var(--card-radius-sm); background: var(--wash); font-size: 0.875rem; }
   .confirm p { margin: 0.5rem 0 0; }
+  .confirm p:focus { outline: none; }
+  .confirm p.wrong { color: var(--warn-text); }
   .confirm .actions { margin-top: 0.5rem; }
   .fields { display: flex; gap: 0.5rem 0.75rem; flex-wrap: wrap; }
   .field { display: flex; flex-direction: column; gap: 0.25rem; max-width: 36rem; flex: 1 1 12rem; }
