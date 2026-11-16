@@ -2,6 +2,7 @@ package us.fatykhov.nous.companion.data
 
 import android.content.Context
 import android.content.pm.ApplicationInfo
+import android.security.NetworkSecurityPolicy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -13,8 +14,15 @@ import us.fatykhov.nous.companion.core.SyncEngine
 import us.fatykhov.nous.companion.core.TokenPolicy
 import java.io.File
 
-/** Hand-wired object graph (no DI framework for a beta). One per process. [box] is replaceable for tests only. */
-class AppGraph(context: Context, box: SecretBox = KeystoreSecretBox()) {
+/**
+ * Hand-wired object graph (no DI framework for a beta). One per process. [box] and
+ * [cleartextPermitted] (the build's network security config) are replaceable for tests only.
+ */
+class AppGraph(
+    context: Context,
+    box: SecretBox = KeystoreSecretBox(),
+    private val cleartextPermitted: (host: String) -> Boolean = { NetworkSecurityPolicy.getInstance().isCleartextTrafficPermitted(it) },
+) {
     val appContext: Context = context.applicationContext
     val settings = Settings(appContext)
     /** Read at run time: the project generates no BuildConfig. A release build is not debuggable. */
@@ -24,6 +32,15 @@ class AppGraph(context: Context, box: SecretBox = KeystoreSecretBox()) {
     val mainScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     val http = OkHttpTransport(settings, credential, debuggable)
     val engine = SyncEngine(store, http, mainScope, tokenSent = ::tokenSent)
+
+    /**
+     * Whether the configured address is plain http on a build that will not use clear text
+     * (the release build): nothing can reach it, and the screens say to use the https address.
+     */
+    fun needsHttps(): Boolean {
+        val e = Endpoints.of(settings.baseUrl) ?: return false
+        return e.scheme == "http" && !cleartextPermitted(e.host)
+    }
 
     /** Whether calls to the configured address carry the device token (paired there, and the policy allows it). */
     fun tokenSent(): Boolean {

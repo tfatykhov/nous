@@ -65,6 +65,9 @@ import us.fatykhov.nous.companion.push.TokenState
 /** Android 16+ runtime permission for private / link-local / CGNAT addresses; a string so older compile targets need no constant. */
 private const val LOCAL_NETWORK_PERMISSION = "android.permission.ACCESS_LOCAL_NETWORK"
 
+/** Shown in the inbox and Settings when the address is plain http on a build that will not use clear text. */
+const val NEEDS_HTTPS = "This app needs the https address of Nous. Disconnect, then connect again with the https address."
+
 /** Opens Settings from anywhere in the tree (a refused tap offers it); a no-op where no shell provides it. */
 val LocalOpenSettings = staticCompositionLocalOf<() -> Unit> { {} }
 
@@ -282,6 +285,16 @@ private fun NotPaired(refused: Refusal, openSettings: () -> Unit) {
 private fun NotConnected(graph: AppGraph, openSettings: () -> Unit) {
     val t = LocalNousTheme.current
     graph.engine.refused?.let { NotPaired(it, openSettings); return }
+    if (graph.needsHttps()) {
+        // Not a network problem: this build will never send plain http, so retrying cannot help.
+        Column(Modifier.fillMaxWidth().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Spacer(Modifier.height(32.dp))
+            Text("Use the https address", color = t.text, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+            Text(NEEDS_HTTPS, color = t.soft, fontSize = 15.sp)
+            NousButton(onClick = openSettings, kind = ButtonKind.Primary, modifier = Modifier.fillMaxWidth().height(54.dp), shape = RoundedCornerShape(14.dp)) { Text("Open Settings", color = t.onAccent, fontWeight = FontWeight.SemiBold) }
+        }
+        return
+    }
     Column(Modifier.fillMaxWidth().padding(28.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp)) {
         Spacer(Modifier.height(32.dp))
         Text("Can't reach Nous", color = t.text, fontSize = 24.sp, fontWeight = FontWeight.Bold)
@@ -353,6 +366,7 @@ fun SettingsScreen(graph: AppGraph, onDisconnect: () -> Unit = {}, onBack: () ->
         Row(verticalAlignment = Alignment.CenterVertically) { TextButton(onClick = onBack) { Text("← Inbox", color = t.text) }; Text("Settings", color = t.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold) }
         Section("Connection") {
             KV("Nous address", graph.settings.baseUrl); KV("Status", graph.store.connection.name.lowercase()); KV("Device name", graph.settings.deviceName)
+            if (graph.needsHttps()) Text(NEEDS_HTTPS, color = t.crit, fontSize = 13.sp)
         }
         PairingSection(graph)
         Section("Notifications") {
