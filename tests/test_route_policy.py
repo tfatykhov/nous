@@ -3,9 +3,10 @@
 No database: the app is built by ``main.build_app`` with its components, the MCP server and the Telegram sender
 replaced by stand-ins. Its lifespan runs only in the test that checks it adds no route; elsewhere it never runs, so no
 handler reaches a component. A route group behind a setting
-is in the app only when the setting is on: this fixture turns on ``mcp_enabled`` (the ``/mcp`` mount) and
-``mcp_client_enabled`` (the ``/integrations/mcp`` routes). The ``/dashboard/v2`` mount and its redirects exist only
-when the dashboard build does, so the test allows them and does not require them.
+is in the app only when the setting is on: this fixture turns on ``mcp_enabled`` (the ``/mcp`` mount),
+``mcp_client_enabled`` (the ``/integrations/mcp`` routes) and ``a2ui_enabled`` (the ``/a2ui`` routes, the companion
+devices' among them). The ``/dashboard/v2`` mount and its redirects exist only when the dashboard build does, so the
+test allows them and does not require them.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from starlette.routing import Mount, Route
 
 from nous import main as M
 from nous.api.companion_assets import OverlayStaticFiles
+from nous.api.companion_devices import NOT_VALID
 from nous.config import Settings
 
 OWNER_VALUE = "owner-only-test-value"
@@ -34,11 +36,16 @@ OWNER = "owner"  # OwnerGuard.route: the owner's or the proxy's secret
 ENTRY = "entry"  # EntryGate.route: the entry gate, under NOUS_OWNER_ENTRY_MODE
 OWNER_SECRET = "owner secret"  # the route's own check of the owner's secret
 PROXY_SECRET = "proxy secret"  # the route's own check of the proxy's secret
-PER_VERB = "per verb: each registration declares owner_proof"
+PER_VERB = (
+    "per verb: a verb registered with owner_proof needs the owner's or the proxy's secret or a paired device's token"
+)
 PER_FUNCTION = "per function, against the surface's nonce"
 INSTALLATION = "keyed by the installation id in the request"
+PAIRING_CODE = "a pairing code, valid once, under the redeem limiter"  # nous/api/companion_devices.py
+DEVICE_TOKEN = "the calling device's own token"  # nous/api/companion_devices.py
+RULES = {OWNER, ENTRY, OWNER_SECRET, PROXY_SECRET, PER_VERB, PER_FUNCTION, INSTALLATION, PAIRING_CODE, DEVICE_TOKEN}
 # The rules the behavioural test checks by sending a call that carries neither secret and expecting 403.
-RULES_CHECKED_BY_A_403 = {OWNER, ENTRY, OWNER_SECRET, PROXY_SECRET}
+RULES_CHECKED_BY_A_403 = {OWNER, ENTRY, OWNER_SECRET, PROXY_SECRET, DEVICE_TOKEN}
 
 # Every route not listed in READS, by (method, path), mapped to the name of the check it applies.
 ROUTE_RULE: dict[tuple[str, str], str] = {
@@ -68,6 +75,11 @@ ROUTE_RULE: dict[tuple[str, str], str] = {
     ("POST", "/a2ui/push/test"): INSTALLATION,
     ("DELETE", "/a2ui/push/tokens/{installation_id}"): INSTALLATION,
     ("PUT", "/a2ui/push/tokens"): INSTALLATION,
+    ("POST", "/a2ui/devices/pairings"): OWNER,
+    ("GET", "/a2ui/devices"): OWNER,
+    ("DELETE", "/a2ui/devices/{id}"): OWNER,
+    ("POST", "/a2ui/devices/redeem"): PAIRING_CODE,
+    ("POST", "/a2ui/devices/unpair"): DEVICE_TOKEN,
     # Heartbeat, undo and sleep
     ("POST", "/heartbeat/trigger"): OWNER,
     ("PUT", "/heartbeat/config"): OWNER,
@@ -254,6 +266,7 @@ def _app(tmp_path, *, digests: bool = True) -> Starlette:
         mcp_server_secret_sha256=MCP_DIGEST if digests else "",
         mcp_enabled=True,
         mcp_client_enabled=True,
+        a2ui_enabled=True,
     )
     return M.build_app(settings)
 
@@ -333,6 +346,46 @@ def test_every_declared_rule_and_read_names_a_route(tmp_path, stand_ins) -> None
     assert set(ROUTE_RULE) - rows == set(), "ROUTE_RULE names a route the app does not have"
     assert {("GET", path) for path in READS - BUILD_ONLY_READS} - rows == set(), "READS names a GET the app lacks"
     assert set(MOUNT_RULE) - set(_mounts(app)) <= BUILD_ONLY_MOUNTS
+
+
+def test_every_rule_is_one_this_file_names_and_tests() -> None:
+    assert set(ROUTE_RULE.values()) <= RULES, "a new kind of check: name it in RULES and test it in this file"
+
+
+async def test_the_redeem_route_refuses_a_call_without_a_valid_code(tmp_path, stand_ins) -> None:
+    """The pairing code is the redeem route's check: with no pairing open, a well-formed body is refused as an invalid
+    code, and a body that is not JSON before it is read. The device store is never reached (its database is a
+    stand-in here, so reaching it would answer 500)."""
+    app = _app(tmp_path)
+    body = b'{"code": "ABCD-EFGH", "installation_id": "an-installation"}'
+    no_code = await _send(
+        app, "POST", "/a2ui/devices/redeem", content=body, headers={"content-type": "application/json"}
+    )
+    not_json = await _send(app, "POST", "/a2ui/devices/redeem", content=b"not json")
+    with_owner = await _send(
+        app,
+        "POST",
+        "/a2ui/devices/redeem",
+        content=body,
+        headers={"content-type": "application/json", "X-Nous-Owner-Secret": OWNER_VALUE},
+    )
+    assert (no_code.status_code, no_code.json()) == (404, NOT_VALID)
+    assert not_json.status_code == 415
+    assert (with_owner.status_code, with_owner.json()) == (404, NOT_VALID)  # a secret is not a code
+
+
+async def test_the_unpair_route_takes_only_a_device_token(tmp_path, stand_ins) -> None:
+    """The device's own token is the unpair route's check: neither the owner's nor the proxy's secret stands in."""
+    app = _app(tmp_path)
+    answers = [
+        (await _send(app, "POST", "/a2ui/devices/unpair", content=b"{}", headers=headers)).status_code
+        for headers in (
+            {"content-type": "application/json"},
+            {"content-type": "application/json", "X-Nous-Owner-Secret": OWNER_VALUE},
+            {"content-type": "application/json", "X-Nous-Proxy-Secret": PROXY_VALUE},
+        )
+    ]
+    assert answers == [403, 403, 403]
 
 
 def test_each_declared_rule_is_the_marker_the_route_carries(tmp_path, stand_ins) -> None:
