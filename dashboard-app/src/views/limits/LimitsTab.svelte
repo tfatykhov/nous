@@ -139,8 +139,10 @@
             <Button size="sm" class="max-md:min-h-11 max-md:px-4" disabled={busy !== null || !edited(row)}
               aria-label="Save {row.label}" onclick={() => void save(row)}>{busy === row.key ? 'Saving…' : 'Save'}</Button>
             {#if row.source === 'owner'}
-              <Button variant="outline" size="sm" class="lim-reset max-md:min-h-11 max-md:px-4" disabled={busy !== null}
-                aria-label="Use the host's value for {row.label}" onclick={() => void useHost(row)}>Use the host's value</Button>
+              <span class="reset">
+                <Button variant="outline" size="sm" class="max-md:min-h-11 max-md:px-4" disabled={busy !== null}
+                  aria-label="Use the host's value for {row.label}" onclick={() => void useHost(row)}>Use the host's value</Button>
+              </span>
             {:else}
               <span class="reset-slot" aria-hidden="true"></span>
             {/if}
@@ -222,7 +224,7 @@
   @media (max-width: 768px) {
     .row { grid-template-columns: minmax(0, 1fr); }
     .edit { grid-template-columns: 7rem minmax(0, 1fr) auto; }
-    .edit :global(.lim-reset) { grid-column: 1 / -1; justify-self: start; }
+    .reset { grid-column: 1 / -1; }
     .reset-slot { display: none; }
     .value { height: 2.75rem; }
   }
