@@ -148,6 +148,101 @@ export const createGoal = (body: CreateBody) =>
 export const goalAction = (ref: string, action: Action, body?: object) =>
   timed((signal) => apiRequest<GoalDetail | GoalMade>(`${goalPath(ref)}/${action}`, 'POST', body, signal));
 
+// ── The tools a goal may use without asking (F115) ─────────────────────────────
+// GET /goals/{ref}/tools, PUT and DELETE /goals/{ref}/tools/{tool}. Every sentence of this section comes from the
+// server's answer (nous/goals/grants.py); the page lays them out.
+
+/** What a tool does when a goal may use it, as the server words it. An MCP client tool names its server. */
+export interface GoalToolWords {
+  tool: string;
+  label: string;
+  group: string;
+  classes: string[];
+  does: string;
+  note: string;
+  says: string;
+  confirm: string;
+  server_name: string | null;
+  server_host: string | null;
+  server_id: string | null;
+}
+export interface GoalToolGrant extends GoalToolWords {
+  granted_at: string | null;
+  usable: boolean;
+  not_usable_why: string | null;
+}
+export interface GoalToolOption extends GoalToolWords {
+  /** Why it cannot be allowed now; null when it can. */
+  blocked: { code: string; sentence: string } | null;
+}
+export interface GoalTools {
+  enabled: boolean;
+  grants_enabled?: boolean;
+  can_edit?: boolean;
+  limit?: number;
+  applies_in?: string;
+  never?: string;
+  grants?: GoalToolGrant[];
+  available?: GoalToolOption[];
+  /** A change's answer: whether it changed anything, and whether the server could not read it back yet. */
+  changed?: boolean;
+  reload?: boolean;
+}
+
+export const goalTools = (ref: string, signal?: AbortSignal) =>
+  apiRequest<GoalTools>(`${goalPath(ref)}/tools`, 'GET', undefined, signal);
+/** Allow: the owner's confirmation, and an MCP client tool's server as the screen showed it. */
+export const allowTool = (ref: string, tool: GoalToolOption) =>
+  timed((signal) =>
+    apiRequest<GoalTools>(
+      `${goalPath(ref)}/tools/${encodeURIComponent(tool.tool)}`,
+      'PUT',
+      tool.server_id ? { confirm: true, server_id: tool.server_id } : { confirm: true },
+      signal,
+    ),
+  );
+export const removeTool = (ref: string, tool: string) =>
+  timed((signal) => apiRequest<GoalTools>(`${goalPath(ref)}/tools/${encodeURIComponent(tool)}`, 'DELETE', {}, signal));
+
+export const TOOLS_TITLE = 'Tools this goal may use';
+export const TOOLS_NONE_TEXT = 'None yet.';
+export const TOOLS_ADD_TITLE = 'Tools you can allow';
+export const TOOLS_NOT_USED_TEXT = 'Not used now.';
+export const TOOL_ALLOWED_TEXT = 'Allowed.';
+export const TOOL_ALREADY_ALLOWED_TEXT = 'It was allowed already.';
+export const TOOL_REMOVED_TEXT = 'Removed.';
+export const TOOL_ALREADY_REMOVED_TEXT = 'It was not allowed.';
+/** A change the server made and could not read back into the running work yet (`reload`). */
+export const TOOL_RELOAD_TEXT = 'Saved. The server could not read it back yet.';
+export const toolsLimitText = (limit: number) => `A goal can have at most ${limit} tools.`;
+export const toolAllowedOnText = (at: string | null) => (at ? `Allowed ${fmtUtc(at)}.` : 'Allowed.');
+export const toolsReadFailedText = (err: unknown) => `Could not read this goal's tools. ${refusalText(err, 'see')}`;
+/** A refused tool change: the server's sentence exactly as sent (it may start with a tool's name), else as for any
+ * refused change. */
+export function toolRefusalText(err: unknown): string {
+  const api = ((err as ApiAnswerError | null)?.body as { error?: unknown } | undefined)?.error;
+  return typeof api === 'string' && api.trim() ? api.trim() : refusalText(err);
+}
+
+/** The groups of the tools that can be allowed, in the order shown; a server's tools are grouped by server. */
+export const TOOL_GROUP_WORDS: Record<string, string> = {
+  reaching_outside: 'Reaching outside',
+  other_servers: 'Tools from other servers',
+};
+
+/** The tools that can be allowed, grouped: the built-in ones, then each MCP server's (`server_name`) in name order. */
+export function toolGroups(options: GoalToolOption[]): { key: string; words: string; rows: GoalToolOption[] }[] {
+  const groups: { key: string; words: string; rows: GoalToolOption[] }[] = [];
+  const builtIn = options.filter((o) => o.server_name === null);
+  if (builtIn.length) groups.push({ key: 'built-in', words: TOOL_GROUP_WORDS.reaching_outside, rows: builtIn });
+  const servers = [...new Set(options.filter((o) => o.server_name !== null).map((o) => o.server_name as string))].sort();
+  for (const server of servers) {
+    const rows = options.filter((o) => o.server_name === server);
+    groups.push({ key: `server-${server}`, words: `${TOOL_GROUP_WORDS.other_servers}: ${server} (${rows[0].server_host})`, rows });
+  }
+  return groups;
+}
+
 /** A request with no answer after this long is given up: a read says the server could not be reached, a change that
  * its answer was lost. */
 export const REQUEST_TIMEOUT_MS = 15_000;

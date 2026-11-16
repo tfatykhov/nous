@@ -2,6 +2,7 @@
   import { tick, untrack } from 'svelte';
   import { Button } from '../../lib/ui/button';
   import { fmtUtc } from '../../lib/harness';
+  import GoalTools from './GoalTools.svelte';
   import {
     ACTION_TEXT, DRIVER_OFF_TEXT, beforeChange, changeLanded, type LostChange, HELD_TEXT, NO_CHANNEL_TEXT, PENDING_TEXT, PILL, RESUME_BLOCKED_TEXT, budgetProblem,
     deadlineProblem, typedNumber,
@@ -10,8 +11,9 @@
     stateWord, type Action, type GoalDetail, type GoalOptions, type PlanStep,
   } from '../../lib/goals';
 
-  // One goal: its state and the owner's actions, then its charter, limits, spend, plan, sessions and journal, and the
-  // note box. The buttons are exactly the server's `actions`; an action that spends tokens or ends something says so
+  // One goal: its state and the owner's actions, then its charter, limits, the tools it may use without asking
+  // (GoalTools, shown only while the server has per-goal tools on), spend, plan, sessions and journal, and the note
+  // box. The buttons are exactly the server's `actions`; an action that spends tokens or ends something says so
   // in a sentence and waits for a Yes. Every text a session wrote is a text node. Ids of this goal's controls are
   // `goal-<letter>.<ref>[.<action>]`: a ref has no ".", so none can take another's.
   let {
@@ -310,6 +312,8 @@
       <dt>Mode</dt><dd>{goal.mode === 'contained' ? 'Contained' : goal.mode}</dd>
     </dl>
   </div>
+
+  <GoalTools {goal} />
 
   <div class="card">
     <h3>Spend</h3>
