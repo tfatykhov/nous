@@ -194,3 +194,16 @@ async def test_the_message_quotes_and_bounds_the_title(runner_env):  # noqa: F81
     (message,) = await _messages(w)
     assert len(message.body.split('"')) == 3 and "\n" not in message.body
     assert "&lt;/journal_entry>" in message.body and "[clipped]" in message.body
+
+
+async def test_a_root_the_owner_cancelled_pauses_the_goal_and_sends_nothing(runner_env):  # noqa: F811
+    """The owner cancels a session's chain: the driver closes the session and pauses the goal as the owner's, with a
+    harness row of its own, but that pause is the owner's: no message."""
+    w = await world(runner_env, bind=False)
+    goal = await active(w)
+    (root_id,) = (await w.driver.tick()).started
+    await w.cont.cancel_root(root_id, reason="not now", actor="owner")
+    await w.driver.tick()
+    assert (await goal_row(w, goal)).pause_reason == "owner"
+    assert any(row.actor == "harness" and "owner cancelled" in row.text for row in await journal(w, goal, "state"))
+    assert await _messages(w) == []
