@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import exists, select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.orm import aliased
 
 from nous import background_processes, cancel_provenance
@@ -42,8 +42,10 @@ JOBS_TIMEOUT_SECONDS = 120.0
 RUNNER_CALL_SECONDS = 30.0
 # One job's ``runner.sh status`` inside the sweep: a dozen fit in the scan's time even when every one hangs.
 STATUS_ASK_SECONDS = 5.0
-ROOTS_MAX = 200
+ROOTS_MAX = 200  # one page of open roots
 ROOTS_BATCH = 8
+# The chains step starts no new batch after this many seconds, so the batch in flight still fits in its timeout.
+CHAINS_SCAN_SECONDS = ROOTS_TIMEOUT_SECONDS - 30.0
 # The jobs step starts no new job after this many seconds, so a status and a cancel call still fit in its timeout.
 JOBS_SCAN_SECONDS = JOBS_TIMEOUT_SECONDS - 2 * RUNNER_CALL_SECONDS
 HALT_REASON_TEXT = "halted by the owner"
@@ -81,6 +83,7 @@ class HaltReport:
     jobs_not_checked: int = 0
     jobs_not_cancelled: int = 0  # running jobs whose cancel failed or timed out
     chains_truncated: bool = False
+    chains_not_reached: int = 0  # open roots the chains step's deadline left uncancelled
     failed: list[str] = field(default_factory=list)
     # The halt this sweep belongs to ended (a resume) or a newer halt replaced it: the steps after that point did not
     # run (the newer halt's own sweep does them).
@@ -101,6 +104,7 @@ class HaltReport:
             "jobs_not_checked": self.jobs_not_checked,
             "jobs_not_cancelled": self.jobs_not_cancelled,
             "chains_truncated": self.chains_truncated,
+            "chains_not_reached": self.chains_not_reached,
             "stopped": self.stopped,
         }
 
@@ -129,7 +133,12 @@ class HaltReport:
         if self.failed:
             words = ", ".join(_STEP_WORDS.get(step, step) for step in self.failed)
             sentences.append(f"Could not stop: {words}. Press Halt again to retry.")
-        if self.chains_truncated:
+        if self.chains_not_reached:
+            sentences.append(
+                f"{_count(self.chains_not_reached, 'chain was', 'chains were')} not reached. "
+                "Press Halt again to reach them."
+            )
+        elif self.chains_truncated:
             sentences.append("Some chains were not reached. Press Halt again to reach them.")
         if self.jobs_not_cancelled:
             sentences.append(
@@ -145,28 +154,48 @@ class HaltReport:
         return " ".join(sentences)
 
 
-async def open_root_ids(session: Any, agent_id: str, *, limit: int = ROOTS_MAX) -> list[UUID]:
-    """The ids of the open roots that are not schedule containers, newest first: the roots
-    ``continuation.list_roots(state="open", exclude_containers=True)`` lists, ids only."""
+def _open_roots(agent_id: str, after: UUID | None) -> Any:
+    """The open roots that are not schedule containers (``continuation.list_roots(state="open",
+    exclude_containers=True)``), ids only; with ``after``, only those that come after that root, newest first."""
     lineage_row = aliased(Intention)
-    query = (
-        select(Intention.id)
-        .where(
-            Intention.agent_id == agent_id,
-            Intention.id == Intention.root_id,
-            Intention.wake_policy != intentions.WAKE_CONTAINER,
-            Intention.root_cancelled_at.is_(None),
-            Intention.root_expired_at.is_(None),
-            exists().where(
-                lineage_row.agent_id == agent_id,
-                lineage_row.root_id == Intention.id,
-                lineage_row.state.in_(continuation.OPEN_STATES),
-            ),
-        )
-        .order_by(Intention.created_at.desc(), Intention.id)
-        .limit(limit)
+    query = select(Intention.id).where(
+        Intention.agent_id == agent_id,
+        Intention.id == Intention.root_id,
+        Intention.wake_policy != intentions.WAKE_CONTAINER,
+        Intention.root_cancelled_at.is_(None),
+        Intention.root_expired_at.is_(None),
+        exists().where(
+            lineage_row.agent_id == agent_id,
+            lineage_row.root_id == Intention.id,
+            lineage_row.state.in_(continuation.OPEN_STATES),
+        ),
     )
+    if after is not None:
+        anchor_row = aliased(Intention)
+        anchor = (
+            select(anchor_row.created_at)
+            .where(anchor_row.agent_id == agent_id, anchor_row.id == after)
+            .scalar_subquery()
+        )
+        query = query.where(
+            or_(Intention.created_at < anchor, and_(Intention.created_at == anchor, Intention.id > after))
+        )
+    return query
+
+
+async def open_root_ids(
+    session: Any, agent_id: str, *, limit: int = ROOTS_MAX, after: UUID | None = None
+) -> list[UUID]:
+    """One page of the ids of the open roots that are not schedule containers, newest first (``after``: the page
+    after that root)."""
+    query = _open_roots(agent_id, after).order_by(Intention.created_at.desc(), Intention.id).limit(limit)
     return list((await session.execute(query)).scalars())
+
+
+async def open_root_count(session: Any, agent_id: str, *, after: UUID | None = None) -> int:
+    """How many open roots that are not schedule containers come after ``after`` (all of them without it)."""
+    query = select(func.count()).select_from(_open_roots(agent_id, after).subquery())
+    return int((await session.execute(query)).scalar_one())
 
 
 def _jobs_to_ask(jobs_dir: Path, workspace: str) -> list[str]:
@@ -287,35 +316,57 @@ class HaltSweeper:
         report.subtasks_running += sum(1 for _id, status in rows if status == "running")
 
     async def _chains(self, report: HaltReport, actor: str | None, epoch: int) -> None:
-        async with self._db.session() as session:
-            roots = await open_root_ids(session, self._settings.agent_id)
+        """Every open root that is not a schedule container, newest first, a page of ``ROOTS_MAX`` at a time and
+        ``ROOTS_BATCH`` cancels at once. No new batch starts after ``CHAINS_SCAN_SECONDS``: the roots left are counted
+        (``chains_not_reached``) and the step is reported failed, so the owner is offered the retry."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + CHAINS_SCAN_SECONDS
         failures = 0
         by_harness = cancel_provenance.halt_record()
-        for start in range(0, len(roots), ROOTS_BATCH):
-            if not self._still_halted(epoch):
-                report.stopped = True
-                return
-            batch = roots[start : start + ROOTS_BATCH]
-            outcomes = await asyncio.gather(
-                *(
-                    self._continuation.cancel_root(
-                        root, reason=HALT_REASON_TEXT, actor=actor or "halt", cancelled_by=by_harness
-                    )
-                    for root in batch
-                ),
-                return_exceptions=True,
-            )
-            for outcome in outcomes:
-                if isinstance(outcome, (continuation.CancelRefused, continuation.RootNotFound)):
-                    continue  # nothing running under it, or gone: skipped, not failed
-                if isinstance(outcome, BaseException):  # a cancelled one included: counted, never re-raised
-                    failures += 1
-                    logger.warning("Background halt: a chain could not be cancelled", exc_info=outcome)
-                    continue
-                report.chains += 1
-                report.chains_truncated = report.chains_truncated or bool(getattr(outcome, "truncated", False))
+        after: UUID | None = None
+        while True:
+            async with self._db.session() as session:
+                page = await open_root_ids(session, self._settings.agent_id, limit=ROOTS_MAX + 1, after=after)
+            more = len(page) > ROOTS_MAX  # one row past the page says more are left
+            page = page[:ROOTS_MAX]
+            for start in range(0, len(page), ROOTS_BATCH):
+                if not self._still_halted(epoch):
+                    report.stopped = True
+                    return
+                if loop.time() > deadline:
+                    left = len(page) - start
+                    if more:
+                        async with self._db.session() as session:
+                            left += await open_root_count(session, self._settings.agent_id, after=page[-1])
+                    report.chains_not_reached += left
+                    logger.warning("Background halt: the chains step's deadline left %d root(s) open", left)
+                    break
+                batch = page[start : start + ROOTS_BATCH]
+                outcomes = await asyncio.gather(
+                    *(
+                        self._continuation.cancel_root(
+                            root, reason=HALT_REASON_TEXT, actor=actor or "halt", cancelled_by=by_harness
+                        )
+                        for root in batch
+                    ),
+                    return_exceptions=True,
+                )
+                for outcome in outcomes:
+                    if isinstance(outcome, (continuation.CancelRefused, continuation.RootNotFound)):
+                        continue  # nothing running under it, or gone: skipped, not failed
+                    if isinstance(outcome, BaseException):  # a cancelled one included: counted, never re-raised
+                        failures += 1
+                        logger.warning("Background halt: a chain could not be cancelled", exc_info=outcome)
+                        continue
+                    report.chains += 1
+                    report.chains_truncated = report.chains_truncated or bool(getattr(outcome, "truncated", False))
+            if report.chains_not_reached or not more:
+                break
+            after = page[-1]
         if failures:
             raise RuntimeError(f"{failures} chain(s) could not be cancelled")
+        if report.chains_not_reached:
+            report.failed.append("chains")
 
     async def _cancel_dags(self, report: HaltReport) -> None:
         report.dags += await self._dags.cancel_all_active(cancel_provenance.halt_record())

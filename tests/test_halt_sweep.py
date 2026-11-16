@@ -82,7 +82,7 @@ async def test_the_sweep_cancels_in_order_and_reports_counts(monkeypatch, tmp_pa
     heart, cont, cont_calls, dags = _fakes(order)
     roots = [uuid.uuid4(), uuid.uuid4()]
 
-    async def two_roots(session, agent_id, *, limit=200):
+    async def two_roots(session, agent_id, *, limit=200, after=None):
         return roots
 
     monkeypatch.setattr(halt_sweep, "open_root_ids", two_roots)
@@ -124,7 +124,7 @@ async def test_a_root_with_nothing_running_is_skipped_not_failed(monkeypatch, tm
 
     cont.cancel_root = refused
 
-    async def one_root(session, agent_id, *, limit=200):
+    async def one_root(session, agent_id, *, limit=200, after=None):
         return [uuid.uuid4()]
 
     monkeypatch.setattr(halt_sweep, "open_root_ids", one_root)
@@ -309,6 +309,46 @@ async def test_open_root_ids_leave_out_a_schedule_container(env_factory):  # noq
     assert plain.id in ids and container.id not in ids
 
 
+async def _chains_with_pages(env, monkeypatch, *, page: int):
+    """Five open roots, the chains step run with pages of ``page``: the roots it asked to cancel, and its report."""
+    roots = {(await make_root(env)).id for _ in range(5)}
+    monkeypatch.setattr(halt_sweep, "ROOTS_MAX", page)
+    asked: list = []
+
+    async def cancel_root(root, *, reason, actor, cancelled_by=None):
+        asked.append(root)
+        return SimpleNamespace(truncated=False)
+
+    halt = _halt()
+    await halt.halt(actor="t", surface="dashboard")
+    sweeper = HaltSweeper(
+        settings=SimpleNamespace(agent_id=env.agent, workspace_dir=""),
+        heart=MagicMock(),
+        halt=halt,
+        database=env.db,
+        continuation_runner=SimpleNamespace(cancel_root=cancel_root),
+    )
+    report = HaltReport()
+    await sweeper._chains(report, "t", halt.epoch)
+    return roots, asked, report
+
+
+async def test_the_chains_step_reaches_every_open_root_page_by_page(env_factory, monkeypatch):  # noqa: F811
+    env = await env_factory(intentions_enabled=True)
+    roots, asked, report = await _chains_with_pages(env, monkeypatch, page=2)
+    assert sorted(asked) == sorted(roots) and len(asked) == 5  # three pages, each root once
+    assert report.chains == 5 and report.chains_not_reached == 0 and report.failed == []
+
+
+async def test_a_chains_step_its_deadline_cuts_short_says_how_many_were_not_reached(env_factory, monkeypatch):  # noqa: F811
+    env = await env_factory(intentions_enabled=True)
+    monkeypatch.setattr(halt_sweep, "CHAINS_SCAN_SECONDS", -1.0)  # already past it
+    _roots, asked, report = await _chains_with_pages(env, monkeypatch, page=2)
+    assert asked == [] and report.chains_not_reached == 5 and report.failed == ["chains"]
+    assert report.as_dict()["chains_not_reached"] == 5
+    assert "5 chains were not reached. Press Halt again to reach them." in report.describe()
+
+
 async def test_resume_reruns_the_subtask_and_dag_cancel_steps_before_clearing_the_flag(env_factory, monkeypatch):  # noqa: F811
     env = await env_factory()
     halt = _halt()
@@ -419,7 +459,7 @@ async def test_a_sweep_stops_once_its_halt_is_no_longer_the_one_on(monkeypatch, 
     outcome = await halt.halt(actor="t", surface="dashboard")
     roots = [uuid.uuid4() for _ in range(10)]  # two batches of eight
 
-    async def ten_roots(session, agent_id, *, limit=200):
+    async def ten_roots(session, agent_id, *, limit=200, after=None):
         return roots
 
     monkeypatch.setattr(halt_sweep, "open_root_ids", ten_roots)
