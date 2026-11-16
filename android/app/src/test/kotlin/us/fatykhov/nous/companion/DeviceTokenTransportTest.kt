@@ -3,9 +3,11 @@ package us.fatykhov.nous.companion
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
+import mockwebserver3.Dispatcher
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
 import mockwebserver3.RecordedRequest
@@ -35,6 +37,7 @@ import us.fatykhov.nous.companion.data.Settings
 import us.fatykhov.nous.companion.push.registrationOutcome
 import java.io.File
 import java.net.InetAddress
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
@@ -211,6 +214,44 @@ class DeviceTokenTransportTest {
         http.get("/a2ui/surfaces")
         assertEquals(SAMPLE_TOKEN, s.next().token)
         assertNull(s.next().token)
+    }
+
+    @Test fun a_rejection_of_an_older_token_arriving_after_a_newer_one_was_saved_keeps_the_newer_one() = runBlocking {
+        val arrived = CountDownLatch(1); val release = CountDownLatch(1)
+        val s = MockWebServer().apply {
+            dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    arrived.countDown(); release.await(10, TimeUnit.SECONDS)
+                    return MockResponse.Builder().code(403).body(rejected).build()
+                }
+            }
+            start(InetAddress.getByName("127.0.0.1"), 0)
+        }
+        servers += s
+        val base = "http://localhost:${s.port}"
+        val cred = credential(base)
+        val http = transport(base, cred, debuggable = true)
+        val call = async(Dispatchers.IO) { http.postJson("/a2ui/action", "{}") }   // carries the old token
+        assertTrue("the old token's request is in flight", arrived.await(5, TimeUnit.SECONDS))
+        val newer = "nd1_" + "N".repeat(43)
+        assertTrue(cred.save(Paired(newer, "d-2", "Pixel", null), base))   // paired again meanwhile
+        release.countDown()
+        assertEquals(403, call.await().status)
+        assertEquals("the rejection was for the old token", newer, cred.tokenFor("http", "localhost", s.port))
+    }
+
+    @Test fun a_device_token_header_already_on_a_request_is_removed_unless_the_paired_token_replaces_it() {
+        val planted = "nd1_" + "P".repeat(43)
+        fun sendWithPlanted(cred: DeviceCredential, s: MockWebServer): String? {
+            s.answer(200)
+            trusting.newBuilder().addNetworkInterceptor(DeviceTokenInterceptor(cred, debuggable = true)).followRedirects(false).build()
+                .newCall(Request.Builder().url("http://localhost:${s.port}/a2ui/surfaces").header(DeviceToken.HEADER, planted).build()).execute().close()
+            return s.next().token
+        }
+        val s = server()
+        assertNull("paired elsewhere", sendWithPlanted(credential("http://localhost:${s.port + 1}"), s))
+        assertNull("not paired", sendWithPlanted(credential(null), s))
+        assertEquals("the paired origin gets the real token", SAMPLE_TOKEN, sendWithPlanted(credential("http://localhost:${s.port}"), s))
     }
 
     @Test fun owner_proof_required_keeps_the_token() = runBlocking {
