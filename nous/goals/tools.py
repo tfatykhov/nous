@@ -3,8 +3,8 @@
 They are per-turn extra tools (``extra_tools`` of the continuation runner's turn), never registered with a
 dispatcher, so no other turn can be offered them; ``nous.api.tool_classes`` classifies them and
 ``nous.api.tool_policy.INTERNAL_ONLY_EXTRA_TOOLS`` lists them. The executors are bound to one session of one goal and
-write as the chain: the actor of every row they write is ``chain``, never the owner, and neither can approve, resume,
-confirm, cancel or change a goal's limits.
+write as the chain: the actor of every row they write is ``chain`` (``harness`` for the fixed words of a state change
+a done claim makes), never the owner, and neither can approve, resume, confirm, cancel or change a goal's limits.
 
 Every write is one transaction that takes the session row ``FOR UPDATE`` and then the goal row ``FOR UPDATE`` (the
 order the driver's close takes them), re-reads both, and writes targeted columns with a journal row. So a close of the
@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -33,9 +34,10 @@ from uuid import UUID
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from nous.brain import continuation
 from nous.goals import evidence
-from nous.goals.quote import STEP_EVIDENCE_MAX, STEP_EVIDENCE_REF_MAX, STEP_TEXT_MAX, _visible
-from nous.goals.store import JOURNAL_MAX_CHARS, GoalStore
+from nous.goals.quote import STEP_EVIDENCE_MAX, STEP_EVIDENCE_REF_MAX, STEP_TEXT_MAX, _visible, neutralize
+from nous.goals.store import JOURNAL_MAX_CHARS, GoalStore, format_short_id
 from nous.storage.database import Database
 from nous.storage.models import Goal, GoalSession
 
@@ -46,13 +48,15 @@ STEP_STATUSES = ("open", "closed", "dropped")
 NOTE_KINDS = ("progress", "done_claim")
 WRITABLE_STATES = ("active", "paused")  # a running session of a paused goal still runs to its end
 _STEP_ID = re.compile(r"s(\d{1,4})")
+# The owner message of a done claim: one per session (its source id).
+DONE_NAMESPACE = uuid.UUID("5b0c3f8e-7d1a-4f0e-9a51-6d2c8e4b1f14")
 
 GOAL_NOTE_SCHEMA: dict[str, Any] = {
     "name": "goal_note",
     "description": (
         "Write a note to the journal of the goal this work belongs to. kind 'progress': what this work did or found, "
-        "for the next session. kind 'done_claim': the goal's done-when is met (only the owner can finish a goal). "
-        "Does not end the turn."
+        "for the next session. kind 'done_claim': the goal's done-when is met; the goal then waits for the owner, "
+        "who confirms it done or resumes it (only the owner can finish a goal). Does not end the turn."
     ),
     "input_schema": {
         "type": "object",
@@ -182,13 +186,73 @@ class GoalTools:
         clipped = len(body) > JOURNAL_MAX_CHARS
         async with self._db.session() as s:
             row, goal = await self._locked(s)
-            n, ended = row.n, row.ended_at is not None
+            n, ended, state, reason = row.n, row.ended_at is not None, goal.state, goal.pause_reason
             self._store.add_journal_row(s, goal.id, kind, body, actor="chain", session_n=n)
+            waiting = False
+            if kind == "done_claim" and state == "active":
+                waiting = await self._wait_for_owner(s, goal, row)
             await s.commit()
         said = "Noted" + (f" (clipped to {JOURNAL_MAX_CHARS} characters)" if clipped else "") + "."
         if ended:
             said += f" Session {n} has ended; the note is kept under it."
+        if kind == "done_claim":
+            if waiting:
+                said += " The goal now waits for the owner, who confirms it done or resumes it."
+            else:
+                said += f" The goal is {state} ({reason}), so it stays as it is; the claim is kept for the owner."
         return said
+
+    async def _wait_for_owner(self, s: AsyncSession, goal: Goal, row: GoalSession) -> bool:
+        """A done claim on an active goal: paused for the owner (``waiting_for_owner``), its next wake cleared, a
+        harness ``state`` row in fixed words, and one message to the owner (per session). The goal is locked."""
+        result = await s.execute(
+            update(Goal)
+            .where(Goal.id == goal.id, Goal.agent_id == self._agent_id, Goal.state == "active")
+            .values(state="paused", pause_reason="waiting_for_owner", next_wake_at=None, updated_at=_now())
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            return False
+        note = f"Waiting for the owner: session {row.n} claimed that the goal is done. Only the owner can finish it."
+        self._store.add_journal_row(s, goal.id, "state", note, actor="harness", session_n=row.n)
+        await self._tell_owner(s, goal, row)
+        return True
+
+    async def _tell_owner(self, s: AsyncSession, goal: Goal, row: GoalSession) -> None:
+        """The done claim's message to the owner, in the harness's words only: the goal's label, title and done-when
+        (the charter the owner approved), how many steps are closed, and what the owner can do. No text the chain
+        wrote and no command line (a claimed message reaches the next chat turn)."""
+        channel = continuation.owner_channel(self._settings, goal.origin_channel)
+        if channel is None:
+            logger.warning("F114: goal %s waits for the owner, who has no channel to be told on", goal.id)
+            return
+        steps = [step for step in goal.plan or [] if isinstance(step, dict)]
+        closed = sum(1 for step in steps if step.get("status") == "closed")
+        label = format_short_id(goal.short_id)
+        body = (
+            f'Goal {label} ("{neutralize(goal.title)}") may be done: its session {row.n} says that what it was '
+            "asked to reach is reached.\n"
+            f"Done when: {neutralize(goal.done_when)}\n"
+            f"Plan: {closed} of {len(steps)} steps closed with checked evidence.\n"
+            "It waits for you: on the Goals screen, confirm it done, or resume it to let it go on. Its plan and the "
+            "session's notes are in the goal's journal there."
+        )
+        source_id = uuid.uuid5(DONE_NAMESPACE, f"{goal.id}:done:{row.n}")
+        await continuation.insert_inbox_row(
+            s,
+            self._agent_id,
+            source_kind=continuation.SOURCE_INTENTION_REPORT,
+            source_id=source_id,
+            msg_type=continuation.MSG_REPORT,
+            title=f"Goal {label} may be done",
+            body=body,
+            channel=channel,
+            correlation_id=str(source_id),
+            intention_id=self._ref.root_id,
+            push_after=await continuation.owner_push_after(
+                s, self._agent_id, self._settings, channel=channel, root_id=self._ref.root_id
+            ),
+        )
 
     # ---- goal_plan ---------------------------------------------------------------------------------------------
 
