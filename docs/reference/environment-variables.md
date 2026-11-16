@@ -63,8 +63,8 @@ DB connection vars are **unprefixed** (shared with docker-compose). All others u
 | `NOUS_SUBTASK_ENABLED` | `true` | Enable subtask worker pool |
 | `NOUS_SUBTASK_WORKERS` | `2` | Number of async worker tasks |
 | `NOUS_SUBTASK_POLL_INTERVAL` | `2.0` | Seconds between queue polls |
-| `NOUS_SUBTASK_DEFAULT_TIMEOUT` | `600` | Default subtask timeout (seconds). Bumped from 120 in F048 so the outer `asyncio.wait_for` does not cancel before the new 600 s per-chunk streaming read completes. |
-| `NOUS_SUBTASK_MAX_TIMEOUT` | `3600` | Maximum allowed subtask timeout (seconds). Bumped from 900 in F048 to pair with `NOUS_API_BACKGROUND_TIMEOUT_READ`. |
+| `NOUS_SUBTASK_DEFAULT_TIMEOUT` | `600` | Default subtask timeout (seconds), written on a task or schedule when it is created, so a change applies to the tasks and schedules made after it. Bumped from 120 in F048 so the outer `asyncio.wait_for` does not cancel before the new 600 s per-chunk streaming read completes. |
+| `NOUS_SUBTASK_MAX_TIMEOUT` | `3600` | Maximum allowed subtask timeout (seconds). `spawn_task` lowers a task's time limit to it when it creates the task, and the worker lowers a spawned task's or a goal session's first task's time limit to it again when the task starts (`subtask_worker.start_timeout`), so a lower value set on the dashboard (F115) binds a task still waiting; a running task keeps the limit it started with, and a raised value never lengthens a task. A workflow step, a schedule's run and a companion action (each told apart by the marker its creator writes on the row) keep their own time limit. Bumped from 900 in F048 to pair with `NOUS_API_BACKGROUND_TIMEOUT_READ`. |
 | `NOUS_API_BACKGROUND_STREAMING_ENABLED` | `true` | F048 master switch — route `is_background=True` turns (subtask + heartbeat) through `call_streaming_aggregated` instead of `call()`. |
 | `NOUS_API_BACKGROUND_TIMEOUT_READ` | `600` | F048 per-chunk read timeout (seconds) applied only to background streamed requests. |
 | `NOUS_API_SOCKET_KEEPALIVE_ENABLED` | `true` | F048 master switch for TCP keep-alive on the httpx transport (both Anthropic client backends). |

@@ -54,6 +54,30 @@ def _error_text(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+# F115: the creators that set a task's time limit themselves, each by the marker it writes on the row in the INSERT that
+# creates it: a schedule's run (metadata.schedule_id), a workflow step (dag_node_id and metadata.dag_id) and a
+# companion action (metadata.a2ui_action_id). The largest time limit binds the other two when they start: a task
+# spawn_task created and a goal session's first task, neither of which writes one of these markers.
+# tests/test_autonomy_task_time_limit.py holds the five creators to these markers.
+OWN_TIME_LIMIT_MARKERS: tuple[str, ...] = ("schedule_id", "dag_id", "a2ui_action_id")
+
+
+def bound_by_max_timeout(subtask: Subtask) -> bool:
+    """Whether NOUS_SUBTASK_MAX_TIMEOUT binds ``subtask`` when it starts: a task that no creator setting its own time
+    limit made (a spawned task, a goal session's first task)."""
+    metadata = subtask.metadata_ or {}
+    return subtask.dag_node_id is None and not any(marker in metadata for marker in OWN_TIME_LIMIT_MARKERS)
+
+
+def start_timeout(subtask: Subtask, settings: Settings) -> int:
+    """The time limit ``subtask`` runs with, fixed when it starts: its own (the default when it has none), and for a
+    task the largest time limit binds no more than that limit as it is now. A raised limit never lengthens a task."""
+    timeout = subtask.timeout_seconds or settings.subtask_default_timeout
+    if bound_by_max_timeout(subtask):
+        timeout = min(timeout, settings.subtask_max_timeout)
+    return timeout
+
+
 class SubtaskWorkerPool:
     """Pool of asyncio workers that execute subtasks via AgentRunner.
 
@@ -160,7 +184,7 @@ class SubtaskWorkerPool:
         """Execute subtask with timeout protection, unless its schedule's guard completes it."""
         if await self._run_guard(subtask):
             return
-        timeout = subtask.timeout_seconds or self._settings.subtask_default_timeout
+        timeout = start_timeout(subtask, self._settings)
         try:
             await asyncio.wait_for(
                 self._execute_subtask(subtask),

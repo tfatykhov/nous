@@ -122,7 +122,8 @@ LIMITS: tuple[Limit, ...] = (
         1,
         168,
         "How long a chain may run, counted from its first task, before it ends.",
-        "For chains that start after the change. A running chain keeps the end it was given.",
+        "For chains that start after the change. A running chain keeps the end it was given, and a task it starts "
+        "after the change ends no later than the new value after its start.",
     ),
     Limit(
         "intention_proposal_ttl_hours",
@@ -144,7 +145,8 @@ LIMITS: tuple[Limit, ...] = (
         6000,
         "How long a task spawned to run in the background, a scheduled task or the first task of a goal session may "
         "run when it gives no time limit of its own. A task the turn waits for has its own, shorter default.",
-        "For tasks and schedules created after the change.",
+        "For tasks and schedules created after the change. A task or schedule already made keeps the time limit it "
+        "was given.",
     ),
     Limit(
         "subtask_max_timeout",
@@ -154,7 +156,9 @@ LIMITS: tuple[Limit, ...] = (
         10_000,
         "The longest a spawned task or the first task of a goal session may run, whatever time limit it asks for. A "
         "tool call left unfinished is not marked unknown before this limit plus 10 minutes have passed.",
-        "For tasks that start after the change.",
+        "When a task starts: a spawned task or the first task of a goal session that is still waiting runs no longer "
+        "than the new value. A running task keeps the time limit it started with, and a raised value never lengthens "
+        "a task already made. A workflow step, a scheduled task and a companion action keep their own time limit.",
     ),
 )
 

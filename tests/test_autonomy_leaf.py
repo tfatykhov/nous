@@ -1,6 +1,7 @@
 """F115: a limit the owner changes is what the code that uses it resolves on its next use, with no restart. Each test
 changes a limit through the store and asserts at the reader: the loop, the subtask turn, the chain's limits, a new
-chain's end, a question's window, a new subtask's time limit and the ledger's orphan threshold."""
+chain's end, a question's window, a new subtask's time limit, a waiting subtask's time limit when it starts and the
+ledger's orphan threshold."""
 
 from __future__ import annotations
 
@@ -151,6 +152,27 @@ async def test_a_chain_started_after_the_change_gets_the_new_lifetime(env_factor
     assert abs((root.deadline - root.created_at) - timedelta(hours=5)) < timedelta(minutes=1)
 
 
+async def test_a_running_chain_keeps_its_end_and_a_task_it_starts_after_a_lowering_ends_sooner(
+    env_factory,  # noqa: F811
+    store_for,
+):
+    env = await env_factory(**CONT)
+    store = await store_for(env)
+    spec = intentions.with_bounds(IntentionSpec(intent="look", origin_kind="interactive"), env.settings)
+    root = await intention_of(env, "subtask", (await env.heart.subtasks.create(task="look", intention=spec)).id)
+    assert abs((root.deadline - root.created_at) - timedelta(hours=72)) < timedelta(minutes=1)
+    await store.set_limit("intention_root_ttl_hours", 5, "owner")
+    # As a chain's decision turn spawns its next task: its bounds from the settings at that moment.
+    child_spec = intentions.with_bounds(
+        IntentionSpec(intent="next", origin_kind="continuation", parent_id=root.id, origin_authority="internal_only"),
+        env.settings,
+    )
+    child_task = await env.heart.subtasks.create(task="next", intention=child_spec)
+    child = await intention_of(env, "subtask", child_task.id)
+    assert abs((child.deadline - child.created_at) - timedelta(hours=5)) < timedelta(minutes=1)
+    assert (await intention_of(env, "subtask", root.source_id)).deadline == root.deadline  # the chain keeps its end
+
+
 async def test_a_question_is_judged_by_the_new_window(env_factory, store_for):  # noqa: F811
     env = await env_factory(**CONT)
     root = await make_root(env)
@@ -210,6 +232,19 @@ async def test_a_new_subtask_gets_the_new_time_limits(env_factory, store_for):  
     assert effective_orphan_threshold(env.settings) == 7800
     await store.set_limit("subtask_max_timeout", 9000, "owner")
     assert effective_orphan_threshold(env.settings) == 9600
+
+
+async def test_a_waiting_task_starts_with_the_lowered_largest_time_limit(env_factory, store_for):  # noqa: F811
+    from nous.handlers.subtask_worker import start_timeout
+
+    env = await env_factory()
+    store = await store_for(env)
+    await store.set_limit("subtask_max_timeout", 3600, "owner")
+    waiting = await env.heart.subtasks.create(task="look", timeout=3600)  # as spawn_task writes it
+    await store.set_limit("subtask_max_timeout", 600, "owner")
+    assert start_timeout(waiting, env.settings) == 600  # when the worker starts it
+    await store.set_limit("subtask_max_timeout", 9000, "owner")
+    assert start_timeout(waiting, env.settings) == 3600  # a raised limit never lengthens it
 
 
 def test_every_reader_of_a_limit_reads_it_from_settings_when_it_uses_it():
