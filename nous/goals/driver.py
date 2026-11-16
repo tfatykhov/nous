@@ -239,9 +239,9 @@ class GoalDriver:
     Two driver processes for one agent share none of it and are coordinated only through the rows: every active
     goal row's lock and the one-open-session index for a start (so the count of open sessions across goals is
     read by one start at a time), the session row's lock and ``ended_at IS NULL`` for a close and for the first
-    task's publish, the claim's ``delivered_at IS NULL``, spend written only upward, the journal's evidence refs
-    under the session row's lock, a request cleared only while it is still the one read, a pause only while its
-    condition still holds, and wake changes compared with the wake read.
+    task's publish, the claim's ``delivered_at IS NULL``, spend written only upward (a refresh updates its session
+    rows in id order), the journal's evidence refs under the session row's lock, a request cleared only while it is
+    still the one read, a pause only while its condition still holds, and wake changes compared with the wake read.
     """
 
     def __init__(self, database: Database, settings: Any, heart: Any, store: GoalStore, runner: Any) -> None:
@@ -1754,7 +1754,9 @@ class GoalDriver:
             resumed: dict[UUID, list[_JournalItem]] = {}
             if rows:
                 totals = await spend.session_spent(s, self._agent_id, [r.root_id for r in rows.values()])
-                for r in rows.values():
+                # In id order: two processes refreshing the same sessions take their row locks in one order, so
+                # neither waits on a row the other holds while holding one it waits for.
+                for r in sorted(rows.values(), key=lambda r: r.id):
                     if totals[r.root_id] > r.spent:
                         # Every source only grows: a read taken before another tick wrote a newer total is older,
                         # and must not put a lower one back.

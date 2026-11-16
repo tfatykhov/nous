@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+from f099_dashboard_support import put_intention
 from f099_support import (
     RESULT,
     add_arrival,
@@ -23,7 +24,7 @@ from f099_support import (
     record,
     set_intention,
 )
-from sqlalchemy import func, select, update
+from sqlalchemy import event, func, select, update
 from test_goals_driver import (
     FakeRunner,
     _active,
@@ -1219,6 +1220,55 @@ async def test_job_launches_are_not_counted_when_the_call_log_is_off(env_factory
     await w.driver.tick()
     await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
     assert len((await w.driver.tick()).started) == 1
+
+
+async def test_the_refresh_updates_its_session_rows_in_id_order(env_factory):  # noqa: F811
+    """Two processes refreshing the same sessions take the rows' locks in one order: every UPDATE of a session's spend
+    is issued in id order. The restart catch-up reads the closed sessions newest close first; the ids here run the
+    other way, so an update in the order read is not in id order."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    await w.store.pause(goal.id, actor="host")  # no session starts
+    ids = sorted((uuid.uuid4() for _ in range(5)), reverse=True)  # the newest close has the highest id
+    now = await _db_now(w)
+    long_ago = now - timedelta(hours=w.env.settings.intention_root_ttl_hours + 24)
+    for n, session_id in enumerate(ids, start=1):
+        root = await put_intention(w.env, state="closed", deadline=now - timedelta(days=5))
+        await add_arrival(w.env, root.id, 1, tokens=(10 * n, n))
+        async with w.db.session() as s:
+            s.add(
+                GoalSession(
+                    id=session_id,
+                    agent_id=w.agent,
+                    goal_id=goal.id,
+                    n=n,
+                    trigger="timer",
+                    first_subtask_id=uuid.uuid4(),
+                    root_id=root.id,
+                    started_at=long_ago - timedelta(hours=1),
+                    ended_at=long_ago - timedelta(minutes=n),
+                    outcome="no_step",
+                    spent=0,
+                )
+            )
+            await s.commit()
+    updated: list[uuid.UUID] = []
+
+    def seen(conn, cursor, statement, parameters, context, executemany):
+        if " ".join(statement.split()).lower().startswith("update brain.goal_sessions set spent"):
+            for value in parameters or ():
+                try:
+                    updated.append(uuid.UUID(str(value)))
+                except ValueError:
+                    pass
+
+    engine = w.db.engine.sync_engine
+    event.listen(engine, "before_cursor_execute", seen)
+    try:
+        assert await w.driver.refresh_sessions() == 5
+    finally:
+        event.remove(engine, "before_cursor_execute", seen)
+    assert updated == sorted(ids)
 
 
 # ---- a reactivated lineage DAG -----------------------------------------------------------------------------------
