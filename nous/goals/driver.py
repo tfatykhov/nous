@@ -41,6 +41,7 @@ from nous.brain import continuation, intentions
 from nous.cancellation import cancel_requested
 from nous.dag.store import TERMINAL_NODE_STATUSES
 from nous.goals import charter, owner_message, roots, spend
+from nous.goals import commands as goal_commands
 from nous.goals.store import SESSION_NOTE_LABEL, STOP_REF, WAITING_REF, GoalStore, clip, moved_steps
 from nous.heart.censor_actions import gate_subtask_task
 from nous.heart.subtasks import MAX_PENDING, SubtaskQueueFull
@@ -1729,13 +1730,23 @@ class GoalDriver:
             return False
         active = [Goal.id == goal.id, Goal.agent_id == self._agent_id, Goal.state == "active"]
         paused = False
+        in_mode = False
         if cancelled_by_owner:
+            in_mode = (
+                await s.scalar(select(Goal.mode).where(Goal.id == goal.id, Goal.agent_id == self._agent_id))
+            ) != goal_commands.MODE_CONTAINED
             values = {"state": "paused", "pause_reason": "owner", "next_wake_at": None}
             paused = (
                 await s.execute(
                     update(Goal)
                     .where(*active)
-                    .values(**values, pending_request=None, pending_request_at=None, updated_at=func.clock_timestamp())
+                    .values(
+                        **values,
+                        pending_request=None,
+                        pending_request_at=None,
+                        updated_at=func.clock_timestamp(),
+                        **goal_commands.CONTAINED_VALUES,
+                    )
                     .execution_options(synchronize_session=False)
                 )
             ).rowcount == 1
@@ -1765,6 +1776,8 @@ class GoalDriver:
                 actor="harness",
                 session_n=row.n,
             )
+            if in_mode:
+                self._ended(s, goal.id, "stopped", session_n=row.n)
         return True
 
     async def refresh_sessions(self) -> int:
@@ -2327,8 +2340,10 @@ class GoalDriver:
         """In the caller's transaction (which has read whatever the pause depends on under the goal row's lock): an
         active goal to ``paused`` for ``reason``, its wake and any request cleared, with a harness ``state`` row saying
         why (with ``evidence``). With ``newest_session`` the row's session is the goal's newest, read with the goal
-        row locked (no start of this goal can add one before the commit). False (nothing written) when the goal is no
-        longer active."""
+        row locked (no start of this goal can add one before the commit). A goal that may run any command returns to
+        contained in the same UPDATE, with a second harness row. False (nothing written) when the goal is no longer
+        active."""
+        mode = await s.scalar(select(Goal.mode).where(Goal.id == goal_id, Goal.agent_id == self._agent_id))
         result = await s.execute(
             update(Goal)
             .where(Goal.id == goal_id, Goal.agent_id == self._agent_id, Goal.state == "active")
@@ -2339,6 +2354,7 @@ class GoalDriver:
                 pending_request=None,
                 pending_request_at=None,
                 updated_at=func.clock_timestamp(),
+                **goal_commands.CONTAINED_VALUES,
             )
             .execution_options(synchronize_session=False)
         )
@@ -2351,7 +2367,21 @@ class GoalDriver:
                 )
             )
         self._journal(s, goal_id, "state", note, actor="harness", session_n=session_n, evidence=evidence)
+        if mode != goal_commands.MODE_CONTAINED:
+            self._ended(s, goal_id, "paused", session_n=session_n)
         return True
+
+    def _ended(self, s: AsyncSession, goal_id: UUID, why: str, *, session_n: int | None = None) -> None:
+        """The harness row of the end of a goal's mode (``commands.ENDED``), in the caller's transaction."""
+        self._journal(
+            s,
+            goal_id,
+            "state",
+            goal_commands.ENDED[why],
+            actor="harness",
+            session_n=session_n,
+            evidence=goal_commands.mode_refs("off", why=why),
+        )
 
     def _journal(
         self,

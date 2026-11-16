@@ -136,6 +136,15 @@ def clamped_text(until: Any) -> str:
     return f"Its end time moved to {until:%Y-%m-%d %H:%M} UTC, the longest this server now allows."
 
 
+def mode_refs(state: str, *, why: str | None = None, via: str | None = None) -> list[str]:
+    """The evidence refs of a journal row of a change of mode: ``mode:<state>``, then ``why:`` and ``via:``."""
+    return [f"{MODE_REF}{state}", *([f"{WHY_REF}{why}"] if why else []), *([f"{VIA_REF}{via}"] if via else [])]
+
+
+# The values that return a goal to contained, in the UPDATE of the change that ends its mode.
+CONTAINED_VALUES: Mapping[str, Any] = MappingProxyType({"mode": MODE_CONTAINED, "mode_hours": None, "mode_until": None})
+
+
 def max_hours(settings: Any) -> int:
     """The host's ceiling (``NOUS_GOAL_COMMANDS_MAX_HOURS``), within ``HOURS_LIMIT``."""
     return max(1, min(int(getattr(settings, "goal_commands_max_hours", 24)), HOURS_LIMIT))
