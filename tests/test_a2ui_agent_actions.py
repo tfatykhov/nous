@@ -1163,7 +1163,7 @@ async def test_app_act_spawns_subtask_and_stamps_pending(
     nonce = (await _surface_row(db, surface_id)).nonce
 
     status, payload = await router.handle(
-        _act_body(surface_id, nonce, "rebalance"), content_type=JSON_CT
+        _act_body(surface_id, nonce, "rebalance"), content_type=JSON_CT, owner_verified=True
     )
 
     assert status == 200, payload
@@ -1183,9 +1183,9 @@ async def test_app_act_double_tap_rejected_serverside(
     surface_id = await service.push_built(_actioned_built(), dedup_key="app:t-2")
     nonce = (await _surface_row(db, surface_id)).nonce
 
-    await router.handle(_act_body(surface_id, nonce, "rebalance"), content_type=JSON_CT)
+    await router.handle(_act_body(surface_id, nonce, "rebalance"), content_type=JSON_CT, owner_verified=True)
     status, payload = await router.handle(
-        _act_body(surface_id, nonce, "escalate"), content_type=JSON_CT
+        _act_body(surface_id, nonce, "escalate"), content_type=JSON_CT, owner_verified=True
     )
 
     # One tap = one LLM turn against a 3-slot worker pool — the second tap
@@ -1204,7 +1204,7 @@ async def test_app_act_unknown_action_rejected(router, service, db, fake_heart) 
     nonce = (await _surface_row(db, surface_id)).nonce
 
     status, payload = await router.handle(
-        _act_body(surface_id, nonce, "not-declared"), content_type=JSON_CT
+        _act_body(surface_id, nonce, "not-declared"), content_type=JSON_CT, owner_verified=True
     )
 
     assert status == 422
@@ -1223,7 +1223,7 @@ async def test_app_act_kill_switch_refuses_existing_surfaces(
     router = ActionRouter(db, off, service, heart=fake_heart)
 
     status, payload = await router.handle(
-        _act_body(surface_id, nonce, "rebalance"), content_type=JSON_CT
+        _act_body(surface_id, nonce, "rebalance"), content_type=JSON_CT, owner_verified=True
     )
 
     assert status == 422
@@ -1240,13 +1240,89 @@ async def test_cap_eviction_retires_the_running_action(
     resolve() — to cover eviction and every future resolver."""
     surface_id = await service.push_built(_actioned_built(), dedup_key="app:evict-1")
     nonce = (await _surface_row(db, surface_id)).nonce
-    await router.handle(_act_body(surface_id, nonce, "rebalance"), content_type=JSON_CT)
+    await router.handle(_act_body(surface_id, nonce, "rebalance"), content_type=JSON_CT, owner_verified=True)
     sub = fake_heart.subtasks.created[0]
 
     await service.resolve(surface_id)
 
     assert sub.id in fake_heart.subtasks.cancelled
     assert service._push_session_blocked(f"subtask-{sub.id.hex[:8]}")
+
+
+@pytest.mark.postgres_only
+async def test_app_act_without_the_owners_proof_starts_no_work(router, service, db, fake_heart) -> None:
+    surface_id = await service.push_built(_actioned_built(), dedup_key="app:proof-1")
+    nonce = (await _surface_row(db, surface_id)).nonce
+
+    status, payload = await router.handle(_act_body(surface_id, nonce, "rebalance"), content_type=JSON_CT)
+
+    assert (status, payload["error"]["code"]) == (403, "OWNER_PROOF_REQUIRED")
+    assert fake_heart.subtasks.created == []
+    row = await _surface_row(db, surface_id)
+    assert row.status == "live", "the card stays"
+    assert "pendingAction" not in ((row.data_model or {}).get("meta") or {})
+
+    status, payload = await router.handle(
+        _act_body(surface_id, nonce, "rebalance"), content_type=JSON_CT, owner_verified=True
+    )
+    assert status == 200, payload
+    assert len(fake_heart.subtasks.created) == 1
+
+
+_OWNER_VALUE = "owner-only-test-value"
+_PROXY_VALUE = "proxy-only-test-value"
+_ROUTE_PROOFS: dict[str, dict[str, str]] = {
+    "none": {"content-type": JSON_CT},
+    "owner": {"X-Nous-Owner-Secret": _OWNER_VALUE, "content-type": JSON_CT},
+    "proxy-json": {"X-Nous-Proxy-Secret": _PROXY_VALUE, "content-type": JSON_CT},
+    "proxy-text": {"X-Nous-Proxy-Secret": _PROXY_VALUE, "content-type": "text/plain"},
+    "empty-header": {"X-Nous-Owner-Secret": "", "content-type": JSON_CT},
+    "wrong": {"X-Nous-Owner-Secret": "a-wrong-test-value", "content-type": JSON_CT},
+}
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("mode", ["off", "warn", "enforce"])
+@pytest.mark.parametrize("proof", list(_ROUTE_PROOFS))
+async def test_app_act_through_the_route_needs_the_owners_proof_whatever_the_entry_mode(
+    db, act_settings, service, fake_heart, mode: str, proof: str
+) -> None:
+    """NOUS_OWNER_ENTRY_MODE governs chat and the MCP server only: app.act needs the owner's or the proxy's secret in
+    every mode."""
+    import hashlib
+
+    from httpx import ASGITransport, AsyncClient
+
+    from nous.api.rest import create_app
+
+    settings = act_settings.model_copy(
+        update={
+            "a2ui_enabled": True,
+            "owner_entry_mode": mode,
+            "owner_route_secret_sha256": hashlib.sha256(_OWNER_VALUE.encode()).hexdigest(),
+            "mcp_client_ui_secret_sha256": hashlib.sha256(_PROXY_VALUE.encode()).hexdigest(),
+        }
+    )
+    router = ActionRouter(db, settings, service, heart=fake_heart, composer=SimpleNamespace())
+    stand_in = SimpleNamespace()
+    app = create_app(
+        stand_in, stand_in, stand_in, stand_in, db, settings, surface_service=service, action_router=router
+    )
+    surface_id = await service.push_built(_actioned_built(), dedup_key=f"app:route-{mode}-{proof}")
+    nonce = (await _surface_row(db, surface_id)).nonce
+    body = json.dumps(_act_body(surface_id, nonce, "rebalance")).encode()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/a2ui/action", content=body, headers=_ROUTE_PROOFS[proof])
+
+    if proof in ("owner", "proxy-json"):
+        assert response.status_code == 200, response.text
+        assert len(fake_heart.subtasks.created) == 1
+    else:
+        expected = (415, "UNSUPPORTED_MEDIA_TYPE") if proof == "proxy-text" else (403, "OWNER_PROOF_REQUIRED")
+        assert (response.status_code, response.json()["error"]["code"]) == expected
+        assert fake_heart.subtasks.created == []
+        assert (await _surface_row(db, surface_id)).status == "live"
 
 
 @pytest.mark.postgres_only

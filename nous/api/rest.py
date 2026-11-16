@@ -3936,7 +3936,7 @@ def create_app(
         Route("/subtasks/{id}", get_subtask),
         Route("/subtasks/{id}", cancel_subtask, methods=["DELETE"]),
         Route("/schedules", list_schedules),
-        Route("/schedules", create_schedule, methods=["POST"]),
+        owner_guard.route("/schedules", create_schedule, methods=["POST"]),
         Route("/schedules/{id}", deactivate_schedule, methods=["DELETE"]),
         Route("/schedules/{id}/run", run_schedule, methods=["POST"]),
         Route("/health", health),

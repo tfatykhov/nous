@@ -1409,7 +1409,7 @@ def _register_micro_app_handlers(router: ActionRouter) -> None:
         watcher.add_done_callback(router._action_watchers.discard)
         return ActionResult(message=f"working on: {stamp['label']}")
 
-    router.register("app.act", app_act, mutating=True, owner_proof=False)
+    router.register("app.act", app_act, mutating=True, owner_proof=True)
 
 
 # F092.2 helpers — module-level so tests can exercise them directly.

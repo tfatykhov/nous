@@ -280,13 +280,17 @@ async def test_channel_of_session_finds_the_channel_whose_latest_session_it_is(d
 def _rest_client(env):
     """The REST app over the env's real Heart. The schedule routes use only
     heart and settings; the other create_app arguments are inert stand-ins
-    (copy tests/test_rest.py's fixtures if create_app ever needs more)."""
+    (copy tests/test_rest.py's fixtures if create_app ever needs more).
+    POST /schedules requires the owner's secret: the app holds its digest and
+    the client sends it."""
+    from f099_support import OWNER_DIGEST, OWNER_HEADERS
     from httpx import ASGITransport, AsyncClient
 
     from nous.api.rest import create_app
 
-    app = create_app(MagicMock(), MagicMock(), env.heart, MagicMock(), env.db, env.settings)
-    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+    settings = env.settings.model_copy(update={"owner_route_secret_sha256": OWNER_DIGEST})
+    app = create_app(MagicMock(), MagicMock(), env.heart, MagicMock(), env.db, settings)
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test", headers=OWNER_HEADERS)
 
 
 async def _post_schedule(env, body: dict):
