@@ -98,12 +98,15 @@
    * shown then, beside controls that can be used again. */
   async function run(action: Action, body?: object) {
     if (busy) return;
+    // The goal's ids are read now: after the awaits below, this pane may show another answer or none.
+    const ref = goal.ref;
+    const opener = `goal-a.${ref}.${action}`;
     busy = action;
     confirming = null;
     result = null;
     let outcome: Note;
     try {
-      const changed = await goalAction(goal.ref, action, body);
+      const changed = await goalAction(ref, action, body);
       outcome = { text: ACTION_TEXT[action].done, ok: true, expect: changed.state };
     } catch (err) {
       outcome = { text: refusalText(err), ok: false };
@@ -112,7 +115,7 @@
     busy = null;
     result = outcome;
     await tick();
-    (byId(buttonId(action)) ?? byId(`goal-h.${goal.ref}`))?.focus();
+    (byId(opener) ?? byId(`goal-h.${ref}`))?.focus();
   }
 
   function yes(action: Action) {
@@ -131,9 +134,10 @@
     if (busy || !noteText.trim()) return;
     busy = 'note';
     noteResult = null;
+    const ref = goal.ref;
     let outcome: Note;
     try {
-      await goalAction(goal.ref, 'note', { text: noteText });
+      await goalAction(ref, 'note', { text: noteText });
       noteText = '';
       outcome = { text: ACTION_TEXT.note.done, ok: true };
     } catch (err) {
@@ -165,6 +169,9 @@
   const sessionLength = (start: string | null, end: string | null) =>
     start && end ? spanText(new Date(end).getTime() - new Date(start).getTime()) : start ? 'running' : '';
 </script>
+
+<!-- Escape closes an open confirmation, as No does. -->
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape' && confirming && busy === null) void no(); }} />
 
 {#snippet line(n: Note | null)}
   {#if n}<p class="result" class:result-err={!n.ok} role={n.ok ? 'status' : 'alert'}>{n.text}</p>{/if}
@@ -388,7 +395,7 @@
   .actions { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.75rem; }
   .confirm { margin-top: 0.75rem; padding: 0.75rem 0.875rem; border-radius: var(--card-radius-sm); background: var(--wash); font-size: 0.875rem; }
   .confirm p { margin: 0.5rem 0 0; }
-  .confirm p:focus { outline: none; }
+  .confirm p:focus { outline: 2px solid var(--focus-ring); outline-offset: 2px; border-radius: var(--radius-sm); }
   .confirm p.wrong { color: var(--warn-text); }
   .confirm .actions { margin-top: 0.5rem; }
   .fields { display: flex; gap: 0.5rem 0.75rem; flex-wrap: wrap; }

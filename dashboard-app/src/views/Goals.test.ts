@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import Goals from './Goals.svelte';
 import { initRouter } from '../lib/router';
-import { markupOf } from '../lib/testing/css';
+import { markupOf, parseBlocks, styleBlocks } from '../lib/testing/css';
 import { OPTIONS, goalDetail, goalRow } from '../lib/testing/goalFixtures';
 import type { Action, GoalDetail } from '../lib/goals';
 
@@ -286,7 +286,7 @@ describe('Goals: the actions', () => {
     expect((within(region).getByRole('button', { name: 'Pause' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it('a 403 on a change asks for the sign-in, and a network failure says nothing was changed', async () => {
+  it('a 403 on a change asks for the sign-in, and a lost answer says to check the goal', async () => {
     handlers['POST /goals/G-0001/pause'] = () => [403, { error: 'forbidden' }];
     render(Goals);
     const region = await pane('Tidy the notes');
@@ -512,7 +512,7 @@ describe('Goals: the review fixes', () => {
     const region = await pane('Tidy the notes');
     await fireEvent.click(within(region).getByRole('button', { name: 'Change budget' }));
     await fireEvent.input(within(region).getByLabelText('Total budget (tokens)'), { target: { value: '2000000000' } });
-    expect(within(region).getByText('The total budget must be at least 1 and at most 1000000000.')).toBeTruthy();
+    expect(within(region).getByText('The total budget must be at least 1 and at most 1,000,000,000.')).toBeTruthy();
     expect((within(region).getByRole('button', { name: 'Yes, change the budget' }) as HTMLButtonElement).disabled).toBe(true);
     await fireEvent.input(within(region).getByLabelText('Total budget (tokens)'), { target: { value: '1000000' } });
     expect(within(region).getByText('The day budget cannot be larger than the total budget.')).toBeTruthy();
@@ -590,6 +590,123 @@ describe('Goals: the review fixes', () => {
   });
 });
 
+describe('Goals: the bare address keeps its goal', () => {
+  it('a cancel on the bare address stays on the goal and says so', async () => {
+    acting('G-0001', 'cancel', { state: 'cancelled', actions: [] });
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await fireEvent.click(within(region).getByRole('button', { name: 'Cancel goal' }));
+    await fireEvent.click(within(region).getByRole('button', { name: 'Yes, cancel the goal' }));
+    expect(await within(region).findByText('Cancelled.')).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Tidy the notes' })).toBe(region);
+    expect(within(region).getByText('Cancelled')).toBeTruthy();
+  });
+
+  it('confirm done on the bare address stays on the goal', async () => {
+    install([goalDetail({ id: 'w', ref: 'G-0004', title: 'Check the backups', state: 'paused', pause_reason: 'waiting_for_owner', actions: ['resume', 'confirm-done', 'cancel'] })]);
+    acting('G-0004', 'confirm-done', { state: 'done', pause_reason: null, actions: [] });
+    render(Goals);
+    const region = await pane('Check the backups');
+    await fireEvent.click(within(region).getByRole('button', { name: 'Confirm done' }));
+    await fireEvent.click(within(region).getByRole('button', { name: 'Yes, it is done' }));
+    expect(await within(region).findByText('Closed as done.')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'New goal' })).toBeNull();
+  });
+
+  it('with one open goal, a cancel never turns the pane into the New goal form', async () => {
+    install([A]);
+    acting('G-0001', 'cancel', { state: 'cancelled', actions: [] });
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await fireEvent.click(within(region).getByRole('button', { name: 'Cancel goal' }));
+    await fireEvent.click(within(region).getByRole('button', { name: 'Yes, cancel the goal' }));
+    await within(region).findByText('Cancelled.');
+    expect(await screen.findByText('No open goals.')).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'New goal' })).toBeNull();
+    expect(screen.getByRole('region', { name: 'Tidy the notes' })).toBe(region);
+  });
+
+  it('a filter switch never moves the pane or drops a typed note', async () => {
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    const box = within(region).getByLabelText('A note for the next session') as HTMLTextAreaElement;
+    await fireEvent.input(box, { target: { value: 'Half a thought' } });
+    const nav = screen.getByRole('navigation', { name: 'Goals' });
+    await fireEvent.click(within(nav).getByRole('button', { name: 'Finished' }));
+    await within(nav).findByText('Old report');
+    expect(screen.getByRole('region', { name: 'Tidy the notes' })).toBe(region);
+    expect(box.value).toBe('Half a thought');
+    await fireEvent.click(within(nav).getByRole('button', { name: 'Open' }));
+    await within(nav).findByText('Sort the photos');
+    expect(box.value).toBe('Half a thought');
+  });
+});
+
+describe('Goals: a filter switch', () => {
+  it('says "Loading" until that filter\'s answer lands, never another filter\'s emptiness', async () => {
+    const hold = held();
+    render(Goals);
+    const nav = await screen.findByRole('navigation', { name: 'Goals' });
+    await within(nav).findByText('Tidy the notes');
+    handlers['GET /goals?state=finished'] = () => hold.promise;
+    await fireEvent.click(within(nav).getByRole('button', { name: 'Finished' }));
+    expect(await within(nav).findByText('Loading…')).toBeTruthy();
+    expect(within(nav).queryByText('No finished goals.')).toBeNull();
+    expect(within(nav).queryByText('Tidy the notes')).toBeNull(); // the open list is not shown under Finished
+    hold.resolve([200, { enabled: true, goals: [rowOf(C)], total: 1 }]);
+    expect(await within(nav).findByText('Old report')).toBeTruthy();
+  });
+
+  it('says so when that filter\'s list could not be read', async () => {
+    render(Goals);
+    await pane('Tidy the notes');
+    const nav = screen.getByRole('navigation', { name: 'Goals' });
+    handlers['GET /goals?state=finished'] = () => [500, { error: 'the request could not be processed' }];
+    await fireEvent.click(within(nav).getByRole('button', { name: 'Finished' }));
+    expect(await within(nav).findByText('Could not load the list.')).toBeTruthy();
+    expect(within(nav).queryByText('No finished goals.')).toBeNull();
+    // the goal shown stays, and says its data is from the last read
+    expect(await screen.findByText(/What is shown is from the last read\./)).toBeTruthy();
+  });
+
+  it('says how many it shows when the list is cut', async () => {
+    handlers['GET /goals?state=open'] = () => [200, { enabled: true, goals: [rowOf(A), rowOf(B)], total: 7 }];
+    render(Goals);
+    const nav = await screen.findByRole('navigation', { name: 'Goals' });
+    expect(await within(nav).findByText('Showing the newest 2 of 7.')).toBeTruthy();
+  });
+});
+
+describe('Goals: confirmations and focus', () => {
+  it('Escape closes a confirmation, sends nothing, and gives the focus back', async () => {
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await fireEvent.click(within(region).getByRole('button', { name: 'Cancel goal' }));
+    expect(within(region).getByRole('group', { name: 'Confirm: Cancel goal' })).toBeTruthy();
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    await waitFor(() => expect(within(region).queryByRole('group', { name: 'Confirm: Cancel goal' })).toBeNull());
+    expect(posts()).toEqual([]);
+    expect(document.activeElement).toBe(within(region).getByRole('button', { name: 'Cancel goal' }));
+  });
+
+  it('the focus goes back to the control that started a change once it has landed', async () => {
+    acting('G-0001', 'budget', { total_budget: 20_000_000 });
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await fireEvent.click(within(region).getByRole('button', { name: 'Change budget' }));
+    await fireEvent.input(within(region).getByLabelText('Total budget (tokens)'), { target: { value: '20000000' } });
+    await fireEvent.click(within(region).getByRole('button', { name: 'Yes, change the budget' }));
+    await within(region).findByText('Budget changed.');
+    await waitFor(() => expect(document.activeElement).toBe(within(region).getByRole('button', { name: 'Change budget' })));
+  });
+
+  it('the focused sentence of a confirmation shows a focus outline', () => {
+    const css = parseBlocks(styleBlocks(readFileSync(join(__dirname, 'goals/GoalPane.svelte'), 'utf-8')));
+    const rule = css.get('.confirm p:focus');
+    expect(rule?.outline).toMatch(/^2px solid var\(--focus-ring\)$/);
+  });
+});
+
 describe('Goals: the poll', () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -617,5 +734,39 @@ describe('Goals: the poll', () => {
     render(Goals);
     await vi.advanceTimersByTimeAsync(16_000);
     await vi.waitFor(() => expect(screen.getByText('Could not load the goals: Could not reach the server.')).toBeTruthy());
+  });
+});
+
+describe('Goals: timeouts and the clock', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('a change with no answer is given up: it says to check the goal, and the controls work again', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    handlers['POST /goals/G-0001/pause'] = () => [HANG, null];
+    render(Goals);
+    const region = await pane('Tidy the notes');
+    await fireEvent.click(within(region).getByRole('button', { name: 'Pause' }));
+    await vi.advanceTimersByTimeAsync(16_000);
+    await vi.waitFor(() => expect(within(region).getByText('No answer came back. Check the goal before trying again.')).toBeTruthy());
+    expect((within(region).getByRole('button', { name: 'Pause' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('after a read times out, the goal shown says it is from the last read', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(Goals);
+    await pane('Tidy the notes');
+    handlers['GET /goals?state=open'] = () => [HANG, null];
+    await fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    await vi.advanceTimersByTimeAsync(16_000);
+    await vi.waitFor(() => expect(screen.getByText(/^Could not read G-0001 again: Could not reach the server\. What is shown is from the last read\./)).toBeTruthy());
+  });
+
+  it('the "updated" badge moves on between polls', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    render(Goals);
+    await pane('Tidy the notes');
+    await vi.waitFor(() => expect(screen.getByText(/^updated [0-2]s ago$/)).toBeTruthy());
+    await vi.advanceTimersByTimeAsync(7_000);
+    await vi.waitFor(() => expect(screen.getByText(/^updated [7-9]s ago$/)).toBeTruthy());
   });
 });

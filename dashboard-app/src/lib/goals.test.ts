@@ -137,7 +137,7 @@ describe('the create form', () => {
     expect(custom({ day_budget: '3000000' })).toEqual(['The day budget cannot be larger than the total budget.']);
     expect(custom({ sessions_per_day: '0' })).toEqual(['Sessions per day must be at least 1 and at most 24.']);
     expect(custom({ deadline_days: '91' })).toEqual(['The deadline in days must be at least 1 and at most 90.']);
-    expect(custom({ min_interval_seconds: '59' })).toEqual(['The interval between sessions in seconds must be at least 60 and at most 604800.']);
+    expect(custom({ min_interval_seconds: '59' })).toEqual(['The interval between sessions in seconds must be at least 60 and at most 604,800.']);
     expect(custom({ jobs_per_day: '1.5' })).toEqual(['Jobs per day must be a whole number.']);
     expect(custom({})).toEqual([]);
     // Every range the server sends is checked: a range with a new field is read, not ignored.
@@ -269,13 +269,13 @@ describe('the budget and deadline forms', () => {
   const goal = goalDetail({ total_budget: 10_000_000, day_budget: 2_000_000 });
   it('follow the server\'s ranges in its words, and an unchanged budget is not sent', () => {
     expect(budgetProblem(20_000_000, 2_000_000, goal, options)).toBeNull();
-    expect(budgetProblem(0, 2_000_000, goal, options)).toBe('The total budget must be at least 1 and at most 1000000000.');
-    expect(budgetProblem(2_000_000_000, 2_000_000, goal, options)).toBe('The total budget must be at least 1 and at most 1000000000.');
+    expect(budgetProblem(0, 2_000_000, goal, options)).toBe('The total budget must be at least 1 and at most 1,000,000,000.');
+    expect(budgetProblem(2_000_000_000, 2_000_000, goal, options)).toBe('The total budget must be at least 1 and at most 1,000,000,000.');
     expect(budgetProblem(10_000_000, Number.NaN, goal, options)).toBe('The day budget must be a whole number.');
     expect(budgetProblem(1_000_000, 2_000_000, goal, options)).toBe('The day budget cannot be larger than the total budget.');
     expect(budgetProblem(10_000_000, 2_000_000, goal, options)).toBe('Type a new total or day budget.');
     const narrower = OPTIONS({ ranges: [{ field: 'total_budget', low: 1, high: 15_000_000, words: 'the total budget' }] });
-    expect(budgetProblem(20_000_000, 2_000_000, goal, narrower)).toBe('The total budget must be at least 1 and at most 15000000.');
+    expect(budgetProblem(20_000_000, 2_000_000, goal, narrower)).toBe('The total budget must be at least 1 and at most 15,000,000.');
   });
   it('a deadline change is 1 to the server\'s bound of whole days', () => {
     expect(deadlineProblem(5, options)).toBeNull();

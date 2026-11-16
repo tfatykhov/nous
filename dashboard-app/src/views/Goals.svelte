@@ -11,6 +11,7 @@
   import {
     DRIVER_OFF_TEXT, GOALS_OFF_TEXT, HALT_TEXT, HELD_TEXT, PILL, READ_FORBIDDEN_TEXT,
     deadlineText, formatNumber, getGoal, goalOptions, haltState, listGoals, nextSessionText, refusalText, spentPercent, stateWord,
+    timed,
     type GoalDetail, type GoalFilter, type GoalList, type GoalOptions, type GoalRow, type HaltState,
   } from '../lib/goals';
   import type { ApiAnswerError } from '../lib/api';
@@ -30,38 +31,41 @@
   let journalAll = $state(false);
   let filter = $state<GoalFilter>('open');
   const JOURNAL_ALL = 200;
-  /** A fetch that has no answer after this long is given up: the screen says so, and the next tick tries again. */
-  const REQUEST_TIMEOUT_MS = 15_000;
-  /** The options change only with the server's settings: read once, and again on the page Refresh. */
+  /** The options change only with the server's settings: read once, and again on the page Refresh. Whoever starts
+   * the goal driver in the app must read `driver_running` again when the driver starts or stops: until then the
+   * screen keeps the value it read first. */
   let knownOptions: GoalOptions | null = null;
+  /** The filter whose list could not be read last (null once a list was read). */
+  let listFailedFor = $state<GoalFilter | null>(null);
 
-  async function fetchPage(signal?: AbortSignal): Promise<Page> {
+  /** Every read of the page, given up after the request timeout (`timed`). */
+  function fetchPage(signal?: AbortSignal): Promise<Page> {
     const ref = want;
     const all = journalAll;
     const asked = filter;
-    const timeout = new AbortController();
-    const timer = setTimeout(() => timeout.abort(), REQUEST_TIMEOUT_MS);
-    const stop = () => timeout.abort();
-    signal?.addEventListener('abort', stop);
-    try {
+    return timed(async (sig) => {
       const detail = ref
-        ? getGoal(ref, all ? JOURNAL_ALL : undefined, timeout.signal).then(
+        ? getGoal(ref, all ? JOURNAL_ALL : undefined, sig).then(
             (d): Shown => ({ ref, detail: d.enabled ? (d as GoalDetail) : null, error: null }),
             (error: unknown): Shown => ({ ref, detail: null, error }),
           )
         : Promise.resolve(null);
-      const [list, options, halt, shown] = await Promise.all([
-        listGoals(asked, timeout.signal),
-        knownOptions ?? goalOptions(timeout.signal),
-        haltState(timeout.signal),
-        detail,
+      const list = listGoals(asked, sig).then(
+        (answer) => {
+          listFailedFor = null;
+          return answer;
+        },
+        (err: unknown) => {
+          if (!signal?.aborted) listFailedFor = asked; // not a fetch the poll itself replaced
+          throw err;
+        },
+      );
+      const [listed, options, halt, shown] = await Promise.all([
+        list, knownOptions ?? goalOptions(sig), haltState(sig), detail,
       ]);
       if (options.enabled) knownOptions = options;
-      return { filter: asked, list, options, halt, shown };
-    } finally {
-      clearTimeout(timer);
-      signal?.removeEventListener('abort', stop);
-    }
+      return { filter: asked, list: listed, options, halt, shown };
+    }, signal);
   }
 
   const store = usePoll(makePollStore<Page>(fetchPage, 15_000));
@@ -84,7 +88,14 @@
   let options = $derived($store.data?.options ?? { enabled: false });
   let halted = $derived($store.data?.halt?.halted === true);
   let driverRunning = $derived(options.driver_running === true);
-  let now = $derived($store.lastUpdated ?? Date.now());
+  // The screen's clock: "updated 5s ago" and the times in words move on between polls.
+  let clock = $state(Date.now());
+  $effect(() => {
+    const ticking = setInterval(() => (clock = Date.now()), 1000);
+    return () => clearInterval(ticking);
+  });
+  let now = $derived(clock);
+  let badge = $derived({ ...$store, clock });
 
   const FILTERS = [
     { value: 'open', label: 'Open' },
@@ -92,8 +103,9 @@
     { value: 'finished', label: 'Finished' },
   ];
   const isOpen = (g: GoalRow) => g.state === 'draft' || g.state === 'active' || g.state === 'paused';
-  /** The list as the server sent it for the filter shown (an answer for another filter is not shown). */
-  let listed = $derived($store.data?.filter === filter ? goals : []);
+  /** The list as the server sent it for the filter shown; until an answer for that filter lands, none is shown. */
+  let listReady = $derived($store.data?.filter === filter);
+  let listed = $derived(listReady ? goals : []);
   let listTotal = $derived($store.data?.list.total ?? listed.length);
   // A new filter asks the server at once.
   let lastFilter: GoalFilter = 'open';
@@ -123,7 +135,10 @@
   const goalHref = (ref: string) => routeHref('goals', ['g', ref]);
 
   type Pane = { kind: 'list' } | { kind: 'new' } | { kind: 'goal'; ref: string };
-  /** The goal shown last: the bare address keeps showing it while it is listed. */
+  /** What the bare address shows: once it has shown a goal (or the form), it keeps showing it while a detail of that
+   * goal is at hand, listed or not, so a change (a cancel, a confirm done) or a filter switch never moves the pane to
+   * another goal or to the form. A goal's own address, or the list, changes it. */
+  const FORM = '#form';
   let stay = $state<string | null>(null);
   let pane = $derived.by((): Pane => {
     if (sub === 'new') return { kind: 'new' };
@@ -137,10 +152,16 @@
       return { kind: 'goal', ref };
     }
     if (narrow) return { kind: 'list' };
-    const first = goals.find((g) => g.ref === stay) ?? goals.find(isOpen) ?? goals[goals.length - 1];
+    if (stay === FORM) return { kind: 'new' };
+    if (stay && (goals.some((g) => g.ref === stay) || lastGood?.ref === stay)) return { kind: 'goal', ref: stay };
+    const first = goals.find(isOpen) ?? goals[goals.length - 1];
     return first ? { kind: 'goal', ref: first.ref } : { kind: 'new' };
   });
   let paneRef = $derived(pane.kind === 'goal' ? pane.ref : null);
+  // The bare address that came to the form, once the list for the filter has landed, stays on the form.
+  $effect(() => {
+    if (!picked && !narrow && listReady && pane.kind === 'new' && sub !== 'new') untrack(() => (stay = FORM));
+  });
 
   // One column: the list and the pane replace each other, so a click would leave the focus on nothing. It goes to
   // what came into view: the pane, or the list.
@@ -176,7 +197,9 @@
     }
   });
   let paneDetail = $derived(shown?.detail ?? (lastGood && lastGood.ref === paneRef ? lastGood.detail : null));
-  let readError = $derived(shown?.error && paneDetail ? refusalText(shown.error, 'see') : null);
+  // The page's last read failed (the goal's, or the whole page's, a timeout included) while a detail is shown.
+  let failedRead = $derived(shown?.error ?? $store.error ?? null);
+  let readError = $derived(failedRead && paneDetail ? refusalText(failedRead, 'see') : null);
   let missing = $derived((shown?.error as ApiAnswerError | null)?.status === 404);
 
   function showMore() {
@@ -196,7 +219,7 @@
     <p class="subtitle">What the agent works on in the background, within the limits you set. Every change here applies at once.</p>
   </div>
   <div class="head-right">
-    <StaleBadge state={$store} />
+    <StaleBadge state={badge} />
     <Button variant="outline" size="lg" class="px-4 max-md:min-h-11" onclick={() => void refreshPage()} disabled={$store.loading}>{$store.loading ? 'Loading…' : 'Refresh'}</Button>
   </div>
 </header>
@@ -225,7 +248,9 @@
         class="w-full max-md:min-h-11 aria-[current=page]:border-[var(--muted)] aria-[current=page]:bg-[var(--bg)]"
         aria-current={pane.kind === 'new' ? 'page' : undefined}>New goal</Button>
       <div class="filters"><FilterBar options={FILTERS} bind:value={filter} required label="Which goals to show" /></div>
-      {#if listed.length === 0}
+      {#if !listReady}
+        <p class="empty" role="status">{listFailedFor === filter ? 'Could not load the list.' : 'Loading…'}</p>
+      {:else if listed.length === 0}
         <p class="empty">{filter === 'open' ? 'No open goals.' : filter === 'finished' ? 'No finished goals.' : 'No goals yet.'}</p>
       {:else}
         <ul>

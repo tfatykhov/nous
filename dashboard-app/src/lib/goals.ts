@@ -143,9 +143,29 @@ export const getGoal = (ref: string, journal?: number, signal?: AbortSignal) =>
   apiRequest<GoalDetail | { enabled: false }>(`${goalPath(ref)}${journal ? `?journal=${journal}` : ''}`, 'GET', undefined, signal);
 // A change answers with the goal in full, or with `reload` when it was made and the goal could not be read back; the
 // screen reads the goal again after every change either way.
-export const createGoal = (body: CreateBody) => apiRequest<GoalDetail | GoalMade>(BASE, 'POST', body);
+export const createGoal = (body: CreateBody) =>
+  timed((signal) => apiRequest<GoalDetail | GoalMade>(BASE, 'POST', body, signal));
 export const goalAction = (ref: string, action: Action, body?: object) =>
-  apiRequest<GoalDetail | GoalMade>(`${goalPath(ref)}/${action}`, 'POST', body);
+  timed((signal) => apiRequest<GoalDetail | GoalMade>(`${goalPath(ref)}/${action}`, 'POST', body, signal));
+
+/** A request with no answer after this long is given up: a read says the server could not be reached, a change that
+ * its answer was lost. */
+export const REQUEST_TIMEOUT_MS = 15_000;
+
+/** Run `request` with a signal that aborts after `REQUEST_TIMEOUT_MS`, or when `outer` aborts. */
+export async function timed<T>(request: (signal: AbortSignal) => Promise<T>, outer?: AbortSignal): Promise<T> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), REQUEST_TIMEOUT_MS);
+  const stop = () => ac.abort();
+  if (outer?.aborted) ac.abort();
+  outer?.addEventListener('abort', stop);
+  try {
+    return await request(ac.signal);
+  } finally {
+    clearTimeout(timer);
+    outer?.removeEventListener('abort', stop);
+  }
+}
 
 /** The background halt, when this server has the route. A 404 (no halt on this server) or any failure is null:
  * nothing to show, and never an error of the goals list. */
@@ -299,7 +319,7 @@ export function budgetProblem(total: number, day: number, goal: Pick<GoalDetail,
   for (const [value, field] of [[total, 'total_budget'], [day, 'day_budget']] as const) {
     const range = rangeOf(options, field) ?? { low: 1, high: Number.MAX_SAFE_INTEGER, words: field };
     if (!Number.isInteger(value)) return capital(`${range.words} must be a whole number`);
-    if (!inRange(value, range.low, range.high)) return capital(`${range.words} must be at least ${range.low} and at most ${range.high}`);
+    if (!inRange(value, range.low, range.high)) return capital(`${range.words} must be at least ${formatNumber(range.low)} and at most ${formatNumber(range.high)}`);
   }
   if (day > total) return capital('the day budget cannot be larger than the total budget');
   if (total === goal.total_budget && day === goal.day_budget) return 'Type a new total or day budget.';
@@ -455,7 +475,7 @@ export function createProblems(form: CreateForm, options: GoalOptions): string[]
       }
       const value = Number(raw);
       values[range.field] = value;
-      if (value < range.low || value > range.high) limits.push(`${range.words} must be at least ${range.low} and at most ${range.high}`);
+      if (value < range.low || value > range.high) limits.push(`${range.words} must be at least ${formatNumber(range.low)} and at most ${formatNumber(range.high)}`);
     }
     if (!limits.length && (values.day_budget ?? 0) > (values.total_budget ?? 0)) {
       limits.push('the day budget cannot be larger than the total budget');
