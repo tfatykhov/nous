@@ -285,6 +285,21 @@ def _mounts(app: Starlette) -> dict[str, Mount]:
     return {route.path: route for route in app.routes if type(route) is Mount}
 
 
+def _declaration(method: str, path: str, route: Route) -> str:
+    """What declares ``route`` in this file, read from the marker its builder sets: the entry to write."""
+    if getattr(route.endpoint, "owner_guarded", False):
+        return f'declare ("{method}", "{path}"): OWNER, in ROUTE_RULE (the route is built with OwnerGuard.route)'
+    if getattr(route.endpoint, "entry_gated", False):
+        return f'declare ("{method}", "{path}"): ENTRY, in ROUTE_RULE (the route is built with EntryGate.route)'
+    if method == "GET":
+        return f'declare "{path}" in READS (a read with no check), or ("GET", "{path}"): <its check>, in ROUTE_RULE'
+    return (
+        f'build {method} {path} with OwnerGuard.route and declare ("{method}", "{path}"): OWNER, in ROUTE_RULE, or '
+        f'declare ("{method}", "{path}"): <the check its handler applies>, naming a new kind of check in RULES '
+        "with a test of it in this file"
+    )
+
+
 def _concrete(path: str) -> str:
     """The path with each ``{param}`` filled with a value that names nothing."""
     return re.sub(r"\{[^}]+\}", "x", path)
@@ -311,9 +326,12 @@ def test_every_route_has_a_declared_rule(tmp_path, stand_ins) -> None:
     )
     if "/dashboard/v2" in mounts:  # the dashboard build exists
         assert isinstance(mounts["/dashboard/v2"].app, OverlayStaticFiles), "/dashboard/v2 serves static files only"
-    for method, path, _route in _rows(app):
-        if method != "GET":
-            assert (method, path) in ROUTE_RULE, f"declare the check {method} {path} applies in ROUTE_RULE"
+    undeclared = [
+        _declaration(method, path, route)
+        for method, path, route in _rows(app)
+        if method != "GET" and (method, path) not in ROUTE_RULE
+    ]
+    assert undeclared == [], "a route with no declared check, in tests/test_route_policy.py:\n" + "\n".join(undeclared)
 
 
 def _table(app: Starlette) -> list[tuple[str, str, tuple[str, ...]]]:
@@ -334,10 +352,15 @@ async def test_the_lifespan_adds_no_route(tmp_path, stand_ins) -> None:
 
 def test_every_get_is_declared_a_read_or_has_a_rule(tmp_path, stand_ins) -> None:
     app = _app(tmp_path)
-    for method, path, _route in _rows(app):
+    problems = []
+    for method, path, route in _rows(app):
         if method == "GET":
-            declared = [path in READS, ("GET", path) in ROUTE_RULE]
-            assert declared.count(True) == 1, f"declare GET {path} in READS or in ROUTE_RULE (exactly one)"
+            declared = [path in READS, ("GET", path) in ROUTE_RULE].count(True)
+            if declared == 0:
+                problems.append(_declaration(method, path, route))
+            elif declared == 2:
+                problems.append(f"GET {path} is in READS and in ROUTE_RULE: keep one")
+    assert problems == [], "declare each GET in tests/test_route_policy.py:\n" + "\n".join(problems)
 
 
 def test_every_declared_rule_and_read_names_a_route(tmp_path, stand_ins) -> None:
@@ -355,7 +378,8 @@ def test_every_rule_is_one_this_file_names_and_tests() -> None:
 async def test_the_redeem_route_refuses_a_call_without_a_valid_code(tmp_path, stand_ins) -> None:
     """The pairing code is the redeem route's check: with no pairing open, a well-formed body is refused as an invalid
     code, and a body that is not JSON before it is read. The device store is never reached (its database is a
-    stand-in here, so reaching it would answer 500)."""
+    stand-in here, so reaching it would answer 500). The rule is declared for this route alone."""
+    assert [key for key, rule in ROUTE_RULE.items() if rule == PAIRING_CODE] == [("POST", "/a2ui/devices/redeem")]
     app = _app(tmp_path)
     body = b'{"code": "ABCD-EFGH", "installation_id": "an-installation"}'
     no_code = await _send(
@@ -375,7 +399,9 @@ async def test_the_redeem_route_refuses_a_call_without_a_valid_code(tmp_path, st
 
 
 async def test_the_unpair_route_takes_only_a_device_token(tmp_path, stand_ins) -> None:
-    """The device's own token is the unpair route's check: neither the owner's nor the proxy's secret stands in."""
+    """The device's own token is the unpair route's check: neither the owner's nor the proxy's secret stands in. The
+    rule is declared for this route alone."""
+    assert [key for key, rule in ROUTE_RULE.items() if rule == DEVICE_TOKEN] == [("POST", "/a2ui/devices/unpair")]
     app = _app(tmp_path)
     answers = [
         (await _send(app, "POST", "/a2ui/devices/unpair", content=b"{}", headers=headers)).status_code
@@ -390,12 +416,20 @@ async def test_the_unpair_route_takes_only_a_device_token(tmp_path, stand_ins) -
 
 def test_each_declared_rule_is_the_marker_the_route_carries(tmp_path, stand_ins) -> None:
     app = _app(tmp_path)
+    wrong = []
     for method, path, route in _rows(app):
         rule = ROUTE_RULE.get((method, path))
         guarded = getattr(route.endpoint, "owner_guarded", False)
         gated = getattr(route.endpoint, "entry_gated", False)
-        assert guarded is (rule == OWNER), f"{method} {path}: declared {rule!r}, owner_guarded is {guarded}"
-        assert gated is (rule == ENTRY), f"{method} {path}: declared {rule!r}, entry_gated is {gated}"
+        if guarded is not (rule == OWNER) or gated is not (rule == ENTRY):
+            found = f"{method} {path}: declared {rule!r}, owner_guarded is {guarded}, entry_gated is {gated}"
+            if guarded or gated:
+                in_reads = method == "GET" and path in READS
+                fix = _declaration(method, path, route) + (", and take it out of READS" if in_reads else "")
+            else:
+                fix = "build it with the check declared, or declare the check its handler applies"
+            wrong.append(f"{found}: {fix}")
+    assert wrong == [], "\n".join(wrong)
     assert getattr(_mounts(app)["/mcp"].app, "entry_gated", False) is True
 
 
