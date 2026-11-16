@@ -92,7 +92,8 @@ class PairingScreenTest {
                 else -> json(200, "{}")
             }
         }
-        val g = graph()
+        val box = FakeBox()
+        val g = graph(box)
         rule.setContent { NousThemed(Themes.nousDefault) { SettingsScreen(g) { } } }
         rule.onNodeWithText("Not paired").assertExists()
         rule.onNodeWithText("Open web companion").assertExists()
@@ -105,6 +106,7 @@ class PairingScreenTest {
         rule.onNodeWithText(PairingWords.paired("Pixel")).assertExists()
         rule.onNodeWithText("Open web companion").assertExists()
         assertNotNull(g.credential.pairedFor(base))
+        assertEquals("a working key is not replaced", 0, box.resets)
         val redeem = seen.first { path(it) == "/a2ui/devices/redeem" }
         val sent = Json.parseToJsonElement(redeem.body!!.utf8()).jsonObject
         assertEquals("\"K7QM2XRD\"", sent["code"].toString())
@@ -192,12 +194,39 @@ class PairingScreenTest {
         assertNull(g.credential.pairedFor(base))
     }
 
-    @Test fun a_key_the_phone_cannot_store_leaves_it_unpaired_and_says_so() {
-        answers = { r -> if (path(r) == "/a2ui/devices/redeem") json(200, """{"device_id":"d-1","name":"Pixel","token":"$SAMPLE_TOKEN"}""") else json(200, "{}") }
-        val g = graph(FakeBox(failSeal = true))
+    private val redeemed = """{"device_id":"d-1","name":"Pixel","token":"$SAMPLE_TOKEN"}"""
+
+    private fun pairIn(g: AppGraph) {
         rule.setContent { NousThemed(Themes.nousDefault) { SettingsScreen(g) { } } }
         rule.onNode(hasSetTextAction()).performTextInput("K7QM2XRD")
         rule.onNodeWithText("Pair this device").performClick()
+    }
+
+    @Test fun a_key_that_stopped_working_is_made_again_once_and_pairing_goes_on() {
+        answers = { r -> if (path(r) == "/a2ui/devices/redeem") json(200, redeemed) else json(200, "{}") }
+        val box = FakeBox(failSeal = true, resetFixes = true)
+        val g = graph(box)
+        pairIn(g)
+        waitForText(PairingWords.paired("Pixel"))
+        assertEquals(1, box.resets)
+        assertNotNull(g.credential.pairedFor(base))
+    }
+
+    @Test fun a_key_that_cannot_be_made_refuses_to_pair_and_sends_nothing() {
+        answers = { r -> if (path(r) == "/a2ui/devices/redeem") json(200, redeemed) else json(200, "{}") }
+        val box = FakeBox(failSeal = true)
+        val g = graph(box)
+        pairIn(g)
+        waitForText(PairingWords.NO_KEY)
+        assertEquals(1, box.resets)
+        assertTrue(seen.none { path(it) == "/a2ui/devices/redeem" })
+        rule.onNodeWithText("Not paired").assertExists()
+    }
+
+    @Test fun a_token_that_cannot_be_stored_after_the_redeem_says_to_revoke_it() {
+        answers = { r -> if (path(r) == "/a2ui/devices/redeem") json(200, redeemed) else json(200, "{}") }
+        val g = graph(FakeBox(failSealFrom = 2))   // the trial seal works, the real one does not
+        pairIn(g)
         waitForText(PairingWords.NOT_STORED)
         rule.onNodeWithText("Not paired").assertExists()
     }

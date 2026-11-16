@@ -23,8 +23,9 @@ class PairingActions(private val graph: AppGraph) {
     var state by mutableStateOf(State())
         private set
 
-    /** Redeem [code] at the configured address and keep the token. Ignored while other work runs. */
+    /** Redeem [code] at the configured address and keep the token; first make sure a token can be kept. Ignored while other work runs. */
     fun pair(code: String) = launchWork {
+        if (!graph.credential.ready()) return@launchWork State(note = PairingWords.NO_KEY, isError = true)
         val base = graph.settings.baseUrl
         when (val out = Pairing.redeem(graph.http, Endpoints.of(base), code, graph.settings.installationId, graph.settings.deviceName, graph.debuggable)) {
             is RedeemOutcome.Done -> if (graph.credential.save(out.paired, base)) {

@@ -58,6 +58,17 @@ class DeviceCredential(private val file: File, private val box: SecretBox) {
         return h.token.takeIf { h.origin == Origin.of(scheme, host, port) }
     }
 
+    /**
+     * Whether a token can be sealed now: a trial seal and, when it fails, one
+     * new key and a second trial. Called before a pairing sends anything, so a
+     * key that stopped working never costs a redeemed code.
+     */
+    fun ready(): Boolean {
+        if (box.seal(TRIAL) != null) return true
+        box.reset()
+        return box.seal(TRIAL) != null
+    }
+
     /** Seal and store [paired] for [baseUrl]'s origin. False, and nothing stored, when it cannot be sealed or written. */
     fun save(paired: Paired, baseUrl: String): Boolean {
         val origin = Endpoints.of(baseUrl)?.origin ?: return false
@@ -107,6 +118,7 @@ class DeviceCredential(private val file: File, private val box: SecretBox) {
     } catch (_: Exception) { null }
 
     private companion object {
+        val TRIAL = "trial".toByteArray()
         const val ORIGIN = "origin"
         const val NAME = "name"
         const val PUBLIC_BASE_URL = "publicBaseUrl"

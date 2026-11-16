@@ -21,6 +21,10 @@ import javax.crypto.spec.GCMParameterSpec
  *
  * Any failure (no Keystore, a lost or invalidated key, a provider error,
  * which can be unchecked) answers null, and the app reads that as not paired.
+ * Before a pairing the app tries a seal first and, when it fails, [reset]s
+ * the key once (`DeviceCredential.ready`), so a key that stopped working is
+ * replaced instead of failing every later pairing after the server issued a
+ * token.
  */
 class KeystoreSecretBox(private val alias: String = "nous_device_token_v1") : SecretBox {
     override fun seal(plain: ByteArray): SecretBox.Sealed? = try {
@@ -36,6 +40,10 @@ class KeystoreSecretBox(private val alias: String = "nous_device_token_v1") : Se
             cipher.doFinal(sealed.ciphertext)
         }
     } catch (_: Exception) { null }
+
+    override fun reset() {
+        try { KeyStore.getInstance(PROVIDER).apply { load(null) }.deleteEntry(alias) } catch (_: Exception) { }
+    }
 
     private fun key(create: Boolean): SecretKey? {
         val store = KeyStore.getInstance(PROVIDER).apply { load(null) }

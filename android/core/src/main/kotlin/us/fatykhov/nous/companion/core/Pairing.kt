@@ -150,6 +150,7 @@ object PairingWords {
     const val UNPAIRED = "Unpaired."
     const val UNPAIRED_UNCONFIRMED = "Unpaired on this phone. Nous did not confirm it, so revoke this device in the dashboard."
     const val NOT_STORED = "This phone could not store its device key, so it is not paired. Revoke the new device in the dashboard, then try again."
+    const val NO_KEY = "This phone could not prepare a key to keep the device token, so pairing did not start. Nothing was sent to Nous."
 
     fun paired(name: String) = "$PAIRED_PREFIX$name."
 
@@ -239,4 +240,6 @@ interface SecretBox {
     class Sealed(val ciphertext: ByteArray, val iv: ByteArray)
     fun seal(plain: ByteArray): Sealed?
     fun open(sealed: Sealed): ByteArray?
+    /** Drop the key, so the next seal makes a new one. What the old key sealed can no longer be opened. */
+    fun reset()
 }

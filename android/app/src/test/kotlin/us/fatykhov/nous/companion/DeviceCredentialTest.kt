@@ -15,12 +15,26 @@ import java.io.File
 
 const val SAMPLE_TOKEN = "nd1_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdE"
 
-/** A reversible stand-in for the Keystore box; [failSeal] and [failOpen] model a Keystore that refuses. */
-class FakeBox(var failSeal: Boolean = false, var failOpen: Boolean = false) : SecretBox {
-    override fun seal(plain: ByteArray): SecretBox.Sealed? =
-        if (failSeal) null else SecretBox.Sealed(plain.map { (it.toInt() xor 0x5A).toByte() }.reversed().toByteArray(), ByteArray(12) { it.toByte() })
+/**
+ * A reversible stand-in for the Keystore box. [failSeal] and [failOpen] model a key that refuses;
+ * [resetFixes] makes [reset] give a working key; [failSealFrom] fails every seal from that call on.
+ */
+class FakeBox(
+    var failSeal: Boolean = false,
+    var failOpen: Boolean = false,
+    private val resetFixes: Boolean = false,
+    private val failSealFrom: Int = Int.MAX_VALUE,
+) : SecretBox {
+    var seals = 0; private set
+    var resets = 0; private set
+    override fun seal(plain: ByteArray): SecretBox.Sealed? {
+        seals += 1
+        if (failSeal || seals >= failSealFrom) return null
+        return SecretBox.Sealed(plain.map { (it.toInt() xor 0x5A).toByte() }.reversed().toByteArray(), ByteArray(12) { it.toByte() })
+    }
     override fun open(sealed: SecretBox.Sealed): ByteArray? =
         if (failOpen) null else sealed.ciphertext.reversed().map { (it.toInt() xor 0x5A).toByte() }.toByteArray()
+    override fun reset() { resets += 1; if (resetFixes) failSeal = false }
 }
 
 class DeviceCredentialTest {
@@ -107,6 +121,20 @@ class DeviceCredentialTest {
         assertEquals(newer, c.tokenFor("https", "nous.example", 443))
         c.clear(onlyIf = newer)
         assertNull(c.pairedFor(base))
+    }
+
+    @Test fun ready_tries_a_seal_and_replaces_a_broken_key_once() {
+        val working = FakeBox()
+        assertTrue(DeviceCredential(file(), working).ready())
+        assertEquals(0, working.resets)
+
+        val fixable = FakeBox(failSeal = true, resetFixes = true)
+        assertTrue(DeviceCredential(file(), fixable).ready())
+        assertEquals(1, fixable.resets)
+
+        val broken = FakeBox(failSeal = true)
+        assertFalse(DeviceCredential(file(), broken).ready())
+        assertEquals(1, broken.resets)
     }
 
     @Test fun a_pairing_without_a_public_base_url_has_none() {
