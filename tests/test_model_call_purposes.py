@@ -364,6 +364,11 @@ _NO_PURPOSE_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         "not a model client: the MCP client's guarded httpx client sending one OAuth request to an external MCP "
         "server or its sign-in provider (F112 PR 2d)",
     ),
+    ("nous/api/safe_fetch.py", "_get_pinned", "client.stream"): (
+        1,
+        "not a model client: a fresh httpx client per request, fetching the page or skill file a URL names for "
+        "web_fetch and learn_skill, from an address that passed the public-address check",
+    ),
 }
 
 _Site = tuple[str, str, str]
