@@ -32,7 +32,7 @@ class EndpointsTest {
         "https://[2001:db8:0:0:0:0:0:1]",   // written out in full; OkHttp compresses it
         "https://[2001:db8::1]:8443",
         "https://my_host.example",          // an underscore
-        "https://nöus.example",         // a non-ASCII host; OkHttp writes it in punycode
+        "https://n\u00f6us.example",         // a non-ASCII host; OkHttp writes it in punycode
         "https://127.1",
         "https://nous.example",
         "HTTPS://Nous.Example:443/",
