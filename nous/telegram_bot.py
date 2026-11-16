@@ -289,8 +289,6 @@ def describe_resume(status: int, body: dict) -> str:
             )
         return "Background work is not halted."
     if status == 403:
-        if body.get("reason") == "not_configured":
-            return "Resume refused: the server has no digest set (NOUS_OWNER_ROUTE_SECRET_SHA256)."
         return "Resume refused: this bot has no owner secret, or it is wrong, or the server has no digest set."
     if status == 409 and body.get("host_hold") is True:
         return "The host holds the halt (NOUS_BACKGROUND_HALT). Clear it on the host and restart."

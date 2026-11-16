@@ -16,7 +16,6 @@ export const WORDS = {
   notSaved: 'Halted, but the halt is not saved yet. Nous keeps trying to save it.',
   hostText: 'The server is set to hold background work (NOUS_BACKGROUND_HALT). Clear that setting on the host and restart to resume.',
   needsSignIn: 'Resume needs your sign-in. Open the dashboard through the login page.',
-  notConfigured: 'Resume is not configured on this server.',
   raced: 'A halt arrived while resuming, so it stays halted.',
   resumeNotSaved: 'Resume could not be saved. Background work stays halted; try again.',
   unreachable: 'Cannot reach the server.',
@@ -62,7 +61,7 @@ export function haltFailed(): HaltOutcome {
 export function resumeRefused(err: { status?: number; body?: unknown }): HaltOutcome {
   const body = (err.body ?? {}) as { reason?: unknown; host_hold?: unknown; raced?: unknown; error?: unknown };
   let message: string = WORDS.unreachable;
-  if (err.status === 401 || err.status === 403) message = body.reason === 'not_configured' ? WORDS.notConfigured : WORDS.needsSignIn;
+  if (err.status === 401 || err.status === 403) message = WORDS.needsSignIn;
   else if (err.status === 409) message = body.host_hold ? WORDS.hostText : WORDS.raced;
   else if (err.status === 503 && body.error === 'not_saved') message = WORDS.resumeNotSaved;
   return { message, whileHalted: true, retry: false };

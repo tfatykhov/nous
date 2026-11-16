@@ -142,9 +142,8 @@ describe('what a press leaves to say', () => {
   });
 
   it.each([
-    [403, { error: 'forbidden', reason: 'no_secret' }, 'Resume needs your sign-in. Open the dashboard through the login page.'],
+    [403, { error: 'forbidden' }, 'Resume needs your sign-in. Open the dashboard through the login page.'],
     [403, undefined, 'Resume needs your sign-in. Open the dashboard through the login page.'], // the login proxy's own page
-    [403, { error: 'forbidden', reason: 'not_configured' }, 'Resume is not configured on this server.'],
     [409, { raced: true }, 'A halt arrived while resuming, so it stays halted.'],
     [409, { host_hold: true }, HOST_TEXT],
     [503, { error: 'not_saved' }, 'Resume could not be saved. Background work stays halted; try again.'],

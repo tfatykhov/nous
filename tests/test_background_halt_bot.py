@@ -96,13 +96,8 @@ async def test_a_halt_with_no_answer_checks_the_state_once_before_answering(post
         (200, {"halted": False, "changed": False}, "Background work is not halted."),
         (
             403,
-            {"reason": "no_secret"},
+            {"error": "forbidden"},
             "Resume refused: this bot has no owner secret, or it is wrong, or the server has no digest set.",
-        ),
-        (
-            403,
-            {"reason": "not_configured"},
-            "Resume refused: the server has no digest set (NOUS_OWNER_ROUTE_SECRET_SHA256).",
         ),
         (409, {"host_hold": True}, "The host holds the halt (NOUS_BACKGROUND_HALT). Clear it on the host and restart."),
         (409, {"raced": True}, "A halt arrived while resuming, so it stays halted."),

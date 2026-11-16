@@ -4115,7 +4115,9 @@ def create_app(
     routes.extend(build_commitment_routes(database=database, settings=settings))
     # Goals PR 0c: the halt switch for background work, always mounted.
     routes.extend(
-        build_background_routes(settings=settings, sweeper=halt_sweeper, continuation_runner=continuation_runner)
+        build_background_routes(
+            settings=settings, guard=owner_guard, sweeper=halt_sweeper, continuation_runner=continuation_runner
+        )
     )
     # F112 PR 2a: the owner's MCP server routes, only with the MCP client on (off, nothing of it is imported).
     if settings.mcp_client_enabled:

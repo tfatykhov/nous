@@ -2,21 +2,18 @@
 
 - ``GET /background/state``: whether background work is halted, since when, by whom, and whether the halt is saved.
 - ``POST /background/halt``: halts at once and runs the cancel sweep. No secret: stopping is the safe direction.
-- ``POST /background/resume``: needs the owner route secret (``X-Nous-Owner-Secret`` against
-  ``NOUS_OWNER_ROUTE_SECRET_SHA256``, the Telegram bot's) or the login proxy's (``X-Nous-Proxy-Secret`` against
-  ``NOUS_MCP_CLIENT_UI_SECRET_SHA256``, the digest the MCP client routes read). This process holds only the SHA-256
-  digests, compared in constant time. With neither digest set, every resume is refused (fail closed). Refused under
-  the host's hold.
+- ``POST /background/resume``: an owner route behind ``OwnerGuard`` (``nous/api/owner_guard.py``): the owner's or the
+  proxy's secret, 403 before the body is read without one, 415 for a proxy-only call that is not JSON, every call
+  refused with neither digest set. Refused under the host's hold.
 
-Both POST routes take only the media type ``application/json`` (415 otherwise), so a cross-site page cannot send them
-through the owner's browser as a simple request. Answers are fixed vocabulary plus counts; header values are never
-logged.
+``POST /background/halt`` takes only the media type ``application/json`` (415 otherwise), so a cross-site page cannot
+send it through the owner's browser as a simple request. A halt or a state read that carries the owner's or the
+proxy's secret is marked verified (``OwnerGuard.grants``). Answers are fixed vocabulary plus counts; header values
+are never logged.
 """
 
 from __future__ import annotations
 
-import logging
-import re
 from typing import Any
 
 from starlette.requests import Request
@@ -24,35 +21,14 @@ from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from nous import background_halt, owner_notice
-from nous.api.commitment_routes import OWNER_SECRET_HEADER, owner_secret_matches
-from nous.background_halt import AuditEntry
+from nous.api.owner_guard import OWNER, OwnerGuard, json_media_type
 
-logger = logging.getLogger(__name__)
-
-PROXY_SECRET_HEADER = "X-Nous-Proxy-Secret"  # the same header as the MCP client routes (pinned by a test)
 RESUMED_TEXT = (
     "Background work is running again. Work that was cancelled was not restarted. "
     "One-time schedules that came due while halted run now."
 )
 NOT_HALTED_TEXT = "Background work is not halted."
-NOT_CONFIGURED_TEXT = (
-    "Resume is not configured on this server: set NOUS_OWNER_ROUTE_SECRET_SHA256 or NOUS_MCP_CLIENT_UI_SECRET_SHA256."
-)
-_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
 _NO_STORE = {"Cache-Control": "no-store"}
-
-
-def _digest(raw: Any) -> str:
-    """The setting as a lowercase hex SHA-256, or "" when it is not one (fail closed). The first field only:
-    ``sha256sum`` prints the digest followed by "  -"."""
-    fields = raw.split() if isinstance(raw, str) else []
-    digest = fields[0].lower() if fields else ""
-    return digest if _SHA256_HEX_RE.fullmatch(digest) else ""
-
-
-def _is_json(request: Request) -> bool:
-    media_type = (request.headers.get("content-type", "") or "").split(";")[0]
-    return media_type.strip().lower() == "application/json"
 
 
 async def _body(request: Request) -> dict[str, Any]:
@@ -68,33 +44,27 @@ def _present(component: Any) -> Any:
     return component if component else None
 
 
-def build_background_routes(*, settings: Any, sweeper: Any = None, continuation_runner: Any = None) -> list[Route]:
-    """The three routes, over the process's installed halt (``background_halt.current()``)."""
-    owner_digest = _digest(getattr(settings, "owner_route_secret_sha256", ""))
-    proxy_digest = _digest(getattr(settings, "mcp_client_ui_secret_sha256", ""))
-    if not owner_digest and not proxy_digest:
-        logger.warning(
-            "Background halt: neither NOUS_OWNER_ROUTE_SECRET_SHA256 nor NOUS_MCP_CLIENT_UI_SECRET_SHA256 is set, so "
-            "POST /background/resume refuses every call; a stored halt can then be cleared only on the host"
-        )
+def build_background_routes(
+    *, settings: Any, guard: OwnerGuard, sweeper: Any = None, continuation_runner: Any = None
+) -> list[Route]:
+    """The three routes, over the process's installed halt (``background_halt.current()``). ``guard`` is the app's
+    owner guard (rest.py warns once at start when it has no digest)."""
 
-    def _verified(request: Request) -> bool:
-        return owner_secret_matches(request.headers.get(OWNER_SECRET_HEADER), owner_digest) or owner_secret_matches(
-            request.headers.get(PROXY_SECRET_HEADER), proxy_digest
-        )
+    async def _verified(request: Request) -> bool:
+        return await guard.grants(request, OWNER)
 
     async def state(request: Request) -> JSONResponse:
         """GET /background/state. With a valid owner or proxy secret, ``by`` is the actor and ``reason`` the reason
         given; without one, ``by`` is the surface kind only and ``reason`` is empty."""
-        return JSONResponse(background_halt.current().snapshot(full=_verified(request)), headers=_NO_STORE)
+        return JSONResponse(background_halt.current().snapshot(full=await _verified(request)), headers=_NO_STORE)
 
     async def halt(request: Request) -> JSONResponse:
         """POST /background/halt: 200 with the sweep's report and its one message; a repeat halts again and re-runs
         the sweep."""
-        if not _is_json(request):
+        if not json_media_type(request.headers.get("content-type")):
             return JSONResponse({"error": "Content-Type must be application/json"}, status_code=415)
         body = await _body(request)
-        verified = _verified(request)
+        verified = await _verified(request)
         current = background_halt.current()
         try:
             outcome = await current.halt(
@@ -124,23 +94,12 @@ def build_background_routes(*, settings: Any, sweeper: Any = None, continuation_
         )
 
     async def resume(request: Request) -> JSONResponse:
-        """POST /background/resume: 200 when resumed (or not halted), 403 without a valid secret or with no digest
-        configured, 409 under the host's hold or when a halt arrived during it, 503 when it could not be saved."""
-        if not _is_json(request):
-            return JSONResponse({"error": "Content-Type must be application/json"}, status_code=415)
+        """POST /background/resume, reached only through the owner guard: 200 when resumed (or not halted), 409
+        under the host's hold or when a halt arrived during it, 503 when it could not be saved."""
         body = await _body(request)
         current = background_halt.current()
         actor = background_halt.clean(body.get("actor"), 100)
         via = background_halt.clean_surface(body.get("surface"))
-        if not owner_digest and not proxy_digest:
-            await current.record(AuditEntry("resume_refused", actor, via, False, None, {"why": "not_configured"}))
-            return JSONResponse(
-                {"error": "forbidden", "reason": "not_configured", "text": NOT_CONFIGURED_TEXT}, status_code=403
-            )
-        if not _verified(request):
-            logger.warning("Background halt: refused a resume with no valid secret")
-            await current.record(AuditEntry("resume_refused", actor, via, False, None, {"why": "no_secret"}))
-            return JSONResponse({"error": "forbidden", "reason": "no_secret"}, status_code=403)
         outcome = await current.resume(actor=actor, via=via, verified=True)
         if outcome.status == "host_hold":
             return JSONResponse({"host_hold": True}, status_code=409)
@@ -157,5 +116,5 @@ def build_background_routes(*, settings: Any, sweeper: Any = None, continuation_
     return [
         Route("/background/state", state, methods=["GET"]),
         Route("/background/halt", halt, methods=["POST"]),
-        Route("/background/resume", resume, methods=["POST"]),
+        guard.route("/background/resume", resume, methods=["POST"]),
     ]

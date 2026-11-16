@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
-import logging
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -17,8 +16,9 @@ from sqlalchemy import select
 from starlette.applications import Starlette
 
 from nous import background_halt, main
-from nous.api import background_routes, mcp_client_routes
+from nous.api import background_routes
 from nous.api.background_routes import build_background_routes
+from nous.api.owner_guard import OwnerGuard
 from nous.background_halt import BackgroundHalt, HaltRow
 from nous.background_halt_store import BackgroundHaltStore
 from nous.handlers.halt_sweep import HaltReport, HaltSweeper
@@ -59,9 +59,10 @@ def _settings(**over):
 
 
 def _client(settings, *, sweeper=None, continuation_runner=None) -> AsyncClient:
-    app = Starlette(
-        routes=build_background_routes(settings=settings, sweeper=sweeper, continuation_runner=continuation_runner)
+    routes = build_background_routes(
+        settings=settings, guard=OwnerGuard(settings), sweeper=sweeper, continuation_runner=continuation_runner
     )
+    app = Starlette(routes=routes)
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
@@ -106,19 +107,25 @@ async def test_a_halt_with_the_owner_secret_is_verified_and_a_repeat_sweeps_agai
     assert sweeper.run.await_count == 2 and halt.snapshot()["verified"] is True
 
 
-async def test_resume_without_the_secret_is_403_and_audited():
+async def test_resume_is_behind_the_owner_guard():
     store = _Store()
     halt = _install(store=store)
     await halt.halt(actor="t", surface="dashboard")
+    resume = next(
+        r
+        for r in build_background_routes(settings=_settings(), guard=OwnerGuard(_settings()))
+        if r.path == "/background/resume"
+    )
+    assert getattr(resume.endpoint, "owner_guarded", False) and resume.methods == {"POST"}
     async with _client(_settings()) as c:
         none = await c.post("/background/resume", json={"actor": "x"})
         wrong = await c.post("/background/resume", json={}, headers={"X-Nous-Owner-Secret": "nope"})
         plain = await c.post(
             "/background/resume", content=b"{}", headers={"Content-Type": "text/plain", "X-Nous-Proxy-Secret": PROXY}
         )
-    assert (none.status_code, none.json()["reason"]) == (403, "no_secret")
+    assert (none.status_code, none.json()) == (403, {"error": "forbidden"})
     assert wrong.status_code == 403 and plain.status_code == 415 and halt.halted
-    assert [a.action for a in store.audits].count("resume_refused") == 2
+    assert [a.action for a in store.audits] == ["halt"]  # a refused call never reaches the halt
 
 
 @pytest.mark.parametrize("header", [("X-Nous-Owner-Secret", OWNER), ("X-Nous-Proxy-Secret", PROXY)])
@@ -156,21 +163,19 @@ async def test_an_empty_header_or_a_secret_in_the_other_header_is_refused(header
         refused = await c.post("/background/resume", json={}, headers=headers)
         state = await c.get("/background/state", headers=headers)
         halted = await c.post("/background/halt", json={}, headers=headers)
-    assert (refused.status_code, refused.json()["reason"]) == (403, "no_secret") and halt.halted
+    assert (refused.status_code, refused.json()) == (403, {"error": "forbidden"}) and halt.halted
     assert state.json()["by"] == "dashboard"  # not verified: the surface kind only
     assert halted.json()["verified"] is False
 
 
-async def test_neither_digest_configured_refuses_every_resume_with_the_plain_reason(caplog):
+async def test_neither_digest_configured_refuses_every_resume():
     halt = _install()
     await halt.halt(actor="t", surface="dashboard")
-    with caplog.at_level(logging.WARNING, logger="nous.api.background_routes"):
-        client = _client(_settings(owner_route_secret_sha256="", mcp_client_ui_secret_sha256="not-a-digest"))
-    assert sum("refuses every call" in r.message for r in caplog.records) == 1
-    async with client as c:
+    async with _client(_settings(owner_route_secret_sha256="", mcp_client_ui_secret_sha256="not-a-digest")) as c:
         refused = await c.post("/background/resume", json={}, headers={"X-Nous-Owner-Secret": OWNER})
-    assert refused.status_code == 403 and refused.json()["reason"] == "not_configured"
-    assert refused.json()["text"] == background_routes.NOT_CONFIGURED_TEXT and halt.halted
+        state = await c.get("/background/state", headers={"X-Nous-Owner-Secret": OWNER})
+    assert (refused.status_code, refused.json()) == (403, {"error": "forbidden"}) and halt.halted
+    assert state.json()["by"] == "dashboard"  # nothing is verified without a digest
 
 
 async def test_state_reports_source_since_and_persisted_and_never_a_secret():
@@ -267,10 +272,6 @@ async def test_agent_or_host_halts_push_one_notice_and_dashboard_or_telegram_hal
         assert len(sent) == pushed, surface
         if pushed:
             assert sent == [answer.json()["text"]]
-
-
-def test_the_proxy_header_name_matches_the_mcp_routes():
-    assert background_routes.PROXY_SECRET_HEADER == mcp_client_routes.PROXY_SECRET_HEADER
 
 
 def test_main_installs_the_halt_before_any_loop_and_sweeps_before_the_continuation_runner_starts():

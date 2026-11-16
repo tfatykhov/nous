@@ -161,6 +161,11 @@ OWNER_ROUTES = {
     ("PUT", "/heartbeat/escalation-policy"): (b"{}", 503, {"error": "Finding store not available"}),
     ("POST", "/admin/search-weights"): (b'{"vector_weight": "x"}', 400, {"error": "vector_weight must be a number"}),
     ("POST", "/undo/snapshots/abc/restore"): (b"{}", 503, {"error": "Undo journal not enabled"}),
+    ("POST", "/background/resume"): (
+        b"{}",
+        200,
+        {"halted": False, "changed": False, "text": "Background work is not halted."},
+    ),
 }
 INTENTION_ROUTE_SET = {
     ("POST", "/intentions/proposals/{id}/decide"),
@@ -174,6 +179,7 @@ REST_ROUTE_SET = {
     ("POST", "/admin/search-weights"),
     ("POST", "/undo/snapshots/{id}/restore"),
     ("POST", "/schedules"),
+    ("POST", "/background/resume"),
 }
 
 
