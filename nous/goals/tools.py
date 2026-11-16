@@ -17,7 +17,7 @@ seen, or waits for the call to commit:
 - the evidence of a closed step is checked against the session's lineage as of the call (``nous.goals.evidence``),
   a step closes only with a completed subtask or workflow (DAG) of that lineage among its refs (files and recorded
   calls only support one), at most three steps close in one call, and no ref closes two steps of the goal;
-- one session writes at most 20 progress notes and changes the plan at most 30 times.
+- one session writes at most 20 progress notes and 3 done claims, and changes the plan at most 30 times.
 
 The executors never raise: a bad call, or a failure, is a text the model reads, and nothing is written.
 """
@@ -55,6 +55,7 @@ DONE_NAMESPACE = uuid.UUID("5b0c3f8e-7d1a-4f0e-9a51-6d2c8e4b1f14")
 MESSAGE_TITLE_CHARS = 120  # the goal's title, as the done message quotes it
 CLOSES_PER_CALL = 3  # plan steps one goal_plan call may close
 NOTES_PER_SESSION = 20  # progress notes one session may write (a done claim is not counted)
+DONE_CLAIMS_PER_SESSION = 3  # done claims one session may write
 PLAN_CHANGES_PER_SESSION = 30  # goal_plan calls that change the plan, per session
 # The kinds of ref that close a step: work of the session that completed. Files and recorded calls only support one.
 CLOSING_KINDS = ("subtask:", "dag:")
@@ -216,6 +217,11 @@ class GoalTools:
                 raise _Refused(
                     f"this session has written {NOTES_PER_SESSION} notes, the most one session may; put what is left "
                     "in resolve_intention's note"
+                )
+            if kind == "done_claim" and await self._written(s, goal, row, "done_claim") >= DONE_CLAIMS_PER_SESSION:
+                raise _Refused(
+                    f"this session has claimed the goal done {DONE_CLAIMS_PER_SESSION} times, the most one session "
+                    "may; the claims it made are kept for the owner"
                 )
             claim = self._store.add_journal_row(s, goal.id, kind, body, actor="chain", session_n=n)
             waiting = told = False

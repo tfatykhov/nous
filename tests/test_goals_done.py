@@ -230,3 +230,13 @@ async def test_a_cancel_of_the_root_does_not_withdraw_the_done_message(runner_en
     )
     assert await OwnerPublisher(database=w.db, settings=w.env.settings, http_client=http).push_due() == 1
     assert http.post.await_count == 1 and "says it is done" in str(http.post.await_args)
+
+
+async def test_a_session_claims_the_goal_done_at_most_three_times(runner_env):  # noqa: F811
+    w = await _turn(runner_env)
+    for _ in range(tools.DONE_CLAIMS_PER_SESSION):
+        said, err = await w.note(kind="done_claim", text=CLAIM)
+        assert not err, said
+    said, err = await w.note(kind="done_claim", text=CLAIM)
+    assert err and "this session has claimed the goal done 3 times, the most one session may" in said
+    assert len(await journal(w, w.goal, "done_claim")) == tools.DONE_CLAIMS_PER_SESSION
