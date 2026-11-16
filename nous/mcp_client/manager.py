@@ -61,6 +61,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import hashlib
 import json
 import logging
 import time
@@ -72,7 +73,7 @@ from typing import Any, Protocol
 
 import httpx
 
-from nous.api.tool_classes import forget_mcp_tool, note_mcp_tool
+from nous.api.tool_classes import McpIdentity, forget_mcp_tool, note_mcp_tool
 from nous.config import Settings
 from nous.events import Event, EventBus
 from nous.mcp_client.bridge import (
@@ -915,7 +916,7 @@ class McpClientManager:
                         continue
                     server = servers[server_name]
                     self._registrar.register(name, self._handler(server, tool.tool, name), schema)
-                    note_mcp_tool(name, background=server.background)
+                    note_mcp_tool(name, background=server.background, identity=_identity(server.config, tool.tool))
                     self._registered[name] = server_name
                     self._sources[name] = tool.tool
             except Exception:
@@ -1411,6 +1412,20 @@ def _error(message: str) -> dict[str, Any]:
 
 def _sign_in_error(server_name: str) -> dict[str, Any]:
     return _error(f'the MCP server "{server_name}" needs the owner to sign in again on the Integrations screen.')
+
+
+def _identity(config: ServerConfig, remote_tool: str) -> McpIdentity | None:
+    """The identity a tool of ``config`` registers with: the server's row id, the SHA-256 of its full URL and the
+    server's own name for the tool (with the server's name and pin host to show). None for a server with no row id."""
+    if config.id is None:
+        return None
+    return McpIdentity(
+        config.id,
+        hashlib.sha256(config.url.encode("utf-8")).hexdigest(),
+        remote_tool,
+        server_name=config.name,
+        server_host=pin_host(config.url),
+    )
 
 
 async def _wait_ended(tasks: set[asyncio.Task[Any]], timeout: float | None = None) -> None:
