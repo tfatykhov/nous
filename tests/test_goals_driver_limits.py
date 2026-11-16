@@ -1210,12 +1210,28 @@ def _logged_input(command: str) -> str:
 
 @pytest.mark.parametrize("command", LAUNCH_SPELLINGS)
 def test_a_launch_counts_however_its_words_are_spaced_or_quoted(command):
-    assert spend.launches_job(_logged_input(command)) is True
+    assert spend.job_launches(_logged_input(command)) == 1
 
 
 @pytest.mark.parametrize("command", NOT_LAUNCHES)
 def test_a_command_that_only_names_the_runner_and_launch_is_not_a_launch(command):
-    assert spend.launches_job(_logged_input(command)) is False
+    assert spend.job_launches(_logged_input(command)) == 0
+
+
+LAUNCH = f"{RUNNER} launch nous --prompt-file /workspace/notes/p.md"
+
+
+@pytest.mark.parametrize(
+    ("command", "launches"),
+    [
+        (f"{LAUNCH} && {LAUNCH}", 2),  # joined by &&
+        (f"{LAUNCH}; {LAUNCH}", 2),  # joined by ;
+        (f"{LAUNCH} && {LAUNCH}; {LAUNCH}", 3),  # three in one call
+        (f"{LAUNCH} && {RUNNER} status", 1),  # a launch and a status call
+    ],
+)
+def test_each_launch_command_in_one_call_counts(command, launches):
+    assert spend.job_launches(_logged_input(command)) == launches
 
 
 def test_a_launch_whose_logged_text_was_clipped_still_counts():
@@ -1224,7 +1240,29 @@ def test_a_launch_whose_logged_text_was_clipped_still_counts():
     text = detail_text(_logged_input(command), 2000)
     with pytest.raises(ValueError):
         json.loads(text)
-    assert spend.launches_job(text) is True
+    assert spend.job_launches(text) == 1
+
+
+def test_each_launch_in_a_clipped_logged_text_counts():
+    """Two launches before a long inline prompt: both are in the head the log keeps, and each match counts."""
+    command = f"{LAUNCH} && {RUNNER}\tlaunch nous " + '"' + "fix the notes " * 400 + '"'
+    text = detail_text(_logged_input(command), 2000)
+    with pytest.raises(ValueError):
+        json.loads(text)
+    assert spend.job_launches(text) == 2
+
+
+async def test_two_launches_in_one_call_use_up_a_cap_of_two(env_factory):  # noqa: F811
+    w = await _world(env_factory, tool_call_log_enabled=True)
+    goal = await _active(w)
+    await _set_goal(w, goal, sessions_per_day=24, jobs_per_day=2)  # only the job cap can hold the next start
+    root, _session_row = await _started(w, goal)
+    await _launch_logged(w, session_id=f"intent-{root.id}", command=_logged_input(f"{LAUNCH} && {LAUNCH}"))
+    await _finish(w, root)
+    assert (await w.driver.tick()).closed == 1
+    await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
+    assert (await w.driver.tick()).started == ()
+    assert len(await _sessions(w, goal)) == 1
 
 
 async def test_the_days_job_count_reads_the_shell_words(env_factory):  # noqa: F811

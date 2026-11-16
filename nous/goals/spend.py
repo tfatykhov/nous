@@ -97,13 +97,15 @@ def runner_verb(words: Sequence[str]) -> str | None:
     return words[at + 1] if at + 1 < len(words) else None
 
 
-def launches_job(input_text: str | None) -> bool:
-    """Whether a bash call, as the tool-call log stores its input (the input as JSON, redacted, clipped past its
-    cap), launches a job. The command is read into shell words by the lineage shell's own tokeniser
-    (``simple_commands``, as ``tool_policy.lineage_bash_allowed`` reads it), so a launch counts however its words are
-    spaced or quoted, and a command that only names runner.sh (an echo, a status) does not. A text that cannot be read
-    so (clipped, not a JSON object with a string ``command``, or refused by the tokeniser) counts when ``_LAUNCH_TEXT``
-    finds runner.sh then launch in it: a cap then holds a start too early rather than too late."""
+def job_launches(input_text: str | None) -> int:
+    """How many jobs a bash call launches, as the tool-call log stores its input (the input as JSON, redacted,
+    clipped past its cap). The command is read into shell words by the lineage shell's own tokeniser
+    (``simple_commands``, as ``tool_policy.lineage_bash_allowed`` reads it), and each simple command in it (commands
+    joined by ``;``, ``&&`` or ``||`` are several) that runs runner.sh with the verb launch is one launch, however its
+    words are spaced or quoted; a command that only names runner.sh (an echo, a status) is none. A text that cannot be
+    read so (clipped, not a JSON object with a string ``command``, or refused by the tokeniser) counts one launch for
+    each place ``_LAUNCH_TEXT`` finds runner.sh then launch in it: a cap then holds a start too early rather than too
+    late."""
     text = input_text or ""
     try:
         data = json.loads(text)
@@ -112,23 +114,23 @@ def launches_job(input_text: str | None) -> bool:
     command = data.get("command") if isinstance(data, dict) else None
     commands = simple_commands(command, globs=True) if isinstance(command, str) else None
     if commands is None:
-        return _LAUNCH_TEXT.search(text) is not None
-    return any(runner_verb(words) == "launch" for words, _targets, _inputs, _op in commands)
+        return len(_LAUNCH_TEXT.findall(text))
+    return sum(1 for words, _targets, _inputs, _op in commands if runner_verb(words) == "launch")
 
 
 async def jobs_launched_today(
     session: AsyncSession, agent_id: str, goal_id: UUID, settings: Any, *, now: datetime
 ) -> int | None:
-    """Job launches (``launches_job``: runner.sh run with the verb launch, in a shell call that ran) of the goal's
+    """Job launches (``job_launches``: runner.sh run with the verb launch, in a shell call that ran) of the goal's
     lineages since the start of the UTC day of ``now``, read from the tool-call log: a call of a session's decision
     turns (their session id), of a lineage subtask or of a lineage DAG. None (unknown) when the tool-call log is off;
     it is best-effort even when on (a write dropped under load is a launch not counted).
 
-    The count reads each logged command as shell words, the way the shell policy does, and counts a launch when the
-    job runner is the program (or a shell's operand) and its verb is launch; a logged command that cannot be read as
-    words is matched by its text. Every bash call of the goal's lineages that ran that day is read for it (the query
-    has no text filter): one goal's calls of one UTC day, each at most ``tool_input_max_chars`` long, read when a
-    start of that goal is decided."""
+    The count reads each logged command as shell words, the way the shell policy does, and counts a launch for each
+    simple command in it whose program is the job runner (or a shell's operand) with the verb launch; a logged command
+    that cannot be read as words is matched by its text, once per match. Every bash call of the goal's lineages that
+    ran that day is read for it (the query has no text filter): one goal's calls of one UTC day, each at most
+    ``tool_input_max_chars`` long, read when a start of that goal is decided."""
     if getattr(settings, "tool_call_log_enabled", False) is not True:
         return None
     goal_roots = select(GoalSession.root_id).where(
@@ -156,4 +158,4 @@ async def jobs_launched_today(
             ),
         )
     )
-    return sum(1 for text in texts if launches_job(text))
+    return sum(job_launches(text) for text in texts)
