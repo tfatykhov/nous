@@ -359,6 +359,20 @@ describe('Devices: a pairing code', () => {
     expect(s.queryByText(CODE)).toBeNull();
   });
 
+  it('a new try drops the sentence about the last code, whatever it answers', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    opening();
+    const s = await showCode();
+    await s.findByText(CODE);
+    listed = { ...listed, pairing: { state: 'used' } };
+    await vi.advanceTimersByTimeAsync(15_500);
+    await vi.waitFor(() => expect(s.getByText('This code was used. The device is paired.')).toBeTruthy());
+    handlers['POST /a2ui/devices/pairings'] = () => [409, { error: 'revoke a device first' }];
+    await fireEvent.click(s.getByRole('button', { name: 'Show a code' }));
+    await vi.waitFor(() => expect(s.getByRole('alert').textContent).toBe('Revoke a device first.'));
+    expect(s.queryByText('This code was used. The device is paired.')).toBeNull();
+  });
+
   it('a new code with no answer is given up after 15 s: it says to check the list, and the button works again', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     handlers['POST /a2ui/devices/pairings'] = () => [HANG, null];

@@ -120,13 +120,13 @@
     busy = 'pair';
     pairError = null;
     note = null;
+    ended = null; // what became of the last code is read: a new try speaks for itself
     const had = shown !== null;
     try {
       const opened = await openPairing(name.trim());
       made += 1;
       clock = Date.now();
       shown = { code: opened.code, deadline: clock + opened.expires_in * 1000, made, replaced: had };
-      ended = null;
       name = '';
     } catch (err) {
       pairError = problemText(err, 'pair');
