@@ -360,6 +360,103 @@ async def test_a_finding_kept_while_a_halt_landed_is_triaged_once_after_the_resu
     assert hb._send_telegram.await_count == (1 if urgency == "high" else 0)  # not sent again at the resume
 
 
+def _halting_triage(triage: MagicMock, halt: BackgroundHalt, times: int) -> None:
+    """The first ``times`` triage turns are ended by a halt that lands while they run."""
+    left = [times]
+
+    async def run_turn(*args, **kwargs):
+        if left[0] > 0:
+            left[0] -= 1
+            await halt.halt(actor="t", surface="dashboard")
+        return "ok", MagicMock(), {"input_tokens": 1, "output_tokens": 1}
+
+    triage.run_turn = AsyncMock(side_effect=run_turn)
+
+
+def _turns_about(triage: MagicMock, summary: str) -> int:
+    return sum(summary in message for message in _triage_messages(triage))
+
+
+async def test_held_findings_whose_turn_a_second_halt_ends_are_triaged_once_after_the_next_resume():
+    hb, triage = _hb_runner(CheckRegistry())
+    halt = _install()
+    finding = Finding(source="email", summary="The bank asks for a signed form", needs_action=True)
+    await halt.halt(actor="t", surface="dashboard")
+    await hb._cognitive_triage([finding])  # held
+    await halt.resume(actor="t", via="dashboard")
+    _halting_triage(triage, halt, times=1)
+    await hb._tick()  # the held findings' turn: a second halt ends it
+    assert _turns_about(triage, finding.summary) == 1 and list(hb._untriaged) == [finding.fingerprint()]
+    await hb._tick()  # still halted
+    await halt.resume(actor="t", via="dashboard")
+    await hb._tick()
+    await hb._tick()
+    assert _turns_about(triage, finding.summary) == 2 and hb._untriaged == {}  # once more after the resume
+
+
+async def test_findings_whose_ordinary_triage_turn_a_halt_ends_are_triaged_once_after_the_resume():
+    hb, triage = _hb_runner(CheckRegistry())
+    halt = _install()
+    finding = Finding(source="email", summary="The bank asks for a signed form", needs_action=True)
+    _halting_triage(triage, halt, times=1)
+    await hb._cognitive_triage([finding])  # an ordinary triage turn, and a halt lands in it
+    assert halt.halted and list(hb._untriaged) == [finding.fingerprint()]
+    await halt.resume(actor="t", via="dashboard")
+    await hb._tick()
+    await hb._tick()
+    assert _turns_about(triage, finding.summary) == 2 and hb._untriaged == {}
+
+
+async def test_held_findings_wait_for_a_tick_with_budget():
+    hb, triage = _hb_runner(CheckRegistry())
+    halt = _install()
+    finding = Finding(source="email", summary="The bank asks for a signed form", needs_action=True)
+    await halt.halt(actor="t", surface="dashboard")
+    await hb._cognitive_triage([finding])
+    await halt.resume(actor="t", via="dashboard")
+    hb._tokens_used_today = hb._settings.heartbeat_daily_token_budget  # spent
+    await hb._tick()
+    assert _turns_about(triage, finding.summary) == 0 and list(hb._untriaged) == [finding.fingerprint()]
+    hb._tokens_used_today = 0  # a new day
+    await hb._tick()
+    await hb._tick()
+    assert _turns_about(triage, finding.summary) == 1 and hb._untriaged == {}
+
+
+async def test_a_callback_that_falls_due_while_halted_runs_once_after_the_resume():
+    from test_f099_phase0b import _await_callbacks, _instructions
+
+    hb, triage = _hb_runner(CheckRegistry())
+    halt = _install()
+    check = _callback_check("disk_watch")
+    await halt.halt(actor="t", surface="dashboard")
+    await hb._execute_callback(check, [Finding(source="disk", summary="Disk at 91%")])
+    assert _instructions(triage) == []  # held, not run
+    await halt.resume(actor="t", via="dashboard")
+    await hb._tick()
+    await _await_callbacks("disk_watch")
+    await hb._tick()
+    await _await_callbacks("disk_watch")
+    (instruction,) = _instructions(triage)
+    assert "Disk at 91%" in instruction
+
+
+async def test_a_callback_whose_turn_a_halt_ends_runs_once_more_after_the_resume():
+    from test_f099_phase0b import _await_callbacks, _instructions
+
+    hb, triage = _hb_runner(CheckRegistry())
+    halt = _install()
+    _halting_triage(triage, halt, times=1)
+    await hb._execute_callback(_callback_check("disk_watch"), [])
+    assert halt.halted and list(hb._held_callbacks) == ["disk_watch"]
+    await halt.resume(actor="t", via="dashboard")
+    await hb._tick()
+    await _await_callbacks("disk_watch")
+    await hb._tick()
+    await _await_callbacks("disk_watch")
+    assert len(_instructions(triage)) == 2 and hb._held_callbacks == {}
+
+
 async def test_findings_held_while_halted_keep_the_newest_and_a_resolved_one_is_not_triaged():
     from nous.heartbeat import runner as hb_runner_module
     from nous.heartbeat.schemas import FindingState

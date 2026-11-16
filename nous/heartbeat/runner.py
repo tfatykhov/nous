@@ -150,6 +150,9 @@ class HeartbeatRunner:
         # Goals PR 0c: the needs-action findings whose triage turn a halt skipped, by fingerprint, for the first tick
         # after the resume in this process (see _cognitive_triage and _triage_untriaged). In memory only.
         self._untriaged: dict[str, Finding] = {}
+        # Goals PR 0c: the on_complete callbacks a halt kept from running (or ended), by check name, for the first tick
+        # after the resume in this process. In memory only.
+        self._held_callbacks: dict[str, tuple[DynamicCheck, list[Finding]]] = {}
         self._api_client = api_client
         self._dynamic_loader = dynamic_loader
         self._dedicated_runner: AgentRunner | None = None
@@ -752,11 +755,12 @@ class HeartbeatRunner:
         tick_epoch = halt.epoch
         if halt.halted:
             due_checks = [c for c in due_checks if _code_only(c)]
-        elif self._untriaged:
+        elif self._untriaged or self._held_callbacks:
             try:
                 await self._triage_untriaged()
             except Exception:
                 logger.exception("Heartbeat triage of the findings held during a halt crashed")
+            self._release_held_callbacks()
 
         if not due_checks:
             return []
@@ -1169,19 +1173,33 @@ class HeartbeatRunner:
             logger.warning("Background halt: %d held finding(s) dropped, more than %d", dropped, _UNTRIAGED_MAX)
 
     async def _triage_untriaged(self) -> None:
-        """Goals PR 0c: one triage turn, at the first tick after a resume, for the findings held while halted; then
-        they are gone (a second tick does not triage them again). One the finding store resolved meanwhile is
-        dropped. With the budget spent they are dropped, as a new finding's triage would be."""
-        held = list(self._untriaged.values())
-        self._untriaged.clear()
+        """Goals PR 0c: one triage turn, at the first tick after a resume that has budget, for the findings held while
+        halted; then they are gone (a second tick does not triage them again), unless a halt ends that turn too, which
+        holds them again. One the finding store resolved meanwhile is dropped. While the day's budget is spent they
+        stay held (at most ``_UNTRIAGED_MAX``)."""
         if self._finding_store is not None:
-            held = [f for f in held if not self._resolved(f.fingerprint())]
-        if not held:
+            for fp in [fp for fp in self._untriaged if self._resolved(fp)]:
+                del self._untriaged[fp]
+        if not self._untriaged:
             return
         if not self._has_budget():
-            logger.warning("Heartbeat budget exhausted: %d finding(s) held during a halt not triaged", len(held))
+            logger.info(
+                "Heartbeat budget exhausted: %d held finding(s) wait for a tick with budget", len(self._untriaged)
+            )
             return
+        held = list(self._untriaged.values())
+        self._untriaged.clear()
         await self._cognitive_triage(held)
+
+    def _release_held_callbacks(self) -> None:
+        """Goals PR 0c: run, once, the on_complete callbacks a halt kept from running, at the first tick after the
+        resume that has budget; they stay held while the day's budget is spent."""
+        if not self._held_callbacks or not self._has_budget():
+            return
+        held = list(self._held_callbacks.values())
+        self._held_callbacks.clear()
+        for check, findings in held:
+            asyncio.create_task(self._execute_callback(check, findings), name=f"callback-{check.name}")
 
     def _resolved(self, fingerprint: str) -> bool:
         tracked = self._finding_store.get_tracked(fingerprint) if self._finding_store is not None else None
@@ -1215,6 +1233,7 @@ class HeartbeatRunner:
 
         try:
             heartbeat_model = self._settings.heartbeat_model or self._settings.background_model
+            epoch = background_halt.turn_epoch()  # the turn's own, captured with no await before its start
             response_text, _context, usage = await triage_runner.run_turn(
                 session_id,
                 message,
@@ -1228,6 +1247,10 @@ class HeartbeatRunner:
             result.response = response_text or ""
             result.tokens_used = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)
             self._tokens_used_today += result.tokens_used
+            if background_halt.current().refuses("heartbeat_triage", session_id, epoch):
+                # Goals PR 0c: a halt ended this turn: its findings wait for the first tick after the resume again.
+                self._hold_untriaged(findings)
+                logger.info("Background halt: %d finding(s) held again, their triage turn was ended", len(findings))
 
             logger.info(
                 "Heartbeat cognitive triage used %d tokens (daily: %d/%d)",
@@ -1275,10 +1298,12 @@ class HeartbeatRunner:
         2. On second failure, send Telegram notification
         3. Create warning Finding and persist callback context
 
-        Goals PR 0c: not while background work is halted.
+        Goals PR 0c: not while background work is halted. A callback that falls due then, or whose turn a halt
+        ends, is held and runs once at the first tick after the resume (in this process: the hold is in memory).
         """
         if background_halt.current().halted:
-            logger.info("Background halt: the callback of check '%s' did not run", check.name)
+            self._held_callbacks[check.name] = (check, list(findings or []))
+            logger.info("Background halt: the callback of check '%s' is held for the resume", check.name)
             return
         session_id = f"dynamic-callback-{check.name}-{uuid4().hex[:8]}"
         triage_runner = self._get_triage_runner()
@@ -1327,6 +1352,7 @@ class HeartbeatRunner:
                 await asyncio.sleep(CALLBACK_RETRY_DELAY_SECONDS)
 
             try:
+                epoch = background_halt.turn_epoch()  # the turn's own, captured with no await before its start
                 response_text, _ctx, usage = await triage_runner.run_turn(
                     session_id,
                     instruction,
@@ -1349,6 +1375,10 @@ class HeartbeatRunner:
                 )
                 tokens = (usage or {}).get("input_tokens", 0) + (usage or {}).get("output_tokens", 0)
                 self._tokens_used_today += tokens
+                if background_halt.current().refuses("heartbeat_callback", session_id, epoch):
+                    # Goals PR 0c: a halt ended this turn: the callback runs again after the resume.
+                    self._held_callbacks[check.name] = (check, list(findings or []))
+                    logger.info("Background halt: the callback of check '%s' is held again", check.name)
                 logger.info(
                     "#273: Callback for '%s' completed (tokens=%d, attempt=%d)",
                     check.name,
