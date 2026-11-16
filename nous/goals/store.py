@@ -343,6 +343,7 @@ class GoalStore:
 
     async def request_run_now(self, ref: GoalRef, *, actor: str) -> Goal:
         """Ask the driver for a session now (``pending_request = 'run_now'``): an active goal with no open session."""
+        _owner_only(actor, "ask for a session now")
         async with self._locked(ref) as (s, goal, now):
             if goal.state != "active":
                 raise GoalRefused(f"{describe(goal)}: only an active goal can run a session now")
@@ -419,7 +420,8 @@ class GoalStore:
 
     async def add_note(self, ref: GoalRef, text: str, *, actor: str) -> Goal:
         """An ``owner_note`` journal row on a draft, active or paused goal. An active goal with no open session is
-        woken now so the next session reads it; a note never resumes a paused goal."""
+        woken now so the next session reads it; a note never resumes a paused goal. Only the owner writes one."""
+        _owner_only(actor, "write an owner's note")
         body = text.strip()
         if not body:
             raise GoalRefused("a note needs some text")
