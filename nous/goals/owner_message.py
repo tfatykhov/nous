@@ -24,6 +24,9 @@ from nous.goals.store import clip, format_short_id
 logger = logging.getLogger(__name__)
 
 MESSAGE_TITLE_CHARS = 120  # the goal's title, as a message quotes it
+# The source ids already warned of as having no channel in this process: the goal driver tries a pause's message again
+# on each tick, so the first try of each warns and the later ones log at debug level. One id per such message.
+_WARNED_NO_CHANNEL: set[UUID] = set()
 
 
 def quoted_title(goal: Any) -> str:
@@ -41,10 +44,15 @@ async def tell_owner(
     s: AsyncSession, agent_id: str, settings: Any, *, goal: Any, source_id: UUID, title: str, body: str
 ) -> bool:
     """Write one message to the owner about ``goal`` in the caller's transaction (it commits). True when the row was
-    written; False when the goal has nowhere to tell the owner, or ``source_id`` was already written."""
+    written; False when the goal has nowhere to tell the owner (a warning for the first try of each ``source_id`` in
+    a process), or ``source_id`` was already written."""
     channel = continuation.owner_channel(settings, goal.origin_channel)
     if channel is None:
-        logger.warning("F114: goal %s has no channel to tell the owner on", goal.id)
+        if source_id in _WARNED_NO_CHANNEL:
+            logger.debug("F114: goal %s has no channel to tell the owner on", goal.id)
+        else:
+            _WARNED_NO_CHANNEL.add(source_id)
+            logger.warning("F114: goal %s has no channel to tell the owner on", goal.id)
         return False
     written = await continuation.insert_inbox_row(
         s,

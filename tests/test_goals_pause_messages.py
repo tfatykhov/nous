@@ -10,6 +10,7 @@ nothing.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -284,3 +285,24 @@ async def test_a_goal_paused_again_for_another_reason_is_told_its_new_reason(run
     (message,) = await _messages(w)
     assert message.source_id == budget_row.id != deadline_row.id
     assert PAUSE_SENTENCES["budget"] in message.body and PAUSE_SENTENCES["deadline"] not in message.body
+
+
+async def test_a_goal_with_no_channel_warns_once_per_pause_and_is_tried_each_tick(runner_env, caplog):  # noqa: F811
+    """The goal's channel is gone (no origin channel, no default chat): each tick tries the message again, the first
+    try of a pause row warns and the later ones log at debug level; a new pause row warns again."""
+    w = await world(runner_env, bind=False)
+    goal = await _deadline_passed(w)
+    await set_goal(w, goal, origin_channel=None)
+    caplog.set_level(logging.DEBUG, logger="nous.goals.owner_message")
+
+    def levels() -> list[int]:
+        return [r.levelno for r in caplog.records if "no channel to tell the owner" in r.getMessage()]
+
+    for _ in range(3):
+        await w.driver.tick()
+    assert levels() == [logging.WARNING, logging.DEBUG, logging.DEBUG]
+    await _answer(w, goal)
+    await set_goal(w, goal, deadline_at=_past())
+    await w.driver.tick()
+    assert levels() == [logging.WARNING, logging.DEBUG, logging.DEBUG, logging.WARNING]
+    assert await inbox(w, source_kind=continuation.SOURCE_INTENTION_REPORT) == []
