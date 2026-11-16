@@ -39,7 +39,7 @@ from nous.brain import continuation, intentions
 from nous.cancellation import cancel_requested
 from nous.dag.store import TERMINAL_NODE_STATUSES
 from nous.goals import charter, roots, spend
-from nous.goals.store import SESSION_NOTE_LABEL, GoalStore, clip
+from nous.goals.store import SESSION_NOTE_LABEL, STOP_REF, GoalStore, clip
 from nous.heart.censor_actions import gate_subtask_task
 from nous.heart.subtasks import MAX_PENDING, SubtaskQueueFull
 from nous.storage.database import Database
@@ -82,7 +82,8 @@ ENDING_REF = "ending:"  # + session id: the driver is ending this session's chai
 REQUEST_REF = "request:"  # + kind@time: the owner's stop or cancel an ending row was written for
 ARRIVALS_REF = "arrivals:"  # + n: a session's end row records its root's newest arrival number at the close
 RESUMED_REF = "resumed:"  # + arrival id: a closed session's chain resumed and ended again, up to that arrival
-STOP_REF = "stop:"  # + reason: a stop condition paused the goal; runs of outcomes restart after its session_n
+# STOP_REF (the store's) + reason: the driver paused the goal (a stop condition, or failed starts); runs of outcomes
+# restart after the row's session_n (a failed-start pause has none: the start made no session).
 # Why a start did not happen, in the words of the journal row a run-now that did not start leaves.
 HELD_WORDS: dict[str, str] = {
     "halted": "background work is halted",
@@ -779,13 +780,15 @@ class GoalDriver:
         self, goal_id: UUID, n: int, failure: str, *, seen: datetime | None, request_at: datetime | None = None
     ) -> None:
         """Count a failed start. Below the limit: journal it and try again in five minutes (never earlier than the
-        wake was). At the limit: pause the goal (``error``), saying why. A run-now request still pending (the insert
-        that would have cleared it rolled back) is cleared with the journal row: it is acted on once."""
+        wake was). At the limit: pause the goal (``error``), saying why, in a row with the pause's evidence ref
+        (``stop:error``) and no session: the start made none, and the number it tried is the next session's, so the
+        pause leaves the run of error sessions as it was. A run-now request still pending (the insert that would have
+        cleared it rolled back) is cleared with the journal row: it is acted on once."""
         count = self._failures.get(goal_id, 0) + 1
         if count >= FAILED_STARTS_BEFORE_PAUSE:
             self._failures.pop(goal_id, None)
             note = f"{failure}\nPaused: the start failed {count} times in a row."
-            await self._pause(goal_id, "error", note, session_n=n)
+            await self._pause(goal_id, "error", note, evidence=[f"{STOP_REF}error"])
             return
         self._failures[goal_id] = count
         async with self._db.session() as s:

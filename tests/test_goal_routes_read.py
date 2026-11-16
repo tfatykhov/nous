@@ -256,26 +256,33 @@ async def test_the_detail_sends_the_newest_sessions_and_how_many_there_are(db) -
     assert body["sessions_total"] == 55
 
 
-async def test_the_pause_sentence_is_the_harness_row_of_the_pause_not_any_state_row(db) -> None:
+async def test_the_pause_sentence_is_the_harness_row_with_the_pauses_evidence_ref(db) -> None:
     env = make_env(db)
     goal = await paused(env.store, "error")
-    await harness_row(env.store, goal, "Session 3 could not start. Paused.", session_n=3)
+    await harness_row(env.store, goal, "Paused: 3 sessions in a row ended in an error.", evidence=("stop:error",))
     await env.store.raise_budget(goal.id, total=goal.total_budget * 2, actor="owner")  # a newer state row, the owner's
-    # Session close rows written after the pause, as the driver writes them, with and without the session's note.
+    # Harness rows written after the pause, as the driver writes them: a session's close, with and without the
+    # session's note, a chain being stopped, and a pause row for another reason. None of them is this pause's row.
     closed = "Session 3 ended: no_step, 10 tokens."
-    await harness_row(env.store, goal, closed, session_n=3)
+    await harness_row(env.store, goal, closed, session_n=3, evidence=("arrivals:4",))
     await harness_row(env.store, goal, f"A row of the session's.\n{SESSION_NOTE_LABEL} It was hard.", session_n=3)
+    stopping = "Session 3 is being stopped: a task of its chain ran past its time limit."
+    await harness_row(env.store, goal, stopping, session_n=3, evidence=(f"ending:{uuid.uuid4()}",))
+    await harness_row(env.store, goal, "Paused: the deadline has passed.", evidence=("stop:deadline",))
     for i in range(55):  # newer rows beyond the journal the detail sends
         await env.store.append_journal(goal.id, "progress", f"progress {i}", actor="chain")
     body = (await env.call("GET", f"/goals/{goal.id}")).json()
     assert body["journal"][0]["actor"] == "chain"
-    assert body["pause_sentence"] == "Session 3 could not start. Paused."
+    assert body["pause_sentence"] == "Paused: 3 sessions in a row ended in an error."
     long = await paused(env.store, "error")
-    await harness_row(env.store, long, "w" * 1000)
+    await harness_row(env.store, long, "w" * 1000, evidence=("stop:error",))
     clipped = (await env.call("GET", f"/goals/{long.id}")).json()["pause_sentence"]
     assert len(clipped) == 300 and clipped.endswith("[clipped]")
+    no_row = await paused(env.store, "stalled")
+    await harness_row(env.store, no_row, "Session 2 is being stopped: the owner asked to stop it.")
+    assert (await env.call("GET", f"/goals/{no_row.id}")).json()["pause_sentence"] is None
     by_owner = await paused(env.store, "owner")
-    await harness_row(env.store, by_owner, "An older harness row.")
+    await harness_row(env.store, by_owner, "An older harness row.", evidence=("stop:error",))
     assert (await env.call("GET", f"/goals/{by_owner.id}")).json()["pause_sentence"] is None
     running = await active(env.store)
     assert (await env.call("GET", f"/goals/{running.id}")).json()["pause_sentence"] is None
@@ -284,10 +291,11 @@ async def test_the_pause_sentence_is_the_harness_row_of_the_pause_not_any_state_
 async def test_of_two_pause_rows_the_newest_is_the_pause_sentence(db) -> None:
     env = make_env(db)
     goal = await paused(env.store, "error")
-    await harness_row(env.store, goal, "Paused: the first start failed.")
-    await harness_row(env.store, goal, "Paused: the start failed 3 times in a row.")
+    await harness_row(env.store, goal, "Paused: 3 sessions in a row ended in an error.", evidence=("stop:error",))
+    failed = "Session 4 could not start: RuntimeError.\nPaused: the start failed 3 times in a row."
+    await harness_row(env.store, goal, failed, evidence=("stop:error",))
     body = (await env.call("GET", f"/goals/{goal.id}")).json()
-    assert body["pause_sentence"] == "Paused: the start failed 3 times in a row."
+    assert body["pause_sentence"] == failed
 
 
 async def test_a_paused_goals_resume_blocked_follows_its_spend_and_deadline(db) -> None:

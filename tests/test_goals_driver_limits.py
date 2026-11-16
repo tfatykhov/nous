@@ -33,6 +33,7 @@ from test_goals_driver import (
     _finish,
     _journal,
     _pending,
+    _refuse,
     _running,
     _session,
     _sessions,
@@ -948,6 +949,33 @@ async def test_a_pause_for_one_reason_never_restarts_another_reasons_run(env_fac
     await _closed(w, failing, ["error"])
     assert await w.driver.apply_stop_conditions() == 1
     assert (await _goal(w, failing)).pause_reason == "error"
+
+
+async def test_a_failed_start_pause_names_its_reason_and_leaves_the_error_run_as_it_was(env_factory, monkeypatch):  # noqa: F811
+    """The pause after three failed starts carries the pause's evidence ref (the Goals screen selects its sentence by
+    it) and no session: the start made none, and the number it tried is the next session's. Two error sessions before
+    it and one after are still three in a row."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    await _set_goal(w, goal, sessions_per_day=24)
+    await _closed(w, goal, ["error", "error"])
+    check_censors = w.env.heart.check_censors
+    monkeypatch.setattr(w.env.heart, "check_censors", _refuse())
+    for _attempt in range(driver_module.FAILED_STARTS_BEFORE_PAUSE):
+        await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
+        assert await w.driver.start_session(goal.id, trigger="timer") is None
+    assert ((await _goal(w, goal)).state, (await _goal(w, goal)).pause_reason) == ("paused", "error")
+    pause = (await _harness(w, goal))[-1]
+    assert (pause.evidence, pause.session_n) == (["stop:error"], None)
+    assert pause.text.endswith("Paused: the start failed 3 times in a row.")
+    monkeypatch.setattr(w.env.heart, "check_censors", check_censors)
+    await w.store.resume(goal.id, actor="host")
+    (third,) = await _closed(w, goal, ["error"])
+    assert third.n == 3
+    assert await w.driver.apply_stop_conditions() == 1
+    after = await _goal(w, goal)
+    assert (after.state, after.pause_reason) == ("paused", "error")
+    assert (await _harness(w, goal))[-1].text == "Paused: 3 sessions in a row ended in an error."
 
 
 async def test_owner_actions_and_other_rows_never_restart_or_skip_a_run(env_factory):  # noqa: F811
