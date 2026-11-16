@@ -415,6 +415,7 @@ READER_VERIFY_LABELS = (
     "reader reads the model-call attempts",
     "reader cannot read an embedding",
     "reader cannot read a push token",
+    "reader cannot read a device digest",
     "reader cannot INSERT",
     "reader cannot read a server file",
     "reader cannot run a program",

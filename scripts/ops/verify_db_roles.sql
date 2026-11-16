@@ -149,6 +149,7 @@ BEGIN
         ('reader reads the model-call attempts', 'nous_reader', 'SELECT count(*) FROM nous_system.model_call_attempt', 'ok', NULL),
         ('reader cannot read an embedding', 'nous_reader', 'SELECT embedding FROM heart.facts', 'error', NULL),
         ('reader cannot read a push token', 'nous_reader', 'SELECT fcm_token FROM nous_system.a2ui_push_installations', 'error', NULL),
+        ('reader cannot read a device digest', 'nous_reader', 'SELECT token_sha256 FROM nous_system.a2ui_devices', 'error', NULL),
         ('reader cannot INSERT', 'nous_reader', 'INSERT INTO heart.subtasks DEFAULT VALUES', 'error', NULL),
         ('reader cannot read a server file', 'nous_reader', 'SELECT pg_read_file(''/etc/hostname'')', 'error', NULL),
         ('reader cannot run a program', 'nous_reader', 'COPY (SELECT 1) TO PROGRAM ''true''', 'error', NULL),
