@@ -41,6 +41,7 @@ from typing import Annotated, Any
 import httpx
 from pydantic import BaseModel, ConfigDict, StrictStr, StringConstraints, ValidationError, field_validator
 from sqlalchemy import func, or_, select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.background import BackgroundTask
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -346,12 +347,14 @@ class DeviceStore:
             ).first()
         return found is not None
 
-    async def run_if_unbound(self, installation_id: str, action: Callable[[], Awaitable[object]]) -> bool:
-        """Await ``action`` when no live device holds ``installation_id``; True when it ran.
+    async def run_if_unbound(self, installation_id: str, action: Callable[[AsyncSession], Awaitable[object]]) -> bool:
+        """Await ``action(session)`` when no live device holds ``installation_id``, then commit; True when it ran.
 
-        The check and ``action`` run under the agent's device lock, the one ``create`` takes, held from the check
-        until ``action`` returns: a device for the same installation is stored either before the check (which then
-        sees it, and ``action`` does not run) or after ``action`` (which then cannot undo anything done for it)."""
+        The check and ``action`` share one connection and one transaction, under the agent's device lock, the one
+        ``create`` takes: a device for the same installation is stored either before the check (which then sees it,
+        and ``action`` does not run) or after the commit (so nothing ``action`` did can undo anything done for it).
+        ``action`` must do its work in the session it is given and not commit it; it opens no connection of its own,
+        so this needs one connection of the pool, not two. If ``action`` raises, nothing it did is kept."""
         async with self._db.session() as session:
             await session.execute(
                 text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": limit_lock_key(self._agent_id)}
@@ -367,16 +370,26 @@ class DeviceStore:
             ).first()
             if bound is not None:
                 return False
-            await action()
-            return True  # the session ends here, which releases the lock
+            await action(session)
+            await session.commit()  # which also releases the lock
+            return True
 
     async def _run_hooks(self, device: Device) -> None:
+        """Run each revoke hook for ``device``. A hook that fails is logged at WARNING with its name, the device's id
+        and the exception's class, and the next hook still runs. The revoke stands, and the failed hook is not retried:
+        what it did not do (a push installation left registered, say) stays until a later revoke of a device on the
+        same installation runs the hook again, or the owner removes it."""
         for hook in list(self.revoke_hooks):
             try:
                 await hook(device)
             except Exception as exc:
                 # The class only: an error's text could repeat what it was given.
-                logger.warning("a companion device revoke hook failed (%s)", type(exc).__name__)
+                logger.warning(
+                    "companion device %s: the revoke hook %s failed (%s): the revoke stands, the hook is not retried",
+                    device.id,
+                    getattr(hook, "__name__", "?"),
+                    type(exc).__name__,
+                )
 
 
 # ---- the pairing desk -------------------------------------------------------------------------------------------

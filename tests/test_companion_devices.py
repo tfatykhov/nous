@@ -230,7 +230,12 @@ async def test_a_failing_hook_does_not_undo_the_revoke_and_logs_its_class_only(
     assert await store.revoke(device.id) is True
     assert ran == ["after"]
     assert await store.verify(token) is None
-    assert "RuntimeError" in caplog.text
+    [warned] = [record for record in caplog.records if "revoke hook" in record.getMessage()]
+    assert warned.levelno == logging.WARNING
+    assert warned.getMessage() == (
+        f"companion device {device.id}: the revoke hook failing failed (RuntimeError): the revoke stands, the hook is "
+        "not retried"
+    )
     for record in caplog.records:
         assert token not in record.getMessage() + repr(record.args)
         assert record.exc_info is None
@@ -921,17 +926,17 @@ async def test_a_store_failure_after_the_code_is_taken_burns_the_code(make_rig, 
 
 @pg
 async def test_run_if_unbound_runs_only_while_no_live_device_holds_the_installation(store: DeviceStore) -> None:
-    ran: list[str] = []
+    ran: list[object] = []
 
-    async def action() -> None:
-        ran.append("ran")
+    async def action(session: object) -> None:
+        ran.append(session)
 
     device, _ = await store.create("Pixel 7", "inst-1")
     assert await store.run_if_unbound("inst-1", action) is False
     assert ran == []
     await store.revoke(device.id)
     assert await store.run_if_unbound("inst-1", action) is True
-    assert ran == ["ran"]
+    assert len(ran) == 1 and type(ran[0]).__name__ == "AsyncSession"  # the action works in the store's session
 
 
 # ---- the live-device limit, held with the insert -----------------------------------------------------------------

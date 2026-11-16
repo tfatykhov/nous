@@ -4135,11 +4135,15 @@ def create_app(
 
         async def drop_device_push(device: Device) -> None:
             """A revoked device's push installation goes with it, unless a live device holds it (it paired again).
-            The check and the deletion hold the agent's device lock, so a device paired with the same installation
-            meanwhile is stored either before the check (and keeps it) or after the deletion."""
+            The check and the deletion are one transaction on one connection, under the agent's device lock, so a
+            device paired with the same installation meanwhile is stored either before the check (and keeps it) or
+            after the deletion."""
             push = _a2ui_push()
             if push is not None:
-                await devices.run_if_unbound(device.installation_id, lambda: push.deregister(device.installation_id))
+                await devices.run_if_unbound(
+                    device.installation_id,
+                    lambda session: push.deregister(device.installation_id, session=session),
+                )
 
         devices.revoke_hooks.extend([drop_device_window, drop_device_push])
         routes.extend(

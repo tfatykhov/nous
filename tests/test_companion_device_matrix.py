@@ -16,6 +16,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Mount
@@ -26,6 +27,7 @@ from nous.a2ui.push import PushService
 from nous.a2ui.service import SurfaceService
 from nous.api.companion_devices import DeviceStore
 from nous.api.rest import create_app
+from nous.storage.database import Database
 from nous.storage.models import A2uiAction, A2uiDevice, A2uiPushInstallation, A2uiSurface
 
 pytestmark = pytest.mark.postgres_only
@@ -149,10 +151,10 @@ class _GatedPush(PushService):
         self.reached = asyncio.Event()
         self.gate = asyncio.Event()
 
-    async def deregister(self, installation_id: str) -> tuple[int, dict[str, Any]]:
+    async def deregister(self, installation_id: str, *, session: Any = None) -> tuple[int, dict[str, Any]]:
         self.reached.set()
         await self.gate.wait()
-        return await super().deregister(installation_id)
+        return await super().deregister(installation_id, session=session)
 
 
 async def _lock_waiters(db) -> int:
@@ -166,6 +168,38 @@ async def _lock_waiters(db) -> int:
                 )
             )
         ).scalar_one()
+
+
+@pytest_asyncio.fixture
+async def one_connection_db(owned):
+    """The application's database on a pool of one connection and no overflow; a checkout waits 3 s at most."""
+    small = Database(owned)
+    url = small.engine.url
+    await small.engine.dispose()
+    small.engine = create_async_engine(url, pool_size=1, max_overflow=0, pool_timeout=3)
+    small.session_factory = async_sessionmaker(small.engine, class_=AsyncSession, expire_on_commit=False)
+    yield small
+    await small.engine.dispose()
+
+
+@pytest.mark.parametrize("how", ["owner-revoke", "unpair"])
+async def test_a_revoke_drops_the_push_row_on_a_pool_of_one_connection(
+    db, one_connection_db, owned, service: SurfaceService, agent_id: str, how: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The binding check and the push deletion share one connection: with a pool of one, a revoke (by the owner, or
+    an unpair) still removes the push row, and no revoke hook fails."""
+    caplog.set_level(logging.WARNING)
+    push = PushService(one_connection_db, owned)
+    app = _app(one_connection_db, owned, service, push)
+    device = await _pair(app, "inst-phone")
+    await push.register("inst-phone", fcm_token="fcm-1")
+    if how == "owner-revoke":
+        response = await _call(app, "DELETE", f"/a2ui/devices/{device['device_id']}", headers=OWNER)
+    else:
+        response = await _call(app, "POST", "/a2ui/devices/unpair", headers={"X-Nous-Device-Token": device["token"]})
+    assert (response.status_code, response.json()) == (200, {"revoked": True})
+    assert await _installations(db, agent_id) == set()
+    assert not [record for record in caplog.records if "revoke hook" in record.getMessage()]
 
 
 @pytest.mark.parametrize("how", ["owner-revoke", "unpair"])
