@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import logging
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -126,6 +127,17 @@ async def test_resume_is_behind_the_owner_guard():
     assert (none.status_code, none.json()) == (403, {"error": "forbidden"})
     assert wrong.status_code == 403 and plain.status_code == 415 and halt.halted
     assert [a.action for a in store.audits] == ["halt"]  # a refused call never reaches the halt
+
+
+async def test_a_refused_resume_leaves_the_halt_on_and_the_guard_logs_one_line_with_the_route(caplog):
+    halt = _install()
+    await halt.halt(actor="t", surface="dashboard")
+    with caplog.at_level(logging.DEBUG, logger="nous"):
+        async with _client(_settings()) as c:
+            refused = await c.post("/background/resume", json={}, headers={"X-Nous-Owner-Secret": "a-wrong-value"})
+    assert refused.status_code == 403 and halt.halted
+    lines = [r.getMessage() for r in caplog.records if r.name.startswith("nous")]
+    assert lines == ["refused POST /background/resume: no valid X-Nous-Owner-Secret or X-Nous-Proxy-Secret"]
 
 
 @pytest.mark.parametrize("header", [("X-Nous-Owner-Secret", OWNER), ("X-Nous-Proxy-Secret", PROXY)])
