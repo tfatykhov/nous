@@ -133,7 +133,8 @@ class TestRestUserIdentity:
             heart=MagicMock(),
             cognitive=MagicMock(),
             database=MagicMock(),
-            settings=MagicMock(agent_id="test", agent_name="Test", model="test"),
+            # A mock answers any setting with a mock; the entry gate counts a mode it does not know as enforce.
+            settings=MagicMock(agent_id="test", agent_name="Test", model="test", owner_entry_mode="warn"),
         )
 
         client = TestClient(app)
