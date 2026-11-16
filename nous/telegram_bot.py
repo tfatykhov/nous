@@ -146,6 +146,11 @@ INTENTIONS_NOT_SHOWN = "This list could not be shown."  # what a list Telegram r
 # What a /debug or /identity chunk Telegram refuses falls back to: a fixed line, never the stripped text.
 DEBUG_NOT_SHOWN = "This part of the debug output could not be shown."
 IDENTITY_NOT_SHOWN = "This part of the identity could not be shown."
+# What a chat the API refused (403) is answered with; the server's text is never shown.
+CHAT_REFUSED = (
+    "Nous refused this message: the bot's owner secret is missing or does not match the API. "
+    "Set NOUS_OWNER_ROUTE_SECRET on the bot to the secret whose SHA-256 the API holds."
+)
 # Fixed vocabulary for a root's state: the state names of the server are looked up, never echoed.
 ROOT_STATE_WORDS = {
     "pending": "running",
@@ -711,9 +716,10 @@ class NousTelegramBot:
         owner_route_secret: str | None = None,
     ):
         self.bot_token = bot_token
-        # F111: sent to the owner's routes only (X-Nous-Owner-Secret); the API holds just its SHA-256.
+        # F111: sent as X-Nous-Owner-Secret to the owner's routes and on chat; the API holds just its SHA-256.
         self.owner_route_secret = owner_route_secret or None
         self._owner_refusal_logged = False  # a reply's 403 is logged once per process
+        self._chat_refusal_logged = False  # a chat's 403 likewise
         self.nous_url = nous_url.rstrip("/")
         self.allowed_users = allowed_users
         self.attachments_enabled = attachments_enabled
@@ -798,12 +804,17 @@ class NousTelegramBot:
             self._session_last_active.pop(chat_id, None)
             if old_session_id:
                 try:
-                    await self._http.delete(
+                    response = await self._http.delete(
                         f"{self.nous_url}/chat/{old_session_id}",
                         timeout=10,
+                        **self._chat_headers(),
                     )
                 except Exception:
                     logger.warning("Failed to end session %s via API", old_session_id)
+                else:
+                    if response.status_code == 403:
+                        await self._chat_refused(chat_id)
+                        return
             await self._send(chat_id, "🔄 New session started.")
             return
 
@@ -916,6 +927,18 @@ class NousTelegramBot:
     def _owner_headers(self) -> dict[str, str] | None:
         """The owner's secret for an owner route's POST, or None when the bot has none (no header is sent)."""
         return {"X-Nous-Owner-Secret": self.owner_route_secret} if self.owner_route_secret else None
+
+    def _chat_headers(self) -> dict[str, dict[str, str]]:
+        """The keyword arguments that send the owner's secret on a chat call; none when the bot has no secret."""
+        headers = self._owner_headers()
+        return {"headers": headers} if headers else {}
+
+    async def _chat_refused(self, chat_id: int) -> None:
+        """A chat the API refused (403): fixed words to the owner, and one warning per process."""
+        if not self._chat_refusal_logged:
+            self._chat_refusal_logged = True
+            logger.warning("the API refused a chat call (403): NOUS_OWNER_ROUTE_SECRET is missing or does not match")
+        await self._send(chat_id, CHAT_REFUSED)
 
     async def _owner_post(
         self, path: str, payload: dict[str, Any], headers: dict[str, str] | None = None
@@ -1149,7 +1172,11 @@ class NousTelegramBot:
                 f"{self.nous_url}/chat",
                 json=payload,
                 timeout=120,
+                **self._chat_headers(),
             )
+            if response.status_code == 403:
+                await self._chat_refused(chat_id)
+                return
             data = response.json()
 
             if response.status_code != 200:
@@ -1291,7 +1318,11 @@ class NousTelegramBot:
                 f"{self.nous_url}/chat/stream",
                 json=payload,
                 timeout=stream_timeout,
+                **self._chat_headers(),
             ) as response:
+                if response.status_code == 403:
+                    await self._chat_refused(chat_id)
+                    return
                 if response.status_code != 200:
                     error_body = await response.aread()
                     await self._send(chat_id, f"\u274c Error: {error_body.decode()[:200]}")
