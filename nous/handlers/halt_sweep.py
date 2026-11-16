@@ -170,8 +170,8 @@ async def open_root_ids(session: Any, agent_id: str, *, limit: int = ROOTS_MAX) 
 def _jobs_to_ask(jobs_dir: Path, workspace: str) -> list[str]:
     """The job directories (names that are job ids, real directories) whose status file does not show a final word
     (``FINAL_JOB_WORDS``): those with a status word, newest first, then those whose status file could not be read,
-    newest first. Reads files: run it in a thread. The status file is trusted: a job whose file shows a final word
-    is not asked, even if something else is still running under it."""
+    newest first. Reads files: run it in a thread. A job whose status file shows a final word (completed, failed,
+    cancelled, gone) is not asked."""
     from nous.api.job_marks import JOB_ID_RE
     from nous.dag.typed_checks import job_state_for
 
