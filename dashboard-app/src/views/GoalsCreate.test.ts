@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/svelte';
 import Goals from './Goals.svelte';
 import { initRouter } from '../lib/router';
-import { LEAD, NOTES_SERVER_ID, OPTIONS, goalDetail, newGoalToolsAnswer } from '../lib/testing/goalFixtures';
+import { LEAD, NOTES_IDENTITY, OPTIONS, goalDetail, newGoalToolsAnswer } from '../lib/testing/goalFixtures';
 import type { GoalOptions } from '../lib/goals';
 
 // F114 goals PR 2: the form that makes a draft (`#/goals/new`), over a stubbed POST /goals. Every value is made up.
@@ -195,7 +195,7 @@ describe('Goals: the create form and the tools a new goal may use (F115)', () =>
     await waitFor(() => expect(posts().length).toBe(1));
     expect((posts()[0].body as { tools: unknown }).tools).toEqual([
       { tool: 'send_email', confirm: true },
-      { tool: 'mcp__notes__search', confirm: true, server_id: NOTES_SERVER_ID },
+      { tool: 'mcp__notes__search', confirm: true, identity: NOTES_IDENTITY },
     ]);
   });
 

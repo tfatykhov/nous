@@ -15,11 +15,12 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from test_goal_tool_grants_routes import MAIL, NOTES, OFF, ON, Env, mcp_registry  # noqa: F401
 
+from nous.api import tool_classes
 from nous.api.goal_routes import GRANTS_OFF
 from nous.api.tool_classes import McpIdentity
 from nous.autonomy import tool_guard
 from nous.autonomy.tool_guard import ToolGuard
-from nous.goals.grants import CREATE_CONFIRM
+from nous.goals.grants import CREATE_CONFIRM, identity_token
 from nous.goals.store import GoalRefused
 from nous.storage.models import Goal, GoalJournal, GoalToolGrant
 
@@ -53,7 +54,7 @@ async def _journal(env, goal_id) -> list[GoalJournal]:
 
 
 async def test_a_goal_created_with_two_tools_has_both_grants_and_their_journal_rows(env):
-    tools = [{"tool": "send_email", "confirm": True}, {"tool": ON, "confirm": True, "server_id": str(NOTES.server_id)}]
+    tools = [{"tool": "send_email", "confirm": True}, {"tool": ON, "confirm": True, "identity": identity_token(NOTES)}]
     response = await env.call("POST", "/goals", json={**NEW, "tools": tools}, headers=PROXY)
     assert response.status_code == 201, response.json()
     goal = response.json()
@@ -85,16 +86,16 @@ async def test_a_goal_created_with_two_tools_has_both_grants_and_their_journal_r
         ({"tool": "browser_task"}, 400, "Allowing a tool needs your confirmation."),
         ({"tool": "send_email", "confirm": True}, 400, "A tool is listed twice."),
         (
-            {"tool": OFF, "confirm": True, "server_id": str(MAIL.server_id)},
+            {"tool": OFF, "confirm": True, "identity": identity_token(MAIL)},
             409,
             "mail is not available to background work. Turn that on for the server on the Integrations screen first.",
         ),
         (
-            {"tool": ON, "confirm": True, "server_id": str(uuid.uuid4())},
+            {"tool": ON, "confirm": True, "identity": identity_token(MAIL)},
             409,
             "That server changed since you looked. Look again.",
         ),
-        ({"tool": ON, "confirm": True}, 400, "Not accepted: tools.server_id."),
+        ({"tool": ON, "confirm": True}, 400, "Not accepted: tools.identity."),
         ({"tool": "mcp__gone__x", "confirm": True}, 400, "mcp__gone__x is not a tool Nous has now."),
     ],
 )
@@ -185,3 +186,25 @@ def test_the_rest_reference_says_a_goal_can_be_created_with_its_tools():
     [row] = [line for line in doc.splitlines() if line.startswith("| POST | `/goals` |")]
     assert "`tools`" in row
     assert re.search(r"one transaction|nothing is created", row)
+
+
+async def test_a_server_repointed_after_the_options_were_read_creates_nothing(env):
+    options = (await env.call("GET", "/goals/options")).json()["tools"]
+    token = {row["tool"]: row for row in options["available"]}[ON]["identity"]
+    assert token == identity_token(NOTES)
+    tool_classes._MCP_IDENTITIES[ON] = McpIdentity(
+        NOTES.server_id, "c3" * 32, "search", server_name="notes", server_host="elsewhere.example.com"
+    )
+    body = {**NEW, "tools": [{"tool": ON, "confirm": True, "identity": token}]}
+    response = await env.call("POST", "/goals", json=body)
+    assert (response.status_code, response.json()) == (
+        409,
+        {"error": "That server changed since you looked. Look again.", "tool": ON},
+    )
+    assert await _goals(env) == [] and await _grant_rows(env) == []
+    fresh = {row["tool"]: row for row in (await env.call("GET", "/goals/options")).json()["tools"]["available"]}
+    body = {**NEW, "tools": [{"tool": ON, "confirm": True, "identity": fresh[ON]["identity"]}]}
+    response = await env.call("POST", "/goals", json=body)
+    assert response.status_code == 201
+    [row] = await _grant_rows(env)
+    assert row.url_sha256 == "c3" * 32

@@ -141,14 +141,14 @@ export interface CreateBody {
   tools?: NewGoalTool[];
 }
 
-export interface NewGoalTool { tool: string; confirm: true; server_id?: string }
+export interface NewGoalTool { tool: string; confirm: true; identity?: string }
 
-/** The tools chosen for a new goal, in the body POST /goals takes; an MCP tool carries its server as the form showed it. */
+/** The tools chosen for a new goal, in the body POST /goals takes; an MCP tool carries the identity the form showed. */
 export function newGoalTools(chosen: string[], available: GoalToolOption[]): NewGoalTool[] {
   return chosen.flatMap((tool) => {
     const option = available.find((o) => o.tool === tool);
     if (!option) return [];
-    return [option.server_id ? { tool, confirm: true as const, server_id: option.server_id } : { tool, confirm: true as const }];
+    return [option.identity ? { tool, confirm: true as const, identity: option.identity } : { tool, confirm: true as const }];
   });
 }
 
@@ -190,6 +190,9 @@ export interface GoalToolWords {
   server_name: string | null;
   server_host: string | null;
   server_id: string | null;
+  /** An MCP client tool's identity (its server row, URL digest and remote tool name) as one opaque token; sent back
+   * when it is allowed, so a server changed since the page was read is refused. */
+  identity: string | null;
 }
 export interface GoalToolGrant extends GoalToolWords {
   granted_at: string | null;
@@ -216,13 +219,13 @@ export interface GoalTools {
 
 export const goalTools = (ref: string, signal?: AbortSignal) =>
   apiRequest<GoalTools>(`${goalPath(ref)}/tools`, 'GET', undefined, signal);
-/** Allow: the owner's confirmation, and an MCP client tool's server as the screen showed it. */
+/** Allow: the owner's confirmation, and an MCP client tool's identity as the screen showed it. */
 export const allowTool = (ref: string, tool: GoalToolOption) =>
   timed((signal) =>
     apiRequest<GoalTools>(
       `${goalPath(ref)}/tools/${encodeURIComponent(tool.tool)}`,
       'PUT',
-      tool.server_id ? { confirm: true, server_id: tool.server_id } : { confirm: true },
+      tool.identity ? { confirm: true, identity: tool.identity } : { confirm: true },
       signal,
     ),
   );

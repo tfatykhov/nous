@@ -18,13 +18,13 @@ from starlette.applications import Starlette
 
 from nous.api import tool_classes
 from nous.api.execution_context import ExecutionContext
-from nous.api.goal_routes import GOALS_OFF, GRANTS_OFF, build_goal_routes
+from nous.api.goal_routes import GOALS_OFF, GRANTS_OFF, SERVER_CHANGED_SENTENCE, build_goal_routes
 from nous.api.owner_guard import OwnerGuard
 from nous.api.tool_classes import TOOL_CLASSES, McpIdentity, ToolClass
 from nous.api.tools import ToolDispatcher
 from nous.autonomy import tool_guard
 from nous.autonomy.tool_guard import ToolGuard
-from nous.goals.grants import NEVER_SENTENCE, GoalToolGrants, decide, lead_sentence
+from nous.goals.grants import NEVER_SENTENCE, GoalToolGrants, decide, identity_token, lead_sentence
 from nous.goals.store import GoalStore
 from nous.storage.models import GoalJournal, GoalSession, GoalToolGrant
 
@@ -149,7 +149,8 @@ async def test_with_the_grants_off_the_read_says_so_and_the_changes_are_503(db, 
         ({"confirm": True, "actor": "owner"}, "Not accepted: actor."),
         ({"confirm": "yes"}, "Not accepted: confirm."),
         ({"confirm": 1}, "Not accepted: confirm."),
-        ({"confirm": True, "server_id": 7}, "Not accepted: server_id."),
+        ({"confirm": True, "identity": 7}, "Not accepted: identity."),
+        ({"confirm": True, "server_id": "x"}, "Not accepted: server_id."),
         ({}, "Allowing a tool needs your confirmation."),
         ({"confirm": False}, "Allowing a tool needs your confirmation."),
         ({"confirm": None}, "Allowing a tool needs your confirmation."),
@@ -259,7 +260,7 @@ async def test_the_tool_guard_refuses_a_grant(env, guard, status, sentence):
 
 async def test_an_mcp_tool_of_a_server_not_available_to_background_work_is_409(env):
     goal = await active(env.store, origin_channel=CHAN)
-    response = await env.allow(goal.id, OFF, {"confirm": True, "server_id": str(MAIL.server_id)})
+    response = await env.allow(goal.id, OFF, {"confirm": True, "identity": identity_token(MAIL)})
     sentence = "mail is not available to background work. Turn that on for the server on the Integrations screen first."
     assert (response.status_code, response.json()) == (409, {"error": sentence})
 
@@ -298,18 +299,18 @@ async def test_at_most_twenty_tools(env):
     assert blocked["send_email"] == {"code": "cap", "sentence": "A goal can have at most 20 tools. Remove one first."}
 
 
-async def test_an_mcp_grant_names_the_server_the_screen_showed(env):
+async def test_an_mcp_grant_names_the_identity_the_screen_showed(env):
     goal = await active(env.store, origin_channel=CHAN)
     response = await env.allow(goal.id, ON)
-    assert (response.status_code, response.json()) == (400, {"error": "Not accepted: server_id."})
-    response = await env.allow(goal.id, ON, {"confirm": True, "server_id": str(uuid.uuid4())})
+    assert (response.status_code, response.json()) == (400, {"error": "Not accepted: identity."})
+    response = await env.allow(goal.id, ON, {"confirm": True, "identity": identity_token(MAIL)})
     assert (response.status_code, response.json()) == (
         409,
         {"error": "That server changed since you looked. Look again."},
     )
-    response = await env.allow(goal.id, "send_email", {"confirm": True, "server_id": str(NOTES.server_id)})
-    assert (response.status_code, response.json()) == (400, {"error": "Not accepted: server_id."})
-    response = await env.allow(goal.id, ON, {"confirm": True, "server_id": str(NOTES.server_id)})
+    response = await env.allow(goal.id, "send_email", {"confirm": True, "identity": identity_token(NOTES)})
+    assert (response.status_code, response.json()) == (400, {"error": "Not accepted: identity."})
+    response = await env.allow(goal.id, ON, {"confirm": True, "identity": identity_token(NOTES)})
     assert response.status_code == 200 and response.json()["changed"] is True
     [row] = await _rows(env.db, goal)
     assert (row.server_name, row.server_host, row.server_id, row.url_sha256, row.remote_tool) == (
@@ -319,6 +320,54 @@ async def test_an_mcp_grant_names_the_server_the_screen_showed(env):
         NOTES.url_sha256,
         "search",
     )
+
+
+async def _journal_count(db, goal) -> int:
+    async with db.session() as s:
+        return len(list((await s.execute(select(GoalJournal.seq).where(GoalJournal.goal_id == goal.id))).scalars()))
+
+
+def _repointed(identity: McpIdentity, *, url: str | None = None, remote: str | None = None) -> McpIdentity:
+    """The same server row, pointed elsewhere (as ``McpRegistry._upsert_server`` keeps a row's id when its URL
+    changes), or with another remote tool behind the name."""
+    return McpIdentity(
+        identity.server_id,
+        url or "c3" * 32,
+        remote or identity.remote_tool,
+        server_name=identity.server_name,
+        server_host="elsewhere.example.com",
+    )
+
+
+@pytest.mark.parametrize("change", [{"url": "c3" * 32}, {"remote": "search_all"}])
+async def test_a_server_repointed_after_the_page_was_read_is_refused_and_nothing_is_written(env, change):
+    goal = await active(env.store, origin_channel=CHAN)
+    shown = {row["tool"]: row for row in (await env.call("GET", f"/goals/{goal.id}/tools")).json()["available"]}
+    token = shown[ON]["identity"]
+    assert token == identity_token(NOTES) and "notes.example.com" not in token
+    moved = _repointed(NOTES, **change)
+    tool_classes._MCP_IDENTITIES[ON] = moved
+    journal_before = await _journal_count(env.db, goal)
+    response = await env.allow(goal.id, ON, {"confirm": True, "identity": token})
+    assert (response.status_code, response.json()) == (409, {"error": SERVER_CHANGED_SENTENCE})
+    assert await _rows(env.db, goal) == [] and await _journal_count(env.db, goal) == journal_before
+    # Read again, the page shows the new identity, and that one is accepted.
+    shown = {row["tool"]: row for row in (await env.call("GET", f"/goals/{goal.id}/tools")).json()["available"]}
+    assert shown[ON]["identity"] == identity_token(moved) != token
+    response = await env.allow(goal.id, ON, {"confirm": True, "identity": shown[ON]["identity"]})
+    assert response.status_code == 200 and response.json()["changed"] is True
+    [row] = await _rows(env.db, goal)
+    assert (row.url_sha256, row.remote_tool) == (moved.url_sha256, moved.remote_tool)
+
+
+async def test_a_stale_identity_does_not_replace_a_grant_that_stopped_working(env):
+    goal = await active(env.store, origin_channel=CHAN)
+    await env.allow(goal.id, ON, {"confirm": True, "identity": identity_token(NOTES)})
+    tool_classes._MCP_IDENTITIES[ON] = _repointed(NOTES)
+    response = await env.allow(goal.id, ON, {"confirm": True, "identity": identity_token(NOTES)})
+    assert response.status_code == 409
+    [row] = await _rows(env.db, goal)
+    assert (row.url_sha256, row.revoked_at) == (NOTES.url_sha256, None)  # the old grant, untouched
 
 
 # ---- changes ----------------------------------------------------------------------------------------------------
@@ -396,7 +445,7 @@ async def test_a_change_whose_view_read_fails_answers_reload(env):
 async def test_the_read_lists_the_grants_and_the_tools_that_could_be_allowed(env):
     goal = await active(env.store, origin_channel=CHAN)
     await env.allow(goal.id, "send_email")
-    await env.allow(goal.id, ON, {"confirm": True, "server_id": str(NOTES.server_id)})
+    await env.allow(goal.id, ON, {"confirm": True, "identity": identity_token(NOTES)})
     body = (await env.call("GET", f"/goals/{_ref(goal)}/tools")).json()
     assert (body["enabled"], body["grants_enabled"], body["can_edit"], body["limit"]) == (True, True, True, 20)
     assert body["applies_in"] == lead_sentence() and body["never"] == NEVER_SENTENCE
@@ -431,7 +480,7 @@ async def test_the_read_lists_the_grants_and_the_tools_that_could_be_allowed(env
 async def test_a_grant_shows_why_it_is_not_used_now(env):
     goal = await active(env.store, origin_channel=CHAN)
     await env.allow(goal.id, "send_email")
-    await env.allow(goal.id, ON, {"confirm": True, "server_id": str(NOTES.server_id)})
+    await env.allow(goal.id, ON, {"confirm": True, "identity": identity_token(NOTES)})
 
     async def why() -> dict:
         body = (await env.call("GET", f"/goals/{goal.id}/tools")).json()

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import re
@@ -147,6 +148,14 @@ def lead_sentence() -> str:
         f"({tool_guard.list_words(list(GRANT_PLACES.values()))}). A workflow's check steps are not included. "
         "Nothing else gets them."
     )
+
+
+def identity_token(identity: McpIdentity) -> str:
+    """An MCP client tool's identity as one opaque string: a SHA-256 of its server row id, its URL digest and its
+    remote tool name (what ``McpIdentity`` compares). The screen sends back the one it was shown, so a server
+    re-pointed since then is refused rather than granted. The URL is not in it."""
+    raw = f"{identity.server_id}\n{identity.url_sha256}\n{identity.remote_tool}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def words_for(tool: str, identity: McpIdentity | None) -> tuple[str, str]:

@@ -111,6 +111,8 @@ export const LEAD =
 export const NEVER =
   'The shell and Python cannot be allowed here. Neither can scheduling, starting other work, or changing settings.';
 export const NOTES_SERVER_ID = '00000000-0000-4000-8000-0000000000aa';
+/** A made-up identity token, in the shape the routes send (64 hex characters). */
+export const NOTES_IDENTITY = 'a'.repeat(64);
 
 export function toolWords(tool: string, ref = 'G-0001'): GoalToolWords {
   const words: Record<string, [string, string]> = {
@@ -141,6 +143,7 @@ export function toolWords(tool: string, ref = 'G-0001'): GoalToolWords {
     server_name: mcp ? 'notes' : null,
     server_host: mcp ? 'notes.example.com' : null,
     server_id: mcp ? NOTES_SERVER_ID : null,
+    identity: mcp ? NOTES_IDENTITY : null,
     tool,
   };
 }

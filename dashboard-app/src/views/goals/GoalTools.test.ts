@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, within } from '@testing-library/svelte';
 import GoalTools from './GoalTools.svelte';
-import { LEAD, NEVER, NOTES_SERVER_ID, goalToolsAnswer, toolGrant, toolOption } from '../../lib/testing/goalFixtures';
+import { LEAD, NEVER, NOTES_IDENTITY, goalToolsAnswer, toolGrant, toolOption } from '../../lib/testing/goalFixtures';
 import type { GoalTools as Answer } from '../../lib/goals';
 
 // F115 per-goal tools: the Goals screen's section over GET, PUT and DELETE /goals/{ref}/tools. The fixtures have the
@@ -100,7 +100,7 @@ describe('the tools a goal may use without asking', () => {
       ),
     ).toBeTruthy();
     await fireEvent.click(within(group).getByRole('button', { name: 'Yes, allow' }));
-    await waitFor(() => expect(writes()[0]?.body).toEqual({ confirm: true, server_id: NOTES_SERVER_ID }));
+    await waitFor(() => expect(writes()[0]?.body).toEqual({ confirm: true, identity: NOTES_IDENTITY }));
   });
 
   it('No closes the confirmation and sends nothing', async () => {

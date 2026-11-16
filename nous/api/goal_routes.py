@@ -21,8 +21,8 @@ rules, read in one place here; ``tests/test_goal_routes_actions.py`` drives the 
 
 F115 per-goal tools: ``GET /goals/{ref}/tools`` (the tools the goal may use without asking, each with what it does and
 whether it can be used now and why not, and the tools it could be allowed, each with why not when it cannot be now),
-``PUT /goals/{ref}/tools/{tool}`` (body ``{"confirm": true}``, and for an MCP client tool ``"server_id"``, the id of the
-server the screen showed) and ``DELETE /goals/{ref}/tools/{tool}``. The proof the guard accepted (``owner`` or
+``PUT /goals/{ref}/tools/{tool}`` (body ``{"confirm": true}``, and for an MCP client tool ``"identity"``, the token of
+its server row, URL digest and remote tool name the screen showed) and ``DELETE /goals/{ref}/tools/{tool}``. The proof the guard accepted (``owner`` or
 ``proxy``) is stored with the grant; the journal's actor is the owner. With ``NOUS_GOAL_TOOL_GRANTS_ENABLED`` off the
 read answers ``grants_enabled: false`` and the changes 503 ``GRANTS_OFF``. After a change, and after every action
 that can change whether a goal is active, the runner's view of the goal's grants is read again; when that read fails
@@ -52,7 +52,7 @@ from nous.api.tool_classes import MCP_TOOL_PREFIX, McpIdentity, mcp_tool_backgro
 from nous.autonomy import tool_guard
 from nous.brain.continuation import owner_channel
 from nous.goals.envelope import _RANGES, PRESETS
-from nous.goals.grants import CREATE_CONFIRM, NEVER_SENTENCE, lead_sentence, not_ready, words_for
+from nous.goals.grants import CREATE_CONFIRM, NEVER_SENTENCE, identity_token, lead_sentence, not_ready, words_for
 from nous.goals.seed import SPEND_NOTE
 from nous.goals.spend import goal_spent
 from nous.goals.store import (
@@ -161,12 +161,12 @@ class Limits(_Body):
 
 class GrantItem(_Body):
     """One tool a new goal may use without asking (F115): its name, the owner's confirmation, and for an MCP client
-    tool the id of the server the screen showed. The shape of ``PUT /goals/{ref}/tools/{tool}``'s body, with the
-    tool's name."""
+    tool the ``identity`` the screen showed (``grants.identity_token``). The shape of
+    ``PUT /goals/{ref}/tools/{tool}``'s body, with the tool's name."""
 
     tool: Text = Field(max_length=200)
     confirm: StrictBool | None = None
-    server_id: Text | None = Field(default=None, max_length=36)
+    identity: Text | None = Field(default=None, max_length=64)
 
 
 class CreateGoal(_Body):
@@ -202,11 +202,11 @@ class NoteBody(_Body):
 
 
 class GrantBody(_Body):
-    """``PUT /goals/{ref}/tools/{tool}``: the owner's confirmation, and for an MCP client tool the id of the server the
-    screen showed."""
+    """``PUT /goals/{ref}/tools/{tool}``: the owner's confirmation, and for an MCP client tool the ``identity`` the
+    screen showed (``grants.identity_token``: its server row, URL digest and remote tool name)."""
 
     confirm: StrictBool | None = None
-    server_id: Text | None = Field(default=None, max_length=36)
+    identity: Text | None = Field(default=None, max_length=64)
 
 
 class _BadRequest(Exception):
@@ -583,6 +583,7 @@ def tool_words(tool: str, identity: McpIdentity | None, ref: str) -> dict[str, A
         "server_name": identity.server_name if identity is not None else None,
         "server_host": identity.server_host if identity is not None else None,
         "server_id": str(identity.server_id) if identity is not None else None,
+        "identity": identity_token(identity) if identity is not None else None,
     }
 
 
@@ -898,9 +899,9 @@ def build_goal_routes(
         if refusal is not None:
             return refusal
         identity = mcp_tool_identity(item.tool) if item.tool.startswith(MCP_TOOL_PREFIX) else None
-        if (identity is None) != (item.server_id is None):
-            return GrantRefusal(400, "server_id", "Not accepted: tools.server_id.")
-        if identity is not None and item.server_id != str(identity.server_id):
+        if (identity is None) != (item.identity is None):
+            return GrantRefusal(400, "identity", "Not accepted: tools.identity.")
+        if identity is not None and item.identity != identity_token(identity):
             return GrantRefusal(409, "server_changed", SERVER_CHANGED_SENTENCE)
         return identity
 
@@ -988,9 +989,9 @@ def build_goal_routes(
             if refusal is not None:
                 return _error(refusal.status, refusal.sentence)
             identity = mcp_tool_identity(tool) if tool.startswith(MCP_TOOL_PREFIX) else None
-            if (identity is None) != (body.server_id is None):
-                return _error(400, "Not accepted: server_id.")
-            if identity is not None and body.server_id != str(identity.server_id):
+            if (identity is None) != (body.identity is None):
+                return _error(400, "Not accepted: identity.")
+            if identity is not None and body.identity != identity_token(identity):
                 return _error(409, SERVER_CHANGED_SENTENCE)
             proof = guard.proof(request)
             assert proof is not None  # the guard let the call in on one

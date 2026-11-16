@@ -367,13 +367,13 @@ describe('the tools a goal may use without asking (F115)', () => {
       sent.push([init.method ?? 'GET', url, init.body === undefined ? undefined : JSON.parse(String(init.body))]);
       return new Response(JSON.stringify({ enabled: true, grants_enabled: true, changed: true }), { status: 200 });
     }));
-    await goals.allowTool('G-0001', { tool: 'send_email', server_id: null } as unknown as goals.GoalToolOption);
-    await goals.allowTool('G-0001', { tool: 'mcp__notes__a', server_id: 'abc' } as unknown as goals.GoalToolOption);
+    await goals.allowTool('G-0001', { tool: 'send_email', server_id: null, identity: null } as unknown as goals.GoalToolOption);
+    await goals.allowTool('G-0001', { tool: 'mcp__notes__a', server_id: 'abc', identity: 'f00d' } as unknown as goals.GoalToolOption);
     await goals.removeTool('G-0001', 'send_email');
     await goals.goalTools('G 1');
     expect(sent).toEqual([
       ['PUT', '/goals/G-0001/tools/send_email', { confirm: true }],
-      ['PUT', '/goals/G-0001/tools/mcp__notes__a', { confirm: true, server_id: 'abc' }],
+      ['PUT', '/goals/G-0001/tools/mcp__notes__a', { confirm: true, identity: 'f00d' }],
       ['DELETE', '/goals/G-0001/tools/send_email', {}],
       ['GET', '/goals/G%201/tools', undefined],
     ]);
