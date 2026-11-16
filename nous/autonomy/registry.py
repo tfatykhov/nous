@@ -130,7 +130,7 @@ def ceiling_problem(limit: Limit, value: int, ceiling: int | None) -> str | None
     """Why ``value`` is above the host's ceiling for ``limit``, else None."""
     if ceiling is None or value <= ceiling:
         return None
-    return f"The server allows at most {_n(ceiling)} {limit.unit} for {limit.label.lower()}."
+    return f"The server allows at most {_n(ceiling)} for {limit.label.lower()}."
 
 
 def cross_problem(values: Mapping[str, float]) -> str | None:

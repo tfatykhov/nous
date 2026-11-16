@@ -351,13 +351,13 @@ class AutonomyStore:
         wanted = list(keys)
         if not wanted:
             return {}
+        newest = (
+            select(func.max(AutonomySettingLog.id))
+            .where(AutonomySettingLog.agent_id == self._agent_id, AutonomySettingLog.key.in_(wanted))
+            .group_by(AutonomySettingLog.key)
+        )
         async with self._db.session() as session:
             rows = (
-                await session.execute(
-                    select(AutonomySettingLog)
-                    .where(AutonomySettingLog.agent_id == self._agent_id, AutonomySettingLog.key.in_(wanted))
-                    .order_by(AutonomySettingLog.key, AutonomySettingLog.id.desc())
-                    .distinct(AutonomySettingLog.key)
-                )
+                await session.execute(select(AutonomySettingLog).where(AutonomySettingLog.id.in_(newest)))
             ).scalars()
             return {row.key: Change(row.key, row.old_value, row.new_value, row.actor, row.created_at) for row in rows}
