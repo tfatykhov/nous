@@ -100,10 +100,10 @@ def _imports_goals(node: ast.AST) -> bool:
 
 
 def test_only_the_goal_routes_import_the_goal_package():
-    # PIN (flag-off parity of PR 1a, widened by PR 2): outside the package only the goal routes and their mount
-    # import it. With NOUS_GOALS_ENABLED off the routes answer fixed sentences and read no table
-    # (tests/test_goal_routes_guard.py), so no existing path runs a goal query, builds a goal prompt or offers a goal
-    # tool. The PR that wires the driver changes this test on purpose.
+    # PIN (flag-off parity of PR 1a, widened by PR 2 and PR 1c): outside the package only the goal routes, their
+    # mount and main.py's goals block import it. With NOUS_GOALS_ENABLED off the routes answer fixed sentences and
+    # read no table (tests/test_goal_routes_guard.py), and main.py imports the chain only inside the flag's block
+    # (tests/test_goals_wiring.py), so no existing path runs a goal query, builds a goal prompt or offers a goal tool.
     nous_dir = Path(__file__).resolve().parents[1] / "nous"
     goals_dir = nous_dir / "goals"
     importers = [
@@ -112,5 +112,5 @@ def test_only_the_goal_routes_import_the_goal_package():
         if goals_dir not in path.parents
         and any(_imports_goals(node) for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))))
     ]
-    assert importers == ["api/goal_routes.py", "api/rest.py"]
+    assert importers == ["api/goal_routes.py", "api/rest.py", "main.py"]
     assert not (goals_dir / "__main__.py").exists()

@@ -23,6 +23,9 @@ const START = (over: Record<string, unknown> = {}) => ({
 });
 const PROBE = { tools: [{ tool: 'search', name: 'mcp__alpha__search', description: 'Search.', schema: '{"type":"object"}', skip_reason: null }], definitions_sha256: 'a'.repeat(64) };
 
+/** The Devices section below the servers reads its own list (Devices.test.ts covers it): here, none and no code. */
+const NO_DEVICES: Answer = [200, { devices: [], pairing: null, redeem: { limited: false } }];
+
 let calls: Call[] = [];
 let listAnswer: () => Answer = () => [200, LIST()];
 let handlers: Record<string, (body: unknown) => Answer> = {};
@@ -37,7 +40,8 @@ beforeEach(() => {
     calls.push({ url, method, body });
     const [status, payload] = method === 'GET' && url === '/integrations/mcp/servers'
       ? listAnswer()
-      : handlers[`${method} ${url}`]?.(body) ?? [500, { error: `unexpected ${method} ${url}` }];
+      : handlers[`${method} ${url}`]?.(body)
+        ?? (method === 'GET' && url === '/a2ui/devices' ? NO_DEVICES : [500, { error: `unexpected ${method} ${url}` }]);
     return new Response(JSON.stringify(payload), { status });
   }));
 });

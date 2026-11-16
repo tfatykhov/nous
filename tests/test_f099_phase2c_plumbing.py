@@ -137,7 +137,8 @@ def test_the_extra_tool_names_collide_with_no_registered_tool_and_are_not_in_the
     from nous.api import tool_policy
     from nous.api.tool_classes import TOOL_CLASSES
 
-    extra_names = {"resolve_intention", "propose_action"}
+    extra_names = {"resolve_intention", "propose_action", "goal_note", "goal_plan"}
+    assert extra_names == set(tool_policy.INTERNAL_ONLY_EXTRA_TOOLS)
     assert not extra_names & _registered_names()
     subtask_ctx = ExecutionContext(
         kind="subtask",

@@ -759,8 +759,9 @@ async def test_no_owner_action_is_a_tool_a_model_can_call(runner_env):  # noqa: 
         assert name not in registered and name not in TOOL_CLASSES and name not in INTERNAL_ONLY_EXTRA_TOOLS
         assert name not in {t["name"] for t in env.dispatcher.tool_definitions()}
     assert not [n for n in registered if any(word in n for word in ("approve", "reject", "decide", "answer"))]
-    # The runner's extra tools are exactly the two decisions of a turn, and answering is not among them.
-    assert set(INTERNAL_ONLY_EXTRA_TOOLS) == {"resolve_intention", "propose_action"}
+    # The runner's extra tools are the two decisions of a turn and a goal session's two records of its progress
+    # (F114), and answering is not among them.
+    assert set(INTERNAL_ONLY_EXTRA_TOOLS) == {"resolve_intention", "propose_action", "goal_note", "goal_plan"}
 
 
 async def test_a_forged_decide_call_in_a_continuation_turn_is_refused_and_changes_nothing(runner_env):  # noqa: F811

@@ -8,6 +8,7 @@
   import FilterBar from '../lib/ui/FilterBar.svelte';
   import { currentRoute, currentSub, routeHref } from '../lib/router';
   import OAuthSignIn from './integrations/OAuthSignIn.svelte';
+  import Devices from './integrations/Devices.svelte';
   import {
     CHANGED_TEXT, HEADERS_MAX, HTTP_NOTE, KEY_HINT, NAME_RULE, NO_KEY_FILE_TEXT, OAUTH_UNAVAILABLE_TEXT, SIGN_OUT_NOTE,
     TOOL_FILTER_FROM, TOOL_SHOW, URL_RULE, VALUE_HINT,
@@ -27,8 +28,10 @@
   // pane shows the first server, or the form when there is none. A narrow screen has one column: the list until
   // something is picked, then the pane alone with a link back to the list.
   const store = usePoll(makePollStore<McpServerList>((signal) => listServers(signal), 30_000));
-  /** The page Refresh: everything this screen shows (finish review fix 8: one header order). */
-  const refreshPage = () => store.refresh();
+  /** The paired devices, below the MCP servers and outside their gate. */
+  let devices = $state<ReturnType<typeof Devices>>();
+  /** The page Refresh: everything this screen shows (finish review fix 8: one header order), the devices too. */
+  const refreshPage = () => Promise.all([store.refresh(), devices?.refresh()]);
   // 403, 404 and 503 are a state of the screen; checked before the data, so an older list never hides them.
   let gate = $derived(listGate($store.error));
 
@@ -1114,6 +1117,8 @@
 {:else}
   <p class="empty">Loading…</p>
 {/if}
+
+<Devices bind:this={devices} />
 
 <style>
   .view-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }

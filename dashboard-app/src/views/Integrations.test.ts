@@ -53,6 +53,9 @@ const PROBE = (hash = 'a'.repeat(64)) => ({
   definitions_sha256: hash,
 });
 
+/** The Devices section below the servers reads its own list (Devices.test.ts covers it): here, none and no code. */
+const NO_DEVICES: Answer = [200, { devices: [], pairing: null, redeem: { limited: false } }];
+
 let calls: Call[] = [];
 let listAnswer: () => Answer = () => [200, LIST()];
 let handlers: Record<string, (body: unknown) => Answer | Promise<Answer>> = {};
@@ -67,7 +70,7 @@ function install() {
     calls.push({ url, method, headers: init.headers as Record<string, string> | undefined, body, raw });
     const [status, payload] = method === 'GET' && url === '/integrations/mcp/servers'
       ? listAnswer()
-      : await (handlers[`${method} ${url}`]?.(body) ?? [500, { error: `unexpected ${method} ${url}` }]);
+      : await (handlers[`${method} ${url}`]?.(body) ?? (method === 'GET' && url === '/a2ui/devices' ? NO_DEVICES : [500, { error: `unexpected ${method} ${url}` }]));
     if (status === 0) throw new TypeError('Failed to fetch');
     // A string is sent as it is (a proxy's page); anything else as JSON.
     return new Response(payload === undefined ? '' : typeof payload === 'string' ? payload : JSON.stringify(payload), { status });

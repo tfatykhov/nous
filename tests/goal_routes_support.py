@@ -117,6 +117,16 @@ async def add_session(
         return row
 
 
+async def harness_row(
+    store: GoalStore, goal: Goal, text: str, *, session_n: int | None = None, evidence: tuple[str, ...] = ()
+) -> None:
+    """A ``state`` row under the ``harness`` actor, written as the goal driver writes it (``add_journal_row`` in a
+    transaction of its own): the store's ``append_journal`` refuses that actor."""
+    async with store._db.session() as s:
+        store.add_journal_row(s, goal.id, "state", text, actor="harness", session_n=session_n, evidence=evidence)
+        await s.commit()
+
+
 async def journal_rows(store: GoalStore, goal: Goal) -> list[GoalJournal]:
     async with store._db.session() as s:
         rows = await s.execute(select(GoalJournal).where(GoalJournal.goal_id == goal.id).order_by(GoalJournal.seq))

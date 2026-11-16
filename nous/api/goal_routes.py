@@ -48,7 +48,7 @@ from nous.goals.store import (
     JOURNAL_MAX_CHARS,
     LIVE_STATES,
     MAX_DEADLINE_DAYS,
-    SESSION_NOTE_LABEL,
+    STOP_REF,
     GoalRefused,
     GoalStore,
     clip,
@@ -72,9 +72,6 @@ LIST_DEFAULT = 100
 LIST_MAX = 200
 SESSIONS_SHOWN = 50
 PAUSE_SENTENCE_CHARS = 300
-# A session's close row as the driver writes it (``nous/goals/driver.py``: "Session <n> ended: <outcome>, ...").
-# When the driver's pause rows carry their evidence ref (``stop:<reason>``), select the pause row by that ref instead.
-CLOSE_ROW_PATTERN = "Session % ended: %"
 # At most this many problems of a body are listed; the rest are counted.
 PROBLEMS_SHOWN = 5
 # The owner's actions on a goal, in the order the screen shows them; each is the last segment of its route.
@@ -231,11 +228,11 @@ def resume_blocked(goal: Goal, *, spent: int, now: datetime) -> str | None:
     return None
 
 
-def pause_sentence_query(agent_id: str, goal_id: UUID) -> Any:
-    """The newest ``state`` row the harness wrote for ``goal_id`` that is not a session's close row: the driver
-    journals each pause it makes as such a row, in the transaction that pauses the goal. A close row is told by
-    its text, as the driver writes it: it starts "Session <n> ended: " and may carry ``SESSION_NOTE_LABEL``; both
-    kinds are left out, so a session that ends after the pause never takes the pause's place."""
+def pause_sentence_query(agent_id: str, goal_id: UUID, reason: str) -> Any:
+    """The newest ``state`` row the harness wrote for ``goal_id`` with the evidence ref of a pause for ``reason``
+    (``stop:<reason>``): the goal driver writes one with each pause it makes for a reason other than the owner's (a
+    stop condition, or failed starts), in the transaction that pauses the goal. Every other harness row (a session's
+    close, a chain being stopped) has no such ref, so none written after the pause takes its place."""
     return (
         select(GoalJournal.text)
         .where(
@@ -243,8 +240,7 @@ def pause_sentence_query(agent_id: str, goal_id: UUID) -> Any:
             GoalJournal.goal_id == goal_id,
             GoalJournal.kind == "state",
             GoalJournal.actor == "harness",
-            GoalJournal.text.not_like(CLOSE_ROW_PATTERN),
-            GoalJournal.text.not_like(f"%{SESSION_NOTE_LABEL}%"),
+            GoalJournal.evidence.contains([f"{STOP_REF}{reason}"]),
         )
         .order_by(GoalJournal.seq.desc())
         .limit(1)
@@ -439,9 +435,12 @@ def _no_goal(ref: str) -> JSONResponse:
 # ---- the routes --------------------------------------------------------------------------------------------------
 
 
-def build_goal_routes(*, database: Any, settings: Any, goals: GoalStore | None, guard: OwnerGuard) -> list[Route]:
-    """The goal routes, every one behind ``guard``. ``goals`` is None with the flag off. Literal paths come before
-    ``/goals/{ref}``."""
+def build_goal_routes(
+    *, database: Any, settings: Any, goals: GoalStore | None, guard: OwnerGuard, driver: Any = None
+) -> list[Route]:
+    """The goal routes, every one behind ``guard``. ``goals`` is None with the flag off. ``driver`` is the app's
+    goal driver component (main.py passes its lazy proxy, falsy until the lifespan built one), read at each request.
+    Literal paths come before ``/goals/{ref}``."""
     agent_id = settings.agent_id
 
     async def tallies(goal_ids: list[UUID]) -> tuple[datetime, dict[UUID, Tally]]:
@@ -479,10 +478,10 @@ def build_goal_routes(*, database: Any, settings: Any, goals: GoalStore | None, 
     async def harness_pause_sentence(goal: Goal) -> str | None:
         """Why the harness paused ``goal``, in its own words (``pause_sentence_query``), cut to
         ``PAUSE_SENTENCE_CHARS``; None for a goal that is not paused, or paused by the owner."""
-        if goal.state != "paused" or goal.pause_reason == "owner":
+        if goal.state != "paused" or goal.pause_reason in (None, "owner"):
             return None
         async with database.session() as session:
-            found = await session.scalar(pause_sentence_query(agent_id, goal.id))
+            found = await session.scalar(pause_sentence_query(agent_id, goal.id, goal.pause_reason))
         return clip(found, PAUSE_SENTENCE_CHARS) if found is not None else None
 
     async def detail(goal: Goal, journal_limit: int = JOURNAL_DEFAULT) -> dict[str, Any]:
@@ -563,8 +562,8 @@ def build_goal_routes(*, database: Any, settings: Any, goals: GoalStore | None, 
                     "deadline_days": MAX_DEADLINE_DAYS,
                     "journal": JOURNAL_MAX,
                 },
-                # No driver is started by the app yet: rows change, and no session follows.
-                "driver_running": False,
+                # Whether the app's goal driver runs its loop now: without it, rows change and no session follows.
+                "driver_running": bool(driver) and driver.running is True,
                 "spend_note": SPEND_NOTE,
             }
         )
