@@ -689,6 +689,105 @@ async def test_the_owners_cancel_records_the_owner_on_the_lineage_dag(env_factor
     assert (status, summary, record["by"]) == ("cancelled", "cancelled by the owner", "owner")
 
 
+class _FailsOnce:
+    """The orchestrator's cancel, raising on its first call (the orchestrator was down, or the process stopped
+    before the call): the DAG is left running under the cancelled root for the continuation runner's sweep."""
+
+    def __init__(self, cancel_dag) -> None:
+        self.cancel_dag, self.calls = cancel_dag, 0
+
+    async def __call__(self, dag_id, reason="cancelled", cancelled_by=None):
+        self.calls += 1
+        if self.calls == 1:
+            raise RuntimeError("the orchestrator is down")
+        await self.cancel_dag(dag_id, reason, cancelled_by)
+
+
+async def _stray_lineage_dag(w: SimpleNamespace, root: Intention) -> tuple[uuid.UUID, object, DAGOrchestrator]:
+    """A running DAG of ``root``'s lineage whose first cancel fails."""
+    dag, store = await make_dag(w.env, status="running", parent=root)
+    orchestrator = DAGOrchestrator(store, settings=w.env.settings)
+    w.runner.set_cancel_dag(_FailsOnce(orchestrator.cancel_dag))
+    return dag.id, store, orchestrator
+
+
+SWEPT_BY_OWNER = ("owner", "root cancelled earlier, finished by the sweep")
+
+
+def test_the_sweeps_harness_words_fit_a_provenance_record():
+    assert cancel_provenance.clean_via(driver_module.STUCK_SWEEP_VIA) == driver_module.STUCK_SWEEP_VIA
+
+
+@pytest.mark.parametrize("restart", [False, True])
+async def test_the_sweep_finishing_a_stuck_chains_dag_records_the_harness(env_factory, restart):  # noqa: F811
+    """The driver ends a stuck chain and the orchestrator's cancel of its DAG fails: the continuation runner's sweep
+    finishes it, asks the bound driver, and records the harness. After a restart (new runner and driver objects over
+    the same rows) the answer is the same: it is read from the rows."""
+    w = await _cont_world(env_factory)
+    w.runner.set_goals(w.driver)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    dag_id, store, orchestrator = await _stray_lineage_dag(w, root)
+    await _held_root(w, session.first_subtask_id, past=5)
+    assert (await w.driver.tick()).stopped == 1
+    assert (await store.get_dag(dag_id)).status == "running"  # left to the sweep
+    runner = w.runner
+    if restart:
+        runner = ContinuationRunner(
+            database=w.db, settings=w.env.settings, runner=None, heart=w.env.heart, brain=None, bus=w.env.bus
+        )
+        runner.set_cancel_dag(orchestrator.cancel_dag)
+        runner.set_goals(GoalDriver(w.db, w.env.settings, w.env.heart, w.store, runner))
+    await runner.run_once()
+    status, summary, record = await _cancelled_by(store, dag_id)
+    assert (status, record["by"], record["via"]) == ("cancelled", "harness", driver_module.STUCK_SWEEP_VIA)
+    assert summary == f"cancelled by the harness ({driver_module.STUCK_SWEEP_VIA})"
+
+
+@pytest.mark.parametrize("how", ["route", "stop"])
+async def test_the_sweep_finishing_an_owners_cancel_records_the_owner(env_factory, how):  # noqa: F811
+    """The owner's cancel of the root through the routes, or the owner's stop of the goal (its ending row names the
+    request): the bound driver answers nothing, and the sweep records the owner as before."""
+    w = await _cont_world(env_factory)
+    w.runner.set_goals(w.driver)
+    goal = await _active(w)
+    root, _session_row = await _started(w, goal)
+    dag_id, store, _orchestrator = await _stray_lineage_dag(w, root)
+    if how == "route":
+        await w.runner.cancel_root(root.id, reason="not now", actor="rest")
+    else:
+        await w.store.stop(goal.id, actor="host")
+        assert (await w.driver.tick()).stopped == 1
+    assert (await store.get_dag(dag_id)).status == "running"
+    await w.runner.run_once()
+    status, summary, record = await _cancelled_by(store, dag_id)
+    assert (status, summary, (record["by"], record["via"])) == ("cancelled", "cancelled by the owner", SWEPT_BY_OWNER)
+
+
+@pytest.mark.parametrize("bound", ["raising", "nothing"])
+async def test_the_sweep_records_the_owner_when_the_driver_cannot_say(env_factory, monkeypatch, caplog, bound):  # noqa: F811
+    """A lookup that raises is logged by its class and the sweep records the owner; with no driver bound the sweep
+    is what it was before goals."""
+    w = await _cont_world(env_factory)
+    goal = await _active(w)
+    root, session = await _started(w, goal)
+    dag_id, store, _orchestrator = await _stray_lineage_dag(w, root)
+    await _held_root(w, session.first_subtask_id, past=5)
+    assert (await w.driver.tick()).stopped == 1
+    if bound == "raising":
+
+        async def broken(root_id):
+            raise ConnectionError("the database went away")
+
+        monkeypatch.setattr(w.driver, "cancel_record_for", broken)
+        w.runner.set_goals(w.driver)
+    await w.runner.run_once()
+    status, summary, record = await _cancelled_by(store, dag_id)
+    assert (status, summary, (record["by"], record["via"])) == ("cancelled", "cancelled by the owner", SWEPT_BY_OWNER)
+    if bound == "raising":
+        assert "cancel record for root" in caplog.text and "ConnectionError" in caplog.text
+
+
 async def test_a_running_subtask_inside_its_timeout_is_left_alone(env_factory):  # noqa: F811
     w = await _cont_world(env_factory)
     goal = await _active(w)

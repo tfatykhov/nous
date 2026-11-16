@@ -14,7 +14,8 @@ It also acts on the owner's requests (run now, stop, cancel), stops the chain of
 time limit, pauses a goal on a stop condition (deadline, total budget, a stall, errors in a row) and holds a start
 on the limits of the goal (day budget, sessions of the day, quiet hours, job launches of the day) and of all goals
 (sessions open at once). ``goal_roots`` tells the continuation runner which roots are goal sessions', so a goal's
-chain never takes the slots kept for the owner's own chains.
+chain never takes the slots kept for the owner's own chains, and ``cancel_record_for`` tells its sweep who cancelled
+a stray DAG of a chain the driver ended.
 
 Nothing builds the driver yet: it is constructed by tests only.
 """
@@ -110,6 +111,8 @@ _ENDINGS = {
 }
 # Who the lineage's DAGs record as having cancelled them when the driver ends a stuck chain (``cancel_provenance``).
 STUCK_CANCEL_VIA = "goal driver: a task ran past its time limit"
+# The same, for a DAG of such a chain that the continuation runner's sweep cancels later (at most 60 characters).
+STUCK_SWEEP_VIA = "goal driver: task ran past its time limit; finished by sweep"
 
 
 def _cancelled_by(why: str) -> dict[str, str] | None:
@@ -2063,6 +2066,39 @@ class GoalDriver:
                 select(GoalSession.root_id).where(GoalSession.agent_id == self._agent_id, GoalSession.root_id.in_(ids))
             )
             return frozenset(found.scalars())
+
+    async def cancel_record_for(self, root_id: UUID) -> dict[str, str] | None:
+        """For the continuation runner's sweep, which finishes the cancel of a DAG still running under a cancelled
+        root: the ``cancel_provenance`` record of that cancel when it was the driver's own end of a stuck chain, else
+        None (the sweep then records the owner). Read from durable rows only: the goal session whose root ``root_id``
+        is (a reopened root is the same root), and that session's newest ending row (``_journal_ending``). One written
+        for a stuck task (no ``request:`` ref) gives the harness's record in the sweep's words; one written for the
+        owner's stop or cancel, no ending row, or a root of no goal session gives None."""
+        async with self._db.session() as s:
+            session = (
+                await s.execute(
+                    select(GoalSession.id, GoalSession.goal_id)
+                    .where(GoalSession.agent_id == self._agent_id, GoalSession.root_id == root_id)
+                    .limit(1)
+                )
+            ).one_or_none()
+            if session is None:
+                return None
+            newest = await s.scalar(
+                select(GoalJournal.evidence)
+                .where(
+                    GoalJournal.agent_id == self._agent_id,
+                    GoalJournal.goal_id == session.goal_id,
+                    GoalJournal.kind == "state",
+                    GoalJournal.actor == "harness",
+                    GoalJournal.evidence.contains([f"{ENDING_REF}{session.id}"]),
+                )
+                .order_by(GoalJournal.seq.desc())
+                .limit(1)
+            )
+        if newest is None or any(isinstance(ref, str) and ref.startswith(REQUEST_REF) for ref in newest):
+            return None
+        return cancel_provenance.record("harness", STUCK_SWEEP_VIA)
 
     # ---- goal rows -----------------------------------------------------------------------------------------
 

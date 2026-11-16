@@ -755,7 +755,8 @@ class ContinuationRunner:
     async def _cancel_sweep(self) -> int:
         """Every sweep: take in the roots cancelled since the last one (a cancel through another surface, or by a
         second process), then cancel the DAGs that are still running under a cancelled root (a cancel whose
-        orchestrator call failed, or whose process stopped after the commit). Returns the DAGs it cancelled."""
+        orchestrator call failed, or whose process stopped after the commit), recording the owner unless the bound goal
+        driver gives the record of a chain it ended itself (``_goal_cancel_record``). Returns the DAGs it cancelled."""
         since = (
             self._view_checked_at - timedelta(seconds=CANCEL_VIEW_MARGIN_SECONDS)
             if self._view_checked_at is not None
@@ -767,7 +768,25 @@ class ContinuationRunner:
         async with self._db.session() as session:
             strays = await continuation.stray_dag_ids(session, self._agent_id, limit=STRAY_DAG_BATCH)
         swept = cancel_provenance.record("owner", "root cancelled earlier, finished by the sweep")
-        return await self._cancel_dags(strays, swept)
+        done = 0
+        for dag_id, root_id in strays:
+            done += await self._cancel_dags([dag_id], await self._goal_cancel_record(root_id) or swept)
+        return done
+
+    async def _goal_cancel_record(self, root_id: UUID) -> dict[str, str] | None:
+        """F114: the ``cancel_provenance`` record the bound goal driver gives a stray DAG of ``root_id``, when the
+        driver itself ended that root's chain (``GoalDriver.cancel_record_for``); else None, and the sweep records the
+        owner as before: no driver bound, a root it did not end, an answer that is not a record, or a lookup that
+        failed (logged by its class)."""
+        goals = self._goals
+        if goals is None:
+            return None
+        try:
+            found = await goals.cancel_record_for(root_id)
+        except Exception as exc:
+            logger.warning("F114: the goal driver's cancel record for root %s failed (%s)", root_id, type(exc).__name__)
+            return None
+        return found if found is not None and cancel_provenance.describe(found) is not None else None
 
     async def _cancel_dags(self, dag_ids: Sequence[UUID], cancelled_by: dict) -> int:
         """The orchestrator's cancel for each DAG, recording ``cancelled_by`` (a ``cancel_provenance`` record) and a
