@@ -424,3 +424,24 @@ async def test_a_publish_whose_commit_fails_leaves_no_grant_for_its_root(env_fac
     monkeypatch.setattr(w.driver, "_set_root", set_root)
     assert await w.driver.start_session(goal.id, trigger="timer") is None  # a failed start
     assert len(roots) == 1 and view.grant(roots[0], "send_email") is None
+
+
+async def test_a_database_error_in_the_publishs_read_neither_fails_nor_undoes_the_start(env_factory, caplog):  # noqa: F811
+    w, goal, view, runner = await _granted_world(env_factory)
+    real_read = view._read
+
+    async def failing_read(*, root_id, goal_id, session=None):
+        if session is None:
+            return await real_read(root_id=root_id, goal_id=goal_id)
+        await session.execute(text("SELECT 1 / 0"))  # an error the database raises inside the publish
+
+    view._read = failing_read
+    root, session = await _started(w, goal)
+    assert session.ended_at is None and session.root_id == root.id and w.driver._runner.wakes == 1
+    async with w.db.session() as s:
+        subtask = (await s.execute(select(Subtask).where(Subtask.id == session.first_subtask_id))).scalar_one()
+    assert subtask.status == "pending"  # published with the session
+    assert not view.fresh() and "send_email" not in _offered(
+        runner, ExecutionContext.for_subtask(subtask, f"subtask-{subtask.id}")
+    )
+    assert "DBAPIError" in caplog.text or "DataError" in caplog.text

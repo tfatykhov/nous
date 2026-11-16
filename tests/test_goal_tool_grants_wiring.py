@@ -245,3 +245,14 @@ async def test_a_pause_whose_read_fails_is_still_made(env_factory, caplog):  # n
     assert await w.driver._pause_after_failed_starts(goal.id, note, since=0) is True
     assert (await w.store.get(goal.id)).state == "paused"
     assert "RuntimeError" in caplog.text and "blew up" not in caplog.text
+
+
+async def test_a_decision_turns_done_claim_reads_the_goals_grants_through_the_chain(env_factory):  # noqa: F811
+    w = await _world(env_factory)
+    goal = await _active(w)
+    root, _session = await _started(w, goal)
+    recorder = Recorder()
+    turn = await GoalChain(w.db, w.env.settings, w.store, tool_grants=recorder).turn_context(root.id)
+    recorder.calls.clear()  # the turn's own read of its root
+    answer, is_error = await turn.tools["goal_note"][1](text="Every duplicate is merged.", kind="done_claim")
+    assert is_error is False and recorder.calls == [("goal", goal.id)]
