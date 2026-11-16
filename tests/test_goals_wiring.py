@@ -11,26 +11,33 @@ import asyncio
 import inspect
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from f099_support import CONT, env_factory, runner_env  # noqa: F401
 from goal_routes_support import OWNER, send, settings_for
 from goals_support import GOALS, reset_goal_report_channel  # noqa: F401
+from sqlalchemy import text
 from starlette.applications import Starlette
 from test_f099_phase2c_parity import NoDatabase, Untouchable
+from test_work_view_retention import _run
 
 import nous.main as main
 from nous.api.goal_routes import build_goal_routes
 from nous.api.owner_guard import OwnerGuard
 from nous.brain import continuation
+from nous.brain.embeddings import EmbeddingProvider
 from nous.config import Settings
 from nous.goals import driver as driver_module
 from nous.goals.chain import GoalChain, report_channel
 from nous.goals.driver import GoalDriver
 from nous.goals.store import GoalStore
 from nous.handlers.continuation_runner import ContinuationRunner
+from nous.heartbeat.runner import HeartbeatRunner
+from nous.storage.database import Database
 
 ROOT = Path(__file__).resolve().parents[1]
 CHAIN_MODULES = ("nous.goals.chain", "nous.goals.tools", "nous.goals.evidence")
@@ -226,3 +233,89 @@ async def test_options_read_the_driver_when_asked_not_when_built():
     assert (await send(app, "GET", "/goals/options", headers=OWNER)).json()["driver_running"] is False
     components["goal_driver"] = _Driver(True)
     assert (await send(app, "GET", "/goals/options", headers=OWNER)).json()["driver_running"] is True
+
+
+@pytest.mark.postgres_only
+def test_a_boot_with_goals_on_runs_one_driver_and_its_shutdown_stops_it(monkeypatch):
+    """The app's own lifespan with the flag and everything it needs on: one driver is built and its loop runs, both
+    hooks are bound, GET /goals/options says the driver runs; after shutdown the loop has stopped and the report hook
+    is cleared."""
+    agent_id = f"test-goals-boot-{uuid.uuid4().hex[:8]}"
+
+    async def already_migrated(engine) -> None:
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("INSERT INTO nous_system.agents (id, name, config) VALUES (:id, 'x', '{}')"), {"id": agent_id}
+            )
+
+    async def never_start(self) -> None:
+        return None
+
+    async def no_network(self, payload, *, batch=False):
+        raise httpx.ConnectError("no network in this test")
+
+    monkeypatch.setattr(main, "run_migrations", already_migrated)
+    monkeypatch.setattr(HeartbeatRunner, "start", never_start)
+    monkeypatch.setattr(EmbeddingProvider, "_post_with_retry", no_network)
+    settings = Settings(
+        _env_file=None,
+        ANTHROPIC_API_KEY="test-key",
+        OPENAI_API_KEY="test-key",
+        agent_id=agent_id,
+        schedule_enabled=False,
+        dag_enabled=False,
+        mcp_enabled=False,
+        telegram_bot_token="",
+        telegram_chat_id="",
+        owner_route_secret_sha256=settings_for().owner_route_secret_sha256,
+        goals_tick_seconds=3600,
+        **GOALS,
+    )
+    assert settings.goals_enabled is True
+    seen: dict = {}
+
+    def goal_tasks() -> list[str]:
+        return [t.get_name() for t in asyncio.all_tasks() if t.get_name() == "goal-driver" and not t.done()]
+
+    async def scenario() -> None:
+        app = main.build_app(settings)
+        try:
+            async with app.router.lifespan_context(app):
+                components = app.state.components
+                driver = components["goal_driver"]
+                seen.update(
+                    driver=driver,
+                    running=driver.running,
+                    tasks=goal_tasks(),
+                    hook=continuation._goal_report_channel,
+                    turns=components["continuation_runner"]._goal_turns,
+                )
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport, base_url="http://nous") as client:
+                    seen["options"] = (await client.get("/goals/options", headers=OWNER)).json()
+            seen.update(
+                after_running=driver.running, after_tasks=goal_tasks(), after_hook=continuation._goal_report_channel
+            )
+        finally:
+            continuation.set_goal_report_channel(None)
+            database = Database(settings)
+            try:
+                async with database.session() as session:
+                    for statement in (
+                        "DELETE FROM nous_system.model_call_log WHERE agent_id = :a",
+                        "DELETE FROM nous_system.model_text_block WHERE agent_id = :a",
+                        "DELETE FROM heart.rubric_versions WHERE agent_id = :a",
+                        "DELETE FROM nous_system.agents WHERE id = :a",
+                    ):
+                        await session.execute(text(statement), {"a": agent_id})
+                    await session.commit()
+            except Exception:
+                pass  # rows of a test agent may stay; nothing reads them
+            finally:
+                await database.disconnect()
+
+    _run(scenario, seconds=120)
+    assert isinstance(seen["driver"], GoalDriver) and seen["running"] is True and seen["tasks"] == ["goal-driver"]
+    assert seen["hook"] is report_channel and seen["turns"].__func__ is GoalChain.turn_context
+    assert seen["options"]["enabled"] is True and seen["options"]["driver_running"] is True
+    assert seen["after_running"] is False and seen["after_tasks"] == [] and seen["after_hook"] is None
