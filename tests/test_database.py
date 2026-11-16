@@ -90,6 +90,9 @@ async def test_all_tables_exist(db):
         ("nous_system", "mcp_server_tools"),
         # F112 MCP client PR 2c: a server's stored credential, sealed (migration 110)
         ("nous_system", "mcp_server_secrets"),
+        # Goals PR 0c: the background halt and its audit log (migration 114)
+        ("nous_system", "background_halt"),
+        ("nous_system", "background_halt_log"),
         # Task scores, in a schema of their own (migration 087)
         ("scoring", "task_scores"),
         # The scoring command's heartbeat, one row per agent (migration 088)

@@ -2256,3 +2256,39 @@ export interface ModelCallBlockBody {
   size_chars: number;
   body: string;
 }
+
+/** GET /background/state (goals PR 0c): whether background work is halted, and by whom. */
+export interface BackgroundState {
+  halted: boolean;
+  source: 'none' | 'stored' | 'host' | 'unreadable';
+  since: string | null;
+  /** The actor with a valid owner or proxy secret; without one, the surface kind only. */
+  by: string | null;
+  surface: 'dashboard' | 'telegram' | 'agent' | 'host' | 'unknown' | null;
+  verified: boolean;
+  /** The reason given, with a valid owner or proxy secret; null without one. */
+  reason: string | null;
+  /** False while the halt is not saved yet (the server retries the write). */
+  persisted: boolean;
+}
+
+/** POST /background/halt: 200. `report.failed` names the sweep steps that could not stop their work. */
+export interface BackgroundHaltAnswer {
+  halted: true;
+  already: boolean;
+  verified: boolean;
+  persisted: boolean;
+  report: {
+    cancelled: { chains: number; subtasks: number; subtasks_running: number; dags: number; commands: number; jobs: number };
+    failed: string[];
+    jobs_checked: boolean;
+  };
+  text: string;
+}
+
+/** POST /background/resume: 200. A refusal is 403 `{error, reason}`, 409 `{host_hold}` or `{raced}`, 503 `{error}`. */
+export interface BackgroundResumeAnswer {
+  halted: false;
+  changed: boolean;
+  text: string;
+}

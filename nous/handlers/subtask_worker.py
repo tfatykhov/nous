@@ -23,6 +23,7 @@ from uuid import UUID
 
 import httpx
 
+from nous import background_halt
 from nous.api.execution_context import ExecutionContext
 from nous.brain import continuation, intentions
 from nous.cancellation import cancel_requested
@@ -88,6 +89,9 @@ class SubtaskWorkerPool:
         # them whose Telegram push was sent; both read and cleared by _record_shadow after the turn.
         self._shadow: dict[UUID, tuple[schedule_guard.GuardSpec, bool]] = {}  # spec, would_skip
         self._pushed: set[UUID] = set()
+        # Goals PR 0c: the runs the background halt ended. Their row is cancelled, and nothing of them is delivered:
+        # no completion, no event, no Telegram push, no inbox row and no memory record.
+        self._halt_ended: set[UUID] = set()
 
     async def start(self) -> None:
         """Spawn worker tasks, after closing what a prior crash left behind.
@@ -136,12 +140,24 @@ class SubtaskWorkerPool:
         """Main loop for a single worker: poll, execute, repeat."""
         while self._running:
             try:
+                # Goals PR 0c: nothing is claimed while halted. The epoch is taken before the claim, so a halt that
+                # lands during it (and a resume right after) still ends the run.
+                halt = background_halt.current()
+                epoch = halt.epoch
+                if halt.halted:
+                    await asyncio.sleep(self._settings.subtask_poll_interval)
+                    continue
                 subtask = await self._heart.subtasks.dequeue(worker_id)
                 if subtask is None:
                     await asyncio.sleep(self._settings.subtask_poll_interval)
                     continue
+                if background_halt.current().refuses("subtask", None, epoch):
+                    await self._heart.subtasks.cancel(subtask.id)
+                    logger.info("Background halt: cancelled subtask %s, claimed as the halt landed", subtask.id.hex[:8])
+                    continue
 
-                await self._process_subtask(subtask)
+                with background_halt.epoch_scope(epoch):
+                    await self._process_subtask(subtask)
 
             except asyncio.CancelledError:
                 if cancel_requested():
@@ -182,6 +198,8 @@ class SubtaskWorkerPool:
             tokens_in = state.tokens_in if state else 0
             tokens_out = state.tokens_out if state else 0
             tool_calls_made = state.tool_calls_made if state else 0
+            if await self._ended_by_halt(subtask, state):
+                return  # Goals PR 0c: nothing is delivered (the finally still runs)
             await self._heart.subtasks.fail(
                 subtask.id, error_msg, final_outcome="timed_out",
                 attempts=attempts, tokens_in=tokens_in,
@@ -204,8 +222,69 @@ class SubtaskWorkerPool:
             await self._notify_telegram(subtask, error=error_msg)
         finally:
             self._inflight_state.pop(subtask.id, None)
-            inbox_written = await self._record_inbox(subtask)
-            await self._record_shadow(subtask, inbox_written=inbox_written)
+            if subtask.id in self._halt_ended:
+                self._halt_ended.discard(subtask.id)
+                self._shadow.pop(subtask.id, None)
+                self._pushed.discard(subtask.id)
+            else:
+                inbox_written = await self._record_inbox(subtask)
+                await self._record_shadow(subtask, inbox_written=inbox_written)
+
+    async def _ended_by_halt(
+        self, subtask: Subtask, state: Any = None, *, persisted: bool = False, usage: dict | None = None
+    ) -> bool:
+        """Goals PR 0c: the halt ended this run (it is halted, or the run was claimed before the last halt). Then the
+        row is cancelled (a no-op once the sweep did it) and the run is remembered, so the caller delivers nothing.
+
+        ``persisted``: the hardened executor already wrote the run's outcome. Then the run counts as ended by the halt
+        only when its row is ``cancelled``: an outcome written before the halt landed is delivered as usual (a row
+        that cannot be read counts as ended).
+
+        The run's usage (``state``'s counters, else the turn's ``usage``) stays on the cancelled row, where the DAG
+        roll-up reads it."""
+        if not getattr(state, "halted", False):
+            if not self._halt_refuses():
+                return False
+            if persisted:
+                try:
+                    row = await self._heart.subtasks.get(subtask.id)
+                except Exception:
+                    row = None
+                    logger.warning("Subtask %s: could not read its row after the halt", subtask.id.hex[:8])
+                if row is not None and row.status != "cancelled":
+                    return False
+        self._halt_ended.add(subtask.id)
+        if state is not None:
+            counters = {
+                "attempts": max(1, getattr(state, "attempts", 0) or 0),
+                "tokens_in": getattr(state, "tokens_in", 0),
+                "tokens_out": getattr(state, "tokens_out", 0),
+                "tool_calls_made": getattr(state, "tool_calls_made", 0),
+            }
+        elif usage is not None:
+            counters = {
+                "attempts": 1,
+                "tokens_in": usage.get("input_tokens", 0),
+                "tokens_out": usage.get("output_tokens", 0),
+                "tool_calls_made": usage.get("tool_calls", 0),
+            }
+        else:
+            counters = None
+        try:
+            await self._heart.subtasks.cancel(subtask.id)
+        except Exception:
+            logger.exception("Subtask %s: could not cancel the run the halt ended", subtask.id.hex[:8])
+        if counters is not None:
+            try:  # bookkeeping: a failed write never fails the halt
+                await self._heart.subtasks.record_cancelled_usage(subtask.id, **counters)
+            except Exception:
+                logger.warning("Subtask %s: could not record the halted run's usage", subtask.id.hex[:8])
+        logger.info("Background halt: subtask %s ended by the halt; nothing delivered", subtask.id.hex[:8])
+        return True
+
+    @staticmethod
+    def _halt_refuses() -> bool:
+        return background_halt.current().refuses("subtask", None, background_halt.TURN_EPOCH.get())
 
     async def _guard_spec(self, subtask: Subtask) -> schedule_guard.GuardSpec | None:
         """The guard of the schedule this run is a plain fire of, or None.
@@ -499,7 +578,9 @@ class SubtaskWorkerPool:
                     executed = True
                     # Telemetry parity with the legacy path. Persistence is
                     # already done inside execute_hardened.
-                    if _result.ok:
+                    if await self._ended_by_halt(subtask, state, persisted=True):
+                        pass  # Goals PR 0c: nothing is delivered
+                    elif _result.ok:
                         await self._emit_event(
                             "subtask_completed", subtask, result=final_text,
                         )
@@ -534,6 +615,8 @@ class SubtaskWorkerPool:
                         "Subtask %s hardened-path errored",
                         subtask.id.hex[:8],
                     )
+                    if await self._ended_by_halt(subtask, state, persisted=executed):
+                        return  # Goals PR 0c: nothing is delivered
                     if not executed:
                         attempts = max(1, state.attempts)
                         await self._heart.subtasks.fail(
@@ -625,13 +708,19 @@ class SubtaskWorkerPool:
             # zero in the default configuration (and, because the claim is
             # one-shot, freezes that zero permanently).
             usage = usage or {}
-            await self._heart.subtasks.complete(
+            if await self._ended_by_halt(subtask, usage=usage):
+                return  # Goals PR 0c: the halted turn's text is never delivered as a result
+            written = await self._heart.subtasks.complete(
                 subtask.id, response_text,
                 final_outcome="completed", attempts=1,
                 tokens_in=usage.get("input_tokens", 0),
                 tokens_out=usage.get("output_tokens", 0),
                 tool_calls_made=usage.get("tool_calls", 0),
             )
+            if written is False:
+                # The row was already terminal (the halt's sweep cancelled it first): nothing is announced.
+                logger.info("Subtask %s was not completed (its row was already terminal)", subtask.id.hex[:8])
+                return
             await self._emit_event("subtask_completed", subtask, result=response_text)
             await self._notify_telegram(subtask, result=response_text)
             logger.info("Subtask %s completed", subtask.id.hex[:8])
@@ -643,6 +732,8 @@ class SubtaskWorkerPool:
             # subtask, like any other error.
             error_msg = _error_text(exc)
             logger.exception("Subtask %s failed", subtask.id.hex[:8])
+            if await self._ended_by_halt(subtask):
+                return  # Goals PR 0c: nothing is delivered
             await self._heart.subtasks.fail(
                 subtask.id, error_msg, final_outcome="errored", attempts=1,
             )

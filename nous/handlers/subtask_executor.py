@@ -27,6 +27,7 @@ from typing import Any, Awaitable, Callable
 
 import jsonschema
 
+from nous import background_halt
 from nous.api.execution_context import ExecutionContext
 from nous.api.subtask_tools import (
     SubtaskReportCollector,
@@ -63,6 +64,9 @@ class HardenedRunState:
     tokens_out: int = 0
     tool_calls_made: int = 0
     last_payload: dict[str, Any] | None = None
+    # Goals PR 0c: the background halt ended this run. Its row was cancelled, nothing was persisted or emitted, and
+    # the caller delivers nothing.
+    halted: bool = False
 
 
 # F061 PR-3: structured outcome event for /dashboard/subtasks. Emitted via
@@ -245,8 +249,14 @@ async def execute_hardened(
     )
 
     cancelled = False
+    halt_epoch = background_halt.turn_epoch()  # the worker's, from before its dequeue
     try:
         for attempt in range(1, max_attempts + 1):
+            # Goals PR 0c: a halted run starts no attempt, and is never retried.
+            if background_halt.current().refuses("subtask", session_id, halt_epoch):
+                state.halted = True
+                last_result = ValidationResult.failed("incomplete_blocked", background_halt.HALT_REASON)
+                break
             # Mirror to state BEFORE the attempt runs so an outer wait_for
             # timeout that fires during the run still sees attempt=N.
             state.attempts = attempt
@@ -309,6 +319,11 @@ async def execute_hardened(
             state.tokens_in = total_in
             state.tokens_out = total_out
             state.tool_calls_made = total_calls
+            # Goals PR 0c: a run the halt reached while it ran: its report is not accepted.
+            if background_halt.current().refuses("subtask", session_id, halt_epoch):
+                state.halted = True
+                last_result = ValidationResult.failed("incomplete_blocked", background_halt.HALT_REASON)
+                break
 
             last_payload = collector.get()
             state.last_payload = last_payload
@@ -435,7 +450,31 @@ async def execute_hardened(
         # Persisting from inside this finally on CancelledError would race
         # with the outer caller's overwrite (DB ends up correct but the
         # event is locked at the WRONG outcome — telemetry desyncs from DB).
-        if not cancelled:
+        if not cancelled and state.halted:
+            # Goals PR 0c: the row is cancelled, never completed or failed, and no outcome is emitted, so nothing
+            # delivers the halted run's text. complete()/fail() would also be no-ops once the sweep cancelled it.
+            # The run's usage stays on the cancelled row, where the DAG roll-up reads it.
+            try:
+                await asyncio.shield(heart.subtasks.cancel(subtask.id))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Subtask %s: could not cancel the halted run's row", subtask.id.hex[:8])
+            try:  # bookkeeping: a failed write never fails the halt
+                await asyncio.shield(
+                    heart.subtasks.record_cancelled_usage(
+                        subtask.id,
+                        attempts=attempt or 1,
+                        tokens_in=total_in,
+                        tokens_out=total_out,
+                        tool_calls_made=total_calls,
+                    )
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.warning("Subtask %s: could not record the halted run's usage", subtask.id.hex[:8])
+        elif not cancelled:
             try:
                 await asyncio.shield(_persist_outcome(
                     heart,
@@ -507,7 +546,7 @@ async def execute_hardened(
                 "emit the subtask_outcome event using state=HardenedRunState",
                 subtask.id.hex[:8],
             )
-    if notify_telegram:
+    if notify_telegram and not state.halted:
         try:
             # Normalized here too: the notification is an emission of the
             # report, and must not show a forged confidence_reported either.

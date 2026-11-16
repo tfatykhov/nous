@@ -15,6 +15,7 @@ import logging
 import re
 from typing import Any
 
+from nous import background_halt
 from nous.api.tools import ToolDispatcher, _tool_error
 from nous.brain import continuation
 
@@ -789,6 +790,9 @@ def register_a2ui_tools(
         pre_broadcast_hook = _do_ingest if _pending_store is not None else None
         pre_broadcast_rollback = _undo_ingest if _pending_store is not None else None
 
+        if background_halt.call_refused():
+            # Goals PR 0c: the halt is checked again after the reads above, before the push.
+            return _tool_error(f"{background_halt.HALT_REASON}: nothing was pushed.")
         try:
             surface_id = await surface_service.push_built(
                 built,
@@ -865,6 +869,9 @@ def register_a2ui_tools(
             # sources are the caller's input, so the caller gets the error.
             return _tool_error(f"compose failed: {exc}")
         dedup_key = kwargs.get("dedup_key") or f"app:{_intent_slug(intent)}"
+        if background_halt.call_refused():
+            # Goals PR 0c: the halt is checked again after the compose, before the push.
+            return _tool_error(f"{background_halt.HALT_REASON}: nothing was pushed.")
         try:
             surface_id = await surface_service.push_built(
                 composed.built,

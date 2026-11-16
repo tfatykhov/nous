@@ -228,6 +228,8 @@ services:
       - NOUS_PROMISE_WATCHER_SINCE=${NOUS_PROMISE_WATCHER_SINCE:-}
       - NOUS_PROMISE_WATCHER_MAX_ITEMS=${NOUS_PROMISE_WATCHER_MAX_ITEMS:-10}
       - NOUS_OWNER_ROUTE_SECRET_SHA256=${NOUS_OWNER_ROUTE_SECRET_SHA256:-}
+      # Goals PR 0c: the host's hold on background work, read once at start.
+      - NOUS_BACKGROUND_HALT=${NOUS_BACKGROUND_HALT:-false}
       # The SHA-256 of the secret the login proxy adds as X-Nous-Proxy-Secret; also accepted on the owner routes.
       - NOUS_MCP_CLIENT_UI_SECRET_SHA256=${NOUS_MCP_CLIENT_UI_SECRET_SHA256:-}
       # Chat and the inbound MCP server: off, warn (log and count calls that carry no proof) or enforce.

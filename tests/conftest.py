@@ -104,6 +104,17 @@ def _no_undo_journal():
     undo_journal.set_journal(None)
 
 
+@pytest.fixture(autouse=True)
+def _no_background_halt():
+    """The background halt is process-wide (``background_halt.install``): a test that installs one, or runs
+    create_components, would leave it for the next. Start and end every test with the never-halted default."""
+    from nous import background_halt
+
+    background_halt.install(None)
+    yield
+    background_halt.install(None)
+
+
 # ---------------------------------------------------------------------------
 # Database fixtures
 # ---------------------------------------------------------------------------

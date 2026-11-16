@@ -29,12 +29,13 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from nous import background_halt
 from nous.api.execution_context import ExecutionContext
 from nous.api.idempotency import SUMMARY_SESSION_PREFIX
 from nous.brain import continuation
 from nous.brain.intentions import AUTHORITY_INTERNAL, SOURCE_DAG, WAKE_CONTINUE
 from nous.brain.intentions import enabled as intentions_enabled
-from nous.cancel_provenance import dag_cancel_line
+from nous.cancel_provenance import cancelled_by_halt, dag_cancel_line
 from nous.config import Settings
 from nous.dag.approval import approval_line, is_answered_approval, stopped_at_approval
 from nous.events import Event
@@ -149,7 +150,17 @@ class DAGResultDelivery:
         Never raises: a leg that throws is recorded as a failed LegResult so
         the orchestrator can decide between retry and give-up from data
         rather than from an exception type.
+
+        Goals PR 0c: a DAG the background halt cancelled is marked delivered with no leg run (no summary turn, no
+        inbox row, no bus event, no Telegram message): the halt's own report is the one message.
         """
+        if cancelled_by_halt(dag):
+            return DeliveryOutcome(
+                delivered=True,
+                legs=(LegResult("halt", ok=True, required=False, detail="cancelled by the background halt"),),
+                summary=self.build_template(dag),
+                summary_authored=False,
+            )
         legs: list[LegResult] = []
         summary_authored = False
 
@@ -178,7 +189,8 @@ class DAGResultDelivery:
             legs.append(
                 LegResult("summary", ok=True, required=False, detail="cached")
             )
-        elif self._settings.dag_delivery_agent_summary_enabled:
+        elif self._settings.dag_delivery_agent_summary_enabled and not background_halt.current().halted:
+            # Goals PR 0c: no summary turn while background work is halted; the template stands.
             leg, authored = await self._leg_agent_summary(dag, summary)
             legs.append(leg)
             if authored:
@@ -371,20 +383,22 @@ class DAGResultDelivery:
         # delivery generation -- a retry_node re-announces deliberately -- scope
         # the idempotency keys of every send this turn and its subtasks make.
         session_id = f"{SUMMARY_SESSION_PREFIX}{dag.id.hex}-g{dag.delivery_generation}"
+        epoch = background_halt.turn_epoch()  # Goals PR 0c: the turn's start
         try:
-            result = await asyncio.wait_for(
-                self._runner.run_turn(
-                    session_id=session_id,
-                    user_message=prompt,
-                    is_background=True,
-                    context=ExecutionContext(  # harness Phase 1a
-                        kind="dag_summary",
+            with background_halt.epoch_scope(epoch):
+                result = await asyncio.wait_for(
+                    self._runner.run_turn(
                         session_id=session_id,
-                        dag_id=dag.id,
+                        user_message=prompt,
+                        is_background=True,
+                        context=ExecutionContext(  # harness Phase 1a
+                            kind="dag_summary",
+                            session_id=session_id,
+                            dag_id=dag.id,
+                        ),
                     ),
-                ),
-                timeout=self._settings.dag_delivery_agent_summary_timeout_seconds,
-            )
+                    timeout=self._settings.dag_delivery_agent_summary_timeout_seconds,
+                )
         except TimeoutError:
             logger.warning(
                 "F087: agent summary timed out for DAG %s — using template",
@@ -404,6 +418,9 @@ class DAGResultDelivery:
                 None,
             )
 
+        if background_halt.current().refuses("dag_summary", session_id, epoch):
+            # Goals PR 0c: the halt ended the summary turn; its fixed text is not a summary. The template stands.
+            return LegResult("summary", ok=False, required=False, detail="halted"), None
         text = self._extract_text(result)
         if not text:
             return (

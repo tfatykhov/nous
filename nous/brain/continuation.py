@@ -1545,15 +1545,38 @@ async def fail_attempt(
         return FAIL_LOST
 
 
-async def release_claim(session: AsyncSession, agent_id: str, claim: Claim) -> int:
-    """Free a claim deliberately (a shutdown, a cancel) without charging an attempt: the rows go back to
-    ``result_ready`` as they were. Fenced: a claim that is no longer live releases nothing. Returns the
-    number of intentions released. Does not commit."""
+async def release_claim(
+    session: AsyncSession, agent_id: str, claim: Claim, *, tokens: tuple[int, int] = (0, 0)
+) -> int:
+    """Free a claim deliberately (a shutdown, a cancel, a turn the background halt ended) without charging an
+    attempt: the rows go back to ``result_ready`` as they were. Fenced: a claim that is no longer live releases
+    nothing. Returns the number of intentions released. Does not commit.
+
+    ``tokens`` is ``(tokens_in, tokens_out)`` the claim's turn spent (Goals PR 0c): booked on the claim's deepest
+    intention (``failed_tokens``, as a failed attempt's are) under the lock, before the release. Through the fence
+    while the claim is live; when the root was cancelled meanwhile (the owner's cancel or the halt's sweep closes
+    every open row and clears a live claim, usually before the turn's model call returns), on that row with no
+    fence if it is ``cancelled``, so what the turn spent still counts against its root. A claim lost any other
+    way books nothing, as ``fail_attempt`` does."""
     ids = sorted(i.id for i in claim.intentions)
     now = datetime.now(UTC)
+    spent = int(tokens[0]) + int(tokens[1])
     async with session.begin_nested():
         await _lock_claimed(session, agent_id, claim.root_id, ids)
         await expire_staged(session, agent_id, claim_token=claim.claim_token)  # 2d: nothing approvable survives
+        if spent > 0:
+            values = {"failed_tokens": Intention.failed_tokens + spent, "updated_at": now}
+            charged = await _fenced_move(session, agent_id, [claim.deepest.id], claim.claim_token, values)
+            if not charged:
+                await session.execute(
+                    update(Intention)
+                    .where(
+                        Intention.agent_id == agent_id,
+                        Intention.id == claim.deepest.id,
+                        Intention.state == STATE_CANCELLED,
+                    )
+                    .values(**values)
+                )
         moved = await _fenced_move(
             session,
             agent_id,

@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from nous import undo_journal
+from nous import background_halt, background_processes, undo_journal
 from nous.api import tool_policy
 from nous.api.call_outcome import current_outcome
 from nous.api.commitment_routes import OWNER_SECRET_ENV
@@ -166,6 +166,39 @@ def _job_cancel_provenance(
 # ---------------------------------------------------------------------------
 
 
+async def run_runner(workspace_dir: str, args: list[str], timeout: float) -> tuple[int | None, str]:
+    """Goals PR 0c: run ``claude-jobs/runner.sh`` with ``args`` as its argv (no shell), in the workspace, with an
+    ordinary bash call's environment. Returns ``(exit code, stdout)``; ``(None, "")`` when it could not run or timed
+    out (its process group is then killed)."""
+    runner = Path(workspace_dir) / "claude-jobs" / "runner.sh"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            str(runner),
+            *args,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            cwd=workspace_dir,
+            env=_agent_env(),
+            start_new_session=True,
+        )
+    except OSError:
+        return None, ""
+    try:
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        await kill_process_group(proc, even_if_exited=True)
+        return None, ""
+    except BaseException:
+        await kill_process_group(proc, even_if_exited=True)
+        raise
+    return proc.returncode, stdout.decode("utf-8", errors="replace")
+
+
+def _halt_refuses() -> bool:
+    return background_halt.current().refuses("background", None, background_halt.turn_epoch())
+
+
 async def bash_tool(
     command: str,
     timeout: int | None = None,
@@ -177,6 +210,7 @@ async def bash_tool(
     _actor: dict | None = None,
     _gh_repo: str = "",
     _lineage_runner: bool = True,
+    _background: bool = False,
 ) -> dict[str, Any]:
     """Execute a shell command in the workspace directory.
 
@@ -202,6 +236,8 @@ async def bash_tool(
             runner.sh (tool_policy.lineage_runs_runner), whose Claude Code job
             would inherit GH_REPO, so it gets none. True unless dispatch says
             otherwise
+        _background: Set by dispatch for a background turn (Goals PR 0c): the
+            command's process group is tracked, so a halt can signal it
 
     Returns:
         MCP-format response with stdout + stderr
@@ -216,6 +252,9 @@ async def bash_tool(
         workspace = Path(_workspace_dir)
         workspace.mkdir(parents=True, exist_ok=True)
 
+        # The halt is checked again at the point of the spawn.
+        if _background and _halt_refuses():
+            return _tool_error(background_halt.HALTED_TOOL_TEXT)
         proc = await asyncio.create_subprocess_shell(
             command,
             stdin=asyncio.subprocess.DEVNULL if _lineage and _lineage_build else None,
@@ -227,11 +266,17 @@ async def bash_tool(
             # whole command (``a; b``, pipelines), not only the /bin/sh parent.
             start_new_session=True,
         )
+        tracked = background_processes.track(proc) if _background else None
+        if tracked is not None and _halt_refuses():
+            await kill_process_group(proc)
+            background_processes.release(tracked)
+            return _tool_error(background_halt.HALTED_TOOL_TEXT)
 
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=effective_timeout)
         except TimeoutError:
             await kill_process_group(proc)
+            background_processes.release(tracked)
             # The first sentence is matched as is (ledger_store._BASH_TIMEOUT,
             # compaction, monitor): add to it, never reword it.
             if effective_timeout < _MAX_BASH_TIMEOUT:
@@ -246,7 +291,9 @@ async def bash_tool(
             # The calling turn was cancelled (e.g. its heartbeat check was
             # disabled by the DAG mid-run): don't leave the command running.
             await kill_process_group(proc)
+            background_processes.release(tracked)
             raise
+        background_processes.release(tracked)  # kept while a child it detached is still in its group
 
         # Decode and truncate
         stdout_text = stdout.decode("utf-8", errors="replace")
@@ -837,6 +884,9 @@ async def write_file_tool(
                 own_lock = lock
             # Passive before-state snapshot (never blocks: a failure is logged).
             await undo_journal.record_file_write(path, _workspace_dir)
+            if background_halt.call_refused():
+                # Goals PR 0c: the halt is checked again after the waits above, before the write.
+                return _tool_error(f"Refused to write '{path}': {background_halt.HALT_REASON}; nothing was written.")
         if outcome is None or outcome.write_target is None:
             # No snapshot is bound to this call (compensation off, or a call
             # nothing can revert): the file itself is written, as before
@@ -1022,6 +1072,7 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
         _long_timeout: bool = False,
         _actor: dict | None = None,
         _lineage_runner: bool = True,
+        _background: bool = False,
     ) -> dict[str, Any]:
         return await bash_tool(
             command,
@@ -1033,6 +1084,7 @@ def register_builtin_tools(dispatcher: ToolDispatcher, settings: Settings) -> No
             _actor=_actor,
             _gh_repo=gh_repo,
             _lineage_runner=_lineage_runner,
+            _background=_background,
         )
 
     async def _read_file(path: str, offset: int = 0, limit: int = 0) -> dict[str, Any]:

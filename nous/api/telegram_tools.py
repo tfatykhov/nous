@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 
+from nous import background_halt
 from nous.api.call_outcome import current_outcome
 from nous.api.tools import _tool_error
 from nous.config import Settings
@@ -143,6 +144,9 @@ def create_send_file_tool(settings: Settings, http_client: httpx.AsyncClient):
             logger.error("Unexpected error sending file %s: %s", file_path, type(e).__name__)
             return _error(f"Failed to send file: {type(e).__name__}")
 
+        if background_halt.call_refused():
+            # Goals PR 0c: the halt is checked again after the file read, before the upload.
+            return _error(f"{background_halt.HALT_REASON}: the file was not sent.")
         try:
             response = await http_client.post(url, files=files, data=data)
         except _NEVER_SENT as e:

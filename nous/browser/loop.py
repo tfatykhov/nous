@@ -30,6 +30,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from nous import background_halt
 from nous.api.anthropic_client import _ms_since, _retry_delay, _should_retry
 from nous.api.preamble import CLAUDE_CODE_PREAMBLE
 from nous.browser.executor import BrowserActionError, BrowserExecutor, ConfirmationRequired, consequential_url
@@ -44,6 +45,9 @@ from nous.browser.session import (
 from nous.observability.model_calls import CallContext, ModelCallRecorder, ModelCallScope, open_scope
 
 logger = logging.getLogger(__name__)
+
+# Goals PR 0c: a background turn's browser task stops at its next step once the halt refuses its call.
+_HALTED_SUMMARY = "Stopped: background work is halted by the owner."
 
 # One browser task at a time in this process: each is a full Chromium. A second call waits within its own
 # time budget, then returns `busy`.
@@ -556,6 +560,9 @@ async def _drive(
     state: BrowserTaskResult,
 ) -> None:
     opening = f"Goal: {goal}\nAllowed domains: {', '.join(sorted(allowlist.hosts))}"
+    if background_halt.call_refused():  # Goals PR 0c: checked again at the first action, then at every step
+        state.status, state.summary = "error", _HALTED_SUMMARY
+        return
     if start_url:
         try:
             await executor.execute("navigate", {"url": start_url})
@@ -566,6 +573,9 @@ async def _drive(
     messages: list[dict[str, Any]] = [{"role": "user", "content": [{"type": "text", "text": opening}]}]
 
     for step in range(1, max_steps + 1):
+        if background_halt.call_refused():
+            state.status, state.summary = "error", _HALTED_SUMMARY
+            return
         state.steps = step
         response = await call_api(_payload(model, messages))
         content = response.get("content") or []
@@ -614,6 +624,9 @@ async def _drive(
                 results.append({**base, "content": HALT_TEXT, "is_error": True})
                 continue
             try:
+                if background_halt.call_refused():
+                    results.append({**base, "content": _HALTED_SUMMARY, "is_error": True})
+                    continue
                 results.append({**base, "content": await executor.execute(block["name"], block.get("input") or {})})
             except ConfirmationRequired as e:
                 state.status, state.summary = "needs_confirmation", f"Confirmation needed: {e}."

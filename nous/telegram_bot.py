@@ -256,6 +256,48 @@ def describe_commitment_close(status: int, body: dict, drop: bool, short_id: int
     return f"Could not close {label} right now; try again."
 
 
+HALT_UNREACHABLE_TEXT = (
+    "Could not reach Nous. If it is running, set NOUS_BACKGROUND_HALT=true on the host and restart it."
+)
+HALT_LANDED_TEXT = "The halt was received: background work is halted. Its report did not arrive in time."
+HALT_SENT_TEXT = (
+    "The halt was sent, but Nous did not answer in time. Its report may follow; send /halt again if it does not."
+)
+_HALT_REASON_MAX = 200
+
+
+def describe_halt(status: int, body: dict) -> str:
+    """Goals PR 0c: the answer to /halt. The server's report is fixed vocabulary and counts."""
+    if status == 0:
+        return HALT_UNREACHABLE_TEXT
+    text = body.get("text")
+    if status == 200 and isinstance(text, str) and text:
+        return text
+    logger.warning("Background halt: /halt answered %s", status)
+    return "The halt was not confirmed. Send /halt again, or set NOUS_BACKGROUND_HALT=true on the host and restart."
+
+
+def describe_resume(status: int, body: dict) -> str:
+    """Goals PR 0c: the answer to /resume, fixed vocabulary."""
+    if status == 0:
+        return "Could not reach Nous."
+    if status == 200:
+        if body.get("changed") is True:
+            return (
+                "Background work is running again. Work that was cancelled was not restarted. "
+                "One-time schedules that came due while halted run now."
+            )
+        return "Background work is not halted."
+    if status == 403:
+        return "Resume refused: this bot has no owner secret, or it is wrong, or the server has no digest set."
+    if status == 409 and body.get("host_hold") is True:
+        return "The host holds the halt (NOUS_BACKGROUND_HALT). Clear it on the host and restart."
+    if status == 409 and body.get("raced") is True:
+        return "A halt arrived while resuming, so it stays halted."
+    logger.warning("Background halt: /resume answered %s", status)
+    return "Resume was not saved; background work stays halted. Try again."
+
+
 def describe_cancel(status: int, body: dict, short_id: str) -> str:
     """The text for the answer of the cancel route (fixed vocabulary, like ``describe_decision``). Not called for a
     404: a command whose id the server does not know goes on to chat (C18)."""
@@ -960,6 +1002,28 @@ class NousTelegramBot:
             body = {}
         return response.status_code, body if isinstance(body, dict) else {}
 
+    async def _post_halt(self, payload: dict[str, Any], headers: dict[str, str] | None) -> tuple[int, dict, bool]:
+        """POST /background/halt: ``(status, body, sent)``. Status 0 when no answer came; ``sent`` is false only when
+        the connection was never made (so the request cannot have reached the server)."""
+        try:
+            response = await self._http.post(
+                f"{self.nous_url}/background/halt",
+                json=payload,
+                timeout=httpx.Timeout(connect=10, read=OWNER_REQUEST_TIMEOUT, write=10, pool=10),
+                **({"headers": headers} if headers else {}),
+            )
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            logger.warning("Background halt: /halt could not connect (%s)", type(exc).__name__)
+            return 0, {}, False
+        except Exception as exc:
+            logger.warning("Background halt: /halt got no answer (%s)", type(exc).__name__)
+            return 0, {}, True
+        try:
+            body = response.json()
+        except Exception:
+            body = {}
+        return response.status_code, body if isinstance(body, dict) else {}, True
+
     async def _owner_get(self, path: str) -> tuple[int, dict]:
         """GET a REST owner route: ``(status, body)``; status 0 when the server could not be reached. The connect is
         bounded like ``_owner_post``'s; a read takes no call, so 30 s is plenty."""
@@ -1027,7 +1091,7 @@ class NousTelegramBot:
 
     async def _handle_owner_text(self, message: dict[str, Any], chat_id: Any, user_id: Any, text: str) -> bool:
         """``/approve``, ``/reject``, ``/answer``, ``/intentions``, ``/cancel_intention``, ``/drop`` and ``/done``
-        (F111) and a reply to one of our messages, in the owner chat. True when
+        (F111), ``/halt`` and ``/resume`` (Goals PR 0c) and a reply to one of our messages, in the owner chat. True when
         the message was consumed; anything else (another chat, another command, a malformed or missing id, an id
         the server answers 404 for, a reply the answer route does not confirm with a 200 or a 409) is left for the
         ordinary path, unchanged: under
@@ -1095,6 +1159,30 @@ class NousTelegramBot:
             # A 404 is answered too (unlike /cancel_intention): the id came from a footer, and passed on to chat the
             # model could claim it dropped something.
             await self._send_owner(chat_id, describe_commitment_close(status, body, command == "/drop", short_id))
+            return True
+        if command in ("/halt", "/resume"):
+            # Goals PR 0c: always answered, never passed on to chat, whatever the status.
+            secret = {"X-Nous-Owner-Secret": self.owner_route_secret} if self.owner_route_secret else None
+            actor = f"telegram:{user_id}"
+            if command == "/halt":
+                payload = {"actor": actor, "surface": "telegram", "reason": rest.strip()[:_HALT_REASON_MAX] or None}
+                status, body, sent = await self._post_halt(payload, secret)
+                if status == 0:
+                    # No answer: the state says whether the halt landed. Only a request that never left and a server
+                    # that cannot be read get the unreachable sentence.
+                    state_status, state = await self._owner_get("/background/state")
+                    if state_status == 200 and state.get("halted") is True:
+                        text = HALT_LANDED_TEXT
+                    else:
+                        text = HALT_SENT_TEXT if sent else HALT_UNREACHABLE_TEXT
+                else:
+                    text = describe_halt(status, body)
+                await self._send_owner(chat_id, text)
+            else:
+                status, body = await self._owner_post(
+                    "/background/resume", {"actor": actor, "surface": "telegram"}, headers=secret
+                )
+                await self._send_owner(chat_id, describe_resume(status, body))
             return True
         reply_to = message.get("reply_to_message")
         if (

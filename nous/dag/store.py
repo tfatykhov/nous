@@ -12,6 +12,7 @@ from sqlalchemy import String, and_, cast, exists, func, or_, select, update
 from sqlalchemy import true as sa_true
 from sqlalchemy.orm import aliased, selectinload
 
+from nous import background_halt
 from nous.brain import intentions
 from nous.brain.intentions import IntentionSpec
 from nous.config import Settings
@@ -271,7 +272,14 @@ class DAGStore:
         With ``intention``, the DAG's ``brain.intentions`` row is written in this
         transaction (F099 I1). Its nodes get the lineage at launch, from the
         orchestrator.
+
+        Goals PR 0c: refused while background work is halted, before the row exists (a pending DAG would be started
+        by the tick's repair after a resume).
         """
+        if background_halt.current().halted:
+            from nous.heart.subtasks import BackgroundHalted
+
+            raise BackgroundHalted()
         resolved, problems, notes = self.resolve_node_timeouts(request.nodes)
         if problems:
             raise ValueError("\n".join(problems))

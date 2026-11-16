@@ -11,6 +11,7 @@ from uuid import UUID
 
 from sqlalchemy import String, cast, func, select, text, update
 
+from nous import background_halt
 from nous.brain import intentions
 from nous.storage.database import Database
 from nous.storage.models import Subtask
@@ -42,6 +43,15 @@ class SubtaskQueueFull(ValueError):
     orchestrator can distinguish transient queue congestion — which should
     DEFER a node — from a genuine launch failure, which fails it.
     """
+
+
+class BackgroundHalted(SubtaskQueueFull):
+    """Goals PR 0c: background work is halted, so no subtask or DAG is created. A ``SubtaskQueueFull`` so every
+    caller that already handles a full queue (the REST schedule run, the DAG orchestrator's deferral, the companion
+    tap) refuses it the same way; its message is the sentence the owner reads."""
+
+    def __init__(self) -> None:
+        super().__init__(background_halt.HALT_REASON)
 
 
 class SubtaskManager:
@@ -99,6 +109,8 @@ class SubtaskManager:
         commit (the goal driver publishes a session's first subtask together
         with the session's root id). Without it, as before, it commits its own.
         """
+        if background_halt.current().halted:
+            raise BackgroundHalted()
         pri_val = _PRIORITY_MAP.get(priority, 100)
         own = session is None
 
@@ -203,8 +215,9 @@ class SubtaskManager:
         payload_schema_valid: bool | None = None,
         # F107: True for a run with nothing to deliver, so no reader picks it up.
         delivered: bool | None = None,
-    ) -> None:
-        """Mark a subtask as completed with its result."""
+    ) -> bool:
+        """Mark a subtask as completed with its result. Returns whether the row was written: False when it was already
+        terminal (for example cancelled first)."""
         values: dict = {
             "status": "completed",
             "result": result,
@@ -252,7 +265,7 @@ class SubtaskManager:
                     tokens_out=tokens_out,
                     tool_calls_made=tool_calls_made,
                 )
-                return
+                return False
             # F061: include outcome in log so operators can grep for the new
             # 5-state enum (completed / incomplete_blocked / ...). Falls back
             # to the legacy message when no outcome was supplied.
@@ -262,6 +275,7 @@ class SubtaskManager:
                 )
             else:
                 logger.info("Completed subtask %s", subtask_id.hex[:8])
+            return True
 
     async def fail(
         self,
@@ -363,6 +377,32 @@ class SubtaskManager:
             )
             await session.commit()
             return result.rowcount > 0
+
+    async def cancel_all_active(self) -> list[tuple[UUID, str]]:
+        """Goals PR 0c, the halt sweep's first step: cancel every pending and running subtask of this agent in one
+        transaction (the columns ``cancel`` writes), the rows locked first so their status before is the one
+        returned. Returns ``(id, status before)`` of each. A worker whose turn is still running finds its row
+        terminal, so its complete()/fail() are no-ops."""
+        active = ("pending", "running")
+        async with self._db.session() as session:
+            rows = (
+                await session.execute(
+                    select(Subtask.id, Subtask.status)
+                    .where(Subtask.agent_id == self._agent_id)
+                    .where(Subtask.status.in_(active))
+                    .with_for_update()
+                )
+            ).all()
+            if rows:
+                await session.execute(
+                    update(Subtask)
+                    .where(Subtask.id.in_([row[0] for row in rows]))
+                    .where(Subtask.status.in_(active))
+                    .values(status="cancelled", final_outcome="cancelled", completed_at=datetime.now(UTC))
+                    .execution_options(synchronize_session=False)
+                )
+            await session.commit()
+        return [(row[0], row[1]) for row in rows]
 
     async def record_cancelled_usage(
         self,

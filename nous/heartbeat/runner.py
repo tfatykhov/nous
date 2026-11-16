@@ -18,6 +18,7 @@ from uuid import uuid4
 
 import httpx
 
+from nous import background_halt
 from nous.api.anthropic_client import AnthropicClient
 from nous.api.execution_context import ExecutionContext, lineage_from_stamp
 from nous.api.runner import AgentRunner
@@ -39,7 +40,7 @@ from nous.heartbeat.dynamic import (
 from nous.heartbeat.finding_store import FindingStore
 from nous.heartbeat.quiet_hours import in_quiet_hours
 from nous.heartbeat.registry import BaseCheck, CheckRegistry
-from nous.heartbeat.schemas import CheckResult, Finding, FindingAction, HeartbeatResult
+from nous.heartbeat.schemas import CheckResult, Finding, FindingAction, FindingState, HeartbeatResult
 from nous.heartbeat.send_result import SendResult, result_for_exception, result_for_status
 from nous.heartbeat.tuner import HeartbeatTuner
 
@@ -94,6 +95,28 @@ def _await_chain(task: asyncio.Task) -> str:
     return " > ".join(hops) or "unknown"
 
 
+# Goals PR 0c: the checks that run while background work is halted. Each runs code only: database reads, the memory
+# search, a dashboard card; no model turn and no tool. Every other check (a DynamicCheck, the work queue, the
+# self-initiated check, and the ones not confirmed code-only: email, drive, behaviour drift) is skipped while halted.
+# By exact class, so a new subclass is skipped until someone adds it here.
+_CODE_ONLY_CHECKS = frozenset(
+    {
+        ("nous.heartbeat.checks", "HealthCheck"),
+        ("nous.heartbeat.fault_detector", "ProcessFaultCheck"),
+        ("nous.heartbeat.fault_detector", "RetrievalCanaryCheck"),
+        ("nous.heartbeat.memory_write_health_check", "MemoryWriteHealthCheck"),
+    }
+)
+
+
+def _code_only(check: object) -> bool:
+    return (type(check).__module__, type(check).__qualname__) in _CODE_ONLY_CHECKS
+
+
+# Goals PR 0c: at most this many findings wait for triage while background work is halted (the newest are kept).
+_UNTRIAGED_MAX = 50
+
+
 class HeartbeatRunner:
     """Background heartbeat loop with check execution and triage.
 
@@ -124,6 +147,9 @@ class HeartbeatRunner:
         self._bus = bus
         self._http = http_client
         self._finding_store = finding_store
+        # Goals PR 0c: the needs-action findings whose triage turn a halt skipped, by fingerprint, for the first tick
+        # after the resume in this process (see _cognitive_triage and _triage_untriaged). In memory only.
+        self._untriaged: dict[str, Finding] = {}
         self._api_client = api_client
         self._dynamic_loader = dynamic_loader
         self._dedicated_runner: AgentRunner | None = None
@@ -715,13 +741,22 @@ class HeartbeatRunner:
             )
 
     async def _tick(self, urgent_only: bool = False) -> list[Finding]:
-        """Run due checks and triage findings."""
+        """Run due checks and triage findings. While background work is halted only the code-only checks run."""
         self._tick_count += 1
         now = datetime.now(UTC)
         due_checks = self._registry.get_due_checks(now)
 
         if urgent_only:
             due_checks = [c for c in due_checks if c.urgent_override]
+        halt = background_halt.current()
+        tick_epoch = halt.epoch
+        if halt.halted:
+            due_checks = [c for c in due_checks if _code_only(c)]
+        elif self._untriaged:
+            try:
+                await self._triage_untriaged()
+            except Exception:
+                logger.exception("Heartbeat triage of the findings held during a halt crashed")
 
         if not due_checks:
             return []
@@ -741,6 +776,9 @@ class HeartbeatRunner:
         callback_candidates: list[tuple[DynamicCheck, list[Finding]]] = []
 
         for check in due_checks:
+            if not _code_only(check) and background_halt.current().refuses("heartbeat_check", None, tick_epoch):
+                # Goals PR 0c: a halt that landed while an earlier check ran: the rest run only if code-only.
+                continue
             # Codex P1: a DAG task can reap/cancel a DAG-managed dynamic
             # check between the snapshot (get_due_checks) and here.  Re-
             # verify the check is still registered and active before
@@ -775,10 +813,20 @@ class HeartbeatRunner:
             outcome: dict[str, bool] = {}
             outcome_token = RUN_OUTCOME.set(outcome)
             try:
-                result: CheckResult = await asyncio.wait_for(
-                    check.run(),
-                    timeout=check.timeout,
-                )
+                with background_halt.epoch_scope(tick_epoch):
+                    result: CheckResult = await asyncio.wait_for(
+                        check.run(),
+                        timeout=check.timeout,
+                    )
+                if isinstance(check, DynamicCheck) and background_halt.current().refuses(
+                    "heartbeat_check", None, tick_epoch
+                ):
+                    # Goals PR 0c: the halt landed during an agent-run check (its turn was cut short): its run is
+                    # discarded, not counted as a success or a failure (a check is never self-disabled by the halt).
+                    # A check that runs no turn keeps its result: it may already have moved a cursor of its own.
+                    logger.info("Background halt: discarded the run of heartbeat check '%s'", check.name)
+                    run_succeeded = None
+                    continue
                 # A skipped result means run() returned early because the
                 # check was disabled at the execution boundary (race between
                 # _tick's snapshot and the first await in run()). Do not
@@ -1106,9 +1154,48 @@ class HeartbeatRunner:
             )
         return self._runner
 
+    def _hold_untriaged(self, findings: list[Finding]) -> None:
+        """Goals PR 0c: keep findings whose triage turn a halt skipped, one per fingerprint, the newest
+        ``_UNTRIAGED_MAX``. They are kept in this process's memory, as the finding store keeps its findings: they are
+        triaged after the resume in the same process, and a restart while halted loses them."""
+        for f in findings:
+            fp = f.fingerprint()
+            self._untriaged.pop(fp, None)
+            self._untriaged[fp] = f
+        dropped = len(self._untriaged) - _UNTRIAGED_MAX
+        if dropped > 0:
+            for fp in list(self._untriaged)[:dropped]:
+                del self._untriaged[fp]
+            logger.warning("Background halt: %d held finding(s) dropped, more than %d", dropped, _UNTRIAGED_MAX)
+
+    async def _triage_untriaged(self) -> None:
+        """Goals PR 0c: one triage turn, at the first tick after a resume, for the findings held while halted; then
+        they are gone (a second tick does not triage them again). One the finding store resolved meanwhile is
+        dropped. With the budget spent they are dropped, as a new finding's triage would be."""
+        held = list(self._untriaged.values())
+        self._untriaged.clear()
+        if self._finding_store is not None:
+            held = [f for f in held if not self._resolved(f.fingerprint())]
+        if not held:
+            return
+        if not self._has_budget():
+            logger.warning("Heartbeat budget exhausted: %d finding(s) held during a halt not triaged", len(held))
+            return
+        await self._cognitive_triage(held)
+
+    def _resolved(self, fingerprint: str) -> bool:
+        tracked = self._finding_store.get_tracked(fingerprint) if self._finding_store is not None else None
+        return tracked is not None and tracked.state == FindingState.RESOLVED
+
     async def _cognitive_triage(self, findings: list[Finding]) -> HeartbeatResult:
-        """Open a cognitive session to process findings."""
+        """Open a cognitive session to process findings. Not while background work is halted."""
         result = HeartbeatResult()
+        if background_halt.current().halted:
+            # The findings wait for the first tick after the resume: a check that moved a cursor of its own (email,
+            # Drive) will not report them again, and the finding store suppresses one it already tracks.
+            self._hold_untriaged(findings)
+            logger.info("Background halt: %d finding(s) held for triage after the resume", len(findings))
+            return result
 
         # Build a message summarizing findings
         lines = ["[Heartbeat] The following items need attention:"]
@@ -1187,7 +1274,12 @@ class HeartbeatRunner:
         1. Run callback prompt; on failure, retry once after delay
         2. On second failure, send Telegram notification
         3. Create warning Finding and persist callback context
+
+        Goals PR 0c: not while background work is halted.
         """
+        if background_halt.current().halted:
+            logger.info("Background halt: the callback of check '%s' did not run", check.name)
+            return
         session_id = f"dynamic-callback-{check.name}-{uuid4().hex[:8]}"
         triage_runner = self._get_triage_runner()
 
@@ -1440,8 +1532,8 @@ class HeartbeatRunner:
     # ------------------------------------------------------------------
 
     async def _detect_missed_checks(self) -> None:
-        """Detect if heartbeat was down and log it."""
-        if self._bus is None:
+        """Detect if heartbeat was down and log it. Not while background work is halted (the halt is not a gap)."""
+        if self._bus is None or background_halt.current().halted:
             return
 
         try:
@@ -1499,8 +1591,12 @@ class HeartbeatRunner:
         enforces MIN_SAMPLES per check and snapshots/rolls back, so a pass with
         no outcome data is a safe no-op. First pass is delayed one full interval
         after startup to avoid tuning on every restart.
+
+        Goals PR 0c: not while background work is halted (the tuner would learn from the gap).
         """
         if not self._settings.heartbeat_tuning_enabled or self._finding_store is None:
+            return
+        if background_halt.current().halted:
             return
         now = datetime.now(UTC)
         if self._last_tune is None:
@@ -1573,6 +1669,8 @@ class HeartbeatRunner:
         check = self._registry.get_check(name)
         if check is None:
             return None
+        if not _code_only(check) and background_halt.current().halted:
+            return CheckResult(skipped=True)  # Goals PR 0c: an agent-run check does not run while halted
         # A check whose DAG node is being terminalized starts no new run.
         if self._registry.is_fenced(name):
             return CheckResult(skipped=True)
@@ -1583,8 +1681,14 @@ class HeartbeatRunner:
         sibling_cancelled = False
         outcome: dict[str, bool] = {}
         outcome_token = RUN_OUTCOME.set(outcome)
+        epoch = background_halt.turn_epoch()
         try:
-            result = await asyncio.wait_for(check.run(), timeout=check.timeout)
+            with background_halt.epoch_scope(epoch):
+                result = await asyncio.wait_for(check.run(), timeout=check.timeout)
+            if isinstance(check, DynamicCheck) and background_halt.current().refuses("heartbeat_check", None, epoch):
+                # Goals PR 0c: as in _tick, an agent-run check the halt reached is discarded.
+                run_succeeded = None
+                return CheckResult(skipped=True)
             # A skipped result means run() returned early because the check
             # was disabled at the execution boundary — no LLM turn ran.
             if result.skipped:

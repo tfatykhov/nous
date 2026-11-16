@@ -27,6 +27,7 @@ from uuid import UUID
 from croniter import croniter
 from sqlalchemy import and_, func, or_, select, text
 
+from nous import background_halt
 from nous.brain import intentions
 from nous.brain.intentions import IntentionSpec
 from nous.cancellation import cancel_requested
@@ -368,6 +369,9 @@ class TaskScheduler:
 
         if not due_schedules:
             return 0
+        if background_halt.current().halted:
+            await self._advance_held(due_schedules, now)
+            return 0
 
         # getattr: test doubles pass a bare settings namespace (the legacy path).
         policies = getattr(self._settings, "schedule_policies_enabled", False)
@@ -427,6 +431,36 @@ class TaskScheduler:
                 )
 
         return fired
+
+    async def _advance_held(self, due_schedules: list[Schedule], now: datetime) -> None:
+        """Goals PR 0c: a check while background work is halted starts nothing, and it uses up the slots instead of
+        leaving them due, so a resume does not start a burst of runs (one per schedule plus catch-up runs). A
+        recurring schedule moves to its next slot after now, with no fire counted, under its fire lock. A one-time
+        schedule is left due (advancing it would deactivate it): it runs at the resume, late. Each schedule alone."""
+        for schedule in due_schedules:
+            if schedule.schedule_type != "recurring":
+                continue
+            try:
+                async with _fire_lock(self._heart, schedule.id) as taken:
+                    if not taken:
+                        continue
+                    current = await self._heart.schedules.get(schedule.id)
+                    due = current is not None and current.active and current.next_fire_at is not None
+                    if not due or current.next_fire_at > now:
+                        continue
+                    await self._heart.schedules.advance(schedule.id, now, fires=0, after=now)
+                if self._bus is not None:
+                    await self._bus.emit(
+                        Event(
+                            type="schedule_fire_suppressed",
+                            agent_id=self._settings.agent_id,
+                            data={"schedule_id": schedule.id.hex, "outcome": "halted", "trigger": "schedule"},
+                        )
+                    )
+            except (asyncio.CancelledError, Exception) as exc:
+                if isinstance(exc, asyncio.CancelledError) and cancel_requested():
+                    raise
+                logger.exception("Could not advance held schedule %s", schedule.id.hex[:8])
 
     async def _fire_with_policies(self, schedule: Schedule, now: datetime) -> int:
         """F101: fire one due recurring schedule under its policies; returns the runs started.

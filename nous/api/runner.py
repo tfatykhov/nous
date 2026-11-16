@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, NamedTuple
 from uuid import UUID, uuid4
 
+from nous import background_halt
 from nous.api import attachment_store, tool_policy
 from nous.api.anthropic_client import (
     AnthropicClient,
@@ -128,6 +129,10 @@ class Refusal:
     code: str
 
 
+class _HaltEndedTurn(Exception):
+    """Goals PR 0c: the streaming loop's max_turns call is skipped because the halt ended the turn."""
+
+
 def _no_cancelled_roots(_root_id: UUID) -> bool:
     """The default view of cancelled roots: none. Installed until ``set_cancelled_roots`` (F099 2e) replaces it,
     so a deployment with continuation off pays one attribute read and one call per lineage tool call."""
@@ -229,6 +234,7 @@ class Dispatched(NamedTuple):
     send_key: str | None
     ledger_entry_id: UUID | None
     images: list[dict] | None = None  # the image blocks of the call's result (``CallOutcome.images``)
+    refused_by: str | None = None  # Goals PR 0c: ``background_halt`` when the halt refused the call at its dispatch
 
 
 class SingleCall(NamedTuple):
@@ -894,7 +900,23 @@ class AgentRunner:
         kind of turn and the two mode settings say: the owner stopped this work, and a subtask that was already
         running, a DAG node or a lineage check must not do one more thing. The view is a set lookup, read only
         when the context names a root (a chat turn names none).
+
+        Goals PR 0c: first of all, a call of a background turn that is halted, or that started before the last halt
+        (the epoch the loop put in ``background_halt.TURN_EPOCH``), is refused. Chat is never refused here.
         """
+        if background_halt.current().refuses(ctx.kind, session_id, background_halt.TURN_EPOCH.get()):
+            logger.warning("Background halt: refused %r in a %s turn (session=%s)", tool_name, ctx.kind, session_id)
+            self._log_f026_decision(
+                "harness_context_policy_violation",
+                {
+                    "tool_name": tool_name,
+                    "context_kind": ctx.kind,
+                    "violation": background_halt.REFUSAL_CODE,
+                    "mode": "enforce",
+                },
+                session_id=session_id,
+            )
+            return Refusal(background_halt.HALTED_TOOL_TEXT, background_halt.REFUSAL_CODE)
         if ctx.root_intention_id is not None and self._root_cancelled(ctx.root_intention_id):
             logger.warning(
                 "F099: refused %r in a %s turn (the root %s was cancelled, session=%s)",
@@ -1938,6 +1960,23 @@ class AgentRunner:
         self._api = None
 
     async def run_turn(
+        self, session_id: str, user_message: str, *args: Any, **kwargs: Any
+    ) -> tuple[str, TurnContext, dict[str, int]]:
+        """Execute a single conversational turn (``_run_turn``, which documents the arguments).
+
+        Goals PR 0c: a background turn's halt epoch is taken here, before its first await, so a halt that lands during
+        any part of the turn (its pre-turn work included) is seen by every check of the turn; an epoch the caller
+        already set (the work that claimed the turn) is kept, and work the turn starts inherits it. A chat turn
+        (``interactive`` or ``mcp`` outside a background session) is never refused by the epoch and hands none on:
+        background work it starts takes the current epoch at its own start."""
+        ctx = resolve_context(
+            kwargs.get("context"), is_background=bool(kwargs.get("is_background", False)), session_id=session_id
+        )
+        foreground = not ctx.is_background and not is_background_session(session_id)
+        with background_halt.epoch_scope(None if foreground else background_halt.turn_epoch()):
+            return await self._run_turn(session_id, user_message, *args, **kwargs)
+
+    async def _run_turn(
         self,
         session_id: str,
         user_message: str,
@@ -2407,6 +2446,8 @@ class AgentRunner:
             shown = [_gate_footer] if _gate_footer and not _ctx.is_background else []
             if not error and (dead_man := self._dead_man_line(_ctx, session_id)):
                 shown.append(dead_man)  # F111 PR B1: the watcher has stalled
+            if halt_line := self._halt_line(_ctx, session_id):
+                shown.append(halt_line)  # Goals PR 0c: background work is halted
             if shown:
                 return "\n\n".join([response_text, *shown]), turn_context, usage
             return response_text, turn_context, usage
@@ -2877,6 +2918,10 @@ class AgentRunner:
         if not self._dispatcher:
             raise RuntimeError("No tool dispatcher set -- call set_dispatcher() first")
 
+        # Goals PR 0c: the turn's halt epoch, taken before the first await and kept in a local (each __anext__ of
+        # this generator runs in a fresh context). It reaches _authorize_tool_call through epoch_scope around that
+        # synchronous call only.
+        _turn_epoch = background_halt.turn_epoch()
         _agent_id = agent_id or self._settings.agent_id
         # stream_chat serves REST /chat/stream only — a person is in the loop.
         _ctx = ExecutionContext(kind="interactive", session_id=session_id, channel=channel)
@@ -3159,6 +3204,12 @@ class AgentRunner:
                 CURRENT_TURN_EXCLUDE_IDS.set(_f071_exclude)
             try:
                 for turn in range(self._settings.max_turns):
+                    # Goals PR 0c: a halted background-session stream makes no further model call; the turn row and
+                    # post_turn still run in the finally below.
+                    if self._halt_ends_turn(_ctx, session_id, _turn_epoch):
+                        response_text = background_halt.HALT_TURN_TEXT
+                        yield StreamEvent(type="text_delta", text=response_text)
+                        break
                     # Unified block accumulator: keyed by block_index, preserves
                     # original order for thinking block preservation (007 Phase D).
                     all_blocks: dict[int, dict[str, Any]] = {}
@@ -3453,13 +3504,14 @@ class AgentRunner:
                             continue
 
                         # Harness: was this tool offered this turn, and may this context use it?
-                        refusal = self._authorize_tool_call(
-                            _ctx,
-                            tool_name,
-                            offered_names,
-                            session_id,
-                            tool_input,
-                        )
+                        with background_halt.epoch_scope(_turn_epoch):
+                            refusal = self._authorize_tool_call(
+                                _ctx,
+                                tool_name,
+                                offered_names,
+                                session_id,
+                                tool_input,
+                            )
                         if refusal is not None:
                             refusal_text = _with_alias_note(alias_note, refusal.text)
                             tool_results_for_message.append(
@@ -3561,6 +3613,7 @@ class AgentRunner:
                                 else:
                                     logger.debug("F026 gate: %s would block (%s)", tool_name, gate_result.reason)
 
+                        _halt_refused: str | None = None  # Goals PR 0c: refused at its dispatch
                         if not gated:
                             start_time = time.monotonic()
                             result_text, is_error = "", False
@@ -3627,6 +3680,22 @@ class AgentRunner:
                                             result_text,
                                             "blocked" if is_error else "success",
                                         )
+                                elif self._halt_refuses_dispatch(_ctx, tool_name, session_id, _turn_epoch):
+                                    # Goals PR 0c: the halt is checked again at the dispatch.
+                                    result_text = await self._refuse_halted_dispatch(
+                                        _ctx,
+                                        tool_name,
+                                        dispatch_input,
+                                        session_id,
+                                        entry_id,
+                                        send_key,
+                                        _snapshotted,
+                                        outcome,
+                                    )
+                                    is_error, _halt_refused = True, background_halt.REFUSAL_CODE
+                                    if ledger:
+                                        ledger.record(tool_name, dispatch_input, result_text, "blocked")
+                                    duration_ms = int((time.monotonic() - start_time) * 1000)
                                 else:
                                     timed_out = False
                                     try:
@@ -3638,6 +3707,7 @@ class AgentRunner:
                                             context=_ctx,  # harness Phase 1a
                                             outcome=outcome,  # harness Phase 2b
                                             turn_id=_stream_turn_id,  # F111
+                                            turn_epoch=_turn_epoch,  # Goals PR 0c
                                         ):
                                             if isinstance(item, StreamEvent):
                                                 yield item
@@ -3665,35 +3735,52 @@ class AgentRunner:
                                             outcome=outcome,
                                         )
                                         raise
-                                    _status = _close_status(is_error, timed_out or outcome.uncertain)
-                                    await self._ledger_close(
-                                        entry_id,
-                                        _status,
-                                        result_text,
-                                        output_of=tool_name,
-                                        external_ref=outcome.external_ref,
-                                        keyed=send_key is not None,
-                                    )
-                                    _unrevertible_note = await self._after_compensable_call(
-                                        _ctx,
-                                        tool_name,
-                                        entry_id,
-                                        session_id,
-                                        snapshotted=_snapshotted,
-                                        status=_status,
-                                        tool_input=dispatch_input,
-                                        outcome=outcome,
-                                    )
-                                    if _unrevertible_note:
-                                        result_text = f"{_unrevertible_note}\n{result_text}"
-                                    # F026: Record in execution ledger (post-dispatch)
-                                    if ledger:
-                                        ledger.record(
+                                    if outcome.refused_by is not None:
+                                        # Goals PR 0c: the dispatcher's own check, right before the handler, refused it.
+                                        self._note_halt_refusal(_ctx, tool_name, session_id)
+                                        result_text = await self._refuse_halted_dispatch(
+                                            _ctx,
                                             tool_name,
                                             dispatch_input,
-                                            result_text,
-                                            "error" if is_error else "success",
+                                            session_id,
+                                            entry_id,
+                                            send_key,
+                                            _snapshotted,
+                                            outcome,
                                         )
+                                        _halt_refused = outcome.refused_by
+                                        if ledger:
+                                            ledger.record(tool_name, dispatch_input, result_text, "blocked")
+                                    else:
+                                        _status = _close_status(is_error, timed_out or outcome.uncertain)
+                                        await self._ledger_close(
+                                            entry_id,
+                                            _status,
+                                            result_text,
+                                            output_of=tool_name,
+                                            external_ref=outcome.external_ref,
+                                            keyed=send_key is not None,
+                                        )
+                                        _unrevertible_note = await self._after_compensable_call(
+                                            _ctx,
+                                            tool_name,
+                                            entry_id,
+                                            session_id,
+                                            snapshotted=_snapshotted,
+                                            status=_status,
+                                            tool_input=dispatch_input,
+                                            outcome=outcome,
+                                        )
+                                        if _unrevertible_note:
+                                            result_text = f"{_unrevertible_note}\n{result_text}"
+                                        # F026: Record in execution ledger (post-dispatch)
+                                        if ledger:
+                                            ledger.record(
+                                                tool_name,
+                                                dispatch_input,
+                                                result_text,
+                                                "error" if is_error else "success",
+                                            )
                             finally:
                                 if outcome.write_fence is not None and not outcome.write_fence.started:
                                     # The handler never handed the write to its
@@ -3746,6 +3833,8 @@ class AgentRunner:
                                 outcome=(
                                     "gated"
                                     if gated
+                                    else "refused"
+                                    if _halt_refused
                                     else "suppressed"
                                     if suppressed is not None
                                     else "error"
@@ -3754,7 +3843,7 @@ class AgentRunner:
                                 ),
                                 result_text=result_text,
                                 is_error=is_error,
-                                refused_by="action_gate" if gated else None,
+                                refused_by="action_gate" if gated else _halt_refused,
                                 duration_ms=duration_ms,
                                 ledger_entry_id=None if gated else entry_id,
                                 session_id=session_id,
@@ -3785,6 +3874,8 @@ class AgentRunner:
                     # Max turns reached -- final call without tools
                     logger.warning("Streaming tool loop reached max_turns=%d", self._settings.max_turns)
                     try:
+                        if self._halt_ends_turn(_ctx, session_id, _turn_epoch):
+                            raise _HaltEndedTurn
                         final = await self._call_api(
                             system_prompt=system_prompt,
                             messages=messages,
@@ -3792,6 +3883,8 @@ class AgentRunner:
                             call_context=_stream_call_context,
                         )
                         response_text = self._extract_text(final.content)
+                    except _HaltEndedTurn:
+                        response_text = background_halt.HALT_TURN_TEXT
                     except Exception:
                         response_text = "I reached the maximum number of tool iterations."
 
@@ -3913,6 +4006,9 @@ class AgentRunner:
             if _gate_due and not error and (dead_man := self._dead_man_line(_ctx, session_id)):
                 # F111 PR B1: as the footer, after the reply is stored; never part of the conversation.
                 yield StreamEvent(type="text_delta", text=f"\n\n{dead_man}")
+            if halt_line := self._halt_line(_ctx, session_id):
+                # Goals PR 0c: under every live chat reply while halted; never part of the conversation.
+                yield StreamEvent(type="text_delta", text=f"\n\n{halt_line}")
             yield StreamEvent(type="done", stop_reason="end_turn", usage=total_usage)
 
     # ------------------------------------------------------------------
@@ -3932,6 +4028,7 @@ class AgentRunner:
         turn_number: int | None,
         is_background: bool,
         turn_id: UUID | None = None,
+        turn_epoch: int | None = None,
     ) -> Dispatched:
         """Everything between "this call may run" and "its text": the F064.1 ping and activity heartbeat, the
         durable ledger row (a keyed send claimed first, or suppressed), the write-path lock and compensation
@@ -3961,6 +4058,7 @@ class AgentRunner:
         # refuses the call as a snapshot that cannot be captured
         # does, and nothing before dispatch can raise out of the loop.
         _write_lock2 = None
+        refused_by: str | None = None
         try:
             # Phase 2.8: capture pre-dispatch snapshot for compensable
             # calls in background contexts. Fail-open except in undoable
@@ -3999,6 +4097,12 @@ class AgentRunner:
                 result_text, is_error = _snap_blocked2, True
             elif suppressed is not None:
                 result_text, is_error = suppressed.text, suppressed.is_error
+            elif self._halt_refuses_dispatch(ctx, tool_name, session_id, turn_epoch):
+                # Goals PR 0c: the halt is checked again at the dispatch, after every await of the work above.
+                result_text = await self._refuse_halted_dispatch(
+                    ctx, tool_name, tool_input, session_id, entry_id, send_key, _snapshotted2, outcome
+                )
+                is_error, refused_by = True, background_halt.REFUSAL_CODE
             else:
                 keyed = send_key is not None
                 self._note_ingress(session_id, tool_name, tool_input)
@@ -4016,6 +4120,7 @@ class AgentRunner:
                         context=ctx,  # harness Phase 1a
                         outcome=outcome,  # harness Phase 2b
                         turn_id=turn_id,  # F111: commit's idempotency key
+                        turn_epoch=turn_epoch,  # Goals PR 0c (caller-captured, as turn_number)
                     )
                 except asyncio.CancelledError:
                     # Subtask timeout / shutdown: the side effect may
@@ -4063,27 +4168,35 @@ class AgentRunner:
                     raise
                 finally:
                     await self._stop_activity_heartbeat(_hb)
-                _status2 = _close_status(is_error, outcome.uncertain)
-                await self._ledger_close(
-                    entry_id,
-                    _status2,
-                    result_text,
-                    output_of=tool_name,
-                    external_ref=outcome.external_ref,
-                    keyed=keyed,
-                )
-                _unrevertible_note = await self._after_compensable_call(
-                    ctx,
-                    tool_name,
-                    entry_id,
-                    session_id,
-                    snapshotted=_snapshotted2,
-                    status=_status2,
-                    tool_input=tool_input,
-                    outcome=outcome,
-                )
-                if _unrevertible_note:
-                    result_text = f"{_unrevertible_note}\n{result_text}"
+                if outcome.refused_by is not None:
+                    # Goals PR 0c: the dispatcher's own check, right before the handler, refused it.
+                    self._note_halt_refusal(ctx, tool_name, session_id)
+                    result_text = await self._refuse_halted_dispatch(
+                        ctx, tool_name, tool_input, session_id, entry_id, send_key, _snapshotted2, outcome
+                    )
+                    refused_by = outcome.refused_by
+                else:
+                    _status2 = _close_status(is_error, outcome.uncertain)
+                    await self._ledger_close(
+                        entry_id,
+                        _status2,
+                        result_text,
+                        output_of=tool_name,
+                        external_ref=outcome.external_ref,
+                        keyed=keyed,
+                    )
+                    _unrevertible_note = await self._after_compensable_call(
+                        ctx,
+                        tool_name,
+                        entry_id,
+                        session_id,
+                        snapshotted=_snapshotted2,
+                        status=_status2,
+                        tool_input=tool_input,
+                        outcome=outcome,
+                    )
+                    if _unrevertible_note:
+                        result_text = f"{_unrevertible_note}\n{result_text}"
         finally:
             if outcome.write_fence is not None and not outcome.write_fence.started:
                 # The handler never handed the write to its
@@ -4092,7 +4205,9 @@ class AgentRunner:
             if _write_lock2 is not None:
                 # Held until an orphaned worker thread finishes.
                 release_write_path_lock_after(_write_lock2, outcome.write_worker)
-        return Dispatched(result_text, is_error, suppressed, send_key, entry_id, None if is_error else outcome.images)
+        return Dispatched(
+            result_text, is_error, suppressed, send_key, entry_id, None if is_error else outcome.images, refused_by
+        )
 
     async def execute_single_call(self, ctx: ExecutionContext, tool_name: str, tool_input: dict) -> SingleCall:
         """Run ONE call the owner approved (F099 2d), with no model in between.
@@ -4243,6 +4358,7 @@ class AgentRunner:
 
         ctx = resolve_context(context, is_background=is_background, session_id=session_id)
         is_background = ctx.is_background
+        turn_epoch = background_halt.turn_epoch()  # Goals PR 0c: the earliest start of this turn wins
 
         # F099: one helper builds the offered set for both loops (frame tools, the 012.2
         # subtask exclusion, F034.5 tool_filter, the F078 refuse denylist, the internal_only
@@ -4313,6 +4429,9 @@ class AgentRunner:
         _force_fires_remaining = 2
 
         while turns < max_turns:
+            # Goals PR 0c: a halted background turn makes no further model call.
+            if self._halt_ends_turn(ctx, session_id, turn_epoch):
+                return background_halt.HALT_TURN_TEXT, all_tool_results, total_usage, all_thinking_blocks
             # F064.1 ping site 1 — top of every iteration. Fires for both
             # tool-using and text-only turns. asyncio.shield prevents a
             # wait_for cancellation from killing an in-flight ping write.
@@ -4547,7 +4666,8 @@ class AgentRunner:
                         continue
 
                     # Harness: was this tool offered this iteration, and may this context use it?
-                    refusal = self._authorize_tool_call(ctx, tool_name, offered_names, session_id, tool_input)
+                    with background_halt.epoch_scope(turn_epoch):
+                        refusal = self._authorize_tool_call(ctx, tool_name, offered_names, session_id, tool_input)
                     if refusal is not None:
                         refusal_text = _with_alias_note(alias_note, refusal.text)
                         tool_results_for_message.append(
@@ -4648,6 +4768,7 @@ class AgentRunner:
                         start_time = time.monotonic()
                         suppressed: Suppressed | None = None  # harness 2b: set by _open_for_call
                         ledger_entry_id: UUID | None = None  # F108: an extra tool opens no ledger row
+                        halt_refused: str | None = None  # Goals PR 0c: refused at its dispatch
                         # F061: per-call dispatch override for extra_tools.
                         # Routes submit_final_report (and any other per-run
                         # tool) to the executor passed by the subtask harness
@@ -4675,23 +4796,28 @@ class AgentRunner:
                                 turn_number=turn_number,
                                 is_background=is_background,
                                 turn_id=turn_id,
+                                turn_epoch=turn_epoch,
                             )
                             result_text, is_error = dispatched.text, dispatched.is_error
                             call_images = dispatched.images
                             suppressed = dispatched.suppressed
                             ledger_entry_id = dispatched.ledger_entry_id
+                            halt_refused = dispatched.refused_by
                         duration_ms = int((time.monotonic() - start_time) * 1000)
 
                         # F026: Record in execution ledger (post-dispatch). A
                         # suppressed repeat that was ALREADY SENT records success
                         # (a 2c claim about the first send stays grounded); a
-                        # refused one records blocked.
+                        # refused one records blocked, as does one the halt
+                        # refused at its dispatch.
                         if ledger:
                             ledger.record(
                                 tool_name,
                                 tool_input,
                                 result_text,
-                                ("blocked" if suppressed is not None else "error") if is_error else "success",
+                                ("blocked" if suppressed is not None or halt_refused else "error")
+                                if is_error
+                                else "success",
                             )
                     else:
                         duration_ms = 0
@@ -4769,6 +4895,8 @@ class AgentRunner:
                             outcome=(
                                 "gated"
                                 if gated
+                                else "refused"
+                                if halt_refused
                                 else "suppressed"
                                 if suppressed is not None
                                 else "error"
@@ -4777,7 +4905,7 @@ class AgentRunner:
                             ),
                             result_text=result_text,
                             is_error=is_error,
-                            refused_by="action_gate" if gated else None,
+                            refused_by="action_gate" if gated else halt_refused,
                             duration_ms=duration_ms,
                             ledger_entry_id=None if gated else ledger_entry_id,
                             session_id=session_id,
@@ -4818,6 +4946,8 @@ class AgentRunner:
             # 012.2: Enforce subtask tool call limit
             if max_tool_calls and total_tool_calls >= max_tool_calls:
                 logger.info("Subtask tool call limit reached (%d/%d)", total_tool_calls, max_tool_calls)
+                if self._halt_ends_turn(ctx, session_id, turn_epoch):
+                    return background_halt.HALT_TURN_TEXT, all_tool_results, total_usage, all_thinking_blocks
                 final = await self._call_api(
                     system_prompt=system_prompt,
                     messages=messages,
@@ -4852,6 +4982,8 @@ class AgentRunner:
 
         # Max turns reached -- extract text from last response if any
         logger.warning("Tool loop reached max_turns=%d", max_turns)
+        if self._halt_ends_turn(ctx, session_id, turn_epoch):
+            return background_halt.HALT_TURN_TEXT, all_tool_results, total_usage, all_thinking_blocks
         # Make one final call without tools to get a text response
         try:
             final_response = await self._call_api(
@@ -4946,6 +5078,8 @@ Rules:
                 dynamic_extras.append("[Previous Turn Corrections]\n" + "\n".join(corrections))
             if platform == "telegram":
                 dynamic_extras.append(self._TELEGRAM_FORMAT_INSTRUCTIONS)
+            if background_halt.current().halted:
+                dynamic_extras.append(background_halt.PROMPT_NOTE)  # Goals PR 0c
 
             # Append runner extras to dynamic tier
             if dynamic_extras:
@@ -4971,6 +5105,8 @@ Rules:
             parts.append("[Previous Turn Corrections]\n" + "\n".join(corrections))
         if platform == "telegram":
             parts.append(self._TELEGRAM_FORMAT_INSTRUCTIONS)
+        if background_halt.current().halted:
+            parts.append(background_halt.PROMPT_NOTE)  # Goals PR 0c
 
         return "\n\n".join(parts)
 
@@ -5297,6 +5433,83 @@ Rules:
             # No running event loop — happens in some test paths. Silent
             # by design; the stall scan's NULL-fallback policy covers us.
             pass
+
+    def _halt_ends_turn(self, ctx: ExecutionContext, session_id: str | None, turn_epoch: int | None) -> bool:
+        """Goals PR 0c: the model loop of this background turn stops here (it is halted, or it started before the
+        last halt). A refusal does not end a turn by itself, so both loops ask before every model call."""
+        if not background_halt.current().refuses(ctx.kind, session_id, turn_epoch):
+            return False
+        logger.warning("Background halt: ended a %s turn before its next model call (session=%s)", ctx.kind, session_id)
+        return True
+
+    def _halt_refuses_dispatch(
+        self, ctx: ExecutionContext, tool_name: str, session_id: str | None, turn_epoch: int | None
+    ) -> bool:
+        """Goals PR 0c: whether the halt refuses this call at its dispatch, after the action gate, the ledger row and
+        the compensation snapshot were awaited. The same predicate as ``_authorize_tool_call`` (chat and
+        owner-approved calls are never refused); ``turn_epoch`` is the loop's, else the one in ``TURN_EPOCH``."""
+        epoch = turn_epoch if turn_epoch is not None else background_halt.TURN_EPOCH.get()
+        if not background_halt.current().refuses(ctx.kind, session_id, epoch):
+            return False
+        self._note_halt_refusal(ctx, tool_name, session_id)
+        return True
+
+    def _note_halt_refusal(self, ctx: ExecutionContext, tool_name: str, session_id: str | None) -> None:
+        """Goals PR 0c: the log line and the F026 record of a call the halt refused at its dispatch."""
+        logger.warning(
+            "Background halt: refused %r at its dispatch in a %s turn (session=%s)", tool_name, ctx.kind, session_id
+        )
+        self._log_f026_decision(
+            "harness_context_policy_violation",
+            {
+                "tool_name": tool_name,
+                "context_kind": ctx.kind,
+                "violation": background_halt.REFUSAL_CODE,
+                "mode": "enforce",
+            },
+            session_id=session_id,
+        )
+
+    async def _refuse_halted_dispatch(
+        self,
+        ctx: ExecutionContext,
+        tool_name: str,
+        tool_input: dict,
+        session_id: str | None,
+        entry_id: Any,
+        send_key: str | None,
+        snapshotted: bool,
+        outcome: CallOutcome,
+    ) -> str:
+        """A call the halt refused at its dispatch: its durable row is closed as a refused call's is (``blocked``,
+        ``refused by background_halt``: never dispatched, its key freed), and a snapshot taken for it is released.
+        Returns the refusal text; the caller records the call once, as refused."""
+        text = background_halt.HALTED_TOOL_TEXT
+        await self._ledger_close(
+            entry_id, "blocked", f"refused by {background_halt.REFUSAL_CODE}", keyed=send_key is not None
+        )
+        if snapshotted:
+            await self._after_compensable_call(
+                ctx,
+                tool_name,
+                entry_id,
+                session_id,
+                snapshotted=True,
+                status="blocked",
+                tool_input=tool_input,
+                outcome=outcome,
+            )
+        return text
+
+    def _halt_line(self, ctx: ExecutionContext, session_id: str | None) -> str | None:
+        """Goals PR 0c: the line under a live chat reply (as ``_dead_man_line``: an ``interactive`` turn outside a
+        background session) while background work is halted. None otherwise."""
+        if ctx.kind != "interactive" or is_background_session(session_id):
+            return None
+        halt = background_halt.current()
+        if not halt.halted:
+            return None
+        return background_halt.HALT_LINE_HOST if halt.host_hold else background_halt.HALT_LINE
 
     def _dead_man_line(self, ctx: ExecutionContext, session_id: str | None) -> str | None:
         """F111 PR B1: the watcher's stall warning for a live chat reply (an ``interactive`` turn in a session a
@@ -5690,6 +5903,7 @@ Rules:
         context: ExecutionContext | None = None,  # harness Phase 1a
         outcome: CallOutcome | None = None,  # harness Phase 2b
         turn_id: UUID | None = None,  # F111: commit's idempotency key
+        turn_epoch: int | None = None,  # Goals PR 0c: the turn's halt epoch, caller-captured
     ) -> AsyncGenerator[StreamEvent | DispatchOutcome, None]:
         """Execute a tool, yielding keepalive events during long execution.
 
@@ -5714,6 +5928,7 @@ Rules:
                     outcome=outcome,  # harness Phase 2b
                     turn_id=turn_id,
                     stream=True,  # F111 PR B1: only stream_chat dispatches through here
+                    turn_epoch=turn_epoch,  # Goals PR 0c
                 ),
                 timeout=timeout,
             )

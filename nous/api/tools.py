@@ -33,10 +33,10 @@ from functools import partial
 from typing import Any
 from uuid import UUID, uuid4
 
-from nous import cancel_provenance
+from nous import background_halt, cancel_provenance
 from nous.api.call_outcome import CallOutcome
 from nous.api.call_outcome import _current as _outcome_var  # the one setter (harness 2b)
-from nous.api.execution_context import ExecutionContext, resolve_context
+from nous.api.execution_context import ExecutionContext, is_background_session, resolve_context
 from nous.api.tool_classes import mcp_tool_background
 from nous.api.tool_policy import INTERNAL_ONLY_LOGGED_TOOLS, lineage_runs_build, lineage_runs_runner
 from nous.brain import continuation, intentions
@@ -305,6 +305,16 @@ def _schema_type_errors(args: dict[str, Any], schema: dict[str, Any]) -> list[st
     return errors
 
 
+# Goals PR 0c: the tools that start background work. While halted, the dispatcher refuses them, and dag_manage's
+# retry_node (it would put a cancelled DAG's work back in motion). schedule_task and heartbeat_check_create are left
+# allowed: their rows fire only after a resume.
+_HALT_REFUSED_TOOLS = frozenset({"spawn_task", "spawn_sync", "dag_create"})
+
+
+def _starts_background_work(name: str, args: dict[str, Any]) -> bool:
+    return name in _HALT_REFUSED_TOOLS or (name == "dag_manage" and args.get("action") == "retry_node")
+
+
 def _required_handler_params(handler: Callable[..., Any]) -> set[str] | None:
     """Parameter names the handler cannot be invoked without.
 
@@ -542,6 +552,7 @@ class ToolDispatcher:
         outcome: CallOutcome | None = None,
         turn_id: UUID | None = None,
         stream: bool = False,
+        turn_epoch: int | None = None,
     ) -> tuple[str, bool]:
         """Dispatch a tool call and return (result_text, is_error).
 
@@ -564,12 +575,23 @@ class ToolDispatcher:
 
         stream: True when ``stream_chat`` dispatches the call (F111 PR B1:
         ``commit`` stamps a streamed chat turn's row ``chat_stream``).
+
+        turn_epoch: the halt epoch of the turn making the call (Goals PR 0c), passed
+        explicitly as ``turn_number`` is: a ContextVar set inside ``stream_chat`` does
+        not reach the task it dispatches in. None reads ``background_halt.TURN_EPOCH``.
+        The halt is checked with it right before the handler starts, and a handler that
+        awaits before its own action reads it through ``background_halt.call_refused``.
         """
         ctx = resolve_context(context, is_background=is_background, session_id=session_id)
         is_background = ctx.is_background
         handler = self._handlers.get(name)
         if not handler:
             return f"Unknown tool: {name}", True
+        if _starts_background_work(name, args) and background_halt.current().halted:
+            # Goals PR 0c: nothing new starts while halted, from a chat turn too (a background turn's call was
+            # already refused by the runner).
+            logger.info("Background halt: refused %s from a %s turn", name, ctx.kind)
+            return background_halt.HALTED_SPAWN_TEXT, True
         try:
             # Guard the **args unpacking below: validate schema-required keys
             # up front and, when one is missing, try to salvage a value the
@@ -637,6 +659,10 @@ class ToolDispatcher:
                 # bash's longer default timeout would outlast a short turn, which would then
                 # be cancelled before the call returned its output or its timeout error.
                 args = {**args, "_long_timeout": not ctx.is_short_turn}
+                # Goals PR 0c: a background turn's command is tracked, so a halt can signal it. Not a chat turn's,
+                # and not an owner-approved call's.
+                background = ctx.kind != "approved_action" and (ctx.is_background or is_background_session(session_id))
+                args = {**args, "_background": background}
             if name in ("bash", "dag_manage"):
                 # Who a cancel belongs to (cancel_provenance): the agent's own turn, or the owner for an
                 # approved proposal. Set from the context, so the model cannot name another actor. bash
@@ -739,10 +765,21 @@ class ToolDispatcher:
                 # F092: surfaces record the chat session that pushed them so
                 # a companion card can be traced back to its conversation.
                 args = {**args, "_session_id": session_id}
+            epoch = turn_epoch if turn_epoch is not None else background_halt.TURN_EPOCH.get()
+            if background_halt.current().refuses(ctx.kind, session_id, epoch):
+                # Goals PR 0c: the last check before the handler starts, with no await between the two. The runner
+                # reads the code on the outcome and closes the call as refused.
+                logger.info("Background halt: refused %s at the dispatcher in a %s turn", name, ctx.kind)
+                if outcome is not None:
+                    outcome.refused_by = background_halt.REFUSAL_CODE
+                return background_halt.HALTED_TOOL_TEXT, True
             token = _outcome_var.set(outcome)
+            # Goals PR 0c: the call's scope, for a handler that checks the halt at its own action.
+            scope_token = background_halt.CALL_SCOPE.set((ctx.kind, session_id, epoch))
             try:
                 result = await handler(**args)  # P0-6: **kwargs unpacking
             finally:
+                background_halt.CALL_SCOPE.reset(scope_token)
                 _outcome_var.reset(token)
             # P1-1: Extract text from MCP-format response. is_error honors
             # the MCP field when a handler sets it (#179: run_python error
@@ -3899,6 +3936,7 @@ def create_subtask_tools(
 
                 # Legacy inline path — bytewise unchanged from pre-F061.
                 system_prefix = build_subtask_prefix(task, frame_type)
+                halt_epoch = background_halt.turn_epoch()  # Goals PR 0c: the run's start, as its turn sees it
 
                 try:
                     response_text, _ctx, _usage = await _asyncio.wait_for(
@@ -3919,6 +3957,21 @@ def create_subtask_tools(
                         ),
                         timeout=effective_timeout,
                     )
+                    if background_halt.current().refuses("subtask", subtask_session_id, halt_epoch):
+                        # Goals PR 0c: the halt ended this inline run; its row is cancelled, never completed, and
+                        # keeps the run's usage.
+                        await heart.subtasks.cancel(subtask.id)
+                        try:  # bookkeeping: a failed write never fails the refusal
+                            await heart.subtasks.record_cancelled_usage(
+                                subtask.id,
+                                attempts=1,
+                                tokens_in=(_usage or {}).get("input_tokens", 0),
+                                tokens_out=(_usage or {}).get("output_tokens", 0),
+                                tool_calls_made=(_usage or {}).get("tool_calls", 0),
+                            )
+                        except Exception:
+                            logger.warning("Subtask %s: could not record the halted run's usage", subtask.id.hex[:8])
+                        return _tool_error(f"[Subtask {subtask.id.hex[:8]} blocked: {background_halt.HALT_REASON}]")
 
                     # F061 PR-1: record outcome on legacy path so dashboard rows
                     # are never NULL between PR-1 ship and PR-2 hardened-executor ship.

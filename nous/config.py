@@ -2184,6 +2184,10 @@ class Settings(BaseSettings):
     # (NOUS_OWNER_ROUTE_SECRET, set on the bot only). Only the digest lives in this process: the agent's run_python
     # runs here and could read anything else. Unset, those routes refuse every call.
     owner_route_secret_sha256: str = ""
+    # Goals PR 0c: the host's hold on background work (nous/background_halt.py). Read once at start: true, the process
+    # starts halted whatever the stored state says, and POST /background/resume answers 409 until it is cleared here
+    # and the process restarts.
+    background_halt: bool = False
     # The chat routes (POST /chat, POST /chat/stream, DELETE /chat/{session_id}) require the owner's or the proxy's
     # secret, and the inbound MCP server at /mcp the owner's secret or the MCP key below (nous/api/entry_gate.py).
     # off: no check. warn: calls that carry no proof are logged and counted by session class, and the owner gets one

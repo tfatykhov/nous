@@ -177,6 +177,7 @@ async def test_on_prods_flags_a_call_that_names_a_root_is_decided_as_one_that_na
 def test_the_refusal_code_is_a_ledger_code():
     """`_ledger_blocked` writes the code into the durable row, and the ledger rejects a code it does not know."""
     assert "root_cancelled" in REFUSAL_CODES
+    assert "background_halt" in REFUSAL_CODES  # Goals PR 0c: the halt's refusal
 
 
 async def test_a_cancelled_roots_tool_call_does_not_run_through_a_real_turn(runner_env):  # noqa: F811

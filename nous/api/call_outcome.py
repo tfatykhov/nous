@@ -53,6 +53,9 @@ class CallOutcome:
     # cancelled call returns before the thread finishes; the runner releases
     # write_lock only once this task is done.
     write_worker: Any = None
+    # Goals PR 0c: set by the dispatcher when it refused the call before its handler
+    # started (the code ``background_halt``); the runner closes the call as refused.
+    refused_by: str | None = None
 
 
 _current: ContextVar[CallOutcome | None] = ContextVar("tool_call_outcome", default=None)

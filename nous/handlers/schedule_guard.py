@@ -32,6 +32,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from nous import background_processes
 from nous.cognitive.execution_ledger import redact_error_text
 from nous.cognitive.ledger_store import durable_key_args
 from nous.utils import kill_process_group
@@ -242,6 +243,7 @@ async def run_guard(spec: GuardSpec) -> GuardResult:
         )
     except Exception as exc:
         return GuardResult(None, "", "", elapsed(), error=f"{type(exc).__name__}: {exc}")
+    tracked = background_processes.track(proc)  # Goals PR 0c: a halt signals it
     try:
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=spec.timeout_seconds)
     except TimeoutError:
@@ -253,6 +255,8 @@ async def run_guard(spec: GuardSpec) -> GuardResult:
     except BaseException:
         await kill_process_group(proc, even_if_exited=True)
         raise
+    finally:
+        background_processes.release(tracked)
     return GuardResult(
         proc.returncode,
         stdout.decode("utf-8", errors="replace"),
