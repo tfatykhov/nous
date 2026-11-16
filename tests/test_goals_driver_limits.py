@@ -7,6 +7,7 @@ Nothing builds the driver outside these tests yet: each test constructs it on an
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -40,6 +41,7 @@ from test_goals_driver import (
 )
 
 from nous.brain import continuation
+from nous.cognitive.ledger_store import detail_text
 from nous.goals import driver as driver_module
 from nous.goals import roots, spend
 from nous.goals.driver import GoalDriver
@@ -1034,6 +1036,55 @@ async def test_job_launches_over_the_cap_hold_the_start_when_the_call_log_is_on(
     await _launch_logged(w, session_id=f"intent-{second.root_id}")  # one by the session's decision turn
     async with w.db.session() as s:
         assert await spend.jobs_launched_today(s, w.agent, goal.id, w.env.settings, now=await _db_now(w)) == 2
+
+
+RUNNER = "/workspace/claude-jobs/runner.sh"
+# Launches the lineage shell's policy accepts (it compares shell words), however the words are spaced or quoted.
+LAUNCH_SPELLINGS = [
+    f"{RUNNER}  launch nous --prompt-file /workspace/notes/p.md",  # two spaces
+    f"{RUNNER}\tlaunch nous --prompt-file /workspace/notes/p.md",  # a tab
+    f'{RUNNER} "launch" nous --prompt-file /workspace/notes/p.md',  # the verb in quotes
+]
+# Commands that name runner.sh and launch without launching a job.
+NOT_LAUNCHES = [
+    f"{RUNNER} status job-20261115-101500-0a1b2c3d",
+    f"echo {RUNNER} launch nous",
+]
+
+
+def _logged_input(command: str) -> str:
+    """The tool-call log's text of a bash call: its input as JSON (the runner's ``json.dumps``)."""
+    return json.dumps({"command": command}, ensure_ascii=False)
+
+
+@pytest.mark.parametrize("command", LAUNCH_SPELLINGS)
+def test_a_launch_counts_however_its_words_are_spaced_or_quoted(command):
+    assert spend.launches_job(_logged_input(command)) is True
+
+
+@pytest.mark.parametrize("command", NOT_LAUNCHES)
+def test_a_command_that_only_names_the_runner_and_launch_is_not_a_launch(command):
+    assert spend.launches_job(_logged_input(command)) is False
+
+
+def test_a_launch_whose_logged_text_was_clipped_still_counts():
+    """A long inline prompt: the log keeps the head and the tail of the JSON, which no longer parses."""
+    command = f"{RUNNER}\tlaunch nous " + '"' + "fix the notes " * 400 + '"'
+    text = detail_text(_logged_input(command), 2000)
+    with pytest.raises(ValueError):
+        json.loads(text)
+    assert spend.launches_job(text) is True
+
+
+async def test_the_days_job_count_reads_the_shell_words(env_factory):  # noqa: F811
+    """Three launches spelled three ways count; a status call and an echo that names the words do not."""
+    w = await _world(env_factory, tool_call_log_enabled=True)
+    goal = await _active(w)
+    root, _session_row = await _started(w, goal)
+    for command in LAUNCH_SPELLINGS + NOT_LAUNCHES:
+        await _launch_logged(w, session_id=f"intent-{root.id}", command=_logged_input(command))
+    async with w.db.session() as s:
+        assert await spend.jobs_launched_today(s, w.agent, goal.id, w.env.settings, now=await _db_now(w)) == 3
 
 
 async def test_job_launches_are_not_counted_when_the_call_log_is_off(env_factory):  # noqa: F811
