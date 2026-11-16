@@ -42,6 +42,7 @@ from nous.goals.store import (
     JOURNAL_MAX_CHARS,
     MOVED_REF,
     MOVED_TEXT,
+    WAITING_REF,
     GoalStore,
     moved_steps,
 )
@@ -271,7 +272,9 @@ class GoalTools:
         if result.rowcount != 1:
             return False, False
         note = f"Waiting for the owner: session {row.n} claimed that the goal is done. Only the owner can finish it."
-        self._store.add_journal_row(s, goal.id, "state", note, actor="harness", session_n=row.n)
+        self._store.add_journal_row(
+            s, goal.id, "state", note, actor="harness", session_n=row.n, evidence=[f"{WAITING_REF}{row.n}"]
+        )
         return True, await self._tell_owner(s, goal, claim_seq)
 
     async def _tell_owner(self, s: AsyncSession, goal: Goal, claim_seq: int) -> bool:

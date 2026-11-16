@@ -41,7 +41,7 @@ from nous.brain import continuation, intentions
 from nous.cancellation import cancel_requested
 from nous.dag.store import TERMINAL_NODE_STATUSES
 from nous.goals import charter, owner_message, roots, spend
-from nous.goals.store import SESSION_NOTE_LABEL, STOP_REF, GoalStore, clip, moved_steps
+from nous.goals.store import SESSION_NOTE_LABEL, STOP_REF, WAITING_REF, GoalStore, clip, moved_steps
 from nous.heart.censor_actions import gate_subtask_task
 from nous.heart.subtasks import MAX_PENDING, SubtaskQueueFull
 from nous.storage.database import Database
@@ -2007,7 +2007,7 @@ class GoalDriver:
             # A session that claimed the goal done takes no step by design: it waits for the owner's answer, and
             # after "go on" the goal must not resume with a stall counted for it.
             stall = await self._run_length(
-                s, goal.id, counts="no_step", breaks=("step_closed", "error"), reason="stalled", skip_done_claims=True
+                s, goal.id, counts="no_step", breaks=("step_closed", "error"), reason="stalled", skip_owner_waits=True
             )
             return f"Paused: {stall} sessions in a row took no step." if stall >= goal.stall_limit else None
         errors = await self._run_length(
@@ -2042,13 +2042,14 @@ class GoalDriver:
         counts: str,
         breaks: tuple[str, ...],
         reason: str,
-        skip_done_claims: bool = False,
+        skip_owner_waits: bool = False,
     ) -> int:
         """The newest run of ``counts`` outcomes of the goal's closed sessions: those after the newest session whose
         outcome is in ``breaks`` and after the session of the newest pause for ``reason`` (``stop:<reason>``); any
-        other outcome neither counts nor breaks it. With ``skip_done_claims`` a session whose chain claimed the goal
-        done (a ``done_claim`` journal row of that session) is not counted either: like a session that asked the
-        owner, it neither counts nor breaks the run. One count, with nothing stored to drift."""
+        other outcome neither counts nor breaks it. With ``skip_owner_waits`` a session whose done claim made the goal
+        wait for the owner (the harness row with ``waiting:<n>``) is not counted either: like a session that asked
+        the owner, it neither counts nor breaks the run. A claim that changed nothing (journalled only, or refused)
+        leaves its session counted. One count, with nothing stored to drift."""
         broken = (
             select(func.coalesce(func.max(GoalSession.n), 0))
             .where(
@@ -2076,13 +2077,15 @@ class GoalDriver:
             GoalSession.n > broken,
             GoalSession.n > paused_at,
         ]
-        if skip_done_claims:
+        if skip_owner_waits:
             counted.append(
                 ~exists().where(
                     GoalJournal.agent_id == self._agent_id,
                     GoalJournal.goal_id == goal_id,
                     GoalJournal.session_n == GoalSession.n,
-                    GoalJournal.kind == "done_claim",
+                    GoalJournal.kind == "state",
+                    GoalJournal.actor == "harness",
+                    GoalJournal.evidence.contains(func.jsonb_build_array(func.concat(WAITING_REF, GoalSession.n))),
                 )
             )
         return int(await s.scalar(select(func.count()).where(*counted)) or 0)

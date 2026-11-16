@@ -40,6 +40,9 @@ SESSION_NOTE_LABEL = "Note written by the session:"
 # reason other than the owner's: the goal routes select a paused goal's row by it, and the driver restarts runs of
 # outcomes after its session.
 STOP_REF = "stop:"
+# The evidence ref (+ the session's number) of the harness row written when a session's done claim made the goal wait
+# for the owner: the goal driver leaves that session out of a run of sessions without a step.
+WAITING_REF = "waiting:"
 MAX_DEADLINE_DAYS = 90
 ACTORS: frozenset[str] = frozenset({"owner", "host", "chain", "harness"})
 JOURNAL_KINDS: frozenset[str] = frozenset(

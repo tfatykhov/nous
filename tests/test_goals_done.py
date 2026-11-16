@@ -288,3 +288,62 @@ async def test_a_done_claim_session_neither_counts_toward_nor_breaks_the_stall_r
     assert (goal.state, goal.pause_reason) == ("paused", "stalled")
     pause = (await journal(w, w.goal, "state"))[-1]
     assert pause.text == "Paused: 2 sessions in a row took no step."
+
+
+async def _session(w, n: int, *, ended: bool) -> GoalSession:
+    """A session row of ``w.goal``, closed as ``no_step`` when ``ended``."""
+    async with w.db.session() as s:
+        row = GoalSession(
+            agent_id=w.agent,
+            goal_id=w.goal.id,
+            n=n,
+            trigger="timer",
+            first_subtask_id=uuid.uuid4(),
+            started_at=datetime.now(UTC) - timedelta(minutes=10),
+            ended_at=datetime.now(UTC) - timedelta(minutes=5) if ended else None,
+            outcome="no_step" if ended else None,
+        )
+        s.add(row)
+        await s.commit()
+        return row
+
+
+async def test_a_claim_that_changed_nothing_does_not_take_its_session_out_of_the_stall(runner_env):  # noqa: F811
+    """Two closed no-step sessions whose reopened chains each claim the goal done: the claims are journalled only
+    (the sessions had ended), so both sessions still count and the goal pauses as stalled."""
+    w = await world(runner_env, bind=False)
+    w.goal = await active(w)
+    await set_goal(w, w.goal, stall_limit=2)
+    for n in (1, 2):
+        row = await _session(w, n, ended=True)
+        note, _plan = goal_tools(w, w.goal, row)
+        said, err = await note(kind="done_claim", text=CLAIM)
+        assert not err and "changes nothing" in said
+    assert len(await journal(w, w.goal, "done_claim")) == 2
+    assert await w.driver.apply_stop_conditions() == 1
+    assert (await goal_row(w, w.goal)).pause_reason == "stalled"
+
+
+async def test_claims_on_a_goal_that_was_not_active_and_a_refused_claim_take_nothing_out(runner_env):  # noqa: F811
+    """The owner paused the goal while session 2 ran: its three claims are journalled only and a fourth is refused
+    by the cap; after the owner resumes and the session ends with no step, it counts with session 1."""
+    w = await world(runner_env, bind=False)
+    w.goal = await active(w)
+    await set_goal(w, w.goal, stall_limit=2)
+    await _session(w, 1, ended=True)
+    row = await _session(w, 2, ended=False)
+    await w.store.pause(w.goal.id, actor="owner")
+    note, _plan = goal_tools(w, w.goal, row)
+    for _ in range(tools.DONE_CLAIMS_PER_SESSION):
+        said, err = await note(kind="done_claim", text=CLAIM)
+        assert not err and "stays as it is" in said
+    said, err = await note(kind="done_claim", text=CLAIM)
+    assert err and "the most one session may" in said
+    await w.store.resume(w.goal.id, actor="owner")
+    async with w.db.session() as s:
+        await s.execute(
+            update(GoalSession).where(GoalSession.id == row.id).values(ended_at=datetime.now(UTC), outcome="no_step")
+        )
+        await s.commit()
+    assert await w.driver.apply_stop_conditions() == 1
+    assert (await goal_row(w, w.goal)).pause_reason == "stalled"
