@@ -9,6 +9,8 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
 import androidx.test.core.app.ApplicationProvider
 import mockwebserver3.Dispatcher
 import mockwebserver3.MockResponse
@@ -17,6 +19,7 @@ import mockwebserver3.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -39,7 +42,8 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * Pair, Unpair and Disconnect run one at a time in the order asked. The
+ * Pair, Unpair and Disconnect run one at a time in the order asked, and work
+ * that finishes in the background does not start the sync engine. The
  * server's answer is held on a latch so the next request lands mid-way.
  */
 @RunWith(RobolectricTestRunner::class)
@@ -71,6 +75,7 @@ class PairingOrderTest {
     }
     private val base = "http://localhost:${server.port}"
     private var graph: AppGraph? = null
+    private val owner = object : LifecycleOwner { override val lifecycle: Lifecycle get() = error("not used") }
 
     @After fun close() { graph?.engine?.stop(); server.close() }
 
@@ -80,6 +85,7 @@ class PairingOrderTest {
         ctx.applicationInfo.flags = ctx.applicationInfo.flags or ApplicationInfo.FLAG_DEBUGGABLE
         return AppGraph(ctx, FakeBox()).also {
             it.credential.clear(); it.settings.baseUrl = base; graph = it
+            it.lifecycle.inForeground = true
             if (paired) assertTrue(it.credential.save(Paired(SAMPLE_TOKEN, "d-1", "Pixel", null), base))
         }
     }
@@ -161,5 +167,42 @@ class PairingOrderTest {
         assertTrue(calls("POST", "/a2ui/devices/redeem").isEmpty())
         assertNull(g.credential.pairedFor(base))
         assertFalse(g.settings.configured)
+    }
+
+    // -------------------------------------------------- answered in the background
+
+    @Test fun a_pairing_answered_in_the_background_keeps_the_token_and_the_next_foreground_connects() {
+        heldPath = "/a2ui/devices/redeem"
+        val g = graph()
+        settings(g)
+        startPairing()
+        rule.runOnIdle { g.lifecycle.onStop(owner) }   // the app goes to the background
+        release.countDown()
+        idleMainUntil("the pairing finished") { !g.pairing.state.busy }
+        assertNotNull("the token is kept", g.credential.pairedFor(base))
+        idleMainFor(300)
+        assertTrue("the engine stays stopped", calls("GET", "/a2ui/surfaces").isEmpty())
+
+        rule.runOnIdle { g.lifecycle.onStart(owner) }   // back in the foreground
+        idleMainUntil("the next foreground connects") { calls("GET", "/a2ui/surfaces").isNotEmpty() }
+        assertEquals(SAMPLE_TOKEN, calls("GET", "/a2ui/surfaces").first().headers[DeviceToken.HEADER])
+    }
+
+    @Test fun an_unpair_answered_in_the_background_forgets_the_token_and_the_next_foreground_connects() {
+        heldPath = "/a2ui/devices/unpair"
+        val g = graph(paired = true)
+        settings(g)
+        rule.onNodeWithText("Unpair").performClick()
+        idleMainUntil("the unpair is in flight") { arrived.count == 0L }
+        rule.runOnIdle { g.lifecycle.onStop(owner) }
+        release.countDown()
+        idleMainUntil("the unpair finished") { !g.pairing.state.busy }
+        assertNull("the token is forgotten", g.credential.pairedFor(base))
+        idleMainFor(300)
+        assertTrue("the engine stays stopped", calls("GET", "/a2ui/surfaces").isEmpty())
+
+        rule.runOnIdle { g.lifecycle.onStart(owner) }
+        idleMainUntil("the next foreground connects") { calls("GET", "/a2ui/surfaces").isNotEmpty() }
+        assertNull(calls("GET", "/a2ui/surfaces").first().headers[DeviceToken.HEADER])
     }
 }

@@ -26,6 +26,9 @@ import us.fatykhov.nous.companion.push.Notifications
  * pairing produced; a Pair or an Unpair that comes after a Disconnect finds
  * nothing configured and does nothing. Settings disables the three buttons
  * while any of them runs or waits ([State.busy]).
+ *
+ * The sync engine is started again after a change only while the app is in
+ * the foreground; otherwise the next foreground starts it.
  */
 class PairingActions(private val graph: AppGraph) {
     enum class Op { PAIR, UNPAIR, DISCONNECT }
@@ -46,7 +49,7 @@ class PairingActions(private val graph: AppGraph) {
         val base = graph.settings.baseUrl
         when (val out = Pairing.redeem(graph.http, Endpoints.of(base), code, graph.settings.installationId, graph.settings.deviceName, graph.debuggable)) {
             is RedeemOutcome.Done -> if (graph.credential.save(out.paired, base)) {
-                graph.engine.connect()
+                reconnectIfForeground()
                 graph.push.registerIfPossible()
                 State(note = PairingWords.paired(out.paired.name))
             } else State(note = PairingWords.NOT_STORED, isError = true)
@@ -58,7 +61,7 @@ class PairingActions(private val graph: AppGraph) {
     fun unpair() = enqueue(Op.UNPAIR) {
         if (!graph.settings.configured || graph.credential.pairedFor(graph.settings.baseUrl) == null) return@enqueue null
         val report = Pairing.unpair(graph.http, graph.settings.installationId, paired = true, forget = { graph.credential.clear() })
-        graph.engine.connect()
+        reconnectIfForeground()
         if (report.revoked) State(note = PairingWords.UNPAIRED) else State(note = PairingWords.UNPAIRED_UNCONFIRMED, isError = true)
     }
 
@@ -78,6 +81,8 @@ class PairingActions(private val graph: AppGraph) {
         onDone()
         State()
     }
+
+    private fun reconnectIfForeground() { if (graph.lifecycle.inForeground) graph.engine.connect() }
 
     /** Run [work] after everything asked for before it. A null result keeps the last sentence. */
     private fun enqueue(op: Op, work: suspend () -> State?) {
