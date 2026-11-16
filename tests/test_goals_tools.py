@@ -272,6 +272,41 @@ async def test_a_cancel_before_the_call_is_seen_and_nothing_is_written(runner_en
     assert await _plan(w) == [] and len(await journal(w, w.goal)) == count
 
 
+async def test_the_drivers_close_holding_the_session_row_refuses_a_step_close_that_waits(runner_env, monkeypatch):  # noqa: F811
+    """The driver's own close takes the session row first (it is held there by a pause after the lock): the tool
+    call waits on that row, then finds the session ended, closes nothing and writes nothing; the session keeps the
+    outcome the close wrote."""
+    w = await _turn(runner_env)
+    await w.plan(steps=[{"text": "List the notes"}])
+    async with w.db.session() as s:  # the chain has ended
+        await s.execute(
+            update(Intention).where(Intention.root_id == w.root.id).values(state="closed", close_reason="resolved")
+        )
+        await s.commit()
+    locked, go_on = asyncio.Event(), asyncio.Event()
+    real_root_state = w.driver._root_state
+
+    async def held(s, root_id):  # called by _close once it holds the session row
+        locked.set()
+        await go_on.wait()
+        return await real_root_state(s, root_id)
+
+    monkeypatch.setattr(w.driver, "_root_state", held)
+    close = asyncio.create_task(w.driver._close(w.row.id))
+    await locked.wait()
+    plan_rows = len(await journal(w, w.goal, "plan"))
+    call = asyncio.create_task(w.plan(steps=[{"id": "s1", "status": "closed", "evidence": [f"subtask:{w.first}"]}]))
+    await _until_waiting(w, "brain.goal_sessions")
+    go_on.set()
+    assert await close is True
+    said, err = await call
+    assert err and "this session has ended, so no step can be closed in it" in said
+    assert (await _plan(w))[0]["status"] == "open"
+    assert len(await journal(w, w.goal, "plan")) == plan_rows
+    closed = await session_row(w, w.row.id)
+    assert (closed.outcome, closed.steps_closed) == ("no_step", 0)
+
+
 async def test_a_close_that_wins_the_session_row_refuses_the_step(runner_env):  # noqa: F811
     """The session's close holds its row: the call waits, then finds the session ended and closes nothing, so the
     step is never counted for a session whose outcome was already written."""
