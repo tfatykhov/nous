@@ -342,11 +342,21 @@ def build_autonomy_routes(
             )
             return {name: (int(count), newest) for name, count, newest in rows.all()}
 
+    def goal_may_be_given(name: str, registered: bool) -> bool:
+        """F115 per-goal tools: whether the owner could allow a goal ``name`` now, as the grant route decides it
+        (``goal_routes.grant_refusal_for``: not locked by the host or switched off by the owner, its server on, the
+        setting it needs set)."""
+        if not settings.goal_tool_grants_enabled:
+            return False
+        from nous.api.goal_routes import grant_refusal_for  # goal_routes imports this module
+
+        return grant_refusal_for(name, registered=registered, settings=settings) is None
+
     def tool_row(current: AutonomyStore, name: str, description: str | None, calls: Any) -> dict[str, Any]:
         locked = name in current.locked
         setting = current.tools.get(name)
         lineage_shell = bool(settings.f099_lineage_shell)
-        goal_grants = bool(settings.goal_tool_grants_enabled)
+        goal_grants = goal_may_be_given(name, description is not None)
         not_offered = [
             {"place": place.key, "why": why}
             for place in PLACES
