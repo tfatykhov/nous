@@ -426,9 +426,7 @@ class GoalStore:
             self.add_journal_row(s, goal.id, "owner_note", body, actor=actor)
             if goal.state == "active" and await self._open_session(s, goal.id) is None:
                 await self._wake(s, goal.id, now)
-            await s.commit()
-            await s.refresh(goal)
-            return goal
+            return await self._commit_read(s, goal)
 
     async def delay_wake(self, goal_id: UUID, *, seconds: int, seen: datetime | None) -> bool:
         """Move an active goal's next wake to ``seconds`` from now, never earlier than it is, only if it is still
@@ -513,8 +511,14 @@ class GoalStore:
         if result.rowcount != 1:
             raise GoalRefused(f"{describe(goal)} changed meanwhile; nothing was done")
         self.add_journal_row(s, goal.id, "state", note, actor=actor, session_n=session_n)
-        await s.commit()
+        return await self._commit_read(s, goal)
+
+    async def _commit_read(self, s: AsyncSession, goal: Goal) -> Goal:
+        """Read ``goal`` back inside the changing transaction (its row lock still held, so the values read are the ones
+        committed), then commit, and return it. Nothing is read after the commit, so a read that fails rolls the
+        change back with it instead of answering a change that was made with an error."""
         await s.refresh(goal)
+        await s.commit()
         return goal
 
     async def _wake(
