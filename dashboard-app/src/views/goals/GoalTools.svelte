@@ -186,7 +186,7 @@
             {#if canEdit}
               <div class="buttons">
                 <Button id="tool-r.{slug(grant.tool)}" size="sm" variant="outline" class="max-md:min-h-11 max-md:px-4"
-                  disabled={busy !== null} onclick={() => void remove(grant.tool)}>{busy === grant.tool ? 'Working…' : 'Remove'}</Button>
+                  disabled={busy !== null} onclick={() => void remove(grant.tool)}>{busy === grant.tool ? 'Working' : 'Remove'}</Button>
               </div>
             {/if}
             <div class="more">{@render said(grant.tool)}</div>
@@ -212,7 +212,7 @@
                   <div class="buttons">
                     <Button id="tool-a.{slug(option.tool)}" size="sm" variant="outline" class="max-md:min-h-11 max-md:px-4"
                       disabled={busy !== null} aria-expanded={confirming === option.tool}
-                      onclick={() => void ask(option)}>{busy === option.tool ? 'Working…' : 'Allow'}</Button>
+                      onclick={() => void ask(option)}>{busy === option.tool ? 'Working' : 'Allow'}</Button>
                   </div>
                 {/if}
                 <div class="more">

@@ -128,6 +128,27 @@ describe('the tools a goal may use without asking', () => {
     expect(await screen.findByText('None yet.')).toBeTruthy();
   });
 
+  it('while a change is on its way its button says Working, in plain words, and every button waits', async () => {
+    let finish: (reply: Reply) => void = () => {};
+    const pending = new Promise<Reply>((resolve) => { finish = resolve; });
+    handlers['DELETE /goals/G-0001/tools/send_email'] = () => [200, { ...current, changed: true }];
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init: RequestInit = {}) => {
+      const method = init.method ?? 'GET';
+      calls.push({ url, method, body: undefined });
+      const [status, payload] = method === 'DELETE' ? await pending : handlers[`${method} ${url}`](undefined);
+      return new Response(JSON.stringify(payload), { status });
+    }));
+    render(GoalTools, { goal: GOAL });
+    const email = await waitFor(() => rowOf('send_email'));
+    await fireEvent.click(within(email).getByRole('button', { name: 'Remove' }));
+    const working = await within(email).findByRole('button', { name: 'Working' });
+    expect(working.textContent?.trim()).toBe('Working');
+    expect(section()!.textContent).not.toContain('…');
+    for (const button of within(section()!).getAllByRole('button')) expect((button as HTMLButtonElement).disabled).toBe(true);
+    finish([200, { ...current, changed: true }]);
+    expect(await screen.findByText('Removed.')).toBeTruthy();
+  });
+
   it("a refusal shows the server's sentence as it is", async () => {
     const sentence = 'send_email is switched off for background work. Set it to Allowed under Limits and tools first.';
     current = goalToolsAnswer({ grants: [], available: [toolOption('send_email')] });
