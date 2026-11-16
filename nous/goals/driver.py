@@ -73,6 +73,7 @@ ANSWER_PREFIX_PATTERN = f"{continuation.ANSWER_CORRELATION_PREFIX}%"
 # A running subtask is stuck this long past its timeout: the task scheduler's grace for a run (``find_active_run``).
 STUCK_GRACE_SECONDS = 300
 ERRORS_BEFORE_PAUSE = 3  # sessions in a row that end in an error before the goal pauses (``error``)
+STOP_REASONS: tuple[str, ...] = ("deadline", "budget", "stalled", "error")  # stop conditions, in the order read
 # The refresh reads every closed session whose root's deadline has not passed. A root's deadline is the TTL counted
 # from the publish of its first task, which comes after the session's start; the scan is bounded by the start, with
 # this much room for the publish's delay and for a difference between this process's clock and the database's.
@@ -235,6 +236,8 @@ class GoalDriver:
       the same pass started from.
     - ``_failures``: failed starts in a row, per goal. With P driver processes a goal can see up to 3 x P failed
       starts before one of them pauses it: each counts its own.
+    - ``_failures_since``: per goal with a run of failed starts, the newest ``stop:error`` row's seq when the run
+      began; a pause for ``error`` written after it restarts the run instead of pausing the goal again.
     - ``_call_log_noted``: whether the start-up line about an uncounted job cap was logged (a log line only).
 
     Two driver processes for one agent share none of it and are coordinated only through the rows: every active
@@ -253,6 +256,7 @@ class GoalDriver:
         self._runner = runner
         self._agent_id = store.agent_id
         self._failures: dict[UUID, int] = {}  # failed starts in a row, per goal (in memory: a restart resets it)
+        self._failures_since: dict[UUID, int] = {}  # per goal: the newest ``stop:error`` row's seq when its run began
         # Closed sessions whose spend is read again at the next tick: closed since, or with lineage work whose
         # usage is not settled yet (``refresh_sessions``). In memory; the first ticks after a start catch up.
         self._following: set[UUID] = set()
@@ -555,6 +559,7 @@ class GoalDriver:
                     await s.commit()
             return _Start()
         self._failures.pop(goal_id, None)
+        self._failures_since.pop(goal_id, None)
         self._runner.wake()
         logger.info("Goal %s: session %d started (root %s)", goal_id, n, root_id)
         return _Start(root_id=root_id)
@@ -782,21 +787,56 @@ class GoalDriver:
         """Count a failed start. Below the limit: journal it and try again in five minutes (never earlier than the
         wake was). At the limit: pause the goal (``error``), saying why, in a row with the pause's evidence ref
         (``stop:error``) and no session: the start made none, and the number it tried is the next session's, so the
-        pause leaves the run of error sessions as it was. A run-now request still pending (the insert that would have
-        cleared it rolled back) is cleared with the journal row: it is acted on once."""
+        pause leaves the run of error sessions as it was. The pause is decided under the goal row's lock: when a pause
+        for ``error`` was written since this run's first failure (``_failures_since``: another driver process's, which
+        the owner may have resumed since), the run restarts at this failure instead. A run-now request still pending
+        (the insert that would have cleared it rolled back) is cleared with the journal row: it is acted on once."""
         count = self._failures.get(goal_id, 0) + 1
         if count >= FAILED_STARTS_BEFORE_PAUSE:
-            self._failures.pop(goal_id, None)
             note = f"{failure}\nPaused: the start failed {count} times in a row."
-            await self._pause(goal_id, "error", note, evidence=[f"{STOP_REF}error"])
-            return
+            if await self._pause_after_failed_starts(goal_id, note, since=self._failures_since.get(goal_id, 0)):
+                self._failures.pop(goal_id, None)
+                self._failures_since.pop(goal_id, None)
+                return
+            count = 1
         self._failures[goal_id] = count
         async with self._db.session() as s:
             if request_at is not None:
                 await self._clear_request(s, goal_id, "run_now", request_at)
             self._journal(s, goal_id, "state", failure, actor="harness", session_n=n)
+            if count == 1:
+                self._failures_since[goal_id] = await self._newest_pause_seq(s, goal_id, "error")
             await s.commit()
         await self._store.delay_wake(goal_id, seconds=FAILED_START_DELAY_SECONDS, seen=seen)
+
+    async def _pause_after_failed_starts(self, goal_id: UUID, note: str, *, since: int) -> bool:
+        """Pause an active goal (``error``) after failed starts in a row, in one transaction under the goal row's
+        lock, unless a pause for ``error`` newer than ``since`` (the newest such row when the run began) was written
+        meanwhile. True when the run is over: the goal paused, or it is no longer active (nothing written). False
+        when such a pause restarted the run (nothing written)."""
+        async with self._db.session() as s:
+            if await self._lock_active(s, goal_id) is None:
+                return True
+            if await self._newest_pause_seq(s, goal_id, "error") != since:
+                return False
+            await self._paused(s, goal_id, "error", note, evidence=[f"{STOP_REF}error"])
+            await s.commit()
+            return True
+
+    async def _newest_pause_seq(self, s: AsyncSession, goal_id: UUID, reason: str) -> int:
+        """The journal seq of the goal's newest harness pause row for ``reason`` (``stop:<reason>``), else 0."""
+        return int(
+            await s.scalar(
+                select(func.coalesce(func.max(GoalJournal.seq), 0)).where(
+                    GoalJournal.agent_id == self._agent_id,
+                    GoalJournal.goal_id == goal_id,
+                    GoalJournal.kind == "state",
+                    GoalJournal.actor == "harness",
+                    GoalJournal.evidence.contains([f"{STOP_REF}{reason}"]),
+                )
+            )
+            or 0
+        )
 
     async def _clear_request(self, s: AsyncSession, goal_id: UUID, kind: str, at: datetime) -> bool:
         """Clear a goal's request in the caller's transaction, only while it is still the one read (``kind`` made
@@ -1884,58 +1924,80 @@ class GoalDriver:
 
     async def apply_stop_conditions(self, *, now: datetime | None = None) -> int:
         """Pause every active goal a stop condition holds, the first that holds (``_stop_reason``): ``deadline``,
-        ``budget``, ``stalled``, ``error``. Each pause is ``_pause``: only while the goal is still active and the
-        condition still holds in its row, its wake and any request cleared, with one harness row whose evidence is
-        ``stop:<reason>`` and whose session is the goal's newest, so runs of outcomes restart after it. A paused
-        goal (``waiting_for_owner`` included) is never looked at, and a pause cannot happen twice. ``now`` defaults
-        to the database's clock. Returns the goals paused.
+        ``budget``, ``stalled``, ``error``. A first read finds them; each pause is ``_pause_on_stop``, which locks the
+        goal row and reads that condition again from it before it writes: its wake and any request cleared, with one
+        harness row whose evidence is ``stop:<reason>`` and whose session is the goal's newest, so runs of outcomes
+        restart after it. A paused goal (``waiting_for_owner`` included) is never looked at, and a pause cannot
+        happen twice. ``now`` defaults to the database's clock. Returns the goals paused.
 
         What gets each one going again is the store's: ``resume`` (refused while the budget is spent or the
         deadline has passed: ``raise_budget`` or ``extend_deadline`` first). A stall or an error run counts only
         sessions after the pause that ended it, so a resumed goal is not paused again for the same sessions."""
         async with self._db.session() as s:
-            if now is None:
-                now = (await s.execute(select(func.clock_timestamp()))).scalar_one()
+            read_at = now if now is not None else (await s.execute(select(func.clock_timestamp()))).scalar_one()
             goals = list(
                 (await s.execute(select(Goal).where(Goal.agent_id == self._agent_id, Goal.state == "active"))).scalars()
             )
-            found = [(goal.id, await self._stop_reason(s, goal, now)) for goal in goals]
+            found = [(goal.id, await self._stop_reason(s, goal, read_at)) for goal in goals]
         paused = 0
         for goal_id, stop in found:
             if stop is None:
                 continue
-            reason, note, still = stop
+            reason, _note = stop
             try:
-                if await self._pause(
-                    goal_id, reason, note, evidence=[f"{STOP_REF}{reason}"], still=still, newest_session=True
-                ):
+                if await self._pause_on_stop(goal_id, reason, now=now):
                     paused += 1
             except Exception:
                 logger.exception("Goal %s: the pause (%s) failed; tried again next tick", goal_id, reason)
         return paused
 
-    async def _stop_reason(
-        self, s: AsyncSession, goal: Goal, now: datetime
-    ) -> tuple[str, str, list[ColumnElement[bool]]] | None:
-        """The first stop condition that holds for ``goal`` at ``now``: ``(reason, the pause row's words, the
-        condition again as guards on the goal row)``, else None. The guards make the pause a no-op when the owner
-        changed the goal between this read and the pause (extended the deadline, raised the budget). Spend only
-        grows, so a budget read as spent stays spent; the runs are read from closing outcomes only."""
-        if _deadline_passed(goal, now):
-            return "deadline", "Paused: the deadline has passed.", [Goal.deadline_at <= now]
-        total, _today = await spend.goal_spent(s, self._agent_id, goal.id, now=now)
-        if _budget_spent(total, goal.total_budget):
-            note = f"Paused: the total budget is spent ({total} of {goal.total_budget} tokens)."
-            return "budget", note, [Goal.total_budget <= total]
-        stall = await self._run_length(s, goal.id, counts="no_step", breaks=("step_closed", "error"), reason="stalled")
-        if stall >= goal.stall_limit:
-            return "stalled", f"Paused: {stall} sessions in a row took no step.", [Goal.stall_limit <= stall]
+    async def _stop_reason(self, s: AsyncSession, goal: Goal, now: datetime) -> tuple[str, str] | None:
+        """The first stop condition that holds for ``goal`` at ``now``: ``(reason, the pause row's words)``, else
+        None."""
+        for reason in STOP_REASONS:
+            note = await self._stop_note(s, goal, reason, now)
+            if note is not None:
+                return reason, note
+        return None
+
+    async def _stop_note(self, s: AsyncSession, goal: Goal, reason: str, now: datetime) -> str | None:
+        """The pause row's words when the stop condition ``reason`` holds for ``goal`` at ``now``, else None. Spend
+        only grows; the runs are read from closing outcomes only, after the newest pause for their reason."""
+        if reason == "deadline":
+            return "Paused: the deadline has passed." if _deadline_passed(goal, now) else None
+        if reason == "budget":
+            total, _today = await spend.goal_spent(s, self._agent_id, goal.id, now=now)
+            if not _budget_spent(total, goal.total_budget):
+                return None
+            return f"Paused: the total budget is spent ({total} of {goal.total_budget} tokens)."
+        if reason == "stalled":
+            stall = await self._run_length(
+                s, goal.id, counts="no_step", breaks=("step_closed", "error"), reason="stalled"
+            )
+            return f"Paused: {stall} sessions in a row took no step." if stall >= goal.stall_limit else None
         errors = await self._run_length(
             s, goal.id, counts="error", breaks=("step_closed", "asked", "no_step"), reason="error"
         )
-        if errors >= ERRORS_BEFORE_PAUSE:
-            return "error", f"Paused: {errors} sessions in a row ended in an error.", []
-        return None
+        return f"Paused: {errors} sessions in a row ended in an error." if errors >= ERRORS_BEFORE_PAUSE else None
+
+    async def _pause_on_stop(self, goal_id: UUID, reason: str, *, now: datetime | None) -> bool:
+        """Pause an active goal for the stop condition ``reason``, read again in the pause's own transaction under
+        the goal row's lock (``_stop_note``; the clock read after the lock unless ``now`` is given). So a pause another
+        driver process made meanwhile (its ``stop:<reason>`` row restarts the run) and an owner's change after it (a
+        resume, a raised budget, an extended deadline) are what the condition is read against. False (nothing
+        written) when the goal is no longer active or the condition no longer holds."""
+        async with self._db.session() as s:
+            goal = await self._lock_active(s, goal_id)
+            if goal is None:
+                return False
+            at = now if now is not None else (await s.execute(select(func.clock_timestamp()))).scalar_one()
+            note = await self._stop_note(s, goal, reason, at)
+            if note is None:
+                return False
+            if not await self._paused(s, goal_id, reason, note, evidence=[f"{STOP_REF}{reason}"], newest_session=True):
+                return False
+            await s.commit()
+            return True
 
     async def _run_length(
         self, s: AsyncSession, goal_id: UUID, *, counts: str, breaks: tuple[str, ...], reason: str
@@ -1994,47 +2056,55 @@ class GoalDriver:
 
     # ---- goal rows -----------------------------------------------------------------------------------------
 
-    async def _pause(
+    async def _lock_active(self, s: AsyncSession, goal_id: UUID) -> Goal | None:
+        """The goal row ``FOR UPDATE`` in the caller's transaction, or None when it is not active."""
+        return (
+            await s.execute(
+                select(Goal)
+                .where(Goal.id == goal_id, Goal.agent_id == self._agent_id, Goal.state == "active")
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+
+    async def _paused(
         self,
+        s: AsyncSession,
         goal_id: UUID,
         reason: str,
         note: str,
         *,
         session_n: int | None = None,
         evidence: Iterable[str] = (),
-        still: Iterable[ColumnElement[bool]] = (),
         newest_session: bool = False,
     ) -> bool:
-        """An active goal to ``paused`` for ``reason``, its wake and any request cleared, with a harness ``state``
-        row saying why (with ``evidence``), in one transaction. ``still`` are more guards on the goal row (the
-        condition read again). With ``newest_session`` the row's session is the goal's newest, read after the
-        update has locked the goal row (no start of this goal can add one before the commit). False (nothing
-        written) when the goal is no longer active or a guard fails."""
-        async with self._db.session() as s:
-            result = await s.execute(
-                update(Goal)
-                .where(Goal.id == goal_id, Goal.agent_id == self._agent_id, Goal.state == "active", *still)
-                .values(
-                    state="paused",
-                    pause_reason=reason,
-                    next_wake_at=None,
-                    pending_request=None,
-                    pending_request_at=None,
-                    updated_at=func.clock_timestamp(),
-                )
-                .execution_options(synchronize_session=False)
+        """In the caller's transaction (which has read whatever the pause depends on under the goal row's lock): an
+        active goal to ``paused`` for ``reason``, its wake and any request cleared, with a harness ``state`` row saying
+        why (with ``evidence``). With ``newest_session`` the row's session is the goal's newest, read with the goal
+        row locked (no start of this goal can add one before the commit). False (nothing written) when the goal is no
+        longer active."""
+        result = await s.execute(
+            update(Goal)
+            .where(Goal.id == goal_id, Goal.agent_id == self._agent_id, Goal.state == "active")
+            .values(
+                state="paused",
+                pause_reason=reason,
+                next_wake_at=None,
+                pending_request=None,
+                pending_request_at=None,
+                updated_at=func.clock_timestamp(),
             )
-            if result.rowcount != 1:
-                return False
-            if newest_session:
-                session_n = await s.scalar(
-                    select(func.max(GoalSession.n)).where(
-                        GoalSession.agent_id == self._agent_id, GoalSession.goal_id == goal_id
-                    )
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount != 1:
+            return False
+        if newest_session:
+            session_n = await s.scalar(
+                select(func.max(GoalSession.n)).where(
+                    GoalSession.agent_id == self._agent_id, GoalSession.goal_id == goal_id
                 )
-            self._journal(s, goal_id, "state", note, actor="harness", session_n=session_n, evidence=evidence)
-            await s.commit()
-            return True
+            )
+        self._journal(s, goal_id, "state", note, actor="harness", session_n=session_n, evidence=evidence)
+        return True
 
     def _journal(
         self,

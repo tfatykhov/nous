@@ -841,21 +841,58 @@ async def test_total_budget_pauses_the_goal_and_names_the_reason(env_factory):  
     assert await w.driver.apply_stop_conditions() == 0
 
 
-async def test_a_pause_waits_for_its_condition_in_the_row(env_factory, monkeypatch):  # noqa: F811
-    """The owner raises the budget between the driver's read and its pause: the pause finds the condition gone in
-    the row and changes nothing."""
+@pytest.mark.parametrize("condition", ["budget", "deadline"])
+async def test_a_pause_waits_for_its_condition_in_the_row(env_factory, monkeypatch, condition):  # noqa: F811
+    """The owner raises the budget, or extends the deadline, between the driver's read and its pause: the pause
+    reads the condition again under the goal row's lock, finds it gone, and changes nothing."""
     w = await _world(env_factory)
     goal = await _active(w)
-    await _closed(w, goal, ["step_closed"], spent=goal.total_budget)
-    real_pause = w.driver._pause
+    if condition == "budget":
+        await _closed(w, goal, ["step_closed"], spent=goal.total_budget)
+    else:
+        await _set_goal(w, goal, deadline_at=func.clock_timestamp() - timedelta(minutes=1))
+    real_pause = w.driver._pause_on_stop
 
     async def owner_first(*args, **kwargs):
-        await w.store.raise_budget(goal.id, total=goal.total_budget * 2, actor="host")
+        if condition == "budget":
+            await w.store.raise_budget(goal.id, total=goal.total_budget * 2, actor="host")
+        else:
+            await w.store.extend_deadline(goal.id, days=1, actor="host")
         return await real_pause(*args, **kwargs)
 
-    monkeypatch.setattr(w.driver, "_pause", owner_first)
+    monkeypatch.setattr(w.driver, "_pause_on_stop", owner_first)
     assert await w.driver.apply_stop_conditions() == 0
     assert (await _goal(w, goal)).state == "active"
+
+
+@pytest.mark.parametrize(("reason", "outcome"), [("stalled", "no_step"), ("error", "error")])
+async def test_a_run_another_driver_paused_and_the_owner_resumed_is_not_paused_again(
+    env_factory,  # noqa: F811
+    monkeypatch,
+    reason,
+    outcome,
+):
+    """Two driver processes read the same run. The first pauses the goal (its ``stop:<reason>`` row restarts the
+    run) and the owner resumes it, all before the second writes: the second reads the run again under the goal
+    row's lock, finds it empty, and the goal stays active."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    await _closed(w, goal, [outcome] * 3)
+    twin = GoalDriver(w.db, w.env.settings, w.env.heart, w.store, FakeRunner())
+    twin_pause = twin._pause_on_stop
+
+    async def first_driver_and_owner_meanwhile(*args, **kwargs):
+        assert await w.driver.apply_stop_conditions() == 1
+        assert (await _goal(w, goal)).pause_reason == reason
+        await w.store.resume(goal.id, actor="host")
+        return await twin_pause(*args, **kwargs)
+
+    monkeypatch.setattr(twin, "_pause_on_stop", first_driver_and_owner_meanwhile)
+    assert await twin.apply_stop_conditions() == 0
+    after = await _goal(w, goal)
+    assert (after.state, after.pause_reason) == ("active", None)
+    pauses = [r for r in await _harness(w, goal) if f"stop:{reason}" in r.evidence]
+    assert len(pauses) == 1
 
 
 async def test_three_no_step_sessions_pause_the_goal_as_stalled(env_factory):  # noqa: F811
@@ -938,13 +975,16 @@ async def test_a_pause_for_one_reason_never_restarts_another_reasons_run(env_fac
 
     failing = await _active(w, title="Sort the photos")
     await _closed(w, failing, ["error", "error"])
-    assert await w.driver._pause(  # a stall pause between two errors and a third one
-        failing.id,
-        "stalled",
-        "Paused: 3 sessions in a row took no step.",
-        evidence=["stop:stalled"],
-        newest_session=True,
-    )
+    async with w.db.session() as s:  # a stall pause between two errors and a third one
+        assert await w.driver._paused(
+            s,
+            failing.id,
+            "stalled",
+            "Paused: 3 sessions in a row took no step.",
+            evidence=["stop:stalled"],
+            newest_session=True,
+        )
+        await s.commit()
     await w.store.resume(failing.id, actor="host")
     await _closed(w, failing, ["error"])
     assert await w.driver.apply_stop_conditions() == 1
@@ -976,6 +1016,37 @@ async def test_a_failed_start_pause_names_its_reason_and_leaves_the_error_run_as
     after = await _goal(w, goal)
     assert (after.state, after.pause_reason) == ("paused", "error")
     assert (await _harness(w, goal))[-1].text == "Paused: 3 sessions in a row ended in an error."
+
+
+async def test_a_failed_start_run_restarts_after_another_drivers_error_pause(env_factory, monkeypatch):  # noqa: F811
+    """This driver counts two failed starts; another driver process pauses the goal for errors and the owner resumes
+    it. This driver's next failure is the first of a new run: no pause, its own failure row, the goal active. Two more
+    failures then pause it."""
+    w = await _world(env_factory)
+    goal = await _active(w)
+    monkeypatch.setattr(w.env.heart, "check_censors", _refuse())
+    for _attempt in range(2):
+        await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
+        assert await w.driver.start_session(goal.id, trigger="timer") is None
+    assert w.driver._failures == {goal.id: 2}
+    twin = GoalDriver(w.db, w.env.settings, w.env.heart, w.store, FakeRunner())
+    for _attempt in range(driver_module.FAILED_STARTS_BEFORE_PAUSE):
+        await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
+        assert await twin.start_session(goal.id, trigger="timer") is None
+    assert (await _goal(w, goal)).pause_reason == "error"
+    await w.store.resume(goal.id, actor="host")
+    await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
+    assert await w.driver.start_session(goal.id, trigger="timer") is None
+    after = await _goal(w, goal)
+    assert (after.state, after.pause_reason) == ("active", None)
+    assert w.driver._failures == {goal.id: 1}
+    assert len([r for r in await _harness(w, goal) if "stop:error" in r.evidence]) == 1
+    assert (await _harness(w, goal))[-1].text == "Session 1 was refused by the censor gate; the log has the reason."
+    for _attempt in range(2):
+        await _set_goal(w, goal, next_wake_at=func.clock_timestamp())
+        assert await w.driver.start_session(goal.id, trigger="timer") is None
+    assert (await _goal(w, goal)).pause_reason == "error"
+    assert w.driver._failures == {}
 
 
 async def test_owner_actions_and_other_rows_never_restart_or_skip_a_run(env_factory):  # noqa: F811
