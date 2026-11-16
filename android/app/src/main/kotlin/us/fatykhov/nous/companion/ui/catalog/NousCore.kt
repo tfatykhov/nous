@@ -214,6 +214,7 @@ fun MemoryGraphView(node: Node.Render) {
     val scope = rememberCoroutineScope()
     var selected by remember { mutableStateOf("") }
     var error by remember { mutableStateOf("") }
+    var refusal by remember { mutableStateOf<us.fatykhov.nous.companion.core.Refusal?>(null) }
     var busy by remember { mutableStateOf(false) }
     val expanded = remember { mutableSetOf<String>() }
     val nodes = Graphs.graphNodes(host.resolve(node.props["nodes"], node.scope))
@@ -232,7 +233,7 @@ fun MemoryGraphView(node: Node.Render) {
         scope.launch {
             val r = host.engine.callAgentFunction(host.surfaceId, "expandGraphNode", buildJsonObject { put("nodeId", n.id); put("nodeType", n.type ?: "fact") })
             busy = false
-            if (!r.ok) { error = r.message; return@launch }
+            if (!r.ok) { error = r.message; refusal = r.refusal; return@launch }
             expanded.add(n.id)
             val value = r.value as? JsonObject ?: return@launch
             val dm = host.surface?.dataModel as? JsonObject ?: return@launch
@@ -271,6 +272,6 @@ fun MemoryGraphView(node: Node.Render) {
             }
         }
         if (busy) Text("expanding…", color = t.muted, fontSize = 12.sp)
-        if (error.isNotEmpty()) Text(error, color = t.crit, fontSize = 12.sp)
+        if (error.isNotEmpty()) us.fatykhov.nous.companion.ui.ActionError(error, refusal)
     }
 }

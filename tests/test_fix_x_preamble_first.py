@@ -224,6 +224,11 @@ _REVIEWED_SITES: dict[tuple[str, str, str], tuple[int, str]] = {
         "not an LLM client: the MCP client's guarded httpx client sending one OAuth request (discovery, registration, "
         "the code exchange, a refresh) to an external MCP server or its sign-in provider (F112 PR 2d)",
     ),
+    ("nous/api/safe_fetch.py", "_get_pinned", "client.stream"): (
+        1,
+        "not an LLM client: a fresh httpx client per request, fetching the web page or skill file a URL names for "
+        "web_fetch and learn_skill, from an address that passed the public-address check",
+    ),
 }
 _REQUEST_METHODS = frozenset({"call", "stream", "call_streaming_aggregated"})
 

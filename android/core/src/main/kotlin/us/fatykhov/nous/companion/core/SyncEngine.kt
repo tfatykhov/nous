@@ -41,12 +41,19 @@ interface Http {
     suspend fun stream(path: String, onOpen: () -> Unit, onChunk: (String) -> Unit)
 }
 
-data class ActionResult(val ok: Boolean, val message: String, val resolved: Boolean? = null)
-data class CallResult(val ok: Boolean, val value: kotlinx.serialization.json.JsonElement?, val message: String)
+/** [refusal] is set when the server refused for the device proof and pairing is the remedy. */
+data class ActionResult(val ok: Boolean, val message: String, val resolved: Boolean? = null, val refusal: Refusal? = null)
+data class CallResult(val ok: Boolean, val value: kotlinx.serialization.json.JsonElement?, val message: String, val refusal: Refusal? = null)
 
 /**
  * Port of `transport.ts` (spec §3.2 R1, R2, R5, R8): the hydration-first
  * cycle, never auto-resume, exponential backoff capped at 30 s.
+ *
+ * [tokenSent] says whether calls to the configured address carry a device
+ * token. A hydration read refused for the device proof stops the loop and
+ * sets [refused] (a phone that is not paired gets the same answer on every
+ * retry); a refused tap or call answers the app's own sentence and the loop
+ * goes on.
  */
 class SyncEngine(
     private val store: SurfaceStore,
@@ -55,14 +62,17 @@ class SyncEngine(
     private val backoffMs: Long = 2000,
     private val nowMs: () -> Long = System::currentTimeMillis,
     private val sleep: suspend (Long) -> Unit = { delay(it) },
+    private val tokenSent: () -> Boolean = { false },
 ) {
     private var job: Job? = null
     private var stopped = false
     var attempt = 0; private set
     var reconnects = 0; private set
     var lastError: String? = null; private set
+    /** Why the loop stopped for the device proof; null while it runs. */
+    var refused: Refusal? = null; private set
 
-    fun connect() { stopped = false; job?.cancel(); job = scope.launch { run() } }
+    fun connect() { stopped = false; refused = null; job?.cancel(); job = scope.launch { run() } }
     fun stop() { stopped = true; job?.cancel(); job = null }
 
     /**
@@ -84,6 +94,7 @@ class SyncEngine(
         store.connection = if (attempt == 0) Connection.CONNECTING else Connection.RESYNCING
         try {
             val index = http.get("/a2ui/surfaces")
+            if (!index.ok) refusedRead(index)?.let { return it }
             if (!index.ok) throw IllegalStateException("HTTP ${index.status} for /a2ui/surfaces")
             val idx = Json.parseToJsonElement(index.body).jsonObject
             val surfaces = (idx["surfaces"] as? JsonArray) ?: JsonArray(emptyList())
@@ -91,6 +102,7 @@ class SyncEngine(
             store.pruneAbsent(ids.toSet())
             for (id in ids) {
                 val res = http.get("/a2ui/surfaces/" + encodeURIComponent(id))
+                if (!res.ok) refusedRead(res)?.let { return it }
                 if (!res.ok) throw IllegalStateException("HTTP ${res.status} for surface $id")   // a 404 aborts the whole cycle
                 store.apply(null, Json.parseToJsonElement(res.body).jsonObject)
                 val upto = res.header("X-A2UI-Upto-Seq")?.toLongOrNull() ?: 0L
@@ -134,6 +146,33 @@ class SyncEngine(
         }
     }
 
+    /**
+     * A hydration read refused for the device proof, or null when [res] is not
+     * such a refusal. Not paired, or a token the server rejects: the loop
+     * stops (a retry gets the same answer) until [connect] runs again. A
+     * token the server could not check: the normal backoff.
+     */
+    private fun refusedRead(res: Http.Response): Boolean? {
+        val r = Refusal.of(res.status, res.body) ?: return null
+        if (r == Refusal.NOT_PAIRED && tokenSent()) {
+            lastError = PairingWords.NOT_CHECKED
+            store.connection = Connection.ERROR; attempt += 1
+            return false
+        }
+        refused = r; stopped = true
+        // Short, for Diagnostics: the screens say it in full from [refused].
+        lastError = if (r == Refusal.TOKEN_REJECTED) "device token rejected (HTTP 403)" else "not paired (HTTP 403)"
+        store.connection = Connection.ERROR
+        return false
+    }
+
+    /** The sentence for a refused tap or call, and the refusal when pairing is the remedy. */
+    private fun refusedTap(r: Refusal): Pair<String, Refusal?> = when {
+        r == Refusal.TOKEN_REJECTED -> PairingWords.TOKEN_REJECTED to r
+        tokenSent() -> PairingWords.NOT_CHECKED to null
+        else -> PairingWords.TAP_NOT_PAIRED to r
+    }
+
     /** R8: a rejection resolves, never throws. Nonce inside `action`; the model rides along. */
     suspend fun postAction(surfaceId: String, name: String, sourceComponentId: String, context: JsonObject): ActionResult {
         val s = store.surfaces[surfaceId]
@@ -155,7 +194,9 @@ class SyncEngine(
         return try {
             val res = http.postJson("/a2ui/action", body.toString())
             val p = runCatching { Json.parseToJsonElement(res.body).jsonObject }.getOrNull()
-            if (!res.ok) ActionResult(false, ((p?.get("error") as? JsonObject)?.get("message")?.stringOrNull) ?: "HTTP ${res.status}")
+            val refusal = if (res.ok) null else Refusal.of(res.status, res.body)
+            if (refusal != null) refusedTap(refusal).let { (words, r) -> ActionResult(false, words, refusal = r) }
+            else if (!res.ok) ActionResult(false, ((p?.get("error") as? JsonObject)?.get("message")?.stringOrNull) ?: "HTTP ${res.status}")
             else ActionResult(true, p?.get("message")?.stringOrNull ?: "", (p?.get("resolved") as? JsonPrimitive)?.let { it.content.toBooleanStrictOrNull() })
         } catch (e: Exception) { ActionResult(false, e.message ?: "network error") }
     }
@@ -177,7 +218,9 @@ class SyncEngine(
             val p = runCatching { Json.parseToJsonElement(res.body).jsonObject }.getOrNull()
             val afr = p?.get("agentFunctionResponse") as? JsonObject
             val err = afr?.get("error") as? JsonObject
-            if (!res.ok || err != null) CallResult(false, null, err?.get("message")?.stringOrNull ?: "HTTP ${res.status}")
+            val refusal = if (res.ok) null else Refusal.of(res.status, res.body)
+            if (refusal != null) refusedTap(refusal).let { (words, r) -> CallResult(false, null, words, refusal = r) }
+            else if (!res.ok || err != null) CallResult(false, null, err?.get("message")?.stringOrNull ?: "HTTP ${res.status}")
             else CallResult(true, afr?.get("value"), "")
         } catch (e: Exception) { CallResult(false, null, e.message ?: "network error") }
     }

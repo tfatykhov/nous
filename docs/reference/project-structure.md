@@ -186,6 +186,7 @@ nous/
 │   └── api/                    # External interfaces
 │       ├── rest.py             # Starlette REST API (the route list in `create_app`; see `docs/reference/rest-api.md`)
 │       ├── commitment_routes.py # F111: POST /commitments/{id}/drop|done, the owner's /drop and /done
+│       ├── companion_devices.py # Companion devices paired by a code: DeviceStore (nous_system.a2ui_devices, migration 115: each device's token as a SHA-256 only, revoke hooks), PairingDesk (the one open code, in memory), clean_name, and the /a2ui/devices routes (pairings, list, revoke, redeem, unpair)
 │       ├── goal_routes.py # F114 PR 2: the owner's /goals routes (list, options, one goal, a new draft, one POST per owner action), every one behind the owner guard; a goal's actions are the store's own rules
 │       ├── mcp_client_routes.py # F112 PR 2a: the owner's /integrations/mcp routes (list, probe, add, change, refresh, remove MCP servers; PR 2c: store, replace and remove a server's key, never returned; PR 2d: OAuth start, callback page, paste fallback, sign-in state, sign-out), behind the proxy's X-Nous-Proxy-Secret; mounted only with NOUS_MCP_CLIENT_ENABLED
 │       ├── intention_routes.py # F099 Phase 2d/2e: the owner-action routes (decide, answer, list, cancel), thin over ContinuationRunner; the POSTs require the owner's or the proxy's secret
@@ -214,6 +215,7 @@ nous/
 │       ├── db_query.py         # db_query: one read-only SELECT as the nous_reader login (scripts/ops/db_roles.sql); row, cell and output caps, ledger redaction
 │       ├── job_marks.py        # The only code that touches files in a Claude Code job dir: small marks (cancelled_by, nous_root) opened without following links
 │       ├── web_tools.py        # web_search, web_fetch (multi-tier routing)
+│       ├── safe_fetch.py       # Fetching a model-supplied URL (web_fetch, learn_skill): public addresses only, each request pinned to the address checked, a client per request, size and time bounds; is_public_address is also the rule of the browser egress proxy and the MCP client
 │       ├── injection_screen.py # F103: flag-only prompt-injection + secret screen over web_fetch / browser_task results
 │       ├── search_providers.py # SearchProvider protocol + Tavily, Exa, Brave
 │       ├── search_router.py   # Query classification + cascading fallback

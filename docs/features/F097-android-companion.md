@@ -139,7 +139,7 @@ The web companion keeps its public path (Traefik + oauth2-proxy with Google sign
 - **Server.** Tailscale runs on the Nous host, and `tailscale serve` publishes HTTPS on `https://<host>.<tailnet>.ts.net`, proxying to the local Nous port (`127.0.0.1:8383` on prod). MagicDNS and HTTPS certificates must be enabled. There is no Traefik change, no public exposure for the app, and no Nous auth code.
 - **Who can connect** is set by tailnet membership plus the tailnet ACL.
 - **Phone.** Tailscale's app-based split tunneling (v1.96.2+ has *include* mode) can restrict the VPN to Nous Companion. Only tailnet-addressed traffic uses the tunnel unless an exit node is selected.
-- **App.** One base URL, no credentials.
+- **App.** One base URL and, once the phone is paired (§7.5), a device token sent only to that address's origin.
   - Release builds allow **HTTPS only**.
   - Debug builds allow cleartext through a debug-only network security config, for `http://10.0.2.2:8000` (emulator → local Nous).
   - The manifest declares `ACCESS_LOCAL_NETWORK` (enforced on Android 17+ at targetSdk 37). The Connect screen requests it before the first request when the base-URL host resolves to a private, link-local, CGNAT (`100.64/10`) or `.local` address. A connect timeout while it is denied is reported as "local network permission required", not as a network error. Whether Android classifies Tailscale's `100.x` addresses as local is on the device checklist (§10.6).
@@ -304,8 +304,17 @@ Each gets a `docker-compose.yml` line with a real default, plus a read-only volu
 - **Permissions:** `INTERNET`, `POST_NOTIFICATIONS`, `ACCESS_LOCAL_NETWORK`.
 - **Messaging service:** `exported="false"` with the `MESSAGING_EVENT` filter. Plus the `FirebaseInitProvider` removal and auto-init meta-data from §6.2.
 - **Network security:** the release config has no cleartext; the debug config permits cleartext.
-- **Backup:** `allowBackup="false"` plus `dataExtractionRules` excluding both `<cloud-backup>` and `<device-transfer>`. All app state (DataStore file, options cache, `installation_id`, tombstones) lives in `noBackupFilesDir`. Otherwise a restore clones `installation_id` onto a second phone, and the two overwrite each other's token.
+- **Backup:** `allowBackup="false"` plus `dataExtractionRules` excluding both `<cloud-backup>` and `<device-transfer>`. All app state (DataStore file, options cache, `installation_id`, tombstones, the pairing in `device.properties`) lives in `noBackupFilesDir`. Otherwise a restore clones `installation_id` onto a second phone, and the two overwrite each other's token.
 - **UI:** edge-to-edge insets through `Scaffold` (enforced from targetSdk 35); predictive back.
+
+### 7.5 Pairing
+
+- **Pair.** Settings, Pairing: the owner types the code the dashboard shows (any case, with or without the dash). The app posts it with its `installation_id` and device name to `POST /a2ui/devices/redeem` and stores the returned token. Each failure has its own sentence: a code that is not valid, too many tries (from `Retry-After`), no connection, a server without the route ("This server does not support pairing yet."), an address that is not https or cannot be parsed. Pairing, Unpair and Disconnect run on the app's scope, so leaving Settings or turning the phone does not stop them halfway; Settings shows the result when it comes back.
+- **Storage.** `device.properties` in `noBackupFilesDir` holds the token encrypted with AES-256-GCM under an Android Keystore key (`nous_device_token_v1`, made inside the Keystore, not exportable by app code), the origin it was paired with, the device name and the server's `public_base_url`. It keeps the token off the disk in plain text, out of backups and away from other apps; code running in the app's own process, or a rooted phone, can still use it. On a debuggable build someone with USB debugging can also use the token, and that build trusts user-installed certificate authorities; the release build does neither. A Keystore failure reads as not paired. Before pairing the app tries a seal; a key that fails is replaced once, and if that fails too, pairing does not start and nothing is sent.
+- **Where the token goes.** `X-Nous-Device-Token` on every call to the paired origin (scheme, host, port) and nowhere else: a network interceptor adds it only to a call's own request (never a redirect's follow-up), and no client follows redirects. Only over https, except `http://10.0.2.2` and `http://localhost` on a debuggable build (the emulator). The paired origin and each request's origin come from one parser (OkHttp's). A changed server address is not paired until it is paired itself. On a build that does not permit clear text, an `http://` address is named as the problem in the inbox and Settings: "This app needs the https address of Nous."
+- **Refusals.** `DEVICE_TOKEN_REJECTED` on any call forgets the token ("This device is no longer paired. Pair it again in Settings."). A hydration read refused with `OWNER_PROOF_REQUIRED` or `DEVICE_TOKEN_REJECTED` stops the sync loop and the inbox offers Settings; a refused tap shows "Pair this device to use this button." with a way to Settings, and the loop goes on. The push token worker stops on an answer a retry cannot change (a 3xx, or a 4xx other than 404, 408 and 429), and Settings shows why.
+- **Unpair** (and Disconnect): delete this installation's push registration while the token still works, then `POST /a2ui/devices/unpair`, then forget the token, each step bounded to 5 s.
+- **Web links** ("Open web companion", "Open in web") open the configured address's companion page while the phone is not paired, as before; once paired, the pairing's `public_base_url` when the server gave one, else the configured address. They are never hidden.
 
 ## 8. Rendering parity
 
@@ -403,11 +412,12 @@ No production behaviour change. Test-only additions:
 - **`.github/workflows/android.yml`.**
   - Triggers on `android/**`, `nous/a2ui/catalogs/**`, `tests/fixtures/a2ui/**`, `dashboard-app/src/companion/**` and itself.
   - Uses `actions/setup-java` (Temurin 21) and `gradle/actions/setup-gradle`, with `working-directory: android`.
-  - Runs `:core:test :app:testDebugUnitTest :app:recordRoborazziDebug :app:lintDebug :app:assembleDebug`.
-  - Uploads the APK and `app/build/outputs/roborazzi/**`, and caches Robolectric's android-all jars.
+  - Runs `:core:test :app:testDebugUnitTest :app:recordRoborazziDebug :app:lintDebug :app:assembleDebug :app:assembleRelease`.
+  - Uploads the debug APK (`nous-companion-debug-apk`), the release APK (`nous-companion-apk`) and `app/build/outputs/roborazzi/**`, and caches Robolectric's android-all jars.
+  - The release APK is the one to install: not debuggable, https only, system certificates only.
   - The catalog ratchet lives in `ci.yml` (§8.3), so required CI enforces it; this workflow is path-filtered.
 - **Signing.**
-  - A beta keystore is generated once with `keytool` and stored as the secrets `ANDROID_BETA_KEYSTORE_B64` and `ANDROID_BETA_KEYSTORE_PASSWORD`. When present, it is the `debug` signingConfig, so each build installs as an update.
+  - A beta keystore is generated once with `keytool` and stored as the secrets `ANDROID_BETA_KEYSTORE_B64` and `ANDROID_BETA_KEYSTORE_PASSWORD`. When present, it is the `debug` signingConfig, which the `release` build type uses too, so each build of either type installs as an update over the other and keeps the app's data.
   - Without the secrets (fork PRs), a random key is used.
   - **No keystore is ever committed** (the repo is public), and none goes into `actions/cache` (evicted after 7 idle days, which rotates the key silently).
   - No `applicationIdSuffix`, because the server selects the Firebase client by package.

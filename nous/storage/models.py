@@ -1929,6 +1929,32 @@ class A2uiPushInstallation(Base):
     )
 
 
+class A2uiDevice(Base):
+    """Migration 115: one companion device paired with this Nous.
+
+    The device proves itself with a token it was given once; only the token's SHA-256 (``token_sha256``) is stored.
+    ``installation_id`` is the device's push installation id. ``revoked_at`` ends the device (the row is kept). The
+    migration holds the CHECKs and the partial unique index (one live device per installation id). Written and read by
+    ``nous/api/companion_devices.py`` only. Not read by the ``db_query`` reader.
+    """
+
+    __tablename__ = "a2ui_devices"
+    __table_args__ = ({"schema": "nous_system"},)
+
+    agent_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    token_sha256: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    installation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class A2uiOutbox(Base):
     """F092: per-envelope delta log consumed by the companion SSE stream.
 

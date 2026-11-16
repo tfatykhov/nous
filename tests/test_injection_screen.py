@@ -16,7 +16,9 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
+from fetch_support import patched_fetch_client
 
 from nous.api import injection_screen as screen_mod
 from nous.api.injection_screen import RULES, screen, screen_tool_result
@@ -663,14 +665,14 @@ class TestWiring:
         from nous.api.tools import ToolDispatcher
 
         page = RULE_FIXTURES["indirect-injection-in-tool-result"]["match"][2]
-        response = MagicMock(status_code=200, text=page, headers={"content-type": "text/plain"})
-        client = MagicMock()
-        client.get = MagicMock(side_effect=lambda *a, **k: asyncio.sleep(0, result=response))
         settings = MagicMock(web_fetch_max_chars=50000, injection_screen_mode="flag", agent_id="a")
         bus = _bus()
         dispatcher = ToolDispatcher()
-        wt.register_web_tools(dispatcher, settings, client, bus=bus)
-        with patch.object(wt, "_is_url_safe", return_value=(True, "")):
+        wt.register_web_tools(dispatcher, settings, MagicMock(), bus=bus)
+        with (
+            patch("nous.api.safe_fetch._resolve_host", return_value=["93.184.216.34"]),
+            patched_fetch_client(lambda r: httpx.Response(200, text=page, headers={"content-type": "text/plain"})),
+        ):
             text, is_error = await dispatcher.dispatch("web_fetch", {"url": "https://docs.example/page"})
         assert not is_error
         assert text == f"Content from https://docs.example/page ({len(page)} chars):\n\n{page}"
@@ -681,15 +683,13 @@ class TestWiring:
     async def test_web_fetch_survives_a_screen_failure(self) -> None:
         from nous.api import web_tools as wt
 
-        response = MagicMock(status_code=200, text="plain page", headers={"content-type": "text/plain"})
-        client = MagicMock()
-        client.get = MagicMock(side_effect=lambda *a, **k: asyncio.sleep(0, result=response))
         settings = MagicMock(web_fetch_max_chars=50000, injection_screen_mode="flag", agent_id="a")
         with (
-            patch.object(wt, "_is_url_safe", return_value=(True, "")),
+            patch("nous.api.safe_fetch._resolve_host", return_value=["93.184.216.34"]),
+            patched_fetch_client(lambda r: httpx.Response(200, text="plain page", headers={"content-type": "text/plain"})),
             patch.object(screen_mod, "screen", side_effect=RuntimeError("boom")),
         ):
-            result = await wt._web_fetch("https://x.example", _settings=settings, _http=client)
+            result = await wt._web_fetch("https://x.example", _settings=settings)
         assert "plain page" in result["content"][0]["text"]
 
     async def test_browser_task_screens_the_summary_and_returns_it_unchanged(self, monkeypatch: Any) -> None:
