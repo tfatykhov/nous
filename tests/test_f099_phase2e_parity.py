@@ -145,7 +145,9 @@ def test_the_cancel_view_is_a_set_lookup_and_the_default_reads_nothing():  # PIN
     tree = ast.parse(textwrap.dedent(inspect.getsource(ContinuationRunner.root_is_cancelled)))
     assert not [node for node in ast.walk(tree) if isinstance(node, ast.Await)]
     assert runner_module._no_cancelled_roots(object()) is False
-    source = inspect.getsource(runner_module.AgentRunner._authorize_tool_call)
+    # _authorize_tool_call asks the per-goal tool grant hook and runs these checks.
+    assert "self._authorize_checks(" in inspect.getsource(runner_module.AgentRunner._authorize_tool_call)
+    source = inspect.getsource(runner_module.AgentRunner._authorize_checks)
     strict_block = source.index("if ctx.authority == AUTHORITY_INTERNAL or ctx.kind")
     head = source[:strict_block]  # the new check comes before even the strict rule: the first thing it does
     assert "self._root_cancelled(ctx.root_intention_id)" in head

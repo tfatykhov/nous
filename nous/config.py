@@ -1547,6 +1547,11 @@ class Settings(BaseSettings):
     goals_reserved_slots: int = Field(default=1, ge=0)
     # Places a goal session leaves free in the subtask queue: none starts while fewer are free.
     goals_queue_headroom: int = Field(default=2, ge=0, le=4)
+    # F115 per-goal tools: the owner may allow one goal's background sessions to use an outward tool (send_file,
+    # send_email, browser_task, a connected MCP server's tool) without asking (nous/goals/grants.py). Needs
+    # goals_enabled, autonomy_settings_enabled and tool_guard_enabled; without them a WARNING and it stays off.
+    # Default off.
+    goal_tool_grants_enabled: bool = False
 
     # F115 autonomy settings: the owner changes the limits of background work on the dashboard (nous/autonomy). Each
     # change is a row of nous_system.autonomy_settings with a record in autonomy_settings_log, applied in place on
@@ -4427,6 +4432,26 @@ class Settings(BaseSettings):
                 "NOUS_TOOL_GUARD_ENABLED=true needs NOUS_AUTONOMY_SETTINGS_ENABLED=true; the tool guard stays OFF."
             )
             object.__setattr__(self, "tool_guard_enabled", False)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_goal_tool_grants_dependency(self) -> "Settings":
+        """F115 per-goal tools: a grant is for a goal's sessions, and the tool guard's holds are what keep a granted
+        tool off when the owner switches it off or the host locks it. Runs after the goals and tool guard
+        validators, so a flag they forced off forces this off too."""
+        if not self.goal_tool_grants_enabled:
+            return self
+        needed = {
+            "NOUS_GOALS_ENABLED": self.goals_enabled,
+            "NOUS_AUTONOMY_SETTINGS_ENABLED": self.autonomy_settings_enabled,
+            "NOUS_TOOL_GUARD_ENABLED": self.tool_guard_enabled,
+        }
+        missing = [f"{name}=true" for name, on in needed.items() if not on]
+        if missing:
+            logging.getLogger(__name__).warning(
+                "NOUS_GOAL_TOOL_GRANTS_ENABLED=true needs %s; goal tool grants stay OFF.", " and ".join(missing)
+            )
+            object.__setattr__(self, "goal_tool_grants_enabled", False)
         return self
 
     @model_validator(mode="after")

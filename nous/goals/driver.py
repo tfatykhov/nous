@@ -28,7 +28,7 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import ColumnElement, Text, and_, cast, delete, exists, false, func, or_, select, text, tuple_, update
@@ -57,6 +57,9 @@ from nous.storage.models import (
     ResultInbox,
     Subtask,
 )
+
+if TYPE_CHECKING:
+    from nous.goals.grants import GoalToolGrants
 
 logger = logging.getLogger(__name__)
 
@@ -275,13 +278,25 @@ class GoalDriver:
     still the one read, a pause only while its condition still holds, and wake changes compared with the wake read.
     """
 
-    def __init__(self, database: Database, settings: Any, heart: Any, store: GoalStore, runner: Any) -> None:
+    def __init__(
+        self,
+        database: Database,
+        settings: Any,
+        heart: Any,
+        store: GoalStore,
+        runner: Any,
+        *,
+        tool_grants: GoalToolGrants | None = None,
+    ) -> None:
         self._db = database
         self._settings = settings
         self._heart = heart
         self._store = store
         self._runner = runner
         self._agent_id = store.agent_id
+        # F115 per-goal tools: the runner's view of the goals' tool grants (main.py, with the flag on), read again at
+        # the start, at the end of every tick, after a session starts and after one closes. None: no grants.
+        self.tool_grants = tool_grants
         self._failures: dict[UUID, int] = {}  # failed starts in a row, per goal (in memory: a restart resets it)
         self._failures_since: dict[UUID, int] = {}  # per goal: the newest ``stop:error`` row's seq when its run began
         # Closed sessions whose spend is read again at the next tick: closed since, or with lineage work whose
@@ -303,6 +318,8 @@ class GoalDriver:
         """Run the loop: one tick every ``goals_tick_seconds``. Does nothing, and builds no task, with goals off."""
         if not self._enabled() or self._task is not None:
             return
+        if self.tool_grants is not None:
+            await self.tool_grants.refresh()
         self._running = True
         self._task = asyncio.create_task(self._loop(), name="goal-driver")
         logger.info("Goal driver started (tick=%ds)", self._settings.goals_tick_seconds)
@@ -341,7 +358,8 @@ class GoalDriver:
         and recently closed sessions spent (and journal what a resumed chain of a closed one asked the owner and how
         it ended), pause the goals a stop condition holds, then start: the run-now requests first, then the sessions
         that are due. Stop conditions run before any start, so a goal that should pause never gets one more session.
-        With goals off it does nothing. A second call waits for this one to end (``_tick_lock``)."""
+        Last, the view of the goals' tool grants is read again (``tool_grants``, when set), so this tick's pauses and
+        closes reach it. With goals off it does nothing. A second call waits for this one to end (``_tick_lock``)."""
         if not self._enabled():
             return TickReport()
         async with self._tick_lock:
@@ -353,6 +371,8 @@ class GoalDriver:
             paused = await self.apply_stop_conditions()
             started, held = await self._start_due()
             await self.tell_owner_of_pauses()  # after every pause of this tick has committed
+            if self.tool_grants is not None:  # F115: after this tick's pauses, closes and starts
+                await self.tool_grants.refresh()
             return TickReport(
                 claimed=claimed, closed=closed, stopped=stopped, paused=paused, started=started, held=held
             )
@@ -588,6 +608,8 @@ class GoalDriver:
             return _Start()
         self._failures.pop(goal_id, None)
         self._failures_since.pop(goal_id, None)
+        if self.tool_grants is not None:  # F115: the new session's first task is offered the goal's tools
+            await self.tool_grants.refresh_root(root_id)
         self._runner.wake()
         logger.info("Goal %s: session %d started (root %s)", goal_id, n, root_id)
         return _Start(root_id=root_id)
@@ -1327,7 +1349,9 @@ class GoalDriver:
             await s.commit()
             self._following.add(row.id)  # read once more after the close, and while its lineage is unsettled
             logger.info("Goal %s: session %d closed (%s, %d tokens)", goal.id, row.n, outcome, spent)
-            return True
+        if self.tool_grants is not None:  # F115: a closed session's root keeps no grant
+            await self.tool_grants.refresh_root(row.root_id)
+        return True
 
     async def _root_state(self, s: AsyncSession, root_id: UUID) -> _RootState:
         marks = (

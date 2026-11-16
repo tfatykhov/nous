@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import Text, and_, cast, select
@@ -27,6 +27,9 @@ from nous.goals.store import GoalStore, moved_steps
 from nous.goals.tools import Executor, GoalSessionRef, make_goal_tools
 from nous.storage.database import Database
 from nous.storage.models import Goal, GoalSession, Intention
+
+if TYPE_CHECKING:
+    from nous.goals.grants import GoalToolGrants
 
 
 @dataclass(frozen=True)
@@ -64,18 +67,24 @@ async def report_channel(session: AsyncSession, agent_id: str, root_id: UUID) ->
 
 
 class GoalChain:
-    """The goals' side of a decision turn (``turn_context``)."""
+    """The goals' side of a decision turn (``turn_context``). ``tool_grants`` is the runner's view of the goals' tool
+    grants (F115 per-goal tools, main.py with the flag on), read again for the root at the start of each of its
+    decision turns."""
 
-    def __init__(self, database: Database, settings: Any, store: GoalStore) -> None:
+    def __init__(
+        self, database: Database, settings: Any, store: GoalStore, *, tool_grants: GoalToolGrants | None = None
+    ) -> None:
         self._db = database
         self._settings = settings
         self._store = store
         self._agent_id = store.agent_id
+        self._tool_grants = tool_grants
 
     async def turn_context(self, root_id: UUID) -> GoalTurn | None:
         """None unless ``root_id`` is a goal session's root. Else the goal block, built from the goal, its plan, its
         journal tail, its spend and the evidence the session's lineage can cite, as read now; and the goal tools,
-        bound to that session."""
+        bound to that session. A goal session's root has its tool grants read again before the turn is offered its
+        tools (a failed read is logged and leaves the view empty; the turn runs)."""
         async with self._db.session() as s:
             row = (await s.execute(_session_of_root(self._agent_id, root_id))).scalar_one_or_none()
             if row is None:
@@ -96,6 +105,8 @@ class GoalChain:
             )
             refs = await evidence.citeable(s, scope, limit=charter.REFS_SHOWN)
             ended = row.ended_at is not None
+        if self._tool_grants is not None:
+            await self._tool_grants.refresh_root(root_id)
         # The directory is walked after the transaction and off the event loop: nothing in it is a database row.
         refs += await asyncio.to_thread(evidence.files, scope)
         journal = await self._store.journal_tail(goal.id)

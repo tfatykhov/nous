@@ -610,24 +610,35 @@ async def _build_continuation_runner(
 
 
 def _build_goals(
-    settings: Settings, *, database: Database, heart: Heart, continuation_runner: Any | None
+    settings: Settings, *, database: Database, heart: Heart, continuation_runner: Any | None, runner: Any = None
 ) -> Any | None:
     """F114: with ``NOUS_GOALS_ENABLED`` on (its validator turns it off unless continuation, intentions, the result
     inbox and subtasks are on) and a continuation runner, build the one goal driver and bind the three goal hooks: a
     goal session's REPORT goes to the goal's journal (``continuation.set_goal_report_channel``), its decision turn
     sees its goal and gets the goal tools (``set_goal_turns``), and the runner keeps goal chains out of the owner's
     reserved slots (``set_goals``). Its loop is started by the caller, after the runner's. None otherwise: nothing of
-    the chain is imported or bound."""
+    the chain is imported or bound.
+
+    F115 per-goal tools: with ``NOUS_GOAL_TOOL_GRANTS_ENABLED`` on as well (its validator needs the autonomy settings
+    and the tool guard), the view of the goals' tool grants is built here, handed to the chain and the driver
+    (``goal_driver.tool_grants``) and bound to ``runner`` (``set_goal_lift``); the caller reads it the first time.
+    Off: nothing of it is imported or bound."""
     if not settings.goals_enabled or continuation_runner is None:
         return None
     from nous.goals.chain import GoalChain, report_channel
     from nous.goals.driver import GoalDriver
     from nous.goals.store import GoalStore
 
+    tool_grants = None
+    if settings.goal_tool_grants_enabled and runner is not None:
+        from nous.goals.grants import GoalToolGrants
+
+        tool_grants = GoalToolGrants(database, settings)
+        runner.set_goal_lift(tool_grants.lifts, tool_grants.note_used)
     store = GoalStore(database, settings.agent_id, settings)
     continuation.set_goal_report_channel(report_channel)
-    continuation_runner.set_goal_turns(GoalChain(database, settings, store).turn_context)
-    goal_driver = GoalDriver(database, settings, heart, store, continuation_runner)
+    continuation_runner.set_goal_turns(GoalChain(database, settings, store, tool_grants=tool_grants).turn_context)
+    goal_driver = GoalDriver(database, settings, heart, store, continuation_runner, tool_grants=tool_grants)
     continuation_runner.set_goals(goal_driver)
     return goal_driver
 
@@ -1579,7 +1590,14 @@ async def create_components(settings: Settings) -> dict:
         settings, database=database, runner=runner, heart=heart, brain=brain, bus=bus, dispatcher=dispatcher
     )
     # F114: the goal hooks are bound here, before anything below can write a goal chain's report or run its turn.
-    goal_driver = _build_goals(settings, database=database, heart=heart, continuation_runner=continuation_runner)
+    goal_driver = _build_goals(
+        settings, database=database, heart=heart, continuation_runner=continuation_runner, runner=runner
+    )
+    # F115 per-goal tools: the view is read before any loop or worker runs; a read that fails leaves it empty (no
+    # tool is lifted) until the driver's start or its first tick reads it again.
+    goal_tool_grants = goal_driver.tool_grants if goal_driver is not None else None
+    if goal_tool_grants is not None:
+        await goal_tool_grants.refresh()
 
     # F098: repair inbox writes the subtask worker lost (codex P1 on #694),
     # and (Phase C) write results to memory that no hook wrote.
@@ -2150,6 +2168,7 @@ async def create_components(settings: Settings) -> dict:
         "dag_orchestrator": dag_orchestrator,
         "continuation_runner": continuation_runner,
         "goal_driver": goal_driver,
+        "goal_tool_grants": goal_tool_grants,
         "context_logger": context_logger,
         "context_view": context_view,
         "context_log_retention_task": context_log_retention_task,
@@ -2196,6 +2215,8 @@ async def shutdown_components(components: dict) -> None:
         if components.get("goal_driver") is not None:  # F114: no goal hook outlives the driver
             continuation_runner.set_goals(None)
             continuation_runner.set_goal_turns(None)
+    if components.get("goal_tool_grants") is not None and components.get("runner") is not None:
+        components["runner"].set_goal_lift(None)  # F115: nor does the per-goal tool grant hook
 
     # F034: Stop heartbeat before other components
     heartbeat_runner = components.get("heartbeat_runner")
