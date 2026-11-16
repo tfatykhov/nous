@@ -29,6 +29,7 @@ try:
 except Exception:
     pass
 
+from scripts._nous_auth import owner_headers  # noqa: E402
 from scripts.diag.faculty.corpus import (  # noqa: E402
     CONCEPT_BRIDGE, CONTROL_NEGATIVE, CONTROL_POSITIVE,
 )
@@ -62,14 +63,15 @@ def ask(query: str) -> tuple[str, int]:
     sid = f"faculty-{int(time.time()*1000)}"
     data: dict = {}
     try:
-        r = httpx.post(f"{BASE}/chat", json={"message": PROMPT.format(q=query), "session_id": sid}, timeout=280)
+        r = httpx.post(f"{BASE}/chat", headers=owner_headers(),
+                       json={"message": PROMPT.format(q=query), "session_id": sid}, timeout=280)
         if r.headers.get("content-type", "").startswith("application/json"):
             data = r.json()
     except Exception as ex:
         return f"(error: {ex})", -1
     finally:
         try:
-            httpx.delete(f"{BASE}/chat/{sid}", timeout=20)
+            httpx.delete(f"{BASE}/chat/{sid}", headers=owner_headers(), timeout=20)
         except Exception:
             pass
     text = ""
