@@ -50,6 +50,9 @@ PROXY_SECRET_HEADER = "X-Nous-Proxy-Secret"  # the name the MCP client routes re
 DEVICE_TOKEN_HEADER = "X-Nous-Device-Token"
 DEVICE_TOKEN_MAX_CHARS = 200
 DEVICE_TOKEN_REJECTED = "device_token_rejected"
+# A device token is this prefix and 256 random bits, URL-safe base64 without padding (43 characters).
+DEVICE_TOKEN_PREFIX = "nd1_"
+_DEVICE_TOKEN_RE = re.compile(r"nd1_[A-Za-z0-9_-]{43}")
 
 # Capabilities, and which proof grants which. This table is the whole rule.
 OWNER = "owner"
@@ -73,6 +76,11 @@ def secret_digest(raw: object) -> str:
     fields = raw.split() if isinstance(raw, str) else []
     digest = fields[0].lower() if fields else ""
     return digest if _SHA256_HEX_RE.fullmatch(digest) else ""
+
+
+def device_token_well_formed(value: object) -> bool:
+    """Whether ``value`` has the shape of a device token, so that any other value is refused with no lookup."""
+    return isinstance(value, str) and _DEVICE_TOKEN_RE.fullmatch(value) is not None
 
 
 def json_media_type(content_type: str | None) -> bool:
