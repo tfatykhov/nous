@@ -21,7 +21,16 @@ from nous.goals.store import GoalStore
 from nous.handlers.continuation_runner import ContinuationRunner
 from nous.storage.models import Goal, GoalJournal, GoalSession, Intention, ResultInbox
 
-GOALS = {**CONT, "subtask_enabled": True, "goals_enabled": True}  # the flag and every setting it needs
+# The flag and every setting it needs; no quiet hours (a start never depends on the hour the test runs at), and
+# room for the sessions of several goals open at once (the tests of two goals' chains).
+GOALS = {
+    **CONT,
+    "subtask_enabled": True,
+    "goals_enabled": True,
+    "heartbeat_quiet_start": 0,
+    "heartbeat_quiet_end": 0,
+    "goals_max_active_sessions": 5,
+}
 
 
 @pytest.fixture(autouse=True)
