@@ -21,6 +21,14 @@ import us.fatykhov.nous.companion.push.ReconcileFlag
 class ForegroundLifecycle(private val graph: AppGraph) : DefaultLifecycleObserver {
     private var lastConnection: Connection? = null
 
+    /**
+     * Between ON_START and ON_STOP. Work that finishes later on the app's scope
+     * (a pairing) starts the engine only while this is true; otherwise the next
+     * ON_START does.
+     */
+    @Volatile var inForeground = false
+        internal set
+
     fun install() {
         ProcessLifecycleOwner.get().lifecycle.addObserver(this)
         val cm = graph.appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
@@ -46,6 +54,7 @@ class ForegroundLifecycle(private val graph: AppGraph) : DefaultLifecycleObserve
     }
 
     override fun onStart(owner: LifecycleOwner) {
+        inForeground = true
         if (!graph.settings.configured) return
         graph.store.connection = Connection.RESYNCING
         graph.engine.connect()
@@ -58,6 +67,7 @@ class ForegroundLifecycle(private val graph: AppGraph) : DefaultLifecycleObserve
     }
 
     override fun onStop(owner: LifecycleOwner) {
+        inForeground = false
         graph.engine.stop()
         graph.http.cancelStream()
     }

@@ -2388,13 +2388,20 @@ def create_nous_tools(brain: Brain, heart: Heart, settings: Settings | None = No
                     return _tool_error("Error: 'content' is required when source is 'inline'")
                 markdown = content
             elif source.startswith(("http://", "https://")):
-                # Fetch from URL
-                import httpx as _httpx
+                # Fetch from URL: public addresses only, pinned to the address checked, redirects checked per hop,
+                # and a skill file is text, so the body is capped at _SKILL_FETCH_MAX_BYTES.
+                from nous.api.safe_fetch import FetchRefused, fetch_checked
 
-                async with _httpx.AsyncClient(timeout=30) as client:
-                    resp = await client.get(source)
-                    resp.raise_for_status()
-                    markdown = resp.text
+                try:
+                    resp, _ = await fetch_checked(source, timeout=30, max_bytes=_SKILL_FETCH_MAX_BYTES)
+                except FetchRefused as e:
+                    return _tool_error(f"Error: {e}")
+                except Exception as e:
+                    logger.warning("learn_skill fetch failed: %s", type(e).__name__)
+                    return _tool_error("Error: the source could not be fetched.")
+                if resp.status_code >= 400:
+                    return _tool_error(f"Error: {source} returned HTTP {resp.status_code}")
+                markdown = resp.text
             else:
                 # Local file path
                 import os
@@ -3048,6 +3055,9 @@ _CREATE_CENSOR_SCHEMA: dict[str, Any] = {
     "required": ["trigger_pattern", "reason"],
 }
 _CREATE_CENSOR_PARAMS = _schema_params(_CREATE_CENSOR_SCHEMA)
+
+# A skill file is markdown a person reads (tens of kilobytes at most); a fetch longer than this is refused.
+_SKILL_FETCH_MAX_BYTES = 1_048_576
 
 _LEARN_SKILL_SCHEMA: dict[str, Any] = {
     "type": "object",

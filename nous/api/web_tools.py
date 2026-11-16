@@ -7,17 +7,15 @@ Uses a separate httpx client (NOT AgentRunner's — that has API credentials).
 from __future__ import annotations
 
 import html as html_module
-import ipaddress
 import logging
 import re
-import socket
 import time
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlparse
 
 import httpx
 
 from nous.api.injection_screen import screen_tool_result
+from nous.api.safe_fetch import FetchRefused, _is_url_safe, fetch_checked  # noqa: F401
 from nous.api.tools import ToolDispatcher, _tool_error
 from nous.config import Settings
 
@@ -33,59 +31,10 @@ _WEB_FETCH_CEILING_CHARS = 200_000
 # Rate limit state (in-memory, resets on restart)
 _rate_limit: dict[str, Any] = {"date": "", "count": 0}
 
-# Blocked IP ranges for SSRF protection
-_BLOCKED_NETWORKS = [
-    ipaddress.ip_network("127.0.0.0/8"),       # Loopback
-    ipaddress.ip_network("10.0.0.0/8"),         # RFC1918
-    ipaddress.ip_network("172.16.0.0/12"),      # RFC1918
-    ipaddress.ip_network("192.168.0.0/16"),     # RFC1918
-    ipaddress.ip_network("169.254.0.0/16"),     # Link-local
-    ipaddress.ip_network("::1/128"),            # IPv6 loopback
-    ipaddress.ip_network("fc00::/7"),           # IPv6 unique local
-    ipaddress.ip_network("fe80::/10"),          # IPv6 link-local
-]
-
-# Blocked hostnames (Docker internal services, etc.)
-_BLOCKED_HOSTNAMES = {"localhost", "postgres", "nous", "redis", "0.0.0.0"}
-
 
 def _mcp_response(text: str) -> dict[str, Any]:
     """Build MCP-format response."""
     return {"content": [{"type": "text", "text": text}]}
-
-
-def _is_url_safe(url: str) -> tuple[bool, str]:
-    """Check if URL is safe from SSRF attacks.
-
-    Resolves hostname to IP and checks against blocked ranges.
-    Returns (is_safe, error_message).
-    """
-    try:
-        parsed = urlparse(url)
-        hostname = parsed.hostname
-
-        if not hostname:
-            return False, "Could not parse hostname from URL"
-
-        # Check blocked hostnames
-        if hostname.lower() in _BLOCKED_HOSTNAMES:
-            return False, f"Blocked hostname: {hostname}"
-
-        # Resolve to IP and check ranges
-        try:
-            addr_infos = socket.getaddrinfo(hostname, None)
-        except socket.gaierror:
-            return False, f"Could not resolve hostname: {hostname}"
-
-        for addr_info in addr_infos:
-            ip = ipaddress.ip_address(addr_info[4][0])
-            for network in _BLOCKED_NETWORKS:
-                if ip in network:
-                    return False, f"URL resolves to blocked IP range ({network})"
-
-        return True, ""
-    except Exception as e:
-        return False, f"URL validation error: {e}"
 
 
 def _check_rate_limit(settings: Settings) -> str | None:
@@ -223,55 +172,23 @@ async def _web_fetch(
     max_chars: int | None = None,
     *,
     _settings: Settings,
-    _http: httpx.AsyncClient,
     _bus: EventBus | None = None,
 ) -> dict[str, Any]:
-    """Fetch URL and extract readable content."""
+    """Fetch URL and extract readable content.
+
+    The page is fetched with ``fetch_checked`` on a client of its own, not the shared ``_http`` client.
+    """
     try:
-        # Validate URL scheme
-        if not url.startswith(("http://", "https://")):
-            return _tool_error("URL must start with http:// or https://")
-
-        # SSRF protection
-        is_safe, error = _is_url_safe(url)
-        if not is_safe:
-            return _tool_error(f"Blocked: {error}")
-
         # F069 (2026-05-26): hard ceiling bumped from 50,000 -> 200,000.
         # Lets explicit doc-ingest callers (ingest_document path) pull a
         # full arxiv paper into one fetch instead of paginating.
         effective_max = min(max_chars or _settings.web_fetch_max_chars, _WEB_FETCH_CEILING_CHARS)
 
-        # Manual redirect following with SSRF check on each hop (P1-1 fix)
-        max_redirects = 5
-        current_url = url
-        response = None
-        for _ in range(max_redirects + 1):
-            response = await _http.get(
-                current_url,
-                headers={"User-Agent": "Nous/0.1 (cognitive agent)"},
-                follow_redirects=False,
-                timeout=15,
-            )
-            if response.status_code not in (301, 302, 303, 307, 308):
-                break
-            redirect_url = response.headers.get("location", "")
-            if not redirect_url:
-                break
-            # Resolve relative redirects
-            if redirect_url.startswith("/"):
-                parsed_current = urlparse(current_url)
-                redirect_url = f"{parsed_current.scheme}://{parsed_current.netloc}{redirect_url}"
-            # SSRF check on redirect target
-            redirect_safe, redirect_error = _is_url_safe(redirect_url)
-            if not redirect_safe:
-                return _tool_error(f"Blocked redirect to unsafe URL: {redirect_error}")
-            current_url = redirect_url
-        else:
-            return _tool_error(f"Too many redirects (max {max_redirects})")
-
-        if response is None:
-            return _tool_error("No response received")
+        # Only public addresses are fetched; every request, redirect hops included, goes to the address checked.
+        try:
+            response, current_url = await fetch_checked(url)
+        except FetchRefused as e:
+            return _tool_error(str(e))
 
         content_type = response.headers.get("content-type", "")
 
@@ -288,13 +205,9 @@ async def _web_fetch(
         if len(text) > effective_max:
             text = text[:effective_max] + "\n\n[... truncated]"
 
-    except httpx.TimeoutException:
-        return _tool_error(f"Fetch timed out for: {url}")
-    except httpx.ConnectError as e:
-        return _tool_error(f"Could not connect to {url}: {e}")
     except Exception as e:
-        logger.exception("web_fetch error")
-        return _tool_error(f"Fetch error: {e}")
+        logger.warning("web_fetch failed: %s", type(e).__name__)
+        return _tool_error("The page could not be fetched.")
 
     # F103: flag-only, outside the fetch's error handling: it never raises and never changes the text.
     await screen_tool_result(text, source="web_fetch", url=current_url, settings=_settings, bus=_bus)
@@ -395,7 +308,7 @@ def register_web_tools(
         )
 
     async def _fetch(url: str, max_chars: int | None = None) -> dict[str, Any]:
-        return await _web_fetch(url, max_chars, _settings=settings, _http=http_client, _bus=bus)
+        return await _web_fetch(url, max_chars, _settings=settings, _bus=bus)
 
     fetch_schema = _WEB_FETCH_SCHEMA
     if getattr(settings, "browser_task_enabled", False) is True:

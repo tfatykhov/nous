@@ -70,12 +70,18 @@ jobs:
         env:
           ANDROID_BETA_KEYSTORE_B64: ${{ secrets.ANDROID_BETA_KEYSTORE_B64 }}
           ANDROID_BETA_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_BETA_KEYSTORE_PASSWORD }}
-        run: ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug --console=plain
+        run: ./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleRelease --console=plain
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: nous-companion-debug-apk
           path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nous-companion-apk
+          path: android/app/build/outputs/apk/release/*.apk
           if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         if: always()

@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 import jsonschema
+import referencing
+import referencing.exceptions
 
 from nous import background_halt
 from nous.api.execution_context import ExecutionContext
@@ -40,6 +42,28 @@ from nous.heart.subtask_report import SubtaskReport
 from nous.heart.subtask_validator import ValidationResult, validate_report
 
 logger = logging.getLogger(__name__)
+
+
+def _retrieve_nothing(uri: str) -> Any:
+    """A reference to a schema outside the payload schema is not retrieved: it cannot be resolved."""
+    raise referencing.exceptions.NoSuchResource(ref=uri)
+
+
+_PAYLOAD_SCHEMA_REGISTRY = referencing.Registry(retrieve=_retrieve_nothing)  # type: ignore[call-arg]
+
+
+def validate_payload(instance: Any, schema: dict[str, Any]) -> None:
+    """Validate ``instance`` against ``schema`` without retrieving any referenced schema.
+
+    A ``$ref`` that points inside the schema, or at a standard JSON Schema meta-schema, resolves as usual; any other
+    reference, and a schema that recurses without end, raise ``jsonschema.ValidationError``.
+    """
+    try:
+        jsonschema.validate(instance, schema, registry=_PAYLOAD_SCHEMA_REGISTRY)
+    except referencing.exceptions.Unresolvable as e:
+        raise jsonschema.ValidationError(f"the schema refers to a schema that is not available: {e.ref}") from e
+    except RecursionError as e:
+        raise jsonschema.ValidationError("the schema refers to itself without end") from e
 
 
 @dataclass
@@ -395,7 +419,7 @@ async def execute_hardened(
 
                 raw_payload = _last["payload"]
                 try:
-                    jsonschema.validate(raw_payload, subtask.payload_schema)
+                    validate_payload(raw_payload, subtask.payload_schema)
                     payload_schema_valid = True
                 except jsonschema.ValidationError as e:
                     logger.warning(

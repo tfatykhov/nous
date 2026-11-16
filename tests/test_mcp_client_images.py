@@ -2104,7 +2104,8 @@ async def test_a_cancelled_call_keeps_its_decode_slot_until_its_thread_ends(monk
         go.set()
     assert [answer["is_error"] for answer in await asyncio.wait_for(asyncio.gather(*later), 10)] == [False, False]
     assert (started, peak) == (4, manager_module.DECODES_AT_ONCE)
-    await until(lambda: not manager._decoding.locked())
+    # Not "not locked()": that is true as soon as one slot is free, while the other may be waiting for its release.
+    await until(lambda: manager._decoding._value >= manager_module.DECODES_AT_ONCE)
     assert manager._decoding._value == manager_module.DECODES_AT_ONCE  # every slot is back, none twice
     await manager.close()
 
@@ -2120,5 +2121,9 @@ async def test_a_decode_that_raises_gives_its_slot_back(monkeypatch):
     for _ in range(manager_module.DECODES_AT_ONCE + 1):
         with pytest.raises(RuntimeError):
             await d._handlers["mcp__alpha__shot"](q="one")
+    for _ in range(500):  # a slot is given back by a done-callback of the decode, a loop iteration after the raise
+        if manager._decoding._value >= manager_module.DECODES_AT_ONCE:
+            break
+        await asyncio.sleep(0.01)
     assert manager._decoding._value == manager_module.DECODES_AT_ONCE
     await manager.close()

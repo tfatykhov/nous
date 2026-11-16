@@ -220,6 +220,7 @@ nous/
 │       ├── db_query.py         # db_query: one read-only SELECT as the nous_reader login (scripts/ops/db_roles.sql); row, cell and output caps, ledger redaction
 │       ├── job_marks.py        # The only code that touches files in a Claude Code job dir: small marks (cancelled_by, nous_root) opened without following links
 │       ├── web_tools.py        # web_search, web_fetch (multi-tier routing)
+│       ├── safe_fetch.py       # Fetching a model-supplied URL (web_fetch, learn_skill): public addresses only, each request pinned to the address checked, a client per request, size and time bounds; is_public_address is also the rule of the browser egress proxy and the MCP client
 │       ├── injection_screen.py # F103: flag-only prompt-injection + secret screen over web_fetch / browser_task results
 │       ├── search_providers.py # SearchProvider protocol + Tavily, Exa, Brave
 │       ├── search_router.py   # Query classification + cascading fallback

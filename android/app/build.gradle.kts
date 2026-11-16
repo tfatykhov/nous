@@ -46,7 +46,14 @@ android {
 
     buildTypes {
         debug { isMinifyEnabled = false }
-        release { isMinifyEnabled = false }   // beta: no R8 (spec §7.1)
+        // beta: no R8 (spec §7.1). Signed with the `debug` signing config, which is the
+        // beta key when the secrets are present (above) and the local debug key otherwise,
+        // so the release build installs as an update over the debug build of the same key.
+        // It is not debuggable, and it uses the main network config: https, system CAs only.
+        release {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
+        }
     }
 
     buildFeatures { compose = true }
@@ -92,6 +99,9 @@ dependencies {
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.kotlinx.coroutines.test)
+    // A real socket for the device-token header and redirect tests, from the same OkHttp release.
+    testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(libs.okhttp.tls)
     testImplementation(platform(libs.compose.bom))
     testImplementation(libs.compose.ui.test.junit4)
     debugImplementation(libs.compose.ui.test.manifest)
