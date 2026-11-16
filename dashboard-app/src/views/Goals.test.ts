@@ -626,6 +626,19 @@ describe('Goals: the bare address keeps its goal', () => {
     expect(screen.getByRole('region', { name: 'Tidy the notes' })).toBe(region);
   });
 
+  it('a bare address that came to the form stays on it, with what was typed, when a filter lists goals', async () => {
+    install([C]); // no open goal: the bare address shows the form
+    render(Goals);
+    const form = await screen.findByRole('region', { name: 'New goal' });
+    await fireEvent.input(within(form).getByLabelText('Title'), { target: { value: 'Half a title' } });
+    const nav = screen.getByRole('navigation', { name: 'Goals' });
+    await fireEvent.click(within(nav).getByRole('button', { name: 'All' }));
+    await within(nav).findByText('Old report');
+    expect(screen.getByRole('region', { name: 'New goal' })).toBe(form);
+    expect((within(form).getByLabelText('Title') as HTMLInputElement).value).toBe('Half a title');
+    expect(screen.queryByRole('region', { name: 'Old report' })).toBeNull();
+  });
+
   it('a filter switch never moves the pane or drops a typed note', async () => {
     render(Goals);
     const region = await pane('Tidy the notes');
