@@ -157,8 +157,11 @@ def test_a_group_whose_leader_has_another_start_time_or_none_readable_is_dropped
     other = subprocess.Popen(["sleep", "30"], start_new_session=True)  # a group this registry never started
     try:
         _state, _group, started = background_processes._stat(other.pid)
-        background_processes._entries[other.pid] = background_processes._Entry(other.pid, None, start=started + 1)
-        background_processes._entries[4_000_000] = background_processes._Entry(4_000_000, None, start=1)
+        # Their calls have returned (released): an entry not shown to be the command's is dropped.
+        background_processes._entries[other.pid] = background_processes._Entry(
+            other.pid, None, start=started + 1, released=True
+        )
+        background_processes._entries[4_000_000] = background_processes._Entry(4_000_000, None, start=1, released=True)
         assert background_processes.kill_all() == 0
         assert other.poll() is None  # untouched
         assert other.pid not in background_processes._entries and 4_000_000 not in background_processes._entries
@@ -340,6 +343,75 @@ def test_a_group_whose_only_members_are_zombies_is_empty():
 
 
 @linux_only
+async def test_a_child_left_holding_the_pipes_is_signalled_by_the_first_halt(tmp_path):
+    """``cmd &`` with no redirect: the shell exits and is collected while the call still waits on the pipes its child
+    holds. The child is the command's, and the first halt signals it."""
+    call = asyncio.create_task(bash_tool("sleep 47 &", 20, _workspace_dir=str(tmp_path), _background=True))
+    child = None
+    try:
+        await _until(lambda: len(background_processes._entries) == 1)
+        (pgid,) = list(background_processes._entries)
+        await _until(lambda: background_processes._stat(pgid) is None)  # the shell is collected
+        (child,) = background_processes._members(pgid)
+        await asyncio.sleep(0.3)  # the collection is seen
+        assert not call.done()  # the call still waits on the pipes the child holds
+        assert background_processes.kill_all() == 1
+        await _until(lambda: not _alive(child))
+        await asyncio.wait_for(call, 5)  # the pipes closed with the child
+    finally:
+        call.cancel()
+        if child is not None and _alive(child):
+            os.kill(child, 9)
+
+
+@linux_only
+def test_an_entry_not_shown_to_be_ours_is_kept_while_its_call_runs_and_dropped_once_it_returned():
+    import time
+
+    for pgid in (4_000_011, 4_000_012):  # no such process or group: nothing shows them to be the command's
+        background_processes._entries[pgid] = background_processes._Entry(pgid, SimpleNamespace(pid=pgid), start=1)
+    background_processes._entries[4_000_012].released = True
+    background_processes._entries[4_000_012].exited_at = time.monotonic() - 10
+    background_processes._entries[4_000_012].exited_ticks = 1
+    assert background_processes.kill_all() == 0
+    assert list(background_processes._entries) == [4_000_011]  # still there for the next halt
+    assert background_processes.kill_all() == 0 and list(background_processes._entries) == [4_000_011]
+
+
+@linux_only
+def test_a_member_recorded_at_track_shows_the_group_is_ours_after_the_leader_ended():
+    import subprocess
+    import time
+
+    shell = subprocess.Popen(
+        ["sh", "-c", "sleep 30 & echo $!"], start_new_session=True, stdout=subprocess.PIPE, text=True
+    )
+    child = int(shell.stdout.readline())
+    shell.wait()
+    try:
+        _state, _group, started = background_processes._stat(child)
+        background_processes._entries[shell.pid] = background_processes._Entry(
+            shell.pid,
+            shell,
+            start=1,  # the leader's: it has ended
+            exited_at=time.monotonic(),
+            exited_ticks=started - 1,  # as if the exit was seen before the child started: that rule does not hold
+            members={child: started},  # but the child was recorded at track
+            released=True,
+        )
+        assert background_processes.kill_all() == 1
+        for _ in range(250):
+            if not _alive(child):
+                break
+            time.sleep(0.02)
+        assert not _alive(child)
+    finally:
+        if _alive(child):
+            os.kill(child, 9)
+        shell.stdout.close()
+
+
+@linux_only
 def test_pruning_scans_proc_once_however_many_entries_have_exited(monkeypatch):
     import time
 
@@ -357,6 +429,22 @@ def test_pruning_scans_proc_once_however_many_entries_have_exited(monkeypatch):
 
     monkeypatch.setattr(background_processes.os, "listdir", counting)
     assert background_processes.tracked() == [] and len(scans) == 1
+
+
+@linux_only
+def test_kill_all_scans_proc_once_however_many_leaders_are_gone(monkeypatch):
+    for pgid in (4_000_021, 4_000_022, 4_000_023):  # leaders gone, calls still running: each needs the members
+        background_processes._entries[pgid] = background_processes._Entry(pgid, SimpleNamespace(pid=pgid), start=1)
+    scans: list[str] = []
+    listdir = os.listdir
+
+    def counting(path="."):
+        if path == "/proc":
+            scans.append(path)
+        return listdir(path)
+
+    monkeypatch.setattr(background_processes.os, "listdir", counting)
+    assert background_processes.kill_all() == 0 and len(scans) == 1
 
 
 def test_the_exit_moment_is_rounded_to_the_tick_not_truncated(monkeypatch):
